@@ -8,6 +8,7 @@
 
 Fixtures go through the real normalizer (Suricata EVE flow records, Arkime SPI sessions)."""
 import random
+from collections import Counter
 from datetime import timedelta
 
 import pytest
@@ -81,21 +82,25 @@ def _ssh_download(*, root=True, records=17):
     return hits
 
 
-def test_an_internal_servers_answers_picked_up_mid_stream_are_not_an_upload():
+def test_an_internal_servers_answers_picked_up_mid_stream_are_not_an_upload_and_coverage_names_them():
     # the old reading took Arkime's mid-stream orientation as the opener and reported "a connection it initiated"
     rule = OutboundVolumeAsymmetry()
     assert run(rule, events(*_ssh_download())) == []
-    assert rule.evaluated == 18 and rule.limit_reasons() == []        # the root shows who opened it: judged, served
+    [reason] = rule.limit_reasons()            # the root shows the outside client opened it: an internal server
+    sent = 12_494_784 + 17 * 12_500_000
+    assert reason == ("not read as uploads: connections a recorded opening shows an external address opened, so the "
+                      f"internal address answered as a server: the internal addresses sent {sent:,} bytes on them, "
+                      f"the most from one pair {sent:,} bytes from {INSIDE} to {OUTSIDE} (1 connection(s))")
 
 
-def test_mid_stream_records_with_no_opening_and_a_servers_port_are_not_evaluated_and_coverage_says_so():
+def test_mid_stream_records_with_no_opening_and_a_servers_port_shape_are_not_an_upload_and_are_named():
     rule = OutboundVolumeAsymmetry()
     assert run(rule, events(*_ssh_download(root=False))) == []
     [reason] = rule.limit_reasons()
-    assert reason.startswith("not evaluated: which side opened these connections between internal and external "
-                             "addresses is not recorded, and their ports do not mark the internal address as the "
-                             "client (1 with both ports ephemeral or the internal port the lower, 0 on transports "
-                             "without ports)")
+    assert reason.startswith("not read as uploads: connections whose opener is not recorded, with the internal "
+                             "address on a port below 32768 and the external address on one at or above it (the port "
+                             "shape of an internal server answering an outside client): the internal addresses sent "
+                             f"{17 * 12_500_000:,} bytes on them")
     assert reason.endswith("(1 connection(s))")
 
 
@@ -109,11 +114,19 @@ def test_an_upload_the_internal_address_opened_says_so_and_cites_the_opening():
     [m] = run(OutboundVolumeAsymmetry(), events(*hits))
     # each address's bytes are its own side's counter, whichever side each record names as its source
     assert f"{INSIDE} sent {60 * MIB:,} bytes (60.0 MiB) to {OUTSIDE} and received {MIB // 2 + 3 * MIB // 4:,}" in m.claim
-    assert (f"A recorded TCP opening (an Arkime session that counted the SYN, or a Suricata flow whose handshake it "
-            f"tracked) shows {INSIDE} opened the connection, to server port tcp/443 (1 connection) on {OUTSIDE}.") \
-        in m.claim
+    assert (f"A recorded TCP opening shows {INSIDE} opened the connection, to server port tcp/443 (1 connection) on "
+            f"{OUTSIDE} (Arkime counted the SYN).") in m.claim
     assert "not recorded" not in m.claim and "All 4 records are cited." in m.claim
     assert {p.field: p.value for p in m.predicate}["tcp.flags.syn"] == 1
+
+
+def test_an_opening_shown_only_by_a_suricata_state_says_what_that_assumes():
+    flow = eve("s", sport=50001, dst=OUTSIDE, dport=443, state="established", c2s=60 * MIB, s2c=MIB, pkts_s=10)
+    [m] = run(OutboundVolumeAsymmetry(), events(flow))
+    assert (f"shows {INSIDE} opened the connection, to server port tcp/443 (1 connection) on {OUTSIDE} (the only "
+            "record of the opening is a Suricata flow in state established or closed, which shows a tracked handshake "
+            "on a sensor that does not pick up mid-stream).") in m.claim
+    assert "stream.midstream" in OutboundVolumeAsymmetry.positive_only_reason
 
 
 def test_an_upload_with_no_recorded_opening_is_read_from_its_ports_and_says_the_opener_is_unknown():
@@ -127,46 +140,59 @@ def test_an_upload_with_no_recorded_opening_is_read_from_its_ports_and_says_the_
     assert f"shows {INSIDE} opened" not in m.claim and "initiated" not in m.claim
 
 
-def test_a_suricata_flow_an_outside_client_opened_to_an_internal_server_is_not_an_upload():
+def test_a_suricata_flow_an_outside_client_opened_to_an_internal_server_is_not_an_upload_and_is_named():
     download = eve("dl", src=OUTSIDE, sport=51000, dst=INSIDE, dport=443, state="closed", seconds=60,
                    c2s=MIB, s2c=600 * MIB, pkts_c=900, pkts_s=9000)
     rule = OutboundVolumeAsymmetry()
-    assert run(rule, events(download)) == [] and rule.limit_reasons() == []
+    assert run(rule, events(download)) == []
+    [reason] = rule.limit_reasons()
+    assert ("so the internal address answered as a server; 1 of them shown only by a Suricata flow in state "
+            "established or closed, which shows a tracked handshake on a sensor that does not pick up mid-stream: "
+            f"the internal addresses sent {600 * MIB:,} bytes on them") in reason
 
 
-@pytest.mark.parametrize("hit", [
-    # a server answering from its service port, picked up mid-stream (state 'new')
-    eve("srv", src=INSIDE, sport=443, dst=OUTSIDE, dport=51000, state="new", c2s=600 * MIB, s2c=MIB, pkts_s=10),
-    # both ports ephemeral (media, peer-to-peer): no shape to tell the client
-    eve("p2p", proto="UDP", src=INSIDE, sport=40000, dst=OUTSIDE, dport=50000, c2s=600 * MIB, s2c=MIB, pkts_s=10),
-])
-def test_connections_whose_opener_and_client_side_are_unknown_are_not_evaluated(hit):
+def test_a_servers_answers_from_its_service_port_with_no_recorded_opening_are_not_an_upload():
+    answers = eve("srv", src=INSIDE, sport=443, dst=OUTSIDE, dport=51000, state="new", c2s=600 * MIB, s2c=MIB,
+                  pkts_s=10)
     rule = OutboundVolumeAsymmetry()
-    assert run(rule, events(hit)) == [] and rule.evaluated == 1
-    assert rule.limit_reasons()[0].startswith("not evaluated:")
+    assert run(rule, events(answers)) == [] and rule.evaluated == 1
+    assert f"the internal addresses sent {600 * MIB:,} bytes on them" in rule.limit_reasons()[0]
 
 
-def test_an_unanswered_inbound_probe_sent_nothing_from_inside_so_nothing_is_left_unread():
+def test_an_unanswered_inbound_probe_sent_nothing_from_inside_so_nothing_is_named():
     # a scanner's SYN to an internal port: Suricata never saw the handshake (state 'new'), the internal side sent 0
     probe = eve("scan", src=OUTSIDE, sport=60000, dst=INSIDE, dport=22, state="new", c2s=60, s2c=0, pkts_s=0)
     rule = OutboundVolumeAsymmetry()
     assert run(rule, events(probe)) == [] and rule.limit_reasons() == []
 
 
-def test_the_unread_bytes_are_named_on_coverage():
+# Channels an attacker can choose: no recorded opening and no port shape of a client. They are still read, and the
+# claim says the bytes may be a server's answers.
+@pytest.mark.parametrize("name,hit,wording", [
+    ("icmp tunnel", eve("i", proto="ICMP", sport=None, dport=None, dst=OUTSIDE, c2s=200 * MIB, s2c=5 * MIB, pkts_c=10,
+                        pkts_s=10),
+     (f"The connection is ICMP, with no ports and no opening the sensors record, so nothing marks a client: what "
+     f"{INSIDE} sent on it may be a server's answers.")),
+    ("udp wireguard", eve("w", proto="UDP", sport=40000, dst=OUTSIDE, dport=51820, c2s=200 * MIB, s2c=5 * MIB,
+                          pkts_s=10),
+     (f"Which side opened the connection is not recorded: it is UDP, which has no opening to record. The ports do not "
+     f"mark a client either: {INSIDE} used udp/40000 (1 connection) and {OUTSIDE} used udp/51820 (1 connection), so "
+     f"what {INSIDE} sent on it may be a server's answers.")),
+    ("tcp c2 port, suricata only, state new", eve("c", sport=50001, dst=OUTSIDE, dport=50050, state="new",
+                                                  c2s=200 * MIB, s2c=5 * MIB, pkts_s=10),
+     (f"{INSIDE} used tcp/50001 (1 connection) and {OUTSIDE} used tcp/50050 (1 connection), so what {INSIDE} sent on "
+     f"it may be a server's answers.")),
+    ("arkime from a low client port, no flag counts", ark("d", sport=5000, dst=OUTSIDE, dport=443, c2s=200 * MIB,
+                                                          s2c=5 * MIB),
+     (f"{INSIDE} used tcp/5000 (1 connection) and {OUTSIDE} used tcp/443 (1 connection), so what {INSIDE} sent on it "
+     f"may be a server's answers.")),
+])
+def test_uploads_with_no_recorded_opener_and_no_client_port_shape_are_still_reported(name, hit, wording):
     rule = OutboundVolumeAsymmetry()
-    run(rule, events(eve("srv", src=INSIDE, sport=443, dst=OUTSIDE, dport=51000, state="new", c2s=600 * MIB,
-                         s2c=MIB, pkts_s=10)))
-    assert f"so the {600 * MIB:,} bytes the internal addresses sent on them were not read as uploads" in \
-        rule.limit_reasons()[0]
-
-
-def test_traffic_on_a_transport_without_ports_is_not_evaluated_and_counted_as_such():
-    icmp = ark("icmp", proto=1, sport=None, dport=None, dst=OUTSIDE, c2s=600 * MIB, s2c=MIB, pkts_s=10)
-    rule = OutboundVolumeAsymmetry()
-    assert run(rule, events(icmp)) == []
-    assert "(0 with both ports ephemeral or the internal port the lower, 1 on transports without ports)" in \
-        rule.limit_reasons()[0]
+    [m] = run(rule, events(hit))
+    assert f"{INSIDE} sent {200 * MIB:,} bytes (200.0 MiB) to {OUTSIDE} and received {5 * MIB:,}" in m.claim, name
+    assert wording in m.claim and f"shows {INSIDE} opened" not in m.claim, name
+    assert rule.limit_reasons() == [], name
 
 
 def test_a_udp_upload_from_a_client_port_is_read_and_says_udp_has_no_opening():
@@ -184,17 +210,23 @@ def test_records_that_disagree_about_the_opener_are_read_as_unknown():
     assert "shows 10.0.0.5 opened" not in m.claim
 
 
-def test_a_mixed_pair_counts_the_opened_and_the_port_shaped_connections_apart():
+def test_a_mixed_pair_counts_each_reading_apart_and_names_the_served_connection():
     hits = [eve("o", sport=50001, dst=OUTSIDE, dport=443, state="closed", c2s=40 * MIB, s2c=MIB, pkts_s=10),
             eve("n", sport=50002, dst=OUTSIDE, dport=8443, state="new", start=T0 + timedelta(minutes=5),
                 c2s=30 * MIB, s2c=MIB, pkts_s=10),
+            eve("u", proto="UDP", sport=40000, dst=OUTSIDE, dport=51820, start=T0 + timedelta(minutes=6),
+                c2s=10 * MIB, s2c=0, pkts_s=0),
             eve("s", src=OUTSIDE, sport=50003, dst=INSIDE, dport=22, state="closed", c2s=MIB, s2c=900 * MIB,
                 pkts_s=10)]
-    [m] = run(OutboundVolumeAsymmetry(), events(*hits))
-    assert f"{INSIDE} sent {70 * MIB:,} bytes" in m.claim and "over 2 connections" in m.claim
-    assert "shows 10.0.0.5 opened 1 of them, to server port tcp/443 (1 connection)" in m.claim
-    assert "Which side opened the other 1 connection is not recorded: 1 is TCP" in m.claim
-    assert "tcp/8443 (1 connection)" in m.claim and "tcp/22" not in m.claim
+    rule = OutboundVolumeAsymmetry()
+    [m] = run(rule, events(*hits))
+    assert f"{INSIDE} sent {80 * MIB:,} bytes" in m.claim and "over 3 connections" in m.claim
+    assert "shows 10.0.0.5 opened 1 connection, to server port tcp/443 (1 connection)" in m.claim
+    assert "Which side opened 1 connection is not recorded: 1 is TCP" in m.claim and "tcp/8443 (1 connection)" in m.claim
+    assert "Which side opened 1 connection is not recorded: 1 is UDP" in m.claim and "udp/51820" in m.claim
+    assert "tcp/22" not in m.claim
+    [reason] = rule.limit_reasons()
+    assert f"sent {900 * MIB:,} bytes on them" in reason and reason.endswith("(1 connection(s))")
 
 
 def test_outbound_citations_bound_the_stated_interval_beyond_the_example_limit():
@@ -274,19 +306,14 @@ def test_a_long_connections_last_record_is_cited_when_records_arrive_newest_firs
     assert "including the first and the last" in m.claim
 
 
-def test_a_long_connection_stages_a_bounded_number_of_records_however_many_it_has():
+def test_a_long_connection_holds_a_bounded_number_of_records_on_the_stage_however_many_it_has(tmp_path):
     evs = events(*_long(400))
-    rule, staged = LongExternalConnection(), {}
-    batches = [evs[i:i + 25] for i in range(0, len(evs), 25)]
-    for batch in batches:
-        rule.consume(batch)
-        staged.update({e.id: e for e in rule.drain_staged()})
-    # the first records, plus at most the two bounding records per batch
-    assert len(staged) <= EXAMPLE_LIMIT + 2 * len(batches)
-    held = rule.conns.peek(next(iter(rule.conns.keys())))
-    assert len(held["events"]) <= EXAMPLE_LIMIT + 1
-    rule.bind_loader(lambda ids: [staged[i] for i in ids if i in staged])
-    [m] = rule.finalize()
+    rule = LongExternalConnection()
+    [m], sizes = staged_live(rule, [evs[i:i + 2] for i in range(0, len(evs), 2)], tmp_path)
+    # its first records, and the two records bounding its span: the same with 200 batches as with one
+    assert max(sizes) <= EXAMPLE_LIMIT + 2
+    held = rule.conns.peek(next(iter(rule.conns.keys()))) if rule.conns else None
+    assert held is None or len(held["events"]) <= EXAMPLE_LIMIT + 1
     assert "20 of the 400 records are cited, including the first and the last." in m.claim
 
 
@@ -367,3 +394,139 @@ def test_bound_note_names_a_bound_that_was_not_kept():
     assert flows.bound_note(set(), ends) == ""
     assert flows.bound_note({"b"}, ends) == (" The record that ends this interval was not kept for citation; the "
                                              "interval is computed from every record.")
+
+
+# ---- the stage holds what can still be cited, however long the hunt ------------------------------------------------
+
+def staged_live(rule, batches, tmp_path):
+    """Drive a staged rule the way the sweep stages its records on the real event stage: citations kept to the end,
+    interval bounds held and released. Returns the findings and the number of events on the stage after each batch."""
+    from romulus.hunt.stage import EventStage
+    stage, sizes = EventStage(tmp_path), []
+    try:
+        for batch in batches:
+            rule.consume(batch)
+            drained = rule.drain_staged()
+            held_ids, released = rule.drain_bounds()
+            holds, copies = Counter(held_ids), Counter(e.id for e in drained)
+            unique = {e.id: e for e in drained}
+            stage.put([e for i, e in unique.items() if copies[i] > holds[i]], {})
+            stage.hold([(rule.id, e) for i, e in unique.items() for _ in range(holds[i])], {})
+            stage.release(rule.id, released)
+            sizes.append(stage.count())
+        rule.bind_loader(stage.load)
+        return rule.finalize(), sizes
+    finally:
+        stage.close()
+
+
+def test_identified_traffic_that_can_never_be_reported_stages_nothing(tmp_path):
+    identified = [eve(f"l{i}", sport=40000 + i, dst=f"10.0.{1 + i // 250}.{1 + i % 250}", dport=9999,
+                      app_proto="tls", c2s=5000, s2c=9000, pkts_c=5, pkts_s=5, state="closed",
+                      start=T0 + timedelta(seconds=i)) for i in range(2000)]
+    evs = events(*identified)
+    found, sizes = staged_live(LongUnidentifiedSession(), [evs[i:i + 250] for i in range(0, len(evs), 250)], tmp_path)
+    assert found == [] and max(sizes) == 0
+
+
+def test_a_pair_that_never_qualifies_stages_only_its_first_records(tmp_path):
+    small = [eve(f"o{i}", sport=40000 + i, dst=OUTSIDE, dport=443, state="closed", c2s=5000, s2c=9000, pkts_s=5,
+                 start=T0 + timedelta(seconds=30 * i)) for i in range(400)]
+    evs = events(*small)
+    found, sizes = staged_live(OutboundVolumeAsymmetry(), [evs[i:i + 2] for i in range(0, len(evs), 2)], tmp_path)
+    assert found == [] and sizes[-1] == OutboundVolumeAsymmetry.FIRST_CITES
+
+
+def test_a_qualifying_pair_holds_its_citations_and_two_bounds_however_many_batches(tmp_path):
+    big = [eve(f"b{i:03d}", sport=40000 + i, dst=OUTSIDE, dport=443, state="closed", c2s=MIB, s2c=1000, pkts_s=5,
+               start=T0 + timedelta(seconds=30 * i)) for i in range(300)]
+    evs = events(*big)
+    [m], sizes = staged_live(OutboundVolumeAsymmetry(), [evs[i:i + 2] for i in range(0, len(evs), 2)], tmp_path)
+    assert max(sizes) <= EXAMPLE_LIMIT + 2
+    assert "20 of the 300 records are cited, including the first and the last." in m.claim
+
+
+def test_a_sweep_group_that_never_qualifies_stages_no_bounds(tmp_path):
+    resolver = [eve(f"s{i}", proto="UDP", sport=40000 + i, dst="10.0.1.1", dport=53, c2s=80, s2c=120, pkts_s=1,
+                    start=T0 + timedelta(seconds=30 * i)) for i in range(400)]
+    evs = events(*resolver)
+    found, sizes = staged_live(HorizontalSweep(), [evs[i:i + 2] for i in range(0, len(evs), 2)], tmp_path)
+    assert found == [] and sizes[-1] <= 2
+
+
+def test_a_qualifying_sweep_still_cites_its_last_record_through_the_stage(tmp_path):
+    sweep = [eve(f"w{i:03d}", sport=30000 + i, dst=f"10.0.100.{i + 1}", start=T0 + timedelta(seconds=i))
+             for i in range(60)]
+    evs = events(*sweep)
+    [m], _sizes = staged_live(HorizontalSweep(), [evs[i:i + 3] for i in range(0, len(evs), 3)], tmp_path)
+    assert {e.get("destination.ip") for e in m.events} >= {"10.0.100.1", "10.0.100.60"}
+
+
+def test_the_event_stage_releases_a_held_event_only_when_no_one_keeps_or_holds_it(tmp_path):
+    from romulus.evidence.typed import RawRef
+    from romulus.hunt.stage import EventStage
+    a, b, c = events(eve("a"), eve("b", sport=50001), eve("c", sport=50002))
+    raw = {r.key: {"doc": r.native_id} for e in (a, b, c) for r in e.raw}
+    stage = EventStage(tmp_path)
+    try:
+        stage.hold([("r1", a), ("r1", a), ("r2", b), ("r1", c)], raw)
+        stage.put([c], raw)                                   # kept by someone: a release never removes it
+        stage.release("r1", [a.id])
+        assert {e.id for e in stage.load([a.id, b.id, c.id])} == {a.id, b.id, c.id}   # a is still held once
+        stage.release("r1", [a.id, c.id])
+        stage.release("r2", [b.id])
+        assert [e.id for e in stage.load([a.id, b.id, c.id])] == [c.id]
+        assert set(stage.raw_sources([a, b, c])) == {r.key for r in c.raw}             # only c's raw copy is left
+        assert isinstance(c.raw[0], RawRef)
+    finally:
+        stage.close()
+
+
+def test_ssh_tag_names_the_opener_only_for_the_tagged_connections_that_show_it():
+    opened = ssh_session("o1", ["ssh-reverse-shell"], cid="1:o1=", tcpflags={"syn": 1})
+    unopened = ssh_session("o2", ["ssh-reverse-shell"], cid="1:o2=", first=T0 + timedelta(minutes=3))
+    [m] = run(ArkimeSshReverseShellTag(), events(opened, unopened))
+    assert ("Tagged records show the SYN from 172.17.100.121 on 1 of the 2 tagged connections, so 172.17.100.121 "
+            "opened those; for the others, which end opened them is not recorded.") in m.claim
+    assert "The client" not in m.claim and "from the client" not in m.claim
+
+
+def test_the_sweep_holds_a_long_connections_bounds_and_releases_the_superseded_ones(monkeypatch, tmp_path):
+    from datetime import UTC, datetime
+
+    from romulus.hunt import sweep as sw
+    from romulus.sources.models import Completeness, SearchOutcome, Window
+    from romulus.store.db import make_engine, migrate
+    from romulus.store.repo import Repo
+
+    hits = _long(120)
+    batches = [hits[i:i + 4] for i in range(0, len(hits), 4)]
+    served = iter(batches)
+
+    def execute(client, intent, contract):
+        now, records = datetime.now(UTC), next(served)
+        return SearchOutcome(target=intent.target, fingerprint="f", started_at=now, ended_at=now,
+                             completeness=Completeness.complete, total=len(records), total_relation="eq",
+                             returned=len(records), records=records)
+
+    monkeypatch.setattr(sw, "execute", execute)
+    engine = make_engine(":memory:")
+    migrate(engine)
+    repo = Repo(engine)
+    repo.create_hunt("h1", {"targets": ["arkime_sessions3-x"]}, "d", "t")
+    sweep = sw.Sweep(repo, None, "h1", Window(start=T0, end=T0 + timedelta(days=1)), {"arkime_sessions3-x": None},
+                     stage_dir=tmp_path)
+    try:
+        for i in range(len(batches)):
+            w = Window(start=T0 + timedelta(hours=i), end=T0 + timedelta(hours=i + 1))
+            sweep.run_partition("arkime_sessions3-x", None, [], w, est=4)
+        stage = sweep._event_stage()
+        last = max(events(*hits), key=lambda e: e.get("flow.end"))
+        assert stage.load([last.id])                        # the record ending the span is on the stage
+        # held bounds: two per rule that states this connection's span, however many partitions it crossed (every
+        # superseded bound was released); the rest of the stage is citations rules keep to the end
+        holds = stage.db.execute("SELECT owner, SUM(n) FROM hold GROUP BY owner").fetchall()
+        assert holds and all(n <= 2 for _owner, n in holds)
+        assert stage.db.execute("SELECT COUNT(*) FROM event WHERE kept = 0").fetchone()[0] <= 2 * len(holds)
+    finally:
+        sweep.close_stage()

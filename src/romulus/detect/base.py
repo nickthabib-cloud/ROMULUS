@@ -179,6 +179,12 @@ class Playbook:
         """Events consumed since the last call that this playbook may cite later (staged playbooks)."""
         return []
 
+    def drain_bounds(self) -> tuple[list[str], list[str]]:
+        """After `drain_staged`: (the ids among the events it returned that are only held while they bound an
+        interval, one per hold; the ids of earlier holds this playbook releases). The stage keeps every other
+        returned event to the end."""
+        return [], []
+
     def bind_loader(self, load) -> None:
         """Give a staged playbook the function that loads staged events back by id."""
         self.load = load

@@ -398,6 +398,7 @@ class Ends:
     order records are read."""
     first: tuple[float, str] | None = None
     last: tuple[float, str] | None = None
+    held: list = field(default_factory=lambda: [None, None])   # the id the stage holds for each bound (BoundStage)
 
     def offer(self, start: float, end: float, event_id: str) -> tuple[bool, bool]:
         """Take one record's span: (it became the earliest, it became the latest)."""
@@ -422,40 +423,61 @@ class Ends:
 
 
 class BoundStage:
-    """Stages the records that bound each group's interval. A bound moves only outwards, so a record that stops
-    being one never becomes one again. The earliest is usually a group's first record; the latest changes with nearly
-    every record of a long-lived group, so each is held until the batch ends and only the record still holding it
-    then reaches the stage: at most two records per group per batch, however many records the group has."""
+    """Stages the records that bound each group's interval, as holds the stage releases when a later record takes
+    the bound, so the stage holds at most two records per group however many records the group has. A bound moves
+    only outwards, so a record that stops being one never becomes one again. The latest changes with nearly every
+    record of a long-lived group, so a new bound waits until the batch ends: only the record still holding it then is
+    held, and the record it replaces is released. A rule offers bounds only for groups that can still be reported
+    (`stage=False` tracks the bound without staging it), so a group that never qualifies stages nothing for them.
+
+    The sweep reads `drain` (the events to stage, with the playbook's other citations) and then `last` (which of
+    them are holds, and which earlier holds to release)."""
 
     def __init__(self):
-        self.pending: dict[tuple, TypedEvent] = {}
-        self.settled: list[TypedEvent] = []
+        self.pending: dict[tuple, tuple[TypedEvent, Ends]] = {}
+        self.kept: list[TypedEvent] = []        # bounds of intervals that have closed: kept to the end
+        self.releasing: list[str] = []
+        self.last: tuple[list[str], list[str]] = ([], [])
 
-    def offer(self, key, ends: Ends, start: float, end: float, event: TypedEvent) -> bool:
+    def offer(self, key, ends: Ends, start: float, end: float, event: TypedEvent, stage: bool = True) -> bool:
         """Offer a record to the group's bounds; True when it became one of them."""
         first, last = ends.offer(start, end, event.id)
-        if first:
-            self.pending[(key, 0)] = event
-        if last:
-            self.pending[(key, 1)] = event
+        if stage and first:
+            self.pending[(key, 0)] = (event, ends)
+        if stage and last:
+            self.pending[(key, 1)] = (event, ends)
         return first or last
 
-    def settle(self, key) -> None:
-        """The group's held latest record bounds an interval that has closed (a later record starts a new one), so it
-        is staged however the group grows from here."""
-        event = self.pending.pop((key, 1), None)
-        if event is not None:
-            self.settled.append(event)
+    def settle(self, key, ends: Ends) -> None:
+        """The group's latest record bounds an interval that has closed (a later record starts a new one): it is kept
+        to the end however the group grows from here."""
+        entry = self.pending.pop((key, 1), None)
+        if entry is not None:
+            self.kept.append(entry[0])
+            if ends.held[1] is not None and ends.held[1] != entry[0].id:
+                self.releasing.append(ends.held[1])       # an earlier latest of the same interval
+        ends.held[1] = None                                # a hold from an earlier batch stays: it is that bound
 
     def drain(self) -> list[TypedEvent]:
-        out = list({event.id: event for event in [*self.settled, *self.pending.values()]}.values())
-        self.pending.clear()
-        self.settled.clear()
+        out, held, released = list(self.kept), [], self.releasing
+        for (_key, side), (event, ends) in self.pending.items():
+            old = ends.held[side]
+            if old == event.id:
+                continue
+            if old is not None:
+                released.append(old)
+            ends.held[side] = event.id
+            out.append(event)
+            held.append(event.id)
+        self.last = (held, released)
+        self.pending, self.kept, self.releasing = {}, [], []
         return out
 
     def clear(self) -> None:
         self.pending.clear()
-        self.settled.clear()
+        self.kept.clear()
+        self.releasing.clear()
+        self.last = ([], [])
 
 
 def cite_with_bounds(load, events, ends: Ends, ids, limit: int) -> tuple[list[TypedEvent], set[str]]:
@@ -508,13 +530,14 @@ class _FlowRule(Playbook):
         self.load = lambda ids: []
 
     def drain_staged(self) -> list[TypedEvent]:
-        for event in self.bounds.drain():
-            self._stage(event)
-        out, self._pending = self._pending, []
+        out, self._pending = self._pending + self.bounds.drain(), []
         for value in list(vars(self).values()):
             if isinstance(value, KeyedStore):
                 value.trim()                        # a batch has ended: states beyond the hot sets go to disk
         return out
+
+    def drain_bounds(self) -> tuple[list[str], list[str]]:
+        return self.bounds.last
 
     def retained_events(self) -> list[TypedEvent]:
         return []                                   # staged on disk instead
@@ -825,7 +848,10 @@ class HorizontalSweep(_FlowRule):
         destination.records += 1
         group.records[view.sensor] += 1
         group.first, group.last = min(group.first, view.start), max(group.last, view.start)
-        self.bounds.offer(key, group.ends, view.start, view.start, event)
+        # the group's bounds are staged once it has enough destinations to qualify; before that they are tracked
+        # (its first record is a destination's first record, staged above)
+        self.bounds.offer(key, group.ends, view.start, view.start, event,
+                          stage=group.reached >= min(self.THRESHOLDS[scope].values()))
         hour = int(view.start // 3600)
         if new or (started[self.WINDOWS[0]] and group.hour_budget[hour] < self.RECONTACT_STAGE_PER_HOUR):
             if not new:
@@ -1402,7 +1428,7 @@ class LongUnidentifiedSession(_FlowRule):
         if expected and all(expected & parsers for parsers in PARSERS.values()):
             return True                 # every sensor can parse the registered protocol: the mismatch rule judges it
         if expected_protocols(view.transport, view.sport) and view.dport >= EPHEMERAL_FLOOR:
-            # A registered service's side seen as the initiator. When the sensor can parse the service, the
+            # A registered service's port on the side the sensor recorded first. When the sensor can parse it, the
             # protocol/port rule judges the record against the source port (and clears it when a forward record of
             # the same connection was identified); when it cannot, its silence says nothing.
             return True
@@ -1416,22 +1442,27 @@ class LongUnidentifiedSession(_FlowRule):
             state = _Identity()
             if not self.pieces.put(view.key, state):
                 return self._refused("connection records'")
+        candidate = not view.protocols and view.payload and not capable
+        state.reportable = state.reportable or candidate
+        # Bounds are staged only for an identity that can be reported, and never for a record with an identified
+        # protocol (a connection holding one is never reported); before that they are only tracked.
+        stage = state.reportable and not view.protocols
         staged = False
         if state.ends.last is not None and view.start > state.ends.last[0] + STITCH_GAP:
             # an earlier connection on this identity has ended: the record that ends it stays citable, and this one
             # opens the next connection
-            self.bounds.settle(("identity", view.key))
-            self._stage(event)
-            staged = True
-        self.bounds.offer(("identity", view.key), state.ends, view.start, view.end, event)
-        if not view.protocols and view.payload and not capable:
-            # the first few candidate records of an identity, and the first of any later connection that reuses it
-            if state.staged < self.STAGE_PER_CONNECTION or abs(view.start - state.last_staged) > STITCH_GAP:
-                state.staged += 1
-                state.last_staged = view.start
+            self.bounds.settle(("identity", view.key), state.ends)
+            if stage:
                 self._stage(event)
                 staged = True
-            state.reportable = True
+        self.bounds.offer(("identity", view.key), state.ends, view.start, view.end, event, stage=stage)
+        # the first few candidate records of an identity, and the first of any later connection that reuses it
+        if candidate and (state.staged < self.STAGE_PER_CONNECTION
+                          or abs(view.start - state.last_staged) > STITCH_GAP):
+            state.staged += 1
+            state.last_staged = view.start
+            self._stage(event)
+            staged = True
         state.pieces.append(_Piece(view.start, view.end, view.sensor, bool(view.protocols), view.payload,
                                             view.failed, capable, event.id, view.src, view.dst, view.dport,
                                             view.transport, staged))
@@ -1511,11 +1542,16 @@ class LongUnidentifiedSession(_FlowRule):
 
 # How a connection between an internal and an external address is read, from what its records show.
 OPENED_INSIDE = "opened inside"     # a record shows the internal address opened it: what it sent is an upload
-SERVED = "served"                   # a record shows the external address opened it: the internal address served it
+SERVED = "served"                   # a record shows the external address opened it: the internal address answered
 CLIENT_SHAPED = "client-shaped"     # opener not recorded (or records disagree); internal port ephemeral, external not
-UNSHAPED = "unshaped"               # opener not recorded, and the ports do not mark the internal address as client
+SERVER_SHAPED = "server-shaped"     # opener not recorded; external port ephemeral, internal not: a server's answers
+UNSHAPED = "unshaped"               # opener not recorded; both ports ephemeral or both below that range
 PORTLESS = "portless"               # opener not recorded, on a transport without ports
-COUNTED = frozenset({OPENED_INSIDE, CLIENT_SHAPED})
+COUNTED = frozenset({OPENED_INSIDE, CLIENT_SHAPED, UNSHAPED, PORTLESS})
+# The typed fact that showed an opener (bit flags on _Connection.opened_inside / opened_outside).
+ARKIME_SYN, SURICATA_STATE = 1, 2
+SURICATA_STATE_NOTE = ("a Suricata flow in state established or closed, which shows a tracked handshake on a sensor "
+                       "that does not pick up mid-stream")
 UNKNOWN_REASONS = {"tcp": "TCP with no record of the opening (picked up mid-stream, or opened before the hunt window)",
                    "udp": "UDP, which has no opening to record", "sctp": "SCTP, whose opening no typed field shows",
                    "disagree": "TCP whose records disagree about which side opened it"}
@@ -1525,8 +1561,8 @@ UNKNOWN_REASONS = {"tcp": "TCP with no record of the opening (picked up mid-stre
 class _Connection:
     """One connection between an internal and an external address, from every record of it."""
     tallies: dict = field(default_factory=dict)     # sensor -> [bytes the internal address sent, received, records]
-    opened_inside: bool = False                     # some record shows the internal address opened it
-    opened_outside: bool = False                    # some record shows the external address opened it
+    opened_inside: int = 0                          # the facts (ARKIME_SYN, SURICATA_STATE) showing the internal
+    opened_outside: int = 0                         # ... or the external address opened it
     first: float = float("inf")
     last: float = float("-inf")
 
@@ -1547,13 +1583,17 @@ def _sides(key: tuple, inside: str) -> tuple[str, int | None, int | None]:
 
 
 def connection_reading(conn: _Connection, transport: str, inside_port: int | None, outside_port: int | None) -> str:
-    """How the bytes the internal address sent on this connection are read (OPENED_INSIDE ... PORTLESS)."""
-    if conn.opened_inside != conn.opened_outside:
+    """How the bytes the internal address sent on this connection are read (OPENED_INSIDE ... PORTLESS). Without a
+    recorded opener the ports decide only the two clear shapes: an internal ephemeral port facing a service port is a
+    client, the reverse is a server answering; anything else is counted with its direction stated as unknown."""
+    if bool(conn.opened_inside) != bool(conn.opened_outside):
         return OPENED_INSIDE if conn.opened_inside else SERVED
     if transport not in PORTED or inside_port is None or outside_port is None:
         return PORTLESS
     if inside_port >= EPHEMERAL_FLOOR > outside_port:
         return CLIENT_SHAPED
+    if outside_port >= EPHEMERAL_FLOOR > inside_port:
+        return SERVER_SHAPED
     return UNSHAPED
 
 
@@ -1564,48 +1604,60 @@ class _Pair:
     cited: list[tuple[int, str, tuple]] = field(default_factory=list)  # (bytes sent inside out, event id, connection)
     ends: Ends = field(default_factory=Ends)
     bound_connections: dict = field(default_factory=dict)              # bounding event id -> its connection
+    sent: int = 0                   # bytes the internal address sent on connections that may count, as read so far
 
 
 @dataclass
 class _PairTotals:
-    """A pair's counted connections, each from the sensor that recorded the most bytes for it."""
+    """A pair's connections, each from the sensor that recorded the most bytes for it: the counted ones by how they
+    were read, and the bytes of those not read as uploads."""
     out: int = 0
     inn: int = 0
     records: Counter = field(default_factory=Counter)
-    opened: int = 0                                         # counted: a record shows the internal address opened it
-    unopened: Counter = field(default_factory=Counter)      # counted by port shape, by why the opener is unknown
-    server_ports: Counter = field(default_factory=Counter)  # the external port of each opened connection
-    peer_ports: Counter = field(default_factory=Counter)    # the external port of each port-shaped connection
+    readings: Counter = field(default_factory=Counter)      # counted connections per reading
+    suricata_only: int = 0                                  # opened inside, shown only by a Suricata flow state
+    unknown: dict = field(default_factory=dict)             # reading -> Counter of why the opener is unknown
+    inside_ports: dict = field(default_factory=dict)        # reading -> Counter of the internal address's ports
+    outside_ports: dict = field(default_factory=dict)       # reading -> Counter of the external address's ports
     first: float = float("inf")
     last: float = float("-inf")
     counted: set = field(default_factory=set)               # the pair's cited connections that are counted
+    not_read: Counter = field(default_factory=Counter)      # (reading, 'connections' | 'bytes' | 'suricata only')
 
     @property
     def connections(self) -> int:
-        return self.opened + sum(self.unopened.values())
+        return sum(self.readings.values())
 
-    def add(self, conn: _Connection, reading: str, transport: str, outside_port: int) -> None:
+    def add(self, conn: _Connection, reading: str, transport: str, inside_port, outside_port) -> None:
         best = conn.best()
+        if reading not in COUNTED:
+            if best[0]:                 # a connection on which the internal address sent nothing adds no upload
+                self.not_read[reading, "connections"] += 1
+                self.not_read[reading, "bytes"] += best[0]
+                self.not_read[reading, "suricata only"] += conn.opened_outside == SURICATA_STATE
+            return
         self.out += best[0]
         self.inn += best[1]
         for name, tally in conn.tallies.items():
             self.records[name] += tally[2]
-        port = f"{transport}/{outside_port}"
+        self.readings[reading] += 1
         if reading == OPENED_INSIDE:
-            self.opened += 1
-            self.server_ports[port] += 1
+            self.suricata_only += conn.opened_inside == SURICATA_STATE
         else:
-            self.unopened["disagree" if conn.opened_inside else transport] += 1
-            self.peer_ports[port] += 1
+            why = "disagree" if conn.opened_inside else transport
+            self.unknown.setdefault(reading, Counter())[why] += 1
+        if inside_port is not None:
+            self.inside_ports.setdefault(reading, Counter())[f"{transport}/{inside_port}"] += 1
+            self.outside_ports.setdefault(reading, Counter())[f"{transport}/{outside_port}"] += 1
         self.first, self.last = min(self.first, conn.first), max(self.last, conn.last)
 
 
-class _NotEvaluated(Limit):
-    """Connections this rule did not read because of what their records show (not a state budget): named on the
-    window cell with the count, and the cell is partial."""
+class _NotRead(Limit):
+    """Connections whose bytes this rule did not read as uploads because of what their records show (not a state
+    budget): named on the window cell with the count and the bytes, and the cell is partial."""
 
     def reason(self) -> str:
-        return f"not evaluated: {self.text} ({self.records} connection(s))"
+        return f"not read as uploads: {self.text} ({self.records} connection(s))"
 
 
 class _Uncited(Limit):
@@ -1633,13 +1685,16 @@ class OutboundVolumeAsymmetry(_FlowRule):
     assures_negative = False
     positive_only_reason = (
         "internal and external are judged from the site's internal-network definition (the RFC 1918 and reserved "
-        "ranges when it is not configured), and only connections the internal address opened (a recorded TCP "
-        "opening shows it), or whose opener is not recorded but whose ports mark the internal address as the client, "
-        "are read. An internal server's answers to outside clients are not uploads, and connections whose direction "
-        "cannot be told are counted on coverage as not evaluated; transfers outside that view are not seen, so the "
-        "absence of a match proves nothing")
+        "ranges when it is not configured). Connections a recorded opening shows an outside address opened (an "
+        "internal server answering), and connections whose opener is not recorded but whose ports have an internal "
+        "server's shape, are not read as uploads; both are counted on the window cell with their bytes. A Suricata "
+        "flow state counts as a recorded opening only on a sensor that does not pick up mid-stream (stream.midstream "
+        "off, its default); on one that does, such a connection may have been opened from inside. Transfers outside "
+        "that view are not seen, so the absence of a match proves nothing")
     benign = ("backups and cloud file synchronisation", "log and telemetry shipping", "video and media uploads",
-              "software publishing to external repositories")
+              "software publishing to external repositories",
+              ("internal servers and VPN gateways answering outside clients where no record shows the opening and the "
+              "ports do not mark a client (the claim says so)"))
     next_checks = ("the process on the internal host that owns the connections",
                    "files archived, compressed or staged on the internal host shortly before",
                    "what the destination is (ownership, other internal clients, reputation)")
@@ -1649,9 +1704,11 @@ class OutboundVolumeAsymmetry(_FlowRule):
     FIRST_CITES = 3
     card: ClassVar[dict] = {
         "behavior": "an internal address sent at least 50 MiB to one external address in the hunt window, at least "
-                    "ten times what it received back from it, over connections it opened (a recorded TCP opening "
-                    "shows it) or whose opener is not recorded but whose ports mark it as the client (its port 32768 "
-                    "or above, the external port below that)",
+                    "ten times what it received back from it, over connections other than those an outside address "
+                    "is shown to have opened or whose ports have an internal server's shape. The claim says, per "
+                    "connection, whether a recorded TCP opening shows the internal address opened it, or that the "
+                    "opener is not recorded and what the ports show (a client's shape, or no shape, in which case "
+                    "the bytes may be a server's answers)",
         "telemetry": "Suricata EVE flow records (flow.bytes_toserver, flow.bytes_toclient, flow.state) and Arkime "
                      "sessions (source.bytes, destination.bytes, tcp.flags.syn): present in the lab profile on every "
                      "record (Arkime counts SYNs on every TCP session; lab Suricata flows it picked up mid-stream "
@@ -1661,15 +1718,18 @@ class OutboundVolumeAsymmetry(_FlowRule):
                     "bytes for it. The opener is stated only from a recorded TCP opening: an Arkime session that "
                     "counted a SYN (Arkime orients such a session by it), or a Suricata flow its TCP engine tracked "
                     "from the handshake (state established or closed; valid while the sensor's stream.midstream is "
-                    "off, its default). Otherwise the claim says the opener is unknown and why, and gives the port "
-                    "shape. Volume and ratio are a deviation, not proof of theft",
+                    "off, its default, and the claim says so where it is the only fact). Without one the claim says "
+                    "the opener is unknown and why. Volume and ratio are a deviation, not proof of theft",
         "benign_and_cost": "backups, cloud sync, log shipping, media uploads (the lab carries CCTV traffic). A "
-                           "connection an outside address opened to an internal server is not read as an upload (the "
-                           "server's answers are the outside client's download), nor is one whose opener is not "
-                           "recorded and whose ports do not mark the internal address as the client (both ephemeral, "
-                           "or the internal port the lower), nor one on a transport without ports: those are counted "
-                           "on the window cell as not evaluated. One item per (internal source, external "
-                           "destination); the claim gives the destination's other internal senders for prevalence",
+                           "connection an outside address is shown to have opened to an internal server is not read "
+                           "as an upload (the server's answers are the outside client's download), nor is one whose "
+                           "opener is not recorded and whose external port is ephemeral while the internal port is "
+                           "not (an internal server answering): both are named on the window cell with their count, "
+                           "the bytes the internal addresses sent on them and the largest pair. Connections with no "
+                           "recorded opener and no clear port shape (both ports ephemeral or both below that range, "
+                           "or no ports at all) are counted and worded as possibly a server's answers. One item per "
+                           "(internal source, external destination); the claim gives the destination's other internal "
+                           "senders for prevalence",
         "query_cost": "none beyond the sweep",
         "next_pivot": "the uploading process and staging (archives, encoders) on the source host",
         "adds": "no other rule measures byte asymmetry",
@@ -1723,54 +1783,59 @@ class OutboundVolumeAsymmetry(_FlowRule):
         tally[1] += received
         tally[2] += 1
         if view.opened:
+            fact = ARKIME_SYN if view.sensor == ARKIME else SURICATA_STATE
             if inside_first:
-                conn.opened_inside = True
+                conn.opened_inside |= fact
             else:
-                conn.opened_outside = True
+                conn.opened_outside |= fact
         conn.first, conn.last = min(conn.first, view.start), max(conn.last, view.end)
         if connection_reading(conn, *_sides(view.key, inside)) not in COUNTED:
             return True                 # as read so far, not an upload: nothing to cite
+        pair.sent += sent
         if len(pair.cited) < self.FIRST_CITES or (sent >= self.CITE_BYTES and len(pair.cited) < EXAMPLE_LIMIT):
             pair.cited.append((sent, event.id, view.key))
             self._stage(event)
-        if self.bounds.offer(("pair", inside, outside), pair.ends, view.start, view.end, event):
+        # the pair's bounds are staged once it has sent enough to qualify; its first records are staged above
+        if self.bounds.offer(("pair", inside, outside), pair.ends, view.start, view.end, event,
+                             stage=pair.sent >= self.MIN_OUTBOUND_BYTES):
             pair.bound_connections[event.id] = view.key
             held = set(pair.ends.ids())
             for event_id in [i for i in pair.bound_connections if i not in held]:
                 del pair.bound_connections[event_id]
         return True
 
-    def _resolved(self, unread: Counter):
-        """((internal, external), totals) per pair over its counted connections; one pair's connections are read at
-        a time. Connections not counted are tallied in `unread` by how they were read."""
+    def _resolved(self):
+        """((internal, external), totals) per pair; one pair's connections are read at a time."""
         pair_key, totals, cited = None, _PairTotals(), set()
         for (inside, outside, key), conn in self.connections.grouped():
             if (inside, outside) != pair_key:
-                if pair_key is not None and totals.connections:
+                if pair_key is not None:
                     yield pair_key, totals
                 pair_key, totals = (inside, outside), _PairTotals()
                 held = self.pairs.peek(pair_key)
                 cited = ({c for *_ref, c in held.cited} | set(held.bound_connections.values())) if held else set()
             transport, inside_port, outside_port = _sides(key, inside)
             reading = connection_reading(conn, transport, inside_port, outside_port)
-            if reading not in COUNTED:
-                sent = conn.sent()
-                if sent:                # a connection on which the internal address sent nothing adds no upload
-                    unread[reading] += 1
-                    unread[reading, "bytes"] += sent
-                continue
-            totals.add(conn, reading, transport, outside_port)
-            if key in cited:
+            totals.add(conn, reading, transport, inside_port, outside_port)
+            if reading in COUNTED and key in cited:
                 totals.counted.add(key)
-        if pair_key is not None and totals.connections:
+        if pair_key is not None:
             yield pair_key, totals
 
     def finalize(self):
         totals_by_source = KeyedStore(self, "ova_totals", self.HOT_PAIRS)     # internal source -> [bytes sent out]
         senders = KeyedStore(self, "ova_senders", self.HOT_PAIRS)             # external destination -> [senders]
-        unread: Counter = Counter()
+        not_read: Counter = Counter()
+        largest: dict[str, tuple[int, str, str]] = {}                        # reading -> (bytes, internal, external)
         hits = []
-        for i, ((src, dst), totals) in enumerate(self._resolved(unread)):
+        for i, ((src, dst), totals) in enumerate(self._resolved()):
+            not_read.update(totals.not_read)
+            for reading in (SERVED, SERVER_SHAPED):
+                sent_here = totals.not_read[reading, "bytes"]
+                if sent_here and sent_here > largest.get(reading, (0,))[0]:
+                    largest[reading] = (sent_here, src, dst)
+            if not totals.connections:
+                continue
             total = totals_by_source.setdefault(src, lambda: [0])
             sent = senders.setdefault(dst, lambda: [0]) if totals.out > 0 else [0]
             if total is None or sent is None:
@@ -1783,17 +1848,7 @@ class OutboundVolumeAsymmetry(_FlowRule):
             if i % FINALIZE_TRIM == FINALIZE_TRIM - 1:
                 totals_by_source.trim()
                 senders.trim()
-        unknown = unread[UNSHAPED] + unread[PORTLESS]
-        if unknown:
-            # Which side opened these is not recorded and their ports do not say which side is the client, so the
-            # bytes their internal address sent may be a server's answers: they are not read, and the cell says so.
-            unread_bytes = unread[UNSHAPED, "bytes"] + unread[PORTLESS, "bytes"]
-            self.limits["direction_unknown"] = _NotEvaluated(
-                f"which side opened these connections between internal and external addresses is not recorded, and "
-                f"their ports do not mark the internal address as the client ({unread[UNSHAPED]} with both ports "
-                f"ephemeral or the internal port the lower, {unread[PORTLESS]} on transports without ports), so the "
-                f"{unread_bytes:,} bytes the internal addresses sent on them were not read as uploads",
-                records=unknown, hits=1)
+        self._note_not_read(not_read, largest)
         # a reported source sent data to the destination, so it is one of the destination's senders
         matches = [self._match(src, dst, totals, totals_by_source.peek(src)[0], senders.peek(dst)[0] - 1)
                    for src, dst, totals in sorted(hits, key=lambda hit: hit[:2])]
@@ -1807,28 +1862,69 @@ class OutboundVolumeAsymmetry(_FlowRule):
         senders.clear()
         return [match for match in matches if match is not None]
 
+    def _note_not_read(self, not_read: Counter, largest: dict) -> None:
+        """Name, on the window cell, the connections whose internal-address bytes were not read as uploads: how many,
+        the bytes, and the pair with the most."""
+        texts = {
+            SERVED: "connections a recorded opening shows an external address opened, so the internal address "
+                    "answered as a server{suricata}",
+            SERVER_SHAPED: f"connections whose opener is not recorded, with the internal address on a port below "
+                           f"{EPHEMERAL_FLOOR} and the external address on one at or above it (the port shape of an "
+                           f"internal server answering an outside client)",
+        }
+        for reading, text in texts.items():
+            count = not_read[reading, "connections"]
+            if not count:
+                continue
+            suricata = not_read[reading, "suricata only"]
+            note = (f"; {suricata} of them shown only by {SURICATA_STATE_NOTE}" if suricata else "")
+            most, src, dst = largest[reading]
+            self.limits[f"not_read_{reading}"] = _NotRead(
+                text.format(suricata=note) + f": the internal addresses sent {not_read[reading, 'bytes']:,} bytes on "
+                f"them, the most from one pair {most:,} bytes from {src} to {dst}", records=count, hits=1)
+
     @staticmethod
     def _openings(src: str, dst: str, totals: _PairTotals) -> str:
-        """What the records show about who opened the counted connections."""
-        n, opened, unopened = totals.connections, totals.opened, sum(totals.unopened.values())
-        parts = []
-        if opened:
-            which = "the connection" if n == 1 else "all of them" if opened == n else f"{opened} of them"
-            parts.append(f"A recorded TCP opening (an Arkime session that counted the SYN, or a Suricata flow whose "
-                         f"handshake it tracked) shows {src} opened {which}, to server port "
-                         f"{_port_list(totals.server_ports)} on {dst}.")
-        if unopened:
-            which = ("the connection" if n == 1 else f"the other {_plural(unopened, 'connection')}" if opened
-                     else "the connections")
-            pronoun = "it" if unopened == 1 else "them"
+        """What the records show about who opened the counted connections, one sentence per reading."""
+        n = totals.connections
+
+        def which(k: int) -> str:
+            return "the connection" if n == 1 else f"all {n} connections" if k == n else _plural(k, "connection")
+
+        def reasons(reading: str) -> str:
+            counts = totals.unknown[reading]
             if n == 1:
-                reasons = f"it is {UNKNOWN_REASONS[next(iter(totals.unopened))]}"
-            else:
-                reasons = "; ".join(f"{count} {'is' if count == 1 else 'are'} {UNKNOWN_REASONS[reason]}"
-                                    for reason, count in sorted(totals.unopened.items()))
-            parts.append(f"Which side opened {which} is not recorded: {reasons}. On {pronoun} {src} used a port of "
-                         f"{EPHEMERAL_FLOOR} or above and {dst} used {_port_list(totals.peer_ports)}, the port shape "
-                         f"of {src} as the client.")
+                return f"it is {UNKNOWN_REASONS[next(iter(counts))]}"
+            return "; ".join(f"{count} {'is' if count == 1 else 'are'} {UNKNOWN_REASONS[why]}"
+                             for why, count in sorted(counts.items()))
+
+        parts = []
+        k = totals.readings[OPENED_INSIDE]
+        if k:
+            arkime = k - totals.suricata_only
+            facts = ([f"Arkime counted the SYN{'' if n == 1 else f' for {arkime}'}"] if arkime else []) + (
+                [(f"{'the only' if n == 1 else f'for {totals.suricata_only} the only'} record of the opening is "
+                 f"{SURICATA_STATE_NOTE}")] if totals.suricata_only else [])
+            parts.append(f"A recorded TCP opening shows {src} opened {which(k)}, to server port "
+                         f"{_port_list(totals.outside_ports[OPENED_INSIDE])} on {dst} ({'; '.join(facts)}).")
+        k = totals.readings[CLIENT_SHAPED]
+        if k:
+            parts.append(f"Which side opened {which(k)} is not recorded: {reasons(CLIENT_SHAPED)}. On "
+                         f"{'it' if k == 1 else 'them'} {src} used a port of {EPHEMERAL_FLOOR} or above and {dst} used "
+                         f"{_port_list(totals.outside_ports[CLIENT_SHAPED])}, the port shape of {src} as the client.")
+        k = totals.readings[UNSHAPED]
+        if k:
+            parts.append(f"Which side opened {which(k)} is not recorded: {reasons(UNSHAPED)}. The ports do not "
+                         f"mark a client either: {src} used {_port_list(totals.inside_ports[UNSHAPED])} and {dst} "
+                         f"used {_port_list(totals.outside_ports[UNSHAPED])}, so what {src} sent on "
+                         f"{'it' if k == 1 else 'them'} may be a server's answers.")
+        k = totals.readings[PORTLESS]
+        if k:
+            kinds = ", ".join(f"{count} {name.upper()}" if n > 1 else name.upper()
+                              for name, count in sorted(totals.unknown[PORTLESS].items()))
+            parts.append(f"{which(k)[0].upper()}{which(k)[1:]} {'is' if k == 1 else 'are'} {kinds}, with no ports "
+                         f"and no opening the sensors record, so nothing marks a client: what {src} sent on "
+                         f"{'it' if k == 1 else 'them'} may be a server's answers.")
         return " ".join(parts)
 
     def _match(self, src, dst, totals: _PairTotals, total, others) -> Match | None:

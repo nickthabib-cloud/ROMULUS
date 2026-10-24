@@ -115,6 +115,9 @@ class _Stitched(Playbook):
         self.conns.trim()
         return out
 
+    def drain_bounds(self) -> tuple[list[str], list[str]]:
+        return self.bounds.last
+
     def release_state(self) -> None:
         self.load = lambda ids: []
         for value in list(vars(self).values()):
@@ -195,7 +198,8 @@ class _Stitched(Playbook):
                 if c["opener_id"] is None:
                     c["opener_id"] = e.id
             if self.BOUNDED:
-                self.bounds.offer(key, c["ends"], start, end, e)
+                # staged only once the connection can be reported; its first records are staged by `cite`
+                self.bounds.offer(key, c["ends"], start, end, e, stage=self.candidate(c))
             opened = _absorb(c["parts"], start, end, self._seq, e.id, protocols, self.IDLE)
             self._seq += 1
             if self.cite(c, e, opened):
@@ -645,6 +649,9 @@ class ArkimeSshReverseShellTag(Playbook):
         self.bounds = BoundStage()      # the tagged records bounding each pair's stated span, staged when a batch ends
         self.load = lambda ids: []
 
+    def drain_bounds(self) -> tuple[list[str], list[str]]:
+        return self.bounds.last
+
     def drain_staged(self) -> list[TypedEvent]:
         out, self._pending = self._pending + self.bounds.drain(), []
         for store in self._fresh:
@@ -691,7 +698,7 @@ class ArkimeSshReverseShellTag(Playbook):
             if pair["info"] is None:
                 pair["info"] = {"records": 0, "conns": set(), "first": e.ts, "last": e.ts, "c2s": 0, "s2c": 0,
                                 "versions": set(), "hassh": set(), "hassh_server": set(), "tags": set(), "end": None,
-                                "by_time": Ends(), "by_end": Ends(), "opened": 0, "flagged": False}
+                                "by_time": Ends(), "by_end": Ends(), "opened": set(), "flagged": False}
                 pair["examples"] = HeldExamples(EXAMPLE_LIMIT)
             g = pair["info"]
             g["records"] += 1
@@ -707,7 +714,8 @@ class ArkimeSshReverseShellTag(Playbook):
             syn = _syn(e)
             if syn is not None:
                 g["flagged"] = True
-            g["opened"] += bool(syn)
+            if syn:
+                g["opened"].add(self._conn_key(e))      # a connection this tagged record shows src opened
             for name, side in (("source.bytes", "c2s"), ("destination.bytes", "s2c")):
                 value = e.get(name)
                 if isinstance(value, int) and not isinstance(value, bool):
@@ -728,7 +736,7 @@ class ArkimeSshReverseShellTag(Playbook):
     @staticmethod
     def _scope(src: str, dst: str, opened: bool) -> str:
         """Where the two ends sit, by the configured internal ranges ('' when either is not a routable address).
-        Each end is named client or server only when a tagged record shows the opening."""
+        Each end is named client or server only when tagged records show the opening of every tagged connection."""
         client, server = canon_ip(src), canon_ip(dst)
         if not (routable_remote(client) and routable_remote(server)):
             return ""
@@ -743,9 +751,15 @@ class ArkimeSshReverseShellTag(Playbook):
 
     @staticmethod
     def _opening(src: str, g: dict) -> str:
-        """What the tagged records show about which end opened the session."""
-        if g["opened"]:
-            return f" A tagged record shows the SYN from {src}, so {src} opened the session."
+        """What the tagged records show about which end opened the sessions."""
+        opened, tagged = len(g["opened"]), len(g["conns"])
+        if opened and opened == tagged:
+            return (f" A tagged record shows the SYN from {src}, so {src} opened the session." if tagged == 1 else
+                    f" Tagged records show the SYN from {src} on all {tagged} tagged connections, so {src} opened "
+                    f"them.")
+        if opened:
+            return (f" Tagged records show the SYN from {src} on {opened} of the {tagged} tagged connections, so "
+                    f"{src} opened those; for the others, which end opened them is not recorded.")
         if g["flagged"]:
             return (" No tagged record shows the SYN (Arkime picked the session up mid-stream, or it opened before "
                     "the hunt window), so which end opened it is not recorded.")
@@ -755,7 +769,8 @@ class ArkimeSshReverseShellTag(Playbook):
         """The session's own context, stated beside the tag: address scope, bytes, announced software,
         fingerprints, other tags, and the pair's untagged SSH connections (a denominator for the heuristic)."""
         src, dst, port = key
-        text = self._scope(src, dst, bool(g["opened"])) + self._opening(src, g)
+        every = len(g["opened"]) == len(g["conns"])      # every tagged connection shows src opened it
+        text = self._scope(src, dst, every) + self._opening(src, g)
         span = (g["end"] - g["first"].timestamp()) if g["end"] is not None else None
         def volume(side: str) -> str:
             missing = g.get(f"{side}_missing", 0)
@@ -764,7 +779,7 @@ class ArkimeSshReverseShellTag(Playbook):
             return (f"at least {g[side]} bytes (not recorded on {missing} record(s))" if missing
                     else f"{g[side]} bytes")
 
-        sides = ("the client", "the server") if g["opened"] else (src, dst)
+        sides = ("the client", "the server") if every else (src, dst)
         text += (f" The tagged record(s) carry {volume('c2s')} from {sides[0]} and {volume('s2c')} from {sides[1]}"
                  + (f" over {span:.0f} s." if span is not None else "."))
         if g["versions"]:

@@ -3,6 +3,7 @@ playbooks, publish direct findings immediately, and keep an exact per-rule cover
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta
@@ -167,13 +168,20 @@ class Sweep:
             return raw_sources
         return {**stage.raw_sources(missing), **raw_sources}
 
-    def _stage_put(self, events: list[TypedEvent], raw_sources: dict[str, dict]) -> None:
-        """Stage citations, charging the stage's growth to its own account of the hunt's state budget. A write the
-        volume cannot take marks the budget broken: those citations are lost to their rules, which say so."""
+    def _stage_put(self, events: list[TypedEvent], raw_sources: dict[str, dict],
+                   held: list[tuple[str, TypedEvent]] = (), released: list[tuple[str, list[str]]] = ()) -> None:
+        """Stage citations (kept to the end) and playbooks' holds of interval bounds, then release the holds they
+        let go, charging the stage's growth to its own account of the hunt's state budget (freed pages are reused,
+        so the charge follows the most the stage held at once). A write the volume cannot take marks the budget
+        broken: those citations are lost to their rules, which say so."""
         import sqlite3
         stage = self._event_stage()
         try:
-            stage.put(events, raw_sources)
+            if events:
+                stage.put(events, raw_sources)
+            stage.hold(list(held), raw_sources)
+            for owner, ids in released:
+                stage.release(owner, ids)
         except sqlite3.OperationalError as exc:
             self.budget.fail(f"writing the event stage failed ({exc})")
             for pb in self.pack:
@@ -395,6 +403,8 @@ class Sweep:
         # events the joining aggregates may cite later, by id: several playbooks stage the same events, and each
         # is serialized to the stage once per partition (the first staged copy of an id is kept)
         staged: dict[str, TypedEvent] = {}
+        held: list[tuple[str, TypedEvent]] = []          # (playbook, event) holds of interval bounds
+        released: list[tuple[str, list[str]]] = []       # (playbook, ids) holds the playbooks let go
         for pb in self.pack:
             rule_partial = affected is ALL_FAMILIES or bool(set(pb.families) & affected)
             before_eval, before_missing, before_capped = pb.evaluated, pb.missing_required, pb.capped
@@ -420,12 +430,21 @@ class Sweep:
                 # volume's reserve the stage takes only strong rules' citations; another rule's held examples are
                 # then not loadable, and its finalize says so.
                 drained = pb.drain_staged()
+                held_ids, released_ids = pb.drain_bounds()
+                if released_ids:
+                    released.append((pb.id, released_ids))
                 if drained and self.budget.hard and pb.state_slice != "strong":
                     pb.note_limit("stage", f"the event stage took no new citation of this rule "
                                            f"({self.budget.hard}); its findings that cite them are not computed")
                 else:
+                    # an event returned more often than it is held is also staged to be kept
+                    holds = Counter(held_ids)
+                    copies = Counter(event.id for event in drained)
                     for event in drained:
-                        staged.setdefault(event.id, event)
+                        if copies[event.id] > holds[event.id]:
+                            staged.setdefault(event.id, event)
+                    for event in {event.id: event for event in drained if holds[event.id]}.values():
+                        held.extend([(pb.id, event)] * holds[event.id])
             elif pb.kind == "aggregate":
                 # aggregates retain examples: stash raw copies of their retained events now
                 self._retain_aggregate_raw(pb, raw_sources)
@@ -468,8 +487,8 @@ class Sweep:
                                f"was full; " + "; ".join(refused))
                 detail["state_capped"] = capped
             cells.append(self._cell(pb, target, pkey, state, len(matches), evaluated, detail))
-        if staged:
-            self._stage_put(list(staged.values()), raw_sources)
+        if staged or held or released:
+            self._stage_put(list(staged.values()), raw_sources, held, released)
         staged.clear()
         # the event stage shares the stage volume: its growth counts toward the free-space reserve
         self.budget.check_free()
