@@ -114,7 +114,10 @@ def test_reverse_density_is_exact_after_20k_scattered_names(monkeypatch, tmp_pat
     assert shape(streamed) == shape(whole)
     [m] = streamed
     assert "for 20540 distinct reverse-lookup name(s)" in m.claim and "at least" not in m.claim
-    assert "Densest: 10.200.7.0/24 (40 address(es), 10.200.7.1 – 10.200.7.40)" in m.claim
+    # the dense block came after the blocks that keep citation candidates: it is named, with a record in it cited,
+    # and its address range is not stated as cited
+    assert "Densest: 10.200.7.0/24 (40 address(es); its range is not cited)" in m.claim
+    assert any(e.get("dns.question.name").endswith(".7.200.10.in-addr.arpa") for e in m.events)
     assert "reverse-DNS sweep (host discovery by name)" in m.claim and "No block holds" not in m.claim
     assert "20540 of the names stand for single addresses in 20501 block(s)" in m.claim
     rule.release_state()

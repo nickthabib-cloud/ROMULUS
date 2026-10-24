@@ -656,8 +656,13 @@ def test_alert_signature_note_is_deterministic_when_names_match():
 
     match = run(network.SuricataAlertStack, evs)[0]
 
-    expected = sorted(range(30), key=str)
-    assert match.notes[-1] == f"signatures: {expected}"
+    # the note lists the signatures of the cited alerts, ordered by name and then id, counts the rest of them, and
+    # counts the signatures no cited alert carries
+    cited = {e.get("alert.signature_id") for e in match.events}
+    expected = sorted(cited, key=str)
+    assert match.notes[-1] == (f"signatures of the cited alerts: {expected[:10]} and {len(cited) - 10} more; "
+                               f"{30 - len(cited)} other signature(s) are in alerts not cited")
+    assert {e.get("alert.signature_id") for e in match.events} >= set(range(10))
 
 
 # ---------------------------------------------------------------- web scan burst (cross-partition)

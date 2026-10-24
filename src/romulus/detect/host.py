@@ -4,8 +4,10 @@ from __future__ import annotations
 import ast
 import ipaddress
 import itertools
+import json
 import posixpath
 import re
+import zlib
 from bisect import bisect_right, insort
 from collections import defaultdict
 from datetime import UTC, datetime
@@ -14,6 +16,7 @@ from typing import ClassVar, NamedTuple
 from romulus.detect import netdef
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, outcome_phrase, pf
 from romulus.detect.bounded import HOT_COUNT, HeldExamples, KeyedStore, RecentIds, SpillList, StateExhausted
+from romulus.detect.citing import BoundStage, Ends, bound_note, cite_group, cited_phrase, more
 from romulus.detect.linux_argv import canonical, program, read_operand_paths
 from romulus.detect.observed import (
     Observed,
@@ -354,7 +357,7 @@ class WebServiceSpawnsInterpreter(Playbook):
     anchor_class = "web_shell"
     # argv/text-identified programs and actions: findings only, never a complete negative
     assures_negative = False
-    version = "12"
+    version = "13"
     title = "Web service account executed a shell or interpreter"
     kind = "aggregate"
     families = ("process_exec",)
@@ -445,16 +448,23 @@ class WebServiceSpawnsInterpreter(Playbook):
     def groups(self):
         return self.shapes
 
-    def _event_match(self, e, user, argv, indicators, count=None, prefix_only=False):
+    def _event_match(self, e, user, argv, indicators, count=None, prefix_only=False, runs=()):
+        """One run's item. `runs`: every run of its rare shape (the run itself among them), all cited with it."""
         rce_shaped = any(("decoded data" in item) or ("stdin" in item) for item in indicators)
         lane, severity = (("urgent", "critical") if rce_shaped else
                           ("high", "high") if indicators else ("lead", "medium"))
-        count_text = f" This command shape occurred {count} time(s) in the window." if count is not None else ""
+        cited = sorted({run.id: run for run in [e, *runs]}.values(), key=lambda run: (run.ts, run.id))
+        count_text = ""
+        if count is not None:
+            count_text = f" This command shape occurred {count} time(s) in the window."
+            if count > 1:
+                count_text += cited_phrase(len(cited), count, False, "runs", "run")
         claim = (f"A process execution event on {e.host} records account '{user}' executing "
                  f"'{basename(argv[0])}' (argv: {_argv_summary(argv)}); {outcome_phrase(e)}.{count_text}")
         match = Match(
-            self.id, claim, self.claim_type, [e], [pf(e, "process.user"), pf(e, "process.argv")],
+            self.id, claim, self.claim_type, cited, [pf(e, "process.user"), pf(e, "process.argv")],
             e.ts, severity, lane, "high" if e.outcome == Outcome.success else "medium", _exec_entities(e),
+            context_ids={run.id for run in cited if run.id != e.id},
         )
         match.notes += [f"indicator: {item}" for item in indicators] or ["rare shape without typed indicators"]
         if prefix_only:
@@ -493,14 +503,15 @@ class WebServiceSpawnsInterpreter(Playbook):
             if n > self.RARE_MAX:
                 claim = (f"Routine pattern: account '{user}' on {host_} executed '{shape}' {n} times in the window, "
                          f"spread across {distinct_hours} distinct hours like a schedule "
-                         f"(stack-counted; retained for context).")
+                         f"(stack-counted; retained for context)." + cited_phrase(min(5, len(evs)), n, False, "runs",
+                                                                                  "run"))
                 out.append(Match(self.id, claim, "aggregate_observation", evs[:5], [pf(evs[0], "process.argv")],
                                  evs[0].ts, "low", "context", "high", _exec_entities(evs[0]),
                                  group_key=f"routine|{host_}|{user}|{shape}" + (f"|{packaged}" if packaged else "")))
                 continue
             for e in evs:
                 argv = e.get("process.argv")
-                out.append(self._event_match(e, user, argv, [], count=n))
+                out.append(self._event_match(e, user, argv, [], count=n, runs=evs))
         return out
 
 
@@ -512,7 +523,7 @@ class DownloaderFeedsInterpreter(Playbook):
     id = "host.downloader_feeds_interpreter"
     # argv/text-identified programs and actions: findings only, never a complete negative
     assures_negative = False
-    version = "3"
+    version = "4"
     title = "Downloader and stdin interpreter launched together by the same parent"
     kind = "aggregate"
     families = ("process_exec",)
@@ -627,9 +638,14 @@ class DownloaderFeedsInterpreter(Playbook):
                      f"({ms[0].ts.isoformat()} – {ms[-1].ts.isoformat()}){cadence}. Each occurrence pairs a "
                      f"downloader exec and a stdin-reading interpreter exec under the same parent; the pipe and "
                      f"content are inferred.")
-            evs = [ev for m in ms[:10] for ev in m.events]
+            # the first occurrences and the last, which ends the stated span
+            cited = ms[:10] + ms[-1:] if len(ms) > 10 else ms
+            evs = [ev for m in cited for ev in m.events]
+            spanned = {ev.id for ev in ms[-1].events} - {ev.id for m in ms[:10] for ev in m.events}
+            claim += cited_phrase(len(cited), len(ms), True, "occurrences", "occurrence")
             m = Match(self.id, claim, self.claim_type, evs, first.predicate, first.ts, self.severity, self.lane,
-                      "high" if regular else "medium", first.entities, group_key=f"{host_}|{url}|{interp}")
+                      "high" if regular else "medium", first.entities, group_key=f"{host_}|{url}|{interp}",
+                      context_ids=spanned if len(ms) > 10 else set())
             m.notes = [f"download URL: {url}", f"occurrences: {len(ms)}"] + \
                       (["regular cadence suggests scheduled execution (e.g. cron)"] if regular else [])
             out.append(m)
@@ -1135,7 +1151,7 @@ class SshLoginFromExternal(Playbook):
     anchor_class = "remote_login"
     # argv/text-identified programs and actions: findings only, never a complete negative
     assures_negative = False
-    version = "5"
+    version = "6"
     title = "Successful SSH login from an address outside the site's internal networks"
     kind = "aggregate"
     families = ("auth",)
@@ -1161,16 +1177,20 @@ class SshLoginFromExternal(Playbook):
         self.order = SpillList(self, "ssh_external_order", self.HOT, refusable=False)
         self._pending: list[TypedEvent] = []
         self._fresh: list[HeldExamples] = []
+        self.bounds = BoundStage()          # the records bounding each group's span, held while they bound it
         self.load = lambda ids: []
 
     def drain_staged(self) -> list[TypedEvent]:
-        out, self._pending = self._pending, []
+        out, self._pending = self._pending + self.bounds.drain(), []
         for store in self._fresh:
             store.staged()
         self._fresh = []
         self.groups.trim()
         self.order.trim()
         return out
+
+    def drain_bounds(self) -> tuple[list[str], list[str]]:
+        return self.bounds.last
 
     def retained_events(self) -> list[TypedEvent]:
         return [item[1] for store in self._fresh for item in store.items if item[1] is not None]
@@ -1191,7 +1211,7 @@ class SshLoginFromExternal(Playbook):
             key = (e.host, e.get("user.name"), str(ip))
             tally = self.groups.get(key)
             if tally is None:
-                tally = [0, 0, e.ts, HeldExamples(20, earliest=True)]
+                tally = [0, 0, e.ts, HeldExamples(20, earliest=True), Ends()]
                 if not self.groups.put(key, tally):
                     # a login from outside is a finding by itself: published now, ungrouped, instead of refused
                     self.note_limit("groups_alone", "the (host, account, source) groups' disk budget is spent; "
@@ -1202,6 +1222,7 @@ class SshLoginFromExternal(Playbook):
                 self.order.append(key)
             tally[1 if e.get("auth.phase") == "login" else 0] += 1
             tally[2] = max(tally[2], e.ts)
+            self.bounds.offer_at(key, tally[4], e)
             store = tally[3]
             if store.offer(e):
                 self._pending.append(e)
@@ -1212,12 +1233,17 @@ class SshLoginFromExternal(Playbook):
     def finalize(self):
         out = []
         for host, user, ip in self.order:
-            journal, audit, last, store = self.groups.peek((host, user, ip))
-            out.append(self._login_match((host, user, ip), journal, audit, last, store.events(self.load)))
+            journal, audit, last, store, ends = self.groups.peek((host, user, ip))
+            out.append(self._login_match((host, user, ip), journal, audit, last, store.events(self.load), ends))
         return out
 
-    def _login_match(self, key: tuple, journal: int, audit: int, last, evs: list[TypedEvent]) -> Match:
+    def _login_match(self, key: tuple, journal: int, audit: int, last, evs: list[TypedEvent],
+                     ends: Ends | None = None) -> Match:
         host, user, ip = key
+        missing: set[str] = set()
+        context: set[str] = set()
+        if ends is not None:
+            evs, missing, context = cite_group(self.load, evs, self.bounds, ends)
         # Each login appears once per collected source (journal sshd "Accepted", audit USER_LOGIN), so the
         # login count is the larger per-source count, never their sum.
         logins = max(journal, audit)
@@ -1225,12 +1251,12 @@ class SshLoginFromExternal(Playbook):
             f"{journal} sshd 'Accepted' journal record(s)" if journal else "",
             f"{audit} audit USER_LOGIN record(s)" if audit else "") if part)
         claim = (f"At least {logins} successful SSH login(s) on {host} for account '{user}' from {ip}, an "
-                 f"address outside the site's internal networks ({evs[0].ts.isoformat()} – {last.isoformat()}; {sources}).")
+                 f"address outside the site's internal networks ({evs[0].ts.isoformat()} – {last.isoformat()}; {sources})."
+                 + cited_phrase(len(evs), journal + audit, not missing)
+                 + (bound_note(missing, ends) if ends is not None else ""))
         m = Match(self.id, claim, self.claim_type, evs, [pf(evs[0], "source.ip"), pf(evs[0], "user.name")],
-                  evs[0].ts, self.severity, self.lane, "high", evs[0].entities(), group_key=f"{host}|{user}|{ip}")
-        if journal + audit > 20:
-            m.notes.append(f"{journal + audit} matching records; the first 20 are cited and the time range covers "
-                           "all of them")
+                  evs[0].ts, self.severity, self.lane, "high", evs[0].entities(), group_key=f"{host}|{user}|{ip}",
+                  context_ids=context)
         return m
 
 
@@ -1267,7 +1293,7 @@ class UnbackedExecutable(Playbook):
     seen on any audit record that carries the executable (exec, socket or file-change calls)."""
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.unbacked_or_deleted_executable"
-    version = "2"
+    version = "3"
     title = "Process running from a memory-backed, deleted or in-memory-directory executable"
     anchor_class = "execution"
     kind = "aggregate"
@@ -1317,6 +1343,7 @@ class UnbackedExecutable(Playbook):
         self._seen = RecentIds()        # bounded re-read guard
         # (host, executable) -> [{family: records}, [first, last], {uid}, cited records]
         self.groups = KeyedStore(self, "unbacked_groups", self.HOT)
+        self.bounds = BoundStage()          # the records bounding each group's span, held while they bound it
         self._pending: list[TypedEvent] = []
         self._fresh: list[HeldExamples] = []
         self.load = lambda ids: []
@@ -1335,7 +1362,8 @@ class UnbackedExecutable(Playbook):
                 continue
             key = (e.host or "", str(exe))
             ts = e.ts.timestamp()
-            group = self.groups.setdefault(key, lambda ts=ts: [{}, [ts, ts], set(), HeldExamples(_UNBACKED_CITE)])
+            group = self.groups.setdefault(key, lambda ts=ts: [{}, [ts, ts], set(), HeldExamples(_UNBACKED_CITE),
+                                                               Ends()])
             if group is None:
                 # the record is a finding by itself: published now, ungrouped, instead of being refused
                 self.note_limit("groups_alone", "the (host, executable) groups' disk budget is spent; records of a "
@@ -1344,9 +1372,10 @@ class UnbackedExecutable(Playbook):
                 add_unheld(out, alone(self._group_match(key, {e.family: 1}, ts, ts,
                                                    {str(uid)} if uid is not None else set(), [e]), self, e))
                 continue
-            counts, span, uids, store = group
+            counts, span, uids, store, ends = group
             counts[e.family] = counts.get(e.family, 0) + 1
             span[0], span[1] = min(span[0], ts), max(span[1], ts)
+            self.bounds.offer_at(key, ends, e)
             if e.get("process.uid") is not None:
                 uids.add(str(e.get("process.uid")))
             if store.offer(e):
@@ -1356,12 +1385,15 @@ class UnbackedExecutable(Playbook):
         return out
 
     def drain_staged(self) -> list[TypedEvent]:
-        out, self._pending = self._pending, []
+        out, self._pending = self._pending + self.bounds.drain(), []
         for store in self._fresh:
             store.staged()
         self._fresh = []
         self.groups.trim()
         return out
+
+    def drain_bounds(self) -> tuple[list[str], list[str]]:
+        return self.bounds.last
 
     def retained_events(self) -> list[TypedEvent]:
         return [item[1] for store in self._fresh for item in store.items if item[1] is not None]
@@ -1369,28 +1401,33 @@ class UnbackedExecutable(Playbook):
     def finalize(self):
         out = []
         for key in sorted(self.groups.keys()):
-            counts, (first, last), uids, store = self.groups.peek(key)
-            out.append(self._group_match(key, counts, first, last, uids, store.events(self.load)))
+            counts, (first, last), uids, store, ends = self.groups.peek(key)
+            out.append(self._group_match(key, counts, first, last, uids, store.events(self.load), ends))
         return out
 
     def _group_match(self, key: tuple, counts: dict, first: float, last: float, uids: set,
-                     evs: list[TypedEvent]) -> Match:
+                     evs: list[TypedEvent], ends: Ends | None = None) -> Match:
         names = {"process_exec": "exec", "net_socket": "socket call", "file_change": "file-change call"}
         host, exe = key
         cls, meaning = unbacked_executable(exe)
+        missing: set[str] = set()
+        context: set[str] = set()
+        if ends is not None:
+            evs, missing, context = cite_group(self.load, evs, self.bounds, ends)
         evs = sorted(evs, key=lambda x: (x.ts, x.id))
         total = sum(counts.values())
         when = (f"at {evs[0].ts.isoformat()}" if first == last else
                 f"from {datetime.fromtimestamp(first, UTC).isoformat()} to "
                 f"{datetime.fromtimestamp(last, UTC).isoformat()}")
         kinds = ", ".join(f"{counts[f]} {names[f]} record(s)" for f in self.families if counts.get(f))
-        uids = sorted(uids)
+        shown = sorted({str(e.get("process.uid")) for e in evs if e.get("process.uid") is not None} & set(uids))
         claim = (f"On {host}, {total} audit record(s) {when} carry the kernel-recorded executable '{exe}' "
-                 f"({kinds}; process uid(s) {', '.join(uids) or 'not recorded'}): {meaning}.")
-        if total > len(evs):
-            claim += f" {len(evs)} of these records are cited."
+                 f"({kinds}; process uid(s) {', '.join(shown) or 'not recorded'}{more(len(shown), len(uids))}): "
+                 f"{meaning}." + cited_phrase(len(evs), total, not missing)
+                 + (bound_note(missing, ends) if ends is not None else ""))
         m = Match(self.id, claim, self.claim_type, evs, [pf(e, "process.executable") for e in evs], evs[0].ts,
-                  self.severity, self.lane, "high", _exec_entities(evs[0]), group_key=f"{host}|{exe}")
+                  self.severity, self.lane, "high", _exec_entities(evs[0]), group_key=f"{host}|{exe}",
+                  context_ids=context)
         m.notes = [f"executable class: {cls}"]
         return m
 
@@ -1538,12 +1575,23 @@ class ExecLineage:
 
     With `observing`, it also holds what processes' own non-exec audit records show (`romulus.detect.observed`):
     per (host, pid), one entry per change of image, parent, session or boot (`observed`, its own store), and the
-    first record of each entry for citation (`citations`, its own store, read only when a lineage names it)."""
+    first record of each entry for citation (`citations`, its own store, read only when a lineage names it).
+
+    With `citing`, it also keeps every exec record for citation (`exec_records`: the typed event and its raw copies,
+    compressed, one disk-backed row per exec, read only when a lineage names the exec), so a claim that names an exec
+    ancestor cites it. The store yields to every detection store in the hunt's state budget: no floor, at most a
+    quarter of the hunt's disk total, no new record once half the shared headroom is held, and its oldest records
+    dropped when a detection store needs the room. A record it refuses is named as not kept for citation, in a coverage
+    note rather than a limit: nothing went unevaluated, and the lineage itself is read from the exec records above."""
 
     # Records held for citation in memory; the rest wait on disk (they are read only when a finding cites them).
     CITATIONS_HOT = 4096
+    # Disk for the exec records kept for citation: about 1 KB each compressed with their raw copies, so some four million
+    # execs. Past it a named exec ancestor is said to be not kept for citation; lineage itself is unaffected.
+    EXEC_RECORDS_DISK = 4 * 2**30
 
-    def __init__(self, owner=None, capacity: int = HOT_COUNT, members: list | None = None, observing: bool = False):
+    def __init__(self, owner=None, capacity: int = HOT_COUNT, members: list | None = None, observing: bool = False,
+                 citing: bool = False):
         self.store = KeyedStore(owner, "exec_lineage", capacity)
         self.members = members if members is not None else [owner] if owner is not None else []
         # The one store every ancestry rule reads, and most of a host hunt's state (one record per exec): it holds a
@@ -1561,6 +1609,11 @@ class ExecLineage:
             self.observed.weight = self.store.weight        # it serves the same rules as the exec records
         # any observation refused so far in the hunt: a record that would change a lineage may be missing
         self.observed_incomplete = False
+        self.exec_records = (KeyedStore(owner, "exec_records", self.CITATIONS_HOT, disk_budget=self.EXEC_RECORDS_DISK)
+                             if citing else None)
+        if self.exec_records is not None:
+            self.exec_records.yields = True
+            self.exec_records.on_evict = self._evicted
 
     @property
     def records(self) -> KeyedStore:
@@ -1575,7 +1628,7 @@ class ExecLineage:
         return self.store.on_disk
 
     def _stores(self) -> list[KeyedStore]:
-        return [store for store in (self.store, self.observed, self.citations) if store is not None]
+        return [store for store in (self.store, self.observed, self.citations, self.exec_records) if store is not None]
 
     def trim(self) -> None:
         for store in self._stores():
@@ -1595,8 +1648,9 @@ class ExecLineage:
                           ancestor.boot, DAEMON if _daemon(event) else 0, ancestor.serial, ancestor.order_domain,
                           session if isinstance(session, int) and not isinstance(session, bool) else None)
 
-    def observe(self, event: TypedEvent) -> None:
-        """Hold an exec record (once, however many rules hand it over)."""
+    def observe(self, event: TypedEvent, raw: dict[str, dict] | None = None) -> None:
+        """Hold an exec record (once, however many rules hand it over); with `citing`, keep it and its raw copies
+        (`raw`, the partition's) for citation."""
         pid = event.get("process.pid")
         seen = (event.id, event.ts)             # a record handed over again (by another rule or a re-read batch)
         if not isinstance(pid, int) or seen in self._observed:
@@ -1611,8 +1665,32 @@ class ExecLineage:
                 for member in self.members:
                     member.note_limit("lineage", "the exec store took no new process (its share of the state budget "
                                                  "is spent); a later process's lineage is not recorded")
+                return
+        else:
+            insort(entries, self.record(event), key=_record_order)   # in place: the store holds this list
+        if self.exec_records is not None:
+            self._cite_exec(event, raw or {})
+
+    def _cite_exec(self, event: TypedEvent, raw: dict[str, dict]) -> None:
+        """Keep an exec record for citation, with the raw copies of its records the partition carries."""
+        body = {"event": event.model_dump_json(), "raw": {r.key: raw[r.key] for r in event.raw if r.key in raw}}
+        if self.exec_records.put(event.id, zlib.compress(json.dumps(body, sort_keys=True).encode(), 6)):
             return
-        insort(entries, self.record(event), key=_record_order)       # in place: the store holds this list
+        when = event.ts.isoformat()
+        for member in self.members:
+            member.note_coverage("lineage_exec_records",
+                                 f"the store of exec records kept for citation took no new record from the record of "
+                                 f"{when} on (it gives way to the detection stores' state budget); every record was "
+                                 f"still evaluated, and a claim naming a later exec ancestor says its record is not "
+                                 f"cited")
+
+    def _evicted(self, n: int) -> None:
+        """Exec records kept for citation were dropped to give detection stores room (oldest first)."""
+        for member in self.members:
+            member.note_coverage("lineage_exec_records_dropped",
+                                 "exec records kept for citation were dropped, oldest first, to give the detection "
+                                 "stores room in the hunt's disk total; every record was still evaluated, and a claim "
+                                 "naming a dropped exec ancestor says its record is not cited")
 
     def entries(self, host: str | None, pid: int) -> list[ExecRecord]:
         """The process's records in time order; read in place when the store does not bring a process back to
@@ -1715,7 +1793,8 @@ class ExecLineage:
                             host=host)
 
     def cited(self, event_ids: list[str]) -> tuple[dict[str, TypedEvent], dict[str, dict]]:
-        """The observed records held for citation, by event id, and their raw copies (an id not held is absent)."""
+        """The observed and exec records held for citation, by event id, and their raw copies (an id not held is
+        absent)."""
         events, raw = {}, {}
         for event_id in event_ids:
             blob = None if self.citations is None else self.citations.peek(event_id)
@@ -1724,6 +1803,12 @@ class ExecLineage:
                 if event is not None:
                     events[event_id] = event
                     raw.update(copies)
+                continue
+            blob = None if self.exec_records is None else self.exec_records.peek(event_id)
+            if blob is not None:
+                body = json.loads(zlib.decompress(blob))
+                events[event_id] = TypedEvent.model_validate_json(body["event"])
+                raw.update(body["raw"])
         return events, raw
 
     def latest(self, host: str | None, pid: int, ts: float, *, strict: bool = False, where=None,
@@ -1807,7 +1892,7 @@ class ProcessLineage:
     CAPACITY = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
 
     def __init__(self, owner=None, members: list | None = None):
-        self.execs = ExecLineage(owner, self.CAPACITY)
+        self.execs = ExecLineage(owner, self.CAPACITY, citing=True)
         self.members = members if members is not None else [owner] if owner is not None else []
 
     @property
@@ -1827,6 +1912,8 @@ class ProcessLineage:
         # /tmp is not package management. Without a recorded executable no marker is given.
         located = str(executable or "")
         script = next((str(a) for a in argv[1:] if not str(a).startswith("-")), "")
+        if _inline_code(name, argv):
+            script = ""                         # its operand is code (sh -c, python -c, perl -e), not a script file
         if name in SHELLS | SCRIPT_FILE_INTERPRETERS and script:
             name, located = basename(script) or name, script
         system = located.startswith(SYSTEM_BIN_DIRS)
@@ -1839,9 +1926,20 @@ class ProcessLineage:
         return Ancestor(event.ts.timestamp(), ppid if isinstance(ppid, int) else None, name,
                         event.get("process.user"), marker, event.id, boot_of(event), serial, order_domain)
 
-    def observe(self, event: TypedEvent) -> None:
+    def observe(self, event: TypedEvent, raw: dict[str, dict] | None = None) -> None:
         if event.family == "process_exec":
-            self.execs.observe(event)
+            self.execs.observe(event, raw)
+
+    def cited_phrase(self, lineage: Lineage) -> tuple[str, list[TypedEvent], dict[str, dict]]:
+        """`lineage_phrase` with the exec record of the ancestor it names, and that record's raw copies, to cite. A
+        record the store did not keep is said to be not cited ('' when the lineage names no ancestor)."""
+        phrase = lineage_phrase(lineage)
+        if not phrase or lineage.depth == 0:
+            return phrase, [], {}
+        found, raw = self.execs.cited([lineage.ancestor.event_id])
+        if lineage.ancestor.event_id not in found:
+            return phrase + " (its exec record was not kept for citation)", [], {}
+        return phrase, list(found.values()), raw
 
     def parent(self, host: str | None, ppid: int | None, ts: float, boot: str | None = None,
                serial: int | None = None, order_domain=None) -> Ancestor | None:
@@ -1883,6 +1981,25 @@ class ProcessLineage:
         return nearest or Lineage("", None, 0)
 
 
+_INLINE_FLAGS = frozenset({"-c", "-e", "-E", "-r", "--command", "--eval"})
+
+
+def _inline_code(name: str, argv: list) -> bool:
+    """Whether an interpreter's first operand is inline code: a flag that takes code (python -c, perl -e, php -r)
+    before it, or for a shell only -c, alone or among grouped short flags (sh -c, sh -ec). A shell's -e, -E or -r is
+    an option, not code (sh -e /path/script runs the script)."""
+    shell = name in SHELLS
+    for arg in (str(a) for a in argv[1:]):
+        if not arg.startswith("-"):
+            return False
+        if shell:
+            if arg == "--command" or (not arg.startswith("--") and "c" in arg[1:]):
+                return True
+        elif arg in _INLINE_FLAGS:
+            return True
+    return False
+
+
 def share_lineage(pack: list) -> None:
     """Give every rule of a pack that reads process ancestry the hunt's one ExecLineage, so each exec record is
     observed and held once (its rows on the first such rule's spill; a disk refusal noted on every rule that
@@ -1893,18 +2010,19 @@ def share_lineage(pack: list) -> None:
         shared_view = ProcessLineage(holders[0], holders)
         for pb in holders:
             pb.lineage = shared_view
-    sites, members, observing = [], [], False
+    sites, members, observing, citing = [], [], False, False
     for pb in pack:
         for holder in (pb, getattr(pb, "lineage", None), getattr(pb, "pids", None)):
             for name, value in list(getattr(holder, "__dict__", {}).items()):
                 if isinstance(value, ExecLineage):
                     sites.append((holder, name))
                     observing = observing or value.observing
+                    citing = citing or value.exec_records is not None
                     if pb not in members:
                         members.append(pb)
     if len(members) < 2:
         return
-    shared = ExecLineage(members[0], HOT_COUNT, members, observing=observing)
+    shared = ExecLineage(members[0], HOT_COUNT, members, observing=observing, citing=citing)
     for holder, name in sites:
         setattr(holder, name, shared)
 

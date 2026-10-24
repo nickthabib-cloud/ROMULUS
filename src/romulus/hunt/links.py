@@ -205,6 +205,18 @@ def _host_reason(anchor: LinkAnchor) -> str | None:
     return anchor.host_reason or "required typed key is unusable"
 
 
+COMPUTED_COMMUNITY_ID = "#computed:community_id_v1"
+
+
+def written_community_id(event: TypedEvent):
+    """The record's community id when its sensor wrote it, None when ROMULUS computed it from the 5-tuple: a computed
+    id is in no backend document, so it can never be a query key (the 5-tuple is)."""
+    field = event.fields.get("network.community_id")
+    if field is None or field.value in (None, "") or field.origin.endswith(COMPUTED_COMMUNITY_ID):
+        return None
+    return field.value
+
+
 def _tuple(event: TypedEvent) -> tuple | None:
     values = (
         event.get("network.transport"), event.get("source.ip"), event.get("source.port"),
@@ -709,7 +721,8 @@ class LinkFetcher:
                 select, reason, [])
 
     def _flow(self, anchor: LinkAnchor, window: LinkWindow):
-        community_id = _value(anchor, "network.community_id")
+        community_id = next((cid for event in sorted(anchor.events, key=lambda item: (item.ts, item.id))
+                             if (cid := written_community_id(event)) is not None), None)
         five_tuple = next((_tuple(event) for event in anchor.events if _tuple(event) is not None), None)
         key = ({"network.community_id": community_id} if community_id else
                {"five_tuple": list(five_tuple) if five_tuple else None})

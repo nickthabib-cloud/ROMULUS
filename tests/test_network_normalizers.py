@@ -335,3 +335,38 @@ def test_normalization_is_deterministic():
     a, _, _ = normalize_hits(hits)
     b, _, _ = normalize_hits(json.loads(json.dumps(hits)))
     assert [e.model_dump() for e in a] == [e.model_dump() for e in b]
+
+
+# ---- community id: written by the sensor, or computed from the record's own 5-tuple ---------------------------
+
+def _without_community_id(_id, record):
+    hit = eve(_id, record)
+    original = json.loads(hit["_source"]["event"]["original"])
+    del original["community_id"]
+    hit["_source"]["event"]["original"] = json.dumps(original)
+    return hit
+
+
+def test_community_id_v1_matches_the_specification_example_in_both_directions():
+    from romulus.evidence.normalize import community_id
+    # the TCP example of the Community ID specification (corelight/community-id-spec)
+    assert community_id("128.232.110.120", 34855, "66.35.250.204", 80, "tcp") == "1:LQU9qZlK+B5F3KDmev6m5PMibrg="
+    assert community_id("66.35.250.204", 80, "128.232.110.120", 34855, "TCP") == "1:LQU9qZlK+B5F3KDmev6m5PMibrg="
+    assert community_id("192.0.2.1", None, "192.0.2.2", 80, "tcp") is None          # no port: not computed
+    assert community_id("192.0.2.1", 1, "192.0.2.2", 80, "icmp") is None            # ICMP hashes type/code instead
+    assert community_id("192.0.2.1", 1, "2001:db8::1", 80, "tcp") is None           # mixed families
+
+
+@pytest.mark.parametrize("record", [
+    {"event_type": "flow", "flow": {"bytes_toserver": 10, "bytes_toclient": 20, "state": "closed"}},
+    {"event_type": "tls", "tls": {"version": "TLS 1.3"}},
+    {"event_type": "alert", "alert": {"signature": "s", "signature_id": 1, "severity": 2, "category": "c"}},
+])
+def test_a_record_its_sensor_wrote_without_a_community_id_gets_the_computed_one_with_an_origin_saying_so(record):
+    from romulus.evidence.normalize import community_id
+    written = one(eve("w", record))
+    assert written.fields["network.community_id"].value == "1:abc="               # as the sensor wrote it
+    assert written.fields["network.community_id"].origin == "w:event.original#eve.community_id"
+    computed = one(_without_community_id("c", record))
+    assert computed.get("network.community_id") == community_id("172.17.100.121", 51000, "192.0.2.174", 443, "tcp")
+    assert computed.fields["network.community_id"].origin.endswith("#computed:community_id_v1")

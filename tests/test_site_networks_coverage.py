@@ -72,14 +72,14 @@ WORDING = {"host.ssh_login_external_source", "host.interpreter_external_connecti
 
 
 def test_each_changed_rule_carries_a_new_version():
-    # the six direction-dependent rules (coverage semantics) and the four whose claim or reason wording changed (two
-    # of them since changed again: their lineage reads observed process records)
+    # the six direction-dependent rules (coverage semantics) and the four whose claim or reason wording changed (most
+    # of them since changed again: lineage read from observed process records, claims that say what they cite)
     versions = {pb.id: pb.version for pb in ALL_PLAYBOOKS if pb.id in AFFECTED | WORDING}
-    assert versions == {"net.horizontal_sweep": "5", "net.long_external_connection": "4", "net.beaconing": "4",
-                        "net.rare_client_fingerprint": "4", "net.tls_self_signed_certificate_outbound": "3",
-                        "net.tls_short_lived_or_new_certificate_outbound": "3",
-                        "host.ssh_login_external_source": "5", "host.interpreter_external_connection": "6",
-                        "corr.process_network_link": "6", "net.outbound_volume_asymmetry": "4"}
+    assert versions == {"net.horizontal_sweep": "6", "net.long_external_connection": "4", "net.beaconing": "5",
+                        "net.rare_client_fingerprint": "4", "net.tls_self_signed_certificate_outbound": "4",
+                        "net.tls_short_lived_or_new_certificate_outbound": "4",
+                        "host.ssh_login_external_source": "6", "host.interpreter_external_connection": "7",
+                        "corr.process_network_link": "7", "net.outbound_volume_asymmetry": "4"}
 
 
 def test_bl_ext_dest_requires_a_configured_internal_network():

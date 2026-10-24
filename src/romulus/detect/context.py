@@ -112,6 +112,15 @@ def _session_key(event: TypedEvent, anchor: ContextAnchor, boots: dict[tuple, st
     return (event.host, boot, part)
 
 
+def _scope(key: tuple) -> str:
+    """Where a group's records ran, as its key shows: one audit session (the records carry its id), or the anchor's
+    process lineage (the records carry no session id)."""
+    session = key[2]
+    if isinstance(session, str) and session.startswith("lin:"):
+        return "in the anchor's process lineage"
+    return f"in audit session {session}"
+
+
 def _group_id(key: tuple) -> str:
     host, boot, session = key
     return f"{host}|{boot}|{session}"
@@ -372,7 +381,7 @@ def classify_discovery(name: str, args: list[str], cwd: str | None) -> tuple[str
 class PostAccessDiscovery(_HostContextRule):
     id = "context.post_access_discovery"
     argv_prefix_safe = True
-    version = "5"
+    version = "6"
     title = "Discovery commands in an anchored session or process lineage"
     anchor_class = "execution"
     families = ("process_exec",)
@@ -411,9 +420,10 @@ class PostAccessDiscovery(_HostContextRule):
             summary, _succeeded, _failed = _outcome_summary(cited)
             lane = "high" if len(techniques) >= 3 else "lead"
             burst = "a discovery burst" if lane == "high" else "discovery activity"
-            claim = (f"On {key[0]}, {burst}: {len(cited)} command(s) across {len(techniques)} distinct "
-                     f"discovery class(es) [{_and_more(sorted(set(behaviors)))}] ran in this session. "
-                     f"{summary}. {_context_suffix(anchor, link)}")
+            classes = sorted(set(behaviors))
+            claim = (f"On {key[0]}, {burst}: {len(cited)} command(s) across {len(classes)} distinct discovery "
+                     f"class(es) [{_and_more(classes)}], under {len(techniques)} ATT&CK technique(s), ran "
+                     f"{_scope(key)}. {summary}. {_context_suffix(anchor, link)}")
             match = Match(self.id, claim, self.claim_type, cited,
                           _predicate_all(cited, "process.executable", "process.argv"), cited[0].ts,
                           "high" if lane == "high" else "medium", lane, "medium",
@@ -501,7 +511,7 @@ def _classify_probe(prog, event: TypedEvent) -> tuple[str, str] | None:
 class PrivilegeProbing(_HostContextRule):
     id = "context.privilege_probing"
     argv_prefix_safe = True
-    version = "4"
+    version = "5"
     title = "Privilege probing or escalation in an anchored session or lineage"
     families = ("process_exec",)
     required_by_family = EXEC_REQUIRED
@@ -574,7 +584,7 @@ class PrivilegeProbing(_HostContextRule):
             behaviors = [behavior for _t, behavior, _e in hits]
             cited = _dedup_sorted([event for _t, _b, event in hits])
             summary, _s, _f = _outcome_summary(cited)
-            claim = (f"On {key[0]}, privilege probing in this session: {_and_more(behaviors)}. {summary}. "
+            claim = (f"On {key[0]}, privilege probing {_scope(key)}: {_and_more(behaviors)}. {summary}. "
                      f"{_context_suffix(anchor, link)}")
             match = Match(self.id, claim, self.claim_type, cited,
                           _predicate_all(cited, "process.executable", "process.argv"), cited[0].ts,
@@ -722,7 +732,7 @@ def classify_credential(path: str) -> tuple[str, str, str] | None:
 class CredentialAccessInContext(_HostContextRule):
     id = "context.credential_access"
     argv_prefix_safe = True
-    version = "3"
+    version = "4"
     title = "Credential-store read in an anchored session or lineage"
     anchor_class = "credential_access"
     families = ("process_exec",)
@@ -760,8 +770,8 @@ class CredentialAccessInContext(_HostContextRule):
             cited = _dedup_sorted([event for _desc, event in hits])
             descs = [desc for desc, _event in hits]
             summary, _s, _f = _outcome_summary(cited)
-            claim = (f"On {key[0]}, a file-reading tool was run against {_and_more(sorted(set(descs)))} in this "
-                     f"session. {summary}. {_context_suffix(anchor, link)}")
+            claim = (f"On {key[0]}, a file-reading tool was run against {_and_more(sorted(set(descs)))} "
+                     f"{_scope(key)}. {summary}. {_context_suffix(anchor, link)}")
             match = Match(self.id, claim, self.claim_type, cited,
                           _predicate_all(cited, "process.executable", "process.argv"), cited[0].ts,
                           "high" if lane == "high" else "medium", lane, "medium", cited[0].entities(),
@@ -1107,7 +1117,7 @@ class _Client:
 class LateralMovement(_HostContextRule):
     id = "context.lateral_movement"
     argv_prefix_safe = True
-    version = "3"
+    version = "4"
     title = "Lateral remote-service use from an anchored session or lineage"
     anchor_class = "lateral_movement"
     families = ("process_exec", "net_socket")
@@ -1209,7 +1219,7 @@ class LateralMovement(_HostContextRule):
                         f"'{matched_client.target}' (same target or process lineage)")
         else:
             lane = "lead"
-            relation = ("no remote-service client exec in this session matches this connect by target or "
+            relation = (f"no remote-service client exec {_scope(session)} matches this connect by target or "
                         "process lineage; any relation to a client is temporal only")
         cited = _dedup_sorted(cited)
         headline = ("a remote-service client was followed by a matching successful connect to an internal admin "

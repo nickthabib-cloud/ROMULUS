@@ -175,7 +175,7 @@ def test_certificate_rules_hold_ids_and_cap_connections_with_lower_bound_wording
     assert rule.staged and rule.retained_events() == []
     assert all(isinstance(i, str) for _key, state in rule.groups.items() for i in state["examples"].ids())
     assert len(out) == 1 and "at least 50 outbound TLS connection(s)" in out[0].claim
-    assert len(stage) <= tls.EXAMPLE_LIMIT
+    assert len(stage) <= tls.EXAMPLE_LIMIT + 1          # the earliest records and the one ending the span (held)
 
 
 @pytest.mark.parametrize("cls", [tls.SelfSignedCertificateOutbound, tls.ShortLivedOrNewCertificateOutbound])
