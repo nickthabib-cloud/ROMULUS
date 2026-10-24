@@ -6,6 +6,7 @@ import pytest
 from romulus.detect.auth import AccountOrGroupChange, account_command
 from romulus.detect.registry import ALL_PLAYBOOKS
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
+from tests.lineage_citation_fixture import bind_lineage
 
 T0 = datetime(2030, 1, 6, 9, 0, tzinfo=UTC)
 _n = 0
@@ -33,8 +34,11 @@ def record(record_type, action, ts=T0, pid=7001, outcome=Outcome.success, **kw):
 
 def run(*partitions):
     pb = AccountOrGroupChange()
+    raw = bind_lineage(pb, [event for partition in partitions for event in partition])
     for part in partitions:
+        pb.bind_raw({ref.key: raw[ref.key] for event in part for ref in event.raw}, "fixture-target")
         assert pb.consume(list(part)) == []
+    pb.bind_raw({})
     return pb, pb.finalize()
 
 
