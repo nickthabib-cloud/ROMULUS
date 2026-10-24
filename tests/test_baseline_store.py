@@ -497,7 +497,8 @@ def test_baseline_listings_are_deterministically_sorted():
 BASELINE_TABLES = ("baseline_segment", "baseline_count", "baseline_scope_hour", "baseline_snapshot",
                    "baseline_snapshot_segment", "baseline_parent_host_boot", "baseline_parent_carry",
                    "baseline_observation", "baseline_window_cell", "baseline_window_exec",
-                   "baseline_window_observation", "baseline_window_pending")
+                   "baseline_window_observation", "baseline_window_pending", "baseline_history_cell",
+                   "baseline_history_row")
 
 
 def _shape(engine) -> dict:

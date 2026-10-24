@@ -624,6 +624,38 @@ baseline_window_pending = Table(
     ),
 )
 
+# Compact history hours whose exec-pair children wait for the whole lookback fill: the hour's counts, scope hours
+# and Pendings, held until every older hour has fed the parent carry. Nothing here is a segment until resolved.
+baseline_history_cell = Table(
+    "baseline_history_cell", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id", ondelete="CASCADE"), nullable=False),
+    Column("target", String, nullable=False),
+    Column("spec_id", String, nullable=False),
+    Column("start", DateTime(timezone=True), nullable=False),
+    Column("end", DateTime(timezone=True), nullable=False),
+    Column("events_total", Integer, nullable=False),
+    PrimaryKeyConstraint("hunt_id", "target", "spec_id", "start", name="pk_baseline_history_cell"),
+)
+
+baseline_history_row = Table(
+    "baseline_history_row", metadata,
+    Column("hunt_id", String, nullable=False),
+    Column("target", String, nullable=False),
+    Column("spec_id", String, nullable=False),
+    Column("start", DateTime(timezone=True), nullable=False),
+    Column("kind", String, nullable=False),      # count | scope_hour | pending
+    Column("ordinal", Integer, nullable=False),
+    Column("body", JSON, nullable=False),
+    PrimaryKeyConstraint("hunt_id", "target", "spec_id", "start", "kind", "ordinal",
+                         name="pk_baseline_history_row"),
+    ForeignKeyConstraint(
+        ["hunt_id", "target", "spec_id", "start"],
+        ["baseline_history_cell.hunt_id", "baseline_history_cell.target", "baseline_history_cell.spec_id",
+         "baseline_history_cell.start"],
+        ondelete="CASCADE",
+    ),
+)
+
 baseline_observation = Table(
     "baseline_observation", metadata,
     Column("hunt_id", String, ForeignKey("hunt.id"), nullable=False),

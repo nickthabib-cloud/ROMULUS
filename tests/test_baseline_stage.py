@@ -762,3 +762,20 @@ def test_a_history_source_failure_fails_the_baseline_stage(state, reason):
     summary = run_baseline_stage(repo, "h1", WINDOW, source=EmptyHistory(state, reason))
 
     assert summary["stage_failed"] is True
+
+
+def test_a_history_child_resolves_to_a_parent_in_an_older_history_hour():
+    parent = _exec_event("hist-parent", START - timedelta(hours=5), pid=77, ppid=1, executable="/usr/sbin/sshd")
+    child = _exec_event("hist-child", START - timedelta(minutes=55), pid=200, ppid=77, executable="/bin/ls")
+    repo = _repo(spec_ids=("bl.exec_pair",), budget={"queries": 1000, "records": 5_000_000, "seconds": 1800})
+
+    run_baseline_stage(repo, "h1", WINDOW, source=TimedHistory({"host-index": [parent, child]}))
+
+    coverage = next(iter(repo.baseline_snapshot("h1")["coverage"].values()))
+    # Only the parent's own hour is unresolved: its parent is pid 1.
+    assert [gap["start"] for gap in coverage["gaps"]] == [(START - timedelta(hours=5)).isoformat()]
+    segment = next(row for row in repo.baseline_segments(statuses=["active"])
+                   if row["start"] == START - timedelta(hours=1))
+    assert [row["key"] for row in repo.baseline_counts(segment["id"])] == [
+        {"child_executable": "/bin/ls", "parent_executable": "/usr/sbin/sshd"},
+    ]

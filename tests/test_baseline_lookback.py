@@ -365,7 +365,7 @@ def test_complete_lookback_fetch_records_parent_carry_on_disk():
     assert carry.for_target("host-index").lookup("web01", 42, START.timestamp(), "boot-a") is None
 
 
-def test_parent_in_an_earlier_hour_is_explicit_then_resolves_on_resume():
+def test_a_history_child_resolves_to_its_parent_in_an_older_hour_in_one_newest_first_fill():
     repo = _repo()
     repo.create_hunt("build", {}, "d", "test")
     parent = TypedEvent(
@@ -394,11 +394,15 @@ def test_parent_in_an_earlier_hour_is_explicit_then_resolves_on_resume():
         ).fill(hunt_id="build", targets=["host-index"], start=START - timedelta(hours=2), end=START)
 
     first = run()
-    assert any(gap.start == START - timedelta(hours=1) and gap.state == "unresolved" for gap in first.gaps)
+    # The parent's own parent is pid 1, out of scope, so only the older hour stays unresolved.
+    assert [(gap.start, gap.state) for gap in first.gaps] == [(START - timedelta(hours=2), "unresolved")]
+    assert first.complete == 1
+    assert _pair_keys(repo) == [(START - timedelta(hours=1), "/usr/sbin/parent", "/bin/sh")]
+    assert repo.baseline_history_cells("build") == []
+    # A rerun re-reads only the unresolved hour and resolves the child's hour no differently.
     second = run()
-    active = repo.baseline_segments(statuses=["active"])
-    assert second.complete == 1
-    assert any(row["start"] == START - timedelta(hours=1) for row in active)
+    assert [(gap.start, gap.state) for gap in second.gaps] == [(START - timedelta(hours=2), "unresolved")]
+    assert _pair_keys(repo) == [(START - timedelta(hours=1), "/usr/sbin/parent", "/bin/sh")]
 
 
 def test_exec_pair_writer_matches_direct_counter_with_same_hour_parent():
@@ -1085,3 +1089,85 @@ def test_a_same_instant_child_resolves_against_the_carry_by_serial():
     assert [key.key["parent_executable"] for key in resolve(8).keys] == ["/usr/bin/cmd2"]
     unordered = resolve(None)
     assert unordered.keys == () and unordered.reason == "an exec of the host between parent and child was not carried"
+
+
+def _pair_exec(event_id: str, ts: datetime, pid: int, ppid: int, executable: str) -> TypedEvent:
+    return TypedEvent(
+        id=event_id, family="process_exec", ts=ts, host="web01", outcome=Outcome.success,
+        fields={
+            "process.pid": fv(pid, "fixture"), "process.ppid": fv(ppid, "fixture"),
+            "process.executable": fv(executable, "fixture"), "host.boot.id": fv("boot-a", "fixture"),
+        }, raw=[], normalizer="fixture@1",
+    )
+
+
+def test_a_deferred_history_hour_counts_what_a_direct_counter_counts():
+    parent = _pair_exec("parent", START - timedelta(minutes=150), 10, 1, "/usr/sbin/parent")
+    events = [parent, *(
+        _pair_exec(f"child-{index}", START - timedelta(minutes=50 - index), 100 + index, 10,
+                   "/bin/sh" if index % 2 else "/bin/ls")
+        for index in range(5)
+    ), _pair_exec("local-parent", START - timedelta(minutes=30), 30, 10, "/bin/bash"),
+        _pair_exec("local-child", START - timedelta(minutes=29), 31, 30, "/bin/cat")]
+    repo = _repo()
+    repo.create_hunt("build", {}, "d", "test")
+    carry = CarryInStore(repo, "build")
+
+    _pair_writer(repo, FakeHistory(events), carry).fill(
+        hunt_id="build", targets=["host-index"], start=START - timedelta(hours=3), end=START,
+    )
+
+    segment = next(row for row in repo.baseline_segments(statuses=["active"])
+                   if row["start"] == START - timedelta(hours=1))
+    stored = [{key: value for key, value in row.items() if key != "segment_id"}
+              for row in repo.baseline_counts(segment["id"])]
+    hours = _hour_parents(events)
+    direct = KeyCounter("direct", SPEC_BY_ID["bl.exec_pair"], span=(START - timedelta(hours=1), START))
+    for event in events:
+        if START - timedelta(hours=1) <= event.ts < START:
+            direct.consume(event, KeyContext(pid_table=hours))
+    expected = [{key: value for key, value in row.items() if key != "segment_id"}
+                for row in direct.count_rows()]
+    assert stored == expected
+    assert sum(row["count"] for row in stored) == 7
+    hour_events = sum(1 for event in events if START - timedelta(hours=1) <= event.ts < START)
+    assert segment["events_total"] == hour_events
+
+
+def _hour_parents(events):
+    from romulus.baseline.carry import HourParents
+
+    table = HourParents()
+    for event in sorted(events, key=lambda item: (item.ts, item.id)):
+        table.add(event)
+    return table
+
+
+def test_a_fill_interrupted_before_resolution_resolves_the_staged_hour_on_resume(monkeypatch):
+    events = [_pair_exec("parent", START - timedelta(minutes=90), 10, 1, "/usr/sbin/parent"),
+              _pair_exec("child", START - timedelta(minutes=30), 11, 10, "/bin/sh")]
+    repo = _repo()
+    repo.create_hunt("build", {}, "d", "test")
+    carry = CarryInStore(repo, "build")
+    cells = repo.baseline_history_cells
+
+    def crash(hunt_id):
+        raise RuntimeError("injected crash before resolution")
+
+    monkeypatch.setattr(repo, "baseline_history_cells", crash)
+    with pytest.raises(RuntimeError):
+        _pair_writer(repo, FakeHistory(events), carry).fill(
+            hunt_id="build", targets=["host-index"], start=START - timedelta(hours=2), end=START,
+        )
+    monkeypatch.setattr(repo, "baseline_history_cells", cells)
+    assert len(cells("build")) == 2 and _pair_keys(repo) == []
+
+    _pair_writer(repo, FakeHistory(events), carry).fill(
+        hunt_id="build", targets=["host-index"], start=START - timedelta(hours=2), end=START,
+    )
+
+    assert _pair_keys(repo) == [(START - timedelta(hours=1), "/usr/sbin/parent", "/bin/sh")]
+    child_hour = next(row for row in repo.baseline_segments(statuses=["active"])
+                      if row["start"] == START - timedelta(hours=1))
+    assert [row["count"] for row in repo.baseline_counts(child_hour["id"])] == [1]
+    assert cells("build") == []

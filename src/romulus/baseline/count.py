@@ -104,6 +104,22 @@ class KeyCounter:
         for row in self._counts.values():
             row["segment_id"] = segment_id
 
+    def restore(self, count_rows: Iterable[dict], scope_hour_rows: Iterable[dict]) -> None:
+        """Reload staged rows of this counter's segment so resolved keys can be added to them.
+
+        Dedup tokens are not staged, so a restored counter is only for keys counted once per record (a resolved
+        exec-pair key carries no token). The open bucket is the latest restored one, as when they were counted.
+        """
+        for row in count_rows:
+            identity = (row["scope_kind"], row["scope"], row["key_digest"], row["bucket"])
+            self._counts[identity] = {**row, "segment_id": self.segment_id}
+            self._first_event_ids[identity] = None
+            self._first_event_refs[identity] = []
+            if self._open_bucket is None or row["bucket"] > self._open_bucket:
+                self._open_bucket = row["bucket"]
+        for row in scope_hour_rows:
+            self._scope_hours[(row["scope_kind"], row["scope"], row["hour"])] += int(row["events"])
+
     def consume(self, event: TypedEvent, context: KeyContext) -> None:
         if self.partial and not self.retain_observations_when_partial:
             return

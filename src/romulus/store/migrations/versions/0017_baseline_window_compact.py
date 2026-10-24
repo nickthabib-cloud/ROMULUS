@@ -1,4 +1,4 @@
-"""durable compact baseline window state and network-bound history
+"""durable compact baseline window and history state and network-bound history
 
 Revision ID: 0017
 Revises: 0016
@@ -79,9 +79,41 @@ def upgrade() -> None:
             "hunt_id", "target", "partition", "ordinal", name="pk_baseline_window_exec",
         ),
     )
+    op.create_table(
+        "baseline_history_cell",
+        sa.Column("hunt_id", sa.String(), nullable=False),
+        sa.Column("target", sa.String(), nullable=False),
+        sa.Column("spec_id", sa.String(), nullable=False),
+        sa.Column("start", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("end", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("events_total", sa.Integer(), nullable=False),
+        sa.ForeignKeyConstraint(["hunt_id"], ["hunt.id"], ondelete="CASCADE"),
+        sa.PrimaryKeyConstraint("hunt_id", "target", "spec_id", "start", name="pk_baseline_history_cell"),
+    )
+    op.create_table(
+        "baseline_history_row",
+        sa.Column("hunt_id", sa.String(), nullable=False),
+        sa.Column("target", sa.String(), nullable=False),
+        sa.Column("spec_id", sa.String(), nullable=False),
+        sa.Column("start", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("kind", sa.String(), nullable=False),
+        sa.Column("ordinal", sa.Integer(), nullable=False),
+        sa.Column("body", sa.JSON(), nullable=False),
+        sa.ForeignKeyConstraint(
+            ["hunt_id", "target", "spec_id", "start"],
+            ["baseline_history_cell.hunt_id", "baseline_history_cell.target", "baseline_history_cell.spec_id",
+             "baseline_history_cell.start"],
+            ondelete="CASCADE",
+        ),
+        sa.PrimaryKeyConstraint(
+            "hunt_id", "target", "spec_id", "start", "kind", "ordinal", name="pk_baseline_history_row",
+        ),
+    )
 
 
 def downgrade() -> None:
+    op.drop_table("baseline_history_row")
+    op.drop_table("baseline_history_cell")
     op.drop_table("baseline_window_exec")
     op.drop_table("baseline_window_pending")
     op.drop_table("baseline_window_observation")

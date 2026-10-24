@@ -2700,6 +2700,76 @@ class Repo:
                 t.baseline_window_cell.c.partition == partition,
             ))
 
+    def clear_baseline_history_stage(self, hunt_id: str) -> None:
+        """Forget every staged history hour of a hunt; a fill re-reads hours that hold no segment."""
+        with write_txn(self.engine) as connection:
+            connection.execute(t.baseline_history_cell.delete().where(t.baseline_history_cell.c.hunt_id == hunt_id))
+
+    def stage_baseline_history_cell(self, hunt_id: str, cell: dict, counts: Iterable[dict],
+                                    scope_hours: Iterable[dict], pendings: Iterable[dict]) -> None:
+        """Replace one history hour's compact counts, scope hours and Pendings, atomically."""
+        start = _utc(cell["start"], "history start")
+        key = {"hunt_id": hunt_id, "target": cell["target"], "spec_id": cell["spec_id"], "start": start}
+
+        def rows(kind: str, items: Iterable[dict]):
+            for ordinal, item in enumerate(items):
+                yield {**key, "kind": kind, "ordinal": ordinal,
+                       "body": json.loads(json.dumps(item, default=_jsonable))}
+
+        with write_txn(self.engine) as connection:
+            table = t.baseline_history_cell.c
+            connection.execute(t.baseline_history_cell.delete().where(
+                table.hunt_id == hunt_id, table.target == cell["target"], table.spec_id == cell["spec_id"],
+                table.start == start,
+            ))
+            connection.execute(t.baseline_history_cell.insert().values(
+                **key, end=_utc(cell["end"], "history end"), events_total=int(cell["events_total"]),
+            ))
+            for kind, items in (("count", counts), ("scope_hour", scope_hours), ("pending", pendings)):
+                batch: list[dict] = []
+                for row in rows(kind, items):
+                    batch.append(row)
+                    if len(batch) >= 5_000:
+                        connection.execute(t.baseline_history_row.insert(), batch)
+                        batch = []
+                if batch:
+                    connection.execute(t.baseline_history_row.insert(), batch)
+
+    def baseline_history_cells(self, hunt_id: str) -> list[dict]:
+        """A hunt's staged history hours, oldest first; at most one per target hour and deferring spec."""
+        table = t.baseline_history_cell.c
+        with self.engine.connect() as connection:
+            rows = connection.execute(select(t.baseline_history_cell).where(table.hunt_id == hunt_id).order_by(
+                table.target, table.spec_id, table.start,
+            )).mappings()
+            return [_with_utc(row, ("start", "end")) for row in rows]
+
+    def baseline_history_rows(self, hunt_id: str, target: str, spec_id: str, start: datetime,
+                              kind: str) -> Iterator[dict]:
+        """One staged hour's rows of one kind, in staging order, keyset-paged."""
+        table = t.baseline_history_row.c
+        start = _utc(start, "history start")
+        after = -1
+        while True:
+            with self.engine.connect() as connection:
+                page = connection.execute(select(table.ordinal, table.body).where(
+                    table.hunt_id == hunt_id, table.target == target, table.spec_id == spec_id,
+                    table.start == start, table.kind == kind, table.ordinal > after,
+                ).order_by(table.ordinal).limit(5_000)).all()
+            if not page:
+                return
+            for ordinal, body in page:
+                yield dict(body)
+            after = page[-1][0]
+
+    def drop_baseline_history_cell(self, hunt_id: str, target: str, spec_id: str, start: datetime) -> None:
+        table = t.baseline_history_cell.c
+        with write_txn(self.engine) as connection:
+            connection.execute(t.baseline_history_cell.delete().where(
+                table.hunt_id == hunt_id, table.target == target, table.spec_id == spec_id,
+                table.start == _utc(start, "history start"),
+            ))
+
     def save_baseline_window_cell(self, hunt_id: str, cell: dict, observations: Iterable[dict]) -> bool:
         """Atomically add one cell's observations once and close its ordinary rule cell.
 

@@ -5,14 +5,14 @@ import hashlib
 import json
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-from romulus.baseline.carry import CarryInStore, HourParents, PendingResolver
+from romulus.baseline.carry import BEFORE_HISTORY, CarryInStore, HourParents, PendingResolver
 from romulus.baseline.count import KeyCounter
 from romulus.baseline.protocol import HistorySource
-from romulus.baseline.spec import BaselineSpec, KeyContext, exec_serial
+from romulus.baseline.spec import BaselineSpec, KeyContext, Pending, exec_serial
 from romulus.store.db import utcnow
 from romulus.store.repo import Repo
 
@@ -131,16 +131,51 @@ class LookbackWriter:
             network_digest=self.network_digest if spec.requires_configured_networks else None,
         )
 
+    def _write_segment(self, hunt_id: str, target: str, spec: BaselineSpec, start: datetime, end: datetime,
+                       events_total: int, counter: KeyCounter, gaps: list[HistoryGap]) -> tuple[int, float]:
+        """Write one complete hour's segment; (1 when the store holds it, longest write in seconds)."""
+        row = self.segment_row(
+            hunt_id=hunt_id, target=target, spec=spec, start=start, end=end, events_total=events_total,
+        )
+        counter.bind_segment(row["id"])
+        try:
+            state = self.repo.begin_baseline_segment(row, reclaim_owner=True)
+            if state == "active":
+                return 1, 0.0  # another hunt finished the identical segment since the cover check
+            if state != "begun":
+                # Never skipped silently: the hour is not in the store for this hunt yet.
+                gaps.append(HistoryGap(
+                    target, start, end, "unresolved",
+                    f"{spec.id}: " + ("being built by another hunt" if state == "building_elsewhere"
+                                      else f"segment {row['id']} is {state}"),
+                    (spec.id,),
+                ))
+                return 0, 0.0
+            seconds = self.repo.append_baseline_segment_rows(
+                row["id"], counter.count_rows(), counter.scope_hour_rows(),
+            )
+            self.repo.finalize_baseline_segment(row["id"])
+            return 1, seconds
+        except Exception as error:  # noqa: BLE001 - abandoned building row is recovered next run
+            gaps.append(HistoryGap(
+                target, start, end, "failed", f"segment build failed: {error}"[:300], (spec.id,),
+            ))
+            return 0, 0.0
+
     def fill(self, *, hunt_id: str, targets: list[str], start: datetime, end: datetime) -> LookbackResult:
         start, end = start.astimezone(UTC), end.astimezone(UTC)
         if start >= end or any((value.minute, value.second, value.microsecond) != (0, 0, 0)
                                for value in (start, end)):
             raise ValueError("lookback fill requires a nonempty hour-aligned interval")
         self.repo.cleanup_baseline_building(before=self.now() - _HOUR)
+        # Hours staged by an interrupted fill hold no segment, so this fill reads them again.
+        self.repo.clear_baseline_history_stage(hunt_id)
         begun = self.clock()
         queries = records = complete = 0
         longest = 0.0
         gaps: list[HistoryGap] = []
+        # (target, hour) -> how many of its specs wait for post-fill resolution before the hour is complete
+        waiting: dict[tuple[str, datetime], int] = {}
         hours = int((end - start) / _HOUR)
         ordered_targets = tuple(sorted(set(targets)))
         # Only whole newest-first rounds within the target-hour cap are worked. Older hours become one
@@ -281,58 +316,103 @@ class LookbackWriter:
             # neither does an hour with an exec of no host, which could be any host's.
             if carry is not None and not hostless:
                 carry.mark_observed(hour_start, hour_end)
+            # Children whose parent is not in their own hour wait for the whole fill: their parent may sit in an
+            # older hour that newest-first filling has not read yet. Their hour is staged compactly and becomes a
+            # segment only after every older hour has fed the carry.
+            deferred: set[str] = set()
+            stage_failures: list[HistoryGap] = []
             for counter in counters.values():
-                # A resolved child gets its counter's own spec key (id and key version).
-                resolver = PendingResolver(carry, counter.spec) if carry is not None else None
-                for pending in counter.take_pendings():
-                    if resolver is None:
-                        counter.mark_partial("parent exec before history")
-                        continue
-                    resolution = resolver.resolve(pending)
-                    if resolution.reason is not None:
-                        counter.mark_partial(f"{pending.event_id}: {resolution.reason}")
-                    else:
-                        counter.add_keys(pending.ts, resolution.keys)
+                if not counter.pendings or counter.partial:
+                    continue
+                if carry is None:
+                    counter.take_pendings()
+                    counter.mark_partial(BEFORE_HISTORY)
+                    continue
+                try:
+                    self.repo.stage_baseline_history_cell(
+                        hunt_id, {"target": target, "spec_id": counter.spec.id, "start": hour_start,
+                                  "end": hour_end, "events_total": events_total},
+                        counter.count_rows(), counter.scope_hour_rows(),
+                        (asdict(pending) for pending in counter.take_pendings()),
+                    )
+                except Exception as error:  # noqa: BLE001 - a staging write failure is a coverage fact
+                    stage_failures.append(HistoryGap(
+                        target, hour_start, hour_end, "failed", f"history stage failed: {error}"[:300],
+                        (counter.spec.id,),
+                    ))
+                    continue
+                deferred.add(counter.spec.id)
             partial = tuple(sorted(spec_id for spec_id, counter in counters.items() if counter.partial))
             if partial:
                 reason = "; ".join(
                     f"{spec_id}: {item}" for spec_id in partial for item in counters[spec_id].reasons
                 )
                 gaps.append(HistoryGap(target, hour_start, hour_end, "unresolved", reason, partial))
+            gaps.extend(stage_failures)
+            unstaged = {gap.spec_ids[0] for gap in stage_failures}
             built = 0
             for spec in missing:
                 counter = counters[spec.id]
-                if counter.partial:
+                if counter.partial or spec.id in deferred or spec.id in unstaged:
                     continue
-                row = self.segment_row(
-                    hunt_id=hunt_id, target=target, spec=spec, start=hour_start, end=hour_end,
-                    events_total=events_total,
-                )
-                counter.bind_segment(row["id"])
-                try:
-                    state = self.repo.begin_baseline_segment(row, reclaim_owner=True)
-                    if state == "active":
-                        built += 1  # another hunt finished the identical segment since the cover check
-                        continue
-                    if state != "begun":
-                        # Never skipped silently: the hour is not in the store for this hunt yet.
-                        gaps.append(HistoryGap(
-                            target, hour_start, hour_end, "unresolved",
-                            f"{spec.id}: " + ("being built by another hunt" if state == "building_elsewhere"
-                                              else f"segment {row['id']} is {state}"),
-                            (spec.id,),
-                        ))
-                        continue
-                    longest = max(longest, self.repo.append_baseline_segment_rows(
-                        row["id"], counter.count_rows(), counter.scope_hour_rows(),
-                    ))
-                    self.repo.finalize_baseline_segment(row["id"])
-                    built += 1
-                except Exception as error:  # noqa: BLE001 - abandoned building row is recovered next run
-                    gaps.append(HistoryGap(
-                        target, hour_start, hour_end, "failed", f"segment build failed: {error}"[:300],
-                        (spec.id,),
-                    ))
-            if built == len(missing) and not partial:
-                complete += 1
+                written, seconds = self._write_segment(hunt_id, target, spec, hour_start, hour_end, events_total,
+                                                       counter, gaps)
+                built += written
+                longest = max(longest, seconds)
+            if not partial and built + len(deferred) == len(missing):
+                if deferred:
+                    waiting[(target, hour_start)] = len(deferred)
+                else:
+                    complete += 1
+        # Every hour the budget allowed has fed the carry: resolve the waiting children and write their hours.
+        for cell in self.repo.baseline_history_cells(hunt_id):
+            spec = next((item for item in self.specs if item.id == cell["spec_id"]), None)
+            if spec is None or self.parent_carry is None:
+                self.repo.drop_baseline_history_cell(hunt_id, cell["target"], cell["spec_id"], cell["start"])
+                continue
+            hour_start, hour_end = cell["start"], cell["end"]
+            counter = KeyCounter("pending", spec, span=(hour_start, hour_end))
+            counter.restore(
+                (_count_row(row) for row in self.repo.baseline_history_rows(
+                    hunt_id, cell["target"], spec.id, hour_start, "count")),
+                (_scope_hour_row(row) for row in self.repo.baseline_history_rows(
+                    hunt_id, cell["target"], spec.id, hour_start, "scope_hour")),
+            )
+            resolver = PendingResolver(self.parent_carry.for_target(cell["target"], horizon=end), spec)
+            for body in self.repo.baseline_history_rows(hunt_id, cell["target"], spec.id, hour_start, "pending"):
+                pending = _pending(body)
+                resolution = resolver.resolve(pending)
+                if resolution.reason is not None:
+                    counter.mark_partial(f"{pending.event_id}: {resolution.reason}")
+                else:
+                    counter.add_keys(pending.ts, resolution.keys)
+            written = 0
+            if counter.partial:
+                gaps.append(HistoryGap(
+                    cell["target"], hour_start, hour_end, "unresolved",
+                    "; ".join(f"{spec.id}: {item}" for item in counter.reasons), (spec.id,),
+                ))
+            else:
+                written, seconds = self._write_segment(hunt_id, cell["target"], spec, hour_start, hour_end,
+                                                       int(cell["events_total"]), counter, gaps)
+                longest = max(longest, seconds)
+            self.repo.drop_baseline_history_cell(hunt_id, cell["target"], spec.id, hour_start)
+            key = (cell["target"], hour_start)
+            if key in waiting:
+                waiting[key] = waiting[key] - 1 if written else -len(self.specs)
+                if waiting[key] == 0:
+                    complete += 1
         return LookbackResult(complete, (*gaps, *omitted), queries, records, longest)
+
+
+def _count_row(body: dict) -> dict:
+    return {**body, **{name: datetime.fromisoformat(body[name]) for name in ("bucket", "first_ts", "last_ts")}}
+
+
+def _scope_hour_row(body: dict) -> dict:
+    return {**body, "hour": datetime.fromisoformat(body["hour"])}
+
+
+def _pending(body: dict) -> Pending:
+    return Pending(**{**body, "ts": datetime.fromisoformat(body["ts"]),
+                      "raw_refs": tuple(tuple(ref) for ref in body.get("raw_refs") or ())})
