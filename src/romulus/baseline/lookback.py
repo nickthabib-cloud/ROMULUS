@@ -224,14 +224,14 @@ class LookbackWriter:
             if planned.completeness != "complete":
                 gaps.append(HistoryGap(
                     target, hour_start, hour_end,
-                    "failed" if planned.completeness == "failed" else "partial",
+                    planned.completeness if planned.completeness in {"failed", "omitted_budget"} else "partial",
                     "; ".join(planned.reasons) or planned.completeness,
                     tuple(spec.id for spec in missing),
                 ))
                 continue
             if len(planned.partitions) > MAX_PARTITIONS_PER_HOUR:
                 gaps.append(HistoryGap(
-                    target, hour_start, hour_end, "partial",
+                    target, hour_start, hour_end, "omitted_budget",
                     f"history partition cap {MAX_PARTITIONS_PER_HOUR} exceeded",
                     tuple(spec.id for spec in missing),
                 ))
@@ -279,7 +279,7 @@ class LookbackWriter:
                     break
                 if fetched.completeness != "complete":
                     failure = (
-                        "failed" if fetched.completeness == "failed" else "partial",
+                        fetched.completeness if fetched.completeness in {"failed", "omitted_budget"} else "partial",
                         "; ".join(fetched.reasons) or fetched.completeness,
                     )
                     break

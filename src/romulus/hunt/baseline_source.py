@@ -73,9 +73,9 @@ class HuntHistorySource:
         try:
             add(Window(start=start, end=end))
         except _BudgetExhausted:
-            return HistoryPlan((), queries, "partial", ("planning query budget exhausted",))
+            return HistoryPlan((), queries, "omitted_budget", ("planning query budget exhausted",))
         except _PartitionCapExceeded:
-            return HistoryPlan((), queries, "partial", (
+            return HistoryPlan((), queries, "omitted_budget", (
                 f"history partition cap {MAX_HISTORY_PARTITIONS} exceeded",
             ))
         except Exception as error:  # noqa: BLE001 - a source planning error is an explicit coverage result
@@ -90,16 +90,18 @@ class HuntHistorySource:
         if partition.expected_records == 0:
             return HistoryFetch((), "complete", (), 0, 0)
         if record_budget is not None and record_budget < partition.expected_records:
-            return HistoryFetch((), "partial", ("lookback record budget exhausted",), 0, 0)
+            return HistoryFetch((), "omitted_budget", ("lookback record budget exhausted",), 0, 0)
         contract = self.contracts[partition.target]
         cap = min(2_000_000, max(PARTITION_MAX_DOCS, int(partition.expected_records * 1.2) + 1000))
         if record_budget is not None:
             cap = min(cap, max(0, record_budget))
         queries = 0
+        ran_out = False
 
         def reserve_query() -> bool:
-            nonlocal queries
+            nonlocal queries, ran_out
             if query_budget is not None and queries >= query_budget:
+                ran_out = True
                 return False
             queries += 1
             return True
@@ -132,8 +134,11 @@ class HuntHistorySource:
                 reasons.append(
                     f"exact-count mismatch: planned {partition.expected_records}, received {outcome.returned}",
                 )
-            return HistoryFetch(tuple(events), "partial", tuple(reasons or ["incomplete retrieval"]),
-                                outcome.returned, queries)
+            # a read the hunt's own query or wall-clock budget cut short is short history, not a source fault
+            budget_cut = (ran_out or (deadline is not None and self.clock() >= deadline)) and not (
+                errors or unsupported or conflicted or outcome.completeness == Completeness.failed)
+            return HistoryFetch(tuple(events), "omitted_budget" if budget_cut else "partial",
+                                tuple(reasons or ["incomplete retrieval"]), outcome.returned, queries)
         return HistoryFetch(tuple(events), "complete", (), outcome.returned, queries)
 
     def fetch_refs(self, refs: list[dict]) -> tuple[tuple, dict[str, dict], tuple[str, ...]]:

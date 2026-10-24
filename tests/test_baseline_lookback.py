@@ -48,7 +48,7 @@ class FakeHistory:
     def plan(self, target, start, end, *, query_budget):
         self.plans.append((target, start))
         if query_budget < 1:
-            return HistoryPlan((), 0, "partial", ("planning query budget exhausted",))
+            return HistoryPlan((), 0, "omitted_budget", ("planning query budget exhausted",))
         expected = sum(start <= event.ts < end for event in self.events)
         return HistoryPlan((
             HistoryPartition(target, start, end, expected, f"{target}:{start.isoformat()}"),

@@ -58,7 +58,7 @@ def test_recursive_planning_stops_at_the_physical_query_budget(monkeypatch):
 
     result = source.plan("host-index", START, START + timedelta(hours=1), query_budget=1)
 
-    assert result.completeness == "partial"
+    assert result.completeness == "omitted_budget"         # the hunt's own budget: short history, not a fault
     assert result.query_count == 1 and len(calls) == 1
     assert result.reasons == ("planning query budget exhausted",)
 
@@ -86,7 +86,7 @@ def test_zero_partition_skips_source_and_fetch_reports_physical_spend(monkeypatc
     monkeypatch.setattr(module, "execute", bounded)
     part = module.HistoryPartition("network", START, START + timedelta(hours=1), 4_000, "paged")
     fetched = source.fetch(part, record_budget=4_000, query_budget=1)
-    assert fetched.query_count == 1 and fetched.completeness == "partial"
+    assert fetched.query_count == 1 and fetched.completeness == "omitted_budget"
 
 
 def test_adapter_turns_normalization_errors_and_unsupported_records_partial(monkeypatch):

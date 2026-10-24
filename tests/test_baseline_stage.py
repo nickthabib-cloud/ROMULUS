@@ -779,3 +779,22 @@ def test_a_history_child_resolves_to_a_parent_in_an_older_history_hour():
     assert [row["key"] for row in repo.baseline_counts(segment["id"])] == [
         {"child_executable": "/bin/ls", "parent_executable": "/usr/sbin/sshd"},
     ]
+
+
+def test_a_lookback_budget_running_out_leaves_history_short_without_failing_the_stage():
+    """A dense hour that needs more planning queries than remain is short history (omitted_budget), not a baseline
+    stage failure: the hunt is not made partial by its own lookback budget."""
+    from romulus.baseline.protocol import HistoryPlan
+
+    class EdgeBudget(EmptyHistory):
+        def plan(self, target, start, end, *, query_budget):
+            self.plans += 1
+            if query_budget < 2:
+                return HistoryPlan((), query_budget, "omitted_budget", ("planning query budget exhausted",))
+            return super().plan(target, start, end, query_budget=query_budget)
+
+    repo = _repo(budget={"queries": 5, "records": 5_000_000, "seconds": 1800})
+    summary = run_baseline_stage(repo, "h1", WINDOW, source=EdgeBudget())
+    gaps = [gap for coverage in repo.baseline_snapshot("h1")["coverage"].values() for gap in coverage["gaps"]]
+    assert summary["stage_failed"] is False
+    assert ("omitted_budget", "planning query budget exhausted") in {(g["state"], g["reason"]) for g in gaps}
