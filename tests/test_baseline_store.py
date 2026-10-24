@@ -231,15 +231,23 @@ def test_0013_round_trips_a_gap_shortened_snapshot(tmp_path):
         assert conn.exec_driver_sql("SELECT status FROM baseline_snapshot").scalar_one() == "unresolved"
 
 
-def test_0014_is_the_single_head_and_round_trips_base_data_from_0012(tmp_path):
+def test_0015_is_the_single_head_backfills_observations_and_round_trips_base_data(tmp_path):
     engine = make_engine(tmp_path / "event-citation-migration.db")
     with engine.begin() as connection:
         cfg = _alembic_config(connection)
-        assert ScriptDirectory.from_config(cfg).get_heads() == ["0014"]
+        assert ScriptDirectory.from_config(cfg).get_heads() == ["0015"]
         command.upgrade(cfg, "0012")
         connection.exec_driver_sql(
             "INSERT INTO hunt (id, created_at, created_by, manifest, manifest_digest, execution_state) "
             "VALUES ('h1', '2026-01-01', 'test', '{}', 'd', 'planned')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO hunt (id, created_at, created_by, manifest, manifest_digest, execution_state) "
+            "VALUES ('h2', '2026-01-01', 'test', '{}', 'd2', 'planned')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO hunt (id, created_at, created_by, manifest, manifest_digest, execution_state) "
+            "VALUES ('h3', '2026-01-01', 'test', '{}', 'd3', 'planned')"
         )
         connection.exec_driver_sql(
             "INSERT INTO typed_event (id, hunt_id, family, ts, host, event, raw_ids, normalizer) "
@@ -248,15 +256,29 @@ def test_0014_is_the_single_head_and_round_trips_base_data_from_0012(tmp_path):
         command.upgrade(cfg, "0014")
         connection.exec_driver_sql(
             "INSERT INTO event_citation (hunt_id, event_id, event, raw_ids) "
-            "VALUES ('h1', 'e1', '{\"id\":\"e1\"}', '[]')"
+            "VALUES ('h3', 'e1', '{\"id\":\"e1\"}', '[]')"
         )
         assert connection.exec_driver_sql("SELECT event_id FROM event_citation").scalar_one() == "e1"
+        connection.exec_driver_sql(
+            "INSERT INTO candidate "
+            "(id, hunt_id, rule_id, rule_version, claim, claim_type, event_ids, predicate_fields, entities, "
+            "ts, severity, confidence, lane, priority, priority_reasons, gate_results, benign_alternatives, "
+            "next_checks, group_key, created_at) VALUES "
+            "('f-h2', 'h2', 'host.test', '1', 'claim', 'observed_action', '[\"e1\"]', '[]', '[]', "
+            "'2026-01-01', 'high', 'high', 'high', 1.0, '[]', '{}', '[]', '[]', '', '2026-01-01')"
+        )
+        command.upgrade(cfg, "0015")
+        assert connection.exec_driver_sql(
+            "SELECT hunt_id, event_id FROM event_observation ORDER BY hunt_id"
+        ).all() == [("h1", "e1"), ("h2", "e1"), ("h3", "e1")]
         command.downgrade(cfg, "0012")
         assert connection.exec_driver_sql("SELECT id FROM typed_event").scalar_one() == "e1"
-        assert "event_citation" not in set(inspect(connection).get_table_names())
-        command.upgrade(cfg, "0014")
+        tables = set(inspect(connection).get_table_names())
+        assert "event_citation" not in tables and "event_observation" not in tables
+        command.upgrade(cfg, "0015")
         assert connection.exec_driver_sql("SELECT id FROM typed_event").scalar_one() == "e1"
-        assert "event_citation" in set(inspect(connection).get_table_names())
+        tables = set(inspect(connection).get_table_names())
+        assert "event_citation" in tables and "event_observation" in tables
 
 
 def test_0010_through_0012_round_trip_agent_link_without_prior_scheduler_anchor(tmp_path):
