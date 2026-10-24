@@ -17,6 +17,7 @@ from typing import ClassVar
 from romulus.detect.base import Match, Playbook, pf
 from romulus.detect.bounded import HOT_COUNT, HeldExamples, KeyedStore, RecentIds
 from romulus.detect.correlation import StageMissing, canon_ip, external, routable_remote
+from romulus.detect.flows import BoundStage, Ends, bound_note, cite_with_bounds, cited_phrase
 from romulus.detect.netdef import assume_direction
 from romulus.evidence.typed import TypedEvent
 
@@ -45,6 +46,15 @@ def _epoch(value) -> float | None:
 
 def _iso(epoch: float) -> str:
     return datetime.fromtimestamp(epoch, UTC).isoformat()
+
+
+def _syn(e: TypedEvent) -> bool | None:
+    """Whether Arkime counted a SYN on this TCP record (None when the record carries no flag counts). Arkime orients a
+    session it saw open by the SYN, so the record's source sent it (romulus.detect.flows.OPENED_STATES)."""
+    count = e.get("tcp.flags.syn")
+    if not isinstance(count, int) or isinstance(count, bool):
+        return None
+    return count > 0
 
 
 def _absorb(parts: list[list], start: float, end: float, seq: int, event_id: str, protocols: frozenset,
@@ -85,12 +95,14 @@ class _Stitched(Playbook):
     IDLE = 3600.0
     CONN_IDS = EXAMPLE_LIMIT        # record ids held (and staged) per connection
     HOT = HOT_COUNT  # count cap; sized in bytes by the hunt's memory budget
+    BOUNDED = False                 # the rule's claims state each connection's span: stage the records bounding it
 
     def __init__(self):
         super().__init__()
         self.conns = KeyedStore(self, f"conns_{type(self).__name__.lower()}", self.HOT, candidate=self.candidate)
         self._seen = RecentIds()        # bounded re-read guard
         self._pending: list[TypedEvent] = []
+        self.bounds = BoundStage()      # records bounding each connection's span, staged when a batch ends
         self.load = lambda ids: []
         self._seq = 0
 
@@ -99,14 +111,14 @@ class _Stitched(Playbook):
         return True
 
     def drain_staged(self) -> list[TypedEvent]:
-        out, self._pending = self._pending, []
+        out, self._pending = self._pending + self.bounds.drain(), []
         self.conns.trim()
         return out
 
     def release_state(self) -> None:
         self.load = lambda ids: []
         for value in list(vars(self).values()):
-            if isinstance(value, KeyedStore):
+            if isinstance(value, (KeyedStore, BoundStage)):
                 value.clear()
         self.close_spill()
 
@@ -120,8 +132,11 @@ class _Stitched(Playbook):
         cid = e.get("network.community_id")
         if cid:
             return str(cid)
-        return f"{e.get('network.transport')}|{e.get('source.ip')}:{e.get('source.port')}|" \
-               f"{e.get('destination.ip')}:{e.get('destination.port')}"
+        # the two endpoints in a fixed order, as the community ID hashes them: a record Arkime oriented the other way
+        # (picked up mid-stream) is the same connection
+        ends = sorted([f"{e.get('source.ip')}:{e.get('source.port')}",
+                       f"{e.get('destination.ip')}:{e.get('destination.port')}"])
+        return f"{e.get('network.transport')}|{ends[0]}|{ends[1]}"
 
     def wants(self, e: TypedEvent) -> bool:
         """Whether this rule can report the connection a first record opens (judged from that record, as the
@@ -149,11 +164,13 @@ class _Stitched(Playbook):
                     if self.skipped_for_direction(e):
                         assume_direction(self)  # judged by a direction the default definition only assumes
                     continue                  # judged: a connection this rule cannot report
-                c = {"start": start, "end": end, "records": 0, "events": [], "c2s": 0, "s2c": 0,
+                # src and dst are the first record's sides as Arkime recorded them; bytes are kept per side
+                c = {"start": start, "end": end, "records": 0, "events": [], "sent_src": 0, "sent_dst": 0,
                      "src": e.get("source.ip"), "sport": e.get("source.port"),
                      "dst": e.get("destination.ip"), "dport": e.get("destination.port"),
                      "transport": e.get("network.transport"), "observer": e.host, "protocols": set(),
-                     "seq": self._seq, "parts": []}
+                     "seq": self._seq, "parts": [], "ends": Ends(), "openers": [], "opener_id": None,
+                     "flagged": False}
                 if not self.conns.put(key, c):
                     self.evaluated -= 1
                     self.refuse("disk", "the connections' disk budget is spent; a record of a new connection is not "
@@ -164,8 +181,21 @@ class _Stitched(Playbook):
             c["protocols"].update(protocols)
             c["start"], c["end"] = min(c["start"], start), max(c["end"], end)
             c["records"] += 1
-            c["c2s"] += int(e.get("source.bytes") or 0)
-            c["s2c"] += int(e.get("destination.bytes") or 0)
+            # each side's bytes are its own counter, whichever side this record names as its source
+            forward = (e.get("source.ip"), e.get("source.port")) == (c["src"], c["sport"])
+            c["sent_src" if forward else "sent_dst"] += int(e.get("source.bytes") or 0)
+            c["sent_dst" if forward else "sent_src"] += int(e.get("destination.bytes") or 0)
+            syn = _syn(e) if e.get("network.transport") == "tcp" else None
+            if syn is not None:
+                c["flagged"] = True
+            if syn:
+                side = (e.get("source.ip"), e.get("source.port"))
+                if side not in c["openers"]:
+                    c["openers"].append(side)
+                if c["opener_id"] is None:
+                    c["opener_id"] = e.id
+            if self.BOUNDED:
+                self.bounds.offer(key, c["ends"], start, end, e)
             opened = _absorb(c["parts"], start, end, self._seq, e.id, protocols, self.IDLE)
             self._seq += 1
             if self.cite(c, e, opened):
@@ -173,10 +203,12 @@ class _Stitched(Playbook):
         return []
 
     def cite(self, conn: dict, e: TypedEvent, opened: bool) -> bool:
-        """Whether this record may be cited later (so it goes to the stage): the connection's first CONN_IDS."""
-        if len(conn["events"]) >= self.CONN_IDS:
+        """Whether this record may be cited later (so it goes to the stage): the connection's first CONN_IDS, and
+        the first record that shows which side opened it."""
+        if len(conn["events"]) >= self.CONN_IDS and e.id != conn["opener_id"]:
             return False
-        conn["events"].append(e.id)
+        if e.id not in conn["events"]:
+            conn["events"].append(e.id)
         return True
 
     def retained_events(self) -> list[TypedEvent]:
@@ -185,7 +217,7 @@ class _Stitched(Playbook):
 
 class LongExternalConnection(_Stitched):
     id = "net.long_external_connection"
-    version = "3"
+    version = "4"
     direction_dependent = True
     title = "Long-lived TCP connection between an internal and a public address"
     severity, lane = "medium", "lead"
@@ -195,13 +227,20 @@ class LongExternalConnection(_Stitched):
     next_checks = ("process connections on the internal host for this endpoint", "flow detail for the community ID",
                    "packets of the connection (cleartext content, TLS fingerprint)")
     MIN_SECONDS = 1800
+    BOUNDED = True
     card: ClassVar[dict] = {
         "behavior": "one TCP connection between an address inside the site and one outside it, recorded by Arkime "
                     "as session records that together span at least 30 minutes",
         "telemetry": "Arkime 6.x sessions as net_session: source.ip, destination.ip, flow.start, flow.end, "
-                     "network.transport, network.community_id (present and normalized in the lab profile)",
+                     "network.transport, network.community_id, source.bytes, destination.bytes, tcp.flags.syn "
+                     "(present and normalized in the lab profile)",
         "fidelity": "direct observation of the connection's lifetime by the sensor; says nothing about what it "
-                    "carried",
+                    "carried. Bytes are given per side. A side is named the client only when a record shows the "
+                    "opening (Arkime counted a SYN on it, tcp.flags.syn, and orients such a session by it); a "
+                    "connection Arkime picked up mid-stream or that opened before the hunt window is worded with its "
+                    "two ends and the opener stated as unknown. The cited records always include the records with "
+                    "the earliest start and the latest end, and the claim says how many records it rests on and how "
+                    "many are cited",
         "benign_and_cost": "remote administration, VPN tunnels, push channels, long downloads; one item per "
                            "connection",
         "query_cost": "none beyond the sweep",
@@ -231,17 +270,42 @@ class LongExternalConnection(_Stitched):
     def candidate(self, conn: dict) -> bool:
         return conn["end"] - conn["start"] >= self.MIN_SECONDS
 
+    @staticmethod
+    def _sides(c: dict) -> str:
+        """The connection's two ends and each one's bytes, with the client named only when a record shows it."""
+        first = (c["src"], c["sport"])
+        span = f"{(c['end'] - c['start']) / 60:.0f} minutes ({_iso(c['start'])} – {_iso(c['end'])})"
+        if len(c["openers"]) == 1:
+            client_first = tuple(c["openers"][0]) == first
+            client, server = ((c["src"], c["sport"]), (c["dst"], c["dport"]))[::1 if client_first else -1]
+            sent = (c["sent_src"], c["sent_dst"])[::1 if client_first else -1]
+            return (f"one TCP connection that {client[0]}:{client[1]} opened to {server[0]}:{server[1]} (a record "
+                    f"shows its SYN) spanning {span}, {sent[0]} bytes from the client and {sent[1]} bytes from the "
+                    f"server.")
+        if c["openers"]:
+            unknown = "its records disagree about which side opened it (each side is recorded sending a SYN)"
+        elif c["flagged"]:
+            unknown = ("no record of it shows a SYN (Arkime picked it up mid-stream, or it opened before the hunt "
+                       "window)")
+        else:
+            unknown = "no record of it carries TCP flag counts"
+        return (f"one TCP connection between {c['src']}:{c['sport']} and {c['dst']}:{c['dport']} spanning {span}, "
+                f"{c['sent_src']} bytes from {c['src']}:{c['sport']} and {c['sent_dst']} bytes from "
+                f"{c['dst']}:{c['dport']}. Which side opened it is not known: {unknown}.")
+
     def finalize(self):
         out = []
         order = sorted((c["seq"], key) for key, c in self.conns.items(candidates=True))
         for _seq, key in order:
             c = self.conns.peek(key)
-            evs = self._events(c["events"])
-            minutes = (c["end"] - c["start"]) / 60
-            claim = (f"Arkime recorded {c['records']} session record(s) for one TCP connection {c['src']}:{c['sport']} "
-                     f"-> {c['dst']}:{c['dport']} spanning {minutes:.0f} minutes ({_iso(c['start'])} – "
-                     f"{_iso(c['end'])}), {c['c2s']} bytes from the client and {c['s2c']} bytes from the server. "
-                     f"Only the part of the connection that started inside the hunt window is counted.")
+            staged = set(c["events"])
+            # the records bounding the span, the record showing the opening, the first record of each later stretch
+            # of activity, then the connection's first records
+            leads = [part[3] for part in c["parts"][1:] if part[3] in staged]
+            ids = ([c["opener_id"]] if c["opener_id"] in staged else []) + leads + c["events"]
+            evs, missing = cite_with_bounds(self.load, self._events, c["ends"], ids, EXAMPLE_LIMIT)
+            claim = (f"Arkime recorded {c['records']} session record(s) for {self._sides(c)} Only the part of the "
+                     f"connection that started inside the hunt window is counted.")
             gaps = len(c["parts"]) - 1
             if gaps:
                 # Arkime writes a live connection's record at least every save interval: a long silence is a
@@ -249,8 +313,14 @@ class LongExternalConnection(_Stitched):
                 claim += (f" The records show {gaps} gap(s) of more than {self.IDLE / 3600:.0f} hour(s) without a "
                           f"record, so this may be one channel that slept between bursts or the same 5-tuple reused "
                           f"by separate connections; the span covers all of them.")
-            preds = [pf(evs[0], "source.ip"), pf(evs[0], "destination.ip"), pf(evs[0], "flow.start"),
-                     pf(evs[-1], "flow.end")]
+            claim += cited_phrase(len(evs), c["records"], not missing) + bound_note(missing, c["ends"], "the span")
+            by_id = {e.id: e for e in evs}
+            opening = by_id.get(c["ends"].first[1]) or evs[0]
+            closing = by_id.get(c["ends"].last[1]) or max(evs, key=lambda e: (_epoch(e.get("flow.end")) or 0, e.id))
+            preds = [pf(opening, "source.ip"), pf(opening, "destination.ip"), pf(opening, "flow.start"),
+                     pf(closing, "flow.end")]
+            if c["opener_id"] in by_id and len(c["openers"]) == 1:
+                preds.append(pf(by_id[c["opener_id"]], "tcp.flags.syn"))
             out.append(Match(self.id, claim, self.claim_type, evs, preds, evs[0].ts, self.severity, self.lane,
                              "high", evs[0].entities(), group_key=key))
         return out
@@ -258,20 +328,23 @@ class LongExternalConnection(_Stitched):
 
 class _Series:
     """One (internal source, public destination, port, transport) series, built at finalize: every connection's
-    start (8 bytes each), the earliest connections' first record ids, and the protocols every connection was
-    identified as."""
+    start (8 bytes each), the earliest connections' first record ids and the latest connection's, and the protocols
+    every connection was identified as."""
 
-    __slots__ = ("first", "protocols", "starts")
+    __slots__ = ("first", "last", "protocols", "starts")
 
     def __init__(self):
         self.starts = array("d")
         self.first: list[tuple[float, int, str]] = []        # (start, first record's order, its id), earliest
+        self.last: tuple[float, int, str] | None = None      # the latest-starting connection's first record
         self.protocols: frozenset | None = None
 
     def add(self, part: list) -> None:
         start, _end, seq, event_id, protocols = part
         self.starts.append(start)
         ref = (start, seq, event_id)
+        if self.last is None or ref > self.last:
+            self.last = ref
         if len(self.first) < EXAMPLE_LIMIT or ref < self.first[-1]:
             self.first = sorted([*self.first, ref])[:EXAMPLE_LIMIT]
         self.protocols = protocols if self.protocols is None else self.protocols & protocols
@@ -282,7 +355,7 @@ class Beaconing(_Stitched):
     connection identity whose records are more than IDLE apart is counted as separate connections (one per stretch
     of activity), so a 5-tuple reused by a periodic client still shows its period."""
     id = "net.beaconing"
-    version = "3"
+    version = "4"
     direction_dependent = True
     title = "Regular, repeated connections from an internal address to one public endpoint"
     severity, lane = "medium", "lead"
@@ -355,7 +428,9 @@ class Beaconing(_Stitched):
             mad = statistics.median(abs(g - median) for g in gaps)
             if mad / median > self.MAX_JITTER:
                 continue
-            evs = self._events([event_id for _start, _seq, event_id in s.first])
+            # the first and the last connection bound the stated span; the earliest others fill the rest
+            ids = [event_id for _start, _seq, event_id in s.first]
+            evs = self._events(list(dict.fromkeys([ids[0], s.last[2], *ids]))[:EXAMPLE_LIMIT])
             # Protocols that are periodic by design, identified by Arkime's parser from packet content (not the
             # port): still reported, in the context lane, never dropped
             periodic = sorted(s.protocols & PERIODIC_BY_DESIGN)
@@ -516,7 +591,7 @@ class ArkimeSshReverseShellTag(Playbook):
     shape of the encrypted session; ROMULUS does not reproduce or verify the heuristic. It is reported like an
     IDS alert: a vendor detection with its own false-positive rate, a lead to check, never proof."""
     id = "net.arkime_ssh_reverse_shell_tag"
-    version = "3"
+    version = "4"
     title = "Arkime's heuristic tagged an SSH session as a possible reverse shell"
     kind = "aggregate"
     anchor_class = "network_observation"
@@ -540,10 +615,13 @@ class ArkimeSshReverseShellTag(Playbook):
         "telemetry": "Arkime 6.x session tags (arkime.tags) as net_session; present in the lab profile",
         "fidelity": "vendor heuristic over encrypted-traffic shape; neither the shell nor its direction is observed",
         "benign_and_cost": "the heuristic's false positives, notably interactive administration between internal "
-                           "hosts; one finding per (client, server, server port). The claim states the session's own "
-                           "context so the analyst can weigh the tag: whether each end is internal or public, the SSH "
-                           "software both ends announced and the HASSH values, the bytes each way, and how many other "
-                           "SSH connections between the same pair Arkime recorded without the tag",
+                           "hosts; one finding per (recorded source, destination, destination port). The claim states "
+                           "the session's own context so the analyst can weigh the tag: whether each end is internal "
+                           "or public, which end opened it when a tagged record shows the SYN (otherwise that it is "
+                           "not recorded, and no end is called the client), the SSH software both ends announced and "
+                           "the HASSH values, the bytes each way, and how many other SSH connections between the same "
+                           "pair Arkime recorded without the tag. The cited records include the tagged records with "
+                           "the first and last record time and the latest end",
         "query_cost": "none beyond the sweep",
         "next_pivot": "host audit records of the SSH login and the processes on both ends",
         "adds": "no other rule reads Arkime's tags; the session rules see only duration, timing and fingerprints",
@@ -564,10 +642,11 @@ class ArkimeSshReverseShellTag(Playbook):
         self.pairs = KeyedStore(self, "ssh_pairs", self.HOT, candidate=lambda pair: pair["info"] is not None)
         self._pending: list[TypedEvent] = []
         self._fresh: list[HeldExamples] = []
+        self.bounds = BoundStage()      # the tagged records bounding each pair's stated span, staged when a batch ends
         self.load = lambda ids: []
 
     def drain_staged(self) -> list[TypedEvent]:
-        out, self._pending = self._pending, []
+        out, self._pending = self._pending + self.bounds.drain(), []
         for store in self._fresh:
             store.staged()
         self._fresh = []
@@ -577,6 +656,7 @@ class ArkimeSshReverseShellTag(Playbook):
     def release_state(self) -> None:
         self.load = lambda ids: []
         self.pairs.clear()
+        self.bounds.clear()
         self.close_spill()
 
     def retained_events(self) -> list[TypedEvent]:
@@ -610,7 +690,8 @@ class ArkimeSshReverseShellTag(Playbook):
                 continue
             if pair["info"] is None:
                 pair["info"] = {"records": 0, "conns": set(), "first": e.ts, "last": e.ts, "c2s": 0, "s2c": 0,
-                                "versions": set(), "hassh": set(), "hassh_server": set(), "tags": set(), "end": None}
+                                "versions": set(), "hassh": set(), "hassh_server": set(), "tags": set(), "end": None,
+                                "by_time": Ends(), "by_end": Ends(), "opened": 0, "flagged": False}
                 pair["examples"] = HeldExamples(EXAMPLE_LIMIT)
             g = pair["info"]
             g["records"] += 1
@@ -619,6 +700,14 @@ class ArkimeSshReverseShellTag(Playbook):
             end = _epoch(e.get("flow.end"))
             if end is not None:
                 g["end"] = end if g["end"] is None else max(g["end"], end)
+            # the tagged records that bound the claim's span: the first and last record time, and the latest end
+            ts = e.ts.timestamp()
+            self.bounds.offer((key, "time"), g["by_time"], ts, ts, e)
+            self.bounds.offer((key, "end"), g["by_end"], ts, ts if end is None else end, e)
+            syn = _syn(e)
+            if syn is not None:
+                g["flagged"] = True
+            g["opened"] += bool(syn)
             for name, side in (("source.bytes", "c2s"), ("destination.bytes", "s2c")):
                 value = e.get(name)
                 if isinstance(value, int) and not isinstance(value, bool):
@@ -637,8 +726,9 @@ class ArkimeSshReverseShellTag(Playbook):
         return []
 
     @staticmethod
-    def _scope(src: str, dst: str) -> str:
-        """Where the two ends sit, by the configured internal ranges ('' when either is not a routable address)."""
+    def _scope(src: str, dst: str, opened: bool) -> str:
+        """Where the two ends sit, by the configured internal ranges ('' when either is not a routable address).
+        Each end is named client or server only when a tagged record shows the opening."""
         client, server = canon_ip(src), canon_ip(dst)
         if not (routable_remote(client) and routable_remote(server)):
             return ""
@@ -646,15 +736,26 @@ class ArkimeSshReverseShellTag(Playbook):
             return " Both ends are internal addresses."
         if external(client) and external(server):
             return " Both ends are public addresses."
+        first, second = ("The client ", "the server ") if opened else ("", "")
         if external(server):
-            return f" The client {src} is internal and the server {dst} is a public address."
-        return f" The client {src} is a public address and the server {dst} is internal."
+            return f" {first}{src} is internal and {second}{dst} is a public address."
+        return f" {first}{src} is a public address and {second}{dst} is internal."
+
+    @staticmethod
+    def _opening(src: str, g: dict) -> str:
+        """What the tagged records show about which end opened the session."""
+        if g["opened"]:
+            return f" A tagged record shows the SYN from {src}, so {src} opened the session."
+        if g["flagged"]:
+            return (" No tagged record shows the SYN (Arkime picked the session up mid-stream, or it opened before "
+                    "the hunt window), so which end opened it is not recorded.")
+        return " No tagged record carries TCP flag counts, so which end opened the session is not recorded."
 
     def _context(self, key: tuple, g: dict, known: set) -> str:
         """The session's own context, stated beside the tag: address scope, bytes, announced software,
         fingerprints, other tags, and the pair's untagged SSH connections (a denominator for the heuristic)."""
         src, dst, port = key
-        text = self._scope(src, dst)
+        text = self._scope(src, dst, bool(g["opened"])) + self._opening(src, g)
         span = (g["end"] - g["first"].timestamp()) if g["end"] is not None else None
         def volume(side: str) -> str:
             missing = g.get(f"{side}_missing", 0)
@@ -663,7 +764,8 @@ class ArkimeSshReverseShellTag(Playbook):
             return (f"at least {g[side]} bytes (not recorded on {missing} record(s))" if missing
                     else f"{g[side]} bytes")
 
-        text += (f" The tagged record(s) carry {volume('c2s')} from the client and {volume('s2c')} from the server"
+        sides = ("the client", "the server") if g["opened"] else (src, dst)
+        text += (f" The tagged record(s) carry {volume('c2s')} from {sides[0]} and {volume('s2c')} from {sides[1]}"
                  + (f" over {span:.0f} s." if span is not None else "."))
         if g["versions"]:
             text += (" SSH software the two ends announced (self-reported; Arkime does not say which end sent which): "
@@ -692,13 +794,23 @@ class ArkimeSshReverseShellTag(Playbook):
     def finalize(self):
         out = []
         for key, pair in self.pairs.items(candidates=True):
-            evs = pair["examples"].events(self.load)
             g = pair["info"]
+            # the tagged records bounding the stated span and its duration first, then the held examples
+            bounds = list(dict.fromkeys(g["by_time"].ids() + g["by_end"].ids()))
+            held = {e.id: e for e in self.load(bounds)}
+            examples = pair["examples"].events(self.load)
+            ordered = list(dict.fromkeys([*(i for i in bounds if i in held), *(e.id for e in examples)]))
+            by_id = {**{e.id: e for e in examples}, **held}
+            evs = sorted((by_id[i] for i in ordered[:EXAMPLE_LIMIT]), key=lambda e: (e.ts, e.id))
+            missing = set(bounds) - set(held)
             src, dst, port = key
             claim = (f"Arkime's heuristic tagged {g['records']} session record(s) of {len(g['conns'])} connection(s) "
                      f"from {src} to {dst} port {port} '{self.TAG}' ({g['first'].isoformat()} – "
                      f"{g['last'].isoformat()}). This is Arkime's own detection from the traffic shape, like an IDS "
                      f"alert; it does not show that a shell ran.") + self._context(key, g, pair["ssh"])
+            claim += bound_note(missing, g["by_time"], "the tagged records' span")
+            if g["by_end"].last and g["by_end"].last[1] in missing - set(g["by_time"].ids()):
+                claim += " The record that ends the last tagged session was not kept for citation."
             out.append(Match(self.id, claim, self.claim_type, evs,
                              [pf(evs[0], "arkime.tags"), pf(evs[0], "source.ip"), pf(evs[0], "destination.ip")],
                              evs[0].ts, self.severity, self.lane, "medium", evs[0].entities(),

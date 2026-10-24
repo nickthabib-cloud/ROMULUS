@@ -25,7 +25,7 @@ def test_catalog_export_has_the_public_ui_schema_and_round_trips_json():
     }
     assert document["schema_version"] == 1
     assert document["attack_version"] == "20.0"
-    assert document["pack_version"] == "pack@20"
+    assert document["pack_version"] == "pack@21"
     assert json.loads(json.dumps(document)) == document
 
 
