@@ -202,7 +202,8 @@ def test_a_reverse_lookup_sweep_cites_its_span_and_the_addresses_it_names(tmp_pa
 def dns_ptr(address, ts):
     name = ".".join(reversed(address.split("."))) + ".in-addr.arpa"
     return ev("dns_query", ts, host="sensor", source__ip="10.20.0.15", destination__ip="10.20.0.53",
-              dns__type="query", dns__question__name=name, dns__question__type="PTR")
+              source__port=40000, destination__port=53, dns__type="query", dns__question__name=name,
+              dns__question__type="PTR")
 
 
 def test_a_port_scan_and_its_reverse_pair_say_what_their_own_records_show(tmp_path):
@@ -369,7 +370,8 @@ def test_the_join_stages_what_it_can_cite_not_every_network_record(tmp_path):
 
 def test_nxdomain_names_and_servers_come_from_cited_records(tmp_path):
     answers = [ev("dns_query", T0 + timedelta(seconds=3 * i), host="sensor", source__ip=f"10.20.0.{53 + i % 7}",
-                  destination__ip="10.20.0.15", dns__type="answer", dns__response_code="NXDOMAIN",
+                  destination__ip="10.20.0.15", source__port=53, destination__port=40000 + i, dns__type="answer",
+                  dns__response_code="NXDOMAIN",
                   dns__question__name=f"q{i:04d}{'x' * (i % 40)}.example.test") for i in range(240)]
     [m] = staged(dns.DnsNxdomainBurst(), batches(answers, 30), tmp_path)
     clean([m])
@@ -385,7 +387,8 @@ def test_a_tunnel_shape_cites_its_example_names_and_span(tmp_path):
 
 def test_subdomain_and_tool_agent_groups_disclose_their_citations(tmp_path):
     queries = [ev("dns_query", T0 + timedelta(seconds=i), host="sensor", source__ip="10.20.0.15",
-                  destination__ip="10.20.0.53", dns__type="query", dns__question__name=f"n{i}.corp.example")
+                  destination__ip="10.20.0.53", source__port=40000 + i, destination__port=53, dns__type="query",
+                  dns__question__name=f"n{i}.corp.example")
                for i in range(150)]
     clean(staged(network.DnsSubdomainEnumeration(), batches(queries, 25), tmp_path / "a"))
     requests = [ev("http_tx", T0 + timedelta(seconds=i), host="sensor", source__ip="198.51.100.7",
@@ -795,8 +798,9 @@ def test_an_alert_stack_past_its_signature_cap_states_a_lower_bound(tmp_path, mo
 
 def test_subdomain_enumeration_past_its_name_cap_states_a_lower_bound(tmp_path, monkeypatch):
     monkeypatch.setattr(network.DnsSubdomainEnumeration, "NAMES_HELD", 120)
-    queries = [ev("dns_query", T0 + timedelta(seconds=i), source__ip="10.20.0.15", dns__type="query",
-                  dns__question__name=f"h{i}.example.test") for i in range(130)]
+    queries = [ev("dns_query", T0 + timedelta(seconds=i), source__ip="10.20.0.15", source__port=40000 + i,
+                  destination__port=53, dns__type="query", dns__question__name=f"h{i}.example.test")
+               for i in range(130)]
     rule = network.DnsSubdomainEnumeration()
     [m] = staged(rule, batches(queries, 50), tmp_path)
     clean([m])

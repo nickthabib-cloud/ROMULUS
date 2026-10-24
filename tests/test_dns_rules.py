@@ -20,12 +20,18 @@ _n = 0
 
 
 def rec(dns_type="query", client=CLIENT, server=RESOLVER, name="www.example.test", qtype="A", rcode=None,
-        ts=None, flow=None, transport="udp", **extra):
-    """One dns_query record. A query flows client -> server; an answer server -> client."""
+        ts=None, flow=None, transport="udp", flow_oriented=False, server_port=53, **extra):
+    """One dns_query record. A query flows client -> server; an answer server -> client, or, with `flow_oriented`
+    (as Suricata writes it), client -> server like its flow. The server is on `server_port`, the client on an
+    ephemeral port (None: no ports typed)."""
     global _n
     _n += 1
-    src, dst = (server, client) if dns_type in ("answer", "response") else (client, server)
-    fields = {"source.ip": src, "destination.ip": dst, "dns.type": dns_type, "dns.question.name": name,
+    answer = dns_type in ("answer", "response") and not flow_oriented
+    src, dst = (server, client) if answer else (client, server)
+    cport = None if server_port is None else 40000 + _n % 20000
+    sport, dport = (server_port, cport) if answer else (cport, server_port)
+    fields = {"source.ip": src, "destination.ip": dst, "source.port": sport, "destination.port": dport,
+              "dns.type": dns_type, "dns.question.name": name,
               "dns.question.type": qtype, "dns.response_code": rcode, "network.transport": transport,
               "suricata.flow_id": flow if flow is not None else _n}
     fields.update({k.replace("__", "."): v for k, v in extra.items()})
@@ -383,6 +389,45 @@ def test_nxdomain_burst_is_keyed_on_the_answer_destination():
     assert f"Answering server(s): {RESOLVER} x60" in m.claim
     assert "60 distinct name(s)" in m.claim
     assert pb.evaluated == 100 and pb.missing_required == 0
+
+
+# ---------------------------------------------------------------- roles from the DNS port, not the orientation
+@pytest.mark.parametrize("flow_oriented", [False, True])
+def test_dns_roles_come_from_the_dns_port_whatever_the_record_orientation(flow_oriented):
+    """Suricata writes an answer in its flow's orientation (client as src_ip, server as dest_ip port 53); a per-packet
+    view writes the server as the source. Either way the server is the endpoint on port 53."""
+    answer = rec("answer", CLIENT, RESOLVER, rcode="NXDOMAIN", flow_oriented=flow_oriented)
+    assert (answer.get("source.ip") == CLIENT) is flow_oriented
+    assert dns.endpoints(answer) == (CLIENT, RESOLVER)
+    events = [rec("answer", CLIENT, RESOLVER, name=f"n{i}.example.test", rcode="NXDOMAIN", flow_oriented=flow_oriented,
+                  ts=T0 + timedelta(seconds=i)) for i in range(60)]
+    _pb, [m] = run(dns.DnsNxdomainBurst, events)
+    assert m.group_key == CLIENT and f"{CLIENT} was sent 60 NXDOMAIN answer(s)" in m.claim
+    assert f"Answering server(s): {RESOLVER} x60" in m.claim and f"{CLIENT} also appears" not in m.claim
+
+
+def test_a_zone_transfer_answer_in_flow_orientation_pairs_with_its_question():
+    q = rec("query", OUTSIDE, AUTH, name="corp.example.test", qtype="AXFR", transport="tcp")
+    a = rec("answer", OUTSIDE, AUTH, name="corp.example.test", qtype="AXFR", rcode="REFUSED", transport="tcp",
+            flow_oriented=True, flow=q.get("suricata.flow_id"), ts=T0 + timedelta(milliseconds=3))
+    _pb, [m] = run(dns.DnsZoneTransferOrAnyRequest, [q, a])
+    assert m.claim.startswith(f"{OUTSIDE} sent 1 DNS question record(s)") and f"to {AUTH}" in m.claim
+    assert "AXFR REFUSED x1" in m.claim and "received" not in m.claim
+
+
+@pytest.mark.parametrize("ports", [(None, None), (53, 53), (40000, 41000)])
+def test_a_dns_record_whose_ports_do_not_tell_the_roles_names_no_server(ports):
+    """Neither or both endpoints on a DNS port, or no port typed: the roles are unknown, the record is counted as
+    missing (coverage partial), and no client or server is named from it."""
+    sport, dport = ports
+    events = [rec("answer", CLIENT, RESOLVER, name=f"n{i}.example.test", rcode="NXDOMAIN", server_port=None,
+                  ts=T0 + timedelta(seconds=i), source__port=sport, destination__port=dport) for i in range(60)]
+    assert dns.endpoints(events[0]) == (None, None)
+    pb, out = run(dns.DnsNxdomainBurst, events)
+    assert out == [] and pb.evaluated == 0 and pb.missing_required == 60
+    zone, out = run(dns.DnsZoneTransferOrAnyRequest, [rec("query", CLIENT, RESOLVER, qtype="AXFR", server_port=None,
+                                                          source__port=sport, destination__port=dport)])
+    assert out == [] and zone.missing_required == 1
 
 
 def test_nxdomain_burst_window_is_half_open():

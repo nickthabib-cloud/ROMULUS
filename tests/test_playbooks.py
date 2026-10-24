@@ -686,14 +686,15 @@ def test_scan_burst_ignores_normal_traffic():
 
 # ---------------------------------------------------------------- dns enumeration
 def test_dns_enumeration():
-    evs = [ev(family="dns_query", source__ip="198.51.100.4", dns__question__name=f"h{i}.example.test", dns__type="query")
-           for i in range(120)]
+    evs = [ev(family="dns_query", source__ip="198.51.100.4", source__port=40000 + i, destination__port=53,
+              dns__question__name=f"h{i}.example.test", dns__type="query") for i in range(120)]
     m = run(network.DnsSubdomainEnumeration, evs)
     assert len(m) == 1 and "120 distinct names" in m[0].claim
 
 
 def test_dns_repeated_same_name_is_not_enumeration():
-    evs = [ev(family="dns_query", source__ip="192.0.2.5", dns__question__name="www.example.test") for _ in range(500)]
+    evs = [ev(family="dns_query", source__ip="192.0.2.5", source__port=40000, destination__port=53,
+              dns__question__name="www.example.test") for _ in range(500)]
     assert run(network.DnsSubdomainEnumeration, evs) == []
 
 
