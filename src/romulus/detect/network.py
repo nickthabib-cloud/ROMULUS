@@ -509,7 +509,7 @@ class PortScan(_Grouped):
     # is held on the rule's disk spill while it is quiet. The index of requests to services (the earliest start of
     # each 4-tuple, to tell an answer from a probe) is a keyed store too, HOT entries in memory.
     REQUESTS_HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
-    version = "8"
+    version = "9"
     # Destination ports the claim names, each with a cited record (the first seen); and probed ports whose opening a
     # cited record shows (a Suricata TCP flow its engine tracked from the handshake).
     PORTS_NAMED = 12
@@ -619,6 +619,11 @@ class PortScan(_Grouped):
                     claim += (" The index of earlier flows reached its disk budget, so some answers may be counted as "
                               "probes.")
             claim += self.told(evs, state, missing, "flow records", "flow record")
+            # how many of the counted ports the cited records show
+            in_cited = {e.get("destination.port") for e in evs if isinstance(e.get("destination.port"), int)}
+            low = (f", and {len(in_cited & set(replies))} of the {len(replies)} reached from a source port below "
+                   f"1024," if replies else "")
+            claim += f" {len(in_cited & ports)} of the {len(ports)} ports{low} are in cited records."
             if len(probed) >= self.MIN_PORTS:
                 lane, severity = self.lane, self.severity
             else:
