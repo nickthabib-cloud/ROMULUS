@@ -13,7 +13,7 @@ import heapq
 import ipaddress
 import json
 import sqlite3
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import lru_cache
@@ -958,8 +958,15 @@ def _version(ip: str) -> int:
 # of its latest record (see count_connections).
 CONNECTION_GAP = 30.0
 # Records of a connection to one service endpoint from one address kept on the stage for citation (and as many
-# alerts): a group cites at most EXAMPLE_LIMIT records, all to its endpoint, from its host's address.
+# alerts), once a connect() call to that endpoint has been read: a group cites at most EXAMPLE_LIMIT records, all to its
+# endpoint, from its host's address.
 PARTNERS_PER_PAIR = EXAMPLE_LIMIT
+# Before any connect() call to the endpoint has been read (a network target read before the host target, or traffic no
+# call reaches), a pair's first record is only held, and at most UNMATCHED_HELD such records across the hunt, the
+# oldest released first: most network traffic never joins a host's call, so what the stage holds for it is bounded
+# (about 35 MB at roughly 1.7 KB of typed record and raw copy each), not one record per connection.
+PARTNERS_UNMATCHED = 1
+UNMATCHED_HELD = 20_000
 EPHEMERAL_FLOOR = 32768         # client ports start here on modern stacks (Linux 32768-60999, Windows 49152-65535)
 
 
@@ -1058,6 +1065,9 @@ class ProcessNetworkLink(Playbook):
         # first records (and alerts) of each (service endpoint, client address) pair.
         self.sock_groups = KeyedStore(self, "pnl_sock_groups", HOT_COUNT)
         self.pairs = KeyedStore(self, "pnl_pairs", HOT_COUNT)
+        self.endpoints = KeyedStore(self, "pnl_endpoints", HOT_COUNT)     # remote endpoints of the calls read
+        self.unmatched: deque[str] = deque()        # held records of pairs no call has reached yet, oldest first
+        self._unstaged: list[str] = []              # released this batch: their rows no longer point at the stage
         self.bounds = BoundStage()
         self.holds = Holds()
 
@@ -1070,8 +1080,15 @@ class ProcessNetworkLink(Playbook):
     def drain_staged(self) -> list[TypedEvent]:
         out, self._pending = self._pending + self.bounds.drain() + self.holds.drain(), []
         self.pids.trim()
+        if self._unstaged:
+            store = self._store()
+            store.flush()
+            store.db.executemany("UPDATE net SET staged = 0 WHERE id = ?", [(i,) for i in self._unstaged])
+            store.db.commit()
+            self._unstaged = []
         self.sock_groups.trim()
         self.pairs.trim()
+        self.endpoints.trim()
         return out
 
     def drain_bounds(self) -> tuple[list[str], list[str]]:
@@ -1100,6 +1117,8 @@ class ProcessNetworkLink(Playbook):
         self.holds.clear()
         self.sock_groups.clear()
         self.pairs.clear()
+        self.endpoints.clear()
+        self.unmatched.clear()
         self.close_spill()
 
     def _room(self, rows: int) -> bool:
@@ -1139,6 +1158,10 @@ class ProcessNetworkLink(Playbook):
         if not self._room(1):
             return
         staged = self._cite_sock(s, e, key)
+        if self.endpoints.get((s.ip, s.port)) is None and not self.endpoints.put((s.ip, s.port), 1):
+            self.note_limit("endpoints", "the called endpoints' disk budget is spent; network records to a new endpoint "
+                                         "are only held for citation (a bounded number), and findings say how many "
+                                         "are cited")
         row = (s.id, s.host, s.ts, s.ip, s.port, s.exe, s.user, s.pid, s.outcome, s.reason, s.process_lane, s.group,
                _claimant_key(s.claimant), s.ppid, s.boot, s.serial, s.session, staged)
         try:
@@ -1198,10 +1221,12 @@ class ProcessNetworkLink(Playbook):
             return
 
     def _cite_net(self, e: TypedEvent, src: str, sport: int, dst: str, dport: int) -> int:
-        """Stage the record when it is among the first PARTNERS_PER_PAIR records (or alerts) of its (service endpoint,
-        client address) pair; 1 when it was staged. The service side is the destination, as a sensor records a
-        connection it saw open; a record whose source port is the lower one, below the client range, is also offered
-        as recorded from the server's side (a connection picked up mid-stream)."""
+        """Stage the record when it may be cited; returns 1 when it is kept, 2 when it is only held, 0 otherwise. It is
+        kept when it is among the first PARTNERS_PER_PAIR records (or alerts) of its (service endpoint, client address)
+        pair once a call to that endpoint has been read, and held (UNMATCHED_HELD at most, oldest released first) when
+        it is among the pair's first PARTNERS_UNMATCHED before any call reached the endpoint. The service side is the
+        destination, as a sensor records a connection it saw open; a record whose source port is the lower one, below
+        the client range, is also offered as recorded from the server's side (a connection picked up mid-stream)."""
         alert = e.family == "net_alert"
         pairs = [(dst, dport, src)]
         if sport < dport and sport < EPHEMERAL_FLOOR:
@@ -1213,11 +1238,23 @@ class ProcessNetworkLink(Playbook):
                 self.note_limit("pairs", "the endpoint pairs' disk budget is spent; a new pair's records are not kept "
                                          "for citation, and findings say how many are cited")
                 continue
-            if count[0] < PARTNERS_PER_PAIR:
+            matched = self.endpoints.get(pair[:2]) is not None
+            if count[0] < (PARTNERS_PER_PAIR if matched else PARTNERS_UNMATCHED):
                 count[0] += 1
-                staged = 1
-        if staged:
+                staged = 1 if matched else staged or 2
+        if staged == 1:
             self._pending.append(e)
+        elif staged == 2:
+            self.holds.hold(e)
+            self.unmatched.append(e.id)
+            if len(self.unmatched) > UNMATCHED_HELD:
+                released = self.unmatched.popleft()
+                self.holds.release(released)
+                self._unstaged.append(released)
+                self.note_limit("unmatched", f"more than {UNMATCHED_HELD:,} network records of endpoints no "
+                                             f"connect() call had reached when they were read were held for citation; "
+                                             f"the oldest were released, so a later join cites fewer network records "
+                                             f"(its counts stay exact and its claim says how many are cited)")
         return staged
 
     def _lost(self, exc: StateExhausted) -> None:

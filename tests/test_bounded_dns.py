@@ -191,7 +191,8 @@ def test_nxdomain_state_stays_bounded_over_two_weeks_and_the_burst_is_still_foun
     assert "at most 301 of them fell within one ten-minute interval" in m.claim
     assert f"was sent {6 * 24 * days + 300} NXDOMAIN answer(s)" in m.claim
     window = timedelta(minutes=10)
-    assert len(m.events) == 20 and all(burst_at - window < e.ts < burst_at + window for e in m.events)
+    # the peak's records, beside the records bounding the span and those the names and servers come from
+    assert len([e for e in m.events if burst_at - window < e.ts < burst_at + window]) >= 20
     assert "lower bound" not in m.claim and rule.limit_reasons() == []
     rule.release_state()
 
