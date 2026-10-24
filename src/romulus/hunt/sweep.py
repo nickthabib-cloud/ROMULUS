@@ -850,7 +850,9 @@ class Sweep:
                 ordered = sorted(pb.scope_partition(events), key=lambda item: (
                     item.ts, -1 if exec_serial(item) is None else exec_serial(item), item.id,
                 ))
-                target_applicable = bool(ordered) or self._baseline_target_applicable(target, pb)
+                # Records of no known format could hold any family, whatever the target's profile says.
+                target_applicable = (bool(ordered) or bool(unsupported) or error_affected is ALL_FAMILIES
+                                     or self._baseline_target_applicable(target, pb))
                 reasons = list(base_reasons)
                 reasons.extend(windows_reasons)
                 if error_reason and (error_affected is ALL_FAMILIES or set(pb.families) & error_affected):
