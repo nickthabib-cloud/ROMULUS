@@ -46,7 +46,8 @@ class KeyCounter:
     def __init__(self, segment_id: str, spec: BaselineSpec, *,
                  token_cap: int = DEFAULT_TOKEN_CAP, row_cap: int = DEFAULT_ROW_CAP,
                  pending_cap: int = DEFAULT_PENDING_CAP,
-                 span: tuple[datetime, datetime] | None = None):
+                 span: tuple[datetime, datetime] | None = None,
+                 retain_observations_when_partial: bool = False):
         if min(token_cap, row_cap, pending_cap) < 1:
             raise ValueError("counter caps must be positive")
         if span is not None and not span[0] < span[1]:
@@ -57,7 +58,9 @@ class KeyCounter:
         self.token_cap = token_cap
         self.row_cap = row_cap
         self.pending_cap = pending_cap
+        self.retain_observations_when_partial = retain_observations_when_partial
         self._counts: dict[tuple, dict] = {}
+        self._first_event_ids: dict[tuple, str | None] = {}
         self._scope_hours: dict[tuple, int] = defaultdict(int)
         self._tokens: dict[tuple, set[str]] = defaultdict(set)
         self._token_entries = 0
@@ -100,7 +103,7 @@ class KeyCounter:
             row["segment_id"] = segment_id
 
     def consume(self, event: TypedEvent, context: KeyContext) -> None:
-        if self.partial:
+        if self.partial and not self.retain_observations_when_partial:
             return
         result = self.spec.keys(event, context)
         if isinstance(result, Missing):
@@ -111,11 +114,11 @@ class KeyCounter:
             else:
                 self._pendings.append(result)
         elif not isinstance(result, NotApplicable):
-            self.add_keys(event.ts, result)
+            self.add_keys(event.ts, result, event_id=event.id)
 
-    def add_keys(self, ts: datetime, keys: Iterable[BaselineKey]) -> None:
+    def add_keys(self, ts: datetime, keys: Iterable[BaselineKey], *, event_id: str | None = None) -> None:
         keys = list({key.key_digest: key for key in keys}.values())
-        if not keys or self.partial:
+        if not keys or (self.partial and not self.retain_observations_when_partial):
             return
         if self.span is not None:
             ts = min(max(ts.astimezone(UTC), self.span[0]), self.span[1] - timedelta(microseconds=1))
@@ -154,6 +157,9 @@ class KeyCounter:
                     row = self._counts.get((key.scope_kind, key.scope, key.key_digest, bucket))
                     if row is not None:
                         instant = ts.astimezone(UTC)
+                        identity = (key.scope_kind, key.scope, key.key_digest, bucket)
+                        if (instant, event_id or "") < (row["first_ts"], self._first_event_ids[identity] or ""):
+                            self._first_event_ids[identity] = event_id
                         row["first_ts"] = min(row["first_ts"], instant)
                         row["last_ts"] = max(row["last_ts"], instant)
                     continue
@@ -183,10 +189,14 @@ class KeyCounter:
                     "first_ts": ts.astimezone(UTC),
                     "last_ts": ts.astimezone(UTC),
                 }
+                self._first_event_ids[identity] = event_id
             else:
+                instant = ts.astimezone(UTC)
+                if (instant, event_id or "") < (row["first_ts"], self._first_event_ids[identity] or ""):
+                    self._first_event_ids[identity] = event_id
                 row["count"] += 1
-                row["first_ts"] = min(row["first_ts"], ts.astimezone(UTC))
-                row["last_ts"] = max(row["last_ts"], ts.astimezone(UTC))
+                row["first_ts"] = min(row["first_ts"], instant)
+                row["last_ts"] = max(row["last_ts"], instant)
 
         for scope_kind, scope in sorted(event_scopes):
             self._scope_hours[(scope_kind, scope, hour)] += 1
@@ -206,3 +216,37 @@ class KeyCounter:
             "hour": hour,
             "events": self._scope_hours[(scope_kind, scope, hour)],
         } for scope_kind, scope, hour in sorted(self._scope_hours))
+
+    def observation_rows(self):
+        """Window observations accumulated so far, including countable keys from a partial cell.
+
+        Immutable history segments still refuse every row when partial through :meth:`count_rows`. Window
+        observations are positive facts and remain useful even when another record made the cell incomplete;
+        their enclosing rule cell carries the partial reason, so they can never support a complete negative.
+        """
+        combined: dict[tuple[str, str, str], dict] = {}
+        for identity in sorted(self._counts):
+            scope_kind, scope, key_digest, _bucket_value = identity
+            source = self._counts[identity]
+            key = (scope_kind, scope, key_digest)
+            row = combined.get(key)
+            event_id = self._first_event_ids[identity]
+            if row is None:
+                combined[key] = {
+                    "scope_kind": scope_kind,
+                    "scope": scope,
+                    "key_id": source["key_id"],
+                    "key_digest": key_digest,
+                    "key": source["key"],
+                    "window_count": source["count"],
+                    "first_ts": source["first_ts"],
+                    "last_ts": source["last_ts"],
+                    "first_event_id": event_id,
+                }
+                continue
+            if (source["first_ts"], event_id or "") < (row["first_ts"], row["first_event_id"] or ""):
+                row["first_event_id"] = event_id
+            row["window_count"] += source["count"]
+            row["first_ts"] = min(row["first_ts"], source["first_ts"])
+            row["last_ts"] = max(row["last_ts"], source["last_ts"])
+        return iter(combined[key] for key in sorted(combined))
