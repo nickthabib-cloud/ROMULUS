@@ -872,3 +872,42 @@ def test_holds_release_a_record_not_yet_staged_by_not_staging_it_and_count_each_
 @pytest.mark.parametrize("bad", ["", "-"])
 def test_the_checker_ignores_text_without_values(bad):
     assert problems(f"Nothing to check here{bad}.", []) == []
+
+
+def test_a_failed_citation_eviction_stops_eviction_and_leaves_the_detection_store_counted(tmp_path):
+    """A delete that fails while a citation store makes room (the volume full, for one) never escapes into the detection
+    store's write: that store's rows are counted, and the citation store stops evicting for good."""
+    import sqlite3
+
+    from romulus.detect.bounded import KeyedStore, StateBudget
+    budget = StateBudget(tmp_path, disk_total=40_000, reserve=0)
+    rule = _Owner(tmp_path, budget, "fails").rule
+    budget.plan(1)
+    cite = KeyedStore(rule, "exec_records", 1)
+    cite.yields = True
+    for i in range(1000):
+        if not cite.put(f"c{i}", "x" * 200):
+            break
+        cite.trim()
+    real_db = cite._db()
+
+    class FailingDeletes:
+        def __getattr__(self, name):
+            return getattr(real_db, name)
+
+        def executemany(self, sql, rows):
+            if sql.lstrip().upper().startswith("DELETE"):
+                raise sqlite3.OperationalError("database or disk is full")
+            return real_db.executemany(sql, rows)
+
+    cite._db = lambda: FailingDeletes()
+    detect = KeyedStore(rule, "state", 1)
+    written = 0
+    for i in range(1000):
+        if not detect.put(f"d{i}", "y" * 200):
+            break
+        detect.trim()
+        written += 1
+    assert written and detect.on_disk == written - len(detect.hot)
+    assert cite.broken and "evicting citation records failed" in cite.broken
+    rule.close_spill()

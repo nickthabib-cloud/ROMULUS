@@ -1078,8 +1078,8 @@ class KeyedStore:
         for row in rows:
             self._filter.add(row[0])
         self.disk_bytes += nbytes
+        self.on_disk += len(rows)       # counted before billing, which may make room by evicting a yielding store
         self._bill(nbytes - sum(before.values()))
-        self.on_disk += len(rows)
         if self._filter.count > self._filter.capacity:
             self._rebuild_filter()
         if self._measure.avg:
@@ -1092,21 +1092,27 @@ class KeyedStore:
         dropped while rows on disk are marked stale (below the reserve) or the table is broken."""
         if self.owner is None or not self.on_disk or self._shadow or self.broken or nbytes <= 0:
             return 0
+        import sqlite3
         db = self._db()
         freed = dropped = 0
-        while freed < nbytes and self.on_disk:
-            rows = db.execute(f"SELECT rowid, n FROM {self.name} ORDER BY rowid LIMIT 256").fetchall()
-            if not rows:
-                break
-            take = []
-            for rowid, size in rows:
-                if freed >= nbytes:
+        try:
+            while freed < nbytes and self.on_disk:
+                rows = db.execute(f"SELECT rowid, n FROM {self.name} ORDER BY rowid LIMIT 256").fetchall()
+                if not rows:
                     break
-                take.append((rowid,))
-                freed += size
-            db.executemany(f"DELETE FROM {self.name} WHERE rowid = ?", take)
-            self.on_disk -= len(take)
-            dropped += len(take)
+                take, size_taken = [], 0
+                for rowid, size in rows:
+                    if freed + size_taken >= nbytes:
+                        break
+                    take.append((rowid,))
+                    size_taken += size
+                db.executemany(f"DELETE FROM {self.name} WHERE rowid = ?", take)
+                freed += size_taken
+                self.on_disk -= len(take)
+                dropped += len(take)
+        except sqlite3.Error as exc:
+            # a failed delete (the volume full, for one) stops eviction for good; what was freed is still billed back
+            self.broken = f"evicting citation records failed ({exc})"
         self.disk_bytes -= freed
         self._bill(-freed)
         if dropped and self.on_evict is not None:
