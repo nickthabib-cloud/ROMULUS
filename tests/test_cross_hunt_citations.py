@@ -401,7 +401,7 @@ def test_citation_event_read_is_one_snapshot_during_owner_transfer(tmp_path):
         def transfer():
             try:
                 repo.delete_hunt("h1", actor="test")
-            except BaseException as exc:  # pragma: no cover - asserted below with the original exception
+            except Exception as exc:  # noqa: BLE001 - the parent assertion surfaces the original thread failure
                 transfer_error.append(exc)
 
         worker = Thread(target=transfer)
