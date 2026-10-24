@@ -162,7 +162,7 @@ class _Profile:
 
     def model_dump(self, mode=None):
         return {"id": f"p-{self.target}", "target": self.target, "kind": "index", "backend_version": "test",
-                "doc_count": 1, "datasets": {}}
+                "doc_count": 1, "datasets": {}, "role": "host", "os_family": "linux"}
 
 
 class _Client:

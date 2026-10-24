@@ -231,6 +231,7 @@ class _Groups(dict):
 
 
 class ReverseShellByLineage(Playbook):
+    os_families = ("linux",)
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.shell_spawned_by_connected_process"
     anchor_class = "execution"

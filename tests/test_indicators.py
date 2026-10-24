@@ -85,6 +85,48 @@ def test_name_match_is_case_insensitive_and_grouped(rule):
     assert len(m) == 1 and m[0].claim.startswith("2 auditd exec record(s)")
 
 
+def test_windows_executable_basename_matches_and_claim_does_not_call_it_auditd(rule):
+    event = exec_event([], r"C:\Tools\LINPEAS.EXE")
+    event.fields["host.os.family"] = fv("windows", "fixture:os")
+    # Reuse the loaded rule shape while making the assertion independent of the repository's indicator files.
+    indicator = next(item for item in rule.set.indicators if item.id == "t.linpeas")
+    rule.names = {"linpeas.exe": indicator}
+
+    [match] = run(rule, event)
+
+    assert "executable is named 'LINPEAS.EXE'" in match.claim
+    assert "auditd" not in match.claim
+
+
+def test_linux_backslash_is_a_legal_filename_character_not_a_path_separator(rule):
+    indicator = next(item for item in rule.set.indicators if item.id == "t.linpeas")
+    rule.names = {"linpeas.exe": indicator}
+
+    assert run(rule, exec_event([], r"/tmp/prefix\linpeas.exe")) == []
+
+
+def test_mixed_os_program_group_uses_os_neutral_record_wording(rule):
+    linux = exec_event([], "/tmp/linpeas", "linux", host="shared")
+    windows = exec_event([], r"C:\Tools\linpeas", "windows", host="shared")
+    windows.fields["host.os.family"] = fv("windows", "fixture:os")
+
+    [match] = run(rule, linux, windows)
+
+    assert match.claim.startswith("2 process-execution record(s)")
+    assert "auditd" not in match.claim and "Windows process-creation" not in match.claim
+
+
+def test_mixed_os_wording_tracks_matches_beyond_the_retained_example_limit(rule):
+    linux = [exec_event([], "/tmp/linpeas", f"linux-{number}", host="shared") for number in range(20)]
+    windows = exec_event([], r"C:\Tools\linpeas", "windows-late", host="shared")
+    windows.fields["host.os.family"] = fv("windows", "fixture:os")
+
+    [match] = run(rule, *linux, windows)
+
+    assert match.claim.startswith("21 process-execution record(s)")
+    assert len(match.events) == 20
+
+
 # ---- network indicators ------------------------------------------------------------------------
 
 def test_address_and_range_match_typed_address_fields(rule):

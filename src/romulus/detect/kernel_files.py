@@ -158,6 +158,7 @@ class _RunTally:
 
 
 class RootExecNonRootModifiableFile(Playbook):
+    os_families = ("linux",)
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.root_exec_nonroot_modifiable_file"
     version = "2"
@@ -592,6 +593,7 @@ class _Change:
 
 
 class PersistencePathChange(Playbook):
+    os_families = ("linux",)
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.persistence_path_change"
     version = "5"

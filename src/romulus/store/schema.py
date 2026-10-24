@@ -95,6 +95,27 @@ typed_event = Table(
 Index("ix_event_hunt_family_ts", typed_event.c.hunt_id, typed_event.c.family, typed_event.c.ts)
 Index("ix_event_host_ts", typed_event.c.hunt_id, typed_event.c.host, typed_event.c.ts)
 
+# Per-hunt citation provenance overlays a globally stable typed event. A later hunt can retain additional raw
+# shipper copies without rewriting the earlier hunt's rendered evidence.
+event_citation = Table(
+    "event_citation", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id"), primary_key=True),
+    Column("event_id", String, ForeignKey("typed_event.id"), primary_key=True),
+    Column("event", JSON, nullable=False),
+    Column("raw_ids", JSON, nullable=False),
+)
+Index("ix_event_citation_event", event_citation.c.event_id)
+
+# A compact marker records that a hunt directly observed a stable event even when its raw-reference set is
+# identical and therefore needs no provenance overlay. It must not depend on extracted entities: valid typed
+# events can carry no host, account, address or domain at all.
+event_observation = Table(
+    "event_observation", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id"), primary_key=True),
+    Column("event_id", String, ForeignKey("typed_event.id"), primary_key=True),
+)
+Index("ix_event_observation_event", event_observation.c.event_id)
+
 normalization_error = Table(
     "normalization_error", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),

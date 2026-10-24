@@ -7,7 +7,7 @@ from datetime import timedelta
 from romulus.detect import network
 from romulus.detect.bounded import StateBudget, live_stores
 from romulus.detect.correlation import InterpreterExternalConnection, PidTable
-from romulus.detect.host import ExecLineage, ProcessLineage, share_lineage
+from romulus.detect.host import ExecLineage, ProcessLineage, exec_order, share_lineage
 from romulus.detect.lineage import ReverseShellByLineage
 from romulus.detect.registry import fresh_pack
 from tests.test_bounded_starvation import (
@@ -136,3 +136,35 @@ def test_without_serials_a_shebang_chains_image_at_that_instant_is_unknown_never
     assert table.lineage_entries("app03", 300, t0 + 1) == []
     # one exec at an instant is not ambiguous: a process asked about at its own exec instant is that exec
     assert table.lookup("app03", 301, t0 + 1)[1] == "/bin/sh"
+
+
+def _windows_exec(event_id, image, record_id, *, channel="Microsoft-Windows-Sysmon/Operational"):
+    event = ev("process_exec", T0, host="ws01", process__pid=300, process__ppid=1,
+               process__executable=image, process__argv=[image], host__os__family="windows",
+               winlog__record_id=record_id, event__channel=channel,
+               winlog__computer_name="WS01.example.test")
+    return event.model_copy(update={"id": event_id, "normalizer": "windows-ecs@2"})
+
+
+def test_windows_same_instant_execs_use_record_id_only_within_the_same_computer_and_channel():
+    lineage = ProcessLineage()
+    first = _windows_exec("first", r"C:\Windows\System32\cmd.exe", 10)
+    second = _windows_exec("second", r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe", 11)
+    child = _windows_exec("child", r"C:\Windows\System32\whoami.exe", 12)
+    for event in (first, second):
+        lineage.observe(event)
+    serial, domain = exec_order(child)
+
+    parent = lineage.parent("ws01", 300, T0.timestamp(), serial=serial, order_domain=domain)
+
+    assert parent is not None and parent.event_id == "second"
+
+
+def test_windows_same_instant_images_from_different_channels_are_ambiguous():
+    lineage = ProcessLineage()
+    lineage.observe(_windows_exec("sysmon", r"C:\Tools\one.exe", 20))
+    lineage.observe(_windows_exec("security", r"C:\Tools\two.exe", 999, channel="Security"))
+    child = _windows_exec("child", r"C:\Tools\child.exe", 21)
+    serial, domain = exec_order(child)
+
+    assert lineage.parent("ws01", 300, T0.timestamp(), serial=serial, order_domain=domain) is None

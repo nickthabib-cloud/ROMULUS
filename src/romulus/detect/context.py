@@ -202,6 +202,8 @@ def _ancestors(index: dict, event: TypedEvent, limit: int = 24) -> tuple[list[Ty
 class _HostContextRule(ContextPlaybook):
     """Shared base for the host-session context rules (exec and socket evidence)."""
 
+    os_families = ("linux",)
+
     anchor_class = "execution"
     anchor_classes = ANCHOR_HOST
     link_types = HOST_LINKS
@@ -1253,6 +1255,8 @@ class EntryPointPromotion(ContextPlaybook):
     (host, boot, session). The login or authentication-phase record is preferred; the PAM session-open record
     is the fallback, worded as such. If any record of the session has an internal source, it is not promoted;
     if no record carries a source, it stays a lead with the source called unknown (never a high promotion)."""
+
+    os_families = ("linux",)
 
     id = "context.entry_point_promotion"
     version = "3"

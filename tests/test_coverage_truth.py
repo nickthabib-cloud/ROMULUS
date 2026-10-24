@@ -27,7 +27,7 @@ from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkWindow
 from romulus.hunt.pivot import PivotExecutor
 from romulus.hunt.sweep import Sweep
 from romulus.report import markdown
-from romulus.report.manifest import _coverage, publish_revision
+from romulus.report.manifest import _coverage, _not_assessed, publish_revision
 from romulus.sources import packets as pk
 from romulus.sources.es import ElasticClient
 from romulus.sources.models import Completeness, SearchOutcome, Window
@@ -524,6 +524,104 @@ def test_unswept_datasets_and_unnormalized_records_are_listed_as_not_assessed(mo
     assert "zoneminder" in section and "ghosts" in section and "cron" in section
     # an unswept dataset is not counted as evaluated: the http rule evaluated only the three access records
     assert _coverage_row(manifest, NEGATIVE_RULE)["records_evaluated"] == 3
+
+
+def test_unknown_windows_event_classes_are_listed_but_do_not_poison_unrelated_rules(monkeypatch):
+    from romulus.evidence.normalize import normalize_hits
+
+    events, _skips, errors = normalize_hits([_access_doc(0, T0)])
+    reason = "Windows event class ('Security', 'Microsoft-Windows-Security-Auditing', 9999) is not normalized"
+    repo = _sweep_records(
+        monkeypatch,
+        [_access_doc(0, T0)],
+        normalized=(events, {reason: 1}, errors),
+    )[0]
+
+    manifest, _text = _report(repo)
+    assert _coverage_row(manifest, NEGATIVE_RULE)["negative_claim"] == "complete"
+    item = next(item for item in manifest["coverage"]["not_assessed"] if reason in item["reason"])
+    assert item["records"] == 1
+
+
+def test_catalogued_windows_classes_without_a_rule_reader_are_listed_with_counts():
+    rows = _not_assessed({}, {"stats": {"windows_unassessed": {"windows-target": [{
+        "channel": "System", "provider": "Service Control Manager", "event_id": 7045,
+        "family": "service_change", "records": 9,
+    }]}}})
+
+    assert rows == [{
+        "target": "windows-target",
+        "dataset": "System|Service Control Manager|7045",
+        "records": 9,
+        "count_scope": "records retrieved in the hunt window",
+        "reason": "catalogued Windows service_change event class has no rule reader in this pack",
+    }]
+
+
+def test_uncatalogued_windows_inventory_and_its_overflow_are_reported_as_not_retrieved():
+    rows = _not_assessed({}, {"stats": {"windows_unassessed": {"windows-target": [
+        {
+            "channel": "Microsoft-Windows-PowerShell/Operational",
+            "provider": "Microsoft-Windows-PowerShell",
+            "event_id": 4104,
+            "records": 8,
+            "uncatalogued": True,
+        },
+        {"overflow": True, "uncatalogued": True, "classes": 12, "records": 34},
+    ]}}})
+
+    assert rows == [
+        {
+            "target": "windows-target",
+            "dataset": "Microsoft-Windows-PowerShell/Operational|Microsoft-Windows-PowerShell|4104",
+            "records": 8,
+            "count_scope": "source inventory for the hunt window; records were not retrieved",
+            "reason": "uncatalogued Windows event class was not retrieved or evaluated",
+        },
+        {
+            "target": "windows-target",
+            "dataset": "12 additional uncatalogued Windows event classes",
+            "records": 34,
+            "count_scope": "source inventory for the hunt window; records were not retrieved",
+            "reason": "inventory rows omitted after the bounded category limit",
+        },
+    ]
+
+
+def test_scoped_windows_skips_do_not_hide_unscoped_linux_skips_in_mixed_hunts():
+    detail = {"stats": {
+        "skips": {"Windows unknown": 2, "journal noise": 3},
+        "skips_by_target": {"windows-target": {"Windows unknown": 2}},
+    }}
+
+    rows = _not_assessed({}, detail)
+
+    assert {(
+        row["target"], row["records"], row["reason"].rsplit(": ", 1)[-1]
+    ) for row in rows} == {
+        ("windows-target", 2, "Windows unknown"),
+        ("all sweep targets", 3, "journal noise"),
+    }
+
+
+def test_bounded_global_skip_overflow_does_not_double_count_target_scoped_windows_records():
+    sweep = object.__new__(Sweep)
+    sweep.stats = {"skips": {}}
+    linux = {f"linux reason {number}": 1 for number in range(256)}
+    Sweep._record_skips(sweep, "linux-target", linux)
+    Sweep._record_skips(sweep, "windows-a", {"Windows event class unknown-a": 2})
+    Sweep._record_skips(sweep, "windows-b", {"Windows event class unknown-b": 3})
+
+    rows = _not_assessed({}, {"stats": sweep.stats})
+
+    assert sum(row["records"] for row in rows) == sum(sweep.stats["skips"].values())
+    assert {(row["target"], row["records"]) for row in rows if row["target"].startswith("windows-")} == {
+        ("windows-a", 2), ("windows-b", 3),
+    }
+    assert not any(
+        row["target"] == "all sweep targets" and "additional skip reasons" in row["reason"]
+        for row in rows
+    )
 
 
 def test_a_target_without_a_dataset_inventory_still_says_what_was_not_retrieved(monkeypatch):

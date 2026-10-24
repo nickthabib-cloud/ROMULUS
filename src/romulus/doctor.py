@@ -16,6 +16,7 @@ from romulus.agent.provider.egress import Resolver, system_resolver
 from romulus.config import Settings, redact_text
 from romulus.detect.netdef import INTERNAL_SETTING, SiteNetworks
 from romulus.hunt.site_networks import check_host_addresses
+from romulus.site import SiteValidationError, load_site_facts
 from romulus.sources.es import ElasticClient, SourceError
 from romulus.sources.profile import contract_from_types, flatten_mapping
 from romulus.store.db import integrity_check, make_engine, migrate, space_report
@@ -181,7 +182,9 @@ def check_tshark(s: Settings) -> Check:
     exe = shutil.which(s.tshark_bin)
     if not exe:
         return Check("tshark", "fail", f"{s.tshark_bin} not found")
-    v = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=20).stdout.splitlines()[:1]
+    v = subprocess.run(
+        [exe, "--version"], check=False, capture_output=True, text=True, timeout=20
+    ).stdout.splitlines()[:1]
     return Check("tshark", "ok", v[0] if v else exe)
 
 
@@ -293,6 +296,25 @@ def check_db_space(s: Settings) -> Check:
                  detail + ("; run `romulus db compact` when no hunt is running" if big else ""))
 
 
+def check_site(s: Settings) -> Check:
+    try:
+        facts = load_site_facts(s.home)
+    except SiteValidationError as exc:
+        return Check("site.collection", "fail", str(exc))
+    if not facts.present:
+        return Check(
+            "site.collection",
+            "warn",
+            "site/collection.yaml is absent; optional, but nothing is attested",
+        )
+    return Check(
+        "site.collection",
+        "ok",
+        f"valid; {len(facts.groups)} collection group(s)",
+        {"digest": facts.digest, "groups": len(facts.groups)},
+    )
+
+
 def run_all(s: Settings, env_file: Path | None = None) -> list[Check]:
     checks = check_es(s)
     checks.append(check_site_networks(s))
@@ -301,6 +323,7 @@ def run_all(s: Settings, env_file: Path | None = None) -> list[Check]:
     checks += check_agent(s)
     checks.append(check_tshark(s))
     checks += check_paths(s, env_file)
+    checks.append(check_site(s))
     checks.append(check_db(s))
     checks.append(check_db_space(s))
     return checks

@@ -32,6 +32,13 @@ from romulus.evidence.auditd import (
     syscall_arg,
 )
 from romulus.evidence.typed import EVIDENCE_VERSION, Outcome, RawRef, TypedEvent, event_id, fv
+from romulus.evidence.windows import (
+    WindowsNotNormalized,
+    is_windows_source,
+    normalize_windows,
+    windows_record_key,
+    windows_record_signature,
+)
 
 NORMALIZER_VERSION = f"lab-ecs@{EVIDENCE_VERSION}"
 # Caveat on a process_exec event whose EXECVE arguments did not all arrive (its process.argv_complete is false).
@@ -1877,13 +1884,32 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
     its audit header time in (an incremental placement, see `BootIntervals`). Otherwise it stays unknown: never
     guessed."""
     events, skips, errors = [], defaultdict(int), []
+    windows_events: dict[tuple[tuple[str, str, str], str], TypedEvent] = {}
+    windows_signatures: dict[tuple[str, str, str], set[str]] = defaultdict(set)
     audit_hits = []
     audit_copies: list[tuple[tuple[str, int, int], str, str, str]] = []
     journal_boots: list[tuple[str, str, int | None, str, bool]] = []
     for h in hits:
         ds = _get(h["_source"], "event.dataset") or ""
         try:
-            if not ds and is_arkime_session(h["_source"]):
+            if is_windows_source(h["_source"]):
+                windows_event = normalize_windows(h)
+                logical_key = windows_record_key(h)
+                signature = windows_record_signature(h)
+                identity = (logical_key, signature) if logical_key is not None else None
+                prior = windows_events.get(identity) if identity is not None else None
+                if prior is None:
+                    events.append(windows_event)
+                    if identity is not None:
+                        if windows_signatures[logical_key]:
+                            skips["record_id reused (log cleared or reverted)"] += 1
+                        windows_signatures[logical_key].add(signature)
+                        windows_events[identity] = windows_event
+                else:
+                    known = {raw.key for raw in prior.raw}
+                    prior.raw.extend(raw for raw in windows_event.raw if raw.key not in known)
+                    skips["duplicate Windows event copy (computer/channel/record_id)"] += 1
+            elif not ds and is_arkime_session(h["_source"]):
                 ds = "arkime.session"
                 events.append(normalize_arkime_session(h))
             elif ds == "linux.audit":
@@ -1901,6 +1927,8 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
             found = _audit_copy_key(h, copy.record)
             if found is not None:
                 audit_copies.append((*found, h["_id"]))
+        except WindowsNotNormalized as unsupported:
+            skips[unsupported.reason] += 1
         except Skip as s:
             skips[s.reason] += 1
         except (ValueError, KeyError, TypeError, AttributeError) as e:   # malformed telemetry: an error, never a crash

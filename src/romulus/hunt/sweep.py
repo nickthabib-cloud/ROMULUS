@@ -6,7 +6,7 @@ import logging
 from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from romulus.detect.base import Match, Playbook
 from romulus.detect.bounded import StateBudget, StateExhausted, live_stores
@@ -19,8 +19,19 @@ from romulus.evidence.normalize import (
     normalize_hits,
 )
 from romulus.evidence.typed import TypedEvent
+from romulus.evidence.windows import RecordIdContinuity
+from romulus.evidence.windows_catalog import (
+    COLLECTION_CHANGE_EVENTS,
+    WINDOWS_CHANNELS,
+    WINDOWS_DATASET_FAMILIES,
+    WINDOWS_HOST_DATASETS,
+    collection_requirements,
+    event_classes_for_families,
+    lookup_event_class,
+)
 from romulus.hunt.publish import publish_match
 from romulus.hunt.stage import EventStage
+from romulus.site import SiteFacts, absent_site_facts
 from romulus.sources.es import ElasticClient, fetch_limit
 from romulus.sources.execute import execute
 from romulus.sources.models import Completeness, Predicate, SearchIntent, Window
@@ -33,21 +44,28 @@ log = logging.getLogger("romulus.sweep")
 PARTITION_MAX_DOCS = 120_000
 # planned cells are written before any partition runs, this many partitions per transaction
 PLANNED_CHUNK = 500
-HOST_DATASETS = ["linux.audit", "systemd.journal", "apache.access", "apache.error"]
+LINUX_HOST_DATASETS = ("linux.audit", "systemd.journal", "apache.access", "apache.error")
+HOST_DATASETS = [*LINUX_HOST_DATASETS, *WINDOWS_HOST_DATASETS]
 NET_FAMILIES = {"net_alert", "net_flow", "dns_query", "http_tx", "file_transfer", "tls_session", "ssh_session"}
 # linux.audit now also yields `auth` (USER_LOGIN/USER_START), so an unparseable audit group may hide one.
 # A login group that fails is tagged linux.audit.auth; it takes every record of its event, so it may also hide
 # an exec, socket or file record of that event and carries the whole audit family set.
 _AUDIT_ADMIN = {"account_change", "service_change", "audit_config", "system_state"}
-DATASET_FAMILIES = {"linux.audit": {"process_exec", "net_socket", "auth", "file_change"} | _AUDIT_ADMIN,
-                    "linux.audit.socket": {"net_socket"}, "linux.audit.file": {"file_change"},
-                    "linux.audit.auth": {"process_exec", "net_socket", "auth", "file_change"} | _AUDIT_ADMIN,
-                    "linux.audit.admin": _AUDIT_ADMIN,
-                    "arkime.session": {"net_session"},
-                    "systemd.journal": {"auth", "privilege_use", "service_change"},
-                    "apache.access": {"http_access"}, "apache.error": {"web_error"},
-                    **{f"suricata.eve.{t}": NET_FAMILIES for t in ("alert", "flow", "netflow", "dns", "http",
-                                                                  "fileinfo", "tls", "ssh")}}
+LINUX_DATASET_FAMILIES = {
+    "linux.audit": {"process_exec", "net_socket", "auth", "file_change"} | _AUDIT_ADMIN,
+    "linux.audit.socket": {"net_socket"},
+    "linux.audit.file": {"file_change"},
+    "linux.audit.auth": {"process_exec", "net_socket", "auth", "file_change"} | _AUDIT_ADMIN,
+    "linux.audit.admin": _AUDIT_ADMIN,
+    "arkime.session": {"net_session"},
+    "systemd.journal": {"auth", "privilege_use", "service_change"},
+    "apache.access": {"http_access"},
+    "apache.error": {"web_error"},
+    **{f"suricata.eve.{event_type}": NET_FAMILIES for event_type in (
+        "alert", "flow", "netflow", "dns", "http", "fileinfo", "tls", "ssh",
+    )},
+}
+DATASET_FAMILIES = {**LINUX_DATASET_FAMILIES, **WINDOWS_DATASET_FAMILIES}
 ALL_FAMILIES = frozenset({"*"})
 WINDOW_ROLLUP_PARTIAL = ("whole-window result over partitions of which one or more were partial, failed or "
                          "unexecuted (listed separately)")
@@ -62,6 +80,10 @@ BOOT_LISTED = 100
 BOOT_BLIND_LISTED = 20
 # A rule-coverage cell recording that sweep-time boot placement was contradicted on some host
 BOOT_PLACEMENT_PARTITION = "boot-placement"
+DEFAULT_WINDOWS_LIVENESS_TOLERANCE = timedelta(minutes=15)
+MAX_SKIP_REASONS = 256
+SKIP_REASON_OVERFLOW = "additional skip reasons omitted after bounded category limit"
+MAX_WINDOWS_UNCATALOGUED = 256
 
 
 def stored_boot_intervals(repo: Repo, hunt_id: str) -> BootIntervals:
@@ -84,10 +106,12 @@ def state_budget(settings, stage_dir) -> StateBudget:
 
 
 def plan_partitions(client: ElasticClient, target: str, contract: FieldContract, window: Window,
-                    filters: list[Predicate]) -> list[tuple[Window, int]]:
+                    filters: list[Predicate], any_of: list[list[Predicate]] | None = None,
+                    ) -> list[tuple[Window, int]]:
     """5-minute histogram with exact counts; merge consecutive buckets up to PARTITION_MAX_DOCS.
     A single bucket above the limit becomes its own partition and is split adaptively at run time."""
     h = execute(client, SearchIntent(kind="histogram", target=target, window=window, filters=filters,
+                                     any_of=any_of or [],
                                      interval_seconds=BUCKET_SECONDS), contract)
     if h.completeness != Completeness.complete:
         raise RuntimeError(f"cannot plan partitions for {target}: {h.reasons} {h.error}")
@@ -115,7 +139,9 @@ def plan_partitions(client: ElasticClient, target: str, contract: FieldContract,
 class Sweep:
     def __init__(self, repo: Repo, client: ElasticClient, hunt_id: str, window: Window,
                  contracts: dict[str, FieldContract], on_candidate: Callable[[dict], None] | None = None,
-                 heartbeat: Callable[[], None] | None = None, stage_dir=None, prefetch: bool | None = None):
+                 heartbeat: Callable[[], None] | None = None, stage_dir=None, prefetch: bool | None = None,
+                 site_facts: SiteFacts | None = None,
+                 windows_liveness_tolerance: timedelta = DEFAULT_WINDOWS_LIVENESS_TOLERANCE):
         self.repo, self.client, self.hunt_id, self.window = repo, client, hunt_id, window
         # Fetch the next partition while this one is evaluated (the client's setting unless given). It changes
         # when a partition's records are read, never what is read or the order partitions are evaluated in.
@@ -125,6 +151,12 @@ class Sweep:
         self._ahead: tuple[str, Future] | None = None
         self._pool: ThreadPoolExecutor | None = None
         self.contracts = contracts
+        self.site_facts = site_facts or absent_site_facts()
+        # Three 5-minute planning buckets tolerate normal low-volume jitter but expose material head/tail outages.
+        self.windows_liveness_tolerance = windows_liveness_tolerance
+        self._windows_inventory: dict[str, set[str]] = {}
+        self._windows_inventory_reasons: dict[str, list[str]] = {}
+        self._windows_record_ids: RecordIdContinuity | None = None
         self.on_candidate = on_candidate or (lambda c: None)
         beat = heartbeat or (lambda: None)
 
@@ -142,10 +174,17 @@ class Sweep:
         for pb in self.pack:
             pb.spill_dir = stage_dir          # a playbook's on-disk join tables live beside the event stage
             pb.budget = self.budget
+        self._has_windows = any(contract is not None and contract.os_family == "windows"
+                                for contract in contracts.values())
         # one guaranteed floor per live store of the pack (a store shared by several rules counts once), and one for
-        # the event stage, which holds the citations of every rule
-        self.budget.plan(live_stores(self.pack) + 1)
+        # the event stage, which holds the citations of every rule. Windows hunts add independent floors for their
+        # id-only delivery guard and continuity state, so event volume cannot take a detector store's floor.
+        self.budget.plan(live_stores(self.pack) + 1 + (2 if self._has_windows else 0))
         self._stage_account = self.budget.account("event_stage")
+        self._windows_seen_account = self.budget.account("windows_seen") if self._has_windows else None
+        self._windows_continuity_account = (
+            self.budget.account("windows_continuity") if self._has_windows else None
+        )
         self._stage_size = 0
         self.partial_reasons: list[str] = []
         preflight = self.budget.preflight()
@@ -201,12 +240,303 @@ class Sweep:
             self.stats["candidates"] += 1
             self.on_candidate(row)
 
-    def _filters_for(self, target: str) -> list[Predicate]:
-        if "host" in target:
+    def _filters_for(self, target: str, contract: FieldContract | None = None) -> list[Predicate]:
+        if contract is not None and contract.role == "host":
+            if contract.os_family == "windows":
+                return []
+            datasets = LINUX_HOST_DATASETS
             # recorded so the report can list the target's other datasets as not assessed
-            self.stats.setdefault("dataset_filter", {})[target] = list(HOST_DATASETS)
-            return [Predicate(field="event.dataset", op="in", value=HOST_DATASETS)]
+            self.stats.setdefault("dataset_filter", {})[target] = list(datasets)
+            return [Predicate(field="event.dataset", op="in", value=list(datasets))]
         return []
+
+    def _any_of_for(self, target: str, contract: FieldContract | None = None) -> list[list[Predicate]]:
+        """Select Windows event logs by dataset or native channel; Winlogbeat may omit event.dataset."""
+        if contract is None or contract.role != "host" or contract.os_family != "windows":
+            return []
+        groups: list[list[Predicate]] = []
+        if contract.supports("event.dataset", "in"):
+            groups.append([Predicate(field="event.dataset", op="in", value=list(WINDOWS_HOST_DATASETS))])
+        if contract.supports("event.channel", "in"):
+            groups.append([Predicate(field="event.channel", op="in", value=list(WINDOWS_CHANNELS))])
+        self.stats.setdefault("dataset_filter", {})[target] = list(WINDOWS_HOST_DATASETS)
+        self.stats.setdefault("channel_filter", {})[target] = list(WINDOWS_CHANNELS)
+        return groups
+
+    def _prepare_windows_inventory(self, target: str, contract: FieldContract | None) -> None:
+        if contract is None or contract.os_family != "windows" or target in self._windows_inventory:
+            return
+        required = ("event.channel", "event.provider", "event.code")
+        if not all(contract.supports(field, "exists") for field in required):
+            self._windows_inventory[target] = set()
+            self._windows_inventory_reasons[target] = [
+                "event class inventory unavailable: channel/provider/event id fields are not searchable"
+            ]
+            return
+        outcome = execute(
+            self.client,
+            SearchIntent(
+                kind="aggregate",
+                target=target,
+                window=self.window,
+                filters=[Predicate(field=field, op="exists") for field in required],
+                group_by=list(required),
+                purpose="windows event class inventory",
+            ),
+            contract,
+        )
+        inventory = set()
+        counts: dict[str, int] = {}
+        classes_by_token = {}
+        uncatalogued: list[dict] = []
+        uncatalogued_total = 0
+        uncatalogued_overflow_classes = 0
+        uncatalogued_overflow_records = 0
+        for bucket in outcome.buckets:
+            key = bucket.get("key") or {}
+            count = int(bucket.get("count") or 0)
+            event_class = lookup_event_class(
+                key.get("event.channel"), key.get("event.provider"), key.get("event.code")
+            )
+            if event_class is not None:
+                inventory.add(event_class.token)
+                counts[event_class.token] = counts.get(event_class.token, 0) + count
+                classes_by_token[event_class.token] = event_class
+                continue
+            uncatalogued_total += 1
+            if len(uncatalogued) >= MAX_WINDOWS_UNCATALOGUED:
+                uncatalogued_overflow_classes += 1
+                uncatalogued_overflow_records += count
+                continue
+            raw_event_id = key.get("event.code")
+            try:
+                shown_event_id = int(raw_event_id)
+            except (TypeError, ValueError):
+                shown_event_id = str(raw_event_id or "<missing>")[:80]
+            uncatalogued.append({
+                "channel": str(key.get("event.channel") or "<missing>")[:200],
+                "provider": str(key.get("event.provider") or "<missing>")[:200],
+                "event_id": shown_event_id,
+                "records": count,
+                "uncatalogued": True,
+            })
+        reasons = []
+        if outcome.completeness != Completeness.complete:
+            reasons.append(
+                "event class inventory incomplete: " + ", ".join(outcome.reasons or [outcome.error or "unknown"])
+            )
+        self._windows_inventory[target] = inventory
+        self._windows_inventory_reasons[target] = reasons
+        self.stats.setdefault("windows_inventory", {})[target] = {
+            "cataloged_classes": len(inventory), "uncatalogued_classes": uncatalogued_total,
+            "counts": dict(sorted(counts.items())), "reasons": reasons,
+        }
+        read_tokens = set()
+        for playbook in self.pack:
+            if "windows" not in playbook.os_families:
+                continue
+            if playbook.windows_event_classes:
+                for channel, provider, event_id in playbook.windows_event_classes:
+                    event_class = lookup_event_class(channel, provider, event_id)
+                    if event_class is not None:
+                        read_tokens.add(event_class.token)
+            else:
+                read_tokens.update(
+                    event_class.token for event_class in event_classes_for_families(set(playbook.families))
+                )
+        unassessed = []
+        for token in sorted(inventory - read_tokens):
+            event_class = classes_by_token[token]
+            unassessed.append({
+                "channel": event_class.channel,
+                "provider": event_class.provider,
+                "event_id": event_class.event_id,
+                "family": event_class.family,
+                "records": counts[token],
+            })
+        unassessed.extend(uncatalogued)
+        if uncatalogued_overflow_classes:
+            unassessed.append({
+                "overflow": True,
+                "uncatalogued": True,
+                "classes": uncatalogued_overflow_classes,
+                "records": uncatalogued_overflow_records,
+            })
+        if unassessed:
+            self.stats.setdefault("windows_unassessed", {})[target] = unassessed
+
+    @staticmethod
+    def _windows_hosts(contract: FieldContract, records: list[dict]) -> tuple[str, ...]:
+        hosts = {str(host).strip().rstrip(".").casefold() for host in contract.hosts if host}
+        for record in records:
+            winlog = (record.get("_source") or {}).get("winlog") or {}
+            computer = str(winlog.get("computer_name") or "").strip().rstrip(".").casefold()
+            if computer:
+                hosts.add(computer)
+        return tuple(sorted(hosts))
+
+    def _windows_rule_reasons(
+        self,
+        target: str,
+        contract: FieldContract | None,
+        playbook: Playbook,
+        records: list[dict],
+        gap_reasons: list[str],
+        partition: Window | None = None,
+    ) -> list[str]:
+        if contract is None or contract.os_family != "windows" or "windows" not in playbook.os_families:
+            return []
+        catalog = event_classes_for_families(set(playbook.families))
+        if not catalog:
+            return []
+        inventory = self._windows_inventory.get(target, set())
+        reasons = list(self._windows_inventory_reasons.get(target, ()))
+        if playbook.windows_event_classes:
+            required = []
+            for channel, provider, event_id in playbook.windows_event_classes:
+                event_class = lookup_event_class(channel, provider, event_id)
+                if event_class is None:
+                    reasons.append(
+                        f"event class declaration is not cataloged: {channel}|{provider}|{event_id}"
+                    )
+                else:
+                    required.append(event_class)
+        else:
+            required = list(catalog)
+        for event_class in required:
+            if event_class.token not in inventory:
+                reasons.append(
+                    "event class absent from source inventory: "
+                    f"{event_class.channel}|{event_class.provider}|{event_class.event_id}"
+                )
+        reasons.extend(gap_reasons)
+        hosts = self._windows_hosts(contract, records)
+        if not contract.host_inventory_complete:
+            reasons.append("collection not attested: source host inventory truncated")
+        if not hosts:
+            reasons.append("collection not attested: source host inventory unavailable")
+        observed_channels = {
+            (
+                str(((record.get("_source") or {}).get("winlog") or {}).get("computer_name") or "")
+                .strip().rstrip(".").casefold(),
+                str(((record.get("_source") or {}).get("winlog") or {}).get("channel") or "").casefold(),
+            )
+            for record in records
+        }
+        observed_times: dict[tuple[str, str], tuple[datetime, datetime]] = {}
+        collection_changes: set[str] = set()
+        for record in records:
+            source = record.get("_source") or {}
+            winlog = source.get("winlog") or {}
+            host = str(winlog.get("computer_name") or "").strip().rstrip(".").casefold()
+            channel = str(winlog.get("channel") or "").casefold()
+            raw_time = winlog.get("time_created") or source.get("@timestamp")
+            try:
+                when = datetime.fromisoformat(str(raw_time)).astimezone(UTC)
+            except (TypeError, ValueError):
+                continue
+            key = (host, channel)
+            prior = observed_times.get(key)
+            observed_times[key] = (when, when) if prior is None else (min(prior[0], when), max(prior[1], when))
+            try:
+                event_id = int(winlog.get("event_id"))
+            except (TypeError, ValueError):
+                continue
+            provider = str(winlog.get("provider_name") or "").strip()
+            change = COLLECTION_CHANGE_EVENTS.get((channel, provider.casefold(), event_id))
+            if change and host:
+                collection_changes.add(
+                    f"collection changed on {host}: {winlog.get('channel')}|{provider}|{event_id} ({change})"
+                )
+        reasons.extend(sorted(collection_changes))
+        def summarize(label: str, affected: list[str], event_class) -> str | None:
+            affected = sorted(set(affected))
+            if not affected:
+                return None
+            if len(affected) == 1:
+                return f"{label} on {affected[0]}"
+            sample = ", ".join(affected[:10])
+            token = f"{event_class.channel}|{event_class.provider}|{event_class.event_id}"
+            return f"{label} on {len(affected):,} hosts [{token}] (sample: {sample})"
+
+        for event_class in required:
+            absent_hosts: list[str] = []
+            late_start_hosts: list[str] = []
+            early_stop_hosts: list[str] = []
+            unattested_by_label: dict[str, list[str]] = {}
+            single_edge_details: dict[tuple[str, str], str] = {}
+            for host in hosts:
+                channel_key = (host, event_class.channel.casefold())
+                if channel_key not in observed_channels:
+                    absent_hosts.append(host)
+                elif partition is not None and observed_times.get(channel_key):
+                    first, last = observed_times[channel_key]
+                    if first > partition.start + self.windows_liveness_tolerance:
+                        late_start_hosts.append(host)
+                        single_edge_details[("before", host)] = first.isoformat()
+                    if last < partition.end - self.windows_liveness_tolerance:
+                        early_stop_hosts.append(host)
+                        single_edge_details[("after", host)] = last.isoformat()
+                for fact, arguments, label in collection_requirements(event_class):
+                    if not self.site_facts.attests(host, fact, **arguments):
+                        unattested_by_label.setdefault(label, []).append(host)
+            summarized = summarize(
+                f"shipper gaps unresolved: no records on {event_class.channel} in partition",
+                absent_hosts, event_class,
+            )
+            if summarized:
+                reasons.append(summarized)
+            for edge, affected in (("before", late_start_hosts), ("after", early_stop_hosts)):
+                if len(set(affected)) == 1:
+                    host = affected[0]
+                    reasons.append(
+                        f"no records from {host}/{event_class.channel} {edge} "
+                        f"{single_edge_details[(edge, host)]}"
+                    )
+                else:
+                    summarized = summarize(
+                        f"no records from {event_class.channel} near partition {edge} edge",
+                        affected, event_class,
+                    )
+                    if summarized:
+                        reasons.append(summarized)
+            for label, affected in unattested_by_label.items():
+                summarized = summarize(f"collection not attested: {label}", affected, event_class)
+                if summarized:
+                    reasons.append(summarized)
+        return sorted(set(reasons))
+
+    @staticmethod
+    def _unsupported_skips(skips: dict[str, int]) -> dict[str, int]:
+        """Only unmodeled source formats poison rules; cataloged-source event classes are not-assessed data."""
+        return {
+            reason: count for reason, count in skips.items()
+            if reason.startswith(("dataset:", "suricata event_type"))
+        }
+
+    @staticmethod
+    def _bounded_counts(target: dict[str, int], additions: dict[str, int]) -> dict[str, str]:
+        applied = {}
+        for reason, count in additions.items():
+            key = reason if reason in target or len(target) < MAX_SKIP_REASONS else SKIP_REASON_OVERFLOW
+            target[key] = target.get(key, 0) + count
+            applied[reason] = key
+        return applied
+
+    def _record_skips(self, target: str, skips: dict[str, int]) -> None:
+        """Keep exact totals with a bounded number of telemetry-controlled reason strings, scoped by target."""
+        global_keys = self._bounded_counts(self.stats["skips"], skips)
+        windows_skips = {
+            reason: count for reason, count in skips.items()
+            if reason.startswith(("Windows event class", "duplicate Windows event copy"))
+        }
+        if windows_skips:
+            by_target = self.stats.setdefault("skips_by_target", {}).setdefault(target, {})
+            self._bounded_counts(by_target, windows_skips)
+            scoped_global = self.stats.setdefault("skips_scoped_global", {})
+            for reason, count in windows_skips.items():
+                key = global_keys[reason]
+                scoped_global[key] = scoped_global.get(key, 0) + count
 
     # -------------------------------------------------------------------------------------
     def _cell(self, pb: Playbook, target: str, pkey: str, state: str, matched: int = 0, evaluated: int = 0,
@@ -231,10 +561,12 @@ class Sweep:
 
     def run_target(self, target: str):
         contract = self.contracts[target]
-        filters = self._filters_for(target)
+        self._prepare_windows_inventory(target, contract)
+        filters = self._filters_for(target, contract)
+        any_of = self._any_of_for(target, contract)
         try:
             self.heartbeat()
-            parts = plan_partitions(self.client, target, contract, self.window, filters)
+            parts = plan_partitions(self.client, target, contract, self.window, filters, any_of)
             self.heartbeat()
         except Exception as e:  # noqa: BLE001 - one source failing must not hide the others
             reason = f"partition planning failed: {e}"[:300]
@@ -250,16 +582,18 @@ class Sweep:
         try:
             for index, (w, est) in enumerate(parts):
                 following = parts[index + 1] if index + 1 < len(parts) else None
-                self._next = (target, contract, filters, *following) if following else None
-                self.run_partition(target, contract, filters, w, est)
+                self._next = (target, contract, filters, any_of, *following) if following else None
+                self.run_partition(target, contract, filters, w, est, any_of=any_of)
         finally:
             self._next = None
             self._stop_prefetch()
 
     @staticmethod
-    def _raw_intent(target: str, filters: list[Predicate], w: Window, est: int) -> SearchIntent:
+    def _raw_intent(target: str, filters: list[Predicate], w: Window, est: int,
+                    any_of: list[list[Predicate]] | None = None) -> SearchIntent:
         cap = max(PARTITION_MAX_DOCS, int(est * 1.2) + 1000)
-        return SearchIntent(kind="raw", target=target, window=w, filters=filters, max_records=cap, purpose="sweep")
+        return SearchIntent(kind="raw", target=target, window=w, filters=filters, any_of=any_of or [],
+                            max_records=cap, purpose="sweep")
 
     def _fetch(self, intent: SearchIntent, contract: FieldContract):
         """The partition's records: the prefetched outcome when it is this very intent, else fetched now."""
@@ -273,11 +607,11 @@ class Sweep:
         """Begin fetching the next top-level partition on the background thread, when it will be fetched whole."""
         if not self.prefetch or self._next is None or self._ahead is not None:
             return
-        target, contract, filters, w, est = self._next
+        target, contract, filters, any_of, w, est = self._next
         self._next = None
         if est > PARTITION_MAX_DOCS and (w.end - w.start) > MIN_SPLIT * 2:
             return                                   # it is split before anything is fetched
-        intent = self._raw_intent(target, filters, w, est)
+        intent = self._raw_intent(target, filters, w, est, any_of)
         if self._pool is None:
             self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="romulus-sweep-prefetch")
         client = self.client
@@ -292,16 +626,18 @@ class Sweep:
             self._pool.shutdown(wait=False, cancel_futures=True)
             self._pool = None
 
-    def _count(self, target: str, contract: FieldContract, filters: list[Predicate], w: Window) -> int | None:
+    def _count(self, target: str, contract: FieldContract, filters: list[Predicate], w: Window,
+               any_of: list[list[Predicate]] | None = None) -> int | None:
         """The exact number of records in a window, or None when the source does not say exactly."""
         out = execute(self.client, SearchIntent(kind="histogram", target=target, window=w, filters=filters,
+                                                any_of=any_of or [],
                                                 interval_seconds=BUCKET_SECONDS, purpose="sweep count"), contract)
         if out.completeness == Completeness.complete and out.total_relation == "eq" and out.total is not None:
             return out.total
         return None
 
     def run_partition(self, target: str, contract: FieldContract, filters: list[Predicate], w: Window, est: int,
-                      *, estimated: bool = False):
+                      *, estimated: bool = False, any_of: list[list[Predicate]] | None = None):
         """Evaluate one partition. `est` is the histogram's exact count for a planned partition; for a half of a
         split one (`estimated`) it is only an estimate, so the half is counted before it is fetched."""
         self.heartbeat()
@@ -309,11 +645,11 @@ class Sweep:
         if est > PARTITION_MAX_DOCS and splittable:
             # exact histogram count already exceeds the limit: subdivide before fetching anything
             a, b = self._split(target, w)
-            self.run_partition(target, contract, filters, a, est // 2, estimated=True)
-            self.run_partition(target, contract, filters, b, est - est // 2, estimated=True)
+            self.run_partition(target, contract, filters, a, est // 2, estimated=True, any_of=any_of)
+            self.run_partition(target, contract, filters, b, est - est // 2, estimated=True, any_of=any_of)
             return
         pkey = w.key()
-        intent = self._raw_intent(target, filters, w, est)
+        intent = self._raw_intent(target, filters, w, est, any_of)
         cap = intent.max_records
         tid = "t-" + digest({"h": self.hunt_id, "target": target, "w": pkey})[:20]
         self.repo.upsert_task(tid, self.hunt_id, "sweep", "sweep", intent.model_dump(mode="json"), tid)
@@ -323,7 +659,7 @@ class Sweep:
         self.repo.update_task(tid, "leased", attempt=True)
         mid = w.start + (w.end - w.start) / 2
         children = [f"{w.start.isoformat()}/{mid.isoformat()}", f"{mid.isoformat()}/{w.end.isoformat()}"]
-        counted = self._count(target, contract, filters, w) if estimated and splittable else None
+        counted = self._count(target, contract, filters, w, any_of) if estimated and splittable else None
         if counted is not None and counted > fetch_limit(cap):
             # The fetch would stop at its cap and be split: split now, without reading records only to drop them.
             # The cap is the same, so the halves and their estimates are those a capped fetch would have given.
@@ -332,8 +668,8 @@ class Sweep:
                                                          "reasons": [f"cap:{cap}<total:{counted}"], "total": counted,
                                                          "returned": 0, "counted": True, "children": children})
             a, b = self._split(target, w)
-            self.run_partition(target, contract, filters, a, counted // 2, estimated=True)
-            self.run_partition(target, contract, filters, b, counted // 2, estimated=True)
+            self.run_partition(target, contract, filters, a, counted // 2, estimated=True, any_of=any_of)
+            self.run_partition(target, contract, filters, b, counted // 2, estimated=True, any_of=any_of)
             return
         out = self._fetch(intent, contract)
         self._start_prefetch()
@@ -347,8 +683,8 @@ class Sweep:
                                                          "children": children})
             half = (out.total or est) // 2
             a, b = self._split(target, w)
-            self.run_partition(target, contract, filters, a, half, estimated=True)
-            self.run_partition(target, contract, filters, b, half, estimated=True)
+            self.run_partition(target, contract, filters, a, half, estimated=True, any_of=any_of)
+            self.run_partition(target, contract, filters, b, half, estimated=True, any_of=any_of)
             return
         self.stats["partitions"] += 1
         self.stats["records"] += out.returned
@@ -360,16 +696,37 @@ class Sweep:
             self.repo.update_task(tid, "failed", error=out.error)
             return
         events, skips, errors = normalize_hits(out.records, self.boots)
+        raw_sources = {f"{r['_index']}/{r['_id']}": r["_source"] for r in out.records}
+        duplicate_events = []
+        windows_state_reasons: list[str] = []
+        if any(event.normalizer.startswith("windows-") for event in events):
+            stage = self._event_stage()
+            events, duplicate_events = stage.unique_windows(events)
+            if stage.windows_refused:
+                windows_state_reasons.append(
+                    f"Windows event dedup state refused {stage.windows_refused} event id(s): "
+                    f"{stage.windows_refusal_reason}; those events were evaluated, but a shipper copy of one in a "
+                    f"later partition is evaluated again, so counts over them may include duplicates"
+                )
+        if duplicate_events:
+            skips["duplicate typed event across source partitions"] = len(duplicate_events)
+            self.repo.merge_evidence_raw(self.hunt_id, duplicate_events, raw_sources)
         self.stats["events"] += len(events)
         self._count_boots(events)
         self.stats["errors"] += len(errors)
-        for k, v in skips.items():
-            self.stats["skips"][k] = self.stats["skips"].get(k, 0) + v
-        raw_sources = {f"{r['_index']}/{r['_id']}": r["_source"] for r in out.records}
+        self._record_skips(target, skips)
         # records retrieved but of a dataset/event type no normalizer supports: we cannot say what
         # they contain, so no rule may claim a complete negative over this partition
-        unsupported = {k: v for k, v in skips.items()
-                       if k.startswith(("dataset:", "suricata event_type"))}
+        unsupported = self._unsupported_skips(skips)
+        gap_reasons = list(windows_state_reasons)
+        if contract is not None and contract.os_family == "windows":
+            record_id = contract.spec("winlog.record_id")
+            if record_id is None or record_id.type not in {"long", "integer", "short"}:
+                gap_reasons.append("shipper gaps unresolved: winlog.record_id mapping is not numeric")
+            else:
+                gap_reasons.extend(self._windows_continuity().observe(
+                    target, out.records, liveness_tolerance=self.windows_liveness_tolerance,
+                ))
         partial = out.completeness != Completeness.complete or bool(errors) or bool(unsupported)
         if partial:
             self.partial_reasons.append(f"{target} {pkey}: {out.reasons or ''} normalization_errors={len(errors)}"
@@ -400,26 +757,41 @@ class Sweep:
                         + (f"; {', '.join(unmapped)} feeds no known event family, so every rule is partial"
                            if unmapped else "")) if errors else ""
         cells: list[dict] = []
+        windows_gate_reasons: set[str] = set()
         # events the joining aggregates may cite later, by id: several playbooks stage the same events, and each
         # is serialized to the stage once per partition (the first staged copy of an id is kept)
         staged: dict[str, TypedEvent] = {}
         held: list[tuple[str, TypedEvent]] = []          # (playbook, event) holds of interval bounds
         released: list[tuple[str, list[str]]] = []       # (playbook, ids) holds the playbooks let go
+        target_os = contract.os_family if contract is not None else "linux"
         for pb in self.pack:
-            rule_partial = affected is ALL_FAMILIES or bool(set(pb.families) & affected)
-            before_eval, before_missing, before_capped = pb.evaluated, pb.missing_required, pb.capped
+            relevant_events = [event for event in events if event.family in pb.families]
+            target_fallback = not relevant_events and (
+                target_os == "unknown" or target_os in pb.os_families
+            )
+            windows_reasons = self._windows_rule_reasons(
+                target, contract, pb, out.records, gap_reasons, w,
+            )
+            windows_gate_reasons.update(windows_reasons)
+            rule_partial = (affected is ALL_FAMILIES or bool(set(pb.families) & affected)
+                            or bool(windows_reasons))
+            before_eval, before_missing, before_os, before_capped = (
+                pb.evaluated, pb.missing_required, pb.os_applicable, pb.capped,
+            )
             before_assumed = pb.direction_assumed
             before_limits = {name: limit.records for name, limit in pb.limits.items()}
+            scoped_events = pb.scope_partition(events)
             # Every rule reads every batch, whatever the state budget: a store in no-growth mode refuses only
             # records that need a new key in it (each rule's own refusal path), and every match that needs no new
             # state still publishes.
             try:
-                matches = pb.consume(events)
+                matches = pb.consume_scoped_partition(scoped_events)
             except StateExhausted as exc:
                 # a write to the stage volume failed mid-batch (a rule that writes rows directly): the records it
                 # had not evaluated yet are refused, counted exactly
                 matches = []
-                pb.refuse_unevaluated(events, pb.evaluated - before_eval + pb.missing_required - before_missing
+                pb.refuse_unevaluated(scoped_events,
+                                      pb.evaluated - before_eval + pb.missing_required - before_missing
                                       + pb.capped - before_capped,
                                       f"a write to the stage volume failed ({exc}); this rule's later records of "
                                       f"the batch are not evaluated")
@@ -450,13 +822,17 @@ class Sweep:
                 self._retain_aggregate_raw(pb, raw_sources)
             evaluated = pb.evaluated - before_eval
             missing = pb.missing_required - before_missing
+            target_applicable = target_fallback or pb.os_applicable > before_os
+            rule_partial = target_applicable and rule_partial
             # records a full state budget kept from evaluation: never a clean evaluation of this partition
             capped = pb.capped - before_capped
             # records skipped or judged for a direction the default internal-network definition only assumes
             assumed = pb.direction_assumed - before_assumed
             incomplete = rule_partial or bool(missing) or bool(capped) or bool(assumed)
-            if not (set(pb.families) & families) and evaluated == 0:
-                state = "not_applicable_no_events" if not (rule_partial or capped) else "evaluated_partial"
+            if not target_applicable:
+                state = "not_applicable_no_events"
+            elif not (set(pb.families) & families) and evaluated == 0:
+                state = "not_applicable_no_events" if not rule_partial else "evaluated_partial"
             elif pb.kind == "aggregate" and matches:
                 # aggregate rules may publish indicator events during consume(); those are matches
                 state = "match_on_partial" if incomplete else "matched"
@@ -470,6 +846,7 @@ class Sweep:
             else:
                 state = "evaluated_partial" if incomplete else "no_match_complete"
             reasons = list(base_reasons)
+            reasons.extend(windows_reasons)
             if error_reason and (error_affected is ALL_FAMILIES or set(pb.families) & error_affected):
                 reasons.append(error_reason)
             if missing:
@@ -487,6 +864,10 @@ class Sweep:
                                f"was full; " + "; ".join(refused))
                 detail["state_capped"] = capped
             cells.append(self._cell(pb, target, pkey, state, len(matches), evaluated, detail))
+        if windows_gate_reasons:
+            self.partial_reasons.append(
+                f"{target} {pkey}: " + "; ".join(sorted(windows_gate_reasons))
+            )
         if staged or held or released:
             self._stage_put(list(staged.values()), raw_sources, held, released)
         staged.clear()
@@ -551,8 +932,22 @@ class Sweep:
     def _event_stage(self) -> EventStage:
         stage = getattr(self, "_stage", None)
         if stage is None:
-            stage = self._stage = EventStage(self.stage_dir)
+            stage = self._stage = EventStage(
+                self.stage_dir,
+                budget=getattr(self, "budget", None),
+                windows_account=getattr(self, "_windows_seen_account", None),
+            )
         return stage
+
+    def _windows_continuity(self) -> RecordIdContinuity:
+        continuity = self._windows_record_ids
+        if continuity is None:
+            continuity = self._windows_record_ids = RecordIdContinuity(
+                self._event_stage().directory,
+                budget=self.budget,
+                account=self._windows_continuity_account,
+            )
+        return continuity
 
     def _retain_aggregate_raw(self, pb: Playbook, raw_sources: dict[str, dict]):
         keep = getattr(self, "_agg_raw", None)
@@ -562,6 +957,13 @@ class Sweep:
             for r in e.raw:
                 if r.key in raw_sources and r.key not in keep:
                     keep[r.key] = raw_sources[r.key]
+
+    def _merge_staged_match_raw(self, match: Match) -> dict[str, dict]:
+        """Reload a final match from the sweep stage so later source copies remain cited."""
+        stage = self._event_stage()
+        loaded = {event.id: event for event in stage.load([event.id for event in match.events])}
+        match.events = [loaded.get(event.id, event) for event in match.events]
+        return stage.raw_sources(match.events)
 
     def finalize(self):
         self.heartbeat()
@@ -578,13 +980,10 @@ class Sweep:
                 stage = self._event_stage()
                 pb.bind_loader(stage.load)
                 pb.heartbeat = self.heartbeat
-                ms = self._finalize_rule(pb)
-                for m in ms:
-                    self._publish(m, None, {**agg_raw, **stage.raw_sources(m.events)})
-            else:
-                ms = self._finalize_rule(pb)
-                for m in ms:
-                    self._publish(m, None, agg_raw)
+            ms = self._finalize_rule(pb)
+            for m in ms:
+                raw_sources = ({**agg_raw, **self._merge_staged_match_raw(m)} if pb.staged else agg_raw)
+                self._publish(m, None, raw_sources)
             cells = [c for c in self.repo.rule_cells(self.hunt_id, rule_id=pb.id)
                      if c["target"] != "*" and c["state"] != "split"]
             any_partial = any(c["state"] in ("evaluated_partial", "executed_failed", "planned", "match_on_partial")
@@ -643,11 +1042,14 @@ class Sweep:
                 return []
 
     def close_stage(self) -> None:
-        """Remove the disk stage (raw telemetry copies) and the playbooks' spills. Called by finalize and on every
-        failure path."""
+        """Remove the disk stage, Windows continuity state and playbook spills on every controlled exit path."""
+        continuity = getattr(self, "_windows_record_ids", None)
+        if continuity is not None:
+            continuity.close()
+            self._windows_record_ids = None
         stage = getattr(self, "_stage", None)
         if stage is not None:
             stage.close()
             self._stage = None
-        for pb in self.pack:
+        for pb in getattr(self, "pack", ()):
             pb.close_spill()

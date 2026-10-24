@@ -628,7 +628,9 @@ class Toolbox:
 
     def _get_evidence(self, args: GetEvidenceArgs) -> dict:
         resolved = [(alias, self.aliases.resolve(alias, {"E"})) for alias in args.evidence]
-        rows = {row["id"]: row for row in self.repo.events_by_ids([target for _alias, target in resolved])}
+        rows = {row["id"]: row for row in self.repo.citation_events(
+            self.hunt_id, [target for _alias, target in resolved],
+        )}
         data = []
         missing = []
         budget = _TelemetryBudget(args.chunk_index)
@@ -893,7 +895,7 @@ class Toolbox:
         page_ids = self.repo.entity_event_page_plan_ids(
             self.hunt_id, cursor, offset=start, limit=ENTITY_EVENT_LIMIT,
         )
-        by_id = {row["id"]: row for row in self.repo.events_by_ids(page_ids)}
+        by_id = {row["id"]: row for row in self.repo.citation_events(self.hunt_id, page_ids)}
         exemplars = [by_id[event_id] for event_id in page_ids if event_id in by_id]
         budget = _TelemetryBudget(args.chunk_index)
         data = {
@@ -1089,7 +1091,7 @@ class Toolbox:
                 "role": _bounded_text(item["role"]),
             })
         persisted = {row["id"]: self._persisted_event_summary(row)
-                     for row in self.repo.events_by_ids(page_ids)}
+                     for row in self.repo.citation_events(self.hunt_id, page_ids)}
         summaries = []
         for event_id in page_ids:
             event_summary = persisted.get(event_id)
@@ -1152,7 +1154,7 @@ class Toolbox:
             return self._semantic_refusal(
                 "evidence_not_in_anchor", "process_tree evidence must be cited by the anchor finding",
             )
-        rows = self.repo.events_by_ids([event_id])
+        rows = self.repo.citation_events(self.hunt_id, [event_id])
         if not rows:
             raise UnknownAlias(f"unknown evidence alias {args.process!r} in hunt {self.hunt_id}")
         event = TypedEvent.model_validate(rows[0]["event"])

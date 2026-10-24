@@ -39,7 +39,7 @@ from romulus.detect.host import (
     interpreter_name,
 )
 from romulus.evidence.shellparse import SHELLS, UnknownShellScript, shell_script_file_of
-from romulus.evidence.typed import TypedEvent
+from romulus.evidence.typed import TypedEvent, event_os_family
 
 KINDS = {"program_name", "ip", "cidr", "domain", "ja3", "ja4", "hassh"}
 EXAMPLE_LIMIT = 20
@@ -222,15 +222,15 @@ class IndicatorMatch(Playbook):
     # ---- matching ---------------------------------------------------------------------------------
     def _keep(self, key: tuple, e: TypedEvent, meta: dict) -> None:
         field_name = meta["field"]
-        state = self.groups.setdefault(key, lambda: [0, field_name, HeldExamples(EXAMPLE_LIMIT)])
+        state = self.groups.setdefault(key, lambda: [0, field_name, HeldExamples(EXAMPLE_LIMIT), set()])
         if state is None:
             state = self.overflow.setdefault(key[:3] + ("*",),
-                                             lambda: [0, field_name, HeldExamples(EXAMPLE_LIMIT), []])
+                                             lambda: [0, field_name, HeldExamples(EXAMPLE_LIMIT), [], set()])
             if state is None:
                 # an indicator hit is a finding by itself: published now as its own single-record finding
                 self.note_limit("groups_alone", "the indicator match groups' disk budget is spent; later matches "
                                                 "with no group are published one record at a time")
-                m = self._finding(key, 1, field_name, [e])
+                m = self._finding(key, 1, field_name, [e], operating_systems={event_os_family(e)})
                 m.group_key = "|".join(map(str, key[:3])) + "|*"   # one per indicator, role and host
                 add_unheld(self._alone, alone(m, self, e))
                 return
@@ -239,28 +239,38 @@ class IndicatorMatch(Playbook):
             if len(state[3]) < self.SAMPLE_VALUES and key[3] not in state[3]:
                 state[3].append(key[3])
         state[0] += 1
+        state[-1].add(event_os_family(e))
         if state[2].offer(e):
             self._pending.append(e)
             self._fresh.append(state[2])
 
+    @staticmethod
+    def _program_basename(event: TypedEvent, path: str) -> str:
+        if event.get("host.os.family") == "windows" or event.normalizer.startswith("windows-"):
+            path = path.replace("\\", "/")
+        return basename(path)
+
     def _programs(self, e: TypedEvent) -> None:
         exe = e.get("process.executable")
-        if exe and basename(str(exe)).lower() in self.names:
-            ind = self.names[basename(str(exe)).lower()]
-            self._keep((ind.id, "executed", e.host, basename(str(exe))), e, {"ind": ind, "field": "process.executable"})
+        exe_name = self._program_basename(e, str(exe)) if exe else ""
+        if exe_name.lower() in self.names:
+            ind = self.names[exe_name.lower()]
+            self._keep((ind.id, "executed", e.host, exe_name), e, {"ind": ind, "field": "process.executable"})
         argv = e.get("process.argv")
         if not isinstance(argv, list) or not argv:
             return
         script = script_operand(argv)
-        script_name = basename(script).lower() if script else None
+        script_base = self._program_basename(e, script) if script else ""
+        script_name = script_base.lower() if script_base else None
         if script_name in self.names:
             ind = self.names[script_name]
-            self._keep((ind.id, "script", e.host, basename(script)), e, {"ind": ind, "field": "process.argv"})
+            self._keep((ind.id, "script", e.host, script_base), e, {"ind": ind, "field": "process.argv"})
         for token in argv[1:]:
-            name = basename(token).lower()
+            token_base = self._program_basename(e, token)
+            name = token_base.lower()
             if name in self.names and name != script_name:
                 ind = self.names[name]
-                self._keep((ind.id, "argument", e.host, basename(token)), e, {"ind": ind, "field": "process.argv"})
+                self._keep((ind.id, "argument", e.host, token_base), e, {"ind": ind, "field": "process.argv"})
                 break
 
     def _addresses(self, e: TypedEvent) -> None:
@@ -352,7 +362,8 @@ class IndicatorMatch(Playbook):
         for key, store in sorted(groups, key=lambda item: str(item[0])):
             state = store.peek(key)
             out.append(self._finding(key, state[0], state[1], state[2].events(self.load),
-                                     state[3] if len(state) > 3 else None))
+                                     state[3] if len(state) > 4 else None,
+                                     operating_systems=state[-1]))
         return out
 
     def finalize_fallback(self, reason: str) -> list[Match]:
@@ -361,13 +372,13 @@ class IndicatorMatch(Playbook):
         for store in (self.groups, self.overflow):
             for key, state in sorted(store.hot.items(), key=lambda item: str(item[0])):
                 m = self._finding(key, state[0], state[1], state[2].events(self.load),
-                                  state[3] if len(state) > 3 else None)
+                                  state[3] if len(state) > 4 else None, operating_systems=state[-1])
                 m.notes.append(f"published from memory only: the groups on disk could not be read ({reason})")
                 out.append(m)
         return out
 
     def _finding(self, key: tuple, n: int, field_name: str, evs: list[TypedEvent],
-                 values: list[str] | None = None) -> Match:
+                 values: list[str] | None = None, *, operating_systems: set[str]) -> Match:
         _iid, role, host, value = key
         evs = sorted(evs, key=lambda x: (x.ts, x.id))
         ind: Indicator = self.by_id[key[0]]
@@ -376,13 +387,17 @@ class IndicatorMatch(Playbook):
         e0 = evs[0]
         span = f"{evs[0].ts.isoformat()} – {evs[-1].ts.isoformat()}"
         listed = f"indicator {ind.id} ({ind.label}, list {ind.source})"
+        process_record = ("Windows process-creation" if operating_systems == {"windows"} else
+                          "auditd exec" if operating_systems == {"linux"} else "process-execution")
+        executable_source = ("kernel-recorded executable" if operating_systems == {"linux"}
+                             else "recorded executable")
         if role == "executed":
-            claim = (f"{n} auditd exec record(s) on {host} show a program whose kernel-recorded executable is named "
+            claim = (f"{n} {process_record} record(s) on {host} show a program whose {executable_source} is named "
                      f"'{value}' ({e0.get('process.executable')}), matching {listed} ({span}). The name matches; "
                      f"whether the program is that tool is not established, and a renamed copy would not match.")
             lane, claim_type = ind.lane, "observed_action"
         elif role == "script":
-            claim = (f"{n} auditd exec record(s) on {host} show an interpreter started with script operand "
+            claim = (f"{n} {process_record} record(s) on {host} show an interpreter started with script operand "
                      f"'{value}', matching {listed} ({span}). The argv names the script; its content is not "
                      f"verified.")
             lane, claim_type = ind.lane, "script_content"

@@ -467,7 +467,9 @@ class Investigator:
 
     def _anchor_time(self, decision: AgentDecision, request: Any) -> datetime | None:
         """Use the first cited event inside the requested window as the pivot's sampling anchor."""
-        rows = {row["id"]: row for row in self.repo.events_by_ids(decision.evidence_ids)}
+        rows = {row["id"]: row for row in self.repo.citation_events(
+            self.hunt_id, decision.evidence_ids,
+        )}
         start = request.arguments.start.astimezone(UTC)
         end = request.arguments.end.astimezone(UTC)
         for event_id in decision.evidence_ids:

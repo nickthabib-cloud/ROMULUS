@@ -10,15 +10,19 @@ from pydantic import BaseModel, ConfigDict, Field
 from romulus.agent.models import PivotCoverage
 from romulus.agent.tools import EntityTimelineArgs, EntityTimelineRequest
 from romulus.detect.correlation import PidTable, boot_of, boots_conflict
+from romulus.detect.host import exec_order
 from romulus.evidence.normalize import BootIntervals
-from romulus.evidence.typed import TypedEvent
+from romulus.evidence.typed import TypedEvent, event_os_family
 from romulus.hunt.pivot import (
     HOST_LOOKUP_BUDGET,
     MAX_PIVOT_RECORDS,
     PivotExecutor,
+    _and_any_of,
+    _host_datasets,
     _is_network,
     _range,
     _supports,
+    _windows_source_groups,
 )
 from romulus.sources.models import Predicate, SearchIntent, Window
 from romulus.store.db import digest
@@ -35,6 +39,15 @@ FORWARD_LINKS = frozenset({"source_ip", "account", "host_after_anchor"})
 OBSERVED_FLOW_SPAN = timedelta(minutes=10)
 
 UNUSABLE_TEXT_KEYS = {"", "-1", "4294967295", "(null)", "(none)", "unset", "(unknown)"}
+_GENERIC_WINDOWS_SIDS = {
+    "sid:s-1-0-0", "sid:s-1-1-0", "sid:s-1-5-7", "sid:s-1-5-11",
+    "sid:s-1-5-18", "sid:s-1-5-19", "sid:s-1-5-20",
+}
+_GENERIC_WINDOWS_SID_PREFIXES = (
+    "sid:s-1-5-32-",  # built-in local groups
+    "sid:s-1-5-80-",  # service identities
+    "sid:s-1-5-90-",  # window manager identities
+)
 # Links that need a host identity: they search one host's own records.
 HOST_SIDE_LINKS = frozenset({"process_lineage", "login_session", "host_after_anchor"})
 RAW_FAMILIES_BY_LINK = {
@@ -65,6 +78,13 @@ def usable_key(value: Any) -> bool:
             return True
         return not (address.is_unspecified or address.is_loopback)
     return True
+
+
+def _portable_windows_account(value: Any) -> bool:
+    normalized = str(value or "").strip().casefold()
+    return (usable_key(value) and normalized not in _GENERIC_WINDOWS_SIDS
+            and normalized not in {"name:", "name:-"} and not normalized.endswith("\\-")
+            and not normalized.startswith(_GENERIC_WINDOWS_SID_PREFIXES))
 
 
 class LinkWindow(BaseModel):
@@ -124,6 +144,18 @@ def _after(event: TypedEvent, root: TypedEvent) -> bool | None:
     return None if left is None or right is None else left > right
 
 
+def _relative_event_order(left: TypedEvent, right: TypedEvent) -> int | None:
+    """Order two events by time, then by a token valid in their shared source sequence."""
+    if left.ts != right.ts:
+        return -1 if left.ts < right.ts else 1
+    left_order, left_domain = exec_order(left)
+    right_order, right_domain = exec_order(right)
+    if (left_order is None or right_order is None or left_domain is None
+            or left_domain != right_domain or (left_order == right_order and left.id != right.id)):
+        return None
+    return (left_order > right_order) - (left_order < right_order)
+
+
 class LinkResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -154,6 +186,12 @@ def _boot(anchor: LinkAnchor) -> str | None:
     """The anchor's recorded boot id (its earliest record that carries one), or None."""
     value = _value(anchor, "host.boot.id")
     return None if value in (None, "") else str(value)
+
+
+def _os_family(anchor: LinkAnchor) -> str | None:
+    families = {event_os_family(event) for event in anchor.events}
+    families.discard("unknown")
+    return next(iter(families)) if len(families) == 1 else None
 
 
 def _victim(anchor: LinkAnchor) -> dict:
@@ -337,12 +375,32 @@ class LinkFetcher:
         }
         return handlers[link_type](anchor, window)
 
-    def _host_intents(self, window: LinkWindow, datasets: tuple[str, ...], host: str | None = None):
+    def _host_intents(self, window: LinkWindow, families: set[str], host: str | None = None,
+                      os_family: str | None = None):
         intents = []
         for target, contract in sorted(self.executor.contracts.items()):
-            if _is_network(target, contract) or not _supports(contract, "event.dataset"):
+            if _is_network(target, contract):
                 continue
-            for dataset in datasets:
+            if os_family is not None and contract.os_family != os_family:
+                continue
+            if contract.os_family == "windows":
+                source_groups = _windows_source_groups(contract, families)
+                if not source_groups:
+                    continue
+                filters = []
+                if host is not None:
+                    if not _supports(contract, "host.name"):
+                        continue
+                    filters.append(Predicate(field="host.name", op="eq", value=host))
+                intents.append(SearchIntent(
+                    kind="raw", target=target, window=Window(start=window.start, end=window.end),
+                    filters=filters, any_of=source_groups, max_records=MAX_PIVOT_RECORDS,
+                    purpose="expansion:windows-events",
+                ))
+                continue
+            if not _supports(contract, "event.dataset"):
+                continue
+            for dataset in _host_datasets(contract, families):
                 filters = [Predicate(field="event.dataset", op="eq", value=dataset)]
                 if host is not None:
                     if not _supports(contract, "host.name"):
@@ -356,32 +414,141 @@ class LinkFetcher:
         return intents
 
     def _endpoint_intents(self, window: LinkWindow, endpoints: list[list]):
-        """Audit socket records on any host whose remote endpoint is one of these (ip, port) pairs."""
+        """Typed host socket records whose remote endpoint is one of these (ip, port) pairs."""
         intents = []
         for target, contract in sorted(self.executor.contracts.items()):
-            if (_is_network(target, contract) or not _supports(contract, "event.dataset")
+            if (_is_network(target, contract)
                     or not all(_supports(contract, field) for field in ("destination.ip", "destination.port"))):
                 continue
-            intents.append(SearchIntent(
-                kind="raw", target=target, window=Window(start=window.start, end=window.end),
-                filters=[Predicate(field="event.dataset", op="eq", value="linux.audit")],
-                any_of=[[Predicate(field="destination.ip", op="eq", value=ip),
-                         Predicate(field="destination.port", op="eq", value=port)] for ip, port in endpoints],
-                max_records=MAX_PIVOT_RECORDS, purpose="expansion:flow_host_side",
-            ))
+            endpoint_groups = [
+                [Predicate(field="destination.ip", op="eq", value=ip),
+                 Predicate(field="destination.port", op="eq", value=port)]
+                for ip, port in endpoints
+            ]
+            if contract.os_family == "windows":
+                source_groups = _windows_source_groups(contract, {"net_socket"})
+                if source_groups:
+                    intents.append(SearchIntent(
+                        kind="raw", target=target, window=Window(start=window.start, end=window.end),
+                        any_of=_and_any_of(source_groups, endpoint_groups),
+                        max_records=MAX_PIVOT_RECORDS, purpose="expansion:flow_host_side",
+                    ))
+                continue
+            if not _supports(contract, "event.dataset"):
+                continue
+            for dataset in _host_datasets(contract, {"net_socket"}):
+                intents.append(SearchIntent(
+                    kind="raw", target=target, window=Window(start=window.start, end=window.end),
+                    filters=[Predicate(field="event.dataset", op="eq", value=dataset)],
+                    any_of=endpoint_groups,
+                    max_records=MAX_PIVOT_RECORDS, purpose="expansion:flow_host_side",
+                ))
         return intents
 
     def _lineage(self, anchor: LinkAnchor, window: LinkWindow):
         pid = _value(anchor, "process.pid")
+        process_guid = _value(anchor, "process.guid")
+        os_family = _os_family(anchor)
         boot_id = _boot(anchor)
         key = {"host": anchor.host, "pid": pid, "host.boot.id": boot_id, **_victim(anchor)}
-        intents = self._host_intents(window, ("linux.audit",), anchor.host) if isinstance(pid, int) else []
+        if usable_key(process_guid):
+            key["process.guid"] = process_guid
+        process_key = usable_key(process_guid) or isinstance(pid, int)
+        families = ({"process_exec", "process_termination", "system_state"}
+                    if os_family == "windows" else {"process_exec"})
+        intents = self._host_intents(window, families, anchor.host, os_family) if process_key else []
 
         def select(events):
-            """The anchored process's exec images (the programs it ran in place), its recorded ancestors and its
-            recorded descendants. Execs of one instant are ordered by audit serial; a step that cannot be decided
-            (execs of different programs at one instant without serials, or the anchor's own image not
-            retrieved) is named in the selection, so the link is partial rather than an empty complete."""
+            """The anchored process's exec images, ancestors and descendants.
+
+            Linux execs at one instant are ordered by audit serial and leave an undecided step when their order
+            cannot be established. Windows uses ProcessGuid where present, or a pid bounded by termination and boot
+            fences; Windows same-instant image ordering is handled by the shared ExecLineage at its lookup seams.
+            """
+            if os_family == "windows":
+                roots = {str(process_guid).casefold()} if usable_key(process_guid) else set()
+                related: dict[str, TypedEvent] = {}
+                candidates = sorted(anchor.events + events, key=lambda item: (item.ts, item.id))
+                if roots:
+                    changed = True
+                    while changed:
+                        changed = False
+                        for candidate in candidates:
+                            if candidate.family != "process_exec" or candidate.host != anchor.host:
+                                continue
+                            guid = str(candidate.get("process.guid") or "").casefold()
+                            parent = str(candidate.get("process.parent.guid") or "").casefold()
+                            if guid in roots or parent in roots:
+                                if guid and guid not in roots:
+                                    roots.add(guid)
+                                    changed = True
+                                if candidate.id not in {event.id for event in anchor.events}:
+                                    related[candidate.id] = candidate
+                    return Selection(list(related.values()), [])
+                # PID fallback is bounded by the closest termination/boot fence around the anchor.
+                lower_fences: list[TypedEvent] = []
+                upper_fences: list[TypedEvent] = []
+                unresolved: list[str] = []
+                anchored = set(anchor.event_ids)
+                anchor_records = [
+                    candidate for candidate in anchor.events
+                    if candidate.ts == anchor.ts and candidate.get("process.pid") == pid
+                ]
+                anchor_record = next(
+                    (candidate for candidate in anchor_records if candidate.id in anchored),
+                    anchor_records[0] if len(anchor_records) == 1 else None,
+                )
+                for candidate in candidates:
+                    fence = candidate.get("process.fence")
+                    same_pid = candidate.get("process.pid") == pid
+                    if fence == "boot" or (fence == "termination" and same_pid):
+                        if candidate.ts < anchor.ts:
+                            lower_fences.append(candidate)
+                            continue
+                        if candidate.ts > anchor.ts:
+                            upper_fences.append(candidate)
+                            continue
+                        relative = (_relative_event_order(candidate, anchor_record)
+                                    if anchor_record is not None else None)
+                        if relative is None:
+                            unresolved.append(
+                                f"lineage undecided: Windows PID {fence} at the anchor instant cannot be ordered "
+                                "without record_id in the same computer/channel"
+                            )
+                        elif relative <= 0:
+                            lower_fences.append(candidate)
+                        else:
+                            upper_fences.append(candidate)
+
+                def inside_fences(candidate: TypedEvent) -> bool:
+                    if not (window.start <= candidate.ts < window.end):
+                        return False
+                    for fence in lower_fences:
+                        relative = _relative_event_order(candidate, fence)
+                        if relative is None:
+                            unresolved.append(
+                                "lineage undecided: a process event and its same-instant Windows PID fence "
+                                "cannot be ordered outside one computer/channel record_id sequence"
+                            )
+                        elif relative <= 0:
+                            return False
+                    for fence in upper_fences:
+                        relative = _relative_event_order(candidate, fence)
+                        if relative is None:
+                            unresolved.append(
+                                "lineage undecided: a process event and its same-instant Windows PID fence "
+                                "cannot be ordered outside one computer/channel record_id sequence"
+                            )
+                        elif relative >= 0:
+                            return False
+                    return True
+
+                return Selection([
+                    candidate for candidate in candidates
+                    if candidate.family == "process_exec" and candidate.host == anchor.host
+                    and (candidate.get("process.pid") == pid or candidate.get("process.ppid") == pid)
+                    and candidate.id not in anchored and inside_fences(candidate)
+                ], unresolved)
             # A record of another boot is another process. The link retrieves audit records without their journald
             # copies; their boot comes from the hunt's boot-interval map. One the map cannot place (a gap between
             # boots, near a boot's edge) is kept: a pid reused after a reboot cannot be excluded for it.
@@ -492,25 +659,51 @@ class LinkFetcher:
                     boot = boot or found.record.boot
             return Selection(list(related.values()), unknown)
 
-        reason = _host_reason(anchor) or (None if usable_key(pid) else "required typed key is unusable")
-        return (key, "observed", intents if reason is None else [],
-                lambda event: event.family == "process_exec", select, reason, [])
+        reason = _host_reason(anchor) or (None if process_key else "required typed key is unusable")
+        pid_fallback = os_family == "windows" and not usable_key(process_guid)
+        strength = ("observed" if not pid_fallback
+                    or self.executor.process_termination_attested(anchor.host) else "inferred")
+        return (key, strength, intents if reason is None else [],
+                lambda event: event.family in families, select, reason, [])
 
     def _session(self, anchor: LinkAnchor, window: LinkWindow):
-        session_id, auid = _value(anchor, "process.session_id"), _value(anchor, "process.auid")
+        os_family = _os_family(anchor)
+        session_field = "auth.session_key" if os_family == "windows" else "process.session_id"
+        session_id, auid = _value(anchor, session_field), _value(anchor, "process.auid")
         boot_id = _boot(anchor)
-        key = {"host": anchor.host, "process.session_id": session_id, "process.auid": auid,
-               "host.boot.id": boot_id, **_victim(anchor)}
+        key = {"host": anchor.host, session_field: session_id, **_victim(anchor)}
+        if os_family != "windows":
+            key.update({"process.auid": auid, "host.boot.id": boot_id})
         reason = _host_reason(anchor) or (None if usable_key(session_id) else "required typed key is unusable")
-        intents = self._host_intents(window, ("linux.audit",), anchor.host) if reason is None else []
+        session_families = {"auth", "system_state"} if os_family == "windows" else {"process_exec"}
+        intents = self._host_intents(window, session_families, anchor.host, os_family) if reason is None else []
 
         def matches(event):
-            return (event.host == anchor.host and event.get("process.session_id") == session_id
+            if os_family == "windows":
+                return event.host == anchor.host and event.get("auth.session_key") == session_id
+            return (event.host == anchor.host and event.get(session_field) == session_id
                     and (auid is None or event.get("process.auid") == auid)
                     and not boots_conflict(boot_id, boot_of(event)))
 
-        return (key, "observed", intents, matches,
-                lambda events: [event for event in events if matches(event)], reason, [])
+        def select(events):
+            if os_family != "windows":
+                return [event for event in events if matches(event)]
+            candidates = sorted(anchor.events + events, key=lambda item: (item.ts, item.id))
+            lower, upper = window.start, window.end
+            for event in candidates:
+                if event.host != anchor.host or event.get("process.fence") != "boot":
+                    continue
+                if event.ts <= anchor.ts:
+                    lower = max(lower, event.ts)
+                elif event.ts < upper:
+                    upper = event.ts
+            return [event for event in candidates if lower <= event.ts < upper and matches(event)]
+
+        strength = ("observed" if os_family != "windows"
+                    or self.executor.system_log_attested(anchor.host) else "inferred")
+        retain = (lambda event: event.family in session_families) if os_family == "windows" else matches
+        return (key, strength, intents, retain,
+                select, reason, [])
 
     def _flow(self, anchor: LinkAnchor, window: LinkWindow):
         community_id = _value(anchor, "network.community_id")
@@ -585,7 +778,7 @@ class LinkFetcher:
             if not intents:
                 reason = "key not pushable; full-dataset scan refused"
         else:
-            intents = self._host_intents(window, ("linux.audit",), anchor.host)
+            intents = self._host_intents(window, {"net_socket"}, anchor.host, _os_family(anchor))
 
         def matches(event):
             return (event.family == "net_socket" and (any_host or event.host == anchor.host)
@@ -636,26 +829,36 @@ class LinkFetcher:
                 planning_coverage)
 
     def _account(self, anchor: LinkAnchor, window: LinkWindow):
-        field = "user.name" if _value(anchor, "user.name") is not None else "process.auid"
+        os_family = _os_family(anchor)
+        fields = (["auth.target_account", "user.entity_id"] if os_family == "windows" else [
+            "user.name" if _value(anchor, "user.name") is not None else "process.auid"
+        ])
+        field = next((name for name in fields if _value(anchor, name) is not None), fields[-1])
         account = _value(anchor, field)
         key = {field: account, "actor": "inferred"}
+        if os_family == "windows" and not _portable_windows_account(account):
+            return (key, "inferred", [], lambda _event: False, lambda _events: [],
+                    "cross-host account identity is well-known or machine-generic", [])
         if not usable_key(account):
             return (key, "inferred", [], lambda _event: False, lambda _events: [],
                     "required typed key is unusable", [])
         forward = LinkWindow(label=window.label, start=max(anchor.ts, window.start), end=window.end)
         intents = []
         for target, contract in sorted(self.executor.contracts.items()):
-            if _is_network(target, contract) or not _supports(contract, field):
+            if _is_network(target, contract):
                 continue
-            intents.append(SearchIntent(
-                kind="raw", target=target, window=Window(start=forward.start, end=forward.end),
-                filters=[Predicate(field=field, op="eq", value=account)],
-                max_records=MAX_PIVOT_RECORDS, purpose="expansion:account",
-            ))
+            for query_field in fields:
+                if not _supports(contract, query_field):
+                    continue
+                intents.append(SearchIntent(
+                    kind="raw", target=target, window=Window(start=forward.start, end=forward.end),
+                    filters=[Predicate(field=query_field, op="eq", value=account)],
+                    max_records=MAX_PIVOT_RECORDS, purpose="expansion:account",
+                ))
 
         def matches(event):
-            return (event.ts >= anchor.ts and event.host != anchor.host
-                    and event.get(field) == account)
+            values = {event.get(name) for name in fields}
+            return event.ts >= anchor.ts and event.host != anchor.host and account in values
 
         reason = None if intents else "key not pushable; full-dataset scan refused"
         return (key, "inferred", intents, matches,
@@ -670,7 +873,11 @@ class LinkFetcher:
             entity={"kind": "host", "value": anchor.host, "role": "host"},
             start=max(anchor.ts, window.start), end=window.end,
         ))
-        intents = self.executor._intents(request)
+        os_family = _os_family(anchor)
+        intents = [
+            intent for intent in self.executor._intents(request)
+            if os_family is None or self.executor.contracts[intent.target].os_family == os_family
+        ]
         matches = lambda event: event.host == anchor.host and event.ts >= anchor.ts
         reason = None if intents else "key not pushable; full-dataset scan refused"
         return (key, "inferred", intents, matches,

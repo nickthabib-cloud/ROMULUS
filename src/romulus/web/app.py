@@ -20,6 +20,7 @@ from romulus.decide.policy import LANE_ORDER
 from romulus.hunt.run import open_repo
 from romulus.report.manifest import internal_networks_view, investigations_for_hunt, publish_revision
 from romulus.report.markdown import render as render_md
+from romulus.site import load_site_facts
 from romulus.web.auth import RateLimiter, Sessions, csrf_ok, verify
 
 HERE = Path(__file__).resolve().parent
@@ -34,6 +35,7 @@ SECURITY_HEADERS = {
 
 
 def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
+    load_site_facts(s.home)
     repo = open_repo(s)
     sessions = Sessions(s.secret_key.get_secret_value())
     limiter = RateLimiter()
@@ -238,7 +240,7 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         c = repo.candidate(cid)
         if c is None:
             raise HTTPException(404)
-        events = repo.events_by_ids(c["event_ids"][:20])
+        events = repo.citation_events(c["hunt_id"], c["event_ids"][:20])
         raw_ids = [rid for e in events for rid in e["raw_ids"]]
         raws = repo.raw_records(raw_ids[:40])
         gates = dict(c["gate_results"])

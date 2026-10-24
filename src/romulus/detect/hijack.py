@@ -283,6 +283,7 @@ def _written(state: _File) -> bool:
 
 
 class NonRootWriteRootExecutedFile(Playbook):
+    os_families = ("linux",)
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.nonroot_write_root_executed_file"
     version = "7"

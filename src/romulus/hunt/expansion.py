@@ -116,7 +116,7 @@ class ExpansionEngine:
     def _events(self, ids: list[str]) -> list[TypedEvent]:
         """Stored records, with the boot the hunt's map places them in when they carry none (a sweep record read
         near its partition's end, before later observations, may have been stored without one)."""
-        rows = self.repo.events_by_ids(ids)
+        rows = self.repo.citation_events(self.hunt_id, ids)
         events = [TypedEvent.model_validate(row["event"]) for row in rows]
         self.boots.fill(events, rederive=True)
         return sorted(events, key=lambda event: (event.ts, event.id))

@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, ClassVar, Literal
 
 from romulus.detect.bounded import Limit
-from romulus.evidence.typed import Outcome, TypedEvent
+from romulus.evidence.typed import Outcome, TypedEvent, event_os_family
 
 SEVERITIES = ("critical", "high", "medium", "low", "info")
 LANES = ("urgent", "high", "lead", "context")
@@ -92,6 +92,11 @@ class Playbook:
     version: ClassVar[str] = "1"
     title: ClassVar[str]
     families: ClassVar[tuple[str, ...]]
+    # Cross-platform by default. OS-specific rules narrow this without relying on dataset or target names.
+    os_families: ClassVar[tuple[str, ...]] = ("linux", "windows")
+    # An OS-specific rule may narrow the catalog classes needed for a complete Windows negative. Empty means
+    # every inventoried class that can produce one of `families`.
+    windows_event_classes: ClassVar[tuple[tuple[str, str, int], ...]] = ()
     required_fields: ClassVar[tuple[str, ...]] = ()
     claim_type: ClassVar[str] = "observed_action"
     severity: ClassVar[str] = "medium"
@@ -119,6 +124,8 @@ class Playbook:
     def __init__(self) -> None:
         self.evaluated = 0
         self.missing_required = 0
+        self.os_applicable = 0
+        self._events_pre_scoped = False
         self.direction_assumed = 0
         # Records a full state budget kept from evaluation (see romulus.detect.bounded): the sweep makes the
         # partition's coverage partial with the limit named, exactly as for a record missing a required field.
@@ -148,6 +155,15 @@ class Playbook:
         """Every state budget this playbook reached, worded for the coverage ledger."""
         return [self.limits[name].reason() for name in sorted(self.limits)]
 
+    def event_in_os_scope(self, event: TypedEvent) -> bool:
+        os_family = event_os_family(event)
+        return os_family == "unknown" or os_family in self.os_families
+
+    def scope_partition(self, events: list[TypedEvent]) -> list[TypedEvent]:
+        """The records this rule may evaluate in one sweep partition, before required-field checks."""
+        return [event for event in events
+                if event.family in self.families and self.event_in_os_scope(event)]
+
     def applicable(self, events: list[TypedEvent]) -> list[TypedEvent]:
         """Events of the right family. Events missing required fields are counted (they make a
         no-match unresolvable for those records) and excluded from evaluation."""
@@ -155,6 +171,10 @@ class Playbook:
         for e in events:
             if e.family not in self.families:
                 continue
+            if not self._events_pre_scoped:
+                if not self.event_in_os_scope(e):
+                    continue
+                self.os_applicable += 1
             if any(e.get(f) in (None, "", [], {}) for f in self.required_fields):
                 self.missing_required += 1
                 continue
@@ -165,6 +185,28 @@ class Playbook:
             out.append(e)
         self.evaluated += len(out)
         return out
+
+    def consume_partition(self, events: list[TypedEvent]) -> list[Match]:
+        """Consume a sweep partition after applying this playbook's OS scope exactly once.
+
+        Direct calls to ``consume`` retain the public playbook behavior used by focused rule tests. The sweep
+        uses this wrapper so custom and context ``consume`` implementations receive only in-scope records and
+        the common ``applicable`` helper does not repeat the same OS classification.
+        """
+        return self.consume_scoped_partition(self.scope_partition(events))
+
+    def consume_scoped_partition(self, scoped: list[TypedEvent]) -> list[Match]:
+        """Consume an already OS- and family-scoped partition.
+
+        The sweep keeps ``scoped`` so a bounded-state failure can count exactly the records the rule did not
+        evaluate; direct callers use :meth:`consume_partition`.
+        """
+        self.os_applicable += len(scoped)
+        self._events_pre_scoped = True
+        try:
+            return self.consume(scoped)
+        finally:
+            self._events_pre_scoped = False
 
     def consume(self, events: list[TypedEvent]) -> list[Match]:
         """Direct playbooks return matches immediately (publishable before the hunt ends)."""

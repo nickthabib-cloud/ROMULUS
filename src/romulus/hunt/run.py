@@ -22,6 +22,7 @@ from romulus.hunt.site_networks import (
 )
 from romulus.hunt.stage import clear_stale_stages
 from romulus.hunt.sweep import Sweep
+from romulus.site import ensure_site_unchanged, load_site_facts
 from romulus.sources.es import ElasticClient
 from romulus.sources.models import Window
 from romulus.sources.profile import build_profile
@@ -72,8 +73,10 @@ def create_hunt(s: Settings, start: datetime, end: datetime, created_by: str, st
             prof, _contract = build_profile(client, target)
             profiles[target] = prof.model_dump(mode="json")
             targets.append(target)
+    site_facts = load_site_facts(s.home)
     manifest = build_manifest(s, window, original_input or {"start": start.isoformat(), "end": end.isoformat()},
-                              style, targets, profiles, hypothesis, ai_agent=ai_agent_entry(s, ai_agent))
+                              style, targets, profiles, hypothesis, ai_agent=ai_agent_entry(s, ai_agent),
+                              site_facts=site_facts)
     manifest["expansion"] = {
         "enabled": expand, "max_depth": 3, "per_anchor_source_queries": PER_ANCHOR_SOURCE_QUERIES,
         "max_source_queries": s.expansion_max_source_queries, "wall_clock_minutes": s.expansion_wall_clock_minutes,
@@ -93,6 +96,15 @@ def _contracts(s: Settings, repo: Repo, hunt: dict, client: ElasticClient,
     for target in manifest["targets"]:
         profile, contract = build_profile(client, target)
         recorded = manifest.get("source_profiles", {}).get(target)
+        if hunt.get("_resume_scope_check") and recorded and (
+            recorded.get("role") not in (None, profile.role)
+            or recorded.get("os_family") not in (None, contract.os_family)
+        ):
+            raise RuntimeError(
+                f"source role/OS changed for {target}: manifest "
+                f"{recorded.get('role')}/{recorded.get('os_family')}, now "
+                f"{profile.role}/{contract.os_family}; start a new hunt instead of resuming"
+            )
         if recorded and profile.id != recorded["id"]:
             repo.audit("system", "source_profile_changed", hunt_id, {
                 "target": target, "now": profile.id, "manifest": recorded["id"],
@@ -223,6 +235,7 @@ def _run_expansion(s: Settings, repo: Repo, client: ElasticClient, hunt: dict, c
             target: set(profile.get("datasets", {}))
             for target, profile in manifest.get("source_profiles", {}).items()
         },
+        site_facts=ensure_site_unchanged(s.home, manifest.get("site")),
     )
     if "wall_clock_minutes" in config:
         # Expansion's own time limit, so a long sweep never leaves it none. A resumed expansion has what earlier runs
@@ -306,6 +319,7 @@ def _run_investigator(s: Settings, repo: Repo, client: ElasticClient, hunt_id: s
             target: set(profile.get("datasets", {}))
             for target, profile in hunt["manifest"].get("source_profiles", {}).items()
         },
+        site_facts=ensure_site_unchanged(s.home, hunt["manifest"].get("site")),
     )
 
     return Investigator(
@@ -321,6 +335,7 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool | None = None, on_candidate=
     if hunt is None:
         raise KeyError(hunt_id)
     initial_manifest = hunt["manifest"]
+    site_facts = ensure_site_unchanged(s.home, initial_manifest.get("site"))
     if expand is not None and bool((initial_manifest.get("expansion") or {}).get("enabled", True)) != expand:
         raise ValueError("expansion mode is immutable after hunt creation")
     # the hunt's internal-network definition, installed once before the sweep
@@ -351,6 +366,7 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool | None = None, on_candidate=
     clear_stale_stages(stage_dir)
     sweep = Sweep(
         repo, client, hunt_id, window, contracts, on_candidate, heartbeat=heartbeat, stage_dir=stage_dir,
+        site_facts=site_facts,
     )
     try:
         for target in m["targets"]:
@@ -421,6 +437,7 @@ def resume_hunt(s: Settings, hunt_id: str, agent_mode: str | None = None, ai_age
     if hunt is None:
         raise KeyError(hunt_id)
     recorded_manifest = hunt.get("manifest") or {}
+    ensure_site_unchanged(s.home, recorded_manifest.get("site"))
     recorded = recorded_manifest.get("normalizer")
     packets_recorded = recorded_manifest.get("packet_normalizer")
     if packets_recorded and packets_recorded != PACKET_NORMALIZER:
@@ -452,7 +469,7 @@ def resume_hunt(s: Settings, hunt_id: str, agent_mode: str | None = None, ai_age
     )
     client = ElasticClient(s)
     try:
-        contracts = _contracts(s, repo, hunt, client, owner_token)
+        contracts = _contracts(s, repo, {**hunt, "_resume_scope_check": True}, client, owner_token)
     except Exception as exc:
         stop_reason = f"source preflight error: {exc}"
         repo.audit("system", "hunt.agent_summary", hunt_id, {

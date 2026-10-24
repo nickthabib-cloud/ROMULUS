@@ -15,6 +15,7 @@ from romulus.detect import correlation, dns, flows, host, netdef, sessions, tls
 from romulus.detect.netdef import SiteNetworks
 from romulus.evidence.normalize import normalize_hits
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
+from romulus.evidence.windows_catalog import SECURITY, SYSMON, SYSMON_CHANNEL
 from tests.test_dns_rules import rec
 
 SITE = SiteNetworks.from_lists(["198.51.100.0/24", "10.0.0.0/8"], ["10.50.0.0/16"])
@@ -67,6 +68,39 @@ def test_the_baseline_key_context_reads_the_installed_definition(configured):
     assert isinstance(SPEC_BY_ID["bl.ext_dest"].keys(flow, KeyContext()), NotApplicable)
 
 
+def test_windows_sysmon_and_security_endpoints_use_the_installed_site_definition(configured):
+    events, skips, errors = normalize_hits([
+        _windows_hit(3, provider=SYSMON, channel=SYSMON_CHANNEL, data={
+            "SourceIp": INSIDE_PUBLIC, "DestinationIp": PARTNER, "SourcePort": "50123",
+            "DestinationPort": "443", "Protocol": "tcp", "Initiated": "true",
+        }),
+        _windows_hit(4624, provider=SECURITY, channel="Security", data={
+            "IpAddress": PARTNER, "IpPort": "50124", "LogonType": "3",
+        }),
+    ])
+
+    assert skips == {} and errors == []
+    socket, logon = events
+    assert host.is_internal(ipaddress.ip_address(socket.get("source.ip")))
+    assert correlation.external(socket.get("destination.ip"))
+    assert correlation.external(logon.get("source.ip"))
+
+
+def test_direction_assumption_is_recorded_for_a_windows_network_event():
+    netdef.install(SiteNetworks.default())
+    event = ev(
+        "net_session", host_name="ws01", source__ip=ELSEWHERE, destination__ip="192.0.2.50",
+        source__port=50123, destination__port=443, network__transport="tcp",
+        network__community_id="1:windows=", flow__start=T0.isoformat(),
+        flow__end=(T0 + timedelta(minutes=35)).isoformat(),
+    )
+    event.normalizer = "windows-ecs@2"
+    rule = sessions.LongExternalConnection()
+
+    assert run(rule, [event]) == []
+    assert rule.direction_assumed == 1
+
+
 # ---- a public-space site through rules of several families ------------------------------------------------
 
 def _arkime(_id, src, dst, *, seconds=1900, dport=443):
@@ -82,6 +116,15 @@ def _sessions(*hits):
     events, skips, errors = normalize_hits(list(hits))
     assert errors == [] and skips == {}
     return events
+
+
+def _windows_hit(event_id, *, provider, channel, data):
+    return {"_index": "logs-windows", "_id": f"windows-{event_id}", "_source": {
+        "@timestamp": T0.isoformat(), "agent": {"type": "winlogbeat"},
+        "winlog": {"channel": channel, "provider_name": provider, "event_id": event_id,
+                   "computer_name": "WS01.example.test", "record_id": event_id + 1000,
+                   "event_data": data},
+    }}
 
 
 def test_session_rule_long_boundary_connection_follows_the_site(configured):
