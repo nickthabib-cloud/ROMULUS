@@ -279,6 +279,7 @@ class StateBudget:
         self.accounts.append(account)
         if yields:
             self.yielding = True
+            self._recalm()
         if not self.stores:
             self._repool()              # unplanned (a rule driven alone): floors follow the stores seen so far
         return account

@@ -86,17 +86,21 @@ from tests import throughput_fixture as tf
 # so anchors, links, tasks, expansion and the context findings are those of the reference; the manifest's findings
 # and incident graph follow the claims and citations, and the extra cited records add their events and raw copies.
 # Every lane is unchanged.
+# Each count a claim states is matched by how many of exactly that count are cited: the ten protocol/port mismatch
+# findings that give per-sensor totals say how many of each sensor's records are cited, and the connect() link with
+# one call says its one record is cited (candidates claims, and the manifest's findings that carry them). Candidate
+# ids, citations, lanes and everything else are unchanged.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
     "audit": "9ff1e6bb2670cb97af97a418aac6138d53d986bd1f0f1746c846ab209ea7519f",
-    "candidates": "e879c7436280475f0cbc307139d8e9a2470db6ae8ffc9d1311b13d283814f94f",
+    "candidates": "85aa8b8e1a1c218be7c2cd434bbb0097d5aab3c380ce138ea63cb55de9271fcb",
     "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
     "event_citations": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     "event_entities": "cf18bb6ae3e613d6cb411550ad8fa0e61c4070c55b24c85e174dcfe2add2841e",
     "events": "c9a4a79653fa4a88195d9f0126cc0c60a9b6eba2679d4c76a26abc514f560f80",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "797137953f5a643e0297b450047aeec3fa79c4cb386118f10d0ec00d337fd023",
-    "manifest": "fc470c6eb757dd972e9ef9477c3ea33b4ce22abafeb215179d76317d203a286b",
+    "manifest": "c41454498ba57b14e4afa6f2b9502602141ee48132f83855bf236d934e9e6b06",
     "raw": "80a0409b9be30979db49d2050bf90b7a4ed6dd2014360e1a21151df3756d0329",
     "rule_cells": "84de97e40b40cbaed6ac7c42678577553b732e5c19a90a33db10501039fb34a9",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",

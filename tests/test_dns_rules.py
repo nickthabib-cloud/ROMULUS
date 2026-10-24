@@ -280,7 +280,8 @@ def test_reverse_sweep_of_an_internal_block_is_reported_with_its_range():
     m = out[0]
     assert m.proposed_lane == "lead" and m.severity == "medium" and m.group_key == CLIENT
     assert "256 distinct reverse-lookup name(s)" in m.claim
-    assert "10.30.4.0/24 (256 address(es), 10.30.4.0 – 10.30.4.255)" in m.claim
+    assert ("10.30.4.0/24 (256 address(es), 10.30.4.0 – 10.30.4.255; 21 of the 256 are in cited records)" in m.claim
+            and "21 of the 256 question records are cited" in m.claim)
     assert "shape of a reverse-DNS sweep" in m.claim and "do not show whether names were returned" in m.claim
     assert "T1018" in m.notes[0]
 

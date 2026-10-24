@@ -237,8 +237,11 @@ class SuricataAlertStack(_Grouped):
             else:
                 lane, severity = "lead", "medium"
             names = "; ".join(f"'{s[1]}' (sid {s[0]})" for s in named[:3])
-            cited_sigs = sorted({e.get("alert.signature_id") for e in evs if e.get("alert.signature_id") is not None},
-                                key=str)
+            # the signatures of the cited alerts, ordered as the claim names signatures: by name, then id
+            cited_sigs = [sid for sid, _name in sorted(
+                {(e.get("alert.signature_id"), e.get("alert.signature")) for e in evs
+                 if e.get("alert.signature_id") is not None}, key=lambda s: (str(s[1]), str(s[0])))]
+            cited_sigs = list(dict.fromkeys(cited_sigs))
             in_cited = (f" All {len(sigs)} signatures are in cited alerts." if len(cited_sigs) >= len(sigs) else
                         f" {len(cited_sigs)} of the {len(sigs)} signatures are in cited alerts.")
             claim = (f"Suricata raised {n} '{cat}' alert(s) at severity {sev} across {len(sigs)} distinct signature(s) "
