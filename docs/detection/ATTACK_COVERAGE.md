@@ -455,6 +455,11 @@ A technique is covered only by a rule that explicitly declares that ATT&CK id.
 
 Active rules without an ATT&CK mapping or an explicit exemption:
 
+- `bl.cmd_shape`
+- `bl.exec_pair`
+- `bl.exec_path`
+- `bl.ext_dest`
+- `bl.ssh_tuple`
 - `ioc.indicator_match`
 - `net.suricata_alert_stack`
 
@@ -464,6 +469,57 @@ Invalid mappings are excluded from coverage:
 - `host.firewall_rule_change_command` → `T1562.004` (revoked → use `T1686`)
 
 ## Rule card summaries
+
+<a id="rule-bl-cmd-shape"></a>
+### `bl.cmd_shape` — Command shape baseline
+
+- Version: `1`; status: `active`
+- Kind: `baseline`; lane: `lead`; severity: `info`
+- Coverage strength: **positive-only**
+- ATT&CK: —
+- Telemetry families: process_exec
+- Required typed fields: —
+- Positive-only reason: command-shape baselines publish positive deviations only
+
+<a id="rule-bl-exec-pair"></a>
+### `bl.exec_pair` — Parent and child executable baseline
+
+- Version: `1`; status: `active`
+- Kind: `baseline`; lane: `lead`; severity: `info`
+- Coverage strength: **negative-capable**
+- ATT&CK: —
+- Telemetry families: process_exec
+- Required typed fields: —
+
+<a id="rule-bl-exec-path"></a>
+### `bl.exec_path` — Executable path baseline
+
+- Version: `1`; status: `active`
+- Kind: `baseline`; lane: `lead`; severity: `info`
+- Coverage strength: **negative-capable**
+- ATT&CK: —
+- Telemetry families: process_exec
+- Required typed fields: —
+
+<a id="rule-bl-ext-dest"></a>
+### `bl.ext_dest` — External destination baseline
+
+- Version: `1`; status: `active`
+- Kind: `baseline`; lane: `lead`; severity: `info`
+- Coverage strength: **negative-capable**
+- ATT&CK: —
+- Telemetry families: dns_query<br>net_flow<br>net_session<br>tls_session
+- Required typed fields: —
+
+<a id="rule-bl-ssh-tuple"></a>
+### `bl.ssh_tuple` — SSH tuple baseline
+
+- Version: `1`; status: `active`
+- Kind: `baseline`; lane: `lead`; severity: `info`
+- Coverage strength: **negative-capable**
+- ATT&CK: —
+- Telemetry families: auth
+- Required typed fields: —
 
 <a id="rule-context-credential-access"></a>
 ### `context.credential_access` — Credential-store read in an anchored session or lineage
