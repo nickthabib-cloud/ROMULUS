@@ -71,11 +71,15 @@ def test_grouped_rules_stage_their_examples_and_hold_only_ids():
     rule.consume([flow(SCANNER, 40000 + p, TARGET, p, T0 + timedelta(seconds=p)) for p in range(1, 40)])
     assert rule.staged and rule.retained_events() == []
     staged = rule.drain_staged()
-    assert len(staged) == network.EXAMPLE_LIMIT
+    # the first examples (the named ports' records are among them), and the record that bounds the span's end, held
+    held, released = rule.drain_bounds()
+    assert len({e.id for e in staged}) == network.EXAMPLE_LIMIT + 1 and released == []
+    assert sorted(held) == sorted({staged[0].id, staged[-1].id}) and staged[-1].get("destination.port") == 39
     assert all(isinstance(i, str) for _key, state in rule.groups.items() for i in state.held)
     rule.bind_loader(lambda ids: [e for e in staged if e.id in ids])
     [m] = rule.finalize()
     assert m.proposed_lane == "lead" and len(m.events) == network.EXAMPLE_LIMIT
+    assert "20 of the 39 flow records are cited, including the first and the last." in m.claim
 
 
 def scenario_slow_probes():
@@ -228,5 +232,6 @@ def test_web_scan_counts_every_url_group_without_a_shared_budget(monkeypatch, tm
                          http__response__status_code=404, url__original=f"/{k}/a{i}") for i in range(250)]
     rule = small(monkeypatch, network.WebScanBurst, tmp_path)
     out = run_batches(rule, [events[:250], events[250:]])
-    assert [m.claim.split("across ")[1] for m in out] == ["250+ distinct URLs."] * 2
+    assert [m.claim.split("across ")[1] for m in out] == [
+        "250+ distinct URLs. 20 of the 250 requests are cited, including the first and the last."] * 2
     assert rule.limit_reasons() == []
