@@ -1111,45 +1111,16 @@ class Repo:
                     link_rows.append({"event_id": e.id, "entity_id": eid, "role": role})
             _upsert_ignore(c, t.raw_record, raw_rows, ["id"])
             _upsert_ignore(c, t.typed_event, ev_rows, ["id"])
-            foreign = {event_id: row for event_id, row in existing.items() if row["hunt_id"] != hunt_id}
-            if foreign:
-                self._merge_citation_raw(c, hunt_id, events, foreign)
-            self._merge_stored_raw(
-                c, {event_id: row for event_id, row in existing.items() if row["hunt_id"] == hunt_id}, events,
-            )
+            if existing:
+                self._merge_citation_raw(c, hunt_id, events, existing)
             self._fill_boot(c, events)
             _upsert_ignore(c, t.entity, list(ent_rows.values()), ["id"])
             _upsert_ignore(c, t.event_entity, link_rows, ["event_id", "entity_id", "role"])
 
     @staticmethod
-    def _merge_stored_raw(c, existing: dict[str, dict], events: list) -> None:
-        """Attach later source copies to an existing stable event without changing its owner hunt."""
-        for event in events:
-            row = existing.get(event.id)
-            if row is None:
-                continue
-            stored = dict(row["event"])
-            stored_raw = list(stored.get("raw") or [])
-            known = {(item.get("target"), item.get("native_id")) for item in stored_raw}
-            additions = [raw.model_dump(mode="json") for raw in event.raw
-                         if (raw.target, raw.native_id) not in known]
-            if not additions:
-                continue
-            merged_ids = list(dict.fromkeys([
-                *(row["raw_ids"] or []),
-                *(raw_id(raw.target, raw.native_id) for raw in event.raw),
-            ]))
-            stored["raw"] = [*stored_raw, *additions]
-            c.execute(t.typed_event.update().where(t.typed_event.c.id == event.id).values(
-                event=stored, raw_ids=merged_ids,
-            ))
-            row["event"] = stored
-            row["raw_ids"] = merged_ids
-
-    @staticmethod
-    def _merge_citation_raw(c, hunt_id: str, events: list, foreign: dict[str, dict]) -> None:
-        """Snapshot and merge only this hunt's raw copies of a foreign stable event."""
-        ids = sorted(foreign)
+    def _merge_citation_raw(c, hunt_id: str, events: list, existing: dict[str, dict]) -> None:
+        """Keep the stable event immutable and snapshot only hunt-specific raw-reference differences."""
+        ids = sorted(existing)
         overlays = {
             row["event_id"]: dict(row)
             for row in c.execute(select(t.event_citation).where(
@@ -1157,40 +1128,69 @@ class Repo:
                 t.event_citation.c.event_id.in_(ids),
             )).mappings()
         }
+        prior_citations = set(c.execute(select(t.event_entity.c.event_id).join(
+            t.entity, t.entity.c.id == t.event_entity.c.entity_id,
+        ).where(
+            t.entity.c.hunt_id == hunt_id,
+            t.event_entity.c.event_id.in_(ids),
+        )).scalars())
+        incoming: dict[str, tuple[Any, list]] = {}
         for event in events:
-            global_row = foreign.get(event.id)
+            if event.id not in existing:
+                continue
+            state = incoming.setdefault(event.id, (event, []))
+            known = {(raw.target, raw.native_id) for raw in state[1]}
+            for raw in event.raw:
+                key = (raw.target, raw.native_id)
+                if key not in known:
+                    state[1].append(raw)
+                    known.add(key)
+        for event_id, (event, incoming_raw) in incoming.items():
+            global_row = existing.get(event_id)
             if global_row is None:
                 continue
-            row = overlays.get(event.id)
+            row = overlays.get(event_id)
             if row:
                 stored = dict(row["event"])
                 stored_raw = list(stored.get("raw") or [])
                 known = {(item.get("target"), item.get("native_id")) for item in stored_raw}
-                additions = [raw.model_dump(mode="json") for raw in event.raw
+                additions = [raw.model_dump(mode="json") for raw in incoming_raw
                              if (raw.target, raw.native_id) not in known]
                 if not additions:
                     continue
                 stored["raw"] = [*stored_raw, *additions]
                 raw_ids = list(dict.fromkeys([
                     *(row.get("raw_ids") or []),
-                    *(raw_id(raw.target, raw.native_id) for raw in event.raw),
+                    *(raw_id(raw.target, raw.native_id) for raw in incoming_raw),
                 ]))
                 c.execute(t.event_citation.update().where(
                     t.event_citation.c.hunt_id == hunt_id,
-                    t.event_citation.c.event_id == event.id,
+                    t.event_citation.c.event_id == event_id,
                 ).values(event=stored, raw_ids=raw_ids))
             else:
-                # This hunt's first overlay starts from what this hunt actually retrieved,
-                # never from the owning hunt's citation set.
+                incoming_ids = list(dict.fromkeys(
+                    raw_id(raw.target, raw.native_id) for raw in incoming_raw
+                ))
+                stable_ids = list(global_row.get("raw_ids") or [])
+                if set(incoming_ids) == set(stable_ids):
+                    continue
+                # A prior identical observation needed no overlay; when this hunt later retrieves another copy,
+                # its exact history is the stable set plus that copy. A first differing observation starts only
+                # from what this hunt actually retrieved, never from the owning hunt's citation set.
                 stored = event.model_dump(mode="json")
-                raw_ids = list(dict.fromkeys(
-                    raw_id(raw.target, raw.native_id) for raw in event.raw
-                ))
+                raw_ids = incoming_ids
+                if global_row["hunt_id"] == hunt_id or event_id in prior_citations:
+                    stable_raw = list((global_row.get("event") or {}).get("raw") or [])
+                    known = {(item.get("target"), item.get("native_id")) for item in stable_raw}
+                    additions = [raw.model_dump(mode="json") for raw in incoming_raw
+                                 if (raw.target, raw.native_id) not in known]
+                    stored["raw"] = [*stable_raw, *additions]
+                    raw_ids = list(dict.fromkeys([*stable_ids, *incoming_ids]))
                 c.execute(t.event_citation.insert().values(
-                    hunt_id=hunt_id, event_id=event.id, event=stored, raw_ids=raw_ids,
+                    hunt_id=hunt_id, event_id=event_id, event=stored, raw_ids=raw_ids,
                 ))
-            overlays[event.id] = {
-                "hunt_id": hunt_id, "event_id": event.id, "event": stored, "raw_ids": raw_ids,
+            overlays[event_id] = {
+                "hunt_id": hunt_id, "event_id": event_id, "event": stored, "raw_ids": raw_ids,
             }
 
     def merge_evidence_raw(self, hunt_id: str, events: Iterable, raw_sources: dict[str, dict], *,
@@ -1222,12 +1222,7 @@ class Repo:
                             "first_task_id": None, "retrieved_at": utcnow(),
                         })
             _upsert_ignore(c, t.raw_record, raw_rows, ["id"])
-            foreign = {event_id: row for event_id, row in existing.items() if row["hunt_id"] != hunt_id}
-            if foreign:
-                self._merge_citation_raw(c, hunt_id, events, foreign)
-            self._merge_stored_raw(
-                c, {event_id: row for event_id, row in existing.items() if row["hunt_id"] == hunt_id}, events,
-            )
+            self._merge_citation_raw(c, hunt_id, events, existing)
 
     @staticmethod
     def _fill_boot(c, events: list) -> None:

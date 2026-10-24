@@ -42,7 +42,7 @@ def test_cross_hunt_raw_merge_is_scoped_to_the_current_hunts_citations():
     assert _citation_count(repo) == 1
 
 
-def test_another_hunt_snapshots_its_citation_when_no_raw_copy_is_added():
+def test_another_hunt_reuses_the_stable_citation_without_an_identical_overlay():
     repo = Repo(make_engine(":memory:"))
     migrate(repo.engine)
     repo.create_hunt("h1", {}, "d1", "test")
@@ -56,7 +56,7 @@ def test_another_hunt_snapshots_its_citation_when_no_raw_copy_is_added():
     repo.save_evidence("h1", [event], {ref.key: {"copy": 1}}, None)
     repo.save_evidence("h2", [event], {ref.key: {"copy": 1}}, None)
 
-    assert _citation_count(repo) == 1
+    assert _citation_count(repo) == 0
     assert [item["native_id"] for item in _citations(
         repo, {"hunt_id": "h2", "event_ids": [event.id]},
     )] == ["copy-1"]
@@ -107,9 +107,14 @@ def test_owner_later_raw_merge_does_not_rewrite_foreign_hunt_citations():
     assert [citation["native_id"] for citation in _citations(
         repo, {"hunt_id": "h2", "event_ids": [first.id]},
     )] == ["copy-1"]
+    assert [citation["native_id"] for citation in _citations(
+        repo, {"hunt_id": "h1", "event_ids": [first.id]},
+    )] == ["copy-1", "copy-2"]
     assert [ref["native_id"] for ref in repo.events_by_ids([first.id])[0]["event"]["raw"]] == [
-        "copy-1", "copy-2",
+        "copy-1",
     ]
+    with repo.engine.connect() as connection:
+        assert connection.execute(select(t.event_citation.c.hunt_id)).scalars().all() == ["h1"]
 
 
 def test_foreign_hunt_merges_its_own_sequential_raw_observations():
@@ -240,5 +245,6 @@ def test_transferred_owner_merges_later_refs_into_its_snapshotted_citations():
     assert [citation["native_id"] for citation in _citations(
         repo, {"hunt_id": "h2", "event_ids": [owner.id]},
     )] == ["copy-2", "copy-3"]
-    assert _citation_count(repo) == 0
+    assert _citation_count(repo) == 1
+    assert [ref["native_id"] for ref in repo.events_by_ids([owner.id])[0]["event"]["raw"]] == ["copy-2"]
     assert repo.raw_records([raw_id(owner_ref.target, owner_ref.native_id)]) == []
