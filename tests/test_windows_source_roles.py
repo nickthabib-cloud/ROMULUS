@@ -530,9 +530,14 @@ def test_linux_host_anchor_without_explicit_os_never_queries_windows_targets():
         LinkAnchor(finding_id="linux", ts=event.ts, host=event.host, events=[event]),
         LinkWindow(label="near", start=START, end=END),
     )[2]
+    after = fetcher._host_after(
+        LinkAnchor(finding_id="linux", ts=event.ts, host=event.host, events=[event]),
+        LinkWindow(label="after", start=START, end=END),
+    )[2]
 
-    assert planned
+    assert planned and after
     assert {intent.target for intent in planned} == {"linux-host"}
+    assert {intent.target for intent in after} == {"linux-host"}
 
 
 def test_windows_account_links_use_the_canonical_sid_or_domain_name_identity():
@@ -736,6 +741,34 @@ def test_pid_fallback_marks_an_unordered_same_instant_termination_partial():
     assert {event.id for event in selected.events} == {"child"}
     assert any("termination at the anchor instant cannot be ordered" in reason
                for reason in selected.unresolved)
+
+
+def test_unrelated_same_instant_process_does_not_create_a_fence_ordering_reason():
+    instant = START + timedelta(minutes=10)
+    anchor = _event(
+        4688, channel="Security", provider=SECURITY, record_id=100,
+        data={"NewProcessId": "0x200"},
+    ).model_copy(update={"id": "anchor", "ts": instant})
+    terminated = _event(
+        4689, channel="Security", provider=SECURITY, record_id=101, data={"ProcessId": "0x200"},
+    ).model_copy(update={"id": "terminated", "ts": instant})
+    unrelated = _event(
+        1, channel=SYSMON_CHANNEL, provider=SYSMON,
+        data={"ProcessId": "700", "ParentProcessId": "600"},
+    ).model_copy(update={"id": "unrelated", "ts": instant})
+    contract = contract_from_types("windows", _windows_types(), role="host", os_family="windows")
+    fetcher = LinkFetcher(PivotExecutor(None, None, "h1", {contract.target: contract}), START, END)
+
+    selected = fetcher._lineage(
+        LinkAnchor(
+            finding_id="lineage", ts=instant, host=anchor.host,
+            event_ids=[anchor.id], events=[anchor],
+        ),
+        LinkWindow(label="near", start=START, end=END),
+    )[4]([terminated, unrelated])
+
+    assert selected.events == []
+    assert selected.unresolved == []
 
 
 def test_windows_session_link_is_bounded_by_boot_fences():

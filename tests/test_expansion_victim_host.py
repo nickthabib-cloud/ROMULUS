@@ -116,6 +116,8 @@ class PredicateExecutor:
 class WindowsFqdnExecutor(PredicateExecutor):
     """The Windows aggregation returns its native FQDN while raw events carry typed short host names."""
 
+    names = ("WS01.Example.Test.",)
+
     def _execute(self, intent, contract, *, pit=None, spend_task_id=None):
         if intent.purpose != "expansion:resolve_host_ip":
             return super()._execute(intent, contract, pit=pit, spend_task_id=spend_task_id)
@@ -126,7 +128,7 @@ class WindowsFqdnExecutor(PredicateExecutor):
         return SearchOutcome(
             target=intent.target, fingerprint="fqdn", started_at=T0, ended_at=T0,
             completeness=Completeness.complete, total=1, total_relation="eq",
-            buckets=[{"key": {"host.name": "WS01.Example.Test."}, "count": 1}],
+            buckets=[{"key": {"host.name": name}, "count": 1} for name in self.names],
         )
 
 
@@ -218,6 +220,18 @@ def test_windows_fqdn_resolution_can_complete_an_empty_after_window():
         link["status"] == "complete" and link["key"]["host.name"] == "ws01" and not link["event_ids"]
         for link in after
     )
+
+
+def test_windows_fqdns_with_one_short_label_remain_ambiguous_native_hosts():
+    repo = network_anchor_repo()
+    executor = WindowsFqdnExecutor(repo, [], windows_contracts())
+    executor.names = ("WS01.a.example.test", "WS01.b.example.test")
+
+    host, reason = executor.resolve_host_ip("F-net", "10.0.0.2", WINDOW.start, WINDOW.end)
+
+    assert host is None
+    assert reason is not None and "victim host ambiguous" in reason
+    assert "ws01.a.example.test" in reason and "ws01.b.example.test" in reason
 
 
 def test_linux_host_resolution_preserves_its_full_typed_host_name():

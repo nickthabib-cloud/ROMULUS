@@ -173,6 +173,23 @@ def test_record_id_continuity_has_its_own_floor_and_reports_refused_groups(tmp_p
     continuity.close()
 
 
+def test_repeated_refused_records_count_one_host_channel_group(tmp_path):
+    budget = StateBudget(tmp_path, disk_total=64 * 1024, reserve=0)
+    budget.plan(1)
+    account = budget.account("windows_continuity")
+    continuity = RecordIdContinuity(tmp_path, budget=budget, account=account)
+    budget.force_full("Windows continuity floor spent (test)", lambda candidate: candidate is account)
+
+    reasons = continuity.observe("target", [
+        _hit(record_id, native_id=f"refused-{record_id}") for record_id in range(20)
+    ])
+
+    assert len(reasons) == 1
+    assert "for ws01.example.test" in reasons[0]
+    assert "20 host/channel groups" not in reasons[0]
+    continuity.close()
+
+
 def test_record_id_continuity_summarizes_many_single_sample_groups(tmp_path):
     continuity = RecordIdContinuity(tmp_path)
     records = []

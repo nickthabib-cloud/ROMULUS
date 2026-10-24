@@ -546,8 +546,8 @@ class LinkFetcher:
                 return Selection([
                     candidate for candidate in candidates
                     if candidate.family == "process_exec" and candidate.host == anchor.host
-                    and candidate.id not in anchored and inside_fences(candidate)
                     and (candidate.get("process.pid") == pid or candidate.get("process.ppid") == pid)
+                    and candidate.id not in anchored and inside_fences(candidate)
                 ], unresolved)
             # A record of another boot is another process. The link retrieves audit records without their journald
             # copies; their boot comes from the hunt's boot-interval map. One the map cannot place (a gap between
@@ -873,7 +873,11 @@ class LinkFetcher:
             entity={"kind": "host", "value": anchor.host, "role": "host"},
             start=max(anchor.ts, window.start), end=window.end,
         ))
-        intents = self.executor._intents(request)
+        os_family = _os_family(anchor)
+        intents = [
+            intent for intent in self.executor._intents(request)
+            if os_family is None or self.executor.contracts[intent.target].os_family == os_family
+        ]
         matches = lambda event: event.host == anchor.host and event.ts >= anchor.ts
         reason = None if intents else "key not pushable; full-dataset scan refused"
         return (key, "inferred", intents, matches,

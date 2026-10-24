@@ -827,7 +827,7 @@ class PivotExecutor:
         self.repo.upsert_task(task_id, self.hunt_id, _link_task_kind(self), "host-resolution", intent_record,
                               fingerprint, owner_token=self.owner_token)
         self.repo.update_task(task_id, "leased", attempt=True, owner_token=self.owner_token)
-        names: set[str] = set()
+        identities: dict[tuple[str, str], str] = {}
         incomplete: list[str] = []
         for target, contract in targets:
             intent = SearchIntent(kind="aggregate", target=target, window=Window(start=start, end=end),
@@ -845,17 +845,21 @@ class PivotExecutor:
                 # Resolve to that same identity before links, anchors and scheduling consume it.
                 resolved = str(name)
                 if contract.os_family == "windows":
-                    resolved = resolved.strip().rstrip(".").casefold().split(".", 1)[0]
+                    native = resolved.strip().rstrip(".").casefold()
+                    resolved = native.split(".", 1)[0]
+                else:
+                    native = resolved
                 if resolved:
-                    names.add(resolved)
+                    identities[(contract.os_family or "unknown", native)] = resolved
         if incomplete:
             host, reason = None, f"victim host unresolved for {ip}: host lookup incomplete ({'; '.join(incomplete)})"
-        elif len(names) == 1:
-            host, reason = next(iter(names)), None
-        elif not names:
+        elif len(identities) == 1:
+            host, reason = next(iter(identities.values())), None
+        elif not identities:
             host, reason = None, f"victim host unknown for {ip}: {NO_HOST_RECORD} {ip}"
         else:
-            host, reason = None, f"{HOST_AMBIGUOUS} for {ip}: {sorted(names)[:5]}"
+            native_names = sorted(native for _os_family, native in identities)
+            host, reason = None, f"{HOST_AMBIGUOUS} for {ip}: {native_names[:5]}"
         # An incomplete lookup (timeout, shard failure, budget) is not a final answer: it stays retryable.
         self.repo.update_task(task_id, "partial" if incomplete else "evaluated",
                               outcome={"host": host, "reason": reason}, owner_token=self.owner_token)

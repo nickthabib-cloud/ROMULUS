@@ -148,9 +148,14 @@ class RecordIdContinuity:
         # Refusal reasons are controlled state-budget text, so aggregate groups by reason and retain only a sample.
         # A 5,000-host outage must not manufacture a 5,000-line in-memory coverage report.
         refused: dict[tuple[str, str], list] = {}
+        refused_groups: set[tuple[str, str, str]] = set()
 
         def record_refusal(group: tuple[str, str], reason: str) -> None:
             computer, channel = group
+            group_key = (reason, channel, computer)
+            if group_key in refused_groups:
+                return
+            refused_groups.add(group_key)
             state = refused.setdefault((reason, channel), [0, []])
             state[0] += 1
             if len(state[1]) < 10:
