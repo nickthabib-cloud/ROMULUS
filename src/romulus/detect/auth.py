@@ -30,6 +30,7 @@ from typing import ClassVar, NamedTuple
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, pf
 from romulus.detect.bounded import HOT_COUNT, KeyedStore, RecentIds, SpillList, StateExhausted
+from romulus.detect.citing import cited_phrase
 from romulus.detect.host import (
     UNBUDGETED,
     Lineage,
@@ -77,10 +78,13 @@ def _unique(events) -> list[TypedEvent]:
     return list(out.values())
 
 
-def _names(items, limit: int = 8) -> str:
+def _names(items, limit: int = 8, more_than: int | None = None) -> str:
+    """The first `limit` items quoted, and how many more of `more_than` (all of `items` by default) there are."""
     items = sorted(items)
-    text = ", ".join(f"'{item}'" for item in items[:limit])
-    return text + (f" and {len(items) - limit} more" if len(items) > limit else "")
+    total = len(items) if more_than is None else more_than
+    shown = items[:limit]
+    text = ", ".join(f"'{item}'" for item in shown) or "none"
+    return text + (f" and {total - len(shown)} more" if total > len(shown) else "")
 
 
 class _Attempt(NamedTuple):
@@ -147,6 +151,13 @@ class _SshAttemptStream(Playbook):
 
     def retained_events(self) -> list[TypedEvent]:
         return list(self._pending)                      # the rest are staged on disk
+
+    def _load(self, ids: list[str]) -> list[TypedEvent]:
+        """Records by id: every evaluated record is staged, so from the stage, or from those not yet handed to it."""
+        wanted = [i for i in dict.fromkeys(ids) if i]
+        pending = {e.id: e for e in self._pending}
+        found = {e.id: e for e in self.load([i for i in wanted if i not in pending])}
+        return [pending.get(i) or found[i] for i in wanted if i in pending or i in found]
 
     def _stores(self) -> tuple[KeyedStore, ...]:
         return ()
@@ -296,7 +307,8 @@ class _Tally:
     peak: int = 0
     crossed: float | None = None
     cited: list[TypedEvent] = field(default_factory=list)
-    last_event: TypedEvent | None = None
+    first_id: str = ""              # the earliest and the latest attempt's records: they bound the stated span
+    last_id: str = ""
     names: set[str] = field(default_factory=set)
     invalid_names: set[str] = field(default_factory=set)
     more_names: int = 0
@@ -308,13 +320,14 @@ class _Tally:
         self.connections += a.new_connection
         self.last = a.ts
         self.invalid = self.invalid or a.valid is False
-        if self.crossed is not None:
-            self.last_event = a.event
+        if not self.first_id:
+            self.first_id = a.event.id
+        self.last_id = a.event.id
 
 
 class SshPasswordGuessing(_SshAttemptStream):
     id = "host.ssh_password_guessing"
-    version = "1"
+    version = "2"
     title = "Many failed sshd attempts from one source against one account"
     severity, lane = "medium", "lead"
     attack = ("T1110.001",)
@@ -383,7 +396,7 @@ class SshPasswordGuessing(_SshAttemptStream):
             t = self.tallies.peek(key)
             if t.crossed is None:
                 continue
-            events = sorted(_unique([*t.cited, t.last_event]), key=lambda e: (e.ts, e.id))
+            events = sorted(_unique([*t.cited, *self._load([t.first_id, t.last_id])]), key=lambda e: (e.ts, e.id))
             ok = _logins(self.successes.peek(key, 0), self.logins_uncounted)
             claim = (f"On {host}, sshd recorded {t.attempts} failed authentication attempt(s) for account "
                      f"'{account}' from {ip} in {t.connections} connection(s) between {_iso(t.first)} and "
@@ -396,8 +409,7 @@ class SshPasswordGuessing(_SshAttemptStream):
                       if ok else " The retrieved records hold no accepted sshd login for this account from this "
                                  "source.")
             claim += " Failures inside connections that then logged in are not counted."
-            if len(events) < t.attempts:
-                claim += f" {len(events)} of the attempt records are cited."
+            claim += cited_phrase(len(events), t.attempts, True, "attempt records", "attempt record")
             m = Match(self.id, claim, self.claim_type, events, _ssh_predicate(events[:3]), events[0].ts,
                       self.severity, self.lane, "high", events[0].entities(), group_key=f"{host}|{ip}|{account}")
             out.append(m)
@@ -406,7 +418,7 @@ class SshPasswordGuessing(_SshAttemptStream):
 
 class SshPasswordSpraying(_SshAttemptStream):
     id = "host.ssh_password_spraying"
-    version = "1"
+    version = "2"
     title = "Failed sshd attempts from one source against many account names"
     severity, lane = "medium", "lead"
     attack = ("T1110.003",)
@@ -486,18 +498,21 @@ class SshPasswordSpraying(_SshAttemptStream):
             t = self.tallies.peek(key)
             if t.crossed is None:
                 continue
-            events = sorted(_unique([*t.cited, t.last_event]), key=lambda e: (e.ts, e.id))
+            events = sorted(_unique([*t.cited, *self._load([t.first_id, t.last_id])]), key=lambda e: (e.ts, e.id))
             total_names = len(t.names) + t.more_names
+            named = {str(e.get("user.name")) for e in events if e.get("user.name")} & t.names
             ok = _logins(self.successes.peek(key, 0), self.logins_uncounted)
             claim = (f"On {host}, sshd recorded failed authentication attempts for {total_names} distinct account "
                      f"name(s) from {ip} between {_iso(t.first)} and {_iso(t.last)} ({t.attempts} attempt(s) in "
                      f"{t.connections} connection(s)); the most distinct names within any "
                      f"{self.WINDOW / 60:.0f} minutes was {t.peak} (threshold {self.THRESHOLD}), first reached at "
-                     f"{_iso(t.crossed)}. Names: {_names(t.names)}. sshd reported {len(t.invalid_names)} of them as "
-                     f"invalid users (no such account, or not permitted to log in).")
+                     f"{_iso(t.crossed)}. Names in the cited records: {_names(named, more_than=total_names)}. Of "
+                     f"all the names, sshd reported {len(t.invalid_names)} of them as invalid users (no such account, "
+                     f"or not permitted to log in).")
             claim += (f" The retrieved records hold {ok} accepted sshd login(s) from this source." if ok else
                       " The retrieved records hold no accepted sshd login from this source.")
             claim += " Failures inside connections that then logged in are not counted."
+            claim += cited_phrase(len(events), t.attempts, True, "attempt records", "attempt record")
             m = Match(self.id, claim, self.claim_type, events, _ssh_predicate(events[:3]), events[0].ts,
                       self.severity, self.lane, "high", events[0].entities(), group_key=f"{host}|{ip}")
             out.append(m)
@@ -519,7 +534,7 @@ class _Followed:
 
 class SshSuccessAfterFailures(_SshAttemptStream):
     id = "host.ssh_success_after_failures"
-    version = "2"
+    version = "3"
     title = "Accepted sshd login after a burst of failed attempts"
     anchor_class = "remote_login"
     severity, lane = "high", "high"
@@ -618,10 +633,14 @@ class SshSuccessAfterFailures(_SshAttemptStream):
         s = f.success
         method = s.get("auth.method") or "unrecorded-method"
         when = s.ts.isoformat()
+        # the accounts and sources named are those of the cited failures (the latest CITE); the rest are counted
+        tried = {str(e.get("user.name")) for e in f.failures if e.get("user.name")} & f.accounts
+        sources = {str(e.get("source.ip")) for e in f.failures if e.get("source.ip")} & f.sources
         if variant == "source":
             claim = (f"On {host}, sshd accepted a {method} login for account '{account}' from {ip} at {when} "
                      f"after {f.count} failed attempt(s) from {ip} in the preceding {self.WINDOW / 60:.0f} "
-                     f"minutes (threshold {self.SOURCE_MIN}; accounts tried: {_names(f.accounts)}). The "
+                     f"minutes (threshold {self.SOURCE_MIN}; accounts tried: "
+                     f"{_names(tried, more_than=len(f.accounts))}). The "
                      "failures and the login share the source address; whether one actor made both is not "
                      "established by the records.")
             lane, confidence = "high", "high"
@@ -634,7 +653,8 @@ class SshSuccessAfterFailures(_SshAttemptStream):
         else:
             claim = (f"On {host}, sshd accepted a {method} login for account '{account}' from {ip} at {when}; in "
                      f"the preceding {self.WINDOW / 60:.0f} minutes sshd recorded {f.count} failed attempt(s) "
-                     f"against '{account}' from {len(f.sources)} other source address(es) ({_names(f.sources)}; "
+                     f"against '{account}' from {len(f.sources)} other source address(es) "
+                     f"({_names(sources, more_than=len(f.sources))}; "
                      f"threshold {self.ACCOUNT_MIN}), and {f.own} from {ip} itself. The login's source differs "
                      "from the failing sources, so the records do not link them.")
             lane, confidence = "lead", "medium"
@@ -642,6 +662,9 @@ class SshSuccessAfterFailures(_SshAttemptStream):
             claim += (f" Logins of this account from this source followed such failures {f.repeats} time(s); "
                       f"the first and up to {self.LATER} later ones are cited.")
         claim += " Failures inside connections that then logged in are not counted."
+        claim += cited_phrase(len(f.failures), f.count, False, "failed attempts", "failed attempt")
+        if len(f.failures) < f.count:
+            claim = claim[:-1] + " (the latest before the login)."
         events = sorted(_unique([*f.failures, s, *f.later]), key=lambda e: (e.ts, e.id))
         predicate = [pf(s, n) for n in ("auth.phase", "user.name", "source.ip", "source.port") if s.has(n)]
         predicate += _ssh_predicate(f.failures[-2:])
