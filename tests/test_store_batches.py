@@ -319,10 +319,10 @@ def test_a_partition_is_staged_once_and_its_cells_written_in_one_transaction(mon
     assert len(serialized) == len(set(serialized))
     ordinary = [playbook for playbook in sweep.pack if playbook.kind != "baseline"]
     assert singles == [] and len(batches) == 1 and len(batches[0]) == len(ordinary)
-    # A baseline cell and its window observations are one idempotent transaction. exec_pair is replayed after
-    # all of a target's cells have reached the carry, so direct run_partition calls leave that one staged.
+    # A baseline cell and its window observations are one idempotent transaction. An exec_pair cell with no
+    # execs has no parent dependency and closes immediately; cells with execs remain compact-staged for replay.
     assert {cell["rule_id"] for cell in baseline_cells} == {
-        playbook.id for playbook in sweep.pack if playbook.kind == "baseline" and playbook.id != "bl.exec_pair"
+        playbook.id for playbook in sweep.pack if playbook.kind == "baseline"
     }
     sweep.close_stage()
 
