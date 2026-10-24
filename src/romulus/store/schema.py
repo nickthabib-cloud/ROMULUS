@@ -8,6 +8,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     MetaData,
@@ -402,6 +403,8 @@ baseline_segment = Table(
     Column("source_hunt_id", String),
     Column("built_by_hunt_id", String),
     Column("exclusion_digest", String, nullable=False),
+    # Direction-dependent history is reusable only under the same site boundary definition.
+    Column("network_digest", String),
     Column("excluded_keys", JSON, nullable=False),
     Column("hunted", Integer, nullable=False),
     Column("events_total", Integer, nullable=False),
@@ -553,6 +556,109 @@ baseline_parent_carry = Table(
     CheckConstraint("executable <> ''", name="ck_baseline_parent_carry_executable"),
 )
 
+# Compact, durable window state for exec-pair resolution after history fill. Full typed events and raw source
+# bodies are deliberately absent; first-event source identities live with the observation or Pending body.
+baseline_window_cell = Table(
+    "baseline_window_cell", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id", ondelete="CASCADE"), nullable=False),
+    Column("target", String, nullable=False),
+    Column("partition", String, nullable=False),
+    Column("spec_version", String, nullable=False),
+    Column("start", DateTime(timezone=True), nullable=False),
+    Column("end", DateTime(timezone=True), nullable=False),
+    Column("target_applicable", Integer, nullable=False),
+    Column("source_complete", Integer, nullable=False),
+    Column("reasons", JSON, nullable=False),
+    Column("task_id", String),
+    Column("evaluated", Integer, nullable=False),
+    PrimaryKeyConstraint("hunt_id", "target", "partition", name="pk_baseline_window_cell"),
+)
+
+baseline_window_exec = Table(
+    "baseline_window_exec", metadata,
+    Column("hunt_id", String, nullable=False),
+    Column("target", String, nullable=False),
+    Column("partition", String, nullable=False),
+    Column("ordinal", Integer, nullable=False),
+    Column("host", String),
+    Column("boot", String),
+    Column("pid", Integer),
+    Column("ppid", Integer),
+    Column("ts", DateTime(timezone=True), nullable=False),
+    Column("serial", Integer),
+    Column("executable", String),
+    Column("outcome", String, nullable=False),
+    Column("event_id", String, nullable=False),
+    PrimaryKeyConstraint("hunt_id", "target", "partition", "ordinal", name="pk_baseline_window_exec"),
+    ForeignKeyConstraint(
+        ["hunt_id", "target", "partition"],
+        ["baseline_window_cell.hunt_id", "baseline_window_cell.target", "baseline_window_cell.partition"],
+        ondelete="CASCADE",
+    ),
+)
+
+baseline_window_observation = Table(
+    "baseline_window_observation", metadata,
+    Column("hunt_id", String, nullable=False),
+    Column("target", String, nullable=False),
+    Column("partition", String, nullable=False),
+    Column("ordinal", Integer, nullable=False),
+    Column("body", JSON, nullable=False),
+    PrimaryKeyConstraint("hunt_id", "target", "partition", "ordinal", name="pk_baseline_window_observation"),
+    ForeignKeyConstraint(
+        ["hunt_id", "target", "partition"],
+        ["baseline_window_cell.hunt_id", "baseline_window_cell.target", "baseline_window_cell.partition"],
+        ondelete="CASCADE",
+    ),
+)
+
+baseline_window_pending = Table(
+    "baseline_window_pending", metadata,
+    Column("hunt_id", String, nullable=False),
+    Column("target", String, nullable=False),
+    Column("partition", String, nullable=False),
+    Column("ordinal", Integer, nullable=False),
+    Column("body", JSON, nullable=False),
+    PrimaryKeyConstraint("hunt_id", "target", "partition", "ordinal", name="pk_baseline_window_pending"),
+    ForeignKeyConstraint(
+        ["hunt_id", "target", "partition"],
+        ["baseline_window_cell.hunt_id", "baseline_window_cell.target", "baseline_window_cell.partition"],
+        ondelete="CASCADE",
+    ),
+)
+
+# Compact history hours whose exec-pair children wait for the whole lookback fill: the hour's counts, scope hours
+# and Pendings, held until every older hour has fed the parent carry. Nothing here is a segment until resolved.
+baseline_history_cell = Table(
+    "baseline_history_cell", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id", ondelete="CASCADE"), nullable=False),
+    Column("target", String, nullable=False),
+    Column("spec_id", String, nullable=False),
+    Column("start", DateTime(timezone=True), nullable=False),
+    Column("end", DateTime(timezone=True), nullable=False),
+    Column("events_total", Integer, nullable=False),
+    PrimaryKeyConstraint("hunt_id", "target", "spec_id", "start", name="pk_baseline_history_cell"),
+)
+
+baseline_history_row = Table(
+    "baseline_history_row", metadata,
+    Column("hunt_id", String, nullable=False),
+    Column("target", String, nullable=False),
+    Column("spec_id", String, nullable=False),
+    Column("start", DateTime(timezone=True), nullable=False),
+    Column("kind", String, nullable=False),      # count | scope_hour | pending
+    Column("ordinal", Integer, nullable=False),
+    Column("body", JSON, nullable=False),
+    PrimaryKeyConstraint("hunt_id", "target", "spec_id", "start", "kind", "ordinal",
+                         name="pk_baseline_history_row"),
+    ForeignKeyConstraint(
+        ["hunt_id", "target", "spec_id", "start"],
+        ["baseline_history_cell.hunt_id", "baseline_history_cell.target", "baseline_history_cell.spec_id",
+         "baseline_history_cell.start"],
+        ondelete="CASCADE",
+    ),
+)
+
 baseline_observation = Table(
     "baseline_observation", metadata,
     Column("hunt_id", String, ForeignKey("hunt.id"), nullable=False),
@@ -567,6 +673,7 @@ baseline_observation = Table(
     Column("first_ts", DateTime(timezone=True)),
     Column("last_ts", DateTime(timezone=True)),
     Column("first_event_id", String),
+    Column("first_event_refs", JSON, nullable=False, default=list, server_default="[]"),
     Column("history_count", Integer),
     Column("history_decayed", Float),
     Column("peer_scopes_with_key", Integer),

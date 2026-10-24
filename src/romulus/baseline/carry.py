@@ -303,6 +303,36 @@ class CarryInStore:
 
         return self.observe_rows(rows(), chunk_size=chunk_size)
 
+    def observe_window_rows(self, rows: Iterable[dict], *, hour: tuple[datetime, datetime],
+                            chunk_size: int = 100_000) -> int:
+        """Feed durable compact window exec rows through the same continuity rules as typed events."""
+        def parents():
+            for row in rows:
+                ts = row["ts"]
+                outcome = Outcome(row["outcome"])
+                if outcome == Outcome.failure:
+                    continue
+                host = row.get("host")
+                if not host:
+                    self._uncarry(None, ts)
+                    continue
+                if not hour[0] <= ts < hour[1]:
+                    self._uncarry(host, ts)
+                    self._uncarry(host, hour[0])
+                pid, executable = row.get("pid"), row.get("executable")
+                if (outcome != Outcome.success or isinstance(pid, bool) or not isinstance(pid, int)
+                        or pid < 0 or not isinstance(executable, str) or not executable):
+                    self._uncarry(host, ts)
+                    continue
+                ppid = row.get("ppid")
+                yield ParentExec(
+                    host, row.get("boot"), pid, ts, executable,
+                    ppid if isinstance(ppid, int) and not isinstance(ppid, bool) else None,
+                    row["event_id"], row.get("serial"),
+                )
+
+        return self.observe_rows(parents(), chunk_size=chunk_size)
+
     def observe_rows(self, rows: Iterable[ParentExec], *, chunk_size: int = 100_000) -> int:
         if chunk_size < 1:
             raise ValueError("carry-in chunk size must be positive")

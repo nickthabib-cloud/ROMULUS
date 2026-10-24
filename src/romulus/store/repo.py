@@ -161,7 +161,7 @@ BASELINE_DELETE_CHUNK = 5000
 CLEANUP_OWNER = "\x00cleanup"
 _BUCKET_WIDTH = {"day": timedelta(days=1), "hour": timedelta(hours=1)}
 _SEGMENT_COLUMNS = frozenset(column.name for column in t.baseline_segment.columns) - {"rows_digest"}
-_SEGMENT_OPTIONAL = frozenset({"source_hunt_id", "built_by_hunt_id"})
+_SEGMENT_OPTIONAL = frozenset({"source_hunt_id", "built_by_hunt_id", "network_digest"})
 # What makes two writes of one segment id the same segment: everything but its lifecycle status and the time
 # this copy was written (the rows are compared through rows_digest).
 _SEGMENT_IDENTITY = tuple(sorted(_SEGMENT_COLUMNS - {"status", "created_at"}))
@@ -172,6 +172,17 @@ _HOUR_COLUMNS = tuple(column.name for column in t.baseline_scope_hour.columns)
 _OBSERVATION_COLUMNS = tuple(column.name for column in t.baseline_observation.columns)
 _OBSERVATION_KEY = ("hunt_id", "spec_id", "spec_version", "scope", "key_digest")
 _OBSERVATION_REQUIRED = frozenset({*_OBSERVATION_KEY, "scope_kind", "key_id", "key", "window_count", "verdict"})
+
+
+def _baseline_observation_row(row: dict) -> dict:
+    _columns(row, _OBSERVATION_COLUMNS, frozenset(_OBSERVATION_COLUMNS) - _OBSERVATION_REQUIRED,
+             "observation")
+    out = {name: row.get(name) for name in _OBSERVATION_COLUMNS}
+    out["first_event_refs"] = list(out.get("first_event_refs") or [])
+    for name in ("first_ts", "last_ts"):
+        if out[name] is not None:
+            out[name] = _utc(out[name], name)
+    return out
 
 
 def _utc(value: Any, name: str) -> datetime:
@@ -1949,6 +1960,31 @@ class Repo:
                 t.disposition_event.c.candidate_id == cid).order_by(t.disposition_event.c.id)).mappings()]
 
     # ---- baseline store --------------------------------------------------------------------
+    def baseline_store_cut_digest(self, *, site: str, targets: Iterable[str], specs: Iterable[dict],
+                                  start: datetime, end: datetime) -> str:
+        """Digest active segment identities eligible at hunt creation, streamed in canonical order."""
+        start, end = _utc(start, "baseline cut start"), _utc(end, "baseline cut end")
+        hasher = hashlib.sha256()
+        segment = t.baseline_segment.c
+        with self.engine.connect() as connection:
+            for target in sorted(set(targets)):
+                for spec in sorted(specs, key=lambda item: item["id"]):
+                    query = (select(segment.id, segment.status)
+                             .where(segment.site == site, segment.target == target,
+                                    segment.spec_id == spec["id"],
+                                    segment.spec_version == spec["version"],
+                                    segment.key_version == spec["key_version"],
+                                    segment.status == "active", segment.start >= start, segment.end <= end)
+                             .order_by(segment.id))
+                    for segment_id, status in connection.execute(query):
+                        material = {"id": segment_id, "status": status, "target": target,
+                                    "spec_id": spec["id"]}
+                        hasher.update(json.dumps(
+                            material, sort_keys=True, separators=(",", ":"),
+                        ).encode())
+                        hasher.update(b"\n")
+        return hasher.hexdigest()
+
     def save_baseline_segment(self, row: dict, counts: Iterable[dict], scope_hours: Iterable[dict], *,
                               chunk_size: int = BASELINE_CHUNK) -> bool:
         """Insert one immutable, complete segment and its rows in one atomic transaction.
@@ -2165,7 +2201,7 @@ class Repo:
 
     def baseline_segments_for_cover(self, *, site: str, target: str, spec_id: str,
                                     spec_version: str, key_version: str, start: datetime,
-                                    end: datetime) -> list[dict]:
+                                    end: datetime, network_digest: str | None = None) -> list[dict]:
         """Complete active segments wholly inside a requested history interval, already cover-ordered."""
         start, end = _utc(start, "cover start"), _utc(end, "cover end")
         s = t.baseline_segment.c
@@ -2174,11 +2210,14 @@ class Repo:
             s.spec_version == spec_version, s.key_version == key_version,
             s.status == "active", s.start >= start, s.end <= end,
         ).order_by(s.start, s.end, s.id))
+        if network_digest is not None:
+            query = query.where(s.network_digest == network_digest)
         with self.engine.connect() as c:
             return [_with_utc(item, ("start", "end", "created_at")) for item in c.execute(query).mappings()]
 
     def baseline_segment_covers(self, *, site: str, target: str, spec_id: str, spec_version: str,
-                                key_version: str, start: datetime, end: datetime) -> bool:
+                                key_version: str, start: datetime, end: datetime,
+                                network_digest: str | None = None) -> bool:
         """Whether one active segment of the spec's versions contains [start, end), whatever its width."""
         start, end = _utc(start, "cover start"), _utc(end, "cover end")
         s = t.baseline_segment.c
@@ -2187,6 +2226,8 @@ class Repo:
             s.spec_version == spec_version, s.key_version == key_version,
             s.status == "active", s.start <= start, s.end >= end,
         ).limit(1)
+        if network_digest is not None:
+            query = query.where(s.network_digest == network_digest)
         with self.engine.connect() as c:
             return c.execute(query).first() is not None
 
@@ -2279,6 +2320,23 @@ class Repo:
         with self.engine.connect() as c:
             return list(c.execute(query).scalars())
 
+    def baseline_snapshot_exclusions(self, hunt_id: str, spec_id: str) -> dict:
+        """Bounded provenance summary for a spec's frozen segments, without materializing exclusion lists."""
+        segment, member = t.baseline_segment.c, t.baseline_snapshot_segment.c
+        query = select(
+            func.count(),
+            func.coalesce(func.sum(func.json_array_length(segment.excluded_keys)), 0),
+            func.coalesce(func.sum(segment.hunted), 0),
+        ).select_from(t.baseline_segment.join(
+            t.baseline_snapshot_segment, member.segment_id == segment.id,
+        )).where(
+            member.hunt_id == hunt_id, member.spec_id == spec_id,
+        )
+        with self.engine.connect() as connection:
+            segments, excluded, hunted = connection.execute(query).one()
+        return {"segments": int(segments), "excluded_keys": int(excluded),
+                "hunted_segments": int(hunted)}
+
     def baseline_parent_boot(self, hunt_id: str, target: str, host: str) -> tuple[str, datetime] | None:
         with self.engine.connect() as c:
             row = c.execute(select(t.baseline_parent_host_boot).where(
@@ -2320,13 +2378,47 @@ class Repo:
             c.execute(stmt)
             return True
 
+    def source_profiles(self, hunt_id: str) -> dict[str, dict]:
+        """Each target's most recently captured source profile for this hunt."""
+        table = t.source_profile.c
+        with self.engine.connect() as c:
+            rows = c.execute(select(table.target, table.profile).where(table.hunt_id == hunt_id)
+                             .order_by(table.captured_at, table.id)).all()
+        return {str(target): profile for target, profile in rows if isinstance(profile, dict)}
+
     def baseline_parent_targets(self, hunt_id: str, host: str) -> list[str]:
-        """Targets that delivered at least one exec for `host` in this hunt (ix_baseline_parent_host_boot_host)."""
+        """Every target that could deliver this host's execs, including a holder that delivered none.
+
+        Carry rows prove delivery. Source profiles conservatively add host-capable holders whose inventory names
+        the host; a target that failed throughout the window therefore still prevents a cross-target parent guess.
+        """
         table = t.baseline_parent_host_boot.c
         with self.engine.connect() as c:
-            return sorted(c.execute(select(table.target).where(
+            targets = set(c.execute(select(table.target).where(
                 table.hunt_id == hunt_id, table.host == host,
             )).scalars())
+            profiles = c.execute(select(t.source_profile.c.target, t.source_profile.c.profile).where(
+                t.source_profile.c.hunt_id == hunt_id,
+            )).all()
+        wanted = host.strip().rstrip(".").casefold()
+        for target, profile in profiles:
+            if not isinstance(profile, dict) or profile.get("role") != "host":
+                continue
+            datasets = profile.get("datasets") or {}
+            fields = profile.get("field_types") or {}
+            exec_capable = any(str(name).startswith("linux.audit") for name in datasets) or (
+                "process.executable" in fields and "process.pid" in fields
+            )
+            hosts = profile.get("hosts") or {}
+            inventory_truncated = any(
+                str(note).startswith("hosts inventory truncated")
+                for note in profile.get("notes") or []
+            )
+            if exec_capable and (inventory_truncated or wanted in {
+                str(name).strip().rstrip(".").casefold() for name in hosts
+            }):
+                targets.add(str(target))
+        return sorted(targets)
 
     def upsert_baseline_parents(self, rows: Iterable[dict]) -> None:
         """Keep the latest two observed exec generations for each live PID, ordered by (time, audit serial).
@@ -2493,27 +2585,286 @@ class Repo:
         values["candidate_id"] = func.coalesce(stmt.excluded.candidate_id, table.candidate_id)
         stmt = stmt.on_conflict_do_update(index_elements=list(_OBSERVATION_KEY), set_=values)
 
-        def normalized(row: dict) -> dict:
-            _columns(row, _OBSERVATION_COLUMNS, frozenset(_OBSERVATION_COLUMNS) - _OBSERVATION_REQUIRED,
-                     "observation")
-            out = {name: row.get(name) for name in _OBSERVATION_COLUMNS}
-            for name in ("first_ts", "last_ts"):
-                if out[name] is not None:
-                    out[name] = _utc(out[name], name)
-            return out
-
         written = 0
         with write_txn(self.engine) as c:
-            for chunk in _chunks((normalized(row) for row in rows), chunk_size):
+            for chunk in _chunks((_baseline_observation_row(row) for row in rows), chunk_size):
                 c.execute(stmt, chunk)
                 written += len(chunk)
         return written
+
+    def baseline_window_cell_done(self, hunt_id: str, rule_id: str, version: str,
+                                  target: str, partition: str) -> bool:
+        """Whether one baseline cell was durably merged already (anything other than planned/split)."""
+        table = t.rule_run.c
+        with self.engine.connect() as c:
+            state = c.execute(select(table.state).where(
+                table.hunt_id == hunt_id, table.rule_id == rule_id, table.rule_version == version,
+                table.target == target, table.partition == partition,
+            )).scalar_one_or_none()
+        return state is not None and state not in {"planned", "split", "executed_failed"}
+
+    def stage_baseline_window_cell(self, hunt_id: str, cell: dict, execs: Iterable[dict],
+                                   observations: Iterable[dict], pendings: Iterable[dict]) -> None:
+        """Replace one unresolved exec-pair cell with compact durable state."""
+        key = (hunt_id, cell["target"], cell["partition"])
+
+        def json_body(value: dict) -> dict:
+            return json.loads(json.dumps(value, default=_jsonable))
+
+        with write_txn(self.engine) as connection:
+            for table in (t.baseline_window_exec, t.baseline_window_observation,
+                          t.baseline_window_pending):
+                connection.execute(table.delete().where(
+                    table.c.hunt_id == key[0], table.c.target == key[1],
+                    table.c.partition == key[2],
+                ))
+            stmt = insert(t.baseline_window_cell).values(
+                hunt_id=hunt_id, target=cell["target"], partition=cell["partition"],
+                spec_version=cell["spec_version"], start=_utc(cell["start"], "window start"),
+                end=_utc(cell["end"], "window end"),
+                target_applicable=int(bool(cell["target_applicable"])),
+                source_complete=int(bool(cell["source_complete"])),
+                reasons=sorted(set(cell.get("reasons") or [])), task_id=cell.get("task_id"),
+                evaluated=int(cell.get("evaluated") or 0),
+            ).on_conflict_do_update(
+                index_elements=["hunt_id", "target", "partition"],
+                set_={
+                    "spec_version": cell["spec_version"], "start": _utc(cell["start"], "window start"),
+                    "end": _utc(cell["end"], "window end"),
+                    "target_applicable": int(bool(cell["target_applicable"])),
+                    "source_complete": int(bool(cell["source_complete"])),
+                    "reasons": sorted(set(cell.get("reasons") or [])),
+                    "task_id": cell.get("task_id"), "evaluated": int(cell.get("evaluated") or 0),
+                },
+            )
+            connection.execute(stmt)
+            _upsert_ignore(connection, t.baseline_window_exec, [
+                {"hunt_id": hunt_id, "target": key[1], "partition": key[2], "ordinal": ordinal,
+                 **row}
+                for ordinal, row in enumerate(execs)
+            ], ["hunt_id", "target", "partition", "ordinal"])
+            _upsert_ignore(connection, t.baseline_window_observation, [
+                {"hunt_id": hunt_id, "target": key[1], "partition": key[2], "ordinal": ordinal,
+                 "body": json_body(row)}
+                for ordinal, row in enumerate(observations)
+            ], ["hunt_id", "target", "partition", "ordinal"])
+            _upsert_ignore(connection, t.baseline_window_pending, [
+                {"hunt_id": hunt_id, "target": key[1], "partition": key[2], "ordinal": ordinal,
+                 "body": json_body(row)}
+                for ordinal, row in enumerate(pendings)
+            ], ["hunt_id", "target", "partition", "ordinal"])
+
+    def baseline_window_cells(self, hunt_id: str) -> list[dict]:
+        with self.engine.connect() as connection:
+            rows = connection.execute(select(t.baseline_window_cell).where(
+                t.baseline_window_cell.c.hunt_id == hunt_id,
+            ).order_by(
+                t.baseline_window_cell.c.target, t.baseline_window_cell.c.start,
+                t.baseline_window_cell.c.partition,
+            )).mappings()
+            return [_with_utc(row, ("start", "end")) for row in rows]
+
+    def _baseline_window_children(self, table, hunt_id: str, target: str, partition: str) -> list[dict]:
+        with self.engine.connect() as connection:
+            return [dict(row) for row in connection.execute(select(table).where(
+                table.c.hunt_id == hunt_id, table.c.target == target, table.c.partition == partition,
+            ).order_by(table.c.ordinal)).mappings()]
+
+    def baseline_window_execs(self, hunt_id: str, target: str, partition: str) -> list[dict]:
+        return [_with_utc(row, ("ts",)) for row in self._baseline_window_children(
+            t.baseline_window_exec, hunt_id, target, partition,
+        )]
+
+    def baseline_window_observations(self, hunt_id: str, target: str, partition: str) -> list[dict]:
+        rows = self._baseline_window_children(t.baseline_window_observation, hunt_id, target, partition)
+        out = []
+        for row in rows:
+            body = dict(row["body"])
+            for name in ("first_ts", "last_ts"):
+                if body.get(name):
+                    body[name] = datetime.fromisoformat(body[name])
+            out.append(body)
+        return out
+
+    def baseline_window_pendings(self, hunt_id: str, target: str, partition: str) -> list[dict]:
+        rows = self._baseline_window_children(t.baseline_window_pending, hunt_id, target, partition)
+        out = []
+        for row in rows:
+            body = dict(row["body"])
+            body["ts"] = datetime.fromisoformat(body["ts"])
+            body["raw_refs"] = tuple(tuple(ref) for ref in body.get("raw_refs") or ())
+            out.append(body)
+        return out
+
+    def drop_baseline_window_cell(self, hunt_id: str, target: str, partition: str) -> None:
+        with write_txn(self.engine) as connection:
+            connection.execute(t.baseline_window_cell.delete().where(
+                t.baseline_window_cell.c.hunt_id == hunt_id,
+                t.baseline_window_cell.c.target == target,
+                t.baseline_window_cell.c.partition == partition,
+            ))
+
+    def clear_baseline_history_stage(self, hunt_id: str) -> None:
+        """Forget every staged history hour of a hunt; a fill re-reads hours that hold no segment."""
+        with write_txn(self.engine) as connection:
+            connection.execute(t.baseline_history_cell.delete().where(t.baseline_history_cell.c.hunt_id == hunt_id))
+
+    def stage_baseline_history_cell(self, hunt_id: str, cell: dict, counts: Iterable[dict],
+                                    scope_hours: Iterable[dict], pendings: Iterable[dict]) -> None:
+        """Replace one history hour's compact counts, scope hours and Pendings, atomically."""
+        start = _utc(cell["start"], "history start")
+        key = {"hunt_id": hunt_id, "target": cell["target"], "spec_id": cell["spec_id"], "start": start}
+
+        def rows(kind: str, items: Iterable[dict]):
+            for ordinal, item in enumerate(items):
+                yield {**key, "kind": kind, "ordinal": ordinal,
+                       "body": json.loads(json.dumps(item, default=_jsonable))}
+
+        with write_txn(self.engine) as connection:
+            table = t.baseline_history_cell.c
+            connection.execute(t.baseline_history_cell.delete().where(
+                table.hunt_id == hunt_id, table.target == cell["target"], table.spec_id == cell["spec_id"],
+                table.start == start,
+            ))
+            connection.execute(t.baseline_history_cell.insert().values(
+                **key, end=_utc(cell["end"], "history end"), events_total=int(cell["events_total"]),
+            ))
+            for kind, items in (("count", counts), ("scope_hour", scope_hours), ("pending", pendings)):
+                batch: list[dict] = []
+                for row in rows(kind, items):
+                    batch.append(row)
+                    if len(batch) >= 5_000:
+                        connection.execute(t.baseline_history_row.insert(), batch)
+                        batch = []
+                if batch:
+                    connection.execute(t.baseline_history_row.insert(), batch)
+
+    def baseline_history_cells(self, hunt_id: str) -> list[dict]:
+        """A hunt's staged history hours, oldest first; at most one per target hour and deferring spec."""
+        table = t.baseline_history_cell.c
+        with self.engine.connect() as connection:
+            rows = connection.execute(select(t.baseline_history_cell).where(table.hunt_id == hunt_id).order_by(
+                table.target, table.spec_id, table.start,
+            )).mappings()
+            return [_with_utc(row, ("start", "end")) for row in rows]
+
+    def baseline_history_rows(self, hunt_id: str, target: str, spec_id: str, start: datetime,
+                              kind: str) -> Iterator[dict]:
+        """One staged hour's rows of one kind, in staging order, keyset-paged."""
+        table = t.baseline_history_row.c
+        start = _utc(start, "history start")
+        after = -1
+        while True:
+            with self.engine.connect() as connection:
+                page = connection.execute(select(table.ordinal, table.body).where(
+                    table.hunt_id == hunt_id, table.target == target, table.spec_id == spec_id,
+                    table.start == start, table.kind == kind, table.ordinal > after,
+                ).order_by(table.ordinal).limit(5_000)).all()
+            if not page:
+                return
+            for ordinal, body in page:
+                yield dict(body)
+            after = page[-1][0]
+
+    def drop_baseline_history_cell(self, hunt_id: str, target: str, spec_id: str, start: datetime) -> None:
+        table = t.baseline_history_cell.c
+        with write_txn(self.engine) as connection:
+            connection.execute(t.baseline_history_cell.delete().where(
+                table.hunt_id == hunt_id, table.target == target, table.spec_id == spec_id,
+                table.start == _utc(start, "history start"),
+            ))
+
+    def save_baseline_window_cell(self, hunt_id: str, cell: dict, observations: Iterable[dict]) -> bool:
+        """Atomically add one cell's observations once and close its ordinary rule cell.
+
+        The terminal rule cell is the idempotency marker. A killed or restarted sweep can process its direct
+        rules again while baseline counting skips cells already committed; counts therefore never double.
+        """
+        rows = (_baseline_observation_row(row) for row in observations)
+        table = t.baseline_observation.c
+        stmt = insert(t.baseline_observation)
+        earlier = or_(
+            stmt.excluded.first_ts < table.first_ts,
+            and_(stmt.excluded.first_ts == table.first_ts,
+                 stmt.excluded.first_event_id < table.first_event_id),
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=list(_OBSERVATION_KEY),
+            set_={
+                "window_count": table.window_count + stmt.excluded.window_count,
+                "first_ts": func.min(table.first_ts, stmt.excluded.first_ts),
+                "last_ts": func.max(table.last_ts, stmt.excluded.last_ts),
+                "first_event_id": case((earlier, stmt.excluded.first_event_id), else_=table.first_event_id),
+                "first_event_refs": case(
+                    (earlier, stmt.excluded.first_event_refs), else_=table.first_event_refs,
+                ),
+                # A window merge precedes judgement. Keep all history fields and verdicts at their pending values.
+                "history_count": None,
+                "history_decayed": None,
+                "peer_scopes_with_key": None,
+                "peer_scopes": None,
+                "threshold": None,
+                "mean": None,
+                "sigma": None,
+                "n_hours": None,
+                "verdict": "unresolved",
+                "reason": "baseline judgement pending",
+            },
+        )
+        rule = t.rule_run.c
+        with write_txn(self.engine) as connection:
+            current = connection.execute(select(rule.state).where(
+                rule.hunt_id == hunt_id,
+                rule.rule_id == cell["rule_id"],
+                rule.rule_version == cell["version"],
+                rule.target == cell["target"],
+                rule.partition == cell["partition"],
+            )).scalar_one_or_none()
+            if current is not None and current not in {"planned", "split"}:
+                return False
+            for chunk in _chunks(rows, BASELINE_CHUNK):
+                connection.execute(stmt, chunk)
+            connection.execute(_RULE_CELL_UPSERT, [{
+                "hunt_id": hunt_id,
+                "rule_id": cell["rule_id"],
+                "rule_version": cell["version"],
+                "target": cell["target"],
+                "partition": cell["partition"],
+                "state": cell["state"],
+                "matched": cell["matched"],
+                "evaluated": cell["evaluated"],
+                "detail": cell.get("detail") or {},
+            }])
+        return True
 
     def baseline_observations(self, hunt_id: str, *, page_size: int = BASELINE_PAGE) -> Iterator[dict]:
         """A hunt's observations in key order (spec, version, scope, key digest), paged."""
         return self._keyset(t.baseline_observation, [t.baseline_observation.c.hunt_id == hunt_id],
                             ("spec_id", "spec_version", "scope", "key_digest"), ("first_ts", "last_ts"),
                             page_size)
+
+    def baseline_observations_for_spec(self, hunt_id: str, spec_id: str, spec_version: str, *,
+                                       page_size: int = BASELINE_PAGE) -> Iterator[dict]:
+        """One spec's observations in scope/key order, keyset-paged for streaming judgement."""
+        return self._keyset(
+            t.baseline_observation,
+            [t.baseline_observation.c.hunt_id == hunt_id,
+             t.baseline_observation.c.spec_id == spec_id,
+             t.baseline_observation.c.spec_version == spec_version],
+            ("scope", "key_digest"), ("first_ts", "last_ts"), page_size,
+        )
+
+    def baseline_observation_verdict_counts(self, hunt_id: str) -> dict[str, dict[str, int]]:
+        """Bounded report aggregate: verdict counts per spec, independent of observation volume."""
+        query = (select(t.baseline_observation.c.spec_id, t.baseline_observation.c.verdict, func.count())
+                 .where(t.baseline_observation.c.hunt_id == hunt_id)
+                 .group_by(t.baseline_observation.c.spec_id, t.baseline_observation.c.verdict)
+                 .order_by(t.baseline_observation.c.spec_id, t.baseline_observation.c.verdict))
+        out: dict[str, dict[str, int]] = {}
+        with self.engine.connect() as connection:
+            for spec_id, verdict, count in connection.execute(query):
+                out.setdefault(str(spec_id), {})[str(verdict)] = int(count)
+        return out
 
     # ---- investigator state ----------------------------------------------------------------
     def create_case(self, row: dict, *, owner_token: str | None = None) -> bool:

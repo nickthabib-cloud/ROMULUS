@@ -3,11 +3,17 @@ playbooks, publish direct findings immediately, and keep an exact per-rule cover
 from __future__ import annotations
 
 import logging
+import sqlite3
 from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 
+from romulus.baseline.carry import HourParents
+from romulus.baseline.playbook import BaselineCell, BaselinePlaybook
+from romulus.baseline.spec import KeyContext, exec_serial
+from romulus.detect import netdef
 from romulus.detect.base import Match, Playbook
 from romulus.detect.bounded import StateBudget, StateExhausted, live_stores
 from romulus.detect.host import bind_lineage_citation_loader
@@ -86,6 +92,52 @@ DEFAULT_WINDOWS_LIVENESS_TOLERANCE = timedelta(minutes=15)
 MAX_SKIP_REASONS = 256
 SKIP_REASON_OVERFLOW = "additional skip reasons omitted after bounded category limit"
 MAX_WINDOWS_UNCATALOGUED = 256
+
+
+def _families_of(datasets) -> frozenset[str]:
+    return frozenset().union(*(DATASET_FAMILIES.get(dataset, frozenset()) for dataset in datasets))
+
+
+_WINDOWS_FAMILIES = frozenset().union(*WINDOWS_DATASET_FAMILIES.values())
+_ROLE_FAMILIES = {
+    "host": _families_of(HOST_DATASETS),
+    "network": _families_of([*(name for name in DATASET_FAMILIES if name.startswith("suricata.eve.")),
+                             "arkime.session"]),
+}
+
+
+def delivered_families(profile: dict | None, contract: FieldContract | None) -> frozenset[str] | None:
+    """The event families the normalizer can produce from one target, or None when nothing says.
+
+    Typed values come from the normalizer, not from the index mapping (audit execs live in `event.original`),
+    so the answer follows the profile's datasets. An inventory that cannot be read in full falls back to every
+    family of the target's role. Errs toward more families: a family wrongly named only costs an unresolved
+    baseline, while one wrongly left out would leave that target's history unread.
+    """
+    role = (profile or {}).get("role") or (contract.role if contract is not None else None)
+    if role is None:
+        return None
+    if profile is None or any(str(note).startswith("ds inventory truncated") for note in profile.get("notes") or []):
+        return _ROLE_FAMILIES.get(role)
+    if profile.get("kind") == "arkime_sessions":
+        # Arkime sessions are recognized by shape; their dataset inventory lists protocols.
+        return DATASET_FAMILIES["arkime.session"]
+    datasets = list(profile.get("datasets") or {})
+    families = set(_families_of(datasets))
+    windows = profile.get("os_family") == "windows" or (contract is not None and contract.os_family == "windows")
+    if windows and (not datasets or any(dataset not in DATASET_FAMILIES for dataset in datasets)):
+        # Any Windows-shaped record is normalized, whatever dataset name the shipper gave it.
+        families |= _WINDOWS_FAMILIES
+    return frozenset(families)
+
+
+def baseline_applicability(profiles: dict[str, dict], contracts: dict | None, targets, specs) -> dict[str, set[str]]:
+    """The baseline specs each target can deliver: one rule for the window cells and the history read."""
+    out: dict[str, set[str]] = {}
+    for target in targets:
+        families = delivered_families(profiles.get(target), (contracts or {}).get(target))
+        out[target] = {spec.id for spec in specs if families is None or set(spec.families) & families}
+    return out
 
 
 def stored_boot_intervals(repo: Repo, hunt_id: str) -> BootIntervals:
@@ -189,6 +241,7 @@ class Sweep:
             self.budget.account("windows_continuity") if self._has_windows else None
         )
         self._stage_size = 0
+        self._profiles: dict[str, dict] | None = None
         self.partial_reasons: list[str] = []
         preflight = self.budget.preflight()
         if preflight:
@@ -231,6 +284,10 @@ class Sweep:
                     pb.note_limit("stage", f"the event stage could not take this partition's citations "
                                            f"({self.budget.broken}); findings that cite them are not computed")
             return
+        self._charge_stage(stage)
+
+    def _charge_stage(self, stage: EventStage) -> None:
+        """Charge the stage file's growth beyond the most it has held to the event stage's account."""
         size = stage.db.execute("PRAGMA page_count").fetchone()[0] * stage.db.execute("PRAGMA page_size").fetchone()[0]
         if size > self._stage_size:
             self.budget.charge(self._stage_account, size - self._stage_size)
@@ -551,8 +608,12 @@ class Sweep:
 
     def _mark_all(self, target: str, pkey: str, state: str, detail: dict | None = None):
         """Write the same coverage state for every rule on one (target, partition), in one transaction."""
-        self.repo.set_rule_cells(self.hunt_id, [self._cell(pb, target, pkey, state, detail=detail)
-                                                for pb in self.pack])
+        self.repo.set_rule_cells(self.hunt_id, [
+            self._cell(pb, target, pkey, state, detail=detail)
+            for pb in self.pack
+            if not (isinstance(pb, BaselinePlaybook)
+                    and self.repo.baseline_window_cell_done(self.hunt_id, pb.id, pb.version, target, pkey))
+        ])
 
     def _split(self, target: str, w: Window) -> tuple[Window, Window]:
         """Record children as planned *before* the parent is superseded, so a crash between the two
@@ -581,14 +642,20 @@ class Sweep:
         # persist every planned (rule x target x partition) cell first: anything never executed
         # stays visibly 'planned' and can never be read as a complete negative
         for start in range(0, len(parts), PLANNED_CHUNK):
-            self.repo.set_rule_cells(self.hunt_id, [self._cell(pb, target, w.key(), "planned")
-                                                    for w, _est in parts[start:start + PLANNED_CHUNK]
-                                                    for pb in self.pack])
+            self.repo.set_rule_cells(self.hunt_id, [
+                self._cell(pb, target, w.key(), "planned")
+                for w, _est in parts[start:start + PLANNED_CHUNK]
+                for pb in self.pack
+                if not (isinstance(pb, BaselinePlaybook)
+                        and self.repo.baseline_window_cell_done(
+                            self.hunt_id, pb.id, pb.version, target, w.key()))
+            ])
         try:
             for index, (w, est) in enumerate(parts):
                 following = parts[index + 1] if index + 1 < len(parts) else None
                 self._next = (target, contract, filters, any_of, *following) if following else None
                 self.run_partition(target, contract, filters, w, est, any_of=any_of)
+            self._finalize_baseline_target(target)
         finally:
             self._next = None
             self._stop_prefetch()
@@ -782,6 +849,81 @@ class Sweep:
             windows_gate_reasons.update(windows_reasons)
             rule_partial = (affected is ALL_FAMILIES or bool(set(pb.families) & affected)
                             or bool(windows_reasons))
+            if isinstance(pb, BaselinePlaybook):
+                if self.repo.baseline_window_cell_done(
+                        self.hunt_id, pb.id, pb.version, target, pkey):
+                    continue
+                ordered = sorted(pb.scope_partition(events), key=lambda item: (
+                    item.ts, -1 if exec_serial(item) is None else exec_serial(item), item.id,
+                ))
+                # Records of no known format could hold any family, whatever the target's profile says.
+                target_applicable = (bool(ordered) or bool(unsupported) or error_affected is ALL_FAMILIES
+                                     or self._baseline_target_applicable(target, pb))
+                reasons = list(base_reasons)
+                reasons.extend(windows_reasons)
+                if error_reason and (error_affected is ALL_FAMILIES or set(pb.families) & error_affected):
+                    reasons.append(error_reason)
+                if pb.id == "bl.exec_pair":
+                    parents = HourParents()
+                    for event in ordered:
+                        parents.add(event)
+                    pb.begin_cell(pkey, (w.start, w.end), KeyContext(pid_table=parents))
+                    before_eval = pb.evaluated
+                    pb.consume_scoped_partition(ordered)
+                    result = pb.finish_cell()
+                    reasons.extend(result.reasons)
+                    evaluated = pb.evaluated - before_eval
+                    # A complete hour without execs is staged like any other, so the carry's ledger counts it as
+                    # observed; an inapplicable or incomplete one is final here and never joins that ledger.
+                    if not ordered and (not target_applicable or rule_partial or reasons):
+                        state = ("evaluated_partial" if target_applicable and (rule_partial or reasons)
+                                 else "not_applicable_no_events")
+                        self.repo.save_baseline_window_cell(self.hunt_id, {
+                            "rule_id": pb.id, "version": pb.spec.version, "target": target,
+                            "partition": pkey, "state": state, "matched": 0,
+                            "evaluated": evaluated, "detail": {"reasons": sorted(set(reasons))},
+                        }, ())
+                        continue
+                    try:
+                        stage = self._event_stage()
+                        stage.record_baseline_cell(
+                            target=target, partition=pkey, start=w.start, end=w.end,
+                            target_applicable=target_applicable, source_complete=not rule_partial,
+                            reasons=reasons, task_id=tid, events=ordered,
+                            observations=result.observations, pendings=result.pendings,
+                        )
+                        # Compact rows share the stage volume with citations and are billed with them.
+                        self._charge_stage(stage)
+                    except sqlite3.OperationalError as exc:
+                        reason = f"compact baseline stage failed ({exc})"
+                        self.budget.fail(reason)
+                        self.partial_reasons.append(f"{target} {pkey}: {reason}")
+                        self.repo.save_baseline_window_cell(self.hunt_id, {
+                            "rule_id": pb.id, "version": pb.spec.version, "target": target,
+                            "partition": pkey, "state": "evaluated_partial", "matched": 0,
+                            "evaluated": evaluated, "detail": {"reasons": sorted({*reasons, reason})},
+                        }, ())
+                    continue
+                pb.begin_cell(
+                    pkey, (w.start, w.end), KeyContext(is_internal=netdef.current().is_internal),
+                )
+                before_eval = pb.evaluated
+                pb.consume_scoped_partition(ordered)
+                result = pb.finish_cell()
+                reasons.extend(result.reasons)
+                evaluated = pb.evaluated - before_eval
+                if not target_applicable:
+                    state = "not_applicable_no_events"
+                elif rule_partial or result.partial:
+                    state = "evaluated_partial"
+                elif not (evaluated_families & families) and evaluated == 0:
+                    state = "not_applicable_no_events"
+                else:
+                    state = "evaluated_complete"
+                self._save_baseline_cell(
+                    pb, target, pkey, state, evaluated, reasons, result, tid, ordered, raw_sources,
+                )
+                continue
             before_eval, before_missing, before_os, before_capped = (
                 pb.evaluated, pb.missing_required, pb.os_applicable, pb.capped,
             )
@@ -885,6 +1027,74 @@ class Sweep:
         # the partition's cells together: a crash before this leaves them all visibly `planned`
         self.repo.set_rule_cells(self.hunt_id, cells)
         self.repo.update_task(tid, "evaluated")
+
+    def _baseline_target_applicable(self, target: str, playbook: BaselinePlaybook) -> bool:
+        """Whether the target can deliver the spec's families, by the rule the baseline stage's history uses."""
+        if self._profiles is None:
+            self._profiles = self.repo.source_profiles(self.hunt_id)
+        return playbook.spec.id in baseline_applicability(
+            self._profiles, self.contracts, [target], [playbook.spec],
+        )[target]
+
+    def _baseline_observations(self, playbook: BaselinePlaybook, cell: BaselineCell):
+        for row in cell.observations:
+            yield {
+                "hunt_id": self.hunt_id,
+                "spec_id": playbook.spec.id,
+                "spec_version": playbook.spec.version,
+                **row,
+                "history_count": None,
+                "history_decayed": None,
+                "peer_scopes_with_key": None,
+                "peer_scopes": None,
+                "threshold": None,
+                "mean": None,
+                "sigma": None,
+                "n_hours": None,
+                "verdict": "unresolved",
+                "reason": "baseline judgement pending",
+                "candidate_id": None,
+            }
+
+    def _save_baseline_cell(self, playbook: BaselinePlaybook, target: str, partition: str,
+                            state: str, evaluated: int, reasons: list[str], result: BaselineCell,
+                            task_id: str | None, events: list[TypedEvent], raw_sources: dict[str, dict]) -> None:
+        """Persist observations and the cell's idempotency marker; citations are fetched only if published."""
+        del task_id, events, raw_sources
+        self.repo.save_baseline_window_cell(self.hunt_id, {
+            "rule_id": playbook.id,
+            "version": playbook.spec.version,
+            "target": target,
+            "partition": partition,
+            "state": state,
+            "matched": 0,
+            "evaluated": evaluated,
+            "detail": {"reasons": sorted(set(reasons))},
+        }, self._baseline_observations(playbook, result))
+
+    def _finalize_baseline_target(self, target: str) -> None:
+        """Persist compact exec-pair cells for post-lookback resolution and resume."""
+        playbook = next((pb for pb in self.pack
+                         if isinstance(pb, BaselinePlaybook) and pb.id == "bl.exec_pair"), None)
+        stage = getattr(self, "_stage", None)
+        if playbook is None or stage is None:
+            return
+        items = sorted(stage.baseline_cells(target), key=lambda item: (item["start"], item["partition"]))
+        for item in items:
+            if self.repo.baseline_window_cell_done(
+                    self.hunt_id, playbook.id, playbook.spec.version, target, item["partition"]):
+                stage.drop_baseline_cell(target, item["partition"])
+                continue
+            self.repo.stage_baseline_window_cell(
+                self.hunt_id, {
+                    **item, "target": target, "spec_version": playbook.spec.version,
+                    "evaluated": len(stage.baseline_execs(target, item["partition"])),
+                },
+                stage.baseline_execs(target, item["partition"]),
+                stage.baseline_observations(target, item["partition"]),
+                [asdict(pending) for pending in stage.baseline_pendings(target, item["partition"])],
+            )
+            stage.drop_baseline_cell(target, item["partition"])
 
     def _count_boots(self, events) -> None:
         """Host-record events by where their boot id came from: a record, the boot-interval map, or nowhere."""
