@@ -202,6 +202,7 @@ class SuricataAlertStack(_Grouped):
 
     version = "3"
     SIGNATURES_NAMED = 10
+    SIGNATURES_HELD = 2000      # distinct signatures held per group; beyond it the count is "at least"
 
     def consume(self, events):
         """Group by (source, destination, category, severity); signatures are listed inside the group so a
@@ -214,8 +215,13 @@ class SuricataAlertStack(_Grouped):
                 continue
             sigs = state.bag("sigs")
             sig = (e.get("alert.signature_id"), e.get("alert.signature"))
-            if len(sigs) < 2000:
-                sigs.add(sig)
+            if sig not in sigs:
+                if len(sigs) < self.SIGNATURES_HELD:
+                    sigs.add(sig)
+                else:
+                    state.extra["sigs_capped"] = True
+                    self.note_limit("signatures", f"a group passed {self.SIGNATURES_HELD:,} distinct signatures held; "
+                                                  f"its signature count is stated as a lower bound")
             self.name(state, "sigs", sig, e, self.SIGNATURES_NAMED)
             tech = e.get("alert.mitre_technique_id")
             if tech:
@@ -242,10 +248,14 @@ class SuricataAlertStack(_Grouped):
                 {(e.get("alert.signature_id"), e.get("alert.signature")) for e in evs
                  if e.get("alert.signature_id") is not None}, key=lambda s: (str(s[1]), str(s[0])))]
             cited_sigs = list(dict.fromkeys(cited_sigs))
-            in_cited = (f" All {len(sigs)} signatures are in cited alerts." if len(cited_sigs) >= len(sigs) else
-                        f" {len(cited_sigs)} of the {len(sigs)} signatures are in cited alerts.")
-            claim = (f"Suricata raised {n} '{cat}' alert(s) at severity {sev} across {len(sigs)} distinct signature(s) "
-                     f"for traffic from {src} to {dst} ({self.span(state)}): {names}{more(min(3, len(named)), len(sigs))}."
+            capped = bool(state.extra.get("sigs_capped"))
+            at_least = "at least " if capped else ""
+            in_cited = (f" All {len(sigs)} signatures are in cited alerts." if len(cited_sigs) >= len(sigs) and not capped
+                        else f" {len(cited_sigs)} of {at_least or 'the '}{len(sigs)} signatures are in cited alerts.")
+            listed = more(min(3, len(named)), len(sigs))
+            claim = (f"Suricata raised {n} '{cat}' alert(s) at severity {sev} across {at_least}{len(sigs)} distinct "
+                     f"signature(s) for traffic from {src} to {dst} ({self.span(state)}): {names}"
+                     f"{listed + ' or more' if capped and listed else listed}."
                      + (in_cited if len(sigs) > 1 else "")
                      + self.told(evs, state, missing, "alerts", "alert")
                      + " IDS alerts are signature matches, not proof of successful exploitation.")
@@ -263,7 +273,7 @@ class SuricataAlertStack(_Grouped):
             others = len(sigs) - len(cited_sigs)
             shown = f"{cited_sigs[:10]}{more(min(10, len(cited_sigs)), len(cited_sigs))}"
             m.notes.append(f"signatures of the cited alerts: {shown}"
-                           + (f"; {others} other signature(s) are in alerts not cited" if others > 0 else ""))
+                           + (f"; {at_least}{others} other signature(s) are in alerts not cited" if others > 0 else ""))
             out.append(m)
         return out
 
@@ -348,6 +358,7 @@ class DnsSubdomainEnumeration(_Grouped):
     benign = ("resolvers forwarding for many clients, CDN-heavy browsing, mail servers",)
     next_checks = ("ip_sessions for the source", "web.scan_burst or ids_alerts from the same source")
     MIN_DISTINCT = 100
+    NAMES_HELD = MIN_DISTINCT * 50      # distinct names held per group; beyond it the count is "at least"
     REVERSE_TREES = ("in-addr.arpa", "ip6.arpa")
     card: ClassVar[dict] = {
         "behavior": "one source queried many distinct names under one forward registered domain (last two labels)",
@@ -389,8 +400,14 @@ class DnsSubdomainEnumeration(_Grouped):
             if state is None:
                 continue
             names = state.bag("names")
-            if len(names) <= self.MIN_DISTINCT * 50:
-                names.add(e.get("dns.question.name").lower())
+            name = e.get("dns.question.name").lower()
+            if name not in names:
+                if len(names) < self.NAMES_HELD:
+                    names.add(name)
+                else:
+                    state.extra["names_capped"] = True
+                    self.note_limit("names", f"a group passed {self.NAMES_HELD:,} distinct names held; its name "
+                                             f"count is stated as a lower bound")
         return []
 
     def finalize(self):
@@ -401,8 +418,11 @@ class DnsSubdomainEnumeration(_Grouped):
                 continue
             evs, missing, context = self.cite(state)
             src, dom = key
-            claim = (f"{src} issued {state.count} DNS queries for {distinct} distinct names under '{dom}' "
-                     f"({self.span(state)})." + self.told(evs, state, missing, "queries", "query"))
+            at_least = "at least " if state.extra.get("names_capped") else ""
+            shown = len({str(e.get("dns.question.name")).lower() for e in evs if e.get("dns.question.name")})
+            claim = (f"{src} issued {state.count} DNS queries for {at_least}{distinct} distinct names under '{dom}' "
+                     f"({self.span(state)}). {min(shown, distinct)} of {at_least or 'the '}{distinct} names are in "
+                     f"cited records." + self.told(evs, state, missing, "queries", "query"))
             out.append(Match(self.id, claim, self.claim_type, evs, [pf(evs[0], "source.ip"),
                                                                      pf(evs[0], "dns.question.name")],
                              evs[0].ts, self.severity, self.lane, "medium", evs[0].entities(),
@@ -527,9 +547,8 @@ class PortScan(_Grouped):
                 if len(seen[1]) < 8:
                     seen[1].add(sport)
                 continue
-            ports = state.bag("ports")
-            if len(ports) < 70000:
-                ports.add(dport)
+            # a port number is 0-65535, so the distinct ports are bounded by construction and counted exactly
+            state.bag("ports").add(dport)
             self.name(state, "ports", dport, e, self.PORTS_NAMED)
             if (e.get("network.transport") == "tcp" and e.get("flow.state") in OPENED_STATES
                     and e.get("flow.bytes_toserver") is not None):

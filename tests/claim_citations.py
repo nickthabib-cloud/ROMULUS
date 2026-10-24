@@ -14,7 +14,10 @@ unambiguously, and wording that says honestly what is not cited passes.
    times'), greater than the number of cited records needs a statement of how many of exactly that total are cited:
    'K of (the) M ... cited' or 'all M ... are cited' with M equal to the count, or 'the earliest K ... are cited' in
    the count's own sentence, with K no more than the records cited. A count in a sentence that says those records
-   were not judged, not cited or not kept is hedged and passes.
+   were not judged, not cited or not kept is hedged and passes; 'at least' is no hedge (a lower bound still needs
+   its disclosure). A total stated as a lower bound ('at least 2000 signatures') must be disclosed as one ('K of at
+   least 2000'), never as exact ('K of the 2000', 'all 2000'), and a total stated exactly must not be disclosed as a
+   lower bound.
 3. Names. Every process id ('pid 964', 'pids 1, 2 and 3 more'), IP address, signature id ('sid 2016184'), port
    ('port 443', 'tcp/22'), bracketed example list item and quoted value the text names must appear in a cited record's
    typed fields: as a value, a list element, the last path component of a value, a part of a value set off by
@@ -60,14 +63,18 @@ COUNT_NOUNS = frozenset({
 STOP = frozenset({"of", "to", "from", "in", "on", "at", "for", "with", "and", "or", "by", "than", "that", "as", "is",
                   "are", "was", "were", "a", "an", "the", "s", "level(s)", "level", "up", "minutes", "hours", "hour",
                   "seconds", "bytes", "byte", "%", "mib"})
-HEDGES = ("not judged", "not cited", "not kept", "not held", "not evaluated", "were not", "was not", "at least")
+HEDGES = ("not judged", "not cited", "not kept", "not held", "not evaluated", "were not", "was not")
+# a count stated as a lower bound
+AT_LEAST = re.compile(r"\b[Aa]t least (\d[\d,]*)\b")
 # within one sentence: a dot ends it only when a space follows (addresses and versions carry dots)
 _SAME_SENTENCE = r"(?:[^.;]|\.(?=\S))*"
 # 'K of (the) M ... cited' and 'all M ... cited' say how many of the total M are cited; 'the earliest K ... cited'
-# says how many of its own sentence's count are
-OF_TOTAL = re.compile(rf"\b(\d[\d,]*) of (?:the |these |its |all |their )?(\d[\d,]*)\b{_SAME_SENTENCE}\bcited\b")
-ALL_OF = re.compile(rf"\b[Aa]ll (\d[\d,]*)\b{_SAME_SENTENCE}\bcited\b")
-FIRST_K = re.compile(rf"\b[Tt]he (?:earliest|first|latest|last) (\d[\d,]*)\b{_SAME_SENTENCE}\bcited\b")
+# says how many of its own sentence's count are. 'cited' is looked ahead to, so one sentence may hold several
+# disclosures ('K of the M addresses and J of the N connections are in cited records').
+OF_TOTAL = re.compile(
+    rf"\b(\d[\d,]*) of (?:the |these |its |all |their )?(at least )?(\d[\d,]*)\b(?={_SAME_SENTENCE}\bcited\b)")
+ALL_OF = re.compile(rf"\b[Aa]ll (\d[\d,]*)\b(?={_SAME_SENTENCE}\bcited\b)")
+FIRST_K = re.compile(rf"\b[Tt]he (?:earliest|first|latest|last) (\d[\d,]*)\b(?={_SAME_SENTENCE}\bcited\b)")
 # a process named as making connect() calls to a port (and an address)
 ATTRIBUTED = re.compile(
     r"\(pids?(?:\(s\))? (\d+(?:(?:, | and )\d+(?! more))*)[^)]*\)" + _SAME_SENTENCE
@@ -243,16 +250,24 @@ def problems(text: str, events: list[TypedEvent]) -> list[str]:
                     hedge in sentence for hedge in ("not cited", "not kept")):
                 out.append(f"instant {match.group(1)} is no cited record's time")
     totals: set[int] = set()
+    # the totals stated as lower bounds, outside the disclosures themselves
+    lower = {_int(m.group(1)) for m in AT_LEAST.finditer(OF_TOTAL.sub("", text))}
     for match in OF_TOTAL.finditer(text):
-        shown, total = _int(match.group(1)), _int(match.group(2))
+        shown, bound, total = _int(match.group(1)), bool(match.group(2)), _int(match.group(3))
         totals.add(total)
         if shown > cited.count:
             out.append(f"says {shown} are cited, but {cited.count} records are")
+        if total in lower and not bound:
+            out.append(f"discloses {shown} of {total} as exact, but {total} is stated as a lower bound")
+        elif bound and total not in lower:
+            out.append(f"discloses {shown} of at least {total}, but {total} is stated exactly")
     for match in ALL_OF.finditer(text):
         total = _int(match.group(1))
         totals.add(total)
         if total > cited.count:
             out.append(f"says {total} are cited, but {cited.count} records are")
+        if total in lower:
+            out.append(f"says all {total} are cited, but {total} is stated as a lower bound")
     for sentence in sentences:
         first_k = [_int(m.group(1)) for m in FIRST_K.finditer(sentence)]
         for shown in first_k:

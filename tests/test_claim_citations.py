@@ -109,6 +109,23 @@ def test_the_checker_holds_each_count_and_endpoint_to_its_own_disclosure():
         f"span endpoint {(T0 - timedelta(minutes=1)).isoformat()} is no cited record's time"]
 
 
+def test_the_checker_holds_a_lower_bound_to_its_disclosure():
+    first = ev("net_alert", T0, source__ip="198.51.100.4", destination__ip="192.0.2.10")
+    last = ev("net_alert", T0 + timedelta(minutes=3), source__ip="198.51.100.4", destination__ip="192.0.2.10")
+    # 'at least' does not excuse a count from saying how many are cited
+    assert problems("across at least 2000 signatures.", [first, last]) == [
+        "states 2000 signatures with 2 records cited and does not say how many are cited"]
+    assert problems("across at least 2000 signatures. 2 of at least 2000 signatures are in cited alerts.",
+                    [first, last]) == []
+    # a lower bound disclosed as exact, and an exact count disclosed as a lower bound
+    assert problems("across at least 2000 signatures. 2 of the 2000 signatures are in cited alerts.",
+                    [first, last]) == ["discloses 2 of 2000 as exact, but 2000 is stated as a lower bound"]
+    assert problems("across 2000 signatures. 2 of at least 2000 signatures are in cited alerts.",
+                    [first, last]) == ["discloses 2 of at least 2000, but 2000 is stated exactly"]
+    assert problems("at least 2 alerts. All 2 alerts are cited.", [first, last]) == [
+        "says all 2 are cited, but 2 is stated as a lower bound"]
+
+
 def test_the_checker_treats_a_one_word_quote_as_a_value_and_checks_who_made_the_calls():
     from tests.test_network_correlation import _sock
     # a program name the rules also quote somewhere is still a value the claim names
@@ -506,22 +523,46 @@ def refused_reasons(tree):
     return rule.limit_reasons(), rule.coverage_notes()
 
 
-def test_the_exec_citation_store_holds_no_floor_and_gives_way_at_half_the_shared_headroom():
-    """Records kept only to be cited never cost a detection store its state: the citation store holds no floor, takes
-    no new key once half the shared headroom is held, and its refusal is no detection store's limit."""
+def _refusal_point(budget, account, step=10, limit=10_000):
+    """The bytes a store holds when the budget first refuses it a new key."""
+    while not budget.new_key_reason(account) and account.used < limit:
+        budget.charge(account, step)
+    return account.used
+
+
+def test_the_exec_citation_store_takes_nothing_from_the_detection_stores_headroom():
+    """Records kept only to be cited never cost a detection store its state: the citation store holds no floor, its
+    bytes do not count in the headroom the detection stores share (a full one leaves their refusal point where it is
+    without it), it stops growing at half their headroom, the volume's reserve still binds it, and its refusal is no
+    detection store's limit."""
     from romulus.detect.bounded import StateBudget, live_stores
     from romulus.detect.host import ExecLineage
+    alone = StateBudget(disk_total=1000, reserve=0)
+    plain = alone.account("rule:state")
+    alone.plan(1)
     budget = StateBudget(disk_total=1000, reserve=0)
     detect = budget.account("rule:state")
     cite = budget.account("rule:exec_records", yields=True)
     budget.plan(1)
     assert cite.weight == 0 and budget.floor_of(cite) == 0 and budget.floor == 500 and budget.pool == 500
-    budget.charge(detect, 600)          # 100 of the 500 shared bytes held
-    assert budget.new_key_reason(cite) == "" and budget.new_key_reason(detect) == ""
-    budget.charge(cite, 150)            # 250 held: half the headroom
-    assert "gives way at half" in budget.new_key_reason(cite)
-    assert budget.new_key_reason(detect) == ""          # the detection store still has the other half
-    assert "rule:exec_records" not in budget.full and not budget.spent
+    budget.charge(cite, 5000)           # a citation store far past the whole shared headroom
+    assert budget.pool_used == 0 and budget.new_key_reason(cite) == ""
+    assert _refusal_point(budget, detect) == _refusal_point(alone, plain) == 1000
+    assert "rule:exec_records" not in budget.full and budget.full == alone.full
+
+    # it stops growing once the detection stores hold half their headroom
+    budget = StateBudget(disk_total=1000, reserve=0)
+    detect, cite = budget.account("rule:state"), budget.account("rule:exec_records", yields=True)
+    budget.plan(1)
+    budget.charge(detect, 740)
+    assert budget.new_key_reason(cite) == ""
+    budget.charge(detect, 10)           # 250 of the 500 shared bytes
+    assert "gives way at half" in budget.new_key_reason(cite) and budget.new_key_reason(detect) == ""
+    assert not budget.spent
+
+    # the volume's reserve binds it as it binds every store
+    budget.low_space = "the stage volume's free space is below the reserve"
+    assert budget.new_key_reason(cite) == budget.low_space
 
     class Owner:
         id = "rule"
@@ -625,6 +666,72 @@ def test_a_group_the_connecting_store_cannot_take_is_still_published(monkeypatch
     assert refused.proposed_lane == kept.proposed_lane
     assert {e.id for e in refused.events} >= {e.id for e in kept.events if e.family == "net_socket"}
     assert not finding_problems(refused.claim, refused.notes, refused.events)
+
+
+# ---- counts at a cap are stated as lower bounds ---------------------------------------------------------------------
+
+def test_an_alert_stack_past_its_signature_cap_states_a_lower_bound(tmp_path, monkeypatch):
+    monkeypatch.setattr(network.SuricataAlertStack, "SIGNATURES_HELD", 5)
+    alerts = [ev("net_alert", T0 + timedelta(seconds=i), source__ip="198.51.100.4", destination__ip="192.0.2.10",
+                 alert__signature=f"ET WEB_SERVER probe {i % 12:02d}", alert__signature_id=2_016_000 + i % 12,
+                 alert__severity=1, alert__category="Web Application Attack") for i in range(40)]
+    rule = network.SuricataAlertStack()
+    [m] = staged(rule, batches(alerts, 10), tmp_path)
+    clean([m])
+    assert "across at least 5 distinct signature(s)" in m.claim and " of at least 5 signatures are in cited" in m.claim
+    assert "and 2 more or more." in m.claim
+    assert any("its signature count is stated as a lower bound" in r for r in rule.limit_reasons())
+    # below the cap the count is exact
+    exact = network.SuricataAlertStack()
+    [m] = staged(exact, batches(alerts[:5], 10), tmp_path / "exact")
+    assert "across 5 distinct signature(s)" in m.claim and not exact.limit_reasons()
+
+
+def test_subdomain_enumeration_past_its_name_cap_states_a_lower_bound(tmp_path, monkeypatch):
+    monkeypatch.setattr(network.DnsSubdomainEnumeration, "NAMES_HELD", 120)
+    queries = [ev("dns_query", T0 + timedelta(seconds=i), source__ip="10.20.0.15", dns__type="query",
+                  dns__question__name=f"h{i}.example.test") for i in range(130)]
+    rule = network.DnsSubdomainEnumeration()
+    [m] = staged(rule, batches(queries, 50), tmp_path)
+    clean([m])
+    assert "130 DNS queries for at least 120 distinct names under 'example.test'" in m.claim
+    assert any("its name count is stated as a lower bound" in r for r in rule.limit_reasons())
+
+
+def test_a_sweep_destination_past_its_connection_cap_states_a_lower_bound(monkeypatch):
+    from romulus.detect.flows import HorizontalSweep
+    from tests.test_flow_rules import eve, events, sweep_flows
+    from tests.test_flow_rules import run as run_flows
+    monkeypatch.setattr(HorizontalSweep, "CONNECTIONS_PER_DESTINATION", 2)
+    again = [eve(f"r{i}", src="10.0.0.5", sport=41000 + i, dst="10.0.1.1", dport=445,
+                 start=T0 + timedelta(seconds=40 + i)) for i in range(3)]
+    [m] = run_flows(HorizontalSweep(), events(*sweep_flows(30), *again))
+    clean([m])
+    assert "10.0.1.1 (at least 2 connections, " in m.claim and "At least " in m.claim
+
+
+def test_a_mismatch_group_past_its_connection_cap_states_its_sources_as_lower_bounds(monkeypatch):
+    from romulus.detect.flows import ProtocolPortMismatch
+    from tests.test_flow_rules import ATTACKER, eve, events
+    from tests.test_flow_rules import run as run_flows
+    monkeypatch.setattr(ProtocolPortMismatch, "CONNECTIONS_PER_MISMATCH", 2)
+    hits = [eve(f"x{i}", src="10.0.0.5", sport=50000 + i, dst=ATTACKER, dport=443, app_proto="ssh", c2s=4000,
+                s2c=9000, pkts_s=12, start=T0 + timedelta(seconds=i)) for i in range(3)]
+    [m] = run_flows(ProtocolPortMismatch(), events(*hits))
+    clean([m])
+    assert (f"Suricata identified ssh on at least 2 connections to {ATTACKER} on tcp/443 from at least 1 source "
+            f"(10.0.0.5: at least 2)") in m.claim
+
+
+@pytest.mark.slow
+def test_a_port_scan_over_every_port_counts_them_exactly(tmp_path):
+    """A port is 0-65535, so the scan's distinct ports are bounded by construction and never a lower bound."""
+    flows = [ev("net_flow", T0 + timedelta(milliseconds=i), source__ip="198.51.100.4", source__port=40000,
+                destination__ip="10.0.0.20", destination__port=port, network__transport="udp")
+             for i, port in enumerate(range(65536))]
+    [m] = staged(network.PortScan(), batches(flows, 8192), tmp_path)
+    assert "covering 65536 distinct destination ports" in m.claim and "at least" not in m.claim
+    clean([m])
 
 
 def test_a_list_with_no_cited_name_says_how_many_there_are_not_none():

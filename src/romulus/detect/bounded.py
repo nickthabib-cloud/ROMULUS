@@ -197,9 +197,11 @@ class StateBudget:
     quiet rule's guarantee meaningful (with 70 stores and a 10 GiB total, about 73 MiB each) while the busiest stores
     still share the other half by need.
 
-    A yielding store (one no detection reads, such as records kept only to be cited) holds no floor and may take a new
-    key only while the stores together hold less than half the shared headroom, so it gives way long before any
-    detection store meets a spent headroom; the bytes it holds count against the headroom like any store's.
+    A yielding store (one no detection reads, such as records kept only to be cited) holds no floor and no share of
+    the headroom: its bytes are bounded by its own disk budget and the volume's reserve, and never count in the
+    headroom the detection stores share, so a full yielding store leaves every detection store's refusal point where
+    it would be without it. It also takes no new key once the detection stores hold half the shared headroom, so it
+    stops growing while they are under pressure.
 
     The automatic total is the smaller of half the stage volume's free space (after the reserve) and TOTAL_SHARE of
     the volume, and the reserve is the larger of the setting and RESERVE_SHARE of the volume, because the stage volume
@@ -228,7 +230,7 @@ class StateBudget:
         self.disk_total = disk_total
         self.accounts: list[Account] = []
         self.stores = 0                 # stores the floors are planned for (0: as many as have accounts)
-        self.pool_used = 0              # bytes the stores hold above their floors
+        self.pool_used = 0              # bytes the detection stores hold above their floors (yielding stores: none)
         self.full: dict[str, str] = {}  # stores that refused a new key, and why
         self.yielding = False           # a yielding store has an account: the budget is watched from half the headroom
         self.forced: list = []          # (predicate on an Account, reason): stores forced into no-growth mode (tests)
@@ -286,12 +288,16 @@ class StateBudget:
 
     def _repool(self) -> None:
         floor = self.floor
-        self.pool_used = sum(max(0, a.used - floor * a.weight) for a in self.accounts)
+        self.pool_used = sum(max(0, a.used - floor * a.weight) for a in self.accounts if not a.yields)
         self._recalm()
 
     def charge(self, account: Account, nbytes: int) -> None:
-        """A store's bytes on disk changed by `nbytes` (negative when states were read back or cleared)."""
+        """A store's bytes on disk changed by `nbytes` (negative when states were read back or cleared). A yielding
+        store's bytes are its own account's only: they take nothing from the detection stores' headroom."""
         if not nbytes:
+            return
+        if account.yields:
+            account.used += nbytes
             return
         floor = self.floor * account.weight
         before = max(0, account.used - floor)
@@ -312,8 +318,9 @@ class StateBudget:
         if not reason and account is not None:
             reason = next((why for where, why in self.forced if where(account)), "")
             if not reason and account.yields and self.pool_used >= self.pool // 2:
-                reason = (f"the stores hold {self.pool_used / 2**20:.1f} MiB of the {self.pool / 2**20:.1f} MiB of "
-                          f"headroom they share, and a store no detection reads gives way at half of it")
+                reason = (f"the detection stores hold {self.pool_used / 2**20:.1f} MiB of the "
+                          f"{self.pool / 2**20:.1f} MiB of headroom they share, and a store no detection reads gives "
+                          f"way at half of it")
             elif not reason and self.pool_used >= self.pool and account.used >= self.floor_of(account):
                 reason = (f"its state on disk ({account.used / 2**20:.1f} MiB) is past its guaranteed floor "
                           f"({self.floor_of(account) / 2**20:.1f} MiB) and the headroom the stores share "

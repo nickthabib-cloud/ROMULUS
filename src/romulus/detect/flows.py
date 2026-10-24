@@ -723,6 +723,11 @@ class HorizontalSweep(_FlowRule):
         self.destinations = KeyedStore(self, "sweep_destinations", self.HOT_DESTINATIONS,
                                        group=lambda key: repr(key[0]))      # (group key, destination address)
 
+    def _connections(self, destination) -> str:
+        """A destination's distinct connections, as a lower bound once its count reached the cap."""
+        n = len(destination.connections)
+        return ("at least " if n >= self.CONNECTIONS_PER_DESTINATION else "") + _plural(n, "connection")
+
     def take(self, view: FlowView, event: TypedEvent) -> bool | None:
         if not routable_remote(view.dst):
             return True                 # multicast, broadcast, loopback or link-local: not a host being reached
@@ -847,11 +852,16 @@ class HorizontalSweep(_FlowRule):
         reached = {canon_ip(e.get("destination.ip")) for e in evs}
         shown = [ip for ip in deciding.members if ip in reached][:self.LIST_LIMIT]
         claim += (f" Addresses in the {label} with a cited record: "
-                  + ", ".join(f"{ip} ({_plural(len(dests[ip].connections), 'connection')}, {dests[ip].state})"
-                              for ip in shown)
+                  + ", ".join(f"{ip} ({self._connections(dests[ip])}, {dests[ip].state})" for ip in shown)
                   + more(len(shown), deciding.size) + ".")
         claim += (cited_phrase(len(evs), sum(group.records.values()), not missing)
                   + bound_note(missing, group.ends, "the hunt-window span"))
+        # how many of the stated addresses and connections the cited records show
+        n_reached = len(reached & set(dests))
+        views = (flow_view(e, kind) for e in evs if (kind := record_kind(e)) not in (None, "netflow"))
+        n_conns = len({view.key for view in views if view is not None})
+        claim += (f" {n_reached} of the {len(dests)} addresses and {min(n_conns, connections)} of "
+                  f"{'at least ' if capped else 'the '}{connections} connections are in cited records.")
         cited = next((e for e in evs if e.has("destination.port")), evs[0])
         match = Match(self.id, claim, self.claim_type, evs,
                       _predicates(cited, ("source.ip", "destination.ip", "destination.port", "network.transport")),
@@ -932,18 +942,19 @@ class _UnidentifiedGroup:
 SOURCE_LIST_LIMIT = 30
 
 
-def _address_list(counts: dict[str, int], noun: str, cited: set[str]) -> str:
+def _address_list(counts: dict[str, int], noun: str, cited: set[str], at_least: bool = False) -> str:
     """'2 sources (10.0.0.5: 3, 10.0.0.6: 2)', naming the addresses a cited record shows, up to the list limit, and
-    counting the rest."""
+    counting the rest; with `at_least` (a capped group) every count is a lower bound and says so."""
     ordered = sorted(counts, key=ip_sort_key)
     named = [ip for ip in ordered if ip in cited][:SOURCE_LIST_LIMIT]
-    listed = ", ".join(f"{ip}: {counts[ip]}" for ip in named)
+    floor = "at least " if at_least else ""
+    listed = ", ".join(f"{ip}: {floor}{counts[ip]}" for ip in named)
     rest = more(len(named), len(ordered)).strip()
-    return f"{_plural(len(ordered), noun)} ({'; '.join(part for part in (listed, rest) if part)})"
+    return f"{floor}{_plural(len(ordered), noun)} ({'; '.join(part for part in (listed, rest) if part)})"
 
 
-def _sources_phrase(counts: dict[str, int], cited: set[str]) -> str:
-    return "from " + _address_list(counts, "source", cited)
+def _sources_phrase(counts: dict[str, int], cited: set[str], at_least: bool = False) -> str:
+    return "from " + _address_list(counts, "source", cited, at_least)
 
 
 def _addresses(events: list[TypedEvent]) -> set[str]:
@@ -1146,7 +1157,8 @@ class ProtocolPortMismatch(_FlowRule):
                 if extra:
                     others[sensor].update(extra)
         evs, missing = self._cite(group.ends, group.cited)
-        sources = _sources_phrase({src: len(keys) for src, keys in group.sources.items()}, _addresses(evs))
+        sources = _sources_phrase({src: len(keys) for src, keys in group.sources.items()}, _addresses(evs),
+                                  group.capped)
         claim = (f"{sensors} identified {names} on {'at least ' if group.capped else ''}"
                  f"{_plural(len(group.connections), 'connection')} to {dst} on "
                  f"{transport}/{port} {sources} ({_iso(group.first)} – {_iso(group.last)}; "
