@@ -1169,6 +1169,7 @@ class ProtocolPortMismatch(_FlowRule):
         parsable = sorted(expected & set().union(*(PARSERS[s] for s in records)))
         denominators = []
         tallies = self.pairs.peek((server, port, transport), {}) if side == "destination" else {}
+        counted = sum(tally["records"] for tally in tallies.values())
         for sensor, tally in sorted(tallies.items()):
             identified = ", ".join(f"{p} {n}" for p, n in sorted(tally.items()) if p != "records")
             kind = "flow record" if sensor == SURICATA else "session record"
@@ -1194,8 +1195,8 @@ class ProtocolPortMismatch(_FlowRule):
                  + cited_phrase(len(evs), records[SURICATA] + records[ARKIME], not missing,
                                 "records with no identified protocol", "record with no identified protocol")
                  + bound_note(missing, group.ends)
-                 + (f" The per-sensor totals of records to {server} on this port count every such record; only the "
-                    f"records above are cited." if denominators else ""))
+                 + (f" {min(len(evs), counted)} of the {counted} records to {server} on this port that the per-sensor "
+                    f"totals count are cited." if denominators and counted > len(evs) else ""))
         match = Match(self.id, claim, "network_observation", evs,
                       _predicates(evs[0], ("source.ip", "source.port", "destination.ip", "destination.port",
                                            "network.app_proto", "network.protocols")),

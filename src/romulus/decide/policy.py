@@ -73,8 +73,11 @@ def decide(m: Match, hunt_id: str) -> Decision:
             gates["outcome"] = "pass"
     else:
         gates["outcome"] = "n/a"
+    # the caveats of the records the predicate is read from (a cited anchor or link record's caveat is about that
+    # record, not about this claim)
+    origins = {field.origin.split(":", 1)[0] for field in m.predicate}
     for e in m.events:
-        if e.caveats:
+        if e.caveats and any(r.native_id in origins for r in e.raw):
             notes.extend(sorted(set(e.caveats)))
             break
     admitted = all(not v.startswith("fail") for v in gates.values())
