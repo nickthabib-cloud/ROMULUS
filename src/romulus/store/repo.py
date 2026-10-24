@@ -427,19 +427,26 @@ class Repo:
             # can depend on it through (a) their findings' event_ids, (b) their investigation steps'
             # pivot digests, (c) their own entity links (written by save_evidence per hunt), and (d) their
             # expansion links.
-            owned_raw = {
-                event_id: list(raw_ids or [])
-                for event_id, raw_ids in c.execute(select(
-                    t.typed_event.c.id, t.typed_event.c.raw_ids,
-                ).where(t.typed_event.c.hunt_id == hunt_id))
+            owned_events = {
+                row["id"]: dict(row)
+                for row in c.execute(select(
+                    t.typed_event.c.id, t.typed_event.c.event, t.typed_event.c.raw_ids,
+                ).where(t.typed_event.c.hunt_id == hunt_id)).mappings()
             }
+            owned_raw = {event_id: list(row["raw_ids"] or []) for event_id, row in owned_events.items()}
             mine = set(owned_raw)
             cited_by: dict[str, str] = {}
+            users_by: dict[str, set[str]] = {}
+
+            def cite(eid: str, citing_hunt: str) -> None:
+                if eid in mine:
+                    users_by.setdefault(eid, set()).add(citing_hunt)
+                    cited_by.setdefault(eid, citing_hunt)
+
             for cid_hunt, eids in c.execute(select(t.candidate.c.hunt_id, t.candidate.c.event_ids)
                                             .where(t.candidate.c.hunt_id != hunt_id)):
                 for eid in eids or []:
-                    if eid in mine:
-                        cited_by.setdefault(eid, cid_hunt)
+                    cite(eid, cid_hunt)
 
             def _strings(obj):
                 if isinstance(obj, str):
@@ -455,21 +462,18 @@ class Repo:
                     select(t.case.c.hunt_id, t.case_step.c.result_digest, t.case_step.c.decision)
                     .join(t.case, t.case.c.id == t.case_step.c.case_id).where(t.case.c.hunt_id != hunt_id)):
                 for sval in _strings([digest_, decision]):
-                    if sval in mine:
-                        cited_by.setdefault(sval, step_hunt)
+                    cite(sval, step_hunt)
             for ev_id, ent_hunt in c.execute(
                     select(t.event_entity.c.event_id, t.entity.c.hunt_id)
                     .join(t.entity, t.entity.c.id == t.event_entity.c.entity_id)
                     .where(t.entity.c.hunt_id != hunt_id)):
-                if ev_id in mine:
-                    cited_by.setdefault(ev_id, ent_hunt)
+                cite(ev_id, ent_hunt)
             # (d) other hunts' expansion links cite events they reached and the evidence they rest on
             for link_hunt, link_events, link_evidence in c.execute(
                     select(t.expansion_link.c.hunt_id, t.expansion_link.c.event_ids, t.expansion_link.c.evidence_ids)
                     .where(t.expansion_link.c.hunt_id != hunt_id)):
                 for eid in [*(link_events or []), *(link_evidence or [])]:
-                    if eid in mine:
-                        cited_by.setdefault(eid, link_hunt)
+                    cite(eid, link_hunt)
             # (e) a later hunt's scoped citation overlay also keeps the stable typed row it describes
             citation_overlays = {
                 (row["event_id"], row["hunt_id"]): dict(row)
@@ -481,16 +485,31 @@ class Repo:
                 )).mappings()
             }
             for event_id, citation_hunt in citation_overlays:
-                if event_id in mine:
-                    cited_by.setdefault(event_id, citation_hunt)
-            # (f) other hunts' baseline observations cite their first window event
+                cite(event_id, citation_hunt)
+            # (f) every direct observation is explicit, including entity-free events and identical observations
+            # that deliberately need no citation overlay.
+            for event_id, observation_hunt in c.execute(select(
+                    t.event_observation.c.event_id, t.event_observation.c.hunt_id,
+            ).where(t.event_observation.c.hunt_id != hunt_id)):
+                cite(event_id, observation_hunt)
+            # (g) other hunts' baseline observations cite their first window event
             for eid, obs_hunt in c.execute(observation_citations_query(hunt_id)):
-                cited_by.setdefault(eid, obs_hunt)
+                cite(eid, obs_hunt)
             displaced_raw: set[str] = set()
             for eid, owner in cited_by.items():
                 overlay = citation_overlays.get((eid, owner))
                 values: dict[str, Any] = {"hunt_id": owner}
                 if overlay is not None:
+                    # Hunts whose identical observation needed no overlay currently fall through to the stable
+                    # row. Preserve that exact old row before replacing it with another hunt's differing overlay.
+                    stable = owned_events[eid]
+                    for fallback_hunt in sorted(users_by[eid] - {owner}):
+                        if (eid, fallback_hunt) in citation_overlays:
+                            continue
+                        c.execute(t.event_citation.insert().values(
+                            hunt_id=fallback_hunt, event_id=eid,
+                            event=stable["event"], raw_ids=stable["raw_ids"],
+                        ))
                     displaced_raw.update(owned_raw[eid])
                     values.update(event=overlay["event"], raw_ids=overlay["raw_ids"])
                     normalizer = (overlay["event"] or {}).get("normalizer")
@@ -556,6 +575,9 @@ class Repo:
             rm("cases", t.case.delete().where(t.case.c.hunt_id == hunt_id))
             rm("entity_links", t.event_entity.delete().where(or_(t.event_entity.c.entity_id.in_(ent_ids),
                                                                  t.event_entity.c.event_id.in_(drop_events))))
+            rm("event_observations", t.event_observation.delete().where(
+                t.event_observation.c.hunt_id == hunt_id,
+            ))
             rm("entities", t.entity.delete().where(t.entity.c.hunt_id == hunt_id))
             rm("event_citations", t.event_citation.delete().where(t.event_citation.c.hunt_id == hunt_id))
             rm("typed_events", t.typed_event.delete().where(t.typed_event.c.id.in_(drop_events)))
@@ -1113,6 +1135,9 @@ class Repo:
             _upsert_ignore(c, t.typed_event, ev_rows, ["id"])
             if existing:
                 self._merge_citation_raw(c, hunt_id, events, existing)
+            _upsert_ignore(c, t.event_observation, [
+                {"hunt_id": hunt_id, "event_id": event.id} for event in events
+            ], ["hunt_id", "event_id"])
             self._fill_boot(c, events)
             _upsert_ignore(c, t.entity, list(ent_rows.values()), ["id"])
             _upsert_ignore(c, t.event_entity, link_rows, ["event_id", "entity_id", "role"])
@@ -1128,11 +1153,9 @@ class Repo:
                 t.event_citation.c.event_id.in_(ids),
             )).mappings()
         }
-        prior_citations = set(c.execute(select(t.event_entity.c.event_id).join(
-            t.entity, t.entity.c.id == t.event_entity.c.entity_id,
-        ).where(
-            t.entity.c.hunt_id == hunt_id,
-            t.event_entity.c.event_id.in_(ids),
+        prior_citations = set(c.execute(select(t.event_observation.c.event_id).where(
+            t.event_observation.c.hunt_id == hunt_id,
+            t.event_observation.c.event_id.in_(ids),
         )).scalars())
         incoming: dict[str, tuple[Any, list]] = {}
         for event in events:
@@ -1223,6 +1246,10 @@ class Repo:
                         })
             _upsert_ignore(c, t.raw_record, raw_rows, ["id"])
             self._merge_citation_raw(c, hunt_id, events, existing)
+            _upsert_ignore(c, t.event_observation, [
+                {"hunt_id": hunt_id, "event_id": event.id}
+                for event in events if event.id in existing
+            ], ["hunt_id", "event_id"])
 
     @staticmethod
     def _fill_boot(c, events: list) -> None:

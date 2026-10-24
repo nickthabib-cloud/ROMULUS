@@ -2,10 +2,11 @@ from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 
+from romulus.agent.toolbox import Toolbox
 from romulus.evidence.typed import RawRef, TypedEvent
-from romulus.report.manifest import _citations
+from romulus.report.manifest import _citations, _content_candidate_key
 from romulus.store import schema as t
-from romulus.store.db import make_engine, migrate
+from romulus.store.db import digest, make_engine, migrate
 from romulus.store.repo import Repo, raw_id
 
 
@@ -40,6 +41,44 @@ def test_cross_hunt_raw_merge_is_scoped_to_the_current_hunts_citations():
     assert [citation["native_id"] for citation in h1] == ["copy-1"]
     assert [citation["native_id"] for citation in h2] == ["copy-1", "copy-2"]
     assert _citation_count(repo) == 1
+
+
+def test_hunt_scoped_agent_and_report_consumers_read_the_citation_overlay():
+    repo = Repo(make_engine(":memory:"))
+    migrate(repo.engine)
+    repo.create_hunt("h1", {}, "d1", "test")
+    repo.create_hunt("h2", {}, "d2", "test")
+    owner_ref = RawRef(target="windows-a", native_id="owner-copy", digest="digest-1")
+    foreign_ref = RawRef(target="windows-b", native_id="foreign-copy", digest="digest-2")
+    owner = TypedEvent(
+        id="stable-event", family="process_exec", ts=datetime(2026, 1, 1, tzinfo=UTC), host="ws01",
+        fields={}, raw=[owner_ref], normalizer="windows-ecs@1",
+    )
+    repo.save_evidence("h1", [owner], {owner_ref.key: {"copy": "owner"}}, None)
+    repo.save_evidence(
+        "h2", [owner.model_copy(update={"raw": [foreign_ref]})],
+        {foreign_ref.key: {"copy": "foreign"}}, None,
+    )
+    repo.save_candidate({
+        "id": "finding-h2", "hunt_id": "h2", "rule_id": "host.test", "rule_version": "1",
+        "claim": "scoped evidence", "claim_type": "observed_action", "event_ids": [owner.id],
+        "predicate_fields": [], "entities": [["host", "ws01", "host"]], "ts": owner.ts,
+        "severity": "high", "confidence": "high", "lane": "high", "priority": 1.0,
+        "priority_reasons": [], "gate_results": {}, "benign_alternatives": [], "next_checks": [],
+        "source_case_id": None, "source_anchor_id": None, "source_link_id": None,
+    })
+
+    toolbox = Toolbox(repo, "h2")
+    finding = toolbox.execute("get_finding", {"finding": "F1"})
+    evidence = toolbox.execute("get_evidence", {
+        "evidence": [finding["data"]["finding"]["evidence"][0]],
+    })["data"]["evidence"][0]
+    candidate = repo.candidate("finding-h2")
+
+    assert [raw["native_id"] for raw in evidence["raw_records"]] == ["foreign-copy"]
+    assert _content_candidate_key(repo, candidate) == "F-" + digest({
+        "rule_id": "host.test", "evidence_identity": ["windows-b/foreign-copy"],
+    })[:20]
 
 
 def test_another_hunt_reuses_the_stable_citation_without_an_identical_overlay():
@@ -131,6 +170,31 @@ def test_foreign_hunt_merges_its_own_sequential_raw_observations():
 
     repo.save_evidence("h1", [first], {first_ref.key: {"copy": 1}}, None)
     repo.save_evidence("h2", [first], {first_ref.key: {"copy": 1}}, None)
+    repo.save_evidence(
+        "h2", [first.model_copy(update={"raw": [second_ref]})],
+        {second_ref.key: {"copy": 2}}, None,
+    )
+
+    assert [citation["native_id"] for citation in _citations(
+        repo, {"hunt_id": "h2", "event_ids": [first.id]},
+    )] == ["copy-1", "copy-2"]
+
+
+def test_entity_free_foreign_hunt_keeps_its_identical_then_differing_observations():
+    repo = Repo(make_engine(":memory:"))
+    migrate(repo.engine)
+    repo.create_hunt("h1", {}, "d1", "test")
+    repo.create_hunt("h2", {}, "d2", "test")
+    first_ref = RawRef(target="windows-a", native_id="copy-1", digest="digest-1")
+    second_ref = RawRef(target="windows-b", native_id="copy-2", digest="digest-2")
+    first = TypedEvent(
+        id="stable-event", family="process_exec", ts=datetime(2026, 1, 1, tzinfo=UTC), host=None,
+        fields={}, raw=[first_ref], normalizer="windows-ecs@1",
+    )
+
+    repo.save_evidence("h1", [first], {first_ref.key: {"copy": 1}}, None)
+    repo.save_evidence("h2", [first], {first_ref.key: {"copy": 1}}, None)
+    assert _citation_count(repo) == 0
     repo.save_evidence(
         "h2", [first.model_copy(update={"raw": [second_ref]})],
         {second_ref.key: {"copy": 2}}, None,
@@ -248,3 +312,34 @@ def test_transferred_owner_merges_later_refs_into_its_snapshotted_citations():
     assert _citation_count(repo) == 1
     assert [ref["native_id"] for ref in repo.events_by_ids([owner.id])[0]["event"]["raw"]] == ["copy-2"]
     assert repo.raw_records([raw_id(owner_ref.target, owner_ref.native_id)]) == []
+
+
+def test_transfer_to_a_differing_overlay_preserves_an_identical_hunts_stable_history():
+    repo = Repo(make_engine(":memory:"))
+    migrate(repo.engine)
+    for hunt_id in ("h1", "h2", "h3"):
+        repo.create_hunt(hunt_id, {}, hunt_id, "test")
+    stable_ref = RawRef(target="windows-a", native_id="copy-1", digest="digest-1")
+    differing_ref = RawRef(target="windows-b", native_id="copy-2", digest="digest-2")
+    event = TypedEvent(
+        id="stable-event", family="process_exec", ts=datetime(2026, 1, 1, tzinfo=UTC), host="ws01",
+        fields={}, raw=[stable_ref], normalizer="windows-ecs@1",
+    )
+
+    repo.save_evidence("h1", [event], {stable_ref.key: {"copy": 1}}, None)
+    repo.save_evidence(
+        "h2", [event.model_copy(update={"raw": [differing_ref]})],
+        {differing_ref.key: {"copy": 2}}, None,
+    )
+    repo.save_evidence("h3", [event], {stable_ref.key: {"copy": 1}}, None)
+    assert _citation_count(repo) == 1
+
+    repo.delete_hunt("h1", actor="test")
+
+    stored = repo.events_by_ids([event.id])[0]
+    assert stored["hunt_id"] == "h2"
+    assert [ref["native_id"] for ref in stored["event"]["raw"]] == ["copy-2"]
+    assert [citation["native_id"] for citation in _citations(
+        repo, {"hunt_id": "h3", "event_ids": [event.id]},
+    )] == ["copy-1"]
+    assert _citation_count(repo) == 1

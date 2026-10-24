@@ -44,7 +44,7 @@ class HuntToolExecutor:
         self.owner_token = owner_token
 
     def _events(self, ids: list[str]) -> list[TypedEvent]:
-        rows = self.repo.events_by_ids(ids)
+        rows = self.repo.citation_events(self.hunt_id, ids)
         return sorted((TypedEvent.model_validate(row["event"]) for row in rows),
                       key=lambda event: (event.ts, event.id))
 

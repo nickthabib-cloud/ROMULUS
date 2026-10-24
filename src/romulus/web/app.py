@@ -240,7 +240,7 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         c = repo.candidate(cid)
         if c is None:
             raise HTTPException(404)
-        events = repo.events_by_ids(c["event_ids"][:20])
+        events = repo.citation_events(c["hunt_id"], c["event_ids"][:20])
         raw_ids = [rid for e in events for rid in e["raw_ids"]]
         raws = repo.raw_records(raw_ids[:40])
         gates = dict(c["gate_results"])

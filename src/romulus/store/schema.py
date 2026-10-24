@@ -106,6 +106,16 @@ event_citation = Table(
 )
 Index("ix_event_citation_event", event_citation.c.event_id)
 
+# A compact marker records that a hunt directly observed a stable event even when its raw-reference set is
+# identical and therefore needs no provenance overlay. It must not depend on extracted entities: valid typed
+# events can carry no host, account, address or domain at all.
+event_observation = Table(
+    "event_observation", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id"), primary_key=True),
+    Column("event_id", String, ForeignKey("typed_event.id"), primary_key=True),
+)
+Index("ix_event_observation_event", event_observation.c.event_id)
+
 normalization_error = Table(
     "normalization_error", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),

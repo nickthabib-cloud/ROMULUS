@@ -280,7 +280,10 @@ def build_brief(repo: Repo, case_id: str, _tool_catalog: dict, num_ctx: int, max
         evidence_ids.update(str(summary["id"]) for summary in result.get("event_summaries") or [] if summary.get("id"))
     evidence_views: list[dict] = []
     if hasattr(repo, "events_by_ids"):
-        for row in repo.events_by_ids(sorted(evidence_ids)):
+        citation_reader = getattr(repo, "citation_events", None)
+        rows = (citation_reader(case["hunt_id"], sorted(evidence_ids))
+                if callable(citation_reader) else repo.events_by_ids(sorted(evidence_ids)))
+        for row in rows:
             event = row.get("event") or {}
             evidence_views.append({
                 "id": row["id"], "family": row["family"], "ts": row["ts"], "host": row["host"],

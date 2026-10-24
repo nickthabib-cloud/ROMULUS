@@ -642,7 +642,7 @@ def _ai_agent(repo: Repo, hunt_id: str, hunt_manifest: dict) -> dict:
 
 def _content_candidate_key(repo: Repo, candidate: dict) -> str:
     raw_keys = set()
-    for row in repo.events_by_ids(candidate["event_ids"]):
+    for row in repo.citation_events(candidate["hunt_id"], candidate["event_ids"]):
         for reference in row["event"].get("raw", []):
             raw_keys.add(f"{reference['target']}/{reference['native_id']}")
     evidence_identity = candidate.get("group_key") or sorted(raw_keys) or sorted(candidate["event_ids"])
