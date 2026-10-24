@@ -764,8 +764,9 @@ class Sweep:
             windows_gate_reasons.update(windows_reasons)
             rule_partial = (affected is ALL_FAMILIES or bool(set(pb.families) & affected)
                             or bool(windows_reasons))
-            before_eval, before_missing, before_os = pb.evaluated, pb.missing_required, pb.os_applicable
-            before_eval, before_missing, before_capped = pb.evaluated, pb.missing_required, pb.capped
+            before_eval, before_missing, before_os, before_capped = (
+                pb.evaluated, pb.missing_required, pb.os_applicable, pb.capped,
+            )
             before_assumed = pb.direction_assumed
             before_limits = {name: limit.records for name, limit in pb.limits.items()}
             scoped_events = pb.scope_partition(events)
