@@ -312,11 +312,11 @@ def test_0016_drops_only_the_owners_implied_observations(tmp_path):
         assert rows() == sorted(observed, key=lambda row: (row[1], row[0]))
 
 
-def test_0017_is_the_single_head_and_leaves_stored_candidates_about_every_record_they_cite(tmp_path):
+def test_0018_is_the_single_head_and_0017_leaves_stored_candidates_about_every_record_they_cite(tmp_path):
     engine = make_engine(tmp_path / "candidate-context.db")
     with engine.begin() as connection:
         cfg = _alembic_config(connection)
-        assert ScriptDirectory.from_config(cfg).get_heads() == ["0017"]
+        assert ScriptDirectory.from_config(cfg).get_heads() == ["0018"]
         command.upgrade(cfg, "0016")
         connection.exec_driver_sql(
             "INSERT INTO hunt (id, created_at, created_by, manifest, manifest_digest, execution_state) "
@@ -517,7 +517,9 @@ def test_baseline_listings_are_deterministically_sorted():
 
 BASELINE_TABLES = ("baseline_segment", "baseline_count", "baseline_scope_hour", "baseline_snapshot",
                    "baseline_snapshot_segment", "baseline_parent_host_boot", "baseline_parent_carry",
-                   "baseline_observation")
+                   "baseline_observation", "baseline_window_cell", "baseline_window_exec",
+                   "baseline_window_observation", "baseline_window_pending", "baseline_history_cell",
+                   "baseline_history_row")
 
 
 def _shape(engine) -> dict:

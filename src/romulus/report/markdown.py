@@ -338,6 +338,20 @@ def render(m: dict, banner: str = BANNER) -> str:
     for r in m["coverage"]["rules"]:
         out.append(f"| {esc(r['rule_id'])} | {r['records_evaluated']} | {esc(r['negative_claim'])} | "
                    f"{esc(json.dumps(r['states'], sort_keys=True))} |")
+    baseline = m["coverage"].get("baseline") or {}
+    baseline_specs = baseline.get("specs") or []
+    if baseline_specs:
+        out += ["", "### Baseline snapshot", "",
+                (f"Snapshot digest: `{esc(baseline.get('snapshot_digest') or 'not frozen')}`; "
+                 f"snapshot status: **{esc(baseline.get('snapshot_status', 'unknown'))}**; "
+                 f"stage status: **{esc(baseline.get('stage_status', 'unknown'))}**."), "",
+                "| Spec | Status | Unresolved observations | Verdict counts |",
+                "|---|---|---:|---|"]
+        for spec in baseline_specs:
+            out.append(
+                f"| {esc(spec['id'])} | {esc(spec['status'])} | {spec['unresolved_count']} | "
+                f"{esc(json.dumps(spec['verdicts'], sort_keys=True))} |"
+            )
     gaps = m["coverage"].get("gaps") or []
     out += ["", "### Coverage gaps", "",
             ("Every source partition or link where at least one rule was left unresolved, and why. No negative "

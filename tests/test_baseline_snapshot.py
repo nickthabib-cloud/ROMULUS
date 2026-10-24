@@ -230,6 +230,32 @@ def test_twin_plans_have_identical_digest():
     assert outputs[0] == outputs[1]
 
 
+def test_external_destination_cover_requires_the_same_network_digest():
+    ext = SPEC_BY_ID["bl.ext_dest"]
+
+    def build(network_digest):
+        repo = _repo()
+        repo.save_baseline_segment({
+            "id": "ext", "site": "site", "target": "network", "spec_id": ext.id,
+            "spec_version": ext.version, "key_version": ext.key_version,
+            "normalizer": "fixture@1", "start": START - timedelta(hours=2), "end": START,
+            "bucket": "day", "origin": "lookback", "source_hunt_id": None,
+            "built_by_hunt_id": None, "exclusion_digest": "none",
+            "network_digest": "network-a", "excluded_keys": [], "hunted": 0,
+            "events_total": 1, "status": "active", "created_at": START,
+        }, [], [])
+        return SnapshotPlanner(repo).freeze(
+            hunt_id="hunt", window_start=START, lookback=timedelta(hours=2),
+            min_live_hours=1, site="site", targets=["network"], specs=[ext],
+            network_digest=network_digest,
+        )
+
+    assert build("network-a")["segment_ids"] == ["ext"]
+    mismatched = build("network-b")
+    assert mismatched["segment_ids"] == []
+    assert mismatched["coverage"]["network|bl.ext_dest"]["status"] == "unresolved"
+
+
 def test_planner_filters_a_store_of_ten_thousand_segments_in_bounded_time():
     repo = _repo()
     rows = []

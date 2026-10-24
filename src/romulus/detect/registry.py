@@ -1,6 +1,7 @@
 """The active playbook pack and per-source applicability."""
 from __future__ import annotations
 
+from romulus.baseline.playbook import BASELINE_PLAYBOOKS
 from romulus.detect.auth import AUTH_PLAYBOOKS
 from romulus.detect.base import Playbook
 from romulus.detect.context import CONTEXT_PLAYBOOKS
@@ -21,7 +22,8 @@ from romulus.detect.tls import TLS_PLAYBOOKS
 PACK_VERSION = "pack@25"
 ALL_PLAYBOOKS = (HOST_PLAYBOOKS + HIJACK_PLAYBOOKS + KERNEL_FILE_PLAYBOOKS + LINEAGE_PLAYBOOKS + AUTH_PLAYBOOKS
                  + TAMPER_PLAYBOOKS + NETWORK_PLAYBOOKS + DNS_PLAYBOOKS + SESSION_PLAYBOOKS + TLS_PLAYBOOKS + FLOW_PLAYBOOKS
-                 + CORRELATION_PLAYBOOKS + INDICATOR_PLAYBOOKS + CONTEXT_PLAYBOOKS + PACKET_PLAYBOOKS)
+                 + CORRELATION_PLAYBOOKS + INDICATOR_PLAYBOOKS + CONTEXT_PLAYBOOKS + PACKET_PLAYBOOKS
+                 + BASELINE_PLAYBOOKS)
 _ANCHOR_CLASSES = {playbook.id: playbook.anchor_class for playbook in ALL_PLAYBOOKS}
 
 
@@ -29,8 +31,9 @@ _KINDS = {playbook.id: playbook.kind for playbook in ALL_PLAYBOOKS}
 
 
 def rule_kind(rule_id: str) -> str:
-    """The declared kind of a registered rule (direct | aggregate | context | packet); 'direct' if unknown."""
-    return _KINDS.get(rule_id, "direct")
+    """The expansion scheduling category of a rule; baseline and context findings never become anchors."""
+    kind = _KINDS.get(rule_id, "direct")
+    return "context" if kind == "baseline" else kind
 
 
 def anchor_class_for_rule(rule_id: str) -> str:
@@ -40,7 +43,8 @@ def anchor_class_for_rule(rule_id: str) -> str:
 
 def fresh_pack():
     """New evaluator instances for one hunt (they carry aggregate state)."""
-    # context rules run only in expansion, packet rules only in the packet stage
+    # context rules run only in expansion, packet rules only in the packet stage; baseline playbooks consume
+    # window cells in the sweep and are judged by the later baseline stage.
     pack = [cls() for cls in ALL_PLAYBOOKS if cls.kind not in ("context", "packet")]
     share_lineage(pack)           # one exec lineage for every rule that keeps one
     return pack

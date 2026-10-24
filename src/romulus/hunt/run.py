@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from romulus.agent.controller import Investigator
 from romulus.agent.provider import agent_readiness
 from romulus.config import Settings
 from romulus.detect import netdef
 from romulus.evidence.normalize import NORMALIZER_VERSION
+from romulus.hunt.baseline_stage import run_baseline_stage
 from romulus.hunt.expansion import PER_ANCHOR_SOURCE_QUERIES, ExpansionEngine
 from romulus.hunt.links import LinkFetcher, is_agent_reach
 from romulus.hunt.manifest import build_manifest, new_hunt_id
@@ -77,6 +78,11 @@ def create_hunt(s: Settings, start: datetime, end: datetime, created_by: str, st
     manifest = build_manifest(s, window, original_input or {"start": start.isoformat(), "end": end.isoformat()},
                               style, targets, profiles, hypothesis, ai_agent=ai_agent_entry(s, ai_agent),
                               site_facts=site_facts)
+    baseline = manifest["baseline"]
+    baseline["store_cut_digest"] = repo.baseline_store_cut_digest(
+        site=baseline["site"], targets=targets, specs=baseline["specs"],
+        start=window.start - timedelta(days=int(baseline["history_days"])), end=window.start,
+    )
     manifest["expansion"] = {
         "enabled": expand, "max_depth": 3, "per_anchor_source_queries": PER_ANCHOR_SOURCE_QUERIES,
         "max_source_queries": s.expansion_max_source_queries, "wall_clock_minutes": s.expansion_wall_clock_minutes,
@@ -166,16 +172,24 @@ def _detection_result(repo: Repo, hunt_id: str) -> tuple[dict[str, int], str]:
 def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
             *, stats: dict | None = None, partial_reasons: list[str] | None = None,
             expansion_summary: dict | None = None, packet_summary: dict | None = None,
-            ai_agent_summary: dict | None = None, owner_token: str | None = None) -> dict:
+            baseline_summary: dict | None = None, ai_agent_summary: dict | None = None,
+            owner_token: str | None = None) -> dict:
     partial_reasons = list(partial_reasons or sweep_summary.get("partial_reasons") or [])
     sweep_complete = bool(sweep_summary.get("complete"))
     missing_summary = not sweep_summary
     agent_status = agent_summary.get("status")
     packet_status = (packet_summary or {}).get("status")
     packets_incomplete = packet_status in ("partial", "failed")
+    baseline_status = (baseline_summary or {}).get("status")
+    baseline_failed = bool(
+        (baseline_summary or {}).get("stage_failed") or baseline_status == "failed"
+    )
+    if baseline_failed:
+        partial_reasons.append(f"baseline_stage:{baseline_status}")
     if packets_incomplete:
         partial_reasons.append(f"packet_stage:{packet_status}")
     partial = (missing_summary or not sweep_complete or agent_status == "unavailable" or packets_incomplete
+               or baseline_failed
                or (expansion_summary or {}).get("status") in {"partial", "failed"})
     counts, result = _detection_result(repo, hunt_id)
     reasons = partial_reasons[:10]
@@ -188,6 +202,8 @@ def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
     if packets_incomplete:
         detail = (packet_summary.get("partial_reasons") or [packet_summary.get("error") or ""])[0]
         reasons.append(f"packet stage {packet_status}: {detail}"[:200])
+    if baseline_failed:
+        reasons.append(f"baseline stage {baseline_status}: source, staging, or execution failure")
     if agent_summary.get("stop_reason"):
         reasons.append(f"agent: {agent_summary['stop_reason']}")
     if expansion_summary and expansion_summary.get("stop_reason"):
@@ -209,6 +225,7 @@ def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
         "partial_reasons": partial_reasons,
         "agent": agent_summary,
         "ai_agent": ai_agent_summary or {},
+        "baseline": baseline_summary or {},
         "expansion": expansion_summary or {},
     }
 
@@ -303,6 +320,28 @@ def _packet_stage(s: Settings, repo: Repo, client: ElasticClient, hunt_id: str, 
         log.exception("packet stage failed")
         summary = {"status": "failed", "finished": False, "error": str(exc)[:300]}
     repo.audit("system", "hunt.packet_summary", hunt_id, summary, owner_token=owner_token)
+    return summary
+
+
+def _baseline_stage(repo: Repo, client: ElasticClient, hunt: dict, window: Window,
+                    contracts: dict, heartbeat, owner_token: str | None) -> dict:
+    """Run or resume the baseline stage; a crash is an explicit partial result, not a hunt stopper."""
+    hunt_id = hunt["id"]
+    try:
+        summary = run_baseline_stage(
+            repo, hunt_id, window, client=client, contracts=contracts,
+            heartbeat=heartbeat, owner_token=owner_token,
+        )
+    except Exception as exc:
+        log.exception("baseline stage failed")
+        summary = {"status": "failed", "finished": False, "stage_failed": True, "error": str(exc)[:300],
+                   "snapshot_digest": (repo.baseline_snapshot(hunt_id) or {}).get("digest")}
+        for item in (hunt["manifest"].get("baseline") or {}).get("specs") or []:
+            repo.set_rule_cell(
+                hunt_id, item["id"], item["version"], "*", "window", "evaluated_partial", 0, 0,
+                {"reasons": [f"baseline stage failed: {exc}"[:300]]}, owner_token=owner_token,
+            )
+    repo.audit("system", "hunt.baseline_summary", hunt_id, summary, owner_token=owner_token)
     return summary
 
 
@@ -401,6 +440,9 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool | None = None, on_candidate=
     )
     # packet findings first, so they can anchor expansion like any sweep finding
     packet_summary = _packet_stage(s, repo, client, hunt_id, window, contracts, heartbeat, owner_token)
+    baseline_summary = _baseline_stage(
+        repo, client, repo.get_hunt(hunt_id), window, contracts, heartbeat, owner_token,
+    )
     expansion_summary = _run_expansion_safely(
         s, repo, client, repo.get_hunt(hunt_id), contracts, window, owner_token,
     )
@@ -426,6 +468,7 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool | None = None, on_candidate=
         repo, hunt_id, agent_summary, sweep_summary,
         stats=sweep.stats, partial_reasons=sweep.partial_reasons,
         expansion_summary=expansion_summary, packet_summary=packet_summary,
+        baseline_summary=baseline_summary,
         ai_agent_summary=ai_agent_summary, owner_token=owner_token,
     )
 
@@ -488,6 +531,16 @@ def resume_hunt(s: Settings, hunt_id: str, agent_mode: str | None = None, ai_age
             repo.heartbeat_hunt(hunt_id, _lease_seconds(s), owner_token=owner_token)
 
         packet_summary = _packet_stage(s, repo, client, hunt_id, window, contracts, heartbeat, owner_token)
+    baseline_audit = repo.latest_audit(hunt_id, "hunt.baseline_summary")
+    baseline_summary = dict(baseline_audit["detail"]) if baseline_audit else {}
+    if not baseline_summary.get("finished"):
+
+        def heartbeat():
+            repo.heartbeat_hunt(hunt_id, _lease_seconds(s), owner_token=owner_token)
+
+        baseline_summary = _baseline_stage(
+            repo, client, hunt, window, contracts, heartbeat, owner_token,
+        )
     expansion_summary = _run_expansion_safely(
         s, repo, client, hunt, contracts, window, owner_token,
     )
@@ -512,5 +565,6 @@ def resume_hunt(s: Settings, hunt_id: str, agent_mode: str | None = None, ai_age
     return _finish(
         repo, hunt_id, agent_summary, sweep_summary,
         expansion_summary=expansion_summary, packet_summary=packet_summary,
+        baseline_summary=baseline_summary,
         ai_agent_summary=ai_agent_summary, owner_token=owner_token,
     )

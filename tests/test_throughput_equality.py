@@ -94,6 +94,12 @@ from tests import throughput_fixture as tf
 # findings that give per-sensor totals say how many of each sensor's records are cited, and the connect() link with
 # one call says its one record is cited (candidates claims, and the manifest's findings that carry them). Candidate
 # ids, citations, lanes and everything else are unchanged.
+# The baseline stage runs after the sweep. This fixture has no pre-window history, so every baseline key is unresolved
+# and no baseline candidate is published. It adds only baseline state: the baseline rule cells (window, history and
+# rollup; the ids of later rule cells shift), the baseline task, the hunt.baseline_summary audit record, the manifest's
+# baseline coverage block and task count, the baseline observations (which keep first-event source identities only)
+# and the frozen snapshot. Candidates, events, event citations, entities, raw copies, anchors, links, expansion and
+# stats are those of the reference.
 # DNS client and server come from the DNS port, a process-network join cites a record of every sensor it names, a
 # grouped write lead cites the files that bound its span, and a port scan says how many of its ports are cited: those
 # rules carry new versions (rule_cells, candidates and the manifest's findings by rule_version). In the fixture only
@@ -101,7 +107,9 @@ from tests import throughput_fixture as tf
 # give the same roles and citations, so every other table is the reference's.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
-    "audit": "9ff1e6bb2670cb97af97a418aac6138d53d986bd1f0f1746c846ab209ea7519f",
+    "audit": "8adb5fe299d810a1c2aee9098bacb4dd3b48235d7353008873fa4c9968c3792b",
+    "baseline_observations": "0c275553cb80d70f1cf869bec3ab72d571ff3b6c3e07f0d6aa6ada13bf21c27b",
+    "baseline_snapshot": "9f22530bb41075bab8270b9f525098e5504886ed16a1723340c3b15e098e140c",
     "candidates": "6063264ca908c73e4710d65d4799e5460e579f9e9f0cd55391c2b3854c1b28c8",
     "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
     "event_citations": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
@@ -109,11 +117,11 @@ GOLDEN_STACK = {
     "events": "46ff37261993417f3e0fa61de9c3aa24977b2e091ad29d7cf4d166e8261a1017",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "797137953f5a643e0297b450047aeec3fa79c4cb386118f10d0ec00d337fd023",
-    "manifest": "064602966b7e23c75962d3d99448ef9a6c56c25fba2cdb24565c552b0a719835",
+    "manifest": "0f0e89d1a9a39779301eb8d545a4ba6863be03d9d4846d083c81bd2811e4d8c6",
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
-    "rule_cells": "32bc0128caf7b71204712daed548ec6113a7acca49bb6ca15cf20b975d7b9ee2",
+    "rule_cells": "f35dd3401b97f24f9546acddb726b9b9866bf8cab7a079dd9d87e7fe04450189",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
-    "tasks": "cffcaf6466928eb0e6a228bbab1a902546d2fba2301ae8383eb03b133df2a4fc",
+    "tasks": "79a32a2c417b61351a7ce50d01b3a45b4d5789993e407fa5b00d4e911e8671f3",
 }
 GOLDEN_NORMALIZED = {
     "arkime_sessions3-x": "20b597e7169ff4713f006bd7b69608eea69a2038505dfa92fdf393709af2fe54",

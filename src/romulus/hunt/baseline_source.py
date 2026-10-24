@@ -37,10 +37,10 @@ class HuntHistorySource:
         self.boots = boots()
         self.clock = clock
 
-    @staticmethod
-    def _filters(target: str) -> list[Predicate]:
+    def _filters(self, target: str) -> list[Predicate]:
+        contract = self.contracts[target]
         return ([Predicate(field="event.dataset", op="in", value=HOST_DATASETS)]
-                if "host" in target else [])
+                if contract.role == "host" else [])
 
     def plan(self, target: str, start: datetime, end: datetime, *, query_budget: int) -> HistoryPlan:
         # Every hour is planned before its partitions are fetched: start this hour's boot map.
@@ -73,9 +73,9 @@ class HuntHistorySource:
         try:
             add(Window(start=start, end=end))
         except _BudgetExhausted:
-            return HistoryPlan((), queries, "partial", ("planning query budget exhausted",))
+            return HistoryPlan((), queries, "omitted_budget", ("planning query budget exhausted",))
         except _PartitionCapExceeded:
-            return HistoryPlan((), queries, "partial", (
+            return HistoryPlan((), queries, "omitted_budget", (
                 f"history partition cap {MAX_HISTORY_PARTITIONS} exceeded",
             ))
         except Exception as error:  # noqa: BLE001 - a source planning error is an explicit coverage result
@@ -90,16 +90,18 @@ class HuntHistorySource:
         if partition.expected_records == 0:
             return HistoryFetch((), "complete", (), 0, 0)
         if record_budget is not None and record_budget < partition.expected_records:
-            return HistoryFetch((), "partial", ("lookback record budget exhausted",), 0, 0)
+            return HistoryFetch((), "omitted_budget", ("lookback record budget exhausted",), 0, 0)
         contract = self.contracts[partition.target]
         cap = min(2_000_000, max(PARTITION_MAX_DOCS, int(partition.expected_records * 1.2) + 1000))
         if record_budget is not None:
             cap = min(cap, max(0, record_budget))
         queries = 0
+        ran_out = False
 
         def reserve_query() -> bool:
-            nonlocal queries
+            nonlocal queries, ran_out
             if query_budget is not None and queries >= query_budget:
+                ran_out = True
                 return False
             queries += 1
             return True
@@ -132,6 +134,41 @@ class HuntHistorySource:
                 reasons.append(
                     f"exact-count mismatch: planned {partition.expected_records}, received {outcome.returned}",
                 )
-            return HistoryFetch(tuple(events), "partial", tuple(reasons or ["incomplete retrieval"]),
-                                outcome.returned, queries)
+            # a read the hunt's own query or wall-clock budget cut short is short history, not a source fault
+            budget_cut = (ran_out or (deadline is not None and self.clock() >= deadline)) and not (
+                errors or unsupported or conflicted or outcome.completeness == Completeness.failed)
+            return HistoryFetch(tuple(events), "omitted_budget" if budget_cut else "partial",
+                                tuple(reasons or ["incomplete retrieval"]), outcome.returned, queries)
         return HistoryFetch(tuple(events), "complete", (), outcome.returned, queries)
+
+    def fetch_refs(self, refs: list[dict]) -> tuple[tuple, dict[str, dict], tuple[str, ...]]:
+        """Re-fetch the bounded native records behind published first-event citations."""
+        grouped: dict[str, set[str]] = {}
+        for ref in refs:
+            target, native_id = str(ref["target"]), str(ref["native_id"])
+            if target not in self.contracts:
+                continue
+            grouped.setdefault(target, set()).add(native_id)
+        events, raw_sources, reasons = [], {}, []
+        for target in sorted(grouped):
+            native_ids = sorted(grouped[target])
+            response = self.client.search(target, {
+                "size": len(native_ids), "query": {"ids": {"values": native_ids}},
+            })
+            records = [record for record in response.get("hits", {}).get("hits", [])
+                       if str(record.get("_id")) in grouped[target]]
+            returned = {str(record.get("_id")) for record in records}
+            missing = sorted(grouped[target] - returned)
+            if missing:
+                reasons.append(f"{target}: {len(missing)} citation raw record(s) missing")
+            raw_sources.update({f"{record['_index']}/{record['_id']}": record["_source"]
+                                for record in records})
+            normalized, skips, errors = normalize_hits(records, self._new_boots())
+            events.extend(normalized)
+            if errors:
+                reasons.append(f"{target}: citation normalization_errors={len(errors)}")
+            unsupported = sum(value for key, value in skips.items()
+                              if key.startswith(("dataset:", "suricata event_type")))
+            if unsupported:
+                reasons.append(f"{target}: citation unsupported_records={unsupported}")
+        return tuple(events), raw_sources, tuple(reasons)

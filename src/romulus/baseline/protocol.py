@@ -7,7 +7,9 @@ from typing import Literal, Protocol, runtime_checkable
 
 from romulus.evidence.typed import TypedEvent
 
-type FetchState = Literal["complete", "partial", "failed"]
+# omitted_budget: the hunt's lookback budget (queries, records, wall clock, partition cap) ended the read; history is
+# then short, which is not a source failure
+type FetchState = Literal["complete", "partial", "failed", "omitted_budget"]
 
 
 @dataclass(frozen=True)
