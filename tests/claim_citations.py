@@ -14,9 +14,11 @@ unambiguously, and wording that says honestly what is not cited passes.
    a sentence that says those records were not judged, not cited or not kept is hedged and passes.
 3. Names. Every process id ('pid 964', 'pids 1, 2 and 3 more'), IP address, signature id ('sid 2016184'), port
    ('port 443', 'tcp/22'), bracketed example list item and quoted value the text names must appear in a cited record's
-   typed fields: as a value, a list element, the last path component of a value, a part of a value set off by punctuation or spaces (never part of a word:
-   'vi' is not in 'vim'), or the command shape of a cited command line. Quoted text that the detection code itself quotes as a constant of its wording (it appears between
-   single quotes in the rule source, such as 'ssh-reverse-shell' or 'failed') is wording, not a value.
+   typed fields: as a value, a list element, the last path component of a value, a part of a value set off by
+   punctuation or spaces (never part of a word: 'vi' is not in 'vim'), or the command shape of a cited command line.
+   An address block ('10.30.4.0/24') is named by any cited address inside it, and a reverse-lookup name stands for
+   its address. Quoted text that the detection code quotes inside one of its string literals ('failed' in "protocol
+   detection 'failed'") is wording, not a value; a pid in a 'K more' tail is counted, not named.
 
 What it does not judge: whether a value is the right one (a pid that appears in a cited record may still be named for
 the wrong reason), counts of things other than records and values, and statements without numbers or quotes. Those
@@ -26,6 +28,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import tokenize
 from datetime import UTC, datetime
 from functools import cache
 from pathlib import Path
@@ -49,10 +52,12 @@ STOP = frozenset({"of", "to", "from", "in", "on", "at", "for", "with", "and", "o
                   "are", "was", "were", "a", "an", "the", "s", "level(s)", "level", "up", "minutes", "hours", "hour",
                   "seconds", "bytes", "byte", "%", "mib"})
 HEDGES = ("not judged", "not cited", "not kept", "not held", "not evaluated", "were not", "was not", "at least")
+# within one sentence: a dot ends it only when a space follows (addresses and versions carry dots)
+_SAME_SENTENCE = r"(?:[^.;]|\.(?=\S))*"
 DISCLOSURE = (
-    re.compile(r"\b(\d[\d,]*) of (?:the |these |its |all |their )?(\d[\d,]*)\b[^.;]*\bcited\b"),
-    re.compile(r"\b[Aa]ll (\d[\d,]*)\b[^.;]*\bcited\b"),
-    re.compile(r"\b[Tt]he (?:earliest|first|latest|last) (\d[\d,]*)\b[^.;]*\bcited\b"),
+    re.compile(rf"\b(\d[\d,]*) of (?:the |these |its |all |their )?(\d[\d,]*)\b{_SAME_SENTENCE}\bcited\b"),
+    re.compile(rf"\b[Aa]ll (\d[\d,]*)\b{_SAME_SENTENCE}\bcited\b"),
+    re.compile(rf"\b[Tt]he (?:earliest|first|latest|last) (\d[\d,]*)\b{_SAME_SENTENCE}\bcited\b"),
 )
 PIDS = re.compile(r"\bpids?(?:\(s\))? (\d+(?:(?:, | and )\d+(?! more))*)")
 SIDS = re.compile(r"\bsid (\d+)")
@@ -69,8 +74,12 @@ def wording_constants() -> frozenset[str]:
     """Text the detection code quotes as a constant of its own wording."""
     root = Path(__file__).resolve().parents[1] / "src" / "romulus"
     found: set[str] = set()
+    kinds = {tokenize.STRING, getattr(tokenize, "FSTRING_MIDDLE", tokenize.STRING)}
     for path in [*root.joinpath("detect").glob("*.py"), *root.joinpath("hunt").glob("*.py")]:
-        found.update(re.findall(r"'([^'{}\n]{1,80})'", path.read_text(encoding="utf-8")))
+        with path.open(encoding="utf-8") as source:
+            for token in tokenize.generate_tokens(source.readline):
+                if token.type in kinds:                 # string literals only, never comments
+                    found.update(re.findall(r"'([^'{}\n]{1,80})'", token.string))
     return frozenset(found)
 
 
@@ -227,6 +236,15 @@ def problems(text: str, events: list[TypedEvent]) -> list[str]:
                 address = ipaddress.ip_address(match.group(0))
             except ValueError:
                 continue
+            prefix = re.match(r"/(\d{1,3})\b", text[match.end():])
+            if prefix:
+                # a block ('10.30.4.0/24') is named by a cited address inside it
+                try:
+                    block = ipaddress.ip_network(f"{address}/{prefix.group(1)}", strict=False)
+                except ValueError:
+                    block = None
+                if block is not None and any(a in block for a in cited.addresses if a.version == block.version):
+                    continue
             if address not in cited.addresses:
                 out.append(f"names address {address}, in no cited record")
     constants = wording_constants()
