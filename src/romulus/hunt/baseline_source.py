@@ -37,10 +37,10 @@ class HuntHistorySource:
         self.boots = boots()
         self.clock = clock
 
-    @staticmethod
-    def _filters(target: str) -> list[Predicate]:
+    def _filters(self, target: str) -> list[Predicate]:
+        contract = self.contracts[target]
         return ([Predicate(field="event.dataset", op="in", value=HOST_DATASETS)]
-                if "host" in target else [])
+                if contract.role == "host" else [])
 
     def plan(self, target: str, start: datetime, end: datetime, *, query_budget: int) -> HistoryPlan:
         # Every hour is planned before its partitions are fetched: start this hour's boot map.
@@ -135,3 +135,35 @@ class HuntHistorySource:
             return HistoryFetch(tuple(events), "partial", tuple(reasons or ["incomplete retrieval"]),
                                 outcome.returned, queries)
         return HistoryFetch(tuple(events), "complete", (), outcome.returned, queries)
+
+    def fetch_refs(self, refs: list[dict]) -> tuple[tuple, dict[str, dict], tuple[str, ...]]:
+        """Re-fetch the bounded native records behind published first-event citations."""
+        grouped: dict[str, set[str]] = {}
+        for ref in refs:
+            target, native_id = str(ref["target"]), str(ref["native_id"])
+            if target not in self.contracts:
+                continue
+            grouped.setdefault(target, set()).add(native_id)
+        events, raw_sources, reasons = [], {}, []
+        for target in sorted(grouped):
+            native_ids = sorted(grouped[target])
+            response = self.client.search(target, {
+                "size": len(native_ids), "query": {"ids": {"values": native_ids}},
+            })
+            records = [record for record in response.get("hits", {}).get("hits", [])
+                       if str(record.get("_id")) in grouped[target]]
+            returned = {str(record.get("_id")) for record in records}
+            missing = sorted(grouped[target] - returned)
+            if missing:
+                reasons.append(f"{target}: {len(missing)} citation raw record(s) missing")
+            raw_sources.update({f"{record['_index']}/{record['_id']}": record["_source"]
+                                for record in records})
+            normalized, skips, errors = normalize_hits(records, self._new_boots())
+            events.extend(normalized)
+            if errors:
+                reasons.append(f"{target}: citation normalization_errors={len(errors)}")
+            unsupported = sum(value for key, value in skips.items()
+                              if key.startswith(("dataset:", "suricata event_type")))
+            if unsupported:
+                reasons.append(f"{target}: citation unsupported_records={unsupported}")
+        return tuple(events), raw_sources, tuple(reasons)

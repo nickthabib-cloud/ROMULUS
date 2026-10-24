@@ -69,26 +69,24 @@ from tests import throughput_fixture as tf
 # unknown (its parent's exec is not in the window), with the network finding's claim stating it. The exec,
 # file-change and observed records corr.process_network_link reads for lineage do not make a partition an evaluation
 # of it, so its cells are otherwise unchanged. Lanes, anchors, links, raw copies and every other finding are unchanged.
-# Baseline playbooks add window/history/rollup rule cells, one baseline task, the frozen snapshot and its observations,
-# and their audit/report fields. Their resumable observations retain the first matching raw record and normalized event
-# so every first-seen claim can cite durable evidence after a restart; the current evidence schema cannot preserve that
-# invariant without also retaining the record's entities. Therefore raw, events, event_entities and entities change in
-# addition to the fields predicted by the S5 brief. Existing candidates, event citations, anchors, links and expansion
-# output remain byte-identical, as their unchanged digests below demonstrate.
+# Baseline observations now retain only first-event source identities and fetch bounded citations if a key is published.
+# The typed event, raw record and their entity rows therefore return to their pre-baseline footprint in this fixture,
+# whose history is unresolved and publishes no baseline candidate. The observation schema and baseline audit change;
+# candidates, event citations, anchors, links, expansion, tasks, rule cells, stats and the report remain byte-identical.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
-    "audit": "4e7fcdf0bb3a53b103ebac6381481f17d9b690645d349fef4636c26bd0bef477",
-    "baseline_observations": "a3213a19fea0107d1ef501cc8d673218e632a31f1c0bf71975e278e10e0a7fb8",
+    "audit": "237f28dbffb09105dfac6370c47af268e01d99f2fff51213736f033a9d33599b",
+    "baseline_observations": "7924e0c49a50a1a2c3158c8348614fa6bdd9573d77f8fca3bd6204e50334022f",
     "baseline_snapshot": "9f22530bb41075bab8270b9f525098e5504886ed16a1723340c3b15e098e140c",
     "candidates": "c70ac8e146d1356b64fc86eec38aa3a97352ea39d63390bfdd819b3cd4a7d8e8",
-    "entities": "0c0069e2de5e3a5f74e20a62f03b8bd105dbfba83ac1ded8f6e74e9be7dc0b23",
+    "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
     "event_citations": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-    "event_entities": "6a5d50a823cd5746517d0b94eadb0636c2e0e20d7c755dbd6d23e0db079de65f",
-    "events": "c7a2d700af14944b3dfbd3c26b656bc23a3f6d6a7dd6efbe95b93122d18a3a1b",
+    "event_entities": "41678ff059653cd297784689d63d228501b582fc22d14e00c7ae923bf401343b",
+    "events": "b1fee0ae16ba050626efab14200b4613d0a1ced778d5cb115a4bc9ac218a7b67",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "a6a78b78aa676b98d84bc5498a164f20c23f1dcb20709a9a8dd6c0b11c5889ec",
     "manifest": "4df6befbcf2da09603d795fd2f6f23cda6fca873624410d86fd4820754832c11",
-    "raw": "b40f4a9a8ee0d21caadbdccfdfb1748c0664cf07f5c42c987c490d3904a72299",
+    "raw": "03d2790712d2ac341c4dafcc4b89d7f991a025f637d97f7ef22cd33e35f4fbe0",
     "rule_cells": "135f88b004e3925cba0d69b286b294342da1b15e9ae836f847dda3089f18416a",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
     "tasks": "bc229fa38180f1340d404b27e7eb80ad26f0aa861fefc09c258eabca66c4ce5c",

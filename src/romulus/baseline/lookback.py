@@ -61,7 +61,8 @@ def _canonical(value) -> str:
 
 def segment_content_id(*, site: str, target: str, spec: BaselineSpec, start: datetime,
                        end: datetime, normalizer: str, exclusion_digest: str,
-                       excluded_keys: list[str], built_by_hunt_id: str | None = None) -> str:
+                       excluded_keys: list[str], built_by_hunt_id: str | None = None,
+                       network_digest: str | None = None) -> str:
     """Stable base id; build ownership is provenance, and exclusion order carries no meaning.
 
     A permanently revoked base id is advanced by ``Repo.usable_baseline_segment_id`` to ``-rN``. That suffix
@@ -75,6 +76,8 @@ def segment_content_id(*, site: str, target: str, spec: BaselineSpec, start: dat
         "exclusion_digest": exclusion_digest, "excluded_keys": sorted(set(excluded_keys)),
         "origin": "lookback",
     }
+    if spec.requires_configured_networks:
+        material["network_digest"] = network_digest
     return "bls-" + hashlib.sha256(_canonical(material).encode()).hexdigest()[:32]
 
 
@@ -85,6 +88,8 @@ class LookbackWriter:
                  specs: list[BaselineSpec], normalizer: str, budget: LookbackBudget,
                  context: KeyContext | None = None,
                  parent_carry: CarryInStore | None = None,
+                 network_digest: str | None = None,
+                 applicable_specs: dict[str, set[str]] | None = None,
                  clock: Callable[[], float] = time.monotonic,
                  now: Callable[[], datetime] = utcnow):
         self.repo, self.source, self.site = repo, source, site
@@ -92,6 +97,8 @@ class LookbackWriter:
         self.normalizer, self.budget = normalizer, budget
         self.context, self.clock = context or KeyContext(), clock
         self.parent_carry = parent_carry
+        self.network_digest = network_digest
+        self.applicable_specs = applicable_specs
         self.now = now
 
     def segment_row(self, *, hunt_id: str, target: str, spec: BaselineSpec,
@@ -102,6 +109,7 @@ class LookbackWriter:
             site=self.site, target=target, spec=spec, start=start, end=end,
             normalizer=self.normalizer, exclusion_digest=exclusion_digest,
             excluded_keys=excluded_keys, built_by_hunt_id=hunt_id,
+            network_digest=self.network_digest,
         )
         return {
             "id": self.repo.usable_baseline_segment_id(base_id), "site": self.site, "target": target,
@@ -109,6 +117,7 @@ class LookbackWriter:
             "normalizer": self.normalizer, "start": start, "end": end, "bucket": spec.bucket,
             "origin": "lookback", "source_hunt_id": None, "built_by_hunt_id": hunt_id,
             "exclusion_digest": exclusion_digest, "excluded_keys": excluded_keys, "hunted": 0,
+            "network_digest": self.network_digest if spec.requires_configured_networks else None,
             "events_total": events_total, "status": "building", "created_at": self.now(),
         }
 
@@ -117,6 +126,7 @@ class LookbackWriter:
         return self.repo.baseline_segment_covers(
             site=self.site, target=target, spec_id=spec.id, spec_version=spec.version,
             key_version=spec.key_version, start=start, end=end,
+            network_digest=self.network_digest if spec.requires_configured_networks else None,
         )
 
     def fill(self, *, hunt_id: str, targets: list[str], start: datetime, end: datetime) -> LookbackResult:
@@ -137,7 +147,9 @@ class LookbackWriter:
         omitted = [
             HistoryGap(target, start, end - worked * _HOUR, "omitted_budget",
                        f"lookback target-hour cap {MAX_WORK_ITEMS} exceeded",
-                       tuple(spec.id for spec in self.specs))
+                       tuple(spec.id for spec in self.specs
+                             if self.applicable_specs is None
+                             or spec.id in self.applicable_specs.get(target, set())))
             for target in ordered_targets
         ] if worked < hours else []
         # One newest hour from every target before moving older: round-robin without target starvation.
@@ -146,7 +158,12 @@ class LookbackWriter:
             for offset in range(1, worked + 1) for target in ordered_targets
         )
         for target, hour_start, hour_end in work:
-            missing = tuple(spec for spec in self.specs if not self._covered(target, spec, hour_start, hour_end))
+            missing = tuple(
+                spec for spec in self.specs
+                if (self.applicable_specs is None
+                    or spec.id in self.applicable_specs.get(target, set()))
+                and not self._covered(target, spec, hour_start, hour_end)
+            )
             if not missing:
                 continue
             if self.clock() - begun >= self.budget.seconds or queries >= self.budget.queries:

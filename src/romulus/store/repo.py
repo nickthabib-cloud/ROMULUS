@@ -161,7 +161,7 @@ BASELINE_DELETE_CHUNK = 5000
 CLEANUP_OWNER = "\x00cleanup"
 _BUCKET_WIDTH = {"day": timedelta(days=1), "hour": timedelta(hours=1)}
 _SEGMENT_COLUMNS = frozenset(column.name for column in t.baseline_segment.columns) - {"rows_digest"}
-_SEGMENT_OPTIONAL = frozenset({"source_hunt_id", "built_by_hunt_id"})
+_SEGMENT_OPTIONAL = frozenset({"source_hunt_id", "built_by_hunt_id", "network_digest"})
 # What makes two writes of one segment id the same segment: everything but its lifecycle status and the time
 # this copy was written (the rows are compared through rows_digest).
 _SEGMENT_IDENTITY = tuple(sorted(_SEGMENT_COLUMNS - {"status", "created_at"}))
@@ -178,6 +178,7 @@ def _baseline_observation_row(row: dict) -> dict:
     _columns(row, _OBSERVATION_COLUMNS, frozenset(_OBSERVATION_COLUMNS) - _OBSERVATION_REQUIRED,
              "observation")
     out = {name: row.get(name) for name in _OBSERVATION_COLUMNS}
+    out["first_event_refs"] = list(out.get("first_event_refs") or [])
     for name in ("first_ts", "last_ts"):
         if out[name] is not None:
             out[name] = _utc(out[name], name)
@@ -2196,7 +2197,7 @@ class Repo:
 
     def baseline_segments_for_cover(self, *, site: str, target: str, spec_id: str,
                                     spec_version: str, key_version: str, start: datetime,
-                                    end: datetime) -> list[dict]:
+                                    end: datetime, network_digest: str | None = None) -> list[dict]:
         """Complete active segments wholly inside a requested history interval, already cover-ordered."""
         start, end = _utc(start, "cover start"), _utc(end, "cover end")
         s = t.baseline_segment.c
@@ -2205,11 +2206,14 @@ class Repo:
             s.spec_version == spec_version, s.key_version == key_version,
             s.status == "active", s.start >= start, s.end <= end,
         ).order_by(s.start, s.end, s.id))
+        if network_digest is not None:
+            query = query.where(s.network_digest == network_digest)
         with self.engine.connect() as c:
             return [_with_utc(item, ("start", "end", "created_at")) for item in c.execute(query).mappings()]
 
     def baseline_segment_covers(self, *, site: str, target: str, spec_id: str, spec_version: str,
-                                key_version: str, start: datetime, end: datetime) -> bool:
+                                key_version: str, start: datetime, end: datetime,
+                                network_digest: str | None = None) -> bool:
         """Whether one active segment of the spec's versions contains [start, end), whatever its width."""
         start, end = _utc(start, "cover start"), _utc(end, "cover end")
         s = t.baseline_segment.c
@@ -2218,6 +2222,8 @@ class Repo:
             s.spec_version == spec_version, s.key_version == key_version,
             s.status == "active", s.start <= start, s.end >= end,
         ).limit(1)
+        if network_digest is not None:
+            query = query.where(s.network_digest == network_digest)
         with self.engine.connect() as c:
             return c.execute(query).first() is not None
 
@@ -2392,9 +2398,13 @@ class Repo:
                 "process.executable" in fields and "process.pid" in fields
             )
             hosts = profile.get("hosts") or {}
-            if exec_capable and wanted in {
+            inventory_truncated = any(
+                str(note).startswith("hosts inventory truncated")
+                for note in profile.get("notes") or []
+            )
+            if exec_capable and (inventory_truncated or wanted in {
                 str(name).strip().rstrip(".").casefold() for name in hosts
-            }:
+            }):
                 targets.add(str(target))
         return sorted(targets)
 
@@ -2579,7 +2589,108 @@ class Repo:
                 table.hunt_id == hunt_id, table.rule_id == rule_id, table.rule_version == version,
                 table.target == target, table.partition == partition,
             )).scalar_one_or_none()
-        return state is not None and state not in {"planned", "split"}
+        return state is not None and state not in {"planned", "split", "executed_failed"}
+
+    def stage_baseline_window_cell(self, hunt_id: str, cell: dict, execs: Iterable[dict],
+                                   observations: Iterable[dict], pendings: Iterable[dict]) -> None:
+        """Replace one unresolved exec-pair cell with compact durable state."""
+        key = (hunt_id, cell["target"], cell["partition"])
+
+        def json_body(value: dict) -> dict:
+            return json.loads(json.dumps(value, default=_jsonable))
+
+        with write_txn(self.engine) as connection:
+            for table in (t.baseline_window_exec, t.baseline_window_observation,
+                          t.baseline_window_pending):
+                connection.execute(table.delete().where(
+                    table.c.hunt_id == key[0], table.c.target == key[1],
+                    table.c.partition == key[2],
+                ))
+            stmt = insert(t.baseline_window_cell).values(
+                hunt_id=hunt_id, target=cell["target"], partition=cell["partition"],
+                spec_version=cell["spec_version"], start=_utc(cell["start"], "window start"),
+                end=_utc(cell["end"], "window end"),
+                target_applicable=int(bool(cell["target_applicable"])),
+                source_complete=int(bool(cell["source_complete"])),
+                reasons=sorted(set(cell.get("reasons") or [])), task_id=cell.get("task_id"),
+                evaluated=int(cell.get("evaluated") or 0),
+            ).on_conflict_do_update(
+                index_elements=["hunt_id", "target", "partition"],
+                set_={
+                    "spec_version": cell["spec_version"], "start": _utc(cell["start"], "window start"),
+                    "end": _utc(cell["end"], "window end"),
+                    "target_applicable": int(bool(cell["target_applicable"])),
+                    "source_complete": int(bool(cell["source_complete"])),
+                    "reasons": sorted(set(cell.get("reasons") or [])),
+                    "task_id": cell.get("task_id"), "evaluated": int(cell.get("evaluated") or 0),
+                },
+            )
+            connection.execute(stmt)
+            _upsert_ignore(connection, t.baseline_window_exec, [
+                {"hunt_id": hunt_id, "target": key[1], "partition": key[2], "ordinal": ordinal,
+                 **row}
+                for ordinal, row in enumerate(execs)
+            ], ["hunt_id", "target", "partition", "ordinal"])
+            _upsert_ignore(connection, t.baseline_window_observation, [
+                {"hunt_id": hunt_id, "target": key[1], "partition": key[2], "ordinal": ordinal,
+                 "body": json_body(row)}
+                for ordinal, row in enumerate(observations)
+            ], ["hunt_id", "target", "partition", "ordinal"])
+            _upsert_ignore(connection, t.baseline_window_pending, [
+                {"hunt_id": hunt_id, "target": key[1], "partition": key[2], "ordinal": ordinal,
+                 "body": json_body(row)}
+                for ordinal, row in enumerate(pendings)
+            ], ["hunt_id", "target", "partition", "ordinal"])
+
+    def baseline_window_cells(self, hunt_id: str) -> list[dict]:
+        with self.engine.connect() as connection:
+            rows = connection.execute(select(t.baseline_window_cell).where(
+                t.baseline_window_cell.c.hunt_id == hunt_id,
+            ).order_by(
+                t.baseline_window_cell.c.target, t.baseline_window_cell.c.start,
+                t.baseline_window_cell.c.partition,
+            )).mappings()
+            return [_with_utc(row, ("start", "end")) for row in rows]
+
+    def _baseline_window_children(self, table, hunt_id: str, target: str, partition: str) -> list[dict]:
+        with self.engine.connect() as connection:
+            return [dict(row) for row in connection.execute(select(table).where(
+                table.c.hunt_id == hunt_id, table.c.target == target, table.c.partition == partition,
+            ).order_by(table.c.ordinal)).mappings()]
+
+    def baseline_window_execs(self, hunt_id: str, target: str, partition: str) -> list[dict]:
+        return [_with_utc(row, ("ts",)) for row in self._baseline_window_children(
+            t.baseline_window_exec, hunt_id, target, partition,
+        )]
+
+    def baseline_window_observations(self, hunt_id: str, target: str, partition: str) -> list[dict]:
+        rows = self._baseline_window_children(t.baseline_window_observation, hunt_id, target, partition)
+        out = []
+        for row in rows:
+            body = dict(row["body"])
+            for name in ("first_ts", "last_ts"):
+                if body.get(name):
+                    body[name] = datetime.fromisoformat(body[name])
+            out.append(body)
+        return out
+
+    def baseline_window_pendings(self, hunt_id: str, target: str, partition: str) -> list[dict]:
+        rows = self._baseline_window_children(t.baseline_window_pending, hunt_id, target, partition)
+        out = []
+        for row in rows:
+            body = dict(row["body"])
+            body["ts"] = datetime.fromisoformat(body["ts"])
+            body["raw_refs"] = tuple(tuple(ref) for ref in body.get("raw_refs") or ())
+            out.append(body)
+        return out
+
+    def drop_baseline_window_cell(self, hunt_id: str, target: str, partition: str) -> None:
+        with write_txn(self.engine) as connection:
+            connection.execute(t.baseline_window_cell.delete().where(
+                t.baseline_window_cell.c.hunt_id == hunt_id,
+                t.baseline_window_cell.c.target == target,
+                t.baseline_window_cell.c.partition == partition,
+            ))
 
     def save_baseline_window_cell(self, hunt_id: str, cell: dict, observations: Iterable[dict]) -> bool:
         """Atomically add one cell's observations once and close its ordinary rule cell.
@@ -2602,6 +2713,9 @@ class Repo:
                 "first_ts": func.min(table.first_ts, stmt.excluded.first_ts),
                 "last_ts": func.max(table.last_ts, stmt.excluded.last_ts),
                 "first_event_id": case((earlier, stmt.excluded.first_event_id), else_=table.first_event_id),
+                "first_event_refs": case(
+                    (earlier, stmt.excluded.first_event_refs), else_=table.first_event_refs,
+                ),
                 # A window merge precedes judgement. Keep all history fields and verdicts at their pending values.
                 "history_count": None,
                 "history_decayed": None,

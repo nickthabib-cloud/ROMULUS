@@ -3,12 +3,14 @@ playbooks, publish direct findings immediately, and keep an exact per-rule cover
 from __future__ import annotations
 
 import logging
+import sqlite3
 from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 
-from romulus.baseline.carry import CarryInStore, HourParents, PendingResolver
+from romulus.baseline.carry import HourParents
 from romulus.baseline.playbook import BaselineCell, BaselinePlaybook
 from romulus.baseline.spec import KeyContext, exec_serial
 from romulus.detect import netdef
@@ -191,7 +193,6 @@ class Sweep:
             self.budget.account("windows_continuity") if self._has_windows else None
         )
         self._stage_size = 0
-        self._baseline_carry = CarryInStore(repo, hunt_id)
         self.partial_reasons: list[str] = []
         preflight = self.budget.preflight()
         if preflight:
@@ -808,20 +809,40 @@ class Sweep:
                 if error_reason and (error_affected is ALL_FAMILIES or set(pb.families) & error_affected):
                     reasons.append(error_reason)
                 if pb.id == "bl.exec_pair":
-                    owner = f"baseline:{target}"
-                    if ordered:
-                        self._stage_put([], raw_sources, [(owner, event) for event in ordered])
-                    self._event_stage().record_baseline_cell(
-                        target=target,
-                        partition=pkey,
-                        start=w.start,
-                        end=w.end,
-                        target_applicable=target_applicable,
-                        source_complete=not rule_partial,
-                        reasons=reasons,
-                        task_id=tid,
-                        events=ordered,
-                    )
+                    parents = HourParents()
+                    for event in ordered:
+                        parents.add(event)
+                    pb.begin_cell(pkey, (w.start, w.end), KeyContext(pid_table=parents))
+                    before_eval = pb.evaluated
+                    pb.consume_scoped_partition(ordered)
+                    result = pb.finish_cell()
+                    reasons.extend(result.reasons)
+                    evaluated = pb.evaluated - before_eval
+                    if not ordered:
+                        state = ("evaluated_partial" if rule_partial or reasons
+                                 else "not_applicable_no_events")
+                        self.repo.save_baseline_window_cell(self.hunt_id, {
+                            "rule_id": pb.id, "version": pb.spec.version, "target": target,
+                            "partition": pkey, "state": state, "matched": 0,
+                            "evaluated": evaluated, "detail": {"reasons": sorted(set(reasons))},
+                        }, ())
+                        continue
+                    try:
+                        self._event_stage().record_baseline_cell(
+                            target=target, partition=pkey, start=w.start, end=w.end,
+                            target_applicable=target_applicable, source_complete=not rule_partial,
+                            reasons=reasons, task_id=tid, events=ordered,
+                            observations=result.observations, pendings=result.pendings,
+                        )
+                    except sqlite3.OperationalError as exc:
+                        reason = f"compact baseline stage failed ({exc})"
+                        self.budget.fail(reason)
+                        self.partial_reasons.append(f"{target} {pkey}: {reason}")
+                        self.repo.save_baseline_window_cell(self.hunt_id, {
+                            "rule_id": pb.id, "version": pb.spec.version, "target": target,
+                            "partition": pkey, "state": "evaluated_partial", "matched": 0,
+                            "evaluated": evaluated, "detail": {"reasons": sorted({*reasons, reason})},
+                        }, ())
                     continue
                 pb.begin_cell(
                     pkey, (w.start, w.end), KeyContext(is_internal=netdef.current().is_internal),
@@ -970,16 +991,11 @@ class Sweep:
     def _save_baseline_cell(self, playbook: BaselinePlaybook, target: str, partition: str,
                             state: str, evaluated: int, reasons: list[str], result: BaselineCell,
                             task_id: str | None, events: list[TypedEvent], raw_sources: dict[str, dict]) -> None:
-        """Persist first citations, observations and the cell's idempotency marker."""
-        by_id = {event.id: event for event in events}
-        cited = [by_id[event_id] for event_id in sorted({
-            row["first_event_id"] for row in result.observations if row["first_event_id"] in by_id
-        })]
-        if cited:
-            self.repo.save_evidence(self.hunt_id, cited, raw_sources, task_id)
+        """Persist observations and the cell's idempotency marker; citations are fetched only if published."""
+        del task_id, events, raw_sources
         self.repo.save_baseline_window_cell(self.hunt_id, {
             "rule_id": playbook.id,
-            "version": playbook.version,
+            "version": playbook.spec.version,
             "target": target,
             "partition": partition,
             "state": state,
@@ -989,59 +1005,28 @@ class Sweep:
         }, self._baseline_observations(playbook, result))
 
     def _finalize_baseline_target(self, target: str) -> None:
-        """Replay staged exec cells newest-first through the shared window carry and persist exec-pair cells."""
+        """Persist compact exec-pair cells for post-lookback resolution and resume."""
         playbook = next((pb for pb in self.pack
                          if isinstance(pb, BaselinePlaybook) and pb.id == "bl.exec_pair"), None)
         stage = getattr(self, "_stage", None)
         if playbook is None or stage is None:
             return
-        carry = self._baseline_carry.for_target(target, horizon=self.window.end)
-        owner = f"baseline:{target}"
         items = sorted(stage.baseline_cells(target), key=lambda item: (item["start"], item["partition"]))
-        # Continuity is known only after every cell has been fed. A later-retrieved exec whose typed time sits in
-        # an earlier hour must be able to break that hour before any child is resolved against the horizon.
         for item in items:
             if self.repo.baseline_window_cell_done(
-                    self.hunt_id, playbook.id, playbook.version, target, item["partition"]):
+                    self.hunt_id, playbook.id, playbook.spec.version, target, item["partition"]):
+                stage.drop_baseline_cell(target, item["partition"])
                 continue
-            events = sorted(stage.baseline_events(target, item["partition"]), key=lambda event: (
-                event.ts, -1 if exec_serial(event) is None else exec_serial(event), event.id,
-            ))
-            carry.observe_events(events, hour=(item["start"], item["end"]))
-            uncarried, hostless = carry.take_uncarried()
-            carry.record_breaks(uncarried)
-            if item["source_complete"] and not hostless:
-                carry.mark_observed(item["start"], item["end"])
-        for item in items:
-            if self.repo.baseline_window_cell_done(
-                    self.hunt_id, playbook.id, playbook.version, target, item["partition"]):
-                stage.release(owner, stage.drop_baseline_cell(target, item["partition"]))
-                continue
-            events = sorted(stage.baseline_events(target, item["partition"]), key=lambda event: (
-                event.ts, -1 if exec_serial(event) is None else exec_serial(event), event.id,
-            ))
-            parents = HourParents()
-            for event in events:
-                parents.add(event)
-            context = KeyContext(pid_table=parents)
-            playbook.begin_cell(item["partition"], (item["start"], item["end"]), context)
-            before_eval = playbook.evaluated
-            playbook.consume_scoped_partition(events)
-            playbook.resolve_pendings(PendingResolver(carry, playbook.spec))
-            for reason in item["reasons"]:
-                playbook.mark_cell_partial(reason)
-            result = playbook.finish_cell()
-            reasons = [*item["reasons"], *result.reasons]
-            state = ("not_applicable_no_events" if not item["target_applicable"] else
-                     "not_applicable_no_events" if not events and item["source_complete"] else
-                     "evaluated_partial" if result.partial or not item["source_complete"] else
-                     "evaluated_complete")
-            raw_sources = stage.raw_sources(events)
-            self._save_baseline_cell(
-                playbook, target, item["partition"], state, playbook.evaluated - before_eval,
-                reasons, result, item["task_id"], events, raw_sources,
+            self.repo.stage_baseline_window_cell(
+                self.hunt_id, {
+                    **item, "target": target, "spec_version": playbook.spec.version,
+                    "evaluated": len(stage.baseline_execs(target, item["partition"])),
+                },
+                stage.baseline_execs(target, item["partition"]),
+                stage.baseline_observations(target, item["partition"]),
+                [asdict(pending) for pending in stage.baseline_pendings(target, item["partition"])],
             )
-            stage.release(owner, stage.drop_baseline_cell(target, item["partition"]))
+            stage.drop_baseline_cell(target, item["partition"])
 
     def _count_boots(self, events) -> None:
         """Host-record events by where their boot id came from: a record, the boot-interval map, or nowhere."""

@@ -161,14 +161,37 @@ def _repo(*, targets=(HOST_TARGET,), profiles=None) -> Repo:
     return repo
 
 
-def _finish(repo: Repo, *, sweep: Sweep | None = None, packet_summary=None, expansion_summary=None) -> dict:
+def _finish(repo: Repo, *, sweep: Sweep | None = None, packet_summary=None, expansion_summary=None,
+            baseline_summary=None) -> dict:
     summary = {"finished": True, "complete": not (sweep.partial_reasons if sweep else []),
                "partial_reasons": list(sweep.partial_reasons) if sweep else [],
                "stats": sweep.stats if sweep else {}}
     repo.audit("system", "hunt.sweep_summary", "h1", summary)
     return hunt_run._finish(repo, "h1", {"status": "disabled", "stop_reason": ""}, summary,
                             partial_reasons=summary["partial_reasons"], packet_summary=packet_summary,
-                            expansion_summary=expansion_summary)
+                            expansion_summary=expansion_summary, baseline_summary=baseline_summary)
+
+
+def test_unusable_baseline_history_does_not_make_hunt_execution_partial():
+    repo = _repo()
+
+    result = _finish(repo, baseline_summary={
+        "finished": True, "status": "partial", "stage_failed": False,
+        "snapshot_status": "unresolved", "specs": {},
+    })
+
+    assert result["execution_state"] == "completed_within_scope"
+
+
+def test_baseline_stage_failure_still_makes_hunt_execution_partial():
+    repo = _repo()
+
+    result = _finish(repo, baseline_summary={
+        "finished": True, "status": "partial", "stage_failed": True,
+        "snapshot_status": "unresolved", "specs": {},
+    })
+
+    assert result["execution_state"] == "partial"
 
 
 def _report(repo: Repo) -> tuple[dict, str]:

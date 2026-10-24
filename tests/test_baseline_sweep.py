@@ -3,18 +3,24 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from romulus.baseline.carry import SPANS_TARGETS, CarryInStore, ParentExec
 from romulus.baseline.count import KeyCounter
+from romulus.baseline.lookback import LookbackBudget, LookbackWriter
 from romulus.baseline.playbook import ExecPairBaseline, ExecPathBaseline, ExternalDestinationBaseline
 from romulus.baseline.spec import SPEC_BY_ID, KeyContext
 from romulus.detect import netdef
 from romulus.detect.netdef import SiteNetworks
 from romulus.evidence.typed import Outcome, TypedEvent, fv
 from romulus.hunt import sweep as sweep_module
+from romulus.hunt.baseline_stage import resolve_window_exec_pairs
+from romulus.hunt.stage import EventStage
 from romulus.sources.models import Completeness, SearchOutcome, Window
 from romulus.sources.profile import contract_from_types
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
+from tests.test_baseline_lookback import FakeHistory
 
 START = datetime(2026, 1, 8, 12, tzinfo=UTC)
 END = START + timedelta(hours=1)
@@ -169,6 +175,94 @@ def test_sweep_crash_resumes_to_the_same_window_observations(monkeypatch, tmp_pa
     )
 
 
+def test_failed_baseline_window_cell_is_recounted_on_resume(monkeypatch, tmp_path):
+    window = Window(start=START, end=END)
+    event = _exec("event", START + timedelta(minutes=1))
+    _install_partition(monkeypatch, [event], window=window)
+    repo = _repo()
+    repo.set_rule_cell(
+        "h1", "bl.exec_path", SPEC_BY_ID["bl.exec_path"].version, "x", window.key(),
+        "executed_failed", 0, 0, {"error": "source offline"},
+    )
+    sweep = sweep_module.Sweep(
+        repo, FakeClient(), "h1", window, {"x": _contract()}, stage_dir=tmp_path,
+    )
+    sweep.pack = [ExecPathBaseline()]
+
+    sweep.run_target("x")
+
+    assert next(repo.baseline_observations("h1"))["window_count"] == 1
+    cell = next(row for row in repo.rule_cells("h1") if row["partition"] == window.key())
+    assert cell["state"] == "evaluated_complete"
+    sweep.close_stage()
+
+
+def test_split_partition_resume_does_not_double_count_completed_child(monkeypatch, tmp_path):
+    window = Window(start=START, end=END)
+    midpoint = START + (END - START) / 2
+    first_window = Window(start=START, end=midpoint)
+    second_window = Window(start=midpoint, end=END)
+    by_window = {
+        first_window.key(): _exec("first", START + timedelta(minutes=1)),
+        second_window.key(): _exec("second", midpoint + timedelta(minutes=1)),
+    }
+
+    def execute(_client, intent, _contract):
+        event = by_window[intent.window.key()]
+        records = [] if intent.kind == "histogram" else [
+            {"_index": "fixture", "_id": event.id, "_source": {}},
+        ]
+        now = datetime.now(UTC)
+        return SearchOutcome(
+            target=intent.target, fingerprint="fixture", started_at=now, ended_at=now,
+            completeness=Completeness.complete, total=1, total_relation="eq",
+            returned=len(records), records=records,
+        )
+
+    monkeypatch.setattr(sweep_module, "execute", execute)
+    monkeypatch.setattr(
+        sweep_module, "normalize_hits",
+        lambda records, _boots=None: ([next(event for event in by_window.values()
+                                             if event.id == row["_id"]) for row in records], {}, []),
+    )
+    monkeypatch.setattr(
+        sweep_module, "plan_partitions",
+        lambda *_args, **_kwargs: [(window, sweep_module.PARTITION_MAX_DOCS + 1)],
+    )
+    repo = _repo()
+    real_save = repo.save_baseline_window_cell
+    crashed = False
+
+    def crash_second(hunt_id, cell, observations):
+        nonlocal crashed
+        if cell["partition"] == second_window.key() and not crashed:
+            crashed = True
+            raise RuntimeError("injected second-child crash")
+        return real_save(hunt_id, cell, observations)
+
+    monkeypatch.setattr(repo, "save_baseline_window_cell", crash_second)
+    first = sweep_module.Sweep(
+        repo, FakeClient(), "h1", window, {"x": _contract()}, stage_dir=tmp_path / "first",
+    )
+    first.pack = [ExecPathBaseline()]
+    with pytest.raises(RuntimeError, match="second-child"):
+        first.run_target("x")
+    first.close_stage()
+
+    monkeypatch.setattr(repo, "save_baseline_window_cell", real_save)
+    resumed = sweep_module.Sweep(
+        repo, FakeClient(), "h1", window, {"x": _contract()}, stage_dir=tmp_path / "resumed",
+    )
+    resumed.pack = [ExecPathBaseline()]
+    resumed.run_target("x")
+    resumed.close_stage()
+
+    assert {row["window_count"] for row in repo.baseline_observations("h1")} == {2}
+    cells = {row["partition"]: row["state"] for row in repo.rule_cells("h1")}
+    assert cells[window.key()] == "split"
+    assert cells[first_window.key()] == cells[second_window.key()] == "evaluated_complete"
+
+
 def test_missing_window_record_keeps_positive_keys_but_makes_the_cell_partial(monkeypatch, tmp_path):
     window = Window(start=START, end=END)
     valid = _exec("valid", START + timedelta(minutes=1))
@@ -231,6 +325,7 @@ def test_window_child_resolves_to_a_pre_window_parent(monkeypatch, tmp_path):
     sweep.pack = [ExecPairBaseline()]
 
     sweep.run_target("x")
+    resolve_window_exec_pairs(repo, "h1", window)
 
     observation = next(repo.baseline_observations("h1"))
     assert observation["key"] == {
@@ -240,6 +335,89 @@ def test_window_child_resolves_to_a_pre_window_parent(monkeypatch, tmp_path):
     assert observation["first_event_id"] == "child"
     cell = next(row for row in repo.rule_cells("h1") if row["partition"] == window.key())
     assert cell["state"] == "evaluated_complete"
+    sweep.close_stage()
+
+
+def test_window_child_resolves_after_history_fill_in_production_order(monkeypatch, tmp_path):
+    window = Window(start=START, end=END)
+    child = _exec("child", START + timedelta(minutes=5), ppid=10, executable="/bin/curl")
+    _install_partition(monkeypatch, [child], window=window)
+    repo = _repo()
+    sweep = sweep_module.Sweep(repo, FakeClient(), "h1", window, {"x": _contract()}, stage_dir=tmp_path)
+    sweep.pack = [ExecPairBaseline()]
+
+    sweep.run_target("x")
+    assert list(repo.baseline_observations("h1")) == []
+
+    parent = _exec(
+        "parent", START - timedelta(minutes=30), pid=10, ppid=1, executable="/usr/sbin/sshd",
+    )
+    writer = LookbackWriter(
+        repo, FakeHistory([parent]), site="site", specs=[SPEC_BY_ID["bl.exec_pair"]],
+        normalizer="fixture@1", budget=LookbackBudget(queries=10, records=10, seconds=10),
+        parent_carry=CarryInStore(repo, "h1"), now=lambda: START,
+    )
+    writer.fill(hunt_id="h1", targets=["x"], start=START - timedelta(hours=1), end=START)
+    resolve_window_exec_pairs(repo, "h1", window)
+
+    observation = next(repo.baseline_observations("h1"))
+    assert observation["key"] == {
+        "child_executable": "/bin/curl",
+        "parent_executable": "/usr/sbin/sshd",
+    }
+    assert observation["first_event_id"] == "child"
+    cell = next(row for row in repo.rule_cells("h1") if row["partition"] == window.key())
+    assert cell["state"] == "evaluated_complete"
+    sweep.close_stage()
+
+
+def test_exec_pair_staging_failure_is_an_explicit_partial_cell(monkeypatch, tmp_path):
+    import sqlite3
+
+    window = Window(start=START, end=END)
+    events = [
+        _exec("parent", START + timedelta(minutes=1), pid=10, ppid=1, executable="/usr/bin/bash"),
+        _exec("child", START + timedelta(minutes=2), pid=20, ppid=10, executable="/bin/curl"),
+    ]
+    _install_partition(monkeypatch, events, window=window)
+
+    def fail_compact_stage(self, **_kwargs):
+        raise sqlite3.OperationalError("database or disk is full")
+
+    monkeypatch.setattr(EventStage, "record_baseline_cell", fail_compact_stage)
+    repo = _repo()
+    sweep = sweep_module.Sweep(repo, FakeClient(), "h1", window, {"x": _contract()}, stage_dir=tmp_path)
+    sweep.pack = [ExecPairBaseline()]
+
+    sweep.run_target("x")
+    resolve_window_exec_pairs(repo, "h1", window)
+
+    cell = next(row for row in repo.rule_cells("h1") if row["partition"] == window.key())
+    assert cell["state"] == "evaluated_partial"
+    assert cell["evaluated"] == 2
+    assert any("compact baseline stage failed" in reason for reason in cell["detail"]["reasons"])
+    assert any("compact baseline stage failed" in reason for reason in sweep.partial_reasons)
+    sweep.close_stage()
+
+
+def test_exec_pair_stage_keeps_compact_rows_not_event_bodies(monkeypatch, tmp_path):
+    window = Window(start=START, end=END)
+    events = [
+        _exec(f"exec-{index}", START + timedelta(seconds=index), pid=index + 10, ppid=1,
+              executable="/usr/bin/" + "x" * 200)
+        for index in range(100)
+    ]
+    _install_partition(monkeypatch, events, window=window)
+    repo = _repo()
+    sweep = sweep_module.Sweep(repo, FakeClient(), "h1", window, {"x": _contract()}, stage_dir=tmp_path)
+    sweep.pack = [ExecPairBaseline()]
+
+    sweep.run_target("x")
+
+    stage = sweep._event_stage()
+    assert stage.db.execute("SELECT COUNT(*) FROM event").fetchone()[0] == 0
+    assert stage.db.execute("SELECT COUNT(*) FROM raw").fetchone()[0] == 0
+    assert stage.baseline_compact_bytes() / len(events) < 500
     sweep.close_stage()
 
 
@@ -254,6 +432,7 @@ def test_exec_pair_empty_incompatible_target_is_not_applicable_not_partial(monke
     sweep.pack = [ExecPairBaseline()]
 
     sweep.run_target("x")
+    resolve_window_exec_pairs(repo, "h1", window)
 
     cell = next(row for row in repo.rule_cells("h1") if row["partition"] == window.key())
     assert cell["state"] == "not_applicable_no_events"
@@ -316,6 +495,7 @@ def test_window_child_resolves_to_a_parent_from_an_earlier_cell(monkeypatch, tmp
     sweep.pack = [ExecPairBaseline()]
 
     sweep.run_target("x")
+    resolve_window_exec_pairs(repo, "h1", Window(start=START, end=END))
 
     assert any(row["key"] == {
         "child_executable": "/bin/curl",
@@ -335,6 +515,7 @@ def test_window_out_of_retrieval_hour_exec_breaks_both_hours(monkeypatch, tmp_pa
     sweep.pack = [ExecPairBaseline()]
 
     sweep.run_target("x")
+    resolve_window_exec_pairs(repo, "h1", window)
 
     assert repo.baseline_parent_breaks("h1", "x", "web01") == [
         (START - timedelta(hours=2), START - timedelta(hours=1)),
@@ -357,6 +538,7 @@ def test_same_instant_parent_images_without_serials_leave_the_child_unresolved(m
     sweep.pack = [ExecPairBaseline()]
 
     sweep.run_target("x")
+    resolve_window_exec_pairs(repo, "h1", window)
 
     assert list(repo.baseline_observations("h1")) == []
     cell = next(row for row in repo.rule_cells("h1") if row["partition"] == window.key())
@@ -386,4 +568,21 @@ def test_profile_holders_include_a_split_host_even_when_one_target_delivered_no_
     assert carry.parent("web01", 10, START + timedelta(minutes=1), "boot-1") == (
         None, SPANS_TARGETS,
     )
+
+
+def test_truncated_exec_capable_profile_is_a_holder_of_every_host():
+    repo = _repo(["observed", "truncated"])
+    repo.save_profile("h1", {
+        "id": "observed-profile", "target": "observed", "kind": "es_index", "role": "host",
+        "os_family": "linux", "field_types": {"process.executable": "keyword", "process.pid": "long"},
+        "datasets": {"linux.audit": 1}, "hosts": {"web99": 1}, "notes": [],
+    })
+    repo.save_profile("h1", {
+        "id": "truncated-profile", "target": "truncated", "kind": "es_index", "role": "host",
+        "os_family": "linux", "field_types": {"process.executable": "keyword", "process.pid": "long"},
+        "datasets": {"linux.audit": 1}, "hosts": {"web01": 1},
+        "notes": ["hosts inventory truncated (composite page budget 1 exceeded)"],
+    })
+
+    assert repo.baseline_parent_targets("h1", "web99") == ["observed", "truncated"]
 

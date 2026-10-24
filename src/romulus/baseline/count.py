@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Iterable
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from romulus.baseline.spec import (
@@ -61,6 +62,7 @@ class KeyCounter:
         self.retain_observations_when_partial = retain_observations_when_partial
         self._counts: dict[tuple, dict] = {}
         self._first_event_ids: dict[tuple, str | None] = {}
+        self._first_event_refs: dict[tuple, list[dict]] = {}
         self._scope_hours: dict[tuple, int] = defaultdict(int)
         self._tokens: dict[tuple, set[str]] = defaultdict(set)
         self._token_entries = 0
@@ -109,14 +111,19 @@ class KeyCounter:
         if isinstance(result, Missing):
             self.mark_partial(f"{event.id}: {result.reason}")
         elif isinstance(result, Pending):
+            result = replace(result, raw_refs=tuple((ref.target, ref.native_id) for ref in event.raw))
             if len(self._pendings) >= self.pending_cap:
                 self.mark_partial(f"pending parent cap {self.pending_cap} exceeded")
             else:
                 self._pendings.append(result)
         elif not isinstance(result, NotApplicable):
-            self.add_keys(event.ts, result, event_id=event.id)
+            self.add_keys(
+                event.ts, result, event_id=event.id,
+                event_refs=[{"target": ref.target, "native_id": ref.native_id} for ref in event.raw],
+            )
 
-    def add_keys(self, ts: datetime, keys: Iterable[BaselineKey], *, event_id: str | None = None) -> None:
+    def add_keys(self, ts: datetime, keys: Iterable[BaselineKey], *, event_id: str | None = None,
+                 event_refs: list[dict] | None = None) -> None:
         keys = list({key.key_digest: key for key in keys}.values())
         if not keys or (self.partial and not self.retain_observations_when_partial):
             return
@@ -160,6 +167,7 @@ class KeyCounter:
                         identity = (key.scope_kind, key.scope, key.key_digest, bucket)
                         if (instant, event_id or "") < (row["first_ts"], self._first_event_ids[identity] or ""):
                             self._first_event_ids[identity] = event_id
+                            self._first_event_refs[identity] = list(event_refs or [])
                         row["first_ts"] = min(row["first_ts"], instant)
                         row["last_ts"] = max(row["last_ts"], instant)
                     continue
@@ -190,10 +198,12 @@ class KeyCounter:
                     "last_ts": ts.astimezone(UTC),
                 }
                 self._first_event_ids[identity] = event_id
+                self._first_event_refs[identity] = list(event_refs or [])
             else:
                 instant = ts.astimezone(UTC)
                 if (instant, event_id or "") < (row["first_ts"], self._first_event_ids[identity] or ""):
                     self._first_event_ids[identity] = event_id
+                    self._first_event_refs[identity] = list(event_refs or [])
                 row["count"] += 1
                 row["first_ts"] = min(row["first_ts"], instant)
                 row["last_ts"] = max(row["last_ts"], instant)
@@ -242,10 +252,12 @@ class KeyCounter:
                     "first_ts": source["first_ts"],
                     "last_ts": source["last_ts"],
                     "first_event_id": event_id,
+                    "first_event_refs": self._first_event_refs.get(identity, []),
                 }
                 continue
             if (source["first_ts"], event_id or "") < (row["first_ts"], row["first_event_id"] or ""):
                 row["first_event_id"] = event_id
+                row["first_event_refs"] = self._first_event_refs.get(identity, [])
             row["window_count"] += source["count"]
             row["first_ts"] = min(row["first_ts"], source["first_ts"])
             row["last_ts"] = max(row["last_ts"], source["last_ts"])

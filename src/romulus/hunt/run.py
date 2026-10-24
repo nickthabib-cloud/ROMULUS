@@ -181,13 +181,15 @@ def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
     packet_status = (packet_summary or {}).get("status")
     packets_incomplete = packet_status in ("partial", "failed")
     baseline_status = (baseline_summary or {}).get("status")
-    baseline_incomplete = baseline_status in ("partial", "failed")
-    if baseline_incomplete:
+    baseline_failed = bool(
+        (baseline_summary or {}).get("stage_failed") or baseline_status == "failed"
+    )
+    if baseline_failed:
         partial_reasons.append(f"baseline_stage:{baseline_status}")
     if packets_incomplete:
         partial_reasons.append(f"packet_stage:{packet_status}")
     partial = (missing_summary or not sweep_complete or agent_status == "unavailable" or packets_incomplete
-               or baseline_incomplete
+               or baseline_failed
                or (expansion_summary or {}).get("status") in {"partial", "failed"})
     counts, result = _detection_result(repo, hunt_id)
     reasons = partial_reasons[:10]
@@ -200,8 +202,8 @@ def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
     if packets_incomplete:
         detail = (packet_summary.get("partial_reasons") or [packet_summary.get("error") or ""])[0]
         reasons.append(f"packet stage {packet_status}: {detail}"[:200])
-    if baseline_incomplete:
-        reasons.append(f"baseline stage {baseline_status}: unresolved history or scopes")
+    if baseline_failed:
+        reasons.append(f"baseline stage {baseline_status}: source, staging, or execution failure")
     if agent_summary.get("stop_reason"):
         reasons.append(f"agent: {agent_summary['stop_reason']}")
     if expansion_summary and expansion_summary.get("stop_reason"):
@@ -332,7 +334,7 @@ def _baseline_stage(repo: Repo, client: ElasticClient, hunt: dict, window: Windo
         )
     except Exception as exc:
         log.exception("baseline stage failed")
-        summary = {"status": "failed", "finished": False, "error": str(exc)[:300],
+        summary = {"status": "failed", "finished": False, "stage_failed": True, "error": str(exc)[:300],
                    "snapshot_digest": (repo.baseline_snapshot(hunt_id) or {}).get("digest")}
         for item in (hunt["manifest"].get("baseline") or {}).get("specs") or []:
             repo.set_rule_cell(

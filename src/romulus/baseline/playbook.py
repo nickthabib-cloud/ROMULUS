@@ -1,6 +1,7 @@
 """Sweep-facing baseline playbooks and their cell-scoped accumulation contract."""
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import ClassVar, Protocol
@@ -26,7 +27,7 @@ class BaselineCell:
 class SnapshotView(Protocol):
     """The post-lookback judge supplied by the hunt-layer baseline stage."""
 
-    def judge(self, playbook: BaselinePlaybook) -> list[Match]: ...
+    def judge(self, playbook: BaselinePlaybook) -> Iterable[Match]: ...
 
 
 class BaselinePlaybook(Playbook):
@@ -44,6 +45,9 @@ class BaselinePlaybook(Playbook):
 
     def __init__(self) -> None:
         super().__init__()
+        # The baseline spec owns the persisted protocol version. Keeping an inherited Playbook.version on the
+        # instance would let sweep, judge and publication address different observation rows.
+        self.version = self.spec.version
         self._counter: KeyCounter | None = None
         self._context = KeyContext()
 
@@ -85,7 +89,11 @@ class BaselinePlaybook(Playbook):
             if resolution.reason is not None:
                 self._counter.mark_partial(f"{pending.event_id}: {resolution.reason}")
             else:
-                self._counter.add_keys(pending.ts, resolution.keys, event_id=pending.event_id)
+                self._counter.add_keys(
+                    pending.ts, resolution.keys, event_id=pending.event_id,
+                    event_refs=[{"target": target, "native_id": native_id}
+                                for target, native_id in pending.raw_refs],
+                )
 
     def finish_cell(self) -> BaselineCell:
         if self._counter is None:
@@ -99,7 +107,7 @@ class BaselinePlaybook(Playbook):
             reasons=counter.reasons,
         )
 
-    def judge(self, view: SnapshotView) -> list[Match]:
+    def judge(self, view: SnapshotView) -> Iterable[Match]:
         return view.judge(self)
 
     def finalize(self) -> list[Match]:

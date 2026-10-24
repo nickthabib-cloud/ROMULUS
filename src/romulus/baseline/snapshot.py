@@ -83,7 +83,9 @@ class SnapshotPlanner:
 
     def freeze(self, *, hunt_id: str, window_start: datetime, lookback: timedelta,
                min_live_hours: int, site: str, targets: list[str],
-               specs: list[BaselineSpec], history_gaps: Iterable[HistoryGap] = ()) -> dict:
+               specs: list[BaselineSpec], history_gaps: Iterable[HistoryGap] = (),
+               network_digest: str | None = None,
+               applicable_specs: dict[str, set[str]] | None = None) -> dict:
         """Freeze the cover once per hunt.
 
         `history_gaps` are the lookback's coverage facts; they give uncovered hours their real reason.
@@ -112,15 +114,28 @@ class SnapshotPlanner:
             "specs": [{"id": spec.id, "version": spec.version, "key_version": spec.key_version}
                       for spec in sorted(specs, key=lambda item: item.id)],
         }
+        if network_digest is not None and any(spec.requires_configured_networks for spec in specs):
+            plan["network_digest"] = network_digest
+        if applicable_specs is not None:
+            plan["applicable_specs"] = {
+                target: sorted(applicable_specs.get(target, set())) for target in plan["targets"]
+            }
         selected_ids: set[str] = set()
         coverage: dict[str, dict] = {}
         cut_material: list[dict] = []
         statuses: list[str] = []
         for target in plan["targets"]:
             for spec in sorted(specs, key=lambda item: item.id):
+                if applicable_specs is not None and spec.id not in applicable_specs.get(target, set()):
+                    coverage[f"{target}|{spec.id}"] = {
+                        "effective_start": _iso(window_start), "effective_hours": 0, "gaps": [],
+                        "absent_before": None, "status": "not_applicable", "segment_ids": [],
+                    }
+                    continue
                 eligible = self.repo.baseline_segments_for_cover(
                     site=site, target=target, spec_id=spec.id, spec_version=spec.version,
                     key_version=spec.key_version, start=history_start, end=window_start,
+                    network_digest=network_digest if spec.requires_configured_networks else None,
                 )
                 cut_material.extend({
                     "id": row["id"], "status": row["status"], "target": target, "spec_id": spec.id,

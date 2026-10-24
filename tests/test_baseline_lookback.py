@@ -229,6 +229,31 @@ def test_segment_identity_is_content_derived_and_revoked_rewrite_is_usable():
     assert rows[1]["id"] == f"{rows[0]['id']}-r1"
 
 
+def test_external_destination_segment_identity_is_bound_to_the_network_definition():
+    ext = SPEC_BY_ID["bl.ext_dest"]
+    common = {
+        "site": "site", "target": "network", "spec": ext,
+        "start": START - timedelta(hours=1), "end": START,
+        "normalizer": "fixture@1", "exclusion_digest": "none", "excluded_keys": [],
+    }
+
+    assert segment_content_id(**common, network_digest="network-a") != segment_content_id(
+        **common, network_digest="network-b",
+    )
+
+    repo = _repo()
+    writer = LookbackWriter(
+        repo, FakeHistory(), site="site", specs=[ext], normalizer="fixture@1",
+        budget=LookbackBudget(queries=10, records=10, seconds=10), network_digest="network-a",
+        now=lambda: START,
+    )
+    row = writer.segment_row(
+        hunt_id="h1", target="network", spec=ext,
+        start=START - timedelta(hours=1), end=START, events_total=0,
+    )
+    assert row["network_digest"] == "network-a"
+
+
 def test_building_segment_is_invisible_and_stale_cleanup_removes_its_rows():
     repo = _repo()
     row = _writer(repo, FakeHistory()).segment_row(

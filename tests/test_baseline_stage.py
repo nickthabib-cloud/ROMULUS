@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from romulus.baseline.playbook import ExecPathBaseline
 from romulus.baseline.protocol import HistoryFetch, HistoryPartition, HistoryPlan
 from romulus.baseline.spec import SPEC_BY_ID
 from romulus.config import Settings
@@ -15,7 +16,9 @@ from romulus.hunt import run as hunt_run
 from romulus.hunt.baseline_stage import BASELINE_CITATION_CAP, run_baseline_stage
 from romulus.hunt.manifest import build_manifest
 from romulus.hunt.packets import PACKET_NORMALIZER
+from romulus.hunt.sweep import BOOT_PLACEMENT_PARTITION
 from romulus.sources.models import Window
+from romulus.sources.profile import contract_from_types
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
 
@@ -238,6 +241,39 @@ def test_a_gap_on_another_target_invalidates_a_scope_seen_in_resolved_history():
     assert repo.candidates("h1") == []
 
 
+def test_target_without_required_fields_does_not_gate_the_specs_history():
+    class SplitHistory(EmptyHistory):
+        def plan(self, target, start, end, *, query_budget):
+            if target == "network-index":
+                raise AssertionError("inapplicable target must not be queried for exec history")
+            return super().plan(target, start, end, query_budget=query_budget)
+
+    repo = _repo(targets=("host-index", "network-index"))
+    _resolved_history(repo)
+    event = _event(1, "/bin/new")
+    repo.save_evidence("h1", [event], {event.raw[0].key: {"message": "new"}}, None)
+    repo.upsert_baseline_observation(_observation(
+        event, key_id="new-id", key_digest="new-digest", path="/bin/new",
+    ))
+    contracts = {
+        "host-index": contract_from_types("host-index", {
+            "process.executable": "keyword", "process.exec_file.path": "keyword",
+            "process.user": "keyword",
+        }, role="host"),
+        "network-index": contract_from_types("network-index", {
+            "source.ip": "ip", "destination.ip": "ip",
+        }, role="network", os_family="unknown"),
+    }
+
+    run_baseline_stage(repo, "h1", WINDOW, source=SplitHistory(), contracts=contracts)
+
+    assert next(repo.baseline_observations("h1"))["verdict"] == "first_seen"
+    assert len(repo.candidates("h1")) == 1
+    history_cell = next(cell for cell in repo.rule_cells("h1")
+                        if cell["target"] == "baseline:network-index")
+    assert history_cell["state"] == "not_applicable_no_events"
+
+
 def test_a_scope_with_no_history_events_is_named_as_silent():
     repo = _repo()
     _resolved_history(repo)
@@ -247,7 +283,8 @@ def test_a_scope_with_no_history_events_is_named_as_silent():
     row["scope"] = "host:newhost"
     repo.upsert_baseline_observation(row)
 
-    run_baseline_stage(repo, "h1", WINDOW, source=EmptyHistory())
+    source = EmptyHistory()
+    run_baseline_stage(repo, "h1", WINDOW, source=source)
 
     stored = next(repo.baseline_observations("h1"))
     assert stored["verdict"] == "unresolved"
@@ -286,9 +323,96 @@ def test_resolved_history_marks_known_common_and_groups_all_new_keys_in_one_capp
     assert "absent from baseline" in claim and "never seen" not in claim
     assert "absence from a baseline is a deviation, not evidence of malicious activity" in claim
     assert f"{len(new_rows)} keys" in claim and summary["snapshot_digest"] in claim
+    assert '"executable":"/opt/new-20"' in claim
+    assert '"executable":"/opt/new-21"' not in claim
+    assert "and 2 more keys (in the observation table)" in claim
     rollup = next(cell for cell in repo.rule_cells("h1")
                   if cell["rule_id"] == SPEC.id and cell["target"] == "*" and cell["partition"] == "window")
     assert rollup["state"] == "matched" and rollup["matched"] == 1
+
+
+def test_boot_placement_partial_gates_rollup_but_not_a_present_keys_first_seen_verdict():
+    repo = _repo()
+    _resolved_history(repo)
+    event = _event(1, "/bin/new")
+    repo.save_evidence("h1", [event], {event.raw[0].key: {"message": "new"}}, None)
+    repo.upsert_baseline_observation(_observation(
+        event, key_id="new-id", key_digest="new-digest", path="/bin/new",
+    ))
+    repo.set_rule_cell(
+        "h1", SPEC.id, SPEC.version, "*", BOOT_PLACEMENT_PARTITION,
+        "evaluated_partial", 0, 0, {"reasons": ["boot placement conflict"]},
+    )
+
+    summary = run_baseline_stage(repo, "h1", WINDOW, source=EmptyHistory())
+
+    assert next(repo.baseline_observations("h1"))["verdict"] == "first_seen"
+    assert len(repo.candidates("h1")) == 1
+    rollup = next(cell for cell in repo.rule_cells("h1")
+                  if cell["rule_id"] == SPEC.id and cell["target"] == "*" and cell["partition"] == "window")
+    assert rollup["state"] == "match_on_partial"
+    assert summary["specs"][SPEC.id]["window_failure"] == "window coverage is partial in 1 cell(s)"
+
+
+def test_baseline_uses_the_specs_version_even_when_the_playbook_class_disagrees(monkeypatch):
+    repo = _repo()
+    _resolved_history(repo)
+    event = _event(1, "/bin/new")
+    repo.save_evidence("h1", [event], {event.raw[0].key: {"message": "new"}}, None)
+    repo.upsert_baseline_observation(_observation(
+        event, key_id="new-id", key_digest="new-digest", path="/bin/new",
+    ))
+    monkeypatch.setattr(ExecPathBaseline, "version", "legacy-mismatch")
+
+    run_baseline_stage(repo, "h1", WINDOW, source=EmptyHistory())
+
+    candidate = repo.candidates("h1")[0]
+    assert candidate["rule_version"] == SPEC.version
+    assert all(cell["rule_version"] == SPEC.version for cell in repo.rule_cells("h1")
+               if cell["rule_id"] == SPEC.id)
+
+
+def test_judge_fetches_and_persists_only_published_first_event_citations():
+    repo = _repo()
+    _resolved_history(repo)
+    rows, events = [], []
+    for index in range(BASELINE_CITATION_CAP + 3):
+        event = _event(index + 1, f"/opt/new-{index:02d}")
+        event.fields["aaa.irrelevant"] = fv("noise", "fixture:irrelevant")
+        events.append(event)
+        row = _observation(
+            event, key_id=f"new-id-{index:02d}", key_digest=f"new-{index:02d}",
+            path=f"/opt/new-{index:02d}",
+        )
+        row["first_event_refs"] = [
+            {"target": event.raw[0].target, "native_id": event.raw[0].native_id},
+        ]
+        rows.append(row)
+    repo.upsert_baseline_observations(rows)
+
+    class CitationSource(EmptyHistory):
+        def __init__(self):
+            super().__init__()
+            self.requested = []
+
+        def fetch_refs(self, refs):
+            self.requested.extend(refs)
+            wanted = {(ref["target"], ref["native_id"]) for ref in refs}
+            selected = [event for event in events
+                        if (event.raw[0].target, event.raw[0].native_id) in wanted]
+            raw = {event.raw[0].key: {"message": event.id} for event in selected}
+            return selected, raw, []
+
+    source = CitationSource()
+    run_baseline_stage(repo, "h1", WINDOW, source=source)
+
+    candidate = repo.candidates("h1")[0]
+    assert len(source.requested) == BASELINE_CITATION_CAP
+    assert len(candidate["event_ids"]) == BASELINE_CITATION_CAP
+    assert len(repo.events_by_ids([event.id for event in events])) == BASELINE_CITATION_CAP
+    assert {item["field"] for item in candidate["predicate_fields"]} == {
+        "process.executable", "process.exec_file.path", "process.user",
+    }
 
 
 def test_unconfigured_external_destination_is_unresolved_even_with_resolved_history():
@@ -306,12 +430,15 @@ def test_unconfigured_external_destination_is_unresolved_even_with_resolved_hist
     repo.save_evidence("h1", [event], {event.raw[0].key: {"message": "flow"}}, None)
     repo.upsert_baseline_observation(row)
 
-    run_baseline_stage(repo, "h1", WINDOW, source=EmptyHistory())
+    source = EmptyHistory()
+    run_baseline_stage(repo, "h1", WINDOW, source=source)
 
     stored = next(repo.baseline_observations("h1"))
     assert stored["verdict"] == "unresolved"
     assert "internal networks not configured" in stored["reason"]
     assert repo.candidates("h1") == []
+    assert source.plans == 0
+    assert repo.baseline_segments(spec_id=ext.id) == []
 
 
 def test_configured_external_destination_is_evaluated_against_resolved_history():
@@ -323,6 +450,7 @@ def test_configured_external_destination_is_evaluated_against_resolved_history()
         "spec_version": ext.version, "key_version": ext.key_version, "normalizer": "fixture@1",
         "start": begin, "end": START, "bucket": "day", "origin": "lookback",
         "source_hunt_id": None, "built_by_hunt_id": None, "exclusion_digest": "none",
+        "network_digest": "fixture",
         "excluded_keys": [], "hunted": 0, "events_total": 48, "status": "active", "created_at": START,
     }, [{
         "segment_id": "ext-history", "scope_kind": "internal_ip", "scope": "internal_ip:10.0.0.5",

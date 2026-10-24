@@ -280,11 +280,11 @@ def test_0015_backfills_observations_and_round_trips_base_data(tmp_path):
         assert "event_citation" in tables and "event_observation" in tables
 
 
-def test_0016_is_the_single_head_and_drops_only_the_owners_implied_observations(tmp_path):
+def test_0017_is_the_single_head_and_0016_drops_only_the_owners_implied_observations(tmp_path):
     engine = make_engine(tmp_path / "event-observation-owner.db")
     with engine.begin() as connection:
         cfg = _alembic_config(connection)
-        assert ScriptDirectory.from_config(cfg).get_heads() == ["0016"]
+        assert ScriptDirectory.from_config(cfg).get_heads() == ["0017"]
         command.upgrade(cfg, "0015")
         for hunt_id in ("h1", "h2", "h3"):
             connection.exec_driver_sql(
@@ -496,7 +496,8 @@ def test_baseline_listings_are_deterministically_sorted():
 
 BASELINE_TABLES = ("baseline_segment", "baseline_count", "baseline_scope_hour", "baseline_snapshot",
                    "baseline_snapshot_segment", "baseline_parent_host_boot", "baseline_parent_carry",
-                   "baseline_observation")
+                   "baseline_observation", "baseline_window_cell", "baseline_window_exec",
+                   "baseline_window_observation", "baseline_window_pending")
 
 
 def _shape(engine) -> dict:
