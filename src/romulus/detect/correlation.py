@@ -1534,8 +1534,10 @@ class ProcessNetworkLink(Playbook):
             + (f", and {n_alerts} IDS alert(s) on those connections"
                + (f", among them {'; '.join(f"'{sig}'" for sig in sigs)}" + more(len(sigs), n_sigs) if sigs else "")
                if n_alerts else "") + ".",
-            (f"{n_cited_socks} of the {g.n_socks} connect() records and {n_cited_partners} of the {n_partners} "
-             f"network records are cited."),
+            "Of these, " + " and ".join(
+                f"all {total} {noun}" if cited_n >= total else f"{cited_n} of the {total} {noun}"
+                for cited_n, total, noun in ((n_cited_socks, g.n_socks, "connect() records"),
+                                             (n_cited_partners, n_partners, "network records"))) + " are cited.",
             "The link between the host process and these network records is inferred from address, port and "
             "time; it is not itself observed"
             + (". It is ambiguous: more than one local address matched" if len(locals_) > 1 else "") + ".",

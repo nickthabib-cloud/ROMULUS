@@ -69,46 +69,63 @@ from tests import throughput_fixture as tf
 # unknown (its parent's exec is not in the window), with the network finding's claim stating it. The exec,
 # file-change and observed records corr.process_network_link reads for lineage do not make a partition an evaluation
 # of it, so its cells are otherwise unchanged. Lanes, anchors, links, raw copies and every other finding are unchanged.
+# Suricata records whose sensor wrote no community id get the one computed from their 5-tuple, so the evidence version
+# moved: every typed event id is rehashed and every event names the new normalizer, which changes every digest that
+# carries an event id (events, event_entities, candidates, links, tasks, audit, manifest) and every normalized and
+# pivot digest. The fixture's sensor writes a community id on every record, so with the old evidence version given the
+# new number the normalized and pivot digests are the reference ones, and the rest is the change below.
+# Claims state only what their citations carry. Aggregate claims cite the records that bound every span they state and
+# a record for each value they name, say how many records are cited when they state more ("K of the N records are
+# cited, including the first and the last"); the rules that do so carry new versions (rule_cells, candidates,
+# manifest). In the fixture: the port scan, the protocol/port mismatches, beaconing, the alert stack, the tool user
+# agent, the SSH login, the persistence change and both connect() rules change their claims; the port scan, the
+# account change and both connect() rules cite more records (the scan's last flow record; the exec ancestors and
+# observed records the lineage names); the alert stack's and the connect() rules' notes are reworded. Lineage
+# ancestors and span bounds are now among a finding's records, so expansion also starts from them: links (95 to
+# 106), tasks, raw copies (which task fetched a record first), the alert stack anchor's per-link query use, and four
+# more context findings (discovery, credential access and lateral movement in the attack's lineage, under the new
+# anchor identities that also rename seven existing ones); their context cells follow. No finding is lost and every
+# lane of a deterministic finding is unchanged.
 GOLDEN_STACK = {
-    "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
-    "audit": "6af1b824ccfa0f6bc1332de83c7bcad95d53a08021cc76eb0cf347a3d47fea46",
-    "candidates": "c70ac8e146d1356b64fc86eec38aa3a97352ea39d63390bfdd819b3cd4a7d8e8",
+    "anchors": "2187f965c915311be616f1ca653b3540f29c12b82c2cc8abfb0c647b1cbb561e",
+    "audit": "2525db8dffaa5d76d13e81fde37b50803c22801f81cf71a3739a77da8315b6e6",
+    "candidates": "ccf2731bdaf4c148a8ee5e9c709129ee70d76b852dc1872b529cf28a33c2db0f",
     "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
     "event_citations": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-    "event_entities": "41678ff059653cd297784689d63d228501b582fc22d14e00c7ae923bf401343b",
-    "events": "b1fee0ae16ba050626efab14200b4613d0a1ced778d5cb115a4bc9ac218a7b67",
-    "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
-    "links": "a6a78b78aa676b98d84bc5498a164f20c23f1dcb20709a9a8dd6c0b11c5889ec",
-    "manifest": "c56ea7fdbd662f111309569acfe8b4d6b685cfdda1727d95eba65bbaf872bb21",
-    "raw": "03d2790712d2ac341c4dafcc4b89d7f991a025f637d97f7ef22cd33e35f4fbe0",
-    "rule_cells": "5e54ecbffe6d72d614d4b6fd5798cc5eb5b95d6d1faceea83e75f357a49b9aed",
+    "event_entities": "24d5cd01bd79882466baa38ad38c0b7939c2594200775923286396f70a8c20eb",
+    "events": "677bbef62b5c979908c354bcc5087b72445dd1ecbc4fc63743bc2e0f93f46773",
+    "expansion": "35c397358e464cca3fd771c73a5fb4d4bacbcbd304e0f62cac61ca7815ca8f4e",
+    "links": "9d584fbdfb8c603c0b5bd3ec23f9b4a5f98ddc22768a5a8eba71b10525c399c9",
+    "manifest": "11e5c52986ec6b9e8feb581f652652214a52e73ee6149aafd48825dbb7dbf7f1",
+    "raw": "26c992d21e0cc268b5d586224dfc7c23182a90b3f3ed108eb66d763cf0eb4924",
+    "rule_cells": "e560501e164abfbe3d3f1a25f1de135738c1fefb59a4987ea578c1c4a11a3075",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
-    "tasks": "02b081d35ae1a1c54e4839faefbcaf5a03f0c07d832aff2cf177befb2d766c50",
+    "tasks": "99a9fc1a0407817016478fbbbbf211a77e9b0f68e3fbe4c54b230a3ae1e6e135",
 }
 GOLDEN_NORMALIZED = {
-    "arkime_sessions3-x": "06f98c12d69e05195c076fd782333b77fcaba75cf63afe11bc78a7f91100a93d",
-    "arkime_sessions3-x+boots": "06f98c12d69e05195c076fd782333b77fcaba75cf63afe11bc78a7f91100a93d",
-    "romulus-host-x": "2f63fecb4b594d2efae3c8d2fb3da44081ef4ee3c520511b70d5377d99a6d5af",
-    "romulus-host-x+boots": "2091b790b25d60963635bf00478300ca29148e3df7969b2e767727e27bbaa5e2",
-    "romulus-network-x": "1613a25e70c432b05d97032b1482c8f663e51454f4469d7792e79879a85ae4c0",
-    "romulus-network-x+boots": "1613a25e70c432b05d97032b1482c8f663e51454f4469d7792e79879a85ae4c0",
+    "arkime_sessions3-x": "20b597e7169ff4713f006bd7b69608eea69a2038505dfa92fdf393709af2fe54",
+    "arkime_sessions3-x+boots": "20b597e7169ff4713f006bd7b69608eea69a2038505dfa92fdf393709af2fe54",
+    "romulus-host-x": "c8605640b20e6a43246db56f2367558b2fab33063ea7a56e4a17d3dcdbdcf9dd",
+    "romulus-host-x+boots": "a21ec9b0aed076c9cee5436e392604732f4eb7cb0641045d538b7b9f2954a573",
+    "romulus-network-x": "570f22b06412adcfad2fba2d17d71ebe4c28b40b1ae69dc89e5ed88325f03385",
+    "romulus-network-x+boots": "570f22b06412adcfad2fba2d17d71ebe4c28b40b1ae69dc89e5ed88325f03385",
 }
 GOLDEN_PIVOT = {
-    "arkime_sessions3-x:-": "13ad382fd02400d2c2a752cec694e5e6ce84527ada5c33bb292ef6bfef64fd46",
-    "arkime_sessions3-x:process_exec": "13ad382fd02400d2c2a752cec694e5e6ce84527ada5c33bb292ef6bfef64fd46",
-    "arkime_sessions3-x:net_socket": "13ad382fd02400d2c2a752cec694e5e6ce84527ada5c33bb292ef6bfef64fd46",
-    "arkime_sessions3-x:auth,net_socket,process_exec": "13ad382fd02400d2c2a752cec694e5e6ce84527ada5c33bb292ef6bfef64fd46",
-    "arkime_sessions3-x:net_flow": "13ad382fd02400d2c2a752cec694e5e6ce84527ada5c33bb292ef6bfef64fd46",
-    "romulus-host-x:-": "4381ac742cb9fb496eea6b93f780ee9a90dce4bcbba0a3809142b921e13157a6",
-    "romulus-host-x:process_exec": "7db85d1a481d00d9ba8f69bf704fcb0bc3e861ff7f88915adf953b8c10864e2c",
-    "romulus-host-x:net_socket": "fd4d94aa261284e2d89eb1913fe664eb8689813cbb047e31727a0313aa081f5f",
-    "romulus-host-x:auth,net_socket,process_exec": "4381ac742cb9fb496eea6b93f780ee9a90dce4bcbba0a3809142b921e13157a6",
-    "romulus-host-x:net_flow": "4381ac742cb9fb496eea6b93f780ee9a90dce4bcbba0a3809142b921e13157a6",
-    "romulus-network-x:-": "26602db2ee376909da616138fb9cabb09717a2d4c0dcff3962d102d735d6b408",
+    "arkime_sessions3-x:-": "10452ded995f9c13ed57ff9ff96c9fb3a859824f4ad87939ef5bdeefd2529b7a",
+    "arkime_sessions3-x:process_exec": "10452ded995f9c13ed57ff9ff96c9fb3a859824f4ad87939ef5bdeefd2529b7a",
+    "arkime_sessions3-x:net_socket": "10452ded995f9c13ed57ff9ff96c9fb3a859824f4ad87939ef5bdeefd2529b7a",
+    "arkime_sessions3-x:auth,net_socket,process_exec": "10452ded995f9c13ed57ff9ff96c9fb3a859824f4ad87939ef5bdeefd2529b7a",
+    "arkime_sessions3-x:net_flow": "10452ded995f9c13ed57ff9ff96c9fb3a859824f4ad87939ef5bdeefd2529b7a",
+    "romulus-host-x:-": "b3b73239344c635784b888d698d2bcc9a7eeb816187500b97cbc2f1ab29ee7cb",
+    "romulus-host-x:process_exec": "2342b20a28efdf4226f91bb8b4665857c585bbb865a9c055ecb9617bd394ac75",
+    "romulus-host-x:net_socket": "e4ab66f60b9dc300f0a3e7426c4db6da78e95ebf6a0bbbd7eaff5684103b7ac8",
+    "romulus-host-x:auth,net_socket,process_exec": "b3b73239344c635784b888d698d2bcc9a7eeb816187500b97cbc2f1ab29ee7cb",
+    "romulus-host-x:net_flow": "b3b73239344c635784b888d698d2bcc9a7eeb816187500b97cbc2f1ab29ee7cb",
+    "romulus-network-x:-": "1cd1a455435f582cb9214500155dd594e0fe845919c5f7607574d54039ba5c1e",
     "romulus-network-x:process_exec": "9e505ce98b1b1f339349e89f9e2e58082d9066b316aa4aa97b727de0423759c6",
     "romulus-network-x:net_socket": "9e505ce98b1b1f339349e89f9e2e58082d9066b316aa4aa97b727de0423759c6",
     "romulus-network-x:auth,net_socket,process_exec": "9e505ce98b1b1f339349e89f9e2e58082d9066b316aa4aa97b727de0423759c6",
-    "romulus-network-x:net_flow": "1cb749978530f8fdc3306a3032f00880594c2aa2bd82157f611c96f394b19a53",
+    "romulus-network-x:net_flow": "6fbac86c1546e6f66cca0db257b23c5f0099622d61b3c2dfd46a9ad6240cd903",
 }
 PIVOT_FAMILIES = (None, frozenset({"process_exec"}), frozenset({"net_socket"}),
                   frozenset({"process_exec", "net_socket", "auth"}), frozenset({"net_flow"}))
