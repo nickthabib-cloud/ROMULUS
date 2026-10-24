@@ -116,10 +116,10 @@ class SnapshotView:
             reason = _coverage_failure(coverage, self.min_live_hours)
         live_hours = len({item["hour"] for item in series})
         history_events = sum(int(item["events"]) for item in series)
-        if reason is None and live_hours < self.min_live_hours:
-            reason = f"scope has {live_hours} live history hour(s), below the required {self.min_live_hours}"
         if reason is None and history_events < 1:
             reason = "scope is silent in history"
+        if reason is None and live_hours < self.min_live_hours:
+            reason = f"scope has {live_hours} live history hour(s), below the required {self.min_live_hours}"
         peers = (self.repo.baseline_peer_scopes(first["scope_kind"], self.hunt_id, playbook.id)
                  if playbook.spec.measure == "prevalence" else None)
         updated: list[dict] = []

@@ -238,6 +238,23 @@ def test_a_gap_on_another_target_invalidates_a_scope_seen_in_resolved_history():
     assert repo.candidates("h1") == []
 
 
+def test_a_scope_with_no_history_events_is_named_as_silent():
+    repo = _repo()
+    _resolved_history(repo)
+    event = _event(1, "/bin/new").model_copy(update={"host": "newhost"})
+    repo.save_evidence("h1", [event], {event.raw[0].key: {"message": "new"}}, None)
+    row = _observation(event, key_id="new-id", key_digest="new-digest", path="/bin/new")
+    row["scope"] = "host:newhost"
+    repo.upsert_baseline_observation(row)
+
+    run_baseline_stage(repo, "h1", WINDOW, source=EmptyHistory())
+
+    stored = next(repo.baseline_observations("h1"))
+    assert stored["verdict"] == "unresolved"
+    assert stored["reason"] == "scope is silent in history"
+    assert repo.candidates("h1") == []
+
+
 def test_resolved_history_marks_known_common_and_groups_all_new_keys_in_one_capped_lead():
     repo = _repo()
     _resolved_history(repo)
