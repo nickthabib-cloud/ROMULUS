@@ -538,6 +538,11 @@ class PortScan(_Grouped):
                 except (TypeError, ValueError):
                     self.missing_required += 1
                     continue
+            if not 0 <= dport <= 65535:
+                self.missing_required += 1      # not a port number: not evaluated
+                continue
+            if sport is not None and not 0 <= sport <= 65535:
+                sport = None                    # not a port number: judged as a record without a source port
             if sport is not None and sport < 1024 <= dport:
                 # A service answering a client, or a probe sent from a fixed low source port (nmap -g 53) to
                 # slip past stateless filters. Judged in finalize against the requests seen.

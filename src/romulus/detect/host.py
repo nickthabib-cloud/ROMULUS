@@ -1579,8 +1579,9 @@ class ExecLineage:
 
     With `citing`, it also keeps every exec record for citation (`exec_records`: the typed event and its raw copies,
     compressed, one disk-backed row per exec, read only when a lineage names the exec), so a claim that names an exec
-    ancestor cites it. The store yields to every detection store in the hunt's state budget (no floor, and no new
-    record once half the shared headroom is held). A record it refuses is named as not kept for citation, in a coverage
+    ancestor cites it. The store yields to every detection store in the hunt's state budget: no floor, at most a
+    quarter of the hunt's disk total, no new record once half the shared headroom is held, and its oldest records
+    dropped when a detection store needs the room. A record it refuses is named as not kept for citation, in a coverage
     note rather than a limit: nothing went unevaluated, and the lineage itself is read from the exec records above."""
 
     # Records held for citation in memory; the rest wait on disk (they are read only when a finding cites them).
@@ -1612,6 +1613,7 @@ class ExecLineage:
                              if citing else None)
         if self.exec_records is not None:
             self.exec_records.yields = True
+            self.exec_records.on_evict = self._evicted
 
     @property
     def records(self) -> KeyedStore:
@@ -1681,6 +1683,14 @@ class ExecLineage:
                                  f"{when} on (it gives way to the detection stores' state budget); every record was "
                                  f"still evaluated, and a claim naming a later exec ancestor says its record is not "
                                  f"cited")
+
+    def _evicted(self, n: int) -> None:
+        """Exec records kept for citation were dropped to give detection stores room (oldest first)."""
+        for member in self.members:
+            member.note_coverage("lineage_exec_records_dropped",
+                                 "exec records kept for citation were dropped, oldest first, to give the detection "
+                                 "stores room in the hunt's disk total; every record was still evaluated, and a claim "
+                                 "naming a dropped exec ancestor says its record is not cited")
 
     def entries(self, host: str | None, pid: int) -> list[ExecRecord]:
         """The process's records in time order; read in place when the store does not bring a process back to

@@ -532,23 +532,21 @@ def _refusal_point(budget, account, step=10, limit=10_000):
 
 def test_the_exec_citation_store_takes_nothing_from_the_detection_stores_headroom():
     """Records kept only to be cited never cost a detection store its state: the citation store holds no floor, its
-    bytes do not count in the headroom the detection stores share (a full one leaves their refusal point where it is
-    without it), it stops growing at half their headroom, the volume's reserve still binds it, and its refusal is no
-    detection store's limit."""
+    bytes do not count in the test that refuses a detection store, it stops growing at half the detection stores'
+    headroom, at its quarter of the total and when detection plus its bytes fill the headroom, and the volume's
+    reserve still binds it."""
     from romulus.detect.bounded import StateBudget, live_stores
     from romulus.detect.host import ExecLineage
-    alone = StateBudget(disk_total=1000, reserve=0)
-    plain = alone.account("rule:state")
-    alone.plan(1)
     budget = StateBudget(disk_total=1000, reserve=0)
     detect = budget.account("rule:state")
     cite = budget.account("rule:exec_records", yields=True)
     budget.plan(1)
     assert cite.weight == 0 and budget.floor_of(cite) == 0 and budget.floor == 500 and budget.pool == 500
-    budget.charge(cite, 5000)           # a citation store far past the whole shared headroom
+    assert budget.yield_cap == 250
+    budget.charge(cite, 240)
     assert budget.pool_used == 0 and budget.new_key_reason(cite) == ""
-    assert _refusal_point(budget, detect) == _refusal_point(alone, plain) == 1000
-    assert "rule:exec_records" not in budget.full and budget.full == alone.full
+    budget.charge(cite, 10)             # its quarter of the total
+    assert "a quarter of the hunt's total" in budget.new_key_reason(cite)
 
     # it stops growing once the detection stores hold half their headroom
     budget = StateBudget(disk_total=1000, reserve=0)
@@ -572,6 +570,114 @@ def test_the_exec_citation_store_takes_nothing_from_the_detection_stores_headroo
     lineage = ExecLineage(owner, citing=True)
     # the pack plans floors for the lineage store alone
     assert lineage.exec_records.yields and live_stores([owner]) == 1
+
+
+class _Owner:
+    """A rule's minimal owner of keyed stores: a spill directory, a state budget and its limits and notes."""
+
+    def __init__(self, directory, budget, name):
+        from romulus.detect.base import Playbook
+
+        class Rule(Playbook):
+            id = name
+            title = name
+            families = ()
+
+        self.rule = Rule()
+        self.rule.spill_dir = directory
+        self.rule.budget = budget
+
+
+def _fill(owner_rule, budget, *, cite_first: int, detect_keys: int, total: int):
+    """A yielding store filled first, then a detection store growing key by key (each written to disk); the keys the
+    detection store took, and by how much the two together ever passed the larger of the total and what the detection
+    store held alone (a store's last write may land just past its limit, as it always has)."""
+    from romulus.detect.bounded import KeyedStore
+    cite = None
+    if cite_first:
+        cite = KeyedStore(owner_rule, "exec_records", 1)
+        cite.yields = True
+        for i in range(cite_first):
+            if not cite.put(f"c{i}", "x" * 200):
+                break
+            cite.trim()
+    detect = KeyedStore(owner_rule, "state", 1)
+    taken, over = 0, 0
+    for i in range(detect_keys):
+        if not detect.put(f"d{i}", "y" * 200):
+            break
+        detect.trim()
+        taken += 1
+        held = detect.held_bytes + (cite.held_bytes if cite is not None else 0)
+        over = max(over, held - max(total, detect.held_bytes))
+    return taken, over, cite, detect
+
+
+def test_detection_and_citation_bytes_stay_within_the_total_and_detection_refuses_where_it_would_alone(tmp_path):
+    """The hunt's disk total is a ceiling for every byte: a detection store that needs the room takes it from the
+    citation store's oldest records, so it refuses at exactly the key it would without the citation store, and the
+    two together never pass the total."""
+    from romulus.detect.bounded import StateBudget
+    total = 40_000
+    alone_budget = StateBudget(tmp_path / "a", disk_total=total, reserve=0)
+    (tmp_path / "a").mkdir()
+    alone = _Owner(tmp_path / "a", alone_budget, "alone").rule
+    alone_budget.plan(1)
+    taken_alone, _over, _none, alone_store = _fill(alone, alone_budget, cite_first=0, detect_keys=1000, total=total)
+
+    both_budget = StateBudget(tmp_path / "b", disk_total=total, reserve=0)
+    (tmp_path / "b").mkdir()
+    both = _Owner(tmp_path / "b", both_budget, "both").rule
+    both_budget.plan(1)
+    taken, over, cite, detect = _fill(both, both_budget, cite_first=1000, detect_keys=1000, total=total)
+    assert taken == taken_alone and taken < 1000                    # detection refused at the same key
+    assert detect.held_bytes == alone_store.held_bytes
+    assert over == 0                    # the citation bytes never took the two past the total
+    assert cite.held_bytes == 0 and cite.peek("c0") is None        # every citation record gave way
+    # partway, the oldest citation records go first and the newest stay; the citation store held its quarter at most
+    part_budget = StateBudget(tmp_path / "c", disk_total=total, reserve=0)
+    (tmp_path / "c").mkdir()
+    part = _Owner(tmp_path / "c", part_budget, "part").rule
+    part_budget.plan(1)
+    taken, over, cite, _detect = _fill(part, part_budget, cite_first=1000, detect_keys=taken_alone - 40, total=total)
+    kept = [i for i in range(1000) if cite.peek(f"c{i}") is not None]
+    assert over == 0 and kept and cite.peek("c0") is None and kept == list(range(kept[0], kept[-1] + 1))
+    assert (kept[-1] + 1) * 200 <= part_budget.yield_cap + 400
+    alone.close_spill()
+    both.close_spill()
+    part.close_spill()
+
+
+def test_an_exec_record_dropped_for_detection_is_named_not_cited_and_changes_no_verdict(tmp_path):
+    from romulus.detect.bounded import StateBudget
+    from romulus.detect.correlation import InterpreterExternalConnection
+    from tests.test_network_correlation import T0 as SOCK_T0
+    from tests.test_network_correlation import _sock, execd, observed
+    spawn = observed(150, 1, "/usr/lib/systemd/systemd", SOCK_T0 - 60.004, 40, comm="(perl)")
+    tree = [spawn, execd(150, 1, "/usr/bin/perl"), execd(100, 150, "/usr/bin/perl", t0=SOCK_T0 - 30)]
+
+    def run(drop: bool):
+        rule = InterpreterExternalConnection()
+        rule.spill_dir = tmp_path / ("drop" if drop else "keep")
+        rule.spill_dir.mkdir()
+        rule.budget = StateBudget(rule.spill_dir, disk_total=2**30, reserve=0)
+        rule.consume([*tree, _sock()])
+        store = next(ref() for ref in rule.__dict__["_state_stores"] if ref().name == "exec_records")
+        store.trim(keep=0)                      # the exec records go to disk
+        if drop:
+            assert store.evict_oldest(2**20) > 0 and store.on_disk == 0
+        [m] = rule.finalize()
+        rule.close_spill()
+        return m, rule
+
+    kept, _rule = run(False)
+    dropped, rule = run(True)
+    assert dropped.proposed_lane == kept.proposed_lane == "lead"
+    assert "reaches the service manager with no web server" in dropped.claim
+    assert {e.id for e in dropped.events} == {e.id for e in kept.events} - {"xvideoserver100", "xvideoserver150"}
+    assert any("were not kept for citation" in note for note in dropped.notes)
+    assert not rule.limit_reasons()
+    assert any("dropped, oldest first" in note for note in rule.coverage_notes())
 
 
 def test_an_account_change_says_its_ancestor_is_not_cited_and_keeps_its_lane(monkeypatch, tmp_path):
@@ -721,6 +827,15 @@ def test_a_mismatch_group_past_its_connection_cap_states_its_sources_as_lower_bo
     clean([m])
     assert (f"Suricata identified ssh on at least 2 connections to {ATTACKER} on tcp/443 from at least 1 source "
             f"(10.0.0.5: at least 2)") in m.claim
+
+
+def test_a_port_scan_does_not_count_a_value_that_is_no_port_number(tmp_path):
+    flows = [ev("net_flow", T0 + timedelta(seconds=i), source__ip="198.51.100.4", source__port=40000,
+                destination__ip="10.0.0.20", destination__port=port, network__transport="udp")
+             for i, port in enumerate([*range(1, 26), 70000, -1])]
+    rule = network.PortScan()
+    [m] = staged(rule, batches(flows, 10), tmp_path)
+    assert "covering 25 distinct destination ports" in m.claim and rule.missing_required == 2
 
 
 @pytest.mark.slow

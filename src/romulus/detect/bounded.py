@@ -174,7 +174,7 @@ def volume_usage(directory) -> tuple[int, int] | None:
 class Account:
     """One store's bytes on disk (a keyed store, a record list, a join's rows, the event stage)."""
 
-    __slots__ = ("name", "strong", "used", "weight", "yields")
+    __slots__ = ("evict", "name", "strong", "used", "weight", "yields")
 
     def __init__(self, name: str, strong: bool, weight: int = 1, yields: bool = False):
         self.name = name
@@ -182,6 +182,7 @@ class Account:
         self.used = 0
         self.weight = 0 if yields else weight   # floors this store holds: one per rule it serves
         self.yields = yields            # a store no detection needs (see `KeyedStore.yields`): no floor, gives way first
+        self.evict = None               # a yielding store's evict(nbytes) -> bytes freed (its oldest records first)
 
 
 class StateBudget:
@@ -197,11 +198,13 @@ class StateBudget:
     quiet rule's guarantee meaningful (with 70 stores and a 10 GiB total, about 73 MiB each) while the busiest stores
     still share the other half by need.
 
-    A yielding store (one no detection reads, such as records kept only to be cited) holds no floor and no share of
-    the headroom: its bytes are bounded by its own disk budget and the volume's reserve, and never count in the
-    headroom the detection stores share, so a full yielding store leaves every detection store's refusal point where
-    it would be without it. It also takes no new key once the detection stores hold half the shared headroom, so it
-    stops growing while they are under pressure.
+    A yielding store (one no detection reads, such as records kept only to be cited) holds no floor, and its bytes
+    never count in the headroom test that refuses a detection store, so every detection store's refusal point is where
+    it would be without it. Its bytes still sit inside the hunt's total: it takes no new key once the detection stores'
+    bytes beyond their floors plus all yielding bytes reach the shared headroom, once it holds a quarter of the total
+    (YIELD_SHARE), or once the detection stores hold half the headroom; and when a detection store's growth would push
+    the two past the headroom, the yielding stores drop their oldest records (`Account.evict`) to make the room, so
+    the total stays a ceiling. A dropped record is one a claim then says is not kept for citation.
 
     The automatic total is the smaller of half the stage volume's free space (after the reserve) and TOTAL_SHARE of
     the volume, and the reserve is the larger of the setting and RESERVE_SHARE of the volume, because the stage volume
@@ -233,6 +236,8 @@ class StateBudget:
         self.pool_used = 0              # bytes the detection stores hold above their floors (yielding stores: none)
         self.full: dict[str, str] = {}  # stores that refused a new key, and why
         self.yielding = False           # a yielding store has an account: the budget is watched from half the headroom
+        self.yield_used = 0             # the yielding stores' bytes (inside the total, outside the detection test)
+        self._evicting = False
         self.forced: list = []          # (predicate on an Account, reason): stores forced into no-growth mode (tests)
         self.calm = True                # no limit reached: the per-record check is one attribute read
         self.disk_used = 0              # the spills' real database growth (for the summary)
@@ -254,7 +259,11 @@ class StateBudget:
         d = self.__dict__
         calm = not (d.get("over_total") or d.get("low_space") or d.get("broken") or d.get("forced"))
         if calm and "accounts" in d:
-            calm = self.pool_used < (self.pool // 2 if d.get("yielding") else self.pool)
+            if d.get("yielding"):
+                calm = (self.pool_used < self.pool // 2 and self.pool_used + self.yield_used < self.pool
+                        and self.yield_used < self.yield_cap)
+            else:
+                calm = self.pool_used < self.pool
         object.__setattr__(self, "calm", calm)
 
     # ---- floors ----
@@ -270,6 +279,11 @@ class StateBudget:
     def pool(self) -> int:
         """The bytes beyond their floors the stores share."""
         return self.disk_total - self.floor * max(1, self.stores or sum(a.weight for a in self.accounts))
+
+    @property
+    def yield_cap(self) -> int:
+        """The bytes one yielding store may hold: a quarter of the hunt's total."""
+        return int(self.disk_total * YIELD_SHARE)
 
     def plan(self, stores: int) -> None:
         """Fix the number of floors planned for (the sweep counts its pack's live stores, each by its weight)."""
@@ -289,7 +303,24 @@ class StateBudget:
     def _repool(self) -> None:
         floor = self.floor
         self.pool_used = sum(max(0, a.used - floor * a.weight) for a in self.accounts if not a.yields)
+        self._make_room()
         self._recalm()
+
+    def _make_room(self) -> None:
+        """Keep the detection stores' bytes beyond their floors plus the yielding stores' bytes within the shared
+        headroom: the yielding stores drop their oldest records for the excess."""
+        excess = self.pool_used + self.yield_used - self.pool
+        if excess <= 0 or self._evicting:
+            return
+        self._evicting = True
+        try:
+            for account in self.accounts:
+                if account.yields and account.evict is not None and account.used > 0:
+                    excess -= account.evict(excess)
+                    if excess <= 0:
+                        break
+        finally:
+            self._evicting = False
 
     def charge(self, account: Account, nbytes: int) -> None:
         """A store's bytes on disk changed by `nbytes` (negative when states were read back or cleared). A yielding
@@ -298,11 +329,15 @@ class StateBudget:
             return
         if account.yields:
             account.used += nbytes
+            self.yield_used += nbytes
+            self._recalm()
             return
         floor = self.floor * account.weight
         before = max(0, account.used - floor)
         account.used += nbytes
         self.pool_used += max(0, account.used - floor) - before
+        if nbytes > 0 and self.yield_used:
+            self._make_room()
         self._recalm()
 
     def force_full(self, reason: str, where) -> None:
@@ -317,10 +352,17 @@ class StateBudget:
         reason = self.hard or self.over_total
         if not reason and account is not None:
             reason = next((why for where, why in self.forced if where(account)), "")
-            if not reason and account.yields and self.pool_used >= self.pool // 2:
-                reason = (f"the detection stores hold {self.pool_used / 2**20:.1f} MiB of the "
-                          f"{self.pool / 2**20:.1f} MiB of headroom they share, and a store no detection reads gives "
-                          f"way at half of it")
+            if not reason and account.yields:
+                if self.pool_used >= self.pool // 2:
+                    reason = (f"the detection stores hold {self.pool_used / 2**20:.1f} MiB of the "
+                              f"{self.pool / 2**20:.1f} MiB of headroom they share, and a store no detection reads "
+                              f"gives way at half of it")
+                elif self.pool_used + self.yield_used >= self.pool:
+                    reason = (f"the detection stores' bytes beyond their floors and the yielding stores' "
+                              f"{self.yield_used / 2**20:.1f} MiB fill the {self.pool / 2**20:.1f} MiB of headroom")
+                elif account.used >= self.yield_cap:
+                    reason = (f"it holds {account.used / 2**20:.1f} MiB, its cap of a quarter of the hunt's total "
+                              f"({self.yield_cap / 2**20:.1f} MiB)")
             elif not reason and self.pool_used >= self.pool and account.used >= self.floor_of(account):
                 reason = (f"its state on disk ({account.used / 2**20:.1f} MiB) is past its guaranteed floor "
                           f"({self.floor_of(account) / 2**20:.1f} MiB) and the headroom the stores share "
@@ -717,6 +759,8 @@ def _hot_limit(store, n: int, values, keep: int | None) -> int:
 # Per-store disk budget: a store's own share of the hunt's budget, so no one store (a flood of routine records)
 # can spend the whole hunt's disk and starve another rule's evidence. Rows are compact pickled per-key states.
 DISK_BUDGET = 8 * 2**30
+# The share of the hunt's disk total one yielding store may hold (see StateBudget).
+YIELD_SHARE = 0.25
 
 
 def store_refuses(owner, account_of) -> bool:
@@ -772,6 +816,8 @@ class KeyedStore:
     # A store no detection reads (records kept only to be cited): it holds no floor of the hunt's state budget and
     # gives way before any detection store (see `StateBudget`), and its refusals are its owner's to name.
     yields = False
+    # Called with how many records `evict_oldest` dropped (a yielding store's owner says they are not cited).
+    on_evict = None
 
     def __init__(self, owner, name: str, hot: int, *, disk_budget: int | None = None, candidate=None, group=None):
         self.owner = owner
@@ -808,6 +854,8 @@ class KeyedStore:
             self._account = _budget_of(owner).account(f"{getattr(owner, 'id', type(owner).__name__)}:{self.name}",
                                                      _strong(owner), max(1, int(getattr(self, "weight", 1))),
                                                      yields=getattr(self, "yields", False))
+            if self._account.yields:
+                self._account.evict = self.evict_oldest
             if self.held_bytes:
                 owner.budget.charge(self._account, self.held_bytes)
         return self._account
@@ -1036,6 +1084,34 @@ class KeyedStore:
             self._rebuild_filter()
         if self._measure.avg:
             budget.hot_allowance(self, int(len(self.hot) * self._measure.avg))
+
+    def evict_oldest(self, nbytes: int) -> int:
+        """Drop the records written to disk longest ago until `nbytes` are freed (a yielding store giving a detection
+        store room); the bytes freed. Rows are read in rowid order (the table's own index, oldest write first), a batch
+        at a time, so no table is scanned. A key read back into memory is not on disk and is never dropped; nothing is
+        dropped while rows on disk are marked stale (below the reserve) or the table is broken."""
+        if self.owner is None or not self.on_disk or self._shadow or self.broken or nbytes <= 0:
+            return 0
+        db = self._db()
+        freed = dropped = 0
+        while freed < nbytes and self.on_disk:
+            rows = db.execute(f"SELECT rowid, n FROM {self.name} ORDER BY rowid LIMIT 256").fetchall()
+            if not rows:
+                break
+            take = []
+            for rowid, size in rows:
+                if freed >= nbytes:
+                    break
+                take.append((rowid,))
+                freed += size
+            db.executemany(f"DELETE FROM {self.name} WHERE rowid = ?", take)
+            self.on_disk -= len(take)
+            dropped += len(take)
+        self.disk_bytes -= freed
+        self._bill(-freed)
+        if dropped and self.on_evict is not None:
+            self.on_evict(dropped)
+        return freed
 
     # ---- finalize -------------------------------------------------------------------------------------
     def _hot_ordered(self, candidates: bool):
