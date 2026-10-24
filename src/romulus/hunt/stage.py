@@ -180,7 +180,8 @@ class EventStage:
         return fresh, duplicates
 
     def put(self, events: list[TypedEvent], raw_sources: dict[str, dict]) -> None:
-        """Stage aggregate inputs exactly as on main; first event body wins and raw copies are keyed."""
+        """Stage events to be kept to the end of the sweep: the first event body wins, raw copies are keyed, and an
+        event or raw copy staged earlier only as a hold is kept from now on."""
         if not events:
             return
         first: dict[str, TypedEvent] = {}
