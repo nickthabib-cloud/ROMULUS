@@ -511,6 +511,30 @@ def test_windows_lineage_session_and_flow_host_links_select_os_specific_keys_and
         assert all("linux.audit" not in str(intent.model_dump(mode="json")) for intent in planned)
 
 
+def test_linux_host_anchor_without_explicit_os_never_queries_windows_targets():
+    linux = contract_from_types(
+        "linux-host", {"@timestamp": "date", "event.dataset": "keyword", "host.name": "keyword"},
+        role="host", os_family="linux",
+    )
+    windows = contract_from_types("windows-host", _windows_types(), role="host", os_family="windows")
+    event = _event(1, data={"ProcessId": "512"})
+    event = event.model_copy(update={
+        "normalizer": "linux-audit@1",
+        "fields": {name: value for name, value in event.fields.items() if name != "host.os.family"},
+    })
+    fetcher = LinkFetcher(
+        PivotExecutor(None, None, "h1", {linux.target: linux, windows.target: windows}), START, END,
+    )
+
+    planned = fetcher._lineage(
+        LinkAnchor(finding_id="linux", ts=event.ts, host=event.host, events=[event]),
+        LinkWindow(label="near", start=START, end=END),
+    )[2]
+
+    assert planned
+    assert {intent.target for intent in planned} == {"linux-host"}
+
+
 def test_windows_account_links_use_the_canonical_sid_or_domain_name_identity():
     contract = contract_from_types("windows", _windows_types(), role="host")
     executor = PivotExecutor(None, None, "h1", {contract.target: contract})

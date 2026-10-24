@@ -11,7 +11,7 @@ from romulus.agent.models import PivotCoverage
 from romulus.agent.tools import EntityTimelineArgs, EntityTimelineRequest
 from romulus.detect.correlation import PidTable, boot_of, boots_conflict
 from romulus.evidence.normalize import BootIntervals
-from romulus.evidence.typed import TypedEvent
+from romulus.evidence.typed import TypedEvent, event_os_family
 from romulus.hunt.pivot import (
     HOST_LOOKUP_BUDGET,
     MAX_PIVOT_RECORDS,
@@ -176,8 +176,9 @@ def _boot(anchor: LinkAnchor) -> str | None:
 
 
 def _os_family(anchor: LinkAnchor) -> str | None:
-    value = _value(anchor, "host.os.family")
-    return str(value).casefold() if value else None
+    families = {event_os_family(event) for event in anchor.events}
+    families.discard("unknown")
+    return next(iter(families)) if len(families) == 1 else None
 
 
 def _victim(anchor: LinkAnchor) -> dict:
