@@ -287,6 +287,95 @@ def test_a_connection_recorded_by_arkime_and_by_suricata_without_a_community_id_
     assert "2 flow or session record(s) across 1 connection(s) to 192.0.2.174 port 4444" in m.claim
 
 
+def test_the_join_stages_what_it_can_cite_not_every_network_record(tmp_path):
+    """Network traffic that no connect() call reaches is held only boundedly (one record per endpoint pair), and a
+    call's group keeps its first calls and bounds: the stage grows with groups and pairs, not with records."""
+    from tests.test_network_correlation import _sock, history
+    hs, hn = history()
+    calls = hs + [_sock(1000 + i, exe="/usr/bin/bash", comm="bash", uid="0", user="root",
+                        t0=1731940000.1 + i) for i in range(40)]
+    scan = [flow("192.0.2.66", 40000 + p, "10.0.0.9", p, T0 + timedelta(seconds=p * 0.01)) for p in range(1, 3001)]
+    rule = ProcessNetworkLink()
+    seen = set()
+    for batch in [calls, *batches(scan, 500), hn]:
+        rule.consume(batch)
+        seen |= {e.id for e in rule.drain_staged()}
+    # the 40 calls of one group keep their first EXAMPLE_LIMIT, and each of the 3000 scan records is the first of its
+    # own (port, address) pair, held until UNMATCHED_HELD; the history's records are matched pairs
+    assert len(seen & {e.id for e in calls}) <= 20 + 2 + 16 + len(hs)
+    assert len(seen & {e.id for e in scan}) == 3000          # one per pair, every pair new: under the hold bound
+
+
+def test_the_unmatched_network_records_held_for_citation_are_bounded(tmp_path, monkeypatch):
+    from romulus.detect import correlation
+    monkeypatch.setattr(correlation, "UNMATCHED_HELD", 100)
+    rule = ProcessNetworkLink()
+    scan = [flow("192.0.2.66", 40000 + p, "10.0.0.9", p, T0 + timedelta(seconds=p * 0.01)) for p in range(1, 1001)]
+    holds = Counter()
+    for batch in batches(scan, 100):
+        rule.consume(batch)
+        rule.drain_staged()
+        held, released = rule.drain_bounds()
+        holds.update(held)
+        holds.subtract(released)
+    assert sum(n for n in holds.values() if n > 0) == 100
+    assert any("the oldest were released" in reason for reason in rule.limit_reasons())
+
+
+def test_nxdomain_names_and_servers_come_from_cited_records(tmp_path):
+    answers = [ev("dns_query", T0 + timedelta(seconds=3 * i), host="sensor", source__ip=f"10.20.0.{53 + i % 7}",
+                  destination__ip="10.20.0.15", dns__type="answer", dns__response_code="NXDOMAIN",
+                  dns__question__name=f"q{i:04d}{'x' * (i % 40)}.example.test") for i in range(240)]
+    [m] = staged(dns.DnsNxdomainBurst(), batches(answers, 30), tmp_path)
+    clean([m])
+    assert "240 NXDOMAIN answer(s)" in m.claim and "of the 240 NXDOMAIN answer records are cited" in m.claim
+
+
+def test_a_tunnel_shape_cites_its_example_names_and_span(tmp_path):
+    from tests.test_dns_rules import tunnel
+    out = staged(dns.DnsTunnelShape(), batches(tunnel(400), 50), tmp_path)
+    clean(out)
+    assert "of the 400 questions are cited, including the first and the last." in out[0].claim
+
+
+def test_subdomain_and_tool_agent_groups_disclose_their_citations(tmp_path):
+    queries = [ev("dns_query", T0 + timedelta(seconds=i), host="sensor", source__ip="10.20.0.15",
+                  destination__ip="10.20.0.53", dns__type="query", dns__question__name=f"n{i}.corp.example")
+               for i in range(150)]
+    clean(staged(network.DnsSubdomainEnumeration(), batches(queries, 25), tmp_path / "a"))
+    requests = [ev("http_tx", T0 + timedelta(seconds=i), host="sensor", source__ip="198.51.100.7",
+                   destination__ip="10.0.0.10", http__hostname="web1", user_agent__original="curl/8.0",
+                   url__original=f"/u{i}") for i in range(40)]
+    [m] = staged(network.ToolUserAgentHttp(), batches(requests, 10), tmp_path / "b")
+    clean([m])
+    assert "URLs include ['/u0', '/u1', '/u2'] and 37 more." in m.claim
+
+
+def test_spraying_names_only_the_accounts_its_cited_records_show(tmp_path):
+    from romulus.detect.auth import SshPasswordGuessing, SshPasswordSpraying
+    from tests.test_ssh_auth_attacks import ssh
+    names = [f"user{i:02d}" for i in range(30)]
+    attempts = [ssh(T0 + timedelta(seconds=20 * i), user=names[i % 30], port=40000 + i) for i in range(90)]
+    clean(staged(SshPasswordSpraying(), batches(attempts, 15), tmp_path / "a"))
+    guesses = [ssh(T0 + timedelta(seconds=20 * i), user="root", port=41000 + i) for i in range(60)]
+    [m] = staged(SshPasswordGuessing(), batches(guesses, 15), tmp_path / "b")
+    clean([m])
+    assert "of the 60 attempt records are cited, including the first and the last." in m.claim
+
+
+def test_discovery_counts_the_classes_it_lists():
+    from romulus.detect.context import PostAccessDiscovery
+    from tests.test_context_playbooks import anchor, event, link
+    commands = [event(f"c{i}", process__argv=argv, process__executable=f"/usr/bin/{argv[0]}", process__session_id=42,
+                      process__pid=900 + i, process__ppid=899)
+                for i, argv in enumerate([["id"], ["whoami"], ["uname", "-a"], ["hostname"], ["ip", "addr"],
+                                          ["ps", "aux"], ["getent", "passwd"], ["groups"]])]
+    [m] = PostAccessDiscovery().consume_linked(anchor(), link(), commands)
+    listed = m.claim.split("[", 1)[1].split("]", 1)[0].split(", ")
+    assert f"across {len(listed)} distinct discovery class(es)" in m.claim
+    assert "in audit session 42" in m.claim and "this session" not in m.claim
+
+
 @pytest.mark.parametrize("bad", ["", "-"])
 def test_the_checker_ignores_text_without_values(bad):
     assert problems(f"Nothing to check here{bad}.", []) == []

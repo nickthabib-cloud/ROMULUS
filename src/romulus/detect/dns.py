@@ -1682,7 +1682,7 @@ class DnsTunnelShape(_DnsAggregate):
         predicate = [pf(e, n) for e in evs[:2] for n in ("dns.question.name", "dns.question.type", "source.ip")
                      if e.has(n)]
         return Match(self.id, claim, self.claim_type, evs, predicate, evs[0].ts, self.severity, found["lane"],
-                     "medium", evs[0].entities(), notes=[f"indicators: {found['indicators']}"],
+                     "medium", evs[0].entities(), notes=[f"indicators: {', '.join(found['indicators'])}"],
                      group_key=f"{client}|{domain}")
 
     def _shared(self, domain: str, members: dict[str, dict], askers: int) -> Match:
@@ -1721,7 +1721,7 @@ class DnsTunnelShape(_DnsAggregate):
         claim += (f" {len(evs)} of the members' {queries} questions are cited: at least one per member, every "
                   f"example of a high-lane member, and the records bounding the span when the stage holds them.")
         notes = [f"{c}: {members[c]['unique']} distinct subdomains, {members[c]['n_long']} long, indicators "
-                 f"{members[c]['indicators']}, lane {members[c]['lane']}" for c in clients]
+                 f"{', '.join(members[c]['indicators'])}; lane {members[c]['lane']}" for c in clients]
         predicate = [pf(e, n) for e in evs[:2] for n in ("dns.question.name", "dns.question.type", "source.ip")
                      if e.has(n)]
         return Match(self.id, claim, self.claim_type, evs, predicate, evs[0].ts, self.severity, lane, "medium",

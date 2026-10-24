@@ -16,7 +16,8 @@ unambiguously, and wording that says honestly what is not cited passes.
    ('port 443', 'tcp/22'), bracketed example list item and quoted value the text names must appear in a cited record's
    typed fields: as a value, a list element, the last path component of a value, a part of a value set off by
    punctuation or spaces (never part of a word: 'vi' is not in 'vim'), or the command shape of a cited command line.
-   An address block ('10.30.4.0/24') is named by any cited address inside it, and a reverse-lookup name stands for
+   An address block ('10.30.4.0/24') is named by any cited address inside it, a domain by a cited name under it,
+   and a reverse-lookup name stands for
    its address. Quoted text that the detection code quotes inside one of its string literals ('failed' in "protocol
    detection 'failed'") is wording, not a value; a pid in a 'K more' tail is counted, not named.
 
@@ -162,6 +163,9 @@ class Cited:
     def names(self, text: str) -> bool:
         if (text in self.strings or text.rstrip("/").rsplit("/", 1)[-1] in self.strings
                 or re.sub(r"\d+", "N", text) in self.shapes):
+            return True
+        # a domain a cited name lies under ('example.test' of 'q1.example.test', at a label boundary)
+        if "." in text and any(value.lower().endswith("." + text.lower()) for value in self.strings):
             return True
         # a part of a value set off by punctuation or spaces ('10.0.0.20' of 'alice@10.0.0.20'), never part of a word
         # ('vi' is not in 'vim')
