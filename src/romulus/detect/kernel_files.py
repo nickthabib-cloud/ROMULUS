@@ -22,6 +22,7 @@ from romulus.detect.bounded import (
     SpillList,
     StateExhausted,
 )
+from romulus.detect.citing import BoundStage, Ends, bound_note, cite_group, cited_phrase
 from romulus.detect.correlation import StageMissing, boot_of, boots_conflict, merge_unknown_boot
 from romulus.detect.hijack import CHANGE_WORDS, _own_elevation, _Write, path_key
 from romulus.detect.host import (
@@ -83,6 +84,7 @@ class _Runs:
     auid: str | None = None                                 # the login uid the latest run recorded
     cited: HeldExamples = field(default_factory=lambda: HeldExamples(CITE))     # the first runs to arrive
     prefixes: dict[str, set[str]] = field(default_factory=dict)                 # cited event -> field prefix
+    ends: Ends = field(default_factory=Ends)        # the runs bounding the span, held on the stage while they do
 
 
 @dataclass
@@ -122,6 +124,7 @@ class _RunTally:
         self.auids: set[str] = set()
         self.cited: dict[str, list] = {}                    # event id -> [(time, id), event or None]
         self.prefixes: dict[str, set[str]] = defaultdict(set)
+        self.ends = Ends()
 
     def __bool__(self) -> bool:
         return self.count > 0
@@ -131,6 +134,7 @@ class _RunTally:
         self.failed += runs.failed
         self.first = runs.first if self.first is None else min(self.first, runs.first)
         self.last = runs.last if self.last is None else max(self.last, runs.last)
+        self.ends.fold(runs.ends)
         if isinstance(runs, _Runs):
             self.auids.add(runs.auid or "none")
             items = runs.cited.items
@@ -220,19 +224,23 @@ class RootExecNonRootModifiableFile(Playbook):
         self.runs = KeyedStore(self, "rx_runs", self.HOT, group=lambda key: "\x00".join(key[:3]))
         # (host, uid, audit session id) -> boot ids of that account's own sessions with that id
         self.owner_sessions = KeyedStore(self, "rx_owner_sessions", self.HOT)
+        self.bounds = BoundStage()          # the runs bounding each file's span, held while they bound it
         self._pending: list[TypedEvent] = []
         self._fresh: list[HeldExamples] = []
         self._alone: list[Match] = []   # runs published as they were read (no room to hold them)
         self.load = lambda ids: []
 
     def drain_staged(self) -> list[TypedEvent]:
-        out, self._pending = self._pending, []
+        out, self._pending = self._pending + self.bounds.drain(), []
         for store in self._fresh:
             store.staged()
         self._fresh = []
         for store in (self.files, self.runs, self.owner_sessions):
             store.trim()
         return out
+
+    def drain_bounds(self) -> tuple[list[str], list[str]]:
+        return self.bounds.last
 
     def retained_events(self) -> list[TypedEvent]:
         # the sweep stages these instead; before staging they are the cited runs still held as events
@@ -285,6 +293,7 @@ class RootExecNonRootModifiableFile(Playbook):
             runs.failed += event.outcome == Outcome.failure
             runs.last = max(runs.last, event.ts.timestamp())
             runs.first = min(runs.first, event.ts.timestamp())
+            self.bounds.offer_at((*key, tag), runs.ends, event)
             if runs.cited.offer(event):
                 self._pending.append(event)
                 self._fresh.append(runs.cited)
@@ -394,10 +403,15 @@ class RootExecNonRootModifiableFile(Playbook):
                   for session in sessions]
         return _own_elevation(("login", tag, auid), owners)
 
+    def _cited(self, kept: _RunTally) -> tuple[list[TypedEvent], str]:
+        """The earliest runs and the runs bounding the span (when held), and the claim's sentence on them."""
+        cited, missing = cite_group(self.load, kept.events(self.load), self.bounds, kept.ends, CITE + 2)
+        return cited, cited_phrase(len(cited), kept.count, not missing, "runs", "run") + bound_note(missing, kept.ends)
+
     def _finding(self, key: tuple[str, str, str], f: _ModifiableFile, kept: _RunTally) -> Match:
         host = key[0]
         total, failed, first, last = kept.count, kept.failed, kept.first, kept.last
-        cited = kept.events(self.load)
+        cited, cited_text = self._cited(kept)
         auids = sorted(kept.auids)
         who = f"uid {f.owner}" + (f" ('{f.owner_name}')" if f.owner_name else "")
         if f.web:
@@ -416,9 +430,7 @@ class RootExecNonRootModifiableFile(Playbook):
                  f"running a file that a non-root account can "
                  f"change lets that account run code as root. These records show the ownership and mode at exec; "
                  f"they do not show whether the file was changed.")
-        if total > len(cited):
-            claim += f" {len(cited)} of these runs are cited."
-        claim += f" The {_tally(cited, 'exec calls')}."
+        claim += cited_text + f" The {_tally(cited, 'exec calls')}."
         lane = "high" if (f.web or f.world) else "lead"
         notes = []
         if failed == total:
@@ -435,7 +447,7 @@ class RootExecNonRootModifiableFile(Playbook):
         for _f, tally in files:
             runs.add(tally)
         total, first, last = runs.count, runs.first, runs.last
-        cited = runs.events(self.load)
+        cited, cited_text = self._cited(runs)
         name = next((f.owner_name for f, _rs in files if f.owner_name), None)
         who = f"uid {owner}" + (f" ('{name}')" if name else "")
         listed = "; ".join(f"{' or '.join(sorted(f.paths))} ({tally.count} run(s), mode "
@@ -445,9 +457,7 @@ class RootExecNonRootModifiableFile(Playbook):
                  f"as root. An administrator running their own script through sudo looks like this; so does a sudo "
                  f"or su rule that runs a file its owner can edit, which gives that account root whenever it edits "
                  f"the file.")
-        if total > len(cited):
-            claim += f" {len(cited)} of these runs are cited."
-        claim += f" The {_tally(cited, 'exec calls')}."
+        claim += cited_text + f" The {_tally(cited, 'exec calls')}."
         match = Match(self.id, claim, self.claim_type, cited, self._predicate(cited, runs.prefixes),
                       cited[0].ts, self.severity, "lead", "high", cited[0].entities(), group_key=f"{host}|own:{owner}")
         match.notes = ["T1548.003", "T1574",
@@ -846,10 +856,11 @@ class PersistencePathChange(Playbook):
         return out
 
     def _cite(self, items: list[_Change]) -> tuple[list[TypedEvent], list]:
-        """The first record of each distinct file, then the earliest others, up to the cap."""
-        firsts = list({c.path: c.event_id for c in reversed(items)}.values())
-        ordered = sorted(firsts, key=lambda i: next(n for n, c in enumerate(items) if c.event_id == i))
-        ids = ordered[:CITE]
+        """The first and the last record (they bound the stated span), the first record of each of the first CITE
+        files by path (the files the claim names), then the earliest others, up to the cap."""
+        firsts = {c.path: c.event_id for c in reversed(items)}
+        ids = list(dict.fromkeys([items[0].event_id, items[-1].event_id,
+                                  *(firsts[path] for path in sorted(firsts)[:CITE])]))
         ids += [c.event_id for c in items if c.event_id not in ids][:max(0, CITE - len(ids))]
         events = self._events(ids)
         cited = sorted(events.values(), key=lambda e: (e.ts, e.id))
@@ -859,13 +870,16 @@ class PersistencePathChange(Playbook):
 
     @staticmethod
     def _changes_text(items: list[_Change]) -> str:
+        """Each change of the first CITE files by path (whose first records are cited), then how many files more."""
         counts: dict[tuple[str, str], int] = defaultdict(int)
         for c in items:
             counts[(c.change, c.path)] += 1
+        named = set(sorted({c.path for c in items})[:CITE])
         parts = [f"{path}: {CHANGE_WORDS.get(change, change)}" + (f" ({n} records)" if n > 1 else "")
-                 for (change, path), n in sorted(counts.items(), key=lambda kv: (kv[0][1], kv[0][0]))]
-        text = "; ".join(parts[:CITE])
-        return text + (f"; and {len(parts) - CITE} more" if len(parts) > CITE else "")
+                 for (change, path), n in sorted(counts.items(), key=lambda kv: (kv[0][1], kv[0][0]))
+                 if path in named]
+        files = len({c.path for c in items})
+        return "; ".join(parts) + (f"; and {files - len(named)} more file(s)" if files > len(named) else "")
 
     def _finding(self, key: tuple, items: list[_Change]) -> Match:
         _kind, host, place, uid, pid = key[:5]
@@ -907,8 +921,7 @@ class PersistencePathChange(Playbook):
         if len(files) > 1:
             claim += (f" The {len(files)} files were changed by process id {pid} running {first.exe} (records no more "
                       f"than {PROCESS_GAP_SECONDS} seconds apart).")
-        if len(items) > len(cited):
-            claim += f" {len(cited)} records are cited (the first of each file first)."
+        claim += cited_phrase(len(cited), len(items), True)
         # A non-root account changing what the system or another account acts on is high; a web-service account
         # always is. An account changing its own per-account files, or a setuid-root helper writing the account's
         # own spool entry, is a lead: that is also routine use.
@@ -940,8 +953,7 @@ class PersistencePathChange(Playbook):
                  f"kernel-recorded process lineage (executables {', '.join(sorted({c.exe for c in items}))}). "
                  f"This is how package installs and upgrades change these files; a malicious or tampered package "
                  f"would change them the same way. The {_tally(cited, 'calls')}.")
-        if len(items) > len(cited):
-            claim += f" {len(cited)} records are cited (the first of each file first)."
+        claim += cited_phrase(len(cited), len(items), True)
         match = Match(self.id, claim, self.claim_type, cited, predicate, cited[0].ts, self.severity, "lead",
                       "high", cited[0].entities(), group_key=f"{host}|package:{manager}")
         match.notes = sorted({c.technique for c in items}) + [f"file: {path}" for path in files]

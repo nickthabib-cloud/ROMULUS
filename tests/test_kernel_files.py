@@ -216,8 +216,11 @@ def test_many_runs_cite_ten_and_give_exact_totals_and_boundary_times():
     runs = [root_exec(ts=T0 + timedelta(seconds=i)) for i in range(25)]
     _pb, out = run_root(runs[:12], runs[12:])
     m = out[0]
-    assert len(m.events) == 10 and "25 times" in m.claim and "10 of these runs are cited" in m.claim
+    # the first ten runs and the run that ends the stated span
+    assert len(m.events) == 11 and "25 times" in m.claim
+    assert "11 of the 25 runs are cited, including the first and the last." in m.claim
     assert f"from {T0.isoformat()} to {(T0 + timedelta(seconds=24)).isoformat()}" in m.claim
+    assert max(e.ts for e in m.events) == T0 + timedelta(seconds=24)
     _pb, out = run_root([root_exec(ts=T0)])
     assert f"once at {T0.isoformat()}" in out[0].claim
 
@@ -454,7 +457,8 @@ def test_many_changes_cite_ten_with_exact_totals():
     _pb, out = run_persist(records)
     m = out[0]
     assert len(m.events) == 10 and "14 kernel file-change record(s)" in m.claim
-    assert "10 records are cited" in m.claim and "(14 records)" in m.claim
+    assert "10 of the 14 records are cited, including the first and the last." in m.claim and "(14 records)" in m.claim
+    assert max(e.ts for e in m.events) == T0 + timedelta(seconds=13)
 
 
 def test_a_reused_pid_hours_later_is_a_separate_finding_and_wording_names_the_executable():
@@ -490,8 +494,10 @@ def test_one_process_writing_many_files_names_every_file_and_cites_each_first():
     records += [change("/etc/cron.d/f00", ts=T0 + timedelta(seconds=20), uid="0", exe="/usr/bin/bash")]
     _pb, out = run_persist(records)
     m = out[0]
-    assert len(out) == 1 and len(m.events) == 10
-    assert sorted(e.get("file.path") for e in m.events) == [f"/etc/cron.d/f{i:02d}" for i in range(10)]
+    # the first and the last record bound the span; the first record of each of the first ten files by path is cited
+    assert len(out) == 1 and len(m.events) == 11
+    assert sorted({e.get("file.path") for e in m.events}) == [f"/etc/cron.d/f{i:02d}" for i in range(10)]
+    assert "and 3 more file(s)" in m.claim
     assert {f"file: /etc/cron.d/f{i:02d}" for i in range(13)} <= set(m.notes)
     assert "14 kernel file-change record(s)" in m.claim
 
@@ -571,8 +577,8 @@ def test_missing_executable_is_counted_missing_and_many_records_cite_ten():
     assert out == [] and pb.missing_required == 1
     records = [ev("net_socket", T0 + timedelta(seconds=i), process__executable="/dev/shm/x") for i in range(12)]
     _pb, out = run_unbacked(records)
-    assert len(out[0].events) == 10 and "12 audit record(s)" in out[0].claim
-    assert "10 of these records are cited" in out[0].claim
+    assert len(out[0].events) == 11 and "12 audit record(s)" in out[0].claim
+    assert "11 of the 12 records are cited, including the first and the last." in out[0].claim
 
 
 # =============================================================================================================
