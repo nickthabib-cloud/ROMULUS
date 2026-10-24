@@ -24,12 +24,14 @@ import hashlib
 import ipaddress
 import os
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
 
 from romulus.detect.base import LANES, SEVERITIES, Match, Playbook, basename, pf
 from romulus.detect.bounded import HOT_COUNT, HeldExamples, KeyedStore
+from romulus.detect.citing import BoundStage, Ends, bound_note, cite_with_bounds, cited_phrase
 from romulus.detect.host import (
     AWK_INTERPRETERS,
     SCRIPT_FILE_INTERPRETERS,
@@ -155,7 +157,7 @@ class IndicatorMatch(Playbook):
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "ioc.indicator_match"
     anchor_class = "indicator"
-    version = f"4+{_SET.digest}"
+    version = f"5+{_SET.digest}"
     title = "Indicator list match in the field that gives it meaning"
     kind = "aggregate"
     claim_type = "observed_action"
@@ -199,6 +201,7 @@ class IndicatorMatch(Playbook):
         self._pending: list[TypedEvent] = []
         self._fresh: list[HeldExamples] = []
         self._alone: list[Match] = []
+        self.bounds = BoundStage()          # the records bounding each group's span, held while they bound it
         self.load = lambda ids: []
 
     # Groups (indicator, role, host, value): the first 20 records cited (staged, held as ids) and a count. A listed
@@ -211,7 +214,7 @@ class IndicatorMatch(Playbook):
     SAMPLE_VALUES = 10
 
     def drain_staged(self) -> list[TypedEvent]:
-        out, self._pending = self._pending, []
+        out, self._pending = self._pending + self.bounds.drain(), []
         for store in self._fresh:
             store.staged()
         self._fresh = []
@@ -219,13 +222,18 @@ class IndicatorMatch(Playbook):
         self.overflow.trim()
         return out
 
+    def drain_bounds(self) -> tuple[list[str], list[str]]:
+        return self.bounds.last
+
     # ---- matching ---------------------------------------------------------------------------------
     def _keep(self, key: tuple, e: TypedEvent, meta: dict) -> None:
         field_name = meta["field"]
-        state = self.groups.setdefault(key, lambda: [0, field_name, HeldExamples(EXAMPLE_LIMIT), set()])
+        group_key = key
+        state = self.groups.setdefault(key, lambda: [0, field_name, HeldExamples(EXAMPLE_LIMIT), set(), Ends()])
         if state is None:
-            state = self.overflow.setdefault(key[:3] + ("*",),
-                                             lambda: [0, field_name, HeldExamples(EXAMPLE_LIMIT), [], set()])
+            group_key = key[:3] + ("*",)
+            state = self.overflow.setdefault(group_key,
+                                             lambda: [0, field_name, HeldExamples(EXAMPLE_LIMIT), [], set(), Ends()])
             if state is None:
                 # an indicator hit is a finding by itself: published now as its own single-record finding
                 self.note_limit("groups_alone", "the indicator match groups' disk budget is spent; later matches "
@@ -239,7 +247,8 @@ class IndicatorMatch(Playbook):
             if len(state[3]) < self.SAMPLE_VALUES and key[3] not in state[3]:
                 state[3].append(key[3])
         state[0] += 1
-        state[-1].add(event_os_family(e))
+        state[-2].add(event_os_family(e))
+        self.bounds.offer_at(group_key, state[-1], e)
         if state[2].offer(e):
             self._pending.append(e)
             self._fresh.append(state[2])
@@ -362,8 +371,8 @@ class IndicatorMatch(Playbook):
         for key, store in sorted(groups, key=lambda item: str(item[0])):
             state = store.peek(key)
             out.append(self._finding(key, state[0], state[1], state[2].events(self.load),
-                                     state[3] if len(state) > 4 else None,
-                                     operating_systems=state[-1]))
+                                     state[3] if len(state) > 5 else None,
+                                     operating_systems=state[-2], ends=state[-1]))
         return out
 
     def finalize_fallback(self, reason: str) -> list[Match]:
@@ -372,20 +381,34 @@ class IndicatorMatch(Playbook):
         for store in (self.groups, self.overflow):
             for key, state in sorted(store.hot.items(), key=lambda item: str(item[0])):
                 m = self._finding(key, state[0], state[1], state[2].events(self.load),
-                                  state[3] if len(state) > 4 else None, operating_systems=state[-1])
+                                  state[3] if len(state) > 5 else None, operating_systems=state[-2], ends=state[-1])
                 m.notes.append(f"published from memory only: the groups on disk could not be read ({reason})")
                 out.append(m)
         return out
 
     def _finding(self, key: tuple, n: int, field_name: str, evs: list[TypedEvent],
-                 values: list[str] | None = None, *, operating_systems: set[str]) -> Match:
+                 values: list[str] | None = None, *, operating_systems: set[str], ends: Ends | None = None) -> Match:
         _iid, role, host, value = key
+        missing: set[str] = set()
+        if ends is not None:
+            # the group's first records and the records bounding its span (when the stage holds them)
+            known = {e.id: e for e in evs}
+
+            def load(ids):
+                found = {e.id: e for e in self.load([i for i in ids if i not in known])}
+                return [known.get(i) or found[i] for i in ids if i in known or i in found]
+
+            evs, missing = cite_with_bounds(load, load, ends, list(known), EXAMPLE_LIMIT)
         evs = sorted(evs, key=lambda x: (x.ts, x.id))
         ind: Indicator = self.by_id[key[0]]
         if values is not None:
             value = values[0]               # an overflow group: worded by its first value, then the others
         e0 = evs[0]
-        span = f"{evs[0].ts.isoformat()} – {evs[-1].ts.isoformat()}"
+        if ends is not None and ends.first is not None:
+            first, last = (datetime.fromtimestamp(ends.first[0], UTC), datetime.fromtimestamp(ends.last[0], UTC))
+        else:
+            first, last = evs[0].ts, evs[-1].ts
+        span = f"{first.isoformat()} – {last.isoformat()}"
         listed = f"indicator {ind.id} ({ind.label}, list {ind.source})"
         process_record = ("Windows process-creation" if operating_systems == {"windows"} else
                           "auditd exec" if operating_systems == {"linux"} else "process-execution")
@@ -434,8 +457,7 @@ class IndicatorMatch(Playbook):
                   e0.entities(), group_key="|".join(map(str, key)))
         if ind.attack:
             m.notes.append(f"indicator ATT&CK context: {list(ind.attack)}")
-        if n > len(evs):
-            m.notes.append(f"{n} matching records; {len(evs)} are cited")
+        m.claim += cited_phrase(len(evs), n, not missing) + (bound_note(missing, ends) if ends is not None else "")
         if values is not None:
             others = values[1:]
             m.claim += (f" These {n} record(s) are every match of {ind.id} by {host} in this role once the "
