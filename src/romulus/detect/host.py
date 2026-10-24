@@ -1577,6 +1577,9 @@ class ExecLineage:
 
     # Records held for citation in memory; the rest wait on disk (they are read only when a finding cites them).
     CITATIONS_HOT = 4096
+    # Disk for the exec records kept for citation: about 1 KB each compressed with their raw copies, so some four million
+    # execs. Past it a named exec ancestor is said to be not kept for citation; lineage itself is unaffected.
+    EXEC_RECORDS_DISK = 4 * 2**30
 
     def __init__(self, owner=None, capacity: int = HOT_COUNT, members: list | None = None, observing: bool = False,
                  citing: bool = False):
@@ -1597,7 +1600,8 @@ class ExecLineage:
             self.observed.weight = self.store.weight        # it serves the same rules as the exec records
         # any observation refused so far in the hunt: a record that would change a lineage may be missing
         self.observed_incomplete = False
-        self.exec_records = KeyedStore(owner, "exec_records", self.CITATIONS_HOT) if citing else None
+        self.exec_records = (KeyedStore(owner, "exec_records", self.CITATIONS_HOT, disk_budget=self.EXEC_RECORDS_DISK)
+                             if citing else None)
 
     @property
     def records(self) -> KeyedStore:

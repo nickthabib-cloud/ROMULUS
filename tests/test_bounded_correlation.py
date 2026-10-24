@@ -98,10 +98,13 @@ def _expected(events) -> dict:
     alerts = [e for e in network if e.family == "net_alert"]
     cited = sorted(network, key=lambda e: (e.family != "net_alert", e.ts, e.id))[:20]
     failed = sum(e.outcome == Outcome.failure for e in calls)
+    # the calls bounding the span, then the group's first calls; the earliest network records, alerts first
+    calls_cited = list(dict.fromkeys([calls[0].id, calls[-1].id, *(e.id for e in calls[:20])]))
     return {"calls": len(calls), "flows": len(network) - len(alerts), "alerts": len(alerts),
             "connections": len(calls), "failed": failed, "succeeded": len(calls) - failed,
-            "cited": [e.id for e in calls[:20]] + [e.id for e in cited],
-            "sigs": sorted({str(e.get("alert.signature")) for e in alerts})}
+            "cited": calls_cited + [e.id for e in cited], "calls_cited": len(calls_cited),
+            "sigs": sorted({str(e.get("alert.signature")) for e in cited if e.family == "net_alert"}),
+            "all_sigs": len({str(e.get("alert.signature")) for e in alerts})}
 
 
 def _join(events, tmp_path):
@@ -130,10 +133,10 @@ def _check(match, want) -> None:
     assert (f"made {want['calls']} connect() call(s) to 203.0.113.99 port 443" in match.claim
             and f"{want['succeeded']} succeeded, {want['failed']} failed" in match.claim)
     assert (f"{want['flows']} flow or session record(s) across {want['connections']} connection(s)" in match.claim
-            and f"{want['alerts']} IDS alert(s) on those connections: {'; '.join(sigs[:3])} and "
-                f"{len(sigs) - 3} more." in match.claim)
-    assert (f"{want['calls']} connect() record(s) and {want['flows'] + want['alerts']} network record(s) joined"
-            in " ".join(match.notes))
+            and f"{want['alerts']} IDS alert(s) on those connections, among them "
+                f"{'; '.join(repr(sig) for sig in sigs[:3])} and {want['all_sigs'] - 3} more." in match.claim)
+    assert (f"Of these, {want['calls_cited']} of the {want['calls']} connect() records and 20 of the "
+            f"{want['flows'] + want['alerts']} network records are cited." in match.claim)
 
 
 @pytest.mark.slow
