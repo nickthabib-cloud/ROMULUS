@@ -765,7 +765,8 @@ def test_5000_host_windows_sweep_refuses_bounded_state_without_crashing(tmp_path
     [cell] = repo.rule_cells("h1")
     refused = sweep._event_stage().windows_refused
     assert cell["state"] == "evaluated_partial"
-    assert cell["evaluated"] == 5_000 - refused
+    assert cell["evaluated"] == 5_000                        # refused dedup state never withholds a record
+    assert any("counts over them may include duplicates" in reason for reason in cell["detail"]["reasons"])
     assert "state_capped" not in cell["detail"]
     assert any("host/channel groups" in reason for reason in cell["detail"]["reasons"])
     assert "windows_seen" in budget.full

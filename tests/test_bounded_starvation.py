@@ -264,7 +264,9 @@ def test_sysmon_volume_cannot_spend_the_indicator_store_floor(monkeypatch, tmp_p
     windows_hit.normalizer = "windows-ecs@2"
     linux_hit = query(T0 + timedelta(hours=1, seconds=1), "two.c2.test")
     linux_hit.host = "linux01"
-    rule.consume([windows_hit, linux_hit])
+    fresh, duplicates = stage.unique_windows([windows_hit, linux_hit])
+    assert fresh == [windows_hit, linux_hit] and duplicates == []   # the spent dedup floor withholds nothing
+    rule.consume(fresh)
     cited = rule.drain_staged()
     stage.put(cited, {})
     rule.bind_loader(stage.load)

@@ -427,13 +427,14 @@ class Repo:
             # can depend on it through (a) their findings' event_ids, (b) their investigation steps'
             # pivot digests, (c) their own entity links (written by save_evidence per hunt), and (d) their
             # expansion links.
-            owned_events = {
-                row["id"]: dict(row)
-                for row in c.execute(select(
-                    t.typed_event.c.id, t.typed_event.c.event, t.typed_event.c.raw_ids,
-                ).where(t.typed_event.c.hunt_id == hunt_id)).mappings()
+            # Only ids and raw references: an event body is read below, one at a time, for the few events whose
+            # new owner has a differing overlay, so deletion memory stays O(owned events) and never O(their bodies).
+            owned_raw = {
+                event_id: list(raw_ids or [])
+                for event_id, raw_ids in c.execute(select(
+                    t.typed_event.c.id, t.typed_event.c.raw_ids,
+                ).where(t.typed_event.c.hunt_id == hunt_id))
             }
-            owned_raw = {event_id: list(row["raw_ids"] or []) for event_id, row in owned_events.items()}
             mine = set(owned_raw)
             cited_by: dict[str, str] = {}
             users_by: dict[str, set[str]] = {}
@@ -490,7 +491,10 @@ class Repo:
             # that deliberately need no citation overlay.
             for event_id, observation_hunt in c.execute(select(
                     t.event_observation.c.event_id, t.event_observation.c.hunt_id,
-            ).where(t.event_observation.c.hunt_id != hunt_id)):
+            ).join(t.typed_event, t.typed_event.c.id == t.event_observation.c.event_id).where(
+                    t.typed_event.c.hunt_id == hunt_id,
+                    t.event_observation.c.hunt_id != hunt_id,
+            )):
                 cite(event_id, observation_hunt)
             # (g) other hunts' baseline observations cite their first window event
             for eid, obs_hunt in c.execute(observation_citations_query(hunt_id)):
@@ -502,7 +506,8 @@ class Repo:
                 if overlay is not None:
                     # Hunts whose identical observation needed no overlay currently fall through to the stable
                     # row. Preserve that exact old row before replacing it with another hunt's differing overlay.
-                    stable = owned_events[eid]
+                    stable = c.execute(select(t.typed_event.c.event, t.typed_event.c.raw_ids).where(
+                        t.typed_event.c.id == eid)).mappings().one()
                     for fallback_hunt in sorted(users_by[eid] - {owner}):
                         if (eid, fallback_hunt) in citation_overlays:
                             continue

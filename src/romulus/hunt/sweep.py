@@ -697,7 +697,8 @@ class Sweep:
             if stage.windows_refused:
                 windows_state_reasons.append(
                     f"Windows event dedup state refused {stage.windows_refused} event id(s): "
-                    f"{stage.windows_refusal_reason}"
+                    f"{stage.windows_refusal_reason}; those events were evaluated, but a shipper copy of one in a "
+                    f"later partition is evaluated again, so counts over them may include duplicates"
                 )
         if duplicate_events:
             skips["duplicate typed event across source partitions"] = len(duplicate_events)

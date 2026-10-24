@@ -146,10 +146,10 @@ class EventStage:
                 self.windows_refusal_reason = reason
                 refused_ids.update(event_id for event_id, in inserts[start:])
                 break
-        # An id whose dedup state was refused cannot be evaluated safely: a later partition would otherwise
-        # consume the same event as fresh again and inflate aggregate counts. Coverage retains the exact refusal.
-        return ([event for event in fresh if event.id not in refused_ids],
-                [event for event in duplicates if event.id not in refused_ids])
+        # An event whose dedup state was refused is still delivered: every rule reads every batch, and a strong
+        # indicator must publish on its own. A later partition may then deliver another copy of it as fresh, so
+        # the refusal reason says that counts may include such copies.
+        return fresh, duplicates
 
     def put(self, events: list[TypedEvent], raw_sources: dict[str, dict]) -> None:
         """Stage aggregate inputs exactly as on main; first event body wins and raw copies are keyed."""
