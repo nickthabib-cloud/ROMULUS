@@ -85,8 +85,11 @@ def _chunks(n, *, minutes=12, **kw):
 def test_chunked_long_connection_is_stitched_into_one_finding():
     m = run(LongExternalConnection(), events(*_chunks(4)))
     assert len(m) == 1
-    assert "4 session record(s) for one TCP connection 172.17.100.121:51000 -> 192.0.2.174:4444" in m[0].claim
-    assert "spanning 48 minutes" in m[0].claim and len(m[0].events) == 4
+    assert ("4 session record(s) for one TCP connection between 172.17.100.121:51000 and 192.0.2.174:4444 "
+            "spanning 48 minutes") in m[0].claim
+    assert "4000 bytes from 172.17.100.121:51000 and 20000 bytes from 192.0.2.174:4444" in m[0].claim
+    assert "no record of it carries TCP flag counts" in m[0].claim and "client" not in m[0].claim
+    assert "All 4 records are cited." in m[0].claim and len(m[0].events) == 4
 
 
 @pytest.mark.parametrize("kw", [{"dst": "10.0.0.9"}, {"proto": 17}])

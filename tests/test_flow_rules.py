@@ -117,7 +117,7 @@ def _attack_ids():
 def test_flow_rules_are_registered_with_cards_and_existing_attack_ids():
     ids = _attack_ids()
     pack = {type(pb) for pb in fresh_pack()}
-    assert PACK_VERSION == "pack@20"
+    assert PACK_VERSION == "pack@21"
     for cls in FLOW_PLAYBOOKS:
         assert cls in ALL_PLAYBOOKS and cls in pack
         assert cls.kind == "aggregate" and cls.staged and cls.anchor_class == "network_observation"
@@ -517,7 +517,12 @@ def test_large_asymmetric_upload_is_a_high_severity_lead_with_denominators():
     [m] = run(OutboundVolumeAsymmetry(), events(upload("u"), other, peer))
     assert m.proposed_lane == "lead" and m.severity == "high"
     assert f"10.0.0.5 sent 62,914,560 bytes (60.0 MiB) to {ATTACKER} and received 1,048,576 bytes back" in m.claim
-    assert "60.0:1 outbound to inbound" in m.claim and "ports tcp/443 (1)" in m.claim
+    assert "60.0:1 outbound to inbound" in m.claim
+    # a Suricata flow in state 'new' does not show the opening: the opener is unknown, the ports are a client's
+    assert ("Which side opened the connection is not recorded: it is TCP with no record of the opening (picked up "
+            "mid-stream, or opened before the hunt window). On it 10.0.0.5 used a port of 32768 or above and "
+            f"{ATTACKER} used tcp/443 (1 connection), the port shape of 10.0.0.5 as the client.") in m.claim
+    assert "initiated" not in m.claim and "Its one record is cited." in m.claim
     assert "That is 60% of the 104,857,600 bytes 10.0.0.5 sent to external addresses" in m.claim
     assert "1 other internal address also sent data" in m.claim
     assert "not proof that data was stolen" in m.claim
@@ -532,7 +537,7 @@ def test_upload_split_over_connections_adds_up():
     hits = [upload(f"u{i}", out=20 * MIB, back=MIB // 2, sport=50000 + i, start=T0 + timedelta(minutes=i))
             for i in range(3)]
     [m] = run(OutboundVolumeAsymmetry(), events(*hits))
-    assert "over 3 connections it initiated" in m.claim
+    assert "over 3 connections" in m.claim and "All 3 records are cited." in m.claim
 
 
 @pytest.mark.parametrize("hit", [
@@ -581,7 +586,9 @@ def test_high_sweep_after_heavy_polling_cites_the_sweep_records():
     assert m.proposed_lane == "high"
     swept = {f"10.0.100.{i + 1}" for i in range(100)}
     cited = [e.get("destination.ip") for e in m.events]
-    assert len(cited) == 20 and set(cited) <= swept
+    # the hunt-window span starts with the polling; its first record is cited, every other cited record is the sweep
+    assert len(cited) == 20 and set(cited) - swept == {m.events[0].get("destination.ip")}
+    assert m.events[0].get("flow.start").startswith("2024-11-18T14:00:00.")      # the first poll, at T0
 
 
 def test_a_silent_sweep_in_a_quieter_hour_is_high_although_a_busier_hour_answered():
@@ -638,8 +645,9 @@ def test_implant_on_source_port_443_to_a_high_port_is_judged_against_its_source_
               pkts_s=900)
     assert run(LongUnidentifiedSession(), events(hit)) == []
     [m] = run(ProtocolPortMismatch(), events(hit))
-    assert f"1 connection from 10.0.0.5 port tcp/443 to 1 peer ({ATTACKER}: 1)" in m.claim
-    assert "the registered port is the initiator's source port" in m.claim
+    assert f"1 connection recorded from 10.0.0.5 port tcp/443 to 1 peer ({ATTACKER}: 1)" in m.claim
+    assert "the registered port is on the side the sensor recorded as the source" in m.claim
+    assert "initiator" not in m.claim
     assert "tcp/443 is registered here for tls, which Suricata can parse (tls)" in m.claim
 
 

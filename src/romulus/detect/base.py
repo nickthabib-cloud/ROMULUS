@@ -146,6 +146,11 @@ class Playbook:
         limit.records += records
         limit.hits += 1
 
+    def coverage_notes(self) -> list[str]:
+        """Informational lines for the rule's window cell, set at finalize: what the rule judged out of its scope and
+        how much of it there was. Unlike a limit, a note does not make the cell partial."""
+        return []
+
     def limit_reasons(self) -> list[str]:
         """Every state budget this playbook reached, worded for the coverage ledger."""
         return [self.limits[name].reason() for name in sorted(self.limits)]
@@ -220,6 +225,12 @@ class Playbook:
     def drain_staged(self) -> list[TypedEvent]:
         """Events consumed since the last call that this playbook may cite later (staged playbooks)."""
         return []
+
+    def drain_bounds(self) -> tuple[list[str], list[str]]:
+        """After `drain_staged`: (the ids among the events it returned that are only held while they bound an
+        interval, one per hold; the ids of earlier holds this playbook releases). The stage keeps every other
+        returned event to the end."""
+        return [], []
 
     def bind_loader(self, load) -> None:
         """Give a staged playbook the function that loads staged events back by id."""

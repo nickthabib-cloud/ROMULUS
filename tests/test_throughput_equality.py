@@ -52,19 +52,27 @@ from tests import throughput_fixture as tf
 # is the same.
 # The expansion summary records the budget it ran under (the fixture's fixed total of 180), and the report's
 # expansion summary carries it with the queries spent: expansion, audit and manifest change by those fields only.
+# The flow and session rules name the side that opened a connection only from a record that shows the opening, and
+# cite the records that bound each interval they state. Seven of them carry new versions (rule_cells, candidates and
+# manifest findings change by rule_version only), and net.outbound_volume_asymmetry's positive-only reason now names
+# the connections it does not read as uploads, so the manifest's negative_claim for it changes. Its window cell
+# stays positive_only and gains one informational reason (rule_cells only): the 301 connections that an Arkime SYN
+# shows outside clients opened to the fixture's internal servers, with the 451,500 bytes the servers sent on them.
+# Findings and citations are unchanged; the port-scan probes to db1 have no recorded opener and a server's port
+# shape, but the internal side sent no data on them, so they are not named.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
     "audit": "538a65e82e05000f401b4dfa3288f0982b55c328e3cede607032141d0f81292d",
-    "candidates": "2ad7bf7a7fb7a18555d594746745560c601f39317f8496653ac3bd21cb00a251",
+    "candidates": "600e63c11a60a3da52ddd578ca68606a1706896abf77637c2f152e457b463f51",
     "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
     "event_citations": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     "event_entities": "af8053b6219447233c1329e280f0ca64054ceceeea79d5d84bfa12af8e067a23",
     "events": "d091e0a4b829e399e1011c9930f8a347a09b480ab7ca069361090e9ae1405c7c",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "0c6ce53f0aa49c6f1e7aa63c0df576ecde37079b918cdce15183b8b30f946646",
-    "manifest": "6e357bde832b9ef364f9e928e5c964ba9a23e845f6d2820c0b698cfffea06aa3",
+    "manifest": "fdfb48da9484ed5627d7bcae89a1e6c7cd99c00115d236e12619d871f48b3f62",
     "raw": "03d2790712d2ac341c4dafcc4b89d7f991a025f637d97f7ef22cd33e35f4fbe0",
-    "rule_cells": "7d7950159c1c13f9e7e023ce522ec2932005616c0f7fa89e9afe553d993ff57d",
+    "rule_cells": "74526e022d2376adc58d65943eca07fef2b4b95f76c009b781357fde8f69dd19",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
     "tasks": "8547b413b445d75e25845cbc8ad6277db4e7bb5e9a18b0ed53bffb63b4df7b9b",
 }

@@ -147,7 +147,9 @@ def test_tag_on_internal_admin_ssh_states_the_sessions_context_and_stays_a_lead(
     assert ("SSH software the two ends announced (self-reported; Arkime does not say which end sent which): "
             "'SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.10', 'SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13'") in m.claim
     assert "client HASSH ec7378c1a92f5a8dde7e8b7a1ddf33d1" in m.claim
-    assert "900 bytes from the client and 4000 bytes from the server" in m.claim
+    # no tagged record shows the opening, so neither end is called the client
+    assert "900 bytes from 10.1.0.5 and 4000 bytes from 10.1.0.9" in m.claim and "client" not in m.claim.split("Fingerprints")[0]
+    assert "No tagged record carries TCP flag counts, so which end opened the session is not recorded." in m.claim
     assert "Arkime recorded 3 other SSH connection(s) from 10.1.0.5 to 10.1.0.9 port 22 without the tag" in m.claim
     assert [e.id for e in m.events] == [e.id for e in events(tagged)]
 
@@ -158,9 +160,9 @@ def test_missing_byte_counts_are_said_to_be_not_recorded_never_zero():
     second = ssh_session("b2", ["ssh-reverse-shell"], cid="1:b1=", first=T0 + timedelta(minutes=1))
     del second["_source"]["destination"]["bytes"]
     [m] = run(ArkimeSshReverseShellTag(), events(hit, second))
-    assert ("carry at least 900 bytes (not recorded on 1 record(s)) from the client and at least 4000 bytes (not "
-            "recorded on 1 record(s)) from the server") in m.claim
-    only = ssh_session("b4", ["ssh-reverse-shell"])
+    assert ("carry at least 900 bytes (not recorded on 1 record(s)) from 172.17.100.121 and at least 4000 bytes "
+            "(not recorded on 1 record(s)) from 192.0.2.174") in m.claim
+    only = ssh_session("b4", ["ssh-reverse-shell"], tcpflags={"syn": 1, "syn-ack": 1})
     del only["_source"]["source"]["bytes"], only["_source"]["destination"]["bytes"]
     [m] = run(ArkimeSshReverseShellTag(), events(only))
     assert "carry a byte count not recorded from the client and a byte count not recorded from the server" in m.claim
@@ -168,8 +170,9 @@ def test_missing_byte_counts_are_said_to_be_not_recorded_never_zero():
 
 
 def test_tag_toward_a_public_address_says_so_and_untagged_pairs_are_never_reported():
-    [m] = run(ArkimeSshReverseShellTag(), events(ssh_session("p1", ["ssh-reverse-shell"]),
+    [m] = run(ArkimeSshReverseShellTag(), events(ssh_session("p1", ["ssh-reverse-shell"], tcpflags={"syn": 1}),
                                                  ssh_session("p2", None, first=T0 + timedelta(minutes=1))))
     assert "The client 172.17.100.121 is internal and the server 192.0.2.174 is a public address." in m.claim
+    assert "A tagged record shows the SYN from 172.17.100.121, so 172.17.100.121 opened the session." in m.claim
     assert "Arkime recorded 1 other SSH connection(s)" in m.claim
     assert run(ArkimeSshReverseShellTag(), events(ssh_session("p3", None))) == []
