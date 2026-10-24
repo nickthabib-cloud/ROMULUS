@@ -816,7 +816,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-net-arkime-ssh-reverse-shell-tag"></a>
 ### `net.arkime_ssh_reverse_shell_tag` — Arkime's heuristic tagged an SSH session as a possible reverse shell
 
-- Version: `3`; status: `active`
+- Version: `4`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1021.004`](https://attack.mitre.org/techniques/T1021/004/), [`T1059.004`](https://attack.mitre.org/techniques/T1059/004/), [`T1572`](https://attack.mitre.org/techniques/T1572/)
@@ -828,7 +828,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-net-beaconing"></a>
 ### `net.beaconing` — Regular, repeated connections from an internal address to one public endpoint
 
-- Version: `3`; status: `active`
+- Version: `4`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **negative-capable**
 - ATT&CK: [`T1029`](https://attack.mitre.org/techniques/T1029/), [`T1071`](https://attack.mitre.org/techniques/T1071/), [`T1573`](https://attack.mitre.org/techniques/T1573/)
@@ -894,7 +894,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-net-horizontal-sweep"></a>
 ### `net.horizontal_sweep` — One source contacted many distinct addresses on the same port within minutes
 
-- Version: `4`; status: `active`
+- Version: `5`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **negative-capable**
 - ATT&CK: [`T1018`](https://attack.mitre.org/techniques/T1018/), [`T1046`](https://attack.mitre.org/techniques/T1046/), [`T1595.001`](https://attack.mitre.org/techniques/T1595/001/)
@@ -905,7 +905,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-net-long-external-connection"></a>
 ### `net.long_external_connection` — Long-lived TCP connection between an internal and a public address
 
-- Version: `3`; status: `active`
+- Version: `4`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **negative-capable**
 - ATT&CK: [`T1071`](https://attack.mitre.org/techniques/T1071/), [`T1095`](https://attack.mitre.org/techniques/T1095/), [`T1571`](https://attack.mitre.org/techniques/T1571/)
@@ -916,7 +916,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-net-long-unidentified-session"></a>
 ### `net.long_unidentified_session` — Long data-carrying connection with no identified protocol on a port its sensor cannot judge
 
-- Version: `4`; status: `active`
+- Version: `5`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1095`](https://attack.mitre.org/techniques/T1095/), [`T1571`](https://attack.mitre.org/techniques/T1571/), [`T1573`](https://attack.mitre.org/techniques/T1573/)
@@ -928,14 +928,14 @@ Invalid mappings are excluded from coverage:
 <a id="rule-net-outbound-volume-asymmetry"></a>
 ### `net.outbound_volume_asymmetry` — Internal address sent much more data to one external address than it received
 
-- Version: `3`; status: `active`
+- Version: `4`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1041`](https://attack.mitre.org/techniques/T1041/), [`T1048`](https://attack.mitre.org/techniques/T1048/), [`T1567`](https://attack.mitre.org/techniques/T1567/)
 - Telemetry families: net_flow<br>net_session
 - Required typed fields: destination.ip<br>network.transport<br>source.ip
-- Behavior: an internal address sent at least 50 MiB to one external address over connections it initiated in the hunt window, at least ten times what it received back from it
-- Positive-only reason: internal and external are judged from the site's internal-network definition (the RFC 1918 and reserved ranges when it is not configured), and only connections that internal addresses initiated are read; transfers outside that view are not evaluated, so the absence of a match proves nothing
+- Behavior: an internal address sent at least 50 MiB to one external address in the hunt window, at least ten times what it received back from it, over connections other than those an outside address is shown to have opened or whose ports have an internal server's shape. The claim says, per connection, whether a recorded TCP opening shows the internal address opened it, or that the opener is not recorded and what the ports show (a client's shape, or no shape, in which case the bytes may be a server's answers)
+- Positive-only reason: internal and external are judged from the site's internal-network definition (the RFC 1918 and reserved ranges when it is not configured). Connections a recorded opening shows an outside address opened (an internal server answering), and connections whose opener is not recorded but whose ports have an internal server's shape, are not read as uploads; those carrying data from the internal address are named on the window cell with their bytes, and server-shaped pairs that met the upload thresholds are listed. A Suricata flow state counts as a recorded opening only on a sensor that does not pick up mid-stream (stream.midstream off, its default); on one that does, such a connection may have been opened from inside. Transfers outside that view are not seen, so the absence of a match proves nothing
 
 <a id="rule-net-port-scan"></a>
 ### `net.port_scan` — One source contacted many distinct ports on one destination
@@ -950,13 +950,13 @@ Invalid mappings are excluded from coverage:
 <a id="rule-net-protocol-port-mismatch"></a>
 ### `net.protocol_port_mismatch` — Application protocol and port disagree on a connection
 
-- Version: `5`; status: `active`
+- Version: `6`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1095`](https://attack.mitre.org/techniques/T1095/), [`T1571`](https://attack.mitre.org/techniques/T1571/), [`T1572`](https://attack.mitre.org/techniques/T1572/)
 - Telemetry families: net_flow<br>net_session
 - Required typed fields: destination.ip<br>network.transport<br>source.ip
-- Behavior: (a) an identified application protocol on a connection where neither port is registered for it, including a registered port carrying a different identified protocol (ssh on tcp/443); (b) a connection to a registered port that carried data both ways with no protocol identified by a sensor that parses the protocol registered there; a record whose initiator is on a registered port and whose other end is a client port (a reversed or mid-stream view, or a program bound to the service port) is judged against its source port, and cleared when a forward record of the same connection had its protocol identified. Multicast name resolution under its own name (Arkime's mdns on udp/5353, llmnr on 5355) is registered on its port, and an HTTP label on a destination port registered for RTSP, from a sensor with no RTSP parser (Suricata), is RTSP's own HTTP-based syntax, not a different protocol; Arkime parses RTSP, so its HTTP-only label there is still reported
+- Behavior: (a) an identified application protocol on a connection where neither port is registered for it, including a registered port carrying a different identified protocol (ssh on tcp/443); (b) a connection to a registered port that carried data both ways with no protocol identified by a sensor that parses the protocol registered there; a record whose recorded source is on a registered port and whose other end is a client port (a reversed or mid-stream view, or a program bound to the service port) is judged against its source port, and cleared when a forward record of the same connection had its protocol identified. Multicast name resolution under its own name (Arkime's mdns on udp/5353, llmnr on 5355) is registered on its port, and an HTTP label on a destination port registered for RTSP, from a sensor with no RTSP parser (Suricata), is RTSP's own HTTP-based syntax, not a different protocol; Arkime parses RTSP, so its HTTP-only label there is still reported
 - Positive-only reason: protocol identity comes from the sensors' application parsers; a parser that does not recognise traffic, or recognises it wrongly, shows nothing about what was really sent, so the absence of a disagreement proves nothing
 
 <a id="rule-net-rare-client-fingerprint"></a>

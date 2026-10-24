@@ -52,6 +52,14 @@ from tests import throughput_fixture as tf
 # is the same.
 # The expansion summary records the budget it ran under (the fixture's fixed total of 180), and the report's
 # expansion summary carries it with the queries spent: expansion, audit and manifest change by those fields only.
+# The flow and session rules name the side that opened a connection only from a record that shows the opening, and
+# cite the records that bound each interval they state. Seven of them carry new versions (rule_cells, candidates and
+# manifest findings change by rule_version only), and net.outbound_volume_asymmetry's positive-only reason now names
+# the connections it does not read as uploads, so the manifest's negative_claim for it changes. Its window cell
+# stays positive_only and gains one informational reason (rule_cells only): the 301 connections that an Arkime SYN
+# shows outside clients opened to the fixture's internal servers, with the 451,500 bytes the servers sent on them.
+# Findings and citations are unchanged; the port-scan probes to db1 have no recorded opener and a server's port
+# shape, but the internal side sent no data on them, so they are not named.
 # Audit SYSCALL groups that become no other typed event now become process_observed events, so the evidence version
 # moved: every typed event id is rehashed and every event names the new normalizer, which changes every digest that
 # carries an event id (events, event_entities, candidates, links, tasks, audit, manifest) and every normalized and
@@ -65,16 +73,16 @@ from tests import throughput_fixture as tf
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
     "audit": "6af1b824ccfa0f6bc1332de83c7bcad95d53a08021cc76eb0cf347a3d47fea46",
-    "candidates": "fc0114db15ebeb3a388b4f29fb337614739b524ba84837024e00c2fdd92df7c2",
+    "candidates": "c70ac8e146d1356b64fc86eec38aa3a97352ea39d63390bfdd819b3cd4a7d8e8",
     "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
     "event_citations": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     "event_entities": "41678ff059653cd297784689d63d228501b582fc22d14e00c7ae923bf401343b",
     "events": "b1fee0ae16ba050626efab14200b4613d0a1ced778d5cb115a4bc9ac218a7b67",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "a6a78b78aa676b98d84bc5498a164f20c23f1dcb20709a9a8dd6c0b11c5889ec",
-    "manifest": "20d743a9001e2f8d0d1f7f341fa474a809a7505205804b00e91b227617f1a3b1",
+    "manifest": "d14ff6efb0124d698c5a105f406af7d235aac4aaad042777593acae4fe87edf5",
     "raw": "03d2790712d2ac341c4dafcc4b89d7f991a025f637d97f7ef22cd33e35f4fbe0",
-    "rule_cells": "23a3abcbd22e587b5b8357fd9d8e109224576aafa2d0879787943cba31fcd0fd",
+    "rule_cells": "da1f1f1a2ffeb1709761c643587a11b756b4414eae6b59acdfbf51eae62c694b",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
     "tasks": "02b081d35ae1a1c54e4839faefbcaf5a03f0c07d832aff2cf177befb2d766c50",
 }
