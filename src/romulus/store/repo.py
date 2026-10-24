@@ -487,8 +487,8 @@ class Repo:
             }
             for event_id, citation_hunt in citation_overlays:
                 cite(event_id, citation_hunt)
-            # (f) every direct observation is explicit, including entity-free events and identical observations
-            # that deliberately need no citation overlay.
+            # (f) every direct observation by another hunt is explicit, including entity-free events and identical
+            # observations that deliberately need no citation overlay (the owner's own observation is its row).
             for event_id, observation_hunt in c.execute(select(
                     t.event_observation.c.event_id, t.event_observation.c.hunt_id,
             ).join(t.typed_event, t.typed_event.c.id == t.event_observation.c.event_id).where(
@@ -521,6 +521,11 @@ class Repo:
                     if isinstance(normalizer, str):
                         values["normalizer"] = normalizer
                 c.execute(t.typed_event.update().where(t.typed_event.c.id == eid).values(**values))
+                # the new owner observed the event by owning it: its marker row says nothing more
+                c.execute(t.event_observation.delete().where(
+                    t.event_observation.c.hunt_id == owner,
+                    t.event_observation.c.event_id == eid,
+                ))
                 if overlay is not None:
                     c.execute(t.event_citation.delete().where(
                         t.event_citation.c.hunt_id == owner,
@@ -1140,9 +1145,7 @@ class Repo:
             _upsert_ignore(c, t.typed_event, ev_rows, ["id"])
             if existing:
                 self._merge_citation_raw(c, hunt_id, events, existing)
-            _upsert_ignore(c, t.event_observation, [
-                {"hunt_id": hunt_id, "event_id": event.id} for event in events
-            ], ["hunt_id", "event_id"])
+            self._observe(c, hunt_id, ids)
             self._fill_boot(c, events)
             _upsert_ignore(c, t.entity, list(ent_rows.values()), ["id"])
             _upsert_ignore(c, t.event_entity, link_rows, ["event_id", "entity_id", "role"])
@@ -1252,10 +1255,21 @@ class Repo:
                         })
             _upsert_ignore(c, t.raw_record, raw_rows, ["id"])
             self._merge_citation_raw(c, hunt_id, events, existing)
-            _upsert_ignore(c, t.event_observation, [
-                {"hunt_id": hunt_id, "event_id": event.id}
-                for event in events if event.id in existing
-            ], ["hunt_id", "event_id"])
+            self._observe(c, hunt_id, sorted(existing))
+
+    @staticmethod
+    def _observe(c, hunt_id: str, ids: list[str]) -> None:
+        """Record that this hunt directly observed these stored events. The hunt that owns an event's stable row
+        (`typed_event.hunt_id`) observed it by definition, so only an event another hunt owns gets a marker row:
+        a hunt observed an event when it owns the row or holds a marker for it. Runs after the batch's own rows are
+        written, inside the same write transaction, so ownership is read as it is stored."""
+        for start in range(0, len(ids), 500):
+            c.execute(insert(t.event_observation).from_select(
+                ["hunt_id", "event_id"],
+                select(literal(hunt_id), t.typed_event.c.id).where(
+                    t.typed_event.c.id.in_(ids[start:start + 500]), t.typed_event.c.hunt_id != hunt_id,
+                ),
+            ).on_conflict_do_nothing())
 
     @staticmethod
     def _fill_boot(c, events: list) -> None:
