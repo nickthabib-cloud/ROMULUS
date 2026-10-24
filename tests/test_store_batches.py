@@ -319,11 +319,12 @@ def test_a_partition_is_staged_once_and_its_cells_written_in_one_transaction(mon
     assert len(serialized) == len(set(serialized))
     ordinary = [playbook for playbook in sweep.pack if playbook.kind != "baseline"]
     assert singles == [] and len(batches) == 1 and len(batches[0]) == len(ordinary)
-    # A baseline cell and its window observations are one idempotent transaction. An exec_pair cell with no
-    # execs has no parent dependency and closes immediately; cells with execs remain compact-staged for replay.
+    # A baseline cell and its window observations are one idempotent transaction. Every complete exec_pair cell,
+    # with or without execs, is compact-staged so the carry's ledger can count its hour after history is filled.
     assert {cell["rule_id"] for cell in baseline_cells} == {
-        playbook.id for playbook in sweep.pack if playbook.kind == "baseline"
+        playbook.id for playbook in sweep.pack if playbook.kind == "baseline" and playbook.id != "bl.exec_pair"
     }
+    assert [item["partition"] for item in sweep._event_stage().baseline_cells("romulus-network-x")] == [w.key()]
     sweep.close_stage()
 
 

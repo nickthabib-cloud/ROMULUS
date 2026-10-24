@@ -30,6 +30,7 @@ from typing import ClassVar, NamedTuple
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, pf
 from romulus.detect.bounded import HOT_COUNT, KeyedStore, RecentIds, SpillList, StateExhausted
+from romulus.detect.citing import Ends, bound_note, cited_phrase
 from romulus.detect.host import (
     UNBUDGETED,
     Lineage,
@@ -39,7 +40,6 @@ from romulus.detect.host import (
     add_unheld,
     alone,
     boot_of,
-    lineage_phrase,
     need,
 )
 from romulus.detect.linux_argv import (
@@ -77,10 +77,15 @@ def _unique(events) -> list[TypedEvent]:
     return list(out.values())
 
 
-def _names(items, limit: int = 8) -> str:
+def _names(items, limit: int = 8, more_than: int | None = None) -> str:
+    """The first `limit` items quoted, and how many more of `more_than` (all of `items` by default) there are; with
+    none to quote, how many there are and that none is in a cited record."""
     items = sorted(items)
-    text = ", ".join(f"'{item}'" for item in items[:limit])
-    return text + (f" and {len(items) - limit} more" if len(items) > limit else "")
+    total = len(items) if more_than is None else more_than
+    shown = items[:limit]
+    if not shown:
+        return f"none of the {total} is in a cited record" if total else "none"
+    return ", ".join(f"'{item}'" for item in shown) + (f" and {total - len(shown)} more" if total > len(shown) else "")
 
 
 class _Attempt(NamedTuple):
@@ -147,6 +152,13 @@ class _SshAttemptStream(Playbook):
 
     def retained_events(self) -> list[TypedEvent]:
         return list(self._pending)                      # the rest are staged on disk
+
+    def _load(self, ids: list[str]) -> list[TypedEvent]:
+        """Records by id: every evaluated record is staged, so from the stage, or from those not yet handed to it."""
+        wanted = [i for i in dict.fromkeys(ids) if i]
+        pending = {e.id: e for e in self._pending}
+        found = {e.id: e for e in self.load([i for i in wanted if i not in pending])}
+        return [pending.get(i) or found[i] for i in wanted if i in pending or i in found]
 
     def _stores(self) -> tuple[KeyedStore, ...]:
         return ()
@@ -296,7 +308,8 @@ class _Tally:
     peak: int = 0
     crossed: float | None = None
     cited: list[TypedEvent] = field(default_factory=list)
-    last_event: TypedEvent | None = None
+    first_id: str = ""              # the earliest and the latest attempt's records: they bound the stated span
+    last_id: str = ""
     names: set[str] = field(default_factory=set)
     invalid_names: set[str] = field(default_factory=set)
     more_names: int = 0
@@ -308,13 +321,14 @@ class _Tally:
         self.connections += a.new_connection
         self.last = a.ts
         self.invalid = self.invalid or a.valid is False
-        if self.crossed is not None:
-            self.last_event = a.event
+        if not self.first_id:
+            self.first_id = a.event.id
+        self.last_id = a.event.id
 
 
 class SshPasswordGuessing(_SshAttemptStream):
     id = "host.ssh_password_guessing"
-    version = "1"
+    version = "2"
     title = "Many failed sshd attempts from one source against one account"
     severity, lane = "medium", "lead"
     attack = ("T1110.001",)
@@ -383,7 +397,9 @@ class SshPasswordGuessing(_SshAttemptStream):
             t = self.tallies.peek(key)
             if t.crossed is None:
                 continue
-            events = sorted(_unique([*t.cited, t.last_event]), key=lambda e: (e.ts, e.id))
+            # the attempts the finding is about, and the first and last attempt cited for the stated span
+            spanning = [e for e in self._load([t.first_id, t.last_id]) if e.id not in {x.id for x in t.cited}]
+            events = sorted(_unique([*t.cited, *spanning]), key=lambda e: (e.ts, e.id))
             ok = _logins(self.successes.peek(key, 0), self.logins_uncounted)
             claim = (f"On {host}, sshd recorded {t.attempts} failed authentication attempt(s) for account "
                      f"'{account}' from {ip} in {t.connections} connection(s) between {_iso(t.first)} and "
@@ -396,17 +412,17 @@ class SshPasswordGuessing(_SshAttemptStream):
                       if ok else " The retrieved records hold no accepted sshd login for this account from this "
                                  "source.")
             claim += " Failures inside connections that then logged in are not counted."
-            if len(events) < t.attempts:
-                claim += f" {len(events)} of the attempt records are cited."
+            claim += _span_cited(events, t, "attempt records", "attempt record")
             m = Match(self.id, claim, self.claim_type, events, _ssh_predicate(events[:3]), events[0].ts,
-                      self.severity, self.lane, "high", events[0].entities(), group_key=f"{host}|{ip}|{account}")
+                      self.severity, self.lane, "high", events[0].entities(), group_key=f"{host}|{ip}|{account}",
+                      context_ids={e.id for e in spanning})
             out.append(m)
         return out
 
 
 class SshPasswordSpraying(_SshAttemptStream):
     id = "host.ssh_password_spraying"
-    version = "1"
+    version = "2"
     title = "Failed sshd attempts from one source against many account names"
     severity, lane = "medium", "lead"
     attack = ("T1110.003",)
@@ -486,22 +502,48 @@ class SshPasswordSpraying(_SshAttemptStream):
             t = self.tallies.peek(key)
             if t.crossed is None:
                 continue
-            events = sorted(_unique([*t.cited, t.last_event]), key=lambda e: (e.ts, e.id))
+            # the attempts the finding is about, and the first and last attempt cited for the stated span
+            spanning = [e for e in self._load([t.first_id, t.last_id]) if e.id not in {x.id for x in t.cited}]
+            events = sorted(_unique([*t.cited, *spanning]), key=lambda e: (e.ts, e.id))
             total_names = len(t.names) + t.more_names
+            named = {str(e.get("user.name")) for e in events if e.get("user.name")} & t.names
             ok = _logins(self.successes.peek(key, 0), self.logins_uncounted)
             claim = (f"On {host}, sshd recorded failed authentication attempts for {total_names} distinct account "
                      f"name(s) from {ip} between {_iso(t.first)} and {_iso(t.last)} ({t.attempts} attempt(s) in "
                      f"{t.connections} connection(s)); the most distinct names within any "
                      f"{self.WINDOW / 60:.0f} minutes was {t.peak} (threshold {self.THRESHOLD}), first reached at "
-                     f"{_iso(t.crossed)}. Names: {_names(t.names)}. sshd reported {len(t.invalid_names)} of them as "
-                     f"invalid users (no such account, or not permitted to log in).")
+                     f"{_iso(t.crossed)}. {_names_cited(named, total_names)}. Of "
+                     f"all the names, sshd reported {len(t.invalid_names)} of them as invalid users (no such account, "
+                     f"or not permitted to log in).")
             claim += (f" The retrieved records hold {ok} accepted sshd login(s) from this source." if ok else
                       " The retrieved records hold no accepted sshd login from this source.")
             claim += " Failures inside connections that then logged in are not counted."
+            claim += _span_cited(events, t, "attempt records", "attempt record")
             m = Match(self.id, claim, self.claim_type, events, _ssh_predicate(events[:3]), events[0].ts,
-                      self.severity, self.lane, "high", events[0].entities(), group_key=f"{host}|{ip}")
+                      self.severity, self.lane, "high", events[0].entities(), group_key=f"{host}|{ip}",
+                      context_ids={e.id for e in spanning})
             out.append(m)
         return out
+
+
+def _names_cited(named: set[str], total: int) -> str:
+    """Which of a count of names the cited records show: 'All 3 names are in cited records: ...', '5 of the 30 names
+    are in cited records: ...' or 'None of the 30 names is in a cited record'."""
+    if not named:
+        return f"None of the {total} names is in a cited record"
+    if len(named) >= total:
+        return f"All {total} names are in cited records: {_names(named)}"
+    return f"{len(named)} of the {total} names are in cited records: {_names(named)}"
+
+
+def _span_cited(events: list[TypedEvent], t, noun: str, one: str) -> str:
+    """How many of the counted records are cited, and whether the first and the last are among them: a bounding
+    record the stage no longer holds is named as not cited."""
+    ids = {e.id for e in events}
+    missing = {i for i in (t.first_id, t.last_id) if i and i not in ids}
+    bounded = not missing and bool(t.first_id) and bool(t.last_id)
+    return (cited_phrase(len(events), t.attempts, bounded, noun, one)
+            + bound_note(missing, Ends(first=(0.0, t.first_id), last=(0.0, t.last_id)), "the stated span"))
 
 
 @dataclass
@@ -519,7 +561,7 @@ class _Followed:
 
 class SshSuccessAfterFailures(_SshAttemptStream):
     id = "host.ssh_success_after_failures"
-    version = "2"
+    version = "3"
     title = "Accepted sshd login after a burst of failed attempts"
     anchor_class = "remote_login"
     severity, lane = "high", "high"
@@ -618,10 +660,14 @@ class SshSuccessAfterFailures(_SshAttemptStream):
         s = f.success
         method = s.get("auth.method") or "unrecorded-method"
         when = s.ts.isoformat()
+        # the accounts and sources named are those of the cited failures (the latest CITE); the rest are counted
+        tried = {str(e.get("user.name")) for e in f.failures if e.get("user.name")} & f.accounts
+        sources = {str(e.get("source.ip")) for e in f.failures if e.get("source.ip")} & f.sources
         if variant == "source":
             claim = (f"On {host}, sshd accepted a {method} login for account '{account}' from {ip} at {when} "
                      f"after {f.count} failed attempt(s) from {ip} in the preceding {self.WINDOW / 60:.0f} "
-                     f"minutes (threshold {self.SOURCE_MIN}; accounts tried: {_names(f.accounts)}). The "
+                     f"minutes (threshold {self.SOURCE_MIN}; accounts tried: "
+                     f"{_names(tried, more_than=len(f.accounts))}). The "
                      "failures and the login share the source address; whether one actor made both is not "
                      "established by the records.")
             lane, confidence = "high", "high"
@@ -634,7 +680,8 @@ class SshSuccessAfterFailures(_SshAttemptStream):
         else:
             claim = (f"On {host}, sshd accepted a {method} login for account '{account}' from {ip} at {when}; in "
                      f"the preceding {self.WINDOW / 60:.0f} minutes sshd recorded {f.count} failed attempt(s) "
-                     f"against '{account}' from {len(f.sources)} other source address(es) ({_names(f.sources)}; "
+                     f"against '{account}' from {len(f.sources)} other source address(es) "
+                     f"({_names(sources, more_than=len(f.sources))}; "
                      f"threshold {self.ACCOUNT_MIN}), and {f.own} from {ip} itself. The login's source differs "
                      "from the failing sources, so the records do not link them.")
             lane, confidence = "lead", "medium"
@@ -642,6 +689,9 @@ class SshSuccessAfterFailures(_SshAttemptStream):
             claim += (f" Logins of this account from this source followed such failures {f.repeats} time(s); "
                       f"the first and up to {self.LATER} later ones are cited.")
         claim += " Failures inside connections that then logged in are not counted."
+        claim += cited_phrase(len(f.failures), f.count, False, "failed attempts", "failed attempt")
+        if len(f.failures) < f.count:
+            claim = claim[:-1] + " (the latest before the login)."
         events = sorted(_unique([*f.failures, s, *f.later]), key=lambda e: (e.ts, e.id))
         predicate = [pf(s, n) for n in ("auth.phase", "user.name", "source.ip", "source.port") if s.has(n)]
         predicate += _ssh_predicate(f.failures[-2:])
@@ -941,14 +991,15 @@ def _written_line_privilege(path: str, words: list[str]) -> str:
     return ""
 
 
-def account_file_writes(name: str, args: list[str], cwd: str | None) -> tuple[list[AccountForm], bool]:
+def account_file_writes(name: str, args: list[str], cwd: str | None,
+                        argv0: str = "") -> tuple[list[AccountForm], bool]:
     """Direct writes to the account databases by a write-capable program (an editor, sed -i, tee, cp/mv/install,
     dd), or by shell command text that redirects into them; and whether a write target could not be placed.
     Permission and owner changes are not writes."""
     if name in {"chmod", "chown", "chgrp"}:
         return [], False
     forms: list[AccountForm] = []
-    targets, uncertain = write_targets(name, args, cwd)
+    targets, uncertain = write_targets(name, args, cwd, argv0=argv0)
     for target in targets:
         if target.path in ACCOUNT_FILES and not target.assumed:
             forms.append(AccountForm("account_db_edit", (), (), f"write {target.path} directly ({target.form})", ""))
@@ -962,7 +1013,7 @@ def account_file_writes(name: str, args: list[str], cwd: str | None) -> tuple[li
                 forms.append(AccountForm("account_db_edit", (), (), f"write {path} with a shell redirect ('{op}')",
                                          privileged))
         if command and command not in ACCOUNT_TOOLS:
-            text_forms, text_uncertain = account_file_writes(command, segment.argv[1:], cwd)
+            text_forms, text_uncertain = account_file_writes(command, segment.argv[1:], cwd, segment.argv[0])
             forms += [f._replace(detail=f"{f.detail} in shell command text") for f in text_forms]
             uncertain = uncertain or text_uncertain
     return forms, uncertain or incomplete
@@ -1047,7 +1098,7 @@ def _record_text(e: TypedEvent) -> str:
 class AccountOrGroupChange(Playbook):
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.account_or_group_change"
-    version = "4"
+    version = "5"
     title = "Account or group created, deleted or modified (command or account-management audit record)"
     anchor_class = "persistence"
     kind = "aggregate"
@@ -1155,7 +1206,7 @@ class AccountOrGroupChange(Playbook):
         for e in sorted(fresh, key=lambda x: (x.ts, x.family != "process_exec", x.id)):
             self._seen.add(e.id)
             if e.family == "process_exec":
-                self.lineage.observe(e)
+                self.lineage.observe(e, self.raw_of(e))
                 if self.program_prefilter and not self._process_relevant(e):
                     self.evaluated += 1
                     self.missing_required += int(argv_incomplete(e))
@@ -1207,7 +1258,8 @@ class AccountOrGroupChange(Playbook):
         elif incomplete:
             return
         else:
-            forms, uncertain = account_file_writes(name, args, e.get("process.cwd"))
+            forms, uncertain = account_file_writes(name, args, e.get("process.cwd"),
+                                                   str((e.get("process.argv") or [""])[0]))
         if uncertain and not incomplete:
             self.missing_required += 1
         if not forms:
@@ -1402,7 +1454,7 @@ class AccountOrGroupChange(Playbook):
             claim += (f" The record {'; '.join(mentions)}, but its operation does not show a membership being "
                       "granted.")
         lineage = web or first.lineage
-        phrase = lineage_phrase(lineage)
+        phrase, lineage_events, lineage_raw = self.lineage.cited_phrase(lineage)
         if phrase:
             claim += f" Exec lineage: {phrase}."
         if web is not None or privileged:
@@ -1428,7 +1480,11 @@ class AccountOrGroupChange(Playbook):
             events = sorted(_unique([*cited, marker]), key=lambda e: (e.ts, e.id))
         else:
             events = sorted(_unique([*commands[:10], *records[:10]]), key=lambda e: (e.ts, e.id))
-        predicate = [pf(e, n) for e in events[:4] for n in ("process.argv", "process.executable", "audit.record_type",
+            told = [f"{min(10, n)} of the {n} {noun}" for n, noun in ((len(commands), "commands"),
+                                                                     (len(records), "audit records")) if n > 10]
+            if told:
+                claim += f" The earliest {' and '.join(told)} are cited."
+        predicate =[pf(e, n) for e in events[:4] for n in ("process.argv", "process.executable", "audit.record_type",
                                                              "account.action", "account.name", "account.group",
                                                              "system.event")
                      if e.has(n)]
@@ -1437,10 +1493,15 @@ class AccountOrGroupChange(Playbook):
         entities = list(events[0].entities())
         for c in items:
             entities += [("account", f"{c.host}\\{a}", "subject") for a in c.accounts]
-        match = Match(self.id, claim, self.claim_type, events, predicate, events[0].ts, self.severity, lane,
+        # the change's own records time it and carry its predicate; the exec ancestor the lineage names is cited too
+        when = events[0].ts
+        events = sorted(_unique([*events, *lineage_events]), key=lambda e: (e.ts, e.id))
+        match = Match(self.id, claim, self.claim_type, events, predicate, when, self.severity, lane,
                       "high" if records else "medium", list(dict.fromkeys(entities)),
                       group_key="|".join(str(part) for part in key))
         match.notes = notes
+        match.raw_copies.update(lineage_raw)
+        match.context_ids = {e.id for e in lineage_events} - {e.id for e in [*commands[:10], *records[:10]]}
         return match
 
 

@@ -61,7 +61,8 @@ def test_root_exec_runs_spill_to_disk_and_finalize_matches_the_unbounded_result(
     keys = [m.group_key for m in small_out]
     assert f"app01|33|{JOB}" in keys and "app01|own:1000" in keys and len(keys) == 302
     [job] = [m for m in small_out if m.group_key == f"app01|33|{JOB}"]
-    assert f"{2 * 24 * 60} times" in job.claim and "10 of these runs are cited" in job.claim
+    assert f"{2 * 24 * 60} times" in job.claim
+    assert f"11 of the {2 * 24 * 60} runs are cited, including the first and the last." in job.claim
     [own] = [m for m in small_out if m.group_key == "app01|own:1000"]
     assert "2 time(s)" in own.claim and small.limit_reasons() == []
 

@@ -63,13 +63,17 @@ def test_the_pack_holds_each_exec_once_in_one_compact_store(monkeypatch, tmp_pat
     assert len(readers) >= 8                # account, 3 tamper, interpreter, reverse shell, persistence, hijack
     per_exec = lineage[0].disk_bytes / lineage[0].on_disk
     assert lineage[0].on_disk >= n - 50 and per_exec <= 300, per_exec          # the pickled record: ~210 B
-    # the real database bytes of every rule's spill per exec (record, both key forms and the key index): ~360 B,
-    # down from ~960 B when five rules each held their own exec history
+    # each exec is also kept once for citation (the compressed typed record, in the same shared lineage), so a claim
+    # that names an exec ancestor cites it
+    records = [s for s in stores if s.name == "exec_records"]
+    assert len(records) == 1 and records[0].on_disk >= n - 50
+    # the real database bytes of every rule's spill per exec (record, both key forms and the key index, and the record
+    # kept for citation): ~1 KB, the citation copy about 600 B of it
     spilled = 0
     for pb in pack:
         if pb._spill is not None:
             spilled += pb._spill.db.execute("PRAGMA page_count").fetchone()[0] * pb._spill._page
-    assert spilled / n <= 450, spilled / n
+    assert spilled / n <= 1200, spilled / n
     for pb in pack:
         pb.close_spill()
 

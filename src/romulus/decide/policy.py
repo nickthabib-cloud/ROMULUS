@@ -28,8 +28,10 @@ class Decision:
 
 def candidate_id(m: Match, hunt_id: str) -> str:
     """Stable identity within a hunt: hunt + rule + exact evidence (or documented aggregate group key).
-    Scoped to the hunt so re-hunting the same data creates that hunt's own candidates."""
-    ident = m.group_key or "|".join(sorted(r.key for e in m.events for r in e.raw))
+    Scoped to the hunt so re-hunting the same data creates that hunt's own candidates. The evidence is the finding's
+    own records: records cited only to support what its claim states (`Match.context_ids`) do not name it, so two
+    findings about different records stay apart, and one finding stays one whatever context it cites."""
+    ident = m.group_key or "|".join(sorted(r.key for e in m.events if e.id not in m.context_ids for r in e.raw))
     return hashlib.sha256(f"{hunt_id}|{m.playbook_id}|{ident}".encode()).hexdigest()[:20]
 
 
@@ -73,8 +75,11 @@ def decide(m: Match, hunt_id: str) -> Decision:
             gates["outcome"] = "pass"
     else:
         gates["outcome"] = "n/a"
+    # the caveats of the records the predicate is read from (a cited anchor or link record's caveat is about that
+    # record, not about this claim)
+    origins = {field.origin.split(":", 1)[0] for field in m.predicate}
     for e in m.events:
-        if e.caveats:
+        if e.caveats and any(r.native_id in origins for r in e.raw):
             notes.extend(sorted(set(e.caveats)))
             break
     admitted = all(not v.startswith("fail") for v in gates.values())

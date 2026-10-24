@@ -519,7 +519,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-context-credential-access"></a>
 ### `context.credential_access` — Credential-store read in an anchored session or lineage
 
-- Version: `3`; status: `active`
+- Version: `4`; status: `active`
 - Kind: `context`; lane: `high`; severity: `high`
 - Coverage strength: **context-only**
 - ATT&CK: [`T1003`](https://attack.mitre.org/techniques/T1003/), [`T1003.008`](https://attack.mitre.org/techniques/T1003/008/), [`T1552.001`](https://attack.mitre.org/techniques/T1552/001/), [`T1552.003`](https://attack.mitre.org/techniques/T1552/003/), [`T1552.004`](https://attack.mitre.org/techniques/T1552/004/), [`T1555.003`](https://attack.mitre.org/techniques/T1555/003/), [`T1555.005`](https://attack.mitre.org/techniques/T1555/005/)
@@ -543,7 +543,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-context-lateral-movement"></a>
 ### `context.lateral_movement` — Lateral remote-service use from an anchored session or lineage
 
-- Version: `3`; status: `active`
+- Version: `4`; status: `active`
 - Kind: `context`; lane: `lead`; severity: `medium`
 - Coverage strength: **context-only**
 - ATT&CK: [`T1021`](https://attack.mitre.org/techniques/T1021/), [`T1021.001`](https://attack.mitre.org/techniques/T1021/001/), [`T1021.002`](https://attack.mitre.org/techniques/T1021/002/), [`T1021.004`](https://attack.mitre.org/techniques/T1021/004/), [`T1021.006`](https://attack.mitre.org/techniques/T1021/006/), [`T1570`](https://attack.mitre.org/techniques/T1570/)
@@ -555,7 +555,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-context-post-access-discovery"></a>
 ### `context.post_access_discovery` — Discovery commands in an anchored session or process lineage
 
-- Version: `5`; status: `active`
+- Version: `6`; status: `active`
 - Kind: `context`; lane: `lead`; severity: `medium`
 - Coverage strength: **context-only**
 - ATT&CK: [`T1007`](https://attack.mitre.org/techniques/T1007/), [`T1016`](https://attack.mitre.org/techniques/T1016/), [`T1033`](https://attack.mitre.org/techniques/T1033/), [`T1049`](https://attack.mitre.org/techniques/T1049/), [`T1057`](https://attack.mitre.org/techniques/T1057/), [`T1069`](https://attack.mitre.org/techniques/T1069/), [`T1082`](https://attack.mitre.org/techniques/T1082/), [`T1083`](https://attack.mitre.org/techniques/T1083/), [`T1087`](https://attack.mitre.org/techniques/T1087/), [`T1120`](https://attack.mitre.org/techniques/T1120/), [`T1135`](https://attack.mitre.org/techniques/T1135/), [`T1201`](https://attack.mitre.org/techniques/T1201/), [`T1518`](https://attack.mitre.org/techniques/T1518/), [`T1680`](https://attack.mitre.org/techniques/T1680/)
@@ -567,7 +567,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-context-privilege-probing"></a>
 ### `context.privilege_probing` — Privilege probing or escalation in an anchored session or lineage
 
-- Version: `4`; status: `active`
+- Version: `5`; status: `active`
 - Kind: `context`; lane: `lead`; severity: `medium`
 - Coverage strength: **context-only**
 - ATT&CK: [`T1068`](https://attack.mitre.org/techniques/T1068/), [`T1548`](https://attack.mitre.org/techniques/T1548/), [`T1548.001`](https://attack.mitre.org/techniques/T1548/001/), [`T1548.003`](https://attack.mitre.org/techniques/T1548/003/)
@@ -591,7 +591,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-corr-process-network-link"></a>
 ### `corr.process_network_link` — Host process connect() calls linked to network-sensor records for the same connection (inferred)
 
-- Version: `6`; status: `active`
+- Version: `7`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1071`](https://attack.mitre.org/techniques/T1071/), [`T1095`](https://attack.mitre.org/techniques/T1095/), [`T1571`](https://attack.mitre.org/techniques/T1571/)
@@ -602,7 +602,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-host-account-or-group-change"></a>
 ### `host.account_or_group_change` — Account or group created, deleted or modified (command or account-management audit record)
 
-- Version: `4`; status: `active`
+- Version: `5`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1098`](https://attack.mitre.org/techniques/T1098/), [`T1098.007`](https://attack.mitre.org/techniques/T1098/007/), [`T1136.001`](https://attack.mitre.org/techniques/T1136/001/), [`T1531`](https://attack.mitre.org/techniques/T1531/)
@@ -614,7 +614,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-host-audit-rules-tamper"></a>
 ### `host.audit_rules_tamper` — Audit rules deleted, auditing switched off or audit configuration changed (command or kernel record)
 
-- Version: `3`; status: `active`
+- Version: `4`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1685.004`](https://attack.mitre.org/techniques/T1685/004/)
@@ -646,7 +646,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-host-downloader-feeds-interpreter"></a>
 ### `host.downloader_feeds_interpreter` — Downloader and stdin interpreter launched together by the same parent
 
-- Version: `3`; status: `active`
+- Version: `4`; status: `active`
 - Kind: `aggregate`; lane: `urgent`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1059.004`](https://attack.mitre.org/techniques/T1059/004/), [`T1105`](https://attack.mitre.org/techniques/T1105/)
@@ -676,7 +676,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-host-interpreter-external-connection"></a>
 ### `host.interpreter_external_connection` — Shell, interpreter, relay tool or web-service process made connect() calls to addresses outside the site's internal networks
 
-- Version: `6`; status: `active`
+- Version: `7`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1059`](https://attack.mitre.org/techniques/T1059/), [`T1071`](https://attack.mitre.org/techniques/T1071/), [`T1095`](https://attack.mitre.org/techniques/T1095/)
@@ -687,7 +687,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-host-log-or-history-clearing"></a>
 ### `host.log_or_history_clearing` — Log or shell history deleted, truncated, overwritten or switched off (command or shell text)
 
-- Version: `3`; status: `active`
+- Version: `4`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1070.003`](https://attack.mitre.org/techniques/T1070/003/), [`T1685.006`](https://attack.mitre.org/techniques/T1685/006/), [`T1690`](https://attack.mitre.org/techniques/T1690/)
@@ -699,7 +699,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-host-nonroot-write-root-executed-file"></a>
 ### `host.nonroot_write_root_executed_file` — Non-root write-capable command on a file a root process runs, or on root's schedule
 
-- Version: `7`; status: `active`
+- Version: `8`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1053`](https://attack.mitre.org/techniques/T1053/), [`T1053.002`](https://attack.mitre.org/techniques/T1053/002/), [`T1053.003`](https://attack.mitre.org/techniques/T1053/003/), [`T1053.006`](https://attack.mitre.org/techniques/T1053/006/), [`T1543.002`](https://attack.mitre.org/techniques/T1543/002/), [`T1574`](https://attack.mitre.org/techniques/T1574/)
@@ -711,7 +711,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-host-persistence-path-change"></a>
 ### `host.persistence_path_change` — Kernel-recorded change to a file that a scheduler, init, the login path or the loader acts on
 
-- Version: `5`; status: `active`
+- Version: `6`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1037`](https://attack.mitre.org/techniques/T1037/), [`T1037.004`](https://attack.mitre.org/techniques/T1037/004/), [`T1053.002`](https://attack.mitre.org/techniques/T1053/002/), [`T1053.003`](https://attack.mitre.org/techniques/T1053/003/), [`T1098.004`](https://attack.mitre.org/techniques/T1098/004/), [`T1543.002`](https://attack.mitre.org/techniques/T1543/002/), [`T1546.004`](https://attack.mitre.org/techniques/T1546/004/), [`T1546.017`](https://attack.mitre.org/techniques/T1546/017/), [`T1547.006`](https://attack.mitre.org/techniques/T1547/006/), [`T1547.013`](https://attack.mitre.org/techniques/T1547/013/), [`T1548.003`](https://attack.mitre.org/techniques/T1548/003/), [`T1556.003`](https://attack.mitre.org/techniques/T1556/003/), [`T1574.006`](https://attack.mitre.org/techniques/T1574/006/)
@@ -733,7 +733,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-host-root-exec-nonroot-modifiable-file"></a>
 ### `host.root_exec_nonroot_modifiable_file` — Root executed a file that a non-root account owns or can write
 
-- Version: `2`; status: `active`
+- Version: `3`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1053`](https://attack.mitre.org/techniques/T1053/), [`T1543.002`](https://attack.mitre.org/techniques/T1543/002/), [`T1574`](https://attack.mitre.org/techniques/T1574/)
@@ -755,7 +755,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-host-security-or-logging-service-stop"></a>
 ### `host.security_or_logging_service_stop` — Logging, audit or security service stopped, disabled or killed (command or service manager record)
 
-- Version: `3`; status: `active`
+- Version: `4`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1685`](https://attack.mitre.org/techniques/T1685/), [`T1685.004`](https://attack.mitre.org/techniques/T1685/004/)
@@ -767,7 +767,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-host-shell-spawned-by-connected-process"></a>
 ### `host.shell_spawned_by_connected_process` — Shell or interpreter executed by a process holding an external connection (reverse shell by lineage)
 
-- Version: `5`; status: `active`
+- Version: `6`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `critical`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1059.004`](https://attack.mitre.org/techniques/T1059/004/), [`T1059.006`](https://attack.mitre.org/techniques/T1059/006/), [`T1071`](https://attack.mitre.org/techniques/T1071/), [`T1095`](https://attack.mitre.org/techniques/T1095/)
@@ -789,7 +789,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-host-ssh-login-external-source"></a>
 ### `host.ssh_login_external_source` — Successful SSH login from an address outside the site's internal networks
 
-- Version: `5`; status: `active`
+- Version: `6`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1021.004`](https://attack.mitre.org/techniques/T1021/004/), [`T1078`](https://attack.mitre.org/techniques/T1078/)
@@ -799,7 +799,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-host-ssh-password-guessing"></a>
 ### `host.ssh_password_guessing` — Many failed sshd attempts from one source against one account
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1110.001`](https://attack.mitre.org/techniques/T1110/001/)
@@ -811,7 +811,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-host-ssh-password-spraying"></a>
 ### `host.ssh_password_spraying` — Failed sshd attempts from one source against many account names
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1110.003`](https://attack.mitre.org/techniques/T1110/003/)
@@ -823,7 +823,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-host-ssh-success-after-failures"></a>
 ### `host.ssh_success_after_failures` — Accepted sshd login after a burst of failed attempts
 
-- Version: `2`; status: `active`
+- Version: `3`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1021.004`](https://attack.mitre.org/techniques/T1021/004/), [`T1078`](https://attack.mitre.org/techniques/T1078/), [`T1110`](https://attack.mitre.org/techniques/T1110/)
@@ -835,7 +835,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-host-unbacked-or-deleted-executable"></a>
 ### `host.unbacked_or_deleted_executable` — Process running from a memory-backed, deleted or in-memory-directory executable
 
-- Version: `2`; status: `active`
+- Version: `3`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1027.011`](https://attack.mitre.org/techniques/T1027/011/), [`T1036.005`](https://attack.mitre.org/techniques/T1036/005/), [`T1070.004`](https://attack.mitre.org/techniques/T1070/004/), [`T1620`](https://attack.mitre.org/techniques/T1620/)
@@ -847,7 +847,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-host-web-service-spawns-interpreter"></a>
 ### `host.web_service_spawns_interpreter` — Web service account executed a shell or interpreter
 
-- Version: `12`; status: `active`
+- Version: `13`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1059.004`](https://attack.mitre.org/techniques/T1059/004/), [`T1190`](https://attack.mitre.org/techniques/T1190/), [`T1505.003`](https://attack.mitre.org/techniques/T1505/003/)
@@ -857,7 +857,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-ioc-indicator-match"></a>
 ### `ioc.indicator_match` — Indicator list match in the field that gives it meaning
 
-- Version: `4+a0e905dcee18`; status: `active`
+- Version: `5+a0e905dcee18`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: —
@@ -867,7 +867,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-net-arkime-ssh-reverse-shell-tag"></a>
 ### `net.arkime_ssh_reverse_shell_tag` — Arkime's heuristic tagged an SSH session as a possible reverse shell
 
-- Version: `4`; status: `active`
+- Version: `5`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1021.004`](https://attack.mitre.org/techniques/T1021/004/), [`T1059.004`](https://attack.mitre.org/techniques/T1059/004/), [`T1572`](https://attack.mitre.org/techniques/T1572/)
@@ -879,7 +879,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-net-beaconing"></a>
 ### `net.beaconing` — Regular, repeated connections from an internal address to one public endpoint
 
-- Version: `4`; status: `active`
+- Version: `5`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **negative-capable**
 - ATT&CK: [`T1029`](https://attack.mitre.org/techniques/T1029/), [`T1071`](https://attack.mitre.org/techniques/T1071/), [`T1573`](https://attack.mitre.org/techniques/T1573/)
@@ -890,7 +890,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-net-dns-nxdomain-burst"></a>
 ### `net.dns_nxdomain_burst` — Many NXDOMAIN answers to one client within ten minutes
 
-- Version: `4`; status: `active`
+- Version: `5`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `high`
 - Coverage strength: **negative-capable**
 - ATT&CK: [`T1568.002`](https://attack.mitre.org/techniques/T1568/002/)
@@ -901,7 +901,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-net-dns-reverse-lookup-sweep"></a>
 ### `net.dns_reverse_lookup_sweep` — Many distinct reverse-lookup (in-addr.arpa / ip6.arpa) names queried by one client
 
-- Version: `3`; status: `active`
+- Version: `4`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **negative-capable**
 - ATT&CK: [`T1018`](https://attack.mitre.org/techniques/T1018/), [`T1590.002`](https://attack.mitre.org/techniques/T1590/002/)
@@ -912,7 +912,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-net-dns-subdomain-enumeration"></a>
 ### `net.dns_subdomain_enumeration` — Many distinct subdomains of one domain queried by one source
 
-- Version: `4`; status: `active`
+- Version: `5`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **negative-capable**
 - ATT&CK: [`T1590.002`](https://attack.mitre.org/techniques/T1590/002/)
@@ -923,7 +923,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-net-dns-tunnel-shape"></a>
 ### `net.dns_tunnel_shape` — Query names under one registered domain from one client with a DNS-tunnel shape
 
-- Version: `4`; status: `active`
+- Version: `5`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `high`
 - Coverage strength: **negative-capable**
 - ATT&CK: [`T1048.003`](https://attack.mitre.org/techniques/T1048/003/), [`T1071.004`](https://attack.mitre.org/techniques/T1071/004/), [`T1132.001`](https://attack.mitre.org/techniques/T1132/001/), [`T1572`](https://attack.mitre.org/techniques/T1572/)
@@ -934,7 +934,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-net-dns-zone-transfer-or-any-request"></a>
 ### `net.dns_zone_transfer_or_any_request` — DNS zone-transfer (AXFR/IXFR) or ANY question sent by one client to one server
 
-- Version: `3`; status: `active`
+- Version: `4`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **negative-capable**
 - ATT&CK: [`T1590.002`](https://attack.mitre.org/techniques/T1590/002/)
@@ -945,7 +945,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-net-horizontal-sweep"></a>
 ### `net.horizontal_sweep` — One source contacted many distinct addresses on the same port within minutes
 
-- Version: `5`; status: `active`
+- Version: `6`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **negative-capable**
 - ATT&CK: [`T1018`](https://attack.mitre.org/techniques/T1018/), [`T1046`](https://attack.mitre.org/techniques/T1046/), [`T1595.001`](https://attack.mitre.org/techniques/T1595/001/)
@@ -967,7 +967,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-net-long-unidentified-session"></a>
 ### `net.long_unidentified_session` — Long data-carrying connection with no identified protocol on a port its sensor cannot judge
 
-- Version: `5`; status: `active`
+- Version: `6`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1095`](https://attack.mitre.org/techniques/T1095/), [`T1571`](https://attack.mitre.org/techniques/T1571/), [`T1573`](https://attack.mitre.org/techniques/T1573/)
@@ -991,7 +991,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-net-port-scan"></a>
 ### `net.port_scan` — One source contacted many distinct ports on one destination
 
-- Version: `7`; status: `active`
+- Version: `8`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **negative-capable**
 - ATT&CK: [`T1046`](https://attack.mitre.org/techniques/T1046/), [`T1595.001`](https://attack.mitre.org/techniques/T1595/001/)
@@ -1001,7 +1001,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-net-protocol-port-mismatch"></a>
 ### `net.protocol_port_mismatch` — Application protocol and port disagree on a connection
 
-- Version: `6`; status: `active`
+- Version: `7`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1095`](https://attack.mitre.org/techniques/T1095/), [`T1571`](https://attack.mitre.org/techniques/T1571/), [`T1572`](https://attack.mitre.org/techniques/T1572/)
@@ -1024,7 +1024,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-net-suricata-alert-stack"></a>
 ### `net.suricata_alert_stack` — IDS alert signature observed between a source and destination
 
-- Version: `2`; status: `active`
+- Version: `3`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **negative-capable**
 - ATT&CK: —
@@ -1034,7 +1034,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-net-tls-self-signed-certificate-outbound"></a>
 ### `net.tls_self_signed_certificate_outbound` — Public server presented a certificate whose subject name equals its issuer name
 
-- Version: `3`; status: `active`
+- Version: `4`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **negative-capable**
 - ATT&CK: [`T1573.002`](https://attack.mitre.org/techniques/T1573/002/), [`T1587.003`](https://attack.mitre.org/techniques/T1587/003/), [`T1608.003`](https://attack.mitre.org/techniques/T1608/003/)
@@ -1045,7 +1045,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-net-tls-short-lived-or-new-certificate-outbound"></a>
 ### `net.tls_short_lived_or_new_certificate_outbound` — Public server presented a short-lived or recently issued certificate
 
-- Version: `3`; status: `active`
+- Version: `4`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **negative-capable**
 - ATT&CK: [`T1573.002`](https://attack.mitre.org/techniques/T1573/002/), [`T1588.004`](https://attack.mitre.org/techniques/T1588/004/), [`T1608.003`](https://attack.mitre.org/techniques/T1608/003/)
@@ -1056,7 +1056,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-net-tool-user-agent-http"></a>
 ### `net.tool_user_agent_http` — HTTP requests whose user agent begins with a known command-line tool name
 
-- Version: `2`; status: `active`
+- Version: `3`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `low`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1105`](https://attack.mitre.org/techniques/T1105/)
@@ -1088,7 +1088,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-web-scan-burst"></a>
 ### `web.scan_burst` — High-volume error-heavy web requests from one source
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **negative-capable**
 - ATT&CK: [`T1595.002`](https://attack.mitre.org/techniques/T1595/002/), [`T1595.003`](https://attack.mitre.org/techniques/T1595/003/)

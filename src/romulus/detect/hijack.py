@@ -286,7 +286,7 @@ class NonRootWriteRootExecutedFile(Playbook):
     os_families = ("linux",)
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.nonroot_write_root_executed_file"
-    version = "7"
+    version = "8"
     title = "Non-root write-capable command on a file a root process runs, or on root's schedule"
     anchor_class = "persistence"
     kind = "aggregate"
@@ -907,6 +907,9 @@ class NonRootWriteRootExecutedFile(Playbook):
                          "earlier, or at the same recorded time)")
             if s.failed:
                 line += f"; {s.failed} of them recorded a failed exec"
+            total_runs = len(s.ok_ts) + s.failed
+            if total_runs > len({run.event_id for run in cited_runs}):
+                line += f"; {len({run.event_id for run in cited_runs})} of these {total_runs} records are cited"
             exec_lines.append(line)
 
         events = self._events(cited_ids)

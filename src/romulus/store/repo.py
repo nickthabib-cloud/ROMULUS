@@ -1390,6 +1390,9 @@ class Repo:
                     key=lambda value: SEVERITY_STRENGTH.get(value, -1),
                 )
                 event_ids = sorted({*(existing["event_ids"] or []), *(row.get("event_ids") or [])})
+                # a record the deterministic pass cites only for its statements stays context; an agent-first
+                # citation of it keeps it the finding's own
+                context = sorted(set(row.get("context_event_ids") or ()) - set(existing["event_ids"] or ()))
                 values = {
                     # The later deterministic pass owns canonical wording and provenance. It must
                     # never weaken the machine decision or discard evidence already cited.
@@ -1397,6 +1400,7 @@ class Repo:
                     "claim": row["claim"],
                     "claim_type": row["claim_type"],
                     "event_ids": event_ids,
+                    "context_event_ids": context,
                     "lane": lane,
                     "severity": severity,
                     "priority": max(existing_priority, incoming_priority),

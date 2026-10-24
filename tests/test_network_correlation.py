@@ -326,7 +326,7 @@ def test_alert_on_joined_flow_is_attributed_to_the_process_in_either_order(netwo
     m = matches[0]
     assert m.claim_type == "correlated_observation" and m.proposed_lane == "high" and m.severity == "high"
     assert "inferred from address, port and time; it is not itself observed" in m.claim
-    assert "1 IDS alert(s) on those connections: ET POLICY Meterpreter-like" in m.claim
+    assert "1 IDS alert(s) on those connections, among them 'ET POLICY Meterpreter-like" in m.claim
     assert "with local address(es) 198.51.100.10," in m.claim and "capped" not in m.claim
     assert {e.family for e in m.events} == {"net_socket", "net_flow", "net_alert"}
     assert any("IPv4 connections from 198.51.100.10 in 5 of 5 joins" in n for n in m.notes)
@@ -518,7 +518,9 @@ def test_correlated_candidate_citations_are_all_retained(monkeypatch, order):
     direct = [c for c in repo.candidates("h1") if c["rule_id"] == "host.interpreter_external_connection"]
     assert len(linked) == 1 and len(direct) == 1
     cites = rm._citations(repo, linked[0])
-    assert len(cites) == 4 and all(c["status"] == "retained" for c in cites), cites
+    # one per raw record: the call's two audit records, the flow and the alert, and the call's own SYSCALL record as
+    # the observed record its (unknown) lineage was read from, which the lineage note's reason names
+    assert len(cites) == 5 and all(c["status"] == "retained" for c in cites), cites
     window = {c["rule_id"]: c["state"] for c in repo.rule_cells("h1") if c["target"] == "*"}
     assert window["corr.process_network_link"] == "matched"
 

@@ -280,11 +280,10 @@ def test_0015_backfills_observations_and_round_trips_base_data(tmp_path):
         assert "event_citation" in tables and "event_observation" in tables
 
 
-def test_0017_is_the_single_head_and_0016_drops_only_the_owners_implied_observations(tmp_path):
+def test_0016_drops_only_the_owners_implied_observations(tmp_path):
     engine = make_engine(tmp_path / "event-observation-owner.db")
     with engine.begin() as connection:
         cfg = _alembic_config(connection)
-        assert ScriptDirectory.from_config(cfg).get_heads() == ["0017"]
         command.upgrade(cfg, "0015")
         for hunt_id in ("h1", "h2", "h3"):
             connection.exec_driver_sql(
@@ -311,6 +310,28 @@ def test_0017_is_the_single_head_and_0016_drops_only_the_owners_implied_observat
         assert rows() == [("h2", "e1"), ("h3", "e1"), ("h3", "e2")]
         command.downgrade(cfg, "0015")
         assert rows() == sorted(observed, key=lambda row: (row[1], row[0]))
+
+
+def test_0018_is_the_single_head_and_0017_leaves_stored_candidates_about_every_record_they_cite(tmp_path):
+    engine = make_engine(tmp_path / "candidate-context.db")
+    with engine.begin() as connection:
+        cfg = _alembic_config(connection)
+        assert ScriptDirectory.from_config(cfg).get_heads() == ["0018"]
+        command.upgrade(cfg, "0016")
+        connection.exec_driver_sql(
+            "INSERT INTO hunt (id, created_at, created_by, manifest, manifest_digest, execution_state) "
+            "VALUES ('h1', '2026-01-01', 'test', '{}', 'd', 'planned')")
+        connection.execute(schema.candidate.delete())
+        connection.exec_driver_sql(
+            "INSERT INTO candidate (id, hunt_id, rule_id, rule_version, claim, claim_type, event_ids, "
+            "predicate_fields, entities, ts, severity, confidence, lane, priority, priority_reasons, gate_results, "
+            "benign_alternatives, next_checks, group_key, created_at) VALUES ('c1', 'h1', 'host.test', '1', 'x', "
+            "'observed_action', '[\"e1\", \"e2\"]', '[]', '[]', '2026-01-01', 'high', 'high', 'high', 1.0, '[]', "
+            "'{}', '[]', '[]', '', '2026-01-01')")
+        command.upgrade(cfg, "0017")
+        assert connection.exec_driver_sql("SELECT context_event_ids FROM candidate").scalar_one() is None
+        command.downgrade(cfg, "0016")
+        assert "context_event_ids" not in {c["name"] for c in inspect(connection).get_columns("candidate")}
 
 
 def test_0010_through_0012_round_trip_agent_link_without_prior_scheduler_anchor(tmp_path):
