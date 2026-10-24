@@ -827,9 +827,9 @@ class SecurityOrLoggingServiceStop(_TamperRule):
             next((i.lineage for i in items if i.lineage.kind == "web"), first.lineage))
         if phrase:
             claim += f" Exec lineage: {phrase}."
-        # the earliest commands and linked stops, and the latest stop (the claim counts every one of them)
-        events = sorted(_unique([*commands[:CITE], *linked[:CITE], *linked[-1:], *([marker[2]] if marker else []),
-                                 *ancestors]), key=lambda e: (e.ts, e.id))
+        # the earliest commands and linked stops, and for what the claim states the latest stop and the ancestor
+        subject = _unique([*commands[:CITE], *linked[:CITE], *([marker[2]] if marker else [])])
+        events = sorted(_unique([*subject, *linked[-1:], *ancestors]), key=lambda e: (e.ts, e.id))
         claim += _cited_records(commands, linked)
         predicate = [pf(c, "process.argv") for c in commands[:3]] + [pf(e, "service.unit") for e in linked[:2]]
         own = [e for e in events if e not in ancestors]           # the ancestors are cited, not timed by
@@ -839,6 +839,7 @@ class SecurityOrLoggingServiceStop(_TamperRule):
         match.notes = notes + (["T1685.004"] if any(service_category(i.target) == "audit" for i in items) else
                                ["T1685"])
         match.raw_copies.update(ancestor_raw)
+        match.context_ids = {e.id for e in events} - {e.id for e in subject}
         return match
 
     def _describe_records(self, key, entries) -> Match:
@@ -854,6 +855,7 @@ class SecurityOrLoggingServiceStop(_TamperRule):
                  f"least {count} time(s) ({stops[0].ts.isoformat()} – {stops[-1].ts.isoformat()}; {listed}); no "
                  f"command naming it was linked within {COMMAND_LINK_BEFORE:.0f} s before.")
         lane, notes, cited = "high", [], _unique([*stops[:CITE], *stops[-1:]])
+        spanning = {stop.id for stop in stops[-1:]} - {stop.id for stop in stops[:CITE]}
         claim += cited_phrase(len(cited), len(stops), True)
         if kind in {"killed", "killed_restarted"}:
             claim = claim.replace(" stopping at least", " ending at least")
@@ -882,7 +884,7 @@ class SecurityOrLoggingServiceStop(_TamperRule):
         events = sorted(_unique(cited), key=lambda e: (e.ts, e.id))
         match = Match(self.id, claim, self.claim_type, events, [pf(s, "service.unit") for s in stops[:3]],
                       stops[0].ts, self.severity, lane, "high", stops[0].entities(),
-                      group_key=f"record|{host}|{name}|{kind}")
+                      group_key=f"record|{host}|{name}|{kind}", context_ids=spanning)
         match.notes = notes + (["T1685.004"] if service_category(name) == "audit" else ["T1685"])
         return match
 
@@ -1110,8 +1112,8 @@ class AuditRulesTamper(_TamperRule):
             next((i.lineage for i in items if i.lineage.kind == "web"), items[0].lineage))
         if phrase:
             claim += f" Exec lineage: {phrase}."
-        events = sorted(_unique([*commands[:CITE], *linked[:CITE], *linked[-1:], *ancestors]),
-                        key=lambda e: (e.ts, e.id))
+        subject = _unique([*commands[:CITE], *linked[:CITE]])
+        events = sorted(_unique([*subject, *linked[-1:], *ancestors]), key=lambda e: (e.ts, e.id))
         claim += _cited_records(commands, linked)
         predicate = [pf(c, "process.argv") for c in commands[:3]] + [pf(e, "audit.config.op") for e in linked[:2]]
         own = [e for e in events if e not in ancestors]           # the ancestors are cited, not timed by
@@ -1120,6 +1122,7 @@ class AuditRulesTamper(_TamperRule):
                       group_key="cmd|" + "|".join(str(p) for p in key))
         match.notes = notes
         match.raw_copies.update(ancestor_raw)
+        match.context_ids = {e.id for e in events} - {e.id for e in subject}
         return match
 
     @staticmethod
@@ -1135,6 +1138,7 @@ class AuditRulesTamper(_TamperRule):
         applied = sum(1 for e in configs if e.outcome == Outcome.success)
         tally = f"{applied} applied (res=1), {len(configs) - applied} refused or unrecorded"
         lane, notes, cited = "high", [], _unique([*configs[:CITE], *configs[-1:]])
+        spanning = {e.id for e in configs[-1:]} - {e.id for e in configs[:CITE]}
         exe = first.get("process.executable")
         by = f" by '{exe}'" if exe else ""
         if kind == "disabled":
@@ -1170,6 +1174,7 @@ class AuditRulesTamper(_TamperRule):
         lineage = self.lineage.classify_pid(host, first.get("process.pid"), first.ts.timestamp(), boot_of(first),
                                             first.get("audit.serial"))
         ancestor_raw: dict[str, dict] = {}
+        ancestors: list[TypedEvent] = []
         if lineage.kind == "web":
             lane = "high"
             phrase, ancestors, ancestor_raw = self.lineage.cited_phrase(lineage)
@@ -1178,9 +1183,10 @@ class AuditRulesTamper(_TamperRule):
         events = sorted(_unique(cited), key=lambda e: (e.ts, e.id))
         match = Match(self.id, claim, self.claim_type, events, [pf(e, "audit.config.op") for e in configs[:3]],
                       first.ts, self.severity, lane, "high", first.entities(),
-                      group_key=f"record|{host}|{actor}|{kind}|{session}")
+                      group_key=f"record|{host}|{actor}|{kind}|{session}", context_ids=spanning)
         match.notes = notes
         match.raw_copies.update(ancestor_raw)
+        match.context_ids = (spanning | {e.id for e in ancestors}) - {e.id for e in configs[:CITE]}
         return match
 
 
@@ -1485,6 +1491,7 @@ class LogOrHistoryClearing(_TamperRule):
         technique = {"history_file": "T1070.003", "history_off": "T1690"}.get(category, "T1685.006")
         match.notes = notes + [technique]
         match.raw_copies.update(ancestor_raw)
+        match.context_ids = {e.id for e in events} - {e.id for e in own}
         return match
 
 

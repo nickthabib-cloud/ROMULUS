@@ -7,6 +7,7 @@ it cites, spans whose last record arrives long after the first ones, more distin
 lineage ancestors named by a note, and one connection recorded by two sensors. The rules are driven through the
 sweep's real event stage, holds and releases included, so a bound released too early fails here.
 """
+import json
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 
@@ -374,6 +375,55 @@ def test_discovery_counts_the_classes_it_lists():
     listed = m.claim.split("[", 1)[1].split("]", 1)[0].split(", ")
     assert f"across {len(listed)} distinct discovery class(es)" in m.claim
     assert "in audit session 42" in m.claim and "this session" not in m.claim
+
+
+def _links_with_decoy(tmp_path, monkeypatch, cited_as: str | None):
+    """The synthetic hunt's expansion links when every anchor-lane finding on web1 also cites an unrelated exec record
+    (another process, in its own audit session), as a record of its own or only for its claim's statements."""
+    from romulus.hunt import publish
+    from romulus.hunt import sweep as sweep_module
+    original = publish.publish_match
+    decoy = TypedEvent(id="decoy-exec", family="process_exec", ts=tf.T0 + timedelta(minutes=6), host="web1",
+                       outcome="success",
+                       fields={"process.pid": fv(31337, "decoy:pid"), "process.ppid": fv(31336, "decoy:ppid"),
+                               "process.session_id": fv(55, "decoy:ses"), "process.argv": fv(["id"], "decoy:argv"),
+                               "process.executable": fv("/usr/bin/id", "decoy:exe")},
+                       raw=[RawRef(target=tf.HOST_TARGET, native_id="decoy")], normalizer="fixture")
+
+    def publish_with_decoy(repo, hunt_id, playbook, match, *args, **kwargs):
+        if cited_as and match.proposed_lane in ("urgent", "high") and match.events[0].host == "web1":
+            match.events = [*match.events, decoy]
+            if cited_as == "context":
+                match.context_ids = {*match.context_ids, decoy.id}
+        return original(repo, hunt_id, playbook, match, *args, **kwargs)
+
+    from romulus.hunt import expansion as expansion_module
+    # the sweep and expansion (which re-publishes direct findings its pivots read) both cite it
+    monkeypatch.setattr(sweep_module, "publish_match", publish_with_decoy)
+    monkeypatch.setattr(expansion_module, "publish_match", publish_with_decoy)
+    tf.patched_sizes(monkeypatch)
+    snapshot = tf.run_stack(tmp_path)
+    monkeypatch.undo()
+    # a link and its tasks are named by the anchor's candidate id, which the decoy's citation changes: compare what
+    # each link is
+    rule_of = {c["id"]: (c["rule_id"], c["group_key"]) for c in snapshot["candidates"]}
+    return sorted(json.dumps({**{k: v for k, v in link.items() if k not in ("id", "anchor_id", "task_ids")},
+                              "anchor": rule_of[link["anchor_id"]]}, sort_keys=True, default=str)
+                  for link in snapshot["links"])
+
+
+def test_a_record_cited_only_for_the_claim_adds_no_expansion_link(tmp_path, monkeypatch):
+    plain = _links_with_decoy(tmp_path / "a", monkeypatch, None)
+    assert _links_with_decoy(tmp_path / "b", monkeypatch, "context") == plain
+    # the control: the same record cited as the finding's own is expanded from
+    assert _links_with_decoy(tmp_path / "c", monkeypatch, "own") != plain
+
+
+def test_a_candidate_stored_without_the_field_is_about_every_record_it_cites():
+    from romulus.hunt.publish import subject_event_ids
+    assert subject_event_ids({"event_ids": ["a", "b"]}) == ["a", "b"]
+    assert subject_event_ids({"event_ids": ["a", "b"], "context_event_ids": None}) == ["a", "b"]
+    assert subject_event_ids({"event_ids": ["a", "b"], "context_event_ids": ["b"]}) == ["a"]
 
 
 def test_holds_release_a_record_not_yet_staged_by_not_staging_it_and_count_each_hold():

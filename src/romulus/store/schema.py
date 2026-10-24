@@ -203,6 +203,9 @@ candidate = Table(
     Column("claim", Text, nullable=False),
     Column("claim_type", String, nullable=False),       # observed_action | network_observation | anomaly | mention
     Column("event_ids", JSON, nullable=False),
+    # of event_ids, those cited only to support the claim's statements (spans, named values, lineage ancestors);
+    # expansion starts from the others. NULL in older hunts: every record is the finding's own.
+    Column("context_event_ids", JSON),
     Column("predicate_fields", JSON, nullable=False),   # [{field, value, raw_path}]
     Column("entities", JSON, nullable=False),
     Column("ts", DateTime(timezone=True), nullable=False),

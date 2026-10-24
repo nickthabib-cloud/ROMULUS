@@ -6,7 +6,7 @@ from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
 from romulus.detect.bounded import HOT_COUNT, KeyedStore
-from romulus.detect.citing import BoundStage, Ends, Named, bound_note, cite_with_bounds, cited_phrase, more
+from romulus.detect.citing import BoundStage, Ends, Named, bound_note, cite_extra, cited_phrase, more
 from romulus.detect.correlation import StageMissing
 from romulus.evidence.typed import TypedEvent
 
@@ -137,8 +137,9 @@ class _Grouped(Playbook):
             self._pending.append(e)
 
     def cite(self, state: _Group) -> tuple[list[TypedEvent], set[str]]:
-        """The group's cited records: its span's bounding records (when held), every record a named value comes
-        from, then its first examples. Returns them in time order with the bounding ids not held."""
+        """The group's cited records: its first examples (what the finding is about), and for what the claim states
+        its span's bounding records (when held) and every record a named value comes from. Returns them in time order,
+        the bounding ids not held, and the ids cited only for the claim's statements."""
         examples = self.examples(state)
         named = [i for kind in sorted(state.named) for i in state.named[kind].ids.values()]
         unstaged = {e.id: e for e in [*self._pending, *(entry[0] for entry in self.bounds.pending.values())]}
@@ -154,7 +155,7 @@ class _Grouped(Playbook):
                 raise StageMissing(f"{self.id}: {len(set(ids)) - len(found)} cited event(s) absent from the stage")
             return found
 
-        return cite_with_bounds(load, events, state.ends, [e.id for e in examples], EXAMPLE_LIMIT, named)
+        return cite_extra(load, events, state.ends, [e.id for e in examples], named)
 
     @staticmethod
     def told(evs: list[TypedEvent], state: _Group, missing: set[str], noun: str, one: str) -> str:
@@ -224,7 +225,7 @@ class SuricataAlertStack(_Grouped):
     def finalize(self):
         out = []
         for key, state in self.reported():
-            evs, missing = self.cite(state)
+            evs, missing, context = self.cite(state)
             src, dst, cat, sev = key
             n = state.count
             sigs = sorted(state.bag("sigs"), key=lambda s: (str(s[1]), str(s[0])))
@@ -243,7 +244,8 @@ class SuricataAlertStack(_Grouped):
             e0 = evs[0]
             m = Match(self.id, claim, self.claim_type, evs, [pf(e0, "alert.signature"), pf(e0, "alert.severity"),
                                                             pf(e0, "source.ip"), pf(e0, "destination.ip")],
-                      e0.ts, severity, lane, "medium", e0.entities(), group_key=f"{src}|{dst}|{cat}|{sev}")
+                      e0.ts, severity, lane, "medium", e0.entities(), group_key=f"{src}|{dst}|{cat}|{sev}",
+                      context_ids=context)
             techs = sorted({t for e in evs for t in _values(e.get("alert.mitre_technique_id")) if t})
             if techs:
                 m.notes.append(f"signature metadata ATT&CK of the cited alerts: {techs[:8]}"
@@ -301,14 +303,14 @@ class WebScanBurst(_Grouped):
             n, errs = state.count, state.errors
             if n < self.MIN_REQUESTS or errs / n < self.MIN_ERROR_RATIO:
                 continue
-            evs, missing = self.cite(state)
+            evs, missing, context = self.cite(state)
             host, src = key
             uas = sorted(state.names("uas", self.AGENTS_NAMED).values())
             claim = (f"{n} HTTP requests to {host} from {src} ({self.span(state)}), {errs} ({errs / n:.0%}) with "
                      f"4xx/5xx responses across {len(state.bag('urls'))}+ distinct URLs."
                      + self.told(evs, state, missing, "requests", "request"))
             m = Match(self.id, claim, self.claim_type, evs, [pf(evs[0], "source.ip")], evs[0].ts, self.severity,
-                      self.lane, "high", evs[0].entities(), group_key=f"{host}|{src}")
+                      self.lane, "high", evs[0].entities(), group_key=f"{host}|{src}", context_ids=context)
             if uas:
                 every = len(state.bag("uas"))
                 m.notes.append("user-agent strings of cited requests (self-reported, not proof of tool): "
@@ -384,14 +386,14 @@ class DnsSubdomainEnumeration(_Grouped):
             distinct = len(state.bag("names"))
             if distinct < self.MIN_DISTINCT:
                 continue
-            evs, missing = self.cite(state)
+            evs, missing, context = self.cite(state)
             src, dom = key
             claim = (f"{src} issued {state.count} DNS queries for {distinct} distinct names under '{dom}' "
                      f"({self.span(state)})." + self.told(evs, state, missing, "queries", "query"))
             out.append(Match(self.id, claim, self.claim_type, evs, [pf(evs[0], "source.ip"),
                                                                      pf(evs[0], "dns.question.name")],
                              evs[0].ts, self.severity, self.lane, "medium", evs[0].entities(),
-                             group_key=f"{src}|{dom}"))
+                             group_key=f"{src}|{dom}", context_ids=context))
         return out
 
 
@@ -434,7 +436,7 @@ class ToolUserAgentHttp(_Grouped):
     def finalize(self):
         out = []
         for key, state in self.reported():
-            evs, missing = self.cite(state)
+            evs, missing, context = self.cite(state)
             src, dst, hostname, ua = key
             urls = sorted(u for u in state.names("urls", self.URLS_NAMED).values())
             every = len([u for u in state.bag("urls") if u])
@@ -445,7 +447,7 @@ class ToolUserAgentHttp(_Grouped):
             out.append(Match(self.id, claim, self.claim_type, evs, [pf(evs[0], "user_agent.original"),
                                                                      pf(evs[0], "source.ip")],
                              evs[0].ts, self.severity, self.lane, "medium", evs[0].entities(),
-                             group_key=f"{src}|{dst}|{ua}"))
+                             group_key=f"{src}|{dst}|{ua}", context_ids=context))
         return out
 
 
@@ -552,7 +554,7 @@ class PortScan(_Grouped):
             ports = forward | set(replies)
             if len(ports) < self.MIN_PORTS:
                 continue
-            evs, missing = self.cite(state)
+            evs, missing, context = self.cite(state)
             answered = {port for port, seen in replies.items() if self._answered(src, dst, port, seen)}
             unanswered = set(replies) - answered
             client_range = {port for port in unanswered if port >= self.EPHEMERAL_FLOOR}
@@ -579,10 +581,10 @@ class PortScan(_Grouped):
                 lane, severity = "context", "low"     # mostly a service answering clients: kept visible, not a lead
                 claim += f" Only {len(probed)} port(s) look probed."
             opened = sorted(port for port in state.names("opened", self.PORTS_NAMED).values() if port in probed)
-            rows.append((src, dst, claim, lane, severity, evs, len(probed), opened, len(answered)))
+            rows.append((src, dst, claim, lane, severity, evs, len(probed), opened, len(answered), context))
         scanned = {(src, dst) for src, dst, _claim, lane, *_rest in rows if lane == self.lane}
         out = []
-        for src, dst, claim, lane, severity, evs, n_probed, opened, n_answered in rows:
+        for src, dst, claim, lane, severity, evs, n_probed, opened, n_answered, context in rows:
             if lane == "context" and (dst, src) in scanned:
                 # The target's side of a scan that is itself a lead belongs to that attack: keep it visible at the
                 # scan's lane, saying what this pair's own records show (answers, and ports it probed itself).
@@ -600,7 +602,8 @@ class PortScan(_Grouped):
                 claim += " Retained for context."
             out.append(Match(self.id, claim, self.claim_type, evs, [pf(evs[0], "source.ip"),
                                                                      pf(evs[0], "destination.ip")],
-                             evs[0].ts, severity, lane, "high", evs[0].entities(), group_key=f"{src}|{dst}"))
+                             evs[0].ts, severity, lane, "high", evs[0].entities(), group_key=f"{src}|{dst}",
+                             context_ids=context))
         return out
 
 

@@ -39,6 +39,10 @@ class Match:
     # Raw copies (target/native id -> source) of cited records a rule kept in its own store rather than the sweep's
     # event stage; saved with the evidence like the stage's.
     raw_copies: dict[str, dict] = field(default_factory=dict)
+    # Ids of cited records that only support what the claim states (the records bounding a stated span, the record a
+    # named value comes from, an exec ancestor a lineage names) rather than being what the finding is about. Expansion
+    # starts from the finding's other records only, so citing more never widens what it reaches.
+    context_ids: set[str] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         # A positive stays valid on a command line some of whose arguments were lost; the claim says so.

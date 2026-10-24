@@ -403,15 +403,17 @@ class RootExecNonRootModifiableFile(Playbook):
                   for session in sessions]
         return _own_elevation(("login", tag, auid), owners)
 
-    def _cited(self, kept: _RunTally) -> tuple[list[TypedEvent], str]:
-        """The earliest runs and the runs bounding the span (when held), and the claim's sentence on them."""
-        cited, missing = cite_group(self.load, kept.events(self.load), self.bounds, kept.ends, CITE + 2)
-        return cited, cited_phrase(len(cited), kept.count, not missing, "runs", "run") + bound_note(missing, kept.ends)
+    def _cited(self, kept: _RunTally) -> tuple[list[TypedEvent], str, set[str]]:
+        """The earliest runs, the runs bounding the span (when held, cited for it), the claim's sentence on them and
+        the ids cited only for the span."""
+        cited, missing, context = cite_group(self.load, kept.events(self.load), self.bounds, kept.ends)
+        return (cited, cited_phrase(len(cited), kept.count, not missing, "runs", "run") + bound_note(missing, kept.ends),
+                context)
 
     def _finding(self, key: tuple[str, str, str], f: _ModifiableFile, kept: _RunTally) -> Match:
         host = key[0]
         total, failed, first, last = kept.count, kept.failed, kept.first, kept.last
-        cited, cited_text = self._cited(kept)
+        cited, cited_text, context = self._cited(kept)
         auids = sorted(kept.auids)
         who = f"uid {f.owner}" + (f" ('{f.owner_name}')" if f.owner_name else "")
         if f.web:
@@ -437,7 +439,8 @@ class RootExecNonRootModifiableFile(Playbook):
             lane = "lead"
             notes.append("lane lowered: every recorded exec of the file failed")
         match = Match(self.id, claim, self.claim_type, cited, self._predicate(cited, kept.prefixes), cited[0].ts,
-                      self.severity, lane, "high", cited[0].entities(), group_key=f"{host}|{f.owner}|{key[1]}")
+                      self.severity, lane, "high", cited[0].entities(), group_key=f"{host}|{f.owner}|{key[1]}",
+                      context_ids=context)
         match.notes = notes + ["T1574"]
         return match
 
@@ -447,7 +450,7 @@ class RootExecNonRootModifiableFile(Playbook):
         for _f, tally in files:
             runs.add(tally)
         total, first, last = runs.count, runs.first, runs.last
-        cited, cited_text = self._cited(runs)
+        cited, cited_text, context = self._cited(runs)
         name = next((f.owner_name for f, _rs in files if f.owner_name), None)
         who = f"uid {owner}" + (f" ('{name}')" if name else "")
         listed = "; ".join(f"{' or '.join(sorted(f.paths))} ({tally.count} run(s), mode "
@@ -459,7 +462,8 @@ class RootExecNonRootModifiableFile(Playbook):
                  f"the file.")
         claim += cited_text + f" The {_tally(cited, 'exec calls')}."
         match = Match(self.id, claim, self.claim_type, cited, self._predicate(cited, runs.prefixes),
-                      cited[0].ts, self.severity, "lead", "high", cited[0].entities(), group_key=f"{host}|own:{owner}")
+                      cited[0].ts, self.severity, "lead", "high", cited[0].entities(), group_key=f"{host}|own:{owner}",
+                      context_ids=context)
         match.notes = ["T1548.003", "T1574",
                        ("own sessions are matched by audit session id and boot id; where the boot id is not recorded, "
                        "a session id reused after a reboot can match a different login")]
@@ -855,18 +859,24 @@ class PersistencePathChange(Playbook):
             out[(*key, run[0].ts)] = run
         return out
 
-    def _cite(self, items: list[_Change]) -> tuple[list[TypedEvent], list]:
-        """The first and the last record (they bound the stated span), the first record of each of the first CITE
-        files by path (the files the claim names), then the earliest others, up to the cap."""
-        firsts = {c.path: c.event_id for c in reversed(items)}
-        ids = list(dict.fromkeys([items[0].event_id, items[-1].event_id,
-                                  *(firsts[path] for path in sorted(firsts)[:CITE])]))
-        ids += [c.event_id for c in items if c.event_id not in ids][:max(0, CITE - len(ids))]
+    def _cite(self, items: list[_Change]) -> tuple[list[TypedEvent], list, set[str]]:
+        """The first record of each distinct file, then the earliest others, up to the cap (what the finding is
+        about); and, for what the claim states, the last record (it ends the stated span) and the first record of each
+        of the first CITE files by path (the files the claim names). Returns the events, the predicate and the ids
+        cited only for the claim's statements."""
+        firsts = list({c.path: c.event_id for c in reversed(items)}.values())
+        ordered = sorted(firsts, key=lambda i: next(n for n, c in enumerate(items) if c.event_id == i))
+        own = ordered[:CITE]
+        own += [c.event_id for c in items if c.event_id not in own][:max(0, CITE - len(own))]
+        by_path = {c.path: c.event_id for c in reversed(items)}
+        extra = [i for i in dict.fromkeys([items[-1].event_id, *(by_path[path] for path in sorted(by_path)[:CITE])])
+                 if i not in own]
+        ids = own + extra
         events = self._events(ids)
         cited = sorted(events.values(), key=lambda e: (e.ts, e.id))
         predicate = [pf(e, name) for e in cited for name in ("file.path", "file.change", "process.uid",
                                                              "process.executable") if e.has(name)]
-        return cited, predicate
+        return cited, predicate, set(extra)
 
     @staticmethod
     def _changes_text(items: list[_Change]) -> str:
@@ -885,7 +895,7 @@ class PersistencePathChange(Playbook):
         _kind, host, place, uid, pid = key[:5]
         first = items[0]
         files = sorted({c.path for c in items})
-        cited, predicate = self._cite(items)
+        cited, predicate, context = self._cite(items)
         root = uid == "0"
         executables = sorted({c.exe for c in items if c.exe})
         ok = [c for c in items if c.outcome != Outcome.failure]
@@ -936,6 +946,7 @@ class PersistencePathChange(Playbook):
         confidence = "high" if ok and all(c.outcome == Outcome.success for c in ok) else "medium"
         match = Match(self.id, claim, self.claim_type, cited, predicate, cited[0].ts, self.severity, lane,
                       confidence, cited[0].entities(),
+                      context_ids=context,
                       group_key=f"{host}|{uid}|{place}" + (f"|pid {pid}" if pid is not None else "")
                       + (f"|{first.exe}|{_iso(first.ts)}" if pid is not None else ""))
         match.notes = notes + [f"file: {path}" for path in files]
@@ -943,7 +954,7 @@ class PersistencePathChange(Playbook):
 
     def _package_finding(self, key: tuple, items: list[_Change]) -> Match:
         _kind, host, manager = key
-        cited, predicate = self._cite(items)
+        cited, predicate, context = self._cite(items)
         files = sorted({c.path for c in items})
         places = sorted({c.location for c in items})
         claim = (f"On {host}, {len(items)} kernel file-change record(s) on {len(files)} file(s) in "
@@ -955,7 +966,7 @@ class PersistencePathChange(Playbook):
                  f"would change them the same way. The {_tally(cited, 'calls')}.")
         claim += cited_phrase(len(cited), len(items), True)
         match = Match(self.id, claim, self.claim_type, cited, predicate, cited[0].ts, self.severity, "lead",
-                      "high", cited[0].entities(), group_key=f"{host}|package:{manager}")
+                      "high", cited[0].entities(), group_key=f"{host}|package:{manager}", context_ids=context)
         match.notes = sorted({c.technique for c in items}) + [f"file: {path}" for path in files]
         return match
 

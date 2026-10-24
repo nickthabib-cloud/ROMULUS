@@ -6,6 +6,15 @@ from romulus.detect.base import Match, Playbook
 from romulus.store.repo import Repo
 
 
+def subject_event_ids(candidate: dict) -> list[str]:
+    """The records a finding is about: its cited records except those cited only to support what its claim states
+    (`Match.context_ids`). Expansion and the context pass start from these, so citing more never widens their reach.
+    A candidate stored without the field (an older hunt) is about every record it cites."""
+    context = set(candidate.get("context_event_ids") or ())
+    subject = [event_id for event_id in candidate["event_ids"] if event_id not in context]
+    return subject or list(candidate["event_ids"])
+
+
 def mark_hypothesis_relation(match: Match, *, anchor_id: str, link_type: str,
                              link_id: str, strength: str) -> None:
     """Label a non-observed relation without weakening the finding's own cited claim."""
@@ -39,6 +48,7 @@ def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
         "claim": match.claim,
         "claim_type": match.claim_type,
         "event_ids": [event.id for event in match.events],
+        "context_event_ids": sorted({event.id for event in match.events} & match.context_ids),
         "predicate_fields": [
             {"field": predicate.field, "value": predicate.value, "origin": predicate.origin}
             for predicate in match.predicate

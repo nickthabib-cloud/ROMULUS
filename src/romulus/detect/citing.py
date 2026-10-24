@@ -205,10 +205,27 @@ def cite_with_bounds(load, events, ends: Ends | Iterable[Ends], ids, limit: int,
     return sorted(found, key=lambda e: (e.ts, e.id)), set(bounds) - set(held)
 
 
-def cite_group(load, examples: list[TypedEvent], bounds: BoundStage, ends: Ends | Iterable[Ends],
-               limit: int = 20, named=()) -> tuple[list[TypedEvent], set[str]]:
-    """`cite_with_bounds` for a group whose first records are already loaded (`examples`): bounding and named records
-    come from the stage (`load`), or from `bounds` while not yet handed to it (a rule driven without a sweep)."""
+def cite_extra(load, events, ends: Ends | Iterable[Ends], ids, named=()
+               ) -> tuple[list[TypedEvent], set[str], set[str]]:
+    """Every record of `ids` (the group's own examples: the records a finding is about, which expansion starts from),
+    and beside them, for what the claim states, the records bounding its intervals that the stage holds (`load`) and
+    `named` (each staged). Returns the events in time order, the bounding ids the stage does not hold, and the ids
+    cited only for the claim's statements (not among `ids`)."""
+    every = [ends] if isinstance(ends, Ends) else list(ends)
+    bounds = list(dict.fromkeys(i for each in every for i in each.ids()))
+    held = {event.id: event for event in load(bounds)} if bounds else {}
+    own = list(dict.fromkeys(ids))
+    extra = [i for i in dict.fromkeys([*(i for i in bounds if i in held), *named]) if i not in set(own)]
+    wanted = [*own, *extra]
+    rest = [i for i in wanted if i not in held]
+    found = [held[i] for i in wanted if i in held] + (events(rest) if rest else [])
+    return sorted(found, key=lambda e: (e.ts, e.id)), set(bounds) - set(held), set(extra)
+
+
+def cite_group(load, examples: list[TypedEvent], bounds: BoundStage, ends: Ends | Iterable[Ends], named=()
+               ) -> tuple[list[TypedEvent], set[str], set[str]]:
+    """`cite_extra` for a group whose own records are already loaded (`examples`): bounding and named records come
+    from the stage (`load`), or from `bounds` while not yet handed to it (a rule driven without a sweep)."""
     known = {e.id: e for e in examples}
     known.update((event.id, event) for event, _ends in bounds.pending.values())
 
@@ -222,7 +239,7 @@ def cite_group(load, examples: list[TypedEvent], bounds: BoundStage, ends: Ends 
             raise LookupError(f"{len(set(ids)) - len(found)} cited event(s) absent from the stage")
         return found
 
-    return cite_with_bounds(get, strict, ends, [e.id for e in examples], limit, named)
+    return cite_extra(get, strict, ends, [e.id for e in examples], named)
 
 
 def cited_phrase(cited: int, records: int, bounded: bool, noun: str = "records", one: str = "record") -> str:

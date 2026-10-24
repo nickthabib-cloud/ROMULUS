@@ -29,7 +29,7 @@ from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
 from romulus.detect.bounded import HOT_COUNT, HeldExamples, KeyedStore, RecentIds
-from romulus.detect.citing import BoundStage, Ends, bound_note, cite_with_bounds, cited_phrase, more
+from romulus.detect.citing import BoundStage, Ends, bound_note, cite_extra, cited_phrase, more
 from romulus.detect.correlation import canon_ip, external, routable_remote
 from romulus.detect.netdef import assume_direction
 from romulus.evidence.typed import TypedEvent
@@ -226,7 +226,7 @@ class _CertificateRule(Playbook):
         return True
 
     def cite(self, state: dict) -> tuple[list[TypedEvent], set[str]]:
-        """The group's earliest records and the record bounding its span's end (when held)."""
+        """The group's earliest records, and the record bounding its span's end (when held) cited for the span."""
         examples = state["examples"].events(self.load)
         unstaged = {e.id: e for e in examples}
 
@@ -234,7 +234,7 @@ class _CertificateRule(Playbook):
             found = {e.id: e for e in self.load([i for i in ids if i not in unstaged])}
             return [unstaged.get(i) or found[i] for i in ids if i in unstaged or i in found]
 
-        return cite_with_bounds(load, load, state["info"]["ends"], [e.id for e in examples], EXAMPLE_LIMIT)
+        return cite_extra(load, load, state["info"]["ends"], [e.id for e in examples])
 
     @staticmethod
     def summary(key: tuple, g: dict, evs: list[TypedEvent], missing: set[str]) -> str:
@@ -302,7 +302,7 @@ class SelfSignedCertificateOutbound(_CertificateRule):
     def finalize(self):
         out = []
         for key, state in self.groups.items():
-            evs, missing = self.cite(state)
+            evs, missing, context = self.cite(state)
             g = state["info"]
             cert = g["cert"]
             compared = cert.get("names_compared") or "CN and O"
@@ -311,7 +311,7 @@ class SelfSignedCertificateOutbound(_CertificateRule):
                      f"Compared by {compared}; the signature was not verified.")
             out.append(Match(self.id, claim, self.claim_type, evs, self.predicate(evs), evs[0].ts, self.severity,
                              self.lane, "high" if compared == "distinguished name" else "medium", evs[0].entities(),
-                             group_key=f"{key[0]}|{key[1]}"))
+                             group_key=f"{key[0]}|{key[1]}", context_ids=context))
         return out
 
 
@@ -388,7 +388,7 @@ class ShortLivedOrNewCertificateOutbound(_CertificateRule):
     def finalize(self):
         out = []
         for key, state in self.groups.items():
-            evs, missing = self.cite(state)
+            evs, missing, context = self.cite(state)
             g = state["info"]
             cert, parts = g["cert"], []
             validity = self.validity_days(cert)
@@ -404,7 +404,8 @@ class ShortLivedOrNewCertificateOutbound(_CertificateRule):
             claim = (f"{self.summary(key, g, evs, missing)} the server presented ({describe(cert)}): "
                      f"{'; '.join(parts)}.")
             out.append(Match(self.id, claim, self.claim_type, evs, self.predicate(evs), evs[0].ts, self.severity,
-                             self.lane, "medium", evs[0].entities(), group_key=f"{key[0]}|{key[1]}"))
+                             self.lane, "medium", evs[0].entities(), group_key=f"{key[0]}|{key[1]}",
+                             context_ids=context))
         return out
 
 

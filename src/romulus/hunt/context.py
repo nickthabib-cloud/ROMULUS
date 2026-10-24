@@ -13,6 +13,7 @@ from romulus.detect.correlation import merge_unknown_boot
 from romulus.detect.registry import anchor_class_for_rule, fresh_context_pack
 from romulus.evidence.typed import TypedEvent
 from romulus.hunt.links import is_agent_reach
+from romulus.hunt.publish import subject_event_ids
 from romulus.hunt.sweep import stored_boot_intervals
 from romulus.store.db import digest
 from romulus.store.repo import Repo
@@ -327,7 +328,7 @@ def finalize_context(repo: Repo, hunt_id: str, *, owner_token: str | None = None
         if anchor is None:
             anchor = anchors[anchor_id] = ContextAnchor(
                 id=cand["id"], anchor_class=anchor_class_for_rule(cand["rule_id"]), lane=cand["lane"],
-                claim=cand["claim"], events=events(cand["event_ids"]), rule_id=cand["rule_id"],
+                claim=cand["claim"], events=events(subject_event_ids(cand)), rule_id=cand["rule_id"],
                 ts=_aware(cand["ts"]))
         link = ContextLink(id=row["id"], link_type=row["link_type"], strength=row["strength"], key=row["key"],
                            evidence_events=events(row["evidence_ids"]), status=row["status"],

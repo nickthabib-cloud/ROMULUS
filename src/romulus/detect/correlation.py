@@ -781,6 +781,7 @@ class InterpreterExternalConnection(Playbook):
         have = {e.id for e in evs}
         extra = [i for i in dict.fromkeys([*info["ends"].ids(), *judged_records(info["procs"]), *named.ids.values()])
                  if i not in have]
+        own = {e.id for e in evs}                      # the group's first calls: what the finding is about
         evs = sorted([*evs, *self._load(extra)], key=lambda x: (x.ts, x.id))
         e0 = evs[0]
         procs = info["procs"]
@@ -812,7 +813,7 @@ class InterpreterExternalConnection(Playbook):
         known = {e.id for e in evs}
         cited = evs + [e for e in lineage_events if e.id not in known]    # the observed records the lineage names
         m = Match(self.id, claim, self.claim_type, cited, preds, e0.ts, self.severity, lane, "high",
-                  e0.entities(), group_key=key)
+                  e0.entities(), group_key=key, context_ids={e.id for e in cited} - own)
         m.raw_copies.update(raw)
         m.notes.extend(notes)
         if lineage_events:
@@ -1572,7 +1573,8 @@ class ProcessNetworkLink(Playbook):
         elif flow_event is not None and flow_event.has("network.community_id"):
             preds.append(pf(flow_event, "network.community_id"))
         m = Match(self.id, " ".join(parts), self.claim_type, cited, preds, first.ts, LANE_SEVERITY[lane], lane,
-                  "medium", first.entities(), group_key=g.key)
+                  "medium", first.entities(), group_key=g.key,
+                  context_ids={e.id for e in cited} - {s.id for s in g.socks} - set(partner_ids))
         m.raw_copies.update(lineage_raw)
         m.notes.extend(lineage_lines)
         if lineage_events:

@@ -395,7 +395,9 @@ class SshPasswordGuessing(_SshAttemptStream):
             t = self.tallies.peek(key)
             if t.crossed is None:
                 continue
-            events = sorted(_unique([*t.cited, *self._load([t.first_id, t.last_id])]), key=lambda e: (e.ts, e.id))
+            # the attempts the finding is about, and the first and last attempt cited for the stated span
+            spanning = [e for e in self._load([t.first_id, t.last_id]) if e.id not in {x.id for x in t.cited}]
+            events = sorted(_unique([*t.cited, *spanning]), key=lambda e: (e.ts, e.id))
             ok = _logins(self.successes.peek(key, 0), self.logins_uncounted)
             claim = (f"On {host}, sshd recorded {t.attempts} failed authentication attempt(s) for account "
                      f"'{account}' from {ip} in {t.connections} connection(s) between {_iso(t.first)} and "
@@ -410,7 +412,8 @@ class SshPasswordGuessing(_SshAttemptStream):
             claim += " Failures inside connections that then logged in are not counted."
             claim += cited_phrase(len(events), t.attempts, True, "attempt records", "attempt record")
             m = Match(self.id, claim, self.claim_type, events, _ssh_predicate(events[:3]), events[0].ts,
-                      self.severity, self.lane, "high", events[0].entities(), group_key=f"{host}|{ip}|{account}")
+                      self.severity, self.lane, "high", events[0].entities(), group_key=f"{host}|{ip}|{account}",
+                      context_ids={e.id for e in spanning})
             out.append(m)
         return out
 
@@ -497,7 +500,9 @@ class SshPasswordSpraying(_SshAttemptStream):
             t = self.tallies.peek(key)
             if t.crossed is None:
                 continue
-            events = sorted(_unique([*t.cited, *self._load([t.first_id, t.last_id])]), key=lambda e: (e.ts, e.id))
+            # the attempts the finding is about, and the first and last attempt cited for the stated span
+            spanning = [e for e in self._load([t.first_id, t.last_id]) if e.id not in {x.id for x in t.cited}]
+            events = sorted(_unique([*t.cited, *spanning]), key=lambda e: (e.ts, e.id))
             total_names = len(t.names) + t.more_names
             named = {str(e.get("user.name")) for e in events if e.get("user.name")} & t.names
             ok = _logins(self.successes.peek(key, 0), self.logins_uncounted)
@@ -513,7 +518,8 @@ class SshPasswordSpraying(_SshAttemptStream):
             claim += " Failures inside connections that then logged in are not counted."
             claim += cited_phrase(len(events), t.attempts, True, "attempt records", "attempt record")
             m = Match(self.id, claim, self.claim_type, events, _ssh_predicate(events[:3]), events[0].ts,
-                      self.severity, self.lane, "high", events[0].entities(), group_key=f"{host}|{ip}")
+                      self.severity, self.lane, "high", events[0].entities(), group_key=f"{host}|{ip}",
+                      context_ids={e.id for e in spanning})
             out.append(m)
         return out
 
@@ -1473,6 +1479,7 @@ class AccountOrGroupChange(Playbook):
                       group_key="|".join(str(part) for part in key))
         match.notes = notes
         match.raw_copies.update(lineage_raw)
+        match.context_ids = {e.id for e in lineage_events} - {e.id for e in [*commands[:10], *records[:10]]}
         return match
 
 

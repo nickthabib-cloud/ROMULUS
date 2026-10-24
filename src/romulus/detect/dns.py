@@ -39,7 +39,7 @@ from romulus.detect.citing import (
     Holds,
     Named,
     bound_note,
-    cite_with_bounds,
+    cite_extra,
     cited_phrase,
     drained_holds,
     more,
@@ -365,11 +365,11 @@ class _DnsAggregate(Playbook):
         if store.offer(value, event):
             self._stage(event)
 
-    def _cite(self, ends, first: list[str], ids: list[str], named=(), limit: int = EXAMPLE_LIMIT
-              ) -> tuple[list[TypedEvent], set[str]]:
-        """Cited records: the bounds of the stated intervals (when held), `first` and `named` (always), then `ids` up
-        to `limit` in all. Returns them in time order and the bounding ids the stage does not hold."""
-        return cite_with_bounds(self.load, self._events, ends, ids, limit, [*first, *named])
+    def _cite(self, ends, own: list[TypedEvent], named=()) -> tuple[list[TypedEvent], set[str], set[str]]:
+        """Cited records: `own` (what the finding is about), and for what the claim states the bounds of its intervals
+        (when held) and `named`. Returns them in time order, the bounding ids the stage does not hold, and the ids
+        cited only for the claim's statements."""
+        return cite_extra(self.load, self._events, ends, [e.id for e in own], named)
 
     def _stage(self, event: TypedEvent) -> None:
         # only records that can still be cited reach the stage, so it grows with groups x cite limits, not with
@@ -676,8 +676,8 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
                              else "; its question record was not retrieved."))
             else:
                 lane, severity = self.lane, self.severity
-            evs, missing = self._cite(group.ends, [e.id for e in first], group.examples.ids(),
-                                      list(group.named.ids.values()))
+            evs, missing, context = self._cite(group.ends, _fill(first, self._events(group.examples.ids())),
+                                               list(group.named.ids.values()))
             claim += (cited_phrase(len(evs), sum(asked.values()) + sum(replies.values()), not missing)
                       + bound_note(missing, group.ends))
             e0 = first[0] if first else evs[0]
@@ -687,7 +687,8 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
                          if e.has(name)]
             match = Match(self.id, claim, self.claim_type, evs, predicate, evs[0].ts, severity, lane, "high",
                           e0.entities(), notes=notes,
-                          group_key=f"{client}|{server}|{zone}" if transfer else f"{client}|{server}|ANY")
+                          group_key=f"{client}|{server}|{zone}" if transfer else f"{client}|{server}|ANY",
+                          context_ids=context)
             out.append(match)
         return out
 
@@ -1028,8 +1029,9 @@ class DnsReverseLookupSweep(_DnsAggregate):
             claim += " The question records do not show whether names were returned."
             dense_store = state.block_examples.get(listed[0][0]) if listed else None
             ends = [state.ends, *spans, *(state.block_ends[entry[0]] for entry in listed if entry[0] in state.block_ends)]
-            evs, missing = self._cite(ends, [unstored[entry[0]] for entry in listed if entry[0] in unstored],
-                                      [*(dense_store.ids() if dense_store else []), *state.examples.ids()])
+            dense = self._events(dense_store.ids()) if dense_store else []
+            evs, missing, context = self._cite(ends, _fill(dense, self._events(state.examples.ids())),
+                                               [unstored[entry[0]] for entry in listed if entry[0] in unstored])
             claim += cited_phrase(len(evs), state.queries, not missing, "question records", "question record")
             if missing:
                 claim += (" A record bounding a stated span or address range was not kept for citation; the values are "
@@ -1040,7 +1042,7 @@ class DnsReverseLookupSweep(_DnsAggregate):
             predicate = [pf(e, n) for e in evs[:2] for n in ("dns.question.name", "dns.question.type", "source.ip")
                          if e.has(n)]
             out.append(Match(self.id, claim, self.claim_type, evs, predicate, e0.ts, self.severity, self.lane,
-                             "high", e0.entities(), notes=notes, group_key=client))
+                             "high", e0.entities(), notes=notes, group_key=client, context_ids=context))
         return out
 
 
@@ -1389,13 +1391,10 @@ class DnsNxdomainBurst(_DnsAggregate):
             claim += self._as_server(client, state, start, bursts)
             claim += (" A burst of NXDOMAIN answers is the shape of algorithmically generated domain lookups and "
                       "also of search-domain suffixing, stale software and blocklist lookups.")
-            # the peak interval's earliest records, all of them, beside the records the claim's span, names and
-            # servers come from
-            peak = [e.id for e in self._peak_records(state, start)]
+            # the peak interval's earliest records, beside the records the claim's span, names and servers come from
             given = [*(event_id for _name, event_id in state.top),
                      *(state.named_servers.ids[server] for server in named)]
-            evs, missing = self._cite(state.ends, peak, [], given,
-                                      limit=len(set(peak) | set(given) | set(state.ends.ids())))
+            evs, missing, context = self._cite(state.ends, self._peak_records(state, start), given)
             claim += (cited_phrase(len(evs), nx, not missing, "NXDOMAIN answer records", "NXDOMAIN answer record")
                       + " The cited records are from the peak interval, with the records bounding the span and those "
                         "of the names and servers given." + bound_note(missing, state.ends))
@@ -1403,7 +1402,7 @@ class DnsNxdomainBurst(_DnsAggregate):
             predicate = [pf(e, n) for e in evs[:2] for n in ("dns.response_code", "destination.ip", "source.ip",
                                                              "dns.type") if e.has(n)]
             out.append(Match(self.id, claim, self.claim_type, evs, predicate, e0.ts, self.severity, self.lane,
-                             "medium", e0.entities(), group_key=client))
+                             "medium", e0.entities(), group_key=client, context_ids=context))
         return out
 
 
@@ -1647,13 +1646,16 @@ class DnsTunnelShape(_DnsAggregate):
                 out += [self._single(client, domain, found) for client, found in sorted(members.items())]
         return out
 
-    def _cited(self, record: _TunnelKey, found: dict) -> tuple[list[TypedEvent], set[str]]:
-        """The strong-type examples (for the high lane), the records of the example names and the span's bounds,
-        then the earliest records."""
+    def _own(self, record: _TunnelKey, found: dict) -> list[TypedEvent]:
+        """What the finding is about: the strong-type examples (for the high lane), then the earliest records."""
         strong_store = record.strong_examples
-        strong = strong_store.ids() if found["lane"] == "high" and strong_store else []
+        strong = self._events(strong_store.ids()) if found["lane"] == "high" and strong_store else []
+        return _fill(strong, self._events(record.examples.ids()))
+
+    def _cited(self, record: _TunnelKey, found: dict) -> tuple[list[TypedEvent], set[str], set[str]]:
+        """Its own records, and the records of the example names and the span's bounds cited for the claim."""
         sample = record.top_long or record.top_any
-        return self._cite(record.ends, strong, record.examples.ids(), [event_id for _name, event_id in sample])
+        return self._cite(record.ends, self._own(record, found), [event_id for _name, event_id in sample])
 
     def _single(self, client: str, domain: str, found: dict) -> Match:
         record = self.pairs.peek((client, domain))
@@ -1676,14 +1678,14 @@ class DnsTunnelShape(_DnsAggregate):
         if found["lane"] == "high":
             claim += (f" {found['strong']} questions for long names are NULL, CNAME, MX or private-use types, which "
                       f"clients almost never ask with long unique names; examples of them are cited.")
-        evs, missing = self._cited(record, found)
+        evs, missing, context = self._cited(record, found)
         claim += cited_phrase(len(evs), record.queries, not missing, "questions", "question") + bound_note(
             missing, record.ends)
         predicate = [pf(e, n) for e in evs[:2] for n in ("dns.question.name", "dns.question.type", "source.ip")
                      if e.has(n)]
         return Match(self.id, claim, self.claim_type, evs, predicate, evs[0].ts, self.severity, found["lane"],
                      "medium", evs[0].entities(), notes=[f"indicators: {', '.join(found['indicators'])}"],
-                     group_key=f"{client}|{domain}")
+                     group_key=f"{client}|{domain}", context_ids=context)
 
     def _shared(self, domain: str, members: dict[str, dict], askers: int) -> Match:
         """One finding for a shape many clients share; every member is listed, cited and keeps its lane."""
@@ -1711,11 +1713,12 @@ class DnsTunnelShape(_DnsAggregate):
         cited: dict[str, TypedEvent] = {}
         for client in clients:
             found = members[client]
-            per_client, _missing = self._cited(self.pairs.peek((client, domain)), found)
+            per_client = self._own(self.pairs.peek((client, domain)), found)
             take = per_client if found["lane"] == "high" else per_client[:1]
             cited.update((e.id, e) for e in take)
-        # the records bounding the stated span, across the members
-        cited.update((e.id, e) for e in self.load(ends.ids()))
+        # the records bounding the stated span, across the members, cited for the span
+        bounding = [e for e in self.load(ends.ids()) if e.id not in cited]
+        cited.update((e.id, e) for e in bounding)
         evs = sorted(cited.values(), key=lambda e: (e.ts, e.id))
         queries = sum(r.queries for r in records)
         claim += (f" {len(evs)} of the members' {queries} questions are cited: at least one per member, every "
@@ -1725,7 +1728,8 @@ class DnsTunnelShape(_DnsAggregate):
         predicate = [pf(e, n) for e in evs[:2] for n in ("dns.question.name", "dns.question.type", "source.ip")
                      if e.has(n)]
         return Match(self.id, claim, self.claim_type, evs, predicate, evs[0].ts, self.severity, lane, "medium",
-                     evs[0].entities(), notes=notes, group_key=f"*|{domain}")
+                     evs[0].entities(), notes=notes, group_key=f"*|{domain}",
+                     context_ids={e.id for e in bounding})
 
 
 def _private_type(kind: str) -> bool:

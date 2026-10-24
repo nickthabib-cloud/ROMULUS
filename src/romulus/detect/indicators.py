@@ -31,7 +31,7 @@ import yaml
 
 from romulus.detect.base import LANES, SEVERITIES, Match, Playbook, basename, pf
 from romulus.detect.bounded import HOT_COUNT, HeldExamples, KeyedStore
-from romulus.detect.citing import BoundStage, Ends, bound_note, cite_with_bounds, cited_phrase
+from romulus.detect.citing import BoundStage, Ends, bound_note, cite_extra, cited_phrase
 from romulus.detect.host import (
     AWK_INTERPRETERS,
     SCRIPT_FILE_INTERPRETERS,
@@ -390,6 +390,7 @@ class IndicatorMatch(Playbook):
                  values: list[str] | None = None, *, operating_systems: set[str], ends: Ends | None = None) -> Match:
         _iid, role, host, value = key
         missing: set[str] = set()
+        context: set[str] = set()
         if ends is not None:
             # the group's first records and the records bounding its span (when the stage holds them)
             known = {e.id: e for e in evs}
@@ -398,7 +399,7 @@ class IndicatorMatch(Playbook):
                 found = {e.id: e for e in self.load([i for i in ids if i not in known])}
                 return [known.get(i) or found[i] for i in ids if i in known or i in found]
 
-            evs, missing = cite_with_bounds(load, load, ends, list(known), EXAMPLE_LIMIT)
+            evs, missing, context = cite_extra(load, load, ends, list(known))
         evs = sorted(evs, key=lambda x: (x.ts, x.id))
         ind: Indicator = self.by_id[key[0]]
         if values is not None:
@@ -454,7 +455,7 @@ class IndicatorMatch(Playbook):
                      f"matching {listed} ({span}).")
             lane, claim_type = ind.lane, "network_observation"
         m = Match(self.id, claim, claim_type, evs, [pf(e0, field_name)], e0.ts, ind.severity, lane, "medium",
-                  e0.entities(), group_key="|".join(map(str, key)))
+                  e0.entities(), group_key="|".join(map(str, key)), context_ids=context)
         if ind.attack:
             m.notes.append(f"indicator ATT&CK context: {list(ind.attack)}")
         m.claim += cited_phrase(len(evs), n, not missing) + (bound_note(missing, ends) if ends is not None else "")

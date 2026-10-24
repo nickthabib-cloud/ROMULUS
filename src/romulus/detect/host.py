@@ -464,6 +464,7 @@ class WebServiceSpawnsInterpreter(Playbook):
         match = Match(
             self.id, claim, self.claim_type, cited, [pf(e, "process.user"), pf(e, "process.argv")],
             e.ts, severity, lane, "high" if e.outcome == Outcome.success else "medium", _exec_entities(e),
+            context_ids={run.id for run in cited if run.id != e.id},
         )
         match.notes += [f"indicator: {item}" for item in indicators] or ["rare shape without typed indicators"]
         if prefix_only:
@@ -638,11 +639,13 @@ class DownloaderFeedsInterpreter(Playbook):
                      f"downloader exec and a stdin-reading interpreter exec under the same parent; the pipe and "
                      f"content are inferred.")
             # the first occurrences and the last, which ends the stated span
-            cited = ms[:9] + ms[-1:] if len(ms) > 10 else ms
+            cited = ms[:10] + ms[-1:] if len(ms) > 10 else ms
             evs = [ev for m in cited for ev in m.events]
+            spanned = {ev.id for ev in ms[-1].events} - {ev.id for m in ms[:10] for ev in m.events}
             claim += cited_phrase(len(cited), len(ms), True, "occurrences", "occurrence")
             m = Match(self.id, claim, self.claim_type, evs, first.predicate, first.ts, self.severity, self.lane,
-                      "high" if regular else "medium", first.entities, group_key=f"{host_}|{url}|{interp}")
+                      "high" if regular else "medium", first.entities, group_key=f"{host_}|{url}|{interp}",
+                      context_ids=spanned if len(ms) > 10 else set())
             m.notes = [f"download URL: {url}", f"occurrences: {len(ms)}"] + \
                       (["regular cadence suggests scheduled execution (e.g. cron)"] if regular else [])
             out.append(m)
@@ -1238,8 +1241,9 @@ class SshLoginFromExternal(Playbook):
                      ends: Ends | None = None) -> Match:
         host, user, ip = key
         missing: set[str] = set()
+        context: set[str] = set()
         if ends is not None:
-            evs, missing = cite_group(self.load, evs, self.bounds, ends)
+            evs, missing, context = cite_group(self.load, evs, self.bounds, ends)
         # Each login appears once per collected source (journal sshd "Accepted", audit USER_LOGIN), so the
         # login count is the larger per-source count, never their sum.
         logins = max(journal, audit)
@@ -1251,7 +1255,8 @@ class SshLoginFromExternal(Playbook):
                  + cited_phrase(len(evs), journal + audit, not missing)
                  + (bound_note(missing, ends) if ends is not None else ""))
         m = Match(self.id, claim, self.claim_type, evs, [pf(evs[0], "source.ip"), pf(evs[0], "user.name")],
-                  evs[0].ts, self.severity, self.lane, "high", evs[0].entities(), group_key=f"{host}|{user}|{ip}")
+                  evs[0].ts, self.severity, self.lane, "high", evs[0].entities(), group_key=f"{host}|{user}|{ip}",
+                  context_ids=context)
         return m
 
 
@@ -1406,8 +1411,9 @@ class UnbackedExecutable(Playbook):
         host, exe = key
         cls, meaning = unbacked_executable(exe)
         missing: set[str] = set()
+        context: set[str] = set()
         if ends is not None:
-            evs, missing = cite_group(self.load, evs, self.bounds, ends, _UNBACKED_CITE + 2)
+            evs, missing, context = cite_group(self.load, evs, self.bounds, ends)
         evs = sorted(evs, key=lambda x: (x.ts, x.id))
         total = sum(counts.values())
         when = (f"at {evs[0].ts.isoformat()}" if first == last else
@@ -1420,7 +1426,8 @@ class UnbackedExecutable(Playbook):
                  f"{meaning}." + cited_phrase(len(evs), total, not missing)
                  + (bound_note(missing, ends) if ends is not None else ""))
         m = Match(self.id, claim, self.claim_type, evs, [pf(e, "process.executable") for e in evs], evs[0].ts,
-                  self.severity, self.lane, "high", _exec_entities(evs[0]), group_key=f"{host}|{exe}")
+                  self.severity, self.lane, "high", _exec_entities(evs[0]), group_key=f"{host}|{exe}",
+                  context_ids=context)
         m.notes = [f"executable class: {cls}"]
         return m
 
