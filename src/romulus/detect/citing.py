@@ -159,6 +159,11 @@ class Holds:
         self.last = ([], [])
 
 
+def drained_holds(*stages) -> tuple[list[str], list[str]]:
+    """The holds and releases of several BoundStage or Holds drained together (`Playbook.drain_bounds`)."""
+    return ([i for stage in stages for i in stage.last[0]], [i for stage in stages for i in stage.last[1]])
+
+
 class Named:
     """One cited record for each of the first `limit` distinct values a group shows (signatures, user agents, ports),
     so every value a claim names comes from a cited record. Held as {value: event id}; the record is staged once,
