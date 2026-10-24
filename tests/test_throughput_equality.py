@@ -80,27 +80,27 @@ from tests import throughput_fixture as tf
 # manifest). In the fixture: the port scan, the protocol/port mismatches, beaconing, the alert stack, the tool user
 # agent, the SSH login, the persistence change and both connect() rules change their claims; the port scan, the
 # account change and both connect() rules cite more records (the scan's last flow record; the exec ancestors and
-# observed records the lineage names); the alert stack's and the connect() rules' notes are reworded. Lineage
-# ancestors and span bounds are now among a finding's records, so expansion also starts from them: links (95 to
-# 106), tasks, raw copies (which task fetched a record first), the alert stack anchor's per-link query use, and four
-# more context findings (discovery, credential access and lateral movement in the attack's lineage, under the new
-# anchor identities that also rename seven existing ones); their context cells follow. No finding is lost and every
-# lane of a deterministic finding is unchanged.
+# observed records the lineage names); the alert stack's and the connect() rules' notes are reworded; the context
+# items' "in this session" names the audit session or the anchor's lineage. Every candidate carries the ids it cites
+# only for its claim's statements (context_event_ids), and expansion and the context pass start from its other records,
+# so anchors, links, tasks, expansion and the context findings are those of the reference; the manifest's findings
+# and incident graph follow the claims and citations, and the extra cited records add their events and raw copies.
+# Every lane is unchanged.
 GOLDEN_STACK = {
-    "anchors": "2187f965c915311be616f1ca653b3540f29c12b82c2cc8abfb0c647b1cbb561e",
-    "audit": "2525db8dffaa5d76d13e81fde37b50803c22801f81cf71a3739a77da8315b6e6",
-    "candidates": "ccf2731bdaf4c148a8ee5e9c709129ee70d76b852dc1872b529cf28a33c2db0f",
+    "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
+    "audit": "9ff1e6bb2670cb97af97a418aac6138d53d986bd1f0f1746c846ab209ea7519f",
+    "candidates": "e879c7436280475f0cbc307139d8e9a2470db6ae8ffc9d1311b13d283814f94f",
     "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
     "event_citations": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-    "event_entities": "24d5cd01bd79882466baa38ad38c0b7939c2594200775923286396f70a8c20eb",
-    "events": "677bbef62b5c979908c354bcc5087b72445dd1ecbc4fc63743bc2e0f93f46773",
-    "expansion": "35c397358e464cca3fd771c73a5fb4d4bacbcbd304e0f62cac61ca7815ca8f4e",
-    "links": "9d584fbdfb8c603c0b5bd3ec23f9b4a5f98ddc22768a5a8eba71b10525c399c9",
-    "manifest": "11e5c52986ec6b9e8feb581f652652214a52e73ee6149aafd48825dbb7dbf7f1",
-    "raw": "26c992d21e0cc268b5d586224dfc7c23182a90b3f3ed108eb66d763cf0eb4924",
-    "rule_cells": "e560501e164abfbe3d3f1a25f1de135738c1fefb59a4987ea578c1c4a11a3075",
+    "event_entities": "cf18bb6ae3e613d6cb411550ad8fa0e61c4070c55b24c85e174dcfe2add2841e",
+    "events": "c9a4a79653fa4a88195d9f0126cc0c60a9b6eba2679d4c76a26abc514f560f80",
+    "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
+    "links": "797137953f5a643e0297b450047aeec3fa79c4cb386118f10d0ec00d337fd023",
+    "manifest": "fc470c6eb757dd972e9ef9477c3ea33b4ce22abafeb215179d76317d203a286b",
+    "raw": "80a0409b9be30979db49d2050bf90b7a4ed6dd2014360e1a21151df3756d0329",
+    "rule_cells": "84de97e40b40cbaed6ac7c42678577553b732e5c19a90a33db10501039fb34a9",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
-    "tasks": "99a9fc1a0407817016478fbbbbf211a77e9b0f68e3fbe4c54b230a3ae1e6e135",
+    "tasks": "5aea729f4d6dd201150516a14962f81c71d2035e3fa3518bc14ae685e76d0931",
 }
 GOLDEN_NORMALIZED = {
     "arkime_sessions3-x": "20b597e7169ff4713f006bd7b69608eea69a2038505dfa92fdf393709af2fe54",
