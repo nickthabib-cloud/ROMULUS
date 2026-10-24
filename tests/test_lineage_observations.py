@@ -22,6 +22,7 @@ from romulus.detect.host import ExecLineage
 from romulus.detect.observed import REPARENT_GAP, Observed, process_view
 from romulus.evidence.normalize import normalize_hits
 from romulus.evidence.typed import RawRef, TypedEvent, fv
+from romulus.hunt.publish import LineageCitationFetcher
 
 HOST = "videoserver"
 EXT = "203.0.113.65"             # stands in for an address outside the site's internal networks
@@ -87,14 +88,35 @@ def normalized(*groups):
     return events, {f"{h['_index']}/{h['_id']}": h["_source"] for h in hits}
 
 
+class _CitationSource:
+    def __init__(self, raw_sources):
+        self.hits = [
+            {"_index": key.split("/", 1)[0], "_id": key.split("/", 1)[1], "_source": source}
+            for key, source in raw_sources.items()
+        ]
+
+    def search(self, _target, body):
+        filters = body["query"]["bool"]["filter"]
+        ids = set(next(item["ids"]["values"] for item in filters if "ids" in item))
+        indices = set(next(item["terms"]["_index"] for item in filters if "terms" in item))
+        return {"hits": {"hits": [
+            hit for hit in self.hits if hit["_id"] in ids and hit["_index"] in indices
+        ]}}
+
+
 def drive(rule, events, raw_sources=None):
     """Consume, stage and finalize the way the sweep does (raw copies bound while the rule reads the batch)."""
     stage = {}
-    rule.bind_raw(raw_sources or {})
+    raw_sources = raw_sources or {}
+    rule.bind_raw(raw_sources, "host-target")
     rule.consume([e for e in events if e.family in rule.families])
     rule.bind_raw({})
     stage.update({e.id: e for e in rule.drain_staged()})
     rule.bind_loader(lambda ids: [stage[i] for i in ids if i in stage])
+    from romulus.detect.host import bind_lineage_citation_loader
+    bind_lineage_citation_loader(
+        [rule], LineageCitationFetcher(_CitationSource(raw_sources), {"host-target": object()}).load,
+    )
     return rule.finalize()
 
 

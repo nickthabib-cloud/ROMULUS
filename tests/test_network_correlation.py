@@ -488,6 +488,17 @@ class _Client:
     class settings:
         es_flavor = "elasticsearch"
 
+    def __init__(self, by_target):
+        self.by_target = by_target
+
+    def search(self, target, body):
+        filters = body["query"]["bool"]["filter"]
+        ids = set(next(item["ids"]["values"] for item in filters if "ids" in item))
+        indices = set(next(item["terms"]["_index"] for item in filters if "terms" in item))
+        hits = [hit for hit in self.by_target[target]
+                if hit["_id"] in ids and hit["_index"] in indices]
+        return {"hits": {"hits": hits}}
+
 
 def _outcome(intent, records):
     now = datetime.now(UTC)
@@ -509,7 +520,7 @@ def test_correlated_candidate_citations_are_all_retained(monkeypatch, order):
     repo.create_hunt("h1", {"targets": list(order)}, "d", "t")
     start = datetime(2024, 11, 18, 14, 0, tzinfo=UTC)
     w = Window(start=start, end=start + timedelta(hours=1))
-    s = sw.Sweep(repo, _Client(), "h1", w, {t: None for t in order})
+    s = sw.Sweep(repo, _Client(by_target), "h1", w, {t: None for t in order})
     for target in order:
         s.run_partition(target, None, [], w, est=2)
     s.finalize()
@@ -552,7 +563,7 @@ def test_sweep_lineage_never_uses_an_exec_after_the_socket(monkeypatch):
     start = datetime(2024, 11, 18, 14, 0, tzinfo=UTC)
     window = Window(start=start, end=start + timedelta(hours=1))
 
-    sweep = sw.Sweep(repo, _Client(), "h1", window, {"romulus-host-logs": None})
+    sweep = sw.Sweep(repo, _Client({"romulus-host-logs": records}), "h1", window, {"romulus-host-logs": None})
     sweep.run_partition("romulus-host-logs", None, [], window, est=len(records))
     sweep.finalize()
 

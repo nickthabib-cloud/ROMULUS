@@ -1206,7 +1206,7 @@ class AccountOrGroupChange(Playbook):
         for e in sorted(fresh, key=lambda x: (x.ts, x.family != "process_exec", x.id)):
             self._seen.add(e.id)
             if e.family == "process_exec":
-                self.lineage.observe(e, self.raw_of(e))
+                self.lineage.observe(e, self.raw_of(e), self.raw_target())
                 if self.program_prefilter and not self._process_relevant(e):
                     self.evaluated += 1
                     self.missing_required += int(argv_incomplete(e))

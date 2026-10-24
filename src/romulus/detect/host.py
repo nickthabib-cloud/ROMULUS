@@ -22,9 +22,11 @@ from romulus.detect.observed import (
     Observed,
     ProcessView,
     citation,
+    citation_pointer,
     continues,
     observation,
     observed_view_id,
+    pointer_body,
     process_view,
     same_state,
     uncite,
@@ -1575,20 +1577,23 @@ class ExecLineage:
 
     With `observing`, it also holds what processes' own non-exec audit records show (`romulus.detect.observed`):
     per (host, pid), one entry per change of image, parent, session or boot (`observed`, its own store), and the
-    first record of each entry for citation (`citations`, its own store, read only when a lineage names it).
+    first record of each entry as a compact verified-source pointer (`citations`, its own store, read only when a
+    lineage names it).
 
-    With `citing`, it also keeps every exec record for citation (`exec_records`: the typed event and its raw copies,
-    compressed, one disk-backed row per exec, read only when a lineage names the exec), so a claim that names an exec
-    ancestor cites it. The store yields to every detection store in the hunt's state budget: no floor, at most a
+    With `citing`, it also keeps a compact verified-source pointer for every exec record (`exec_records`, one
+    disk-backed row per exec, read only when a lineage names the exec), so a claim that names an exec ancestor cites
+    it after the hunt layer re-reads and verifies the source record. The store yields to every detection store in the
+    hunt's state budget: no floor, at most a
     quarter of the hunt's disk total, no new record once half the shared headroom is held, and its oldest records
     dropped when a detection store needs the room. A record it refuses is named as not kept for citation, in a coverage
     note rather than a limit: nothing went unevaluated, and the lineage itself is read from the exec records above."""
 
     # Records held for citation in memory; the rest wait on disk (they are read only when a finding cites them).
     CITATIONS_HOT = 4096
-    # Disk for the exec records kept for citation: about 1 KB each compressed with their raw copies, so some four million
-    # execs. Past it a named exec ancestor is said to be not kept for citation; lineage itself is unaffected.
-    EXEC_RECORDS_DISK = 4 * 2**30
+    # At roughly 150 compressed bytes per pointer, 1 GiB covers about seven million cited lineage records. Observed
+    # pointers retain their detection-store floor; exec pointers keep their established yielding/eviction behavior.
+    LINEAGE_CITATION_DISK = 2**30
+    EXEC_RECORDS_DISK = LINEAGE_CITATION_DISK
 
     def __init__(self, owner=None, capacity: int = HOT_COUNT, members: list | None = None, observing: bool = False,
                  citing: bool = False):
@@ -1604,11 +1609,14 @@ class ExecLineage:
         self.incomplete = False                 # any process refused so far in the hunt: lineage may have gaps
         self.observing = observing
         self.observed = KeyedStore(owner, "proc_observed", capacity) if observing else None
-        self.citations = KeyedStore(owner, "proc_observed_records", self.CITATIONS_HOT) if observing else None
+        self.citations = (KeyedStore(owner, "proc_observed_records", self.CITATIONS_HOT,
+                                     disk_budget=self.LINEAGE_CITATION_DISK)
+                          if observing else None)
         if self.observed is not None:
             self.observed.weight = self.store.weight        # it serves the same rules as the exec records
         # any observation refused so far in the hunt: a record that would change a lineage may be missing
         self.observed_incomplete = False
+        self._citation_loader = None
         self.exec_records = (KeyedStore(owner, "exec_records", self.CITATIONS_HOT, disk_budget=self.EXEC_RECORDS_DISK)
                              if citing else None)
         if self.exec_records is not None:
@@ -1648,9 +1656,14 @@ class ExecLineage:
                           ancestor.boot, DAEMON if _daemon(event) else 0, ancestor.serial, ancestor.order_domain,
                           session if isinstance(session, int) and not isinstance(session, bool) else None)
 
-    def observe(self, event: TypedEvent, raw: dict[str, dict] | None = None) -> None:
-        """Hold an exec record (once, however many rules hand it over); with `citing`, keep it and its raw copies
-        (`raw`, the partition's) for citation."""
+    def observe(
+        self,
+        event: TypedEvent,
+        raw: dict[str, dict] | None = None,
+        source_target: str | None = None,
+    ) -> None:
+        """Hold an exec record (once, however many rules hand it over); with `citing`, keep a pointer to its raw
+        records (`raw`, the partition's) for verified re-fetch when cited."""
         pid = event.get("process.pid")
         seen = (event.id, event.ts)             # a record handed over again (by another rule or a re-read batch)
         if not isinstance(pid, int) or seen in self._observed:
@@ -1669,12 +1682,20 @@ class ExecLineage:
         else:
             insort(entries, self.record(event), key=_record_order)   # in place: the store holds this list
         if self.exec_records is not None:
-            self._cite_exec(event, raw or {})
+            self._cite_exec(event, raw or {}, source_target)
 
-    def _cite_exec(self, event: TypedEvent, raw: dict[str, dict]) -> None:
-        """Keep an exec record for citation, with the raw copies of its records the partition carries."""
-        body = {"event": event.model_dump_json(), "raw": {r.key: raw[r.key] for r in event.raw if r.key in raw}}
-        if self.exec_records.put(event.id, zlib.compress(json.dumps(body, sort_keys=True).encode(), 6)):
+    def _cite_exec(
+        self,
+        event: TypedEvent,
+        raw: dict[str, dict],
+        source_target: str | None,
+    ) -> None:
+        """Keep a compact verified-source pointer for an exec record's raw records."""
+        blob = citation_pointer(event, event.raw, raw, "exec", source_target)
+        if blob is None:
+            body = {"event": event.model_dump_json(), "raw": {}}
+            blob = zlib.compress(json.dumps(body, sort_keys=True).encode(), 6)
+        if self.exec_records.put(event.id, blob):
             return
         when = event.ts.isoformat()
         for member in self.members:
@@ -1699,12 +1720,17 @@ class ExecLineage:
         return found if found is not None else self.store.peek((host, pid), None) or []
 
     # ---- observations: what a process's own non-exec audit records show ----
-    def observe_process(self, event: TypedEvent, raw: dict[str, dict] | None = None) -> None:
+    def observe_process(
+        self,
+        event: TypedEvent,
+        raw: dict[str, dict] | None = None,
+        source_target: str | None = None,
+    ) -> None:
         """Hold the state (image, parent, session, boot) a process's own audit SYSCALL record shows, once per change
         of state: a record that repeats the state of the entry before it (an observation, or the exec itself) only
         moves that observation's latest time. A new entry that can begin a process keeps its record for citation:
-        the SYSCALL record's raw copy (from `raw`) and the boot id, from which the process_observed view of the record
-        is rebuilt when a lineage cites it; or, without a raw copy, the typed event itself."""
+        a pointer to the SYSCALL record (from `raw`) and the boot id, from which the process_observed view is rebuilt
+        after verified source re-fetch when a lineage cites it; or, without a raw copy, the typed event itself."""
         if self.observed is None:
             return
         found = observation(event)
@@ -1716,7 +1742,12 @@ class ExecLineage:
         source = (raw or {}).get(ref.key) if ref is not None else None
         if source is not None:
             entry = entry._replace(event_id=observed_view_id(ref))
-        self.hold_observed(event.host, pid, entry, lambda: self._cite(entry, citation(event, ref, source)))
+        self.hold_observed(
+            event.host,
+            pid,
+            entry,
+            lambda: self._cite(entry, citation(event, ref, source, source_target)),
+        )
 
     def hold_observed(self, host: str | None, pid: int, entry: Observed, cite) -> None:
         """Hold one observed state of (`host`, `pid`) unless the entry before it shows the same state; `cite()` keeps
@@ -1780,6 +1811,10 @@ class ExecLineage:
                                                  f"and lowers no lane")
         return False
 
+    def bind_citation_loader(self, load) -> None:
+        """Bind the hunt-layer function that re-reads and verifies citation pointers."""
+        self._citation_loader = load
+
     def view(self, host: str | None, pid: int, ts: float, serial: int | None, boot: str | None, *,
              inclusive: bool) -> ProcessView:
         """The process holding `pid` at (`ts`, audit `serial`) from its execs and observations
@@ -1795,20 +1830,30 @@ class ExecLineage:
     def cited(self, event_ids: list[str]) -> tuple[dict[str, TypedEvent], dict[str, dict]]:
         """The observed and exec records held for citation, by event id, and their raw copies (an id not held is
         absent)."""
-        events, raw = {}, {}
+        events, raw, pointers = {}, {}, {}
         for event_id in event_ids:
             blob = None if self.citations is None else self.citations.peek(event_id)
             if blob is not None:
-                event, copies = uncite(blob)
-                if event is not None:
-                    events[event_id] = event
-                    raw.update(copies)
+                if pointer_body(blob) is not None:
+                    pointers[event_id] = blob
+                else:
+                    event, copies = uncite(blob)
+                    if event is not None:
+                        events[event_id] = event
+                        raw.update(copies)
                 continue
             blob = None if self.exec_records is None else self.exec_records.peek(event_id)
             if blob is not None:
-                body = json.loads(zlib.decompress(blob))
-                events[event_id] = TypedEvent.model_validate_json(body["event"])
-                raw.update(body["raw"])
+                if pointer_body(blob) is not None:
+                    pointers[event_id] = blob
+                else:
+                    body = json.loads(zlib.decompress(blob))
+                    events[event_id] = TypedEvent.model_validate_json(body["event"])
+                    raw.update(body["raw"])
+        if pointers and self._citation_loader is not None:
+            loaded, copies = self._citation_loader(pointers)
+            events.update(loaded)
+            raw.update(copies)
         return events, raw
 
     def latest(self, host: str | None, pid: int, ts: float, *, strict: bool = False, where=None,
@@ -1926,9 +1971,14 @@ class ProcessLineage:
         return Ancestor(event.ts.timestamp(), ppid if isinstance(ppid, int) else None, name,
                         event.get("process.user"), marker, event.id, boot_of(event), serial, order_domain)
 
-    def observe(self, event: TypedEvent, raw: dict[str, dict] | None = None) -> None:
+    def observe(
+        self,
+        event: TypedEvent,
+        raw: dict[str, dict] | None = None,
+        source_target: str | None = None,
+    ) -> None:
         if event.family == "process_exec":
-            self.execs.observe(event, raw)
+            self.execs.observe(event, raw, source_target)
 
     def cited_phrase(self, lineage: Lineage) -> tuple[str, list[TypedEvent], dict[str, dict]]:
         """`lineage_phrase` with the exec record of the ancestor it names, and that record's raw copies, to cite. A
@@ -2025,6 +2075,17 @@ def share_lineage(pack: list) -> None:
     shared = ExecLineage(members[0], HOT_COUNT, members, observing=observing, citing=citing)
     for holder, name in sites:
         setattr(holder, name, shared)
+
+
+def bind_lineage_citation_loader(pack: list, load) -> None:
+    """Give every distinct lineage store the hunt-layer verified pointer loader."""
+    seen: set[int] = set()
+    for playbook in pack:
+        for holder in (playbook, getattr(playbook, "lineage", None), getattr(playbook, "pids", None)):
+            for value in getattr(holder, "__dict__", {}).values():
+                if isinstance(value, ExecLineage) and id(value) not in seen:
+                    value.bind_citation_loader(load)
+                    seen.add(id(value))
 
 
 def lineage_phrase(lineage: Lineage) -> str:

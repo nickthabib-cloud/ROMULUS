@@ -29,6 +29,7 @@ it) keeps its record for citation: a verdict cites only the earliest record of e
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import zlib
 from typing import NamedTuple
@@ -116,17 +117,50 @@ def same_state(a, b) -> bool:
             and a.boot == b.boot)
 
 
-def citation(event: TypedEvent, ref: RawRef | None, source: dict | None) -> bytes:
-    """An observation's record as its lineage keeps it for citation. With the SYSCALL record's raw copy, that copy and
-    the event's boot id (the typed event is rebuilt from them: `uncite`); without one (a record that did not come
-    from a source read), the typed event itself."""
+def citation_pointer(
+    event: TypedEvent,
+    refs: list[RawRef],
+    sources: dict[str, dict],
+    kind: str,
+    source_target: str | None = None,
+) -> bytes | None:
+    """A compact pointer to raw records that can rebuild one cited lineage view."""
+    if not refs or any(ref.key not in sources for ref in refs):
+        return None
+    raw = [sources[ref.key] for ref in refs]
+    encoded = json.dumps(raw, sort_keys=True, separators=(",", ":"), default=str).encode()
+    boot = event.fields.get("host.boot.id")
+    body = {
+        "v": 1,
+        "kind": kind,
+        "target": source_target or refs[0].target,
+        "records": [[ref.target, ref.native_id] for ref in refs],
+        "raw_digest": hashlib.sha256(encoded).hexdigest(),
+        "boot": [boot.value, boot.origin] if boot is not None else None,
+    }
+    return zlib.compress(json.dumps(body, sort_keys=True, separators=(",", ":")).encode(), 6)
+
+
+def citation(
+    event: TypedEvent,
+    ref: RawRef | None,
+    source: dict | None,
+    source_target: str | None = None,
+) -> bytes:
+    """An observation's citation. A source-backed record becomes a compact pointer plus digest and boot metadata;
+    a record constructed without source evidence retains its typed event for compatibility with isolated callers."""
     if ref is not None and source is not None:
-        boot = event.fields.get("host.boot.id")
-        body = {"raw": [ref.target, ref.native_id, source],
-                "boot": [boot.value, boot.origin] if boot is not None else None}
-    else:
-        body = {"event": event.model_dump_json()}
+        pointer = citation_pointer(event, [ref], {ref.key: source}, "observed", source_target)
+        if pointer is not None:
+            return pointer
+    body = {"event": event.model_dump_json()}
     return zlib.compress(json.dumps(body, sort_keys=True).encode(), 6)
+
+
+def pointer_body(blob: bytes) -> dict | None:
+    """Decode a lineage citation pointer; legacy inline citation blobs are not pointers."""
+    body = json.loads(zlib.decompress(blob))
+    return body if body.get("v") == 1 and body.get("kind") in {"observed", "exec"} else None
 
 
 def uncite(blob: bytes) -> tuple[TypedEvent | None, dict[str, dict]]:

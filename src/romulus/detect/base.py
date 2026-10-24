@@ -253,11 +253,16 @@ class Playbook:
         """Give a staged playbook the function that loads staged events back by id."""
         self.load = load
 
-    def bind_raw(self, raw_sources: dict[str, dict]) -> None:
+    def bind_raw(self, raw_sources: dict[str, dict], source_target: str | None = None) -> None:
         """The raw copies of the partition being read (target/native id -> source), bound by the sweep while the rule
         consumes it, for a rule that keeps records it may cite in its own disk-backed store. Detection reads typed
         fields only: these are kept for citation, never matched against."""
         self._raw_sources = raw_sources
+        self._raw_source_target = source_target
+
+    def raw_target(self) -> str | None:
+        """The configured source target that supplied the currently bound raw records."""
+        return getattr(self, "_raw_source_target", None)
 
     def raw_of(self, event: TypedEvent) -> dict[str, dict]:
         """The raw copies of an event's records in the partition being read (empty outside a sweep)."""

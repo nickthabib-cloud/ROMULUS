@@ -707,7 +707,7 @@ class PersistencePathChange(Playbook):
 
     def _exec(self, event: TypedEvent) -> None:
         """Process lineage only: the exec record is held (once) in the exec store."""
-        self.execs.observe(event)
+        self.execs.observe(event, self.raw_of(event), self.raw_target())
 
     def _change(self, event: TypedEvent) -> None:
         path, uid = event.get("file.path"), _str(event.get("process.uid"))

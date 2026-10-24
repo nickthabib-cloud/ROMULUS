@@ -1971,6 +1971,18 @@ def observed_record(hit: dict, boot: list | tuple | None = None) -> TypedEvent |
     return event
 
 
+def exec_record(hits: list[dict], boot: list | tuple | None = None) -> TypedEvent | None:
+    """The one process_exec view rebuilt from its raw audit records, with its sweep-assigned boot id."""
+    events, _skips, errors = normalize_hits(hits)
+    execs = [event for event in events if event.family == "process_exec"]
+    if errors or len(execs) != 1:
+        return None
+    event = execs[0]
+    if boot is not None and not event.has("host.boot.id"):
+        event.fields["host.boot.id"] = fv(boot[0], boot[1])
+    return event
+
+
 def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                    audit_parse: Callable[[dict, str], AuditRecord] | None = None,
                    ) -> tuple[list[TypedEvent], dict[str, int], list[tuple[str, str]]]:

@@ -393,16 +393,19 @@ def _values(source: dict, field: str) -> list:
     return value if isinstance(value, list) else [value]
 
 
-def _matches(clause: dict, source: dict, time_field: str) -> bool:
+def _matches(clause: dict, source: dict, time_field: str, document: dict | None = None) -> bool:
     (kind, spec), = clause.items()
     if kind == "bool":
-        if not all(_matches(c, source, time_field) for c in spec.get("filter", []) + spec.get("must", [])):
+        if not all(_matches(c, source, time_field, document)
+                   for c in spec.get("filter", []) + spec.get("must", [])):
             return False
-        if any(_matches(c, source, time_field) for c in spec.get("must_not", [])):
+        if any(_matches(c, source, time_field, document) for c in spec.get("must_not", [])):
             return False
         should = spec.get("should", [])
-        return not should or sum(_matches(c, source, time_field) for c in should) >= spec.get(
+        return not should or sum(_matches(c, source, time_field, document) for c in should) >= spec.get(
             "minimum_should_match", 1)
+    if kind == "ids":
+        return document is not None and str(document.get("_id")) in {str(value) for value in spec["values"]}
     if kind == "range":
         (field, bounds), = spec.items()
         value = _ns(_path(source, field))
@@ -413,10 +416,14 @@ def _matches(clause: dict, source: dict, time_field: str) -> bool:
         return not ("lt" in bounds and value >= _ns(bounds["lt"]))
     if kind == "term":
         (field, wanted), = spec.items()
+        if field == "_index":
+            return document is not None and str(document.get("_index")) == str(wanted)
         return any(str(v) == str(wanted) for v in _values(source, field))
     if kind == "terms":
         (field, wanted), = spec.items()
         wanted = {str(w) for w in wanted}
+        if field == "_index":
+            return document is not None and str(document.get("_index")) in wanted
         return any(str(v) in wanted for v in _values(source, field))
     if kind == "exists":
         return bool(_values(source, spec["field"]))
@@ -478,7 +485,7 @@ class MiniES:
                     low = max(low, bisect.bisect_left(rows, (_ns(bounds["gte"]), -1)))
                 if "lt" in bounds:
                     high = min(high, bisect.bisect_left(rows, (_ns(bounds["lt"]), -1)))
-        return [row for row in rows[low:high] if _matches(query, row[2]["_source"], field)]
+        return [row for row in rows[low:high] if _matches(query, row[2]["_source"], field, row[2])]
 
     def _search(self, target: str, body: dict) -> dict:
         rows = self._matching(target, body.get("query", {"bool": {}}))
@@ -504,6 +511,11 @@ class MiniES:
                 doc = row[2]
                 out["hits"]["hits"].append({"_index": doc["_index"], "_id": doc["_id"], "_source": doc["_source"],
                                             "sort": [_ns_text(ns), n]})
+        elif size:
+            out["hits"]["hits"] = [
+                {"_index": row[2]["_index"], "_id": row[2]["_id"], "_source": row[2]["_source"]}
+                for row in rows[:size]
+            ]
         return out
 
     @staticmethod
