@@ -122,14 +122,15 @@ def test_external_ssh_login_groups_spill_and_read_back_exactly(tmp_path, monkeyp
              for p in range(30)]
     _rule, out = same_small_and_unbounded(host.SshLoginFromExternal, parts, tmp_path, monkeypatch, "groups")
     assert len(out) == 39 and all("At least 30 successful SSH login(s)" in m.claim for m in out)
-    assert all(len(m.events) == 20 for m in out)
+    assert all(len(m.events) == 21 for m in out)        # the first twenty, and the one ending the span
 
 
 def test_external_ssh_logins_hold_twenty_citations_and_exact_counts(tmp_path, monkeypatch):
     logins = [login(T0 + timedelta(minutes=i)) for i in range(500)]
     rule, [m] = staged_run(host.SshLoginFromExternal, [logins[:250], logins[250:]], tmp_path, hot=1,
                            monkeypatch=monkeypatch)
-    assert len(m.events) == 20 and "At least 500 successful SSH login(s)" in m.claim
+    assert len(m.events) == 21 and "At least 500 successful SSH login(s)" in m.claim
+    assert "21 of the 500 records are cited, including the first and the last." in m.claim
     assert (T0 + timedelta(minutes=499)).isoformat() in m.claim
     assert all(item[1] is None for _key, state in rule.groups.items() for item in state[3].items)
 

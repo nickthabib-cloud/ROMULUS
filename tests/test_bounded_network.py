@@ -78,8 +78,10 @@ def test_grouped_rules_stage_their_examples_and_hold_only_ids():
     assert all(isinstance(i, str) for _key, state in rule.groups.items() for i in state.held)
     rule.bind_loader(lambda ids: [e for e in staged if e.id in ids])
     [m] = rule.finalize()
-    assert m.proposed_lane == "lead" and len(m.events) == network.EXAMPLE_LIMIT
-    assert "20 of the 39 flow records are cited, including the first and the last." in m.claim
+    # the first examples (what the finding is about) and the span's last record, cited for the span
+    assert m.proposed_lane == "lead" and len(m.events) == network.EXAMPLE_LIMIT + 1
+    assert m.context_ids == {staged[-1].id}
+    assert "21 of the 39 flow records are cited, including the first and the last." in m.claim
 
 
 def scenario_slow_probes():
@@ -233,5 +235,5 @@ def test_web_scan_counts_every_url_group_without_a_shared_budget(monkeypatch, tm
     rule = small(monkeypatch, network.WebScanBurst, tmp_path)
     out = run_batches(rule, [events[:250], events[250:]])
     assert [m.claim.split("across ")[1] for m in out] == [
-        "250+ distinct URLs. 20 of the 250 requests are cited, including the first and the last."] * 2
+        "250+ distinct URLs. 21 of the 250 requests are cited, including the first and the last."] * 2
     assert rule.limit_reasons() == []

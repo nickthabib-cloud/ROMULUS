@@ -456,8 +456,8 @@ def test_many_changes_cite_ten_with_exact_totals():
     records = [change("/etc/cron.d/job", ts=T0 + timedelta(seconds=i), change_="content") for i in range(14)]
     _pb, out = run_persist(records)
     m = out[0]
-    assert len(m.events) == 10 and "14 kernel file-change record(s)" in m.claim
-    assert "10 of the 14 records are cited, including the first and the last." in m.claim and "(14 records)" in m.claim
+    assert len(m.events) == 11 and "14 kernel file-change record(s)" in m.claim
+    assert "11 of the 14 records are cited, including the first and the last." in m.claim and "(14 records)" in m.claim
     assert max(e.ts for e in m.events) == T0 + timedelta(seconds=13)
 
 
