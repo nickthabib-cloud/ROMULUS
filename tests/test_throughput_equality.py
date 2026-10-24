@@ -94,19 +94,24 @@ from tests import throughput_fixture as tf
 # findings that give per-sensor totals say how many of each sensor's records are cited, and the connect() link with
 # one call says its one record is cited (candidates claims, and the manifest's findings that carry them). Candidate
 # ids, citations, lanes and everything else are unchanged.
+# DNS client and server come from the DNS port, a process-network join cites a record of every sensor it names, a
+# grouped write lead cites the files that bound its span, and a port scan says how many of its ports are cited: those
+# rules carry new versions (rule_cells, candidates and the manifest's findings by rule_version). In the fixture only
+# the port scan's claim changes (it gains "K of the N ports are in cited records"); its DNS records, joins and writes
+# give the same roles and citations, so every other table is the reference's.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
     "audit": "9ff1e6bb2670cb97af97a418aac6138d53d986bd1f0f1746c846ab209ea7519f",
-    "candidates": "85aa8b8e1a1c218be7c2cd434bbb0097d5aab3c380ce138ea63cb55de9271fcb",
+    "candidates": "6063264ca908c73e4710d65d4799e5460e579f9e9f0cd55391c2b3854c1b28c8",
     "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
     "event_citations": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     "event_entities": "8224880134ac06339cbde46274c20ea7d2fa4a41e30f1426a576e0afd4270b58",
     "events": "46ff37261993417f3e0fa61de9c3aa24977b2e091ad29d7cf4d166e8261a1017",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "797137953f5a643e0297b450047aeec3fa79c4cb386118f10d0ec00d337fd023",
-    "manifest": "c41454498ba57b14e4afa6f2b9502602141ee48132f83855bf236d934e9e6b06",
+    "manifest": "064602966b7e23c75962d3d99448ef9a6c56c25fba2cdb24565c552b0a719835",
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
-    "rule_cells": "84de97e40b40cbaed6ac7c42678577553b732e5c19a90a33db10501039fb34a9",
+    "rule_cells": "32bc0128caf7b71204712daed548ec6113a7acca49bb6ca15cf20b975d7b9ee2",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
     "tasks": "cffcaf6466928eb0e6a228bbab1a902546d2fba2301ae8383eb03b133df2a4fc",
 }
