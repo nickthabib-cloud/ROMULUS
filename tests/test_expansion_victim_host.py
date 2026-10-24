@@ -11,7 +11,7 @@ from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkWindow
 from romulus.hunt.pivot import PivotEventBatch, PivotExecutor
 from romulus.sources.models import Completeness, SearchOutcome, Window
 from romulus.sources.profile import contract_from_types
-from romulus.store.db import make_engine, migrate
+from romulus.store.db import digest, make_engine, migrate
 from romulus.store.repo import Repo
 
 T0 = datetime(2024, 11, 18, 14, 0, tzinfo=UTC)
@@ -245,6 +245,12 @@ def test_linux_host_resolution_preserves_its_full_typed_host_name():
     assert executor.resolve_host_ip(
         "F-net", "10.0.0.2", WINDOW.start, WINDOW.end,
     ) == ("linux01.example.test", None)
+    [task] = repo.host_resolution_tasks("h1")
+    legacy_fingerprint = digest({
+        "hunt": "h1", "source_query_scope": "expansion", "resolve_host_ip": "10.0.0.2",
+        "start": WINDOW.start.isoformat(), "end": WINDOW.end.isoformat(), "targets": ["host-x"],
+    })
+    assert task["id"] == "t-" + legacy_fingerprint[:20]
 
 
 def test_an_ambiguous_endpoint_is_unsupported_with_the_candidates():

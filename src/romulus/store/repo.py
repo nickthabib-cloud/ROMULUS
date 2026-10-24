@@ -1281,17 +1281,23 @@ class Repo:
 
     def citation_events(self, hunt_id: str, ids: list[str]) -> list[dict]:
         """Typed events with the raw provenance retained specifically for this hunt."""
-        rows = {row["id"]: row for row in self.events_by_ids(ids)}
         with self.engine.connect() as c:
-            for overlay in c.execute(select(t.event_citation).where(
+            query = select(
+                *t.typed_event.c,
+                t.event_citation.c.event.label("citation_event"),
+                t.event_citation.c.raw_ids.label("citation_raw_ids"),
+            ).select_from(t.typed_event.outerjoin(t.event_citation, and_(
+                t.event_citation.c.event_id == t.typed_event.c.id,
                 t.event_citation.c.hunt_id == hunt_id,
-                t.event_citation.c.event_id.in_(ids),
-            )).mappings():
-                row = rows.get(overlay["event_id"])
-                if row is not None:
-                    rows[overlay["event_id"]] = {
-                        **row, "event": overlay["event"], "raw_ids": overlay["raw_ids"],
-                    }
+            ))).where(t.typed_event.c.id.in_(ids))
+            rows = {}
+            for result in c.execute(query).mappings():
+                row = dict(result)
+                citation_event = row.pop("citation_event")
+                citation_raw_ids = row.pop("citation_raw_ids")
+                if citation_event is not None:
+                    row.update(event=citation_event, raw_ids=citation_raw_ids)
+                rows[row["id"]] = row
         return list(rows.values())
 
     def raw_records(self, ids: list[str]) -> list[dict]:

@@ -1,5 +1,7 @@
 from datetime import UTC, datetime
+from threading import Thread
 
+from sqlalchemy import event as sqlalchemy_event
 from sqlalchemy import func, select
 
 from romulus.agent.toolbox import Toolbox
@@ -369,3 +371,50 @@ def test_transfer_to_a_differing_overlay_preserves_an_identical_hunts_stable_his
         repo, {"hunt_id": "h3", "event_ids": [event.id]},
     )] == ["copy-1"]
     assert _citation_count(repo) == 1
+
+
+def test_citation_event_read_is_one_snapshot_during_owner_transfer(tmp_path):
+    repo = Repo(make_engine(tmp_path / "citation-snapshot.db"))
+    migrate(repo.engine)
+    repo.create_hunt("h1", {}, "d1", "test")
+    repo.create_hunt("h2", {}, "d2", "test")
+    owner_ref = RawRef(target="windows-a", native_id="copy-1", digest="digest-1")
+    overlay_ref = RawRef(target="windows-b", native_id="copy-2", digest="digest-2")
+    owner = TypedEvent(
+        id="stable-event", family="process_exec", ts=datetime(2026, 1, 1, tzinfo=UTC), host="ws01",
+        fields={}, raw=[owner_ref], normalizer="windows-ecs@1",
+    )
+    repo.save_evidence("h1", [owner], {owner_ref.key: {"copy": 1}}, None)
+    repo.save_evidence(
+        "h2", [owner.model_copy(update={"raw": [overlay_ref]})],
+        {overlay_ref.key: {"copy": 2}}, None,
+    )
+    transferred = False
+    transfer_error: list[BaseException] = []
+
+    def transfer_between_reads(_connection, _cursor, statement, _parameters, _context, _many):
+        nonlocal transferred
+        if transferred or not statement.lstrip().upper().startswith("SELECT") or "event_citation" not in statement:
+            return
+        transferred = True
+
+        def transfer():
+            try:
+                repo.delete_hunt("h1", actor="test")
+            except BaseException as exc:  # pragma: no cover - asserted below with the original exception
+                transfer_error.append(exc)
+
+        worker = Thread(target=transfer)
+        worker.start()
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+
+    sqlalchemy_event.listen(repo.engine, "before_cursor_execute", transfer_between_reads)
+    try:
+        [scoped] = repo.citation_events("h2", [owner.id])
+    finally:
+        sqlalchemy_event.remove(repo.engine, "before_cursor_execute", transfer_between_reads)
+
+    assert transfer_error == []
+    assert transferred is True
+    assert [ref["native_id"] for ref in scoped["event"]["raw"]] == ["copy-2"]

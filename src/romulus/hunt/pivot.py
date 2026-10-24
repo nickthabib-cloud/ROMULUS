@@ -808,15 +808,19 @@ class PivotExecutor:
                    and (contract.spec("host.name") is not None and contract.spec("host.name").aggregatable)]
         if not targets:
             return None, f"victim host unknown for {ip}: no host source has a searchable host.ip field"
-        fingerprint = digest({
+        fingerprint_input = {
             "hunt": self.hunt_id,
             "source_query_scope": getattr(self, "source_query_scope", None) or "expansion",
             "resolve_host_ip": ip,
-            "host_identity": "typed-v2",
             "start": start.isoformat(),
             "end": end.isoformat(),
             "targets": [target for target, _ in targets],
-        })
+        }
+        # Only Windows resolution semantics changed. Preserve Linux task identities byte-for-byte so existing
+        # durable results and deterministic Linux report goldens remain valid.
+        if any(contract.os_family == "windows" for _target, contract in targets):
+            fingerprint_input["host_identity"] = "typed-v2"
+        fingerprint = digest(fingerprint_input)
         task_id = "t-" + fingerprint[:20]
         prior = self.repo.task(task_id)
         if prior and prior["state"] == "evaluated" and isinstance(prior.get("outcome"), dict):
