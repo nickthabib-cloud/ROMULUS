@@ -22,6 +22,7 @@ from romulus.agent.tools import EntityTimelineArgs, EntityTimelineRequest
 from romulus.config import Settings
 from romulus.hunt import packets as hp
 from romulus.hunt import run as hunt_run
+from romulus.hunt.baseline_stage import resolve_window_exec_pairs
 from romulus.hunt.expansion import ExpansionEngine
 from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkWindow
 from romulus.hunt.pivot import PivotExecutor
@@ -232,6 +233,8 @@ def _sweep(fault: str) -> tuple[Repo, Sweep]:
     sweep = Sweep(repo, _client(fault), "h1", WINDOW, _contracts())
     sweep.run_target(HOST_TARGET)
     sweep.finalize()
+    # The baseline stage settles the staged exec-pair cells once history is filled; none is filled here.
+    resolve_window_exec_pairs(repo, "h1", WINDOW)
     return repo, sweep
 
 

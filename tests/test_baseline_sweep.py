@@ -586,3 +586,48 @@ def test_truncated_exec_capable_profile_is_a_holder_of_every_host():
 
     assert repo.baseline_parent_targets("h1", "web99") == ["observed", "truncated"]
 
+
+
+def test_a_complete_hour_without_execs_joins_the_carry_ledger(monkeypatch, tmp_path):
+    quiet_hour = Window(start=START, end=END)
+    child_hour = Window(start=END, end=END + timedelta(hours=1))
+    login = TypedEvent(
+        id="login", family="auth", ts=START + timedelta(minutes=10), host="web01", outcome=Outcome.success,
+        fields={"user.name": fv("bob", "fixture:user.name")}, raw=[], normalizer="fixture@1",
+    )
+    child = _exec("child", END + timedelta(minutes=5), ppid=10, executable="/bin/curl")
+    by_id = {event.id: event for event in (login, child)}
+
+    def execute(_client, intent, _contract):
+        records = [{"_index": "fixture", "_id": event.id, "_source": {}} for event in by_id.values()
+                   if intent.window.start <= event.ts < intent.window.end]
+        now = datetime.now(UTC)
+        return SearchOutcome(target=intent.target, fingerprint="fixture", started_at=now, ended_at=now,
+                             completeness=Completeness.complete, total=len(records), total_relation="eq",
+                             returned=len(records), records=records)
+
+    monkeypatch.setattr(sweep_module, "execute", execute)
+    monkeypatch.setattr(sweep_module, "normalize_hits",
+                        lambda fetched, _boots=None: ([by_id[row["_id"]] for row in fetched], {}, []))
+    monkeypatch.setattr(sweep_module, "plan_partitions",
+                        lambda *_args, **_kwargs: [(quiet_hour, 1), (child_hour, 1)])
+    repo = _repo()
+    window = Window(start=quiet_hour.start, end=child_hour.end)
+    sweep = sweep_module.Sweep(repo, FakeClient(), "h1", window, {"x": _contract()}, stage_dir=tmp_path)
+    sweep.pack = [ExecPairBaseline()]
+    sweep.run_target("x")
+    sweep.close_stage()
+    parent = _exec("parent", START - timedelta(minutes=30), pid=10, ppid=1, executable="/usr/sbin/sshd")
+    LookbackWriter(
+        repo, FakeHistory([parent]), site="site", specs=[SPEC_BY_ID["bl.exec_pair"]], normalizer="fixture@1",
+        budget=LookbackBudget(queries=10, records=10, seconds=10), parent_carry=CarryInStore(repo, "h1"),
+        now=lambda: START,
+    ).fill(hunt_id="h1", targets=["x"], start=START - timedelta(hours=1), end=START)
+
+    resolve_window_exec_pairs(repo, "h1", window)
+
+    assert repo.baseline_parent_observed_ranges("h1", "x") == [(START - timedelta(hours=1), child_hour.end)]
+    observation = next(repo.baseline_observations("h1"))
+    assert observation["key"] == {"child_executable": "/bin/curl", "parent_executable": "/usr/sbin/sshd"}
+    cells = {row["partition"]: row["state"] for row in repo.rule_cells("h1")}
+    assert cells == {quiet_hour.key(): "not_applicable_no_events", child_hour.key(): "evaluated_complete"}

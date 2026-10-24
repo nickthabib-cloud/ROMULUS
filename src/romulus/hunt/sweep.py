@@ -282,6 +282,10 @@ class Sweep:
                     pb.note_limit("stage", f"the event stage could not take this partition's citations "
                                            f"({self.budget.broken}); findings that cite them are not computed")
             return
+        self._charge_stage(stage)
+
+    def _charge_stage(self, stage: EventStage) -> None:
+        """Charge the stage file's growth beyond the most it has held to the event stage's account."""
         size = stage.db.execute("PRAGMA page_count").fetchone()[0] * stage.db.execute("PRAGMA page_size").fetchone()[0]
         if size > self._stage_size:
             self.budget.charge(self._stage_account, size - self._stage_size)
@@ -867,8 +871,10 @@ class Sweep:
                     result = pb.finish_cell()
                     reasons.extend(result.reasons)
                     evaluated = pb.evaluated - before_eval
-                    if not ordered:
-                        state = ("evaluated_partial" if rule_partial or reasons
+                    # A complete hour without execs is staged like any other, so the carry's ledger counts it as
+                    # observed; an inapplicable or incomplete one is final here and never joins that ledger.
+                    if not ordered and (not target_applicable or rule_partial or reasons):
+                        state = ("evaluated_partial" if target_applicable and (rule_partial or reasons)
                                  else "not_applicable_no_events")
                         self.repo.save_baseline_window_cell(self.hunt_id, {
                             "rule_id": pb.id, "version": pb.spec.version, "target": target,
@@ -877,12 +883,15 @@ class Sweep:
                         }, ())
                         continue
                     try:
-                        self._event_stage().record_baseline_cell(
+                        stage = self._event_stage()
+                        stage.record_baseline_cell(
                             target=target, partition=pkey, start=w.start, end=w.end,
                             target_applicable=target_applicable, source_complete=not rule_partial,
                             reasons=reasons, task_id=tid, events=ordered,
                             observations=result.observations, pendings=result.pendings,
                         )
+                        # Compact rows share the stage volume with citations and are billed with them.
+                        self._charge_stage(stage)
                     except sqlite3.OperationalError as exc:
                         reason = f"compact baseline stage failed ({exc})"
                         self.budget.fail(reason)
