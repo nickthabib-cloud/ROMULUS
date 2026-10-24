@@ -9,7 +9,7 @@ from romulus.agent.provider import agent_readiness
 from romulus.config import Settings
 from romulus.detect import netdef
 from romulus.evidence.normalize import NORMALIZER_VERSION
-from romulus.hunt.expansion import ExpansionEngine
+from romulus.hunt.expansion import PER_ANCHOR_SOURCE_QUERIES, ExpansionEngine
 from romulus.hunt.links import LinkFetcher, is_agent_reach
 from romulus.hunt.manifest import build_manifest, new_hunt_id
 from romulus.hunt.packets import PACKET_NORMALIZER, run_packet_stage
@@ -77,7 +77,10 @@ def create_hunt(s: Settings, start: datetime, end: datetime, created_by: str, st
     manifest = build_manifest(s, window, original_input or {"start": start.isoformat(), "end": end.isoformat()},
                               style, targets, profiles, hypothesis, ai_agent=ai_agent_entry(s, ai_agent),
                               site_facts=site_facts)
-    manifest["expansion"] = {"enabled": expand, "max_depth": 3, "max_source_queries": 180}
+    manifest["expansion"] = {
+        "enabled": expand, "max_depth": 3, "per_anchor_source_queries": PER_ANCHOR_SOURCE_QUERIES,
+        "max_source_queries": s.expansion_max_source_queries, "wall_clock_minutes": s.expansion_wall_clock_minutes,
+    }
     hid = new_hunt_id()
     repo.create_hunt(hid, manifest, digest(manifest), created_by)
     for p in profiles.values():
@@ -223,6 +226,8 @@ def _run_expansion(s: Settings, repo: Repo, client: ElasticClient, hunt: dict, c
         repo.heartbeat_hunt(hunt["id"], _lease_seconds(s), owner_token=owner_token)
 
     max_source_queries = int(config.get("max_source_queries", 180))
+    # A hunt recorded before per-anchor shares keeps its fixed total.
+    per_anchor = config.get("per_anchor_source_queries")
     executor = PivotExecutor(
         repo, client, hunt["id"], contracts, heartbeat=heartbeat, owner_token=owner_token,
         source_query_budget=max_source_queries,
@@ -232,16 +237,24 @@ def _run_expansion(s: Settings, repo: Repo, client: ElasticClient, hunt: dict, c
         },
         site_facts=ensure_site_unchanged(s.home, manifest.get("site")),
     )
-    budget_seconds = float((manifest.get("budgets") or {}).get("wall_clock_minutes", 120)) * 60
-    started_at = hunt.get("started_at")
-    if started_at is not None:
-        if started_at.tzinfo is None:
-            started_at = started_at.replace(tzinfo=utcnow().tzinfo)
-        budget_seconds = max(0.0, budget_seconds - (utcnow() - started_at).total_seconds())
+    if "wall_clock_minutes" in config:
+        # Expansion's own time limit, so a long sweep never leaves it none. A resumed expansion has what earlier runs
+        # of it did not spend fetching.
+        fetched_ms = sum(int(link["duration_ms"] or 0) for link in repo.expansion_links(hunt["id"])
+                         if not is_agent_reach(link["link_type"], link["strength"]))
+        budget_seconds = max(0.0, float(config["wall_clock_minutes"]) * 60 - fetched_ms / 1000)
+    else:
+        budget_seconds = float((manifest.get("budgets") or {}).get("wall_clock_minutes", 120)) * 60
+        started_at = hunt.get("started_at")
+        if started_at is not None:
+            if started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=utcnow().tzinfo)
+            budget_seconds = max(0.0, budget_seconds - (utcnow() - started_at).total_seconds())
     return ExpansionEngine(
         repo, hunt["id"], window, LinkFetcher(executor, window.start, window.end),
         max_depth=int(config.get("max_depth", 3)),
         max_source_queries=max_source_queries,
+        per_anchor_source_queries=int(per_anchor) if per_anchor is not None else None,
         wall_clock_seconds=budget_seconds, owner_token=owner_token, heartbeat=heartbeat,
     ).run()
 

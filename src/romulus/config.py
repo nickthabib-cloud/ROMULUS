@@ -78,6 +78,11 @@ class Settings(BaseModel):
     state_disk_gb: float = Field(default=0.0, ge=0.0)
     state_disk_reserve_gb: float = Field(default=2.0, ge=0.0)
     state_memory_mb: int = Field(default=1536, ge=64)
+    # Post-sweep expansion: every anchor brings its own share of source queries, so the total grows with the findings
+    # to follow. This ceiling bounds that total (expansion queries run one at a time, so it is about what its wall
+    # clock admits), and the wall clock is the expansion phase's own, so a long sweep never leaves it no time.
+    expansion_max_source_queries: int = Field(default=20_000, ge=1, le=1_000_000)
+    expansion_wall_clock_minutes: float = Field(default=120.0, gt=0.0)
 
     arkime_url: str = "http://127.0.0.1:8005"
     arkime_username: str = ""
@@ -209,6 +214,8 @@ ENV_MAP = {
     "ROMULUS_SWEEP_PREFETCH": "sweep_prefetch",
     "ROMULUS_STAGE_DIR": "stage_dir", "ROMULUS_STATE_DISK_GB": "state_disk_gb", "ROMULUS_STATE_DISK_RESERVE_GB": "state_disk_reserve_gb",
     "ROMULUS_STATE_MEMORY_MB": "state_memory_mb",
+    "ROMULUS_EXPANSION_MAX_SOURCE_QUERIES": "expansion_max_source_queries",
+    "ROMULUS_EXPANSION_WALL_CLOCK_MINUTES": "expansion_wall_clock_minutes",
     "ARKIME_URL": "arkime_url", "ARKIME_USERNAME": "arkime_username", "ARKIME_PASSWORD": "arkime_password",
     "ARKIME_VERIFY_TLS": "arkime_verify_tls",
     "PCAP_ALLOWED_DIRS": "pcap_allowed_dirs", "TSHARK_BIN": "tshark_bin", "MISSION_TIMEZONE": "mission_timezone",
