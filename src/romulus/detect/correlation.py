@@ -1195,9 +1195,13 @@ class ProcessNetworkLink(Playbook):
         bounding its span and the earliest call of each of its earliest notable processes (held while they are)."""
         state = self.sock_groups.setdefault(s.group, _SockGroup)
         if state is None:
-            self.note_limit("sock_groups", "the connecting groups' disk budget is spent; the calls of a new group are "
-                                           "not kept for citation, and its findings say how many are cited")
-            return 0
+            # every call of a group the store cannot track is kept on the stage instead (its disk budget bounds them),
+            # so the group's finding is still published with its calls cited
+            self.note_limit("sock_groups", "the connecting groups' store took no new group; the calls of a later group "
+                                           "are each kept for citation instead of its first ones, and its span is "
+                                           "cited only through them")
+            self._pending.append(e)
+            return 1
         self.bounds.offer_at(s.group, state.ends, e)
         if s.reason is not None and key is not None:
             hold_earliest(state.earliest, key, s.ts, s.serial, e, self.holds)
@@ -1435,10 +1439,11 @@ class ProcessNetworkLink(Playbook):
         db = self._spill.db
         components = []
         judged, unjudged, lineage_events, lineage_raw, lineage_lines = [], 0, [], {}, []
-        # the processes whose lineage is judged: the group's earliest notable processes, whose earliest calls are held
-        # for citation; a linked process outside them leaves the lineage unjudged (it only keeps the lane)
-        procs = {key: (order[0][0], None if order[0][1] else order[0][2], event_id)
-                 for order, key, event_id in g.state.earliest}
+        # the processes whose lineage is judged: the group's notable processes with a linked call, walked from their
+        # earliest linked call, each cited by a linked call of its own; a linked process with no call kept for
+        # citation is left unjudged (that only keeps the lane)
+        procs = {key: (ts, serial, g.proc_cites[key]) for key, (ts, serial, _event_id) in g.procs.items()
+                 if key in g.proc_cites}
         if g.notable is not None:
             unheld = len(set(g.procs) - set(procs)) + g.unheld
             judged, unjudged, lineage_events, lineage_raw = judge_processes(self.pids, g.notable.host, procs, unheld)
@@ -1507,10 +1512,12 @@ class ProcessNetworkLink(Playbook):
         outcome_words = ", ".join(f"{n} {w}" for w, n in (
             ("succeeded", outcomes.get(Outcome.success, 0)), ("failed", outcomes.get(Outcome.failure, 0)),
             ("with unknown or in-progress outcome", outcomes.get(Outcome.unknown, 0))) if n)
-        cited_pids = list(dict.fromkeys(e.get("process.pid") for e in cited if e.family == "net_socket"
-                                        and isinstance(e.get("process.pid"), int)))
+        # the group's own linked calls (another process's call cited for the shared records is not one of them)
+        own_calls = [loaded[i] for i in sock_ids]
+        cited_pids = list(dict.fromkeys(e.get("process.pid") for e in own_calls
+                                        if isinstance(e.get("process.pid"), int)))
         pids = cited_pids + sorted(p for p in g.pids if p not in cited_pids)
-        n_cited_socks = sum(e.family == "net_socket" for e in cited)
+        n_cited_socks = len(own_calls)
         n_cited_partners = len(partner_ids)
         span_note = bound_note(set(bounds) - set(held_bounds), g.ends, "these calls' interval")
         parts = [
@@ -1528,9 +1535,11 @@ class ProcessNetworkLink(Playbook):
                + (f", among them {'; '.join(f"'{sig}'" for sig in sigs)}" + more(len(sigs), n_sigs) if sigs else "")
                if n_alerts else "") + ".",
             "Of these, " + " and ".join(
-                f"all {total} {noun}" if cited_n >= total else f"{cited_n} of the {total} {noun}"
+                (f"all {total} {noun}" if total > 1 else f"the one {noun[:-1]}") if cited_n >= total
+                else f"{cited_n} of the {total} {noun}"
                 for cited_n, total, noun in ((n_cited_socks, g.n_socks, "connect() records"),
-                                             (n_cited_partners, n_partners, "network records"))) + " are cited.",
+                                             (n_cited_partners, n_partners, "network records")))
+            + (" is cited." if g.n_socks == 1 and n_partners == 1 else " are cited."),
             "The link between the host process and these network records is inferred from address, port and "
             "time; it is not itself observed"
             + (". It is ambiguous: more than one local address matched" if len(locals_) > 1 else "") + ".",
@@ -1610,6 +1619,7 @@ class _Group:
         self.unheld = 0                           # notable calls of processes past PROCESSES_HELD
         self.pids: set = set()                    # the group's pids (PROCESSES_HELD at most)
         self.pids_more = False
+        self.proc_cites: dict = {}                # notable process -> its earliest linked call kept for citation
 
     def shared(self, net_id: str, seq: int) -> None:
         self.db.execute("INSERT OR IGNORE INTO gsh VALUES (?, ?)", (net_id, seq))
@@ -1637,6 +1647,8 @@ class _Group:
             key = (s.pid, s.ppid, s.boot, s.session) if isinstance(s.pid, int) else None
             if not note_process(self.procs, key, s.ts, s.serial, s.id):
                 self.unheld += 1
+            elif s.id in self.citable and key is not None and key not in self.proc_cites:
+                self.proc_cites[key] = s.id     # rows stream in time order: the process's earliest citable call
         self.db.execute("INSERT OR IGNORE INTO gs VALUES (?)", (sock_rowid,))
         for n, local, status in kept:
             if not self.db.execute(

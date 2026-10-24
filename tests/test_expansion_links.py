@@ -445,6 +445,32 @@ def test_network_flow_exact_tuple_queries_both_directions():
     ]
 
 
+@pytest.mark.parametrize("origin, keyed_by_id", [
+    ("eve:event.original#eve.community_id", True),
+    ("eve:event.original#eve.src_ip+src_port+dest_ip+dest_port+proto#computed:community_id_v1", False),
+])
+def test_a_community_id_computed_for_a_sensor_that_wrote_none_is_never_a_query_key(origin, keyed_by_id):
+    """A computed id is in no backend document: the flow link queries by the 5-tuple in both directions instead, so
+    the records of a sensor that wrote no id are found."""
+    from romulus.evidence.typed import fv as value
+    root = event(
+        "flow-computed", "net_flow", source__ip="10.0.0.2", source__port=50000,
+        destination__ip=IP, destination__port=443, network__transport="tcp",
+    )
+    root.fields["network.community_id"] = value("1:abc=", origin)
+    pivot = FakePivot([root])
+    linked = LinkFetcher(pivot, T0, T1).fetch(anchor("network_flow", root), "network_flow", window())
+    intents = [intent for _owner, _key, intents, _ts, _cap in pivot.calls for intent in intents
+               if intent.target == "arkime_sessions3-x"]
+    assert intents
+    queried_ids = [p for intent in intents for p in intent.filters if p.field == "network.community_id"]
+    if keyed_by_id:
+        assert queried_ids and linked.key == {"network.community_id": "1:abc="}
+    else:
+        assert not queried_ids and all(len(intent.any_of) == 2 for intent in intents)
+        assert linked.key == {"five_tuple": ["tcp", "10.0.0.2", 50000, IP, 443]}
+
+
 def test_host_socket_endpoint_match_is_inferred_not_observed_network_flow():
     flow = event(
         "flow", "net_flow", host="sensor", network__community_id="1:abc",

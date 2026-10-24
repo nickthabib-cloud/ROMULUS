@@ -29,6 +29,7 @@ from romulus.hunt.links import (
     LinkWindow,
     is_agent_reach,
     usable_key,
+    written_community_id,
 )
 from romulus.hunt.pivot import HOST_AMBIGUOUS, HOST_LOOKUP_BUDGET, NO_HOST_RECORD
 from romulus.hunt.publish import mark_hypothesis_relation, publish_match, subject_event_ids
@@ -307,7 +308,7 @@ class ExpansionEngine:
                     "process.auid": event.get("process.auid") if usable_key(event.get("process.auid")) else None,
                 }
             elif link_type in {"network_flow", "flow_host_side"}:
-                community_id = event.get("network.community_id")
+                community_id = written_community_id(event)
                 flow_tuple = [event.get(field) for field in (
                     "network.transport", "source.ip", "source.port",
                     "destination.ip", "destination.port",
