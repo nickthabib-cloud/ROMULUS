@@ -672,6 +672,72 @@ def test_pid_fallback_link_is_inferred_until_4689_collection_is_attested():
     assert strength(True) == "observed"
 
 
+def test_pid_fallback_orders_same_instant_termination_by_windows_record_id():
+    instant = START + timedelta(minutes=10)
+    anchor = _event(
+        4688, channel="Security", provider=SECURITY, record_id=100,
+        data={"NewProcessId": "0x200"},
+    ).model_copy(update={"id": "anchor", "ts": instant})
+    before = _event(
+        4688, channel="Security", provider=SECURITY, record_id=101,
+        data={"NewProcessId": "0x258", "ProcessId": "0x200"},
+    ).model_copy(update={"id": "before-termination", "ts": instant})
+    terminated = _event(
+        4689, channel="Security", provider=SECURITY, record_id=102, data={"ProcessId": "0x200"},
+    ).model_copy(update={"id": "terminated", "ts": instant})
+    after = _event(
+        4688, channel="Security", provider=SECURITY, record_id=103,
+        data={"NewProcessId": "0x2bc", "ProcessId": "0x200"},
+    ).model_copy(update={"id": "after-termination", "ts": instant})
+    contract = contract_from_types("windows", _windows_types(), role="host", os_family="windows")
+    fetcher = LinkFetcher(PivotExecutor(None, None, "h1", {contract.target: contract}), START, END)
+
+    selected = fetcher._lineage(
+        LinkAnchor(
+            finding_id="lineage", ts=instant, host=anchor.host,
+            event_ids=[anchor.id], events=[anchor],
+        ),
+        LinkWindow(label="near", start=START, end=END),
+    )[4]([before, terminated, after])
+
+    assert {event.id for event in selected.events} == {"before-termination"}
+    assert selected.unresolved == []
+
+
+def test_pid_fallback_marks_an_unordered_same_instant_termination_partial():
+    instant = START + timedelta(minutes=10)
+    anchor = _event(
+        4688, channel="Security", provider=SECURITY, record_id=100,
+        data={"NewProcessId": "0x200"},
+    ).model_copy(update={"id": "anchor", "ts": instant})
+    termination_record = _event(
+        4689, channel="Security", provider=SECURITY, record_id=101, data={"ProcessId": "0x200"},
+    )
+    terminated = termination_record.model_copy(update={
+        "id": "terminated", "ts": instant,
+        "fields": {name: value for name, value in termination_record.fields.items()
+                   if name != "winlog.record_id"},
+    })
+    child = _event(
+        4688, channel="Security", provider=SECURITY, record_id=102,
+        data={"NewProcessId": "0x258", "ProcessId": "0x200"},
+    ).model_copy(update={"id": "child", "ts": instant})
+    contract = contract_from_types("windows", _windows_types(), role="host", os_family="windows")
+    fetcher = LinkFetcher(PivotExecutor(None, None, "h1", {contract.target: contract}), START, END)
+
+    selected = fetcher._lineage(
+        LinkAnchor(
+            finding_id="lineage", ts=instant, host=anchor.host,
+            event_ids=[anchor.id], events=[anchor],
+        ),
+        LinkWindow(label="near", start=START, end=END),
+    )[4]([terminated, child])
+
+    assert {event.id for event in selected.events} == {"child"}
+    assert any("termination at the anchor instant cannot be ordered" in reason
+               for reason in selected.unresolved)
+
+
 def test_windows_session_link_is_bounded_by_boot_fences():
     before = _event(4624, channel="Security", provider=SECURITY, data={
         "TargetLogonId": "0x44", "TargetUserSid": "S-1-5-21-1-2-3-1001",

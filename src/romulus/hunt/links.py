@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from romulus.agent.models import PivotCoverage
 from romulus.agent.tools import EntityTimelineArgs, EntityTimelineRequest
 from romulus.detect.correlation import PidTable, boot_of, boots_conflict
+from romulus.detect.host import exec_order
 from romulus.evidence.normalize import BootIntervals
 from romulus.evidence.typed import TypedEvent, event_os_family
 from romulus.hunt.pivot import (
@@ -141,6 +142,18 @@ def _after(event: TypedEvent, root: TypedEvent) -> bool | None:
         return event.ts > root.ts
     left, right = _serial(event), _serial(root)
     return None if left is None or right is None else left > right
+
+
+def _relative_event_order(left: TypedEvent, right: TypedEvent) -> int | None:
+    """Order two events by time, then by a token valid in their shared source sequence."""
+    if left.ts != right.ts:
+        return -1 if left.ts < right.ts else 1
+    left_order, left_domain = exec_order(left)
+    right_order, right_domain = exec_order(right)
+    if (left_order is None or right_order is None or left_domain is None
+            or left_domain != right_domain or (left_order == right_order and left.id != right.id)):
+        return None
+    return (left_order > right_order) - (left_order < right_order)
 
 
 class LinkResult(BaseModel):
@@ -473,21 +486,69 @@ class LinkFetcher:
                                     related[candidate.id] = candidate
                     return Selection(list(related.values()), [])
                 # PID fallback is bounded by the closest termination/boot fence around the anchor.
-                lower, upper = window.start, window.end
+                lower_fences: list[TypedEvent] = []
+                upper_fences: list[TypedEvent] = []
+                unresolved: list[str] = []
+                anchored = set(anchor.event_ids)
+                anchor_records = [
+                    candidate for candidate in anchor.events
+                    if candidate.ts == anchor.ts and candidate.get("process.pid") == pid
+                ]
+                anchor_record = next(
+                    (candidate for candidate in anchor_records if candidate.id in anchored),
+                    anchor_records[0] if len(anchor_records) == 1 else None,
+                )
                 for candidate in candidates:
                     fence = candidate.get("process.fence")
                     same_pid = candidate.get("process.pid") == pid
                     if fence == "boot" or (fence == "termination" and same_pid):
-                        if candidate.ts <= anchor.ts:
-                            lower = max(lower, candidate.ts)
-                        elif candidate.ts < upper:
-                            upper = candidate.ts
+                        if candidate.ts < anchor.ts:
+                            lower_fences.append(candidate)
+                            continue
+                        if candidate.ts > anchor.ts:
+                            upper_fences.append(candidate)
+                            continue
+                        relative = (_relative_event_order(candidate, anchor_record)
+                                    if anchor_record is not None else None)
+                        if relative is None:
+                            unresolved.append(
+                                f"lineage undecided: Windows PID {fence} at the anchor instant cannot be ordered "
+                                "without record_id in the same computer/channel"
+                            )
+                        elif relative <= 0:
+                            lower_fences.append(candidate)
+                        else:
+                            upper_fences.append(candidate)
+
+                def inside_fences(candidate: TypedEvent) -> bool:
+                    if not (window.start <= candidate.ts < window.end):
+                        return False
+                    for fence in lower_fences:
+                        relative = _relative_event_order(candidate, fence)
+                        if relative is None:
+                            unresolved.append(
+                                "lineage undecided: a process event and its same-instant Windows PID fence "
+                                "cannot be ordered outside one computer/channel record_id sequence"
+                            )
+                        elif relative <= 0:
+                            return False
+                    for fence in upper_fences:
+                        relative = _relative_event_order(candidate, fence)
+                        if relative is None:
+                            unresolved.append(
+                                "lineage undecided: a process event and its same-instant Windows PID fence "
+                                "cannot be ordered outside one computer/channel record_id sequence"
+                            )
+                        elif relative >= 0:
+                            return False
+                    return True
+
                 return Selection([
                     candidate for candidate in candidates
                     if candidate.family == "process_exec" and candidate.host == anchor.host
-                    and lower <= candidate.ts < upper and candidate.id not in set(anchor.event_ids)
+                    and candidate.id not in anchored and inside_fences(candidate)
                     and (candidate.get("process.pid") == pid or candidate.get("process.ppid") == pid)
-                ], [])
+                ], unresolved)
             # A record of another boot is another process. The link retrieves audit records without their journald
             # copies; their boot comes from the hunt's boot-interval map. One the map cannot place (a gap between
             # boots, near a boot's edge) is kept: a pid reused after a reboot cannot be excluded for it.
