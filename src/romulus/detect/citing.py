@@ -130,35 +130,33 @@ class Holds:
     records; `last` then says which of them are holds and which earlier holds to release (`Playbook.drain_bounds`)."""
 
     def __init__(self):
-        self.pending: list[TypedEvent] = []
+        self.pending: dict[str, list] = {}      # event id -> [event, holds taken this batch]
         self.releasing: list[str] = []
         self.last: tuple[list[str], list[str]] = ([], [])
 
     def hold(self, event: TypedEvent) -> None:
-        self.pending.append(event)
+        entry = self.pending.setdefault(event.id, [event, 0])
+        entry[1] += 1
 
     def release(self, event_id: str) -> None:
         """Let go of one hold of the record: one not yet handed to the stage is simply not staged."""
-        for i, event in enumerate(self.pending):
-            if event.id == event_id:
-                del self.pending[i]
-                return
-        self.releasing.append(event_id)
+        entry = self.pending.get(event_id)
+        if entry is None:
+            self.releasing.append(event_id)
+            return
+        entry[1] -= 1
+        if entry[1] <= 0:
+            del self.pending[event_id]
 
     def drain(self) -> list[TypedEvent]:
-        out = self.pending
+        out = [event for event, n in self.pending.values() for _ in range(n)]
         self.last = ([event.id for event in out], self.releasing)
-        self.pending, self.releasing = [], []
+        self.pending, self.releasing = {}, []
         return out
 
     def clear(self) -> None:
-        self.pending, self.releasing = [], []
+        self.pending, self.releasing = {}, []
         self.last = ([], [])
-
-
-def drained_holds(*stages) -> tuple[list[str], list[str]]:
-    """The holds and releases of several BoundStage or Holds drained together (`Playbook.drain_bounds`)."""
-    return ([i for stage in stages for i in stage.last[0]], [i for stage in stages for i in stage.last[1]])
 
 
 class Named:

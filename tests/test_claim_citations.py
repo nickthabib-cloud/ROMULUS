@@ -376,6 +376,19 @@ def test_discovery_counts_the_classes_it_lists():
     assert "in audit session 42" in m.claim and "this session" not in m.claim
 
 
+def test_holds_release_a_record_not_yet_staged_by_not_staging_it_and_count_each_hold():
+    from romulus.detect.citing import Holds
+    a, b = ev("net_flow", T0), ev("net_flow", T0)
+    holds = Holds()
+    holds.hold(a)
+    holds.hold(a)                       # two groups hold it
+    holds.hold(b)
+    holds.release(b.id)                 # let go before the batch ended: never staged
+    assert [e.id for e in holds.drain()] == [a.id, a.id] and holds.last == ([a.id, a.id], [])
+    holds.release(a.id)                 # an earlier batch's hold: released on the stage
+    assert holds.drain() == [] and holds.last == ([], [a.id])
+
+
 @pytest.mark.parametrize("bad", ["", "-"])
 def test_the_checker_ignores_text_without_values(bad):
     assert problems(f"Nothing to check here{bad}.", []) == []
