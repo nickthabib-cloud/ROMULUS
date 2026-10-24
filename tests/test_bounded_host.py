@@ -154,7 +154,9 @@ def memfd(ts, i, host_name="web1"):
 def test_unbacked_executable_groups_spill_and_read_back_exactly(tmp_path, monkeypatch):
     parts = [[memfd(T0 + timedelta(minutes=p, seconds=i), i) for i in range(40)] for p in range(12)]
     _rule, out = same_small_and_unbounded(host.UnbackedExecutable, parts, tmp_path, monkeypatch, "groups")
-    assert len(out) == 40 and all("12 audit record(s)" in m.claim and len(m.events) == 10 for m in out)
+    # the first ten records and the one that ends the span
+    assert len(out) == 40 and all("12 audit record(s)" in m.claim and len(m.events) == 11 for m in out)
+    assert all("11 of the 12 records are cited, including the first and the last." in m.claim for m in out)
 
 
 def test_unbacked_executable_record_of_a_refused_group_is_published_on_its_own(tmp_path, monkeypatch):

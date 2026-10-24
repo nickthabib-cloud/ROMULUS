@@ -202,6 +202,26 @@ def cite_with_bounds(load, events, ends: Ends | Iterable[Ends], ids, limit: int,
     return sorted(found, key=lambda e: (e.ts, e.id)), set(bounds) - set(held)
 
 
+def cite_group(load, examples: list[TypedEvent], bounds: BoundStage, ends: Ends | Iterable[Ends],
+               limit: int = 20, named=()) -> tuple[list[TypedEvent], set[str]]:
+    """`cite_with_bounds` for a group whose first records are already loaded (`examples`): bounding and named records
+    come from the stage (`load`), or from `bounds` while not yet handed to it (a rule driven without a sweep)."""
+    known = {e.id: e for e in examples}
+    known.update((event.id, event) for event, _ends in bounds.pending.values())
+
+    def get(ids):
+        found = {e.id: e for e in load([i for i in ids if i not in known])} if any(i not in known for i in ids) else {}
+        return [known.get(i) or found[i] for i in ids if i in known or i in found]
+
+    def strict(ids):
+        found = get(ids)
+        if len(found) != len(set(ids)):
+            raise LookupError(f"{len(set(ids)) - len(found)} cited event(s) absent from the stage")
+        return found
+
+    return cite_with_bounds(get, strict, ends, [e.id for e in examples], limit, named)
+
+
 def cited_phrase(cited: int, records: int, bounded: bool, noun: str = "records", one: str = "record") -> str:
     """How many of the records a claim rests on are cited: '20 of the 47 records are cited, including the first and
     the last.'"""

@@ -14,6 +14,7 @@ from typing import ClassVar, NamedTuple
 from romulus.detect import netdef
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, outcome_phrase, pf
 from romulus.detect.bounded import HOT_COUNT, HeldExamples, KeyedStore, RecentIds, SpillList, StateExhausted
+from romulus.detect.citing import BoundStage, Ends, bound_note, cite_group, cited_phrase, more
 from romulus.detect.linux_argv import canonical, program, read_operand_paths
 from romulus.detect.observed import (
     Observed,
@@ -445,15 +446,21 @@ class WebServiceSpawnsInterpreter(Playbook):
     def groups(self):
         return self.shapes
 
-    def _event_match(self, e, user, argv, indicators, count=None, prefix_only=False):
+    def _event_match(self, e, user, argv, indicators, count=None, prefix_only=False, runs=()):
+        """One run's item. `runs`: every run of its rare shape (the run itself among them), all cited with it."""
         rce_shaped = any(("decoded data" in item) or ("stdin" in item) for item in indicators)
         lane, severity = (("urgent", "critical") if rce_shaped else
                           ("high", "high") if indicators else ("lead", "medium"))
-        count_text = f" This command shape occurred {count} time(s) in the window." if count is not None else ""
+        cited = sorted({run.id: run for run in [e, *runs]}.values(), key=lambda run: (run.ts, run.id))
+        count_text = ""
+        if count is not None:
+            count_text = f" This command shape occurred {count} time(s) in the window."
+            if count > 1:
+                count_text += cited_phrase(len(cited), count, False, "runs", "run")
         claim = (f"A process execution event on {e.host} records account '{user}' executing "
                  f"'{basename(argv[0])}' (argv: {_argv_summary(argv)}); {outcome_phrase(e)}.{count_text}")
         match = Match(
-            self.id, claim, self.claim_type, [e], [pf(e, "process.user"), pf(e, "process.argv")],
+            self.id, claim, self.claim_type, cited, [pf(e, "process.user"), pf(e, "process.argv")],
             e.ts, severity, lane, "high" if e.outcome == Outcome.success else "medium", _exec_entities(e),
         )
         match.notes += [f"indicator: {item}" for item in indicators] or ["rare shape without typed indicators"]
@@ -493,14 +500,15 @@ class WebServiceSpawnsInterpreter(Playbook):
             if n > self.RARE_MAX:
                 claim = (f"Routine pattern: account '{user}' on {host_} executed '{shape}' {n} times in the window, "
                          f"spread across {distinct_hours} distinct hours like a schedule "
-                         f"(stack-counted; retained for context).")
+                         f"(stack-counted; retained for context)." + cited_phrase(min(5, len(evs)), n, False, "runs",
+                                                                                  "run"))
                 out.append(Match(self.id, claim, "aggregate_observation", evs[:5], [pf(evs[0], "process.argv")],
                                  evs[0].ts, "low", "context", "high", _exec_entities(evs[0]),
                                  group_key=f"routine|{host_}|{user}|{shape}" + (f"|{packaged}" if packaged else "")))
                 continue
             for e in evs:
                 argv = e.get("process.argv")
-                out.append(self._event_match(e, user, argv, [], count=n))
+                out.append(self._event_match(e, user, argv, [], count=n, runs=evs))
         return out
 
 
@@ -627,7 +635,10 @@ class DownloaderFeedsInterpreter(Playbook):
                      f"({ms[0].ts.isoformat()} – {ms[-1].ts.isoformat()}){cadence}. Each occurrence pairs a "
                      f"downloader exec and a stdin-reading interpreter exec under the same parent; the pipe and "
                      f"content are inferred.")
-            evs = [ev for m in ms[:10] for ev in m.events]
+            # the first occurrences and the last, which ends the stated span
+            cited = ms[:9] + ms[-1:] if len(ms) > 10 else ms
+            evs = [ev for m in cited for ev in m.events]
+            claim += cited_phrase(len(cited), len(ms), True, "occurrences", "occurrence")
             m = Match(self.id, claim, self.claim_type, evs, first.predicate, first.ts, self.severity, self.lane,
                       "high" if regular else "medium", first.entities, group_key=f"{host_}|{url}|{interp}")
             m.notes = [f"download URL: {url}", f"occurrences: {len(ms)}"] + \
@@ -1161,16 +1172,20 @@ class SshLoginFromExternal(Playbook):
         self.order = SpillList(self, "ssh_external_order", self.HOT, refusable=False)
         self._pending: list[TypedEvent] = []
         self._fresh: list[HeldExamples] = []
+        self.bounds = BoundStage()          # the records bounding each group's span, held while they bound it
         self.load = lambda ids: []
 
     def drain_staged(self) -> list[TypedEvent]:
-        out, self._pending = self._pending, []
+        out, self._pending = self._pending + self.bounds.drain(), []
         for store in self._fresh:
             store.staged()
         self._fresh = []
         self.groups.trim()
         self.order.trim()
         return out
+
+    def drain_bounds(self) -> tuple[list[str], list[str]]:
+        return self.bounds.last
 
     def retained_events(self) -> list[TypedEvent]:
         return [item[1] for store in self._fresh for item in store.items if item[1] is not None]
@@ -1191,7 +1206,7 @@ class SshLoginFromExternal(Playbook):
             key = (e.host, e.get("user.name"), str(ip))
             tally = self.groups.get(key)
             if tally is None:
-                tally = [0, 0, e.ts, HeldExamples(20, earliest=True)]
+                tally = [0, 0, e.ts, HeldExamples(20, earliest=True), Ends()]
                 if not self.groups.put(key, tally):
                     # a login from outside is a finding by itself: published now, ungrouped, instead of refused
                     self.note_limit("groups_alone", "the (host, account, source) groups' disk budget is spent; "
@@ -1202,6 +1217,7 @@ class SshLoginFromExternal(Playbook):
                 self.order.append(key)
             tally[1 if e.get("auth.phase") == "login" else 0] += 1
             tally[2] = max(tally[2], e.ts)
+            self.bounds.offer_at(key, tally[4], e)
             store = tally[3]
             if store.offer(e):
                 self._pending.append(e)
@@ -1212,12 +1228,16 @@ class SshLoginFromExternal(Playbook):
     def finalize(self):
         out = []
         for host, user, ip in self.order:
-            journal, audit, last, store = self.groups.peek((host, user, ip))
-            out.append(self._login_match((host, user, ip), journal, audit, last, store.events(self.load)))
+            journal, audit, last, store, ends = self.groups.peek((host, user, ip))
+            out.append(self._login_match((host, user, ip), journal, audit, last, store.events(self.load), ends))
         return out
 
-    def _login_match(self, key: tuple, journal: int, audit: int, last, evs: list[TypedEvent]) -> Match:
+    def _login_match(self, key: tuple, journal: int, audit: int, last, evs: list[TypedEvent],
+                     ends: Ends | None = None) -> Match:
         host, user, ip = key
+        missing: set[str] = set()
+        if ends is not None:
+            evs, missing = cite_group(self.load, evs, self.bounds, ends)
         # Each login appears once per collected source (journal sshd "Accepted", audit USER_LOGIN), so the
         # login count is the larger per-source count, never their sum.
         logins = max(journal, audit)
@@ -1225,12 +1245,11 @@ class SshLoginFromExternal(Playbook):
             f"{journal} sshd 'Accepted' journal record(s)" if journal else "",
             f"{audit} audit USER_LOGIN record(s)" if audit else "") if part)
         claim = (f"At least {logins} successful SSH login(s) on {host} for account '{user}' from {ip}, an "
-                 f"address outside the site's internal networks ({evs[0].ts.isoformat()} – {last.isoformat()}; {sources}).")
+                 f"address outside the site's internal networks ({evs[0].ts.isoformat()} – {last.isoformat()}; {sources})."
+                 + cited_phrase(len(evs), journal + audit, not missing)
+                 + (bound_note(missing, ends) if ends is not None else ""))
         m = Match(self.id, claim, self.claim_type, evs, [pf(evs[0], "source.ip"), pf(evs[0], "user.name")],
                   evs[0].ts, self.severity, self.lane, "high", evs[0].entities(), group_key=f"{host}|{user}|{ip}")
-        if journal + audit > 20:
-            m.notes.append(f"{journal + audit} matching records; the first 20 are cited and the time range covers "
-                           "all of them")
         return m
 
 
@@ -1317,6 +1336,7 @@ class UnbackedExecutable(Playbook):
         self._seen = RecentIds()        # bounded re-read guard
         # (host, executable) -> [{family: records}, [first, last], {uid}, cited records]
         self.groups = KeyedStore(self, "unbacked_groups", self.HOT)
+        self.bounds = BoundStage()          # the records bounding each group's span, held while they bound it
         self._pending: list[TypedEvent] = []
         self._fresh: list[HeldExamples] = []
         self.load = lambda ids: []
@@ -1335,7 +1355,8 @@ class UnbackedExecutable(Playbook):
                 continue
             key = (e.host or "", str(exe))
             ts = e.ts.timestamp()
-            group = self.groups.setdefault(key, lambda ts=ts: [{}, [ts, ts], set(), HeldExamples(_UNBACKED_CITE)])
+            group = self.groups.setdefault(key, lambda ts=ts: [{}, [ts, ts], set(), HeldExamples(_UNBACKED_CITE),
+                                                               Ends()])
             if group is None:
                 # the record is a finding by itself: published now, ungrouped, instead of being refused
                 self.note_limit("groups_alone", "the (host, executable) groups' disk budget is spent; records of a "
@@ -1344,9 +1365,10 @@ class UnbackedExecutable(Playbook):
                 add_unheld(out, alone(self._group_match(key, {e.family: 1}, ts, ts,
                                                    {str(uid)} if uid is not None else set(), [e]), self, e))
                 continue
-            counts, span, uids, store = group
+            counts, span, uids, store, ends = group
             counts[e.family] = counts.get(e.family, 0) + 1
             span[0], span[1] = min(span[0], ts), max(span[1], ts)
+            self.bounds.offer_at(key, ends, e)
             if e.get("process.uid") is not None:
                 uids.add(str(e.get("process.uid")))
             if store.offer(e):
@@ -1356,12 +1378,15 @@ class UnbackedExecutable(Playbook):
         return out
 
     def drain_staged(self) -> list[TypedEvent]:
-        out, self._pending = self._pending, []
+        out, self._pending = self._pending + self.bounds.drain(), []
         for store in self._fresh:
             store.staged()
         self._fresh = []
         self.groups.trim()
         return out
+
+    def drain_bounds(self) -> tuple[list[str], list[str]]:
+        return self.bounds.last
 
     def retained_events(self) -> list[TypedEvent]:
         return [item[1] for store in self._fresh for item in store.items if item[1] is not None]
@@ -1369,26 +1394,29 @@ class UnbackedExecutable(Playbook):
     def finalize(self):
         out = []
         for key in sorted(self.groups.keys()):
-            counts, (first, last), uids, store = self.groups.peek(key)
-            out.append(self._group_match(key, counts, first, last, uids, store.events(self.load)))
+            counts, (first, last), uids, store, ends = self.groups.peek(key)
+            out.append(self._group_match(key, counts, first, last, uids, store.events(self.load), ends))
         return out
 
     def _group_match(self, key: tuple, counts: dict, first: float, last: float, uids: set,
-                     evs: list[TypedEvent]) -> Match:
+                     evs: list[TypedEvent], ends: Ends | None = None) -> Match:
         names = {"process_exec": "exec", "net_socket": "socket call", "file_change": "file-change call"}
         host, exe = key
         cls, meaning = unbacked_executable(exe)
+        missing: set[str] = set()
+        if ends is not None:
+            evs, missing = cite_group(self.load, evs, self.bounds, ends, _UNBACKED_CITE + 2)
         evs = sorted(evs, key=lambda x: (x.ts, x.id))
         total = sum(counts.values())
         when = (f"at {evs[0].ts.isoformat()}" if first == last else
                 f"from {datetime.fromtimestamp(first, UTC).isoformat()} to "
                 f"{datetime.fromtimestamp(last, UTC).isoformat()}")
         kinds = ", ".join(f"{counts[f]} {names[f]} record(s)" for f in self.families if counts.get(f))
-        uids = sorted(uids)
+        shown = sorted({str(e.get("process.uid")) for e in evs if e.get("process.uid") is not None} & set(uids))
         claim = (f"On {host}, {total} audit record(s) {when} carry the kernel-recorded executable '{exe}' "
-                 f"({kinds}; process uid(s) {', '.join(uids) or 'not recorded'}): {meaning}.")
-        if total > len(evs):
-            claim += f" {len(evs)} of these records are cited."
+                 f"({kinds}; process uid(s) {', '.join(shown) or 'not recorded'}{more(len(shown), len(uids))}): "
+                 f"{meaning}." + cited_phrase(len(evs), total, not missing)
+                 + (bound_note(missing, ends) if ends is not None else ""))
         m = Match(self.id, claim, self.claim_type, evs, [pf(e, "process.executable") for e in evs], evs[0].ts,
                   self.severity, self.lane, "high", _exec_entities(evs[0]), group_key=f"{host}|{exe}")
         m.notes = [f"executable class: {cls}"]
