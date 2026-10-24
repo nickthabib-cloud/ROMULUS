@@ -4,8 +4,10 @@ from __future__ import annotations
 import ast
 import ipaddress
 import itertools
+import json
 import posixpath
 import re
+import zlib
 from bisect import bisect_right, insort
 from collections import defaultdict
 from datetime import UTC, datetime
@@ -1566,12 +1568,18 @@ class ExecLineage:
 
     With `observing`, it also holds what processes' own non-exec audit records show (`romulus.detect.observed`):
     per (host, pid), one entry per change of image, parent, session or boot (`observed`, its own store), and the
-    first record of each entry for citation (`citations`, its own store, read only when a lineage names it)."""
+    first record of each entry for citation (`citations`, its own store, read only when a lineage names it).
+
+    With `citing`, it also keeps every exec record for citation (`exec_records`: the typed event and its raw copies,
+    compressed, one disk-backed row per exec, read only when a lineage names the exec), so a claim that names an exec
+    ancestor cites it. A record the store refuses is named as not kept for citation; the lineage itself is unchanged,
+    as it is read from the exec records above."""
 
     # Records held for citation in memory; the rest wait on disk (they are read only when a finding cites them).
     CITATIONS_HOT = 4096
 
-    def __init__(self, owner=None, capacity: int = HOT_COUNT, members: list | None = None, observing: bool = False):
+    def __init__(self, owner=None, capacity: int = HOT_COUNT, members: list | None = None, observing: bool = False,
+                 citing: bool = False):
         self.store = KeyedStore(owner, "exec_lineage", capacity)
         self.members = members if members is not None else [owner] if owner is not None else []
         # The one store every ancestry rule reads, and most of a host hunt's state (one record per exec): it holds a
@@ -1589,6 +1597,7 @@ class ExecLineage:
             self.observed.weight = self.store.weight        # it serves the same rules as the exec records
         # any observation refused so far in the hunt: a record that would change a lineage may be missing
         self.observed_incomplete = False
+        self.exec_records = KeyedStore(owner, "exec_records", self.CITATIONS_HOT) if citing else None
 
     @property
     def records(self) -> KeyedStore:
@@ -1603,7 +1612,7 @@ class ExecLineage:
         return self.store.on_disk
 
     def _stores(self) -> list[KeyedStore]:
-        return [store for store in (self.store, self.observed, self.citations) if store is not None]
+        return [store for store in (self.store, self.observed, self.citations, self.exec_records) if store is not None]
 
     def trim(self) -> None:
         for store in self._stores():
@@ -1623,8 +1632,9 @@ class ExecLineage:
                           ancestor.boot, DAEMON if _daemon(event) else 0, ancestor.serial, ancestor.order_domain,
                           session if isinstance(session, int) and not isinstance(session, bool) else None)
 
-    def observe(self, event: TypedEvent) -> None:
-        """Hold an exec record (once, however many rules hand it over)."""
+    def observe(self, event: TypedEvent, raw: dict[str, dict] | None = None) -> None:
+        """Hold an exec record (once, however many rules hand it over); with `citing`, keep it and its raw copies
+        (`raw`, the partition's) for citation."""
         pid = event.get("process.pid")
         seen = (event.id, event.ts)             # a record handed over again (by another rule or a re-read batch)
         if not isinstance(pid, int) or seen in self._observed:
@@ -1639,8 +1649,23 @@ class ExecLineage:
                 for member in self.members:
                     member.note_limit("lineage", "the exec store took no new process (its share of the state budget "
                                                  "is spent); a later process's lineage is not recorded")
+                return
+        else:
+            insort(entries, self.record(event), key=_record_order)   # in place: the store holds this list
+        if self.exec_records is not None:
+            self._cite_exec(event, raw or {})
+
+    def _cite_exec(self, event: TypedEvent, raw: dict[str, dict]) -> None:
+        """Keep an exec record for citation, with the raw copies of its records the partition carries."""
+        body = {"event": event.model_dump_json(), "raw": {r.key: raw[r.key] for r in event.raw if r.key in raw}}
+        if self.exec_records.put(event.id, zlib.compress(json.dumps(body, sort_keys=True).encode(), 6)):
             return
-        insort(entries, self.record(event), key=_record_order)       # in place: the store holds this list
+        when = event.ts.isoformat()
+        for member in self.members:
+            member.note_limit("lineage_exec_records", f"the store of exec records kept for citation took no new record "
+                                                      f"from the record of {when} on (its share of the state budget is "
+                                                      f"spent): a claim naming a later exec ancestor says its record is "
+                                                      f"not cited")
 
     def entries(self, host: str | None, pid: int) -> list[ExecRecord]:
         """The process's records in time order; read in place when the store does not bring a process back to
@@ -1743,7 +1768,8 @@ class ExecLineage:
                             host=host)
 
     def cited(self, event_ids: list[str]) -> tuple[dict[str, TypedEvent], dict[str, dict]]:
-        """The observed records held for citation, by event id, and their raw copies (an id not held is absent)."""
+        """The observed and exec records held for citation, by event id, and their raw copies (an id not held is
+        absent)."""
         events, raw = {}, {}
         for event_id in event_ids:
             blob = None if self.citations is None else self.citations.peek(event_id)
@@ -1752,6 +1778,12 @@ class ExecLineage:
                 if event is not None:
                     events[event_id] = event
                     raw.update(copies)
+                continue
+            blob = None if self.exec_records is None else self.exec_records.peek(event_id)
+            if blob is not None:
+                body = json.loads(zlib.decompress(blob))
+                events[event_id] = TypedEvent.model_validate_json(body["event"])
+                raw.update(body["raw"])
         return events, raw
 
     def latest(self, host: str | None, pid: int, ts: float, *, strict: bool = False, where=None,
@@ -1835,7 +1867,7 @@ class ProcessLineage:
     CAPACITY = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
 
     def __init__(self, owner=None, members: list | None = None):
-        self.execs = ExecLineage(owner, self.CAPACITY)
+        self.execs = ExecLineage(owner, self.CAPACITY, citing=True)
         self.members = members if members is not None else [owner] if owner is not None else []
 
     @property
@@ -1855,6 +1887,8 @@ class ProcessLineage:
         # /tmp is not package management. Without a recorded executable no marker is given.
         located = str(executable or "")
         script = next((str(a) for a in argv[1:] if not str(a).startswith("-")), "")
+        if _inline_code(name, argv):
+            script = ""                         # its operand is code (sh -c, python -c, perl -e), not a script file
         if name in SHELLS | SCRIPT_FILE_INTERPRETERS and script:
             name, located = basename(script) or name, script
         system = located.startswith(SYSTEM_BIN_DIRS)
@@ -1867,9 +1901,20 @@ class ProcessLineage:
         return Ancestor(event.ts.timestamp(), ppid if isinstance(ppid, int) else None, name,
                         event.get("process.user"), marker, event.id, boot_of(event), serial, order_domain)
 
-    def observe(self, event: TypedEvent) -> None:
+    def observe(self, event: TypedEvent, raw: dict[str, dict] | None = None) -> None:
         if event.family == "process_exec":
-            self.execs.observe(event)
+            self.execs.observe(event, raw)
+
+    def cited_phrase(self, lineage: Lineage) -> tuple[str, list[TypedEvent], dict[str, dict]]:
+        """`lineage_phrase` with the exec record of the ancestor it names, and that record's raw copies, to cite. A
+        record the store did not keep is said to be not cited ('' when the lineage names no ancestor)."""
+        phrase = lineage_phrase(lineage)
+        if not phrase or lineage.depth == 0:
+            return phrase, [], {}
+        found, raw = self.execs.cited([lineage.ancestor.event_id])
+        if lineage.ancestor.event_id not in found:
+            return phrase + " (its exec record was not kept for citation)", [], {}
+        return phrase, list(found.values()), raw
 
     def parent(self, host: str | None, ppid: int | None, ts: float, boot: str | None = None,
                serial: int | None = None, order_domain=None) -> Ancestor | None:
@@ -1911,6 +1956,20 @@ class ProcessLineage:
         return nearest or Lineage("", None, 0)
 
 
+_INLINE_FLAGS = frozenset({"-c", "-e", "-E", "-r", "--command", "--eval"})
+
+
+def _inline_code(name: str, argv: list) -> bool:
+    """Whether an interpreter's first operand is inline code: a flag that takes code (sh -c, python -c, perl -e,
+    php -r) before it, or a shell's grouped short flags that include c (sh -ec)."""
+    for arg in (str(a) for a in argv[1:]):
+        if not arg.startswith("-"):
+            return False
+        if arg in _INLINE_FLAGS or (name in SHELLS and not arg.startswith("--") and "c" in arg[1:]):
+            return True
+    return False
+
+
 def share_lineage(pack: list) -> None:
     """Give every rule of a pack that reads process ancestry the hunt's one ExecLineage, so each exec record is
     observed and held once (its rows on the first such rule's spill; a disk refusal noted on every rule that
@@ -1921,18 +1980,19 @@ def share_lineage(pack: list) -> None:
         shared_view = ProcessLineage(holders[0], holders)
         for pb in holders:
             pb.lineage = shared_view
-    sites, members, observing = [], [], False
+    sites, members, observing, citing = [], [], False, False
     for pb in pack:
         for holder in (pb, getattr(pb, "lineage", None), getattr(pb, "pids", None)):
             for name, value in list(getattr(holder, "__dict__", {}).items()):
                 if isinstance(value, ExecLineage):
                     sites.append((holder, name))
                     observing = observing or value.observing
+                    citing = citing or value.exec_records is not None
                     if pb not in members:
                         members.append(pb)
     if len(members) < 2:
         return
-    shared = ExecLineage(members[0], HOT_COUNT, members, observing=observing)
+    shared = ExecLineage(members[0], HOT_COUNT, members, observing=observing, citing=citing)
     for holder, name in sites:
         setattr(holder, name, shared)
 

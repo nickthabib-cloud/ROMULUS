@@ -40,7 +40,6 @@ from romulus.detect.host import (
     add_unheld,
     alone,
     boot_of,
-    lineage_phrase,
     need,
 )
 from romulus.detect.linux_argv import (
@@ -1179,7 +1178,7 @@ class AccountOrGroupChange(Playbook):
         for e in sorted(fresh, key=lambda x: (x.ts, x.family != "process_exec", x.id)):
             self._seen.add(e.id)
             if e.family == "process_exec":
-                self.lineage.observe(e)
+                self.lineage.observe(e, self.raw_of(e))
                 if self.program_prefilter and not self._process_relevant(e):
                     self.evaluated += 1
                     self.missing_required += int(argv_incomplete(e))
@@ -1427,7 +1426,7 @@ class AccountOrGroupChange(Playbook):
             claim += (f" The record {'; '.join(mentions)}, but its operation does not show a membership being "
                       "granted.")
         lineage = web or first.lineage
-        phrase = lineage_phrase(lineage)
+        phrase, lineage_events, lineage_raw = self.lineage.cited_phrase(lineage)
         if phrase:
             claim += f" Exec lineage: {phrase}."
         if web is not None or privileged:
@@ -1453,6 +1452,7 @@ class AccountOrGroupChange(Playbook):
             events = sorted(_unique([*cited, marker]), key=lambda e: (e.ts, e.id))
         else:
             events = sorted(_unique([*commands[:10], *records[:10]]), key=lambda e: (e.ts, e.id))
+        events = sorted(_unique([*events, *lineage_events]), key=lambda e: (e.ts, e.id))      # the named ancestor
         predicate = [pf(e, n) for e in events[:4] for n in ("process.argv", "process.executable", "audit.record_type",
                                                              "account.action", "account.name", "account.group",
                                                              "system.event")
@@ -1466,6 +1466,7 @@ class AccountOrGroupChange(Playbook):
                       "high" if records else "medium", list(dict.fromkeys(entities)),
                       group_key="|".join(str(part) for part in key))
         match.notes = notes
+        match.raw_copies.update(lineage_raw)
         return match
 
 

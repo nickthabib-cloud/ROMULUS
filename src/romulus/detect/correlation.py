@@ -248,17 +248,16 @@ def judge_processes(pids: PidTable, host: str | None, procs: dict, unheld: int
     judged = [Judged(key[0], pids.ancestry_of(host, key[0], ts, key[2], serial))
               for key, (ts, serial, _event_id) in ordered[:PROCESSES_JUDGED]]
     unjudged = len(ordered) - len(judged) + (1 if unheld else 0)
-    wanted = list(dict.fromkeys(i for j in judged if j.ancestry.verdict != "unknown" for i in j.ancestry.cites))
+    wanted = list(dict.fromkeys(i for j in judged for i in j.ancestry.cites))
     found, raw = pids.execs.cited(wanted)
     out, cited = [], {}
     for item in judged:
         ancestry = item.ancestry
-        if ancestry.verdict != "unknown":
-            if any(i not in found for i in ancestry.cites):
-                ancestry = ancestry._replace(verdict="unknown", why="a record this lineage rests on could not be read "
-                                                                    "back for citation")
-            else:
-                cited.update((i, found[i]) for i in ancestry.cites)
+        if ancestry.verdict != "unknown" and any(i not in found for i in ancestry.cites):
+            ancestry = ancestry._replace(verdict="unknown", why="a record this lineage rests on could not be read "
+                                                                "back for citation")
+        # every record the walk named is cited, for an unknown lineage too (its reason names what it read)
+        cited.update((i, found[i]) for i in ancestry.cites if i in found)
         out.append(Judged(item.pid, ancestry))
     raws = {r.key: raw[r.key] for event in cited.values() for r in event.raw if r.key in raw}
     return out, unjudged, list(cited.values()), raws
@@ -433,14 +432,16 @@ class PidTable:
     CAPACITY = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
 
     def __init__(self, capacity: int | None = None, owner=None, observing: bool = False):
-        self.execs = ExecLineage(owner, capacity if capacity is not None else _UNBOUNDED, observing=observing)
+        # an observing table also keeps its exec records for citation: the lineages it judges name them
+        self.execs = ExecLineage(owner, capacity if capacity is not None else _UNBOUNDED, observing=observing,
+                                 citing=observing)
         self.observing = observing
 
     def add(self, e: TypedEvent, raw: dict[str, dict] | None = None) -> None:
         """Hold an exec record; with `observing`, also the process state any other audit SYSCALL record shows (its
         raw copies `raw` are kept for citation)."""
         if e.family == "process_exec":
-            self.execs.observe(e)
+            self.execs.observe(e, raw)
         elif self.observing:
             self.execs.observe_process(e, raw)
 
@@ -564,6 +565,10 @@ class PidTable:
                 gap = _not_forked(child, child_pid, pid, view)
             cites += [entry.event_id for entry in view.used if entry.event_id not in cites]
             named = view.named
+            # the exec records the claim names the process by and reads its parent from
+            for step in (named, view.first):
+                if step.kind == EXEC and step.entry.event_id not in cites:
+                    cites.append(step.entry.event_id)
             if level:
                 chain.append(_link(pid, named, level))
             # a web server's image in the process's own records (an exec, or its cited earliest record: an image
@@ -573,6 +578,8 @@ class PidTable:
             if web is not None:
                 if web is not named or not level:
                     chain.append(_link(pid, web, level))
+                if web.kind == EXEC and web.entry.event_id not in cites:
+                    cites.append(web.entry.event_id)
                 return Ancestry("web_server", chain, cites)
             first = view.first
             if spawned(first):
@@ -807,7 +814,8 @@ class InterpreterExternalConnection(Playbook):
         m.raw_copies.update(raw)
         m.notes.extend(notes)
         if lineage_events:
-            m.notes.append(f"{len(lineage_events)} observed process record(s) the named lineage rests on are cited")
+            m.notes.append(f"{len(lineage_events)} process record(s) (exec and observed) the named lineage rests on "
+                           f"are cited")
         return m
 
     def _load(self, ids: list[str]) -> list[TypedEvent]:
@@ -1559,7 +1567,8 @@ class ProcessNetworkLink(Playbook):
         m.raw_copies.update(lineage_raw)
         m.notes.extend(lineage_lines)
         if lineage_events:
-            m.notes.append(f"{len(lineage_events)} observed process record(s) the named lineage rests on are cited")
+            m.notes.append(f"{len(lineage_events)} process record(s) (exec and observed) the named lineage rests on "
+                           f"are cited")
         for observer in observers:
             for version in (4, 6):
                 known = address.get((s0.host, observer, version))

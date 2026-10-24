@@ -518,7 +518,9 @@ def test_correlated_candidate_citations_are_all_retained(monkeypatch, order):
     direct = [c for c in repo.candidates("h1") if c["rule_id"] == "host.interpreter_external_connection"]
     assert len(linked) == 1 and len(direct) == 1
     cites = rm._citations(repo, linked[0])
-    assert len(cites) == 4 and all(c["status"] == "retained" for c in cites), cites
+    # one per raw record: the call's two audit records, the flow and the alert, and the call's own SYSCALL record as
+    # the observed record its (unknown) lineage was read from, which the lineage note's reason names
+    assert len(cites) == 5 and all(c["status"] == "retained" for c in cites), cites
     window = {c["rule_id"]: c["state"] for c in repo.rule_cells("h1") if c["target"] == "*"}
     assert window["corr.process_network_link"] == "matched"
 

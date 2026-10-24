@@ -144,7 +144,10 @@ def test_web_service_lineage_raises_an_ordinary_creation_to_high():
     assert len(out) == 1
     m = out[0]
     assert m.proposed_lane == "high" and "web-service account 'www-data'" in m.claim
-    assert m.events == [child]                          # the parent shell's text and the sudo wrapper are not actions
+    # the parent shell's text and the sudo wrapper are not actions; the sudo exec is cited as the exec ancestor the
+    # lineage sentence names
+    assert m.events == [sudo, child]
+    assert "its exec ancestor 1 level(s) up ran as web-service account 'www-data' ('sudo')" in m.claim
 
 
 def test_package_lineage_is_one_grouped_lead_per_host():

@@ -39,7 +39,6 @@ from romulus.detect.host import (
     add_unheld,
     alone,
     boot_of,
-    lineage_phrase,
     need,
 )
 from romulus.detect.linux_argv import (
@@ -435,7 +434,7 @@ class _TamperRule(Playbook):
             if marker is not None:
                 self._pending.append(marker)
             if e.family == "process_exec":
-                self.lineage.observe(e)
+                self.lineage.observe(e, self.raw_of(e))
                 if self.program_prefilter and not self._process_relevant(e):
                     self.evaluated += 1
                     self.missing_required += int(argv_incomplete(e))
@@ -810,10 +809,11 @@ class SecurityOrLoggingServiceStop(_TamperRule):
         if marker:
             claim += (f" A shutdown or reboot marker on the host ({marker[1]}) is {abs(marker[0] - first.ts):.0f} s "
                       f"{'before' if marker[0] <= first.ts else 'after'} the first command.")
-        phrase = lineage_phrase(next((i.lineage for i in items if i.lineage.kind == "web"), first.lineage))
+        phrase, ancestors, ancestor_raw = self.lineage.cited_phrase(
+            next((i.lineage for i in items if i.lineage.kind == "web"), first.lineage))
         if phrase:
             claim += f" Exec lineage: {phrase}."
-        events = sorted(_unique([*commands[:CITE], *linked[:CITE], *([marker[2]] if marker else [])]),
+        events = sorted(_unique([*commands[:CITE], *linked[:CITE], *([marker[2]] if marker else []), *ancestors]),
                         key=lambda e: (e.ts, e.id))
         predicate = [pf(c, "process.argv") for c in commands[:3]] + [pf(e, "service.unit") for e in linked[:2]]
         match = Match(self.id, claim, self.claim_type, events, predicate, events[0].ts, self.severity, lane,
@@ -821,6 +821,7 @@ class SecurityOrLoggingServiceStop(_TamperRule):
                       group_key="cmd|" + "|".join(str(p) for p in key))
         match.notes = notes + (["T1685.004"] if any(service_category(i.target) == "audit" for i in items) else
                                ["T1685"])
+        match.raw_copies.update(ancestor_raw)
         return match
 
     def _describe_records(self, key, entries) -> Match:
@@ -1087,15 +1088,17 @@ class AuditRulesTamper(_TamperRule):
         if linked and all(e.outcome == Outcome.failure for e in linked) and lane == "high":
             lane = "lead"
             notes.append("lane lowered: the kernel refused every recorded change")
-        phrase = lineage_phrase(next((i.lineage for i in items if i.lineage.kind == "web"), items[0].lineage))
+        phrase, ancestors, ancestor_raw = self.lineage.cited_phrase(
+            next((i.lineage for i in items if i.lineage.kind == "web"), items[0].lineage))
         if phrase:
             claim += f" Exec lineage: {phrase}."
-        events = sorted(_unique([*commands[:CITE], *linked[:CITE]]), key=lambda e: (e.ts, e.id))
+        events = sorted(_unique([*commands[:CITE], *linked[:CITE], *ancestors]), key=lambda e: (e.ts, e.id))
         predicate = [pf(c, "process.argv") for c in commands[:3]] + [pf(e, "audit.config.op") for e in linked[:2]]
         match = Match(self.id, claim, self.claim_type, events, predicate, events[0].ts, self.severity, lane,
                       "high" if linked else "medium", commands[0].entities(),
                       group_key="cmd|" + "|".join(str(p) for p in key))
         match.notes = notes
+        match.raw_copies.update(ancestor_raw)
         return match
 
     @staticmethod
@@ -1144,14 +1147,18 @@ class AuditRulesTamper(_TamperRule):
             notes.append("lane lowered: no record shows the change applied")
         lineage = self.lineage.classify_pid(host, first.get("process.pid"), first.ts.timestamp(), boot_of(first),
                                             first.get("audit.serial"))
+        ancestor_raw: dict[str, dict] = {}
         if lineage.kind == "web":
             lane = "high"
-            claim += f" Exec lineage: {lineage_phrase(lineage)}."
+            phrase, ancestors, ancestor_raw = self.lineage.cited_phrase(lineage)
+            claim += f" Exec lineage: {phrase}."
+            cited += ancestors
         events = sorted(_unique(cited), key=lambda e: (e.ts, e.id))
         match = Match(self.id, claim, self.claim_type, events, [pf(e, "audit.config.op") for e in configs[:3]],
                       first.ts, self.severity, lane, "high", first.entities(),
                       group_key=f"record|{host}|{actor}|{kind}|{session}")
         match.notes = notes
+        match.raw_copies.update(ancestor_raw)
         return match
 
 
@@ -1441,10 +1448,11 @@ class LogOrHistoryClearing(_TamperRule):
                   if text_only else " Whether the files changed is not established by exec records.")
         proposed = "high" if any(i.lane == "high" for i in items) else "lead"
         lane = self._command_lane(items, proposed, notes)
-        phrase = lineage_phrase(next((i.lineage for i in items if i.lineage.kind == "web"), items[0].lineage))
+        phrase, ancestors, ancestor_raw = self.lineage.cited_phrase(
+            next((i.lineage for i in items if i.lineage.kind == "web"), items[0].lineage))
         if phrase:
             claim += f" Exec lineage: {phrase}."
-        events = sorted(commands[:CITE], key=lambda e: (e.ts, e.id))
+        events = sorted(_unique([*commands[:CITE], *ancestors]), key=lambda e: (e.ts, e.id))
         if len(commands) > CITE:
             claim += f" The earliest {CITE} records are cited."
         match = Match(self.id, claim, "script_content" if text_only else self.claim_type, events,
@@ -1453,6 +1461,7 @@ class LogOrHistoryClearing(_TamperRule):
                       group_key="|".join(str(p) for p in key))
         technique = {"history_file": "T1070.003", "history_off": "T1690"}.get(category, "T1685.006")
         match.notes = notes + [technique]
+        match.raw_copies.update(ancestor_raw)
         return match
 
 
