@@ -416,18 +416,39 @@ def test_a_zone_transfer_answer_in_flow_orientation_pairs_with_its_question():
 
 
 @pytest.mark.parametrize("ports", [(None, None), (53, 53), (40000, 41000)])
-def test_a_dns_record_whose_ports_do_not_tell_the_roles_names_no_server(ports):
-    """Neither or both endpoints on a DNS port, or no port typed: the roles are unknown, the record is counted as
-    missing (coverage partial), and no client or server is named from it."""
+def test_a_dns_answer_whose_ports_do_not_tell_the_roles_names_no_server(ports):
+    """An answer with neither or both endpoints on a DNS port, or no port typed: its roles are unknown, the record is
+    counted as missing (coverage partial), and no client or server is named from it."""
     sport, dport = ports
     events = [rec("answer", CLIENT, RESOLVER, name=f"n{i}.example.test", rcode="NXDOMAIN", server_port=None,
                   ts=T0 + timedelta(seconds=i), source__port=sport, destination__port=dport) for i in range(60)]
     assert dns.endpoints(events[0]) == (None, None)
     pb, out = run(dns.DnsNxdomainBurst, events)
     assert out == [] and pb.evaluated == 0 and pb.missing_required == 60
+    zone, out = run(dns.DnsZoneTransferOrAnyRequest, [rec("answer", CLIENT, RESOLVER, qtype="AXFR", rcode="REFUSED",
+                                                          server_port=None, source__port=sport,
+                                                          destination__port=dport)])
+    assert out == [] and zone.missing_required == 1
+
+
+@pytest.mark.parametrize("ports", [(41000, 5300), (53, 53), (None, None)])
+def test_a_question_whose_ports_do_not_tell_is_read_as_sent(ports):
+    """A question is written as the client sent it: DNS parsed on a site-configured port (5300), a server-to-server
+    query from port 53 to port 53, or one with no ports typed is evaluated with its source as the client."""
+    sport, dport = ports
+    query = rec("query", CLIENT, RESOLVER, server_port=None, source__port=sport, destination__port=dport)
+    assert dns.endpoints(query) == (CLIENT, RESOLVER)
+    events = []
+    for e in tunnel(200):
+        fields = {k: v for k, v in e.fields.items() if k not in ("source.port", "destination.port")}
+        fields.update({k: fv(v, f"fixture:{k}") for k, v in (("source.port", sport), ("destination.port", dport))
+                       if v is not None})
+        events.append(e.model_copy(update={"fields": fields}))
+    pb, out = run(dns.DnsTunnelShape, events)
+    assert pb.evaluated == 200 and pb.missing_required == 0 and [m.group_key for m in out] == [f"{CLIENT}|example.test"]
     zone, out = run(dns.DnsZoneTransferOrAnyRequest, [rec("query", CLIENT, RESOLVER, qtype="AXFR", server_port=None,
                                                           source__port=sport, destination__port=dport)])
-    assert out == [] and zone.missing_required == 1
+    assert zone.evaluated == 1 and len(out) == 1 and out[0].claim.startswith(f"{CLIENT} sent 1 DNS question")
 
 
 def test_nxdomain_burst_window_is_half_open():

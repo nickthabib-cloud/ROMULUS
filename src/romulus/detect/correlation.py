@@ -1247,9 +1247,10 @@ class ProcessNetworkLink(Playbook):
     def _cite_net(self, e: TypedEvent, src: str, sport: int, dst: str, dport: int) -> int:
         """Stage the record when it may be cited (1, else 0): when it is among its sensor's first PARTNERS_PER_PAIR
         records (or alerts) of its (service endpoint, client address) pair once a call to that endpoint has been read,
-        or among the sensor's first PARTNERS_UNMATCHED of the pair before any call reached the endpoint. The service side is the destination,
-        as a sensor records a connection it saw open; a record whose source port is the lower one, below the client
-        range, is also offered as recorded from the server's side (a connection picked up mid-stream)."""
+        or among the sensor's first PARTNERS_UNMATCHED of the pair before any call reached the endpoint. The service
+        side is the destination, as a sensor records a connection it saw open; a record whose source port is the lower
+        one, below the client range, is also offered as recorded from the server's side (a connection picked up
+        mid-stream)."""
         alert = e.family == "net_alert"
         pairs = [(dst, dport, src)]
         if sport < dport and sport < EPHEMERAL_FLOOR:

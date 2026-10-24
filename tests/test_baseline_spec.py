@@ -71,10 +71,11 @@ def test_registry_has_the_six_accepted_specs_and_metadata():
         "bl.ssh_tuple": "presence", "bl.exec_path": "prevalence", "bl.exec_pair": "prevalence",
         "bl.cmd_shape": "prevalence", "bl.ext_dest": "prevalence", "bl.svc_exec_rate": "rate",
     }
-    # the external-destination spec keys DNS records by the DNS port's side since its second key version
+    # the external-destination spec keys DNS records by the DNS port's side (questions read as sent when the ports do
+    # not tell) since its third key version
     assert {spec.id: (spec.version, spec.key_version) for spec in BASELINE_SPECS} == {
         "bl.ssh_tuple": ("1", "1"), "bl.exec_path": ("1", "1"), "bl.exec_pair": ("1", "1"),
-        "bl.cmd_shape": ("1", "1"), "bl.ext_dest": ("2", "2"), "bl.svc_exec_rate": ("1", "1"),
+        "bl.cmd_shape": ("1", "1"), "bl.ext_dest": ("3", "3"), "bl.svc_exec_rate": ("1", "1"),
     }
 
 
@@ -442,11 +443,25 @@ def test_a_dns_answer_keys_its_client_in_either_orientation(flow_oriented):
 
 @pytest.mark.parametrize("ports", [{}, {"source.port": 53, "destination.port": 53},
                                    {"source.port": 40000, "destination.port": 41000}])
-def test_a_dns_record_whose_ports_do_not_tell_its_client_is_missing(ports):
+def test_a_dns_answer_whose_ports_do_not_tell_its_client_is_missing(ports):
     result = SPEC_BY_ID["bl.ext_dest"].keys(_event("dns_query", **{
         "dns.type": "answer", "source.ip": "10.0.0.53", "destination.ip": "10.0.0.4",
         "dns.question.name": "www.example.com", **ports}), _ctx())
     assert isinstance(result, Missing) and result.fields == ("source.port", "destination.port")
+
+
+@pytest.mark.parametrize("ports", [{"source.port": 41000, "destination.port": 5300},
+                                   {"source.port": 53, "destination.port": 53}, {}])
+@pytest.mark.parametrize("role", ["query", None])
+def test_a_dns_question_whose_ports_do_not_tell_is_read_as_sent(ports, role):
+    """A question (query or transaction record) is written as the client sent it: DNS on a site-configured port, a
+    server-to-server query from port 53, or one without ports keys its source as the client."""
+    fields = {"source.ip": "10.0.0.4", "destination.ip": "10.0.0.53", "dns.question.name": "www.example.com", **ports}
+    if role is not None:
+        fields["dns.type"] = role
+    keys = SPEC_BY_ID["bl.ext_dest"].keys(_event("dns_query", **fields), _ctx())
+    assert [key.scope for key in keys] == ["internal_ip:10.0.0.4"]
+    assert [key.key for key in keys] == [{"kind": "registered_domain", "registered_domain": "example.com"}]
 
 
 @pytest.mark.parametrize(

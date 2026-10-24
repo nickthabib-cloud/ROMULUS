@@ -516,12 +516,13 @@ def _dns_destination(event: TypedEvent, context: KeyContext, spec: BaselineSpec)
     if (record_role == "answer" and event.get("dns.question.names") is None
             and event.get("dns.question.name") is None):
         return NotApplicable("an answer resource record without its question; the query record carries it")
-    # The client is the endpoint not on a DNS service port, whatever the record's role or orientation (a sensor may
-    # write an answer in its flow's orientation, client first); ports that do not tell leave the record Missing.
-    side = dns_server_side(event)
+    # The client is the endpoint not on a DNS service port, whatever the record's orientation (a sensor may write an
+    # answer in its flow's orientation, client first); a question whose ports do not tell is read as sent, source to
+    # destination, and an answer whose ports do not tell is Missing.
+    side = dns_server_side(event, record_role)
     if side is None:
-        return Missing("the DNS ports do not tell the client from the server (neither or both on a DNS port, or a "
-                       "port not typed)", ("source.port", "destination.port"))
+        return Missing("the DNS ports do not tell the client from the server of an answer (neither or both on a DNS "
+                       "port, or a port not typed)", ("source.port", "destination.port"))
     client_field, resolver_field = (("source.ip", "destination.ip") if side == "destination"
                                     else ("destination.ip", "source.ip"))
     client = _ip(event, client_field)
@@ -649,7 +650,7 @@ BASELINE_SPECS = (
         _extract=_cmd_shape,
     ),
     BaselineSpec(
-        id="bl.ext_dest", version="2", key_version="2",
+        id="bl.ext_dest", version="3", key_version="3",
         families=("net_flow", "dns_query", "tls_session", "net_session"),
         datasets=(
             "suricata.eve.flow", "suricata.eve.netflow", "suricata.eve.dns", "suricata.eve.tls",
@@ -658,14 +659,13 @@ BASELINE_SPECS = (
         scope="internal_ip", measure="prevalence", bucket="day",
         required_fields={
             "net_flow": ("source.ip", "destination.ip"),
-            "dns_query": ("source.ip", "destination.ip", ("source.port", "destination.port"),
-                          ("dns.question.names", "dns.question.name")),
+            "dns_query": ("source.ip", "destination.ip", ("dns.question.names", "dns.question.name")),
             "tls_session": ("source.ip", "destination.ip"),
             "net_session": ("source.ip", "destination.ip"),
         },
         optional_fields={
             "net_flow": (*_FLOW_IDS,),
-            "dns_query": ("dns.type", *_FLOW_IDS),
+            "dns_query": ("dns.type", "source.port", "destination.port", *_FLOW_IDS),
             "tls_session": ("tls.client.server_name", *_FLOW_IDS),
             "net_session": ("tls.client.server_name", *_FLOW_IDS),
         },

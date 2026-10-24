@@ -105,16 +105,16 @@ from tests import throughput_fixture as tf
 # rules carry new versions (rule_cells, candidates and the manifest's findings by rule_version). In the fixture only
 # the port scan's claim changes (it gains "K of the N ports are in cited records"); its DNS records, joins and writes
 # give the same roles and citations, so every other table is the reference's.
-# The external-destination baseline keys DNS records by the DNS port's side, so bl.ext_dest carries version and key
-# version 2. The fixture's DNS records give the same keys; the new versions change the snapshot plan and digest (the
-# baseline snapshot, the hunt.baseline_summary audit record, the baseline task's id and outcome, and the
-# snapshot_digest in every baseline rule cell and in the manifest's baseline coverage block), bl.ext_dest's rule cells
-# by rule_version, and its 20 observations by spec_version and key identity.
+# The external-destination baseline keys DNS records by the DNS port's side (a question whose ports do not tell is
+# read as sent), so bl.ext_dest carries version and key version 3. The fixture's DNS records give the same keys; the
+# new versions change the snapshot plan and digest (the baseline snapshot, the hunt.baseline_summary audit record, the
+# baseline task's id and outcome, and the snapshot_digest in every baseline rule cell and in the manifest's baseline
+# coverage block), bl.ext_dest's rule cells by rule_version, and its 20 observations by spec_version and key identity.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
-    "audit": "734cf76f597e9a3b97a2054c2f20cf48f91c45a94fe8eaca4280f17587c5d7cb",
-    "baseline_observations": "f95af4be993ed3f9bd8b0fd9689e8ec173bb6e95ca7f5c95adfd9c8325e85c56",
-    "baseline_snapshot": "ee6577342827c829b296453b801f5322c85cc58ba1caead7af4c52a510e42ed8",
+    "audit": "0b80cc678442cceee405a79d719a896d06d00228559dccd07cc1e45b8821747b",
+    "baseline_observations": "a622940f3edc51095fae860c5247d8b9494c32522d92fca63ce77a73ffcd1856",
+    "baseline_snapshot": "ee69ca9a69bb202d32ea01780bd4832d6cb0972b4ecd8941ba6aaf5e9c8a2b6b",
     "candidates": "6063264ca908c73e4710d65d4799e5460e579f9e9f0cd55391c2b3854c1b28c8",
     "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
     "event_citations": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
@@ -122,11 +122,11 @@ GOLDEN_STACK = {
     "events": "46ff37261993417f3e0fa61de9c3aa24977b2e091ad29d7cf4d166e8261a1017",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "797137953f5a643e0297b450047aeec3fa79c4cb386118f10d0ec00d337fd023",
-    "manifest": "d449ede1c9724cc57743a39eda1a85bb114ad32758750dfaaff2962a9ee05f63",
+    "manifest": "2d211d2f801dbdc30aebe86ad8ada49c08fb59e13ab722d6da86567ac79d91ee",
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
-    "rule_cells": "f65dd621b304f4654f8707419c7e9a84af32a2be1a54f7788babdf6579ccdb7d",
+    "rule_cells": "77f0e52a52d3609f1fe98712e3687b184dd5e67ed53bc35711e3b35d36f7541c",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
-    "tasks": "c1e119cb847af624773522afc5e6b5283f128fae60350bf347274d9371d44288",
+    "tasks": "0e7ef8a8240c951b30447cdc147395503b0a93e438972fdc25e5ff459dc5107c",
 }
 GOLDEN_NORMALIZED = {
     "arkime_sessions3-x": "20b597e7169ff4713f006bd7b69608eea69a2038505dfa92fdf393709af2fe54",

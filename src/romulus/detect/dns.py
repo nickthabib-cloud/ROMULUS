@@ -5,10 +5,12 @@ Typed fields read (no record text is ever searched):
   record with no `dns.type` a whole-transaction record (one session-level view of a question and its reply). Any
   other role value is not evaluated and is counted as missing.
 - `source.ip`/`source.port` and `destination.ip`/`destination.port`: which endpoint is the DNS server is decided by
-  the DNS service port (`DNS_PORTS`: 53, and 853 for DNS over TLS), never by the record's orientation. Sensors
-  orient records differently (Suricata writes an answer with the flow's client as `src_ip`; a per-packet view writes
-  the server as the source), so the server is the endpoint on a DNS port and the client the other one. A record with
-  neither port on a DNS port, or both, leaves the roles unknown: it is counted as missing, and no server is named.
+  the DNS service port (`DNS_PORTS`: 53, and 853 for DNS over TLS), not by an answer's orientation. Sensors orient
+  answers differently (Suricata writes an answer with the flow's client as `src_ip`; a per-packet view writes the
+  server as the source), so the server is the endpoint on a DNS port and the client the other one. A question
+  (a query or transaction record) is written as the client sent it, so when its ports do not tell (DNS on a
+  site-configured port, or a server-to-server query from port 53 to port 53) its source is the client. An answer whose
+  ports do not tell leaves the roles unknown: it is counted as missing, and no server is named.
 - `dns.question.names` (a list) or `dns.question.name`, and `dns.question.type`: the question. When the list is
   present every name in it is evaluated (a session record may hold several questions); otherwise the scalar name
   is. Rules that read names and types read them from question records (queries and transaction records) only: in
@@ -198,13 +200,13 @@ def _port(value) -> int | None:
 
 
 def endpoints(event: TypedEvent, record_role: str | None = None) -> tuple[str | None, str | None]:
-    """(client, server) addresses: the server is the endpoint on a DNS service port, the client the other one,
-    whatever the record's role or orientation; (None, None) when the ports do not tell (neither or both on a DNS port,
-    or a port not typed)."""
+    """(client, server) addresses: the server is the endpoint on a DNS service port, the client the other one, whatever
+    the record's orientation. When the ports do not tell (neither or both on a DNS port, or a port not typed), a
+    question (query or transaction record) is read as sent, source to destination; an answer gives (None, None)."""
     src, dst = event.get("source.ip"), event.get("destination.ip")
     src = str(src) if src not in (None, "") else None
     dst = str(dst) if dst not in (None, "") else None
-    side = server_side(event)
+    side = server_side(event, record_role)
     if side == "destination":
         return src, dst
     if side == "source":
@@ -212,16 +214,17 @@ def endpoints(event: TypedEvent, record_role: str | None = None) -> tuple[str | 
     return None, None
 
 
-def server_side(event: TypedEvent) -> str | None:
-    """'destination' or 'source': the side of the record on a DNS service port (the server); None when the ports
-    do not tell (neither or both on a DNS port, or a port not typed)."""
+def server_side(event: TypedEvent, record_role: str | None = None) -> str | None:
+    """'destination' or 'source': the side of the record on a DNS service port (the server). When the ports do not
+    tell (neither or both on a DNS port, or a port not typed), a question (query or transaction record, by
+    `record_role` or the record's own role) is read as sent and its server is the destination; an answer gives None."""
     to_server = _port(event.get("destination.port")) in DNS_PORTS
     from_server = _port(event.get("source.port")) in DNS_PORTS
     if to_server and not from_server:
         return "destination"
     if from_server and not to_server:
         return "source"
-    return None
+    return "destination" if (record_role or role(event)) in ("query", "transaction") else None
 
 
 def flow_key(event: TypedEvent):
