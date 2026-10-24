@@ -23,6 +23,7 @@ from romulus.detect.observed import REPARENT_GAP, Observed, process_view
 from romulus.evidence.normalize import normalize_hits
 from romulus.evidence.typed import RawRef, TypedEvent, fv
 from romulus.hunt.publish import LineageCitationFetcher
+from tests.lineage_citation_fixture import source_copies
 
 HOST = "videoserver"
 EXT = "203.0.113.65"             # stands in for an address outside the site's internal networks
@@ -123,8 +124,9 @@ def drive(rule, events, raw_sources=None):
 def table(events, raw=None) -> PidTable:
     """A lineage over these records (with `raw`, their raw copies, as a sweep hands them over)."""
     pids = PidTable(observing=True)
+    raw = raw or source_copies(events)
     for event in events:
-        pids.add(event, {r.key: raw[r.key] for r in event.raw if r.key in raw} if raw else None)
+        pids.add(event, {r.key: raw[r.key] for r in event.raw if r.key in raw}, "host-target")
     return pids
 
 
@@ -357,6 +359,7 @@ def test_a_refused_observation_makes_every_service_manager_verdict_unknown(tmp_p
     events, raw = lab_zmc()
     first, rest = events[:3], events[3:]
     drive_events = list(first)
+    rule.bind_raw(raw, "host-target")
     rule.consume([e for e in drive_events if e.family in rule.families])
     rule.budget.force_full("the observed states' store is past its floor (test)",
                            lambda account: account.name.endswith("proc_observed"))
@@ -369,6 +372,7 @@ def test_a_refused_observation_makes_every_service_manager_verdict_unknown(tmp_p
     rule = InterpreterExternalConnection()
     rule.spill_dir = tmp_path / "second"
     rule.budget = StateBudget(tmp_path, disk_total=2**40, reserve=0)
+    rule.bind_raw(raw, "host-target")
     rule.consume([e for e in events if e.family in rule.families])
     rule.budget.force_full("the observed states' store is past its floor (test)",
                            lambda account: account.name.endswith("proc_observed"))

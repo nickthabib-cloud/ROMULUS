@@ -12,6 +12,7 @@ from romulus.hunt import sweep as sw
 from romulus.sources.models import Completeness, SearchOutcome, Window
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
+from tests.lineage_citation_fixture import bind_lineage
 
 T0 = 1731940000.100                                   # 2024-11-18T14:26:40.100Z
 TS = "2024-11-18T14:26:40.100Z"
@@ -169,7 +170,9 @@ def _sock(serial=500, saddr=SADDR_C2, host="videoserver", t0=T0, **kw):
 
 def iec(*events):
     rule = InterpreterExternalConnection()
+    bind_lineage(rule, events)
     rule.consume(list(events))
+    rule.bind_raw({})
     return rule.finalize()
 
 

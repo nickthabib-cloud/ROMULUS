@@ -69,6 +69,22 @@ def test_pointer_stores_use_shrunken_caps_that_still_cover_mission_scale():
     assert lineage.exec_records.disk_budget == 2 * 2**30
 
 
+def test_missing_raw_source_never_falls_back_to_an_unverified_inline_citation():
+    [observed_event], _raw = normalized(observe(T, 12, 401, 1, "/usr/lib/systemd/systemd"))
+    exec_events, _raw = normalized(execd(T + 1, 13, 402, 1, "/usr/bin/perl", ["/usr/bin/perl", "job.pl"]))
+    exec_event = next(event for event in exec_events if event.family == "process_exec")
+    lineage = ExecLineage(observing=True, citing=True)
+
+    lineage.observe_process(observed_event, {}, "host-target")
+    lineage.observe(exec_event, {}, "host-target")
+
+    [entry] = lineage.observed.peek((HOST, 401))
+    assert entry.cited is False
+    assert len(lineage.citations) == 0
+    assert len(lineage.exec_records) == 0
+    assert lineage.cited([entry.event_id, exec_event.id]) == ({}, {})
+
+
 class _Source:
     def __init__(self, hits: list[dict]):
         self.hits = hits
@@ -297,3 +313,4 @@ def test_exec_source_failure_drops_the_ancestor_citation_but_changes_no_verdict(
     assert match.proposed_lane == "lead"
     assert "reaches the service manager with no web server" in match.claim
     assert any("exec record(s) it reads were not kept for citation" in note for note in match.notes)
+    assert all("store of exec records was full" not in note for note in match.notes)

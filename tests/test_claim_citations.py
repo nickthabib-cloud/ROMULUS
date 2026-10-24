@@ -24,6 +24,7 @@ from romulus.evidence.typed import RawRef, TypedEvent, fv
 from romulus.hunt.stage import EventStage
 from tests import throughput_fixture as tf
 from tests.claim_citations import finding_problems, problems
+from tests.lineage_citation_fixture import bind_lineage
 
 T0 = datetime(2024, 11, 18, 14, 0, tzinfo=UTC)
 _n = 0
@@ -40,9 +41,13 @@ def ev(family, ts, host="web01", outcome="success", **fields):
 def staged(rule, batches, stage_dir):
     """Drive a staged rule as the sweep does: each batch's citations are put on a real event stage, its interval
     bounds held and released, then the rule finalizes with the stage's loader."""
+    batches = list(batches)
     stage = EventStage(stage_dir)
+    all_events = [event for batch in batches for event in batch]
+    raw = bind_lineage(rule, all_events)
     try:
         for batch in batches:
+            rule.bind_raw({ref.key: raw[ref.key] for event in batch for ref in event.raw}, "fixture-target")
             rule.consume(list(batch))
             drained = rule.drain_staged()
             held, released = rule.drain_bounds()
@@ -50,6 +55,7 @@ def staged(rule, batches, stage_dir):
             stage.put([e for e in {e.id: e for e in drained}.values() if copies[e.id] > holds[e.id]], {})
             stage.hold([(rule.id, e) for e in {e.id: e for e in drained}.values() for _ in range(holds[e.id])], {})
             stage.release(rule.id, released)
+        rule.bind_raw({})
         rule.bind_loader(stage.load)
         return rule.finalize()
     finally:
@@ -519,7 +525,9 @@ def refused_reasons(tree):
     from romulus.detect.correlation import InterpreterExternalConnection
     from tests.test_network_correlation import _sock
     rule = InterpreterExternalConnection()
-    rule.consume([*tree, _sock()])
+    events = [*tree, _sock()]
+    bind_lineage(rule, events)
+    rule.consume(events)
     return rule.limit_reasons(), rule.coverage_notes()
 
 
@@ -661,7 +669,10 @@ def test_an_exec_record_dropped_for_detection_is_named_not_cited_and_changes_no_
         rule.spill_dir = tmp_path / ("drop" if drop else "keep")
         rule.spill_dir.mkdir()
         rule.budget = StateBudget(rule.spill_dir, disk_total=2**30, reserve=0)
-        rule.consume([*tree, _sock()])
+        events = [*tree, _sock()]
+        bind_lineage(rule, events)
+        rule.consume(events)
+        rule.bind_raw({})
         store = next(ref() for ref in rule.__dict__["_state_stores"] if ref().name == "exec_records")
         store.trim(keep=0)                      # the exec records go to disk
         if drop:

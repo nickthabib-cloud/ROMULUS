@@ -4,10 +4,8 @@ from __future__ import annotations
 import ast
 import ipaddress
 import itertools
-import json
 import posixpath
 import re
-import zlib
 from bisect import bisect_right, insort
 from collections import defaultdict
 from datetime import UTC, datetime
@@ -29,7 +27,6 @@ from romulus.detect.observed import (
     pointer_body,
     process_view,
     same_state,
-    uncite,
 )
 from romulus.evidence.shellparse import (
     SHELLS,
@@ -1694,8 +1691,7 @@ class ExecLineage:
         """Keep a compact verified-source pointer for an exec record's raw records."""
         blob = citation_pointer(event, event.raw, raw, "exec", source_target)
         if blob is None:
-            body = {"event": event.model_dump_json(), "raw": {}}
-            blob = zlib.compress(json.dumps(body, sort_keys=True).encode(), 6)
+            return
         if self.exec_records.put(event.id, blob):
             return
         when = event.ts.isoformat()
@@ -1799,9 +1795,11 @@ class ExecLineage:
                                                   f"anywhere in this hunt (every lineage that would have is stated as "
                                                   f"unknown)")
 
-    def _cite(self, entry: Observed, blob: bytes) -> bool:
-        """Keep an observation's record for citation; False when its store refuses it (a lineage resting on it is then
-        unknown)."""
+    def _cite(self, entry: Observed, blob: bytes | None) -> bool:
+        """Keep an observation's source pointer; False when it is unavailable or its store refuses it (a lineage
+        resting on it is then unknown)."""
+        if blob is None:
+            return False
         if self.citations.put(entry.event_id, blob):
             return True
         when = datetime.fromtimestamp(entry.ts, UTC).isoformat()
@@ -1834,23 +1832,12 @@ class ExecLineage:
         events, raw, pointers = {}, {}, {}
         for event_id in event_ids:
             blob = None if self.citations is None else self.citations.peek(event_id)
-            if blob is not None:
-                if pointer_body(blob) is not None:
-                    pointers[event_id] = blob
-                else:
-                    event, copies = uncite(blob)
-                    if event is not None:
-                        events[event_id] = event
-                        raw.update(copies)
+            if blob is not None and pointer_body(blob) is not None:
+                pointers[event_id] = blob
                 continue
             blob = None if self.exec_records is None else self.exec_records.peek(event_id)
-            if blob is not None:
-                if pointer_body(blob) is not None:
-                    pointers[event_id] = blob
-                else:
-                    body = json.loads(zlib.decompress(blob))
-                    events[event_id] = TypedEvent.model_validate_json(body["event"])
-                    raw.update(body["raw"])
+            if blob is not None and pointer_body(blob) is not None:
+                pointers[event_id] = blob
         if pointers and self._citation_loader is not None:
             loaded, copies = self._citation_loader(pointers)
             events.update(loaded)

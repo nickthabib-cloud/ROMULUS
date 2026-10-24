@@ -34,7 +34,6 @@ import json
 import zlib
 from typing import NamedTuple
 
-from romulus.evidence.normalize import observed_record
 from romulus.evidence.typed import RawRef, TypedEvent, event_id
 
 # A parent change to pid 1 is a reparent of the same process only when the earlier parent was seen this recently.
@@ -146,31 +145,17 @@ def citation(
     ref: RawRef | None,
     source: dict | None,
     source_target: str | None = None,
-) -> bytes:
-    """An observation's citation. A source-backed record becomes a compact pointer plus digest and boot metadata;
-    a record constructed without source evidence retains its typed event for compatibility with isolated callers."""
+) -> bytes | None:
+    """A compact source pointer for an observation, or None when its source record is unavailable."""
     if ref is not None and source is not None:
-        pointer = citation_pointer(event, [ref], {ref.key: source}, "observed", source_target)
-        if pointer is not None:
-            return pointer
-    body = {"event": event.model_dump_json()}
-    return zlib.compress(json.dumps(body, sort_keys=True).encode(), 6)
+        return citation_pointer(event, [ref], {ref.key: source}, "observed", source_target)
+    return None
 
 
 def pointer_body(blob: bytes) -> dict | None:
     """Decode a lineage citation pointer; legacy inline citation blobs are not pointers."""
     body = json.loads(zlib.decompress(blob))
     return body if body.get("v") == 1 and body.get("kind") in {"observed", "exec"} else None
-
-
-def uncite(blob: bytes) -> tuple[TypedEvent | None, dict[str, dict]]:
-    """The cited typed event and its raw copies (None when the record no longer reads as one)."""
-    body = json.loads(zlib.decompress(blob))
-    if "event" in body:
-        return TypedEvent.model_validate_json(body["event"]), {}
-    target, native, source = body["raw"]
-    event = observed_record({"_index": target, "_id": native, "_source": source}, body["boot"])
-    return event, ({f"{target}/{native}": source} if event is not None else {})
 
 
 # ---- one pid's process at an instant ----------------------------------------------------------------------------

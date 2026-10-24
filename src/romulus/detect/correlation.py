@@ -305,7 +305,7 @@ def lineage_notes(judged: list[Judged]) -> list[str]:
         ancestry = item.ancestry
         if ancestry.execs:
             notes.append(f"lineage of pid {item.pid}: {len(ancestry.execs)} exec record(s) it reads were not kept for "
-                         f"citation (the store of exec records was full); the chain names them by native id")
+                         f"citation; the chain names them by native id")
         if ancestry.verdict == "unknown":
             notes.append(f"lineage of pid {item.pid} not established: {ancestry.why}")
         elif ancestry.verdict == "web_server":
