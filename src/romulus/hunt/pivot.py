@@ -812,6 +812,7 @@ class PivotExecutor:
             "hunt": self.hunt_id,
             "source_query_scope": getattr(self, "source_query_scope", None) or "expansion",
             "resolve_host_ip": ip,
+            "host_identity": "typed-v2",
             "start": start.isoformat(),
             "end": end.isoformat(),
             "targets": [target for target, _ in targets],
@@ -835,8 +836,18 @@ class PivotExecutor:
             outcome = self._execute(intent, contract, spend_task_id=task_id)
             if outcome.completeness != Completeness.complete:
                 incomplete.append(f"{target}: {'; '.join(outcome.reasons or [outcome.error or 'incomplete'])}")
-            names.update(str(bucket["key"].get("host.name")) for bucket in outcome.buckets
-                         if bucket["key"].get("host.name") not in (None, ""))
+            for bucket in outcome.buckets:
+                name = bucket["key"].get("host.name")
+                if name in (None, ""):
+                    continue
+                # Windows contracts aggregate their native computer-name field, which commonly carries an FQDN,
+                # while normalization deliberately uses the lower-case short name as the typed host identity.
+                # Resolve to that same identity before links, anchors and scheduling consume it.
+                resolved = str(name)
+                if contract.os_family == "windows":
+                    resolved = resolved.strip().rstrip(".").casefold().split(".", 1)[0]
+                if resolved:
+                    names.add(resolved)
         if incomplete:
             host, reason = None, f"victim host unresolved for {ip}: host lookup incomplete ({'; '.join(incomplete)})"
         elif len(names) == 1:
