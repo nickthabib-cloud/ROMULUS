@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from romulus.hunt import baseline_source as module
 from romulus.hunt.baseline_source import HuntHistorySource
 from romulus.sources.models import Completeness
+from romulus.sources.profile import FieldContract
 
 START = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -19,7 +20,9 @@ def test_adapter_reuses_partition_planner_execute_and_normalizer(monkeypatch):
         return [(window, 2)]
 
     monkeypatch.setattr(module, "plan_partitions", plan)
-    source = HuntHistorySource("client", {"host-index": "contract"})
+    source = HuntHistorySource("client", {
+        "host-index": FieldContract(target="host-index", fields={}, role="host"),
+    })
     result = source.plan("host-index", START, START + timedelta(hours=1), query_budget=5)
     parts = list(result.partitions)
     assert len(parts) == 1 and parts[0].expected_records == 2
@@ -49,18 +52,22 @@ def test_recursive_planning_stops_at_the_physical_query_budget(monkeypatch):
         return [(window, module.PARTITION_MAX_DOCS + 1)]
 
     monkeypatch.setattr(module, "plan_partitions", oversized)
-    source = HuntHistorySource("client", {"host-index": "contract"})
+    source = HuntHistorySource("client", {
+        "host-index": FieldContract(target="host-index", fields={}, role="host"),
+    })
 
     result = source.plan("host-index", START, START + timedelta(hours=1), query_budget=1)
 
-    assert result.completeness == "partial"
+    assert result.completeness == "omitted_budget"         # the hunt's own budget: short history, not a fault
     assert result.query_count == 1 and len(calls) == 1
     assert result.reasons == ("planning query budget exhausted",)
 
 
 def test_zero_partition_skips_source_and_fetch_reports_physical_spend(monkeypatch):
     called = []
-    source = HuntHistorySource("client", {"network": "contract"})
+    source = HuntHistorySource("client", {
+        "network": FieldContract(target="network", fields={}, role="network"),
+    })
     zero = module.HistoryPartition("network", START, START + timedelta(hours=1), 0, "zero")
     monkeypatch.setattr(module, "execute", lambda *_args, **_kwargs: called.append(True))
     assert source.fetch(zero, record_budget=0, query_budget=1).query_count == 0
@@ -79,11 +86,13 @@ def test_zero_partition_skips_source_and_fetch_reports_physical_spend(monkeypatc
     monkeypatch.setattr(module, "execute", bounded)
     part = module.HistoryPartition("network", START, START + timedelta(hours=1), 4_000, "paged")
     fetched = source.fetch(part, record_budget=4_000, query_budget=1)
-    assert fetched.query_count == 1 and fetched.completeness == "partial"
+    assert fetched.query_count == 1 and fetched.completeness == "omitted_budget"
 
 
 def test_adapter_turns_normalization_errors_and_unsupported_records_partial(monkeypatch):
-    source = HuntHistorySource("client", {"network": "contract"})
+    source = HuntHistorySource("client", {
+        "network": FieldContract(target="network", fields={}, role="network"),
+    })
     partition = module.HistoryPartition(
         "network", START, START + timedelta(hours=1), 1, "p",
     )
@@ -124,7 +133,9 @@ def test_boot_conflict_in_an_hour_makes_the_hour_partial_and_the_map_is_per_hour
         return ["event"], {}, []
 
     monkeypatch.setattr(module, "normalize_hits", normalize)
-    source = HuntHistorySource("client", {"host-index": "contract"})
+    source = HuntHistorySource("client", {
+        "host-index": FieldContract(target="host-index", fields={}, role="host"),
+    })
     newest = source.plan("host-index", START + timedelta(hours=1), START + timedelta(hours=2), query_budget=5)
     fetched = source.fetch(newest.partitions[0])
     assert fetched.completeness == "partial"
@@ -160,3 +171,53 @@ def test_a_process_execs_time_is_the_retrieval_time_field():
     time_field = FieldContract(target="host-index", fields={}).time_field
     assert time_field == "@timestamp"
     assert execs[0].ts == datetime.fromisoformat(hits[0]["_source"][time_field]).astimezone(UTC)
+
+
+def test_history_filter_uses_contract_role_not_target_name(monkeypatch):
+    planned = []
+    monkeypatch.setattr(module, "plan_partitions", lambda _client, target, _contract, window, filters: (
+        planned.append((target, filters)) or [(window, 0)]
+    ))
+    source = HuntHistorySource("client", {
+        "host-looking-network": FieldContract(target="host-looking-network", fields={}, role="network"),
+        "plain-index": FieldContract(target="plain-index", fields={}, role="host"),
+    })
+
+    source.plan("host-looking-network", START, START + timedelta(hours=1), query_budget=2)
+    source.plan("plain-index", START, START + timedelta(hours=1), query_budget=2)
+
+    assert planned[0] == ("host-looking-network", [])
+    assert planned[1][1][0].field == "event.dataset"
+
+
+def test_fetch_refs_uses_exact_native_ids_and_returns_raw_copies(monkeypatch):
+    class Client:
+        def __init__(self):
+            self.calls = []
+
+        def search(self, target, body):
+            self.calls.append((target, body))
+            return {"hits": {"hits": [
+                {"_index": target, "_id": native_id, "_source": {"message": native_id}}
+                for native_id in body["query"]["ids"]["values"]
+            ]}}
+
+    client = Client()
+    event = SimpleNamespace(id="event", raw=[])
+    monkeypatch.setattr(module, "normalize_hits", lambda records, boots: ([event], {}, []))
+    source = HuntHistorySource(client, {
+        "host-index": FieldContract(target="host-index", fields={}, role="host"),
+    })
+
+    events, raw, reasons = source.fetch_refs([
+        {"target": "host-index", "native_id": "b"},
+        {"target": "host-index", "native_id": "a"},
+        {"target": "host-index", "native_id": "a"},
+    ])
+
+    assert events == (event,)
+    assert client.calls == [("host-index", {
+        "size": 2, "query": {"ids": {"values": ["a", "b"]}},
+    })]
+    assert raw == {"host-index/a": {"message": "a"}, "host-index/b": {"message": "b"}}
+    assert reasons == ()

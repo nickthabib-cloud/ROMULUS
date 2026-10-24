@@ -48,7 +48,7 @@ class FakeHistory:
     def plan(self, target, start, end, *, query_budget):
         self.plans.append((target, start))
         if query_budget < 1:
-            return HistoryPlan((), 0, "partial", ("planning query budget exhausted",))
+            return HistoryPlan((), 0, "omitted_budget", ("planning query budget exhausted",))
         expected = sum(start <= event.ts < end for event in self.events)
         return HistoryPlan((
             HistoryPartition(target, start, end, expected, f"{target}:{start.isoformat()}"),
@@ -229,6 +229,31 @@ def test_segment_identity_is_content_derived_and_revoked_rewrite_is_usable():
     assert rows[1]["id"] == f"{rows[0]['id']}-r1"
 
 
+def test_external_destination_segment_identity_is_bound_to_the_network_definition():
+    ext = SPEC_BY_ID["bl.ext_dest"]
+    common = {
+        "site": "site", "target": "network", "spec": ext,
+        "start": START - timedelta(hours=1), "end": START,
+        "normalizer": "fixture@1", "exclusion_digest": "none", "excluded_keys": [],
+    }
+
+    assert segment_content_id(**common, network_digest="network-a") != segment_content_id(
+        **common, network_digest="network-b",
+    )
+
+    repo = _repo()
+    writer = LookbackWriter(
+        repo, FakeHistory(), site="site", specs=[ext], normalizer="fixture@1",
+        budget=LookbackBudget(queries=10, records=10, seconds=10), network_digest="network-a",
+        now=lambda: START,
+    )
+    row = writer.segment_row(
+        hunt_id="h1", target="network", spec=ext,
+        start=START - timedelta(hours=1), end=START, events_total=0,
+    )
+    assert row["network_digest"] == "network-a"
+
+
 def test_building_segment_is_invisible_and_stale_cleanup_removes_its_rows():
     repo = _repo()
     row = _writer(repo, FakeHistory()).segment_row(
@@ -284,7 +309,7 @@ def test_fresh_building_segment_is_not_cleaned_by_a_concurrent_writer():
     assert repo.baseline_segments()[0]["status"] == "building"
     # Never skipped silently: the hour is a gap for this hunt, with the reason.
     assert [(gap.start, gap.state, gap.reason) for gap in contender.gaps] == [
-        (START - timedelta(hours=1), "partial", "bl.exec_path: being built by another hunt"),
+        (START - timedelta(hours=1), "unresolved", "bl.exec_path: being built by another hunt"),
     ]
 
 
@@ -316,7 +341,7 @@ def test_unresolved_exec_pair_pending_never_becomes_an_empty_complete_segment():
         hunt_id="build", targets=["host-index"], start=START - timedelta(hours=1), end=START,
     )
     assert repo.baseline_segments(statuses=["active"]) == []
-    assert result.gaps[0].state == "partial" and "parent exec before history" in result.gaps[0].reason
+    assert result.gaps[0].state == "unresolved" and "parent exec before history" in result.gaps[0].reason
 
 
 def test_complete_lookback_fetch_records_parent_carry_on_disk():
@@ -340,7 +365,7 @@ def test_complete_lookback_fetch_records_parent_carry_on_disk():
     assert carry.for_target("host-index").lookup("web01", 42, START.timestamp(), "boot-a") is None
 
 
-def test_parent_in_an_earlier_hour_is_explicit_then_resolves_on_resume():
+def test_a_history_child_resolves_to_its_parent_in_an_older_hour_in_one_newest_first_fill():
     repo = _repo()
     repo.create_hunt("build", {}, "d", "test")
     parent = TypedEvent(
@@ -369,11 +394,15 @@ def test_parent_in_an_earlier_hour_is_explicit_then_resolves_on_resume():
         ).fill(hunt_id="build", targets=["host-index"], start=START - timedelta(hours=2), end=START)
 
     first = run()
-    assert any(gap.start == START - timedelta(hours=1) and gap.state == "partial" for gap in first.gaps)
+    # The parent's own parent is pid 1, out of scope, so only the older hour stays unresolved.
+    assert [(gap.start, gap.state) for gap in first.gaps] == [(START - timedelta(hours=2), "unresolved")]
+    assert first.complete == 1
+    assert _pair_keys(repo) == [(START - timedelta(hours=1), "/usr/sbin/parent", "/bin/sh")]
+    assert repo.baseline_history_cells("build") == []
+    # A rerun re-reads only the unresolved hour and resolves the child's hour no differently.
     second = run()
-    active = repo.baseline_segments(statuses=["active"])
-    assert second.complete == 1
-    assert any(row["start"] == START - timedelta(hours=1) for row in active)
+    assert [(gap.start, gap.state) for gap in second.gaps] == [(START - timedelta(hours=2), "unresolved")]
+    assert _pair_keys(repo) == [(START - timedelta(hours=1), "/usr/sbin/parent", "/bin/sh")]
 
 
 def test_exec_pair_writer_matches_direct_counter_with_same_hour_parent():
@@ -544,7 +573,7 @@ def test_parent_across_a_failed_hour_is_unresolved_never_the_older_generation():
         )
     assert ("/old", "/bin/sh") not in [(parent, child) for _, parent, child in _pair_keys(repo)]
     child_gap = [gap for gap in result.gaps if gap.start == H_HOUR]
-    assert child_gap and child_gap[0].state == "partial"
+    assert child_gap and child_gap[0].state == "unresolved"
     assert "e3: parent exec in an unobserved hour" in child_gap[0].reason
 
 
@@ -1060,3 +1089,85 @@ def test_a_same_instant_child_resolves_against_the_carry_by_serial():
     assert [key.key["parent_executable"] for key in resolve(8).keys] == ["/usr/bin/cmd2"]
     unordered = resolve(None)
     assert unordered.keys == () and unordered.reason == "an exec of the host between parent and child was not carried"
+
+
+def _pair_exec(event_id: str, ts: datetime, pid: int, ppid: int, executable: str) -> TypedEvent:
+    return TypedEvent(
+        id=event_id, family="process_exec", ts=ts, host="web01", outcome=Outcome.success,
+        fields={
+            "process.pid": fv(pid, "fixture"), "process.ppid": fv(ppid, "fixture"),
+            "process.executable": fv(executable, "fixture"), "host.boot.id": fv("boot-a", "fixture"),
+        }, raw=[], normalizer="fixture@1",
+    )
+
+
+def test_a_deferred_history_hour_counts_what_a_direct_counter_counts():
+    parent = _pair_exec("parent", START - timedelta(minutes=150), 10, 1, "/usr/sbin/parent")
+    events = [parent, *(
+        _pair_exec(f"child-{index}", START - timedelta(minutes=50 - index), 100 + index, 10,
+                   "/bin/sh" if index % 2 else "/bin/ls")
+        for index in range(5)
+    ), _pair_exec("local-parent", START - timedelta(minutes=30), 30, 10, "/bin/bash"),
+        _pair_exec("local-child", START - timedelta(minutes=29), 31, 30, "/bin/cat")]
+    repo = _repo()
+    repo.create_hunt("build", {}, "d", "test")
+    carry = CarryInStore(repo, "build")
+
+    _pair_writer(repo, FakeHistory(events), carry).fill(
+        hunt_id="build", targets=["host-index"], start=START - timedelta(hours=3), end=START,
+    )
+
+    segment = next(row for row in repo.baseline_segments(statuses=["active"])
+                   if row["start"] == START - timedelta(hours=1))
+    stored = [{key: value for key, value in row.items() if key != "segment_id"}
+              for row in repo.baseline_counts(segment["id"])]
+    hours = _hour_parents(events)
+    direct = KeyCounter("direct", SPEC_BY_ID["bl.exec_pair"], span=(START - timedelta(hours=1), START))
+    for event in events:
+        if START - timedelta(hours=1) <= event.ts < START:
+            direct.consume(event, KeyContext(pid_table=hours))
+    expected = [{key: value for key, value in row.items() if key != "segment_id"}
+                for row in direct.count_rows()]
+    assert stored == expected
+    assert sum(row["count"] for row in stored) == 7
+    hour_events = sum(1 for event in events if START - timedelta(hours=1) <= event.ts < START)
+    assert segment["events_total"] == hour_events
+
+
+def _hour_parents(events):
+    from romulus.baseline.carry import HourParents
+
+    table = HourParents()
+    for event in sorted(events, key=lambda item: (item.ts, item.id)):
+        table.add(event)
+    return table
+
+
+def test_a_fill_interrupted_before_resolution_resolves_the_staged_hour_on_resume(monkeypatch):
+    events = [_pair_exec("parent", START - timedelta(minutes=90), 10, 1, "/usr/sbin/parent"),
+              _pair_exec("child", START - timedelta(minutes=30), 11, 10, "/bin/sh")]
+    repo = _repo()
+    repo.create_hunt("build", {}, "d", "test")
+    carry = CarryInStore(repo, "build")
+    cells = repo.baseline_history_cells
+
+    def crash(hunt_id):
+        raise RuntimeError("injected crash before resolution")
+
+    monkeypatch.setattr(repo, "baseline_history_cells", crash)
+    with pytest.raises(RuntimeError):
+        _pair_writer(repo, FakeHistory(events), carry).fill(
+            hunt_id="build", targets=["host-index"], start=START - timedelta(hours=2), end=START,
+        )
+    monkeypatch.setattr(repo, "baseline_history_cells", cells)
+    assert len(cells("build")) == 2 and _pair_keys(repo) == []
+
+    _pair_writer(repo, FakeHistory(events), carry).fill(
+        hunt_id="build", targets=["host-index"], start=START - timedelta(hours=2), end=START,
+    )
+
+    assert _pair_keys(repo) == [(START - timedelta(hours=1), "/usr/sbin/parent", "/bin/sh")]
+    child_hour = next(row for row in repo.baseline_segments(statuses=["active"])
+                      if row["start"] == START - timedelta(hours=1))
+    assert [row["count"] for row in repo.baseline_counts(child_hour["id"])] == [1]
+    assert cells("build") == []

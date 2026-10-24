@@ -574,8 +574,12 @@ def run_stack(stage_dir, *, scale: int = 1, docs: dict | None = None) -> dict:
     pivot sizes first (`patched_sizes`)."""
     from sqlalchemy import select
 
+    from romulus.baseline.lookback import HistoryGap
+    from romulus.baseline.playbook import BASELINE_PLAYBOOKS
+    from romulus.baseline.snapshot import SnapshotPlanner
     from romulus.config import Settings
     from romulus.hunt import run as hunt_run
+    from romulus.hunt.baseline_stage import run_baseline_stage
     from romulus.hunt.expansion import ExpansionEngine
     from romulus.hunt.links import LinkFetcher
     from romulus.hunt.pivot import PivotExecutor
@@ -599,12 +603,22 @@ def run_stack(stage_dir, *, scale: int = 1, docs: dict | None = None) -> dict:
     migrate(engine)
     repo = Repo(engine)
     targets = [HOST_TARGET, NETWORK_TARGET, ARKIME_TARGET]
+    baseline_specs = [playbook.spec for playbook in BASELINE_PLAYBOOKS]
     repo.create_hunt("h1", {
         "window": {"start": window.start.isoformat(), "end": window.end.isoformat()},
         "style": "broad", "hypothesis": "", "original_input": {}, "targets": targets,
         "pack": {"version": "test", "playbooks": []}, "normalizer": "test", "policy": "test",
         "model": {}, "romulus_version": "test", "agent_mode": "off", "source_profiles": {},
-        "budgets": {"wall_clock_minutes": 120}}, "digest", "test")
+        "budgets": {"wall_clock_minutes": 120},
+        "baseline": {
+            "plan_version": "baseline-plan@1", "site": "throughput-fixture", "history_days": 7,
+            "min_live_hours": 48,
+            "specs": [{"id": spec.id, "version": spec.version, "key_version": spec.key_version}
+                      for spec in baseline_specs],
+            "decay": {"first_seen": "none", "rare_half_life_days": 14, "rate": "none"},
+            "budget": {"queries": 200, "records": 5_000_000, "seconds": 1800},
+            "store_cut_digest": "empty",
+        }}, "digest", "test")
     repo.set_hunt_state("h1", "running")
     sweep = Sweep(repo, client, "h1", window, contracts, stage_dir=stage_dir)
     for target in targets:
@@ -613,6 +627,17 @@ def run_stack(stage_dir, *, scale: int = 1, docs: dict | None = None) -> dict:
     sweep_summary = {"finished": True, "complete": not sweep.partial_reasons,
                      "partial_reasons": sweep.partial_reasons, "stats": sweep.stats}
     repo.audit("system", "hunt.sweep_summary", "h1", sweep_summary)
+    history_start = window.start - timedelta(days=7)
+    gaps = [HistoryGap(
+        target, history_start, window.start, "failed", "fixture has no pre-window history",
+        tuple(spec.id for spec in baseline_specs),
+    ) for target in targets]
+    SnapshotPlanner(repo).freeze(
+        hunt_id="h1", window_start=window.start, lookback=timedelta(days=7), min_live_hours=48,
+        site="throughput-fixture", targets=targets, specs=baseline_specs, history_gaps=gaps,
+    )
+    baseline = run_baseline_stage(repo, "h1", window)
+    repo.audit("system", "hunt.baseline_summary", "h1", baseline)
     executor = PivotExecutor(repo, client, "h1", contracts, source_query_budget=180,
                              dataset_inventory={HOST_TARGET: {"linux.audit", "systemd.journal", "apache.access",
                                                               "apache.error"}})
@@ -642,6 +667,10 @@ def run_stack(stage_dir, *, scale: int = 1, docs: dict | None = None) -> dict:
         "event_entities": table("event_entity", ["event_id", "entity_id", "role"]),
         "candidates": table("candidate", ["id"]),
         "rule_cells": table("rule_run", ["id"]),
+        "baseline_observations": table(
+            "baseline_observation", ["spec_id", "spec_version", "scope", "key_digest"],
+        ),
+        "baseline_snapshot": table("baseline_snapshot", ["hunt_id"]),
         "anchors": table("expansion_anchor", ["id"]),
         "links": table("expansion_link", ["id"]),
         "tasks": tasks,

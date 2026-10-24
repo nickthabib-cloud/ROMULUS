@@ -175,6 +175,53 @@ def test_manifest_citations_resolve_and_renderers_agree():
     )
 
 
+def test_report_coverage_names_the_baseline_snapshot_and_each_specs_unresolved_count():
+    repo, _ = _repo_with_finding()
+    hunt = repo.get_hunt("h1")
+    hunt_manifest = hunt["manifest"]
+    hunt_manifest["baseline"] = {
+        "specs": [{"id": "bl.exec_path", "version": "1", "key_version": "1"}],
+    }
+    from romulus.store import schema as tables
+    with repo.engine.begin() as connection:
+        connection.execute(tables.hunt.update().where(tables.hunt.c.id == "h1").values(manifest=hunt_manifest))
+    repo.save_baseline_snapshot({
+        "hunt_id": "h1", "plan": {"targets": ["idx"]}, "store_cut": {}, "segment_ids": [],
+        "coverage": {"idx|bl.exec_path": {
+            "effective_start": "2024-11-16T10:00:00+00:00", "effective_hours": 48,
+            "gaps": [], "absent_before": None, "status": "resolved", "segment_ids": [],
+        }},
+        "status": "resolved", "digest": "snapshot-abc",
+    })
+    repo.upsert_baseline_observation({
+        "hunt_id": "h1", "spec_id": "bl.exec_path", "spec_version": "1",
+        "scope_kind": "host", "scope": "host:web01", "key_id": "key-id", "key_digest": "key-digest",
+        "key": {"executable": "/bin/new"}, "window_count": 1, "first_ts": T, "last_ts": T,
+        "first_event_id": "ev1", "history_count": 0, "history_decayed": None,
+        "peer_scopes_with_key": 0, "peer_scopes": 1, "threshold": None, "mean": None, "sigma": None,
+        "n_hours": 1, "verdict": "unresolved", "reason": "scope silent in history", "candidate_id": None,
+    })
+    repo.audit("system", "hunt.baseline_summary", "h1", {
+        "finished": True, "status": "partial", "snapshot_digest": "snapshot-abc", "specs": {},
+    })
+
+    manifest = publish_revision(repo, "h1", "test")
+    baseline = manifest["coverage"]["baseline"]
+
+    assert baseline["snapshot_digest"] == "snapshot-abc"
+    assert baseline["specs"] == [{
+        "id": "bl.exec_path", "version": "1", "status": "unresolved", "unresolved_count": 1,
+        "verdicts": {"unresolved": 1},
+        "targets": {"idx": {
+            "effective_start": "2024-11-16T10:00:00+00:00", "effective_hours": 48,
+            "gaps": [], "absent_before": None, "status": "resolved", "segment_ids": [],
+        }},
+    }]
+    rendered = render(manifest)
+    assert "### Baseline snapshot" in rendered and "snapshot-abc" in rendered
+    assert "bl.exec\\_path" in rendered and "| unresolved | 1 |" in rendered
+
+
 def test_duplicate_partition_events_have_a_separate_not_assessed_explanation():
     from romulus.report.manifest import _not_assessed
 

@@ -39,6 +39,7 @@ def parse_env_file(path: Path) -> dict[str, str]:
 
 class Settings(BaseModel):
     home: Path = Path.home() / "romulus"
+    site: str = ""
     web_bind: str = "127.0.0.1:8443"
     web_tls_cert: str = ""
     web_tls_key: str = ""
@@ -202,7 +203,8 @@ class Settings(BaseModel):
 
 
 ENV_MAP = {
-    "ROMULUS_HOME": "home", "ROMULUS_EVAL_ROOT": "eval_root", "ROMULUS_WEB_BIND": "web_bind", "ROMULUS_SECRET_KEY": "secret_key",
+    "ROMULUS_HOME": "home", "ROMULUS_SITE": "site", "ROMULUS_EVAL_ROOT": "eval_root",
+    "ROMULUS_WEB_BIND": "web_bind", "ROMULUS_SECRET_KEY": "secret_key",
     "ROMULUS_WEB_TLS_CERT": "web_tls_cert", "ROMULUS_WEB_TLS_KEY": "web_tls_key",
     "OLLAMA_URL": "ollama_url", "OLLAMA_MODEL_TRIAGE": "ollama_model_triage",
     "OLLAMA_MODEL_SYNTHESIS": "ollama_model_synthesis", "OLLAMA_NUM_CTX": "ollama_num_ctx",

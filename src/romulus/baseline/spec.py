@@ -79,6 +79,8 @@ class Pending:
     child_executable: str
     # The child's audit serial: it places the child among its parent's execs at the same instant.
     serial: int | None = None
+    # Source identities are sufficient to fetch the child's record only if its key is published.
+    raw_refs: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
