@@ -122,7 +122,6 @@ class EventStage:
                 seen.add(event.id)
                 inserts.append((event.id,))
                 fresh.append(event)
-        refused_ids: set[str] = set()
         for start in range(0, len(inserts), 500):
             chunk = inserts[start:start + 500]
             reason = (self.budget.new_key_reason(self.windows_account)
@@ -130,7 +129,6 @@ class EventStage:
             if reason:
                 self.windows_refused += len(inserts) - start
                 self.windows_refusal_reason = reason
-                refused_ids.update(event_id for event_id, in inserts[start:])
                 break
             try:
                 self._cap_windows()
@@ -144,7 +142,6 @@ class EventStage:
                     self.budget.fail(reason)
                 self.windows_refused += len(inserts) - start
                 self.windows_refusal_reason = reason
-                refused_ids.update(event_id for event_id, in inserts[start:])
                 break
         # An event whose dedup state was refused is still delivered: every rule reads every batch, and a strong
         # indicator must publish on its own. A later partition may then deliver another copy of it as fresh, so
