@@ -381,7 +381,7 @@ def classify_discovery(name: str, args: list[str], cwd: str | None) -> tuple[str
 class PostAccessDiscovery(_HostContextRule):
     id = "context.post_access_discovery"
     argv_prefix_safe = True
-    version = "5"
+    version = "6"
     title = "Discovery commands in an anchored session or process lineage"
     anchor_class = "execution"
     families = ("process_exec",)
@@ -511,7 +511,7 @@ def _classify_probe(prog, event: TypedEvent) -> tuple[str, str] | None:
 class PrivilegeProbing(_HostContextRule):
     id = "context.privilege_probing"
     argv_prefix_safe = True
-    version = "4"
+    version = "5"
     title = "Privilege probing or escalation in an anchored session or lineage"
     families = ("process_exec",)
     required_by_family = EXEC_REQUIRED
@@ -732,7 +732,7 @@ def classify_credential(path: str) -> tuple[str, str, str] | None:
 class CredentialAccessInContext(_HostContextRule):
     id = "context.credential_access"
     argv_prefix_safe = True
-    version = "3"
+    version = "4"
     title = "Credential-store read in an anchored session or lineage"
     anchor_class = "credential_access"
     families = ("process_exec",)
@@ -1117,7 +1117,7 @@ class _Client:
 class LateralMovement(_HostContextRule):
     id = "context.lateral_movement"
     argv_prefix_safe = True
-    version = "3"
+    version = "4"
     title = "Lateral remote-service use from an anchored session or lineage"
     anchor_class = "lateral_movement"
     families = ("process_exec", "net_socket")

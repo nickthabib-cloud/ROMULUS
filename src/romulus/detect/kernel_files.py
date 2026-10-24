@@ -165,7 +165,7 @@ class RootExecNonRootModifiableFile(Playbook):
     os_families = ("linux",)
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.root_exec_nonroot_modifiable_file"
-    version = "2"
+    version = "3"
     title = "Root executed a file that a non-root account owns or can write"
     anchor_class = "execution"
     kind = "aggregate"
@@ -606,7 +606,7 @@ class PersistencePathChange(Playbook):
     os_families = ("linux",)
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.persistence_path_change"
-    version = "5"
+    version = "6"
     title = "Kernel-recorded change to a file that a scheduler, init, the login path or the loader acts on"
     anchor_class = "persistence"
     kind = "aggregate"

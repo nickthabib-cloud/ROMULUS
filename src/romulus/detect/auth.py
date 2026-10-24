@@ -1070,7 +1070,7 @@ def _record_text(e: TypedEvent) -> str:
 class AccountOrGroupChange(Playbook):
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.account_or_group_change"
-    version = "4"
+    version = "5"
     title = "Account or group created, deleted or modified (command or account-management audit record)"
     anchor_class = "persistence"
     kind = "aggregate"
@@ -1452,6 +1452,10 @@ class AccountOrGroupChange(Playbook):
             events = sorted(_unique([*cited, marker]), key=lambda e: (e.ts, e.id))
         else:
             events = sorted(_unique([*commands[:10], *records[:10]]), key=lambda e: (e.ts, e.id))
+            told = [f"{min(10, n)} of the {n} {noun}" for n, noun in ((len(commands), "commands"),
+                                                                     (len(records), "audit records")) if n > 10]
+            if told:
+                claim += f" The earliest {' and '.join(told)} are cited."
         events = sorted(_unique([*events, *lineage_events]), key=lambda e: (e.ts, e.id))      # the named ancestor
         predicate = [pf(e, n) for e in events[:4] for n in ("process.argv", "process.executable", "audit.record_type",
                                                              "account.action", "account.name", "account.group",

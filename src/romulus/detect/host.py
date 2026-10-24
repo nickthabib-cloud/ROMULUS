@@ -357,7 +357,7 @@ class WebServiceSpawnsInterpreter(Playbook):
     anchor_class = "web_shell"
     # argv/text-identified programs and actions: findings only, never a complete negative
     assures_negative = False
-    version = "12"
+    version = "13"
     title = "Web service account executed a shell or interpreter"
     kind = "aggregate"
     families = ("process_exec",)
@@ -522,7 +522,7 @@ class DownloaderFeedsInterpreter(Playbook):
     id = "host.downloader_feeds_interpreter"
     # argv/text-identified programs and actions: findings only, never a complete negative
     assures_negative = False
-    version = "3"
+    version = "4"
     title = "Downloader and stdin interpreter launched together by the same parent"
     kind = "aggregate"
     families = ("process_exec",)
@@ -1148,7 +1148,7 @@ class SshLoginFromExternal(Playbook):
     anchor_class = "remote_login"
     # argv/text-identified programs and actions: findings only, never a complete negative
     assures_negative = False
-    version = "5"
+    version = "6"
     title = "Successful SSH login from an address outside the site's internal networks"
     kind = "aggregate"
     families = ("auth",)
@@ -1288,7 +1288,7 @@ class UnbackedExecutable(Playbook):
     seen on any audit record that carries the executable (exec, socket or file-change calls)."""
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.unbacked_or_deleted_executable"
-    version = "2"
+    version = "3"
     title = "Process running from a memory-backed, deleted or in-memory-directory executable"
     anchor_class = "execution"
     kind = "aggregate"

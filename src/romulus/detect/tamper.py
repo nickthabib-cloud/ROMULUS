@@ -30,6 +30,7 @@ from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, pf
 from romulus.detect.bounded import HOT_COUNT, KeyedStore, RecentIds, SpillList, StateExhausted
+from romulus.detect.citing import cited_phrase
 from romulus.detect.host import (
     UNBUDGETED,
     Lineage,
@@ -112,6 +113,19 @@ def service_category(name: str) -> str:
     if key in SERVICE_CATEGORIES:
         return SERVICE_CATEGORIES[key]
     return "security" if key.startswith("falco-") else ""
+
+
+def _cited_records(commands: list[TypedEvent], linked: list[TypedEvent]) -> str:
+    """How many of the commands and linked records the claim counts are cited (the earliest, and the latest linked
+    record); '' when all are."""
+    if len(commands) <= CITE and len(linked) <= CITE:
+        return ""
+    parts = []
+    if len(commands) > CITE:
+        parts.append(f"{CITE} of the {len(commands)} command records (the earliest)")
+    if len(linked) > CITE:
+        parts.append(f"{CITE + 1} of the {len(linked)} linked records (the earliest and the last)")
+    return " " + " and ".join(parts) + " are cited."
 
 
 def _iso(epoch: float) -> str:
@@ -531,7 +545,7 @@ class _TamperRule(Playbook):
 
 class SecurityOrLoggingServiceStop(_TamperRule):
     id = "host.security_or_logging_service_stop"
-    version = "3"
+    version = "4"
     title = "Logging, audit or security service stopped, disabled or killed (command or service manager record)"
     families = ("process_exec", "service_change", "system_state")
     severity, lane = "high", "high"
@@ -813,8 +827,10 @@ class SecurityOrLoggingServiceStop(_TamperRule):
             next((i.lineage for i in items if i.lineage.kind == "web"), first.lineage))
         if phrase:
             claim += f" Exec lineage: {phrase}."
-        events = sorted(_unique([*commands[:CITE], *linked[:CITE], *([marker[2]] if marker else []), *ancestors]),
-                        key=lambda e: (e.ts, e.id))
+        # the earliest commands and linked stops, and the latest stop (the claim counts every one of them)
+        events = sorted(_unique([*commands[:CITE], *linked[:CITE], *linked[-1:], *([marker[2]] if marker else []),
+                                 *ancestors]), key=lambda e: (e.ts, e.id))
+        claim += _cited_records(commands, linked)
         predicate = [pf(c, "process.argv") for c in commands[:3]] + [pf(e, "service.unit") for e in linked[:2]]
         match = Match(self.id, claim, self.claim_type, events, predicate, events[0].ts, self.severity, lane,
                       "high" if linked else "medium", commands[0].entities(),
@@ -836,7 +852,8 @@ class SecurityOrLoggingServiceStop(_TamperRule):
         claim = (f"On {host}, the service manager recorded the {service_category(name)} service '{name}' stopping at "
                  f"least {count} time(s) ({stops[0].ts.isoformat()} – {stops[-1].ts.isoformat()}; {listed}); no "
                  f"command naming it was linked within {COMMAND_LINK_BEFORE:.0f} s before.")
-        lane, notes, cited = "high", [], list(stops[:CITE])
+        lane, notes, cited = "high", [], _unique([*stops[:CITE], *stops[-1:]])
+        claim += cited_phrase(len(cited), len(stops), True)
         if kind in {"killed", "killed_restarted"}:
             claim = claim.replace(" stopping at least", " ending at least")
             claim += (" The records show its main process killed by a signal or ending in a core dump (not a "
@@ -910,7 +927,7 @@ def auditctl_requests(args: list[str]) -> list[tuple[str, str, str]]:
 
 class AuditRulesTamper(_TamperRule):
     id = "host.audit_rules_tamper"
-    version = "3"
+    version = "4"
     title = "Audit rules deleted, auditing switched off or audit configuration changed (command or kernel record)"
     families = ("process_exec", "audit_config", "service_change", "system_state")
     severity, lane = "high", "high"
@@ -1092,7 +1109,9 @@ class AuditRulesTamper(_TamperRule):
             next((i.lineage for i in items if i.lineage.kind == "web"), items[0].lineage))
         if phrase:
             claim += f" Exec lineage: {phrase}."
-        events = sorted(_unique([*commands[:CITE], *linked[:CITE], *ancestors]), key=lambda e: (e.ts, e.id))
+        events = sorted(_unique([*commands[:CITE], *linked[:CITE], *linked[-1:], *ancestors]),
+                        key=lambda e: (e.ts, e.id))
+        claim += _cited_records(commands, linked)
         predicate = [pf(c, "process.argv") for c in commands[:3]] + [pf(e, "audit.config.op") for e in linked[:2]]
         match = Match(self.id, claim, self.claim_type, events, predicate, events[0].ts, self.severity, lane,
                       "high" if linked else "medium", commands[0].entities(),
@@ -1113,7 +1132,7 @@ class AuditRulesTamper(_TamperRule):
         first, last = configs[0], configs[-1]
         applied = sum(1 for e in configs if e.outcome == Outcome.success)
         tally = f"{applied} applied (res=1), {len(configs) - applied} refused or unrecorded"
-        lane, notes, cited = "high", [], list(configs[:CITE])
+        lane, notes, cited = "high", [], _unique([*configs[:CITE], *configs[-1:]])
         exe = first.get("process.executable")
         by = f" by '{exe}'" if exe else ""
         if kind == "disabled":
@@ -1129,7 +1148,8 @@ class AuditRulesTamper(_TamperRule):
         else:
             readded = [t for t in adds.peek((host, *session), ()) if 0 <= t - last.ts.timestamp() <= self.RELOAD_SECONDS]
             claim = (f"On {host}, {len(configs)} kernel CONFIG_CHANGE record(s) show audit rules being removed{by} "
-                     f"as {actor} ({first.ts.isoformat()} – {last.ts.isoformat()}; {tally}).")
+                     f"as {actor} ({first.ts.isoformat()} – {last.ts.isoformat()}; {tally})."
+                     + cited_phrase(len(cited), len(configs), True))
             if readded:
                 claim += (f" The same audit session added {len(readded)} rule(s) within {self.RELOAD_SECONDS:.0f} s "
                           "afterwards, as a rule reload does.")
@@ -1356,7 +1376,7 @@ def _history_assignments(words: list[str]) -> list[tuple[str, str, str, str]]:
 
 class LogOrHistoryClearing(_TamperRule):
     id = "host.log_or_history_clearing"
-    version = "3"
+    version = "4"
     title = "Log or shell history deleted, truncated, overwritten or switched off (command or shell text)"
     families = ("process_exec",)
     severity, lane = "high", "high"

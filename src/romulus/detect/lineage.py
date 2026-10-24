@@ -53,6 +53,7 @@ from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, pf
 from romulus.detect.bounded import HOT_COUNT, KeyedStore, RecentIds, SpillList, StateExhausted
+from romulus.detect.citing import more
 from romulus.detect.correlation import (
     LINEAGE_DEPTH,
     PidTable,
@@ -235,7 +236,7 @@ class ReverseShellByLineage(Playbook):
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.shell_spawned_by_connected_process"
     anchor_class = "execution"
-    version = "5"
+    version = "6"
     title = "Shell or interpreter executed by a process holding an external connection (reverse shell by lineage)"
     kind = "aggregate"
     staged = True
@@ -553,9 +554,18 @@ class ReverseShellByLineage(Playbook):
             f"{unknown} {'has' if unknown == 1 else 'have'} an incomplete argv (its shape is unknown), and "
             if unknown else "") + "the rest ran a -c script or a script file"
         names = sorted({interpreter_name(basename(s.exe)) for s in shells})
-        listed = ", ".join(peers[:PEERS_LISTED]) + (f" and {len(peers) - PEERS_LISTED} more"
-                                                     if len(peers) > PEERS_LISTED else "")
-        pid_text = ("pid " if len(pids) == 1 else "pids ") + ", ".join(str(p) for p in pids)
+        # one shell and its latest socket for every (pid, peer), so the peers and pids named are cited
+        per_pair: dict[tuple, _Hit] = {}
+        for h in hits:
+            per_pair.setdefault((h.owner_pid, h.socket.peer_ip, str(h.socket.peer_port)), h)
+        pairs = sorted(per_pair.items(), key=lambda kv: (kv[1].shell.ts, kv[1].shell.event_id))
+        cited_ids = sorted({i for _k, h in pairs[:HELPER_PAIRS_CITED] for i in (h.shell.event_id, h.socket.event_id)}
+                           | {s.event_id for s in shells[:CITE_PER_GROUP]})
+        named_peers = sorted({f"{h.socket.peer_ip}:{h.socket.peer_port}" for _k, h in pairs[:HELPER_PAIRS_CITED]})
+        named_pids = sorted({h.owner_pid for _k, h in pairs[:HELPER_PAIRS_CITED]})
+        listed = ", ".join(named_peers[:PEERS_LISTED]) + more(min(PEERS_LISTED, len(named_peers)), len(peers))
+        pid_text = (("pid " if len(named_pids) == 1 else "pids ") + ", ".join(str(p) for p in named_pids)
+                    + more(len(named_pids), len(pids)))
         claim = (
             f"On {host}, '{exe}' ({pid_text}"
             + (f", account(s) {', '.join(repr(u) for u in users)}" if users else "")
@@ -570,13 +580,6 @@ class ReverseShellByLineage(Playbook):
             f"running tasked commands looks the same. The connections and the executions are each directly "
             f"recorded; that a shell's input and output use a connection is inferred from lineage and timing, "
             f"not observed.")
-        # one shell and its latest socket for every (pid, peer), so no peer of the group goes uncited
-        per_pair: dict[tuple, _Hit] = {}
-        for h in hits:
-            per_pair.setdefault((h.owner_pid, h.socket.peer_ip, str(h.socket.peer_port)), h)
-        pairs = sorted(per_pair.items(), key=lambda kv: (kv[1].shell.ts, kv[1].shell.event_id))
-        cited_ids = sorted({i for _k, h in pairs[:HELPER_PAIRS_CITED] for i in (h.shell.event_id, h.socket.event_id)}
-                           | {s.event_id for s in shells[:CITE_PER_GROUP]})
         events = self._events(cited_ids)
         cited = sorted(events.values(), key=lambda e: (e.ts, e.id))
         sock_event = events[hits[0].socket.event_id] if hits[0].socket.event_id in events else next(
@@ -595,7 +598,9 @@ class ReverseShellByLineage(Playbook):
         if len(pairs) > HELPER_PAIRS_CITED:
             notes.append(f"{len(pairs)} (pid, peer) pairs; a shell and socket are cited for the first "
                          f"{HELPER_PAIRS_CITED}")
-        notes += [f"peer: {peer}" for peer in peers]
+        notes += [f"peer: {peer}" for peer in named_peers]
+        if len(peers) > len(named_peers):
+            notes.append(f"{len(peers) - len(named_peers)} more peer(s) whose socket records are not cited")
         notes.append(f"PID reuse by a forked process with no exec record cannot be excluded; the gap is bounded "
                      f"by {MAX_GAP:.0f}s")
         if len(shells) > CITE_PER_GROUP:
@@ -632,9 +637,14 @@ class ReverseShellByLineage(Playbook):
             f"call before the exec), and {len(shells)} shell/interpreter exec(s) ({', '.join(shell_names)}; "
             f"pid(s) {shell_pids}) followed under the same process lineage ({first.relation}; {first.gap:.2f}s "
             f"after that call, {between}).")
+        window_cited = {s.event_id for h in hits[:CITE_PER_GROUP] for s in h.window[-CITE_PER_GROUP:]}
+        named_others = sorted({f"{s.peer_ip}:{s.peer_port}" for h in hits for s in h.window
+                               if s.event_id in window_cited} & set(others))
         if others:
-            claim += (f" Other external peers of that pid in the same window: {', '.join(others[:PEERS_LISTED])}"
-                      + (f" and {len(others) - PEERS_LISTED} more" if len(others) > PEERS_LISTED else "") + ".")
+            claim += (" Other external peers of that pid in the same window"
+                      + (f": {', '.join(named_others[:PEERS_LISTED])}"
+                         + more(min(PEERS_LISTED, len(named_others)), len(others)) if named_others
+                         else f": {len(others)}, whose socket records are not cited") + ".")
         claim += (" The connection and the execution are each directly recorded; that the shell's input and output "
                   "use that connection is inferred from lineage and timing, not observed.")
         if any(h.shell.devtcp for h in hits):

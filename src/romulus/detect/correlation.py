@@ -639,7 +639,7 @@ class InterpreterExternalConnection(Playbook):
     account, port), listing every destination, so routine update traffic is one lead, not one per address."""
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.interpreter_external_connection"
-    version = "6"
+    version = "7"
     title = ("Shell, interpreter, relay tool or web-service process made connect() calls to addresses outside the "
              "site's internal networks")
     kind = "aggregate"
@@ -1003,7 +1003,7 @@ class ProcessNetworkLink(Playbook):
     address is not established for this host is linked but stated, and caps the lane at lead, as do
     multiple local addresses and records shared with another process."""
     id = "corr.process_network_link"
-    version = "6"
+    version = "7"
     title = "Host process connect() calls linked to network-sensor records for the same connection (inferred)"
     kind = "aggregate"
     staged = True
