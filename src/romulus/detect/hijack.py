@@ -907,6 +907,9 @@ class NonRootWriteRootExecutedFile(Playbook):
                          "earlier, or at the same recorded time)")
             if s.failed:
                 line += f"; {s.failed} of them recorded a failed exec"
+            total_runs = len(s.ok_ts) + s.failed
+            if total_runs > len({run.event_id for run in cited_runs}):
+                line += f"; {len({run.event_id for run in cited_runs})} of these {total_runs} records are cited"
             exec_lines.append(line)
 
         events = self._events(cited_ids)

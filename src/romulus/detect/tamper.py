@@ -970,13 +970,15 @@ class AuditRulesTamper(_TamperRule):
             self.evaluated += 1
             name, args, _from_exe = ident
             # an incomplete argv cannot settle absent tokens (a later -h, a lost operand); shell text is whole
-            found = [] if argv_incomplete(e) else self._requests(name, args, e.get("process.cwd"))
+            found = [] if argv_incomplete(e) else self._requests(name, args, e.get("process.cwd"),
+                                                                 str((e.get("process.argv") or [""])[0]))
             segments, incomplete = shell_segments(name, args)
             incomplete = incomplete or argv_incomplete(e)
             text_found = []
             for seg in segments:
                 if seg.argv:
-                    text_found += self._requests(canonical(basename(seg.argv[0])), seg.argv[1:], e.get("process.cwd"))
+                    text_found += self._requests(canonical(basename(seg.argv[0])), seg.argv[1:], e.get("process.cwd"),
+                                                 seg.argv[0])
                 for op, target in seg.redirects:
                     path = normalize_path(target, e.get("process.cwd"))
                     if op in {">", ">>", "1>", "1>>"} and path and is_under(path, AUDIT_CONFIG_PATHS):
@@ -1002,11 +1004,11 @@ class AuditRulesTamper(_TamperRule):
             self.evaluated += 1
 
     @staticmethod
-    def _requests(name, args, cwd):
+    def _requests(name, args, cwd, argv0=""):
         if name == "auditctl":
             return auditctl_requests(args)
         out = []
-        targets, _unresolved = write_targets(name, args, cwd)
+        targets, _unresolved = write_targets(name, args, cwd, argv0=argv0)
         for target in targets:
             if is_under(target.path, AUDIT_CONFIG_PATHS) and not name.startswith("ch"):
                 out.append(("config_file", f"write audit configuration file {target.path} ({target.form})", "lead"))
@@ -1227,7 +1229,7 @@ def journal_vacuum(args: list[str]) -> tuple[str, str, str] | None:
     return ("journal_vacuum", how, "high" if aggressive else "lead")
 
 
-def log_requests(name: str, args: list[str], cwd: str | None) -> list[tuple[str, str, str, str]]:
+def log_requests(name: str, args: list[str], cwd: str | None, argv0: str = "") -> list[tuple[str, str, str, str]]:
     """(category, target, how, proposed lane) for each log or history file a command line deletes, truncates,
     overwrites, edits or links away. Readers and appends ask for nothing."""
     out: list[tuple[str, str, str, str]] = []
@@ -1290,7 +1292,8 @@ def log_requests(name: str, args: list[str], cwd: str | None) -> list[tuple[str,
     elif is_editor(name):
         for target in write_targets(name, args, cwd)[0]:
             if log_target(target.path) in {"critical", "history"}:
-                how = f"open {target.path} in the editor '{name}' (reading and editing cannot be told apart)"
+                how = (f"open {target.path} in the editor '{basename(argv0) or name}' (reading and editing cannot "
+                       f"be told apart)")
                 out.append(("log_editor", target.path, how, "lead"))
     elif name == "find":
         starts = []
@@ -1399,14 +1402,14 @@ class LogOrHistoryClearing(_TamperRule):
         name, args, _from_exe = ident
         cwd = e.get("process.cwd")
         # an incomplete argv cannot settle absent tokens (tee -a, find filters, truncate's size); shell text is whole
-        found = [] if argv_incomplete(e) else log_requests(name, args, cwd)
+        found = [] if argv_incomplete(e) else log_requests(name, args, cwd, str((e.get("process.argv") or [""])[0]))
         segments, incomplete = shell_segments(name, args)
         incomplete = incomplete or argv_incomplete(e)
         text_found = []
         for seg in segments:
             text_found += _history_assignments(seg.assignments)
             if seg.argv:
-                text_found += log_requests(canonical(basename(seg.argv[0])), seg.argv[1:], cwd)
+                text_found += log_requests(canonical(basename(seg.argv[0])), seg.argv[1:], cwd, seg.argv[0])
             for op, target in seg.redirects:
                 if op in {">", "1>"}:
                     path = _path(target, cwd)

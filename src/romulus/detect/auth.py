@@ -941,14 +941,15 @@ def _written_line_privilege(path: str, words: list[str]) -> str:
     return ""
 
 
-def account_file_writes(name: str, args: list[str], cwd: str | None) -> tuple[list[AccountForm], bool]:
+def account_file_writes(name: str, args: list[str], cwd: str | None,
+                        argv0: str = "") -> tuple[list[AccountForm], bool]:
     """Direct writes to the account databases by a write-capable program (an editor, sed -i, tee, cp/mv/install,
     dd), or by shell command text that redirects into them; and whether a write target could not be placed.
     Permission and owner changes are not writes."""
     if name in {"chmod", "chown", "chgrp"}:
         return [], False
     forms: list[AccountForm] = []
-    targets, uncertain = write_targets(name, args, cwd)
+    targets, uncertain = write_targets(name, args, cwd, argv0=argv0)
     for target in targets:
         if target.path in ACCOUNT_FILES and not target.assumed:
             forms.append(AccountForm("account_db_edit", (), (), f"write {target.path} directly ({target.form})", ""))
@@ -962,7 +963,7 @@ def account_file_writes(name: str, args: list[str], cwd: str | None) -> tuple[li
                 forms.append(AccountForm("account_db_edit", (), (), f"write {path} with a shell redirect ('{op}')",
                                          privileged))
         if command and command not in ACCOUNT_TOOLS:
-            text_forms, text_uncertain = account_file_writes(command, segment.argv[1:], cwd)
+            text_forms, text_uncertain = account_file_writes(command, segment.argv[1:], cwd, segment.argv[0])
             forms += [f._replace(detail=f"{f.detail} in shell command text") for f in text_forms]
             uncertain = uncertain or text_uncertain
     return forms, uncertain or incomplete
@@ -1207,7 +1208,8 @@ class AccountOrGroupChange(Playbook):
         elif incomplete:
             return
         else:
-            forms, uncertain = account_file_writes(name, args, e.get("process.cwd"))
+            forms, uncertain = account_file_writes(name, args, e.get("process.cwd"),
+                                                   str((e.get("process.argv") or [""])[0]))
         if uncertain and not incomplete:
             self.missing_required += 1
         if not forms:

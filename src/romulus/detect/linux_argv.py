@@ -794,7 +794,9 @@ def write_targets(name: str, args: list[str], cwd: str | None = None,
     raw: list[tuple[str, str]] = []
     assumed: set[int] = set()
     if is_editor(name):
-        raw = [(item, f"the editor '{name}' was started on it") for item in _editor_files(name, args, argv0)]
+        # the editor as the record shows it (argv[0]): the canonical name ('vi' for vim) only groups
+        shown = basename(argv0) or name
+        raw = [(item, f"the editor '{shown}' was started on it") for item in _editor_files(name, args, argv0)]
     elif name == "sed":
         raw = [(item, "'sed' was run with in-place editing on it") for item in _sed_in_place(args)]
     elif name == "perl":
