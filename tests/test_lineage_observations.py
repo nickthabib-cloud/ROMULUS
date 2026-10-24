@@ -564,7 +564,7 @@ def test_a_refused_observation_store_is_stated_on_the_rules_window_cell(monkeypa
     window = next(c for c in cells if c["rule_id"] == InterpreterExternalConnection.id and c["target"] == "*")
     assert window["state"] == "match_on_partial"
     assert any("took no new process from the record of 2024-11-18T10:21:21.941000+00:00 on" in r
-               and "no lineage lowers a lane in this hunt" in r for r in window["detail"]["reasons"])
+               and "no lineage lowers a lane anywhere in this hunt" in r for r in window["detail"]["reasons"])
 
 
 def test_the_network_join_is_not_evaluated_by_a_partition_of_lineage_records_only(monkeypatch, tmp_path):

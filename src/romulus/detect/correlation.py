@@ -268,7 +268,9 @@ LINEAGE_LANES = (
     "pid 1, a subreaper, or a program merely named like the service manager never proves that, and any unknown, "
     "unjudged or uncitable lineage keeps the lane. Residual: a unit started on request (systemd-run, a transient "
     "unit) by an account allowed to start one has the same spawn record as a configured service, and is lowered "
-    "like one; who asked for it is in the journal, not in these records")
+    "like one; who asked for it is in the journal, not in these records. Residual: a process that made itself a "
+    "subreaper above a web server, under a proven service start, adopts an orphan that then execs, and the web "
+    "server between them is not seen")
 LINEAGE_TELEMETRY = (
     "lineage from process_exec and from the process state every other audit SYSCALL record shows (process_observed, "
     "net_socket, file_change: process.pid, process.ppid, process.executable, process.session_id, audit.serial, "

@@ -65,11 +65,10 @@ from tests import throughput_fixture as tf
 # carries an event id (events, event_entities, candidates, links, tasks, audit, manifest) and every normalized and
 # pivot digest. The fixture writes no such group, so the events themselves are the same. With the old evidence version
 # given the new number, the rest is: host.interpreter_external_connection and corr.process_network_link carry new
-# versions (rule_cells, candidates, manifest); corr.process_network_link reads exec, file-change and observed records
-# for lineage, so the 16 host partitions holding none of its socket records go from not_applicable_no_events to
-# evaluated_complete (0 evaluated) and the manifest's coverage counts follow; and both rules' bash connect finding
-# gains the note why its lineage is unknown (its parent's exec is not in the window), with the network finding's
-# claim stating it. Lanes, anchors, links, raw copies and every other finding are unchanged.
+# versions (rule_cells, candidates, manifest); and both rules' bash connect finding gains the note why its lineage is
+# unknown (its parent's exec is not in the window), with the network finding's claim stating it. The exec,
+# file-change and observed records corr.process_network_link reads for lineage do not make a partition an evaluation
+# of it, so its cells are otherwise unchanged. Lanes, anchors, links, raw copies and every other finding are unchanged.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
     "audit": "6af1b824ccfa0f6bc1332de83c7bcad95d53a08021cc76eb0cf347a3d47fea46",
@@ -80,9 +79,9 @@ GOLDEN_STACK = {
     "events": "b1fee0ae16ba050626efab14200b4613d0a1ced778d5cb115a4bc9ac218a7b67",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "a6a78b78aa676b98d84bc5498a164f20c23f1dcb20709a9a8dd6c0b11c5889ec",
-    "manifest": "d14ff6efb0124d698c5a105f406af7d235aac4aaad042777593acae4fe87edf5",
+    "manifest": "c56ea7fdbd662f111309569acfe8b4d6b685cfdda1727d95eba65bbaf872bb21",
     "raw": "03d2790712d2ac341c4dafcc4b89d7f991a025f637d97f7ef22cd33e35f4fbe0",
-    "rule_cells": "da1f1f1a2ffeb1709761c643587a11b756b4414eae6b59acdfbf51eae62c694b",
+    "rule_cells": "5e54ecbffe6d72d614d4b6fd5798cc5eb5b95d6d1faceea83e75f357a49b9aed",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
     "tasks": "02b081d35ae1a1c54e4839faefbcaf5a03f0c07d832aff2cf177befb2d766c50",
 }

@@ -1685,8 +1685,9 @@ class ExecLineage:
         for member in self.members:
             member.note_limit("lineage_observed", f"the store of processes' observed states took no new process from "
                                                   f"the record of {when} on (its share of the state budget is spent): "
-                                                  f"from then on no lineage lowers a lane in this hunt (every lineage "
-                                                  f"that would have is stated as unknown)")
+                                                  f"lineages are judged when the hunt ends, so no lineage lowers a lane "
+                                                  f"anywhere in this hunt (every lineage that would have is stated as "
+                                                  f"unknown)")
 
     def _cite(self, entry: Observed, blob: bytes) -> bool:
         """Keep an observation's record for citation; False when its store refuses it (a lineage resting on it is then
