@@ -92,7 +92,8 @@ class EventStage:
         # the target is complete. Event bodies and raw copies remain in the shared event/raw tables under holds.
         self.db.execute(
             "CREATE TABLE baseline_cell (target TEXT NOT NULL, partition TEXT NOT NULL, start TEXT NOT NULL, "
-            "end TEXT NOT NULL, source_complete INTEGER NOT NULL, reasons TEXT NOT NULL, task_id TEXT, "
+            "end TEXT NOT NULL, target_applicable INTEGER NOT NULL, source_complete INTEGER NOT NULL, "
+            "reasons TEXT NOT NULL, task_id TEXT, "
             "PRIMARY KEY (target, partition))"
         )
         self.db.execute(
@@ -281,13 +282,13 @@ class EventStage:
         return out
 
     def record_baseline_cell(self, *, target: str, partition: str, start, end,
-                             source_complete: bool, reasons: list[str], task_id: str | None,
-                             events: list[TypedEvent]) -> None:
+                             target_applicable: bool, source_complete: bool, reasons: list[str],
+                             task_id: str | None, events: list[TypedEvent]) -> None:
         """Index held process events under one sweep cell for newest-first baseline replay."""
         self.db.execute(
-            "INSERT OR REPLACE INTO baseline_cell VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (target, partition, start.isoformat(), end.isoformat(), int(source_complete),
-             json.dumps(sorted(set(reasons))), task_id),
+            "INSERT OR REPLACE INTO baseline_cell VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (target, partition, start.isoformat(), end.isoformat(), int(target_applicable),
+             int(source_complete), json.dumps(sorted(set(reasons))), task_id),
         )
         self.db.execute("DELETE FROM baseline_event WHERE target = ? AND partition = ?", (target, partition))
         self.db.executemany(
@@ -299,7 +300,8 @@ class EventStage:
     def baseline_cells(self, target: str) -> list[dict]:
         """A target's staged cells newest-first, which is the carry-in writer's processing order."""
         rows = self.db.execute(
-            "SELECT partition, start, end, source_complete, reasons, task_id FROM baseline_cell "
+            "SELECT partition, start, end, target_applicable, source_complete, reasons, task_id "
+            "FROM baseline_cell "
             "WHERE target = ? ORDER BY start DESC, partition DESC",
             (target,),
         )
@@ -307,10 +309,10 @@ class EventStage:
             "partition": partition,
             "start": datetime.fromisoformat(start),
             "end": datetime.fromisoformat(end),
-            "source_complete": bool(source_complete),
+            "target_applicable": bool(target_applicable), "source_complete": bool(source_complete),
             "reasons": json.loads(reasons),
             "task_id": task_id,
-        } for partition, start, end, source_complete, reasons, task_id in rows]
+        } for partition, start, end, target_applicable, source_complete, reasons, task_id in rows]
 
     def baseline_events(self, target: str, partition: str) -> list[TypedEvent]:
         rows = self.db.execute(

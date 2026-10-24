@@ -815,7 +815,8 @@ class Sweep:
                         partition=pkey,
                         start=w.start,
                         end=w.end,
-                        source_complete=target_applicable and not rule_partial,
+                        target_applicable=target_applicable,
+                        source_complete=not rule_partial,
                         reasons=reasons,
                         task_id=tid,
                         events=ordered,
@@ -1028,7 +1029,8 @@ class Sweep:
                 playbook.mark_cell_partial(reason)
             result = playbook.finish_cell()
             reasons = [*item["reasons"], *result.reasons]
-            state = ("not_applicable_no_events" if not events and item["source_complete"] else
+            state = ("not_applicable_no_events" if not item["target_applicable"] else
+                     "not_applicable_no_events" if not events and item["source_complete"] else
                      "evaluated_partial" if result.partial or not item["source_complete"] else
                      "evaluated_complete")
             raw_sources = stage.raw_sources(events)

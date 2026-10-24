@@ -106,6 +106,7 @@ class SshTupleBaseline(BaselinePlaybook):
     title = "SSH tuple baseline"
     spec = SPEC_BY_ID[id]
     families = spec.families
+    os_families = ("linux",)
 
 
 class ExecPathBaseline(BaselinePlaybook):
@@ -113,6 +114,7 @@ class ExecPathBaseline(BaselinePlaybook):
     title = "Executable path baseline"
     spec = SPEC_BY_ID[id]
     families = spec.families
+    os_families = ("linux",)
 
 
 class ExecPairBaseline(BaselinePlaybook):
@@ -120,6 +122,7 @@ class ExecPairBaseline(BaselinePlaybook):
     title = "Parent and child executable baseline"
     spec = SPEC_BY_ID[id]
     families = spec.families
+    os_families = ("linux",)
 
 
 class CommandShapeBaseline(BaselinePlaybook):
@@ -127,6 +130,7 @@ class CommandShapeBaseline(BaselinePlaybook):
     title = "Command shape baseline"
     spec = SPEC_BY_ID[id]
     families = spec.families
+    os_families = ("linux",)
     assures_negative = False
     positive_only_reason = "command-shape baselines publish positive deviations only"
 

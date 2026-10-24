@@ -58,12 +58,12 @@ def _exec(event_id: str, ts: datetime, *, host: str = "web01", pid: int = 20, pp
     )
 
 
-def _contract(target: str = "x", hosts: tuple[str, ...] = ("web01",)):
+def _contract(target: str = "x", hosts: tuple[str, ...] = ("web01",), os_family: str = "linux"):
     return contract_from_types(
         target,
         {"@timestamp": "date", "process.executable": "keyword", "process.pid": "long"},
         role="host",
-        os_family="linux",
+        os_family=os_family,
         hosts=hosts,
     )
 
@@ -238,6 +238,23 @@ def test_window_child_resolves_to_a_pre_window_parent(monkeypatch, tmp_path):
     assert observation["first_event_id"] == "child"
     cell = next(row for row in repo.rule_cells("h1") if row["partition"] == window.key())
     assert cell["state"] == "evaluated_complete"
+    sweep.close_stage()
+
+
+def test_exec_pair_empty_incompatible_target_is_not_applicable_not_partial(monkeypatch, tmp_path):
+    window = Window(start=START, end=END)
+    _install_partition(monkeypatch, [], window=window)
+    repo = _repo()
+    sweep = sweep_module.Sweep(
+        repo, FakeClient(), "h1", window,
+        {"x": _contract(os_family="windows")}, stage_dir=tmp_path,
+    )
+    sweep.pack = [ExecPairBaseline()]
+
+    sweep.run_target("x")
+
+    cell = next(row for row in repo.rule_cells("h1") if row["partition"] == window.key())
+    assert cell["state"] == "not_applicable_no_events"
     sweep.close_stage()
 
 
