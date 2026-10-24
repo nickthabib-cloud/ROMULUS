@@ -121,6 +121,10 @@ PIVOT_FAMILIES = (None, frozenset({"process_exec"}), frozenset({"net_socket"}),
 def _assert_every_citation_resolves_with_raw(snapshot):
     events = {row["id"]: row for row in snapshot["events"]}
     raw_ids = {row["id"] for row in snapshot["raw"]}
+    citation_keys = {
+        "event_id", "event_ids", "evidence_id", "evidence_ids", "first_event_id",
+        "first_event_ids", "anchor_event_id", "anchor_event_ids",
+    }
     cited = {
         event_id
         for row in [*snapshot["candidates"], *snapshot["links"]]
@@ -133,12 +137,12 @@ def _assert_every_citation_resolves_with_raw(snapshot):
             for name, nested in value.items():
                 yield from coverage_citations(nested, name)
         elif isinstance(value, list):
-            if key in {"event_ids", "evidence_ids"}:
+            if key in citation_keys:
                 yield from (item for item in value if isinstance(item, str))
             else:
                 for nested in value:
                     yield from coverage_citations(nested, key)
-        elif isinstance(value, str) and "event" in key and value in events:
+        elif isinstance(value, str) and key in citation_keys:
             yield value
 
     cited.update(
