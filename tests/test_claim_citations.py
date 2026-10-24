@@ -289,38 +289,24 @@ def test_a_connection_recorded_by_arkime_and_by_suricata_without_a_community_id_
 
 
 def test_the_join_stages_what_it_can_cite_not_every_network_record(tmp_path):
-    """Network traffic that no connect() call reaches is held only boundedly (one record per endpoint pair), and a
-    call's group keeps its first calls and bounds: the stage grows with groups and pairs, not with records."""
+    """A call's group keeps its first calls, its bounds and its earliest processes' calls; network records are kept per
+    (service endpoint, client address) pair: the first twenty once a call reached the endpoint, the first one before.
+    The stage grows with groups and pairs, not with records, and its disk budget bounds it."""
     from tests.test_network_correlation import _sock, history
     hs, hn = history()
     calls = hs + [_sock(1000 + i, exe="/usr/bin/bash", comm="bash", uid="0", user="root",
                         t0=1731940000.1 + i) for i in range(40)]
     scan = [flow("192.0.2.66", 40000 + p, "10.0.0.9", p, T0 + timedelta(seconds=p * 0.01)) for p in range(1, 3001)]
+    repeated = [flow("192.0.2.66", 50000 + i, "10.0.0.9", 443, T0 + timedelta(minutes=1, seconds=i)) for i in range(50)]
     rule = ProcessNetworkLink()
     seen = set()
-    for batch in [calls, *batches(scan, 500), hn]:
+    for batch in [calls, *batches(scan, 500), repeated, hn]:
         rule.consume(batch)
         seen |= {e.id for e in rule.drain_staged()}
-    # the 40 calls of one group keep their first EXAMPLE_LIMIT, and each of the 3000 scan records is the first of its
-    # own (port, address) pair, held until UNMATCHED_HELD; the history's records are matched pairs
     assert len(seen & {e.id for e in calls}) <= 20 + 2 + 16 + len(hs)
-    assert len(seen & {e.id for e in scan}) == 3000          # one per pair, every pair new: under the hold bound
-
-
-def test_the_unmatched_network_records_held_for_citation_are_bounded(tmp_path, monkeypatch):
-    from romulus.detect import correlation
-    monkeypatch.setattr(correlation, "UNMATCHED_HELD", 100)
-    rule = ProcessNetworkLink()
-    scan = [flow("192.0.2.66", 40000 + p, "10.0.0.9", p, T0 + timedelta(seconds=p * 0.01)) for p in range(1, 1001)]
-    holds = Counter()
-    for batch in batches(scan, 100):
-        rule.consume(batch)
-        rule.drain_staged()
-        held, released = rule.drain_bounds()
-        holds.update(held)
-        holds.subtract(released)
-    assert sum(n for n in holds.values() if n > 0) == 100
-    assert any("the oldest were released" in reason for reason in rule.limit_reasons())
+    assert len(seen & {e.id for e in scan}) == 3000          # each the first record of its own pair
+    assert len(seen & {e.id for e in repeated}) == 0         # tcp/443 from 192.0.2.66 already has its first record
+    assert rule.limit_reasons() == []
 
 
 def test_nxdomain_names_and_servers_come_from_cited_records(tmp_path):
@@ -424,6 +410,55 @@ def test_a_candidate_stored_without_the_field_is_about_every_record_it_cites():
     assert subject_event_ids({"event_ids": ["a", "b"]}) == ["a", "b"]
     assert subject_event_ids({"event_ids": ["a", "b"], "context_event_ids": None}) == ["a", "b"]
     assert subject_event_ids({"event_ids": ["a", "b"], "context_event_ids": ["b"]}) == ["a"]
+
+
+def _refusing_exec_records(monkeypatch):
+    from romulus.detect.bounded import KeyedStore
+    put = KeyedStore.put
+    monkeypatch.setattr(KeyedStore, "put", lambda self, key, value: False if self.name == "exec_records"
+                        else put(self, key, value))
+
+
+def test_an_exec_record_not_kept_for_citation_changes_no_verdict_only_the_citation(monkeypatch):
+    from tests.test_network_correlation import T0 as SOCK_T0
+    from tests.test_network_correlation import _sock, execd, iec, observed
+    spawn = observed(150, 1, "/usr/lib/systemd/systemd", SOCK_T0 - 60.004, 40, comm="(perl)")
+    tree = [spawn, execd(150, 1, "/usr/bin/perl"), execd(100, 150, "/usr/bin/perl", t0=SOCK_T0 - 30)]
+    kept = iec(*tree, _sock())[0]
+    _refusing_exec_records(monkeypatch)
+    [refused] = iec(*tree, _sock())
+    # the service-manager verdict and the lowered lane stand; the exec records are named, not cited, and it says so
+    assert refused.proposed_lane == kept.proposed_lane == "lead"
+    assert "reaches the service manager with no web server" in refused.claim
+    assert {e.id for e in refused.events} == {e.id for e in kept.events} - {"xvideoserver100", "xvideoserver150"}
+    assert any("were not kept for citation" in note for note in refused.notes)
+    assert any("lineage_exec_records" in reason or "exec records kept for citation" in reason
+               for reason in refused_reasons(monkeypatch, tree))
+
+
+def refused_reasons(monkeypatch, tree):
+    from romulus.detect.correlation import InterpreterExternalConnection
+    from tests.test_network_correlation import _sock
+    rule = InterpreterExternalConnection()
+    rule.consume([*tree, _sock()])
+    return rule.limit_reasons()
+
+
+def test_an_account_change_says_its_ancestor_is_not_cited_and_keeps_its_lane(monkeypatch, tmp_path):
+    def run():
+        web = ev("process_exec", T0, host="app01", process__argv=["/bin/sh", "-c", "useradd svc"],
+                 process__executable="/usr/bin/dash", process__uid="33", process__user="www-data", process__pid=4000,
+                 process__ppid=3999)
+        child = ev("process_exec", T0 + timedelta(seconds=1), host="app01", process__argv=["useradd", "svc"],
+                   process__executable="/usr/sbin/useradd", process__uid="0", process__user="root",
+                   process__pid=4001, process__ppid=4000)
+        return staged(AccountOrGroupChange(), [[web], [child]], tmp_path), web
+    ([kept], web) = run()
+    _refusing_exec_records(monkeypatch)
+    ([refused], web2) = run()
+    assert refused.proposed_lane == kept.proposed_lane == "high"
+    assert web.id in {e.id for e in kept.events} and web2.id not in {e.id for e in refused.events}
+    assert "(its exec record was not kept for citation)" in refused.claim
 
 
 def test_holds_release_a_record_not_yet_staged_by_not_staging_it_and_count_each_hold():

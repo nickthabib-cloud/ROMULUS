@@ -13,7 +13,7 @@ import heapq
 import ipaddress
 import json
 import sqlite3
-from collections import Counter, defaultdict, deque
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import lru_cache
@@ -248,7 +248,7 @@ def judge_processes(pids: PidTable, host: str | None, procs: dict, unheld: int
     judged = [Judged(key[0], pids.ancestry_of(host, key[0], ts, key[2], serial))
               for key, (ts, serial, _event_id) in ordered[:PROCESSES_JUDGED]]
     unjudged = len(ordered) - len(judged) + (1 if unheld else 0)
-    wanted = list(dict.fromkeys(i for j in judged for i in j.ancestry.cites))
+    wanted = list(dict.fromkeys(i for j in judged for i in (*j.ancestry.cites, *j.ancestry.execs)))
     found, raw = pids.execs.cited(wanted)
     out, cited = [], {}
     for item in judged:
@@ -256,9 +256,10 @@ def judge_processes(pids: PidTable, host: str | None, procs: dict, unheld: int
         if ancestry.verdict != "unknown" and any(i not in found for i in ancestry.cites):
             ancestry = ancestry._replace(verdict="unknown", why="a record this lineage rests on could not be read "
                                                                 "back for citation")
-        # every record the walk named is cited, for an unknown lineage too (its reason names what it read)
-        cited.update((i, found[i]) for i in ancestry.cites if i in found)
-        out.append(Judged(item.pid, ancestry))
+        # every record the walk named is cited, for an unknown lineage too (its reason names what it read); an exec
+        # record the store did not keep is named by its native id only (lineage_notes says so)
+        cited.update((i, found[i]) for i in (*ancestry.cites, *ancestry.execs) if i in found)
+        out.append(Judged(item.pid, ancestry._replace(execs=tuple(i for i in ancestry.execs if i not in found))))
     raws = {r.key: raw[r.key] for event in cited.values() for r in event.raw if r.key in raw}
     return out, unjudged, list(cited.values()), raws
 
@@ -297,10 +298,14 @@ def lineage_sentence(judged: list[Judged], unjudged: int) -> str:
 
 
 def lineage_notes(judged: list[Judged]) -> list[str]:
-    """Why each process's lineage is unknown, and the chain each named lineage rests on."""
+    """Why each process's lineage is unknown, the chain each named lineage rests on, and the exec records it names that
+    were not kept for citation (`judge_processes` leaves only those in `execs`)."""
     notes = []
     for item in judged:
         ancestry = item.ancestry
+        if ancestry.execs:
+            notes.append(f"lineage of pid {item.pid}: {len(ancestry.execs)} exec record(s) it reads were not kept for "
+                         f"citation (the store of exec records was full); the chain names them by native id")
         if ancestry.verdict == "unknown":
             notes.append(f"lineage of pid {item.pid} not established: {ancestry.why}")
         elif ancestry.verdict == "web_server":
@@ -375,11 +380,14 @@ class ChainLink(NamedTuple):
 
 class Ancestry(NamedTuple):
     """An ancestry walk (`PidTable.ancestry_of`): the verdict, the processes it named, the event ids of the observed
-    records it rests on (cited with any claim that names them), and why it is unknown."""
+    records it rests on (cited with any claim that names them; the verdict needs them), why it is unknown, and the
+    event ids of the exec records it named (cited when they were kept for citation; the verdict does not need the
+    copy, as it reads the exec store itself)."""
     verdict: str            # "web_server" | "service_manager" | "unknown"
     chain: list[ChainLink]
     cites: list[str]
     why: str = ""
+    execs: tuple = ()
 
 
 def _link(pid: int, step: Step, level: int, *, start: bool = False) -> ChainLink:
@@ -542,6 +550,12 @@ class PidTable:
 
     def _walk(self, host: str, pid: int, ts: float, boot: str | None, serial: int | None, *, inclusive: bool,
               depth: int) -> Ancestry:
+        execs: list[str] = []
+        found = self._walk_steps(host, pid, ts, boot, serial, inclusive=inclusive, depth=depth, execs=execs)
+        return found._replace(execs=tuple(execs))
+
+    def _walk_steps(self, host: str, pid: int, ts: float, boot: str | None, serial: int | None, *, inclusive: bool,
+                    depth: int, execs: list[str]) -> Ancestry:
         chain: list[ChainLink] = []
         cites: list[str] = []
         child: Step | None = None               # the earliest record of the process below (how it was started)
@@ -567,8 +581,8 @@ class PidTable:
             named = view.named
             # the exec records the claim names the process by and reads its parent from
             for step in (named, view.first):
-                if step.kind == EXEC and step.entry.event_id not in cites:
-                    cites.append(step.entry.event_id)
+                if step.kind == EXEC and step.entry.event_id not in execs:
+                    execs.append(step.entry.event_id)
             if level:
                 chain.append(_link(pid, named, level))
             # a web server's image in the process's own records (an exec, or its cited earliest record: an image
@@ -578,8 +592,8 @@ class PidTable:
             if web is not None:
                 if web is not named or not level:
                     chain.append(_link(pid, web, level))
-                if web.kind == EXEC and web.entry.event_id not in cites:
-                    cites.append(web.entry.event_id)
+                if web.kind == EXEC and web.entry.event_id not in execs:
+                    execs.append(web.entry.event_id)
                 return Ancestry("web_server", chain, cites)
             first = view.first
             if spawned(first):
@@ -973,11 +987,10 @@ CONNECTION_GAP = 30.0
 # endpoint, from its host's address.
 PARTNERS_PER_PAIR = EXAMPLE_LIMIT
 # Before any connect() call to the endpoint has been read (a network target read before the host target, or traffic no
-# call reaches), a pair's first record is only held, and at most UNMATCHED_HELD such records across the hunt, the
-# oldest released first: most network traffic never joins a host's call, so what the stage holds for it is bounded
-# (about 35 MB at roughly 1.7 KB of typed record and raw copy each), not one record per connection.
+# call reaches), a pair's first record is kept: a call read later can still join it. That is one record per pair, not
+# one per connection; the stage's disk budget is what bounds it (the sweep stops staging citations when it is spent,
+# and the rule then says its findings are not computed from them).
 PARTNERS_UNMATCHED = 1
-UNMATCHED_HELD = 20_000
 EPHEMERAL_FLOOR = 32768         # client ports start here on modern stacks (Linux 32768-60999, Windows 49152-65535)
 
 
@@ -1082,8 +1095,6 @@ class ProcessNetworkLink(Playbook):
         self.sock_groups = KeyedStore(self, "pnl_sock_groups", HOT_COUNT)
         self.pairs = KeyedStore(self, "pnl_pairs", HOT_COUNT)
         self.endpoints = KeyedStore(self, "pnl_endpoints", HOT_COUNT)     # remote endpoints of the calls read
-        self.unmatched: deque[str] = deque()        # held records of pairs no call has reached yet, oldest first
-        self._unstaged: list[str] = []              # released this batch: their rows no longer point at the stage
         self.bounds = BoundStage()
         self.holds = Holds()
 
@@ -1096,12 +1107,6 @@ class ProcessNetworkLink(Playbook):
     def drain_staged(self) -> list[TypedEvent]:
         out, self._pending = self._pending + self.bounds.drain() + self.holds.drain(), []
         self.pids.trim()
-        if self._unstaged:
-            store = self._store()
-            store.flush()
-            store.db.executemany("UPDATE net SET staged = 0 WHERE id = ?", [(i,) for i in self._unstaged])
-            store.db.commit()
-            self._unstaged = []
         self.sock_groups.trim()
         self.pairs.trim()
         self.endpoints.trim()
@@ -1134,7 +1139,6 @@ class ProcessNetworkLink(Playbook):
         self.sock_groups.clear()
         self.pairs.clear()
         self.endpoints.clear()
-        self.unmatched.clear()
         self.close_spill()
 
     def _room(self, rows: int) -> bool:
@@ -1237,12 +1241,11 @@ class ProcessNetworkLink(Playbook):
             return
 
     def _cite_net(self, e: TypedEvent, src: str, sport: int, dst: str, dport: int) -> int:
-        """Stage the record when it may be cited; returns 1 when it is kept, 2 when it is only held, 0 otherwise. It is
-        kept when it is among the first PARTNERS_PER_PAIR records (or alerts) of its (service endpoint, client address)
-        pair once a call to that endpoint has been read, and held (UNMATCHED_HELD at most, oldest released first) when
-        it is among the pair's first PARTNERS_UNMATCHED before any call reached the endpoint. The service side is the
-        destination, as a sensor records a connection it saw open; a record whose source port is the lower one, below
-        the client range, is also offered as recorded from the server's side (a connection picked up mid-stream)."""
+        """Stage the record when it may be cited (1, else 0): when it is among the first PARTNERS_PER_PAIR records (or
+        alerts) of its (service endpoint, client address) pair once a call to that endpoint has been read, or among
+        the pair's first PARTNERS_UNMATCHED before any call reached the endpoint. The service side is the destination,
+        as a sensor records a connection it saw open; a record whose source port is the lower one, below the client
+        range, is also offered as recorded from the server's side (a connection picked up mid-stream)."""
         alert = e.family == "net_alert"
         pairs = [(dst, dport, src)]
         if sport < dport and sport < EPHEMERAL_FLOOR:
@@ -1257,20 +1260,9 @@ class ProcessNetworkLink(Playbook):
             matched = self.endpoints.get(pair[:2]) is not None
             if count[0] < (PARTNERS_PER_PAIR if matched else PARTNERS_UNMATCHED):
                 count[0] += 1
-                staged = 1 if matched else staged or 2
-        if staged == 1:
+                staged = 1
+        if staged:
             self._pending.append(e)
-        elif staged == 2:
-            self.holds.hold(e)
-            self.unmatched.append(e.id)
-            if len(self.unmatched) > UNMATCHED_HELD:
-                released = self.unmatched.popleft()
-                self.holds.release(released)
-                self._unstaged.append(released)
-                self.note_limit("unmatched", f"more than {UNMATCHED_HELD:,} network records of endpoints no "
-                                             f"connect() call had reached when they were read were held for citation; "
-                                             f"the oldest were released, so a later join cites fewer network records "
-                                             f"(its counts stay exact and its claim says how many are cited)")
         return staged
 
     def _lost(self, exc: StateExhausted) -> None:
