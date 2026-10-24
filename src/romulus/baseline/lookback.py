@@ -41,7 +41,9 @@ class HistoryGap:
     target: str
     start: datetime
     end: datetime
-    state: Literal["partial", "failed", "omitted_budget"]
+    # partial and failed: the source did not deliver the hour. unresolved: it did, but the hour's keys cannot be
+    # stated (a missing field, a parent before history, a closed bucket, a segment another hunt is building).
+    state: Literal["partial", "failed", "omitted_budget", "unresolved"]
     reason: str
     spec_ids: tuple[str, ...]
 
@@ -296,7 +298,7 @@ class LookbackWriter:
                 reason = "; ".join(
                     f"{spec_id}: {item}" for spec_id in partial for item in counters[spec_id].reasons
                 )
-                gaps.append(HistoryGap(target, hour_start, hour_end, "partial", reason, partial))
+                gaps.append(HistoryGap(target, hour_start, hour_end, "unresolved", reason, partial))
             built = 0
             for spec in missing:
                 counter = counters[spec.id]
@@ -315,7 +317,7 @@ class LookbackWriter:
                     if state != "begun":
                         # Never skipped silently: the hour is not in the store for this hunt yet.
                         gaps.append(HistoryGap(
-                            target, hour_start, hour_end, "partial",
+                            target, hour_start, hour_end, "unresolved",
                             f"{spec.id}: " + ("being built by another hunt" if state == "building_elsewhere"
                                               else f"segment {row['id']} is {state}"),
                             (spec.id,),

@@ -37,7 +37,7 @@ def _hours(start: datetime, end: datetime) -> list[datetime]:
 
 
 # When several history gaps name one hour, the state that says most about why it is missing wins.
-_GAP_STATE_ORDER = {"failed": 0, "partial": 1, "omitted_budget": 2}
+_GAP_STATE_ORDER = {"failed": 0, "partial": 1, "unresolved": 2, "omitted_budget": 3}
 _NO_SEGMENT = ("missing", "no complete segment")
 
 

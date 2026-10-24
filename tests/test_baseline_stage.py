@@ -734,3 +734,31 @@ def test_a_host_split_between_a_mapped_and_an_audit_target_never_claims_a_false_
     stored = next(repo.baseline_observations("h1"))
     assert stored["verdict"] == "common" and stored["history_count"] == 48
     assert repo.candidates("h1") == []
+
+
+def test_an_unresolvable_history_child_leaves_the_baseline_unresolved_without_failing_the_stage():
+    child = _exec_event("hist-child", START - timedelta(minutes=55), pid=200, ppid=77, executable="/bin/ls")
+    repo = _repo(spec_ids=("bl.exec_pair",), budget={"queries": 1000, "records": 5_000_000, "seconds": 1800})
+
+    summary = run_baseline_stage(repo, "h1", WINDOW, source=TimedHistory({"host-index": [child]}))
+
+    gaps = next(iter(repo.baseline_snapshot("h1")["coverage"].values()))["gaps"]
+    assert [(gap["state"], gap["start"]) for gap in gaps] == [
+        ("unresolved", (START - timedelta(hours=1)).isoformat()),
+    ]
+    assert "parent exec before history" in gaps[0]["reason"]
+    assert summary["status"] == "partial" and summary["stage_failed"] is False
+    rollup = next(cell for cell in repo.rule_cells("h1")
+                  if cell["rule_id"] == "bl.exec_pair" and cell["target"] == "*")
+    assert rollup["state"] == "evaluated_partial"
+    history = next(cell for cell in repo.rule_cells("h1") if cell["target"] == "baseline:host-index")
+    assert history["state"] == "partial"
+
+
+@pytest.mark.parametrize(("state", "reason"), [("failed", "shard failure"), ("partial", "source timeout")])
+def test_a_history_source_failure_fails_the_baseline_stage(state, reason):
+    repo = _repo()
+
+    summary = run_baseline_stage(repo, "h1", WINDOW, source=EmptyHistory(state, reason))
+
+    assert summary["stage_failed"] is True

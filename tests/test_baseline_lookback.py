@@ -309,7 +309,7 @@ def test_fresh_building_segment_is_not_cleaned_by_a_concurrent_writer():
     assert repo.baseline_segments()[0]["status"] == "building"
     # Never skipped silently: the hour is a gap for this hunt, with the reason.
     assert [(gap.start, gap.state, gap.reason) for gap in contender.gaps] == [
-        (START - timedelta(hours=1), "partial", "bl.exec_path: being built by another hunt"),
+        (START - timedelta(hours=1), "unresolved", "bl.exec_path: being built by another hunt"),
     ]
 
 
@@ -341,7 +341,7 @@ def test_unresolved_exec_pair_pending_never_becomes_an_empty_complete_segment():
         hunt_id="build", targets=["host-index"], start=START - timedelta(hours=1), end=START,
     )
     assert repo.baseline_segments(statuses=["active"]) == []
-    assert result.gaps[0].state == "partial" and "parent exec before history" in result.gaps[0].reason
+    assert result.gaps[0].state == "unresolved" and "parent exec before history" in result.gaps[0].reason
 
 
 def test_complete_lookback_fetch_records_parent_carry_on_disk():
@@ -394,7 +394,7 @@ def test_parent_in_an_earlier_hour_is_explicit_then_resolves_on_resume():
         ).fill(hunt_id="build", targets=["host-index"], start=START - timedelta(hours=2), end=START)
 
     first = run()
-    assert any(gap.start == START - timedelta(hours=1) and gap.state == "partial" for gap in first.gaps)
+    assert any(gap.start == START - timedelta(hours=1) and gap.state == "unresolved" for gap in first.gaps)
     second = run()
     active = repo.baseline_segments(statuses=["active"])
     assert second.complete == 1
@@ -569,7 +569,7 @@ def test_parent_across_a_failed_hour_is_unresolved_never_the_older_generation():
         )
     assert ("/old", "/bin/sh") not in [(parent, child) for _, parent, child in _pair_keys(repo)]
     child_gap = [gap for gap in result.gaps if gap.start == H_HOUR]
-    assert child_gap and child_gap[0].state == "partial"
+    assert child_gap and child_gap[0].state == "unresolved"
     assert "e3: parent exec in an unobserved hour" in child_gap[0].reason
 
 
