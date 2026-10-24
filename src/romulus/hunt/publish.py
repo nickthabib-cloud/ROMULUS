@@ -7,11 +7,24 @@ import json
 from romulus.decide.policy import decide
 from romulus.detect.base import Match, Playbook
 from romulus.detect.observed import pointer_body
-from romulus.evidence.normalize import exec_record, observed_record
+from romulus.evidence.normalize import normalize_hits, observed_record
+from romulus.evidence.typed import TypedEvent, fv
 from romulus.sources.es import SourceError
 from romulus.store.repo import Repo
 
 LINEAGE_CITATION_BATCH = 500
+
+
+def _exec_record(hits: list[dict], boot: list | tuple | None = None) -> TypedEvent | None:
+    """Rebuild the one process_exec view from its raw audit records and sweep-assigned boot id."""
+    events, _skips, errors = normalize_hits(hits)
+    execs = [event for event in events if event.family == "process_exec"]
+    if errors or len(execs) != 1:
+        return None
+    event = execs[0]
+    if boot is not None and not event.has("host.boot.id"):
+        event.fields["host.boot.id"] = fv(boot[0], boot[1])
+    return event
 
 
 class LineageCitationFetcher:
@@ -69,7 +82,7 @@ class LineageCitationFetcher:
             event = (
                 observed_record(hits[0], body.get("boot"))
                 if body["kind"] == "observed"
-                else exec_record(hits, body.get("boot"))
+                else _exec_record(hits, body.get("boot"))
             )
             if event is None or event.id != event_id:
                 continue
