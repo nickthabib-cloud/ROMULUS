@@ -16,8 +16,8 @@ from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
 from romulus.detect.bounded import HOT_COUNT, HeldExamples, KeyedStore, RecentIds
-from romulus.detect.correlation import StageMissing, canon_ip, external, routable_remote
 from romulus.detect.citing import BoundStage, Ends, bound_note, cite_with_bounds, cited_phrase
+from romulus.detect.correlation import StageMissing, canon_ip, external, routable_remote
 from romulus.detect.netdef import assume_direction
 from romulus.evidence.typed import TypedEvent
 
@@ -359,7 +359,7 @@ class Beaconing(_Stitched):
     connection identity whose records are more than IDLE apart is counted as separate connections (one per stretch
     of activity), so a 5-tuple reused by a periodic client still shows its period."""
     id = "net.beaconing"
-    version = "4"
+    version = "5"
     direction_dependent = True
     title = "Regular, repeated connections from an internal address to one public endpoint"
     severity, lane = "medium", "lead"
@@ -440,7 +440,10 @@ class Beaconing(_Stitched):
             periodic = sorted(s.protocols & PERIODIC_BY_DESIGN)
             claim = (f"Arkime recorded {len(starts)} separate {transport} connections from {src} to {dst} port {dport} "
                      f"({_iso(starts[0])} – {_iso(starts[-1])}) starting every {median:.0f} s (median), with a median "
-                     f"deviation of {mad:.1f} s between starts."
+                     f"deviation of {mad:.1f} s between starts. "
+                     + (f"The first records of all {len(starts)} connections are cited." if len(evs) >= len(starts)
+                        else f"The first records of {len(evs)} of the {len(starts)} connections are cited, including "
+                             f"the first and the last.")
                      + (f" Arkime's parser identified every connection as {', '.join(periodic)}, a protocol that is "
                         f"periodic by design." if periodic else ""))
             preds = [pf(evs[0], "source.ip"), pf(evs[0], "destination.ip"), pf(evs[0], "destination.port")]
@@ -595,7 +598,7 @@ class ArkimeSshReverseShellTag(Playbook):
     shape of the encrypted session; ROMULUS does not reproduce or verify the heuristic. It is reported like an
     IDS alert: a vendor detection with its own false-positive rate, a lead to check, never proof."""
     id = "net.arkime_ssh_reverse_shell_tag"
-    version = "4"
+    version = "5"
     title = "Arkime's heuristic tagged an SSH session as a possible reverse shell"
     kind = "aggregate"
     anchor_class = "network_observation"
@@ -797,8 +800,7 @@ class ArkimeSshReverseShellTag(Playbook):
             self.note_limit("connections", f"a pair passed {self.PAIR_CONNS_CAP:,} SSH connections held; its untagged "
                                            f"count is a lower bound")
         text += (f" Arkime recorded {at_least}{others} other SSH connection(s) from {src} to {dst} port {port} without "
-                 "the tag "
-                 "in the window." if others else
+                 "the tag in the window (counted; their records are not cited)." if others else
                  f" Arkime recorded no other SSH connection from {src} to {dst} port {port} in the window.")
         return text
 
@@ -819,13 +821,21 @@ class ArkimeSshReverseShellTag(Playbook):
             evs = sorted((by_id[i] for i in ordered[:EXAMPLE_LIMIT]), key=lambda e: (e.ts, e.id))
             missing = set(bounds) - set(held)
             src, dst, port = key
+            # the span runs from the first tagged record's start to the latest end of a tagged record (or the last
+            # tagged record's time when no end is recorded): the interval the stated duration measures
+            end = _iso(g["end"]) if g["end"] is not None else g["last"].isoformat()
             claim = (f"Arkime's heuristic tagged {g['records']} session record(s) of {len(g['conns'])} connection(s) "
-                     f"from {src} to {dst} port {port} '{self.TAG}' ({g['first'].isoformat()} – "
-                     f"{g['last'].isoformat()}). This is Arkime's own detection from the traffic shape, like an IDS "
-                     f"alert; it does not show that a shell ran.") + self._context(key, g, pair["ssh"])
-            claim += bound_note(missing, g["by_time"], "the tagged records' span")
-            if g["by_end"].last and g["by_end"].last[1] in missing - set(g["by_time"].ids()):
+                     f"from {src} to {dst} port {port} '{self.TAG}' ({g['first'].isoformat()} – {end}). This is "
+                     f"Arkime's own detection from the traffic shape, like an IDS alert; it does not show that a shell "
+                     f"ran.") + self._context(key, g, pair["ssh"])
+            claim += cited_phrase(len(evs), g["records"], not missing, "tagged records", "tagged record")
+            if g["by_time"].first and g["by_time"].first[1] in missing:
+                claim += (" The record that starts the tagged records' span was not kept for citation; the interval is "
+                          "computed from every record.")
+            if g["end"] is not None and g["by_end"].last and g["by_end"].last[1] in missing:
                 claim += " The record that ends the last tagged session was not kept for citation."
+            elif g["end"] is None and g["by_time"].last and g["by_time"].last[1] in missing:
+                claim += " The last tagged record was not kept for citation."
             out.append(Match(self.id, claim, self.claim_type, evs,
                              [pf(evs[0], "arkime.tags"), pf(evs[0], "source.ip"), pf(evs[0], "destination.ip")],
                              evs[0].ts, self.severity, self.lane, "medium", evs[0].entities(),

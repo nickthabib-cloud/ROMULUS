@@ -80,7 +80,7 @@ def _times(event: TypedEvent) -> set[datetime]:
         value = field.value
         if isinstance(value, str) and len(value) >= 19 and value[4] == "-" and value[10] == "T":
             try:
-                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                parsed = datetime.fromisoformat(value)
             except ValueError:
                 continue
             out.add((parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)).astimezone(UTC))
@@ -88,7 +88,7 @@ def _times(event: TypedEvent) -> set[datetime]:
 
 
 def _parse_ts(text: str) -> datetime:
-    parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    parsed = datetime.fromisoformat(text)
     return (parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)).astimezone(UTC)
 
 
@@ -240,9 +240,9 @@ def problems(text: str, events: list[TypedEvent]) -> list[str]:
             if NUMBER.match(item):
                 if int(item.replace(",", "")) not in cited.ints:
                     out.append(f"lists {item}, in no cited record")
-            elif len(item) >= 2 and item[0] == item[-1] and item[0] in "'\"":
-                if item[1:-1] not in constants and not cited.names(item[1:-1]):
-                    out.append(f"lists {item}, in no cited record")
+            elif (len(item) >= 2 and item[0] == item[-1] and item[0] in "'\""
+                  and item[1:-1] not in constants and not cited.names(item[1:-1])):
+                out.append(f"lists {item}, in no cited record")
     return list(dict.fromkeys(out))
 
 

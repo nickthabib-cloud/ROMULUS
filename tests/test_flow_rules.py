@@ -223,7 +223,10 @@ def test_an_address_reached_exactly_one_hour_later_is_not_listed_in_the_busiest_
     late = eve("late", sport=41000, dst="10.0.1.200", start=T0 + timedelta(seconds=3600))
     [m] = run(HorizontalSweep(), events(*burst, late))
     assert "contacted 41 distinct internal addresses" in m.claim and "up to 40 within 60 minutes" in m.claim
-    assert "10.0.1.200" not in m.claim and m.claim.endswith("10.0.1.30 (1 connection, no reply) and 10 more.")
+    # the late address bounds the hunt-window span (cited) but is not in the busiest hour, so it is not listed
+    assert "10.0.1.200" not in m.claim
+    assert m.claim.endswith("(1 connection, no reply) and 21 more. 20 of the 41 records are cited, including the first "
+                            "and the last.")
 
 
 def test_slow_sweep_is_caught_by_the_hour_window():

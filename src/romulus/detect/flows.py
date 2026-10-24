@@ -39,7 +39,7 @@ from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
 from romulus.detect.bounded import HOT_COUNT, KeyedStore, Limit, RecentIds
-from romulus.detect.citing import BoundStage, Ends, bound_note, cite_with_bounds, cited_phrase
+from romulus.detect.citing import BoundStage, Ends, bound_note, cite_with_bounds, cited_phrase, more
 from romulus.detect.correlation import StageMissing, canon_ip, external, routable_remote
 from romulus.detect.netdef import assume_direction
 from romulus.evidence.typed import TypedEvent
@@ -806,9 +806,6 @@ class HorizontalSweep(_FlowRule):
         src_scope = "internal" if internal_address(src) else "external" if external(src) else "non-routable"
         label = {True: "lane window", False: "deciding window"}[high]
         span = "5 minutes" if deciding.width == 300 else "hour"
-        listed = ", ".join(f"{ip} ({_plural(len(dests[ip].connections), 'connection')}, {dests[ip].state})"
-                           for ip in deciding.members[:self.LIST_LIMIT])
-        more = (f" and {deciding.size - self.LIST_LIMIT} more" if deciding.size > self.LIST_LIMIT else "")
         claim = (f"{src} ({src_scope} address) contacted {len(dests)} distinct {scope} addresses on {service} in the "
                  f"hunt window ({_iso(group.first)} – {_iso(group.last)}): up to {short.size} within 5 minutes (from "
                  f"{_iso(short.start)}) and up to {long.size} within 60 minutes (from {_iso(long.start)}). "
@@ -818,7 +815,7 @@ class HorizontalSweep(_FlowRule):
                  f"answered and {states['reply unknown']} have no typed packet count; in the busiest hour "
                  f"{long.silent} of {long.size} never answered. The {label} is the {span} from "
                  f"{_iso(deciding.start)}: {deciding.size} addresses, {deciding.silent} of {deciding.size} never "
-                 f"answered. Addresses in the {label}: {listed}{more}.")
+                 f"answered.")
         members = set(deciding.members)
         end = deciding.start + deciding.width
         staged = [(ts, eid, ip) for ip, destination in dests.items() for ts, eid in destination.staged]
@@ -831,7 +828,15 @@ class HorizontalSweep(_FlowRule):
         window = [timed[0][1], timed[-1][1]] if timed else []
         ids = window + [eid for _answered, _ts, eid in sorted(inside)] + [eid for _ts, eid in sorted(rest)]
         evs, missing = self._cite(group.ends, ids)
-        claim += bound_note(missing, group.ends, "the hunt-window span")
+        # the window's addresses that a cited record reaches, in the window's order
+        reached = {canon_ip(e.get("destination.ip")) for e in evs}
+        shown = [ip for ip in deciding.members if ip in reached][:self.LIST_LIMIT]
+        claim += (f" Addresses in the {label} with a cited record: "
+                  + ", ".join(f"{ip} ({_plural(len(dests[ip].connections), 'connection')}, {dests[ip].state})"
+                              for ip in shown)
+                  + more(len(shown), deciding.size) + ".")
+        claim += (cited_phrase(len(evs), sum(group.records.values()), not missing)
+                  + bound_note(missing, group.ends, "the hunt-window span"))
         cited = next((e for e in evs if e.has("destination.port")), evs[0])
         match = Match(self.id, claim, self.claim_type, evs,
                       _predicates(cited, ("source.ip", "destination.ip", "destination.port", "network.transport")),
@@ -912,16 +917,23 @@ class _UnidentifiedGroup:
 SOURCE_LIST_LIMIT = 30
 
 
-def _address_list(counts: dict[str, int], noun: str) -> str:
-    """'2 sources (10.0.0.5: 3, 10.0.0.6: 2)' with every address up to the list limit."""
+def _address_list(counts: dict[str, int], noun: str, cited: set[str]) -> str:
+    """'2 sources (10.0.0.5: 3, 10.0.0.6: 2)', naming the addresses a cited record shows, up to the list limit, and
+    counting the rest."""
     ordered = sorted(counts, key=ip_sort_key)
-    listed = ", ".join(f"{ip}: {counts[ip]}" for ip in ordered[:SOURCE_LIST_LIMIT])
-    more = f" and {len(ordered) - SOURCE_LIST_LIMIT} more" if len(ordered) > SOURCE_LIST_LIMIT else ""
-    return f"{_plural(len(ordered), noun)} ({listed}{more})"
+    named = [ip for ip in ordered if ip in cited][:SOURCE_LIST_LIMIT]
+    listed = ", ".join(f"{ip}: {counts[ip]}" for ip in named)
+    rest = more(len(named), len(ordered)).strip()
+    return f"{_plural(len(ordered), noun)} ({'; '.join(part for part in (listed, rest) if part)})"
 
 
-def _sources_phrase(counts: dict[str, int]) -> str:
-    return "from " + _address_list(counts, "source")
+def _sources_phrase(counts: dict[str, int], cited: set[str]) -> str:
+    return "from " + _address_list(counts, "source", cited)
+
+
+def _addresses(events: list[TypedEvent]) -> set[str]:
+    """The addresses the cited records show, on either side."""
+    return {ip for e in events for ip in (canon_ip(e.get("source.ip")), canon_ip(e.get("destination.ip"))) if ip}
 
 
 class ProtocolPortMismatch(_FlowRule):
@@ -1118,7 +1130,8 @@ class ProtocolPortMismatch(_FlowRule):
                 extra = seen - set(protocols)
                 if extra:
                     others[sensor].update(extra)
-        sources = _sources_phrase({src: len(keys) for src, keys in group.sources.items()})
+        evs, missing = self._cite(group.ends, group.cited)
+        sources = _sources_phrase({src: len(keys) for src, keys in group.sources.items()}, _addresses(evs))
         claim = (f"{sensors} identified {names} on {'at least ' if group.capped else ''}"
                  f"{_plural(len(group.connections), 'connection')} to {dst} on "
                  f"{transport}/{port} {sources} ({_iso(group.first)} – {_iso(group.last)}; "
@@ -1126,9 +1139,8 @@ class ProtocolPortMismatch(_FlowRule):
         if others:
             claim += " On the same connection(s) " + "; ".join(
                 f"{SENSOR_NAMES[s]} also identified {', '.join(sorted(v))}" for s, v in sorted(others.items())) + "."
+        claim += cited_phrase(len(evs), sum(group.records.values()), not missing) + bound_note(missing, group.ends)
         claim += " Protocol identity is the sensor parser's judgement."
-        evs, missing = self._cite(group.ends, group.cited)
-        claim += bound_note(missing, group.ends)
         match = Match(self.id, claim, "network_observation", evs,
                       _predicates(evs[0], ("source.ip", "destination.ip", "destination.port", "network.app_proto",
                                            "network.protocols")),
@@ -1163,22 +1175,27 @@ class ProtocolPortMismatch(_FlowRule):
             denominators.append(f"{SENSOR_NAMES[sensor]} wrote {_plural(tally['records'], kind)} to {server} on "
                                 f"this port" + (f", identified as {identified}" if identified else
                                                 ", none with an identified protocol"))
+        evs, missing = self._cite(group.ends, [event_id for _first, event_id in group.cites])
+        cited = _addresses(evs)
         if side == "source":
-            peers = _address_list(group.addresses, "peer")
+            peers = _address_list(group.addresses, "peer", cited)
             subject = (f"{_plural(group.connections, 'connection')} recorded from {server} port {transport}/{port} to "
                        f"{peers}; the registered port is on the side the sensor recorded as the source (a reversed or "
                        f"mid-stream view of a connection to that service, or a program bound to the service port to "
                        f"make outgoing connections)")
         else:
-            sources = _sources_phrase(group.addresses)
+            sources = _sources_phrase(group.addresses, cited)
             subject = f"{_plural(group.connections, 'connection')} to {server} on {transport}/{port} {sources}"
         registered = f"{transport}/{port} is registered here for {', '.join(sorted(expected))}"
         claim = (f"{subject} ({_iso(first)} – {_iso(last)}) carried data in both directions with no application "
                  f"protocol identified: {'; '.join(how)}. {registered}, which {' and '.join(capable)} can parse "
                  f"({', '.join(parsable)}). " + (f"{'; '.join(denominators)}. " if denominators else "")
-                 + "A parser that does not recognise traffic is not proof that a different protocol was used.")
-        evs, missing = self._cite(group.ends, [event_id for _first, event_id in group.cites])
-        claim += bound_note(missing, group.ends)
+                 + "A parser that does not recognise traffic is not proof that a different protocol was used."
+                 + cited_phrase(len(evs), records[SURICATA] + records[ARKIME], not missing,
+                                "records with no identified protocol", "record with no identified protocol")
+                 + bound_note(missing, group.ends)
+                 + (f" The per-sensor totals of records to {server} on this port count every such record; only the "
+                    f"records above are cited." if denominators else ""))
         match = Match(self.id, claim, "network_observation", evs,
                       _predicates(evs[0], ("source.ip", "source.port", "destination.ip", "destination.port",
                                            "network.app_proto", "network.protocols")),
@@ -1404,7 +1421,10 @@ class LongUnidentifiedSession(_FlowRule):
         expected = expected_protocols(transport, port)
         registration = (f"{transport}/{port} is registered here for {', '.join(sorted(expected))}, which {sensors} "
                         f"cannot parse" if expected else f"{transport}/{port} is registered here for no protocol")
-        sources = _sources_phrase(group.sources)
+        ids = [event_id for *_rank, held in group.ranked for event_id in held] + group.rest
+        bounds = Ends((start, opening), (end, closing))
+        evs, missing = self._cite(bounds, ids)
+        sources = _sources_phrase(group.sources, _addresses(evs))
         claim = (f"{_plural(group.long, 'connection')} to {dst} on {transport}/{port} {sources} lasted at least "
                  f"{self.MIN_SECONDS // 60} minutes with data in both directions and no application protocol "
                  f"identified by {sensors}; the longest ran {longest / 60:.0f} minutes ({_iso(start)} "
@@ -1413,10 +1433,8 @@ class LongUnidentifiedSession(_FlowRule):
                  f"in total ({_sensor_counts(records)}"
                  + (f"; Suricata reported protocol detection 'failed' on {failed}" if failed else "") + "). "
                  f"{registration}. Times are as the sensors recorded them.")
-        ids = [event_id for *_rank, held in group.ranked for event_id in held] + group.rest
-        bounds = Ends((start, opening), (end, closing))
-        evs, missing = self._cite(bounds, ids)
-        claim += bound_note(missing, bounds, "the longest connection")
+        claim += (cited_phrase(len(evs), sum(records.values()), not missing)
+                  + bound_note(missing, bounds, "the longest connection"))
         match = Match(self.id, claim, "network_observation", evs,
                       _predicates(evs[0], ("source.ip", "destination.ip", "destination.port", "flow.start",
                                            "flow.end")),
