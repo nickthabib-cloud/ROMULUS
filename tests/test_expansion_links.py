@@ -9,8 +9,11 @@ from romulus.detect.context import EntryPointPromotion
 from romulus.evidence.normalize import normalize_hits
 from romulus.evidence.typed import RawRef, TypedEvent, fv
 from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkWindow, usable_key
-from romulus.hunt.pivot import PivotEventBatch
+from romulus.hunt.pivot import PivotEventBatch, PivotExecutor
+from romulus.sources.models import Completeness, SearchOutcome
 from romulus.sources.profile import contract_from_types
+from romulus.store.db import make_engine, migrate
+from romulus.store.repo import Repo, raw_id
 
 T0 = datetime(2024, 11, 18, 14, 0, tzinfo=UTC)
 T1 = T0 + timedelta(minutes=10)
@@ -46,6 +49,7 @@ class FakePivot:
         self.events = events
         self.status = status
         self.calls = []
+        self.persisted = []
         self.contracts = {
             "host-x": contract_from_types("host-x", {
                 "@timestamp": "date", "event.dataset": "keyword", "host.name": "keyword",
@@ -74,10 +78,12 @@ class FakePivot:
 
     def fetch_intents(
         self, owner, fetch_key, intents, retain, *, anchor_ts=None, query_cap=None,
-        planning_coverage=None,
+        planning_coverage=None, persist=True,
     ):
         self.calls.append((owner, fetch_key, intents, anchor_ts, query_cap))
         selected = [item for item in self.events if retain(item)]
+        if persist:
+            self.persisted.extend(item.id for item in selected)
         planned = list(planning_coverage or [])
         status = "partial" if planned else self.status
         return PivotEventBatch(
@@ -87,6 +93,10 @@ class FakePivot:
                      if planned else [] if self.status == "complete" else ["cap:2<total:3"]),
             duration_ms=1,
         )
+
+    def save_batch_selection(self, batch, events):
+        del batch
+        self.persisted.extend(item.id for item in events)
 
 
 def cases(matched=True):
@@ -252,6 +262,7 @@ def test_each_link_fetcher_returns_only_typed_matches(link_type):
 
     assert result.status == "complete"
     assert linked.id in result.event_ids
+    assert pivot.persisted == result.event_ids
     assert result.key
     assert result.strength == ("inferred" if link_type in {
         "source_ip", "account", "host_after_anchor", "flow_host_side",
@@ -269,6 +280,66 @@ def test_each_link_fetcher_rejects_a_typed_key_mismatch(link_type):
 
     assert result.status == "complete"
     assert unrelated.id not in result.event_ids
+
+
+def test_link_persists_only_the_records_its_final_selection_cites(monkeypatch):
+    root = event(
+        "root", "process_exec", process__executable="/bin/sh", process__pid=100,
+        process__ppid=1, process__session_id=42,
+    )
+    child = event(
+        "child", "process_exec", ts=T0 + timedelta(seconds=1),
+        process__executable="/usr/bin/id", process__pid=101,
+        process__ppid=100, process__session_id=42,
+    )
+    unrelated = event(
+        "unrelated", "process_exec", ts=T0 + timedelta(seconds=2),
+        process__executable="/usr/bin/true", process__pid=999,
+        process__ppid=1, process__session_id=99,
+    )
+    raw_sources = {
+        item.raw[0].key: {"event": {"dataset": "linux.audit"}, "marker": item.id}
+        for item in (root, child, unrelated)
+    }
+    records = [
+        {"_index": "host-x", "_id": item.id, "_source": raw_sources[item.raw[0].key]}
+        for item in (root, child, unrelated)
+    ]
+    engine = make_engine(":memory:")
+    migrate(engine)
+    repo = Repo(engine)
+    repo.create_hunt("h1", {"targets": []}, "digest", "test")
+    repo.save_evidence("h1", [root], raw_sources, None)
+    contract = contract_from_types("host-x", {
+        "@timestamp": "date", "event.dataset": "keyword", "host.name": "keyword",
+    })
+    executor = PivotExecutor(repo, None, "h1", {"host-x": contract})
+    outcome = SearchOutcome(
+        target="host-x", fingerprint="f", started_at=T0, ended_at=T1,
+        completeness=Completeness.complete, total=3, total_relation="eq", returned=3,
+        records=records,
+    )
+    monkeypatch.setattr(
+        executor, "_execute_partitions",
+        lambda intent, *_args, **_kwargs: [(intent, outcome, [], [])],
+    )
+    monkeypatch.setattr(
+        executor, "_normalize_pivot_records",
+        lambda _records, _families: ([root, child, unrelated], []),
+    )
+
+    result = LinkFetcher(executor, T0, T1).fetch(
+        anchor("process_lineage", root), "process_lineage", window(),
+    )
+
+    assert result.event_ids == [child.id]
+    assert {row["id"] for row in repo.events_by_ids([root.id, child.id, unrelated.id])} == {
+        root.id, child.id,
+    }
+    [stored_child] = repo.events_by_ids([child.id])
+    assert {row["id"] for row in repo.raw_records(stored_child["raw_ids"])} == set(stored_child["raw_ids"])
+    assert repo.raw_records([raw_id("host-x", unrelated.id)]) == []
+    assert "event_ids" not in (repo.tasks("h1")[0]["outcome"] or {})
 
 
 @pytest.mark.parametrize("link_type", sorted(cases()))

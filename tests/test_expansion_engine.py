@@ -350,6 +350,75 @@ def test_resume_continues_after_crash_without_repeating_evaluated_links():
     assert repo.expansion_anchors("h1")[0]["status"] == "expanded_complete"
 
 
+def test_resume_after_fetch_before_evaluation_matches_uninterrupted_state_and_keeps_citations():
+    linked = event("linked-event", ts=T0 + timedelta(seconds=1), argv=["/usr/bin/id"])
+
+    class CitingFetcher(ScriptedFetcher):
+        def fetch(self, anchor, link_type, window, *, query_cap=None):
+            result = super().fetch(anchor, link_type, window, query_cap=query_cap)
+            if result.event_ids:
+                self.repo.save_evidence(
+                    "h1", [linked], {linked.raw[0].key: {"marker": linked.id}}, None,
+                )
+            return result
+
+    def prepared_repo():
+        repo = repo_with_anchor()
+        anchor_event = event("anchor-event")
+        repo.merge_evidence_raw(
+            "h1", [anchor_event], {anchor_event.raw[0].key: {"marker": anchor_event.id}},
+        )
+        return repo
+
+    uninterrupted = prepared_repo()
+    uninterrupted_summary = ExpansionEngine(
+        uninterrupted, "h1", WINDOW,
+        CitingFetcher(uninterrupted, linked=linked, linked_type="login_session"),
+    ).run()
+
+    resumed = prepared_repo()
+    first_fetcher = CitingFetcher(resumed, linked=linked, linked_type="login_session")
+    crashing = ExpansionEngine(
+        resumed, "h1", WINDOW, first_fetcher,
+    )
+
+    def crash_before_evaluation(_candidate, _result):
+        raise RuntimeError("simulated crash before evaluation")
+
+    crashing._evaluate = crash_before_evaluation
+    with pytest.raises(RuntimeError, match="simulated crash before evaluation"):
+        crashing.run()
+    [fetched_link] = resumed.expansion_links("h1")
+    first_key = first_fetcher.calls[0]
+    assert fetched_link["evaluated"] == 0
+    assert fetched_link["event_ids"] == [linked.id]
+
+    resumed_fetcher = CitingFetcher(resumed, linked=linked, linked_type="login_session")
+    resumed_summary = ExpansionEngine(resumed, "h1", WINDOW, resumed_fetcher).run()
+
+    assert first_key not in resumed_fetcher.calls
+    assert stable_state(resumed) == stable_state(uninterrupted)
+    assert {key: resumed_summary[key] for key in ("status", "stop_reason", "source_queries")} == {
+        key: uninterrupted_summary[key] for key in ("status", "stop_reason", "source_queries")
+    }
+    cited = {
+        event_id
+        for row in [*resumed.candidates("h1"), *resumed.expansion_links("h1")]
+        for field in ("event_ids", "evidence_ids")
+        for event_id in row.get(field) or []
+    }
+    stored = {row["id"]: row for row in resumed.citation_events("h1", sorted(cited))}
+    assert set(stored) == cited
+    assert all(row["raw_ids"] for row in stored.values())
+    assert {
+        raw_id for row in stored.values() for raw_id in row["raw_ids"]
+    } == {
+        row["id"] for row in resumed.raw_records(sorted({
+            raw_id for event_row in stored.values() for raw_id in event_row["raw_ids"]
+        }))
+    }
+
+
 def test_resume_seeds_budget_from_persisted_query_spend_and_uses_only_remainder():
     repo = repo_with_anchor()
     first = DurableBudgetFetcher(repo)

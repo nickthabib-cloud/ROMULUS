@@ -26,7 +26,7 @@ from romulus.sources.compile import compile_es
 from romulus.sources.models import Completeness, SearchIntent, SearchOutcome, Window
 from romulus.sources.profile import contract_from_types
 from romulus.store.db import make_engine, migrate
-from romulus.store.repo import Repo
+from romulus.store.repo import Repo, raw_id
 
 START = datetime(2024, 11, 18, 14, 0, tzinfo=UTC)
 END = START + timedelta(minutes=10)
@@ -788,6 +788,66 @@ def test_partial_pivot_retains_events_and_publishes_direct_matches(monkeypatch):
     assert repo.candidate(result.candidate_ids[0])["source_case_id"] == "case-1"
     assert repo.tasks("h1")[0]["state"] == "evaluated"
     assert "shard_failures" in result.reasons
+
+
+def test_windows_process_tree_persists_only_its_fenced_selection(monkeypatch):
+    def windows_event(event_id, pid, ppid, guid, parent_guid=None, *, ts=START):
+        fields = {
+            "host.os.family": fv("windows", f"{event_id}:os"),
+            "process.pid": fv(pid, f"{event_id}:pid"),
+            "process.ppid": fv(ppid, f"{event_id}:ppid"),
+            "process.guid": fv(guid, f"{event_id}:guid"),
+            "process.executable": fv("C:\\Windows\\System32\\cmd.exe", f"{event_id}:image"),
+        }
+        if parent_guid is not None:
+            fields["process.parent.guid"] = fv(parent_guid, f"{event_id}:parent")
+        return TypedEvent(
+            id=event_id, family="process_exec", ts=ts, host="video", outcome=Outcome.success,
+            fields=fields,
+            raw=[RawRef(target="winlogbeat-x", native_id=event_id, digest="d")],
+            normalizer="windows-events@1",
+        )
+
+    root = windows_event("windows-root", 123, 4, "root-guid")
+    child = windows_event(
+        "windows-child", 124, 123, "child-guid", "root-guid", ts=START + timedelta(seconds=1),
+    )
+    unrelated = windows_event(
+        "windows-unrelated", 900, 4, "other-guid", ts=START + timedelta(seconds=2),
+    )
+    records = [
+        {"_id": item.id, "_index": "winlogbeat-x", "_source": {
+            "event": {"dataset": "windows.sysmon_operational"}, "marker": item.id,
+        }}
+        for item in (root, child, unrelated)
+    ]
+
+    def fake_execute(_client, intent, _contract, *, pit=None):
+        return SearchOutcome(
+            target=intent.target, fingerprint="fp", started_at=START, ended_at=END,
+            completeness=Completeness.complete, total=3, total_relation="eq", returned=3,
+            records=records,
+        )
+
+    monkeypatch.setattr(pivot_module, "execute", fake_execute)
+    monkeypatch.setattr(pivot_module, "normalize_hits", lambda _records: (
+        [root, child, unrelated], {}, [],
+    ))
+    contracts = {"winlogbeat-x": contract_from_types("winlogbeat-x", {
+        "@timestamp": "date", "event.dataset": "keyword", "host.name": "keyword",
+    }, os_family="windows")}
+    request = ProcessTreeRequest(tool="process_tree", arguments=ProcessTreeArgs(
+        host="video", process_id=123, start=START, end=END,
+    ))
+    repo = _repo()
+
+    result = PivotExecutor(repo, FakeClient(), "h1", contracts).run("case-1", request)
+
+    assert result.reach_event_ids == [child.id, root.id]
+    assert {row["id"] for row in repo.events_by_ids([root.id, child.id, unrelated.id])} == {
+        root.id, child.id,
+    }
+    assert repo.raw_records([raw_id("winlogbeat-x", unrelated.id)]) == []
 
 
 def test_displaced_pivot_worker_cannot_write_after_normalization(monkeypatch):

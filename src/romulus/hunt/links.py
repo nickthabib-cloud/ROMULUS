@@ -311,8 +311,8 @@ class LinkFetcher:
         query_start = getattr(self.executor, "source_queries", 0)
 
         def placed(event: TypedEvent) -> bool:
-            # The executor stores what `retain` keeps, so each record's boot is placed before it is stored and
-            # before `select` filters by boot. Link fetches carry no journald copies of their own.
+            # Place boot identity before final selection. Persistence happens only after `select`, and link
+            # fetches carry no journald copies of their own.
             self.boots.fill([event])
             return retain(event)
 
@@ -324,7 +324,7 @@ class LinkFetcher:
         if getattr(self.executor, "raw_family_prefilter", False):
             fetch_options["raw_families"] = RAW_FAMILIES_BY_LINK.get(link_type)
         batch = self.executor.fetch_intents(
-            anchor.finding_id, fetch_key, intents, placed, **fetch_options,
+            anchor.finding_id, fetch_key, intents, placed, persist=False, **fetch_options,
         )
         selected = select(batch.events)
         if not isinstance(selected, Selection):
@@ -334,6 +334,9 @@ class LinkFetcher:
             (event for event in selected.events if event.id not in anchored),
             key=lambda event: (event.ts, event.id),
         )
+        save_selection = getattr(self.executor, "save_batch_selection", None)
+        if save_selection is not None:
+            save_selection(batch, linked)
         # A step the selection could not decide (an ambiguous or missing lineage record) leaves the link partial
         # with that reason: complete retrieval never makes an undecided selection a complete negative.
         status, reasons = batch.status, list(batch.reasons)
