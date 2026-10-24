@@ -4,7 +4,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import time
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
@@ -77,6 +77,12 @@ FALLBACK_LOOKUP_SHARE = 0.10
 FALLBACK_CAP_REASON = "fallback lookup cap reached"
 
 
+# Cited records the planning cache may hold across all its anchors' plans. Beyond it the least recently planned anchor
+# is dropped and planned again from the store when it is next needed, exactly as an uncached plan would be, so the
+# cache bounds memory without changing a result; at a few KB per typed record this is a few hundred MB at most.
+PLAN_CACHE_EVENTS = 100_000
+
+
 def fallback_lookup_cap(max_source_queries: int) -> int:
     """Source queries all fallback lookups of a hunt may spend: FALLBACK_LOOKUP_SHARE of the budget, at least 1."""
     return max(1, int(max_source_queries * FALLBACK_LOOKUP_SHARE))
@@ -89,6 +95,7 @@ class _LinkPlan:
     planned_query_cap: int
     planned_budget: int
     retryable: bool
+    planned_lookups: int = 0         # the hunt's resolved lookups when planned: a refused plan retries when they grow
     slots: dict[str, list[_PlannedSlot]] = dataclass_field(default_factory=dict)
 
 
@@ -145,9 +152,10 @@ class ExpansionEngine:
         self._fallback_queries = 0
         # anchor id -> its hunt-independent identity, the last tie-break of the anchor order
         self._identities: dict[str, str] = {}
-        # Planning inputs live only for this run. Candidate citations are already bounded by the detector citation
-        # limits; variants share those event objects, so this is O(anchors * cited records), not O(link slots).
-        self._plans: dict[str, _AnchorPlan] = {}
+        # Planning inputs live only for this run, least recently used first, holding at most PLAN_CACHE_EVENTS cited
+        # records in all; variants share those event objects.
+        self._plans: OrderedDict[str, _AnchorPlan] = OrderedDict()
+        self._plan_events = 0
 
     def _events(self, ids: list[str]) -> list[TypedEvent]:
         """Stored records, with the boot the hunt's map places them in when they carry none (a sweep record read
@@ -328,6 +336,7 @@ class ExpansionEngine:
                      events: list[TypedEvent] | None = None) -> _AnchorPlan:
         plan = self._plans.get(row["id"])
         if plan is not None:
+            self._plans.move_to_end(row["id"])
             return plan
         candidate = candidate or self.repo.candidate(row["candidate_id"])
         events = events if events is not None else self._events(candidate["event_ids"])
@@ -341,6 +350,10 @@ class ExpansionEngine:
             windows={window.label: window for window in expansion_windows(candidate_ts, self.window)},
         )
         self._plans[row["id"]] = plan
+        self._plan_events += len(events)
+        while self._plan_events > PLAN_CACHE_EVENTS and len(self._plans) > 1:
+            _evicted, dropped = self._plans.popitem(last=False)
+            self._plan_events -= len(dropped.events)
         return plan
 
     def _seed_candidates(self, candidates: list[dict], existing_rows: list[dict]) -> list[dict]:
@@ -455,9 +468,11 @@ class ExpansionEngine:
                    anchor_reasons: dict[str, list[str]], root_cap: int) -> _LinkPlan:
         query_cap = root_cap if plan.row["depth"] == 0 else self.max_source_queries
         cached = plan.links.get(link_type)
+        lookups = len(self._fallback or {})
         if cached is not None and not (
             cached.retryable
-            and (query_cap > cached.planned_query_cap or self.budget > cached.planned_budget)
+            and (query_cap > cached.planned_query_cap or self.budget > cached.planned_budget
+                 or lookups > cached.planned_lookups)
         ):
             return cached
 
@@ -484,7 +499,7 @@ class ExpansionEngine:
             )
         planned = _LinkPlan(
             variants=variants, notes=tuple(notes), planned_query_cap=query_cap, planned_budget=self.budget,
-            retryable=self._retryable_victim_plan(variants, notes),
+            retryable=self._retryable_victim_plan(variants, notes), planned_lookups=len(self._fallback or {}),
         )
         plan.links[link_type] = planned
         return planned
@@ -504,9 +519,11 @@ class ExpansionEngine:
                 stored = self.repo.expansion_link_for(
                     plan.candidate["id"], link_type, window.label, window.start, window.end,
                 )
+            done = bool(stored and stored["evaluated"])
+            # an evaluated link needs nothing more from its stored row, which can carry thousands of record ids
             slots.append(_PlannedSlot(
                 row=plan.row, candidate=plan.candidate, anchor=variant, link_type=link_type,
-                window=window, stored=stored, done=bool(stored and stored["evaluated"]),
+                window=window, stored=None if done else stored, done=done,
             ))
         link_plan.slots[window_label] = slots
         return slots
@@ -688,7 +705,7 @@ class ExpansionEngine:
                     query_count = (actual_queries if actual_queries is not None
                                    else query_count + result.query_spend)
                 published = self._evaluate(candidate, result)
-                slot.done = True
+                slot.done, slot.stored = True, None
                 made_progress = True
                 if result.status != "complete":
                     anchor_reasons[anchor_row["id"]].extend(
