@@ -1456,8 +1456,7 @@ class AccountOrGroupChange(Playbook):
                                                                      (len(records), "audit records")) if n > 10]
             if told:
                 claim += f" The earliest {' and '.join(told)} are cited."
-        events = sorted(_unique([*events, *lineage_events]), key=lambda e: (e.ts, e.id))      # the named ancestor
-        predicate = [pf(e, n) for e in events[:4] for n in ("process.argv", "process.executable", "audit.record_type",
+        predicate =[pf(e, n) for e in events[:4] for n in ("process.argv", "process.executable", "audit.record_type",
                                                              "account.action", "account.name", "account.group",
                                                              "system.event")
                      if e.has(n)]
@@ -1466,7 +1465,10 @@ class AccountOrGroupChange(Playbook):
         entities = list(events[0].entities())
         for c in items:
             entities += [("account", f"{c.host}\\{a}", "subject") for a in c.accounts]
-        match = Match(self.id, claim, self.claim_type, events, predicate, events[0].ts, self.severity, lane,
+        # the change's own records time it and carry its predicate; the exec ancestor the lineage names is cited too
+        when = events[0].ts
+        events = sorted(_unique([*events, *lineage_events]), key=lambda e: (e.ts, e.id))
+        match = Match(self.id, claim, self.claim_type, events, predicate, when, self.severity, lane,
                       "high" if records else "medium", list(dict.fromkeys(entities)),
                       group_key="|".join(str(part) for part in key))
         match.notes = notes

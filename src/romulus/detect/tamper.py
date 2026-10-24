@@ -832,7 +832,8 @@ class SecurityOrLoggingServiceStop(_TamperRule):
                                  *ancestors]), key=lambda e: (e.ts, e.id))
         claim += _cited_records(commands, linked)
         predicate = [pf(c, "process.argv") for c in commands[:3]] + [pf(e, "service.unit") for e in linked[:2]]
-        match = Match(self.id, claim, self.claim_type, events, predicate, events[0].ts, self.severity, lane,
+        own = [e for e in events if e not in ancestors]           # the ancestors are cited, not timed by
+        match = Match(self.id, claim, self.claim_type, events, predicate, own[0].ts, self.severity, lane,
                       "high" if linked else "medium", commands[0].entities(),
                       group_key="cmd|" + "|".join(str(p) for p in key))
         match.notes = notes + (["T1685.004"] if any(service_category(i.target) == "audit" for i in items) else
@@ -1113,7 +1114,8 @@ class AuditRulesTamper(_TamperRule):
                         key=lambda e: (e.ts, e.id))
         claim += _cited_records(commands, linked)
         predicate = [pf(c, "process.argv") for c in commands[:3]] + [pf(e, "audit.config.op") for e in linked[:2]]
-        match = Match(self.id, claim, self.claim_type, events, predicate, events[0].ts, self.severity, lane,
+        own = [e for e in events if e not in ancestors]           # the ancestors are cited, not timed by
+        match = Match(self.id, claim, self.claim_type, events, predicate, own[0].ts, self.severity, lane,
                       "high" if linked else "medium", commands[0].entities(),
                       group_key="cmd|" + "|".join(str(p) for p in key))
         match.notes = notes
@@ -1472,11 +1474,12 @@ class LogOrHistoryClearing(_TamperRule):
             next((i.lineage for i in items if i.lineage.kind == "web"), items[0].lineage))
         if phrase:
             claim += f" Exec lineage: {phrase}."
-        events = sorted(_unique([*commands[:CITE], *ancestors]), key=lambda e: (e.ts, e.id))
+        own = sorted(commands[:CITE], key=lambda e: (e.ts, e.id))           # the ancestors are cited, not timed by
+        events = sorted(_unique([*own, *ancestors]), key=lambda e: (e.ts, e.id))
         if len(commands) > CITE:
             claim += f" The earliest {CITE} records are cited."
         match = Match(self.id, claim, "script_content" if text_only else self.claim_type, events,
-                      [pf(c, "process.argv") for c in events[:3]], events[0].ts, self.severity, lane,
+                      [pf(c, "process.argv") for c in own[:3]], own[0].ts, self.severity, lane,
                       "medium" if text_only else "high", commands[0].entities(),
                       group_key="|".join(str(p) for p in key))
         technique = {"history_file": "T1070.003", "history_off": "T1690"}.get(category, "T1685.006")

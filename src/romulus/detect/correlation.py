@@ -663,7 +663,9 @@ class InterpreterExternalConnection(Playbook):
         "telemetry": "Linux auditd net_socket (socket.syscall connect, destination.ip/port from SOCKADDR, "
                      "process.executable, process.user/effective_user, process.pid, outcome); " + LINEAGE_TELEMETRY,
         "fidelity": "direct observation of each call and its outcome; the socket type is not recorded (a UDP connect "
-                    "sends nothing); the lineage claim names the records it rests on, observed ones cited",
+                    "sends nothing); the lineage claim names the records it rests on, exec and observed ones cited; "
+                    "the claim cites the calls bounding its span, the earliest call of each pid it lists and the first "
+                    "call to each destination it names, and says how many calls are cited",
         "benign_and_cost": "package managers and update checks, monitoring and backup scripts, web applications' "
                            "approved API calls and daemons of the web account, resolvers' UDP connects; one item per "
                            "(host, program, account, port) listing every destination and pid",
@@ -1029,7 +1031,12 @@ class ProcessNetworkLink(Playbook):
                      "ip and port, flow start/end, community_id, alert severity/category/signature); "
                      + LINEAGE_TELEMETRY,
         "fidelity": "each side directly observed; the link is inferred from address, port and time and worded as "
-                    "inferred; the host's own address on a sensor is inferred from its unique joins",
+                    "inferred; the host's own address on a sensor is inferred from its unique joins. Connections are "
+                    "counted by transport and both endpoints in either direction, records of one identity within "
+                    f"{CONNECTION_GAP:.0f} s of each other being one connection, so a connection two sensors recorded "
+                    "(with or without a community id) counts once. The claim cites the group's first calls, the "
+                    "calls bounding its span, its judged processes' earliest calls and the records their lineage "
+                    "names, and the first network records of the endpoint pair, and says how many of each are cited",
         "benign_and_cost": "another host or process reaching the same endpoint at the same second (stated, capped at "
                            "lead), benign IDS signatures on routine traffic; one item per (host, program, account, "
                            "endpoint)",
