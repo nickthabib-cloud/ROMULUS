@@ -106,8 +106,9 @@ event_citation = Table(
 )
 Index("ix_event_citation_event", event_citation.c.event_id)
 
-# A compact marker records that a hunt directly observed a stable event even when its raw-reference set is
-# identical and therefore needs no provenance overlay. It must not depend on extracted entities: valid typed
+# A compact marker records that a hunt directly observed a stable event another hunt owns, even when its
+# raw-reference set is identical and therefore needs no provenance overlay. The owning hunt (typed_event.hunt_id)
+# observed the event by definition and has no marker. It must not depend on extracted entities: valid typed
 # events can carry no host, account, address or domain at all.
 event_observation = Table(
     "event_observation", metadata,

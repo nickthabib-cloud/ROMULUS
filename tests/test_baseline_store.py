@@ -231,11 +231,10 @@ def test_0013_round_trips_a_gap_shortened_snapshot(tmp_path):
         assert conn.exec_driver_sql("SELECT status FROM baseline_snapshot").scalar_one() == "unresolved"
 
 
-def test_0015_is_the_single_head_backfills_observations_and_round_trips_base_data(tmp_path):
+def test_0015_backfills_observations_and_round_trips_base_data(tmp_path):
     engine = make_engine(tmp_path / "event-citation-migration.db")
     with engine.begin() as connection:
         cfg = _alembic_config(connection)
-        assert ScriptDirectory.from_config(cfg).get_heads() == ["0015"]
         command.upgrade(cfg, "0012")
         connection.exec_driver_sql(
             "INSERT INTO hunt (id, created_at, created_by, manifest, manifest_digest, execution_state) "
@@ -279,6 +278,39 @@ def test_0015_is_the_single_head_backfills_observations_and_round_trips_base_dat
         assert connection.exec_driver_sql("SELECT id FROM typed_event").scalar_one() == "e1"
         tables = set(inspect(connection).get_table_names())
         assert "event_citation" in tables and "event_observation" in tables
+
+
+def test_0016_is_the_single_head_and_drops_only_the_owners_implied_observations(tmp_path):
+    engine = make_engine(tmp_path / "event-observation-owner.db")
+    with engine.begin() as connection:
+        cfg = _alembic_config(connection)
+        assert ScriptDirectory.from_config(cfg).get_heads() == ["0016"]
+        command.upgrade(cfg, "0015")
+        for hunt_id in ("h1", "h2", "h3"):
+            connection.exec_driver_sql(
+                "INSERT INTO hunt (id, created_at, created_by, manifest, manifest_digest, execution_state) "
+                f"VALUES ('{hunt_id}', '2026-01-01', 'test', '{{}}', 'd{hunt_id}', 'planned')"
+            )
+        for event_id, owner in (("e1", "h1"), ("e2", "h2")):
+            connection.exec_driver_sql(
+                "INSERT INTO typed_event (id, hunt_id, family, ts, host, event, raw_ids, normalizer) "
+                f"VALUES ('{event_id}', '{owner}', 'process_exec', '2026-01-01', 'host1', '{{}}', '[]', 'lab-ecs@10')"
+            )
+        observed = [("h1", "e1"), ("h2", "e1"), ("h3", "e1"), ("h2", "e2"), ("h3", "e2")]
+        for hunt_id, event_id in observed:
+            connection.exec_driver_sql(
+                f"INSERT INTO event_observation (hunt_id, event_id) VALUES ('{hunt_id}', '{event_id}')"
+            )
+
+        def rows():
+            return connection.exec_driver_sql(
+                "SELECT hunt_id, event_id FROM event_observation ORDER BY event_id, hunt_id").all()
+
+        command.upgrade(cfg, "0016")
+        # the owners' rows go; every other hunt's observation stays
+        assert rows() == [("h2", "e1"), ("h3", "e1"), ("h3", "e2")]
+        command.downgrade(cfg, "0015")
+        assert rows() == sorted(observed, key=lambda row: (row[1], row[0]))
 
 
 def test_0010_through_0012_round_trip_agent_link_without_prior_scheduler_anchor(tmp_path):
