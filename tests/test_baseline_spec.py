@@ -71,7 +71,11 @@ def test_registry_has_the_six_accepted_specs_and_metadata():
         "bl.ssh_tuple": "presence", "bl.exec_path": "prevalence", "bl.exec_pair": "prevalence",
         "bl.cmd_shape": "prevalence", "bl.ext_dest": "prevalence", "bl.svc_exec_rate": "rate",
     }
-    assert all(spec.version == "1" and spec.key_version == "1" for spec in BASELINE_SPECS)
+    # the external-destination spec keys DNS records by the DNS port's side since its second key version
+    assert {spec.id: (spec.version, spec.key_version) for spec in BASELINE_SPECS} == {
+        "bl.ssh_tuple": ("1", "1"), "bl.exec_path": ("1", "1"), "bl.exec_pair": ("1", "1"),
+        "bl.cmd_shape": ("1", "1"), "bl.ext_dest": ("2", "2"), "bl.svc_exec_rate": ("1", "1"),
+    }
 
 
 def test_key_id_is_scope_free_and_key_digest_is_scoped():
@@ -400,7 +404,7 @@ def test_known_sni_on_a_new_address_keeps_the_same_sni_key():
 
 def test_same_domain_through_two_resolvers_gives_the_same_domain_key():
     spec = SPEC_BY_ID["bl.ext_dest"]
-    fields = {"dns.type": "query", "source.ip": "10.0.0.4", "dns.question.name": "WWW.Example.CO.UK."}
+    fields = {"dns.type": "query", "source.port": 40000, "destination.port": 53, "source.ip": "10.0.0.4", "dns.question.name": "WWW.Example.CO.UK."}
     first = spec.keys(_event("dns_query", **{**fields, "destination.ip": "10.0.0.53"}), _ctx())
     second = spec.keys(_event("dns_query", **{**fields, "destination.ip": "8.8.8.8"}), _ctx())
     assert [key.key for key in first] == [{"kind": "registered_domain", "registered_domain": "example.co.uk"}]
@@ -411,10 +415,38 @@ def test_same_domain_through_two_resolvers_gives_the_same_domain_key():
 def test_dns_answer_scopes_the_client_not_the_resolver():
     keys = SPEC_BY_ID["bl.ext_dest"].keys(_event(
         "dns_query",
-        **{"dns.type": "answer", "source.ip": "10.0.0.53", "destination.ip": "10.0.0.4",
+        **{"dns.type": "answer", "source.port": 53, "destination.port": 40000, "source.ip": "10.0.0.53", "destination.ip": "10.0.0.4",
            "dns.question.name": "example.com"},
     ), _ctx())
     assert [key.scope for key in keys] == ["internal_ip:10.0.0.4"]
+
+
+@pytest.mark.parametrize("flow_oriented", [False, True])
+def test_a_dns_answer_keys_its_client_in_either_orientation(flow_oriented):
+    """Suricata writes an answer in its flow's orientation (client as source, server on port 53 as destination); a
+    per-packet view writes the server as the source. Either way the client is the endpoint not on the DNS port."""
+    client, resolver = "10.0.0.4", "10.0.0.53"
+    ends = ({"source.ip": client, "source.port": 40000, "destination.ip": resolver, "destination.port": 53}
+            if flow_oriented else
+            {"source.ip": resolver, "source.port": 53, "destination.ip": client, "destination.port": 40000})
+    keys = SPEC_BY_ID["bl.ext_dest"].keys(_event("dns_query", **{
+        "dns.type": "answer", "dns.question.name": "www.example.com", "suricata.flow_id": 9, **ends}), _ctx())
+    assert [key.scope for key in keys] == ["internal_ip:10.0.0.4"]
+    assert [key.key for key in keys] == [{"kind": "registered_domain", "registered_domain": "example.com"}]
+    packet = SPEC_BY_ID["bl.ext_dest"].keys(_event("dns_query", **{
+        "dns.type": "answer", "dns.question.name": "www.example.com", "suricata.flow_id": 9,
+        "source.ip": resolver, "source.port": 53, "destination.ip": client, "destination.port": 40000}), _ctx())
+    assert [key.key_digest for key in keys] == [key.key_digest for key in packet]
+    assert [key.dedup_token for key in keys] == [key.dedup_token for key in packet]
+
+
+@pytest.mark.parametrize("ports", [{}, {"source.port": 53, "destination.port": 53},
+                                   {"source.port": 40000, "destination.port": 41000}])
+def test_a_dns_record_whose_ports_do_not_tell_its_client_is_missing(ports):
+    result = SPEC_BY_ID["bl.ext_dest"].keys(_event("dns_query", **{
+        "dns.type": "answer", "source.ip": "10.0.0.53", "destination.ip": "10.0.0.4",
+        "dns.question.name": "www.example.com", **ports}), _ctx())
+    assert isinstance(result, Missing) and result.fields == ("source.port", "destination.port")
 
 
 @pytest.mark.parametrize(
@@ -429,13 +461,13 @@ def test_dns_answer_scopes_the_client_not_the_resolver():
                          "tls.client.server_name": ["a.example.com"]}, ("tls.client.server_name",)),
         ("tls_session", {"source.ip": "10.0.0.1", "destination.ip": "192.0.2.1",
                          "tls.client.server_name": 7}, ("tls.client.server_name",)),
-        ("dns_query", {"dns.type": "query", "source.ip": None, "destination.ip": "10.0.0.53",
+        ("dns_query", {"dns.type": "query", "source.port": 40000, "destination.port": 53, "source.ip": None, "destination.ip": "10.0.0.53",
                        "dns.question.name": "example.com"}, ("source.ip",)),
-        ("dns_query", {"dns.type": "query", "source.ip": "10.0.0.4", "destination.ip": "bogus",
+        ("dns_query", {"dns.type": "query", "source.port": 40000, "destination.port": 53, "source.ip": "10.0.0.4", "destination.ip": "bogus",
                        "dns.question.name": "example.com"}, ("destination.ip",)),
-        ("dns_query", {"dns.type": "query", "source.ip": "10.0.0.4", "destination.ip": "10.0.0.53"},
+        ("dns_query", {"dns.type": "query", "source.port": 40000, "destination.port": 53, "source.ip": "10.0.0.4", "destination.ip": "10.0.0.53"},
          ("dns.question.names", "dns.question.name")),
-        ("dns_query", {"dns.type": "query", "source.ip": "10.0.0.4", "destination.ip": "10.0.0.53",
+        ("dns_query", {"dns.type": "query", "source.port": 40000, "destination.port": 53, "source.ip": "10.0.0.4", "destination.ip": "10.0.0.53",
                        "dns.question.names": ["example.com", 7]}, ("dns.question.names",)),
     ],
 )
@@ -464,13 +496,13 @@ def test_external_destination_absent_or_malformed_value_is_typed_missing(family,
         # an external source decides even when the destination is unreadable
         ("net_flow", {"source.ip": "203.0.113.50", "destination.ip": None}),
         # a DNS client outside the site asking a site resolver
-        ("dns_query", {"dns.type": "query", "source.ip": "203.0.113.50", "destination.ip": "10.0.0.53",
+        ("dns_query", {"dns.type": "query", "source.port": 40000, "destination.port": 53, "source.ip": "203.0.113.50", "destination.ip": "10.0.0.53",
                        "dns.question.name": "example.com"}),
         # a recorded DNS role that is neither question nor answer
-        ("dns_query", {"dns.type": "update", "source.ip": "10.0.0.4", "destination.ip": "10.0.0.53",
+        ("dns_query", {"dns.type": "update", "source.port": 40000, "destination.port": 53, "source.ip": "10.0.0.4", "destination.ip": "10.0.0.53",
                        "dns.question.name": "example.com"}),
         # a Suricata v1 answer resource record carries no question; its query record does
-        ("dns_query", {"dns.type": "answer", "source.ip": "10.0.0.53", "destination.ip": "10.0.0.4"}),
+        ("dns_query", {"dns.type": "answer", "source.port": 53, "destination.port": 40000, "source.ip": "10.0.0.53", "destination.ip": "10.0.0.4"}),
     ],
 )
 def test_external_destination_wrong_direction_or_role_is_not_applicable(family, fields):
@@ -560,7 +592,8 @@ _COMPLETE = {
     ("bl.ext_dest", "net_session"): (Outcome.unknown, {"source.ip": "10.0.0.4", "destination.ip": "192.0.2.1"}),
     ("bl.ext_dest", "tls_session"): (Outcome.unknown, {"source.ip": "10.0.0.4", "destination.ip": "192.0.2.1"}),
     ("bl.ext_dest", "dns_query"): (Outcome.unknown, {
-        "source.ip": "10.0.0.4", "destination.ip": "10.0.0.53", "dns.question.name": "example.com",
+        "source.ip": "10.0.0.4", "destination.ip": "10.0.0.53", "source.port": 40000, "destination.port": 53,
+        "dns.question.name": "example.com",
         "dns.question.names": ["example.com"],
     }),
     ("bl.svc_exec_rate", "process_exec"): (Outcome.unknown, {"process.user": "postgres", "process.uid": "114"}),
@@ -614,7 +647,7 @@ def test_internationalized_names_become_punycode():
     assert _kinds(keys)["sni"]["sni"] == "xn--bcher-kva.example"
     assert _kinds(keys)["registered_domain"]["registered_domain"] == "xn--bcher-kva.example"
     dns = SPEC_BY_ID["bl.ext_dest"].keys(_event("dns_query", **{
-        "dns.type": "query", "source.ip": "10.0.0.4", "destination.ip": "10.0.0.53",
+        "dns.type": "query", "source.port": 40000, "destination.port": 53, "source.ip": "10.0.0.4", "destination.ip": "10.0.0.53",
         "dns.question.name": "www.bücher.example",
     }), _ctx())
     assert [key.key["registered_domain"] for key in dns] == ["xn--bcher-kva.example"]
@@ -652,14 +685,14 @@ def test_an_ip_literal_sni_has_no_registered_domain(sni):
 @pytest.mark.parametrize("name", ["192.0.2.10", ".", "<root>"])
 def test_a_dns_question_naming_no_domain_is_not_applicable(name):
     result = SPEC_BY_ID["bl.ext_dest"].keys(_event("dns_query", **{
-        "dns.type": "query", "source.ip": "10.0.0.4", "destination.ip": "10.0.0.53", "dns.question.name": name,
+        "dns.type": "query", "source.port": 40000, "destination.port": 53, "source.ip": "10.0.0.4", "destination.ip": "10.0.0.53", "dns.question.name": name,
     }), _ctx())
     assert isinstance(result, NotApplicable)
 
 
 def test_identical_keys_within_one_event_are_counted_once():
     keys = SPEC_BY_ID["bl.ext_dest"].keys(_event("dns_query", **{
-        "dns.type": "query", "source.ip": "10.0.0.4", "destination.ip": "10.0.0.53",
+        "dns.type": "query", "source.port": 40000, "destination.port": 53, "source.ip": "10.0.0.4", "destination.ip": "10.0.0.53",
         "dns.question.names": ["a.example.com", "B.example.com.", "a.example.com"],
     }), _ctx())
     assert [key.key for key in keys] == [{"kind": "registered_domain", "registered_domain": "example.com"}]
@@ -668,8 +701,9 @@ def test_identical_keys_within_one_event_are_counted_once():
 def _dns(role: str, flow, **extra) -> TypedEvent:
     client, resolver = "10.0.0.4", "10.0.0.53"
     source, destination = (resolver, client) if role == "answer" else (client, resolver)
-    fields = {"dns.type": role, "source.ip": source, "destination.ip": destination,
-              "dns.question.name": "www.example.com", **extra}
+    ports = (53, 40000) if role == "answer" else (40000, 53)
+    fields = {"dns.type": role, "source.ip": source, "destination.ip": destination, "source.port": ports[0],
+              "destination.port": ports[1], "dns.question.name": "www.example.com", **extra}
     if flow is not None:
         fields["suricata.flow_id"] = flow
     return _event("dns_query", **fields)

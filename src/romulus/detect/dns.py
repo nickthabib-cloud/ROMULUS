@@ -204,13 +204,24 @@ def endpoints(event: TypedEvent, record_role: str | None = None) -> tuple[str | 
     src, dst = event.get("source.ip"), event.get("destination.ip")
     src = str(src) if src not in (None, "") else None
     dst = str(dst) if dst not in (None, "") else None
+    side = server_side(event)
+    if side == "destination":
+        return src, dst
+    if side == "source":
+        return dst, src
+    return None, None
+
+
+def server_side(event: TypedEvent) -> str | None:
+    """'destination' or 'source': the side of the record on a DNS service port (the server); None when the ports
+    do not tell (neither or both on a DNS port, or a port not typed)."""
     to_server = _port(event.get("destination.port")) in DNS_PORTS
     from_server = _port(event.get("source.port")) in DNS_PORTS
     if to_server and not from_server:
-        return src, dst
+        return "destination"
     if from_server and not to_server:
-        return dst, src
-    return None, None
+        return "source"
+    return None
 
 
 def flow_key(event: TypedEvent):

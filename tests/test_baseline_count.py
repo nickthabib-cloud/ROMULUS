@@ -103,8 +103,8 @@ def test_shuffle_within_one_bucket_is_deterministic():
 def test_dns_integer_and_string_ids_share_one_dedup_token():
     spec = SPEC_BY_ID["bl.ext_dest"]
     fields = {
-        "dns.type": "query", "source.ip": "10.0.0.4", "destination.ip": "10.0.0.53",
-        "dns.question.name": "www.example.com", "suricata.flow_id": 77,
+        "dns.type": "query", "source.ip": "10.0.0.4", "destination.ip": "10.0.0.53", "source.port": 40000,
+        "destination.port": 53, "dns.question.name": "www.example.com", "suricata.flow_id": 77,
     }
     integer = spec.keys(_event("dns_query", "one", **fields, **{"dns.id": 42}), KeyContext())[0]
     string = spec.keys(_event("dns_query", "two", **fields, **{"dns.id": "42"}), KeyContext())[0]
