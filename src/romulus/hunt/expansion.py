@@ -85,10 +85,10 @@ def fallback_lookup_cap(max_source_queries: int) -> int:
 @dataclass
 class _LinkPlan:
     variants: list[LinkAnchor]
+    notes: tuple[str, ...]
     planned_query_cap: int
     planned_budget: int
     retryable: bool
-    generation: int = 0
     slots: dict[str, list[_PlannedSlot]] = dataclass_field(default_factory=dict)
 
 
@@ -483,9 +483,8 @@ class ExpansionEngine:
                 "keys_not_expanded:" + json.dumps(dropped, sort_keys=True, separators=(",", ":")),
             )
         planned = _LinkPlan(
-            variants=variants, planned_query_cap=query_cap, planned_budget=self.budget,
+            variants=variants, notes=tuple(notes), planned_query_cap=query_cap, planned_budget=self.budget,
             retryable=self._retryable_victim_plan(variants, notes),
-            generation=(cached.generation + 1 if cached is not None else 0),
         )
         plan.links[link_type] = planned
         return planned

@@ -10,6 +10,7 @@ from romulus.store import schema as tables
 from tests.expansion_reference import ReferenceExpansionEngine
 from tests.test_expansion_engine import T0, WINDOW, add_anchor, repo_with_anchor, stable_state
 from tests.test_expansion_lane_budget import SteadyFetcher, set_lane
+from tests.test_expansion_victim_host import _fetcher, network_anchor_repo
 
 
 class _CountingEngine(ExpansionEngine):
@@ -69,6 +70,20 @@ def test_anchor_outside_the_hunt_window_is_unexpanded_with_an_explicit_reason():
     assert anchor["status"] == "unexpanded"
     assert anchor["reasons"] == ["anchor outside the hunt window"]
     assert summary["unexpanded"] == ["F-outside"]
+
+
+def test_network_anchor_plan_keeps_victim_variants_and_their_notes():
+    repo = network_anchor_repo()
+    engine = ExpansionEngine(repo, "h1", WINDOW, _fetcher(repo), max_depth=1)
+
+    engine.run()
+
+    host_plans = [
+        plan for link_type, plan in engine._plans["F-net"].links.items()
+        if link_type in {"login_session", "process_lineage", "host_after_anchor"}
+    ]
+    assert host_plans and all(plan.variants for plan in host_plans)
+    assert any(plan.notes for plan in host_plans)
 
 
 def _random_repo(seed: int, count: int = 16):
