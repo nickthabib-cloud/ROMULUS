@@ -32,6 +32,16 @@ from romulus.detect.bounded import (
     scalar,
     store_refuses,
 )
+from romulus.detect.citing import (
+    BoundStage,
+    Ends,
+    Holds,
+    Named,
+    bound_note,
+    cited_phrase,
+    drained_holds,
+    more,
+)
 from romulus.detect.host import (  # boot_of and boots_conflict are defined in host.py (no import cycle)
     INTERPRETERS,
     WEB_SERVICE_USERS,
@@ -133,20 +143,24 @@ def process_interest(e: TypedEvent) -> tuple[str | None, str]:
     return None, "lead"
 
 
-def _process_words(e: TypedEvent, pids: list[int] | None = None, more: bool = False) -> str:
-    """The program, the pid(s) of its group (the record's own when `pids` is None; up to PIDS_LISTED, then a count;
-    `more`: records came from further processes not counted) and the account."""
+def _process_words(e: TypedEvent, pids: list[int] | None = None, more: bool = False,
+                   listed: int | None = None) -> str:
+    """The program, the pid(s) of its group (the record's own when `pids` is None; the first `listed`, PIDS_LISTED by
+    default, then a count; `more`: records came from further processes not counted) and the account."""
+    listed = PIDS_LISTED if listed is None else listed
     if pids is None:
         pid = e.get("process.pid")
         pids = [pid] if pid is not None else []
     user = e.get("process.user") or e.get("process.uid")
     if not pids:
         who = "pid unknown"
+    elif not listed:
+        who = f"{len(pids)} pid(s) not listed" + (", and further processes not counted" if more else "")
     elif len(pids) == 1 and not more:
         who = f"pid {pids[0]}"
     else:
-        who = (f"pids {', '.join(str(p) for p in pids[:PIDS_LISTED])}"
-               + (f" and {len(pids) - PIDS_LISTED} more" if len(pids) > PIDS_LISTED else "")
+        who = (f"pids {', '.join(str(p) for p in pids[:listed])}"
+               + (f" and {len(pids) - listed} more" if len(pids) > listed else "")
                + (", and further processes not counted" if more else ""))
     return f"'{e.get('process.executable')}' ({who}" + (f", user '{user}')" if user is not None else ")")
 
@@ -171,19 +185,52 @@ def _order(ts: float, serial: int | None) -> tuple:
     return ts, serial is None, serial or 0
 
 
-def note_process(procs: dict, key: tuple | None, ts: float, serial: int | None) -> bool:
-    """Keep a process's earliest record (time, audit serial) in a group's `procs`; False when the group already
-    holds PROCESSES_HELD other processes (the record's process is then counted as not held)."""
+def note_process(procs: dict, key: tuple | None, ts: float, serial: int | None, event_id: str = "") -> bool:
+    """Keep a process's earliest record (time, audit serial, event id) in a group's `procs`; False when the group
+    already holds PROCESSES_HELD other processes (the record's process is then counted as not held)."""
     if key is None:
         return True
     held = procs.get(key)
     if held is None:
         if len(procs) >= PROCESSES_HELD:
             return False
-        procs[key] = (ts, serial)
-    elif _order(ts, serial) < _order(*held):
-        procs[key] = (ts, serial)
+        procs[key] = (ts, serial, event_id)
+    elif _order(ts, serial) < _order(held[0], held[1]):
+        procs[key] = (ts, serial, event_id)
     return True
+
+
+def _process_order(key: tuple, ts: float, serial: int | None) -> tuple:
+    """A process's place among a group's processes: its earliest record, then its key (as `judge_processes` orders)."""
+    return _order(ts, serial), repr(key)
+
+
+def hold_earliest(earliest: list, key: tuple, ts: float, serial: int | None, event: TypedEvent,
+                  holds: Holds) -> None:
+    """Hold for citation the earliest record of each of a group's PROCESSES_JUDGED earliest processes: the processes a
+    claim lists by pid and whose lineage it judges. `earliest` is the group's sorted [(order, key, event id)]; a record
+    that stops being one of them is released, so a group holds at most PROCESSES_JUDGED. Call it only for a record
+    whose process `note_process` holds."""
+    order = _process_order(key, ts, serial)
+    for i, (held, held_key, held_id) in enumerate(earliest):
+        if held_key == key:
+            if order >= held:
+                return
+            holds.release(held_id)
+            del earliest[i]
+            break
+    if len(earliest) >= PROCESSES_JUDGED and order >= earliest[-1][0]:
+        return
+    bisect.insort(earliest, (order, key, event.id), key=lambda item: item[0])
+    holds.hold(event)
+    if len(earliest) > PROCESSES_JUDGED:
+        holds.release(earliest.pop()[2])
+
+
+def listed_pids(procs: dict) -> list[int]:
+    """A group's distinct pids, earliest process first (the first ones are those whose records are cited)."""
+    ordered = sorted(procs.items(), key=lambda item: _process_order(item[0], item[1][0], item[1][1]))
+    return list(dict.fromkeys(key[0] for key, _value in ordered))
 
 
 class Judged(NamedTuple):
@@ -195,25 +242,32 @@ def judge_processes(pids: PidTable, host: str | None, procs: dict, unheld: int
                     ) -> tuple[list[Judged], int, list[TypedEvent], dict[str, dict]]:
     """The lineage of a group's processes, each walked from its earliest record: the first PROCESSES_JUDGED by
     time. Returns (judged, processes not judged, the observed records the named lineages rest on, their raw copies).
-    A lineage whose records cannot be read back for citation is unknown."""
-    ordered = sorted(procs.items(), key=lambda item: (_order(*item[1]), repr(item[0])))
+    A lineage whose records cannot be read back for citation is unknown. The caller cites each judged process's
+    earliest record (`judged_records`)."""
+    ordered = sorted(procs.items(), key=lambda item: _process_order(item[0], item[1][0], item[1][1]))
     judged = [Judged(key[0], pids.ancestry_of(host, key[0], ts, key[2], serial))
-              for key, (ts, serial) in ordered[:PROCESSES_JUDGED]]
+              for key, (ts, serial, _event_id) in ordered[:PROCESSES_JUDGED]]
     unjudged = len(ordered) - len(judged) + (1 if unheld else 0)
-    wanted = list(dict.fromkeys(i for j in judged if j.ancestry.verdict != "unknown" for i in j.ancestry.cites))
+    wanted = list(dict.fromkeys(i for j in judged for i in (*j.ancestry.cites, *j.ancestry.execs)))
     found, raw = pids.execs.cited(wanted)
     out, cited = [], {}
     for item in judged:
         ancestry = item.ancestry
-        if ancestry.verdict != "unknown":
-            if any(i not in found for i in ancestry.cites):
-                ancestry = ancestry._replace(verdict="unknown", why="a record this lineage rests on could not be read "
-                                                                    "back for citation")
-            else:
-                cited.update((i, found[i]) for i in ancestry.cites)
-        out.append(Judged(item.pid, ancestry))
+        if ancestry.verdict != "unknown" and any(i not in found for i in ancestry.cites):
+            ancestry = ancestry._replace(verdict="unknown", why="a record this lineage rests on could not be read "
+                                                                "back for citation")
+        # every record the walk named is cited, for an unknown lineage too (its reason names what it read); an exec
+        # record the store did not keep is named by its native id only (lineage_notes says so)
+        cited.update((i, found[i]) for i in (*ancestry.cites, *ancestry.execs) if i in found)
+        out.append(Judged(item.pid, ancestry._replace(execs=tuple(i for i in ancestry.execs if i not in found))))
     raws = {r.key: raw[r.key] for event in cited.values() for r in event.raw if r.key in raw}
     return out, unjudged, list(cited.values()), raws
+
+
+def judged_records(procs: dict) -> list[str]:
+    """The event ids of the earliest records of the processes `judge_processes` judges (in its order)."""
+    ordered = sorted(procs.items(), key=lambda item: _process_order(item[0], item[1][0], item[1][1]))
+    return [value[2] for _key, value in ordered[:PROCESSES_JUDGED] if value[2]]
 
 
 def _verdict_words(item: Judged, alone: bool) -> str:
@@ -244,10 +298,14 @@ def lineage_sentence(judged: list[Judged], unjudged: int) -> str:
 
 
 def lineage_notes(judged: list[Judged]) -> list[str]:
-    """Why each process's lineage is unknown, and the chain each named lineage rests on."""
+    """Why each process's lineage is unknown, the chain each named lineage rests on, and the exec records it names that
+    were not kept for citation (`judge_processes` leaves only those in `execs`)."""
     notes = []
     for item in judged:
         ancestry = item.ancestry
+        if ancestry.execs:
+            notes.append(f"lineage of pid {item.pid}: {len(ancestry.execs)} exec record(s) it reads were not kept for "
+                         f"citation (the store of exec records was full); the chain names them by native id")
         if ancestry.verdict == "unknown":
             notes.append(f"lineage of pid {item.pid} not established: {ancestry.why}")
         elif ancestry.verdict == "web_server":
@@ -322,11 +380,14 @@ class ChainLink(NamedTuple):
 
 class Ancestry(NamedTuple):
     """An ancestry walk (`PidTable.ancestry_of`): the verdict, the processes it named, the event ids of the observed
-    records it rests on (cited with any claim that names them), and why it is unknown."""
+    records it rests on (cited with any claim that names them; the verdict needs them), why it is unknown, and the
+    event ids of the exec records it named (cited when they were kept for citation; the verdict does not need the
+    copy, as it reads the exec store itself)."""
     verdict: str            # "web_server" | "service_manager" | "unknown"
     chain: list[ChainLink]
     cites: list[str]
     why: str = ""
+    execs: tuple = ()
 
 
 def _link(pid: int, step: Step, level: int, *, start: bool = False) -> ChainLink:
@@ -379,14 +440,16 @@ class PidTable:
     CAPACITY = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
 
     def __init__(self, capacity: int | None = None, owner=None, observing: bool = False):
-        self.execs = ExecLineage(owner, capacity if capacity is not None else _UNBOUNDED, observing=observing)
+        # an observing table also keeps its exec records for citation: the lineages it judges name them
+        self.execs = ExecLineage(owner, capacity if capacity is not None else _UNBOUNDED, observing=observing,
+                                 citing=observing)
         self.observing = observing
 
     def add(self, e: TypedEvent, raw: dict[str, dict] | None = None) -> None:
         """Hold an exec record; with `observing`, also the process state any other audit SYSCALL record shows (its
         raw copies `raw` are kept for citation)."""
         if e.family == "process_exec":
-            self.execs.observe(e)
+            self.execs.observe(e, raw)
         elif self.observing:
             self.execs.observe_process(e, raw)
 
@@ -487,6 +550,12 @@ class PidTable:
 
     def _walk(self, host: str, pid: int, ts: float, boot: str | None, serial: int | None, *, inclusive: bool,
               depth: int) -> Ancestry:
+        execs: list[str] = []
+        found = self._walk_steps(host, pid, ts, boot, serial, inclusive=inclusive, depth=depth, execs=execs)
+        return found._replace(execs=tuple(execs))
+
+    def _walk_steps(self, host: str, pid: int, ts: float, boot: str | None, serial: int | None, *, inclusive: bool,
+                    depth: int, execs: list[str]) -> Ancestry:
         chain: list[ChainLink] = []
         cites: list[str] = []
         child: Step | None = None               # the earliest record of the process below (how it was started)
@@ -510,6 +579,10 @@ class PidTable:
                 gap = _not_forked(child, child_pid, pid, view)
             cites += [entry.event_id for entry in view.used if entry.event_id not in cites]
             named = view.named
+            # the exec records the claim names the process by and reads its parent from
+            for step in (named, view.first):
+                if step.kind == EXEC and step.entry.event_id not in execs:
+                    execs.append(step.entry.event_id)
             if level:
                 chain.append(_link(pid, named, level))
             # a web server's image in the process's own records (an exec, or its cited earliest record: an image
@@ -519,6 +592,8 @@ class PidTable:
             if web is not None:
                 if web is not named or not level:
                     chain.append(_link(pid, web, level))
+                if web.kind == EXEC and web.entry.event_id not in execs:
+                    execs.append(web.entry.event_id)
                 return Ancestry("web_server", chain, cites)
             first = view.first
             if spawned(first):
@@ -578,7 +653,7 @@ class InterpreterExternalConnection(Playbook):
     account, port), listing every destination, so routine update traffic is one lead, not one per address."""
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.interpreter_external_connection"
-    version = "6"
+    version = "7"
     title = ("Shell, interpreter, relay tool or web-service process made connect() calls to addresses outside the "
              "site's internal networks")
     kind = "aggregate"
@@ -602,7 +677,9 @@ class InterpreterExternalConnection(Playbook):
         "telemetry": "Linux auditd net_socket (socket.syscall connect, destination.ip/port from SOCKADDR, "
                      "process.executable, process.user/effective_user, process.pid, outcome); " + LINEAGE_TELEMETRY,
         "fidelity": "direct observation of each call and its outcome; the socket type is not recorded (a UDP connect "
-                    "sends nothing); the lineage claim names the records it rests on, observed ones cited",
+                    "sends nothing); the lineage claim names the records it rests on, exec and observed ones cited; "
+                    "the claim cites the calls bounding its span, the earliest call of each pid it lists and the first "
+                    "call to each destination it names, and says how many calls are cited",
         "benign_and_cost": "package managers and update checks, monitoring and backup scripts, web applications' "
                            "approved API calls and daemons of the web account, resolvers' UDP connects; one item per "
                            "(host, program, account, port) listing every destination and pid",
@@ -620,9 +697,13 @@ class InterpreterExternalConnection(Playbook):
     }
 
     # Per (host, program, account, port) of notable processes: counts, destinations and the first cited calls (as ids
-    # once staged), in a keyed store: the HOT most recent groups in memory, the rest on disk, never forgotten.
+    # once staged), in a keyed store: the HOT most recent groups in memory, the rest on disk, never forgotten. Besides
+    # the first calls a group cites the calls that bound its span (held while they bound it), the earliest call of
+    # each process it lists by pid (held while it is among the earliest PROCESSES_JUDGED) and the first call to each
+    # destination it names: at most 2 + PROCESSES_JUDGED + DESTINATIONS_NAMED records beyond the first ones.
     staged = True
     HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
+    DESTINATIONS_NAMED = 8
 
     def __init__(self):
         super().__init__()
@@ -630,16 +711,26 @@ class InterpreterExternalConnection(Playbook):
         self.groups = KeyedStore(self, "iec_groups", self.HOT)        # key -> [info, HeldExamples]
         self._pending: list[TypedEvent] = []
         self._fresh: list[HeldExamples] = []
+        self.bounds = BoundStage()
+        self.holds = Holds()
         self.load = lambda ids: []
 
     def drain_staged(self) -> list[TypedEvent]:
-        out, self._pending = self._pending, []
+        out, self._pending = self._pending + self.bounds.drain() + self.holds.drain(), []
         for store in self._fresh:
             store.staged()
         self._fresh = []
         self.groups.trim()
         self.pids.trim()
         return out
+
+    def drain_bounds(self) -> tuple[list[str], list[str]]:
+        return drained_holds(self.bounds, self.holds)
+
+    def _info(self, e: TypedEvent, reason: str, lane: str) -> dict:
+        return {"count": 0, "dests": Counter(), "outcomes": Counter(), "first": e.ts, "last": e.ts,
+                "reason": reason, "lane": lane, "procs": {}, "unheld": 0, "ends": Ends(), "earliest": [],
+                "named": Named(self.DESTINATIONS_NAMED)}
 
     def consume(self, events):
         self._batch, out = events, []
@@ -660,15 +751,15 @@ class InterpreterExternalConnection(Playbook):
                 continue
             key = f"{e.host}|{e.get('process.executable')}|{e.get('process.user')}|{port}"
             state = self.groups.setdefault(key, lambda e=e, reason=reason, lane=lane: [
-                {"count": 0, "dests": Counter(), "outcomes": Counter(), "first": e.ts, "last": e.ts,
-                 "reason": reason, "lane": lane, "procs": {}, "unheld": 0}, HeldExamples(EXAMPLE_LIMIT)])
+                self._info(e, reason, lane), HeldExamples(EXAMPLE_LIMIT)])
             if state is None:
                 # the call is a finding by itself: published now, on its own, instead of being refused
                 self.note_limit("groups_alone", "the groups' disk budget is spent; calls of a new group are published "
                                                 "one at a time")
                 # judged when read, before the rest of the hunt's records: its lineage is not judged (never lowered)
-                info = {"count": 1, "dests": Counter({ip: 1}), "outcomes": Counter({str(e.outcome): 1}),
-                        "first": e.ts, "last": e.ts, "reason": reason, "lane": lane, "procs": {}, "unheld": 1}
+                info = {**self._info(e, reason, lane), "count": 1, "dests": Counter({ip: 1}),
+                        "outcomes": Counter({str(e.outcome): 1}), "unheld": 1}
+                info["named"].offer(ip, e)
                 add_unheld(out, alone(self._group_match(key, info, [e]), self, e))
                 continue
             info, group = state
@@ -676,10 +767,16 @@ class InterpreterExternalConnection(Playbook):
             info["dests"][ip] += 1
             info["outcomes"][str(e.outcome)] += 1
             info["first"], info["last"] = min(info["first"], e.ts), max(info["last"], e.ts)
-            if not note_process(info["procs"], process_key(e), e.ts.timestamp(), _audit_serial(e)):
+            self.bounds.offer_at(key, info["ends"], e)
+            process, ts, serial = process_key(e), e.ts.timestamp(), _audit_serial(e)
+            if not note_process(info["procs"], process, ts, serial, e.id):
                 info["unheld"] += 1
-            if group.offer(e):
+            elif process is not None:
+                hold_earliest(info["earliest"], process, ts, serial, e, self.holds)
+            kept = group.offer(e)
+            if info["named"].offer(ip, e) or kept:
                 self._pending.append(e)
+            if kept:
                 self._fresh.append(group)
         self._batch = None
         return out
@@ -692,7 +789,14 @@ class InterpreterExternalConnection(Playbook):
         return out
 
     def _group_match(self, key: str, info: dict, evs: list[TypedEvent]) -> Match:
-        evs = sorted(evs, key=lambda x: (x.ts, x.id))
+        # the first calls, the calls bounding the span, the earliest call of each judged process, and the first call
+        # to each named destination
+        named = info["named"]
+        have = {e.id for e in evs}
+        extra = [i for i in dict.fromkeys([*info["ends"].ids(), *judged_records(info["procs"]), *named.ids.values()])
+                 if i not in have]
+        own = {e.id for e in evs}                      # the group's first calls: what the finding is about
+        evs = sorted([*evs, *self._load(extra)], key=lambda x: (x.ts, x.id))
         e0 = evs[0]
         procs = info["procs"]
         judged, unjudged, lineage_events, raw = judge_processes(self.pids, e0.host, procs, info["unheld"])
@@ -701,34 +805,45 @@ class InterpreterExternalConnection(Playbook):
         if lane == "high" and all(o == Outcome.failure for o in info["outcomes"]):
             lane = "lead"
             notes.append("lane lowered to lead: every connect() call failed")
-        dests = ", ".join(f"{ip} ({n})" for ip, n in info["dests"].most_common(8))
-        more = f" and {len(info['dests']) - 8} more" if len(info["dests"]) > 8 else ""
+        shown = sorted((ip for ip in info["dests"] if ip in named), key=lambda ip: (-info["dests"][ip], ip))
+        dests = ", ".join(f"{ip} ({info['dests'][ip]})" for ip in shown) + more(len(shown), len(info["dests"]))
         outcomes = ", ".join(f"{n} {w}" for w, n in (
             ("succeeded", info["outcomes"].get(Outcome.success, 0)),
             ("failed", info["outcomes"].get(Outcome.failure, 0)),
             ("with unknown or in-progress outcome", info["outcomes"].get(Outcome.unknown, 0))) if n)
         port = e0.get("destination.port")
-        pids = sorted({key[0] for key in procs})
+        pids = listed_pids(procs)
         who = _process_words(e0, pids, bool(info["unheld"])) if pids else _process_words(e0)
+        bounded = set(info["ends"].ids()) <= {e.id for e in evs}
         claim = (f"auditd connect() records on {e0.host} show {who}, "
                  f"{info['reason']}, making {info['count']} connect() call(s) to {len(info['dests'])} address(es) "
                  f"outside the site's internal networks on port {port} ({info['first'].isoformat()} – "
-                 f"{info['last'].isoformat()}): {dests}{more}; {outcomes}.{lineage_sentence(judged, unjudged)} "
-                 f"{SOCKET_TYPE_CAVEAT[0].upper()}{SOCKET_TYPE_CAVEAT[1:]}.")
+                 f"{info['last'].isoformat()}): {dests}; {outcomes}."
+                 + cited_phrase(len(evs), info["count"], bounded, "connect() records", "connect() record")
+                 + f"{lineage_sentence(judged, unjudged)} {SOCKET_TYPE_CAVEAT[0].upper()}{SOCKET_TYPE_CAVEAT[1:]}.")
         preds = [pf(e0, "socket.syscall"), pf(e0, "process.executable"), pf(e0, "destination.port")]
         if e0.has("process.user"):
             preds.append(pf(e0, "process.user"))
         known = {e.id for e in evs}
         cited = evs + [e for e in lineage_events if e.id not in known]    # the observed records the lineage names
         m = Match(self.id, claim, self.claim_type, cited, preds, e0.ts, self.severity, lane, "high",
-                  e0.entities(), group_key=key)
+                  e0.entities(), group_key=key, context_ids={e.id for e in cited} - own)
         m.raw_copies.update(raw)
         m.notes.extend(notes)
-        if info["count"] > len(evs):
-            m.notes.append(f"{info['count']} matching connect() records; {len(evs)} are cited")
         if lineage_events:
-            m.notes.append(f"{len(lineage_events)} observed process record(s) the named lineage rests on are cited")
+            m.notes.append(f"{len(lineage_events)} process record(s) (exec and observed) the named lineage rests on "
+                           f"are cited")
         return m
+
+    def _load(self, ids: list[str]) -> list[TypedEvent]:
+        found = self.load(ids) if ids else []
+        if len(found) != len(ids):
+            raise StageMissing(f"{self.id}: {len(ids) - len(found)} cited event(s) absent from the stage")
+        return found
+
+    def release_state(self) -> None:
+        self.bounds.clear()
+        self.holds.clear()
 
     def retained_events(self) -> list[TypedEvent]:
         return []                               # staged on disk instead
@@ -755,6 +870,7 @@ class Sock:
     boot: str | None = None
     serial: int | None = None
     session: int | None = None
+    staged: int = 0             # kept on the stage for citation to the end (the group's first calls)
 
     @property
     def group(self) -> str:
@@ -780,6 +896,8 @@ class Net:
     alert_sev: int | None
     alert_cat: str | None
     alert_sig: str | None
+    conn: str = ""              # the connection's identity: transport and both endpoints, in either direction
+    staged: int = 0             # kept on the stage for citation
 
     def local_side(self, ip: str, port: int) -> str | None:
         """The non-remote endpoint, if this record is one direction of a connection to ip:port."""
@@ -788,6 +906,49 @@ class Net:
         if (self.src, self.sport) == (ip, port):
             return self.dst
         return None
+
+
+def connection_identity(transport, src: str, sport: int, dst: str, dport: int) -> str:
+    """One connection's identity whichever sensor recorded it and whichever side it recorded first: the transport and
+    the two endpoints in a fixed order (what a community id hashes). A sensor that wrote no community id, or a record
+    type that carries none, still joins the same connection."""
+    a, b = sorted([(src, sport), (dst, dport)], key=lambda end: (ip_sort(end[0]), end[1]))
+    return f"{str(transport or '').lower()}|{a[0]}:{a[1]}|{b[0]}:{b[1]}"
+
+
+def ip_sort(ip: str):
+    try:
+        address = ipaddress.ip_address(ip)
+        return address.version, int(address)
+    except ValueError:
+        return 9, ip
+
+
+def count_connections(rows) -> int:
+    """Distinct connections among (identity, start, end) rows sorted by identity and start. Records of one identity
+    are one connection while each starts within CONNECTION_GAP seconds of the latest end (or start) before it: a
+    client cannot open the same 5-tuple again until the previous connection has left TIME_WAIT (60 s on Linux, twice
+    the maximum segment lifetime elsewhere), while the records two sensors write of one connection differ by clock
+    offsets and log-time starts of seconds."""
+    count, current, reach = 0, None, 0.0
+    for identity, start, end in rows:
+        if identity != current or start > reach + CONNECTION_GAP:
+            count += 1
+            current, reach = identity, start
+        reach = max(reach, end if end is not None else start, start)
+    return count
+
+
+class _SockGroup:
+    """A (host, program, account, endpoint) group's calls as the sweep reads them: how many of its first calls are
+    kept on the stage, the calls bounding its span (held while they bound it) and the earliest call of each of its
+    PROCESSES_JUDGED earliest notable processes (held while they are)."""
+    __slots__ = ("earliest", "ends", "kept")
+
+    def __init__(self):
+        self.kept = 0
+        self.ends = Ends()
+        self.earliest: list = []
 
 
 def _claimant_key(claimant: tuple) -> str:
@@ -818,6 +979,21 @@ def _version(ip: str) -> int:
     return ipaddress.ip_address(ip).version
 
 
+# Connection records two sensors (or one sensor's record types) wrote of one connection start within this many seconds
+# of its latest record (see count_connections).
+CONNECTION_GAP = 30.0
+# Records of a connection to one service endpoint from one address kept on the stage for citation (and as many
+# alerts), once a connect() call to that endpoint has been read: a group cites at most EXAMPLE_LIMIT records, all to its
+# endpoint, from its host's address.
+PARTNERS_PER_PAIR = EXAMPLE_LIMIT
+# Before any connect() call to the endpoint has been read (a network target read before the host target, or traffic no
+# call reaches), a pair's first record is kept: a call read later can still join it. That is one record per pair, not
+# one per connection; the stage's disk budget is what bounds it (the sweep stops staging citations when it is spent,
+# and the rule then says its findings are not computed from them).
+PARTNERS_UNMATCHED = 1
+EPHEMERAL_FLOOR = 32768         # client ports start here on modern stacks (Linux 32768-60999, Windows 49152-65535)
+
+
 class StageMissing(RuntimeError):
     """A cited event is absent from the stage: a defect, never a reason to drop a finding quietly."""
 
@@ -843,7 +1019,7 @@ class ProcessNetworkLink(Playbook):
     address is not established for this host is linked but stated, and caps the lane at lead, as do
     multiple local addresses and records shared with another process."""
     id = "corr.process_network_link"
-    version = "6"
+    version = "7"
     title = "Host process connect() calls linked to network-sensor records for the same connection (inferred)"
     kind = "aggregate"
     staged = True
@@ -869,7 +1045,12 @@ class ProcessNetworkLink(Playbook):
                      "ip and port, flow start/end, community_id, alert severity/category/signature); "
                      + LINEAGE_TELEMETRY,
         "fidelity": "each side directly observed; the link is inferred from address, port and time and worded as "
-                    "inferred; the host's own address on a sensor is inferred from its unique joins",
+                    "inferred; the host's own address on a sensor is inferred from its unique joins. Connections are "
+                    "counted by transport and both endpoints in either direction, records of one identity within "
+                    f"{CONNECTION_GAP:.0f} s of each other being one connection, so a connection two sensors recorded "
+                    "(with or without a community id) counts once. The claim cites the group's first calls, the "
+                    "calls bounding its span, its judged processes' earliest calls and the records their lineage "
+                    "names, and the first network records of the endpoint pair, and says how many of each are cited",
         "benign_and_cost": "another host or process reaching the same endpoint at the same second (stated, capped at "
                            "lead), benign IDS signatures on routine traffic; one item per (host, program, account, "
                            "endpoint)",
@@ -908,6 +1089,14 @@ class ProcessNetworkLink(Playbook):
         register_store(self, self)      # its rows are one store of the hunt's state budget
         # the lineage of the connecting processes, which can lower a web-service process's lane (never raise it)
         self.pids = PidTable(PidTable.CAPACITY, owner=self, observing=True)
+        # What the stage keeps for citation, bounded by groups rather than records: each (host, program, account,
+        # endpoint) group's first calls, the calls bounding its span and its earliest processes' first calls; and the
+        # first records (and alerts) of each (service endpoint, client address) pair.
+        self.sock_groups = KeyedStore(self, "pnl_sock_groups", HOT_COUNT)
+        self.pairs = KeyedStore(self, "pnl_pairs", HOT_COUNT)
+        self.endpoints = KeyedStore(self, "pnl_endpoints", HOT_COUNT)     # remote endpoints of the calls read
+        self.bounds = BoundStage()
+        self.holds = Holds()
 
     def account(self):
         """The join rows' Account in the hunt's state budget."""
@@ -916,18 +1105,24 @@ class ProcessNetworkLink(Playbook):
         return self._rows_account
 
     def drain_staged(self) -> list[TypedEvent]:
-        out, self._pending = self._pending, []
+        out, self._pending = self._pending + self.bounds.drain() + self.holds.drain(), []
         self.pids.trim()
+        self.sock_groups.trim()
+        self.pairs.trim()
+        self.endpoints.trim()
         return out
+
+    def drain_bounds(self) -> tuple[list[str], list[str]]:
+        return drained_holds(self.bounds, self.holds)
 
     def _store(self) -> Spill:
         """The join's tables, on the rule's spill (which the lineage's stores may share)."""
         spill = self.spill()
         if not self._tables:
             spill.table("sock", "id, host, ts, ip, port, exe, user, pid, outcome, reason, lane, grp, claimant, "
-                                "ppid, boot, serial, session")
+                                "ppid, boot, serial, session, staged")
             spill.table("net", 'id, family, observer, start, "end", src, sport, dst, dport, cid, sev, cat, sig, '
-                               "seq INTEGER PRIMARY KEY")
+                               "seq INTEGER PRIMARY KEY, conn, staged")
             spill.table("ep", "ip, port, start, net")
             self._tables = True
         return spill
@@ -939,6 +1134,11 @@ class ProcessNetworkLink(Playbook):
         self._tables = False
 
     def release_state(self) -> None:
+        self.bounds.clear()
+        self.holds.clear()
+        self.sock_groups.clear()
+        self.pairs.clear()
+        self.endpoints.clear()
         self.close_spill()
 
     def _room(self, rows: int) -> bool:
@@ -975,16 +1175,41 @@ class ProcessNetworkLink(Playbook):
         s = Sock(e.id, e.host or "", e.ts.timestamp(), ip, int(port), str(e.get("process.executable")),
                  str(e.get("process.user")), scalar(e.get("process.pid")), str(e.outcome), reason, lane,
                  *((scalar(key[1]), key[2], _audit_serial(e), scalar(key[3])) if key else (None, None, None, None)))
-        row = (s.id, s.host, s.ts, s.ip, s.port, s.exe, s.user, s.pid, s.outcome, s.reason, s.process_lane, s.group,
-               _claimant_key(s.claimant), s.ppid, s.boot, s.serial, s.session)
         if not self._room(1):
             return
+        staged = self._cite_sock(s, e, key)
+        if self.endpoints.get((s.ip, s.port)) is None and not self.endpoints.put((s.ip, s.port), 1):
+            self.note_limit("endpoints", "the called endpoints' disk budget is spent; network records to a new endpoint "
+                                         "are only held for citation (a bounded number), and findings say how many "
+                                         "are cited")
+        row = (s.id, s.host, s.ts, s.ip, s.port, s.exe, s.user, s.pid, s.outcome, s.reason, s.process_lane, s.group,
+               _claimant_key(s.claimant), s.ppid, s.boot, s.serial, s.session, staged)
         try:
             self._store().add("sock", row)
         except StateExhausted as exc:
             self._lost(exc)
             return
+
+    def _cite_sock(self, s: Sock, e: TypedEvent, key: tuple | None) -> int:
+        """Stage what the call's group may cite: its first EXAMPLE_LIMIT calls (kept; 1 is returned), the calls
+        bounding its span and the earliest call of each of its earliest notable processes (held while they are)."""
+        state = self.sock_groups.setdefault(s.group, _SockGroup)
+        if state is None:
+            # every call of a group the store cannot track is kept on the stage instead (its disk budget bounds them),
+            # so the group's finding is still published with its calls cited
+            self.note_limit("sock_groups", "the connecting groups' store took no new group; the calls of a later group "
+                                           "are each kept for citation instead of its first ones, and its span is "
+                                           "cited only through them")
+            self._pending.append(e)
+            return 1
+        self.bounds.offer_at(s.group, state.ends, e)
+        if s.reason is not None and key is not None:
+            hold_earliest(state.earliest, key, s.ts, s.serial, e, self.holds)
+        if state.kept >= EXAMPLE_LIMIT:
+            return 0
+        state.kept += 1
         self._pending.append(e)
+        return 1
 
     def _net(self, e: TypedEvent) -> None:
         src, dst = canon_ip(e.get("source.ip")), canon_ip(e.get("destination.ip"))
@@ -1001,12 +1226,14 @@ class ProcessNetworkLink(Playbook):
         end = _epoch(e.get("flow.end"))
         sev = e.get("alert.severity")
         seq = self._net_seq + 1
-        row = (e.id, e.family, e.host or "", start, end, src, sport, dst, dport,
-               scalar(e.get("network.community_id")) or None, sev if isinstance(sev, int) else None,
-               scalar(e.get("alert.category")), scalar(e.get("alert.signature")), seq)
         endpoints = [(dst, dport, start, seq)] + ([(src, sport, start, seq)] if (src, sport) != (dst, dport) else [])
         if not self._room(1 + len(endpoints)):
             return
+        staged = self._cite_net(e, src, sport, dst, dport)
+        row = (e.id, e.family, e.host or "", start, end, src, sport, dst, dport,
+               scalar(e.get("network.community_id")) or None, sev if isinstance(sev, int) else None,
+               scalar(e.get("alert.category")), scalar(e.get("alert.signature")), seq,
+               connection_identity(e.get("network.transport"), src, sport, dst, dport), staged)
         self._net_seq = seq
         store = self._store()
         try:
@@ -1016,7 +1243,31 @@ class ProcessNetworkLink(Playbook):
         except StateExhausted as exc:
             self._lost(exc)
             return
-        self._pending.append(e)
+
+    def _cite_net(self, e: TypedEvent, src: str, sport: int, dst: str, dport: int) -> int:
+        """Stage the record when it may be cited (1, else 0): when it is among the first PARTNERS_PER_PAIR records (or
+        alerts) of its (service endpoint, client address) pair once a call to that endpoint has been read, or among
+        the pair's first PARTNERS_UNMATCHED before any call reached the endpoint. The service side is the destination,
+        as a sensor records a connection it saw open; a record whose source port is the lower one, below the client
+        range, is also offered as recorded from the server's side (a connection picked up mid-stream)."""
+        alert = e.family == "net_alert"
+        pairs = [(dst, dport, src)]
+        if sport < dport and sport < EPHEMERAL_FLOOR:
+            pairs.append((src, sport, dst))
+        staged = 0
+        for pair in pairs:
+            count = self.pairs.setdefault((*pair, alert), lambda: [0])
+            if count is None:
+                self.note_limit("pairs", "the endpoint pairs' disk budget is spent; a new pair's records are not kept "
+                                         "for citation, and findings say how many are cited")
+                continue
+            matched = self.endpoints.get(pair[:2]) is not None
+            if count[0] < (PARTNERS_PER_PAIR if matched else PARTNERS_UNMATCHED):
+                count[0] += 1
+                staged = 1
+        if staged:
+            self._pending.append(e)
+        return staged
 
     def _lost(self, exc: StateExhausted) -> None:
         """A batch of rows could not be written (the stage volume is at its reserve): this record is refused, and
@@ -1050,7 +1301,7 @@ class ProcessNetworkLink(Playbook):
         db = spill.db
         spill.cap()                     # every statement below stops itself at the volume's headroom
         db.execute("CREATE INDEX ep_key ON ep (ip, port, start)")
-        db.execute("CREATE INDEX net_cid ON net (cid)")
+        db.execute("CREATE INDEX net_conn ON net (conn)")
         spill.check()
         db.execute("CREATE TABLE link (sock INTEGER, net INTEGER, direct INTEGER, PRIMARY KEY (sock, net)) "
                    "WITHOUT ROWID")
@@ -1065,11 +1316,9 @@ class ProcessNetworkLink(Playbook):
             self.heartbeat()
         for low in range(0, last + 1, self.JOIN_CHUNK):
             db.execute('INSERT OR IGNORE INTO link SELECT l.sock, m.seq, 0 FROM link l JOIN net d ON d.seq = l.net '
-                       'JOIN net m ON m.cid = d.cid WHERE l.direct = 1 AND d.cid IS NOT NULL '
+                       'JOIN net m ON m.conn = d.conn WHERE l.direct = 1 '
                        'AND l.sock > ? AND l.sock <= ? '
-                       'AND m.start >= d.start - ? AND m.start <= COALESCE(d."end", d.start + ?) + ? '
-                       'AND ((m.src = d.src AND m.sport = d.sport AND m.dst = d.dst AND m.dport = d.dport) '
-                       'OR (m.src = d.dst AND m.sport = d.dport AND m.dst = d.src AND m.dport = d.sport))',
+                       'AND m.start >= d.start - ? AND m.start <= COALESCE(d."end", d.start + ?) + ?',
                        (low, low + self.JOIN_CHUNK, FLOW_SLACK, JOIN_AFTER, FLOW_SLACK))
             spill.check()
             self.heartbeat()
@@ -1081,22 +1330,23 @@ class ProcessNetworkLink(Playbook):
                    "ON s.rowid = l.sock GROUP BY l.net")
         # the group being built: its distinct linked records (with the latest call's attribution status), the calls
         # that kept a link, and the records more than one process claims
-        db.execute("CREATE TABLE gp (nid PRIMARY KEY, family, observer, local, conn, sig, status)")
+        db.execute('CREATE TABLE gp (nid PRIMARY KEY, family, observer, local, conn, sig, status, start, "end")')
         db.execute("CREATE TABLE gs (sock INTEGER PRIMARY KEY)")
         db.execute("CREATE TABLE gsh (nid, seq INTEGER, PRIMARY KEY (nid, seq)) WITHOUT ROWID")
         db.commit()
 
     _ROWS = ('SELECT s.rowid, s.id, s.host, s.ts, s.ip, s.port, s.exe, s.user, s.pid, s.outcome, s.reason, s.lane, '
              's.grp, n.id, n.family, n.observer, n.start, n."end", n.src, n.sport, n.dst, n.dport, n.cid, n.sev, '
-             'n.cat, n.sig, nc.n, n.seq, s.ppid, s.boot, s.serial, s.session FROM link l JOIN sock s '
+             'n.cat, n.sig, nc.n, n.seq, s.ppid, s.boot, s.serial, s.session, n.conn, n.staged, s.staged '
+             'FROM link l JOIN sock s '
              'ON s.rowid = l.sock JOIN net n ON n.seq = l.net JOIN nc ON nc.net = l.net ')
 
     @staticmethod
     def _row(row) -> tuple[int, Sock, Net, int, int]:
         sock = Sock(row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[9], row[10], row[11],
-                    row[28], row[29], row[30], row[31])
+                    row[28], row[29], row[30], row[31], row[34])
         net = Net(row[13], row[14], row[15], row[16], row[17], row[18], row[19], row[20], row[21], row[22],
-                  row[23], row[24], row[25])
+                  row[23], row[24], row[25], row[32], row[33])
         return row[0], sock, net, row[26], row[27]
 
     def _socket_rows(self, order: str):
@@ -1158,7 +1408,8 @@ class ProcessNetworkLink(Playbook):
                 if group is not None:
                     out += self._finish(group, address)
                     self._spill.check()
-                group = _Group(s.group, self._spill.db)
+                state = self.sock_groups.peek(s.group, None)
+                group = _Group(s.group, self._spill.db, state if state is not None else _SockGroup())
             kept = []
             for _r, _s, n, claimed, seq in rows:
                 if claimed > 1:
@@ -1188,9 +1439,14 @@ class ProcessNetworkLink(Playbook):
         db = self._spill.db
         components = []
         judged, unjudged, lineage_events, lineage_raw, lineage_lines = [], 0, [], {}, []
+        # the processes whose lineage is judged: the group's notable processes with a linked call, walked from their
+        # earliest linked call, each cited by a linked call of its own; a linked process with no call kept for
+        # citation is left unjudged (that only keeps the lane)
+        procs = {key: (ts, serial, g.proc_cites[key]) for key, (ts, serial, _event_id) in g.procs.items()
+                 if key in g.proc_cites}
         if g.notable is not None:
-            judged, unjudged, lineage_events, lineage_raw = judge_processes(self.pids, g.notable.host, g.procs,
-                                                                            g.unheld)
+            unheld = len(set(g.procs) - set(procs)) + g.unheld
+            judged, unjudged, lineage_events, lineage_raw = judge_processes(self.pids, g.notable.host, procs, unheld)
             lane, lineage_lines = lineage_lane(g.notable.reason, g.notable.process_lane, judged, unjudged)
             lineage_lines += lineage_notes(judged)
             if g.notable_all_failed:
@@ -1201,15 +1457,18 @@ class ProcessNetworkLink(Playbook):
         if not components:
             return None
         lane = min(components, key=LANE_RANK.__getitem__)
-        s0 = g.socks[0]
-        # other processes claiming the group's shared records: counted, and the first five named, as they stream
+        s0 = g.first
+        # other processes claiming the group's shared records: counted, and the first five with a call kept for
+        # citation named (with that call cited)
         n_others, others = 0, []
-        for claimant in db.execute(
-                "SELECT DISTINCT s.host, s.exe, s.pid FROM gsh JOIN gp ON gp.nid = gsh.nid JOIN link l "
-                "ON l.net = gsh.seq JOIN sock s ON s.rowid = l.sock EXCEPT SELECT s.host, s.exe, s.pid FROM gs "
-                "JOIN sock s ON s.rowid = gs.sock"):
+        for host, exe, pid, cited_id in db.execute(
+                "SELECT s.host, s.exe, s.pid, MIN(CASE WHEN s.staged = 1 THEN s.id END) FROM gsh JOIN gp "
+                "ON gp.nid = gsh.nid JOIN link l ON l.net = gsh.seq JOIN sock s ON s.rowid = l.sock "
+                "WHERE NOT EXISTS (SELECT 1 FROM gs JOIN sock t ON t.rowid = gs.sock WHERE t.host = s.host "
+                "AND t.exe = s.exe AND t.pid IS s.pid) GROUP BY s.host, s.exe, s.pid"):
             n_others += 1
-            others = heapq.nsmallest(5, [*others, tuple(claimant)], key=str)
+            if cited_id is not None:
+                others = heapq.nsmallest(5, [*others, (host, exe, pid, cited_id)], key=str)
         locals_ = [local for (local,) in db.execute(
             "SELECT DISTINCT local FROM gp WHERE local IS NOT NULL ORDER BY local")]
         unestablished = [observer for (observer,) in db.execute(
@@ -1225,37 +1484,62 @@ class ProcessNetworkLink(Playbook):
             caps.append("unestablished")
         if caps and lane == "high":
             lane = "lead"
-        n_partners, n_flows, n_alerts, n_connections = db.execute(
-            "SELECT COUNT(*), TOTAL(family IN ('net_flow', 'net_session')), TOTAL(family = 'net_alert'), "
-            "COUNT(DISTINCT conn) FROM gp").fetchone()
+        n_partners, n_flows, n_alerts = db.execute(
+            "SELECT COUNT(*), TOTAL(family IN ('net_flow', 'net_session')), TOTAL(family = 'net_alert') "
+            "FROM gp").fetchone()
         n_flows, n_alerts = int(n_flows), int(n_alerts)
+        n_connections = count_connections(db.execute('SELECT conn, start, "end" FROM gp ORDER BY conn, start, nid'))
         observers = [observer for (observer,) in db.execute("SELECT DISTINCT observer FROM gp ORDER BY observer")]
         (n_sigs,) = db.execute("SELECT COUNT(DISTINCT sig) FROM gp WHERE family = 'net_alert'").fetchone()
-        sigs = [sig for (sig,) in db.execute(
-            "SELECT DISTINCT sig FROM gp WHERE family = 'net_alert' ORDER BY sig LIMIT 3")]
         outcomes = g.outcomes
 
-        ids = [s.id for s in g.socks] + [n.id for _k, n, _o in g.first_partners]
+        # cited: the group's first kept calls, the calls bounding its span (when held), each judged process's
+        # earliest call, the first records in citation order that are kept, and a call of each named other process
+        bounds = g.ends.ids()
+        held_bounds = [i for i in bounds if i in g.citable]
+        sock_ids = list(dict.fromkeys([*held_bounds, *(s.id for s in g.socks), *judged_records(procs)]))
+        partner_ids = [n.id for _k, n, _o in g.first_partners]
+        ids = list(dict.fromkeys([*sock_ids, *partner_ids, *(o[3] for o in others)]))
         loaded = {e.id: e for e in self.load(ids)}
         missing = [i for i in ids if i not in loaded]
         if missing:
             raise StageMissing(f"{self.id}: {len(missing)} cited event(s) absent from the stage, e.g. {missing[0]}")
         cited = [loaded[i] for i in ids]
-        first = loaded[s0.id]
+        first = loaded[g.socks[0].id] if g.socks else loaded[sock_ids[0]] if sock_ids else None
+        if first is None:
+            return None                             # nothing of the group could be cited (stated on coverage)
+        sigs = sorted({str(n.alert_sig) for _k, n, _o in g.first_partners if n.family == "net_alert"})[:3]
         outcome_words = ", ".join(f"{n} {w}" for w, n in (
             ("succeeded", outcomes.get(Outcome.success, 0)), ("failed", outcomes.get(Outcome.failure, 0)),
             ("with unknown or in-progress outcome", outcomes.get(Outcome.unknown, 0))) if n)
+        # the group's own linked calls (another process's call cited for the shared records is not one of them)
+        own_calls = [loaded[i] for i in sock_ids]
+        cited_pids = list(dict.fromkeys(e.get("process.pid") for e in own_calls
+                                        if isinstance(e.get("process.pid"), int)))
+        pids = cited_pids + sorted(p for p in g.pids if p not in cited_pids)
+        n_cited_socks = len(own_calls)
+        n_cited_partners = len(partner_ids)
+        span_note = bound_note(set(bounds) - set(held_bounds), g.ends, "these calls' interval")
         parts = [
-            (f"Observed on {s0.host} (auditd): {_process_words(first, sorted(g.pids), g.pids_more)} made "
+            (f"Observed on {s0.host} (auditd): "
+             f"{_process_words(first, pids, g.pids_more, listed=min(PIDS_LISTED, len(cited_pids)))} made "
              f"{g.n_socks} connect() call(s) to "
              f"{s0.ip} port {s0.port} that join network records "
              f"({datetime.fromtimestamp(s0.ts, UTC).isoformat()} – "
-             f"{datetime.fromtimestamp(g.last_ts, UTC).isoformat()}); {outcome_words}. {SOCKET_TYPE_CAVEAT}."),
+             f"{datetime.fromtimestamp(g.last_ts, UTC).isoformat()}); {outcome_words}. {SOCKET_TYPE_CAVEAT}."
+             + span_note),
             f"Observed by network sensor(s) {', '.join(observers)}: {n_flows} flow or session record(s) across "
             f"{n_connections} connection(s) to {s0.ip} port {s0.port} starting within seconds of those calls"
             + (f", with local address(es) {', '.join(locals_)}" if locals_ else "")
-            + (f", and {n_alerts} IDS alert(s) on those connections: {'; '.join(sigs)}"
-               + (f" and {n_sigs - 3} more" if n_sigs > 3 else "") if n_alerts else "") + ".",
+            + (f", and {n_alerts} IDS alert(s) on those connections"
+               + (f", among them {'; '.join(f"'{sig}'" for sig in sigs)}" + more(len(sigs), n_sigs) if sigs else "")
+               if n_alerts else "") + ".",
+            "Of these, " + " and ".join(
+                (f"all {total} {noun}" if total > 1 else f"the one {noun[:-1]}") if cited_n >= total
+                else f"{cited_n} of the {total} {noun}"
+                for cited_n, total, noun in ((n_cited_socks, g.n_socks, "connect() records"),
+                                             (n_cited_partners, n_partners, "network records")))
+            + (" is cited." if g.n_socks == 1 and n_partners == 1 else " are cited."),
             "The link between the host process and these network records is inferred from address, port and "
             "time; it is not itself observed"
             + (". It is ambiguous: more than one local address matched" if len(locals_) > 1 else "") + ".",
@@ -1268,9 +1552,9 @@ class ProcessNetworkLink(Playbook):
             parts.append(f"Local address(es) {', '.join(differs)} differ from the address usually seen for "
                          f"{s0.host} on the same sensor.")
         if n_others:
-            names = "; ".join(f"{h} '{exe}' (pid {pid})" for h, exe, pid in others)
+            names = "; ".join(f"{h} '{exe}' (pid {pid})" for h, exe, pid, _i in others)
             parts.append(f"The same network records also join connect() calls by {n_others} other "
-                         f"process(es): {names}" + (" and more" if n_others > 5 else "") + ".")
+                         f"process(es)" + (f": {names}" + more(len(others), n_others) if others else "") + ".")
         if caps:
             parts.append("Because the attribution is " + " and ".join(
                 {"shared": "shared", "ambiguous": "ambiguous", "unestablished": "not established"}[c] for c in caps)
@@ -1290,11 +1574,13 @@ class ProcessNetworkLink(Playbook):
         elif flow_event is not None and flow_event.has("network.community_id"):
             preds.append(pf(flow_event, "network.community_id"))
         m = Match(self.id, " ".join(parts), self.claim_type, cited, preds, first.ts, LANE_SEVERITY[lane], lane,
-                  "medium", first.entities(), group_key=g.key)
+                  "medium", first.entities(), group_key=g.key,
+                  context_ids={e.id for e in cited} - {s.id for s in g.socks} - set(partner_ids))
         m.raw_copies.update(lineage_raw)
         m.notes.extend(lineage_lines)
         if lineage_events:
-            m.notes.append(f"{len(lineage_events)} observed process record(s) the named lineage rests on are cited")
+            m.notes.append(f"{len(lineage_events)} process record(s) (exec and observed) the named lineage rests on "
+                           f"are cited")
         for observer in observers:
             for version in (4, 6):
                 known = address.get((s0.host, observer, version))
@@ -1302,22 +1588,25 @@ class ProcessNetworkLink(Playbook):
                     best, n, total = known
                     m.notes.append(f"inferred, not an asset record: sensor {observer} saw {s0.host}'s uniquely "
                                    f"joined IPv{version} connections from {best} in {n} of {total} joins")
-        if g.n_socks > EXAMPLE_LIMIT or n_partners > EXAMPLE_LIMIT:
-            m.notes.append(f"{g.n_socks} connect() record(s) and {n_partners} network record(s) joined; up to "
-                           f"{EXAMPLE_LIMIT} of each are cited")
         return m
 
 
 class _Group:
     """One (host, program, account, endpoint) group while its linked rows stream by. Memory holds its first
-    EXAMPLE_LIMIT calls, counts, the first notable call, the strongest alert lane, and the EXAMPLE_LIMIT partner records
-    first in citation order (alerts, then by start and id). Its distinct partners, the calls that kept a link and its
-    shared records are rows of the spill's gp, gs and gsh tables, emptied by `clear`."""
+    EXAMPLE_LIMIT calls kept for citation, the calls bounding its span, counts, the first notable call, the strongest
+    alert lane, and the EXAMPLE_LIMIT kept partner records first in citation order (alerts, then by start and id). Its
+    distinct partners, the calls that kept a link and its shared records are rows of the spill's gp, gs and gsh tables,
+    emptied by `clear`. `state` is what the sweep staged for the group (`_SockGroup`)."""
 
-    def __init__(self, key: str, db):
+    def __init__(self, key: str, db, state: _SockGroup):
         self.key = key
         self.db = db
+        self.state = state
+        # calls on the stage: the group's first kept calls (row flag), the held bounds and earliest-process calls
+        self.citable = set(state.ends.ids()) | {event_id for _o, _k, event_id in state.earliest}
         self.socks: list[Sock] = []
+        self.first: Sock | None = None
+        self.ends = Ends()                        # the linked calls bounding the stated span
         self.n_socks = 0
         self.last_ts = 0.0
         self.outcomes: Counter = Counter()
@@ -1330,14 +1619,20 @@ class _Group:
         self.unheld = 0                           # notable calls of processes past PROCESSES_HELD
         self.pids: set = set()                    # the group's pids (PROCESSES_HELD at most)
         self.pids_more = False
+        self.proc_cites: dict = {}                # notable process -> its earliest linked call kept for citation
 
     def shared(self, net_id: str, seq: int) -> None:
         self.db.execute("INSERT OR IGNORE INTO gsh VALUES (?, ?)", (net_id, seq))
 
     def add(self, sock_rowid: int, s: Sock, kept: list[tuple]) -> None:
         self.n_socks += 1
-        if len(self.socks) < EXAMPLE_LIMIT:
+        if self.first is None:
+            self.first = s
+        if s.staged:
+            self.citable.add(s.id)
+        if s.id in self.citable and len(self.socks) < EXAMPLE_LIMIT:
             self.socks.append(s)
+        self.ends.offer(s.ts, s.ts, s.id)
         self.last_ts = s.ts
         self.outcomes[s.outcome] += 1
         if s.pid is not None and s.pid not in self.pids:
@@ -1350,14 +1645,15 @@ class _Group:
                 self.notable = s
             self.notable_all_failed = self.notable_all_failed and s.outcome == Outcome.failure
             key = (s.pid, s.ppid, s.boot, s.session) if isinstance(s.pid, int) else None
-            if not note_process(self.procs, key, s.ts, s.serial):
+            if not note_process(self.procs, key, s.ts, s.serial, s.id):
                 self.unheld += 1
+            elif s.id in self.citable and key is not None and key not in self.proc_cites:
+                self.proc_cites[key] = s.id     # rows stream in time order: the process's earliest citable call
         self.db.execute("INSERT OR IGNORE INTO gs VALUES (?)", (sock_rowid,))
         for n, local, status in kept:
             if not self.db.execute(
-                    "INSERT OR IGNORE INTO gp VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (n.id, n.family, n.observer, local, n.cid or f"{n.src}:{n.sport}-{n.dst}:{n.dport}",
-                     str(n.alert_sig), status)).rowcount:
+                    'INSERT OR IGNORE INTO gp VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    (n.id, n.family, n.observer, local, n.conn, str(n.alert_sig), status, n.start, n.end)).rowcount:
                 self.db.execute("UPDATE gp SET status = ? WHERE nid = ?", (status, n.id))   # the latest call's
                 continue
             if n.family == "net_alert":
@@ -1365,7 +1661,7 @@ class _Group:
                 if lane is not None and (self.alert_lane is None or LANE_RANK[lane] < LANE_RANK[self.alert_lane]):
                     self.alert_lane = lane
             key = (n.family != "net_alert", n.start, n.id)
-            if len(self.first_partners) < EXAMPLE_LIMIT or key < self.first_partners[-1][0]:
+            if n.staged and (len(self.first_partners) < EXAMPLE_LIMIT or key < self.first_partners[-1][0]):
                 bisect.insort(self.first_partners, (key, n, self.order), key=lambda item: item[0])
                 del self.first_partners[EXAMPLE_LIMIT:]
             self.order += 1

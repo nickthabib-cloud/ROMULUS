@@ -3,6 +3,7 @@ fields, time boundaries and order independence. Internal addresses are RFC 1918;
 ranges, which the internal-range list does not include."""
 import json
 import random
+from collections import Counter
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -97,7 +98,10 @@ def test_dns_examples_stage_whole_events_and_release_compact_state():
 
     assert rule.staged is True
     assert rule.retained_events() == []
-    assert rule.drain_staged() == [event]
+    # kept as an example, and held as the record bounding the span, the address range and its block's range
+    assert {e.id for e in rule.drain_staged()} == {event.id}
+    held, released = rule.drain_bounds()
+    assert set(held) == {event.id} and released == []
     assert all(isinstance(event_id, str) for store in rule.examples.values() for event_id in store.ids())
     rule.release_state()
     assert rule.examples == {}
@@ -115,14 +119,22 @@ def test_dns_staging_grows_with_cite_limits_not_with_dns_volume(shuffled):
     if shuffled:
         random.Random(7).shuffle(events)
     rule = dns.DnsTunnelShape()
-    staged = set()
+    kept, holds = set(), Counter()
     for start in range(0, volume, 1000):
         rule.consume(events[start:start + 1000])
-        staged |= {event.id for event in rule.drain_staged()}
+        drained = rule.drain_staged()
+        held, released = rule.drain_bounds()
+        holds.update(held)
+        holds.subtract(released)
+        copies = Counter(event.id for event in drained)
+        kept |= {event_id for event_id, n in copies.items() if n > held.count(event_id)}
+        # what the stage holds now: the kept examples, the span's two bounds and the example names' records
+        live = kept | {event_id for event_id, n in holds.items() if n > 0}
+        assert len(live) <= (dns.EXAMPLE_LIMIT if not shuffled else dns.EXAMPLE_LIMIT * 12) + 2 + 6
     earliest = {event.id for event in sorted(events, key=lambda e: (e.ts, e.id))[:dns.EXAMPLE_LIMIT]}
-    assert earliest <= staged
+    assert earliest <= kept
     # in time order exactly the cite limit; in random order each record enters with probability limit/rank
-    assert len(staged) <= (dns.EXAMPLE_LIMIT if not shuffled else dns.EXAMPLE_LIMIT * 12)
+    assert len(kept) <= (dns.EXAMPLE_LIMIT if not shuffled else dns.EXAMPLE_LIMIT * 12)
 
 
 @pytest.mark.parametrize("raw, expected", [
@@ -268,7 +280,8 @@ def test_reverse_sweep_of_an_internal_block_is_reported_with_its_range():
     m = out[0]
     assert m.proposed_lane == "lead" and m.severity == "medium" and m.group_key == CLIENT
     assert "256 distinct reverse-lookup name(s)" in m.claim
-    assert "10.30.4.0/24 (256 address(es), 10.30.4.0 – 10.30.4.255)" in m.claim
+    assert ("10.30.4.0/24 (256 address(es), 10.30.4.0 – 10.30.4.255; 21 of the 256 are in cited records)" in m.claim
+            and "21 of the 256 question records are cited" in m.claim)
     assert "shape of a reverse-DNS sweep" in m.claim and "do not show whether names were returned" in m.claim
     assert "T1018" in m.notes[0]
 
@@ -457,8 +470,10 @@ def test_resolver_burst_from_mixed_clients_says_so_and_names_the_clients_that_as
     assert f"{RESOLVER} was sent 60 NXDOMAIN answer(s)" in m.claim and f"Answering server(s): {OUTSIDE} x60" in m.claim
     assert RESOLVER_SAYS in m.claim
     assert "it sent 61 DNS answer record(s) to 7 other address(es)" in m.claim
-    assert "In the peak interval it sent 60 NXDOMAIN answer(s) to 6 client(s) (" in m.claim
-    assert all(f"{c}: 10" in m.claim for c in clients)
+    # the clients it answered are counted, not named: their answer records are not among this finding's citations
+    assert ("In the peak interval it sent 60 NXDOMAIN answer(s) to 6 client(s) (counted from answer records that are "
+            "not cited).") in m.claim
+    assert not any(c in m.claim for c in clients)
     assert "No client it answered reached the burst threshold on its own." in m.claim
 
 
@@ -471,7 +486,7 @@ def test_workstation_dga_behind_a_resolver_keeps_its_own_finding_and_the_resolve
     ws = by_key[workstation]
     assert ws.proposed_lane == "lead" and ws.severity == "high" and RESOLVER_SAYS not in ws.claim
     assert "at most 300 of them fell within one ten-minute interval" in ws.claim
-    assert f"{workstation}: 300 (it has its own finding)" in by_key[RESOLVER].claim
+    assert "1 of those clients have their own finding" in by_key[RESOLVER].claim
 
 
 def test_an_address_that_only_asks_is_not_called_a_resolver():
@@ -739,8 +754,9 @@ def test_nxdomain_citations_come_from_the_peak_window():
     burst = nx_answers(60, step=timedelta(seconds=3), start=burst_start)
     _pb, out = run(dns.DnsNxdomainBurst, early + burst)
     m = out[0]
-    assert all(burst_start <= e.ts < burst_start + timedelta(minutes=10) for e in m.events)
-    assert len(m.events) == 20
+    # the peak's earliest 20 records, beside the records bounding the span and those the names and servers come from
+    inside = [e for e in m.events if burst_start <= e.ts < burst_start + timedelta(minutes=10)]
+    assert len(inside) >= 20 and len(m.events) <= 20 + 2 + 5 + 5
 
 
 def test_nxdomain_peak_citations_when_the_window_straddles_buckets():
@@ -750,8 +766,7 @@ def test_nxdomain_peak_citations_when_the_window_straddles_buckets():
     before = nx_answers(10, step=timedelta(seconds=1), start=bucket)        # same bucket, before the peak
     _pb, out = run(dns.DnsNxdomainBurst, nx_answers(25, step=timedelta(minutes=3)) + before + burst)
     m = out[0]
-    assert len(m.events) == 20
-    assert all(start <= e.ts < start + timedelta(minutes=10) for e in m.events)
+    assert len([e for e in m.events if start <= e.ts < start + timedelta(minutes=10)]) >= 20
 
 
 def test_reverse_sweep_cites_the_densest_block():
@@ -829,4 +844,4 @@ def test_nxdomain_citations_always_fill_from_inside_the_peak(seed):
         return
     window = pb.WINDOW // timedelta(microseconds=1)
     cited = [dns._micros(e.ts) for e in out[0].events]
-    assert len(cited) == 20 and all(start <= c < start + window for c in cited)
+    assert len([c for c in cited if start <= c < start + window]) >= 20

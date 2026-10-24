@@ -39,6 +39,7 @@ from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
 from romulus.detect.bounded import HOT_COUNT, KeyedStore, Limit, RecentIds
+from romulus.detect.citing import BoundStage, Ends, bound_note, cite_with_bounds, cited_phrase, more
 from romulus.detect.correlation import StageMissing, canon_ip, external, routable_remote
 from romulus.detect.netdef import assume_direction
 from romulus.evidence.typed import TypedEvent
@@ -389,6 +390,21 @@ def internal_address(ip: str) -> bool:
     return routable_remote(ip) and not external(ip)
 
 
+def _per_sensor_cited(evs: list[TypedEvent], tallies: dict) -> str:
+    """How many of each sensor's counted records to the server port are cited ('0 of the 2 Suricata flow records')."""
+    cited = Counter(ARKIME if e.family == "net_session" else SURICATA for e in evs)
+    parts = []
+    for sensor, tally in sorted(tallies.items()):
+        total = tally["records"]
+        kind = "flow record" if sensor == SURICATA else "session record"
+        shown = min(cited[sensor], total)
+        name = f"{SENSOR_NAMES[sensor]} {kind}"
+        parts.append(f"the one {name}" if total == 1 and shown == 1 else f"all {total} {name}s" if shown == total
+                     else f"{shown} of the {total} {name}{'' if total == 1 else 's'}")
+    return " Of the records the per-sensor totals count, " + " and ".join(parts) + (
+        " is cited." if len(parts) == 1 and parts[0].startswith("the one") else " are cited.")
+
+
 def _plural(n: int, word: str, plural: str | None = None) -> str:
     return f"{n} {word if n == 1 else (plural or word + 's')}"
 
@@ -400,137 +416,6 @@ def _sensor_counts(counts: Counter) -> str:
     if counts.get(ARKIME):
         parts.append(_plural(counts[ARKIME], "Arkime session record"))
     return " and ".join(parts) or "no records"
-
-
-# ---------------------------------------------------------------------------------------------
-# records that bound a stated interval
-# ---------------------------------------------------------------------------------------------
-
-@dataclass
-class Ends:
-    """The records that bound an interval a claim states: the one with the earliest start and the one with the
-    latest end, each held as (time, event id). Ties go to the lower event id, so the choice does not depend on the
-    order records are read."""
-    first: tuple[float, str] | None = None
-    last: tuple[float, str] | None = None
-    held: list = field(default_factory=lambda: [None, None])   # the id the stage holds for each bound (BoundStage)
-
-    def offer(self, start: float, end: float, event_id: str) -> tuple[bool, bool]:
-        """Take one record's span: (it became the earliest, it became the latest)."""
-        first = self.first is None or (start, event_id) < self.first
-        last = self.last is None or end > self.last[0] or (end == self.last[0] and event_id < self.last[1])
-        if first:
-            self.first = (start, event_id)
-        if last:
-            self.last = (end, event_id)
-        return first, last
-
-    def fold(self, other: Ends) -> None:
-        """Take another group's bounds (folding groups at finalize)."""
-        if other.first is not None and (self.first is None or other.first < self.first):
-            self.first = other.first
-        if other.last is not None and (self.last is None or other.last[0] > self.last[0]
-                                       or (other.last[0] == self.last[0] and other.last[1] < self.last[1])):
-            self.last = other.last
-
-    def ids(self) -> list[str]:
-        return list(dict.fromkeys(ref[1] for ref in (self.first, self.last) if ref is not None))
-
-
-class BoundStage:
-    """Stages the records that bound each group's interval, as holds the stage releases when a later record takes
-    the bound, so the stage holds at most two records per group however many records the group has. A bound moves
-    only outwards, so a record that stops being one never becomes one again. The latest changes with nearly every
-    record of a long-lived group, so a new bound waits until the batch ends: only the record still holding it then is
-    held, and the record it replaces is released. A rule offers bounds only for groups that can still be reported
-    (`stage=False` tracks the bound without staging it), so a group that never qualifies stages nothing for them.
-
-    The sweep reads `drain` (the events to stage, with the playbook's other citations) and then `last` (which of
-    them are holds, and which earlier holds to release)."""
-
-    def __init__(self):
-        self.pending: dict[tuple, tuple[TypedEvent, Ends]] = {}
-        self.kept: list[TypedEvent] = []        # bounds of intervals that have closed: kept to the end
-        self.releasing: list[str] = []
-        self.last: tuple[list[str], list[str]] = ([], [])
-
-    def offer(self, key, ends: Ends, start: float, end: float, event: TypedEvent, stage: bool = True) -> bool:
-        """Offer a record to the group's bounds; True when it became one of them. A bound taken by a record that is
-        not staged releases the hold it replaces (that record is no longer the bound)."""
-        moved = ends.offer(start, end, event.id)
-        for side in (0, 1):
-            if not moved[side]:
-                continue
-            if stage:
-                self.pending[(key, side)] = (event, ends)
-                continue
-            self.pending.pop((key, side), None)
-            if ends.held[side] is not None:
-                self.releasing.append(ends.held[side])
-                ends.held[side] = None
-        return moved[0] or moved[1]
-
-    def settle(self, key, ends: Ends) -> None:
-        """The group's latest record bounds an interval that has closed (a later record starts a new one): it is kept
-        to the end however the group grows from here."""
-        entry = self.pending.pop((key, 1), None)
-        if entry is not None:
-            self.kept.append(entry[0])
-            if ends.held[1] is not None and ends.held[1] != entry[0].id:
-                self.releasing.append(ends.held[1])       # an earlier latest of the same interval
-        ends.held[1] = None                                # a hold from an earlier batch stays: it is that bound
-
-    def drain(self) -> list[TypedEvent]:
-        out, held, released = list(self.kept), [], self.releasing
-        for (_key, side), (event, ends) in self.pending.items():
-            old = ends.held[side]
-            if old == event.id:
-                continue
-            if old is not None:
-                released.append(old)
-            ends.held[side] = event.id
-            out.append(event)
-            held.append(event.id)
-        self.last = (held, released)
-        self.pending, self.kept, self.releasing = {}, [], []
-        return out
-
-    def clear(self) -> None:
-        self.pending.clear()
-        self.kept.clear()
-        self.releasing.clear()
-        self.last = ([], [])
-
-
-def cite_with_bounds(load, events, ends: Ends, ids, limit: int) -> tuple[list[TypedEvent], set[str]]:
-    """Cited records with the interval's bounding records first: those the stage holds (`load`), then `ids`, every one
-    of which must be staged (`events` raises otherwise), up to `limit`. Returns the events in time order and the
-    bounding ids the stage does not hold."""
-    bounds = ends.ids()
-    held = {event.id: event for event in load(bounds)} if bounds else {}
-    wanted = list(dict.fromkeys([*(i for i in bounds if i in held), *ids]))[:limit]
-    rest = [i for i in wanted if i not in held]
-    found = [held[i] for i in wanted if i in held] + (events(rest) if rest else [])
-    return sorted(found, key=lambda e: (e.ts, e.id)), set(bounds) - set(held)
-
-
-def cited_phrase(cited: int, records: int, bounded: bool) -> str:
-    """How many of the records a claim rests on are cited: '20 of the 47 records are cited, including the first and
-    the last.'"""
-    if records == 1:
-        return " Its one record is cited."
-    if cited >= records:
-        return f" All {records} records are cited."
-    return f" {cited} of the {records} records are cited" + (", including the first and the last." if bounded else ".")
-
-
-def bound_note(missing: set[str], ends: Ends, what: str = "this interval") -> str:
-    """The claim's sentence when a record bounding its interval was not held for citation ('' when both are)."""
-    sides = [name for name, ref in (("starts", ends.first), ("ends", ends.last)) if ref and ref[1] in missing]
-    if not sides:
-        return ""
-    return (f" The record that {' and the record that '.join(sides)} {what} was not kept for citation; the "
-            f"interval is computed from every record.")
 
 
 class _FlowRule(Playbook):
@@ -756,7 +641,7 @@ class HorizontalSweep(_FlowRule):
     """One source reaching many distinct addresses on the same transport and port (or by ICMP) within a short
     window: the shape of host discovery and service sweeps, and of worm-style propagation."""
     id = "net.horizontal_sweep"
-    version = "5"
+    version = "6"
     direction_dependent = True
     title = "One source contacted many distinct addresses on the same port within minutes"
     severity, lane = "medium", "lead"
@@ -837,6 +722,11 @@ class HorizontalSweep(_FlowRule):
         self.sweeps = KeyedStore(self, "sweep_groups", self.HOT_GROUPS)
         self.destinations = KeyedStore(self, "sweep_destinations", self.HOT_DESTINATIONS,
                                        group=lambda key: repr(key[0]))      # (group key, destination address)
+
+    def _connections(self, destination) -> str:
+        """A destination's distinct connections, as a lower bound once its count reached the cap."""
+        n = len(destination.connections)
+        return ("at least " if n >= self.CONNECTIONS_PER_DESTINATION else "") + _plural(n, "connection")
 
     def take(self, view: FlowView, event: TypedEvent) -> bool | None:
         if not routable_remote(view.dst):
@@ -936,9 +826,6 @@ class HorizontalSweep(_FlowRule):
         src_scope = "internal" if internal_address(src) else "external" if external(src) else "non-routable"
         label = {True: "lane window", False: "deciding window"}[high]
         span = "5 minutes" if deciding.width == 300 else "hour"
-        listed = ", ".join(f"{ip} ({_plural(len(dests[ip].connections), 'connection')}, {dests[ip].state})"
-                           for ip in deciding.members[:self.LIST_LIMIT])
-        more = (f" and {deciding.size - self.LIST_LIMIT} more" if deciding.size > self.LIST_LIMIT else "")
         claim = (f"{src} ({src_scope} address) contacted {len(dests)} distinct {scope} addresses on {service} in the "
                  f"hunt window ({_iso(group.first)} – {_iso(group.last)}): up to {short.size} within 5 minutes (from "
                  f"{_iso(short.start)}) and up to {long.size} within 60 minutes (from {_iso(long.start)}). "
@@ -948,7 +835,7 @@ class HorizontalSweep(_FlowRule):
                  f"answered and {states['reply unknown']} have no typed packet count; in the busiest hour "
                  f"{long.silent} of {long.size} never answered. The {label} is the {span} from "
                  f"{_iso(deciding.start)}: {deciding.size} addresses, {deciding.silent} of {deciding.size} never "
-                 f"answered. Addresses in the {label}: {listed}{more}.")
+                 f"answered.")
         members = set(deciding.members)
         end = deciding.start + deciding.width
         staged = [(ts, eid, ip) for ip, destination in dests.items() for ts, eid in destination.staged]
@@ -961,7 +848,20 @@ class HorizontalSweep(_FlowRule):
         window = [timed[0][1], timed[-1][1]] if timed else []
         ids = window + [eid for _answered, _ts, eid in sorted(inside)] + [eid for _ts, eid in sorted(rest)]
         evs, missing = self._cite(group.ends, ids)
-        claim += bound_note(missing, group.ends, "the hunt-window span")
+        # the window's addresses that a cited record reaches, in the window's order
+        reached = {canon_ip(e.get("destination.ip")) for e in evs}
+        shown = [ip for ip in deciding.members if ip in reached][:self.LIST_LIMIT]
+        claim += (f" Addresses in the {label} with a cited record: "
+                  + ", ".join(f"{ip} ({self._connections(dests[ip])}, {dests[ip].state})" for ip in shown)
+                  + more(len(shown), deciding.size) + ".")
+        claim += (cited_phrase(len(evs), sum(group.records.values()), not missing)
+                  + bound_note(missing, group.ends, "the hunt-window span"))
+        # how many of the stated addresses and connections the cited records show
+        n_reached = len(reached & set(dests))
+        views = (flow_view(e, kind) for e in evs if (kind := record_kind(e)) not in (None, "netflow"))
+        n_conns = len({view.key for view in views if view is not None})
+        claim += (f" {n_reached} of the {len(dests)} addresses and {min(n_conns, connections)} of "
+                  f"{'at least ' if capped else 'the '}{connections} connections are in cited records.")
         cited = next((e for e in evs if e.has("destination.port")), evs[0])
         match = Match(self.id, claim, self.claim_type, evs,
                       _predicates(cited, ("source.ip", "destination.ip", "destination.port", "network.transport")),
@@ -1042,16 +942,24 @@ class _UnidentifiedGroup:
 SOURCE_LIST_LIMIT = 30
 
 
-def _address_list(counts: dict[str, int], noun: str) -> str:
-    """'2 sources (10.0.0.5: 3, 10.0.0.6: 2)' with every address up to the list limit."""
+def _address_list(counts: dict[str, int], noun: str, cited: set[str], at_least: bool = False) -> str:
+    """'2 sources (10.0.0.5: 3, 10.0.0.6: 2)', naming the addresses a cited record shows, up to the list limit, and
+    counting the rest; with `at_least` (a capped group) every count is a lower bound and says so."""
     ordered = sorted(counts, key=ip_sort_key)
-    listed = ", ".join(f"{ip}: {counts[ip]}" for ip in ordered[:SOURCE_LIST_LIMIT])
-    more = f" and {len(ordered) - SOURCE_LIST_LIMIT} more" if len(ordered) > SOURCE_LIST_LIMIT else ""
-    return f"{_plural(len(ordered), noun)} ({listed}{more})"
+    named = [ip for ip in ordered if ip in cited][:SOURCE_LIST_LIMIT]
+    floor = "at least " if at_least else ""
+    listed = ", ".join(f"{ip}: {floor}{counts[ip]}" for ip in named)
+    rest = more(len(named), len(ordered)).strip()
+    return f"{floor}{_plural(len(ordered), noun)} ({'; '.join(part for part in (listed, rest) if part)})"
 
 
-def _sources_phrase(counts: dict[str, int]) -> str:
-    return "from " + _address_list(counts, "source")
+def _sources_phrase(counts: dict[str, int], cited: set[str], at_least: bool = False) -> str:
+    return "from " + _address_list(counts, "source", cited, at_least)
+
+
+def _addresses(events: list[TypedEvent]) -> set[str]:
+    """The addresses the cited records show, on either side."""
+    return {ip for e in events for ip in (canon_ip(e.get("source.ip")), canon_ip(e.get("destination.ip"))) if ip}
 
 
 class ProtocolPortMismatch(_FlowRule):
@@ -1059,7 +967,7 @@ class ProtocolPortMismatch(_FlowRule):
     data-carrying connection to a registered port had no protocol identified although the sensor can parse the
     protocol registered there."""
     id = "net.protocol_port_mismatch"
-    version = "6"
+    version = "7"
     title = "Application protocol and port disagree on a connection"
     severity, lane = "medium", "lead"
     attack = ("T1571", "T1572", "T1095")
@@ -1248,7 +1156,9 @@ class ProtocolPortMismatch(_FlowRule):
                 extra = seen - set(protocols)
                 if extra:
                     others[sensor].update(extra)
-        sources = _sources_phrase({src: len(keys) for src, keys in group.sources.items()})
+        evs, missing = self._cite(group.ends, group.cited)
+        sources = _sources_phrase({src: len(keys) for src, keys in group.sources.items()}, _addresses(evs),
+                                  group.capped)
         claim = (f"{sensors} identified {names} on {'at least ' if group.capped else ''}"
                  f"{_plural(len(group.connections), 'connection')} to {dst} on "
                  f"{transport}/{port} {sources} ({_iso(group.first)} – {_iso(group.last)}; "
@@ -1256,9 +1166,8 @@ class ProtocolPortMismatch(_FlowRule):
         if others:
             claim += " On the same connection(s) " + "; ".join(
                 f"{SENSOR_NAMES[s]} also identified {', '.join(sorted(v))}" for s, v in sorted(others.items())) + "."
+        claim += cited_phrase(len(evs), sum(group.records.values()), not missing) + bound_note(missing, group.ends)
         claim += " Protocol identity is the sensor parser's judgement."
-        evs, missing = self._cite(group.ends, group.cited)
-        claim += bound_note(missing, group.ends)
         match = Match(self.id, claim, "network_observation", evs,
                       _predicates(evs[0], ("source.ip", "destination.ip", "destination.port", "network.app_proto",
                                            "network.protocols")),
@@ -1287,28 +1196,33 @@ class ProtocolPortMismatch(_FlowRule):
         parsable = sorted(expected & set().union(*(PARSERS[s] for s in records)))
         denominators = []
         tallies = self.pairs.peek((server, port, transport), {}) if side == "destination" else {}
+        counted = sum(tally["records"] for tally in tallies.values())
         for sensor, tally in sorted(tallies.items()):
             identified = ", ".join(f"{p} {n}" for p, n in sorted(tally.items()) if p != "records")
             kind = "flow record" if sensor == SURICATA else "session record"
             denominators.append(f"{SENSOR_NAMES[sensor]} wrote {_plural(tally['records'], kind)} to {server} on "
                                 f"this port" + (f", identified as {identified}" if identified else
                                                 ", none with an identified protocol"))
+        evs, missing = self._cite(group.ends, [event_id for _first, event_id in group.cites])
+        cited = _addresses(evs)
         if side == "source":
-            peers = _address_list(group.addresses, "peer")
+            peers = _address_list(group.addresses, "peer", cited)
             subject = (f"{_plural(group.connections, 'connection')} recorded from {server} port {transport}/{port} to "
                        f"{peers}; the registered port is on the side the sensor recorded as the source (a reversed or "
                        f"mid-stream view of a connection to that service, or a program bound to the service port to "
                        f"make outgoing connections)")
         else:
-            sources = _sources_phrase(group.addresses)
+            sources = _sources_phrase(group.addresses, cited)
             subject = f"{_plural(group.connections, 'connection')} to {server} on {transport}/{port} {sources}"
         registered = f"{transport}/{port} is registered here for {', '.join(sorted(expected))}"
         claim = (f"{subject} ({_iso(first)} – {_iso(last)}) carried data in both directions with no application "
                  f"protocol identified: {'; '.join(how)}. {registered}, which {' and '.join(capable)} can parse "
                  f"({', '.join(parsable)}). " + (f"{'; '.join(denominators)}. " if denominators else "")
-                 + "A parser that does not recognise traffic is not proof that a different protocol was used.")
-        evs, missing = self._cite(group.ends, [event_id for _first, event_id in group.cites])
-        claim += bound_note(missing, group.ends)
+                 + "A parser that does not recognise traffic is not proof that a different protocol was used."
+                 + cited_phrase(len(evs), records[SURICATA] + records[ARKIME], not missing,
+                                "records with no identified protocol", "record with no identified protocol")
+                 + bound_note(missing, group.ends)
+                 + (_per_sensor_cited(evs, tallies) if denominators and counted > len(evs) else ""))
         match = Match(self.id, claim, "network_observation", evs,
                       _predicates(evs[0], ("source.ip", "source.port", "destination.ip", "destination.port",
                                            "network.app_proto", "network.protocols")),
@@ -1392,7 +1306,7 @@ class LongUnidentifiedSession(_FlowRule):
     """A long connection that carried data both ways while no sensor identified its application protocol, on a
     port that is unregistered or registered only for protocols the recording sensor cannot parse."""
     id = "net.long_unidentified_session"
-    version = "5"
+    version = "6"
     title = "Long data-carrying connection with no identified protocol on a port its sensor cannot judge"
     severity, lane = "medium", "lead"
     attack = ("T1095", "T1571", "T1573")
@@ -1534,7 +1448,10 @@ class LongUnidentifiedSession(_FlowRule):
         expected = expected_protocols(transport, port)
         registration = (f"{transport}/{port} is registered here for {', '.join(sorted(expected))}, which {sensors} "
                         f"cannot parse" if expected else f"{transport}/{port} is registered here for no protocol")
-        sources = _sources_phrase(group.sources)
+        ids = [event_id for *_rank, held in group.ranked for event_id in held] + group.rest
+        bounds = Ends((start, opening), (end, closing))
+        evs, missing = self._cite(bounds, ids)
+        sources = _sources_phrase(group.sources, _addresses(evs))
         claim = (f"{_plural(group.long, 'connection')} to {dst} on {transport}/{port} {sources} lasted at least "
                  f"{self.MIN_SECONDS // 60} minutes with data in both directions and no application protocol "
                  f"identified by {sensors}; the longest ran {longest / 60:.0f} minutes ({_iso(start)} "
@@ -1543,10 +1460,8 @@ class LongUnidentifiedSession(_FlowRule):
                  f"in total ({_sensor_counts(records)}"
                  + (f"; Suricata reported protocol detection 'failed' on {failed}" if failed else "") + "). "
                  f"{registration}. Times are as the sensors recorded them.")
-        ids = [event_id for *_rank, held in group.ranked for event_id in held] + group.rest
-        bounds = Ends((start, opening), (end, closing))
-        evs, missing = self._cite(bounds, ids)
-        claim += bound_note(missing, bounds, "the longest connection")
+        claim += (cited_phrase(len(evs), sum(records.values()), not missing)
+                  + bound_note(missing, bounds, "the longest connection"))
         match = Match(self.id, claim, "network_observation", evs,
                       _predicates(evs[0], ("source.ip", "destination.ip", "destination.port", "flow.start",
                                            "flow.end")),
@@ -1956,7 +1871,7 @@ class OutboundVolumeAsymmetry(_FlowRule):
                 self.limits[f"not_read_{kind}"] = _NotRead(text, records=count, hits=1)
 
     def coverage_notes(self) -> list[str]:
-        return list(getattr(self, "_notes", []))
+        return list(getattr(self, "_notes", [])) + super().coverage_notes()
 
     @staticmethod
     def _openings(src: str, dst: str, totals: _PairTotals) -> str:

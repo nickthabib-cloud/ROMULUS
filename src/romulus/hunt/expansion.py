@@ -29,9 +29,10 @@ from romulus.hunt.links import (
     LinkWindow,
     is_agent_reach,
     usable_key,
+    written_community_id,
 )
 from romulus.hunt.pivot import HOST_AMBIGUOUS, HOST_LOOKUP_BUDGET, NO_HOST_RECORD
-from romulus.hunt.publish import mark_hypothesis_relation, publish_match
+from romulus.hunt.publish import mark_hypothesis_relation, publish_match, subject_event_ids
 from romulus.hunt.sweep import stored_boot_intervals
 from romulus.sources.models import Window
 from romulus.store.db import digest
@@ -307,7 +308,7 @@ class ExpansionEngine:
                     "process.auid": event.get("process.auid") if usable_key(event.get("process.auid")) else None,
                 }
             elif link_type in {"network_flow", "flow_host_side"}:
-                community_id = event.get("network.community_id")
+                community_id = written_community_id(event)
                 flow_tuple = [event.get(field) for field in (
                     "network.transport", "source.ip", "source.port",
                     "destination.ip", "destination.port",
@@ -339,13 +340,14 @@ class ExpansionEngine:
             self._plans.move_to_end(row["id"])
             return plan
         candidate = candidate or self.repo.candidate(row["candidate_id"])
-        events = events if events is not None else self._events(candidate["event_ids"])
+        subject = subject_event_ids(candidate)
+        events = events if events is not None else self._events(subject)
         candidate_ts = _utc(candidate["ts"])
         plan = _AnchorPlan(
             row=row, candidate=candidate, events=events,
             anchor=LinkAnchor(
                 finding_id=candidate["id"], ts=candidate_ts, host=row["host"],
-                event_ids=candidate["event_ids"], events=events,
+                event_ids=subject, events=events,
             ),
             windows={window.label: window for window in expansion_windows(candidate_ts, self.window)},
         )
@@ -373,7 +375,7 @@ class ExpansionEngine:
                 continue
             parent = candidate.get("source_anchor_id")
             depth = depths.get(parent, -1) + 1 if parent else 0
-            events = self._events(candidate["event_ids"])
+            events = self._events(subject_event_ids(candidate))
             host = self._anchor_host(events)
             row = {
                 "id": candidate["id"], "hunt_id": self.hunt_id, "candidate_id": candidate["id"],
@@ -401,7 +403,7 @@ class ExpansionEngine:
             candidate = plan.candidate if plan is not None else self.repo.candidate(row["candidate_id"])
             self._identities[row["id"]] = digest({
                 "rule_id": candidate["rule_id"],
-                "evidence": candidate.get("group_key") or sorted(candidate["event_ids"]),
+                "evidence": candidate.get("group_key") or sorted(subject_event_ids(candidate)),
             })
         return self._identities[row["id"]]
 

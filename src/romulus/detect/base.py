@@ -39,6 +39,10 @@ class Match:
     # Raw copies (target/native id -> source) of cited records a rule kept in its own store rather than the sweep's
     # event stage; saved with the evidence like the stage's.
     raw_copies: dict[str, dict] = field(default_factory=dict)
+    # Ids of cited records that only support what the claim states (the records bounding a stated span, the record a
+    # named value comes from, an exec ancestor a lineage names) rather than being what the finding is about. Expansion
+    # starts from the finding's other records only, so citing more never widens what it reaches.
+    context_ids: set[str] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         # A positive stays valid on a command line some of whose arguments were lost; the claim says so.
@@ -137,6 +141,7 @@ class Playbook:
         # partition's coverage partial with the limit named, exactly as for a record missing a required field.
         self.capped = 0
         self.limits: dict[str, Limit] = {}
+        self._cov_notes: dict[str, str] = {}       # informational coverage lines, by name (the first text of each)
 
     def refuse(self, name: str, text: str, records: int = 1) -> None:
         """A state budget is full: `records` record(s) were not evaluated. Coverage becomes partial and says why."""
@@ -152,10 +157,16 @@ class Playbook:
         limit.records += records
         limit.hits += 1
 
+    def note_coverage(self, name: str, text: str) -> None:
+        """Something the rule's window cell should say that does not make it partial: nothing went unevaluated, and
+        no stated count or verdict changed."""
+        notes = self.__dict__.setdefault("_cov_notes", {})
+        notes.setdefault(name, text)
+
     def coverage_notes(self) -> list[str]:
         """Informational lines for the rule's window cell, set at finalize: what the rule judged out of its scope and
         how much of it there was. Unlike a limit, a note does not make the cell partial."""
-        return []
+        return list(self.__dict__.get("_cov_notes", {}).values())
 
     def limit_reasons(self) -> list[str]:
         """Every state budget this playbook reached, worded for the coverage ledger."""
