@@ -1686,7 +1686,8 @@ def community_id(src, sport, dst, dport, transport) -> str | None:
     or None for a transport without ports or an endpoint that is not an address and a port. The two endpoints are
     ordered as the specification orders them, so either direction of a connection gives the same id."""
     number = COMMUNITY_ID_PROTOCOLS.get(str(transport or "").lower())
-    if number is None or not isinstance(sport, int) or not isinstance(dport, int) or isinstance(sport, bool)             or isinstance(dport, bool) or not (0 <= sport <= 65535 and 0 <= dport <= 65535):
+    if (number is None or not isinstance(sport, int) or not isinstance(dport, int) or isinstance(sport, bool)
+            or isinstance(dport, bool) or not (0 <= sport <= 65535 and 0 <= dport <= 65535)):
         return None
     try:
         a, b = ipaddress.ip_address(str(src)).packed, ipaddress.ip_address(str(dst)).packed

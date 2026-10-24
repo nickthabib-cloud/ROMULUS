@@ -174,13 +174,14 @@ def volume_usage(directory) -> tuple[int, int] | None:
 class Account:
     """One store's bytes on disk (a keyed store, a record list, a join's rows, the event stage)."""
 
-    __slots__ = ("name", "strong", "used", "weight")
+    __slots__ = ("name", "strong", "used", "weight", "yields")
 
-    def __init__(self, name: str, strong: bool, weight: int = 1):
+    def __init__(self, name: str, strong: bool, weight: int = 1, yields: bool = False):
         self.name = name
         self.strong = strong            # a strong-indicator rule's store (see `Playbook.state_slice`)
         self.used = 0
-        self.weight = weight            # floors this store holds: one per rule it serves (see `KeyedStore.weight`)
+        self.weight = 0 if yields else weight   # floors this store holds: one per rule it serves
+        self.yields = yields            # a store no detection needs (see `KeyedStore.yields`): no floor, gives way first
 
 
 class StateBudget:
@@ -195,6 +196,10 @@ class StateBudget:
     partial, the reason named), and every match that needs no new state still publishes. Half for floors keeps a
     quiet rule's guarantee meaningful (with 70 stores and a 10 GiB total, about 73 MiB each) while the busiest stores
     still share the other half by need.
+
+    A yielding store (one no detection reads, such as records kept only to be cited) holds no floor and may take a new
+    key only while the stores together hold less than half the shared headroom, so it gives way long before any
+    detection store meets a spent headroom; the bytes it holds count against the headroom like any store's.
 
     The automatic total is the smaller of half the stage volume's free space (after the reserve) and TOTAL_SHARE of
     the volume, and the reserve is the larger of the setting and RESERVE_SHARE of the volume, because the stage volume
@@ -225,6 +230,7 @@ class StateBudget:
         self.stores = 0                 # stores the floors are planned for (0: as many as have accounts)
         self.pool_used = 0              # bytes the stores hold above their floors
         self.full: dict[str, str] = {}  # stores that refused a new key, and why
+        self.yielding = False           # a yielding store has an account: the budget is watched from half the headroom
         self.forced: list = []          # (predicate on an Account, reason): stores forced into no-growth mode (tests)
         self.calm = True                # no limit reached: the per-record check is one attribute read
         self.disk_used = 0              # the spills' real database growth (for the summary)
@@ -246,7 +252,7 @@ class StateBudget:
         d = self.__dict__
         calm = not (d.get("over_total") or d.get("low_space") or d.get("broken") or d.get("forced"))
         if calm and "accounts" in d:
-            calm = self.pool_used < self.pool
+            calm = self.pool_used < (self.pool // 2 if d.get("yielding") else self.pool)
         object.__setattr__(self, "calm", calm)
 
     # ---- floors ----
@@ -268,9 +274,11 @@ class StateBudget:
         self.stores = max(1, stores)
         self._repool()
 
-    def account(self, name: str, strong: bool = False, weight: int = 1) -> Account:
-        account = Account(name, strong, weight)
+    def account(self, name: str, strong: bool = False, weight: int = 1, yields: bool = False) -> Account:
+        account = Account(name, strong, weight, yields)
         self.accounts.append(account)
+        if yields:
+            self.yielding = True
         if not self.stores:
             self._repool()              # unplanned (a rule driven alone): floors follow the stores seen so far
         return account
@@ -302,11 +310,14 @@ class StateBudget:
         reason = self.hard or self.over_total
         if not reason and account is not None:
             reason = next((why for where, why in self.forced if where(account)), "")
-            if not reason and self.pool_used >= self.pool and account.used >= self.floor_of(account):
+            if not reason and account.yields and self.pool_used >= self.pool // 2:
+                reason = (f"the stores hold {self.pool_used / 2**20:.1f} MiB of the {self.pool / 2**20:.1f} MiB of "
+                          f"headroom they share, and a store no detection reads gives way at half of it")
+            elif not reason and self.pool_used >= self.pool and account.used >= self.floor_of(account):
                 reason = (f"its state on disk ({account.used / 2**20:.1f} MiB) is past its guaranteed floor "
                           f"({self.floor_of(account) / 2**20:.1f} MiB) and the headroom the stores share "
                           f"({self.pool / 2**20:.1f} MiB) is spent")
-        if reason and account is not None and account.name not in self.full:
+        if reason and account is not None and account.name not in self.full and not account.yields:
             self.full[account.name] = reason
         return reason
 
@@ -409,7 +420,7 @@ def live_stores(pack) -> int:
         for ref in pb.__dict__.get("_state_stores", ()):
             store = ref()
             if store is not None:
-                seen[id(store)] = max(1, int(getattr(store, "weight", 1)))
+                seen[id(store)] = 0 if getattr(store, "yields", False) else max(1, int(getattr(store, "weight", 1)))
     return sum(seen.values())
 
 
@@ -702,13 +713,16 @@ DISK_BUDGET = 8 * 2**30
 
 def store_refuses(owner, account_of) -> bool:
     """Whether the hunt's state budget refuses a new key in a store now; when it does, the owner's coverage names
-    the store and why (the caller refuses the record through its own path). `account_of()` gives the store's
-    Account (called only when the budget is not calm)."""
+    the store and why (the caller refuses the record through its own path); a yielding store's refusal is left to
+    its caller to name, as no record goes unevaluated. `account_of()` gives the store's Account (called only when the
+    budget is not calm)."""
     budget = None if owner is None else owner.budget
     if budget is None or budget.calm:
         return False
     account = account_of()
     reason = budget.new_key_reason(account)
+    if reason and account is not None and account.yields:
+        return True
     if reason:
         owner.note_limit(f"state_budget:{account.name if account is not None else ''}",
                          f"the store {account.name if account is not None else ''} took no new key: {reason}; "
@@ -747,6 +761,10 @@ class KeyedStore:
     `group(key)` (optional) is kept as a text column, so finalize can read states grouped. Without an owner the
     store is memory only (callers outside the sweep whose input is bounded)."""
 
+    # A store no detection reads (records kept only to be cited): it holds no floor of the hunt's state budget and
+    # gives way before any detection store (see `StateBudget`), and its refusals are its owner's to name.
+    yields = False
+
     def __init__(self, owner, name: str, hot: int, *, disk_budget: int | None = None, candidate=None, group=None):
         self.owner = owner
         self.name = name
@@ -780,7 +798,8 @@ class KeyedStore:
         if self._account is None and self.owner is not None:
             owner = self.owner
             self._account = _budget_of(owner).account(f"{getattr(owner, 'id', type(owner).__name__)}:{self.name}",
-                                                     _strong(owner), max(1, int(getattr(self, "weight", 1))))
+                                                     _strong(owner), max(1, int(getattr(self, "weight", 1))),
+                                                     yields=getattr(self, "yields", False))
             if self.held_bytes:
                 owner.budget.charge(self._account, self.held_bytes)
         return self._account

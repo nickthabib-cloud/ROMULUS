@@ -237,8 +237,13 @@ class SuricataAlertStack(_Grouped):
             else:
                 lane, severity = "lead", "medium"
             names = "; ".join(f"'{s[1]}' (sid {s[0]})" for s in named[:3])
+            cited_sigs = sorted({e.get("alert.signature_id") for e in evs if e.get("alert.signature_id") is not None},
+                                key=str)
+            in_cited = (f" All {len(sigs)} signatures are in cited alerts." if len(cited_sigs) >= len(sigs) else
+                        f" {len(cited_sigs)} of the {len(sigs)} signatures are in cited alerts.")
             claim = (f"Suricata raised {n} '{cat}' alert(s) at severity {sev} across {len(sigs)} distinct signature(s) "
                      f"for traffic from {src} to {dst} ({self.span(state)}): {names}{more(min(3, len(named)), len(sigs))}."
+                     + (in_cited if len(sigs) > 1 else "")
                      + self.told(evs, state, missing, "alerts", "alert")
                      + " IDS alerts are signature matches, not proof of successful exploitation.")
             e0 = evs[0]
@@ -248,9 +253,14 @@ class SuricataAlertStack(_Grouped):
                       context_ids=context)
             techs = sorted({t for e in evs for t in _values(e.get("alert.mitre_technique_id")) if t})
             if techs:
-                m.notes.append(f"signature metadata ATT&CK of the cited alerts: {techs[:8]}"
-                               f"{more(min(8, len(techs)), len(state.bag('tech')))}")
-            m.notes.append(f"signatures of the cited alerts: {[s[0] for s in named]}{more(len(named), len(sigs))}")
+                others = len(state.bag("tech")) - len(techs)
+                shown = f"{techs[:8]}{more(min(8, len(techs)), len(techs))}"
+                m.notes.append(f"signature metadata ATT&CK of the cited alerts: {shown}"
+                               + (f"; {others} other technique id(s) are in alerts not cited" if others > 0 else ""))
+            others = len(sigs) - len(cited_sigs)
+            shown = f"{cited_sigs[:10]}{more(min(10, len(cited_sigs)), len(cited_sigs))}"
+            m.notes.append(f"signatures of the cited alerts: {shown}"
+                           + (f"; {others} other signature(s) are in alerts not cited" if others > 0 else ""))
             out.append(m)
         return out
 

@@ -390,6 +390,21 @@ def internal_address(ip: str) -> bool:
     return routable_remote(ip) and not external(ip)
 
 
+def _per_sensor_cited(evs: list[TypedEvent], tallies: dict) -> str:
+    """How many of each sensor's counted records to the server port are cited ('0 of the 2 Suricata flow records')."""
+    cited = Counter(ARKIME if e.family == "net_session" else SURICATA for e in evs)
+    parts = []
+    for sensor, tally in sorted(tallies.items()):
+        total = tally["records"]
+        kind = "flow record" if sensor == SURICATA else "session record"
+        shown = min(cited[sensor], total)
+        name = f"{SENSOR_NAMES[sensor]} {kind}"
+        parts.append(f"the one {name}" if total == 1 and shown == 1 else f"all {total} {name}s" if shown == total
+                     else f"{shown} of the {total} {name}{'' if total == 1 else 's'}")
+    return " Of the records the per-sensor totals count, " + " and ".join(parts) + (
+        " is cited." if len(parts) == 1 and parts[0].startswith("the one") else " are cited.")
+
+
 def _plural(n: int, word: str, plural: str | None = None) -> str:
     return f"{n} {word if n == 1 else (plural or word + 's')}"
 
@@ -1195,8 +1210,7 @@ class ProtocolPortMismatch(_FlowRule):
                  + cited_phrase(len(evs), records[SURICATA] + records[ARKIME], not missing,
                                 "records with no identified protocol", "record with no identified protocol")
                  + bound_note(missing, group.ends)
-                 + (f" {min(len(evs), counted)} of the {counted} records to {server} on this port that the per-sensor "
-                    f"totals count are cited." if denominators and counted > len(evs) else ""))
+                 + (_per_sensor_cited(evs, tallies) if denominators and counted > len(evs) else ""))
         match = Match(self.id, claim, "network_observation", evs,
                       _predicates(evs[0], ("source.ip", "source.port", "destination.ip", "destination.port",
                                            "network.app_proto", "network.protocols")),
@@ -1845,7 +1859,7 @@ class OutboundVolumeAsymmetry(_FlowRule):
                 self.limits[f"not_read_{kind}"] = _NotRead(text, records=count, hits=1)
 
     def coverage_notes(self) -> list[str]:
-        return list(getattr(self, "_notes", []))
+        return list(getattr(self, "_notes", [])) + super().coverage_notes()
 
     @staticmethod
     def _openings(src: str, dst: str, totals: _PairTotals) -> str:

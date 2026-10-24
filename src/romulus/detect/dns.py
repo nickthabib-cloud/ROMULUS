@@ -994,17 +994,26 @@ class DnsReverseLookupSweep(_DnsAggregate):
             if densest < self.DENSE_BLOCK and state.n_names < self.MIN_DISTINCT:
                 continue
             addresses = state.addresses
+            # a block is named only with the records showing its lowest and highest address (blocks past BLOCK_STORES
+            # keep none, and are counted instead)
+            unstored = {item[0]: item[2] for item in state.top_blocks}
+            listed = [entry for entry in ranked if entry[0] in state.block_ends or entry[0] in unstored]
+            spans = [state.vends[version] for version in (4, 6)
+                     if state.n_blocks > 1 and state.vspan.get(version)]
+            dense_store = state.block_examples.get(listed[0][0]) if listed else None
+            ends = [state.ends, *spans, *(state.block_ends[entry[0]] for entry in listed if entry[0] in state.block_ends)]
+            dense = self._events(dense_store.ids()) if dense_store else []
+            evs, missing, context = self._cite(ends, _fill(dense, self._events(state.examples.ids())),
+                                               [unstored[entry[0]] for entry in listed if entry[0] in unstored])
+            in_block = _addresses_by_block(evs)
             claim = (f"{client} sent {state.queries} DNS question record(s) for {state.n_names} distinct "
                      f"reverse-lookup name(s) ({state.span.text()}; question types: "
                      f"{_tally(Counter(state.types))}). {addresses} of the names stand for single addresses in "
                      f"{state.n_blocks} block(s)")
             if state.zone_names:
                 claim += f"; {state.zone_names} name a reverse zone rather than one address"
-            # a block is named only with the records showing its lowest and highest address (blocks past BLOCK_STORES
-            # keep none, and are counted instead)
-            unstored = {item[0]: item[2] for item in state.top_blocks}
-            listed = [entry for entry in ranked if entry[0] in state.block_ends or entry[0] in unstored]
-            shown = [f"{block} ({count} address(es), {low} – {high})" if block in state.block_ends
+            shown = [f"{block} ({count} address(es), {low} – {high}; {_cited_of(in_block.get(str(block), 0), count)})"
+                     if block in state.block_ends
                      else f"{block} ({count} address(es); its range is not cited)"
                      for block, count, low, high in listed]
             claim += (f". Densest: {'; '.join(shown)}" if shown else "")
@@ -1012,12 +1021,10 @@ class DnsReverseLookupSweep(_DnsAggregate):
                 claim += (f"{';' if shown else '. Of the densest blocks,'} {len(ranked) - len(listed)} "
                           f"{'more ' if shown else ''}keep no cited record and are not named")
             claim += "."
-            spans = []
             for version in (4, 6):
                 span = state.vspan.get(version)
                 if state.n_blocks > 1 and span:
                     claim += f" IPv{version} addresses span {span[0]} – {span[1]}."
-                    spans.append(state.vends[version])
             if state.n_blocks:
                 claim += f" {state.internal} of the {addresses} addresses are in internal ranges."
             if densest >= self.DENSE_BLOCK:
@@ -1027,11 +1034,6 @@ class DnsReverseLookupSweep(_DnsAggregate):
                 claim += (f" No block holds {self.DENSE_BLOCK} or more of them: lookups spread across many blocks "
                           f"are the shape of a server resolving its peers' names as well as of a sparse sweep.")
             claim += " The question records do not show whether names were returned."
-            dense_store = state.block_examples.get(listed[0][0]) if listed else None
-            ends = [state.ends, *spans, *(state.block_ends[entry[0]] for entry in listed if entry[0] in state.block_ends)]
-            dense = self._events(dense_store.ids()) if dense_store else []
-            evs, missing, context = self._cite(ends, _fill(dense, self._events(state.examples.ids())),
-                                               [unstored[entry[0]] for entry in listed if entry[0] in unstored])
             claim += cited_phrase(len(evs), state.queries, not missing, "question records", "question record")
             if missing:
                 claim += (" A record bounding a stated span or address range was not kept for citation; the values are "
@@ -1049,6 +1051,22 @@ class DnsReverseLookupSweep(_DnsAggregate):
 def _block_of(address):
     """The IPv4 /24 or IPv6 /64 holding an address."""
     return ipaddress.ip_network(f"{address}/{24 if address.version == 4 else 64}", strict=False)
+
+
+def _addresses_by_block(events: list[TypedEvent]) -> Counter:
+    """How many distinct addresses the cited question records name in each block (by the block's text)."""
+    found: dict[str, set] = {}
+    for event in events:
+        for name in question_names(event) or ():
+            address = reverse_address(name)
+            if address is not None:
+                found.setdefault(str(_block_of(address)), set()).add(address)
+    return Counter({block: len(addresses) for block, addresses in found.items()})
+
+
+def _cited_of(shown: int, total: int) -> str:
+    """'4 of the 200 are in cited records' (or all of them)."""
+    return f"all {total} are in cited records" if shown >= total else f"{shown} of the {total} are in cited records"
 
 
 # ---------------------------------------------------------------------------------------- NXDOMAIN burst
@@ -1675,10 +1693,14 @@ class DnsTunnelShape(_DnsAggregate):
                   f"under a listed country suffix).")
         sample = record.top_long or record.top_any
         claim += f" Examples: {', '.join(repr(sub + '.' + domain) for sub, _id in sample)}."
-        if found["lane"] == "high":
-            claim += (f" {found['strong']} questions for long names are NULL, CNAME, MX or private-use types, which "
-                      f"clients almost never ask with long unique names; examples of them are cited.")
         evs, missing, context = self._cited(record, found)
+        if found["lane"] == "high":
+            strong = found["strong"]
+            kept = set(record.strong_examples.ids()) if record.strong_examples else set()
+            shown = sum(e.id in kept for e in evs)
+            claim += (f" {strong} questions for long names are NULL, CNAME, MX or private-use types, which clients "
+                      f"almost never ask with long unique names; "
+                      + (f"all {strong} are cited." if shown >= strong else f"{shown} of the {strong} are cited."))
         claim += cited_phrase(len(evs), record.queries, not missing, "questions", "question") + bound_note(
             missing, record.ends)
         predicate = [pf(e, n) for e in evs[:2] for n in ("dns.question.name", "dns.question.type", "source.ip")

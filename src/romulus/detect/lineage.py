@@ -559,11 +559,25 @@ class ReverseShellByLineage(Playbook):
         for h in hits:
             per_pair.setdefault((h.owner_pid, h.socket.peer_ip, str(h.socket.peer_port)), h)
         pairs = sorted(per_pair.items(), key=lambda kv: (kv[1].shell.ts, kv[1].shell.event_id))
-        cited_ids = sorted({i for _k, h in pairs[:HELPER_PAIRS_CITED] for i in (h.shell.event_id, h.socket.event_id)}
+        # the pairs cited: the earliest for each distinct peer, then for each distinct pid, then the rest, so the
+        # cap leaves out repeats before it leaves out a peer or a pid
+        chosen: dict[tuple, _Hit] = {}
+        for part in (2, 1, 0):
+            seen: set = set()
+            for k, h in pairs:
+                tag = (k[1], k[2]) if part == 2 else k[0] if part == 1 else k
+                if tag not in seen and k not in chosen:
+                    seen.add(tag)
+                    chosen[k] = h
+        cited_pairs = list(chosen.items())[:HELPER_PAIRS_CITED]
+        cited_ids = sorted({i for _k, h in cited_pairs for i in (h.shell.event_id, h.socket.event_id)}
                            | {s.event_id for s in shells[:CITE_PER_GROUP]})
-        named_peers = sorted({f"{h.socket.peer_ip}:{h.socket.peer_port}" for _k, h in pairs[:HELPER_PAIRS_CITED]})
-        named_pids = sorted({h.owner_pid for _k, h in pairs[:HELPER_PAIRS_CITED]})
-        listed = ", ".join(named_peers[:PEERS_LISTED]) + more(min(PEERS_LISTED, len(named_peers)), len(peers))
+        named_peers = sorted({f"{h.socket.peer_ip}:{h.socket.peer_port}" for _k, h in cited_pairs})
+        named_pids = sorted({h.owner_pid for _k, h in cited_pairs})
+        unnamed = len(peers) - len(named_peers)
+        listed = (", ".join(named_peers[:PEERS_LISTED]) + more(min(PEERS_LISTED, len(named_peers)), len(named_peers))
+                  + (f"; {unnamed} other peer(s) in the windows, whose socket records are not cited" if unnamed
+                     else ""))
         pid_text = (("pid " if len(named_pids) == 1 else "pids ") + ", ".join(str(p) for p in named_pids)
                     + more(len(named_pids), len(pids)))
         claim = (
@@ -599,8 +613,8 @@ class ReverseShellByLineage(Playbook):
             notes.append(f"{len(pairs)} (pid, peer) pairs; a shell and socket are cited for the first "
                          f"{HELPER_PAIRS_CITED}")
         notes += [f"peer: {peer}" for peer in named_peers]
-        if len(peers) > len(named_peers):
-            notes.append(f"{len(peers) - len(named_peers)} more peer(s) whose socket records are not cited")
+        if unnamed:
+            notes.append(f"{unnamed} more peer(s) whose socket records are not cited")
         notes.append(f"PID reuse by a forked process with no exec record cannot be excluded; the gap is bounded "
                      f"by {MAX_GAP:.0f}s")
         if len(shells) > CITE_PER_GROUP:

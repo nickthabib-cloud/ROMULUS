@@ -30,7 +30,7 @@ from typing import ClassVar, NamedTuple
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, pf
 from romulus.detect.bounded import HOT_COUNT, KeyedStore, RecentIds, SpillList, StateExhausted
-from romulus.detect.citing import cited_phrase
+from romulus.detect.citing import Ends, bound_note, cited_phrase
 from romulus.detect.host import (
     UNBUDGETED,
     Lineage,
@@ -78,12 +78,14 @@ def _unique(events) -> list[TypedEvent]:
 
 
 def _names(items, limit: int = 8, more_than: int | None = None) -> str:
-    """The first `limit` items quoted, and how many more of `more_than` (all of `items` by default) there are."""
+    """The first `limit` items quoted, and how many more of `more_than` (all of `items` by default) there are; with
+    none to quote, how many there are and that none is in a cited record."""
     items = sorted(items)
     total = len(items) if more_than is None else more_than
     shown = items[:limit]
-    text = ", ".join(f"'{item}'" for item in shown) or "none"
-    return text + (f" and {total - len(shown)} more" if total > len(shown) else "")
+    if not shown:
+        return f"none of the {total} is in a cited record" if total else "none"
+    return ", ".join(f"'{item}'" for item in shown) + (f" and {total - len(shown)} more" if total > len(shown) else "")
 
 
 class _Attempt(NamedTuple):
@@ -410,7 +412,7 @@ class SshPasswordGuessing(_SshAttemptStream):
                       if ok else " The retrieved records hold no accepted sshd login for this account from this "
                                  "source.")
             claim += " Failures inside connections that then logged in are not counted."
-            claim += cited_phrase(len(events), t.attempts, True, "attempt records", "attempt record")
+            claim += _span_cited(events, t, "attempt records", "attempt record")
             m = Match(self.id, claim, self.claim_type, events, _ssh_predicate(events[:3]), events[0].ts,
                       self.severity, self.lane, "high", events[0].entities(), group_key=f"{host}|{ip}|{account}",
                       context_ids={e.id for e in spanning})
@@ -510,18 +512,38 @@ class SshPasswordSpraying(_SshAttemptStream):
                      f"name(s) from {ip} between {_iso(t.first)} and {_iso(t.last)} ({t.attempts} attempt(s) in "
                      f"{t.connections} connection(s)); the most distinct names within any "
                      f"{self.WINDOW / 60:.0f} minutes was {t.peak} (threshold {self.THRESHOLD}), first reached at "
-                     f"{_iso(t.crossed)}. Names in the cited records: {_names(named, more_than=total_names)}. Of "
+                     f"{_iso(t.crossed)}. {_names_cited(named, total_names)}. Of "
                      f"all the names, sshd reported {len(t.invalid_names)} of them as invalid users (no such account, "
                      f"or not permitted to log in).")
             claim += (f" The retrieved records hold {ok} accepted sshd login(s) from this source." if ok else
                       " The retrieved records hold no accepted sshd login from this source.")
             claim += " Failures inside connections that then logged in are not counted."
-            claim += cited_phrase(len(events), t.attempts, True, "attempt records", "attempt record")
+            claim += _span_cited(events, t, "attempt records", "attempt record")
             m = Match(self.id, claim, self.claim_type, events, _ssh_predicate(events[:3]), events[0].ts,
                       self.severity, self.lane, "high", events[0].entities(), group_key=f"{host}|{ip}",
                       context_ids={e.id for e in spanning})
             out.append(m)
         return out
+
+
+def _names_cited(named: set[str], total: int) -> str:
+    """Which of a count of names the cited records show: 'All 3 names are in cited records: ...', '5 of the 30 names
+    are in cited records: ...' or 'None of the 30 names is in a cited record'."""
+    if not named:
+        return f"None of the {total} names is in a cited record"
+    if len(named) >= total:
+        return f"All {total} names are in cited records: {_names(named)}"
+    return f"{len(named)} of the {total} names are in cited records: {_names(named)}"
+
+
+def _span_cited(events: list[TypedEvent], t, noun: str, one: str) -> str:
+    """How many of the counted records are cited, and whether the first and the last are among them: a bounding
+    record the stage no longer holds is named as not cited."""
+    ids = {e.id for e in events}
+    missing = {i for i in (t.first_id, t.last_id) if i and i not in ids}
+    bounded = not missing and bool(t.first_id) and bool(t.last_id)
+    return (cited_phrase(len(events), t.attempts, bounded, noun, one)
+            + bound_note(missing, Ends(first=(0.0, t.first_id), last=(0.0, t.last_id)), "the stated span"))
 
 
 @dataclass

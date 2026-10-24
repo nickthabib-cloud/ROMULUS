@@ -1579,8 +1579,9 @@ class ExecLineage:
 
     With `citing`, it also keeps every exec record for citation (`exec_records`: the typed event and its raw copies,
     compressed, one disk-backed row per exec, read only when a lineage names the exec), so a claim that names an exec
-    ancestor cites it. A record the store refuses is named as not kept for citation; the lineage itself is unchanged,
-    as it is read from the exec records above."""
+    ancestor cites it. The store yields to every detection store in the hunt's state budget (no floor, and no new
+    record once half the shared headroom is held). A record it refuses is named as not kept for citation, in a coverage
+    note rather than a limit: nothing went unevaluated, and the lineage itself is read from the exec records above."""
 
     # Records held for citation in memory; the rest wait on disk (they are read only when a finding cites them).
     CITATIONS_HOT = 4096
@@ -1609,6 +1610,8 @@ class ExecLineage:
         self.observed_incomplete = False
         self.exec_records = (KeyedStore(owner, "exec_records", self.CITATIONS_HOT, disk_budget=self.EXEC_RECORDS_DISK)
                              if citing else None)
+        if self.exec_records is not None:
+            self.exec_records.yields = True
 
     @property
     def records(self) -> KeyedStore:
@@ -1673,10 +1676,11 @@ class ExecLineage:
             return
         when = event.ts.isoformat()
         for member in self.members:
-            member.note_limit("lineage_exec_records", f"the store of exec records kept for citation took no new record "
-                                                      f"from the record of {when} on (its share of the state budget is "
-                                                      f"spent): a claim naming a later exec ancestor says its record is "
-                                                      f"not cited")
+            member.note_coverage("lineage_exec_records",
+                                 f"the store of exec records kept for citation took no new record from the record of "
+                                 f"{when} on (it gives way to the detection stores' state budget); every record was "
+                                 f"still evaluated, and a claim naming a later exec ancestor says its record is not "
+                                 f"cited")
 
     def entries(self, host: str | None, pid: int) -> list[ExecRecord]:
         """The process's records in time order; read in place when the store does not bring a process back to
@@ -1971,12 +1975,17 @@ _INLINE_FLAGS = frozenset({"-c", "-e", "-E", "-r", "--command", "--eval"})
 
 
 def _inline_code(name: str, argv: list) -> bool:
-    """Whether an interpreter's first operand is inline code: a flag that takes code (sh -c, python -c, perl -e,
-    php -r) before it, or a shell's grouped short flags that include c (sh -ec)."""
+    """Whether an interpreter's first operand is inline code: a flag that takes code (python -c, perl -e, php -r)
+    before it, or for a shell only -c, alone or among grouped short flags (sh -c, sh -ec). A shell's -e, -E or -r is
+    an option, not code (sh -e /path/script runs the script)."""
+    shell = name in SHELLS
     for arg in (str(a) for a in argv[1:]):
         if not arg.startswith("-"):
             return False
-        if arg in _INLINE_FLAGS or (name in SHELLS and not arg.startswith("--") and "c" in arg[1:]):
+        if shell:
+            if arg == "--command" or (not arg.startswith("--") and "c" in arg[1:]):
+                return True
+        elif arg in _INLINE_FLAGS:
             return True
     return False
 
