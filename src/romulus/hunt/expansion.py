@@ -4,8 +4,10 @@ from __future__ import annotations
 import ipaddress
 import json
 import time
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 from collections.abc import Callable
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import UTC, datetime, timedelta
 
 from romulus.agent.models import PivotCoverage
@@ -75,9 +77,47 @@ FALLBACK_LOOKUP_SHARE = 0.10
 FALLBACK_CAP_REASON = "fallback lookup cap reached"
 
 
+# Cited records the planning cache may hold across all its anchors' plans. Beyond it the least recently planned anchor
+# is dropped and planned again from the store when it is next needed, exactly as an uncached plan would be, so the
+# cache bounds memory without changing a result; at a few KB per typed record this is a few hundred MB at most.
+PLAN_CACHE_EVENTS = 100_000
+
+
 def fallback_lookup_cap(max_source_queries: int) -> int:
     """Source queries all fallback lookups of a hunt may spend: FALLBACK_LOOKUP_SHARE of the budget, at least 1."""
     return max(1, int(max_source_queries * FALLBACK_LOOKUP_SHARE))
+
+
+@dataclass
+class _LinkPlan:
+    variants: list[LinkAnchor]
+    notes: tuple[str, ...]
+    planned_query_cap: int
+    planned_budget: int
+    retryable: bool
+    planned_lookups: int = 0         # the hunt's resolved lookups when planned: a refused plan retries when they grow
+    slots: dict[str, list[_PlannedSlot]] = dataclass_field(default_factory=dict)
+
+
+@dataclass
+class _AnchorPlan:
+    row: dict
+    candidate: dict
+    events: list[TypedEvent]
+    anchor: LinkAnchor
+    windows: dict[str, LinkWindow]
+    links: dict[LinkType, _LinkPlan] = dataclass_field(default_factory=dict)
+
+
+@dataclass
+class _PlannedSlot:
+    row: dict
+    candidate: dict
+    anchor: LinkAnchor
+    link_type: LinkType
+    window: LinkWindow
+    stored: dict | None
+    done: bool = False
 
 class ExpansionEngine:
     def __init__(
@@ -112,6 +152,10 @@ class ExpansionEngine:
         self._fallback_queries = 0
         # anchor id -> its hunt-independent identity, the last tie-break of the anchor order
         self._identities: dict[str, str] = {}
+        # Planning inputs live only for this run, least recently used first, holding at most PLAN_CACHE_EVENTS cited
+        # records in all; variants share those event objects.
+        self._plans: OrderedDict[str, _AnchorPlan] = OrderedDict()
+        self._plan_events = 0
 
     def _events(self, ids: list[str]) -> list[TypedEvent]:
         """Stored records, with the boot the hunt's map places them in when they carry none (a sweep record read
@@ -288,11 +332,36 @@ class ExpansionEngine:
         variants = [anchor.model_copy(update={"events": [event]}) for _key, event in kept]
         return variants, [key for key, _event in dropped]
 
-    def _seed_anchors(self) -> None:
-        existing = {row["candidate_id"] for row in self.repo.expansion_anchors(self.hunt_id)}
-        depths = {row["id"]: row["depth"] for row in self.repo.expansion_anchors(self.hunt_id)}
-        for candidate in self.repo.candidates(self.hunt_id, ["urgent", "high"]):
-            if candidate["id"] in existing:
+    def _anchor_plan(self, row: dict, *, candidate: dict | None = None,
+                     events: list[TypedEvent] | None = None) -> _AnchorPlan:
+        plan = self._plans.get(row["id"])
+        if plan is not None:
+            self._plans.move_to_end(row["id"])
+            return plan
+        candidate = candidate or self.repo.candidate(row["candidate_id"])
+        events = events if events is not None else self._events(candidate["event_ids"])
+        candidate_ts = _utc(candidate["ts"])
+        plan = _AnchorPlan(
+            row=row, candidate=candidate, events=events,
+            anchor=LinkAnchor(
+                finding_id=candidate["id"], ts=candidate_ts, host=row["host"],
+                event_ids=candidate["event_ids"], events=events,
+            ),
+            windows={window.label: window for window in expansion_windows(candidate_ts, self.window)},
+        )
+        self._plans[row["id"]] = plan
+        self._plan_events += len(events)
+        while self._plan_events > PLAN_CACHE_EVENTS and len(self._plans) > 1:
+            _evicted, dropped = self._plans.popitem(last=False)
+            self._plan_events -= len(dropped.events)
+        return plan
+
+    def _seed_candidates(self, candidates: list[dict], existing_rows: list[dict]) -> list[dict]:
+        existing = {row["candidate_id"] for row in existing_rows}
+        depths = {row["id"]: row["depth"] for row in existing_rows}
+        added = []
+        for candidate in candidates:
+            if candidate["id"] in existing or candidate["lane"] not in {"urgent", "high"}:
                 continue
             # Agent-published discoveries remain case contributions. A resume must not silently
             # promote them into deterministic expansion roots with a different reach contract.
@@ -306,20 +375,30 @@ class ExpansionEngine:
             depth = depths.get(parent, -1) + 1 if parent else 0
             events = self._events(candidate["event_ids"])
             host = self._anchor_host(events)
-            self.repo.save_expansion_anchor({
+            row = {
                 "id": candidate["id"], "hunt_id": self.hunt_id, "candidate_id": candidate["id"],
                 "depth": depth, "parent_anchor_id": parent, "host": host, "lane": candidate["lane"],
                 "severity": candidate["severity"], "ts": candidate["ts"], "status": "pending", "reasons": [],
-            }, owner_token=self.owner_token)
+            }
+            if not self.repo.save_expansion_anchor(row, owner_token=self.owner_token):
+                continue
             existing.add(candidate["id"])
             depths[candidate["id"]] = depth
+            added.append(row)
+            self._anchor_plan(row, candidate=candidate, events=events)
+        return added
+
+    def _seed_anchors(self) -> list[dict]:
+        rows = self.repo.expansion_anchors(self.hunt_id)
+        return self._seed_candidates(self.repo.candidates(self.hunt_id, ["urgent", "high"]), rows)
 
     def _identity(self, row: dict) -> str:
         """The anchor's rule and evidence, which are the same in every hunt over the same records. A candidate id also
         carries its hunt's id, so ordering ties by it would give two runs of one hunt different anchor orders, and a
         budget cut inside a tier would then fall on different links."""
         if row["id"] not in self._identities:
-            candidate = self.repo.candidate(row["candidate_id"])
+            plan = self._plans.get(row["id"])
+            candidate = plan.candidate if plan is not None else self.repo.candidate(row["candidate_id"])
             self._identities[row["id"]] = digest({
                 "rule_id": candidate["rule_id"],
                 "evidence": candidate.get("group_key") or sorted(candidate["event_ids"]),
@@ -375,54 +454,93 @@ class ExpansionEngine:
             return budget
         return min(budget, root_budget + (reserve // 2 if reserve - reserve // 2 >= 2 else 0))
 
-    def _tier_slots(self, ordered: list[dict], anchor_reasons: dict[str, list[str]], root_cap: int) -> list[tuple]:
-        """The unevaluated links of the lowest tier any of these anchors still has, in anchor order."""
+    @staticmethod
+    def _add_reason(anchor_reasons: dict[str, list[str]], anchor_id: str, reason: str) -> None:
+        if reason not in anchor_reasons[anchor_id]:
+            anchor_reasons[anchor_id].append(reason)
+
+    @staticmethod
+    def _retryable_victim_plan(variants: list[LinkAnchor], notes: list[str]) -> bool:
+        reasons = [*(variant.host_reason or "" for variant in variants), *notes]
+        return any("budget" in reason or FALLBACK_CAP_REASON in reason for reason in reasons)
+
+    def _link_plan(self, plan: _AnchorPlan, link_type: LinkType,
+                   anchor_reasons: dict[str, list[str]], root_cap: int) -> _LinkPlan:
+        query_cap = root_cap if plan.row["depth"] == 0 else self.max_source_queries
+        cached = plan.links.get(link_type)
+        lookups = len(self._fallback or {})
+        if cached is not None and not (
+            cached.retryable
+            and (query_cap > cached.planned_query_cap or self.budget > cached.planned_budget
+                 or lookups > cached.planned_lookups)
+        ):
+            return cached
+
+        variants, dropped = self._link_anchors(plan.anchor, link_type)
+        notes: list[str] = []
+        if link_type in HOST_SIDE_LINKS and not plan.anchor.host:
+            variants, dropped_ips, notes = self._victim_variants(
+                plan.candidate["id"], variants, plan.events, query_cap=query_cap,
+            )
+            for note in notes:
+                self._add_reason(anchor_reasons, plan.row["id"], note)
+            if dropped_ips:
+                self._add_reason(
+                    anchor_reasons, plan.row["id"],
+                    "keys_not_expanded:" + json.dumps(
+                        [{"victim_ip": ip} for ip in dropped_ips],
+                        sort_keys=True, separators=(",", ":"),
+                    ),
+                )
+        if dropped:
+            self._add_reason(
+                anchor_reasons, plan.row["id"],
+                "keys_not_expanded:" + json.dumps(dropped, sort_keys=True, separators=(",", ":")),
+            )
+        planned = _LinkPlan(
+            variants=variants, notes=tuple(notes), planned_query_cap=query_cap, planned_budget=self.budget,
+            retryable=self._retryable_victim_plan(variants, notes), planned_lookups=len(self._fallback or {}),
+        )
+        plan.links[link_type] = planned
+        return planned
+
+    def _planned_slots(self, plan: _AnchorPlan, link_type: LinkType, window_label: str,
+                       anchor_reasons: dict[str, list[str]], root_cap: int) -> list[_PlannedSlot]:
+        link_plan = self._link_plan(plan, link_type, anchor_reasons, root_cap)
+        cached = link_plan.slots.get(window_label)
+        if cached is not None:
+            return cached
+        window = plan.windows[window_label]
+        slots = []
+        for variant in link_plan.variants:
+            if hasattr(self.fetcher, "result_id"):
+                stored = self.repo.expansion_link(self.fetcher.result_id(variant, link_type, window))
+            else:
+                stored = self.repo.expansion_link_for(
+                    plan.candidate["id"], link_type, window.label, window.start, window.end,
+                )
+            done = bool(stored and stored["evaluated"])
+            # an evaluated link needs nothing more from its stored row, which can carry thousands of record ids
+            slots.append(_PlannedSlot(
+                row=plan.row, candidate=plan.candidate, anchor=variant, link_type=link_type,
+                window=window, stored=None if done else stored, done=done,
+            ))
+        link_plan.slots[window_label] = slots
+        return slots
+
+    def _tier_slots(self, ordered: list[dict], anchor_reasons: dict[str, list[str]],
+                    root_cap: int) -> list[_PlannedSlot]:
+        """The unevaluated slots of the lowest unfinished tier, assembled from per-anchor plans."""
         for _tier, link_types, window_label in TIER_PLAN:
             tier_slots = []
             for link_type in link_types:
                 for anchor_row in ordered:
-                    candidate = self.repo.candidate(anchor_row["candidate_id"])
-                    candidate_ts = _utc(candidate["ts"])
-                    anchor_events = self._events(candidate["event_ids"])
-                    base_anchor = LinkAnchor(
-                        finding_id=candidate["id"], ts=candidate_ts, host=anchor_row["host"],
-                        event_ids=candidate["event_ids"], events=anchor_events,
+                    plan = self._anchor_plan(anchor_row)
+                    tier_slots.extend(
+                        slot for slot in self._planned_slots(
+                            plan, link_type, window_label, anchor_reasons, root_cap,
+                        ) if not slot.done
                     )
-                    window = next(
-                        item for item in expansion_windows(candidate_ts, self.window)
-                        if item.label == window_label
-                    )
-                    variants, dropped = self._link_anchors(base_anchor, link_type)
-                    if link_type in HOST_SIDE_LINKS and not base_anchor.host:
-                        cap = root_cap if anchor_row["depth"] == 0 else self.max_source_queries
-                        variants, dropped_ips, notes = self._victim_variants(
-                            candidate["id"], variants, anchor_events, query_cap=cap)
-                        anchor_reasons[anchor_row["id"]].extend(
-                            note for note in notes if note not in anchor_reasons[anchor_row["id"]])
-                        if dropped_ips:
-                            anchor_reasons[anchor_row["id"]].append(
-                                "keys_not_expanded:" + json.dumps(
-                                    [{"victim_ip": ip} for ip in dropped_ips],
-                                    sort_keys=True, separators=(",", ":")))
-                    if dropped:
-                        anchor_reasons[anchor_row["id"]].append(
-                            "keys_not_expanded:" + json.dumps(
-                                dropped, sort_keys=True, separators=(",", ":"),
-                            ),
-                        )
-                    for variant in variants:
-                        if hasattr(self.fetcher, "result_id"):
-                            stored = self.repo.expansion_link(
-                                self.fetcher.result_id(variant, link_type, window),
-                            )
-                        else:
-                            stored = self.repo.expansion_link_for(
-                                candidate["id"], link_type, window.label, window.start, window.end,
-                            )
-                        if not (stored and stored["evaluated"]):
-                            tier_slots.append((
-                                anchor_row, candidate, variant, link_type, window, stored,
-                            ))
             if tier_slots:
                 return tier_slots
         return []
@@ -453,10 +571,11 @@ class ExpansionEngine:
             "query_spend": result.query_spend, "evaluated": 0,
         }, owner_token=self.owner_token)
 
-    def _evaluate(self, candidate: dict, anchor_events: list[TypedEvent], result: LinkResult) -> None:
+    def _evaluate(self, candidate: dict, result: LinkResult) -> list[dict]:
         # Per link, only the direct (sweep) pack runs: a strong indicator among the linked records is published
         # immediately. Context rules are judged once, after expansion ends, by finalize_context.
         events = self._events(result.event_ids)
+        published = []
         for playbook in fresh_direct_pack():
             for match in playbook.consume(events):
                 # The finding stands on its own cited records and keeps its machine lane. Only its relation to
@@ -465,11 +584,14 @@ class ExpansionEngine:
                     match, anchor_id=candidate["id"], link_type=result.link_type,
                     link_id=result.id, strength=result.strength,
                 )
-                publish_match(
+                row = publish_match(
                     self.repo, self.hunt_id, playbook, match, result.task_ids[0] if result.task_ids else None, {},
                     source_anchor_id=candidate["id"], source_link_id=result.id, owner_token=self.owner_token,
                 )
+                if row is not None:
+                    published.append(row)
         self.repo.mark_expansion_link_evaluated(result.id, owner_token=self.owner_token)
+        return published
 
     def _budget_reason(self, query_count: int) -> str | None:
         if query_count >= self.budget:
@@ -480,6 +602,7 @@ class ExpansionEngine:
 
     def run(self) -> dict:
         self._seed_anchors()
+        all_rows = self.repo.expansion_anchors(self.hunt_id)
         query_count = self.repo.expansion_source_queries(self.hunt_id)
         executor = getattr(self.fetcher, "executor", None)
         if executor is not None and hasattr(executor, "source_queries"):
@@ -492,8 +615,6 @@ class ExpansionEngine:
         # reserve is released or a discovered anchor brings its share; the anchor then spends again.
         budget_blocked: dict[str, tuple[int, list[str]]] = {}
         while True:
-            self._seed_anchors()
-            all_rows = self.repo.expansion_anchors(self.hunt_id)
             self.budget = self._budget_for(all_rows)
             eligible = []
             for row in all_rows:
@@ -504,6 +625,12 @@ class ExpansionEngine:
                     anchor_reasons[row["id"]].append(reason)
                     blocked_anchors.add(row["id"])
                     stop_reason = "depth_limit"
+                    continue
+                plan = self._anchor_plan(row)
+                candidate_ts = _utc(plan.candidate["ts"])
+                if not (_utc(self.window.start) <= candidate_ts < _utc(self.window.end)):
+                    self._add_reason(anchor_reasons, row["id"], "anchor outside the hunt window")
+                    blocked_anchors.add(row["id"])
                     continue
                 eligible.append(row)
             # Always choose the globally lowest unfinished tier, so every anchor, and a newly discovered one, gets its
@@ -535,7 +662,9 @@ class ExpansionEngine:
                 query_count = max(query_count, spent)
             made_progress = False
             known_anchor_ids = {row["id"] for row in all_rows}
-            for slot_index, (anchor_row, candidate, anchor, link_type, window, stored) in enumerate(slots):
+            for slot_index, slot in enumerate(slots):
+                anchor_row, candidate, anchor = slot.row, slot.candidate, slot.anchor
+                link_type, window, stored = slot.link_type, slot.window, slot.stored
                 if stored:
                     budget_reason = None
                 else:
@@ -567,7 +696,6 @@ class ExpansionEngine:
                 remaining_slots = len(slots) - slot_index
                 query_cap = min(12, max(2, remaining // max(1, remaining_slots)))
                 self.heartbeat()
-                anchor_events = self._events(candidate["event_ids"])
                 result = self._stored_result(stored) if stored else self.fetcher.fetch(
                     anchor, link_type, window, query_cap=query_cap,
                 )
@@ -576,7 +704,8 @@ class ExpansionEngine:
                     actual_queries = getattr(getattr(self.fetcher, "executor", None), "source_queries", None)
                     query_count = (actual_queries if actual_queries is not None
                                    else query_count + result.query_spend)
-                self._evaluate(candidate, anchor_events, result)
+                published = self._evaluate(candidate, result)
+                slot.done, slot.stored = True, None
                 made_progress = True
                 if result.status != "complete":
                     anchor_reasons[anchor_row["id"]].extend(
@@ -587,8 +716,23 @@ class ExpansionEngine:
                     source_failed = True
                 if self.after_link:
                     self.after_link(result)
-                self._seed_anchors()
-                if {row["id"] for row in self.repo.expansion_anchors(self.hunt_id)} - known_anchor_ids:
+                    added = self._seed_anchors()
+                elif published:
+                    # Direct discoveries are the only production source of anchors during expansion. Seed just
+                    # those rows; the optional callback is a test/integration hook and uses the full scan above.
+                    current = [*all_rows]
+                    added = []
+                    for published_row in published:
+                        stored_candidate = self.repo.candidate(published_row["id"])
+                        if stored_candidate is not None:
+                            newly_added = self._seed_candidates([stored_candidate], current)
+                            current.extend(newly_added)
+                            added.extend(newly_added)
+                else:
+                    added = []
+                if added:
+                    all_rows = self.repo.expansion_anchors(self.hunt_id)
+                if {row["id"] for row in added} - known_anchor_ids:
                     break
             if not made_progress:
                 continue
