@@ -45,14 +45,7 @@ from romulus.detect.host import (  # boot_of and boots_conflict are defined in h
     interpreter_name,
     is_internal,
 )
-from romulus.detect.observed import (
-    OBSERVED,
-    SERVICE_MANAGER_IMAGES,
-    SPAWN_HELPERS,
-    Step,
-    is_reaper,
-    is_service_manager,
-)
+from romulus.detect.observed import EXEC, OBSERVED, ProcessView, Step, is_reaper, spawned
 from romulus.evidence.shellparse import SHELLS
 from romulus.evidence.typed import Outcome, TypedEvent
 
@@ -272,13 +265,16 @@ LINEAGE_LANES = (
     f"lineage only lowers: a web-service group goes to lead when every one of its processes (at most "
     f"{PROCESSES_JUDGED}, each walked from its earliest call through the parent each process had when it was "
     "forked) is proved to descend from a start by the service manager with no web server in between; a parent of "
-    "pid 1 or a subreaper never proves that, and any unknown, unjudged or uncitable lineage keeps the lane")
+    "pid 1, a subreaper, or a program merely named like the service manager never proves that, and any unknown, "
+    "unjudged or uncitable lineage keeps the lane. Residual: a unit started on request (systemd-run, a transient "
+    "unit) by an account allowed to start one has the same spawn record as a configured service, and is lowered "
+    "like one; who asked for it is in the journal, not in these records")
 LINEAGE_TELEMETRY = (
     "lineage from process_exec and from the process state every other audit SYSCALL record shows (process_observed, "
     "net_socket, file_change: process.pid, process.ppid, process.executable, process.session_id, audit.serial, "
     "host.boot.id); present in the lab profile, where connect() is audited for every process (so systemd's spawn "
-    "child, connecting to journald before its exec, proves a service start) and exec auditing covers euid 0 or "
-    "uid<1000 only")
+    "child, connecting to journald before its exec as a child of pid 1 running /usr/lib/systemd/systemd, proves a "
+    "service start) and exec auditing covers euid 0 or uid<1000 only; the lab's audit records carry no unit name")
 _UNBOUNDED = 2**62
 
 
@@ -307,18 +303,19 @@ class ChainLink(NamedTuple):
     pid: int
     exe: str
     raw_id: str
-    observed: bool          # shown by the process's own non-exec record (cited), not by an exec record
+    observed: bool          # an observed record (the process's own non-exec record, cited), not an exec record
     level: int              # 0: the asking process; 1: its parent at fork; ...
-    start: bool = False     # the record proving the service manager started it (its image before its exec)
-    forked_under: int | None = None     # its parent at fork, when a later parent is the one this record shows
-    fork_record: str = ""               # the record showing the parent at fork
+    start: bool = False     # the record proving the service manager started it
+    ppid: int | None = None             # the parent the record shows
 
     def words(self) -> str:
-        what = ("its image before its exec, observed" if self.start else "observed" if self.observed else "exec")
-        text = f"{self.exe} (pid {self.pid}, {what}, record {self.raw_id}"
-        if self.forked_under is not None:
-            text += f"; forked under pid {self.forked_under}, record {self.fork_record}"
-        return text + ")"
+        record = f"{'observed' if self.observed else 'exec'} record {self.raw_id}"
+        if self.start:
+            what = ("running the service manager's own executable as a child of pid 1, before its exec"
+                    if self.observed else "exec of the service manager's spawn helper as a child of pid 1")
+            return f"{self.exe} (pid {self.pid}, {what}, {record})"
+        parent = f", parent pid {self.ppid}" if self.ppid is not None else ""
+        return f"{self.exe} (pid {self.pid}{parent}, {record})"
 
 
 class Ancestry(NamedTuple):
@@ -330,19 +327,33 @@ class Ancestry(NamedTuple):
     why: str = ""
 
 
-def _link(pid: int, step: Step, level: int, *, start: bool = False, first: Step | None = None) -> ChainLink:
-    """A process of the walk named by `step`; `first`, its earliest record, when that shows another parent."""
-    forked = first is not None and first is not step and first.ppid != step.ppid
-    return ChainLink(pid, step.exe, step.entry.raw_id, step.kind == OBSERVED, level, start,
-                     first.ppid if forked else None, first.entry.raw_id if forked else "")
+def _link(pid: int, step: Step, level: int, *, start: bool = False) -> ChainLink:
+    return ChainLink(pid, step.exe, step.entry.raw_id, step.kind == OBSERVED, level, start, step.ppid)
 
 
-def spawned(first: Step) -> bool:
-    """Whether a process's earliest record proves that the service manager started it: the process running the
-    service manager's own image (a child it forked, recorded before its exec), or its spawn helper, which only the
-    service manager runs. A parent of pid 1 alone never proves it."""
-    name = basename(first.exe)
-    return name in SPAWN_HELPERS or (first.kind == OBSERVED and name in SERVICE_MANAGER_IMAGES)
+def _not_forked(child: Step | None, child_pid: int | None, pid: int, view: ProcessView) -> str | None:
+    """Why pid `pid` (its process `view` when its child was first recorded) is not shown to be the parent at fork of
+    the process below, whose earliest record is `child` (None: the walk began at this parent). A process whose parent
+    exits is adopted by pid 1 or by its nearest subreaper, so a recorded parent proves the fork only when the child's
+    earliest record shows it still running its parent's image (forked, not yet exec'd), or is its exec under a parent
+    recorded before it that is not a known subreaper."""
+    image = view.image.exe
+    if child is None:
+        return (f"pid {pid} ('{image}') adopts orphaned processes, and no record of its child shows it was forked "
+                f"there" if is_reaper(image) else None)
+    if child.kind == OBSERVED:
+        if child.exe != image:
+            return (f"the earliest record of pid {child_pid} shows it running '{child.exe}', not the image of its "
+                    f"recorded parent pid {pid} ('{image}'): it may have been adopted by pid {pid} after its parent "
+                    f"exited, so pid {pid} is not shown to be its parent at fork")
+        return None
+    if is_reaper(image):
+        return (f"pid {pid} ('{image}') adopts orphaned processes, and the earliest record of pid {child_pid} is its "
+                f"exec, so it may have been reparented to pid {pid}")
+    if not view.prior:
+        return (f"pid {pid} is recorded only after the earliest record of pid {child_pid}, so it is not shown to have "
+                f"been its parent then")
+    return None
 
 
 class ExecImage(NamedTuple):
@@ -478,6 +489,10 @@ class PidTable:
         cites: list[str] = []
         child: Step | None = None               # the earliest record of the process below (how it was started)
         child_pid = None
+        # A step whose fork is not proved: the recorded parent is still an ancestor (orphans are adopted only by an
+        # ancestor or pid 1), so a web server above it is in the ancestry, but processes between may be missing, so
+        # no start by the service manager is proved through it.
+        gap: str | None = None
         for level in range(depth, LINEAGE_DEPTH + 1):
             view = self.execs.view(host, pid, ts, serial, boot, inclusive=inclusive)
             if view.image is None:
@@ -486,43 +501,44 @@ class PidTable:
                     f"no exec or other audit record of pid {pid} on {host} at or before {when} is in the window"))
             if any(not entry.cited for entry in view.used):
                 return Ancestry("unknown", chain, cites, (
-                    f"a record of pid {pid} on {host} this lineage rests on was not kept for citation (the store of "
-                    f"observed records had no room)"))
+                    f"the earliest record of pid {pid} on {host}, which this lineage rests on, is not held for "
+                    f"citation (the store of observed records had no room, or it arrived after a later record of the "
+                    f"same process)"))
+            if level and gap is None:
+                gap = _not_forked(child, child_pid, pid, view)
             cites += [entry.event_id for entry in view.used if entry.event_id not in cites]
+            named = view.named
             if level:
-                chain.append(_link(pid, view.image, level, first=view.first))
-            web = next((step for step in reversed(view.span) if basename(step.exe).startswith(WEB_SERVER_PREFIXES)),
-                       None)
+                chain.append(_link(pid, named, level))
+            # a web server's image in the process's own records (an exec, or its cited earliest record: an image
+            # seen in any other observation of the span is also one of these)
+            web = next((s for s in reversed(view.span) if basename(s.exe).startswith(WEB_SERVER_PREFIXES)
+                        and (s.kind == EXEC or s.entry.cited)), None)
             if web is not None:
-                if web is not view.image or not level:
+                if web is not named or not level:
                     chain.append(_link(pid, web, level))
                 return Ancestry("web_server", chain, cites)
-            if level and is_reaper(view.image.exe):
-                # a subreaper adopts orphaned descendants: the process below is its child only if its earliest record
-                # shows it running this parent's image (forked, not yet exec'd)
-                if child is None or child.kind != OBSERVED or child.exe != view.image.exe:
-                    return Ancestry("unknown", chain, cites, (
-                        f"pid {pid} ('{view.image.exe}') adopts orphaned processes, and no record shows pid "
-                        f"{child_pid} running its image before an exec, so pid {child_pid} may have been reparented "
-                        f"to it"))
-                if is_service_manager(view.image.exe):
-                    return self._started(chain, cites)
             first = view.first
             if spawned(first):
-                chain.append(_link(pid, first, level, start=True))
+                if gap is not None:
+                    return Ancestry("unknown", chain, cites, gap)
+                if first is not named or not level:
+                    chain.append(_link(pid, first, level, start=True))
+                else:
+                    chain[-1] = chain[-1]._replace(start=True)
                 return self._started(chain, cites)
             parent = first.ppid
             if not isinstance(parent, int):
                 return Ancestry("unknown", chain, cites, f"the earliest record of pid {pid} on {host} names no parent")
             if parent in (0, 1):
                 when = datetime.fromtimestamp(first.ts, UTC).isoformat()
-                return Ancestry("unknown", chain, cites, (
+                return Ancestry("unknown", chain, cites, gap or (
                     f"the earliest record of pid {pid} on {host} ({when}) shows parent pid {parent}: it was started by "
                     f"the service manager or reparented to it after its parent exited, and no record shows which"))
             child, child_pid = first, pid
             pid, ts, serial, inclusive = parent, first.ts, first.serial, False
             boot = boot if boot is not None else first.boot
-        return Ancestry("unknown", chain, cites, f"the lineage is deeper than the {LINEAGE_DEPTH} levels walked")
+        return Ancestry("unknown", chain, cites, gap or f"the lineage is deeper than the {LINEAGE_DEPTH} levels walked")
 
     def _started(self, chain: list[ChainLink], cites: list[str]) -> Ancestry:
         """A service-manager verdict, unless a lineage store refused records in this hunt: then a record that would
@@ -548,7 +564,10 @@ def lineage_lane(reason: str | None, lane: str, judged: list[Judged], unjudged: 
         return lane, []
     return "lead", [(f"lane lowered to lead: audit records trace pid {item.pid} to a start by the service manager "
                      f"with no web server in between ("
-                     + " <- ".join(link.words() for link in item.ancestry.chain) + ")") for item in judged]
+                     + " <- ".join(link.words() for link in item.ancestry.chain)
+                     + "); the start is proved by the service manager's spawn record, and a unit started on request "
+                       "(for example with systemd-run by an account allowed to) has the same record")
+                    for item in judged]
 
 
 class InterpreterExternalConnection(Playbook):
@@ -562,6 +581,7 @@ class InterpreterExternalConnection(Playbook):
              "site's internal networks")
     kind = "aggregate"
     families = LINEAGE_FAMILIES
+    context_families = ("process_observed", "file_change")     # its lineage only (exec records it always read)
     os_families = ("linux",)
     required_fields = ()
     assures_negative = False
@@ -827,6 +847,7 @@ class ProcessNetworkLink(Playbook):
     staged = True
     claim_type = "correlated_observation"
     families = LINEAGE_FAMILIES + NETWORK_JOIN_FAMILIES
+    context_families = ("process_exec", "process_observed", "file_change")     # its lineage only
     os_families = ("linux",)
     required_fields = ()
     # a join that finds nothing proves nothing: sensors and audit rules each see only part of the traffic

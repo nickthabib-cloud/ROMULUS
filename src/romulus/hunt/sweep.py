@@ -55,6 +55,7 @@ LINUX_DATASET_FAMILIES = {
     "linux.audit": {"process_exec", "net_socket", "auth", "file_change", "process_observed"} | _AUDIT_ADMIN,
     "linux.audit.socket": {"net_socket", "process_observed"},
     "linux.audit.file": {"file_change", "process_observed"},
+    "linux.audit.observed": {"process_observed"},
     "linux.audit.auth": {"process_exec", "net_socket", "auth", "file_change", "process_observed"} | _AUDIT_ADMIN,
     "linux.audit.admin": _AUDIT_ADMIN,
     "arkime.session": {"net_session"},
@@ -767,7 +768,9 @@ class Sweep:
         released: list[tuple[str, list[str]]] = []       # (playbook, ids) holds the playbooks let go
         target_os = contract.os_family if contract is not None else "linux"
         for pb in self.pack:
-            relevant_events = [event for event in events if event.family in pb.families]
+            # families a rule reads only as context (its lineage) do not make a partition an evaluation of it
+            evaluated_families = set(pb.families) - set(pb.context_families)
+            relevant_events = [event for event in events if event.family in evaluated_families]
             target_fallback = not relevant_events and (
                 target_os == "unknown" or target_os in pb.os_families
             )
@@ -835,7 +838,7 @@ class Sweep:
             incomplete = rule_partial or bool(missing) or bool(capped) or bool(assumed)
             if not target_applicable:
                 state = "not_applicable_no_events"
-            elif not (set(pb.families) & families) and evaluated == 0:
+            elif not (evaluated_families & families) and evaluated == 0:
                 state = "not_applicable_no_events" if not rule_partial else "evaluated_partial"
             elif pb.kind == "aggregate" and matches:
                 # aggregate rules may publish indicator events during consume(); those are matches

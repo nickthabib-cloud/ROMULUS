@@ -95,6 +95,9 @@ class Playbook:
     version: ClassVar[str] = "1"
     title: ClassVar[str]
     families: ClassVar[tuple[str, ...]]
+    # Families of `families` the rule reads only as context (process lineage): a partition holding only these is no
+    # evaluation of the rule.
+    context_families: ClassVar[tuple[str, ...]] = ()
     # Cross-platform by default. OS-specific rules narrow this without relying on dataset or target names.
     os_families: ClassVar[tuple[str, ...]] = ("linux", "windows")
     # An OS-specific rule may narrow the catalog classes needed for a complete Windows negative. Empty means

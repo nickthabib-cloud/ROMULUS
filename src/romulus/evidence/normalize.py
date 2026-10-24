@@ -1899,15 +1899,37 @@ SINGLE = {
 }
 
 
-def _observed_or_skip(events: list[TypedEvent], skips: dict[str, int], host: str,
-                      members: list[tuple[dict, AuditRecord]], reason: str) -> None:
+def _observed_or_skip(events: list[TypedEvent], skips: dict[str, int], errors: list[tuple[str, str]], host: str,
+                      members: list[tuple[dict, AuditRecord]], reason: str | None) -> None:
     """An audit group that is no event of its own family (`reason`): the process its SYSCALL record names, as a
-    process_observed event; counted as skipped only when no record names one."""
-    observed = normalize_observed_group(host, members)
-    if observed is None:
-        skips[reason] += 1
-    else:
+    process_observed event; counted as skipped only when no record names one (`reason` None: the caller counts it).
+    A group that cannot be read is one error, tagged so that only rules reading observations are partial."""
+    try:
+        observed = normalize_observed_group(host, members)
+    except (AuditParseError, ValueError, KeyError, TypeError, OverflowError, OSError) as e:
+        errors.append((members[0][0]["_id"], f"linux.audit.observed: {e}"))
+        return
+    if observed is not None:
         events.append(observed)
+    elif reason is not None:
+        skips[reason] += 1
+
+
+def observed_record(hit: dict, boot: list | tuple | None = None) -> TypedEvent | None:
+    """The process_observed view of one audit SYSCALL record (a hit as the source returned it), exactly as
+    `normalize_observed_group` builds it, with the boot id the hunt gave the record (`boot`: value and origin) when that
+    came from another record (a journald copy, the boot-interval map). None when it is not such a record."""
+    source = hit["_source"]
+    raw = _get(source, "event.original") or source.get("message")
+    if not raw:
+        return None
+    record = parse_record(raw)
+    if record.type != "SYSCALL":
+        return None
+    event = normalize_observed_group(_get(source, "host.name") or "", [(hit, record)])
+    if event is not None and boot is not None and not event.has("host.boot.id"):
+        event.fields["host.boot.id"] = fv(boot[0], boot[1])
+    return event
 
 
 def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
@@ -2006,7 +2028,7 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                 try:
                     events.extend(normalize_file_group(host, members, file_call))
                 except Skip as s:
-                    _observed_or_skip(events, skips, host, members, s.reason)
+                    _observed_or_skip(events, skips, errors, host, members, s.reason)
                 except (AuditParseError, ValueError, KeyError) as e:
                     # tagged by family so the sweep marks only file-change rules partial
                     errors.append((members[0][0]["_id"], f"linux.audit.file: {e}"))
@@ -2014,19 +2036,17 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
             if syscall is None:
                 arch = sys_rec.fields.get("arch", "") if sys_rec is not None else ""
                 if not arch or arch in SOCKET_SYSCALLS:
-                    _observed_or_skip(events, skips, host, members,
+                    _observed_or_skip(events, skips, errors, host, members,
                                       "audit group without EXECVE, socket or file-change syscall")
                 else:
                     # the process is still observed; what its socket calls did is not decoded, and the skip says so
-                    observed = normalize_observed_group(host, members)
-                    if observed is not None:
-                        events.append(observed)
+                    _observed_or_skip(events, skips, errors, host, members, None)
                     skips[f"audit syscall on an arch whose socket calls are not decoded ({arch})"] += 1
                 continue
             try:
                 events.append(normalize_socket_group(host, members, syscall))
             except Skip as s:
-                _observed_or_skip(events, skips, host, members, s.reason)
+                _observed_or_skip(events, skips, errors, host, members, s.reason)
             except (AuditParseError, ValueError, KeyError) as e:
                 # tagged by family so the sweep marks only socket rules partial
                 errors.append((members[0][0]["_id"], f"linux.audit.socket: {e}"))

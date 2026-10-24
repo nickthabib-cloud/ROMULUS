@@ -219,7 +219,7 @@ def observed_ev(family, ts, *, boot=None, **fields):
     for name in ("process.pid", "process.ppid", "process.executable"):
         if name in event.fields:
             field = event.fields[name]
-            event.fields[name] = fv(field.value, f"{field.origin}#auditd:SYSCALL.{name.split('.')[1]}")
+            event.fields[name] = fv(field.value, f"{event.id}:event.original#auditd:SYSCALL.{name.split('.')[1]}")
     return event
 
 
@@ -228,22 +228,29 @@ def test_service_manager_ancestry_in_another_boot_never_lowers_a_web_lane():
         return observed_ev("net_socket", T0 + timedelta(hours=1), boot=boot, socket__syscall="connect",
                            process__executable="/usr/bin/python3", process__user="www-data", process__pid=301,
                            process__ppid=300, destination__ip=EXT, destination__port=443)
+    # pid 300 is a user's service manager, which pid 1 forked (its spawn record) and which then exec'd systemd
+    spawn = observed_ev("process_observed", T0 - timedelta(milliseconds=3), boot=BOOT_A, process__pid=300,
+                        process__ppid=1, process__executable="/usr/lib/systemd/systemd")
     manager = exc("/usr/lib/systemd/systemd", 300, T0, ppid=1, boot=BOOT_A)
-    # pid 301 ran the service manager's image (forked by pid 300) moments before it exec'd python3
+    # pid 301 ran the user manager's image (forked by pid 300) moments before it exec'd python3
     forked = observed_ev("process_observed", T0 + timedelta(minutes=5), boot=BOOT_A, process__pid=301,
                          process__ppid=300, process__executable="/usr/lib/systemd/systemd")
     started = exc("/usr/bin/python3", 301, T0 + timedelta(minutes=5, milliseconds=3), ppid=300, boot=BOOT_A)
     same = InterpreterExternalConnection()
-    same.consume([manager, forked, started, connect(BOOT_A)])
+    same.consume([spawn, manager, forked, started, connect(BOOT_A)])
     assert same.finalize()[0].proposed_lane == "lead"                              # a daemon of the account
     other = InterpreterExternalConnection()
-    other.consume([manager, forked, started, connect(BOOT_B)])
+    other.consume([spawn, manager, forked, started, connect(BOOT_B)])
     assert other.finalize()[0].proposed_lane == "high"                             # pid 300 is another process
     # without the record of pid 301 before its exec, pid 300 (a service manager, which adopts orphans) may have
     # adopted it: unknown, the lane is kept
     adopted = InterpreterExternalConnection()
-    adopted.consume([manager, started, connect(BOOT_A)])
+    adopted.consume([spawn, manager, started, connect(BOOT_A)])
     assert adopted.finalize()[0].proposed_lane == "high"
+    # a user's service manager is no proof of a start by pid 1 by itself
+    unproved = InterpreterExternalConnection()
+    unproved.consume([manager, forked, started, connect(BOOT_A)])
+    assert unproved.finalize()[0].proposed_lane == "high"
 
 
 # ---------------------------------------------------------------- reverse shell by lineage

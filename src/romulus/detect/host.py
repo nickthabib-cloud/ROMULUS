@@ -19,7 +19,9 @@ from romulus.detect.observed import (
     Observed,
     ProcessView,
     citation,
+    continues,
     observation,
+    observed_view_id,
     process_view,
     same_state,
     uncite,
@@ -1622,7 +1624,9 @@ class ExecLineage:
     def observe_process(self, event: TypedEvent, raw: dict[str, dict] | None = None) -> None:
         """Hold the state (image, parent, session, boot) a process's own audit SYSCALL record shows, once per change
         of state: a record that repeats the state of the entry before it (an observation, or the exec itself) only
-        moves that observation's latest time. A new entry keeps its record for citation (`raw`: its raw copies)."""
+        moves that observation's latest time. A new entry that can begin a process keeps its record for citation:
+        the SYSCALL record's raw copy (from `raw`) and the boot id, from which the process_observed view of the record
+        is rebuilt when a lineage cites it; or, without a raw copy, the typed event itself."""
         if self.observed is None:
             return
         found = observation(event)
@@ -1630,17 +1634,25 @@ class ExecLineage:
         if found is None or seen in self._observed:
             return
         self._observed.add(seen)
-        pid, entry = found
-        self.hold_observed(event.host, pid, entry, lambda: self._cite(event, raw))
+        pid, entry, ref = found
+        source = (raw or {}).get(ref.key) if ref is not None else None
+        if source is not None:
+            entry = entry._replace(event_id=observed_view_id(ref))
+        self.hold_observed(event.host, pid, entry, lambda: self._cite(entry, citation(event, ref, source)))
 
     def hold_observed(self, host: str | None, pid: int, entry: Observed, cite) -> None:
         """Hold one observed state of (`host`, `pid`) unless the entry before it shows the same state; `cite()` keeps
-        a new entry's record for citation and says whether it was kept."""
+        a new entry's record for citation and says whether it was kept. Only an entry that can begin a process (it
+        does not continue the process of the entry before it) is cited: a verdict cites each process's earliest
+        record only.
+
+        A pid's entries are one per change of state of the processes that held it, so the list grows with pid reuse
+        as the pid's exec records do (`ExecLineage`); records arrive nearly in time order, so an entry is appended."""
         key = (host, pid)
         held = self.observed.get(key)
         if held is None and self.observed.peek(key, None) is not None:
             # held on disk but not brought back (below the stage volume's reserve): this record cannot be added
-            self._refused_observation()
+            self._refused_observation(entry.ts)
             return
         order = _observed_order(entry)
         index = bisect_right(held, order, key=_observed_order) if held else 0
@@ -1654,33 +1666,39 @@ class ExecLineage:
             if isinstance(previous, Observed) and entry.ts > previous.last:
                 held[index - 1] = previous._replace(last=entry.ts)         # in place: the store holds this list
             return
+        entry = entry._replace(cited=False)
         if not held:
             held = [entry]
             if not self.observed.put(key, held):
-                self._refused_observation()
+                self._refused_observation(entry.ts)
                 return
             index = 0
         else:
             held.insert(index, entry)
-        held[index] = entry._replace(cited=cite())                         # in place: the store holds this list
+        if not continues(previous, entry):
+            held[index] = entry._replace(cited=cite())                     # in place: the store holds this list
 
-    def _refused_observation(self) -> None:
+    def _refused_observation(self, ts: float) -> None:
         """A process's observed state was not held: from now on a lineage may miss a record that would change it."""
         self.observed_incomplete = True
+        when = datetime.fromtimestamp(ts, UTC).isoformat()
         for member in self.members:
-            member.note_limit("lineage_observed", "the store of processes' observed states took no new process (its "
-                                                  "share of the state budget is spent): a later process's observed "
-                                                  "lineage is not recorded, so no lineage lowers a lane")
+            member.note_limit("lineage_observed", f"the store of processes' observed states took no new process from "
+                                                  f"the record of {when} on (its share of the state budget is spent): "
+                                                  f"from then on no lineage lowers a lane in this hunt (every lineage "
+                                                  f"that would have is stated as unknown)")
 
-    def _cite(self, event: TypedEvent, raw: dict[str, dict] | None) -> bool:
+    def _cite(self, entry: Observed, blob: bytes) -> bool:
         """Keep an observation's record for citation; False when its store refuses it (a lineage resting on it is then
         unknown)."""
-        if self.citations.put(event.id, citation(event, raw or {})):
+        if self.citations.put(entry.event_id, blob):
             return True
+        when = datetime.fromtimestamp(entry.ts, UTC).isoformat()
         for member in self.members:
-            member.note_limit("lineage_records", "the store of observed records took no new record (its share of the "
-                                                 "state budget is spent): a lineage resting on a later observation is "
-                                                 "unknown")
+            member.note_limit("lineage_records", f"the store of observed records took no new record from the record of "
+                                                 f"{when} on (its share of the state budget is spent): a lineage "
+                                                 f"resting on a later process's earliest record is stated as unknown "
+                                                 f"and lowers no lane")
         return False
 
     def view(self, host: str | None, pid: int, ts: float, serial: int | None, boot: str | None, *,
@@ -1701,8 +1719,10 @@ class ExecLineage:
         for event_id in event_ids:
             blob = None if self.citations is None else self.citations.peek(event_id)
             if blob is not None:
-                events[event_id], copies = uncite(blob)
-                raw.update(copies)
+                event, copies = uncite(blob)
+                if event is not None:
+                    events[event_id] = event
+                    raw.update(copies)
         return events, raw
 
     def latest(self, host: str | None, pid: int, ts: float, *, strict: bool = False, where=None,

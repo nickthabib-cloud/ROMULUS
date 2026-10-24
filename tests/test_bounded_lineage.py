@@ -82,14 +82,14 @@ def _iec_run(events, capacity, directory):
 
 def test_pid_reuse_after_release_gives_the_unbounded_answer(tmp_path):
     """apache2 on pid 500, then python3 (a service the service manager started) reuses pid 500 and connects out from
-    a child; churn moves pid 500 to disk. The lineage walk must see python3 (the latest exec of 500 before the call),
+    a forked child; churn moves pid 500 to disk. The lineage walk must see python3 (the latest exec of 500 before the call),
     never the older apache2."""
     spawned = syscall_ev("spawn-500", "process_observed", T0 + timedelta(minutes=5, milliseconds=-3), process__pid=500,
                          process__ppid=1, process__executable="/usr/lib/systemd/systemd")
     batches = [[execd(500, 1, "/usr/sbin/apache2", T0)],
                [spawned, execd(500, 1, "/usr/bin/python3", T0 + timedelta(minutes=5))],
                [syscall_ev("s1", "net_socket", T0 + timedelta(minutes=6), socket__syscall="connect",
-                           process__executable="/usr/bin/perl", process__user="www-data", process__pid=600,
+                           process__executable="/usr/bin/python3", process__user="www-data", process__pid=600,
                            process__ppid=500, destination__ip="203.0.113.5", destination__port=443)],
                [execd(1000 + i, 1, "/usr/bin/true", T0 + timedelta(minutes=7, seconds=i)) for i in range(500)]]
     bounded, rule = _iec_run(batches, 20, tmp_path / "small")

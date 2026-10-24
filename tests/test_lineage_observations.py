@@ -98,10 +98,11 @@ def drive(rule, events, raw_sources=None):
     return rule.finalize()
 
 
-def table(events) -> PidTable:
+def table(events, raw=None) -> PidTable:
+    """A lineage over these records (with `raw`, their raw copies, as a sweep hands them over)."""
     pids = PidTable(observing=True)
     for event in events:
-        pids.add(event)
+        pids.add(event, {r.key: raw[r.key] for r in event.raw if r.key in raw} if raw else None)
     return pids
 
 
@@ -136,14 +137,18 @@ def test_the_lab_zmc_lineage_reaches_the_service_manager_and_its_lane_is_lowered
     assert "Its ancestry reaches the service manager with no web server." in m.claim
     [note] = [n for n in m.notes if n.startswith("lane lowered to lead")]
     # the chain: zmdc.pl's forked child (observed), zmdc.pl, sudo, zmpkg.pl, and zmpkg.pl's spawn record
-    assert (note.index("/usr/bin/perl (pid 874, observed, record o971; forked under pid 872, record o928)")
-            < note.index("/usr/bin/perl (pid 872, exec"))
-    assert "/usr/bin/sudo (pid 871, exec" in note and "/usr/bin/perl (pid 817, exec" in note
-    assert note.endswith("/usr/lib/systemd/systemd (pid 817, its image before its exec, observed, record s843))")
-    # every observed record the lineage rests on is cited, with its raw copy
+    assert ("(/usr/bin/perl (pid 874, parent pid 872, observed record o928) <- /usr/bin/perl (pid 872, parent pid 871, "
+            "exec record e924) <- /usr/bin/sudo (pid 871, parent pid 817, exec record e916) <- /usr/bin/perl (pid 817, "
+            "parent pid 1, exec record e846) <- /usr/lib/systemd/systemd (pid 817, running the service manager's own "
+            "executable as a child of pid 1, before its exec, observed record s843))") in note
+    assert "a unit started on request (for example with systemd-run" in note
+    # the earliest record of each process the lineage names is cited, rebuilt from its raw copy, which is kept
     cited = {e.raw[0].native_id for e in m.events if e.family == "process_observed"}
-    assert {"s843", "o928", "o971", "o972"} <= cited
+    assert cited == {"s843", "o928", "o972"}
     assert all(r.key in m.raw_copies for e in m.events if e.family == "process_observed" for r in e.raw)
+    rebuilt = next(e for e in m.events if e.raw[0].native_id == "o928")
+    original = next(e for e in events if e.raw[0].native_id == "o928")
+    assert rebuilt.model_dump() == original.model_dump()
 
 
 def test_the_lab_zmc_lineage_without_the_spawn_record_stays_unknown_and_high():
@@ -319,7 +324,8 @@ def test_one_entry_per_change_of_state_never_one_per_record():
     assert [(o.ppid, o.ts, o.last) for o in held] == [(400, T + 5, T + 54), (1, T + 60, T + 109)]
     # pid 400's records repeat its exec's state: nothing beyond its spawn record is held
     assert [o.exe for o in pids.execs.observed.peek((HOST, 400))] == ["/usr/lib/systemd/systemd"]
-    assert len(pids.execs.citations) == 3
+    # only an entry that can begin a process keeps its record for citation (the reparent continues pid 401's process)
+    assert len(pids.execs.citations) == 2
 
 
 def test_a_refused_observation_makes_every_service_manager_verdict_unknown(tmp_path):
@@ -359,7 +365,7 @@ def test_a_record_not_kept_for_citation_makes_its_lineage_unknown(tmp_path):
     events, raw = lab_zmc()
     [m] = drive(rule, events, raw)
     assert m.proposed_lane == "high"
-    assert any("not kept for citation" in n for n in m.notes)
+    assert any("not held for citation" in n for n in m.notes)
     assert "lineage_records" in rule.limits
 
 
@@ -414,50 +420,224 @@ def test_the_windows_guid_path_is_untouched_by_observations():
     assert len(lineage.observed) == 0
 
 
+# ---- what never proves a service start ---------------------------------------------------------------------------
+def _web_child():
+    """apache2 (a service) -> worker 501 (www-data, forked) -> sh 502 (exec, a web shell)."""
+    return [*_service(500, exe="/usr/sbin/apache2", argv=("/usr/sbin/apache2", "-k", "start")),
+            observe(T + 5, 20, 501, 500, "/usr/sbin/apache2", "apache2", "33", "www-data"),
+            execd(T + 6, 21, 502, 501, "/usr/bin/dash", ["sh", "-c", "x"], "33", "www-data")]
+
+
+@pytest.mark.parametrize("payload, forks", [
+    ("/tmp/systemd-executor", False),           # named like the spawn helper, exec'd by the web shell
+    ("/tmp/systemd", True),                     # named like the manager; its forked child connects out
+    ("/dev/shm/init", True),                    # named like init; the same
+    ("/usr/lib/systemd/systemd", True),         # the real manager run by the web shell: its child is not pid 1's
+])
+def test_a_program_named_or_run_like_the_service_manager_under_a_web_shell_stays_high(payload, forks):
+    asking = 504 if forks else 503
+    groups = [*_web_child(), execd(T + 7, 23, 503, 502, payload, [payload], "33", "www-data")]
+    if forks:
+        groups.append(observe(T + 8, 24, 504, 503, payload, "x", "33", "www-data"))
+    groups.append(connect(T + 9, 25, asking, 503 if forks else 502, payload, "x"))
+    events, raw = normalized(*groups)
+    found = table(events, raw).ancestry_of(HOST, asking, T + 9, None, 25)
+    assert found.verdict == "web_server" and found.chain[-1].exe == "/usr/sbin/apache2"
+    [m] = drive(InterpreterExternalConnection(), events, raw)
+    assert m.proposed_lane == "high" and "ancestry includes the web server '/usr/sbin/apache2'" in m.claim
+    assert not any(n.startswith("lane lowered") for n in m.notes)
+
+
+def test_the_spawn_helpers_exec_proves_a_start_and_the_note_names_it_as_an_exec():
+    events, raw = normalized(execd(T, 10, 800, 1, "/usr/lib/systemd/systemd-executor",
+                                   ["/usr/lib/systemd/systemd-executor", "--deserialize", "3"]),
+                             execd(T + 0.002, 11, 800, 1, "/usr/bin/perl", ["/usr/bin/perl", "/usr/sbin/d.pl"]),
+                             observe(T + 5, 20, 801, 800, "/usr/bin/perl", uid="33", user="www-data"),
+                             connect(T + 6, 21, 801, 800, "/usr/bin/perl", "perl"))
+    [m] = drive(InterpreterExternalConnection(), events, raw)
+    assert m.proposed_lane == "lead"
+    [note] = [n for n in m.notes if n.startswith("lane lowered")]
+    assert ("/usr/lib/systemd/systemd-executor (pid 800, exec of the service manager's spawn helper as a child of "
+            "pid 1, exec record e10)") in note
+    # the same helper exec'd by anything but pid 1 proves nothing
+    events, raw = normalized(execd(T, 10, 800, 77, "/usr/lib/systemd/systemd-executor", ["x"]),
+                             observe(T + 5, 20, 801, 800, "/usr/lib/systemd/systemd-executor", uid="33",
+                                     user="www-data"))
+    assert table(events, raw).ancestry_of(HOST, 801, T + 5, None, 20).verdict == "unknown"
+
+
+# ---- the parent at fork needs proof of the fork --------------------------------------------------------------------
+def test_a_child_recorded_under_a_parent_whose_image_it_does_not_run_may_have_been_adopted():
+    """A daemonized child is adopted by its nearest subreaper (a container's init under any name): its earliest record
+    under that adopter shows its own image, not the adopter's, so the adopter is not its parent at fork."""
+    groups = [*_service(400, exe="/usr/local/bin/appinit", argv=("/usr/local/bin/appinit",)),
+              observe(T + 5, 20, 410, 400, "/usr/bin/dash", "sh", "33", "www-data"),
+              connect(T + 6, 21, 410, 400, "/usr/bin/dash", "sh")]
+    events, raw = normalized(*groups)
+    found = table(events, raw).ancestry_of(HOST, 410, T + 6, None, 21)
+    assert found.verdict == "unknown" and "may have been adopted by pid 400" in found.why
+    [m] = drive(InterpreterExternalConnection(), events, raw)
+    assert m.proposed_lane == "high"
+
+
+def test_an_exec_under_a_parent_recorded_before_it_resolves_and_under_a_known_subreaper_does_not():
+    # an ordinary exec chain: a service's bash runs python3 as www-data
+    events, raw = normalized(*_service(400, exe="/usr/bin/bash", argv=("/usr/bin/bash", "/usr/sbin/job.sh")),
+                             execd(T + 5, 20, 401, 400, "/usr/bin/python3", ["python3", "x.py"], "33", "www-data"),
+                             connect(T + 6, 21, 401, 400, "/usr/bin/python3", "python3"))
+    assert table(events, raw).ancestry_of(HOST, 401, T + 6, None, 21).verdict == "service_manager"
+    [m] = drive(InterpreterExternalConnection(), events, raw)
+    assert m.proposed_lane == "lead"
+    # the same exec under tini (it adopts orphans): it may have been reparented there
+    events, raw = normalized(*_service(400, exe="/usr/bin/tini", argv=("/usr/bin/tini", "--", "app")),
+                             execd(T + 5, 20, 401, 400, "/usr/bin/python3", ["python3", "x.py"], "33", "www-data"))
+    found = table(events, raw).ancestry_of(HOST, 401, T + 5, None, 20)
+    assert found.verdict == "unknown" and "adopts orphaned processes" in found.why
+
+
+def test_a_web_server_above_an_unproved_fork_is_still_in_the_ancestry():
+    # the recorded parent is the parent at fork or an ancestor that adopted the child: either way its web server
+    # is an ancestor (a raise, never a lowering)
+    events, raw = normalized(*_web_child()[:-1], observe(T + 7, 30, 520, 501, "/usr/bin/perl", uid="33",
+                                                         user="www-data"))
+    assert table(events, raw).ancestry_of(HOST, 520, T + 7, None, 30).verdict == "web_server"
+
+
+# ---- order within a boot -------------------------------------------------------------------------------------------
+def _booted(groups, boot):
+    for group in groups:
+        for hit in group:
+            hit["_source"]["host"]["boot"] = {"id": boot}
+    return groups
+
+
+def test_records_of_one_boot_are_ordered_by_audit_serial_not_by_a_skewed_time():
+    """The exec's time is the shipper's and here lags its audit header by three seconds: by time, the child's record
+    would precede its parent's exec and show an image the parent did not yet run."""
+    exec_group = execd(T + 0.002, 11, 400, 1, "/usr/bin/perl", ["/usr/bin/perl", "/usr/sbin/d.pl"])
+    for hit in exec_group:
+        hit["_source"]["@timestamp"] = _iso(T + 3)
+    groups = [spawn(T, 10, 400), exec_group, observe(T + 1, 12, 401, 400, "/usr/bin/perl", uid="33", user="www-data")]
+    boot = "0d" * 16
+    events, raw = normalized(*_booted(groups, boot))
+    assert table(events, raw).ancestry_of(HOST, 401, T + 1, boot, 12).verdict == "service_manager"
+    # without boot identity the serials of two boots cannot be compared: ordered by time, it is unknown
+    events, raw = normalized(spawn(T, 10, 400), execd(T + 0.002, 11, 400, 1, "/usr/bin/perl", ["perl"]),
+                             observe(T + 1, 12, 401, 400, "/usr/bin/perl"))
+    for event in events:
+        if event.family == "process_exec":
+            event.ts = datetime.fromtimestamp(T + 3, UTC)
+    assert table(events, raw).ancestry_of(HOST, 401, T + 1, None, 12).verdict == "unknown"
+
+
+# ---- normalization and coverage ------------------------------------------------------------------------------------
+def test_an_unreadable_observed_group_is_one_error_and_the_rest_normalize(monkeypatch):
+    from romulus.evidence import normalize
+    from romulus.hunt.sweep import DATASET_FAMILIES
+    real = normalize.normalize_observed_group
+
+    def flaky(host, members):
+        if members[0][0]["_id"] == "o21":
+            raise ValueError("unreadable")
+        return real(host, members)
+    monkeypatch.setattr(normalize, "normalize_observed_group", flaky)
+    hits = [hit for group in (observe(T, 20, 401, 400, "/usr/bin/perl"), observe(T + 1, 21, 402, 400, "/usr/bin/perl"),
+                              observe(T + 2, 22, 403, 400, "/usr/bin/perl")) for hit in group]
+    events, _skips, errors = normalize_hits(hits)
+    assert [e.raw[0].native_id for e in events] == ["o20", "o22"]
+    assert errors == [("o21", "linux.audit.observed: unreadable")]
+    assert DATASET_FAMILIES["linux.audit.observed"] == {"process_observed"}
+
+
+def _sweep_cells(monkeypatch, tmp_path, pack, events, budget):
+    from tests.test_bounded_starvation import run_sweep
+    _published, cells = run_sweep(monkeypatch, tmp_path, pack, [events], budget)
+    return cells
+
+
+def test_a_refused_observation_store_is_stated_on_the_rules_window_cell(monkeypatch, tmp_path):
+    budget = StateBudget(tmp_path, disk_total=2**40, reserve=0)
+    budget.force_full("the observed states' store is past its floor (test)",
+                      lambda account: account.name.endswith("proc_observed"))
+    events, _raw = lab_zmc()
+    cells = _sweep_cells(monkeypatch, tmp_path, [InterpreterExternalConnection()], events, budget)
+    window = next(c for c in cells if c["rule_id"] == InterpreterExternalConnection.id and c["target"] == "*")
+    assert window["state"] == "match_on_partial"
+    assert any("took no new process from the record of 2024-11-18T10:21:21.941000+00:00 on" in r
+               and "no lineage lowers a lane in this hunt" in r for r in window["detail"]["reasons"])
+
+
+def test_the_network_join_is_not_evaluated_by_a_partition_of_lineage_records_only(monkeypatch, tmp_path):
+    budget = StateBudget(tmp_path, disk_total=2**40, reserve=0)
+    events, _raw = normalized(*_service(), observe(T + 5, 20, 401, 400, "/usr/bin/perl"))
+    cells = _sweep_cells(monkeypatch, tmp_path, [ProcessNetworkLink()], events, budget)
+    [cell] = [c for c in cells if c["rule_id"] == ProcessNetworkLink.id and c["target"] != "*"]
+    assert cell["state"] == "not_applicable_no_events"
+
+
 @pytest.mark.slow
 def test_mission_scale_observations_hold_one_entry_per_change_on_bounded_memory(tmp_path):
     """About 10M syscall records across 5,000 hosts with heavy pid reuse (each host cycles through 400 pids; each
     process makes records under its first parent, may be reparented to pid 1, and its pid is reused by a process with
-    another parent). The store holds exactly one entry per change of state, moves cold processes to disk under a
-    small memory budget, and every record is handled in bounded time."""
+    another parent). The store holds exactly one entry per change of state, keeps a lab-sized raw copy for citation
+    only for each process's earliest record, moves cold state to disk under a small memory budget, and every record
+    is handled in bounded time."""
     import time
+    from types import SimpleNamespace
 
+    from romulus.detect.observed import citation
     from tests.test_bounded_lineage import _Owner
     owner = _Owner(tmp_path).playbook
     owner.budget = StateBudget(tmp_path, disk_total=2**40, reserve=0, memory_total=64 * 2**20)
     lineage = ExecLineage(owner, observing=True)
     hosts, pids_per_host, records_per_process = 5000, 400, 10
-    total, changes, kept = 0, 0, [0]
+    total, changes, processes = 0, 0, 0
+    bare = SimpleNamespace(fields={})
 
-    def cite():
-        kept[0] += 1
-        return True
+    def source(host, pid, ppid, t, serial):
+        line = _syscall(t, serial, nr=257, name="openat", pid=pid, ppid=ppid, exe="/usr/bin/worker", comm="worker",
+                        uid="33", user="www-data", success="no", exit_code="-13")
+        return {"@timestamp": _iso(t), "message": line, "host": {"name": host, "hostname": host},
+                "event": {"dataset": "linux.audit", "original": line, "module": "auditd", "kind": "event"},
+                "agent": {"type": "filebeat", "version": "8.15.0", "name": host, "id": f"agent-{host}"},
+                "ecs": {"version": "8.11.0"}, "input": {"type": "log"},
+                "log": {"file": {"path": "/var/log/audit/audit.log"}, "offset": serial * 431}}
     started = time.perf_counter()
-    t = T
-    generation = 0
+    t, serial, generation = T, 0, 0
     while total < 10_000_000:
         for host_index in range(hosts):
             host = f"h{host_index:04d}"
             for slot in range(0, pids_per_host, 100):          # a quarter of each host's pids per round
                 pid = 1000 + (slot + generation) % pids_per_host
                 parent = 500 + generation % 7                  # each reuse of the pid has another parent
+                processes += 1
                 for r in range(records_per_process):
                     reparented = r >= records_per_process - 2 and generation % 3 == 0
-                    entry = Observed(t, None, "/usr/bin/worker", 1 if reparented else parent, None, None,
-                                     f"{host}-{pid}-{generation}-{r}", "raw", t)
-                    lineage.hold_observed(host, pid, entry, cite)
+                    ppid = 1 if reparented else parent
+                    serial += 1
+                    entry = Observed(t, None, "/usr/bin/worker", ppid, None, None, f"{host}-{serial}", f"r{serial}", t)
+                    ref = RawRef(target="host-logs-x", native_id=f"r{serial}")
+                    lineage.hold_observed(host, pid, entry, lambda entry=entry, ref=ref, host=host, pid=pid, ppid=ppid,
+                                          t=t, serial=serial: lineage._cite(
+                                              entry, citation(bare, ref, source(host, pid, ppid, t, serial))))
                     t += 0.0001
                     total += 1
                 changes += 2 if generation % 3 == 0 else 1
             if host_index % 50 == 49:
                 lineage.trim()                                 # the sweep trims when a batch ends
         generation += 1
-    lineage.trim()
+    lineage.observed.trim(0)
+    lineage.citations.trim(0)
     elapsed = time.perf_counter() - started
     stored = sum(len(state) for _key, state in lineage.observed.items())
-    assert stored == changes == kept[0] and stored < total / 4
-    assert lineage.observed.on_disk > 0                        # the memory budget moved processes to disk
-    assert len(lineage.observed.hot) < len(lineage.observed)
+    cited = len(lineage.citations)
+    assert stored == changes and stored < total / 4
+    assert cited == processes                                  # one record per process: a reparent cites nothing
+    assert lineage.observed.on_disk > 0 and len(lineage.observed.hot) == 0
+    entries_bytes, citation_bytes = lineage.observed.disk_bytes, lineage.citations.disk_bytes
+    assert citation_bytes / cited < 800                        # the raw copy only, compressed
     assert elapsed < 1800, elapsed
-    print(f"\n{total:,} records, {stored:,} entries ({stored / total:.1%}), {elapsed:.0f} s, "
-          f"{lineage.observed.on_disk:,} processes on disk, {len(lineage.observed.hot):,} in memory")
+    print(f"\n{total:,} records, {stored:,} entries ({stored / total:.1%}) in {len(lineage.observed):,} pid keys, "
+          f"{cited:,} cited records; entries {entries_bytes / 2**20:.0f} MiB ({entries_bytes / stored:.0f} B per entry "
+          f"on disk, pickled per pid), citations {citation_bytes / 2**20:.0f} MiB ({citation_bytes / cited:.0f} B "
+          f"each); {elapsed:.0f} s")
