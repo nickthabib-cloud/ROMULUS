@@ -2272,17 +2272,6 @@ class Repo:
             return [_with_utc(row, ("hour",)) for row in c.execute(
                 baseline_scope_series_query(scope_kind, scope, hunt_id, spec_id)).mappings()]
 
-    def baseline_scope_targets(self, scope_kind: str, scope: str, hunt_id: str, spec_id: str) -> set[str]:
-        """Targets whose frozen segments contain liveness for one scope."""
-        hours, member = t.baseline_scope_hour.c, t.baseline_snapshot_segment.c
-        query = (select(member.target)
-                 .join(t.baseline_scope_hour, member.segment_id == hours.segment_id)
-                 .where(member.hunt_id == hunt_id, member.spec_id == spec_id,
-                        hours.scope_kind == scope_kind, hours.scope == scope)
-                 .order_by(hours.scope_kind, hours.scope, hours.segment_id, hours.hour))
-        with self.engine.connect() as connection:
-            return {str(target) for target in connection.execute(query).scalars()}
-
     def save_baseline_snapshot(self, row: dict) -> bool:
         """Atomically freeze the first snapshot and normalized membership for a hunt."""
         row = dict(row)

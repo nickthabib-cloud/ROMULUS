@@ -89,9 +89,9 @@ class SnapshotView:
             return f"window coverage is partial in {len(partial)} cell(s)"
         return None
 
-    def _history_coverage(self, spec_id: str, targets: set[str]) -> list[dict]:
+    def _history_coverage(self, spec_id: str) -> list[dict]:
         coverage = self.snapshot.get("coverage") or {}
-        wanted = targets or {
+        wanted = {
             key.split("|", 1)[0] for key in coverage if key.endswith(f"|{spec_id}")
         }
         return [coverage[f"{target}|{spec_id}"] for target in sorted(wanted)
@@ -103,10 +103,10 @@ class SnapshotView:
         series = self.repo.baseline_scope_series(
             first["scope_kind"], first["scope"], self.hunt_id, playbook.id,
         )
-        targets = self.repo.baseline_scope_targets(
-            first["scope_kind"], first["scope"], self.hunt_id, playbook.id,
-        )
-        coverage = self._history_coverage(playbook.id, targets)
+        # A frozen spec is only as complete as its least-complete target. Observations do not carry a source
+        # target, and one scope can be split across targets, so narrowing coverage from history liveness could
+        # turn another target's gap into a false first-seen claim.
+        coverage = self._history_coverage(playbook.id)
         reason = None
         if playbook.id == "bl.ext_dest" and not self.networks_configured:
             reason = "internal networks not configured for this site; external destinations are unresolved"
@@ -201,7 +201,7 @@ class SnapshotView:
         matches: list[Match] = []
         updated_total = unresolved = common = first_total = 0
         window_failure = self._window_failure(playbook)
-        spec_coverage = self._history_coverage(playbook.id, set())
+        spec_coverage = self._history_coverage(playbook.id)
         history_failure = _coverage_failure(spec_coverage, self.min_live_hours)
         if playbook.id == "bl.ext_dest" and not self.networks_configured:
             history_failure = "internal networks not configured for this site; external destinations are unresolved"

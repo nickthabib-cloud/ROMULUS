@@ -39,9 +39,9 @@ class EmptyHistory:
         return HistoryFetch((), "complete", (), 0, 0)
 
 
-def _manifest(*, spec_ids=(SPEC.id,), configured=True, budget=None):
+def _manifest(*, spec_ids=(SPEC.id,), configured=True, budget=None, targets=("host-index",)):
     return {
-        "style": "broad", "original_input": {}, "targets": ["host-index"],
+        "style": "broad", "original_input": {}, "targets": list(targets),
         "window": {"start": WINDOW.start.isoformat(), "end": WINDOW.end.isoformat()},
         "source_profiles": {},
         "internal_networks": {
@@ -61,15 +61,18 @@ def _manifest(*, spec_ids=(SPEC.id,), configured=True, budget=None):
     }
 
 
-def _repo(*, spec_ids=(SPEC.id,), configured=True, budget=None):
+def _repo(*, spec_ids=(SPEC.id,), configured=True, budget=None, targets=("host-index",)):
     repo = Repo(make_engine(":memory:"))
     migrate(repo.engine)
     repo.create_hunt(
-        "h1", _manifest(spec_ids=spec_ids, configured=configured, budget=budget), "digest", "test",
+        "h1", _manifest(
+            spec_ids=spec_ids, configured=configured, budget=budget, targets=targets,
+        ), "digest", "test",
     )
-    for sid in spec_ids:
-        repo.set_rule_cell("h1", sid, SPEC_BY_ID[sid].version, "host-index", WINDOW.key(),
-                           "evaluated_complete", 0, 1, {})
+    for target in targets:
+        for sid in spec_ids:
+            repo.set_rule_cell("h1", sid, SPEC_BY_ID[sid].version, target, WINDOW.key(),
+                               "evaluated_complete", 0, 1, {})
     return repo
 
 
@@ -207,6 +210,32 @@ def test_mid_history_gap_invalidates_an_otherwise_long_enough_recent_span():
     assert row["verdict"] == "unresolved" and "history gap" in row["reason"]
     assert repo.candidates("h1") == []
     assert all(cell["state"] != "no_match_complete" for cell in repo.rule_cells("h1"))
+
+
+def test_a_gap_on_another_target_invalidates_a_scope_seen_in_resolved_history():
+    class SplitHistory(EmptyHistory):
+        def plan(self, target, start, end, *, query_budget):
+            if target == "broken-index":
+                self.plans += 1
+                return HistoryPlan((), 1, "failed", ("shard failure",))
+            return super().plan(target, start, end, query_budget=query_budget)
+
+    repo = _repo(
+        targets=("host-index", "broken-index"),
+        budget={"queries": 500, "records": 5_000_000, "seconds": 1800},
+    )
+    _resolved_history(repo)
+    event = _event(1, "/bin/new")
+    repo.save_evidence("h1", [event], {event.raw[0].key: {"message": "new"}}, None)
+    repo.upsert_baseline_observation(_observation(
+        event, key_id="new-id", key_digest="new-digest", path="/bin/new",
+    ))
+
+    run_baseline_stage(repo, "h1", WINDOW, source=SplitHistory())
+
+    row = next(repo.baseline_observations("h1"))
+    assert row["verdict"] == "unresolved" and "history gap" in row["reason"]
+    assert repo.candidates("h1") == []
 
 
 def test_resolved_history_marks_known_common_and_groups_all_new_keys_in_one_capped_lead():
