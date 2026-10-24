@@ -133,7 +133,8 @@ def test_windows_dedup_has_its_own_budget_account_and_refuses_growth_honestly(tm
     assert stage.unique_windows([first]) == ([first], [])
     assert account.used > 0
     budget.force_full("Windows dedup floor spent (test)", lambda candidate: candidate is account)
-    assert stage.unique_windows([refused]) == ([refused], [])
+    assert stage.unique_windows([refused]) == ([], [])
+    assert stage.unique_windows([refused]) == ([], [])
 
     assert stage.windows_refused == 1
     assert "Windows dedup floor spent" in stage.windows_refusal_reason

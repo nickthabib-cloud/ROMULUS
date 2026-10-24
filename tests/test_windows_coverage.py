@@ -746,11 +746,12 @@ def test_5000_host_windows_sweep_refuses_bounded_state_without_crashing(tmp_path
     sweep.run_partition(contract.target, contract, [], sweep.window, est=len(records))
 
     [cell] = repo.rule_cells("h1")
+    refused = sweep._event_stage().windows_refused
     assert cell["state"] == "evaluated_partial"
-    assert cell["evaluated"] == 5_000
+    assert cell["evaluated"] == 5_000 - refused
     assert "state_capped" not in cell["detail"]
     assert any("host/channel groups" in reason for reason in cell["detail"]["reasons"])
     assert "windows_seen" in budget.full
-    assert sweep._event_stage().windows_refused > 0
+    assert refused > 0
     assert len(cell["detail"]["reasons"]) < 10
     sweep.close_stage()

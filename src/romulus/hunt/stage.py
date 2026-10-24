@@ -122,6 +122,7 @@ class EventStage:
                 seen.add(event.id)
                 inserts.append((event.id,))
                 fresh.append(event)
+        refused_ids: set[str] = set()
         for start in range(0, len(inserts), 500):
             chunk = inserts[start:start + 500]
             reason = (self.budget.new_key_reason(self.windows_account)
@@ -129,6 +130,7 @@ class EventStage:
             if reason:
                 self.windows_refused += len(inserts) - start
                 self.windows_refusal_reason = reason
+                refused_ids.update(event_id for event_id, in inserts[start:])
                 break
             try:
                 self._cap_windows()
@@ -142,8 +144,12 @@ class EventStage:
                     self.budget.fail(reason)
                 self.windows_refused += len(inserts) - start
                 self.windows_refusal_reason = reason
+                refused_ids.update(event_id for event_id, in inserts[start:])
                 break
-        return fresh, duplicates
+        # An id whose dedup state was refused cannot be evaluated safely: a later partition would otherwise
+        # consume the same event as fresh again and inflate aggregate counts. Coverage retains the exact refusal.
+        return ([event for event in fresh if event.id not in refused_ids],
+                [event for event in duplicates if event.id not in refused_ids])
 
     def put(self, events: list[TypedEvent], raw_sources: dict[str, dict]) -> None:
         """Stage aggregate inputs exactly as on main; first event body wins and raw copies are keyed."""
