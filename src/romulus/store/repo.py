@@ -89,6 +89,10 @@ def _rule_cell_upsert():
 _RULE_CELL_UPSERT = _rule_cell_upsert()
 
 
+# A stored typed event's boot id field, read in SQL without loading the event body (JSON text; NULL when absent).
+_STORED_BOOT = func.json_extract(t.typed_event.c.event, '$.fields."host.boot.id"')
+
+
 def raw_id(target: str, native_id: str) -> str:
     return hashlib.sha256(f"{target}/{native_id}".encode()).hexdigest()[:32]
 
@@ -1105,44 +1109,40 @@ class Repo:
     # ---- evidence ---------------------------------------------------------------------------
     def save_evidence(self, hunt_id: str, events: Iterable, raw_sources: dict[str, dict], task_id: str | None,
                       *, owner_token: str | None = None):
-        """Persist typed events plus retained raw copies for every record they cite."""
+        """Persist typed events plus retained raw copies for every record they cite. A row already stored is never
+        written again (the first written wins), so a re-save serializes only what is new: the events and raw copies
+        no hunt stored yet, and this hunt's entity rows for events it does not own."""
         events = list(events)
         with write_txn(self.engine) as c:
             self._fence_lease(c, hunt_id, owner_token)
+            if owner_token is None:
+                # what is stored is read under the write lock: a deletion cannot remove a row between this read
+                # and the writes that rely on it being there
+                self._lock(c, hunt_id)
             # rows this hunt already stored (with their entity rows) need no rebuild; another hunt's rows still
             # get this hunt's entity rows, which deletion relies on to keep events another hunt uses
             ids = sorted({event.id for event in events})
-            own_ids: set[str] = set()
-            existing: dict[str, dict] = {}
-            for start in range(0, len(ids), 500):
-                for row in c.execute(select(
-                    t.typed_event.c.id, t.typed_event.c.hunt_id,
-                    t.typed_event.c.event, t.typed_event.c.raw_ids,
-                ).where(t.typed_event.c.id.in_(ids[start:start + 500]))).mappings():
-                    existing[row["id"]] = dict(row)
-                    if row["hunt_id"] == hunt_id:
-                        own_ids.add(row["id"])
-            raw_rows, ev_rows, ent_rows, link_rows = [], [], {}, []
+            existing = self._stored_events(c, ids)
+            own_ids = {event_id for event_id, row in existing.items() if row["hunt_id"] == hunt_id}
+            raw_rows = self._new_raw_rows(c, events, raw_sources, task_id)
+            ev_rows: dict[str, dict] = {}
+            ent_rows: dict[str, dict] = {}
+            link_rows = []
             for e in events:
-                for r in e.raw:
-                    src = raw_sources.get(r.key)
-                    if src is not None:
-                        raw_rows.append({"id": raw_id(r.target, r.native_id), "target": r.target,
-                                         "native_id": r.native_id, "digest": r.digest, "source": src,
-                                         "first_task_id": task_id, "retrieved_at": utcnow()})
                 if e.id in own_ids:
                     continue
-                ev_rows.append({"id": e.id, "hunt_id": hunt_id, "family": e.family, "ts": e.ts, "host": e.host,
-                                "event": e.model_dump(mode="json"), "raw_ids": [raw_id(r.target, r.native_id)
-                                                                                for r in e.raw],
-                                "normalizer": e.normalizer})
+                if e.id not in existing and e.id not in ev_rows:
+                    ev_rows[e.id] = {"id": e.id, "hunt_id": hunt_id, "family": e.family, "ts": e.ts, "host": e.host,
+                                     "event": e.model_dump(mode="json"),
+                                     "raw_ids": [raw_id(r.target, r.native_id) for r in e.raw],
+                                     "normalizer": e.normalizer}
                 for kind, value, role in e.entities():
                     eid = f"{hunt_id}:{kind}:{value}"
                     ent_rows.setdefault(eid, {"id": eid, "hunt_id": hunt_id, "kind": kind, "value": value,
                                               "first_seen": e.ts, "last_seen": e.ts, "event_count": 0})
                     link_rows.append({"event_id": e.id, "entity_id": eid, "role": role})
             _upsert_ignore(c, t.raw_record, raw_rows, ["id"])
-            _upsert_ignore(c, t.typed_event, ev_rows, ["id"])
+            _upsert_ignore(c, t.typed_event, list(ev_rows.values()), ["id"])
             if existing:
                 self._merge_citation_raw(c, hunt_id, events, existing)
             self._observe(c, hunt_id, ids)
@@ -1154,17 +1154,18 @@ class Repo:
     def _merge_citation_raw(c, hunt_id: str, events: list, existing: dict[str, dict]) -> None:
         """Keep the stable event immutable and snapshot only hunt-specific raw-reference differences."""
         ids = sorted(existing)
-        overlays = {
-            row["event_id"]: dict(row)
-            for row in c.execute(select(t.event_citation).where(
+        overlays: dict[str, dict] = {}
+        prior_citations: set[str] = set()
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            overlays.update((row["event_id"], dict(row)) for row in c.execute(select(t.event_citation).where(
                 t.event_citation.c.hunt_id == hunt_id,
-                t.event_citation.c.event_id.in_(ids),
-            )).mappings()
-        }
-        prior_citations = set(c.execute(select(t.event_observation.c.event_id).where(
-            t.event_observation.c.hunt_id == hunt_id,
-            t.event_observation.c.event_id.in_(ids),
-        )).scalars())
+                t.event_citation.c.event_id.in_(chunk),
+            )).mappings())
+            prior_citations.update(c.execute(select(t.event_observation.c.event_id).where(
+                t.event_observation.c.hunt_id == hunt_id,
+                t.event_observation.c.event_id.in_(chunk),
+            )).scalars())
         incoming: dict[str, tuple[Any, list]] = {}
         for event in events:
             if event.id not in existing:
@@ -1212,7 +1213,10 @@ class Repo:
                 stored["raw"] = [raw.model_dump(mode="json") for raw in incoming_raw]
                 raw_ids = incoming_ids
                 if global_row["hunt_id"] == hunt_id or event_id in prior_citations:
-                    stable_raw = list((global_row.get("event") or {}).get("raw") or [])
+                    # the stable body is read only here, the one case that extends it
+                    stable = c.execute(select(t.typed_event.c.event).where(
+                        t.typed_event.c.id == event_id)).scalar_one()
+                    stable_raw = list((stable or {}).get("raw") or [])
                     known = {(item.get("target"), item.get("native_id")) for item in stable_raw}
                     additions = [raw.model_dump(mode="json") for raw in incoming_raw
                                  if (raw.target, raw.native_id) not in known]
@@ -1234,28 +1238,51 @@ class Repo:
             return
         with write_txn(self.engine) as c:
             self._fence_lease(c, hunt_id, owner_token)
-            existing: dict[str, dict] = {}
-            for start in range(0, len(ids), 500):
-                for row in c.execute(select(
-                    t.typed_event.c.id, t.typed_event.c.hunt_id,
-                    t.typed_event.c.event, t.typed_event.c.raw_ids,
-                ).where(t.typed_event.c.id.in_(ids[start:start + 500]))).mappings():
-                    existing[row["id"]] = dict(row)
-            raw_rows = []
-            for event in events:
-                if event.id not in existing:
-                    continue
-                for raw in event.raw:
-                    source = raw_sources.get(raw.key)
-                    if source is not None:
-                        raw_rows.append({
-                            "id": raw_id(raw.target, raw.native_id), "target": raw.target,
-                            "native_id": raw.native_id, "digest": raw.digest, "source": source,
-                            "first_task_id": None, "retrieved_at": utcnow(),
-                        })
-            _upsert_ignore(c, t.raw_record, raw_rows, ["id"])
+            if owner_token is None:
+                self._lock(c, hunt_id)
+            existing = self._stored_events(c, ids)
+            _upsert_ignore(c, t.raw_record, self._new_raw_rows(
+                c, [event for event in events if event.id in existing], raw_sources, None,
+            ), ["id"])
             self._merge_citation_raw(c, hunt_id, events, existing)
             self._observe(c, hunt_id, sorted(existing))
+
+    @staticmethod
+    def _lock(c, hunt_id: str) -> None:
+        """Take SQLite's write lock now (pysqlite defers BEGIN until the first write), so the rows this transaction
+        reads next stay as read until it commits. The no-op write touches no key, so no foreign key is checked."""
+        c.execute(t.hunt.update().where(t.hunt.c.id == hunt_id).values(lease_owner=t.hunt.c.lease_owner))
+
+    @staticmethod
+    def _stored_events(c, ids: list[str]) -> dict[str, dict]:
+        """The stored stable rows among `ids`: id, owning hunt and raw references (never the event body)."""
+        existing: dict[str, dict] = {}
+        for start in range(0, len(ids), 500):
+            for row in c.execute(select(
+                t.typed_event.c.id, t.typed_event.c.hunt_id, t.typed_event.c.raw_ids,
+            ).where(t.typed_event.c.id.in_(ids[start:start + 500]))).mappings():
+                existing[row["id"]] = dict(row)
+        return existing
+
+    @staticmethod
+    def _new_raw_rows(c, events: list, raw_sources: dict[str, dict], task_id: str | None) -> list[dict]:
+        """Rows for the raw copies the events reference that no hunt stored yet, one per id with the first reference
+        given winning, as an insert that skips stored keys would keep them: a stored copy is never serialized
+        again."""
+        wanted: dict[str, Any] = {}
+        for event in events:
+            for raw in event.raw:
+                if raw.key in raw_sources:
+                    wanted.setdefault(raw_id(raw.target, raw.native_id), raw)
+        ids = sorted(wanted)
+        stored: set[str] = set()
+        for start in range(0, len(ids), 500):
+            stored.update(c.execute(select(t.raw_record.c.id).where(
+                t.raw_record.c.id.in_(ids[start:start + 500]))).scalars())
+        now = utcnow()
+        return [{"id": rid, "target": raw.target, "native_id": raw.native_id, "digest": raw.digest,
+                 "source": raw_sources[raw.key], "first_task_id": task_id, "retrieved_at": now}
+                for rid, raw in wanted.items() if rid not in stored]
 
     @staticmethod
     def _observe(c, hunt_id: str, ids: list[str]) -> None:
@@ -1283,16 +1310,20 @@ class Repo:
         booted = {event_id: field for event_id, field in dumped.items() if not is_derived_boot(field)}
         ids = sorted(booted)
         for start in range(0, len(ids), 500):
-            chunk = ids[start:start + 500]
-            for row in c.execute(select(t.typed_event.c.id, t.typed_event.c.event)
-                                 .where(t.typed_event.c.id.in_(chunk))).mappings():
-                stored = row["event"]
-                fields = stored.get("fields") or {}
-                current = fields.get("host.boot.id") or {}
+            # only the stored boot field is read to decide; a row's body is read when it takes the boot id
+            unfilled = []
+            for event_id, current in c.execute(select(t.typed_event.c.id, _STORED_BOOT)
+                                               .where(t.typed_event.c.id.in_(ids[start:start + 500]))):
+                current = json.loads(current) if isinstance(current, str) else None
+                current = current if isinstance(current, dict) else {}
                 if current.get("value") not in (None, "") and not is_derived_boot(current):
                     continue
-                stored = {**stored, "fields": {**fields, "host.boot.id": booted[row["id"]]}}
-                c.execute(t.typed_event.update().where(t.typed_event.c.id == row["id"]).values(event=stored))
+                unfilled.append(event_id)
+            for event_id in unfilled:
+                stored = c.execute(select(t.typed_event.c.event).where(t.typed_event.c.id == event_id)).scalar_one()
+                fields = stored.get("fields") or {}
+                stored = {**stored, "fields": {**fields, "host.boot.id": booted[event_id]}}
+                c.execute(t.typed_event.update().where(t.typed_event.c.id == event_id).values(event=stored))
 
     def events_by_ids(self, ids: list[str]) -> list[dict]:
         with self.engine.connect() as c:
