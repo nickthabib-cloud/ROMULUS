@@ -1201,6 +1201,7 @@ class Repo:
                 # its exact history is the stable set plus that copy. A first differing observation starts only
                 # from what this hunt actually retrieved, never from the owning hunt's citation set.
                 stored = event.model_dump(mode="json")
+                stored["raw"] = [raw.model_dump(mode="json") for raw in incoming_raw]
                 raw_ids = incoming_ids
                 if global_row["hunt_id"] == hunt_id or event_id in prior_citations:
                     stable_raw = list((global_row.get("event") or {}).get("raw") or [])

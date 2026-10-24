@@ -229,6 +229,32 @@ def test_foreign_hunt_citation_contains_only_the_raw_copy_that_hunt_retrieved():
     ]
 
 
+def test_foreign_duplicate_id_batch_keeps_every_retrieved_raw_ref_in_the_overlay_event():
+    repo = Repo(make_engine(":memory:"))
+    migrate(repo.engine)
+    repo.create_hunt("h1", {}, "d1", "test")
+    repo.create_hunt("h2", {}, "d2", "test")
+    first_ref = RawRef(target="windows-a", native_id="copy-1", digest="digest-1")
+    second_ref = RawRef(target="windows-b", native_id="copy-2", digest="digest-2")
+    first = TypedEvent(
+        id="stable-event", family="process_exec", ts=datetime(2026, 1, 1, tzinfo=UTC), host="ws01",
+        fields={}, raw=[first_ref], normalizer="windows-ecs@1",
+    )
+    second = first.model_copy(update={"raw": [second_ref]})
+
+    repo.save_evidence("h1", [first], {first_ref.key: {"copy": 1}}, None)
+    repo.save_evidence("h2", [first, second], {
+        first_ref.key: {"copy": 1}, second_ref.key: {"copy": 2},
+    }, None)
+
+    scoped = repo.citation_events("h2", [first.id])[0]
+    assert [ref["native_id"] for ref in scoped["event"]["raw"]] == ["copy-1", "copy-2"]
+    assert scoped["raw_ids"] == [
+        raw_id(first_ref.target, first_ref.native_id),
+        raw_id(second_ref.target, second_ref.native_id),
+    ]
+
+
 def test_deleting_a_hunt_removes_raw_records_referenced_only_by_its_citation_overlay():
     repo = Repo(make_engine(":memory:"))
     migrate(repo.engine)
