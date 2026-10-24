@@ -7,7 +7,7 @@ import pytest
 
 from romulus.baseline.playbook import ExecPathBaseline
 from romulus.baseline.protocol import HistoryFetch, HistoryPartition, HistoryPlan
-from romulus.baseline.spec import SPEC_BY_ID
+from romulus.baseline.spec import SPEC_BY_ID, KeyContext
 from romulus.config import Settings
 from romulus.detect.netdef import SiteNetworks
 from romulus.evidence.normalize import NORMALIZER_VERSION
@@ -605,3 +605,132 @@ def test_hunt_manifest_records_the_frozen_baseline_plan_and_network_definition()
     default_a = build_manifest(Settings(), WINDOW, {}, "broad", ["b", "a"], {})["baseline"]["site"]
     default_b = build_manifest(Settings(), WINDOW, {}, "broad", ["a", "b"], {})["baseline"]["site"]
     assert default_a == default_b and default_a.startswith("targets-sha256:")
+
+
+def _lab_profile(repo: Repo, target: str, datasets: dict[str, int]) -> None:
+    repo.save_profile("h1", {
+        "id": f"profile-{target}", "target": target, "kind": "es_index", "role": "host", "os_family": "linux",
+        "datasets": datasets, "notes": [],
+    })
+
+
+def _lab_contract(target: str):
+    from tests.throughput_fixture import HOST_TYPES
+
+    return contract_from_types(target, HOST_TYPES)
+
+
+class TimedHistory(EmptyHistory):
+    """Complete history whose hours hold the given events, per target."""
+
+    def __init__(self, events_by_target: dict[str, list[TypedEvent]]):
+        super().__init__()
+        self.events_by_target = events_by_target
+
+    def _events(self, target, start, end):
+        return [event for event in self.events_by_target.get(target, []) if start <= event.ts < end]
+
+    def plan(self, target, start, end, *, query_budget):
+        self.plans += 1
+        return HistoryPlan((HistoryPartition(target, start, end, len(self._events(target, start, end)),
+                                             start.isoformat()),), 1, "complete", ())
+
+    def fetch(self, partition, *, record_budget=None, query_budget=None, deadline=None):
+        events = tuple(self._events(partition.target, partition.start, partition.end))
+        return HistoryFetch(events, "complete", (), len(events), 1)
+
+
+def _exec_event(event_id: str, ts: datetime, *, pid: int, ppid: int, executable: str,
+                target: str = "host-index") -> TypedEvent:
+    values = {"process.pid": pid, "process.ppid": ppid, "process.executable": executable,
+              "process.exec_file.path": executable, "process.user": "svc", "host.boot.id": "boot-1"}
+    return TypedEvent(
+        id=event_id, family="process_exec", ts=ts, host="web01", outcome=Outcome.success,
+        fields={name: fv(value, f"fixture:{name}") for name, value in values.items()},
+        raw=[RawRef(target=target, native_id=f"raw-{event_id}")], normalizer="fixture@1",
+    )
+
+
+def test_an_audit_target_whose_exec_fields_are_unmapped_reads_history_and_resolves_a_pre_window_parent(
+        monkeypatch, tmp_path):
+    from romulus.baseline.playbook import ExecPairBaseline
+    from romulus.hunt import sweep as sweep_module
+    from tests.test_baseline_sweep import FakeClient, _install_partition
+
+    pair = SPEC_BY_ID["bl.exec_pair"]
+    repo = Repo(make_engine(":memory:"))
+    migrate(repo.engine)
+    repo.create_hunt("h1", _manifest(
+        spec_ids=(pair.id,), budget={"queries": 1000, "records": 5_000_000, "seconds": 1800},
+    ), "digest", "test")
+    _lab_profile(repo, "host-index", {"linux.audit": 10, "systemd.journal": 10})
+    contracts = {"host-index": _lab_contract("host-index")}
+    child = _exec_event("child", START + timedelta(minutes=5), pid=20, ppid=10, executable="/bin/curl")
+    _install_partition(monkeypatch, [child], window=WINDOW)
+    sweep = sweep_module.Sweep(repo, FakeClient(), "h1", WINDOW, contracts, stage_dir=tmp_path)
+    sweep.pack = [ExecPairBaseline()]
+    sweep.run_target("host-index")
+    sweep.close_stage()
+    parent = _exec_event("parent", START - timedelta(minutes=30), pid=10, ppid=1, executable="/usr/sbin/sshd")
+    source = TimedHistory({"host-index": [parent]})
+
+    run_baseline_stage(repo, "h1", WINDOW, source=source, contracts=contracts)
+
+    assert source.plans == 7 * 24
+    observation = next(repo.baseline_observations("h1"))
+    assert observation["key"] == {"child_executable": "/bin/curl", "parent_executable": "/usr/sbin/sshd"}
+    cell = next(row for row in repo.rule_cells("h1") if row["partition"] == WINDOW.key())
+    assert cell["state"] == "evaluated_complete"
+    history = next(row for row in repo.rule_cells("h1") if row["target"] == "baseline:host-index")
+    assert history["detail"]["coverage"]["status"] != "not_applicable"
+
+
+def test_an_audit_target_reads_its_history_and_states_absence_not_silence():
+    repo = _repo()
+    _lab_profile(repo, "host-index", {"linux.audit": 10})
+    event = _event(1, "/bin/new")
+    repo.save_evidence("h1", [event], {event.raw[0].key: {"m": 1}}, None)
+    repo.upsert_baseline_observation(_observation(event, key_id="n", key_digest="n", path="/bin/new"))
+    source = EmptyHistory()
+
+    summary = run_baseline_stage(repo, "h1", WINDOW, source=source,
+                                 contracts={"host-index": _lab_contract("host-index")})
+
+    row = next(repo.baseline_observations("h1"))
+    assert source.plans == 7 * 24
+    assert row["verdict"] == "unresolved" and row["reason"] == "no pre-window data"
+    history = next(cell for cell in repo.rule_cells("h1") if cell["target"] == "baseline:host-index")
+    assert history["state"] != "not_applicable_no_events"
+    assert history["detail"]["coverage"]["status"] == "absent"
+    assert summary["specs"][SPEC.id]["history_failure"] == "no pre-window data"
+
+
+def test_a_host_split_between_a_mapped_and_an_audit_target_never_claims_a_false_first_seen():
+    repo = _repo(targets=("mapped-index", "audit-index"),
+                 budget={"queries": 1000, "records": 5_000_000, "seconds": 1800})
+    _lab_profile(repo, "mapped-index", {"linux.audit": 10})
+    _lab_profile(repo, "audit-index", {"linux.audit": 10})
+    hours = [START - timedelta(hours=hour) for hour in range(1, 49)]
+    mapped = [_exec_event(f"m{index}", hour, pid=100 + index, ppid=1, executable="/bin/other",
+                          target="mapped-index") for index, hour in enumerate(hours)]
+    audited = [_exec_event(f"a{index}", hour + timedelta(minutes=1), pid=500 + index, ppid=1,
+                           executable="/bin/known", target="audit-index") for index, hour in enumerate(hours)]
+    window_event = _event(1, "/bin/known")
+    repo.save_evidence("h1", [window_event], {window_event.raw[0].key: {"m": 1}}, None)
+    key = next(item for item in SPEC.keys(window_event, KeyContext()) if item.scope_kind == "host")
+    row = _observation(window_event, key_id=key.key_id, key_digest=key.key_digest, path="/bin/known")
+    repo.upsert_baseline_observation({**row, "scope": key.scope, "key": key.key})
+    contracts = {
+        "mapped-index": contract_from_types("mapped-index", {
+            "@timestamp": "date", "host.name": "keyword", "process.executable": "keyword",
+            "process.exec_file.path": "keyword", "process.user": "keyword",
+        }),
+        "audit-index": _lab_contract("audit-index"),
+    }
+
+    run_baseline_stage(repo, "h1", WINDOW, source=TimedHistory({"mapped-index": mapped, "audit-index": audited}),
+                       contracts=contracts)
+
+    stored = next(repo.baseline_observations("h1"))
+    assert stored["verdict"] == "common" and stored["history_count"] == 48
+    assert repo.candidates("h1") == []

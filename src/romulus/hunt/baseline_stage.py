@@ -20,6 +20,7 @@ from romulus.evidence.normalize import NORMALIZER_VERSION
 from romulus.evidence.typed import TypedEvent
 from romulus.hunt.baseline_source import HuntHistorySource
 from romulus.hunt.publish import publish_match
+from romulus.hunt.sweep import baseline_applicability
 from romulus.sources.models import Window
 from romulus.store.repo import Repo
 
@@ -84,28 +85,6 @@ def _pending_observation(hunt_id: str, spec, row: dict) -> dict:
         "n_hours": None, "verdict": "unresolved", "reason": "baseline judgement pending",
         "candidate_id": None,
     }
-
-
-def _target_spec_applicability(contracts: dict | None, targets: list[str], specs: list) -> dict[str, set[str]]:
-    """Specs each target can deliver, derived only from their declared typed-field requirements."""
-    out: dict[str, set[str]] = {}
-    for target in targets:
-        contract = (contracts or {}).get(target)
-        if contract is None:
-            out[target] = {spec.id for spec in specs}
-            continue
-        supported = set()
-        for spec in specs:
-            for requirements in spec.required_fields.values():
-                if all(
-                    any(contract.supports(field, "exists") for field in requirement)
-                    if isinstance(requirement, tuple) else contract.supports(requirement, "exists")
-                    for requirement in requirements
-                ):
-                    supported.add(spec.id)
-                    break
-        out[target] = supported
-    return out
 
 
 def resolve_window_exec_pairs(repo: Repo, hunt_id: str, window: Window) -> None:
@@ -457,7 +436,7 @@ def run_baseline_stage(repo: Repo, hunt_id: str, window: Window, *, client=None,
     networks_configured = network_record.get("source") == "configured"
     build_specs = [spec for spec in specs if not spec.requires_configured_networks or networks_configured]
     targets = list(hunt["manifest"]["targets"])
-    applicable_specs = _target_spec_applicability(contracts, targets, specs)
+    applicable_specs = baseline_applicability(repo.source_profiles(hunt_id), contracts, targets, specs)
     build_ids = {spec.id for spec in build_specs}
     build_applicability = {
         target: spec_ids & build_ids for target, spec_ids in applicable_specs.items()

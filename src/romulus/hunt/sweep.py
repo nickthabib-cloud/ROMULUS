@@ -93,6 +93,52 @@ SKIP_REASON_OVERFLOW = "additional skip reasons omitted after bounded category l
 MAX_WINDOWS_UNCATALOGUED = 256
 
 
+def _families_of(datasets) -> frozenset[str]:
+    return frozenset().union(*(DATASET_FAMILIES.get(dataset, frozenset()) for dataset in datasets))
+
+
+_WINDOWS_FAMILIES = frozenset().union(*WINDOWS_DATASET_FAMILIES.values())
+_ROLE_FAMILIES = {
+    "host": _families_of(HOST_DATASETS),
+    "network": _families_of([*(name for name in DATASET_FAMILIES if name.startswith("suricata.eve.")),
+                             "arkime.session"]),
+}
+
+
+def delivered_families(profile: dict | None, contract: FieldContract | None) -> frozenset[str] | None:
+    """The event families the normalizer can produce from one target, or None when nothing says.
+
+    Typed values come from the normalizer, not from the index mapping (audit execs live in `event.original`),
+    so the answer follows the profile's datasets. An inventory that cannot be read in full falls back to every
+    family of the target's role. Errs toward more families: a family wrongly named only costs an unresolved
+    baseline, while one wrongly left out would leave that target's history unread.
+    """
+    role = (profile or {}).get("role") or (contract.role if contract is not None else None)
+    if role is None:
+        return None
+    if profile is None or any(str(note).startswith("ds inventory truncated") for note in profile.get("notes") or []):
+        return _ROLE_FAMILIES.get(role)
+    if profile.get("kind") == "arkime_sessions":
+        # Arkime sessions are recognized by shape; their dataset inventory lists protocols.
+        return DATASET_FAMILIES["arkime.session"]
+    datasets = list(profile.get("datasets") or {})
+    families = set(_families_of(datasets))
+    windows = profile.get("os_family") == "windows" or (contract is not None and contract.os_family == "windows")
+    if windows and (not datasets or any(dataset not in DATASET_FAMILIES for dataset in datasets)):
+        # Any Windows-shaped record is normalized, whatever dataset name the shipper gave it.
+        families |= _WINDOWS_FAMILIES
+    return frozenset(families)
+
+
+def baseline_applicability(profiles: dict[str, dict], contracts: dict | None, targets, specs) -> dict[str, set[str]]:
+    """The baseline specs each target can deliver: one rule for the window cells and the history read."""
+    out: dict[str, set[str]] = {}
+    for target in targets:
+        families = delivered_families(profiles.get(target), (contracts or {}).get(target))
+        out[target] = {spec.id for spec in specs if families is None or set(spec.families) & families}
+    return out
+
+
 def stored_boot_intervals(repo: Repo, hunt_id: str) -> BootIntervals:
     """The boot-interval map the hunt's sweep recorded; empty (it places nothing) when there is none."""
     row = repo.latest_audit(hunt_id, BOOT_INTERVALS_AUDIT) if hasattr(repo, "latest_audit") else None
@@ -193,6 +239,7 @@ class Sweep:
             self.budget.account("windows_continuity") if self._has_windows else None
         )
         self._stage_size = 0
+        self._profiles: dict[str, dict] | None = None
         self.partial_reasons: list[str] = []
         preflight = self.budget.preflight()
         if preflight:
@@ -803,7 +850,7 @@ class Sweep:
                 ordered = sorted(pb.scope_partition(events), key=lambda item: (
                     item.ts, -1 if exec_serial(item) is None else exec_serial(item), item.id,
                 ))
-                target_applicable = target_fallback or bool(ordered)
+                target_applicable = bool(ordered) or self._baseline_target_applicable(target, pb)
                 reasons = list(base_reasons)
                 reasons.extend(windows_reasons)
                 if error_reason and (error_affected is ALL_FAMILIES or set(pb.families) & error_affected):
@@ -967,6 +1014,14 @@ class Sweep:
         # the partition's cells together: a crash before this leaves them all visibly `planned`
         self.repo.set_rule_cells(self.hunt_id, cells)
         self.repo.update_task(tid, "evaluated")
+
+    def _baseline_target_applicable(self, target: str, playbook: BaselinePlaybook) -> bool:
+        """Whether the target can deliver the spec's families, by the rule the baseline stage's history uses."""
+        if self._profiles is None:
+            self._profiles = self.repo.source_profiles(self.hunt_id)
+        return playbook.spec.id in baseline_applicability(
+            self._profiles, self.contracts, [target], [playbook.spec],
+        )[target]
 
     def _baseline_observations(self, playbook: BaselinePlaybook, cell: BaselineCell):
         for row in cell.observations:

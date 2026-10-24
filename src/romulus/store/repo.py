@@ -2374,6 +2374,14 @@ class Repo:
             c.execute(stmt)
             return True
 
+    def source_profiles(self, hunt_id: str) -> dict[str, dict]:
+        """Each target's most recently captured source profile for this hunt."""
+        table = t.source_profile.c
+        with self.engine.connect() as c:
+            rows = c.execute(select(table.target, table.profile).where(table.hunt_id == hunt_id)
+                             .order_by(table.captured_at, table.id)).all()
+        return {str(target): profile for target, profile in rows if isinstance(profile, dict)}
+
     def baseline_parent_targets(self, hunt_id: str, host: str) -> list[str]:
         """Every target that could deliver this host's execs, including a holder that delivered none.
 
