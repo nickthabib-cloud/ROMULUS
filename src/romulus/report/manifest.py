@@ -49,6 +49,7 @@ def _citations(repo: Repo, cand: dict) -> list[dict]:
 
 UNRESOLVED_STATES = (
     "planned", "executed_failed", "evaluated_partial", "match_on_partial", "positive_only_partial",
+    "partial", "failed", "omitted_budget",
 )
 _NO_ASSURANCE = ("no rule in this pack can prove absence for this behavior yet; a negative from kernel records "
                  "needs a typed inventory of what the host's audit rules record, which the telemetry does not carry")
@@ -317,7 +318,47 @@ def coverage_for_hunt(repo: Repo, hunt_id: str) -> dict:
                          rule_ids=[p["id"] for p in (hm.get("pack") or {}).get("playbooks", [])],
                          sweep_finished=finished)
     coverage["not_assessed"] = _not_assessed(hm, detail)
+    coverage["baseline"] = _baseline_coverage(repo, hunt_id, hm)
     return coverage
+
+
+def _baseline_coverage(repo: Repo, hunt_id: str, hunt_manifest: dict) -> dict:
+    """Bounded report projection of the immutable baseline snapshot and per-spec verdict health."""
+    config = hunt_manifest.get("baseline") or {}
+    declared = config.get("specs") or []
+    snapshot = repo.baseline_snapshot(hunt_id)
+    audit = repo.latest_audit(hunt_id, "hunt.baseline_summary")
+    summary = (audit or {}).get("detail") or {}
+    verdicts = repo.baseline_observation_verdict_counts(hunt_id)
+    specs = []
+    for declared_spec in declared:
+        spec_id = declared_spec["id"]
+        target_coverage = {
+            key.split("|", 1)[0]: value
+            for key, value in ((snapshot or {}).get("coverage") or {}).items()
+            if key.endswith(f"|{spec_id}")
+        }
+        statuses = {item.get("status") for item in target_coverage.values()}
+        stage_stats = (summary.get("specs") or {}).get(spec_id) or {}
+        unresolved = int((verdicts.get(spec_id) or {}).get("unresolved", 0))
+        if (snapshot is None or unresolved or stage_stats.get("history_failure")
+                or stage_stats.get("window_failure") or statuses - {"resolved", "shortened"}):
+            status = "unresolved"
+        elif "shortened" in statuses:
+            status = "shortened"
+        else:
+            status = "resolved"
+        specs.append({
+            "id": spec_id, "version": declared_spec["version"], "status": status,
+            "unresolved_count": unresolved, "verdicts": verdicts.get(spec_id) or {},
+            "targets": target_coverage,
+        })
+    return {
+        "snapshot_digest": (snapshot or {}).get("digest") or summary.get("snapshot_digest"),
+        "snapshot_status": (snapshot or {}).get("status") or "not_frozen",
+        "stage_status": summary.get("status", "not_run"),
+        "specs": specs,
+    }
 
 
 def coverage_for_rules(repo: Repo, hunt_id: str, rule_ids: set[str]) -> dict:

@@ -1910,6 +1910,31 @@ class Repo:
                 t.disposition_event.c.candidate_id == cid).order_by(t.disposition_event.c.id)).mappings()]
 
     # ---- baseline store --------------------------------------------------------------------
+    def baseline_store_cut_digest(self, *, site: str, targets: Iterable[str], specs: Iterable[dict],
+                                  start: datetime, end: datetime) -> str:
+        """Digest active segment identities eligible at hunt creation, streamed in canonical order."""
+        start, end = _utc(start, "baseline cut start"), _utc(end, "baseline cut end")
+        hasher = hashlib.sha256()
+        segment = t.baseline_segment.c
+        with self.engine.connect() as connection:
+            for target in sorted(set(targets)):
+                for spec in sorted(specs, key=lambda item: item["id"]):
+                    query = (select(segment.id, segment.status)
+                             .where(segment.site == site, segment.target == target,
+                                    segment.spec_id == spec["id"],
+                                    segment.spec_version == spec["version"],
+                                    segment.key_version == spec["key_version"],
+                                    segment.status == "active", segment.start >= start, segment.end <= end)
+                             .order_by(segment.id))
+                    for segment_id, status in connection.execute(query):
+                        material = {"id": segment_id, "status": status, "target": target,
+                                    "spec_id": spec["id"]}
+                        hasher.update(json.dumps(
+                            material, sort_keys=True, separators=(",", ":"),
+                        ).encode())
+                        hasher.update(b"\n")
+        return hasher.hexdigest()
+
     def save_baseline_segment(self, row: dict, counts: Iterable[dict], scope_hours: Iterable[dict], *,
                               chunk_size: int = BASELINE_CHUNK) -> bool:
         """Insert one immutable, complete segment and its rows in one atomic transaction.
@@ -2202,6 +2227,17 @@ class Repo:
             return [_with_utc(row, ("hour",)) for row in c.execute(
                 baseline_scope_series_query(scope_kind, scope, hunt_id, spec_id)).mappings()]
 
+    def baseline_scope_targets(self, scope_kind: str, scope: str, hunt_id: str, spec_id: str) -> set[str]:
+        """Targets whose frozen segments contain liveness for one scope."""
+        hours, member = t.baseline_scope_hour.c, t.baseline_snapshot_segment.c
+        query = (select(member.target)
+                 .join(t.baseline_scope_hour, member.segment_id == hours.segment_id)
+                 .where(member.hunt_id == hunt_id, member.spec_id == spec_id,
+                        hours.scope_kind == scope_kind, hours.scope == scope)
+                 .order_by(hours.scope_kind, hours.scope, hours.segment_id, hours.hour))
+        with self.engine.connect() as connection:
+            return {str(target) for target in connection.execute(query).scalars()}
+
     def save_baseline_snapshot(self, row: dict) -> bool:
         """Atomically freeze the first snapshot and normalized membership for a hunt."""
         row = dict(row)
@@ -2239,6 +2275,23 @@ class Repo:
                  .order_by(t.baseline_snapshot_segment.c.segment_id))
         with self.engine.connect() as c:
             return list(c.execute(query).scalars())
+
+    def baseline_snapshot_exclusions(self, hunt_id: str, spec_id: str) -> dict:
+        """Bounded provenance summary for a spec's frozen segments, without materializing exclusion lists."""
+        segment, member = t.baseline_segment.c, t.baseline_snapshot_segment.c
+        query = select(
+            func.count(),
+            func.coalesce(func.sum(func.json_array_length(segment.excluded_keys)), 0),
+            func.coalesce(func.sum(segment.hunted), 0),
+        ).select_from(t.baseline_segment.join(
+            t.baseline_snapshot_segment, member.segment_id == segment.id,
+        )).where(
+            member.hunt_id == hunt_id, member.spec_id == spec_id,
+        )
+        with self.engine.connect() as connection:
+            segments, excluded, hunted = connection.execute(query).one()
+        return {"segments": int(segments), "excluded_keys": int(excluded),
+                "hunted_segments": int(hunted)}
 
     def baseline_parent_boot(self, hunt_id: str, target: str, host: str) -> tuple[str, datetime] | None:
         with self.engine.connect() as c:
@@ -2559,6 +2612,29 @@ class Repo:
         return self._keyset(t.baseline_observation, [t.baseline_observation.c.hunt_id == hunt_id],
                             ("spec_id", "spec_version", "scope", "key_digest"), ("first_ts", "last_ts"),
                             page_size)
+
+    def baseline_observations_for_spec(self, hunt_id: str, spec_id: str, spec_version: str, *,
+                                       page_size: int = BASELINE_PAGE) -> Iterator[dict]:
+        """One spec's observations in scope/key order, keyset-paged for streaming judgement."""
+        return self._keyset(
+            t.baseline_observation,
+            [t.baseline_observation.c.hunt_id == hunt_id,
+             t.baseline_observation.c.spec_id == spec_id,
+             t.baseline_observation.c.spec_version == spec_version],
+            ("scope", "key_digest"), ("first_ts", "last_ts"), page_size,
+        )
+
+    def baseline_observation_verdict_counts(self, hunt_id: str) -> dict[str, dict[str, int]]:
+        """Bounded report aggregate: verdict counts per spec, independent of observation volume."""
+        query = (select(t.baseline_observation.c.spec_id, t.baseline_observation.c.verdict, func.count())
+                 .where(t.baseline_observation.c.hunt_id == hunt_id)
+                 .group_by(t.baseline_observation.c.spec_id, t.baseline_observation.c.verdict)
+                 .order_by(t.baseline_observation.c.spec_id, t.baseline_observation.c.verdict))
+        out: dict[str, dict[str, int]] = {}
+        with self.engine.connect() as connection:
+            for spec_id, verdict, count in connection.execute(query):
+                out.setdefault(str(spec_id), {})[str(verdict)] = int(count)
+        return out
 
     # ---- investigator state ----------------------------------------------------------------
     def create_case(self, row: dict, *, owner_token: str | None = None) -> bool:
