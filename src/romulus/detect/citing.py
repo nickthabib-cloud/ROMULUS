@@ -123,6 +123,44 @@ class BoundStage:
         self.last = ([], [])
 
 
+class Holds:
+    """Records a rule holds on the stage only while it may cite them (a group's earliest few processes, say), each
+    released when it can no longer be cited, so the stage holds a bounded number per group however the group grows.
+    One hold per call: a record held twice (by two groups) is released twice. Drained with the rule's other staged
+    records; `last` then says which of them are holds and which earlier holds to release (`Playbook.drain_bounds`)."""
+
+    def __init__(self):
+        self.pending: list[TypedEvent] = []
+        self.releasing: list[str] = []
+        self.last: tuple[list[str], list[str]] = ([], [])
+
+    def hold(self, event: TypedEvent) -> None:
+        self.pending.append(event)
+
+    def release(self, event_id: str) -> None:
+        """Let go of one hold of the record: one not yet handed to the stage is simply not staged."""
+        for i, event in enumerate(self.pending):
+            if event.id == event_id:
+                del self.pending[i]
+                return
+        self.releasing.append(event_id)
+
+    def drain(self) -> list[TypedEvent]:
+        out = self.pending
+        self.last = ([event.id for event in out], self.releasing)
+        self.pending, self.releasing = [], []
+        return out
+
+    def clear(self) -> None:
+        self.pending, self.releasing = [], []
+        self.last = ([], [])
+
+
+def drained_holds(*stages) -> tuple[list[str], list[str]]:
+    """The holds and releases of several BoundStage or Holds drained together (`Playbook.drain_bounds`)."""
+    return ([i for stage in stages for i in stage.last[0]], [i for stage in stages for i in stage.last[1]])
+
+
 class Named:
     """One cited record for each of the first `limit` distinct values a group shows (signatures, user agents, ports),
     so every value a claim names comes from a cited record. Held as {value: event id}; the record is staged once,

@@ -1,10 +1,13 @@
 """Per-event-family normalizers for the lab schema. Dispatch on authoritative type fields only."""
 from __future__ import annotations
 
+import base64
 import hashlib
+import ipaddress
 import json
 import posixpath
 import re
+import struct
 from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
 from collections.abc import Callable
@@ -1674,6 +1677,41 @@ def _app_block(eve: dict, key: str) -> dict | None:
     return block
 
 
+# Community ID v1 (corelight/community-id-spec): the transports whose two ports it hashes, by IP protocol number.
+COMMUNITY_ID_PROTOCOLS = {"tcp": 6, "udp": 17, "sctp": 132}
+
+
+def community_id(src, sport, dst, dport, transport) -> str | None:
+    """Community ID v1 with seed 0 of a connection's 5-tuple (the id Suricata and Arkime write when configured to),
+    or None for a transport without ports or an endpoint that is not an address and a port. The two endpoints are
+    ordered as the specification orders them, so either direction of a connection gives the same id."""
+    number = COMMUNITY_ID_PROTOCOLS.get(str(transport or "").lower())
+    if number is None or not isinstance(sport, int) or not isinstance(dport, int) or isinstance(sport, bool)             or isinstance(dport, bool) or not (0 <= sport <= 65535 and 0 <= dport <= 65535):
+        return None
+    try:
+        a, b = ipaddress.ip_address(str(src)).packed, ipaddress.ip_address(str(dst)).packed
+    except ValueError:
+        return None
+    if len(a) != len(b):
+        return None
+    if (a, sport) > (b, dport):
+        a, b, sport, dport = b, a, dport, sport
+    data = struct.pack("!H", 0) + a + b + struct.pack("!BBHH", number, 0, sport, dport)
+    return "1:" + base64.b64encode(hashlib.sha1(data).digest()).decode()
+
+
+def _suricata_community_id(eve: dict, o: str):
+    """The record's community id: as Suricata wrote it, or, when its sensor did not write one (the setting is per
+    sensor and output), computed from the record's own 5-tuple, with an origin that says so. The computed id equals
+    the written one, so records of one connection from different sensors and event types share it."""
+    written = eve.get("community_id")
+    if written not in (None, ""):
+        return fv(written, f"{o}.community_id")
+    computed = community_id(eve.get("src_ip"), eve.get("src_port"), eve.get("dest_ip"), eve.get("dest_port"),
+                            eve.get("proto"))
+    return fv(computed, f"{o}.src_ip+src_port+dest_ip+dest_port+proto#computed:community_id_v1")
+
+
 def normalize_suricata(hit: dict) -> TypedEvent:
     src, nid, ref = hit["_source"], hit["_id"], _ref(hit)
     try:
@@ -1687,7 +1725,7 @@ def normalize_suricata(hit: dict) -> TypedEvent:
          "destination.port": fv(eve.get("dest_port"), f"{o}.dest_port"),
          "network.transport": fv((eve.get("proto") or "").lower() or None, f"{o}.proto"),
          "network.app_proto": fv(eve.get("app_proto"), f"{o}.app_proto"),
-         "network.community_id": fv(eve.get("community_id"), f"{o}.community_id"),
+         "network.community_id": _suricata_community_id(eve, o),
          "suricata.flow_id": fv(eve.get("flow_id"), f"{o}.flow_id")}
     family = {"alert": "net_alert", "flow": "net_flow", "netflow": "net_flow", "dns": "dns_query",
               "http": "http_tx", "fileinfo": "file_transfer", "tls": "tls_session", "ssh": "ssh_session"}.get(et)
