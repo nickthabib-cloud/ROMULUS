@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from romulus.baseline.carry import CarryInStore, ParentExec
+from romulus.baseline.carry import SPANS_TARGETS, CarryInStore, ParentExec
 from romulus.baseline.count import KeyCounter
 from romulus.baseline.playbook import ExecPairBaseline, ExecPathBaseline
 from romulus.baseline.spec import SPEC_BY_ID, KeyContext
@@ -114,6 +114,57 @@ def test_window_cells_sort_events_persist_first_citations_and_are_idempotent(mon
     assert cell["state"] == "evaluated_complete"
     assert not cell["detail"]["reasons"]
     sweep.close_stage()
+
+
+def test_sweep_crash_resumes_to_the_same_window_observations(monkeypatch, tmp_path):
+    window = Window(start=START, end=START + timedelta(days=2))
+    events = [_exec("later", START + timedelta(days=1)), _exec("earlier", START + timedelta(minutes=1))]
+    _install_partition(monkeypatch, events, window=window)
+
+    interrupted = _repo()
+    first = sweep_module.Sweep(
+        interrupted, FakeClient(), "h1", window, {"x": _contract()}, stage_dir=tmp_path / "first",
+    )
+    first.pack = [ExecPathBaseline()]
+    save = interrupted.save_baseline_window_cell
+
+    def crash_before_commit(*_args, **_kwargs):
+        raise RuntimeError("injected sweep crash")
+
+    monkeypatch.setattr(interrupted, "save_baseline_window_cell", crash_before_commit)
+    try:
+        try:
+            first.run_target("x")
+        except RuntimeError as error:
+            assert str(error) == "injected sweep crash"
+        else:
+            raise AssertionError("injected crash did not fire")
+    finally:
+        first.close_stage()
+    monkeypatch.setattr(interrupted, "save_baseline_window_cell", save)
+
+    resumed = sweep_module.Sweep(
+        interrupted, FakeClient(), "h1", window, {"x": _contract()}, stage_dir=tmp_path / "resumed",
+    )
+    resumed.pack = [ExecPathBaseline()]
+    resumed.run_target("x")
+    resumed.close_stage()
+
+    uninterrupted = _repo()
+    fresh = sweep_module.Sweep(
+        uninterrupted, FakeClient(), "h1", window, {"x": _contract()}, stage_dir=tmp_path / "fresh",
+    )
+    fresh.pack = [ExecPathBaseline()]
+    fresh.run_target("x")
+    fresh.close_stage()
+
+    assert list(interrupted.baseline_observations("h1")) == list(
+        uninterrupted.baseline_observations("h1"),
+    )
+    assert interrupted.rule_cells("h1") == uninterrupted.rule_cells("h1")
+    assert interrupted.events_by_ids(["earlier", "later"]) == uninterrupted.events_by_ids(
+        ["earlier", "later"],
+    )
 
 
 def test_missing_window_record_keeps_positive_keys_but_makes_the_cell_partial(monkeypatch, tmp_path):
@@ -280,9 +331,13 @@ def test_profile_holders_include_a_split_host_even_when_one_target_delivered_no_
     }
     repo.save_profile("h1", {"id": "pa", "target": "a", **base})
     repo.save_profile("h1", {"id": "pb", "target": "b", **base})
-    CarryInStore(repo, "h1").for_target("a").observe_rows([
+    carry = CarryInStore(repo, "h1").for_target("a")
+    carry.observe_rows([
         ParentExec("web01", "boot-1", 10, START, "/bin/a", 1, "parent"),
     ])
 
     assert repo.baseline_parent_targets("h1", "web01") == ["a", "b"]
+    assert carry.parent("web01", 10, START + timedelta(minutes=1), "boot-1") == (
+        None, SPANS_TARGETS,
+    )
 

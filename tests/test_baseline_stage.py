@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from romulus.baseline.protocol import HistoryFetch, HistoryPartition, HistoryPlan
 from romulus.baseline.spec import SPEC_BY_ID
 from romulus.config import Settings
@@ -37,7 +39,7 @@ class EmptyHistory:
         return HistoryFetch((), "complete", (), 0, 0)
 
 
-def _manifest(*, spec_ids=(SPEC.id,), configured=True):
+def _manifest(*, spec_ids=(SPEC.id,), configured=True, budget=None):
     return {
         "style": "broad", "original_input": {}, "targets": ["host-index"],
         "window": {"start": WINDOW.start.isoformat(), "end": WINDOW.end.isoformat()},
@@ -53,16 +55,18 @@ def _manifest(*, spec_ids=(SPEC.id,), configured=True):
             "specs": [{"id": sid, "version": SPEC_BY_ID[sid].version,
                        "key_version": SPEC_BY_ID[sid].key_version} for sid in spec_ids],
             "decay": {"rare_half_life_days": 14, "first_seen": "none"},
-            "budget": {"queries": 200, "records": 5_000_000, "seconds": 1800},
+            "budget": budget or {"queries": 200, "records": 5_000_000, "seconds": 1800},
             "store_cut_digest": "empty",
         },
     }
 
 
-def _repo(*, spec_ids=(SPEC.id,), configured=True):
+def _repo(*, spec_ids=(SPEC.id,), configured=True, budget=None):
     repo = Repo(make_engine(":memory:"))
     migrate(repo.engine)
-    repo.create_hunt("h1", _manifest(spec_ids=spec_ids, configured=configured), "digest", "test")
+    repo.create_hunt(
+        "h1", _manifest(spec_ids=spec_ids, configured=configured, budget=budget), "digest", "test",
+    )
     for sid in spec_ids:
         repo.set_rule_cell("h1", sid, SPEC_BY_ID[sid].version, "host-index", WINDOW.key(),
                            "evaluated_complete", 0, 1, {})
@@ -146,19 +150,45 @@ def test_absent_history_cannot_become_a_complete_negative_when_the_window_has_no
     assert "no pre-window data" in rollup["detail"]["reasons"]
 
 
-def test_history_failure_never_becomes_first_seen_or_a_complete_negative():
+@pytest.mark.parametrize(("state", "reason"), [
+    ("failed", "shard failure"),
+    ("partial", "source result cap reached"),
+    ("partial", "source timeout"),
+    ("partial", "normalization_errors=1"),
+])
+def test_history_failure_never_becomes_first_seen_or_a_complete_negative(state, reason):
     repo = _repo()
     event = _event(1, "/bin/new")
     repo.save_evidence("h1", [event], {event.raw[0].key: {"message": "new"}}, None)
     repo.upsert_baseline_observation(_observation(event, key_id="new-id", key_digest="new-digest",
                                                   path="/bin/new"))
 
-    run_baseline_stage(repo, "h1", WINDOW, source=EmptyHistory("failed", "shard failure"))
+    run_baseline_stage(repo, "h1", WINDOW, source=EmptyHistory(state, reason))
 
     assert next(repo.baseline_observations("h1"))["verdict"] == "unresolved"
     assert repo.candidates("h1") == []
     cells = [cell for cell in repo.rule_cells("h1") if cell["rule_id"] == SPEC.id]
-    assert any(cell["state"] == "failed" for cell in cells)
+    expected = "failed" if state == "failed" else "partial"
+    assert any(cell["state"] == expected for cell in cells)
+    assert all(cell["state"] != "no_match_complete" for cell in cells)
+
+
+def test_exhausted_history_budget_is_explicit_and_never_becomes_first_seen():
+    source = EmptyHistory()
+    repo = _repo(budget={"queries": 1, "records": 5_000_000, "seconds": 1800})
+    event = _event(1, "/bin/new")
+    repo.save_evidence("h1", [event], {event.raw[0].key: {"message": "new"}}, None)
+    repo.upsert_baseline_observation(_observation(
+        event, key_id="new-id", key_digest="new-digest", path="/bin/new",
+    ))
+
+    run_baseline_stage(repo, "h1", WINDOW, source=source)
+
+    assert source.plans == 1
+    assert next(repo.baseline_observations("h1"))["verdict"] == "unresolved"
+    assert repo.candidates("h1") == []
+    cells = [cell for cell in repo.rule_cells("h1") if cell["rule_id"] == SPEC.id]
+    assert any(cell["state"] == "omitted_budget" for cell in cells)
     assert all(cell["state"] != "no_match_complete" for cell in cells)
 
 
@@ -294,6 +324,23 @@ def test_stage_resume_reuses_the_frozen_snapshot_and_is_idempotent():
     assert resumed["snapshot_digest"] == first["snapshot_digest"]
     assert later_source.plans == 0
     assert repo.candidates("h1") == first_candidates
+
+
+def test_twin_stage_runs_are_canonical_identical():
+    def run_once():
+        repo = _repo()
+        _resolved_history(repo)
+        event = _event(1, "/bin/new")
+        repo.save_evidence("h1", [event], {event.raw[0].key: {"message": "new"}}, None)
+        repo.upsert_baseline_observation(_observation(
+            event, key_id="new-id", key_digest="new-digest", path="/bin/new",
+        ))
+        summary = run_baseline_stage(repo, "h1", WINDOW, source=EmptyHistory())
+        candidates = [{key: value for key, value in row.items() if key != "created_at"}
+                      for row in repo.candidates("h1")]
+        return summary, list(repo.baseline_observations("h1")), candidates, repo.rule_cells("h1")
+
+    assert run_once() == run_once()
 
 
 def test_run_orders_baseline_after_packets_before_expansion_and_resume_retries_a_crash(monkeypatch, tmp_path):
