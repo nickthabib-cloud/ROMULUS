@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from romulus.baseline.carry import CarryInStore, HourParents, PendingResolver
 from romulus.baseline.playbook import BaselineCell, BaselinePlaybook
 from romulus.baseline.spec import KeyContext, exec_serial
+from romulus.detect import netdef
 from romulus.detect.base import Match, Playbook
 from romulus.detect.bounded import StateBudget, StateExhausted, live_stores
 from romulus.detect.netdef import DIRECTION_ASSUMED_REASON
@@ -822,7 +823,9 @@ class Sweep:
                         events=ordered,
                     )
                     continue
-                pb.begin_cell(pkey, (w.start, w.end), KeyContext())
+                pb.begin_cell(
+                    pkey, (w.start, w.end), KeyContext(is_internal=netdef.current().is_internal),
+                )
                 before_eval = pb.evaluated
                 pb.consume_scoped_partition(ordered)
                 result = pb.finish_cell()

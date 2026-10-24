@@ -25,8 +25,9 @@ SITE = SiteNetworks.from_lists(["198.51.100.0/24", "10.0.0.0/8"], ["10.50.0.0/16
 T0 = datetime(2024, 11, 18, 14, 0, tzinfo=UTC)
 WINDOW = Window(start=T0, end=T0 + timedelta(minutes=5))
 TARGET = "romulus-network-x"
-AFFECTED = {"net.horizontal_sweep", "net.long_external_connection", "net.beaconing", "net.rare_client_fingerprint",
-            "net.tls_self_signed_certificate_outbound", "net.tls_short_lived_or_new_certificate_outbound"}
+AFFECTED = {"bl.ext_dest", "net.horizontal_sweep", "net.long_external_connection", "net.beaconing",
+            "net.rare_client_fingerprint", "net.tls_self_signed_certificate_outbound",
+            "net.tls_short_lived_or_new_certificate_outbound"}
 _n = 0
 
 
@@ -75,7 +76,8 @@ def test_each_changed_rule_carries_a_new_version():
     # the six direction-dependent rules (coverage semantics) and the four whose claim or reason wording changed (two
     # of them since changed again: their lineage reads observed process records)
     versions = {pb.id: pb.version for pb in ALL_PLAYBOOKS if pb.id in AFFECTED | WORDING}
-    assert versions == {"net.horizontal_sweep": "5", "net.long_external_connection": "4", "net.beaconing": "4",
+    assert versions == {"bl.ext_dest": "1", "net.horizontal_sweep": "5",
+                        "net.long_external_connection": "4", "net.beaconing": "4",
                         "net.rare_client_fingerprint": "4", "net.tls_self_signed_certificate_outbound": "3",
                         "net.tls_short_lived_or_new_certificate_outbound": "3",
                         "host.ssh_login_external_source": "5", "host.interpreter_external_connection": "6",

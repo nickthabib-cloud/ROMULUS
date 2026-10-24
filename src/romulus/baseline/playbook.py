@@ -37,6 +37,9 @@ class BaselinePlaybook(Playbook):
     severity: ClassVar[str] = "info"
     lane: ClassVar[str] = "lead"
     anchor_class: ClassVar[str] = "baseline"
+    attack_exempt: ClassVar[str] = (
+        "Baseline deviations are technique-agnostic context, not claims of adversary behavior."
+    )
     spec: ClassVar[BaselineSpec]
 
     def __init__(self) -> None:
@@ -57,7 +60,9 @@ class BaselinePlaybook(Playbook):
 
     def consume(self, events: list[TypedEvent]) -> list[Match]:
         if self._counter is None:
-            raise RuntimeError(f"baseline cell is not open for {self.id}")
+            # Generic full-pack probes call every playbook directly, outside a sweep cell. Baselines have no
+            # defensible span in that mode, so they neither accumulate nor publish.
+            return []
         for event in events:
             before = self._counter.partial
             self._counter.consume(event, self._context)

@@ -5,8 +5,10 @@ from datetime import UTC, datetime, timedelta
 
 from romulus.baseline.carry import SPANS_TARGETS, CarryInStore, ParentExec
 from romulus.baseline.count import KeyCounter
-from romulus.baseline.playbook import ExecPairBaseline, ExecPathBaseline
+from romulus.baseline.playbook import ExecPairBaseline, ExecPathBaseline, ExternalDestinationBaseline
 from romulus.baseline.spec import SPEC_BY_ID, KeyContext
+from romulus.detect import netdef
+from romulus.detect.netdef import SiteNetworks
 from romulus.evidence.typed import Outcome, TypedEvent, fv
 from romulus.hunt import sweep as sweep_module
 from romulus.sources.models import Completeness, SearchOutcome, Window
@@ -255,6 +257,33 @@ def test_exec_pair_empty_incompatible_target_is_not_applicable_not_partial(monke
 
     cell = next(row for row in repo.rule_cells("h1") if row["partition"] == window.key())
     assert cell["state"] == "not_applicable_no_events"
+    sweep.close_stage()
+
+
+def test_external_destination_uses_the_installed_site_network(monkeypatch, tmp_path):
+    window = Window(start=START, end=END)
+    event = TypedEvent(
+        id="public-space-source", family="net_flow", ts=START, host="sensor",
+        outcome=Outcome.unknown,
+        fields={
+            "source.ip": fv("198.51.100.10", "fixture:source.ip"),
+            "destination.ip": fv("8.8.8.8", "fixture:destination.ip"),
+        },
+        raw=[], normalizer="fixture@1",
+    )
+    _install_partition(monkeypatch, [event], window=window)
+    netdef.install(SiteNetworks.from_lists(["198.51.100.0/24"]))
+    repo = _repo()
+    sweep = sweep_module.Sweep(
+        repo, FakeClient(), "h1", window, {"x": _contract()}, stage_dir=tmp_path,
+    )
+    sweep.pack = [ExternalDestinationBaseline()]
+
+    sweep.run_target("x")
+
+    observations = list(repo.baseline_observations("h1"))
+    assert {row["key"]["kind"] for row in observations} == {"dest_ip", "dest_network"}
+    assert {row["scope"] for row in observations} == {"internal_ip:198.51.100.10"}
     sweep.close_stage()
 
 

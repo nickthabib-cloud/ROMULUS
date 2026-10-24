@@ -455,11 +455,6 @@ A technique is covered only by a rule that explicitly declares that ATT&CK id.
 
 Active rules without an ATT&CK mapping or an explicit exemption:
 
-- `bl.cmd_shape`
-- `bl.exec_pair`
-- `bl.exec_path`
-- `bl.ext_dest`
-- `bl.ssh_tuple`
 - `ioc.indicator_match`
 - `net.suricata_alert_stack`
 
