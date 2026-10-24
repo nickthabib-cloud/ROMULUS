@@ -170,6 +170,16 @@ _OBSERVATION_KEY = ("hunt_id", "spec_id", "spec_version", "scope", "key_digest")
 _OBSERVATION_REQUIRED = frozenset({*_OBSERVATION_KEY, "scope_kind", "key_id", "key", "window_count", "verdict"})
 
 
+def _baseline_observation_row(row: dict) -> dict:
+    _columns(row, _OBSERVATION_COLUMNS, frozenset(_OBSERVATION_COLUMNS) - _OBSERVATION_REQUIRED,
+             "observation")
+    out = {name: row.get(name) for name in _OBSERVATION_COLUMNS}
+    for name in ("first_ts", "last_ts"):
+        if out[name] is not None:
+            out[name] = _utc(out[name], name)
+    return out
+
+
 def _utc(value: Any, name: str) -> datetime:
     """A timezone-aware time as UTC; a naive time is refused, never assumed to be UTC."""
     if not isinstance(value, datetime):
@@ -2272,12 +2282,34 @@ class Repo:
             return True
 
     def baseline_parent_targets(self, hunt_id: str, host: str) -> list[str]:
-        """Targets that delivered at least one exec for `host` in this hunt (ix_baseline_parent_host_boot_host)."""
+        """Every target that could deliver this host's execs, including a holder that delivered none.
+
+        Carry rows prove delivery. Source profiles conservatively add host-capable holders whose inventory names
+        the host; a target that failed throughout the window therefore still prevents a cross-target parent guess.
+        """
         table = t.baseline_parent_host_boot.c
         with self.engine.connect() as c:
-            return sorted(c.execute(select(table.target).where(
+            targets = set(c.execute(select(table.target).where(
                 table.hunt_id == hunt_id, table.host == host,
             )).scalars())
+            profiles = c.execute(select(t.source_profile.c.target, t.source_profile.c.profile).where(
+                t.source_profile.c.hunt_id == hunt_id,
+            )).all()
+        wanted = host.strip().rstrip(".").casefold()
+        for target, profile in profiles:
+            if not isinstance(profile, dict) or profile.get("role") != "host":
+                continue
+            datasets = profile.get("datasets") or {}
+            fields = profile.get("field_types") or {}
+            exec_capable = any(str(name).startswith("linux.audit") for name in datasets) or (
+                "process.executable" in fields and "process.pid" in fields
+            )
+            hosts = profile.get("hosts") or {}
+            if exec_capable and wanted in {
+                str(name).strip().rstrip(".").casefold() for name in hosts
+            }:
+                targets.add(str(target))
+        return sorted(targets)
 
     def upsert_baseline_parents(self, rows: Iterable[dict]) -> None:
         """Keep the latest two observed exec generations for each live PID, ordered by (time, audit serial).
@@ -2444,21 +2476,83 @@ class Repo:
         values["candidate_id"] = func.coalesce(stmt.excluded.candidate_id, table.candidate_id)
         stmt = stmt.on_conflict_do_update(index_elements=list(_OBSERVATION_KEY), set_=values)
 
-        def normalized(row: dict) -> dict:
-            _columns(row, _OBSERVATION_COLUMNS, frozenset(_OBSERVATION_COLUMNS) - _OBSERVATION_REQUIRED,
-                     "observation")
-            out = {name: row.get(name) for name in _OBSERVATION_COLUMNS}
-            for name in ("first_ts", "last_ts"):
-                if out[name] is not None:
-                    out[name] = _utc(out[name], name)
-            return out
-
         written = 0
         with write_txn(self.engine) as c:
-            for chunk in _chunks((normalized(row) for row in rows), chunk_size):
+            for chunk in _chunks((_baseline_observation_row(row) for row in rows), chunk_size):
                 c.execute(stmt, chunk)
                 written += len(chunk)
         return written
+
+    def baseline_window_cell_done(self, hunt_id: str, rule_id: str, version: str,
+                                  target: str, partition: str) -> bool:
+        """Whether one baseline cell was durably merged already (anything other than planned/split)."""
+        table = t.rule_run.c
+        with self.engine.connect() as c:
+            state = c.execute(select(table.state).where(
+                table.hunt_id == hunt_id, table.rule_id == rule_id, table.rule_version == version,
+                table.target == target, table.partition == partition,
+            )).scalar_one_or_none()
+        return state is not None and state not in {"planned", "split"}
+
+    def save_baseline_window_cell(self, hunt_id: str, cell: dict, observations: Iterable[dict]) -> bool:
+        """Atomically add one cell's observations once and close its ordinary rule cell.
+
+        The terminal rule cell is the idempotency marker. A killed or restarted sweep can process its direct
+        rules again while baseline counting skips cells already committed; counts therefore never double.
+        """
+        rows = (_baseline_observation_row(row) for row in observations)
+        table = t.baseline_observation.c
+        stmt = insert(t.baseline_observation)
+        earlier = or_(
+            stmt.excluded.first_ts < table.first_ts,
+            and_(stmt.excluded.first_ts == table.first_ts,
+                 stmt.excluded.first_event_id < table.first_event_id),
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=list(_OBSERVATION_KEY),
+            set_={
+                "window_count": table.window_count + stmt.excluded.window_count,
+                "first_ts": func.min(table.first_ts, stmt.excluded.first_ts),
+                "last_ts": func.max(table.last_ts, stmt.excluded.last_ts),
+                "first_event_id": case((earlier, stmt.excluded.first_event_id), else_=table.first_event_id),
+                # A window merge precedes judgement. Keep all history fields and verdicts at their pending values.
+                "history_count": None,
+                "history_decayed": None,
+                "peer_scopes_with_key": None,
+                "peer_scopes": None,
+                "threshold": None,
+                "mean": None,
+                "sigma": None,
+                "n_hours": None,
+                "verdict": "unresolved",
+                "reason": "baseline judgement pending",
+            },
+        )
+        rule = t.rule_run.c
+        with write_txn(self.engine) as connection:
+            current = connection.execute(select(rule.state).where(
+                rule.hunt_id == hunt_id,
+                rule.rule_id == cell["rule_id"],
+                rule.rule_version == cell["version"],
+                rule.target == cell["target"],
+                rule.partition == cell["partition"],
+            )).scalar_one_or_none()
+            if current is not None and current not in {"planned", "split"}:
+                return False
+            for chunk in _chunks(rows, BASELINE_CHUNK):
+                connection.execute(stmt, chunk)
+            connection.execute(_RULE_CELL_UPSERT, [{
+                "hunt_id": hunt_id,
+                "rule_id": cell["rule_id"],
+                "rule_version": cell["version"],
+                "target": cell["target"],
+                "partition": cell["partition"],
+                "state": cell["state"],
+                "matched": cell["matched"],
+                "evaluated": cell["evaluated"],
+                "detail": cell.get("detail") or {},
+            }])
+        return True
 
     def baseline_observations(self, hunt_id: str, *, page_size: int = BASELINE_PAGE) -> Iterator[dict]:
         """A hunt's observations in key order (spec, version, scope, key digest), paged."""

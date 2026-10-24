@@ -8,6 +8,9 @@ from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 
+from romulus.baseline.carry import CarryInStore, HourParents, PendingResolver
+from romulus.baseline.playbook import BaselineCell, BaselinePlaybook
+from romulus.baseline.spec import KeyContext, exec_serial
 from romulus.detect.base import Match, Playbook
 from romulus.detect.bounded import StateBudget, StateExhausted, live_stores
 from romulus.detect.netdef import DIRECTION_ASSUMED_REASON
@@ -187,6 +190,7 @@ class Sweep:
             self.budget.account("windows_continuity") if self._has_windows else None
         )
         self._stage_size = 0
+        self._baseline_carry = CarryInStore(repo, hunt_id)
         self.partial_reasons: list[str] = []
         preflight = self.budget.preflight()
         if preflight:
@@ -549,8 +553,12 @@ class Sweep:
 
     def _mark_all(self, target: str, pkey: str, state: str, detail: dict | None = None):
         """Write the same coverage state for every rule on one (target, partition), in one transaction."""
-        self.repo.set_rule_cells(self.hunt_id, [self._cell(pb, target, pkey, state, detail=detail)
-                                                for pb in self.pack])
+        self.repo.set_rule_cells(self.hunt_id, [
+            self._cell(pb, target, pkey, state, detail=detail)
+            for pb in self.pack
+            if not (isinstance(pb, BaselinePlaybook)
+                    and self.repo.baseline_window_cell_done(self.hunt_id, pb.id, pb.version, target, pkey))
+        ])
 
     def _split(self, target: str, w: Window) -> tuple[Window, Window]:
         """Record children as planned *before* the parent is superseded, so a crash between the two
@@ -579,14 +587,20 @@ class Sweep:
         # persist every planned (rule x target x partition) cell first: anything never executed
         # stays visibly 'planned' and can never be read as a complete negative
         for start in range(0, len(parts), PLANNED_CHUNK):
-            self.repo.set_rule_cells(self.hunt_id, [self._cell(pb, target, w.key(), "planned")
-                                                    for w, _est in parts[start:start + PLANNED_CHUNK]
-                                                    for pb in self.pack])
+            self.repo.set_rule_cells(self.hunt_id, [
+                self._cell(pb, target, w.key(), "planned")
+                for w, _est in parts[start:start + PLANNED_CHUNK]
+                for pb in self.pack
+                if not (isinstance(pb, BaselinePlaybook)
+                        and self.repo.baseline_window_cell_done(
+                            self.hunt_id, pb.id, pb.version, target, w.key()))
+            ])
         try:
             for index, (w, est) in enumerate(parts):
                 following = parts[index + 1] if index + 1 < len(parts) else None
                 self._next = (target, contract, filters, any_of, *following) if following else None
                 self.run_partition(target, contract, filters, w, est, any_of=any_of)
+            self._finalize_baseline_target(target)
         finally:
             self._next = None
             self._stop_prefetch()
@@ -780,6 +794,51 @@ class Sweep:
             windows_gate_reasons.update(windows_reasons)
             rule_partial = (affected is ALL_FAMILIES or bool(set(pb.families) & affected)
                             or bool(windows_reasons))
+            if isinstance(pb, BaselinePlaybook):
+                if self.repo.baseline_window_cell_done(
+                        self.hunt_id, pb.id, pb.version, target, pkey):
+                    continue
+                ordered = sorted(pb.scope_partition(events), key=lambda item: (
+                    item.ts, -1 if exec_serial(item) is None else exec_serial(item), item.id,
+                ))
+                target_applicable = target_fallback or bool(ordered)
+                reasons = list(base_reasons)
+                reasons.extend(windows_reasons)
+                if error_reason and (error_affected is ALL_FAMILIES or set(pb.families) & error_affected):
+                    reasons.append(error_reason)
+                if pb.id == "bl.exec_pair":
+                    owner = f"baseline:{target}"
+                    if ordered:
+                        self._stage_put([], raw_sources, [(owner, event) for event in ordered])
+                    self._event_stage().record_baseline_cell(
+                        target=target,
+                        partition=pkey,
+                        start=w.start,
+                        end=w.end,
+                        source_complete=target_applicable and not rule_partial,
+                        reasons=reasons,
+                        task_id=tid,
+                        events=ordered,
+                    )
+                    continue
+                pb.begin_cell(pkey, (w.start, w.end), KeyContext())
+                before_eval = pb.evaluated
+                pb.consume_scoped_partition(ordered)
+                result = pb.finish_cell()
+                reasons.extend(result.reasons)
+                evaluated = pb.evaluated - before_eval
+                if not target_applicable:
+                    state = "not_applicable_no_events"
+                elif rule_partial or result.partial:
+                    state = "evaluated_partial"
+                elif not (evaluated_families & families) and evaluated == 0:
+                    state = "not_applicable_no_events"
+                else:
+                    state = "evaluated_complete"
+                self._save_baseline_cell(
+                    pb, target, pkey, state, evaluated, reasons, result, tid, ordered, raw_sources,
+                )
+                continue
             before_eval, before_missing, before_os, before_capped = (
                 pb.evaluated, pb.missing_required, pb.os_applicable, pb.capped,
             )
@@ -883,6 +942,101 @@ class Sweep:
         # the partition's cells together: a crash before this leaves them all visibly `planned`
         self.repo.set_rule_cells(self.hunt_id, cells)
         self.repo.update_task(tid, "evaluated")
+
+    def _baseline_observations(self, playbook: BaselinePlaybook, cell: BaselineCell):
+        for row in cell.observations:
+            yield {
+                "hunt_id": self.hunt_id,
+                "spec_id": playbook.spec.id,
+                "spec_version": playbook.spec.version,
+                **row,
+                "history_count": None,
+                "history_decayed": None,
+                "peer_scopes_with_key": None,
+                "peer_scopes": None,
+                "threshold": None,
+                "mean": None,
+                "sigma": None,
+                "n_hours": None,
+                "verdict": "unresolved",
+                "reason": "baseline judgement pending",
+                "candidate_id": None,
+            }
+
+    def _save_baseline_cell(self, playbook: BaselinePlaybook, target: str, partition: str,
+                            state: str, evaluated: int, reasons: list[str], result: BaselineCell,
+                            task_id: str | None, events: list[TypedEvent], raw_sources: dict[str, dict]) -> None:
+        """Persist first citations, observations and the cell's idempotency marker."""
+        by_id = {event.id: event for event in events}
+        cited = [by_id[event_id] for event_id in sorted({
+            row["first_event_id"] for row in result.observations if row["first_event_id"] in by_id
+        })]
+        if cited:
+            self.repo.save_evidence(self.hunt_id, cited, raw_sources, task_id)
+        self.repo.save_baseline_window_cell(self.hunt_id, {
+            "rule_id": playbook.id,
+            "version": playbook.version,
+            "target": target,
+            "partition": partition,
+            "state": state,
+            "matched": 0,
+            "evaluated": evaluated,
+            "detail": {"reasons": sorted(set(reasons))},
+        }, self._baseline_observations(playbook, result))
+
+    def _finalize_baseline_target(self, target: str) -> None:
+        """Replay staged exec cells newest-first through the shared window carry and persist exec-pair cells."""
+        playbook = next((pb for pb in self.pack
+                         if isinstance(pb, BaselinePlaybook) and pb.id == "bl.exec_pair"), None)
+        stage = getattr(self, "_stage", None)
+        if playbook is None or stage is None:
+            return
+        carry = self._baseline_carry.for_target(target, horizon=self.window.end)
+        owner = f"baseline:{target}"
+        items = sorted(stage.baseline_cells(target), key=lambda item: (item["start"], item["partition"]))
+        # Continuity is known only after every cell has been fed. A later-retrieved exec whose typed time sits in
+        # an earlier hour must be able to break that hour before any child is resolved against the horizon.
+        for item in items:
+            if self.repo.baseline_window_cell_done(
+                    self.hunt_id, playbook.id, playbook.version, target, item["partition"]):
+                continue
+            events = sorted(stage.baseline_events(target, item["partition"]), key=lambda event: (
+                event.ts, -1 if exec_serial(event) is None else exec_serial(event), event.id,
+            ))
+            carry.observe_events(events, hour=(item["start"], item["end"]))
+            uncarried, hostless = carry.take_uncarried()
+            carry.record_breaks(uncarried)
+            if item["source_complete"] and not hostless:
+                carry.mark_observed(item["start"], item["end"])
+        for item in items:
+            if self.repo.baseline_window_cell_done(
+                    self.hunt_id, playbook.id, playbook.version, target, item["partition"]):
+                stage.release(owner, stage.drop_baseline_cell(target, item["partition"]))
+                continue
+            events = sorted(stage.baseline_events(target, item["partition"]), key=lambda event: (
+                event.ts, -1 if exec_serial(event) is None else exec_serial(event), event.id,
+            ))
+            parents = HourParents()
+            for event in events:
+                parents.add(event)
+            context = KeyContext(pid_table=parents)
+            playbook.begin_cell(item["partition"], (item["start"], item["end"]), context)
+            before_eval = playbook.evaluated
+            playbook.consume_scoped_partition(events)
+            playbook.resolve_pendings(PendingResolver(carry, playbook.spec))
+            for reason in item["reasons"]:
+                playbook.mark_cell_partial(reason)
+            result = playbook.finish_cell()
+            reasons = [*item["reasons"], *result.reasons]
+            state = ("not_applicable_no_events" if not events and item["source_complete"] else
+                     "evaluated_partial" if result.partial or not item["source_complete"] else
+                     "evaluated_complete")
+            raw_sources = stage.raw_sources(events)
+            self._save_baseline_cell(
+                playbook, target, item["partition"], state, playbook.evaluated - before_eval,
+                reasons, result, item["task_id"], events, raw_sources,
+            )
+            stage.release(owner, stage.drop_baseline_cell(target, item["partition"]))
 
     def _count_boots(self, events) -> None:
         """Host-record events by where their boot id came from: a record, the boot-interval map, or nowhere."""

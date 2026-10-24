@@ -230,15 +230,24 @@ def test_a_partition_is_staged_once_and_its_cells_written_in_one_transaction(mon
     monkeypatch.setattr(TypedEvent, "model_dump_json", lambda self, **kw: serialized.append(self.id)
                         or real_dump(self, **kw))
     repo = _repo()
-    batches, singles = [], []
+    batches, singles, baseline_cells = [], [], []
     real_cells, real_cell = repo.set_rule_cells, repo.set_rule_cell
+    real_baseline_cell = repo.save_baseline_window_cell
     monkeypatch.setattr(repo, "set_rule_cells", lambda *a, **k: batches.append(a[1]) or real_cells(*a, **k))
     monkeypatch.setattr(repo, "set_rule_cell", lambda *a, **k: singles.append(a) or real_cell(*a, **k))
+    monkeypatch.setattr(repo, "save_baseline_window_cell",
+                        lambda *a, **k: baseline_cells.append(a[1]) or real_baseline_cell(*a, **k))
     w = Window(start=T0, end=T0 + timedelta(minutes=5))
     sweep = sw.Sweep(repo, None, "h1", w, {"romulus-network-x": None}, stage_dir=tmp_path)
     assert sum(pb.staged for pb in sweep.pack) >= 2       # several joining playbooks stage the same flows
     sweep.run_partition("romulus-network-x", None, [], w, est=len(records))
     assert len(puts) == 1 and puts[0] and len({e.id for e in puts[0]}) == len(puts[0])
     assert len(serialized) == len(set(serialized))
-    assert singles == [] and len(batches) == 1 and len(batches[0]) == len(sweep.pack)
+    ordinary = [playbook for playbook in sweep.pack if playbook.kind != "baseline"]
+    assert singles == [] and len(batches) == 1 and len(batches[0]) == len(ordinary)
+    # A baseline cell and its window observations are one idempotent transaction. exec_pair is replayed after
+    # all of a target's cells have reached the carry, so direct run_partition calls leave that one staged.
+    assert {cell["rule_id"] for cell in baseline_cells} == {
+        playbook.id for playbook in sweep.pack if playbook.kind == "baseline" and playbook.id != "bl.exec_pair"
+    }
     sweep.close_stage()

@@ -1,0 +1,288 @@
+"""Sweep integration for bounded window observations and parent continuity."""
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+
+from romulus.baseline.carry import CarryInStore, ParentExec
+from romulus.baseline.count import KeyCounter
+from romulus.baseline.playbook import ExecPairBaseline, ExecPathBaseline
+from romulus.baseline.spec import SPEC_BY_ID, KeyContext
+from romulus.evidence.typed import Outcome, TypedEvent, fv
+from romulus.hunt import sweep as sweep_module
+from romulus.sources.models import Completeness, SearchOutcome, Window
+from romulus.sources.profile import contract_from_types
+from romulus.store.db import make_engine, migrate
+from romulus.store.repo import Repo
+
+START = datetime(2026, 1, 8, 12, tzinfo=UTC)
+END = START + timedelta(hours=1)
+
+
+class FakeClient:
+    version = "test"
+
+    class settings:
+        es_flavor = "elasticsearch"
+
+
+def _repo(targets: list[str] | None = None) -> Repo:
+    engine = make_engine(":memory:")
+    migrate(engine)
+    repo = Repo(engine)
+    repo.create_hunt("h1", {"targets": targets or ["x"]}, "digest", "tester")
+    return repo
+
+
+def _exec(event_id: str, ts: datetime, *, host: str = "web01", pid: int = 20, ppid: int = 10,
+          executable: str = "/bin/sh", serial: int | None = None,
+          outcome: Outcome = Outcome.success) -> TypedEvent:
+    values = {
+        "process.pid": pid,
+        "process.ppid": ppid,
+        "process.executable": executable,
+        "process.exec_file.path": executable,
+        "process.user": "www-data",
+        "host.boot.id": "boot-1",
+    }
+    if serial is not None:
+        values["audit.serial"] = serial
+    return TypedEvent(
+        id=event_id,
+        family="process_exec",
+        ts=ts,
+        host=host,
+        outcome=outcome,
+        fields={name: fv(value, f"fixture:{name}") for name, value in values.items()},
+        raw=[],
+        normalizer="fixture@1",
+    )
+
+
+def _contract(target: str = "x", hosts: tuple[str, ...] = ("web01",)):
+    return contract_from_types(
+        target,
+        {"@timestamp": "date", "process.executable": "keyword", "process.pid": "long"},
+        role="host",
+        os_family="linux",
+        hosts=hosts,
+    )
+
+
+def _install_partition(monkeypatch, events: list[TypedEvent], *, window: Window) -> None:
+    records = [{"_index": "fixture", "_id": event.id, "_source": {}} for event in events]
+    by_id = {event.id: event for event in events}
+
+    def execute(_client, intent, _contract):
+        now = datetime.now(UTC)
+        return SearchOutcome(
+            target=intent.target,
+            fingerprint="fixture",
+            started_at=now,
+            ended_at=now,
+            completeness=Completeness.complete,
+            total=len(records),
+            total_relation="eq",
+            returned=len(records),
+            records=records,
+        )
+
+    monkeypatch.setattr(sweep_module, "execute", execute)
+    monkeypatch.setattr(
+        sweep_module,
+        "normalize_hits",
+        lambda fetched, _boots=None: ([by_id[row["_id"]] for row in fetched], {}, []),
+    )
+    monkeypatch.setattr(sweep_module, "plan_partitions", lambda *_args, **_kwargs: [(window, len(records))])
+
+
+def test_window_cells_sort_events_persist_first_citations_and_are_idempotent(monkeypatch, tmp_path):
+    window = Window(start=START, end=START + timedelta(days=2))
+    events = [_exec("later", START + timedelta(days=1)), _exec("earlier", START + timedelta(minutes=1))]
+    _install_partition(monkeypatch, events, window=window)
+    repo = _repo()
+    sweep = sweep_module.Sweep(repo, FakeClient(), "h1", window, {"x": _contract()}, stage_dir=tmp_path)
+    sweep.pack = [ExecPathBaseline()]
+
+    sweep.run_target("x")
+    sweep.run_target("x")
+
+    observations = list(repo.baseline_observations("h1"))
+    assert len(observations) == 2
+    assert {row["window_count"] for row in observations} == {2}
+    assert {row["first_event_id"] for row in observations} == {"earlier"}
+    cell = next(row for row in repo.rule_cells("h1") if row["partition"] == window.key())
+    assert cell["state"] == "evaluated_complete"
+    assert not cell["detail"]["reasons"]
+    sweep.close_stage()
+
+
+def test_missing_window_record_keeps_positive_keys_but_makes_the_cell_partial(monkeypatch, tmp_path):
+    window = Window(start=START, end=END)
+    valid = _exec("valid", START + timedelta(minutes=1))
+    missing = valid.model_copy(update={"id": "missing", "fields": {}})
+    _install_partition(monkeypatch, [missing, valid], window=window)
+    repo = _repo()
+    sweep = sweep_module.Sweep(repo, FakeClient(), "h1", window, {"x": _contract()}, stage_dir=tmp_path)
+    sweep.pack = [ExecPathBaseline()]
+
+    sweep.run_target("x")
+
+    assert {row["first_event_id"] for row in repo.baseline_observations("h1")} == {"valid"}
+    cell = next(row for row in repo.rule_cells("h1") if row["partition"] == window.key())
+    assert cell["state"] == "evaluated_partial"
+    assert any("process.executable is absent" in reason for reason in cell["detail"]["reasons"])
+    sweep.close_stage()
+
+
+def test_window_and_lookback_counters_are_equal_at_retrieval_edges(monkeypatch, tmp_path):
+    window = Window(start=START, end=END)
+    events = [
+        _exec("before", START - timedelta(seconds=1)),
+        _exec("after", END + timedelta(seconds=1)),
+    ]
+    _install_partition(monkeypatch, events, window=window)
+    repo = _repo()
+    sweep = sweep_module.Sweep(repo, FakeClient(), "h1", window, {"x": _contract()}, stage_dir=tmp_path)
+    sweep.pack = [ExecPathBaseline()]
+
+    sweep.run_target("x")
+
+    direct = KeyCounter("segment", SPEC_BY_ID["bl.exec_path"], span=(START, END))
+    for event in sorted(events, key=lambda item: (item.ts, item.id)):
+        direct.consume(event, KeyContext())
+    expected = {
+        (row["scope_kind"], row["scope"], row["key_digest"]):
+        (row["count"], row["first_ts"], row["last_ts"])
+        for row in direct.count_rows()
+    }
+    actual = {
+        (row["scope_kind"], row["scope"], row["key_digest"]):
+        (row["window_count"], row["first_ts"], row["last_ts"])
+        for row in repo.baseline_observations("h1")
+    }
+    assert actual == expected
+    sweep.close_stage()
+
+
+def test_window_child_resolves_to_a_pre_window_parent(monkeypatch, tmp_path):
+    window = Window(start=START, end=END)
+    child = _exec("child", START + timedelta(minutes=5), ppid=10, executable="/bin/curl")
+    _install_partition(monkeypatch, [child], window=window)
+    repo = _repo()
+    carry = CarryInStore(repo, "h1").for_target("x", horizon=END)
+    carry.observe_rows([
+        ParentExec("web01", "boot-1", 10, START - timedelta(minutes=30), "/usr/sbin/sshd", 1, "parent"),
+    ])
+    carry.mark_observed(START - timedelta(hours=1), START)
+    sweep = sweep_module.Sweep(repo, FakeClient(), "h1", window, {"x": _contract()}, stage_dir=tmp_path)
+    sweep.pack = [ExecPairBaseline()]
+
+    sweep.run_target("x")
+
+    observation = next(repo.baseline_observations("h1"))
+    assert observation["key"] == {
+        "child_executable": "/bin/curl",
+        "parent_executable": "/usr/sbin/sshd",
+    }
+    assert observation["first_event_id"] == "child"
+    cell = next(row for row in repo.rule_cells("h1") if row["partition"] == window.key())
+    assert cell["state"] == "evaluated_complete"
+    sweep.close_stage()
+
+
+def test_window_child_resolves_to_a_parent_from_an_earlier_cell(monkeypatch, tmp_path):
+    first = Window(start=START, end=START + timedelta(minutes=30))
+    second = Window(start=first.end, end=END)
+    parent = _exec("parent", START + timedelta(minutes=5), pid=10, ppid=1, executable="/usr/bin/bash")
+    child = _exec("child", START + timedelta(minutes=35), pid=20, ppid=10, executable="/bin/curl")
+    by_id = {event.id: event for event in (parent, child)}
+
+    def execute(_client, intent, _contract):
+        selected = [event for event in (parent, child) if intent.window.start <= event.ts < intent.window.end]
+        records = [{"_index": "fixture", "_id": event.id, "_source": {}} for event in selected]
+        now = datetime.now(UTC)
+        return SearchOutcome(
+            target=intent.target, fingerprint="fixture", started_at=now, ended_at=now,
+            completeness=Completeness.complete, total=len(records), total_relation="eq",
+            returned=len(records), records=records,
+        )
+
+    monkeypatch.setattr(sweep_module, "execute", execute)
+    monkeypatch.setattr(
+        sweep_module, "normalize_hits",
+        lambda records, _boots=None: ([by_id[row["_id"]] for row in records], {}, []),
+    )
+    monkeypatch.setattr(sweep_module, "plan_partitions", lambda *_args, **_kwargs: [(first, 1), (second, 1)])
+    repo = _repo()
+    sweep = sweep_module.Sweep(repo, FakeClient(), "h1", Window(start=START, end=END),
+                               {"x": _contract()}, stage_dir=tmp_path)
+    sweep.pack = [ExecPairBaseline()]
+
+    sweep.run_target("x")
+
+    assert any(row["key"] == {
+        "child_executable": "/bin/curl",
+        "parent_executable": "/usr/bin/bash",
+    } for row in repo.baseline_observations("h1"))
+    child_cell = next(row for row in repo.rule_cells("h1") if row["partition"] == second.key())
+    assert child_cell["state"] == "evaluated_complete"
+    sweep.close_stage()
+
+
+def test_window_out_of_retrieval_hour_exec_breaks_both_hours(monkeypatch, tmp_path):
+    window = Window(start=START, end=END)
+    outside = _exec("outside", START - timedelta(hours=2), pid=30)
+    _install_partition(monkeypatch, [outside], window=window)
+    repo = _repo()
+    sweep = sweep_module.Sweep(repo, FakeClient(), "h1", window, {"x": _contract()}, stage_dir=tmp_path)
+    sweep.pack = [ExecPairBaseline()]
+
+    sweep.run_target("x")
+
+    assert repo.baseline_parent_breaks("h1", "x", "web01") == [
+        (START - timedelta(hours=2), START - timedelta(hours=1)),
+        (START, START + timedelta(hours=1)),
+    ]
+    sweep.close_stage()
+
+
+def test_same_instant_parent_images_without_serials_leave_the_child_unresolved(monkeypatch, tmp_path):
+    window = Window(start=START, end=END)
+    instant = START + timedelta(minutes=5)
+    events = [
+        _exec("parent-a", instant, pid=10, executable="/bin/a"),
+        _exec("parent-b", instant, pid=10, executable="/bin/b"),
+        _exec("child", instant, pid=20, ppid=10, executable="/bin/c"),
+    ]
+    _install_partition(monkeypatch, events, window=window)
+    repo = _repo()
+    sweep = sweep_module.Sweep(repo, FakeClient(), "h1", window, {"x": _contract()}, stage_dir=tmp_path)
+    sweep.pack = [ExecPairBaseline()]
+
+    sweep.run_target("x")
+
+    assert list(repo.baseline_observations("h1")) == []
+    cell = next(row for row in repo.rule_cells("h1") if row["partition"] == window.key())
+    assert cell["state"] == "evaluated_partial"
+    assert any("not carried" in reason for reason in cell["detail"]["reasons"])
+    sweep.close_stage()
+
+
+def test_profile_holders_include_a_split_host_even_when_one_target_delivered_no_exec():
+    repo = _repo(["a", "b"])
+    base = {
+        "kind": "es_index",
+        "role": "host",
+        "os_family": "linux",
+        "field_types": {"process.executable": "keyword", "process.pid": "long"},
+        "datasets": {"linux.audit": 1},
+        "hosts": {"web01": 1},
+    }
+    repo.save_profile("h1", {"id": "pa", "target": "a", **base})
+    repo.save_profile("h1", {"id": "pb", "target": "b", **base})
+    CarryInStore(repo, "h1").for_target("a").observe_rows([
+        ParentExec("web01", "boot-1", 10, START, "/bin/a", 1, "parent"),
+    ])
+
+    assert repo.baseline_parent_targets("h1", "web01") == ["a", "b"]
+

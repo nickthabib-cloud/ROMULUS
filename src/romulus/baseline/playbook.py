@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import ClassVar, Protocol
 
+from romulus.baseline.carry import PendingResolver
 from romulus.baseline.count import KeyCounter
 from romulus.baseline.spec import SPEC_BY_ID, BaselineSpec, KeyContext, Pending
 from romulus.detect.base import Match, Playbook
@@ -64,6 +65,22 @@ class BaselinePlaybook(Playbook):
             if not before and self._counter.partial:
                 self.missing_required += 1
         return []
+
+    def mark_cell_partial(self, reason: str) -> None:
+        if self._counter is None:
+            raise RuntimeError(f"baseline cell is not open for {self.id}")
+        self._counter.mark_partial(reason)
+
+    def resolve_pendings(self, resolver: PendingResolver) -> None:
+        """Resolve compact children after the cell and its later continuity have been recorded."""
+        if self._counter is None:
+            raise RuntimeError(f"baseline cell is not open for {self.id}")
+        for pending in self._counter.take_pendings():
+            resolution = resolver.resolve(pending)
+            if resolution.reason is not None:
+                self._counter.mark_partial(f"{pending.event_id}: {resolution.reason}")
+            else:
+                self._counter.add_keys(pending.ts, resolution.keys, event_id=pending.event_id)
 
     def finish_cell(self) -> BaselineCell:
         if self._counter is None:

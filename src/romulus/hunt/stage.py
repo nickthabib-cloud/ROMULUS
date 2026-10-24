@@ -23,6 +23,7 @@ import shutil
 import sqlite3
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
 
 from romulus.detect.bounded import Account, StateBudget
@@ -87,6 +88,18 @@ class EventStage:
         # event that becomes kept loses its rows here
         self.db.execute("CREATE TABLE event_raw (id TEXT NOT NULL, key TEXT NOT NULL, PRIMARY KEY (id, key))")
         self.db.execute("CREATE INDEX event_raw_key ON event_raw (key)")
+        # Window execs are staged by bounded sweep cell so the baseline carry can replay cells newest-first after
+        # the target is complete. Event bodies and raw copies remain in the shared event/raw tables under holds.
+        self.db.execute(
+            "CREATE TABLE baseline_cell (target TEXT NOT NULL, partition TEXT NOT NULL, start TEXT NOT NULL, "
+            "end TEXT NOT NULL, source_complete INTEGER NOT NULL, reasons TEXT NOT NULL, task_id TEXT, "
+            "PRIMARY KEY (target, partition))"
+        )
+        self.db.execute(
+            "CREATE TABLE baseline_event (target TEXT NOT NULL, partition TEXT NOT NULL, ordinal INTEGER NOT NULL, "
+            "id TEXT NOT NULL, PRIMARY KEY (target, partition, ordinal))"
+        )
+        self.db.execute("CREATE INDEX baseline_event_id ON baseline_event (id)")
         # One bounded-width key per normalized Windows event. The row count follows the hunt's retrieved Windows
         # records; unlike aggregate staging this seam never serializes event bodies or raw telemetry. Keeping the
         # table in the stage gives all transient sweep state the same private lifecycle and cleanup behavior.
@@ -266,6 +279,57 @@ class EventStage:
             for key, body in self.db.execute(f"SELECT key, body FROM raw WHERE key IN ({marks})", chunk):
                 out[key] = json.loads(body)
         return out
+
+    def record_baseline_cell(self, *, target: str, partition: str, start, end,
+                             source_complete: bool, reasons: list[str], task_id: str | None,
+                             events: list[TypedEvent]) -> None:
+        """Index held process events under one sweep cell for newest-first baseline replay."""
+        self.db.execute(
+            "INSERT OR REPLACE INTO baseline_cell VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (target, partition, start.isoformat(), end.isoformat(), int(source_complete),
+             json.dumps(sorted(set(reasons))), task_id),
+        )
+        self.db.execute("DELETE FROM baseline_event WHERE target = ? AND partition = ?", (target, partition))
+        self.db.executemany(
+            "INSERT INTO baseline_event VALUES (?, ?, ?, ?)",
+            [(target, partition, ordinal, event.id) for ordinal, event in enumerate(events)],
+        )
+        self.db.commit()
+
+    def baseline_cells(self, target: str) -> list[dict]:
+        """A target's staged cells newest-first, which is the carry-in writer's processing order."""
+        rows = self.db.execute(
+            "SELECT partition, start, end, source_complete, reasons, task_id FROM baseline_cell "
+            "WHERE target = ? ORDER BY start DESC, partition DESC",
+            (target,),
+        )
+        return [{
+            "partition": partition,
+            "start": datetime.fromisoformat(start),
+            "end": datetime.fromisoformat(end),
+            "source_complete": bool(source_complete),
+            "reasons": json.loads(reasons),
+            "task_id": task_id,
+        } for partition, start, end, source_complete, reasons, task_id in rows]
+
+    def baseline_events(self, target: str, partition: str) -> list[TypedEvent]:
+        rows = self.db.execute(
+            "SELECT event.body FROM baseline_event JOIN event ON event.id = baseline_event.id "
+            "WHERE baseline_event.target = ? AND baseline_event.partition = ? ORDER BY baseline_event.ordinal",
+            (target, partition),
+        )
+        return [TypedEvent.model_validate_json(body) for (body,) in rows]
+
+    def drop_baseline_cell(self, target: str, partition: str) -> list[str]:
+        """Remove the replay index and return the held ids for release by its baseline owner."""
+        ids = [row[0] for row in self.db.execute(
+            "SELECT id FROM baseline_event WHERE target = ? AND partition = ? ORDER BY ordinal",
+            (target, partition),
+        )]
+        self.db.execute("DELETE FROM baseline_event WHERE target = ? AND partition = ?", (target, partition))
+        self.db.execute("DELETE FROM baseline_cell WHERE target = ? AND partition = ?", (target, partition))
+        self.db.commit()
+        return ids
 
     def close(self) -> None:
         """Close the database before removing its directory (Windows cannot delete an open file)."""
