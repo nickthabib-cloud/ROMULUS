@@ -1590,9 +1590,10 @@ class ExecLineage:
 
     # Records held for citation in memory; the rest wait on disk (they are read only when a finding cites them).
     CITATIONS_HOT = 4096
-    # At roughly 150 compressed bytes per pointer, 1 GiB covers about seven million cited lineage records. Observed
-    # pointers retain their detection-store floor; exec pointers keep their established yielding/eviction behavior.
-    LINEAGE_CITATION_DISK = 2**30
+    # At roughly 160-175 on-disk bytes per pointer, 2 GiB covers more than the ten million observed citations in the
+    # 100M-record mission-scale shape. Observed pointers retain their detection-store floor; exec pointers keep their
+    # established yielding/eviction behavior.
+    LINEAGE_CITATION_DISK = 2 * 2**30
     EXEC_RECORDS_DISK = LINEAGE_CITATION_DISK
 
     def __init__(self, owner=None, capacity: int = HOT_COUNT, members: list | None = None, observing: bool = False,

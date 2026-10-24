@@ -62,11 +62,11 @@ def test_exec_citation_store_keeps_only_a_compact_verified_source_pointer():
     }
 
 
-def test_pointer_stores_use_the_shrunken_one_gib_disk_caps():
+def test_pointer_stores_use_shrunken_caps_that_still_cover_mission_scale():
     lineage = ExecLineage(observing=True, citing=True)
 
-    assert lineage.citations.disk_budget == 2**30
-    assert lineage.exec_records.disk_budget == 2**30
+    assert lineage.citations.disk_budget == 2 * 2**30
+    assert lineage.exec_records.disk_budget == 2 * 2**30
 
 
 class _Source:

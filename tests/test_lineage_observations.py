@@ -601,9 +601,9 @@ def test_the_network_join_is_not_evaluated_by_a_partition_of_lineage_records_onl
 def test_mission_scale_observations_hold_one_entry_per_change_on_bounded_memory(tmp_path):
     """About 10M syscall records across 5,000 hosts with heavy pid reuse (each host cycles through 400 pids; each
     process makes records under its first parent, may be reparented to pid 1, and its pid is reused by a process with
-    another parent). The store holds exactly one entry per change of state, keeps a lab-sized raw copy for citation
-    only for each process's earliest record, moves cold state to disk under a small memory budget, and every record
-    is handled in bounded time."""
+    another parent). The store holds exactly one entry per change of state, keeps a compact source pointer only for
+    each process's earliest record, moves cold state to disk under a small memory budget, and every record is handled
+    in bounded time."""
     import time
     from types import SimpleNamespace
 
@@ -657,7 +657,7 @@ def test_mission_scale_observations_hold_one_entry_per_change_on_bounded_memory(
     assert cited == processes                                  # one record per process: a reparent cites nothing
     assert lineage.observed.on_disk > 0 and len(lineage.observed.hot) == 0
     entries_bytes, citation_bytes = lineage.observed.disk_bytes, lineage.citations.disk_bytes
-    assert citation_bytes / cited < 800                        # the raw copy only, compressed
+    assert citation_bytes / cited < 180                        # the compact pointer, compressed
     assert elapsed < 1800, elapsed
     print(f"\n{total:,} records, {stored:,} entries ({stored / total:.1%}) in {len(lineage.observed):,} pid keys, "
           f"{cited:,} cited records; entries {entries_bytes / 2**20:.0f} MiB ({entries_bytes / stored:.0f} B per entry "
