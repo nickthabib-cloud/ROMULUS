@@ -333,3 +333,19 @@ def test_save_evidence_reads_what_is_stored_under_the_write_lock(tmp_path):
                 other.execute("BEGIN IMMEDIATE")
         finally:
             other.close()
+
+
+def test_saving_and_merging_evidence_take_the_write_lock_before_reading_what_is_stored(monkeypatch):
+    """Both write paths lock before they read existing rows, with or without a lease token."""
+    repo = _repo()
+    calls = []
+    real_lock, real_stored = Repo._lock, Repo._stored_events
+    monkeypatch.setattr(Repo, "_lock", staticmethod(lambda c, hunt: calls.append("lock") or real_lock(c, hunt)))
+    monkeypatch.setattr(Repo, "_stored_events",
+                        staticmethod(lambda c, ids: calls.append("read") or real_stored(c, ids)))
+    event = _event(1)
+    repo.save_evidence("h1", [event], {}, None)
+    assert calls and calls[0] == "lock" and "read" in calls
+    calls.clear()
+    repo.merge_evidence_raw("h1", [event], {})
+    assert calls and calls[0] == "lock"

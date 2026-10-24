@@ -1272,7 +1272,7 @@ class Repo:
         wanted: dict[str, Any] = {}
         for event in events:
             for raw in event.raw:
-                if raw.key in raw_sources:
+                if raw_sources.get(raw.key) is not None:     # a missing copy is not stored, never as null
                     wanted.setdefault(raw_id(raw.target, raw.native_id), raw)
         ids = sorted(wanted)
         stored: set[str] = set()
