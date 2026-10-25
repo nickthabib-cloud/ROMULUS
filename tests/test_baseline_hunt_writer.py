@@ -659,6 +659,45 @@ def test_external_destination_segments_wait_for_a_configured_internal_network():
     assert summary["specs"][spec.id]["reason"] == "host-index: internal networks not configured for this site"
 
 
+def test_external_destination_hunt_segments_are_bound_end_to_end_to_the_network_digest():
+    spec = SPEC_BY_ID["bl.ext_dest"]
+    segment_ids = []
+    for digest in ("network-a", "network-b"):
+        repo = _repo()
+        manifest = _manifest()
+        manifest["baseline"]["specs"] = [
+            {"id": spec.id, "version": spec.version, "key_version": spec.key_version},
+        ]
+        manifest["internal_networks"] = {"source": "configured", "digest": digest}
+        repo.create_hunt("hunt-a", manifest, "manifest-a", "test")
+        event = TypedEvent(
+            id="flow", family="net_flow", ts=START + timedelta(minutes=5), host="sensor",
+            fields={
+                "source.ip": fv("10.0.0.4", "fixture"),
+                "destination.ip": fv("192.0.2.1", "fixture"),
+            }, raw=[RawRef(target="host-index", native_id="flow", digest="raw-flow")],
+            normalizer="fixture@1",
+        )
+        counter = KeyCounter("window-cell", spec, span=(START, END))
+        counter.consume(event, KeyContext())
+        repo.save_baseline_window_cell(
+            "hunt-a",
+            {
+                "rule_id": spec.id, "version": spec.version, "target": "host-index",
+                "partition": f"{START.isoformat()}/{END.isoformat()}", "state": "evaluated_complete",
+                "matched": 0, "evaluated": 1, "detail": {"reasons": []},
+            },
+            (), counts=counter.count_rows(), scope_hours=counter.scope_hour_rows(),
+        )
+
+        assert run_hunt_segment_writer(repo, "hunt-a", hunt_complete=True)["written"] == 1
+        segment = repo.baseline_segments(statuses=["active"])[0]
+        assert segment["network_digest"] == digest
+        segment_ids.append(segment["id"])
+
+    assert segment_ids[0] != segment_ids[1]
+
+
 def test_window_material_is_released_after_the_decision_and_kept_through_a_crash_or_a_partial_hunt(monkeypatch):
     repo = _repo()
     repo.create_hunt("hunt-a", _manifest(), "manifest-a", "test")

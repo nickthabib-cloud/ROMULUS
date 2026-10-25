@@ -71,11 +71,10 @@ def test_registry_has_the_six_accepted_specs_and_metadata():
         "bl.ssh_tuple": "presence", "bl.exec_path": "prevalence", "bl.exec_pair": "prevalence",
         "bl.cmd_shape": "prevalence", "bl.ext_dest": "prevalence", "bl.svc_exec_rate": "rate",
     }
-    # the external-destination spec keys DNS records by the DNS port's side (questions read as sent when the ports do
-    # not tell) since its third key version
+    # The fourth external-destination key version also distinguishes v1 answer-name recovery from v2/v3 records.
     assert {spec.id: (spec.version, spec.key_version) for spec in BASELINE_SPECS} == {
         "bl.ssh_tuple": ("1", "1"), "bl.exec_path": ("1", "1"), "bl.exec_pair": ("2", "2"),
-        "bl.cmd_shape": ("2", "2"), "bl.ext_dest": ("3", "3"), "bl.svc_exec_rate": ("1", "2"),
+        "bl.cmd_shape": ("2", "2"), "bl.ext_dest": ("4", "4"), "bl.svc_exec_rate": ("1", "2"),
     }
 
 
@@ -479,6 +478,49 @@ def test_dns_answer_scopes_the_client_not_the_resolver():
     assert [key.scope for key in keys] == ["internal_ip:10.0.0.4"]
 
 
+@pytest.mark.parametrize(
+    ("role", "fields"),
+    [
+        ("query", {"source.ip": "10.0.0.4", "source.port": 40000, "destination.port": 53}),
+        ("answer", {"destination.ip": "10.0.0.4", "source.port": 53, "destination.port": 40000}),
+    ],
+)
+def test_dns_record_does_not_require_the_resolver_ip(role, fields):
+    keys = SPEC_BY_ID["bl.ext_dest"].keys(_event(
+        "dns_query", **{"dns.type": role, "dns.question.name": "www.example.com", **fields},
+    ), _ctx())
+
+    assert [key.scope for key in keys] == ["internal_ip:10.0.0.4"]
+
+
+@pytest.mark.parametrize("version", [2, 3, "2", "3"])
+def test_dns_v2_and_v3_answers_without_questions_are_missing(version):
+    result = SPEC_BY_ID["bl.ext_dest"].keys(_event(
+        "dns_query", **{
+            "dns.type": "answer", "dns.version": version,
+            "source.ip": "10.0.0.53", "source.port": 53,
+            "destination.ip": "10.0.0.4", "destination.port": 40000,
+            "dns.answers": [{"name": "www.example.com", "type": "A", "data": "192.0.2.1"}],
+        },
+    ), _ctx())
+
+    assert isinstance(result, Missing)
+    assert result.fields == ("dns.question.names", "dns.question.name")
+
+
+def test_dns_v1_answer_without_a_question_may_key_from_its_answer_name():
+    keys = SPEC_BY_ID["bl.ext_dest"].keys(_event(
+        "dns_query", **{
+            "dns.type": "answer", "source.ip": "10.0.0.53", "source.port": 53,
+            "destination.ip": "10.0.0.4", "destination.port": 40000,
+            "dns.answers": [{"name": "WWW.Example.COM.", "type": "A", "data": "192.0.2.1"}],
+        },
+    ), _ctx())
+
+    assert [key.scope for key in keys] == ["internal_ip:10.0.0.4"]
+    assert [key.key for key in keys] == [{"kind": "registered_domain", "registered_domain": "example.com"}]
+
+
 @pytest.mark.parametrize("flow_oriented", [False, True])
 def test_a_dns_answer_keys_its_client_in_either_orientation(flow_oriented):
     """Suricata writes an answer in its flow's orientation (client as source, server on port 53 as destination); a
@@ -529,14 +571,8 @@ def test_a_dns_question_whose_ports_do_not_tell_is_read_as_sent(ports, role):
         ("net_flow", {"source.ip": "not-an-ip", "destination.ip": "192.0.2.1"}, ("source.ip",)),
         ("net_flow", {"source.ip": "10.0.0.1", "destination.ip": "not-an-ip"}, ("destination.ip",)),
         ("net_session", {"source.ip": ["10.0.0.1"], "destination.ip": "192.0.2.1"}, ("source.ip",)),
-        ("tls_session", {"source.ip": "10.0.0.1", "destination.ip": "192.0.2.1",
-                         "tls.client.server_name": ["a.example.com"]}, ("tls.client.server_name",)),
-        ("tls_session", {"source.ip": "10.0.0.1", "destination.ip": "192.0.2.1",
-                         "tls.client.server_name": 7}, ("tls.client.server_name",)),
         ("dns_query", {"dns.type": "query", "source.port": 40000, "destination.port": 53, "source.ip": None, "destination.ip": "10.0.0.53",
                        "dns.question.name": "example.com"}, ("source.ip",)),
-        ("dns_query", {"dns.type": "query", "source.port": 40000, "destination.port": 53, "source.ip": "10.0.0.4", "destination.ip": "bogus",
-                       "dns.question.name": "example.com"}, ("destination.ip",)),
         ("dns_query", {"dns.type": "query", "source.port": 40000, "destination.port": 53, "source.ip": "10.0.0.4", "destination.ip": "10.0.0.53"},
          ("dns.question.names", "dns.question.name")),
         ("dns_query", {"dns.type": "query", "source.port": 40000, "destination.port": 53, "source.ip": "10.0.0.4", "destination.ip": "10.0.0.53",
@@ -573,8 +609,6 @@ def test_external_destination_absent_or_malformed_value_is_typed_missing(family,
         # a recorded DNS role that is neither question nor answer
         ("dns_query", {"dns.type": "update", "source.port": 40000, "destination.port": 53, "source.ip": "10.0.0.4", "destination.ip": "10.0.0.53",
                        "dns.question.name": "example.com"}),
-        # a Suricata v1 answer resource record carries no question; its query record does
-        ("dns_query", {"dns.type": "answer", "source.port": 53, "destination.port": 40000, "source.ip": "10.0.0.53", "destination.ip": "10.0.0.4"}),
     ],
 )
 def test_external_destination_wrong_direction_or_role_is_not_applicable(family, fields):
@@ -592,6 +626,18 @@ def test_internal_network_test_is_a_context_seam():
     assert isinstance(SPEC_BY_ID["bl.ext_dest"].keys(
         _event("net_flow", **{"source.ip": "10.0.0.4", "destination.ip": "203.0.113.9"}), context,
     ), NotApplicable)
+
+
+@pytest.mark.parametrize("sni", [["a.example.com"], 7, {"name": "a.example.com"}])
+def test_non_string_sni_drops_only_sni_dimensions(sni):
+    keys = SPEC_BY_ID["bl.ext_dest"].keys(_event("tls_session", **{
+        "source.ip": "10.0.0.1", "destination.ip": "192.0.2.1", "tls.client.server_name": sni,
+    }), _ctx())
+
+    assert _kinds(keys) == {
+        "dest_ip": {"kind": "dest_ip", "dest_ip": "192.0.2.1"},
+        "dest_network": {"kind": "dest_network", "dest_network": "192.0.2.0/24"},
+    }
 
 
 def test_service_exec_rate_keys_configured_service_accounts_with_an_empty_key():
@@ -734,6 +780,12 @@ def test_internationalized_names_become_punycode():
     }), _ctx())
     assert [key.key["registered_domain"] for key in dns] == ["xn--bcher-kva.example"]
 
+    idna_2008 = SPEC_BY_ID["bl.ext_dest"].keys(_event("tls_session", **{
+        "source.ip": "10.0.0.4", "destination.ip": "198.51.100.9",
+        "tls.client.server_name": "Straße.Example",
+    }), _ctx())
+    assert _kinds(idna_2008)["sni"]["sni"] == "xn--strae-oqa.example"
+
 
 def test_an_unencodable_internationalized_name_is_missing():
     result = SPEC_BY_ID["bl.ext_dest"].keys(_event("tls_session", **{
@@ -805,6 +857,14 @@ def test_query_and_answer_of_one_dns_transaction_share_a_dedup_token():
     assert first_id.dedup_token != second_id.dedup_token
     # without a flow identity a query and an answer cannot be proven one transaction: each counts
     assert spec.keys(_dns("query", None), _ctx())[0].dedup_token is None
+
+
+def test_numeric_and_string_dns_ids_share_one_dedup_token():
+    spec = SPEC_BY_ID["bl.ext_dest"]
+    numeric = spec.keys(_dns("query", 77, **{"dns.id": 4919}), _ctx())[0]
+    text = spec.keys(_dns("query", 77, **{"dns.id": "4919"}), _ctx())[0]
+
+    assert numeric.dedup_token == text.dedup_token
 
 
 def test_records_of_one_flow_share_a_dedup_token_across_families():

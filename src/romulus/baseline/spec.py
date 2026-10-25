@@ -24,6 +24,8 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Literal, Protocol, runtime_checkable
 
+import idna
+
 from romulus.detect import netdef
 from romulus.detect.correlation import PidTable, boot_of, boots_conflict
 from romulus.detect.dns import registered_domain
@@ -299,8 +301,8 @@ def _dns_name(value: str) -> str | None:
     name = text.rstrip(".").lower()
     if name and not name.isascii():
         try:
-            name = name.encode("idna").decode("ascii").lower()
-        except UnicodeError as error:
+            name = idna.encode(name, uts46=True, std3_rules=True).decode("ascii").lower()
+        except idna.IDNAError as error:
             raise ValueError(f"{value!r} is not an encodable internationalized name") from error
     return name or None
 
@@ -547,13 +549,34 @@ def _question_names(event: TypedEvent) -> list[str] | Missing:
     return found
 
 
+def _v1_answer_names(event: TypedEvent) -> list[str] | Missing:
+    """Question-equivalent names in Suricata v1's one-resource-record answer layout."""
+    answers = event.get("dns.answers")
+    if not isinstance(answers, list) or not answers:
+        return Missing("a DNS v1 answer has no answer name", ("dns.answers",))
+    names: list[str] = []
+    for answer in answers:
+        if not isinstance(answer, dict):
+            return Missing("dns.answers is not a list of answer objects", ("dns.answers",))
+        name = answer.get("name")
+        if name in (None, ""):
+            continue
+        if not isinstance(name, str):
+            return Missing("a DNS answer name is not a string", ("dns.answers",))
+        names.append(name)
+    if not names:
+        return Missing("a DNS v1 answer has no answer name", ("dns.answers",))
+    try:
+        found = sorted({canonical for canonical in (_dns_name(value) for value in names) if canonical})
+    except ValueError as error:
+        return Missing(str(error), ("dns.answers",))
+    return found or Missing("a DNS v1 answer has no answer name", ("dns.answers",))
+
+
 def _dns_destination(event: TypedEvent, context: KeyContext, spec: BaselineSpec) -> KeyResult:
     record_role = dns_role(event)
     if record_role is None:
         return NotApplicable(f"DNS record role {event.get('dns.type')} is neither a question nor an answer")
-    if (record_role == "answer" and event.get("dns.question.names") is None
-            and event.get("dns.question.name") is None):
-        return NotApplicable("an answer resource record without its question; the query record carries it")
     # The client is the endpoint not on a DNS service port, whatever the record's orientation (a sensor may write an
     # answer in its flow's orientation, client first); a question whose ports do not tell is read as sent, source to
     # destination, and an answer whose ports do not tell is Missing.
@@ -561,14 +584,15 @@ def _dns_destination(event: TypedEvent, context: KeyContext, spec: BaselineSpec)
     if side is None:
         return Missing("the DNS ports do not tell the client from the server of an answer (neither or both on a DNS "
                        "port, or a port not typed)", ("source.port", "destination.port"))
-    client_field, resolver_field = (("source.ip", "destination.ip") if side == "destination"
-                                    else ("destination.ip", "source.ip"))
+    client_field = "source.ip" if side == "destination" else "destination.ip"
     client = _ip(event, client_field)
     if not isinstance(client, Missing) and not context.is_internal(client):
         return NotApplicable("the DNS client is outside the site")
-    resolver = _ip(event, resolver_field)
-    names = _question_names(event)
-    for value in (client, resolver, names):
+    has_question = event.get("dns.question.names") is not None or event.get("dns.question.name") is not None
+    version = event.get("dns.version")
+    names = (_v1_answer_names(event) if record_role == "answer" and not has_question and version in (None, 1, "1")
+             else _question_names(event))
+    for value in (client, names):
         if isinstance(value, Missing):
             return value
     domains = sorted({domain for domain in (_registrable(name) for name in names) if domain})
@@ -601,9 +625,7 @@ def _destination(event: TypedEvent, context: KeyContext, spec: BaselineSpec) -> 
             return value
     sni_value = event.get("tls.client.server_name")
     sni = None
-    if sni_value is not None:
-        if not isinstance(sni_value, str):
-            return Missing("tls.client.server_name is not a single string", ("tls.client.server_name",))
+    if isinstance(sni_value, str):
         try:
             sni = _dns_name(sni_value)
         except ValueError as error:
@@ -694,7 +716,7 @@ BASELINE_SPECS = (
         _extract=_cmd_shape,
     ),
     BaselineSpec(
-        id="bl.ext_dest", version="3", key_version="3",
+        id="bl.ext_dest", version="4", key_version="4",
         families=("net_flow", "dns_query", "tls_session", "net_session"),
         datasets=(
             "suricata.eve.flow", "suricata.eve.netflow", "suricata.eve.dns", "suricata.eve.tls",
@@ -703,13 +725,16 @@ BASELINE_SPECS = (
         scope="internal_ip", measure="prevalence", bucket="day",
         required_fields={
             "net_flow": ("source.ip", "destination.ip"),
-            "dns_query": ("source.ip", "destination.ip", ("dns.question.names", "dns.question.name")),
+            "dns_query": (
+                ("source.ip", "destination.ip"),
+                ("dns.question.names", "dns.question.name", "dns.answers"),
+            ),
             "tls_session": ("source.ip", "destination.ip"),
             "net_session": ("source.ip", "destination.ip"),
         },
         optional_fields={
             "net_flow": (*_FLOW_IDS,),
-            "dns_query": ("dns.type", "source.port", "destination.port", *_FLOW_IDS),
+            "dns_query": ("dns.type", "dns.version", "dns.id", "source.port", "destination.port", *_FLOW_IDS),
             "tls_session": ("tls.client.server_name", *_FLOW_IDS),
             "net_session": ("tls.client.server_name", *_FLOW_IDS),
         },

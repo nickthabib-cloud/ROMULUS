@@ -286,6 +286,7 @@ def test_suricata_dns_v2_answer_keeps_answers_and_authorities():
     assert e.get("dns.answers") == [{"name": "bad.example", "type": "A", "ttl": 30, "data": "203.0.113.9"}]
     assert e.get("dns.authorities") == [{"name": "example", "type": "SOA", "ttl": 600, "data": None}]
     assert e.get("dns.response_code") == "NOERROR" and e.get("dns.type") == "answer"
+    assert e.get("dns.version") == 2 and e.get("dns.id") == 1
 
 
 def test_suricata_dns_grouped_answers_are_read():
@@ -304,6 +305,7 @@ def test_suricata_dns_v1_answer_record_is_an_answer_never_the_question():
     assert e.get("dns.question.name") is None and e.get("dns.question.names") is None
     assert e.get("dns.question.type") is None and e.get("dns.response_code") == "NOERROR"
     assert e.get("dns.answers") == [{"name": "cdn.example", "type": "A", "ttl": 20, "data": "203.0.113.5"}]
+    assert e.get("dns.version") is None
     assert not [x for x in e.entities() if x[0] == "domain"]
 
 
@@ -317,6 +319,7 @@ def test_suricata_dns_v3_queries_list():
     e = one(eve("d3", {"event_type": "dns", "dns": {"version": 3, "type": "request",
                                                     "queries": [{"rrname": "q.example", "rrtype": "TXT"}]}}))
     assert e.get("dns.question.name") == "q.example" and e.get("dns.question.type") == "TXT"
+    assert e.get("dns.version") == 3
 
 
 def test_suricata_dns_query_record_is_unchanged_in_shape():
