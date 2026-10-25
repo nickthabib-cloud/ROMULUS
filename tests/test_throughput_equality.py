@@ -127,54 +127,63 @@ from tests import throughput_fixture as tf
 # count, observation and exclusion rows. The snapshot plan/digest changes, and that digest flows into baseline rule
 # cells, the baseline task/audit summary and the manifest. Non-baseline candidates and all detection evidence remain
 # byte-identical.
+# Baseline S8 changes exec-pair and command-shape outcome/canonicalization semantics, external-destination DNS
+# canonicalization, and the rate key's uid fallback. Their versioned identities change window counts, scope-hour
+# witnesses, observations, exclusions, the frozen snapshot, baseline rule cells/task/audit and the manifest. Window
+# count rows now identify their material hour, and exact event totals have their own captured table. DNS normalization
+# now records the normalized DNS transaction id/version and uses UTS46 IDNA, so evidence version 12 rehashes every
+# typed event id; candidates, links, tasks and their downstream audit/manifest references change by those identities.
+# The fixture's non-baseline finding claims, lanes, citations and detector decisions are unchanged. Anchors, raw
+# copies, entities, expansion, stats and the empty history/segment tables remain byte-identical.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
-    "audit": "45c0ee26e947bbd26d7938e1dc95acb9522328304ad221e6b151fb7ad6dfe6ef",
+    "audit": "4ac18411fc75aaea0724492e2bf0b79894c772bb7ec32987b6b7833098cbbf93",
     "baseline_counts": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-    "baseline_hunt_exclusions": "9fa7360d4553f9c589a04e36599c5d5095ff74f128fad099750f6b8968a59440",
-    "baseline_observations": "d990cd2ea081352ceae05649cfbe2e6513e700bd1eca6a909841a0513e5a7c4f",
+    "baseline_hunt_exclusions": "d3577183bfcf871f6712314c68522f64a01515a1e509d00925fcdca6eff143cf",
+    "baseline_observations": "df05e88604c0ac3883a6c0ec9db5e3ff6e4e634068fc4d0bec785a1bbb794799",
     "baseline_scope_hours": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     "baseline_segments": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-    "baseline_snapshot": "b5692f92a7259392c1d414e697fc653217eccdee9380604696a2d4e4fc368658",
-    "baseline_window_counts": "35a8bc3bcc261b30d5c2a84d2e26b38d2bc39ee3a83f8563394058c0f17abc3c",
-    "baseline_window_scope_hours": "7b7140f83902290b9a95a85b61667d704a1c5e641e7c5730df1c476e6f4b071c",
-    "candidates": "e8baaad0f844984320258730fa65318e2cea0e57c2df8b5b3674ded6fb78f89d",
+    "baseline_snapshot": "709fbd5828f6e5be380b34f2008f0b3937c4307ebcc33c4c16cdaa2267111068",
+    "baseline_window_counts": "2a91438dfc4a6aa624de8256789a998f6453fc07f9511ff203edfba8ecfd518d",
+    "baseline_window_event_hours": "d7ef5845a973ea1f92116e4c5660593b97316628436bf9ae58cf84af782d8ca4",
+    "baseline_window_scope_hours": "b8b7eae859913f58f1fc355a778a3151c7082a1615bd63c6466a85b1ae87d89b",
+    "candidates": "b5abecf132a0f5f4be6a541acb6a584f7b206821294991c5ae36ba89d2eb672b",
     "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
     "event_citations": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-    "event_entities": "8224880134ac06339cbde46274c20ea7d2fa4a41e30f1426a576e0afd4270b58",
-    "events": "46ff37261993417f3e0fa61de9c3aa24977b2e091ad29d7cf4d166e8261a1017",
+    "event_entities": "9753e1bc55ffce6cfde297608596104c2ed3ef08cdd0a8db54e3ecb279fe392a",
+    "events": "d4eede2cca8fd1bac673b1abe0aa2327cf7a5a3f90f72683680d2af986679e39",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
-    "links": "797137953f5a643e0297b450047aeec3fa79c4cb386118f10d0ec00d337fd023",
-    "manifest": "8d25db9cb24e2a76613aa493d29b362c39e4d58e398034cb77aa06aa99d53f98",
+    "links": "e5bd8ec83459a57a14627ad2222f752e4c29e0415beddd54eaa11afd08e1b62f",
+    "manifest": "fbfbe6c5f339ae46fd691ded3a29d3146abdfb0c996ce9e7e42a77b70327333d",
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
-    "rule_cells": "4de1c6d0109532794cff544d8c9be6b3c9c20aeebe0ef7bf85e6ce6a3264b4fd",
+    "rule_cells": "17f4760cfde411877bac8e7762ce2555fa52a6aaeb5d2e48beb10b7ce677bafa",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
-    "tasks": "ddcb2963bd8260458389f04c7cd6914b7cdc45d37c615fe03c0aaa3f5dca08e3",
+    "tasks": "6de107dcab42d125ac48ea0aa135d46c74b431b216979513e4858afc85cbf580",
 }
 GOLDEN_NORMALIZED = {
-    "arkime_sessions3-x": "20b597e7169ff4713f006bd7b69608eea69a2038505dfa92fdf393709af2fe54",
-    "arkime_sessions3-x+boots": "20b597e7169ff4713f006bd7b69608eea69a2038505dfa92fdf393709af2fe54",
-    "romulus-host-x": "c8605640b20e6a43246db56f2367558b2fab33063ea7a56e4a17d3dcdbdcf9dd",
-    "romulus-host-x+boots": "a21ec9b0aed076c9cee5436e392604732f4eb7cb0641045d538b7b9f2954a573",
-    "romulus-network-x": "570f22b06412adcfad2fba2d17d71ebe4c28b40b1ae69dc89e5ed88325f03385",
-    "romulus-network-x+boots": "570f22b06412adcfad2fba2d17d71ebe4c28b40b1ae69dc89e5ed88325f03385",
+    "arkime_sessions3-x": "49755f3034ebf83ec012716f283034f38087d5c7f1cabb0df5c1bf9a7db4eb10",
+    "arkime_sessions3-x+boots": "49755f3034ebf83ec012716f283034f38087d5c7f1cabb0df5c1bf9a7db4eb10",
+    "romulus-host-x": "7b698601e63b7c16fdb1c3b8bbf1cb1a28554bfa1ea19c2050dae704b8f7e6fa",
+    "romulus-host-x+boots": "3f7e8e5acb3941e4aebd98d806854db6638826ae21aaf90e23c331b4c05a0a27",
+    "romulus-network-x": "c7f6b8047e46c515a860217295c01d353fef49ca6e606475b79650eda20c3d3b",
+    "romulus-network-x+boots": "c7f6b8047e46c515a860217295c01d353fef49ca6e606475b79650eda20c3d3b",
 }
 GOLDEN_PIVOT = {
-    "arkime_sessions3-x:-": "10452ded995f9c13ed57ff9ff96c9fb3a859824f4ad87939ef5bdeefd2529b7a",
-    "arkime_sessions3-x:process_exec": "10452ded995f9c13ed57ff9ff96c9fb3a859824f4ad87939ef5bdeefd2529b7a",
-    "arkime_sessions3-x:net_socket": "10452ded995f9c13ed57ff9ff96c9fb3a859824f4ad87939ef5bdeefd2529b7a",
-    "arkime_sessions3-x:auth,net_socket,process_exec": "10452ded995f9c13ed57ff9ff96c9fb3a859824f4ad87939ef5bdeefd2529b7a",
-    "arkime_sessions3-x:net_flow": "10452ded995f9c13ed57ff9ff96c9fb3a859824f4ad87939ef5bdeefd2529b7a",
-    "romulus-host-x:-": "b3b73239344c635784b888d698d2bcc9a7eeb816187500b97cbc2f1ab29ee7cb",
-    "romulus-host-x:process_exec": "2342b20a28efdf4226f91bb8b4665857c585bbb865a9c055ecb9617bd394ac75",
-    "romulus-host-x:net_socket": "e4ab66f60b9dc300f0a3e7426c4db6da78e95ebf6a0bbbd7eaff5684103b7ac8",
-    "romulus-host-x:auth,net_socket,process_exec": "b3b73239344c635784b888d698d2bcc9a7eeb816187500b97cbc2f1ab29ee7cb",
-    "romulus-host-x:net_flow": "b3b73239344c635784b888d698d2bcc9a7eeb816187500b97cbc2f1ab29ee7cb",
-    "romulus-network-x:-": "1cd1a455435f582cb9214500155dd594e0fe845919c5f7607574d54039ba5c1e",
+    "arkime_sessions3-x:-": "1e222211f99bc0aa64458c9a629a263bdecd0a365eb28feb2d8bc2c8b1d52d18",
+    "arkime_sessions3-x:process_exec": "1e222211f99bc0aa64458c9a629a263bdecd0a365eb28feb2d8bc2c8b1d52d18",
+    "arkime_sessions3-x:net_socket": "1e222211f99bc0aa64458c9a629a263bdecd0a365eb28feb2d8bc2c8b1d52d18",
+    "arkime_sessions3-x:auth,net_socket,process_exec": "1e222211f99bc0aa64458c9a629a263bdecd0a365eb28feb2d8bc2c8b1d52d18",
+    "arkime_sessions3-x:net_flow": "1e222211f99bc0aa64458c9a629a263bdecd0a365eb28feb2d8bc2c8b1d52d18",
+    "romulus-host-x:-": "198db87bdcf7ade9c2d53ea81bc15166c3e77734541da3fe82a925085c74ec33",
+    "romulus-host-x:process_exec": "1837ef9198a0ab5552ea60ca415acc40be6cf9339fe7a5dafd51354e39f18ba0",
+    "romulus-host-x:net_socket": "b92e4dc84c0403f132a2066b7cc32392f87cfa3d62bddeaa00e74e55ad9cea94",
+    "romulus-host-x:auth,net_socket,process_exec": "198db87bdcf7ade9c2d53ea81bc15166c3e77734541da3fe82a925085c74ec33",
+    "romulus-host-x:net_flow": "198db87bdcf7ade9c2d53ea81bc15166c3e77734541da3fe82a925085c74ec33",
+    "romulus-network-x:-": "541211d1dc3e2ce1304804b4c9ca44842764853a3a43ecba3bce839906a62520",
     "romulus-network-x:process_exec": "9e505ce98b1b1f339349e89f9e2e58082d9066b316aa4aa97b727de0423759c6",
     "romulus-network-x:net_socket": "9e505ce98b1b1f339349e89f9e2e58082d9066b316aa4aa97b727de0423759c6",
     "romulus-network-x:auth,net_socket,process_exec": "9e505ce98b1b1f339349e89f9e2e58082d9066b316aa4aa97b727de0423759c6",
-    "romulus-network-x:net_flow": "6fbac86c1546e6f66cca0db257b23c5f0099622d61b3c2dfd46a9ad6240cd903",
+    "romulus-network-x:net_flow": "d87be864a0f1f1286442d5308c4621a727342cfff6ed3d280077adf034ac1d3b",
 }
 PIVOT_FAMILIES = (None, frozenset({"process_exec"}), frozenset({"net_socket"}),
                   frozenset({"process_exec", "net_socket", "auth"}), frozenset({"net_flow"}))

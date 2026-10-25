@@ -692,6 +692,9 @@ def run_stack(stage_dir, *, scale: int = 1, docs: dict | None = None) -> dict:
         "baseline_window_counts": table(
             "baseline_window_count", ["hunt_id", "spec_id", "target", "partition", "ordinal"],
         ),
+        "baseline_window_event_hours": table(
+            "baseline_window_event_hour", ["hunt_id", "spec_id", "target", "partition", "ordinal"],
+        ),
         "baseline_window_scope_hours": table(
             "baseline_window_scope_hour", ["hunt_id", "spec_id", "target", "partition", "ordinal"],
         ),
