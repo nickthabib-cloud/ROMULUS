@@ -299,6 +299,42 @@ def test_observed_parent_retains_conflicting_states_at_the_nearest_later_instant
     assert resolved.keys == () and "ambiguous" in resolved.reason
 
 
+def test_parent_observations_keep_only_the_boundaries_of_each_process_state_run():
+    repo, store = _store()
+    rows = [
+        _observed(10, second, executable, ppid=ppid, session=session)
+        for start, executable, ppid, session in (
+            (1, "/usr/sbin/nginx", 1, 9),
+            (101, "/usr/bin/python3", 1, 9),
+            (201, "/usr/sbin/nginx", 20, 10),
+        )
+        for second in range(start, start + 100)
+    ]
+
+    written = store.observe_observation_rows(rows, chunk_size=37)
+
+    assert written == len(rows)
+    assert repo.baseline_parent_observation_count("hunt") == 6
+
+
+@pytest.mark.slow
+def test_a_million_repeated_parent_observations_compact_to_two_run_boundaries():
+    repo, store = _store()
+
+    started = time.perf_counter()
+    written = store.observe_observation_rows(
+        (_observed(10, second, "/usr/sbin/nginx") for second in range(1_000_000)),
+        chunk_size=100_000,
+    )
+    elapsed = time.perf_counter() - started
+    retained = repo.baseline_parent_observation_count("hunt")
+    print(f"1m repeated parent observations in {elapsed:.1f}s; retained rows {retained}")
+
+    assert written == 1_000_000
+    assert retained == 2
+    assert elapsed < 180
+
+
 @pytest.mark.slow
 def test_ten_million_exec_history_is_bounded_by_live_pids():
     repo, store = _store()

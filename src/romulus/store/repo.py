@@ -2659,6 +2659,44 @@ class Repo:
         for chunk in _chunks(normalized(), chunk_size):
             with write_txn(self.engine) as connection:
                 connection.execute(stmt, chunk)
+                # Repeated audit records often name the same long-lived process image. Only the two boundaries
+                # of each ordered state run can affect a child lookup; interior sightings carry no additional
+                # ordering information. Recompute after every bounded input chunk so out-of-order history and
+                # runs crossing chunk boundaries compact identically.
+                connection.execute(text("""
+                    WITH ordered AS (
+                        SELECT rowid AS rid,
+                               executable,
+                               parent_pid,
+                               session,
+                               LAG(executable) OVER lineage AS previous_executable,
+                               LAG(parent_pid) OVER lineage AS previous_parent_pid,
+                               LAG(session) OVER lineage AS previous_session,
+                               LEAD(executable) OVER lineage AS next_executable,
+                               LEAD(parent_pid) OVER lineage AS next_parent_pid,
+                               LEAD(session) OVER lineage AS next_session
+                        FROM baseline_parent_observation
+                        WHERE hunt_id = :hunt_id AND target = :target
+                        WINDOW lineage AS (
+                            PARTITION BY hunt_id, target, host, boot, pid
+                            ORDER BY observed_ts,
+                                     CASE WHEN serial IS NULL THEN 1 ELSE 0 END,
+                                     serial,
+                                     event_id
+                        )
+                    ), interior AS (
+                        SELECT rid
+                        FROM ordered
+                        WHERE executable = previous_executable
+                          AND parent_pid = previous_parent_pid
+                          AND session IS previous_session
+                          AND executable = next_executable
+                          AND parent_pid = next_parent_pid
+                          AND session IS next_session
+                    )
+                    DELETE FROM baseline_parent_observation
+                    WHERE rowid IN (SELECT rid FROM interior)
+                """), {"hunt_id": chunk[0]["hunt_id"], "target": chunk[0]["target"]})
             written += len(chunk)
         return written
 
