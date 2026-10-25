@@ -110,21 +110,25 @@ from tests import throughput_fixture as tf
 # new versions change the snapshot plan and digest (the baseline snapshot, the hunt.baseline_summary audit record, the
 # baseline task's id and outcome, and the snapshot_digest in every baseline rule cell and in the manifest's baseline
 # coverage block), bl.ext_dest's rule cells by rule_version, and its 20 observations by spec_version and key identity.
+# A tool user-agent lead quotes the agents as recorded and names the tool signature as a classification, and an
+# NXDOMAIN burst says how many answers of its rcode tally are cited: both rules carry new versions (rule_cells,
+# candidates and the manifest's findings by rule_version). In the fixture only the tool user-agent lead's claim changes
+# ("with user agent(s) 'curl/...' ..., which matched the curl tool signature"); every other table is the reference's.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
     "audit": "0b80cc678442cceee405a79d719a896d06d00228559dccd07cc1e45b8821747b",
     "baseline_observations": "a622940f3edc51095fae860c5247d8b9494c32522d92fca63ce77a73ffcd1856",
     "baseline_snapshot": "ee69ca9a69bb202d32ea01780bd4832d6cb0972b4ecd8941ba6aaf5e9c8a2b6b",
-    "candidates": "6063264ca908c73e4710d65d4799e5460e579f9e9f0cd55391c2b3854c1b28c8",
+    "candidates": "e8baaad0f844984320258730fa65318e2cea0e57c2df8b5b3674ded6fb78f89d",
     "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
     "event_citations": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     "event_entities": "8224880134ac06339cbde46274c20ea7d2fa4a41e30f1426a576e0afd4270b58",
     "events": "46ff37261993417f3e0fa61de9c3aa24977b2e091ad29d7cf4d166e8261a1017",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "797137953f5a643e0297b450047aeec3fa79c4cb386118f10d0ec00d337fd023",
-    "manifest": "2d211d2f801dbdc30aebe86ad8ada49c08fb59e13ab722d6da86567ac79d91ee",
+    "manifest": "806eddba35d6ebef9b7e7d85032465765de13b9cbcb422c315bfae93c669b21d",
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
-    "rule_cells": "77f0e52a52d3609f1fe98712e3687b184dd5e67ed53bc35711e3b35d36f7541c",
+    "rule_cells": "c6284aff25a94921755f8b0e8879a43d7292ab9d627ac81732c499f0edd05084",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
     "tasks": "0e7ef8a8240c951b30447cdc147395503b0a93e438972fdc25e5ff459dc5107c",
 }

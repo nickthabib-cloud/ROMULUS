@@ -117,7 +117,7 @@ def _attack_ids():
 def test_flow_rules_are_registered_with_cards_and_existing_attack_ids():
     ids = _attack_ids()
     pack = {type(pb) for pb in fresh_pack()}
-    assert PACK_VERSION == "pack@25"
+    assert PACK_VERSION == "pack@26"
     for cls in FLOW_PLAYBOOKS:
         assert cls in ALL_PLAYBOOKS and cls in pack
         assert cls.kind == "aggregate" and cls.staged and cls.anchor_class == "network_observation"
