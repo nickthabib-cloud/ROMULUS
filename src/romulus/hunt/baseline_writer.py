@@ -202,6 +202,7 @@ def _write_target(repo: Repo, hunt_id: str, spec, target: str, *, site: str,
     if blocked is not None:
         return blocked, 0, 0.0
     cells = [row for row in repo.rule_cells(hunt_id, rule_id=spec.id)
+             if row["rule_version"] == spec.version
              if row["target"] == target and row["partition"] != "window"
              and row["state"] != "split"]
     if not cells:
@@ -220,10 +221,16 @@ def _write_target(repo: Repo, hunt_id: str, spec, target: str, *, site: str,
             cell_span[0] < span[0] < cell_span[1] for cell_span in spans.values()
     ):
         return "a deduplicated window cell straddles the retained whole-hour span", 0, 0.0
+    if span != window and repo.baseline_window_has_unplaced_counts(
+            hunt_id, spec.id, spec.version, target
+    ):
+        return "legacy window count material has no hour; the window cell must be swept again", 0, 0.0
     inside = [row for row in cells
               if span[0] <= spans[row["partition"]][0] and spans[row["partition"]][1] <= span[1]]
     event_total = event_rows = 0
-    for item in repo.baseline_window_merged_event_hours(hunt_id, spec.id, target, span=span):
+    for item in repo.baseline_window_merged_event_hours(
+            hunt_id, spec.id, target, spec_version=spec.version, span=span
+    ):
         event_total += int(item["events"])
         event_rows += 1
     if event_rows == 0:
@@ -258,10 +265,14 @@ def _write_target(repo: Repo, hunt_id: str, spec, target: str, *, site: str,
     seconds = repo.append_baseline_segment_rows(
         segment_id,
         ({"segment_id": segment_id, **item} for item in _without_excluded(
-            repo.baseline_window_merged_counts(hunt_id, spec.id, target, span=span), excluded,
+            repo.baseline_window_merged_counts(
+                hunt_id, spec.id, target, spec_version=spec.version, span=span,
+            ), excluded,
         )),
         ({"segment_id": segment_id, **item} for item in
-         repo.baseline_window_merged_scope_hours(hunt_id, spec.id, target, span=span)),
+         repo.baseline_window_merged_scope_hours(
+             hunt_id, spec.id, target, spec_version=spec.version, span=span,
+         )),
     )
     repo.finalize_baseline_segment(segment_id)
     return None, 1, seconds

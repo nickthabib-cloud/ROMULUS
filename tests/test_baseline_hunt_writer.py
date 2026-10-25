@@ -644,6 +644,35 @@ def test_deduplicated_token_crossing_a_clipped_left_edge_declines_the_segment():
     assert "deduplicated window cell straddles" in summary["specs"][spec.id]["reason"]
 
 
+def test_legacy_unplaced_count_spanning_a_clipped_edge_declines_the_segment():
+    from romulus.store import schema
+
+    window_start = START + timedelta(minutes=30)
+    manifest = _manifest()
+    manifest["window"] = {"start": window_start.isoformat(), "end": END.isoformat()}
+    repo = _repo()
+    repo.create_hunt("hunt-a", manifest, "manifest-a", "test")
+    events = [_event("edge", "/usr/bin/id", 40), _event("inside", "/usr/bin/id", 70)]
+    counter = KeyCounter("cell", SPEC, span=(window_start, END))
+    for event in events:
+        counter.consume(event, KeyContext())
+    repo.save_baseline_window_cell(
+        "hunt-a", {
+            "rule_id": SPEC.id, "version": SPEC.version, "target": "host-index",
+            "partition": f"{window_start.isoformat()}/{END.isoformat()}",
+            "state": "evaluated_complete", "matched": 0, "evaluated": 2, "detail": {"reasons": []},
+        }, (), counts=counter.count_rows(), scope_hours=counter.scope_hour_rows(),
+        event_hours=counter.event_hour_rows(),
+    )
+    with repo.engine.begin() as connection:
+        connection.execute(schema.baseline_window_count.update().values(material_hour=None))
+
+    summary = run_hunt_segment_writer(repo, "hunt-a", hunt_complete=True)
+
+    assert repo.baseline_segments() == []
+    assert "legacy window count material has no hour" in summary["specs"][SPEC.id]["reason"]
+
+
 def test_a_writer_failure_is_stated_in_the_baseline_summary_and_never_makes_the_hunt_partial(monkeypatch):
     from romulus.hunt import run as hunt_run
 

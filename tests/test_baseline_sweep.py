@@ -359,6 +359,35 @@ def test_window_child_resolves_to_a_pre_window_parent(monkeypatch, tmp_path):
     sweep.close_stage()
 
 
+def test_exec_pair_resolution_rejects_staged_material_from_an_older_spec_version():
+    repo = _repo()
+    spec = SPEC_BY_ID["bl.exec_pair"]
+    repo.stage_baseline_window_cell(
+        "h1",
+        {
+            "target": "x", "partition": f"{START.isoformat()}/{END.isoformat()}",
+            "spec_version": "1", "start": START, "end": END,
+            "target_applicable": True, "source_complete": True, "reasons": [], "evaluated": 1,
+        },
+        (), (), (),
+        counts=[{
+            "scope_kind": "host", "scope": "host:web01", "key_id": "old-key",
+            "key_digest": "old-digest",
+            "key": {"child_executable": "/bin/sh", "parent_executable": "/bin/old"},
+            "bucket": START.replace(hour=0), "material_hour": START, "count": 1,
+            "first_ts": START, "last_ts": START,
+        }],
+    )
+
+    resolve_window_exec_pairs(repo, "h1", Window(start=START, end=END))
+
+    assert repo.baseline_window_counts("h1", spec.id, "x") == []
+    current = next(cell for cell in repo.rule_cells("h1", rule_id=spec.id)
+                   if cell["rule_version"] == spec.version)
+    assert current["state"] == "executed_failed"
+    assert "staged version 1" in current["detail"]["reasons"][0]
+
+
 def test_exec_pair_segment_rows_keep_in_hour_and_deferred_resolutions(monkeypatch, tmp_path):
     window = Window(start=START, end=END)
     parent = _exec("parent", START + timedelta(minutes=5), pid=20, ppid=10, executable="/usr/bin/python")

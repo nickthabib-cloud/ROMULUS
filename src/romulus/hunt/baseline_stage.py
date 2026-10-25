@@ -103,6 +103,15 @@ def resolve_window_exec_pairs(repo: Repo, hunt_id: str, window: Window) -> None:
     """Resolve durable compact window Pendings after lookback has filled the parent carry."""
     spec = SPEC_BY_ID["bl.exec_pair"]
     cells = repo.baseline_window_cells(hunt_id)
+    for cell in [row for row in cells if row["spec_version"] != spec.version]:
+        reason = (f"staged version {cell['spec_version']} does not match current version {spec.version}; "
+                  "the window cell must be swept again")
+        repo.reject_baseline_window_cell(hunt_id, spec.id, cell["target"], cell["partition"])
+        repo.set_rule_cell(
+            hunt_id, spec.id, spec.version, cell["target"], cell["partition"],
+            "executed_failed", 0, 0, {"reasons": [reason]},
+        )
+    cells = [row for row in cells if row["spec_version"] == spec.version]
     carry_root = CarryInStore(repo, hunt_id)
     for target in sorted({row["target"] for row in cells}):
         target_cells = [row for row in cells if row["target"] == target]
@@ -127,10 +136,10 @@ def resolve_window_exec_pairs(repo: Repo, hunt_id: str, window: Window) -> None:
             )
             segment_counter.restore(
                 repo.baseline_window_counts(
-                    hunt_id, spec.id, target, partition=cell["partition"],
+                    hunt_id, spec.id, target, spec_version=spec.version, partition=cell["partition"],
                 ),
                 repo.baseline_window_scope_hours(
-                    hunt_id, spec.id, target, partition=cell["partition"],
+                    hunt_id, spec.id, target, spec_version=spec.version, partition=cell["partition"],
                 ),
             )
             pending_counter = KeyCounter(
@@ -172,7 +181,7 @@ def resolve_window_exec_pairs(repo: Repo, hunt_id: str, window: Window) -> None:
             }, (_pending_observation(hunt_id, spec, row) for row in observations),
                 counts=segment_counter.material_count_rows(), scope_hours=segment_counter.scope_hour_rows(),
                 event_hours=repo.baseline_window_event_hours(
-                    hunt_id, spec.id, target, partition=cell["partition"],
+                    hunt_id, spec.id, target, spec_version=spec.version, partition=cell["partition"],
                 ))
             repo.drop_baseline_window_cell(hunt_id, target, cell["partition"])
 
@@ -202,6 +211,7 @@ class SnapshotView:
 
     def _window_failure(self, playbook: BaselinePlaybook) -> str | None:
         cells = [cell for cell in self.repo.rule_cells(self.hunt_id, rule_id=playbook.id)
+                 if cell["rule_version"] == playbook.spec.version
                  if not (cell["target"] == "*" and cell["partition"] == "window")
                  and not cell["target"].startswith("baseline:")
                  and cell["state"] != "split"]
@@ -356,9 +366,11 @@ class SnapshotView:
             reason = "window has no complete whole hour"
         measurements = (list(self.repo.baseline_window_scope_series(
             self.hunt_id, playbook.id, first["scope_kind"], first["scope"],
+            spec_version=playbook.spec.version,
             span=(whole_start, whole_end),
         )) if whole_start < whole_end else [])
         partial_cells = [cell for cell in self.repo.rule_cells(self.hunt_id, rule_id=playbook.id)
+                         if cell["rule_version"] == playbook.spec.version
                          if not (cell["target"] == "*" and cell["partition"] == "window")
                          and not cell["target"].startswith("baseline:")
                          and cell["state"] != "split" and cell["state"] not in _COMPLETE_WINDOW_STATES]
