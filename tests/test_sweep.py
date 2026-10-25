@@ -29,6 +29,32 @@ def _repo():
     return r
 
 
+def test_zeek_conn_profiles_do_not_claim_general_net_flow_and_queries_select_only_icmp():
+    contract = contract_from_types(
+        "zeek", {"@timestamp": "date", "event.dataset": "keyword", "network.transport": "keyword"},
+        role="network", os_family="unknown",
+    )
+    profile = {"role": "network", "datasets": {"zeek.connection": 1000}}
+
+    assert sw.delivered_families(profile, contract) == frozenset()
+
+    sweep = sw.Sweep(_repo(), FakeClient(), "h1", Window(
+        start=START, end=START + timedelta(minutes=5),
+    ), {"zeek": contract})
+    sweep._profiles = {"zeek": profile}
+    groups = sweep._any_of_for("zeek", contract)
+
+    assert [[predicate.model_dump() for predicate in group] for group in groups] == [[
+        {"field": "event.dataset", "op": "in", "value": ["zeek.connection"]},
+        {"field": "network.transport", "op": "in", "value": ["icmp", "icmpv6", "ipv6-icmp"]},
+    ]]
+
+
+def test_unfiltered_zeek_non_icmp_skip_makes_coverage_partial():
+    skips = {"zeek non-ICMP connection is not normalized": 7}
+    assert sw.Sweep._unsupported_skips(skips) == skips
+
+
 def test_capped_partitions_split_until_complete(monkeypatch):
     calls = []
 

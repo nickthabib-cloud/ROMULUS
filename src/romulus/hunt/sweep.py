@@ -54,6 +54,8 @@ PARTITION_MAX_DOCS = 120_000
 PLANNED_CHUNK = 500
 LINUX_HOST_DATASETS = ("linux.audit", "systemd.journal", "apache.access", "apache.error")
 HOST_DATASETS = [*LINUX_HOST_DATASETS, *WINDOWS_HOST_DATASETS]
+ZEEK_CONN_DATASETS = frozenset({"zeek.connection", "zeek.conn"})
+ZEEK_ICMP_TRANSPORTS = ("icmp", "icmpv6", "ipv6-icmp")
 NET_FAMILIES = {"net_alert", "net_flow", "dns_query", "http_tx", "file_transfer", "tls_session", "ssh_session"}
 # linux.audit now also yields `auth` (USER_LOGIN/USER_START), so an unparseable audit group may hide one.
 # A login group that fails is tagged linux.audit.auth; it takes every record of its event, so it may also hide
@@ -67,8 +69,6 @@ LINUX_DATASET_FAMILIES = {
     "linux.audit.auth": {"process_exec", "net_socket", "auth", "file_change", "process_observed"} | _AUDIT_ADMIN,
     "linux.audit.admin": _AUDIT_ADMIN,
     "arkime.session": {"net_session"},
-    "zeek.connection": {"net_flow"},
-    "zeek.conn": {"net_flow"},
     "systemd.journal": {"auth", "privilege_use", "service_change"},
     "apache.access": {"http_access"},
     "apache.error": {"web_error"},
@@ -105,7 +105,7 @@ _WINDOWS_FAMILIES = frozenset().union(*WINDOWS_DATASET_FAMILIES.values())
 _ROLE_FAMILIES = {
     "host": _families_of(HOST_DATASETS),
     "network": _families_of([*(name for name in DATASET_FAMILIES if name.startswith("suricata.eve.")),
-                             "arkime.session", "zeek.connection", "zeek.conn"]),
+                             "arkime.session"]),
 }
 
 
@@ -316,7 +316,30 @@ class Sweep:
         return []
 
     def _any_of_for(self, target: str, contract: FieldContract | None = None) -> list[list[Predicate]]:
-        """Select Windows event logs by dataset or native channel; Winlogbeat may omit event.dataset."""
+        """Select only normalized source shapes while preserving each target's other known datasets."""
+        if contract is not None and contract.role == "network":
+            if self._profiles is None:
+                self._profiles = self.repo.source_profiles(self.hunt_id)
+            profile = self._profiles.get(target) or {}
+            datasets = sorted(profile.get("datasets") or {})
+            zeek = [dataset for dataset in datasets if dataset in ZEEK_CONN_DATASETS]
+            if (zeek and not any(str(note).startswith("ds inventory truncated")
+                                 for note in profile.get("notes") or [])
+                    and contract.supports("event.dataset", "in")
+                    and contract.supports("network.transport", "in")):
+                groups = []
+                others = [dataset for dataset in datasets if dataset not in ZEEK_CONN_DATASETS]
+                if others:
+                    groups.append([Predicate(field="event.dataset", op="in", value=others)])
+                groups.append([
+                    Predicate(field="event.dataset", op="in", value=zeek),
+                    Predicate(field="network.transport", op="in", value=list(ZEEK_ICMP_TRANSPORTS)),
+                ])
+                self.stats.setdefault("dataset_filter", {})[target] = others
+                self.stats.setdefault("zeek_transport_filter", {})[target] = list(ZEEK_ICMP_TRANSPORTS)
+                return groups
+            return []
+        # Winlogbeat may omit event.dataset, so Windows also selects by native channel.
         if contract is None or contract.role != "host" or contract.os_family != "windows":
             return []
         groups: list[list[Predicate]] = []
@@ -576,7 +599,7 @@ class Sweep:
         """Only unmodeled source formats poison rules; cataloged-source event classes are not-assessed data."""
         return {
             reason: count for reason, count in skips.items()
-            if reason.startswith(("dataset:", "suricata event_type"))
+            if reason.startswith(("dataset:", "suricata event_type", "zeek non-ICMP connection"))
         }
 
     @staticmethod
