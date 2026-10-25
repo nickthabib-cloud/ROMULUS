@@ -2624,8 +2624,8 @@ class Repo:
         return written
 
     def baseline_parent_observations(self, hunt_id: str, target: str, host: str, pid: int,
-                                     boot: str, at: datetime) -> list[dict]:
-        """A bounded set of process states nearest one child instant, including two exact-time states."""
+                                     boot: str, at: datetime, serial: int | None = None) -> list[dict]:
+        """A bounded set of process states nearest one child instant in its strongest ordering domain."""
         at = _utc(at, "parent observation lookup timestamp")
         table = t.baseline_parent_observation.c
         where = (
@@ -2633,41 +2633,74 @@ class Repo:
             table.boot == boot, table.pid == pid,
         )
         with self.engine.connect() as connection:
-            latest_before = connection.execute(
-                select(func.max(table.observed_ts)).where(*where, table.observed_ts < at),
-            ).scalar_one_or_none()
-            before = []
-            if latest_before is not None:
-                known = connection.execute(
+            def states_at(timestamp, *extra):
+                if timestamp is None:
+                    return []
+                return connection.execute(
                     select(t.baseline_parent_observation).where(
-                        *where, table.observed_ts == latest_before, table.serial.is_not(None),
-                    ).order_by(table.serial.desc(), table.event_id.desc()).limit(1),
+                        *where, table.observed_ts == timestamp, *extra,
+                    ).group_by(table.executable, table.parent_pid, table.session, table.serial)
+                    .order_by(table.executable, table.parent_pid, table.session, table.serial)
+                    .limit(2),
                 ).mappings().all()
-                unknown = connection.execute(
-                    select(t.baseline_parent_observation).where(
-                        *where, table.observed_ts == latest_before, table.serial.is_(None),
-                    ).group_by(table.executable, table.parent_pid, table.session)
+
+            def states_at_serial(value):
+                if value is None:
+                    return []
+                return connection.execute(
+                    select(t.baseline_parent_observation).where(*where, table.serial == value)
+                    .group_by(table.executable, table.parent_pid, table.session, table.serial)
                     .order_by(table.executable, table.parent_pid, table.session).limit(2),
                 ).mappings().all()
-                if known:
-                    before.extend(known)
-                    state = tuple(known[0][name] for name in ("executable", "parent_pid", "session"))
-                    before.extend(row for row in unknown if tuple(
-                        row[name] for name in ("executable", "parent_pid", "session")
-                    ) != state)
-                    before = before[:2]
-                else:
-                    before = list(unknown)
-            exact = connection.execute(
-                select(t.baseline_parent_observation).where(*where, table.observed_ts == at)
-                .group_by(table.executable, table.parent_pid, table.session, table.serial)
-                .order_by(table.executable, table.parent_pid, table.session, table.serial).limit(2),
-            ).mappings().all()
-            after = connection.execute(
-                select(t.baseline_parent_observation).where(*where, table.observed_ts > at)
-                .order_by(table.observed_ts, table.event_id).limit(1),
-            ).mappings().all()
-        return [_with_utc(row, ("observed_ts",)) for row in [*before, *exact, *after]]
+
+            def ordered_states_at(timestamp, *, newest):
+                if timestamp is None:
+                    return []
+                order = table.serial.desc() if newest else table.serial.asc()
+                known = connection.execute(
+                    select(t.baseline_parent_observation).where(
+                        *where, table.observed_ts == timestamp, table.serial.is_not(None),
+                    ).order_by(order, table.event_id).limit(1),
+                ).mappings().all()
+                unknown = states_at(timestamp, table.serial.is_(None))
+                states = {
+                    tuple(row[name] for name in ("executable", "parent_pid", "session")): row
+                    for row in [*known, *unknown]
+                }
+                return list(states.values())[:2]
+
+            rows = []
+            if serial is not None:
+                prior_serial = connection.execute(select(func.max(table.serial)).where(
+                    *where, table.serial.is_not(None), table.serial < serial,
+                )).scalar_one_or_none()
+                later_serial = connection.execute(select(func.min(table.serial)).where(
+                    *where, table.serial.is_not(None), table.serial >= serial,
+                )).scalar_one_or_none()
+                rows.extend(states_at_serial(prior_serial))
+                rows.extend(states_at_serial(later_serial))
+                unknown = (table.serial.is_(None),)
+                latest_before = connection.execute(select(func.max(table.observed_ts)).where(
+                    *where, *unknown, table.observed_ts < at,
+                )).scalar_one_or_none()
+                earliest_after = connection.execute(select(func.min(table.observed_ts)).where(
+                    *where, *unknown, table.observed_ts > at,
+                )).scalar_one_or_none()
+                rows.extend(states_at(latest_before, *unknown))
+                rows.extend(states_at(at, *unknown))
+                rows.extend(states_at(earliest_after, *unknown))
+            else:
+                latest_before = connection.execute(select(func.max(table.observed_ts)).where(
+                    *where, table.observed_ts < at,
+                )).scalar_one_or_none()
+                earliest_after = connection.execute(select(func.min(table.observed_ts)).where(
+                    *where, table.observed_ts > at,
+                )).scalar_one_or_none()
+                rows.extend(ordered_states_at(latest_before, newest=True))
+                rows.extend(states_at(at))
+                rows.extend(ordered_states_at(earliest_after, newest=False))
+        unique = {row["event_id"]: row for row in rows}
+        return [_with_utc(row, ("observed_ts",)) for row in unique.values()]
 
     def baseline_parent_observation_count(self, hunt_id: str) -> int:
         with self.engine.connect() as connection:

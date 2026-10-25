@@ -221,6 +221,37 @@ def test_observed_parent_prior_same_instant_states_require_serial_order_or_stay_
     assert resolved.keys[0].key["parent_executable"] == "/usr/bin/reloaded"
 
 
+def test_observed_parent_exact_instant_selects_the_nearest_prior_audit_serial():
+    _repo, store = _store()
+    store.observe_observation_rows([
+        _observed(10, 1, "/a", serial=100),
+        _observed(10, 1, "/m", serial=101),
+        _observed(10, 1, "/z", serial=102),
+    ])
+
+    resolved = PendingResolver(store).resolve(Pending(
+        "host", "boot-a", 10, START + timedelta(seconds=1), "child", "/bin/sh", 103,
+    ))
+
+    assert resolved.reason is None
+    assert resolved.keys[0].key["parent_executable"] == "/z"
+
+
+def test_observed_parent_retains_conflicting_states_at_the_nearest_later_instant():
+    _repo, store = _store()
+    store.observe_observation_rows([
+        _observed(10, 0, "/a"),
+        _observed(10, 2, "/a"),
+        _observed(10, 2, "/z"),
+    ])
+
+    resolved = PendingResolver(store).resolve(Pending(
+        "host", "boot-a", 10, START + timedelta(seconds=1), "child", "/bin/sh",
+    ))
+
+    assert resolved.keys == () and "ambiguous" in resolved.reason
+
+
 @pytest.mark.slow
 def test_ten_million_exec_history_is_bounded_by_live_pids():
     repo, store = _store()

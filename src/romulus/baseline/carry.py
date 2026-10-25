@@ -465,7 +465,7 @@ class CarryInStore:
         if len(self.repo.baseline_parent_targets(self.hunt_id, host)) > 1:
             return None, SPANS_TARGETS
         rows = self.repo.baseline_parent_observations(
-            self.hunt_id, self.target, host, pid, boot, ts,
+            self.hunt_id, self.target, host, pid, boot, ts, serial,
         )
         prior_states = {
             (row["executable"], row["parent_pid"], row["session"])
@@ -474,6 +474,18 @@ class CarryInStore:
         if len(prior_states) > 1:
             return None, (f"lineage ambiguous for pid {pid} on {host}: records at one instant without audit "
                           "serials to order them show different states")
+        instants: dict[datetime, list[dict]] = defaultdict(list)
+        for row in rows:
+            instants[row["observed_ts"]].append(row)
+        for instant_rows in instants.values():
+            states = {
+                (row["executable"], row["parent_pid"], row["session"])
+                for row in instant_rows
+            }
+            serials = [row["serial"] for row in instant_rows]
+            if len(states) > 1 and (None in serials or len(set(serials)) < len(serials)):
+                return None, (f"lineage ambiguous for pid {pid} on {host}: records at one instant without audit "
+                              "serials to order them show different states")
         observed = [Observed(
             row["observed_ts"].timestamp(), row["serial"], row["executable"], row["parent_pid"],
             row["session"], boot, row["event_id"], row["event_id"],
