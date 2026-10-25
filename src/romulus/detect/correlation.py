@@ -983,13 +983,13 @@ def _version(ip: str) -> int:
 # of its latest record (see count_connections).
 CONNECTION_GAP = 30.0
 # Records of a connection to one service endpoint from one address kept on the stage for citation (and as many
-# alerts), once a connect() call to that endpoint has been read: a group cites at most EXAMPLE_LIMIT records, all to its
-# endpoint, from its host's address.
+# alerts), per sensor, once a connect() call to that endpoint has been read: a group cites at most EXAMPLE_LIMIT records
+# (plus one more for each further sensor), all to its endpoint, from its host's address.
 PARTNERS_PER_PAIR = EXAMPLE_LIMIT
 # Before any connect() call to the endpoint has been read (a network target read before the host target, or traffic no
-# call reaches), a pair's first record is kept: a call read later can still join it. That is one record per pair, not
-# one per connection; the stage's disk budget is what bounds it (the sweep stops staging citations when it is spent,
-# and the rule then says its findings are not computed from them).
+# call reaches), a pair's first record from each sensor is kept: a call read later can still join it. That is one
+# record per pair and sensor, not one per connection; the stage's disk budget is what bounds it (the sweep stops
+# staging citations when it is spent, and the rule then says its findings are not computed from them).
 PARTNERS_UNMATCHED = 1
 EPHEMERAL_FLOOR = 32768         # client ports start here on modern stacks (Linux 32768-60999, Windows 49152-65535)
 
@@ -1019,7 +1019,7 @@ class ProcessNetworkLink(Playbook):
     address is not established for this host is linked but stated, and caps the lane at lead, as do
     multiple local addresses and records shared with another process."""
     id = "corr.process_network_link"
-    version = "7"
+    version = "8"
     title = "Host process connect() calls linked to network-sensor records for the same connection (inferred)"
     kind = "aggregate"
     staged = True
@@ -1245,18 +1245,19 @@ class ProcessNetworkLink(Playbook):
             return
 
     def _cite_net(self, e: TypedEvent, src: str, sport: int, dst: str, dport: int) -> int:
-        """Stage the record when it may be cited (1, else 0): when it is among the first PARTNERS_PER_PAIR records (or
-        alerts) of its (service endpoint, client address) pair once a call to that endpoint has been read, or among
-        the pair's first PARTNERS_UNMATCHED before any call reached the endpoint. The service side is the destination,
-        as a sensor records a connection it saw open; a record whose source port is the lower one, below the client
-        range, is also offered as recorded from the server's side (a connection picked up mid-stream)."""
+        """Stage the record when it may be cited (1, else 0): when it is among its sensor's first PARTNERS_PER_PAIR
+        records (or alerts) of its (service endpoint, client address) pair once a call to that endpoint has been read,
+        or among the sensor's first PARTNERS_UNMATCHED of the pair before any call reached the endpoint. The service
+        side is the destination, as a sensor records a connection it saw open; a record whose source port is the lower
+        one, below the client range, is also offered as recorded from the server's side (a connection picked up
+        mid-stream)."""
         alert = e.family == "net_alert"
         pairs = [(dst, dport, src)]
         if sport < dport and sport < EPHEMERAL_FLOOR:
             pairs.append((src, sport, dst))
         staged = 0
         for pair in pairs:
-            count = self.pairs.setdefault((*pair, alert), lambda: [0])
+            count = self.pairs.setdefault((*pair, alert, e.host or ""), lambda: [0])
             if count is None:
                 self.note_limit("pairs", "the endpoint pairs' disk budget is spent; a new pair's records are not kept "
                                          "for citation, and findings say how many are cited")
@@ -1498,7 +1499,8 @@ class ProcessNetworkLink(Playbook):
         bounds = g.ends.ids()
         held_bounds = [i for i in bounds if i in g.citable]
         sock_ids = list(dict.fromkeys([*held_bounds, *(s.id for s in g.socks), *judged_records(procs)]))
-        partner_ids = [n.id for _k, n, _o in g.first_partners]
+        partners = g.partners()
+        partner_ids = [n.id for _k, n, _o in partners]
         ids = list(dict.fromkeys([*sock_ids, *partner_ids, *(o[3] for o in others)]))
         loaded = {e.id: e for e in self.load(ids)}
         missing = [i for i in ids if i not in loaded]
@@ -1508,7 +1510,15 @@ class ProcessNetworkLink(Playbook):
         first = loaded[g.socks[0].id] if g.socks else loaded[sock_ids[0]] if sock_ids else None
         if first is None:
             return None                             # nothing of the group could be cited (stated on coverage)
-        sigs = sorted({str(n.alert_sig) for _k, n, _o in g.first_partners if n.family == "net_alert"})[:3]
+        sigs = sorted({str(n.alert_sig) for _k, n, _o in partners if n.family == "net_alert"})[:3]
+        # the sensors named are those with a cited record; the others are counted
+        cited_observers = sorted({n.observer for _k, n, _o in partners})
+        per_observer = dict(db.execute("SELECT observer, COUNT(*) FROM gp GROUP BY observer").fetchall())
+        uncited_observers = [o for o in observers if o not in cited_observers]
+        sensors = ", ".join(cited_observers) + (
+            f" (and {sum(per_observer.get(o, 0) for o in uncited_observers)} record(s) from "
+            f"{len(uncited_observers)} other sensor(s), not cited)" if uncited_observers else "")
+        unestablished_cited = [o for o in unestablished if o in cited_observers]
         outcome_words = ", ".join(f"{n} {w}" for w, n in (
             ("succeeded", outcomes.get(Outcome.success, 0)), ("failed", outcomes.get(Outcome.failure, 0)),
             ("with unknown or in-progress outcome", outcomes.get(Outcome.unknown, 0))) if n)
@@ -1528,7 +1538,7 @@ class ProcessNetworkLink(Playbook):
              f"({datetime.fromtimestamp(s0.ts, UTC).isoformat()} – "
              f"{datetime.fromtimestamp(g.last_ts, UTC).isoformat()}); {outcome_words}. {SOCKET_TYPE_CAVEAT}."
              + span_note),
-            f"Observed by network sensor(s) {', '.join(observers)}: {n_flows} flow or session record(s) across "
+            f"Observed by network sensor(s) {sensors}: {n_flows} flow or session record(s) across "
             f"{n_connections} connection(s) to {s0.ip} port {s0.port} starting within seconds of those calls"
             + (f", with local address(es) {', '.join(locals_)}" if locals_ else "")
             + (f", and {n_alerts} IDS alert(s) on those connections"
@@ -1545,9 +1555,11 @@ class ProcessNetworkLink(Playbook):
             + (". It is ambiguous: more than one local address matched" if len(locals_) > 1 else "") + ".",
         ]
         if unestablished:
-            parts.append(f"{s0.host}'s own address on sensor(s) {', '.join(unestablished)} is not established from "
-                         f"other joins, so these records could belong to another machine reaching the same "
-                         f"endpoint.")
+            where = (f"on sensor(s) {', '.join(unestablished_cited)}" if unestablished_cited else "")
+            others_n = len(unestablished) - len(unestablished_cited)
+            where += ((" and " if where else "on ") + f"{others_n} sensor(s) with no cited record" if others_n else "")
+            parts.append(f"{s0.host}'s own address {where} is not established from other joins, so these records "
+                         f"could belong to another machine reaching the same endpoint.")
         if differs:
             parts.append(f"Local address(es) {', '.join(differs)} differ from the address usually seen for "
                          f"{s0.host} on the same sensor.")
@@ -1565,7 +1577,7 @@ class ProcessNetworkLink(Playbook):
         known = set(ids)
         cited += [e for e in lineage_events if e.id not in known]         # the observed records the lineage names
         # the first-seen alert (and flow) among the cited records
-        by_order = sorted(g.first_partners, key=lambda item: item[2])
+        by_order = sorted(partners, key=lambda item: item[2])
         alert_event = next((loaded[n.id] for _k, n, _o in by_order if n.family == "net_alert"), None)
         flow_event = next((loaded[n.id] for _k, n, _o in by_order if n.family in ("net_flow", "net_session")), None)
         preds = [pf(first, "process.executable"), pf(first, "destination.ip"), pf(first, "destination.port")]
@@ -1581,7 +1593,7 @@ class ProcessNetworkLink(Playbook):
         if lineage_events:
             m.notes.append(f"{len(lineage_events)} process record(s) (exec and observed) the named lineage rests on "
                            f"are cited")
-        for observer in observers:
+        for observer in cited_observers:
             for version in (4, 6):
                 known = address.get((s0.host, observer, version))
                 if known:
@@ -1614,6 +1626,9 @@ class _Group:
         self.notable_all_failed = True
         self.alert_lane: str | None = None
         self.first_partners: list[tuple] = []     # (citation key, record, first-seen order), sorted by key
+        self.observer_first: dict = {}            # sensor -> its first kept record in citation order
+        self.conn_first: dict = {}                # connection -> its first kept record, for the EXAMPLE_LIMIT
+                                                  # connections whose first record comes first in citation order
         self.order = 0
         self.procs: dict = {}                     # notable processes and their earliest calls (`note_process`)
         self.unheld = 0                           # notable calls of processes past PROCESSES_HELD
@@ -1661,10 +1676,39 @@ class _Group:
                 if lane is not None and (self.alert_lane is None or LANE_RANK[lane] < LANE_RANK[self.alert_lane]):
                     self.alert_lane = lane
             key = (n.family != "net_alert", n.start, n.id)
-            if n.staged and (len(self.first_partners) < EXAMPLE_LIMIT or key < self.first_partners[-1][0]):
-                bisect.insort(self.first_partners, (key, n, self.order), key=lambda item: item[0])
-                del self.first_partners[EXAMPLE_LIMIT:]
+            if n.staged:
+                item = (key, n, self.order)
+                if len(self.first_partners) < EXAMPLE_LIMIT or key < self.first_partners[-1][0]:
+                    bisect.insort(self.first_partners, item, key=lambda each: each[0])
+                    del self.first_partners[EXAMPLE_LIMIT:]
+                held = self.observer_first.get(n.observer)
+                if held is None or key < held[0]:
+                    self.observer_first[n.observer] = item
+                held = self.conn_first.get(n.conn)
+                if held is not None:
+                    if key < held[0]:
+                        self.conn_first[n.conn] = item
+                elif len(self.conn_first) < EXAMPLE_LIMIT:
+                    self.conn_first[n.conn] = item
+                else:
+                    last = max(self.conn_first, key=lambda conn: self.conn_first[conn][0])
+                    if key < self.conn_first[last][0]:
+                        del self.conn_first[last]
+                        self.conn_first[n.conn] = item
             self.order += 1
+
+    def partners(self) -> list[tuple]:
+        """The network records the group cites: the first of each sensor (always, so every sensor named has a cited
+        record), then the first of each connection, then the first in citation order, up to EXAMPLE_LIMIT."""
+        chosen: dict = {}
+        for item in sorted(self.observer_first.values(), key=lambda each: each[0]):
+            chosen[item[1].id] = item
+        for pool in (sorted(self.conn_first.values(), key=lambda each: each[0]), self.first_partners):
+            for item in pool:
+                if len(chosen) >= EXAMPLE_LIMIT:
+                    break
+                chosen.setdefault(item[1].id, item)
+        return sorted(chosen.values(), key=lambda each: each[0])
 
     def clear(self) -> None:
         for table in ("gp", "gs", "gsh"):

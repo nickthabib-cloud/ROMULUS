@@ -373,6 +373,12 @@ def test_own_elevation_only_leads_are_one_lead_per_host_and_writer():
     assert "and 2 more (every path is in the notes)" in m.claim and len(m.events) == 10
     assert {f"file: {p}" for p in out_files} <= set(m.notes) and "T1548.003" in m.notes
     assert len({e.id for e in m.events}) == 10 and all(e.get("process.uid") == "1001" for e in m.events)
+    # the stated span ends on the latest file's write, which is cited although it is past the cap of files in order
+    from tests.claim_citations import finding_problems
+    last_write = max((r for r in records if r.get("process.uid") == "1001"), key=lambda e: e.ts)
+    assert last_write.id in {e.id for e in m.events} and f"to {last_write.ts.isoformat()}" in m.claim
+    assert "The first record of 10 of the 12 files is cited, the earliest and the latest file among them." in m.claim
+    assert not finding_problems(m.claim, m.notes, m.events)
 
 
 def _managed(host, n, start=T0, pid=700, base="/home/deploy/.ansible/tmp"):
