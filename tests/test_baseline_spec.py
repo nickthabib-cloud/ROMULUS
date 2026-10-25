@@ -378,6 +378,8 @@ def test_command_shape_masks_mktemp_style_random_names(name):
     ("blob", "bucket"),
     [
         ("YWJjZGVmZ2hpamts", "<b64:16-31>"),
+        ("GGGGGGGGGGGGGGGG", "<b64:16-31>"),
+        ("YWJjZGVmZ2hpamtsbQ", "<b64:16-31>"),
         ("YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4", "<b64:32-63>"),
     ],
 )

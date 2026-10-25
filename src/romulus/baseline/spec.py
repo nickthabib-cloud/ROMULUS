@@ -444,11 +444,10 @@ def _replace_bare_hex(match: re.Match[str]) -> str:
 
 def _base64_bucket(value: str) -> str | None:
     """A bounded description of a complete base64 token, excluding values already classed as long hex."""
-    if (len(value) < 16 or len(set(value.rstrip("="))) < 6
-            or not _BASE64.fullmatch(value) or _HEX_BARE.fullmatch(value)):
+    if len(value) < 16 or not _BASE64.fullmatch(value) or _HEX_BARE.fullmatch(value):
         return None
     try:
-        base64.b64decode(value, validate=True)
+        base64.b64decode(value + "=" * (-len(value) % 4), validate=True)
     except (ValueError, base64.binascii.Error):
         return None
     low = 1 << (len(value).bit_length() - 1)
