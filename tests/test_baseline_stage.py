@@ -581,9 +581,12 @@ def test_run_orders_baseline_after_packets_before_expansion_and_resume_retries_a
     assert order[:3] == ["packet", "baseline", "expansion"]
     assert order[3:] == ["baseline", "expansion"]
     assert first["execution_state"] == "partial" and first["baseline"]["finished"] is False
-    assert resumed["baseline"] == {
+    assert {key: resumed["baseline"][key] for key in ("status", "finished", "snapshot_digest", "specs")} == {
         "status": "complete", "finished": True, "snapshot_digest": "frozen", "specs": {},
     }
+    assert resumed["baseline"]["segment_writer"]["specs"]["bl.exec_path"]["reason"] == (
+        "host-index: no window cells"
+    )
     assert repo.latest_audit("h1", "hunt.baseline_summary")["detail"]["finished"] is True
 
 

@@ -164,9 +164,12 @@ _SEGMENT_COLUMNS = frozenset(column.name for column in t.baseline_segment.column
 _SEGMENT_OPTIONAL = frozenset({"source_hunt_id", "built_by_hunt_id", "network_digest"})
 # What makes two writes of one segment id the same segment: everything but its lifecycle status and the time
 # this copy was written (the rows are compared through rows_digest).
-_SEGMENT_IDENTITY = tuple(sorted(_SEGMENT_COLUMNS - {"status", "created_at"}))
-# Content identity of a building segment: who builds it is provenance, not content.
-_BUILD_CONTENT = tuple(name for name in _SEGMENT_IDENTITY if name != "built_by_hunt_id")
+# The two hunt ids are provenance rather than content. A twin hunt reuses an immutable segment written by the
+# first, while the stored provenance continues to identify that original write.
+_SEGMENT_IDENTITY = tuple(sorted(
+    _SEGMENT_COLUMNS - {"status", "created_at", "source_hunt_id", "built_by_hunt_id"},
+))
+_BUILD_CONTENT = _SEGMENT_IDENTITY
 _COUNT_COLUMNS = tuple(column.name for column in t.baseline_count.columns)
 _HOUR_COLUMNS = tuple(column.name for column in t.baseline_scope_hour.columns)
 _OBSERVATION_COLUMNS = tuple(column.name for column in t.baseline_observation.columns)
@@ -1974,7 +1977,8 @@ class Repo:
                                     segment.spec_id == spec["id"],
                                     segment.spec_version == spec["version"],
                                     segment.key_version == spec["key_version"],
-                                    segment.status == "active", segment.start >= start, segment.end <= end)
+                                    segment.status == "active", segment.start < end,
+                                    segment.end > start, segment.end <= end)
                              .order_by(segment.id))
                     for segment_id, status in connection.execute(query):
                         material = {"id": segment_id, "status": status, "target": target,
@@ -2027,6 +2031,24 @@ class Repo:
                 t.baseline_segment.c.id == segment_id,
             ).values(status=status))
             return bool(result.rowcount)
+
+    def prune_baseline_segment(self, segment_id: str) -> bool:
+        """Delete one stale/revoked segment unless a retained snapshot still references it."""
+        segment, member = t.baseline_segment.c, t.baseline_snapshot_segment.c
+        with write_txn(self.engine) as connection:
+            status = connection.execute(select(segment.status).where(
+                segment.id == segment_id,
+            )).scalar_one_or_none()
+            if status not in {"stale", "revoked"}:
+                return False
+            retained = connection.execute(select(member.segment_id).where(
+                member.segment_id == segment_id,
+            ).limit(1)).first()
+            if retained is not None:
+                return False
+            return bool(connection.execute(t.baseline_segment.delete().where(
+                segment.id == segment_id, segment.status.in_(("stale", "revoked")),
+            )).rowcount)
 
     def usable_baseline_segment_id(self, base_id: str) -> str:
         """Return the stable usable generation for content, advancing only after revocation.
@@ -2202,13 +2224,13 @@ class Repo:
     def baseline_segments_for_cover(self, *, site: str, target: str, spec_id: str,
                                     spec_version: str, key_version: str, start: datetime,
                                     end: datetime, network_digest: str | None = None) -> list[dict]:
-        """Complete active segments wholly inside a requested history interval, already cover-ordered."""
+        """Active segments usable before ``end``, including ones that straddle the left boundary."""
         start, end = _utc(start, "cover start"), _utc(end, "cover end")
         s = t.baseline_segment.c
         query = (select(t.baseline_segment).where(
             s.site == site, s.target == target, s.spec_id == spec_id,
             s.spec_version == spec_version, s.key_version == key_version,
-            s.status == "active", s.start >= start, s.end <= end,
+            s.status == "active", s.start < end, s.end > start, s.end <= end,
         ).order_by(s.start, s.end, s.id))
         if network_digest is not None:
             query = query.where(s.network_digest == network_digest)
@@ -2604,7 +2626,8 @@ class Repo:
         return state is not None and state not in {"planned", "split", "executed_failed"}
 
     def stage_baseline_window_cell(self, hunt_id: str, cell: dict, execs: Iterable[dict],
-                                   observations: Iterable[dict], pendings: Iterable[dict]) -> None:
+                                   observations: Iterable[dict], pendings: Iterable[dict],
+                                   counts: Iterable[dict] = (), scope_hours: Iterable[dict] = ()) -> None:
         """Replace one unresolved exec-pair cell with compact durable state."""
         key = (hunt_id, cell["target"], cell["partition"])
 
@@ -2653,6 +2676,10 @@ class Repo:
                  "body": json_body(row)}
                 for ordinal, row in enumerate(pendings)
             ], ["hunt_id", "target", "partition", "ordinal"])
+            self._replace_baseline_window_counter_rows(
+                connection, hunt_id, "bl.exec_pair", cell["spec_version"], key[1], key[2],
+                counts, scope_hours,
+            )
 
     def baseline_window_cells(self, hunt_id: str) -> list[dict]:
         with self.engine.connect() as connection:
@@ -2774,7 +2801,9 @@ class Repo:
                 table.start == _utc(start, "history start"),
             ))
 
-    def save_baseline_window_cell(self, hunt_id: str, cell: dict, observations: Iterable[dict]) -> bool:
+    def save_baseline_window_cell(self, hunt_id: str, cell: dict, observations: Iterable[dict], *,
+                                  counts: Iterable[dict] = (),
+                                  scope_hours: Iterable[dict] = ()) -> bool:
         """Atomically add one cell's observations once and close its ordinary rule cell.
 
         The terminal rule cell is the idempotency marker. A killed or restarted sweep can process its direct
@@ -2822,6 +2851,10 @@ class Repo:
             )).scalar_one_or_none()
             if current is not None and current not in {"planned", "split"}:
                 return False
+            self._replace_baseline_window_counter_rows(
+                connection, hunt_id, cell["rule_id"], cell["version"], cell["target"],
+                cell["partition"], counts, scope_hours,
+            )
             for chunk in _chunks(rows, BASELINE_CHUNK):
                 connection.execute(stmt, chunk)
             connection.execute(_RULE_CELL_UPSERT, [{
@@ -2836,6 +2869,204 @@ class Repo:
                 "detail": cell.get("detail") or {},
             }])
         return True
+
+    def _replace_baseline_window_counter_rows(self, connection, hunt_id: str, spec_id: str,
+                                              spec_version: str, target: str, partition: str,
+                                              counts: Iterable[dict], scope_hours: Iterable[dict]) -> None:
+        """Replace one cell's segment material inside its caller's transaction."""
+        for table in (t.baseline_window_count, t.baseline_window_scope_hour):
+            connection.execute(table.delete().where(
+                table.c.hunt_id == hunt_id, table.c.spec_id == spec_id,
+                table.c.target == target, table.c.partition == partition,
+            ))
+        count_rows = (
+                {
+                    "hunt_id": hunt_id,
+                    "spec_id": spec_id,
+                    "spec_version": spec_version,
+                    "target": target,
+                    "partition": partition,
+                    "ordinal": ordinal,
+                    "scope_kind": row["scope_kind"],
+                    "scope": row["scope"],
+                    "key_id": row["key_id"],
+                    "key_digest": row["key_digest"],
+                    "key": row["key"],
+                    "bucket": _utc(row["bucket"], "window count bucket"),
+                    "count": int(row["count"]),
+                    "first_ts": _utc(row["first_ts"], "window count first_ts"),
+                    "last_ts": _utc(row["last_ts"], "window count last_ts"),
+                }
+                for ordinal, row in enumerate(counts)
+            )
+        for chunk in _chunks(count_rows, BASELINE_CHUNK):
+            connection.execute(t.baseline_window_count.insert(), chunk)
+        hour_rows = (
+                {
+                    "hunt_id": hunt_id,
+                    "spec_id": spec_id,
+                    "spec_version": spec_version,
+                    "target": target,
+                    "partition": partition,
+                    "ordinal": ordinal,
+                    "scope_kind": row["scope_kind"],
+                    "scope": row["scope"],
+                    "hour": _utc(row["hour"], "window scope hour"),
+                    "events": int(row["events"]),
+                }
+                for ordinal, row in enumerate(scope_hours)
+            )
+        for chunk in _chunks(hour_rows, BASELINE_CHUNK):
+            connection.execute(t.baseline_window_scope_hour.insert(), chunk)
+
+    def baseline_window_counts(self, hunt_id: str, spec_id: str, target: str, *,
+                               partition: str | None = None) -> list[dict]:
+        """Compact count rows retained from complete sweep cells, in deterministic cell order."""
+        table = t.baseline_window_count.c
+        with self.engine.connect() as connection:
+            query = select(t.baseline_window_count).where(
+                table.hunt_id == hunt_id,
+                table.spec_id == spec_id,
+                table.target == target,
+            )
+            if partition is not None:
+                query = query.where(table.partition == partition)
+            rows = connection.execute(query.order_by(table.partition, table.ordinal)).mappings()
+            return [_with_utc(row, ("bucket", "first_ts", "last_ts")) for row in rows]
+
+    def baseline_window_scope_hours(self, hunt_id: str, spec_id: str, target: str, *,
+                                    partition: str | None = None) -> list[dict]:
+        """Compact scope-hour rows retained from complete sweep cells."""
+        table = t.baseline_window_scope_hour.c
+        with self.engine.connect() as connection:
+            query = select(t.baseline_window_scope_hour).where(
+                table.hunt_id == hunt_id,
+                table.spec_id == spec_id,
+                table.target == target,
+            )
+            if partition is not None:
+                query = query.where(table.partition == partition)
+            rows = connection.execute(query.order_by(table.partition, table.ordinal)).mappings()
+            return [_with_utc(row, ("hour",)) for row in rows]
+
+    def baseline_window_merged_counts(self, hunt_id: str, spec_id: str, target: str, *,
+                                      page_size: int = BASELINE_PAGE) -> Iterator[dict]:
+        """Merge a hunt's per-cell count rows in bounded pages, ordered like segment count rows."""
+        if page_size < 1:
+            raise ValueError("page size must be positive")
+        table = t.baseline_window_count.c
+        order = (table.scope, table.key_digest, table.bucket)
+        after = None
+        while True:
+            query = (select(
+                table.scope_kind, table.scope, table.key_id, table.key_digest, table.key, table.bucket,
+                func.sum(table.count).label("count"), func.min(table.first_ts).label("first_ts"),
+                func.max(table.last_ts).label("last_ts"),
+            ).where(
+                table.hunt_id == hunt_id, table.spec_id == spec_id, table.target == target,
+            ).group_by(
+                table.scope_kind, table.scope, table.key_id, table.key_digest, table.key, table.bucket,
+            ))
+            if after is not None:
+                query = query.having(tuple_(*order) > tuple_(*after))
+            query = query.order_by(*order).limit(page_size)
+            with self.engine.connect() as connection:
+                page = [_with_utc(row, ("bucket", "first_ts", "last_ts"))
+                        for row in connection.execute(query).mappings()]
+            yield from page
+            if len(page) < page_size:
+                return
+            after = [page[-1]["scope"], page[-1]["key_digest"], page[-1]["bucket"]]
+
+    def baseline_window_merged_scope_hours(self, hunt_id: str, spec_id: str, target: str, *,
+                                           page_size: int = BASELINE_PAGE) -> Iterator[dict]:
+        """Merge a hunt's per-cell scope-hour rows without collecting the hunt in memory."""
+        if page_size < 1:
+            raise ValueError("page size must be positive")
+        table = t.baseline_window_scope_hour.c
+        order = (table.scope, table.hour)
+        after = None
+        while True:
+            query = (select(
+                table.scope_kind, table.scope, table.hour, func.sum(table.events).label("events"),
+            ).where(
+                table.hunt_id == hunt_id, table.spec_id == spec_id, table.target == target,
+            ).group_by(table.scope_kind, table.scope, table.hour))
+            if after is not None:
+                query = query.having(tuple_(*order) > tuple_(*after))
+            query = query.order_by(*order).limit(page_size)
+            with self.engine.connect() as connection:
+                page = [_with_utc(row, ("hour",)) for row in connection.execute(query).mappings()]
+            yield from page
+            if len(page) < page_size:
+                return
+            after = [page[-1]["scope"], page[-1]["hour"]]
+
+    def replace_baseline_hunt_exclusions(self, hunt_id: str, *, site: str,
+                                         start: datetime, end: datetime,
+                                         exclusions: dict[tuple[str, str], set[str]]) -> None:
+        """Replace one hunt's cited-key ledger atomically; a resumed finish is idempotent."""
+        start, end = _utc(start, "exclusion start"), _utc(end, "exclusion end")
+        if start >= end:
+            raise ValueError("baseline exclusion start before end is required")
+        rows = (
+            {
+                "hunt_id": hunt_id, "site": site, "target": target, "spec_id": spec_id,
+                "key_digest": key_digest, "start": start, "end": end,
+            }
+            for (target, spec_id), keys in sorted(exclusions.items())
+            for key_digest in sorted(keys)
+        )
+        with write_txn(self.engine) as connection:
+            connection.execute(t.baseline_hunt_exclusion.delete().where(
+                t.baseline_hunt_exclusion.c.hunt_id == hunt_id,
+            ))
+            for chunk in _chunks(rows, BASELINE_CHUNK):
+                connection.execute(t.baseline_hunt_exclusion.insert(), chunk)
+
+    def baseline_exclusion_keys(self, *, site: str, target: str, spec_id: str,
+                                start: datetime, end: datetime) -> list[str]:
+        """Distinct cited keys from every hunt whose half-open window overlaps the span."""
+        start, end = _utc(start, "exclusion query start"), _utc(end, "exclusion query end")
+        table = t.baseline_hunt_exclusion.c
+        query = (select(table.key_digest).where(
+            table.site == site, table.target == target, table.spec_id == spec_id,
+            table.start < end, table.end > start,
+        ).distinct().order_by(table.key_digest))
+        with self.engine.connect() as connection:
+            return list(connection.execute(query).scalars())
+
+    @staticmethod
+    def _baseline_exclusion_digest(keys: list[str]) -> str:
+        if not keys:
+            return "none"
+        return hashlib.sha256(json.dumps(
+            keys, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        ).encode()).hexdigest()
+
+    def stale_baseline_segments_for_exclusions(self, *, site: str,
+                                               start: datetime, end: datetime) -> int:
+        """Mark active overlapping segments stale when the durable cited-key union changed."""
+        start, end = _utc(start, "staleness start"), _utc(end, "staleness end")
+        segment, exclusion = t.baseline_segment.c, t.baseline_hunt_exclusion.c
+        with write_txn(self.engine) as connection:
+            segments = list(connection.execute(select(t.baseline_segment).where(
+                segment.site == site, segment.status == "active",
+                segment.start < end, segment.end > start,
+            )).mappings())
+            stale = 0
+            for row in segments:
+                keys = list(connection.execute(select(exclusion.key_digest).where(
+                    exclusion.site == site, exclusion.target == row["target"],
+                    exclusion.spec_id == row["spec_id"], exclusion.start < row["end"],
+                    exclusion.end > row["start"],
+                ).distinct().order_by(exclusion.key_digest)).scalars())
+                if (keys != sorted(row["excluded_keys"] or [])
+                        or self._baseline_exclusion_digest(keys) != row["exclusion_digest"]):
+                    stale += connection.execute(t.baseline_segment.update().where(
+                        segment.id == row["id"], segment.status == "active",
+                    ).values(status="stale")).rowcount
+            return stale
 
     def baseline_observations(self, hunt_id: str, *, page_size: int = BASELINE_PAGE) -> Iterator[dict]:
         """A hunt's observations in key order (spec, version, scope, key digest), paged."""

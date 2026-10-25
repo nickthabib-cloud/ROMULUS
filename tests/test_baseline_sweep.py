@@ -118,6 +118,10 @@ def test_window_cells_sort_events_persist_first_citations_and_are_idempotent(mon
     assert len(observations) == 2
     assert {row["window_count"] for row in observations} == {2}
     assert {row["first_event_id"] for row in observations} == {"earlier"}
+    staged_counts = repo.baseline_window_counts("h1", "bl.exec_path", "x")
+    staged_hours = repo.baseline_window_scope_hours("h1", "bl.exec_path", "x")
+    assert len(staged_counts) == 4 and sum(row["count"] for row in staged_counts) == 4
+    assert len(staged_hours) == 4 and sum(row["events"] for row in staged_hours) == 4
     cell = next(row for row in repo.rule_cells("h1") if row["partition"] == window.key())
     assert cell["state"] == "evaluated_complete"
     assert not cell["detail"]["reasons"]
@@ -233,12 +237,12 @@ def test_split_partition_resume_does_not_double_count_completed_child(monkeypatc
     real_save = repo.save_baseline_window_cell
     crashed = False
 
-    def crash_second(hunt_id, cell, observations):
+    def crash_second(hunt_id, cell, observations, **kwargs):
         nonlocal crashed
         if cell["partition"] == second_window.key() and not crashed:
             crashed = True
             raise RuntimeError("injected second-child crash")
-        return real_save(hunt_id, cell, observations)
+        return real_save(hunt_id, cell, observations, **kwargs)
 
     monkeypatch.setattr(repo, "save_baseline_window_cell", crash_second)
     first = sweep_module.Sweep(
@@ -333,8 +337,38 @@ def test_window_child_resolves_to_a_pre_window_parent(monkeypatch, tmp_path):
         "parent_executable": "/usr/sbin/sshd",
     }
     assert observation["first_event_id"] == "child"
+    staged = repo.baseline_window_counts("h1", "bl.exec_pair", "x")
+    assert len(staged) == 1 and staged[0]["key"] == observation["key"]
     cell = next(row for row in repo.rule_cells("h1") if row["partition"] == window.key())
     assert cell["state"] == "evaluated_complete"
+    sweep.close_stage()
+
+
+def test_exec_pair_segment_rows_keep_in_hour_and_deferred_resolutions(monkeypatch, tmp_path):
+    window = Window(start=START, end=END)
+    parent = _exec("parent", START + timedelta(minutes=5), pid=20, ppid=10, executable="/usr/bin/python")
+    child = _exec("child", START + timedelta(minutes=6), pid=21, ppid=20, executable="/bin/curl")
+    _install_partition(monkeypatch, [parent, child], window=window)
+    repo = _repo()
+    carry = CarryInStore(repo, "h1").for_target("x", horizon=END)
+    carry.observe_rows([
+        ParentExec("web01", "boot-1", 10, START - timedelta(minutes=30), "/usr/sbin/sshd", 1, "grandparent"),
+    ])
+    carry.mark_observed(START - timedelta(hours=1), START)
+    sweep = sweep_module.Sweep(repo, FakeClient(), "h1", window, {"x": _contract()}, stage_dir=tmp_path)
+    sweep.pack = [ExecPairBaseline()]
+
+    sweep.run_target("x")
+    resolve_window_exec_pairs(repo, "h1", window)
+
+    staged = repo.baseline_window_counts("h1", "bl.exec_pair", "x")
+    assert {
+        (row["key"]["child_executable"], row["key"]["parent_executable"])
+        for row in staged
+    } == {
+        ("/bin/curl", "/usr/bin/python"),
+        ("/usr/bin/python", "/usr/sbin/sshd"),
+    }
     sweep.close_stage()
 
 

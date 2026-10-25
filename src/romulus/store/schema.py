@@ -627,6 +627,73 @@ baseline_window_pending = Table(
     ),
 )
 
+# Per-sweep-cell count rows retained for the hunt-derived segment writer. These are compact typed keys, not
+# source events; the writer merges them after every finding that can exclude a key has been published.
+baseline_window_count = Table(
+    "baseline_window_count", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id", ondelete="CASCADE"), nullable=False),
+    Column("spec_id", String, nullable=False),
+    Column("spec_version", String, nullable=False),
+    Column("target", String, nullable=False),
+    Column("partition", String, nullable=False),
+    Column("ordinal", Integer, nullable=False),
+    Column("scope_kind", String, nullable=False),
+    Column("scope", String, nullable=False),
+    Column("key_id", String, nullable=False),
+    Column("key_digest", String, nullable=False),
+    Column("key", JSON, nullable=False),
+    Column("bucket", DateTime(timezone=True), nullable=False),
+    Column("count", Integer, nullable=False),
+    Column("first_ts", DateTime(timezone=True), nullable=False),
+    Column("last_ts", DateTime(timezone=True), nullable=False),
+    PrimaryKeyConstraint(
+        "hunt_id", "spec_id", "target", "partition", "ordinal",
+        name="pk_baseline_window_count",
+    ),
+    CheckConstraint("count >= 1", name="ck_baseline_window_count_count"),
+)
+
+baseline_window_scope_hour = Table(
+    "baseline_window_scope_hour", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id", ondelete="CASCADE"), nullable=False),
+    Column("spec_id", String, nullable=False),
+    Column("spec_version", String, nullable=False),
+    Column("target", String, nullable=False),
+    Column("partition", String, nullable=False),
+    Column("ordinal", Integer, nullable=False),
+    Column("scope_kind", String, nullable=False),
+    Column("scope", String, nullable=False),
+    Column("hour", DateTime(timezone=True), nullable=False),
+    Column("events", Integer, nullable=False),
+    PrimaryKeyConstraint(
+        "hunt_id", "spec_id", "target", "partition", "ordinal",
+        name="pk_baseline_window_scope_hour",
+    ),
+    CheckConstraint("events >= 0", name="ck_baseline_window_scope_hour_events"),
+)
+
+# Durable cited-key facts used to derive each segment's exclusion set. The hunt window is retained on every
+# row so a later overlapping hunt can invalidate an older segment without retaining candidate event bodies.
+baseline_hunt_exclusion = Table(
+    "baseline_hunt_exclusion", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id", ondelete="CASCADE"), nullable=False),
+    Column("site", String, nullable=False),
+    Column("target", String, nullable=False),
+    Column("spec_id", String, nullable=False),
+    Column("key_digest", String, nullable=False),
+    Column("start", DateTime(timezone=True), nullable=False),
+    Column("end", DateTime(timezone=True), nullable=False),
+    PrimaryKeyConstraint(
+        "hunt_id", "target", "spec_id", "key_digest", name="pk_baseline_hunt_exclusion",
+    ),
+    CheckConstraint("end > start", name="ck_baseline_hunt_exclusion_span"),
+)
+Index(
+    "ix_baseline_hunt_exclusion_overlap", baseline_hunt_exclusion.c.site,
+    baseline_hunt_exclusion.c.target, baseline_hunt_exclusion.c.spec_id,
+    baseline_hunt_exclusion.c.start, baseline_hunt_exclusion.c.end,
+)
+
 # Compact history hours whose exec-pair children wait for the whole lookback fill: the hour's counts, scope hours
 # and Pendings, held until every older hour has fed the parent carry. Nothing here is a segment until resolved.
 baseline_history_cell = Table(

@@ -111,6 +111,14 @@ def resolve_window_exec_pairs(repo: Repo, hunt_id: str, window: Window) -> None:
             reasons = list(cell["reasons"])
             counter = KeyCounter(cell["partition"], spec, span=(cell["start"], cell["end"]),
                                  retain_observations_when_partial=True)
+            counter.restore(
+                repo.baseline_window_counts(
+                    hunt_id, spec.id, target, partition=cell["partition"],
+                ),
+                repo.baseline_window_scope_hours(
+                    hunt_id, spec.id, target, partition=cell["partition"],
+                ),
+            )
             for body in repo.baseline_window_pendings(hunt_id, target, cell["partition"]):
                 pending = Pending(**body)
                 resolution = resolver.resolve(pending)
@@ -138,7 +146,8 @@ def resolve_window_exec_pairs(repo: Repo, hunt_id: str, window: Window) -> None:
                 "rule_id": spec.id, "version": spec.version, "target": target,
                 "partition": cell["partition"], "state": state, "matched": 0,
                 "evaluated": cell["evaluated"], "detail": {"reasons": sorted(set(reasons))},
-            }, (_pending_observation(hunt_id, spec, row) for row in observations))
+            }, (_pending_observation(hunt_id, spec, row) for row in observations),
+                counts=counter.count_rows(), scope_hours=counter.scope_hour_rows())
             repo.drop_baseline_window_cell(hunt_id, target, cell["partition"])
 
 

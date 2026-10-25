@@ -61,10 +61,17 @@ def _canonical(value) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+def exclusion_digest(keys: list[str]) -> str:
+    """Canonical digest of a segment's sorted cited-key exclusions."""
+    keys = sorted(set(keys))
+    return "none" if not keys else hashlib.sha256(_canonical(keys).encode()).hexdigest()
+
+
 def segment_content_id(*, site: str, target: str, spec: BaselineSpec, start: datetime,
                        end: datetime, normalizer: str, exclusion_digest: str,
                        excluded_keys: list[str], built_by_hunt_id: str | None = None,
-                       network_digest: str | None = None) -> str:
+                       network_digest: str | None = None,
+                       origin: Literal["lookback", "hunt"] = "lookback") -> str:
     """Stable base id; build ownership is provenance, and exclusion order carries no meaning.
 
     A permanently revoked base id is advanced by ``Repo.usable_baseline_segment_id`` to ``-rN``. That suffix
@@ -76,7 +83,7 @@ def segment_content_id(*, site: str, target: str, spec: BaselineSpec, start: dat
         "key_version": spec.key_version, "start": start.astimezone(UTC).isoformat(),
         "end": end.astimezone(UTC).isoformat(), "bucket": spec.bucket, "normalizer": normalizer,
         "exclusion_digest": exclusion_digest, "excluded_keys": sorted(set(excluded_keys)),
-        "origin": "lookback",
+        "origin": origin,
     }
     if spec.requires_configured_networks:
         material["network_digest"] = network_digest
@@ -134,8 +141,13 @@ class LookbackWriter:
     def _write_segment(self, hunt_id: str, target: str, spec: BaselineSpec, start: datetime, end: datetime,
                        events_total: int, counter: KeyCounter, gaps: list[HistoryGap]) -> tuple[int, float]:
         """Write one complete hour's segment; (1 when the store holds it, longest write in seconds)."""
+        excluded_keys = self.repo.baseline_exclusion_keys(
+            site=self.site, target=target, spec_id=spec.id, start=start, end=end,
+        )
+        excluded = set(excluded_keys)
         row = self.segment_row(
             hunt_id=hunt_id, target=target, spec=spec, start=start, end=end, events_total=events_total,
+            exclusion_digest=exclusion_digest(excluded_keys), excluded_keys=excluded_keys,
         )
         counter.bind_segment(row["id"])
         try:
@@ -152,7 +164,9 @@ class LookbackWriter:
                 ))
                 return 0, 0.0
             seconds = self.repo.append_baseline_segment_rows(
-                row["id"], counter.count_rows(), counter.scope_hour_rows(),
+                row["id"],
+                (item for item in counter.count_rows() if item["key_digest"] not in excluded),
+                counter.scope_hour_rows(),
             )
             self.repo.finalize_baseline_segment(row["id"])
             return 1, seconds

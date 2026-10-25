@@ -69,6 +69,21 @@ def test_cover_prefers_hunt_then_newest_then_id_without_overlap():
     assert snapshot["status"] == "resolved"
 
 
+def test_cover_claims_the_in_span_hours_of_a_segment_straddling_history_start():
+    repo = _repo()
+    _segment(repo, "straddling", START - timedelta(hours=6), START - timedelta(hours=2), origin="hunt")
+    _segment(repo, "latest", START - timedelta(hours=2), START, origin="hunt")
+
+    snapshot = _freeze(repo)
+    coverage = snapshot["coverage"]["host|bl.exec_path"]
+
+    assert snapshot["segment_ids"] == ["latest", "straddling"]
+    assert coverage["gaps"] == []
+    assert coverage["effective_start"] == (START - timedelta(hours=4)).isoformat()
+    assert coverage["effective_hours"] == 4
+    assert coverage["status"] == "resolved"
+
+
 def test_gaps_stop_effective_span_and_carry_their_reason():
     repo = _repo()
     _segment(repo, "latest", START - timedelta(hours=1), START)
