@@ -74,8 +74,8 @@ def test_registry_has_the_six_accepted_specs_and_metadata():
     # the external-destination spec keys DNS records by the DNS port's side (questions read as sent when the ports do
     # not tell) since its third key version
     assert {spec.id: (spec.version, spec.key_version) for spec in BASELINE_SPECS} == {
-        "bl.ssh_tuple": ("1", "1"), "bl.exec_path": ("1", "1"), "bl.exec_pair": ("1", "1"),
-        "bl.cmd_shape": ("1", "1"), "bl.ext_dest": ("3", "3"), "bl.svc_exec_rate": ("1", "1"),
+        "bl.ssh_tuple": ("1", "1"), "bl.exec_path": ("1", "1"), "bl.exec_pair": ("2", "2"),
+        "bl.cmd_shape": ("2", "2"), "bl.ext_dest": ("3", "3"), "bl.svc_exec_rate": ("1", "1"),
     }
 
 
@@ -234,6 +234,7 @@ def test_exec_pair_uses_the_same_boot_parent_exec():
     ))
     child = _event(
         "process_exec",
+        outcome=Outcome.success,
         **{
             "process.pid": 101, "process.ppid": 100, "process.executable": "/bin/sh",
             "host.boot.id": "boot-a",
@@ -246,7 +247,7 @@ def test_exec_pair_uses_the_same_boot_parent_exec():
 
 
 def test_exec_pair_without_parent_exec_returns_compact_pending_carry_in():
-    child = _event("process_exec", event_id="child-1", host="Web01",
+    child = _event("process_exec", event_id="child-1", host="Web01", outcome=Outcome.success,
                    **{"process.ppid": 100, "process.executable": "/bin/sh"})
     # the host stays as recorded: a carry-in pid table is keyed on the recorded host
     assert SPEC_BY_ID["bl.exec_pair"].keys(child, _ctx()) == Pending(
@@ -266,7 +267,7 @@ def test_exec_pair_accepts_any_parent_lookup_exposing_only_lookup():
             return (ts - 1, "/usr/sbin/cron", 1, "raw-1", boot)
 
     table = OneParent()
-    child = _event("process_exec", **{"process.ppid": 7, "process.executable": "/bin/sh",
+    child = _event("process_exec", outcome=Outcome.success, **{"process.ppid": 7, "process.executable": "/bin/sh",
                                       "host.boot.id": "boot-a"})
     keys = SPEC_BY_ID["bl.exec_pair"].keys(child, KeyContext(pid_table=table))
     assert keys[0].key == {"child_executable": "/bin/sh", "parent_executable": "/usr/sbin/cron"}
@@ -284,6 +285,7 @@ def test_exec_pair_never_joins_a_parent_from_another_boot():
     ))
     child = _event(
         "process_exec",
+        outcome=Outcome.success,
         **{"process.ppid": 100, "process.executable": "/bin/sh", "host.boot.id": "boot-b"},
     )
     assert SPEC_BY_ID["bl.exec_pair"].keys(child, _ctx(table)) == Pending(
@@ -304,14 +306,35 @@ def test_exec_pair_never_joins_a_parent_from_another_boot():
     ],
 )
 def test_exec_pair_absent_or_malformed_required_value_is_typed_missing(host, fields, missing):
-    event = _event("process_exec", host=host, **{"process.ppid": 100, "process.executable": "/bin/sh", **fields})
+    event = _event(
+        "process_exec", host=host, outcome=Outcome.success,
+        **{"process.ppid": 100, "process.executable": "/bin/sh", **fields},
+    )
     result = SPEC_BY_ID["bl.exec_pair"].keys(event, _ctx())
     assert isinstance(result, Missing) and result.fields == missing
+
+
+@pytest.mark.parametrize(
+    ("spec_id", "fields"),
+    [
+        ("bl.exec_pair", {"process.ppid": 100, "process.executable": "/bin/sh"}),
+        ("bl.cmd_shape", {"process.executable": "/bin/sh", "process.argv": ["sh", "-c", "id"]}),
+    ],
+)
+def test_exec_pair_and_command_shape_require_a_successful_exec(spec_id, fields):
+    spec = SPEC_BY_ID[spec_id]
+
+    failed = spec.keys(_event("process_exec", outcome=Outcome.failure, **fields), _ctx())
+    unknown = spec.keys(_event("process_exec", outcome=Outcome.unknown, **fields), _ctx())
+
+    assert isinstance(failed, NotApplicable) and "failed" in failed.reason
+    assert isinstance(unknown, Missing) and unknown.fields == ("outcome",)
 
 
 def test_command_shape_masks_variable_tokens_without_using_serialized_records():
     event = _event(
         "process_exec",
+        outcome=Outcome.success,
         **{
             "process.executable": "/usr/bin/tool",
             "process.argv": [
@@ -331,6 +354,38 @@ def test_command_shape_masks_variable_tokens_without_using_serialized_records():
     }
 
 
+def _command_shape(argv: list[str]) -> list[str]:
+    result = SPEC_BY_ID["bl.cmd_shape"].keys(_event(
+        "process_exec", outcome=Outcome.success,
+        **{"process.executable": f"/usr/bin/{argv[0]}", "process.argv": argv},
+    ), _ctx())
+    return result[0].key["argv_shape"]
+
+
+def test_command_shape_keeps_security_relevant_chmod_modes_distinct():
+    assert _command_shape(["chmod", "4755", "/tmp/tool"]) == ["chmod", "4755", "/tmp/tool"]
+    assert _command_shape(["chmod", "755", "/tmp/tool"]) == ["chmod", "755", "/tmp/tool"]
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["tmp.XXXXXXXXXX", "/tmp/tmp.aB19zQ", "temp-session_A1b2C3d4"],
+)
+def test_command_shape_masks_mktemp_style_random_names(name):
+    assert _command_shape(["mktemp", name]) == ["mktemp", "<tmp>"]
+
+
+@pytest.mark.parametrize(
+    ("blob", "bucket"),
+    [
+        ("YWJjZGVmZ2hpamts", "<b64:16-31>"),
+        ("YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4", "<b64:32-63>"),
+    ],
+)
+def test_command_shape_masks_base64_blobs_by_length_bucket(blob, bucket):
+    assert _command_shape(["tool", blob]) == ["tool", bucket]
+
+
 @pytest.mark.parametrize(
     ("host", "fields", "missing"),
     [
@@ -345,7 +400,9 @@ def test_command_shape_masks_variable_tokens_without_using_serialized_records():
     ],
 )
 def test_command_shape_incomplete_or_missing_argv_is_typed_missing(host, fields, missing):
-    result = SPEC_BY_ID["bl.cmd_shape"].keys(_event("process_exec", host=host, **fields), _ctx())
+    result = SPEC_BY_ID["bl.cmd_shape"].keys(
+        _event("process_exec", host=host, outcome=Outcome.success, **fields), _ctx(),
+    )
     assert isinstance(result, Missing) and result.fields == missing
 
 
@@ -601,8 +658,8 @@ def test_service_exec_rate_absent_or_malformed_identity_is_typed_missing(host, f
 _COMPLETE = {
     ("bl.ssh_tuple", "auth"): (Outcome.success, SSH),
     ("bl.exec_path", "process_exec"): (Outcome.success, EXEC),
-    ("bl.exec_pair", "process_exec"): (Outcome.unknown, {"process.ppid": 100, "process.executable": "/bin/sh"}),
-    ("bl.cmd_shape", "process_exec"): (Outcome.unknown, {"process.executable": "/bin/sh", "process.argv": ["sh"]}),
+    ("bl.exec_pair", "process_exec"): (Outcome.success, {"process.ppid": 100, "process.executable": "/bin/sh"}),
+    ("bl.cmd_shape", "process_exec"): (Outcome.success, {"process.executable": "/bin/sh", "process.argv": ["sh"]}),
     ("bl.ext_dest", "net_flow"): (Outcome.unknown, {"source.ip": "10.0.0.4", "destination.ip": "192.0.2.1"}),
     ("bl.ext_dest", "net_session"): (Outcome.unknown, {"source.ip": "10.0.0.4", "destination.ip": "192.0.2.1"}),
     ("bl.ext_dest", "tls_session"): (Outcome.unknown, {"source.ip": "10.0.0.4", "destination.ip": "192.0.2.1"}),
@@ -636,6 +693,7 @@ def test_required_fields_are_accurate_per_event_kind():
 def test_key_digests_are_deterministic_across_repeated_extraction():
     event = _event(
         "process_exec",
+        outcome=Outcome.success,
         **{"process.executable": "/bin/tool", "process.argv": ["tool", "--port=1234"]},
     )
     first = SPEC_BY_ID["bl.cmd_shape"].keys(event, _ctx())[0]
@@ -757,7 +815,10 @@ def test_argv_shape_is_bounded_and_the_overflow_is_hashed_and_marked():
     spec = SPEC_BY_ID["bl.cmd_shape"]
 
     def shape(argv):
-        event = _event("process_exec", **{"process.executable": "/bin/tool", "process.argv": argv})
+        event = _event(
+            "process_exec", outcome=Outcome.success,
+            **{"process.executable": "/bin/tool", "process.argv": argv},
+        )
         return spec.keys(event, _ctx())[0]
 
     long_argv = ["tool", *[f"--opt-{index:04d}x" for index in range(1000)]]

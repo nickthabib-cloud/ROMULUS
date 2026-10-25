@@ -14,6 +14,7 @@ When a present value already proves the event is not applicable, that answer win
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import ipaddress
 import json
@@ -383,6 +384,8 @@ def _exec_path(event: TypedEvent, _context: KeyContext, spec: BaselineSpec) -> K
 
 
 def _exec_pair(event: TypedEvent, context: KeyContext, spec: BaselineSpec) -> KeyResult:
+    if (outcome := _outcome_success(event, "exec")) is not None:
+        return outcome
     host, executable = _host(event), _text(event, "process.executable")
     ppid = event.get("process.ppid")
     for value in (host, executable):
@@ -417,6 +420,11 @@ _BRACKETED_IP = re.compile(r"\[([0-9a-fA-F:.]+)\]")
 _HEX_PREFIX = re.compile(r"(?i)(?<![0-9a-z])0x[0-9a-f]+(?![0-9a-z])")
 _HEX_BARE = re.compile(r"(?i)(?<![0-9a-z])[0-9a-f]{8,}(?![0-9a-z])")
 _NUMBER = re.compile(r"(?<![0-9a-zA-Z])[-+]?\d+(?:\.\d+)?(?![0-9a-zA-Z])")
+_CHMOD_MODE = re.compile(r"[0-7]{3,4}")
+_TEMP_NAME = re.compile(
+    r"(?i)(?:^|.*/)(?:tmp|temp)(?:[-_.][a-z][a-z0-9-]*)?[-_.][a-z0-9x]{6,}$",
+)
+_BASE64 = re.compile(r"[A-Za-z0-9+/]+={0,2}")
 
 
 def _replace_ipv4(match: re.Match[str]) -> str:
@@ -432,8 +440,31 @@ def _replace_bare_hex(match: re.Match[str]) -> str:
     return "<hex>" if any(character.lower() in "abcdef" for character in value) else value
 
 
+def _base64_bucket(value: str) -> str | None:
+    """A bounded description of a complete base64 token, excluding values already classed as long hex."""
+    if (len(value) < 16 or len(set(value.rstrip("="))) < 6
+            or not _BASE64.fullmatch(value) or _HEX_BARE.fullmatch(value)):
+        return None
+    try:
+        base64.b64decode(value, validate=True)
+    except (ValueError, base64.binascii.Error):
+        return None
+    low = 1 << (len(value).bit_length() - 1)
+    return f"<b64:{low}-{2 * low - 1}>"
+
+
 def mask_argv_token(value: str) -> str:
     """Mask variable identifiers within one already-tokenized argv value."""
+    if _TEMP_NAME.fullmatch(value):
+        return "<tmp>"
+    if (bucket := _base64_bucket(value)) is not None:
+        return bucket
+    if "=" in value:
+        prefix, candidate = value.rsplit("=", 1)
+        if _TEMP_NAME.fullmatch(candidate):
+            return f"{prefix}=<tmp>"
+        if (bucket := _base64_bucket(candidate)) is not None:
+            return f"{prefix}={bucket}"
     token = _UUID.sub("<uuid>", value)
     if _canon_ip(token) is not None:
         return "<ip>"
@@ -452,7 +483,12 @@ def argv_shape(argv: list[str]) -> dict[str, Any]:
     """`argv_shape`: the masked leading tokens within the size bound; `argv_overflow` (present only when the
     bound was hit): how many masked tokens did not fit and the sha256 of their canonical JSON, so two commands
     that differ only past the bound still get different keys and the truncation is visible in the key."""
-    masked = [mask_argv_token(token) for token in argv]
+    command = argv[0].replace("\\", "/").rsplit("/", 1)[-1].lower() if argv else ""
+    masked = [
+        token if command == "chmod" and index > 0 and _CHMOD_MODE.fullmatch(token)
+        else mask_argv_token(token)
+        for index, token in enumerate(argv)
+    ]
     kept, size = 0, 0
     for token in masked:
         if kept == ARGV_SHAPE_MAX_TOKENS or size + len(token) > ARGV_SHAPE_MAX_CHARS:
@@ -466,6 +502,8 @@ def argv_shape(argv: list[str]) -> dict[str, Any]:
 
 
 def _cmd_shape(event: TypedEvent, _context: KeyContext, spec: BaselineSpec) -> KeyResult:
+    if (outcome := _outcome_success(event, "exec")) is not None:
+        return outcome
     host, executable = _host(event), _text(event, "process.executable")
     for value in (host, executable):
         if isinstance(value, Missing):
@@ -636,14 +674,14 @@ BASELINE_SPECS = (
         _extract=_exec_path,
     ),
     BaselineSpec(
-        id="bl.exec_pair", version="1", key_version="1", families=("process_exec",),
+        id="bl.exec_pair", version="2", key_version="2", families=("process_exec",),
         datasets=("linux.audit",), scope="host", measure="prevalence", bucket="day",
         required_fields={"process_exec": ("process.executable", "process.ppid")},
         optional_fields={"process_exec": ("host.boot.id",)},
         _extract=_exec_pair,
     ),
     BaselineSpec(
-        id="bl.cmd_shape", version="1", key_version="1", families=("process_exec",),
+        id="bl.cmd_shape", version="2", key_version="2", families=("process_exec",),
         datasets=("linux.audit",), scope="host", measure="prevalence", bucket="day",
         required_fields={"process_exec": ("process.executable", "process.argv")},
         optional_fields={"process_exec": ("process.argv_complete",)},

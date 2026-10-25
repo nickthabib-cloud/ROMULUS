@@ -71,7 +71,7 @@ def test_count_and_pending_caps_make_oversized_segments_partial():
 
     pendings = KeyCounter("segment", SPEC_BY_ID["bl.exec_pair"], pending_cap=1)
     for index in range(2):
-        pendings.consume(_event("process_exec", f"child-{index}", **{
+        pendings.consume(_event("process_exec", f"child-{index}", outcome=Outcome.success, **{
             "process.executable": "/bin/sh", "process.ppid": 99,
         }), KeyContext())
     assert pendings.partial and "pending parent cap 1 exceeded" in pendings.reasons
@@ -125,10 +125,10 @@ def test_every_accepted_spec_runs_through_the_counter():
         "bl.exec_path": _event("process_exec", "path", outcome=Outcome.success, **{
             "process.executable": "/bin/id", "process.exec_file.path": "/bin/id", "process.user": "svc",
         }),
-        "bl.exec_pair": _event("process_exec", "pair", **{
+        "bl.exec_pair": _event("process_exec", "pair", outcome=Outcome.success, **{
             "process.executable": "/bin/id", "process.ppid": 10,
         }),
-        "bl.cmd_shape": _event("process_exec", "shape", **{
+        "bl.cmd_shape": _event("process_exec", "shape", outcome=Outcome.success, **{
             "process.executable": "/bin/id", "process.argv": ["id"],
         }),
         "bl.ext_dest": _event("net_flow", "flow", **{
