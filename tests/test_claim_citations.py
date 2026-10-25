@@ -384,6 +384,23 @@ def test_nxdomain_names_and_servers_come_from_cited_records(tmp_path):
     assert "240 NXDOMAIN answer(s)" in m.claim and "of the 240 NXDOMAIN answer records are cited" in m.claim
 
 
+def test_an_nxdomain_burst_says_how_many_of_its_rcode_tally_are_cited():
+    from datetime import timedelta as td
+
+    from tests.test_dns_rules import T0 as DNS_T0
+    from tests.test_dns_rules import nx_answers
+    from tests.test_dns_rules import run as run_dns
+    events = nx_answers(60) + nx_answers(40, code="NOERROR", start=DNS_T0 + td(hours=1))
+    _pb, [m] = run_dns(dns.DnsNxdomainBurst, events)
+    assert "rcodes: NXDOMAIN x60, NOERROR x40" in m.claim
+    cited = sum(e.get("dns.response_code") is not None for e in m.events)
+    assert f"Of the 100 answer records in the rcode tally, {cited} of the 100 are cited (NXDOMAIN x{cited})." in m.claim
+    clean([m])
+    # without that sentence the tally is an undisclosed count
+    bare = m.claim.split(" Of the 100 answer records")[0]
+    assert any("tallies 100 records" in p for p in finding_problems(bare, m.notes, m.events))
+
+
 def test_a_tunnel_shape_cites_its_example_names_and_span(tmp_path):
     from tests.test_dns_rules import tunnel
     out = staged(dns.DnsTunnelShape(), batches(tunnel(400), 50), tmp_path)

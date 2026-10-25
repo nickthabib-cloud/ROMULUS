@@ -1149,7 +1149,7 @@ class _Address:
 
 class DnsNxdomainBurst(_DnsAggregate):
     id = "net.dns_nxdomain_burst"
-    version = "6"
+    version = "7"
     title = "Many NXDOMAIN answers to one client within ten minutes"
     required_fields = ()
     severity, lane = "high", "lead"
@@ -1455,6 +1455,14 @@ class DnsNxdomainBurst(_DnsAggregate):
             claim += (cited_phrase(len(evs), nx, not missing, "NXDOMAIN answer records", "NXDOMAIN answer record")
                       + " The cited records are from the peak interval, with the records bounding the span and those "
                         "of the names and servers given." + bound_note(missing, state.ends))
+            # the rcode tally counts every answer to the client: say how many of them are cited, and which
+            cited_codes = Counter(code for code in (rcode(e.get("dns.response_code")) for e in evs) if code)
+            shown = sum(cited_codes.values())
+            if answered > nx:
+                claim += (f" Of the {answered} answer records in the rcode tally, "
+                          + (f"all {answered} are cited." if shown >= answered else
+                             f"{shown} of the {answered} are cited ({_tally(cited_codes)})." if shown else
+                             f"0 of the {answered} are cited."))
             e0 = evs[0]
             predicate = [pf(e, n) for e in evs[:2] for n in ("dns.response_code", "destination.ip", "source.ip",
                                                              "dns.type") if e.has(n)]

@@ -27,6 +27,9 @@ unambiguously, and wording that says honestly what is not cited passes.
    quotes inside one of its string literals is wording, not a value, as are the few one-word protocol states in
    WORDING_WORDS ('failed' in "protocol detection 'failed'"); any other one-word quote, such as a program name
    ('curl', 'nc', 'perl'), is a value and must be cited. A pid in a 'K more' tail is counted, not named.
+7. Tallies. A tally of records by value ('NOERROR x11, REFUSED x1') counts its total of records, which needs a
+   disclosure of how many of exactly that total are cited when it is more than the records cited; a partial tally
+   ('A x35, B x34 and 2 more') is a breakdown of a disclosed total at least its sum.
 6. User agents. A quoted user agent ('user agent(s) 'X'') must be a cited record's value exactly, never a token
    of it.
 5. Sensors. A sensor a claim names as having observed records ('network sensor(s) inetfw, server', 'on sensor(s)
@@ -86,6 +89,8 @@ ATTRIBUTED = re.compile(
     + _SAME_SENTENCE + r"?\bon port (\d{1,5})\b)")
 # a quoted user agent: a value that must be recorded exactly (never part of a longer one, as a grouping token is)
 USER_AGENTS = re.compile(r"\buser agents?(?:\(s\))? ((?:'[^'\n]+'(?:, | and )?)+)")
+# a tally of records by value ('NOERROR x11, REFUSED x1'): its total is a count of records
+TALLY = re.compile(r"(?<![\w.-])[\w./:-]+ x\d+(?:, [\w./:-]+ x\d+)*( and \d+ more)?")
 # a sensor named as having observed records
 SENSORS = (re.compile(r"\b(?:network sensor\(s\)|on sensor\(s\)) ([\w.-]+(?:, [\w.-]+)*)"),
            re.compile(r"\bsensor ([\w.-]+) saw\b"))
@@ -288,6 +293,15 @@ def problems(text: str, events: list[TypedEvent]) -> list[str]:
             if number > cited.count and number not in totals:
                 out.append(f"states {number} {noun} with {cited.count} records cited and does not say how many "
                            f"are cited")
+    # a tally's total beyond the cited records needs its disclosure, as any count does
+    for match in TALLY.finditer(text):
+        total = sum(int(n) for n in re.findall(r" x(\d+)", match.group(0)))
+        # a full tally is covered by a disclosure of its total; a partial one ('... and 2 more'), a breakdown of a
+        # disclosed total, by a disclosure of a total at least its sum
+        partial = bool(match.group(1))
+        if total > cited.count and total not in totals and not (partial and any(t >= total for t in totals)):
+            out.append(f"tallies {total} records ({match.group(0)}) with {cited.count} records cited and does not say "
+                       f"how many of them are cited")
     out += _misattributed(text, events)
     for match in USER_AGENTS.finditer(text):
         for agent in re.findall(r"'([^'\n]+)'", match.group(1)):
