@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from romulus.baseline.playbook import ExecPathBaseline
+from romulus.baseline.playbook import CommandShapeBaseline, ExecPathBaseline, SshTupleBaseline
 from romulus.baseline.protocol import HistoryFetch, HistoryPartition, HistoryPlan
 from romulus.baseline.spec import SPEC_BY_ID, KeyContext
 from romulus.config import Settings
@@ -13,7 +13,7 @@ from romulus.detect.netdef import SiteNetworks
 from romulus.evidence.normalize import NORMALIZER_VERSION
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
 from romulus.hunt import run as hunt_run
-from romulus.hunt.baseline_stage import BASELINE_CITATION_CAP, run_baseline_stage
+from romulus.hunt.baseline_stage import BASELINE_CITATION_CAP, SnapshotView, run_baseline_stage
 from romulus.hunt.manifest import build_manifest
 from romulus.hunt.packets import PACKET_NORMALIZER
 from romulus.hunt.sweep import BOOT_PLACEMENT_PARTITION
@@ -124,6 +124,52 @@ def _resolved_history(repo: Repo, *, known_key_id="known-id", known_digest="know
         "segment_id": "history", "scope_kind": "host", "scope": "host:web01",
         "hour": begin + timedelta(hours=hour), "events": 1,
     } for hour in range(48)])
+
+
+class _ClaimRepo:
+    def get_hunt(self, _hunt_id):
+        return {"manifest": {}}
+
+    def baseline_snapshot_exclusions(self, _hunt_id, _spec_id):
+        return {"segments": 0, "hunted_segments": 0, "excluded_keys": 0}
+
+
+def _claim(playbook, rows):
+    view = SnapshotView(
+        _ClaimRepo(), "h1", WINDOW,
+        {"digest": "snapshot", "plan": {}}, min_live_hours=48, networks_configured=True,
+    )
+    facts = {
+        "effective_start": (START - timedelta(hours=48)).isoformat(),
+        "effective_hours": 48, "live_hours": 48, "history_events": 96, "coverage": [],
+    }
+    return view._claim(playbook, "site", rows, facts, len(rows))
+
+
+def test_command_shape_claim_states_the_shape_and_its_masking_policy():
+    row = {
+        "key": {"executable": "/usr/bin/tool", "argv_shape": ["tool", "<ip>", "<b64:16-31>"]},
+        "window_count": 1, "peer_scopes": 1, "peer_scopes_with_key": 0,
+    }
+
+    claim = _claim(CommandShapeBaseline(), [row])
+
+    assert '"argv_shape":["tool","<ip>","<b64:16-31>"]' in claim
+    assert "argv masking replaces" in claim
+    assert all(name in claim for name in ("IP addresses", "numbers", "UUIDs", "hexadecimal", "mktemp", "base64"))
+    assert "chmod permission modes remain literal" in claim
+
+
+@pytest.mark.parametrize(("peers", "present"), [(4, False), (5, True)])
+def test_ssh_claim_includes_peer_prevalence_only_with_at_least_five_peers(peers, present):
+    row = {
+        "key": {"kind": "source_ip", "source_ip": "192.0.2.19"},
+        "window_count": 1, "peer_scopes": peers, "peer_scopes_with_key": 1,
+    }
+
+    claim = _claim(SshTupleBaseline(), [row])
+
+    assert ("peer prevalence 1/" in claim) is present
 
 
 def test_no_pre_window_history_is_unresolved_without_a_lead_or_complete_negative():

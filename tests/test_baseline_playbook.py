@@ -47,6 +47,9 @@ def test_baseline_pack_registers_all_built_specs_and_never_enters_direct_pivots(
     # rule_kind is the legacy expansion scheduling hook. Baseline rules retain their declared kind in the
     # catalog but share the non-anchor scheduling category with context rules.
     assert {rule_kind(spec_id) for spec_id in expected} == {"context"}
+    cmd_shape = next(cls() for cls in BASELINE_PLAYBOOKS if cls.spec.id == "bl.cmd_shape")
+    assert cmd_shape.assures_negative is False
+    assert cmd_shape.positive_only_reason == "command-shape baselines publish positive deviations only"
 
 
 def test_consume_accumulates_one_cell_without_publishing_and_keeps_the_first_event():

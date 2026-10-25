@@ -515,6 +515,12 @@ class SnapshotView:
             f"({facts['effective_hours']} hours), with {facts['live_hours']} live scope hours and "
             f"{facts['history_events']} scope events{peer_text}. "
         )
+        if playbook.id == "bl.cmd_shape":
+            claim += (
+                "The argv masking replaces variable IP addresses, numbers, UUIDs, long hexadecimal values, "
+                "mktemp-style random names, and base64 blobs with class tokens; chmod permission modes remain "
+                "literal. "
+            )
         if any(item.get("status") == "shortened" for item in facts["coverage"]):
             claim += "The complete baseline span was shortened by evidenced source absence. "
         exclusions = self.repo.baseline_snapshot_exclusions(self.hunt_id, playbook.id)
