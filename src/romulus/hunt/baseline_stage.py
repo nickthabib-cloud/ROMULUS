@@ -281,10 +281,15 @@ class SnapshotView:
                 first_seen.append(item)
         effective_hours = min((int(item.get("effective_hours") or 0) for item in coverage), default=0)
         effective_start = max((str(item.get("effective_start")) for item in coverage), default=None)
+        history_count_upper_bound = bool(
+            playbook.spec.bucket == "day" and self.span is not None
+            and self.span[0] != self.span[0].replace(hour=0, minute=0, second=0, microsecond=0)
+        )
         return first_seen, {
             "rows": updated, "coverage": coverage, "live_hours": live_hours,
             "history_events": history_events, "effective_hours": effective_hours,
             "effective_start": effective_start, "reason": reason,
+            "history_count_upper_bound": history_count_upper_bound,
         }
 
     def _whole_window(self) -> tuple[datetime, datetime, list[tuple[datetime, datetime]]]:
@@ -494,8 +499,9 @@ class SnapshotView:
     def _claim(self, playbook: BaselinePlaybook, scope: str, first_seen: list[dict], facts: dict,
                cited: int) -> str:
         shown = first_seen[:BASELINE_CITATION_CAP]
+        history_label = "history count at most 0" if facts.get("history_count_upper_bound") else "history count 0"
         keys = "; ".join(
-            f"{_canonical(row['key'])} (window count {row['window_count']}, history count 0)"
+            f"{_canonical(row['key'])} (window count {row['window_count']}, {history_label})"
             for row in shown
         )
         remaining = len(first_seen) - len(shown)

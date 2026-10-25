@@ -889,6 +889,7 @@ def test_a_segment_straddling_history_start_contributes_only_its_in_span_rows():
     row = next(repo.baseline_observations("h1"))
     assert row["verdict"] == "first_seen" and row["history_count"] == 0
     assert row["n_hours"] == 7 * 24
+    assert "history count at most 0" in repo.candidates("h1")[0]["claim"]
 
 
 def test_history_stopped_on_budget_is_never_called_absent():
