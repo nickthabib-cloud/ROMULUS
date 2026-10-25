@@ -6,10 +6,12 @@ import pytest
 
 from romulus.agent.models import PivotCoverage
 from romulus.config import Settings
+from romulus.detect.base import Match, Playbook, pf
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
 from romulus.hunt import run as hunt_run
 from romulus.hunt.expansion import ExpansionEngine
 from romulus.hunt.links import LinkResult, LinkWindow
+from romulus.hunt.publish import publish_match
 from romulus.report.manifest import build_manifest
 from romulus.sources.models import Window
 from romulus.store.db import digest, make_engine, migrate
@@ -586,6 +588,52 @@ def test_expansion_deduplicates_a_direct_finding_and_retains_both_routes_determi
         {"anchor_id": "F-two", "link_id": "L-F-two", "link_type": "host_after_anchor",
          "strength": "observed"},
     ]
+
+
+class _SameGroupDirect(Playbook):
+    id = "test.same_group_direct"
+    title = "same group direct"
+    families = ("process_exec",)
+    version = "1"
+
+
+def _publish_distinct_subjects(anchor_order):
+    repo = repo_with_anchor(candidate_id="F-one")
+    add_anchor(repo, "F-two", "web1", ts=T0 + timedelta(seconds=1))
+    events = {
+        "F-one": event("subject-two", ts=T0 + timedelta(minutes=2), argv=["/bin/sh", "-c", "two"]),
+        "F-two": event("subject-five", ts=T0 + timedelta(minutes=5), argv=["/bin/sh", "-c", "five"]),
+    }
+    rule = _SameGroupDirect()
+    for anchor_id in anchor_order:
+        subject = events[anchor_id]
+        match = Match(
+            rule.id, f"{anchor_id} cites {subject.id}", "observed_action", [subject],
+            [pf(subject, "process.executable")], subject.ts, "high", "high", "high",
+            subject.entities(), group_key="shared-subject",
+        )
+        publish_match(
+            repo, "h1", rule, match, None, {}, source_anchor_id=anchor_id,
+            source_link_id=f"L-{anchor_id}", context_reach={
+                "anchor_id": anchor_id, "link_id": f"L-{anchor_id}",
+                "link_type": "host_after_anchor", "strength": "observed",
+            },
+        )
+    return sorted(
+        ({key: row[key] for key in ("id", "claim", "event_ids", "lane", "severity", "source_anchor_id")}
+         for row in repo.candidates("h1") if row["rule_id"] == rule.id),
+        key=lambda row: row["claim"],
+    )
+
+
+def test_cross_anchor_same_group_with_distinct_subjects_stays_separate_and_deterministic():
+    forward = _publish_distinct_subjects(["F-one", "F-two"])
+    reversed_order = _publish_distinct_subjects(["F-two", "F-one"])
+
+    assert forward == reversed_order
+    assert len(forward) == 2
+    assert all(len(row["event_ids"]) == 1 and row["event_ids"][0] in row["claim"] for row in forward)
+    assert len({row["id"] for row in forward}) == 2
 
 
 def test_nested_windows_each_evaluate_the_event_but_publish_one_context_finding():

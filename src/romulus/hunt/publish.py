@@ -100,6 +100,22 @@ def subject_event_ids(candidate: dict) -> list[str]:
     return subject or list(candidate["event_ids"])
 
 
+def expansion_candidate_id(base_id: str, match: Match) -> str:
+    """Bind an expansion finding's group identity to the raw records it is actually about.
+
+    Aggregate group keys intentionally collapse records inside one evaluation. Across independent anchor
+    evaluations, however, the same key can describe different subject records. Including their raw identity keeps
+    those findings separate while allowing two anchors that reached the same records to share one candidate.
+    """
+    subject = [event for event in match.events if event.id not in match.context_ids] or list(match.events)
+    raw_identity = [
+        sorted((ref.target, ref.native_id) for ref in event.raw)
+        for event in sorted(subject, key=lambda event: event.id)
+    ]
+    material = json.dumps(raw_identity, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(f"{base_id}|{material}".encode()).hexdigest()[:20]
+
+
 def mark_hypothesis_relation(match: Match, *, anchor_id: str, link_type: str,
                              link_id: str, strength: str) -> None:
     """Label a non-observed relation without weakening the finding's own cited claim."""
@@ -125,15 +141,30 @@ def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
     if match.raw_copies:
         raw_sources = {**match.raw_copies, **raw_sources}
     repo.save_evidence(hunt_id, match.events, raw_sources, task_id, owner_token=owner_token)
+    event_ids = [event.id for event in match.events]
+    context_event_ids = sorted({event.id for event in match.events} & match.context_ids)
+    candidate_id = decision.candidate_id
+    if source_case_id is None and source_anchor_id is not None:
+        existing = repo.candidate(candidate_id)
+        same_agent_subject = (
+            existing is not None
+            and existing.get("source_case_id") is not None
+            and repo.candidate_subject_raw_identity(existing)
+            == repo.candidate_subject_raw_identity({
+                "event_ids": event_ids, "context_event_ids": context_event_ids,
+            })
+        )
+        if not same_agent_subject:
+            candidate_id = expansion_candidate_id(candidate_id, match)
     row = {
-        "id": decision.candidate_id,
+        "id": candidate_id,
         "hunt_id": hunt_id,
         "rule_id": match.playbook_id,
         "rule_version": playbook.version,
         "claim": match.claim,
         "claim_type": match.claim_type,
-        "event_ids": [event.id for event in match.events],
-        "context_event_ids": sorted({event.id for event in match.events} & match.context_ids),
+        "event_ids": event_ids,
+        "context_event_ids": context_event_ids,
         "predicate_fields": [
             {"field": predicate.field, "value": predicate.value, "origin": predicate.origin}
             for predicate in match.predicate

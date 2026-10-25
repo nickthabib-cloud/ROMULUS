@@ -1403,6 +1403,25 @@ class Repo:
             return [dict(r) for r in c.execute(select(t.raw_record).where(t.raw_record.c.id.in_(ids))).mappings()]
 
     # ---- candidates -------------------------------------------------------------------------
+    @staticmethod
+    def _candidate_subject_raw_identity(c, row: dict) -> tuple[tuple[str, ...], ...]:
+        """Raw-record identity of the records a candidate is about, excluding claim-only context."""
+        event_ids = list(row.get("event_ids") or [])
+        context_ids = set(row.get("context_event_ids") or ())
+        subject_ids = [event_id for event_id in event_ids if event_id not in context_ids] or event_ids
+        stored = {
+            event_id: tuple(sorted(raw_ids or ()))
+            for event_id, raw_ids in c.execute(select(
+                t.typed_event.c.id, t.typed_event.c.raw_ids,
+            ).where(t.typed_event.c.id.in_(subject_ids)))
+        }
+        return tuple(sorted(stored.get(event_id) or (f"event:{event_id}",) for event_id in subject_ids))
+
+    def candidate_subject_raw_identity(self, row: dict) -> tuple[tuple[str, ...], ...]:
+        """Read-only subject identity used when deterministic publication may replace an agent-first candidate."""
+        with self.engine.connect() as c:
+            return self._candidate_subject_raw_identity(c, row)
+
     def save_candidate(self, row: dict, *, canonicalize_agent: bool = False,
                        owner_token: str | None = None) -> bool:
         """Insert once, while retaining deterministic provenance for the two supported duplicate cases."""
@@ -1411,12 +1430,29 @@ class Repo:
             existing = c.execute(select(t.candidate).where(
                 t.candidate.c.id == row["id"],
             )).mappings().first()
+            if (existing
+                    and existing["source_case_id"] is None
+                    and row.get("source_case_id") is None
+                    and existing["source_anchor_id"] is not None
+                    and row.get("source_anchor_id") is not None
+                    and self._candidate_subject_raw_identity(c, existing)
+                    != self._candidate_subject_raw_identity(c, row)):
+                # A legacy or hostile caller reused a group-key candidate id for different subject evidence.
+                # Keep both complete rows; the normal publication path already includes this digest up front.
+                subject = self._candidate_subject_raw_identity(c, row)
+                material = json.dumps(subject, sort_keys=True, separators=(",", ":"))
+                row["id"] = hashlib.sha256(f"{row['id']}|{material}".encode()).hexdigest()[:20]
+                existing = c.execute(select(t.candidate).where(
+                    t.candidate.c.id == row["id"],
+                )).mappings().first()
             if existing:
                 deterministic_expansion_duplicate = (
                     existing["source_case_id"] is None
                     and row.get("source_case_id") is None
                     and existing["source_anchor_id"] is not None
                     and row.get("source_anchor_id") is not None
+                    and self._candidate_subject_raw_identity(c, existing)
+                    == self._candidate_subject_raw_identity(c, row)
                 )
                 if deterministic_expansion_duplicate:
                     before = dict(existing)
