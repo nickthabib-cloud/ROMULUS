@@ -683,7 +683,7 @@ class PersistencePathChange(Playbook):
         self.changes = SpillList(self, "persistence_changes", self.HOT)
         # exec records per (host, pid), read for the writer's lineage: the hunt's one exec store in a sweep
         # (`share_lineage`), the most recent in memory, the rest on disk
-        self.lineage = ProcessLineage(self)
+        self.lineage = ProcessLineage(self, capacity=self.EXEC_CAPACITY)
         self.execs = self.lineage.execs       # compatibility alias; share_lineage replaces both with one store
         self._alone: list[Match] = []   # changes published on their own (the budget refused holding them)
 

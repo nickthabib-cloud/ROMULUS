@@ -1815,7 +1815,7 @@ class ExecLineage:
         self._citation_loader = load
 
     def view(self, host: str | None, pid: int, ts: float, serial: int | None, boot: str | None, *,
-             inclusive: bool, exclude: str | None = None) -> ProcessView:
+             inclusive: bool, exclude: str | None = None, order_domain=None) -> ProcessView:
         """The process holding `pid` at (`ts`, audit `serial`) from its execs and observations
         (`romulus.detect.observed.process_view`)."""
         observed = []
@@ -1826,7 +1826,8 @@ class ExecLineage:
         execs = self.entries(host, pid)
         if exclude is not None:
             execs = [record for record in execs if record.event_id != exclude]
-        return process_view(execs, observed, ts, serial, boot, inclusive=inclusive, pid=pid, host=host)
+        return process_view(execs, observed, ts, serial, boot, inclusive=inclusive, pid=pid, host=host,
+                            order_domain=order_domain)
 
     def cited(self, event_ids: list[str]) -> tuple[dict[str, TypedEvent], dict[str, dict]]:
         """The observed and exec records held for citation, by event id, and their raw copies (an id not held is
@@ -1926,8 +1927,8 @@ class ProcessLineage:
     DEPTH = 16
     CAPACITY = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
 
-    def __init__(self, owner=None, members: list | None = None):
-        self.execs = ExecLineage(owner, self.CAPACITY, observing=True, citing=True)
+    def __init__(self, owner=None, members: list | None = None, capacity: int | None = None):
+        self.execs = ExecLineage(owner, self.CAPACITY if capacity is None else capacity, observing=True, citing=True)
         self.members = members if members is not None else [owner] if owner is not None else []
 
     @property
@@ -1994,10 +1995,9 @@ class ProcessLineage:
         """
         if ppid is None or ppid <= 1:
             return None
-        del order_domain  # observations and Linux execs share the audit-serial domain in ProcessView
         if self.execs.observed_incomplete:
             return None
-        view = self.execs.view(host, ppid, ts, serial, boot, inclusive=inclusive)
+        view = self.execs.view(host, ppid, ts, serial, boot, inclusive=inclusive, order_domain=order_domain)
         if view.image is None or any(not entry.cited for entry in view.used):
             return None
         first, named = view.first, view.named
