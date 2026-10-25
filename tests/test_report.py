@@ -400,6 +400,10 @@ def test_canonical_manifest_resorts_collections_after_rekeying():
     )
 
     assert first_json == second_json
+    link_ids = [
+        row["id"] for row in publish_revision(first, "hunt-one", "test")["investigations"]["link_accounting"]
+    ]
+    assert link_ids == sorted(link_ids)
 
 
 def _add_investigation(repo, seed_id, *, hostile=""):

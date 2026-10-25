@@ -1,0 +1,650 @@
+"""Hourly service-account rate thresholds and publication semantics."""
+from __future__ import annotations
+
+import random
+import tracemalloc
+from dataclasses import asdict
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from sqlalchemy import inspect
+
+from romulus.baseline import playbook as playbook_module
+from romulus.baseline import rate as rate_module
+from romulus.baseline.spec import SPEC_BY_ID, KeyContext
+from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
+from romulus.hunt.baseline_stage import SnapshotView, _write_rollup
+from romulus.sources.models import Window
+from romulus.store.db import make_engine, migrate
+from romulus.store.repo import Repo
+
+T0 = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+def test_rate_threshold_uses_sample_sigma_and_published_defaults():
+    result = rate_module.threshold([0, 0, 2, 2])
+
+    assert result.n == 4
+    assert result.mean == 1.0
+    assert result.sigma == 1.154701
+    assert result.value == 5.618802
+    assert (result.min_count, result.k, result.z) == (5.0, 3.0, 4.0)
+
+
+def test_rate_threshold_is_exactly_order_independent_over_shuffled_series():
+    series = [0, 1, 2, 3, 5, 8, 13, 21, 34, 55] * 6
+    expected = rate_module.threshold(series)
+    rng = random.Random(1729)
+
+    for _ in range(100):
+        shuffled = list(series)
+        rng.shuffle(shuffled)
+        assert rate_module.threshold(shuffled) == expected
+
+
+@pytest.mark.parametrize("series", ([], [1]))
+def test_sample_sigma_requires_two_history_hours(series):
+    with pytest.raises(ValueError, match="at least two"):
+        rate_module.threshold(series)
+
+
+def test_service_rate_playbook_is_registered_positive_only_and_lead_capped():
+    playbook = playbook_module.ServiceExecRateBaseline()
+
+    assert playbook_module.BASELINE_PLAYBOOKS[-1] is playbook_module.ServiceExecRateBaseline
+    assert playbook.id == "bl.svc_exec_rate"
+    assert playbook.spec.measure == "rate" and playbook.spec.bucket == "hour"
+    assert playbook.assures_negative is False
+    assert playbook.lane == "lead" and playbook.severity == "info"
+
+
+def test_service_rate_projects_uid_without_making_it_required_for_configured_names():
+    spec = SPEC_BY_ID["bl.svc_exec_rate"]
+
+    assert spec.required_fields["process_exec"] == (("process.user", "process.uid"),)
+    assert spec.optional_fields["process_exec"] == ()
+
+
+def test_a_missing_rate_identity_marks_only_its_own_hour_partial():
+    playbook = playbook_module.ServiceExecRateBaseline()
+    playbook.begin_cell("window", (T0, T0 + timedelta(hours=2)), KeyContext())
+    playbook.consume([
+        _rate_event("complete", T0 + timedelta(minutes=1)),
+        TypedEvent(
+            id="missing", family="process_exec", ts=T0 + timedelta(hours=1, minutes=1),
+            host="other-host", outcome=Outcome.success, fields={}, raw=[], normalizer="fixture@1",
+        ),
+    ])
+
+    cell = playbook.finish_cell()
+
+    assert cell.partial is True
+    assert cell.partial_hours == (T0 + timedelta(hours=1),)
+    assert cell.partial_unscoped_hours == ()
+    assert cell.partial_host_hours == (("other-host", (T0 + timedelta(hours=1),)),)
+    assert cell.whole_cell_partial is False
+
+
+def _rate_segment(segment_id: str, start: datetime, end: datetime, *, target="host-index") -> dict:
+    return {
+        "id": segment_id, "site": "site", "target": target, "spec_id": "bl.svc_exec_rate",
+        "spec_version": "1", "key_version": "2", "normalizer": "fixture@1",
+        "start": start, "end": end, "bucket": "hour", "origin": "lookback",
+        "source_hunt_id": None, "built_by_hunt_id": None, "exclusion_digest": "none",
+        "excluded_keys": [], "hunted": 0, "events_total": 1, "status": "active", "created_at": end,
+    }
+
+
+def _rate_hour(segment_id: str, hour: datetime, events: int, *, scope="host_account:web-svc") -> dict:
+    return {
+        "segment_id": segment_id, "scope_kind": "host_account", "scope": scope,
+        "hour": hour, "events": events,
+    }
+
+
+def test_history_scope_series_is_keyset_paged_instead_of_collected():
+    repo = Repo(make_engine(":memory:"))
+    migrate(repo.engine)
+    end = T0 + timedelta(hours=211)
+    repo.save_baseline_segment(
+        _rate_segment("history", T0, end), (),
+        (_rate_hour("history", T0 + timedelta(hours=index), index % 7) for index in range(211)),
+    )
+    repo.create_hunt("hunt", {}, "digest", "test")
+    repo.save_baseline_snapshot({
+        "hunt_id": "hunt", "plan": {}, "store_cut": {}, "segment_ids": ["history"],
+        "coverage": {}, "status": "resolved", "digest": "snapshot",
+    })
+
+    series = repo.baseline_scope_series(
+        "host_account", "host_account:web-svc", "hunt", "bl.svc_exec_rate", page_size=17,
+    )
+
+    assert not isinstance(series, list)
+    rows = list(series)
+    assert len(rows) == 211
+    assert (rows[0]["hour"], rows[-1]["hour"]) == (T0, end - timedelta(hours=1))
+
+
+def test_history_rows_from_every_snapshot_segment_are_summed_before_thresholding():
+    repo = Repo(make_engine(":memory:"))
+    migrate(repo.engine)
+    history_end = T0 + timedelta(hours=48)
+    repo.create_hunt("hunt", {"baseline": {"thresholds": {"rate": {
+        "min_count": 5, "k": 3, "z": 4,
+    }}}}, "digest", "test")
+    scope = 'host_account:{"account":"web-svc","host":"web01"}'
+    for segment_id, target, events in (("part-a", "host-a", 2), ("part-b", "host-b", 3)):
+        repo.save_baseline_segment(
+            _rate_segment(segment_id, T0, history_end, target=target), (),
+            [_rate_hour(segment_id, T0, events, scope=scope)],
+        )
+    repo.save_baseline_segment(
+        {**_rate_segment("host-live", T0, history_end), "id": "host-live", "spec_id": "bl.exec_path",
+         "bucket": "day"}, (),
+        ({"segment_id": "host-live", "scope_kind": "host", "scope": "host:web01",
+          "hour": T0 + timedelta(hours=index), "events": 1} for index in range(48)),
+    )
+    snapshot_row = {
+        "hunt_id": "hunt",
+        "plan": {"history_start": T0.isoformat(), "window_start": history_end.isoformat()},
+        "store_cut": {}, "segment_ids": ["part-a", "part-b", "host-live"],
+        "coverage": {
+            f"{target}|bl.svc_exec_rate": {
+                "effective_start": T0.isoformat(), "effective_hours": 48,
+                "gaps": [], "status": "resolved", "segment_ids": [segment_id],
+            }
+            for segment_id, target in (("part-a", "host-a"), ("part-b", "host-b"))
+        },
+        "status": "resolved", "digest": "snapshot",
+    }
+    repo.save_baseline_snapshot(snapshot_row)
+    view = SnapshotView(
+        repo, "hunt", Window(start=history_end, end=history_end + timedelta(hours=1)),
+        repo.baseline_snapshot("hunt"), min_live_hours=48, networks_configured=True,
+    )
+
+    rows, anomalous, facts = view._rate_scope(
+        playbook_module.ServiceExecRateBaseline(),
+        [{"scope_kind": "host_account", "scope": scope}],
+        None,
+    )
+
+    assert anomalous == []
+    assert facts["history_events"] == 5
+    assert rows[0]["history_count"] == 5
+    assert rows[0]["n_hours"] == 48
+
+
+def test_window_scope_series_sums_partitions_and_targets_by_hour_with_keyset_pages():
+    repo = Repo(make_engine(":memory:"))
+    migrate(repo.engine)
+    repo.create_hunt("hunt", {}, "digest", "test")
+    for target, partition, rows in (
+        ("host-a", "p1", [{**_rate_hour("unused", T0, 2),
+                            "first_event_id": "z", "first_event_refs": [{"target": "a", "native_id": "z"}]}]),
+        ("host-a", "p2", [
+            {**_rate_hour("unused", T0, 3),
+             "first_event_id": "b", "first_event_refs": [{"target": "a", "native_id": "b"}]},
+            {**_rate_hour("unused", T0 + timedelta(hours=1), 4),
+             "first_event_id": "h", "first_event_refs": [{"target": "a", "native_id": "h"}]},
+        ]),
+        ("host-b", "p1", [{**_rate_hour("unused", T0, 5),
+                            "first_event_id": "a", "first_event_refs": [{"target": "b", "native_id": "a"}]}]),
+    ):
+        repo.save_baseline_window_cell("hunt", {
+            "rule_id": "bl.svc_exec_rate", "version": "1", "target": target,
+            "partition": partition, "state": "evaluated_complete", "matched": 0,
+            "evaluated": sum(row["events"] for row in rows), "detail": {},
+        }, (), scope_hours=rows)
+
+    rows = list(repo.baseline_window_scope_series(
+        "hunt", "bl.svc_exec_rate", "host_account", "host_account:web-svc",
+        span=(T0, T0 + timedelta(hours=2)), page_size=1,
+    ))
+
+    assert [(row["hour"], row["events"]) for row in rows] == [
+        (T0, 10), (T0 + timedelta(hours=1), 4),
+    ]
+    assert [(row["first_event_id"], row["first_event_refs"]) for row in rows] == [
+        ("a", [{"target": "b", "native_id": "a"}]),
+        ("h", [{"target": "a", "native_id": "h"}]),
+    ]
+    indexes = {row["name"] for row in inspect(repo.engine).get_indexes("baseline_window_scope_hour")}
+    assert "ix_baseline_window_scope_rate" in indexes
+
+
+def _rate_event(event_id: str, ts: datetime, *, user="web-svc", uid=100) -> TypedEvent:
+    return TypedEvent(
+        id=event_id, family="process_exec", ts=ts, host="web01", outcome=Outcome.success,
+        fields={
+            "process.user": fv(user, "fixture:process.user"),
+            "process.uid": fv(uid, "fixture:process.uid"),
+        },
+        raw=[RawRef(target="host-index", native_id=f"raw-{event_id}")], normalizer="fixture@1",
+    )
+
+
+def _pending_observation(hunt_id: str, row: dict) -> dict:
+    return {
+        "hunt_id": hunt_id, "spec_id": "bl.svc_exec_rate", "spec_version": "1", **row,
+        "history_count": None, "history_decayed": None, "peer_scopes_with_key": None,
+        "peer_scopes": None, "threshold": None, "mean": None, "sigma": None,
+        "n_hours": None, "verdict": "unresolved", "reason": "baseline judgement pending",
+        "candidate_id": None,
+    }
+
+
+_ALL_LIVE = object()
+
+
+def _rate_view(*, history_hours=48, history_values=None, window_counts=(5,),
+               window_start=T0 + timedelta(days=10), edge_minutes=0,
+               window_state="evaluated_complete", history_status=None, hunt_id="hunt",
+               live_history_hours=_ALL_LIVE, partial_window_hours=(), partial_host_hours=None,
+               partial_unscoped_hours=None, missing_witness_hours=()):
+    history_values = {0: 1} if history_values is None else history_values
+    start = window_start + timedelta(minutes=edge_minutes)
+    window = Window(start=start, end=start + timedelta(hours=len(window_counts)))
+    history_start = window.start.replace(minute=0, second=0, microsecond=0) - timedelta(hours=history_hours)
+    history_end = window.start.replace(minute=0, second=0, microsecond=0)
+    repo = Repo(make_engine(":memory:"))
+    migrate(repo.engine)
+    manifest = {
+        "targets": ["host-index"],
+        "baseline": {
+            "thresholds": {"rate": {"min_count": 5, "k": 3, "z": 4}},
+        },
+    }
+    repo.create_hunt(hunt_id, manifest, "digest", "test")
+    scope = "host_account:{\"account\":\"web-svc\",\"host\":\"web01\"}"
+    history_rows = [
+        _rate_hour("history", history_start + timedelta(hours=index), value, scope=scope)
+        for index, value in sorted(history_values.items())
+    ]
+    repo.save_baseline_segment(
+        _rate_segment("history", history_start, history_end), (), history_rows,
+    )
+    if live_history_hours is _ALL_LIVE:
+        live_history_hours = range(history_hours)
+    if live_history_hours:
+        repo.save_baseline_segment(
+            {
+                **_rate_segment("host-live", history_start, history_end),
+                "id": "host-live", "spec_id": "bl.exec_path", "bucket": "day",
+            }, (), ({
+                "segment_id": "host-live", "scope_kind": "host", "scope": "host:web01",
+                "hour": history_start + timedelta(hours=index), "events": 1,
+            } for index in live_history_hours),
+        )
+    status = history_status or ("resolved" if history_hours >= 48 else "unresolved")
+    gaps = ([{
+        "start": (history_start + timedelta(hours=1)).isoformat(),
+        "end": (history_start + timedelta(hours=2)).isoformat(),
+        "state": "partial", "reason": "shard failure",
+    }] if status == "gap_shortened" else [])
+    snapshot_row = {
+        "hunt_id": hunt_id,
+        "plan": {
+            "history_start": history_start.isoformat(), "window_start": history_end.isoformat(),
+            "targets": ["host-index"], "specs": [{"id": "bl.svc_exec_rate", "version": "1",
+                                                    "key_version": "2"}],
+        },
+        "store_cut": {}, "segment_ids": ["history", *(["host-live"] if live_history_hours else [])],
+        "coverage": {"host-index|bl.svc_exec_rate": {
+            "effective_start": history_start.isoformat(), "effective_hours": history_hours,
+            "gaps": gaps, "absent_before": None, "status": status, "segment_ids": ["history"],
+        }},
+        "status": status, "digest": "snapshot-rate",
+    }
+    repo.save_baseline_snapshot(snapshot_row)
+
+    events: list[TypedEvent] = []
+    for hour_index, count in enumerate(window_counts):
+        hour = window.start + timedelta(hours=hour_index)
+        events.extend(
+            _rate_event(f"window-{hour_index:02d}-{index:03d}", hour + timedelta(minutes=1, seconds=index))
+            for index in range(count)
+        )
+    retained = [event for event in events
+                if int((event.ts - window.start) / timedelta(hours=1)) not in missing_witness_hours]
+    repo.save_evidence(
+        hunt_id, retained,
+        {ref.key: {"message": event.id} for event in retained for ref in event.raw}, None,
+    )
+    playbook = playbook_module.ServiceExecRateBaseline()
+    playbook.begin_cell("window", (window.start, window.end), KeyContext())
+    playbook.consume(events)
+    cell = playbook.finish_cell()
+    repo.save_baseline_window_cell(hunt_id, {
+        "rule_id": playbook.id, "version": playbook.version, "target": "host-index",
+        "partition": window.key(), "state": window_state, "matched": 0,
+        "evaluated": len(events), "detail": {
+            "reasons": [] if window_state == "evaluated_complete" else ["a record was missing required fields"],
+            "partial_hours": [
+                (window.start.replace(minute=0, second=0, microsecond=0)
+                 + timedelta(hours=index)).isoformat()
+                for index in partial_window_hours
+            ],
+            "partial_host_hours": {
+                host: [
+                    (window.start.replace(minute=0, second=0, microsecond=0)
+                     + timedelta(hours=index)).isoformat()
+                    for index in indexes
+                ]
+                for host, indexes in (partial_host_hours or {}).items()
+            },
+            **({} if partial_unscoped_hours is None else {
+                "partial_unscoped_hours": [
+                    (window.start.replace(minute=0, second=0, microsecond=0)
+                     + timedelta(hours=index)).isoformat()
+                    for index in partial_unscoped_hours
+                ],
+            }),
+        },
+    }, (_pending_observation(hunt_id, row) for row in cell.observations),
+        counts=cell.counts, scope_hours=cell.scope_hours)
+    snapshot = repo.baseline_snapshot(hunt_id)
+    assert snapshot is not None
+    view = SnapshotView(
+        repo, hunt_id, window, snapshot, min_live_hours=48, networks_configured=True,
+    )
+    return repo, playbook, view, scope
+
+
+def test_live_history_hours_without_events_are_zeroes_in_the_threshold_series():
+    repo, playbook, view, _scope = _rate_view(history_values={0: 1}, window_counts=(5,))
+
+    matches = list(playbook.judge(view))
+
+    row = next(repo.baseline_observations("hunt"))
+    assert len(matches) == 1
+    assert (row["n_hours"], row["history_count"]) == (48, 1)
+    assert (row["mean"], row["sigma"], row["threshold"]) == (0.020833, 0.144338, 5.0)
+    assert row["verdict"] == "over_threshold"
+    assert "min_count 5" in matches[0].claim
+    assert "mean × k (0.020833 × 3)" in matches[0].claim
+    assert "mean + z × sample sigma (0.020833 + 4 × 0.144338)" in matches[0].claim
+    assert "n=48" in matches[0].claim and "Seasonality is not modelled" in matches[0].claim
+
+
+def test_one_execution_in_a_48_hour_span_with_one_live_hour_is_unresolved():
+    repo, playbook, view, _scope = _rate_view(
+        history_values={0: 1}, live_history_hours=(0,), window_counts=(5,),
+    )
+
+    assert list(playbook.judge(view)) == []
+    row = next(repo.baseline_observations("hunt"))
+    assert row["n_hours"] == 1
+    assert row["verdict"] == "unresolved" and row["reason"] == "fewer than 48 live history hours"
+
+
+def test_offline_hours_are_left_out_of_the_rate_series():
+    live = tuple(range(24)) + tuple(range(48, 72))
+    repo, playbook, view, _scope = _rate_view(
+        history_hours=72, history_values={0: 1, 24: 100, 48: 1},
+        live_history_hours=live, window_counts=(5,),
+    )
+
+    matches = list(playbook.judge(view))
+    row = next(repo.baseline_observations("hunt"))
+    assert len(matches) == 1 and row["n_hours"] == 48
+    assert row["history_count"] == 2
+
+
+def test_missing_host_liveness_keeps_the_rate_unresolved():
+    repo, playbook, view, _scope = _rate_view(
+        history_values={index: 1 for index in range(48)}, live_history_hours=(), window_counts=(20,),
+    )
+
+    assert list(playbook.judge(view)) == []
+    row = next(repo.baseline_observations("hunt"))
+    assert row["verdict"] == "unresolved" and row["reason"] == "host liveness is unavailable"
+
+
+def test_a_scope_silent_in_history_is_unresolved_instead_of_becoming_a_zero_rate():
+    repo, playbook, view, _scope = _rate_view(history_values={}, window_counts=(12,))
+
+    assert list(playbook.judge(view)) == []
+    row = next(repo.baseline_observations("hunt"))
+    assert row["verdict"] == "unresolved" and row["reason"] == "scope is silent in history"
+
+
+@pytest.mark.parametrize(("history_hours", "verdict", "leads"), [
+    (47, "unresolved", 0),
+    (48, "over_threshold", 1),
+])
+def test_rate_warmup_requires_48_live_complete_hours(history_hours, verdict, leads):
+    repo, playbook, view, _scope = _rate_view(
+        history_hours=history_hours, history_values={0: 1}, window_counts=(5,),
+    )
+
+    assert len(list(playbook.judge(view))) == leads
+    assert next(repo.baseline_observations("hunt"))["verdict"] == verdict
+
+
+@pytest.mark.parametrize(("counts", "reported"), [
+    ((5, 7, 9), (5, 7, 9)),
+    ((4, 5, 3), (5,)),
+])
+def test_one_grouped_lead_lists_every_and_only_window_hour_at_or_above_threshold(counts, reported):
+    _repo, playbook, view, _scope = _rate_view(
+        history_values={index: 1 for index in range(48)}, window_counts=counts,
+    )
+
+    matches = list(playbook.judge(view))
+
+    assert len(matches) == 1
+    for hour_index, count in enumerate(counts):
+        hour = (view.window.start + timedelta(hours=hour_index)).isoformat()
+        assert (f"{hour} count {count}" in matches[0].claim) is (count in reported)
+    assert matches[0].group_key.startswith("baseline:bl.svc_exec_rate:host_account:")
+
+
+def test_a_partial_hour_on_another_host_does_not_silence_a_complete_anomalous_hour():
+    repo, playbook, view, _scope = _rate_view(
+        history_values={index: 1 for index in range(48)}, window_counts=(5,),
+        window_state="evaluated_partial", partial_window_hours=(0,),
+        partial_host_hours={"other-host": (0,)},
+    )
+
+    matches = list(playbook.judge(view))
+
+    assert len(matches) == 1
+    assert f"{view.window.start.isoformat()} count 5" in matches[0].claim
+    assert "other window cells were partial" in matches[0].claim.lower()
+    assert next(repo.baseline_observations("hunt"))["verdict"] == "over_threshold"
+
+
+def test_an_unscoped_partial_hour_is_not_erased_by_another_hosts_partial_hour():
+    repo, playbook, view, _scope = _rate_view(
+        history_values={index: 1 for index in range(48)}, window_counts=(5,),
+        window_state="evaluated_partial", partial_window_hours=(0,),
+        partial_host_hours={"other-host": (0,)}, partial_unscoped_hours=(0,),
+    )
+
+    assert list(playbook.judge(view)) == []
+    row = next(repo.baseline_observations("hunt"))
+    assert row["verdict"] == "unresolved" and "window coverage is partial" in row["reason"]
+
+
+def test_a_partial_anomalous_hour_is_never_measured():
+    repo, playbook, view, _scope = _rate_view(
+        history_values={index: 1 for index in range(48)}, window_counts=(5,),
+        window_state="evaluated_partial", partial_window_hours=(0,),
+    )
+
+    assert list(playbook.judge(view)) == []
+    row = next(repo.baseline_observations("hunt"))
+    assert row["verdict"] == "unresolved" and "window coverage is partial" in row["reason"]
+
+
+def test_rate_claim_lists_and_cites_at_most_twenty_anomalous_hours():
+    _repo, playbook, view, _scope = _rate_view(
+        history_values={index: 1 for index in range(48)}, window_counts=(5,) * 25,
+    )
+
+    match = next(iter(playbook.judge(view)))
+
+    assert len(match.events) == 20
+    assert match.claim.count(" count 5") == 20
+    assert "and 5 more hours (in the observation table)" in match.claim
+
+
+def test_one_missing_witness_does_not_suppress_other_citable_anomalous_hours():
+    _repo, playbook, view, _scope = _rate_view(
+        history_values={index: 1 for index in range(48)}, window_counts=(5, 6),
+        missing_witness_hours=(1,),
+    )
+
+    match = next(iter(playbook.judge(view)))
+
+    assert len(match.events) == 1
+    assert f"{view.window.start.isoformat()} count 5" in match.claim
+    assert "1 anomalous hour(s) whose witness could not be retained" in match.claim
+
+
+def test_fractional_window_edges_are_not_measured_and_are_stated_in_the_lead():
+    repo, playbook, view, _scope = _rate_view(
+        history_values={index: 1 for index in range(48)},
+        window_counts=(20, 5, 1, 20), edge_minutes=30,
+    )
+
+    matches = list(playbook.judge(view))
+
+    assert len(matches) == 1
+    claim = matches[0].claim
+    assert "edge fractions" in claim and "not assessed" in claim
+    floor = view.window.start.replace(minute=0, second=0, microsecond=0)
+    assert f"{floor.isoformat()} count 20" not in claim
+    assert f"{(floor + timedelta(hours=1)).isoformat()} count 5" in claim
+    assert f"{(floor + timedelta(hours=3)).isoformat()} count 20" in claim
+    assert {event.ts.replace(minute=0, second=0, microsecond=0) for event in matches[0].events} == {
+        floor + timedelta(hours=1),
+        floor + timedelta(hours=3),
+    }
+    assert next(repo.baseline_observations("hunt"))["window_count"] == 46
+
+
+def test_a_window_with_only_fractional_hours_is_unresolved_and_not_measured():
+    repo, playbook, view, _scope = _rate_view(
+        history_values={index: 1 for index in range(48)}, window_counts=(20,), edge_minutes=30,
+    )
+
+    assert list(playbook.judge(view)) == []
+    row = next(repo.baseline_observations("hunt"))
+    assert row["verdict"] == "unresolved"
+    assert "no complete whole hour" in row["reason"] and "not assessed" in row["reason"]
+
+
+@pytest.mark.parametrize(("window_state", "history_status", "reason"), [
+    ("evaluated_partial", None, "window coverage is partial"),
+    ("evaluated_complete", "gap_shortened", "history gap"),
+])
+def test_partial_window_or_history_never_publishes_or_writes_a_complete_negative(
+        window_state, history_status, reason):
+    repo, playbook, view, _scope = _rate_view(
+        history_values={index: 1 for index in range(48)}, window_counts=(20,),
+        window_state=window_state, history_status=history_status,
+    )
+
+    assert list(playbook.judge(view)) == []
+    row = next(repo.baseline_observations("hunt"))
+    assert row["verdict"] == "unresolved" and reason in row["reason"]
+    _write_rollup(repo, "hunt", playbook, view.spec_stats[playbook.id], view.snapshot, None)
+    rollup = next(cell for cell in repo.rule_cells("hunt", rule_id=playbook.id)
+                  if cell["target"] == "*" and cell["partition"] == "window")
+    assert rollup["state"] == "positive_only_partial"
+
+
+def test_twins_with_the_same_snapshot_are_canonical_identical():
+    products = []
+    for hunt_id in ("twin-a", "twin-b"):
+        repo, playbook, view, _scope = _rate_view(
+            history_values={index: index % 3 for index in range(48)}, window_counts=(9, 1, 10),
+            hunt_id=hunt_id,
+        )
+        matches = list(playbook.judge(view))
+        row = next(repo.baseline_observations(hunt_id))
+        products.append({
+            "match": {
+                **asdict(matches[0]),
+                "events": [event.model_dump(mode="json") for event in matches[0].events],
+            },
+            "observation": {key: value for key, value in row.items() if key != "hunt_id"},
+        })
+
+    assert products[0] == products[1]
+
+
+@pytest.mark.slow
+def test_many_scopes_over_two_weeks_are_judged_one_scope_at_a_time_with_bounded_memory():
+    scope_count = 5_000
+    history_start = T0
+    history_end = T0 + timedelta(days=14)
+    window = Window(start=history_end, end=history_end + timedelta(hours=1))
+
+    class StreamingRepo:
+        def __init__(self):
+            self.written = 0
+            self.max_batch = 0
+
+        def get_hunt(self, _hunt_id):
+            return {"manifest": {"baseline": {"thresholds": {"rate": {
+                "min_count": 5, "k": 3, "z": 4,
+            }}}}}
+
+        def rule_cells(self, _hunt_id, *, rule_id=None):
+            assert rule_id == "bl.svc_exec_rate"
+            return [{
+                    "target": "host-index", "partition": window.key(), "state": "evaluated_complete",
+                    "rule_version": "1",
+            }]
+
+        def baseline_observations_for_spec(self, _hunt_id, _spec_id, _version):
+            for index in range(scope_count):
+                scope = f'host_account:{{"account":"svc","host":"scope-{index:05d}"}}'
+                yield {
+                    "hunt_id": "hunt", "spec_id": "bl.svc_exec_rate", "spec_version": "1",
+                    "scope_kind": "host_account", "scope": scope, "key_id": f"key-{index}",
+                    "key_digest": f"digest-{index:05d}", "key": {}, "window_count": 1,
+                    "first_ts": window.start, "last_ts": window.start, "first_event_id": None,
+                    "first_event_refs": [], "history_count": None, "history_decayed": None,
+                    "peer_scopes_with_key": None, "peer_scopes": None, "threshold": None,
+                    "mean": None, "sigma": None, "n_hours": None, "verdict": "unresolved",
+                    "reason": "pending", "candidate_id": None,
+                }
+
+        def baseline_scope_series(self, _kind, _scope, _hunt_id, _spec_id, _span):
+            return iter(({"segment_id": "history", "hour": history_start, "events": 1},))
+
+        def baseline_host_hours(self, _host, _hunt_id, _span):
+            return (history_start + timedelta(hours=index) for index in range(14 * 24))
+
+        def baseline_window_scope_series(self, *_args, **_kwargs):
+            return iter(({"hour": window.start, "events": 1},))
+
+        def upsert_baseline_observations(self, rows):
+            batch = list(rows)
+            self.written += len(batch)
+            self.max_batch = max(self.max_batch, len(batch))
+
+    repo = StreamingRepo()
+    snapshot = {
+        "plan": {"history_start": history_start.isoformat(), "window_start": history_end.isoformat()},
+        "coverage": {"host-index|bl.svc_exec_rate": {
+            "effective_start": history_start.isoformat(), "effective_hours": 14 * 24,
+            "gaps": [], "status": "resolved",
+        }},
+        "digest": "snapshot-rate", "status": "resolved",
+    }
+    view = SnapshotView(repo, "hunt", window, snapshot, min_live_hours=48, networks_configured=True)
+
+    tracemalloc.start()
+    assert list(playbook_module.ServiceExecRateBaseline().judge(view)) == []
+    _current, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    assert repo.written == scope_count and repo.max_batch == 1
+    assert view.spec_stats["bl.svc_exec_rate"]["within_threshold"] == scope_count
+    assert peak < 32 * 1024 * 1024

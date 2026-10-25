@@ -108,8 +108,9 @@ def _stage_cell(repo: Repo, events: list[TypedEvent], *, hunt_id: str = "hunt-a"
             "detail": {"reasons": []},
         },
         (),
-        counts=counter.count_rows(),
+        counts=counter.material_count_rows(),
         scope_hours=counter.scope_hour_rows(),
+        event_hours=counter.event_hour_rows(),
     )
 
 
@@ -318,7 +319,8 @@ def test_exec_pair_citation_resolves_against_the_network_index_carry_before_excl
             "rule_id": spec.id, "version": spec.version, "target": "host-index",
             "partition": f"{START.isoformat()}/{END.isoformat()}", "state": "evaluated_complete", "matched": 0,
             "evaluated": 1, "detail": {"reasons": []},
-        }, (), counts=counter.count_rows(), scope_hours=counter.scope_hour_rows(),
+        }, (), counts=counter.material_count_rows(), scope_hours=counter.scope_hour_rows(),
+        event_hours=counter.event_hour_rows(),
     )
     _candidate(repo, child)
 
@@ -348,7 +350,8 @@ def test_hunt_and_lookback_writers_are_equivalent_at_clamped_hour_edges():
             "partition": f"{START.isoformat()}/{hour_end.isoformat()}", "state": "evaluated_complete",
             "matched": 0,
             "evaluated": 2, "detail": {"reasons": []},
-        }, (), counts=counter.count_rows(), scope_hours=counter.scope_hour_rows(),
+        }, (), counts=counter.material_count_rows(), scope_hours=counter.scope_hour_rows(),
+        event_hours=counter.event_hour_rows(),
     )
     run_hunt_segment_writer(hunt_repo, "hunt-a", hunt_complete=True)
 
@@ -492,7 +495,8 @@ def _cell(repo: Repo, events: list[TypedEvent], start: datetime, end: datetime, 
             "rule_id": spec.id, "version": spec.version, "target": "host-index",
             "partition": f"{start.isoformat()}/{end.isoformat()}", "state": "evaluated_complete",
             "matched": 0, "evaluated": len(events), "detail": {"reasons": []},
-        }, (), counts=counter.count_rows(), scope_hours=counter.scope_hour_rows(),
+        }, (), counts=counter.material_count_rows(), scope_hours=counter.scope_hour_rows(),
+        event_hours=counter.event_hour_rows(),
     )
 
 
@@ -533,7 +537,7 @@ def test_a_window_ending_on_the_half_hour_writes_its_whole_hours_and_leaves_the_
     assert max(row["hour"] for row in repo.baseline_scope_hours(segment["id"])) == START + timedelta(hours=1)
 
 
-def test_a_cell_straddling_the_last_whole_hour_shrinks_the_segment_to_hours_no_cell_straddles():
+def test_cells_straddling_hour_edges_still_write_their_per_hour_material():
     repo = _repo()
     end = START + timedelta(hours=2, minutes=30)
     manifest = _manifest()
@@ -547,11 +551,14 @@ def test_a_cell_straddling_the_last_whole_hour_shrinks_the_segment_to_hours_no_c
 
     segment = repo.baseline_segments(statuses=["active"])[0]
     assert summary["written"] == 1
-    assert (segment["start"], segment["end"]) == (START, START + timedelta(hours=1))
-    assert {row["key"]["executable"] for row in repo.baseline_counts(segment["id"])} == {"/usr/bin/id"}
+    assert (segment["start"], segment["end"]) == (START, START + timedelta(hours=2))
+    assert segment["events_total"] == 3
+    assert {row["key"]["executable"] for row in repo.baseline_counts(segment["id"])} == {
+        "/usr/bin/id", "/usr/bin/w", "/usr/bin/late",
+    }
 
 
-def test_a_window_whose_cells_straddle_every_hour_writes_nothing_and_says_why():
+def test_one_non_aligned_cell_writes_all_whole_hours_inside_it():
     repo = _repo()
     end = START + timedelta(hours=2, minutes=30)
     manifest = _manifest()
@@ -561,10 +568,146 @@ def test_a_window_whose_cells_straddle_every_hour_writes_nothing_and_says_why():
 
     summary = run_hunt_segment_writer(repo, "hunt-a", hunt_complete=True)
 
-    assert repo.baseline_segments() == []
-    assert summary["specs"][SPEC.id]["reason"] == (
-        "host-index: the window holds no whole hour that its cells do not straddle"
+    segment = repo.baseline_segments(statuses=["active"])[0]
+    assert summary["written"] == 1 and summary["specs"][SPEC.id]["reason"] is None
+    assert (segment["start"], segment["end"]) == (START, START + timedelta(hours=2))
+    assert segment["events_total"] == 1
+    assert {row["key"]["executable"] for row in repo.baseline_counts(segment["id"])} == {"/usr/bin/id"}
+
+
+def test_non_aligned_cell_excludes_edge_hours_field_by_field():
+    window_start, window_end = START + timedelta(minutes=30), START + timedelta(hours=3, minutes=30)
+    manifest = _manifest()
+    manifest["window"] = {"start": window_start.isoformat(), "end": window_end.isoformat()}
+    repo = _repo()
+    repo.create_hunt("hunt-a", manifest, "manifest-a", "test")
+    events = [
+        _event("left-edge", "/bin/left", 40),
+        _event("inside-a", "/bin/a", 70),
+        _event("inside-b", "/bin/b", 130),
+        _event("right-edge", "/bin/right", 200),
+    ]
+    _cell(repo, events, window_start, window_end)
+
+    summary = run_hunt_segment_writer(repo, "hunt-a", hunt_complete=True)
+
+    segment = repo.baseline_segments(statuses=["active"])[0]
+    assert summary["written"] == 1
+    assert (segment["start"], segment["end"], segment["events_total"]) == (
+        START + timedelta(hours=1), START + timedelta(hours=3), 2,
     )
+    assert {row["key"]["executable"] for row in repo.baseline_counts(segment["id"])} == {
+        "/bin/a", "/bin/b",
+    }
+    assert {row["hour"] for row in repo.baseline_scope_hours(segment["id"])} == {
+        START + timedelta(hours=1), START + timedelta(hours=2),
+    }
+
+
+def test_deduplicated_token_crossing_a_clipped_left_edge_declines_the_segment():
+    spec = SPEC_BY_ID["bl.ext_dest"]
+    window_start = START + timedelta(minutes=30)
+    manifest = _manifest()
+    manifest["window"] = {"start": window_start.isoformat(), "end": END.isoformat()}
+    manifest["baseline"]["specs"] = [
+        {"id": spec.id, "version": spec.version, "key_version": spec.key_version},
+    ]
+    manifest["internal_networks"] = {"source": "configured", "digest": "network-a"}
+    repo = _repo()
+    repo.create_hunt("hunt-a", manifest, "manifest-a", "test")
+
+    def dns(event_id: str, minute: int, role: str) -> TypedEvent:
+        answer = role == "answer"
+        return TypedEvent(
+            id=event_id, family="dns_query", ts=START + timedelta(minutes=minute), host="sensor",
+            fields={
+                "dns.type": fv(role, "fixture"),
+                "dns.version": fv(3, "fixture"),
+                "dns.id": fv(7, "fixture"),
+                "dns.question.name": fv("www.example.com", "fixture"),
+                "source.ip": fv("10.0.0.53" if answer else "10.0.0.4", "fixture"),
+                "destination.ip": fv("10.0.0.4" if answer else "10.0.0.53", "fixture"),
+                "source.port": fv(53 if answer else 40000, "fixture"),
+                "destination.port": fv(40000 if answer else 53, "fixture"),
+                "suricata.flow_id": fv(99, "fixture"),
+            },
+            raw=[RawRef(target="host-index", native_id=event_id, digest=f"raw-{event_id}")],
+            normalizer="fixture@1",
+        )
+
+    _cell(repo, [dns("edge-query", 40, "query"), dns("inside-answer", 70, "answer")],
+          window_start, END, spec=spec)
+
+    summary = run_hunt_segment_writer(repo, "hunt-a", hunt_complete=True)
+
+    assert repo.baseline_segments() == []
+    assert "deduplicated window cell straddles" in summary["specs"][spec.id]["reason"]
+
+
+def test_deduplicated_bucket_split_across_complete_cells_declines_the_segment():
+    spec = SPEC_BY_ID["bl.ext_dest"]
+    manifest = _manifest()
+    manifest["baseline"]["specs"] = [
+        {"id": spec.id, "version": spec.version, "key_version": spec.key_version},
+    ]
+    manifest["internal_networks"] = {"source": "configured", "digest": "network-a"}
+    repo = _repo()
+    repo.create_hunt("hunt-a", manifest, "manifest-a", "test")
+
+    def dns(event_id: str, minute: int, role: str) -> TypedEvent:
+        answer = role == "answer"
+        return TypedEvent(
+            id=event_id, family="dns_query", ts=START + timedelta(minutes=minute), host="sensor",
+            fields={
+                "dns.type": fv(role, "fixture"), "dns.version": fv(3, "fixture"),
+                "dns.id": fv(7, "fixture"), "dns.question.name": fv("www.example.com", "fixture"),
+                "source.ip": fv("10.0.0.53" if answer else "10.0.0.4", "fixture"),
+                "destination.ip": fv("10.0.0.4" if answer else "10.0.0.53", "fixture"),
+                "source.port": fv(53 if answer else 40000, "fixture"),
+                "destination.port": fv(40000 if answer else 53, "fixture"),
+                "suricata.flow_id": fv(99, "fixture"),
+            },
+            raw=[RawRef(target="host-index", native_id=event_id, digest=f"raw-{event_id}")],
+            normalizer="fixture@1",
+        )
+
+    middle = START + timedelta(hours=1)
+    _cell(repo, [dns("query", 59, "query")], START, middle, spec=spec)
+    _cell(repo, [dns("answer", 61, "answer")], middle, END, spec=spec)
+
+    summary = run_hunt_segment_writer(repo, "hunt-a", hunt_complete=True)
+
+    assert repo.baseline_segments() == []
+    assert "deduplicated bucket spans multiple window cells" in summary["specs"][spec.id]["reason"]
+
+
+def test_legacy_unplaced_count_spanning_a_clipped_edge_declines_the_segment():
+    from romulus.store import schema
+
+    window_start = START + timedelta(minutes=30)
+    manifest = _manifest()
+    manifest["window"] = {"start": window_start.isoformat(), "end": END.isoformat()}
+    repo = _repo()
+    repo.create_hunt("hunt-a", manifest, "manifest-a", "test")
+    events = [_event("edge", "/usr/bin/id", 40), _event("inside", "/usr/bin/id", 70)]
+    counter = KeyCounter("cell", SPEC, span=(window_start, END))
+    for event in events:
+        counter.consume(event, KeyContext())
+    repo.save_baseline_window_cell(
+        "hunt-a", {
+            "rule_id": SPEC.id, "version": SPEC.version, "target": "host-index",
+            "partition": f"{window_start.isoformat()}/{END.isoformat()}",
+            "state": "evaluated_complete", "matched": 0, "evaluated": 2, "detail": {"reasons": []},
+        }, (), counts=counter.count_rows(), scope_hours=counter.scope_hour_rows(),
+        event_hours=counter.event_hour_rows(),
+    )
+    with repo.engine.begin() as connection:
+        connection.execute(schema.baseline_window_count.update().values(material_hour=None))
+
+    summary = run_hunt_segment_writer(repo, "hunt-a", hunt_complete=True)
+
+    assert repo.baseline_segments() == []
+    assert "legacy window count material has no hour" in summary["specs"][SPEC.id]["reason"]
 
 
 def test_a_writer_failure_is_stated_in_the_baseline_summary_and_never_makes_the_hunt_partial(monkeypatch):
@@ -657,6 +800,45 @@ def test_external_destination_segments_wait_for_a_configured_internal_network():
 
     assert repo.baseline_segments() == []
     assert summary["specs"][spec.id]["reason"] == "host-index: internal networks not configured for this site"
+
+
+def test_external_destination_hunt_segments_are_bound_end_to_end_to_the_network_digest():
+    spec = SPEC_BY_ID["bl.ext_dest"]
+    segment_ids = []
+    for digest in ("network-a", "network-b"):
+        repo = _repo()
+        manifest = _manifest()
+        manifest["baseline"]["specs"] = [
+            {"id": spec.id, "version": spec.version, "key_version": spec.key_version},
+        ]
+        manifest["internal_networks"] = {"source": "configured", "digest": digest}
+        repo.create_hunt("hunt-a", manifest, "manifest-a", "test")
+        event = TypedEvent(
+            id="flow", family="net_flow", ts=START + timedelta(minutes=5), host="sensor",
+            fields={
+                "source.ip": fv("10.0.0.4", "fixture"),
+                "destination.ip": fv("192.0.2.1", "fixture"),
+            }, raw=[RawRef(target="host-index", native_id="flow", digest="raw-flow")],
+            normalizer="fixture@1",
+        )
+        counter = KeyCounter("window-cell", spec, span=(START, END))
+        counter.consume(event, KeyContext())
+        repo.save_baseline_window_cell(
+            "hunt-a",
+            {
+                "rule_id": spec.id, "version": spec.version, "target": "host-index",
+                "partition": f"{START.isoformat()}/{END.isoformat()}", "state": "evaluated_complete",
+                "matched": 0, "evaluated": 1, "detail": {"reasons": []},
+            },
+            (), counts=counter.count_rows(), scope_hours=counter.scope_hour_rows(),
+        )
+
+        assert run_hunt_segment_writer(repo, "hunt-a", hunt_complete=True)["written"] == 1
+        segment = repo.baseline_segments(statuses=["active"])[0]
+        assert segment["network_digest"] == digest
+        segment_ids.append(segment["id"])
+
+    assert segment_ids[0] != segment_ids[1]
 
 
 def test_window_material_is_released_after_the_decision_and_kept_through_a_crash_or_a_partial_hunt(monkeypatch):

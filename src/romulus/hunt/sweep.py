@@ -18,6 +18,7 @@ from romulus.detect.base import Match, Playbook
 from romulus.detect.bounded import StateBudget, StateExhausted, live_stores
 from romulus.detect.host import bind_lineage_citation_loader
 from romulus.detect.netdef import DIRECTION_ASSUMED_REASON
+from romulus.detect.observed import observation
 from romulus.detect.registry import fresh_pack
 from romulus.evidence.normalize import (
     BOOT_FILL_FAMILIES,
@@ -864,6 +865,13 @@ class Sweep:
                 if error_reason and (error_affected is ALL_FAMILIES or set(pb.families) & error_affected):
                     reasons.append(error_reason)
                 if pb.id == "bl.exec_pair":
+                    carry_events = sorted(
+                        (event for event in events
+                         if event.family == "process_exec" or observation(event) is not None),
+                        key=lambda item: (
+                            item.ts, -1 if exec_serial(item) is None else exec_serial(item), item.id,
+                        ),
+                    )
                     parents = HourParents()
                     for event in ordered:
                         parents.add(event)
@@ -889,9 +897,10 @@ class Sweep:
                         stage.record_baseline_cell(
                             target=target, partition=pkey, start=w.start, end=w.end,
                             target_applicable=target_applicable, source_complete=not rule_partial,
-                            reasons=reasons, task_id=tid, events=ordered,
+                            reasons=reasons, task_id=tid, events=carry_events,
                             observations=result.observations, pendings=result.pendings,
                             counts=result.counts, scope_hours=result.scope_hours,
+                            event_hours=result.event_hours,
                         )
                         # Compact rows share the stage volume with citations and are billed with them.
                         self._charge_stage(stage)
@@ -1062,6 +1071,17 @@ class Sweep:
                             task_id: str | None, events: list[TypedEvent], raw_sources: dict[str, dict]) -> None:
         """Persist observations and the cell's idempotency marker; citations are fetched only if published."""
         del task_id, events, raw_sources
+        detail = {"reasons": sorted(set(reasons))}
+        if playbook.spec.measure == "rate" and result.partial:
+            detail.update(
+                partial_hours=[hour.isoformat() for hour in result.partial_hours],
+                partial_unscoped_hours=[hour.isoformat() for hour in result.partial_unscoped_hours],
+                partial_host_hours={
+                    host: [hour.isoformat() for hour in hours]
+                    for host, hours in result.partial_host_hours
+                },
+                whole_cell_partial=result.whole_cell_partial,
+            )
         self.repo.save_baseline_window_cell(self.hunt_id, {
             "rule_id": playbook.id,
             "version": playbook.spec.version,
@@ -1070,9 +1090,9 @@ class Sweep:
             "state": state,
             "matched": 0,
             "evaluated": evaluated,
-            "detail": {"reasons": sorted(set(reasons))},
+            "detail": detail,
         }, self._baseline_observations(playbook, result),
-            counts=result.counts, scope_hours=result.scope_hours)
+            counts=result.counts, scope_hours=result.scope_hours, event_hours=result.event_hours)
 
     def _finalize_baseline_target(self, target: str) -> None:
         """Persist compact exec-pair cells for post-lookback resolution and resume."""
@@ -1090,13 +1110,15 @@ class Sweep:
             self.repo.stage_baseline_window_cell(
                 self.hunt_id, {
                     **item, "target": target, "spec_version": playbook.spec.version,
-                    "evaluated": len(stage.baseline_execs(target, item["partition"])),
+                    "evaluated": sum(row.get("family", "process_exec") == "process_exec"
+                                     for row in stage.baseline_execs(target, item["partition"])),
                 },
                 stage.baseline_execs(target, item["partition"]),
                 stage.baseline_observations(target, item["partition"]),
                 [asdict(pending) for pending in stage.baseline_pendings(target, item["partition"])],
                 stage.baseline_counts(target, item["partition"]),
                 stage.baseline_scope_hours(target, item["partition"]),
+                stage.baseline_event_hours(target, item["partition"]),
             )
             stage.drop_baseline_cell(target, item["partition"])
 

@@ -21,9 +21,14 @@ class BaselineCell:
     observations: tuple[dict, ...]
     counts: tuple[dict, ...]
     scope_hours: tuple[dict, ...]
+    event_hours: tuple[dict, ...]
     pendings: tuple[Pending, ...]
     partial: bool
     reasons: tuple[str, ...]
+    partial_hours: tuple[datetime, ...]
+    partial_unscoped_hours: tuple[datetime, ...]
+    partial_host_hours: tuple[tuple[str, tuple[datetime, ...]], ...]
+    whole_cell_partial: bool
 
 
 class SnapshotView(Protocol):
@@ -89,7 +94,7 @@ class BaselinePlaybook(Playbook):
         for pending in self._counter.take_pendings():
             resolution = resolver.resolve(pending)
             if resolution.reason is not None:
-                self._counter.mark_partial(f"{pending.event_id}: {resolution.reason}")
+                self._counter.mark_partial(f"{pending.event_id}: {resolution.reason}", pending.ts)
             else:
                 self._counter.add_keys(
                     pending.ts, resolution.keys, event_id=pending.event_id,
@@ -104,11 +109,16 @@ class BaselinePlaybook(Playbook):
         return BaselineCell(
             spec_id=self.spec.id,
             observations=tuple(counter.observation_rows()),
-            counts=tuple(counter.count_rows()),
-            scope_hours=tuple(counter.scope_hour_rows()),
+            counts=tuple(counter.material_count_rows()),
+            scope_hours=tuple(counter.scope_hour_rows(include_witnesses=self.spec.measure == "rate")),
+            event_hours=tuple(counter.event_hour_rows()),
             pendings=counter.take_pendings(),
             partial=counter.partial,
             reasons=counter.reasons,
+            partial_hours=counter.partial_hours,
+            partial_unscoped_hours=counter.partial_unscoped_hours,
+            partial_host_hours=counter.partial_host_hours,
+            whole_cell_partial=counter.whole_cell_partial,
         )
 
     def judge(self, view: SnapshotView) -> Iterable[Match]:
@@ -160,10 +170,21 @@ class ExternalDestinationBaseline(BaselinePlaybook):
     direction_dependent = True
 
 
+class ServiceExecRateBaseline(BaselinePlaybook):
+    id = "bl.svc_exec_rate"
+    title = "Service-account execution rate baseline"
+    spec = SPEC_BY_ID[id]
+    families = spec.families
+    os_families = ("linux",)
+    assures_negative = False
+    positive_only_reason = "service-account rate baselines publish positive deviations only"
+
+
 BASELINE_PLAYBOOKS = [
     SshTupleBaseline,
     ExecPathBaseline,
     ExecPairBaseline,
     CommandShapeBaseline,
     ExternalDestinationBaseline,
+    ServiceExecRateBaseline,
 ]

@@ -11,6 +11,7 @@ the new digests below with the reason.
 """
 import hashlib
 import json
+import re
 
 import pytest
 
@@ -117,54 +118,124 @@ from tests import throughput_fixture as tf
 # the segment writer's, the hunt's stop reason names the baseline stage (its execution state was already partial),
 # and the manifest's baseline coverage block reports the stage as partial instead of not run. The partial hunt writes
 # no segment and keeps its window counter material.
+# Registering bl.svc_exec_rate adds one unresolved www-data observation and its exact window-hour count on this
+# no-history fixture. Baseline observations/window rows, the snapshot, exclusion ledger, rate rule cells, audit and
+# report manifest change; findings, citations, evidence, entities, anchors, links, expansion and stats do not. The
+# baseline task also changes by its rate spec in fingerprint, intent and outcome: retaining the old row would falsely
+# say that the new spec did not run. Window scope-hour rows also retain a deterministic per-hour citation witness.
+# The service-rate scope can now fall back to a typed system uid when process.user is absent, so its key version is 2.
+# This fixture's named account produces the same semantic scope, but the versioned key id/digest changes its window
+# count, observation and exclusion rows. The snapshot plan/digest changes, and that digest flows into baseline rule
+# cells, the baseline task/audit summary and the manifest. Non-baseline candidates and all detection evidence remain
+# byte-identical.
+# Baseline S8 changes exec-pair and command-shape outcome/canonicalization semantics, external-destination DNS
+# canonicalization, and the rate key's uid fallback. Their versioned identities change window counts, scope-hour
+# witnesses, observations, exclusions, the frozen snapshot, baseline rule cells/task/audit and the manifest. Window
+# count rows now identify their material hour, and exact event totals have their own captured table. DNS normalization
+# now records the normalized DNS transaction id/version and uses UTS46 IDNA, so evidence version 12 rehashes every
+# typed event id; candidates, links, tasks and their downstream audit/manifest references change by those identities.
+# The fixture's non-baseline finding claims, lanes, citations and detector decisions are unchanged. Anchors, raw
+# copies, entities, expansion, stats and the empty history/segment tables remain byte-identical.
+# Expansion link accounting is now content-sorted before the raw manifest is emitted, so only the manifest digest
+# changes; the links themselves and their canonical report order are unchanged.
+# The S8 merge-gate correction moves bl.cmd_shape to version/key version 3. Path-shaped argv tokens now remain
+# literal, while only evidenced Base64 and known random tmp/temp basenames are masked. That deliberate baseline-only
+# identity change updates command-shape keys and version fields in window counts, witnesses, observations and
+# exclusions; the frozen plan/digest then flows into baseline rule cells, the baseline task/audit and the manifest.
+# Exact non-baseline candidate and rule-cell field projections remain equal to their S7 references below.
+# The second merge-gate correction moves bl.cmd_shape to version/key version 4. Evidenced Base64 may contain `/`,
+# and mktemp's mixed-case or `tmp.` random suffixes are masked without changing path-shaped or word-like names.
+# The fixture's command shapes are unchanged, so only versioned command-shape identities, their baseline rows and
+# the snapshot-derived baseline cells/task/audit/manifest change; non-baseline semantic projections stay identical.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
-    "audit": "234a968ea7a0cebda51c453371b28867670b7c9898dd1d05568ae00007305dbf",
+    "audit": "d48d2621f6db2d9fc504f613ece9fb036cc20bc53b22cc0a5c128f9076288973",
     "baseline_counts": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-    "baseline_hunt_exclusions": "0d871301eb31d300f00eefeadae48aaa99381de0d8c6158e74e9bb351dd1bd52",
-    "baseline_observations": "a622940f3edc51095fae860c5247d8b9494c32522d92fca63ce77a73ffcd1856",
+    "baseline_hunt_exclusions": "fe9edaf9efe3065352ae1bedc95ac7e78ddbe2d6e34f835203cfe56cb368ec56",
+    "baseline_observations": "629be8768a4e8e673f7145d30e61da1e157d0898f079c6d9ee41eb744cce861a",
     "baseline_scope_hours": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     "baseline_segments": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-    "baseline_snapshot": "ee69ca9a69bb202d32ea01780bd4832d6cb0972b4ecd8941ba6aaf5e9c8a2b6b",
-    "baseline_window_counts": "86ae9aaddb32e101784fb876d1bd3db544e3139f35c20d6b438db788e4327103",
-    "baseline_window_scope_hours": "5b23e9db42982af2cc4122ca8e0c1457a553409ff95569eb92ad2edaf7797160",
-    "candidates": "e8baaad0f844984320258730fa65318e2cea0e57c2df8b5b3674ded6fb78f89d",
+    "baseline_snapshot": "63b4c8094cb5450b1e707fd7be786e90324528e738b882358cae15cb8d53f776",
+    "baseline_window_counts": "163b75766bc7cc487118b4e8bc24fe338d9e364898f9200887b89ba11b464acc",
+    "baseline_window_event_hours": "bb58c65144b135443e75a690b7b2f8137ebac6b827f8e8bd8cc7606a01c53e52",
+    "baseline_window_scope_hours": "49a7182642abe3b848eb33b97e628395e57d806d9feeeaa8b9b198f0c07489d8",
+    "candidates": "b5abecf132a0f5f4be6a541acb6a584f7b206821294991c5ae36ba89d2eb672b",
     "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
     "event_citations": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-    "event_entities": "8224880134ac06339cbde46274c20ea7d2fa4a41e30f1426a576e0afd4270b58",
-    "events": "46ff37261993417f3e0fa61de9c3aa24977b2e091ad29d7cf4d166e8261a1017",
+    "event_entities": "9753e1bc55ffce6cfde297608596104c2ed3ef08cdd0a8db54e3ecb279fe392a",
+    "events": "d4eede2cca8fd1bac673b1abe0aa2327cf7a5a3f90f72683680d2af986679e39",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
-    "links": "797137953f5a643e0297b450047aeec3fa79c4cb386118f10d0ec00d337fd023",
-    "manifest": "c47c0fee9ef788aee97ca9b712349f01d3fd95cb3496e479dd8b440f1c6a5ef4",
+    "links": "e5bd8ec83459a57a14627ad2222f752e4c29e0415beddd54eaa11afd08e1b62f",
+    "manifest": "04a003a9c55a069ee63954c0f7540fa4cc0bf91ca0e5570f120da48cffe91e61",
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
-    "rule_cells": "c6284aff25a94921755f8b0e8879a43d7292ab9d627ac81732c499f0edd05084",
+    "rule_cells": "04cb50a84ef9c5f9edfc3e5983e9a9eea13e69a1ce19c462fb1af4f48face93e",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
-    "tasks": "0e7ef8a8240c951b30447cdc147395503b0a93e438972fdc25e5ff459dc5107c",
+    "tasks": "f0c05a2a05135e822ab077a843472e4cb4d31b93b5c27050685bf6b9675e4cdc",
+}
+# Captured directly from the S7 fixture through _non_baseline_semantic_digests. Typed-event-derived hashes and
+# interchangeable predicate origins are normalized, while every decision, claim, lane, raw citation and gate is
+# checked field by field.
+GOLDEN_NON_BASELINE_SEMANTICS = {
+    "candidates": {
+        "all_fields": "1449f2eda5df5db8bba1f2953ecf743590fbccb5827ae924c4d7ff911e6370cc",
+        "benign_alternatives": "8e3c0bf9bd14733cc2b4a049393aded638eaa0e93632c2c69d1428a52a4cc221",
+        "claim": "94f373eede1b0deee042a316fc9ede39a619bbef58ded217ad94860f9fd4a2b0",
+        "claim_type": "1ccc0da03751218f3bb63463a348cd5519fb63c2eec9e0d2e83259f18bfc6681",
+        "confidence": "307872061aea17d3b0ed62d34865ad350c9b4cb9cc7d2cea041ca39011ee3e7e",
+        "context_event_records": "14e8dd60caac665ccc2c9570d79e5556b3cd929f6d77e471ee65e0ced5529799",
+        "count": 35,
+        "entities": "dfb7f8d1a995807f75365452dae6c80e325d1f2d1ad42f1fd1a2bb1292b98d21",
+        "event_records": "d1e3c446a09e2c4921cc3562b4cfa20f9be678868ba2976a65cd049fdabbae48",
+        "gate_results": "1494f3c1cd4853709e0ccaa599c397076f29a9b8ef2431c339d607cabb57f46e",
+        "group_key": "e568af201841df36a89a8f8cebf9384f4fae5219b5fa742761a17778c24e21db",
+        "lane": "2a992b1fbb25d9d7cddc90e6ada69d30c0eb0e743881c35e567bd8cc08828f3b",
+        "next_checks": "a8069762d98e73840e159485c7fd877c5bc891cb9eab67f139c75af1e1eb979f",
+        "predicate_fields": "578a1d5b70a2fcc8a4cb62c5c02ceb1bdae66cd8c85400a4da6412aa77b70c16",
+        "priority": "aa73edc71e40ea4964645f62817edb7b3e790121d824db413442d99a21c05d5d",
+        "priority_reasons": "b473ae5921bb2f50e3cc347ad18a3a5b6557ecacdaca7568e9f2f10b2fde3a9b",
+        "rule_id": "2ae926e61da026e299be84e4e716e9bd0a33eb9a6ea3c97196c3167fc017a257",
+        "rule_version": "2142bc3ed67292746dfe53ca60a03a13e3c92a2cffc7b02f5a9dbec3f551101f",
+        "severity": "b2e229e267531f35a076f4db58edc48cbea38cce613ae2a6954cb6b1bf5ea20c",
+        "source_presence": "4b20d257ae462d3a6c1af7eeddf340a1558a100d29f517eb7b5c7564fa778d1c",
+        "ts": "d8015c1ff0b135e082a5fef2ab1cb88206470e30beee157a0cfc7790d48b8310",
+    },
+    "rule_cells": {
+        "all_fields": "8e74a064318014defdc8084d3f44c5e64e91f002cd85268146431a9e0bb88f68",
+        "count": 3688,
+        "detail": "3b6af381df806efdc5499095d6bdada58f46a51ad0fe49ef73b7943cf00bd1f7",
+        "evaluated": "9a4cc79e7039a5e5987bfa7865f4e6e792c5b79bc164e5b8d12dd1a0ebfc790a",
+        "matched": "5f86646f1c45362a125a457db638a1bc775450b07628b809bd008c3fd15ee45f",
+        "partition": "b172589e7b406a22e7325bd06a8df239958a812c681c846dc588734b82a04807",
+        "rule_id": "10210f59a0598c51c024391f3880dea1cbbb8b9edb7d9d0236b06f3e2571934c",
+        "rule_version": "4fc681e6e7ff900d86bf15f7eb989457a3daefbcf56649989fae0f1597dd0390",
+        "state": "58b1b96d6f59540c4b4a12550f3aeca9bd5751269e49d4909a1899443f169442",
+        "target": "ab5599793d6b17b874ecfbb346dcffe738e30bcd85366dadcae28ac17c8e2545",
+    },
 }
 GOLDEN_NORMALIZED = {
-    "arkime_sessions3-x": "20b597e7169ff4713f006bd7b69608eea69a2038505dfa92fdf393709af2fe54",
-    "arkime_sessions3-x+boots": "20b597e7169ff4713f006bd7b69608eea69a2038505dfa92fdf393709af2fe54",
-    "romulus-host-x": "c8605640b20e6a43246db56f2367558b2fab33063ea7a56e4a17d3dcdbdcf9dd",
-    "romulus-host-x+boots": "a21ec9b0aed076c9cee5436e392604732f4eb7cb0641045d538b7b9f2954a573",
-    "romulus-network-x": "570f22b06412adcfad2fba2d17d71ebe4c28b40b1ae69dc89e5ed88325f03385",
-    "romulus-network-x+boots": "570f22b06412adcfad2fba2d17d71ebe4c28b40b1ae69dc89e5ed88325f03385",
+    "arkime_sessions3-x": "49755f3034ebf83ec012716f283034f38087d5c7f1cabb0df5c1bf9a7db4eb10",
+    "arkime_sessions3-x+boots": "49755f3034ebf83ec012716f283034f38087d5c7f1cabb0df5c1bf9a7db4eb10",
+    "romulus-host-x": "7b698601e63b7c16fdb1c3b8bbf1cb1a28554bfa1ea19c2050dae704b8f7e6fa",
+    "romulus-host-x+boots": "3f7e8e5acb3941e4aebd98d806854db6638826ae21aaf90e23c331b4c05a0a27",
+    "romulus-network-x": "c7f6b8047e46c515a860217295c01d353fef49ca6e606475b79650eda20c3d3b",
+    "romulus-network-x+boots": "c7f6b8047e46c515a860217295c01d353fef49ca6e606475b79650eda20c3d3b",
 }
 GOLDEN_PIVOT = {
-    "arkime_sessions3-x:-": "10452ded995f9c13ed57ff9ff96c9fb3a859824f4ad87939ef5bdeefd2529b7a",
-    "arkime_sessions3-x:process_exec": "10452ded995f9c13ed57ff9ff96c9fb3a859824f4ad87939ef5bdeefd2529b7a",
-    "arkime_sessions3-x:net_socket": "10452ded995f9c13ed57ff9ff96c9fb3a859824f4ad87939ef5bdeefd2529b7a",
-    "arkime_sessions3-x:auth,net_socket,process_exec": "10452ded995f9c13ed57ff9ff96c9fb3a859824f4ad87939ef5bdeefd2529b7a",
-    "arkime_sessions3-x:net_flow": "10452ded995f9c13ed57ff9ff96c9fb3a859824f4ad87939ef5bdeefd2529b7a",
-    "romulus-host-x:-": "b3b73239344c635784b888d698d2bcc9a7eeb816187500b97cbc2f1ab29ee7cb",
-    "romulus-host-x:process_exec": "2342b20a28efdf4226f91bb8b4665857c585bbb865a9c055ecb9617bd394ac75",
-    "romulus-host-x:net_socket": "e4ab66f60b9dc300f0a3e7426c4db6da78e95ebf6a0bbbd7eaff5684103b7ac8",
-    "romulus-host-x:auth,net_socket,process_exec": "b3b73239344c635784b888d698d2bcc9a7eeb816187500b97cbc2f1ab29ee7cb",
-    "romulus-host-x:net_flow": "b3b73239344c635784b888d698d2bcc9a7eeb816187500b97cbc2f1ab29ee7cb",
-    "romulus-network-x:-": "1cd1a455435f582cb9214500155dd594e0fe845919c5f7607574d54039ba5c1e",
+    "arkime_sessions3-x:-": "1e222211f99bc0aa64458c9a629a263bdecd0a365eb28feb2d8bc2c8b1d52d18",
+    "arkime_sessions3-x:process_exec": "1e222211f99bc0aa64458c9a629a263bdecd0a365eb28feb2d8bc2c8b1d52d18",
+    "arkime_sessions3-x:net_socket": "1e222211f99bc0aa64458c9a629a263bdecd0a365eb28feb2d8bc2c8b1d52d18",
+    "arkime_sessions3-x:auth,net_socket,process_exec": "1e222211f99bc0aa64458c9a629a263bdecd0a365eb28feb2d8bc2c8b1d52d18",
+    "arkime_sessions3-x:net_flow": "1e222211f99bc0aa64458c9a629a263bdecd0a365eb28feb2d8bc2c8b1d52d18",
+    "romulus-host-x:-": "198db87bdcf7ade9c2d53ea81bc15166c3e77734541da3fe82a925085c74ec33",
+    "romulus-host-x:process_exec": "1837ef9198a0ab5552ea60ca415acc40be6cf9339fe7a5dafd51354e39f18ba0",
+    "romulus-host-x:net_socket": "b92e4dc84c0403f132a2066b7cc32392f87cfa3d62bddeaa00e74e55ad9cea94",
+    "romulus-host-x:auth,net_socket,process_exec": "198db87bdcf7ade9c2d53ea81bc15166c3e77734541da3fe82a925085c74ec33",
+    "romulus-host-x:net_flow": "198db87bdcf7ade9c2d53ea81bc15166c3e77734541da3fe82a925085c74ec33",
+    "romulus-network-x:-": "541211d1dc3e2ce1304804b4c9ca44842764853a3a43ecba3bce839906a62520",
     "romulus-network-x:process_exec": "9e505ce98b1b1f339349e89f9e2e58082d9066b316aa4aa97b727de0423759c6",
     "romulus-network-x:net_socket": "9e505ce98b1b1f339349e89f9e2e58082d9066b316aa4aa97b727de0423759c6",
     "romulus-network-x:auth,net_socket,process_exec": "9e505ce98b1b1f339349e89f9e2e58082d9066b316aa4aa97b727de0423759c6",
-    "romulus-network-x:net_flow": "6fbac86c1546e6f66cca0db257b23c5f0099622d61b3c2dfd46a9ad6240cd903",
+    "romulus-network-x:net_flow": "d87be864a0f1f1286442d5308c4621a727342cfff6ed3d280077adf034ac1d3b",
 }
 PIVOT_FAMILIES = (None, frozenset({"process_exec"}), frozenset({"net_socket"}),
                   frozenset({"process_exec", "net_socket", "auth"}), frozenset({"net_flow"}))
@@ -213,6 +284,112 @@ def _digest(value) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
 
 
+def _raw_event_identity(event_id, events):
+    event = events[event_id]
+    return sorted(event["raw_ids"])
+
+
+def _normalize_detail_citations(value, events, key=""):
+    citation_keys = {
+        "event_id", "event_ids", "evidence_id", "evidence_ids", "first_event_id",
+        "first_event_ids", "anchor_event_id", "anchor_event_ids",
+    }
+    if isinstance(value, dict):
+        return {name: _normalize_detail_citations(nested, events, name) for name, nested in value.items()}
+    if isinstance(value, list):
+        if key in citation_keys:
+            return sorted(_raw_event_identity(item, events) for item in value)
+        return [_normalize_detail_citations(item, events, key) for item in value]
+    if isinstance(value, str) and key in citation_keys:
+        return _raw_event_identity(value, events)
+    return value
+
+
+def _field_digests(rows, fields):
+    def ordered(values):
+        return sorted(values, key=lambda value: json.dumps(value, sort_keys=True, separators=(",", ":"), default=str))
+
+    return {
+        "all_fields": _digest(rows),
+        "count": len(rows),
+        **{field: _digest(ordered([row[field] for row in rows])) for field in fields},
+    }
+
+
+def _semantic_group_key(value):
+    return re.sub(r"(?<=\|lin:)[0-9a-f]+", "<typed-event-identity>", value)
+
+
+def _semantic_gate_results(value):
+    result = {key: nested for key, nested in value.items() if key != "_finalize_digest"}
+    if "_context_reaches" in result:
+        result["_context_reaches"] = sorted(
+            ({"link_type": row["link_type"], "strength": row["strength"]} for row in result["_context_reaches"]),
+            key=lambda row: (row["link_type"], row["strength"]),
+        )
+    return result
+
+
+def _non_baseline_semantic_digests(snapshot):
+    events = {row["id"]: row for row in snapshot["events"]}
+    candidates = []
+    for row in snapshot["candidates"]:
+        if row["rule_id"].startswith("bl."):
+            continue
+        candidates.append({
+            "rule_id": row["rule_id"],
+            "rule_version": row["rule_version"],
+            "ts": row["ts"],
+            "claim": row["claim"],
+            "claim_type": row["claim_type"],
+            "severity": row["severity"],
+            "confidence": row["confidence"],
+            "lane": row["lane"],
+            "priority": row["priority"],
+            "priority_reasons": row["priority_reasons"],
+            # Exact cited raw records are compared separately. Predicate origins may select a different one of
+            # two cited records that carry the same value when typed-event ids are rehashed.
+            "predicate_fields": [
+                {"field": item["field"], "value": item["value"]} for item in row["predicate_fields"]
+            ],
+            "entities": row["entities"],
+            # Context grouping/finalization hashes contain typed-event ids. Preserve their semantic shape and
+            # every gate outcome while excluding those derived identities.
+            "group_key": _semantic_group_key(row["group_key"]),
+            "gate_results": _semantic_gate_results(row["gate_results"]),
+            "benign_alternatives": row["benign_alternatives"],
+            "next_checks": row["next_checks"],
+            "event_records": sorted(_raw_event_identity(item, events) for item in (row["event_ids"] or [])),
+            "context_event_records": sorted(
+                _raw_event_identity(item, events) for item in (row["context_event_ids"] or [])
+            ),
+            "source_presence": {
+                "anchor": row["source_anchor_id"] is not None,
+                "case": row["source_case_id"] is not None,
+                "link": row["source_link_id"] is not None,
+            },
+        })
+    candidates.sort(key=lambda row: json.dumps(row, sort_keys=True, separators=(",", ":"), default=str))
+
+    rule_cells = [{
+        "rule_id": row["rule_id"],
+        "rule_version": row["rule_version"],
+        "target": row["target"],
+        "partition": row["partition"],
+        "state": row["state"],
+        "matched": row["matched"],
+        "evaluated": row["evaluated"],
+        "detail": _normalize_detail_citations(row["detail"], events),
+    } for row in snapshot["rule_cells"] if not row["rule_id"].startswith("bl.")]
+    rule_cells.sort(key=lambda row: (
+        row["rule_id"], row["rule_version"], row["target"], row["partition"],
+    ))
+    return {
+        "candidates": _field_digests(candidates, tuple(candidates[0])),
+        "rule_cells": _field_digests(rule_cells, tuple(rule_cells[0])),
+    }
+
+
 def _normalized(records, boots=None) -> dict:
     events, skips, errors = normalize_hits(records, boots)
     return {"events": [event.model_dump(mode="json") for event in events], "skips": skips, "errors": errors}
@@ -234,6 +411,7 @@ def test_the_sweep_and_expansion_stack_reproduces_the_captured_result(docs, tmp_
     assert snapshot["manifest"]["findings"]
     _assert_every_citation_resolves_with_raw(snapshot)
     assert tf.digests(snapshot) == GOLDEN_STACK
+    assert _non_baseline_semantic_digests(snapshot) == GOLDEN_NON_BASELINE_SEMANTICS
 
 
 def test_normalization_of_every_target_reproduces_the_captured_events(docs):

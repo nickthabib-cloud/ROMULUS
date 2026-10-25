@@ -5,9 +5,13 @@ import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import event
+from sqlalchemy.dialects.sqlite import insert
 
-from romulus.baseline.carry import CarryInStore, ParentExec, PendingResolver
+from romulus.baseline.carry import CarryInStore, ParentExec, ParentObservation, PendingResolver
 from romulus.baseline.spec import Pending
+from romulus.evidence.typed import Outcome, TypedEvent, fv
+from romulus.store import schema as tables
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
 
@@ -75,9 +79,11 @@ def test_marker_cache_overflow_persists_advances_before_reboot_comparison(monkey
 def test_deleting_hunt_cascades_its_disk_carry_state():
     repo, store = _store()
     store.observe_rows([_row(10, 1, "/parent")])
+    store.observe_observation_rows([_observed(11, 2, "/observed")])
     repo.set_hunt_state("hunt", "canceled")
     repo.delete_hunt("hunt", actor="test")
     assert repo.baseline_parent_count("hunt") == 0
+    assert repo.baseline_parent_observation_count("hunt") == 0
 
 
 def test_pending_resolver_produces_key_or_explicit_unresolved_reason():
@@ -92,7 +98,311 @@ def test_pending_resolver_produces_key_or_explicit_unresolved_reason():
     init = resolver.resolve(Pending("host", "boot-a", 1, START, "init", "/bin/sh"))
     kthreadd = resolver.resolve(Pending("host", "boot-a", 2, START, "kthreadd", "/bin/sh"))
     assert before.reason == "parent exec before history" and before.keys == ()
-    assert init.reason == kthreadd.reason == "parent pid 1/2 out of scope"
+    assert init.reason is None and init.keys[0].key["parent_executable"] == "init"
+    assert kthreadd.reason is None and kthreadd.keys[0].key["parent_executable"] == "kthreadd"
+
+
+def _observed(pid: int, seconds: float, executable: str, *, ppid: int = 1,
+              boot: str = "boot-a", serial: int | None = None, session: int | None = 9) -> ParentObservation:
+    return ParentObservation(
+        "host", boot, pid, START + timedelta(seconds=seconds), executable, ppid,
+        session, f"observed-{pid}-{seconds}-{executable}", serial,
+    )
+
+
+def _unknown_exec(pid: int, seconds: float) -> TypedEvent:
+    return TypedEvent(
+        id=f"unknown-{pid}-{seconds}", family="process_exec",
+        ts=START + timedelta(seconds=seconds), host="host", outcome=Outcome.unknown,
+        fields={
+            "process.pid": fv(pid, "fixture"), "process.ppid": fv(1, "fixture"),
+            "process.executable": fv("/unknown", "fixture"), "host.boot.id": fv("boot-a", "fixture"),
+        },
+        raw=[], normalizer="fixture@1",
+    )
+
+
+def test_long_lived_parent_resolves_from_a_same_boot_observed_image():
+    repo, store = _store()
+    store.observe_observation_rows([_observed(10, 1, "/usr/sbin/nginx")])
+
+    resolved = PendingResolver(store).resolve(Pending(
+        "host", "boot-a", 10, START + timedelta(seconds=20), "child", "/bin/sh",
+    ))
+
+    assert resolved.reason is None
+    assert resolved.keys[0].key == {
+        "child_executable": "/bin/sh", "parent_executable": "/usr/sbin/nginx",
+    }
+    assert repo.baseline_parent_observation_count("hunt") == 1
+
+
+def test_an_observed_image_without_a_recorded_boot_is_never_used_as_carry_in():
+    repo, store = _store()
+    store.observe_observation_rows([_observed(10, 1, "/usr/sbin/nginx", boot="")])
+
+    resolved = PendingResolver(store).resolve(Pending(
+        "host", None, 10, START + timedelta(seconds=20), "child", "/bin/sh",
+    ))
+
+    assert repo.baseline_parent_observation_count("hunt") == 0
+    assert resolved.keys == () and resolved.reason == "parent boot is not recorded"
+
+
+def test_a_successful_exec_supersedes_an_older_observed_image():
+    _repo, store = _store()
+    store.observe_observation_rows([_observed(10, 1, "/usr/sbin/nginx")])
+    store.observe_rows([_row(10, 10, "/usr/bin/reloaded")])
+
+    resolved = PendingResolver(store).resolve(Pending(
+        "host", "boot-a", 10, START + timedelta(seconds=20), "child", "/bin/sh",
+    ))
+
+    assert resolved.reason is None
+    assert resolved.keys[0].key["parent_executable"] == "/usr/bin/reloaded"
+
+
+def test_an_evicted_exec_between_observation_and_child_never_restores_the_observed_image():
+    _repo, store = _store()
+    store.observe_observation_rows([_observed(10, 1, "/usr/sbin/nginx")])
+    store.observe_rows([
+        _row(10, 10, "/usr/bin/python3"),
+        _row(10, 30, "/bin/a"),
+        _row(10, 40, "/bin/b"),
+    ])
+
+    resolved = PendingResolver(store).resolve(Pending(
+        "host", "boot-a", 10, START + timedelta(seconds=20), "child", "/bin/sh",
+    ))
+
+    assert resolved.keys == () and "not carried" in resolved.reason
+
+
+def test_an_exec_evicted_before_the_observation_does_not_block_that_observed_image():
+    _repo, store = _store()
+    store.observe_rows([_row(10, 0, "/bin/old")])
+    store.observe_observation_rows([_observed(10, 1, "/usr/sbin/nginx")])
+    store.observe_rows([_row(10, 30, "/bin/a"), _row(10, 40, "/bin/b")])
+
+    resolved = PendingResolver(store).resolve(Pending(
+        "host", "boot-a", 10, START + timedelta(seconds=20), "child", "/bin/sh",
+    ))
+
+    assert resolved.reason is None
+    assert resolved.keys[0].key["parent_executable"] == "/usr/sbin/nginx"
+
+
+def test_a_single_exec_evicted_after_the_child_does_not_block_the_observed_image():
+    _repo, store = _store()
+    store.observe_observation_rows([_observed(10, 1, "/usr/sbin/nginx")])
+    store.observe_rows([
+        _row(10, 30, "/bin/after-child"),
+        _row(10, 40, "/bin/a"),
+        _row(10, 50, "/bin/b"),
+    ])
+
+    resolved = PendingResolver(store).resolve(Pending(
+        "host", "boot-a", 10, START + timedelta(seconds=20), "child", "/bin/sh",
+    ))
+
+    assert resolved.reason is None
+    assert resolved.keys[0].key["parent_executable"] == "/usr/sbin/nginx"
+
+
+def test_an_unknown_exec_between_observation_and_child_keeps_the_parent_unresolved():
+    _repo, store = _store()
+    store.observe_observation_rows([_observed(10, 1, "/usr/sbin/nginx")])
+    store.observe_events([_unknown_exec(10, 10)])
+    uncarried, _hostless = store.take_uncarried()
+    store.record_breaks(uncarried)
+
+    resolved = PendingResolver(store).resolve(Pending(
+        "host", "boot-a", 10, START + timedelta(seconds=20), "child", "/bin/sh",
+    ))
+
+    assert resolved.keys == () and "not carried" in resolved.reason
+
+
+def test_observed_parent_pid_reuse_is_ambiguous_never_joined_to_the_old_process():
+    _repo, store = _store()
+    store.observe_observation_rows([
+        _observed(10, 1, "/usr/sbin/nginx", ppid=1, session=9),
+        _observed(10, 30, "/usr/bin/unrelated", ppid=20, session=10),
+    ])
+
+    resolved = PendingResolver(store).resolve(Pending(
+        "host", "boot-a", 10, START + timedelta(seconds=20), "child", "/bin/sh",
+    ))
+
+    assert resolved.keys == () and "ambiguous" in resolved.reason
+
+
+def test_observed_parent_same_instant_tie_without_serials_is_unresolved():
+    _repo, store = _store()
+    store.observe_observation_rows([
+        _observed(10, 20, "/usr/sbin/nginx"),
+        _observed(10, 20, "/usr/bin/unrelated"),
+    ])
+
+    resolved = PendingResolver(store).resolve(Pending(
+        "host", "boot-a", 10, START + timedelta(seconds=20), "child", "/bin/sh",
+    ))
+
+    assert resolved.keys == () and "ambiguous" in resolved.reason
+
+
+def test_observed_parent_prior_same_instant_states_require_serial_order_or_stay_ambiguous():
+    _repo, unordered = _store()
+    unordered.observe_observation_rows([
+        _observed(10, 1, "/usr/sbin/nginx"),
+        _observed(10, 1, "/usr/bin/unrelated"),
+    ])
+    child = Pending("host", "boot-a", 10, START + timedelta(seconds=2), "child", "/bin/sh")
+    unresolved = PendingResolver(unordered).resolve(child)
+    assert unresolved.keys == () and "ambiguous" in unresolved.reason
+
+    _repo, ordered = _store()
+    ordered.observe_observation_rows([
+        _observed(10, 1, "/usr/sbin/nginx", serial=100),
+        _observed(10, 1, "/usr/bin/reloaded", serial=101),
+    ])
+    resolved = PendingResolver(ordered).resolve(child)
+    assert resolved.reason is None
+    assert resolved.keys[0].key["parent_executable"] == "/usr/bin/reloaded"
+
+
+def test_observed_parent_exact_instant_selects_the_nearest_prior_audit_serial():
+    _repo, store = _store()
+    store.observe_observation_rows([
+        _observed(10, 1, "/a", serial=100),
+        _observed(10, 1, "/m", serial=101),
+        _observed(10, 1, "/z", serial=102),
+    ])
+
+    resolved = PendingResolver(store).resolve(Pending(
+        "host", "boot-a", 10, START + timedelta(seconds=1), "child", "/bin/sh", 103,
+    ))
+
+    assert resolved.reason is None
+    assert resolved.keys[0].key["parent_executable"] == "/z"
+
+
+def test_observed_parent_retains_conflicting_states_at_the_nearest_later_instant():
+    _repo, store = _store()
+    store.observe_observation_rows([
+        _observed(10, 0, "/a"),
+        _observed(10, 2, "/a"),
+        _observed(10, 2, "/z"),
+    ])
+
+    resolved = PendingResolver(store).resolve(Pending(
+        "host", "boot-a", 10, START + timedelta(seconds=1), "child", "/bin/sh",
+    ))
+
+    assert resolved.keys == () and "ambiguous" in resolved.reason
+
+
+def test_parent_observations_keep_only_the_boundaries_of_each_process_state_run():
+    repo, store = _store()
+    rows = [
+        _observed(10, second, executable, ppid=ppid, session=session)
+        for start, executable, ppid, session in (
+            (1, "/usr/sbin/nginx", 1, 9),
+            (101, "/usr/bin/python3", 1, 9),
+            (201, "/usr/sbin/nginx", 20, 10),
+        )
+        for second in range(start, start + 100)
+    ]
+
+    written = store.observe_observation_rows(rows, chunk_size=37)
+
+    assert written == len(rows)
+    assert repo.baseline_parent_observation_count("hunt") == 6
+
+
+@pytest.mark.slow
+def test_parent_observation_chunk_cost_does_not_scale_with_untouched_history(tmp_path):
+    repo = Repo(make_engine(tmp_path / "parent-observations.db"))
+    migrate(repo.engine)
+    repo.create_hunt("hunt", {}, "d", "test")
+
+    def observations(start: int, count: int):
+        for index in range(start, start + count):
+            yield {
+                "hunt_id": "hunt", "target": "target", "host": f"host-{index % 50}",
+                "boot": "boot", "pid": index % 20_000,
+                "observed_ts": START + timedelta(seconds=index), "serial": index,
+                "executable": "/bin/a" if (index // 20_000) % 2 else "/bin/b",
+                "parent_pid": 1, "session": None, "event_id": f"event-{index}",
+            }
+
+    statement = insert(tables.baseline_parent_observation)
+    with repo.engine.begin() as connection:
+        connection.execute(statement, list(observations(0, 25_000)))
+
+    started = time.perf_counter()
+    repo.upsert_baseline_parent_observations(observations(25_000, 25_000), chunk_size=5_000)
+    small = time.perf_counter() - started
+
+    with repo.engine.begin() as connection:
+        for offset in range(50_000, 500_000, 25_000):
+            connection.execute(statement, list(observations(offset, 25_000)))
+
+    started = time.perf_counter()
+    repo.upsert_baseline_parent_observations(observations(500_000, 25_000), chunk_size=5_000)
+    large = time.perf_counter() - started
+    print(f"25k parent observations over 25k: {small:.2f}s; over 500k: {large:.2f}s")
+
+    assert large < max(1.0, small * 4)
+
+
+def test_parent_observation_compaction_plan_never_scans_the_observation_table():
+    repo, store = _store()
+    statements = []
+
+    def capture(connection, cursor, statement, parameters, context, executemany):
+        if "WITH incoming_rows" in statement:
+            statements.append((statement, parameters))
+
+    event.listen(repo.engine, "before_cursor_execute", capture)
+    store.observe_observation_rows(
+        [_observed(10 + second % 7, second, "/bin/a" if second % 3 else "/bin/b") for second in range(1, 400)],
+        chunk_size=100,
+    )
+    event.remove(repo.engine, "before_cursor_execute", capture)
+
+    statement, parameters = statements[-1]
+    with repo.engine.connect() as connection:
+        cursor = connection.connection.cursor()
+        cursor.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS baseline_parent_observation_incoming ("
+            "hunt_id TEXT, target TEXT, host TEXT, boot TEXT, pid INTEGER, observed_ts DATETIME,"
+            " event_id TEXT, PRIMARY KEY (hunt_id, target, host, boot, pid, observed_ts, event_id)"
+            ") WITHOUT ROWID"
+        )
+        plan = [row[-1] for row in cursor.execute("EXPLAIN QUERY PLAN " + statement, parameters)]
+
+    # Only the chunk-sized CTEs may be scanned; every observation-table access is an index or rowid lookup.
+    scanned = {detail.split()[1] for detail in plan if detail.startswith("SCAN")}
+    assert scanned <= {"incoming", "candidate", "current", "incoming_rows", "candidate_ids", "candidate_rows"}, plan
+
+
+@pytest.mark.slow
+def test_a_million_repeated_parent_observations_compact_to_two_run_boundaries():
+    repo, store = _store()
+
+    started = time.perf_counter()
+    written = store.observe_observation_rows(
+        (_observed(10, second, "/usr/sbin/nginx") for second in range(1_000_000)),
+        chunk_size=100_000,
+    )
+    elapsed = time.perf_counter() - started
+    retained = repo.baseline_parent_observation_count("hunt")
+    print(f"1m repeated parent observations in {elapsed:.1f}s; retained rows {retained}")
+
+    assert written == 1_000_000
+    assert retained == 2
+    assert elapsed < 180
 
 
 @pytest.mark.slow

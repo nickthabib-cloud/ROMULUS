@@ -396,7 +396,9 @@ def _case_conclusion(summary: str | None) -> dict | None:
 
 def _expansion_investigations(repo: Repo, hunt_id: str, audit: dict) -> dict:
     anchors = repo.expansion_anchors(hunt_id)
-    links = repo.expansion_links(hunt_id)
+    # created_at reflects runtime scheduling, not report identity. Emit stable content order even before the
+    # whole-manifest canonicalizer so this helper cannot leak execution order to another caller.
+    links = sorted(repo.expansion_links(hunt_id), key=lambda row: row["id"])
     by_status = {
         status: [row["id"] for row in anchors if row["status"] == status]
         for status in ("expanded_complete", "expanded_partial", "unexpanded", "pending")

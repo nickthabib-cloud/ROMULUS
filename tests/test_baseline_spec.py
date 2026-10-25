@@ -71,11 +71,10 @@ def test_registry_has_the_six_accepted_specs_and_metadata():
         "bl.ssh_tuple": "presence", "bl.exec_path": "prevalence", "bl.exec_pair": "prevalence",
         "bl.cmd_shape": "prevalence", "bl.ext_dest": "prevalence", "bl.svc_exec_rate": "rate",
     }
-    # the external-destination spec keys DNS records by the DNS port's side (questions read as sent when the ports do
-    # not tell) since its third key version
+    # The fourth external-destination key version also distinguishes v1 answer-name recovery from v2/v3 records.
     assert {spec.id: (spec.version, spec.key_version) for spec in BASELINE_SPECS} == {
-        "bl.ssh_tuple": ("1", "1"), "bl.exec_path": ("1", "1"), "bl.exec_pair": ("1", "1"),
-        "bl.cmd_shape": ("1", "1"), "bl.ext_dest": ("3", "3"), "bl.svc_exec_rate": ("1", "1"),
+        "bl.ssh_tuple": ("1", "1"), "bl.exec_path": ("1", "1"), "bl.exec_pair": ("2", "2"),
+        "bl.cmd_shape": ("4", "4"), "bl.ext_dest": ("4", "4"), "bl.svc_exec_rate": ("1", "2"),
     }
 
 
@@ -234,6 +233,7 @@ def test_exec_pair_uses_the_same_boot_parent_exec():
     ))
     child = _event(
         "process_exec",
+        outcome=Outcome.success,
         **{
             "process.pid": 101, "process.ppid": 100, "process.executable": "/bin/sh",
             "host.boot.id": "boot-a",
@@ -246,7 +246,7 @@ def test_exec_pair_uses_the_same_boot_parent_exec():
 
 
 def test_exec_pair_without_parent_exec_returns_compact_pending_carry_in():
-    child = _event("process_exec", event_id="child-1", host="Web01",
+    child = _event("process_exec", event_id="child-1", host="Web01", outcome=Outcome.success,
                    **{"process.ppid": 100, "process.executable": "/bin/sh"})
     # the host stays as recorded: a carry-in pid table is keyed on the recorded host
     assert SPEC_BY_ID["bl.exec_pair"].keys(child, _ctx()) == Pending(
@@ -266,7 +266,7 @@ def test_exec_pair_accepts_any_parent_lookup_exposing_only_lookup():
             return (ts - 1, "/usr/sbin/cron", 1, "raw-1", boot)
 
     table = OneParent()
-    child = _event("process_exec", **{"process.ppid": 7, "process.executable": "/bin/sh",
+    child = _event("process_exec", outcome=Outcome.success, **{"process.ppid": 7, "process.executable": "/bin/sh",
                                       "host.boot.id": "boot-a"})
     keys = SPEC_BY_ID["bl.exec_pair"].keys(child, KeyContext(pid_table=table))
     assert keys[0].key == {"child_executable": "/bin/sh", "parent_executable": "/usr/sbin/cron"}
@@ -284,6 +284,7 @@ def test_exec_pair_never_joins_a_parent_from_another_boot():
     ))
     child = _event(
         "process_exec",
+        outcome=Outcome.success,
         **{"process.ppid": 100, "process.executable": "/bin/sh", "host.boot.id": "boot-b"},
     )
     assert SPEC_BY_ID["bl.exec_pair"].keys(child, _ctx(table)) == Pending(
@@ -304,14 +305,35 @@ def test_exec_pair_never_joins_a_parent_from_another_boot():
     ],
 )
 def test_exec_pair_absent_or_malformed_required_value_is_typed_missing(host, fields, missing):
-    event = _event("process_exec", host=host, **{"process.ppid": 100, "process.executable": "/bin/sh", **fields})
+    event = _event(
+        "process_exec", host=host, outcome=Outcome.success,
+        **{"process.ppid": 100, "process.executable": "/bin/sh", **fields},
+    )
     result = SPEC_BY_ID["bl.exec_pair"].keys(event, _ctx())
     assert isinstance(result, Missing) and result.fields == missing
+
+
+@pytest.mark.parametrize(
+    ("spec_id", "fields"),
+    [
+        ("bl.exec_pair", {"process.ppid": 100, "process.executable": "/bin/sh"}),
+        ("bl.cmd_shape", {"process.executable": "/bin/sh", "process.argv": ["sh", "-c", "id"]}),
+    ],
+)
+def test_exec_pair_and_command_shape_require_a_successful_exec(spec_id, fields):
+    spec = SPEC_BY_ID[spec_id]
+
+    failed = spec.keys(_event("process_exec", outcome=Outcome.failure, **fields), _ctx())
+    unknown = spec.keys(_event("process_exec", outcome=Outcome.unknown, **fields), _ctx())
+
+    assert isinstance(failed, NotApplicable) and "failed" in failed.reason
+    assert isinstance(unknown, Missing) and unknown.fields == ("outcome",)
 
 
 def test_command_shape_masks_variable_tokens_without_using_serialized_records():
     event = _event(
         "process_exec",
+        outcome=Outcome.success,
         **{
             "process.executable": "/usr/bin/tool",
             "process.argv": [
@@ -331,6 +353,110 @@ def test_command_shape_masks_variable_tokens_without_using_serialized_records():
     }
 
 
+def _command_shape(argv: list[str]) -> list[str]:
+    result = SPEC_BY_ID["bl.cmd_shape"].keys(_event(
+        "process_exec", outcome=Outcome.success,
+        **{"process.executable": f"/usr/bin/{argv[0]}", "process.argv": argv},
+    ), _ctx())
+    return result[0].key["argv_shape"]
+
+
+def test_command_shape_keeps_security_relevant_chmod_modes_distinct():
+    assert _command_shape(["chmod", "4755", "/tmp/tool"]) == ["chmod", "4755", "/tmp/tool"]
+    assert _command_shape(["chmod", "755", "/tmp/tool"]) == ["chmod", "755", "/tmp/tool"]
+
+
+@pytest.mark.parametrize(
+    ("name", "masked"),
+    [
+        ("tmp.XXXXXXXXXX", "<tmp>"),
+        ("/tmp/tmp.aB19zQ", "/tmp/<tmp>"),
+        ("temp-session_A1b2C3d4", "<tmp>"),
+        ("/tmp/tmp.AbCdEfGhIj", "/tmp/<tmp>"),
+        ("/tmp/tmp.abcdefghij", "/tmp/<tmp>"),
+        ("tmp.Xa81kQ", "<tmp>"),
+    ],
+)
+def test_command_shape_masks_only_the_mktemp_basename_and_preserves_its_directory(name, masked):
+    assert _command_shape(["mktemp", name]) == ["mktemp", masked]
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/usr/local/bin/sshd",
+        "/home/attacker/implant",
+        "/usr/local/sbin/backdoor",
+        "/var/lib/docker/overlay2",
+        "/etc/cron.d/tmp_backdoor",
+        "/etc/cron.d/tmp_persist1",
+        "/etc/sudoers.d/temp-escalate",
+        "/var/www/html/temp-uploads",
+        "usr/local/bin/sshd",
+        "../../etc/cron.d/x",
+        "Library/LaunchDaemons/ComAppleUpdate",
+        "Program/Files/Common/Files/Microsoft/Shared",
+        "Home/Admin/Ssh/AuthorizedKeys/Root",
+    ],
+)
+def test_command_shape_never_masks_absolute_or_segmented_security_paths_as_base64_or_temp(path):
+    assert _command_shape(["tool", path]) == ["tool", path]
+
+
+def test_command_shape_keeps_assignment_paths_and_chmod_targets_literal():
+    assert _command_shape(["tool", "--output=/usr/lib/systemd/system"]) == [
+        "tool", "--output=/usr/lib/systemd/system",
+    ]
+    assert _command_shape(["tool", "--prefix=Program/Files/Common/Files/Microsoft"]) == [
+        "tool", "--prefix=Program/Files/Common/Files/Microsoft",
+    ]
+
+
+@pytest.mark.parametrize("name", ["tmp_backdoor", "temp-escalate", "tmp_persist1"])
+def test_command_shape_keeps_wordlike_tmp_names_literal(name):
+    assert _command_shape(["tool", name]) == ["tool", name]
+    assert _command_shape(["chmod", "4755", "/usr/local/bin/sshd"]) == [
+        "chmod", "4755", "/usr/local/bin/sshd",
+    ]
+    assert _command_shape(["cp", "/tmp/tmp.A1b2C3", "/etc/cron.d/tmp.A1b2C3"]) == [
+        "cp", "/tmp/<tmp>", "/etc/cron.d/<tmp>",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("blob", "bucket"),
+    [
+        ("aGVsbG8gd29ybGQhIQ==", "<b64:16-31>"),
+        ("VGhlIHF1aWNrIGJyb3duIGZveCBqdW1wcw", "<b64:32-63>"),
+        ("QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo+", "<b64:32-63>"),
+        (
+            ("AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKywtLi8wMTIzNDU2Nzg5"
+             "Ojs8PT4/QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl9gYWJjZGVmZ2hpamtsbW5vcHFy"
+             "c3R1dnd4"),
+            "<b64:128-255>",
+        ),
+        (
+            ("AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKywtLi8wMTIzNDU2Nzg5"
+             "Ojs8PT4/QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl9gYWJjZGVmZ2hpamtsbW5vcHFy"
+             "c3R1dnc="),
+            "<b64:128-255>",
+        ),
+    ],
+)
+def test_command_shape_masks_base64_with_padding_symbol_or_length_and_entropy_evidence(blob, bucket):
+    assert _command_shape(["tool", blob]) == ["tool", bucket]
+
+
+def test_command_shape_rejects_structurally_invalid_base64_without_decoding_it():
+    invalid = "G" * 17
+    assert _command_shape(["tool", invalid]) == ["tool", invalid]
+
+
+def test_command_shape_does_not_mask_low_entropy_base64_alphabet_text():
+    repeated = "G" * 32
+    assert _command_shape(["tool", repeated]) == ["tool", repeated]
+
+
 @pytest.mark.parametrize(
     ("host", "fields", "missing"),
     [
@@ -345,7 +471,9 @@ def test_command_shape_masks_variable_tokens_without_using_serialized_records():
     ],
 )
 def test_command_shape_incomplete_or_missing_argv_is_typed_missing(host, fields, missing):
-    result = SPEC_BY_ID["bl.cmd_shape"].keys(_event("process_exec", host=host, **fields), _ctx())
+    result = SPEC_BY_ID["bl.cmd_shape"].keys(
+        _event("process_exec", host=host, outcome=Outcome.success, **fields), _ctx(),
+    )
     assert isinstance(result, Missing) and result.fields == missing
 
 
@@ -422,6 +550,49 @@ def test_dns_answer_scopes_the_client_not_the_resolver():
     assert [key.scope for key in keys] == ["internal_ip:10.0.0.4"]
 
 
+@pytest.mark.parametrize(
+    ("role", "fields"),
+    [
+        ("query", {"source.ip": "10.0.0.4", "source.port": 40000, "destination.port": 53}),
+        ("answer", {"destination.ip": "10.0.0.4", "source.port": 53, "destination.port": 40000}),
+    ],
+)
+def test_dns_record_does_not_require_the_resolver_ip(role, fields):
+    keys = SPEC_BY_ID["bl.ext_dest"].keys(_event(
+        "dns_query", **{"dns.type": role, "dns.question.name": "www.example.com", **fields},
+    ), _ctx())
+
+    assert [key.scope for key in keys] == ["internal_ip:10.0.0.4"]
+
+
+@pytest.mark.parametrize("version", [2, 3, "2", "3"])
+def test_dns_v2_and_v3_answers_without_questions_are_missing(version):
+    result = SPEC_BY_ID["bl.ext_dest"].keys(_event(
+        "dns_query", **{
+            "dns.type": "answer", "dns.version": version,
+            "source.ip": "10.0.0.53", "source.port": 53,
+            "destination.ip": "10.0.0.4", "destination.port": 40000,
+            "dns.answers": [{"name": "www.example.com", "type": "A", "data": "192.0.2.1"}],
+        },
+    ), _ctx())
+
+    assert isinstance(result, Missing)
+    assert result.fields == ("dns.question.names", "dns.question.name")
+
+
+def test_dns_v1_answer_without_a_question_may_key_from_its_answer_name():
+    keys = SPEC_BY_ID["bl.ext_dest"].keys(_event(
+        "dns_query", **{
+            "dns.type": "answer", "source.ip": "10.0.0.53", "source.port": 53,
+            "destination.ip": "10.0.0.4", "destination.port": 40000,
+            "dns.answers": [{"name": "WWW.Example.COM.", "type": "A", "data": "192.0.2.1"}],
+        },
+    ), _ctx())
+
+    assert [key.scope for key in keys] == ["internal_ip:10.0.0.4"]
+    assert [key.key for key in keys] == [{"kind": "registered_domain", "registered_domain": "example.com"}]
+
+
 @pytest.mark.parametrize("flow_oriented", [False, True])
 def test_a_dns_answer_keys_its_client_in_either_orientation(flow_oriented):
     """Suricata writes an answer in its flow's orientation (client as source, server on port 53 as destination); a
@@ -472,14 +643,8 @@ def test_a_dns_question_whose_ports_do_not_tell_is_read_as_sent(ports, role):
         ("net_flow", {"source.ip": "not-an-ip", "destination.ip": "192.0.2.1"}, ("source.ip",)),
         ("net_flow", {"source.ip": "10.0.0.1", "destination.ip": "not-an-ip"}, ("destination.ip",)),
         ("net_session", {"source.ip": ["10.0.0.1"], "destination.ip": "192.0.2.1"}, ("source.ip",)),
-        ("tls_session", {"source.ip": "10.0.0.1", "destination.ip": "192.0.2.1",
-                         "tls.client.server_name": ["a.example.com"]}, ("tls.client.server_name",)),
-        ("tls_session", {"source.ip": "10.0.0.1", "destination.ip": "192.0.2.1",
-                         "tls.client.server_name": 7}, ("tls.client.server_name",)),
         ("dns_query", {"dns.type": "query", "source.port": 40000, "destination.port": 53, "source.ip": None, "destination.ip": "10.0.0.53",
                        "dns.question.name": "example.com"}, ("source.ip",)),
-        ("dns_query", {"dns.type": "query", "source.port": 40000, "destination.port": 53, "source.ip": "10.0.0.4", "destination.ip": "bogus",
-                       "dns.question.name": "example.com"}, ("destination.ip",)),
         ("dns_query", {"dns.type": "query", "source.port": 40000, "destination.port": 53, "source.ip": "10.0.0.4", "destination.ip": "10.0.0.53"},
          ("dns.question.names", "dns.question.name")),
         ("dns_query", {"dns.type": "query", "source.port": 40000, "destination.port": 53, "source.ip": "10.0.0.4", "destination.ip": "10.0.0.53",
@@ -516,8 +681,6 @@ def test_external_destination_absent_or_malformed_value_is_typed_missing(family,
         # a recorded DNS role that is neither question nor answer
         ("dns_query", {"dns.type": "update", "source.port": 40000, "destination.port": 53, "source.ip": "10.0.0.4", "destination.ip": "10.0.0.53",
                        "dns.question.name": "example.com"}),
-        # a Suricata v1 answer resource record carries no question; its query record does
-        ("dns_query", {"dns.type": "answer", "source.port": 53, "destination.port": 40000, "source.ip": "10.0.0.53", "destination.ip": "10.0.0.4"}),
     ],
 )
 def test_external_destination_wrong_direction_or_role_is_not_applicable(family, fields):
@@ -535,6 +698,18 @@ def test_internal_network_test_is_a_context_seam():
     assert isinstance(SPEC_BY_ID["bl.ext_dest"].keys(
         _event("net_flow", **{"source.ip": "10.0.0.4", "destination.ip": "203.0.113.9"}), context,
     ), NotApplicable)
+
+
+@pytest.mark.parametrize("sni", [["a.example.com"], 7, {"name": "a.example.com"}])
+def test_non_string_sni_drops_only_sni_dimensions(sni):
+    keys = SPEC_BY_ID["bl.ext_dest"].keys(_event("tls_session", **{
+        "source.ip": "10.0.0.1", "destination.ip": "192.0.2.1", "tls.client.server_name": sni,
+    }), _ctx())
+
+    assert _kinds(keys) == {
+        "dest_ip": {"kind": "dest_ip", "dest_ip": "192.0.2.1"},
+        "dest_network": {"kind": "dest_network", "dest_network": "192.0.2.0/24"},
+    }
 
 
 def test_service_exec_rate_keys_configured_service_accounts_with_an_empty_key():
@@ -581,11 +756,20 @@ def test_service_exec_rate_uid_range_is_configurable():
     assert isinstance(result, NotApplicable)
 
 
+@pytest.mark.parametrize("uid", (1, 114, 999, "114"))
+def test_service_exec_rate_keys_a_system_uid_when_account_name_is_absent(uid):
+    result = SPEC_BY_ID["bl.svc_exec_rate"].keys(
+        _event("process_exec", **{"process.uid": uid}), _ctx(),
+    )
+
+    assert len(result) == 1
+    assert result[0].scope == f'host_account:{{"account":"uid:{int(uid)}","host":"web01"}}'
+
+
 @pytest.mark.parametrize(
     ("host", "fields", "missing"),
     [
         (None, {"process.user": "postgres", "process.uid": "114"}, ("host",)),
-        ("web01", {"process.user": None, "process.uid": "114"}, ("process.user",)),
         ("web01", {"process.user": ["postgres"], "process.uid": "114"}, ("process.user",)),
         ("web01", {"process.user": "postgres"}, ("process.uid",)),
         ("web01", {"process.user": "postgres", "process.uid": True}, ("process.uid",)),
@@ -601,8 +785,8 @@ def test_service_exec_rate_absent_or_malformed_identity_is_typed_missing(host, f
 _COMPLETE = {
     ("bl.ssh_tuple", "auth"): (Outcome.success, SSH),
     ("bl.exec_path", "process_exec"): (Outcome.success, EXEC),
-    ("bl.exec_pair", "process_exec"): (Outcome.unknown, {"process.ppid": 100, "process.executable": "/bin/sh"}),
-    ("bl.cmd_shape", "process_exec"): (Outcome.unknown, {"process.executable": "/bin/sh", "process.argv": ["sh"]}),
+    ("bl.exec_pair", "process_exec"): (Outcome.success, {"process.ppid": 100, "process.executable": "/bin/sh"}),
+    ("bl.cmd_shape", "process_exec"): (Outcome.success, {"process.executable": "/bin/sh", "process.argv": ["sh"]}),
     ("bl.ext_dest", "net_flow"): (Outcome.unknown, {"source.ip": "10.0.0.4", "destination.ip": "192.0.2.1"}),
     ("bl.ext_dest", "net_session"): (Outcome.unknown, {"source.ip": "10.0.0.4", "destination.ip": "192.0.2.1"}),
     ("bl.ext_dest", "tls_session"): (Outcome.unknown, {"source.ip": "10.0.0.4", "destination.ip": "192.0.2.1"}),
@@ -636,6 +820,7 @@ def test_required_fields_are_accurate_per_event_kind():
 def test_key_digests_are_deterministic_across_repeated_extraction():
     event = _event(
         "process_exec",
+        outcome=Outcome.success,
         **{"process.executable": "/bin/tool", "process.argv": ["tool", "--port=1234"]},
     )
     first = SPEC_BY_ID["bl.cmd_shape"].keys(event, _ctx())[0]
@@ -666,6 +851,12 @@ def test_internationalized_names_become_punycode():
         "dns.question.name": "www.bücher.example",
     }), _ctx())
     assert [key.key["registered_domain"] for key in dns] == ["xn--bcher-kva.example"]
+
+    idna_2008 = SPEC_BY_ID["bl.ext_dest"].keys(_event("tls_session", **{
+        "source.ip": "10.0.0.4", "destination.ip": "198.51.100.9",
+        "tls.client.server_name": "Straße.Example",
+    }), _ctx())
+    assert _kinds(idna_2008)["sni"]["sni"] == "xn--strae-oqa.example"
 
 
 def test_an_unencodable_internationalized_name_is_missing():
@@ -740,6 +931,14 @@ def test_query_and_answer_of_one_dns_transaction_share_a_dedup_token():
     assert spec.keys(_dns("query", None), _ctx())[0].dedup_token is None
 
 
+def test_numeric_and_string_dns_ids_share_one_dedup_token():
+    spec = SPEC_BY_ID["bl.ext_dest"]
+    numeric = spec.keys(_dns("query", 77, **{"dns.id": 4919}), _ctx())[0]
+    text = spec.keys(_dns("query", 77, **{"dns.id": "4919"}), _ctx())[0]
+
+    assert numeric.dedup_token == text.dedup_token
+
+
 def test_records_of_one_flow_share_a_dedup_token_across_families():
     spec = SPEC_BY_ID["bl.ext_dest"]
     fields = {"source.ip": "10.0.0.4", "destination.ip": "198.51.100.9", "suricata.flow_id": 5}
@@ -757,7 +956,10 @@ def test_argv_shape_is_bounded_and_the_overflow_is_hashed_and_marked():
     spec = SPEC_BY_ID["bl.cmd_shape"]
 
     def shape(argv):
-        event = _event("process_exec", **{"process.executable": "/bin/tool", "process.argv": argv})
+        event = _event(
+            "process_exec", outcome=Outcome.success,
+            **{"process.executable": "/bin/tool", "process.argv": argv},
+        )
         return spec.keys(event, _ctx())[0]
 
     long_argv = ["tool", *[f"--opt-{index:04d}x" for index in range(1000)]]
@@ -771,9 +973,13 @@ def test_argv_shape_is_bounded_and_the_overflow_is_hashed_and_marked():
     assert changed_tail.key["argv_shape"] == bounded.key["argv_shape"]
     assert shape(list(long_argv)).key_digest == bounded.key_digest
 
-    giant = shape(["python3", "-c", "x" * 100_000, "--flag"])
+    giant = shape(["python3", "-c", "x" * 99_999 + "!", "--flag"])
     assert giant.key["argv_shape"] == ["python3", "-c"]
     assert giant.key["argv_overflow"]["tokens"] == 2
     assert len(canonical_json(giant.key)) < 2 * ARGV_SHAPE_MAX_CHARS
+
+    giant_base64 = shape(["python3", "-c", ("QWxhZGRpbjpvcGVuIHNlc2FtZQ" * 4000)[:100_000], "--flag"])
+    assert giant_base64.key["argv_shape"] == ["python3", "-c", "<b64:65536-131071>", "--flag"]
+    assert "argv_overflow" not in giant_base64.key
 
     assert "argv_overflow" not in shape(["tool", "--port=1"]).key

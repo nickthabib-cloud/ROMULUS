@@ -329,6 +329,7 @@ def test_unresolved_exec_pair_pending_never_becomes_an_empty_complete_segment():
     repo = _repo()
     child = TypedEvent(
         id="child", family="process_exec", ts=START - timedelta(minutes=1), host="web01",
+        outcome=Outcome.success,
         fields={"process.executable": fv("/bin/sh", "fixture"), "process.ppid": fv(99, "fixture")},
         raw=[], normalizer="fixture@1",
     )
@@ -394,15 +395,20 @@ def test_a_history_child_resolves_to_its_parent_in_an_older_hour_in_one_newest_f
         ).fill(hunt_id="build", targets=["host-index"], start=START - timedelta(hours=2), end=START)
 
     first = run()
-    # The parent's own parent is pid 1, out of scope, so only the older hour stays unresolved.
-    assert [(gap.start, gap.state) for gap in first.gaps] == [(START - timedelta(hours=2), "unresolved")]
-    assert first.complete == 1
-    assert _pair_keys(repo) == [(START - timedelta(hours=1), "/usr/sbin/parent", "/bin/sh")]
+    assert first.gaps == ()
+    assert first.complete == 2
+    assert _pair_keys(repo) == [
+        (START - timedelta(hours=2), "init", "/usr/sbin/parent"),
+        (START - timedelta(hours=1), "/usr/sbin/parent", "/bin/sh"),
+    ]
     assert repo.baseline_history_cells("build") == []
-    # A rerun re-reads only the unresolved hour and resolves the child's hour no differently.
+    # A rerun reuses both completed hours without changing their material.
     second = run()
-    assert [(gap.start, gap.state) for gap in second.gaps] == [(START - timedelta(hours=2), "unresolved")]
-    assert _pair_keys(repo) == [(START - timedelta(hours=1), "/usr/sbin/parent", "/bin/sh")]
+    assert second.gaps == ()
+    assert _pair_keys(repo) == [
+        (START - timedelta(hours=2), "init", "/usr/sbin/parent"),
+        (START - timedelta(hours=1), "/usr/sbin/parent", "/bin/sh"),
+    ]
 
 
 def test_exec_pair_writer_matches_direct_counter_with_same_hour_parent():
@@ -472,11 +478,16 @@ def test_exec_pair_resolves_children_before_three_pid_reuses_are_compacted():
         parent_carry=carry, now=lambda: START,
     ).fill(hunt_id="build", targets=["host-index"], start=START - timedelta(hours=1), end=START)
 
-    assert result.complete == 0
-    # PID 1 parents remain explicitly unresolved, but all three child generations were resolved rather than
-    # adding a "parent exec before history" omission after carry compaction.
-    assert "parent pid 1/2 out of scope" in result.gaps[0].reason
-    assert "parent exec before history" not in result.gaps[0].reason
+    assert result.complete == 1
+    assert result.gaps == ()
+    assert _pair_keys(repo) == [
+        (START - timedelta(hours=1), "/p1", "/bin/sh"),
+        (START - timedelta(hours=1), "/p3", "/bin/sh"),
+        (START - timedelta(hours=1), "/p5", "/bin/sh"),
+        (START - timedelta(hours=1), "init", "/p1"),
+        (START - timedelta(hours=1), "init", "/p3"),
+        (START - timedelta(hours=1), "init", "/p5"),
+    ]
 
 
 @pytest.mark.slow
@@ -1166,7 +1177,10 @@ def test_a_fill_interrupted_before_resolution_resolves_the_staged_hour_on_resume
         hunt_id="build", targets=["host-index"], start=START - timedelta(hours=2), end=START,
     )
 
-    assert _pair_keys(repo) == [(START - timedelta(hours=1), "/usr/sbin/parent", "/bin/sh")]
+    assert _pair_keys(repo) == [
+        (START - timedelta(hours=2), "init", "/usr/sbin/parent"),
+        (START - timedelta(hours=1), "/usr/sbin/parent", "/bin/sh"),
+    ]
     child_hour = next(row for row in repo.baseline_segments(statuses=["active"])
                       if row["start"] == START - timedelta(hours=1))
     assert [row["count"] for row in repo.baseline_counts(child_hour["id"])] == [1]

@@ -11,6 +11,7 @@ from romulus.baseline.carry import CarryInStore, PendingResolver
 from romulus.baseline.count import KeyCounter
 from romulus.baseline.lookback import LookbackBudget, LookbackResult, LookbackWriter
 from romulus.baseline.playbook import BASELINE_PLAYBOOKS, BaselinePlaybook
+from romulus.baseline.rate import RATE_MEAN_MULTIPLIER, RATE_MIN_COUNT, RATE_SIGMA_MULTIPLIER, threshold
 from romulus.baseline.snapshot import SnapshotPlanner
 from romulus.baseline.spec import BASELINE_SPECS, SPEC_BY_ID, KeyContext, Pending
 from romulus.decide.policy import decide
@@ -25,6 +26,7 @@ from romulus.sources.models import Window
 from romulus.store.repo import Repo
 
 BASELINE_CITATION_CAP = 20
+_HOUR = timedelta(hours=1)
 _COMPLETE_WINDOW_STATES = {"evaluated_complete", "not_applicable_no_events"}
 _PLAYBOOK_BY_SPEC = {playbook.spec.id: playbook for playbook in BASELINE_PLAYBOOKS}
 
@@ -101,6 +103,15 @@ def resolve_window_exec_pairs(repo: Repo, hunt_id: str, window: Window) -> None:
     """Resolve durable compact window Pendings after lookback has filled the parent carry."""
     spec = SPEC_BY_ID["bl.exec_pair"]
     cells = repo.baseline_window_cells(hunt_id)
+    for cell in [row for row in cells if row["spec_version"] != spec.version]:
+        reason = (f"staged version {cell['spec_version']} does not match current version {spec.version}; "
+                  "the window cell must be swept again")
+        repo.reject_baseline_window_cell(hunt_id, spec.id, cell["target"], cell["partition"])
+        repo.set_rule_cell(
+            hunt_id, spec.id, spec.version, cell["target"], cell["partition"],
+            "executed_failed", 0, 0, {"reasons": [reason]},
+        )
+    cells = [row for row in cells if row["spec_version"] == spec.version]
     carry_root = CarryInStore(repo, hunt_id)
     for target in sorted({row["target"] for row in cells}):
         target_cells = [row for row in cells if row["target"] == target]
@@ -125,10 +136,10 @@ def resolve_window_exec_pairs(repo: Repo, hunt_id: str, window: Window) -> None:
             )
             segment_counter.restore(
                 repo.baseline_window_counts(
-                    hunt_id, spec.id, target, partition=cell["partition"],
+                    hunt_id, spec.id, target, spec_version=spec.version, partition=cell["partition"],
                 ),
                 repo.baseline_window_scope_hours(
-                    hunt_id, spec.id, target, partition=cell["partition"],
+                    hunt_id, spec.id, target, spec_version=spec.version, partition=cell["partition"],
                 ),
             )
             pending_counter = KeyCounter(
@@ -155,7 +166,8 @@ def resolve_window_exec_pairs(repo: Repo, hunt_id: str, window: Window) -> None:
                 *repo.baseline_window_observations(hunt_id, target, cell["partition"]),
                 *pending_counter.observation_rows(),
             ]
-            execs = repo.baseline_window_execs(hunt_id, target, cell["partition"])
+            execs = [row for row in repo.baseline_window_execs(hunt_id, target, cell["partition"])
+                     if row.get("family", "process_exec") == "process_exec"]
             state = (
                 "not_applicable_no_events" if not cell["target_applicable"] else
                 "not_applicable_no_events" if not execs and cell["source_complete"] else
@@ -167,7 +179,10 @@ def resolve_window_exec_pairs(repo: Repo, hunt_id: str, window: Window) -> None:
                 "partition": cell["partition"], "state": state, "matched": 0,
                 "evaluated": cell["evaluated"], "detail": {"reasons": sorted(set(reasons))},
             }, (_pending_observation(hunt_id, spec, row) for row in observations),
-                counts=segment_counter.count_rows(), scope_hours=segment_counter.scope_hour_rows())
+                counts=segment_counter.material_count_rows(), scope_hours=segment_counter.scope_hour_rows(),
+                event_hours=repo.baseline_window_event_hours(
+                    hunt_id, spec.id, target, spec_version=spec.version, partition=cell["partition"],
+                ))
             repo.drop_baseline_window_cell(hunt_id, target, cell["partition"])
 
 
@@ -183,11 +198,20 @@ class SnapshotView:
         # Member segments may straddle history_start; only their rows inside the frozen span are history.
         self.span = ((datetime.fromisoformat(plan["history_start"]), datetime.fromisoformat(plan["window_start"]))
                      if plan.get("history_start") and plan.get("window_start") else None)
+        hunt = repo.get_hunt(hunt_id) or {}
+        rate_config = ((((hunt.get("manifest") or {}).get("baseline") or {}).get("thresholds") or {})
+                       .get("rate") or {})
+        self.rate_parameters = {
+            "min_count": float(rate_config.get("min_count", RATE_MIN_COUNT)),
+            "k": float(rate_config.get("k", RATE_MEAN_MULTIPLIER)),
+            "z": float(rate_config.get("z", RATE_SIGMA_MULTIPLIER)),
+        }
         self._pending_group: tuple[str, list[dict]] | None = None
         self.spec_stats: dict[str, dict] = {}
 
     def _window_failure(self, playbook: BaselinePlaybook) -> str | None:
         cells = [cell for cell in self.repo.rule_cells(self.hunt_id, rule_id=playbook.id)
+                 if cell["rule_version"] == playbook.spec.version
                  if not (cell["target"] == "*" and cell["partition"] == "window")
                  and not cell["target"].startswith("baseline:")
                  and cell["state"] != "split"]
@@ -222,8 +246,12 @@ class SnapshotView:
             reason = "internal networks not configured for this site; external destinations are unresolved"
         else:
             reason = _coverage_failure(coverage, self.min_live_hours)
-        live_hours = len({item["hour"] for item in series})
-        history_events = sum(int(item["events"]) for item in series)
+        live: set[datetime] = set()
+        history_events = 0
+        for item in series:
+            live.add(item["hour"])
+            history_events += int(item["events"])
+        live_hours = len(live)
         if reason is None and history_events < 1:
             reason = "scope is silent in history"
         if reason is None and live_hours < self.min_live_hours:
@@ -263,17 +291,247 @@ class SnapshotView:
                 first_seen.append(item)
         effective_hours = min((int(item.get("effective_hours") or 0) for item in coverage), default=0)
         effective_start = max((str(item.get("effective_start")) for item in coverage), default=None)
+        history_count_upper_bound = bool(
+            playbook.spec.bucket == "day" and self.span is not None
+            and self.span[0] != self.span[0].replace(hour=0, minute=0, second=0, microsecond=0)
+        )
         return first_seen, {
             "rows": updated, "coverage": coverage, "live_hours": live_hours,
             "history_events": history_events, "effective_hours": effective_hours,
             "effective_start": effective_start, "reason": reason,
+            "history_count_upper_bound": history_count_upper_bound,
+        }
+
+    def _whole_window(self) -> tuple[datetime, datetime, list[tuple[datetime, datetime]]]:
+        start_floor = self.window.start.replace(minute=0, second=0, microsecond=0)
+        end_floor = self.window.end.replace(minute=0, second=0, microsecond=0)
+        whole_start = start_floor if self.window.start == start_floor else start_floor + _HOUR
+        whole_end = end_floor
+        edges = []
+        if self.window.start < min(whole_start, self.window.end):
+            edges.append((self.window.start, min(whole_start, self.window.end)))
+        if max(whole_end, self.window.start) < self.window.end:
+            tail = (max(whole_end, self.window.start), self.window.end)
+            if not edges or edges[-1] != tail:
+                edges.append(tail)
+        return whole_start, whole_end, edges
+
+    @staticmethod
+    def _edge_text(edges: list[tuple[datetime, datetime]]) -> str:
+        if not edges:
+            return ""
+        spans = ", ".join(f"{start.isoformat()} to {end.isoformat()}" for start, end in edges)
+        return f" The window edge fractions {spans} were not assessed."
+
+    def _rate_scope(self, playbook: BaselinePlaybook, rows: list[dict],
+                    window_failure: str | None) -> tuple[list[dict], list[dict], dict]:
+        first = rows[0]
+        coverage = self._history_coverage(playbook.id)
+        reason = _coverage_failure(coverage, self.min_live_hours)
+        plan = self.snapshot.get("plan") or {}
+        history_end = datetime.fromisoformat(plan.get("window_start") or self.window.start.isoformat())
+        starts = [datetime.fromisoformat(str(item["effective_start"])) for item in coverage
+                  if item.get("effective_start")]
+        history_start = max(starts) if starts else history_end
+        sparse: dict[datetime, int] = {}
+        for item in self.repo.baseline_scope_series(
+                first["scope_kind"], first["scope"], self.hunt_id, playbook.id,
+                (history_start, history_end)):
+            sparse[item["hour"]] = sparse.get(item["hour"], 0) + int(item["events"])
+        host = None
+        if first["scope"].startswith("host_account:"):
+            try:
+                body = json.loads(first["scope"].removeprefix("host_account:"))
+                host = body.get("host") if isinstance(body, dict) else None
+            except (TypeError, ValueError):
+                pass
+        live = (sorted(set(self.repo.baseline_host_hours(
+            host, self.hunt_id, (history_start, history_end),
+        ))) if isinstance(host, str) and host else [])
+        history_events = sum(sparse.get(hour, 0) for hour in live)
+        n_hours = len(live)
+        if reason is None and not live:
+            reason = "host liveness is unavailable"
+        if reason is None and n_hours < self.min_live_hours:
+            reason = f"fewer than {self.min_live_hours} live history hours"
+        if reason is None and history_events < 1:
+            reason = "scope is silent in history"
+        series = [sparse.get(hour, 0) for hour in live]
+        statistics = None
+        if reason is None:
+            statistics = threshold(series, **self.rate_parameters)
+
+        whole_start, whole_end, edges = self._whole_window()
+        if reason is None and whole_start >= whole_end:
+            reason = "window has no complete whole hour"
+        measurements = (list(self.repo.baseline_window_scope_series(
+            self.hunt_id, playbook.id, first["scope_kind"], first["scope"],
+            spec_version=playbook.spec.version,
+            span=(whole_start, whole_end),
+        )) if whole_start < whole_end else [])
+        partial_cells = [cell for cell in self.repo.rule_cells(self.hunt_id, rule_id=playbook.id)
+                         if cell["rule_version"] == playbook.spec.version
+                         if not (cell["target"] == "*" and cell["partition"] == "window")
+                         and not cell["target"].startswith("baseline:")
+                         and cell["state"] != "split" and cell["state"] not in _COMPLETE_WINDOW_STATES]
+        partial_hours: set[datetime] = set()
+        for cell in partial_cells:
+            detail = cell.get("detail") or {}
+            host_hours = detail.get("partial_host_hours") or {}
+            localized = {
+                datetime.fromisoformat(value)
+                for values in host_hours.values()
+                for value in values
+            }
+            unscoped = detail.get("partial_unscoped_hours")
+            if unscoped is None:  # resume compatibility for cells staged before explicit scope persistence
+                partial_hours.update(
+                    datetime.fromisoformat(value)
+                    for value in detail.get("partial_hours") or []
+                    if datetime.fromisoformat(value) not in localized
+                )
+            else:
+                partial_hours.update(datetime.fromisoformat(value) for value in unscoped)
+            if isinstance(host, str) and host:
+                partial_hours.update(
+                    datetime.fromisoformat(value)
+                    for value in host_hours.get(host) or []
+                )
+        whole_cell_partial = any(
+            (cell.get("detail") or {}).get("whole_cell_partial")
+            or not (cell.get("detail") or {}).get("partial_hours")
+            for cell in partial_cells
+        )
+        if whole_cell_partial:
+            measurements = []
+        elif partial_hours:
+            measurements = [item for item in measurements if item["hour"] not in partial_hours]
+        anomalous = ([] if reason or statistics is None else [
+            item for item in measurements if int(item["events"]) >= statistics.value
+        ])
+        if reason is None and window_failure and not anomalous:
+            reason = window_failure
+        verdict = "unresolved" if reason else "over_threshold" if anomalous else "within_threshold"
+        edge_text = self._edge_text(edges)
+        if reason:
+            verdict_reason = reason + edge_text
+        elif anomalous:
+            verdict_reason = (f"{len(anomalous)} complete window hour(s) met or exceeded threshold "
+                              f"{statistics.value}{edge_text}")
+            if window_failure:
+                verdict_reason += f"; other window cells were partial ({window_failure})"
+        else:
+            verdict_reason = f"no complete window hour met threshold {statistics.value}{edge_text}"
+        updated = [{
+            **row,
+            "history_count": history_events,
+            "history_decayed": None,
+            "peer_scopes_with_key": None,
+            "peer_scopes": None,
+            "threshold": None if statistics is None else statistics.value,
+            "mean": None if statistics is None else statistics.mean,
+            "sigma": None if statistics is None else statistics.sigma,
+            "n_hours": n_hours,
+            "verdict": verdict,
+            "reason": verdict_reason,
+        } for row in rows]
+        return updated, anomalous, {
+            "coverage": coverage, "history_start": history_start, "history_end": history_end,
+            "history_events": history_events, "statistics": statistics, "edges": edges,
+            "window_failure": window_failure,
+        }
+
+    def _rate_claim(self, playbook: BaselinePlaybook, scope: str, cited_hours: list[dict], facts: dict,
+                    total_anomalous: int, unlisted: int, missing_witnesses: int) -> str:
+        statistics = facts["statistics"]
+        assert statistics is not None
+        hours = "; ".join(
+            f"{item['hour'].isoformat()} count {int(item['events'])}" for item in cited_hours
+        )
+        if unlisted:
+            hours += f"; and {unlisted} more hours (in the observation table)"
+        claim = (
+            f"Between {self.window.start.isoformat()} and {self.window.end.isoformat()}, {scope} met or "
+            f"exceeded its service-account execution-rate threshold in {total_anomalous} complete hour(s): "
+            f"{hours}. The threshold was {statistics.value} = max(min_count {statistics.min_count:g}, "
+            f"mean × k ({statistics.mean} × {statistics.k:g}), mean + z × sample sigma "
+            f"({statistics.mean} + {statistics.z:g} × {statistics.sigma})); n={statistics.n}. The exact "
+            f"history series spans {facts['history_start'].isoformat()} to {facts['history_end'].isoformat()} "
+            f"and contains {facts['history_events']} executions; rate-series decay is none. Seasonality is "
+            "not modelled."
+        )
+        claim += self._edge_text(facts["edges"])
+        if facts.get("window_failure"):
+            claim += f" Other window cells were partial ({facts['window_failure']})."
+        if missing_witnesses:
+            claim += f" There were {missing_witnesses} anomalous hour(s) whose witness could not be retained."
+        claim += (
+            f" Baseline {self.snapshot['digest']} supplied the frozen history. This rate deviation is not "
+            f"evidence of malicious activity. The lead cites one retained event from each of the {len(cited_hours)} "
+            "anomalous hour(s)."
+        )
+        return claim
+
+    def _judge_rate(self, playbook: BaselinePlaybook) -> Iterator[Match]:
+        observations = self.repo.baseline_observations_for_spec(
+            self.hunt_id, playbook.id, playbook.spec.version,
+        )
+        updated_total = unresolved = over = within = groups = 0
+        window_failure = self._window_failure(playbook)
+        coverage = self._history_coverage(playbook.id)
+        history_failure = _coverage_failure(coverage, self.min_live_hours)
+        for scope, grouped in groupby(observations, key=lambda row: row["scope"]):
+            rows, anomalous, facts = self._rate_scope(playbook, list(grouped), window_failure)
+            self.repo.upsert_baseline_observations(rows)
+            updated_total += len(rows)
+            unresolved += sum(row["verdict"] == "unresolved" for row in rows)
+            over += sum(row["verdict"] == "over_threshold" for row in rows)
+            within += sum(row["verdict"] == "within_threshold" for row in rows)
+            if not anomalous:
+                continue
+            shown = anomalous[:BASELINE_CITATION_CAP]
+            witnesses = [{
+                "first_event_id": item.get("first_event_id"),
+                "first_event_refs": item.get("first_event_refs") or [],
+            } for item in shown]
+            events, raw_copies = self._citation_events(witnesses)
+            retained_ids = {event.id for event in events}
+            cited_hours = [item for item in shown if item.get("first_event_id") in retained_ids]
+            missing_witnesses = len(shown) - len(cited_hours)
+            if not cited_hours:
+                for row in rows:
+                    row.update(verdict="unresolved", reason="no anomalous hour has a retained citation event")
+                self.repo.upsert_baseline_observations(rows)
+                unresolved += len(rows)
+                over -= len(rows)
+                continue
+            group_key = f"baseline:{playbook.id}:{scope}"
+            self._pending_group = (group_key, rows)
+            groups += 1
+            yield Match(
+                playbook_id=playbook.id,
+                claim=self._rate_claim(
+                    playbook, scope, cited_hours, facts, len(anomalous), len(anomalous) - len(shown),
+                    missing_witnesses,
+                ),
+                claim_type="anomaly", events=events, predicate=_predicate(events, playbook),
+                ts=min(event.ts for event in events), severity="info", proposed_lane="lead",
+                confidence="medium", entities=_entities(events),
+                notes=["baseline rate deviations are capped at the lead lane"], group_key=group_key,
+                raw_copies=raw_copies,
+            )
+        self.spec_stats[playbook.id] = {
+            "observations": updated_total, "unresolved": unresolved,
+            "common": 0, "first_seen": 0, "over_threshold": over, "within_threshold": within,
+            "groups": groups, "window_failure": window_failure, "history_failure": history_failure,
         }
 
     def _claim(self, playbook: BaselinePlaybook, scope: str, first_seen: list[dict], facts: dict,
                cited: int) -> str:
         shown = first_seen[:BASELINE_CITATION_CAP]
+        history_label = "history count 0"
         keys = "; ".join(
-            f"{_canonical(row['key'])} (window count {row['window_count']}, history count 0)"
+            f"{_canonical(row['key'])} (window count {row['window_count']}, {history_label})"
             for row in shown
         )
         remaining = len(first_seen) - len(shown)
@@ -296,6 +554,12 @@ class SnapshotView:
             f"({facts['effective_hours']} hours), with {facts['live_hours']} live scope hours and "
             f"{facts['history_events']} scope events{peer_text}. "
         )
+        if playbook.id == "bl.cmd_shape":
+            claim += (
+                "The argv masking replaces IP literals, numbers, UUIDs, long hexadecimal values, random "
+                "tmp/temp basenames while preserving their directories, and evidenced Base64 tokens with class "
+                "tokens; chmod permission modes and non-temp path text remain literal. "
+            )
         if any(item.get("status") == "shortened" for item in facts["coverage"]):
             claim += "The complete baseline span was shortened by evidenced source absence. "
         exclusions = self.repo.baseline_snapshot_exclusions(self.hunt_id, playbook.id)
@@ -327,6 +591,9 @@ class SnapshotView:
         return [stored[event_id] for event_id in ids if event_id in stored], raw_copies
 
     def judge(self, playbook: BaselinePlaybook) -> Iterator[Match]:
+        if playbook.spec.measure == "rate":
+            yield from self._judge_rate(playbook)
+            return
         observations = self.repo.baseline_observations_for_spec(
             self.hunt_id, playbook.id, playbook.spec.version,
         )

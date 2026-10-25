@@ -47,20 +47,12 @@ def _cell_span(partition: str) -> tuple[datetime, datetime] | None:
 
 
 def whole_hour_span(start: datetime, end: datetime,
-                    cells: list[tuple[datetime, datetime]]) -> tuple[datetime, datetime] | None:
-    """The widest hour-aligned span inside [start, end) whose edges no cell straddles, or None.
+                    _cells: list[tuple[datetime, datetime]]) -> tuple[datetime, datetime] | None:
+    """The widest hour-aligned span inside [start, end), or None when the window holds no whole hour.
 
-    A segment spans whole hours. A cell's counts carry no finer time than its own interval, so a cell is either
-    wholly inside the segment or wholly outside it, never split.
+    Counts and evaluated-record totals are staged per hour, so a source cell may safely straddle either edge.
     """
-    def straddled(hour: datetime) -> bool:
-        return any(first < hour < last for first, last in cells)
-
     low, high = _ceil_hour(start), _floor_hour(end)
-    while low < high and straddled(low):
-        low += _HOUR
-    while high > low and straddled(high):
-        high -= _HOUR
     return (low, high) if low < high else None
 
 
@@ -210,6 +202,7 @@ def _write_target(repo: Repo, hunt_id: str, spec, target: str, *, site: str,
     if blocked is not None:
         return blocked, 0, 0.0
     cells = [row for row in repo.rule_cells(hunt_id, rule_id=spec.id)
+             if row["rule_version"] == spec.version
              if row["target"] == target and row["partition"] != "window"
              and row["state"] != "split"]
     if not cells:
@@ -223,9 +216,30 @@ def _write_target(repo: Repo, hunt_id: str, spec, target: str, *, site: str,
         return f"window cell {unplaced[0]} names no time interval", 0, 0.0
     span = whole_hour_span(*window, list(spans.values()))
     if span is None:
-        return "the window holds no whole hour that its cells do not straddle", 0, 0.0
+        return "the window holds no whole hour", 0, 0.0
+    if spec.deduplicates_records and any(
+            cell_span[0] < span[0] < cell_span[1] for cell_span in spans.values()
+    ):
+        return "a deduplicated window cell straddles the retained whole-hour span", 0, 0.0
+    if spec.deduplicates_records and repo.baseline_window_dedup_bucket_spans_cells(
+            hunt_id, spec.id, spec.version, target, span
+    ):
+        return "a deduplicated bucket spans multiple window cells", 0, 0.0
+    if span != window and repo.baseline_window_has_unplaced_counts(
+            hunt_id, spec.id, spec.version, target
+    ):
+        return "legacy window count material has no hour; the window cell must be swept again", 0, 0.0
     inside = [row for row in cells
               if span[0] <= spans[row["partition"]][0] and spans[row["partition"]][1] <= span[1]]
+    event_total = event_rows = 0
+    for item in repo.baseline_window_merged_event_hours(
+            hunt_id, spec.id, target, spec_version=spec.version, span=span
+    ):
+        event_total += int(item["events"])
+        event_rows += 1
+    if event_rows == 0:
+        # Resume compatibility for material staged before migration 0022.
+        event_total = sum(int(cell.get("evaluated") or 0) for cell in inside)
     excluded = set(repo.baseline_exclusion_keys(
         site=site, target=target, spec_id=spec.id, spec_version=spec.version,
         key_version=spec.key_version, start=span[0], end=span[1],
@@ -244,7 +258,7 @@ def _write_target(repo: Repo, hunt_id: str, spec, target: str, *, site: str,
         "origin": "hunt", "source_hunt_id": hunt_id, "built_by_hunt_id": hunt_id,
         "exclusion_digest": digest, "excluded_keys": sorted(excluded), "hunted": 1,
         "network_digest": network_digest if spec.requires_configured_networks else None,
-        "events_total": sum(int(cell.get("evaluated") or 0) for cell in inside),
+        "events_total": event_total,
         "status": "building", "created_at": utcnow(),
     }
     state = repo.begin_baseline_segment(row, reclaim_owner=True)
@@ -255,10 +269,14 @@ def _write_target(repo: Repo, hunt_id: str, spec, target: str, *, site: str,
     seconds = repo.append_baseline_segment_rows(
         segment_id,
         ({"segment_id": segment_id, **item} for item in _without_excluded(
-            repo.baseline_window_merged_counts(hunt_id, spec.id, target, span=span), excluded,
+            repo.baseline_window_merged_counts(
+                hunt_id, spec.id, target, spec_version=spec.version, span=span,
+            ), excluded,
         )),
         ({"segment_id": segment_id, **item} for item in
-         repo.baseline_window_merged_scope_hours(hunt_id, spec.id, target, span=span)),
+         repo.baseline_window_merged_scope_hours(
+             hunt_id, spec.id, target, spec_version=spec.version, span=span,
+         )),
     )
     repo.finalize_baseline_segment(segment_id)
     return None, 1, seconds

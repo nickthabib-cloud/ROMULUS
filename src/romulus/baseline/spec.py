@@ -17,11 +17,16 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+import math
 import re
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from itertools import pairwise
 from typing import Any, Literal, Protocol, runtime_checkable
+
+import idna
 
 from romulus.detect import netdef
 from romulus.detect.correlation import PidTable, boot_of, boots_conflict
@@ -177,6 +182,9 @@ class BaselineSpec:
     # with an explicitly configured internal-network definition, and otherwise its result is unresolved, never
     # "no match" (the default RFC 1918 view reads a site in public space as entirely outside).
     requires_configured_networks: bool = False
+    # True when multiple source records can share one counting token. A hunt writer must retain enough material
+    # to re-deduplicate any clipped span, or decline that span rather than undercount it.
+    deduplicates_records: bool = False
 
     def keys(self, event: TypedEvent, context: KeyContext) -> KeyResult:
         if event.family not in self.families:
@@ -298,8 +306,8 @@ def _dns_name(value: str) -> str | None:
     name = text.rstrip(".").lower()
     if name and not name.isascii():
         try:
-            name = name.encode("idna").decode("ascii").lower()
-        except UnicodeError as error:
+            name = idna.encode(name, uts46=True, std3_rules=True).decode("ascii").lower()
+        except idna.IDNAError as error:
             raise ValueError(f"{value!r} is not an encodable internationalized name") from error
     return name or None
 
@@ -383,6 +391,8 @@ def _exec_path(event: TypedEvent, _context: KeyContext, spec: BaselineSpec) -> K
 
 
 def _exec_pair(event: TypedEvent, context: KeyContext, spec: BaselineSpec) -> KeyResult:
+    if (outcome := _outcome_success(event, "exec")) is not None:
+        return outcome
     host, executable = _host(event), _text(event, "process.executable")
     ppid = event.get("process.ppid")
     for value in (host, executable):
@@ -417,6 +427,13 @@ _BRACKETED_IP = re.compile(r"\[([0-9a-fA-F:.]+)\]")
 _HEX_PREFIX = re.compile(r"(?i)(?<![0-9a-z])0x[0-9a-f]+(?![0-9a-z])")
 _HEX_BARE = re.compile(r"(?i)(?<![0-9a-z])[0-9a-f]{8,}(?![0-9a-z])")
 _NUMBER = re.compile(r"(?<![0-9a-zA-Z])[-+]?\d+(?:\.\d+)?(?![0-9a-zA-Z])")
+_CHMOD_MODE = re.compile(r"[0-7]{3,4}")
+_TEMP_BASENAME = re.compile(
+    r"(?i)^(?:tmp|temp)(?:[-_.][a-z][a-z0-9-]*)?[-_.]([a-z0-9]{6,})$",
+)
+_BASE64 = re.compile(r"[A-Za-z0-9+/]+={0,2}")
+_PATH_IDENTIFIER = re.compile(r"[a-z_][a-z0-9._-]*")
+_PATH_SEGMENT = re.compile(r"[A-Za-z_][A-Za-z0-9._-]*")
 
 
 def _replace_ipv4(match: re.Match[str]) -> str:
@@ -432,8 +449,67 @@ def _replace_bare_hex(match: re.Match[str]) -> str:
     return "<hex>" if any(character.lower() in "abcdef" for character in value) else value
 
 
+def _base64_bucket(value: str) -> str | None:
+    """A bounded description of a complete, evidenced Base64 token that is not path-shaped."""
+    segments = value.split("/")
+    # Lowercase neighbours read as a path at once; mixed-case segments need at least two separators, which
+    # real Base64 (one "/" in about 64 characters, "+" as often) seldom pairs with identifier-shaped segments.
+    path_shaped = value.startswith(("/", "./", "../")) or any(
+        _PATH_IDENTIFIER.fullmatch(left) and _PATH_IDENTIFIER.fullmatch(right)
+        for left, right in pairwise(segments)
+    ) or (len(segments) > 2 and all(_PATH_SEGMENT.fullmatch(segment) for segment in segments))
+    if path_shaped or len(value) < 16 or not _BASE64.fullmatch(value) or _HEX_BARE.fullmatch(value):
+        return None
+    payload = value.rstrip("=")
+    padding = len(value) - len(payload)
+    remainder = len(payload) % 4
+    if remainder == 1 or (padding and (len(value) % 4 or padding != 4 - remainder)):
+        return None
+    frequencies = Counter(payload)
+    entropy = -sum(
+        (count / len(payload)) * math.log2(count / len(payload)) for count in frequencies.values()
+    )
+    if "+" not in payload and not padding and (len(payload) < 32 or entropy < 3.5):
+        return None
+    low = 1 << (len(value).bit_length() - 1)
+    return f"<b64:{low}-{2 * low - 1}>"
+
+
+def _mask_temp_name(value: str) -> str | None:
+    """Mask a known random tmp/temp basename while retaining any directory verbatim."""
+    directory, separator, basename = value.rpartition("/")
+    match = _TEMP_BASENAME.fullmatch(basename)
+    if match is None:
+        return None
+    suffix = match.group(1)
+    digits = sum(character.isdigit() for character in suffix)
+    letters = any(character.isalpha() for character in suffix)
+    mixed_case = any(character.islower() for character in suffix) and any(
+        character.isupper() for character in suffix
+    )
+    looks_random = (
+        set(suffix.casefold()) == {"x"}
+        or mixed_case
+        or (letters and digits and (len(suffix) == 6 or digits >= 2))
+        or (basename.startswith("tmp.") and suffix.islower() and suffix.isalpha())
+    )
+    if not looks_random:
+        return None
+    return f"{directory}{separator}<tmp>" if separator else "<tmp>"
+
+
 def mask_argv_token(value: str) -> str:
     """Mask variable identifiers within one already-tokenized argv value."""
+    if (masked_temp := _mask_temp_name(value)) is not None:
+        return masked_temp
+    if (bucket := _base64_bucket(value)) is not None:
+        return bucket
+    if "=" in value:
+        prefix, candidate = value.rsplit("=", 1)
+        if (masked_temp := _mask_temp_name(candidate)) is not None:
+            return f"{prefix}={masked_temp}"
+        if (bucket := _base64_bucket(candidate)) is not None:
+            return f"{prefix}={bucket}"
     token = _UUID.sub("<uuid>", value)
     if _canon_ip(token) is not None:
         return "<ip>"
@@ -452,7 +528,12 @@ def argv_shape(argv: list[str]) -> dict[str, Any]:
     """`argv_shape`: the masked leading tokens within the size bound; `argv_overflow` (present only when the
     bound was hit): how many masked tokens did not fit and the sha256 of their canonical JSON, so two commands
     that differ only past the bound still get different keys and the truncation is visible in the key."""
-    masked = [mask_argv_token(token) for token in argv]
+    command = argv[0].replace("\\", "/").rsplit("/", 1)[-1].lower() if argv else ""
+    masked = [
+        token if command == "chmod" and index > 0 and _CHMOD_MODE.fullmatch(token)
+        else mask_argv_token(token)
+        for index, token in enumerate(argv)
+    ]
     kept, size = 0, 0
     for token in masked:
         if kept == ARGV_SHAPE_MAX_TOKENS or size + len(token) > ARGV_SHAPE_MAX_CHARS:
@@ -466,6 +547,8 @@ def argv_shape(argv: list[str]) -> dict[str, Any]:
 
 
 def _cmd_shape(event: TypedEvent, _context: KeyContext, spec: BaselineSpec) -> KeyResult:
+    if (outcome := _outcome_success(event, "exec")) is not None:
+        return outcome
     host, executable = _host(event), _text(event, "process.executable")
     for value in (host, executable):
         if isinstance(value, Missing):
@@ -509,13 +592,34 @@ def _question_names(event: TypedEvent) -> list[str] | Missing:
     return found
 
 
+def _v1_answer_names(event: TypedEvent) -> list[str] | Missing:
+    """Question-equivalent names in Suricata v1's one-resource-record answer layout."""
+    answers = event.get("dns.answers")
+    if not isinstance(answers, list) or not answers:
+        return Missing("a DNS v1 answer has no answer name", ("dns.answers",))
+    names: list[str] = []
+    for answer in answers:
+        if not isinstance(answer, dict):
+            return Missing("dns.answers is not a list of answer objects", ("dns.answers",))
+        name = answer.get("name")
+        if name in (None, ""):
+            continue
+        if not isinstance(name, str):
+            return Missing("a DNS answer name is not a string", ("dns.answers",))
+        names.append(name)
+    if not names:
+        return Missing("a DNS v1 answer has no answer name", ("dns.answers",))
+    try:
+        found = sorted({canonical for canonical in (_dns_name(value) for value in names) if canonical})
+    except ValueError as error:
+        return Missing(str(error), ("dns.answers",))
+    return found or Missing("a DNS v1 answer has no answer name", ("dns.answers",))
+
+
 def _dns_destination(event: TypedEvent, context: KeyContext, spec: BaselineSpec) -> KeyResult:
     record_role = dns_role(event)
     if record_role is None:
         return NotApplicable(f"DNS record role {event.get('dns.type')} is neither a question nor an answer")
-    if (record_role == "answer" and event.get("dns.question.names") is None
-            and event.get("dns.question.name") is None):
-        return NotApplicable("an answer resource record without its question; the query record carries it")
     # The client is the endpoint not on a DNS service port, whatever the record's orientation (a sensor may write an
     # answer in its flow's orientation, client first); a question whose ports do not tell is read as sent, source to
     # destination, and an answer whose ports do not tell is Missing.
@@ -523,14 +627,15 @@ def _dns_destination(event: TypedEvent, context: KeyContext, spec: BaselineSpec)
     if side is None:
         return Missing("the DNS ports do not tell the client from the server of an answer (neither or both on a DNS "
                        "port, or a port not typed)", ("source.port", "destination.port"))
-    client_field, resolver_field = (("source.ip", "destination.ip") if side == "destination"
-                                    else ("destination.ip", "source.ip"))
+    client_field = "source.ip" if side == "destination" else "destination.ip"
     client = _ip(event, client_field)
     if not isinstance(client, Missing) and not context.is_internal(client):
         return NotApplicable("the DNS client is outside the site")
-    resolver = _ip(event, resolver_field)
-    names = _question_names(event)
-    for value in (client, resolver, names):
+    has_question = event.get("dns.question.names") is not None or event.get("dns.question.name") is not None
+    version = event.get("dns.version")
+    names = (_v1_answer_names(event) if record_role == "answer" and not has_question and version in (None, 1, "1")
+             else _question_names(event))
+    for value in (client, names):
         if isinstance(value, Missing):
             return value
     domains = sorted({domain for domain in (_registrable(name) for name in names) if domain})
@@ -563,9 +668,7 @@ def _destination(event: TypedEvent, context: KeyContext, spec: BaselineSpec) -> 
             return value
     sni_value = event.get("tls.client.server_name")
     sni = None
-    if sni_value is not None:
-        if not isinstance(sni_value, str):
-            return Missing("tls.client.server_name is not a single string", ("tls.client.server_name",))
+    if isinstance(sni_value, str):
         try:
             sni = _dns_name(sni_value)
         except ValueError as error:
@@ -598,9 +701,15 @@ def _uid(event: TypedEvent) -> int | Missing:
 
 
 def _service_rate(event: TypedEvent, context: KeyContext, spec: BaselineSpec) -> KeyResult:
+    raw_account = event.get("process.user")
     account = _text(event, "process.user")
     raw_uid = event.get("process.uid")
     uid = _uid(event)
+    if raw_account in (None, ""):
+        if isinstance(uid, Missing):
+            return Missing("neither process.user nor a usable process.uid is recorded",
+                           ("process.user", "process.uid"))
+        account = f"uid:{uid}"
     if account == "root" or uid == 0:
         return NotApplicable("root is not a service account")
     low, high = context.system_uid_range
@@ -636,21 +745,21 @@ BASELINE_SPECS = (
         _extract=_exec_path,
     ),
     BaselineSpec(
-        id="bl.exec_pair", version="1", key_version="1", families=("process_exec",),
+        id="bl.exec_pair", version="2", key_version="2", families=("process_exec",),
         datasets=("linux.audit",), scope="host", measure="prevalence", bucket="day",
         required_fields={"process_exec": ("process.executable", "process.ppid")},
         optional_fields={"process_exec": ("host.boot.id",)},
         _extract=_exec_pair,
     ),
     BaselineSpec(
-        id="bl.cmd_shape", version="1", key_version="1", families=("process_exec",),
+        id="bl.cmd_shape", version="4", key_version="4", families=("process_exec",),
         datasets=("linux.audit",), scope="host", measure="prevalence", bucket="day",
         required_fields={"process_exec": ("process.executable", "process.argv")},
         optional_fields={"process_exec": ("process.argv_complete",)},
         _extract=_cmd_shape,
     ),
     BaselineSpec(
-        id="bl.ext_dest", version="3", key_version="3",
+        id="bl.ext_dest", version="4", key_version="4",
         families=("net_flow", "dns_query", "tls_session", "net_session"),
         datasets=(
             "suricata.eve.flow", "suricata.eve.netflow", "suricata.eve.dns", "suricata.eve.tls",
@@ -659,24 +768,28 @@ BASELINE_SPECS = (
         scope="internal_ip", measure="prevalence", bucket="day",
         required_fields={
             "net_flow": ("source.ip", "destination.ip"),
-            "dns_query": ("source.ip", "destination.ip", ("dns.question.names", "dns.question.name")),
+            "dns_query": (
+                ("source.ip", "destination.ip"),
+                ("dns.question.names", "dns.question.name", "dns.answers"),
+            ),
             "tls_session": ("source.ip", "destination.ip"),
             "net_session": ("source.ip", "destination.ip"),
         },
         optional_fields={
             "net_flow": (*_FLOW_IDS,),
-            "dns_query": ("dns.type", "source.port", "destination.port", *_FLOW_IDS),
+            "dns_query": ("dns.type", "dns.version", "dns.id", "source.port", "destination.port", *_FLOW_IDS),
             "tls_session": ("tls.client.server_name", *_FLOW_IDS),
             "net_session": ("tls.client.server_name", *_FLOW_IDS),
         },
         _extract=_destination,
         requires_configured_networks=True,
+        deduplicates_records=True,
     ),
     BaselineSpec(
-        id="bl.svc_exec_rate", version="1", key_version="1", families=("process_exec",),
+        id="bl.svc_exec_rate", version="1", key_version="2", families=("process_exec",),
         datasets=("linux.audit",), scope="host_account", measure="rate", bucket="hour",
-        # the uid decides a service account; a configured account name decides one without it
-        required_fields={"process_exec": ("process.user", "process.uid")},
+        # A configured account name decides one without a uid; when present, uid is still projected and typed.
+        required_fields={"process_exec": (("process.user", "process.uid"),)},
         optional_fields={"process_exec": ()},
         _extract=_service_rate,
     ),

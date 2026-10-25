@@ -1415,6 +1415,7 @@ def normalize_apache_error(hit: dict) -> TypedEvent:
 #   attributed by direction). ssh.version (Arkime): list[str] of SSH banners, not attributed to either side.
 # - dns.question.names, dns.question.types, dns.response_codes: sorted distinct list[str]. dns.question.name,
 #   dns.question.type, dns.response_code: str, only when the record holds exactly one distinct value.
+#   dns.version: non-negative int when Suricata records one; dns.id: int or str as recorded.
 #   dns.answers, dns.authorities: list of {"name", "type", "ttl", "data"} in record order.
 # - parse.malformed: sorted native paths that were present but not of the documented type. Such a value is
 #   dropped, never guessed or stringified; a rule that needs it counts the record as missing that field.
@@ -1632,6 +1633,14 @@ def _suricata_dns(d: dict, o: str, bad: list[str]) -> dict:
     resource record of the response: its rrname/rrtype/ttl/rdata describe that answer (a CNAME target, say), so
     they are typed as an answer and never as the question."""
     f = {"dns.type": fv(d.get("type"), f"{o}.dns.type")}
+    version = _count(d.get("version"), "dns.version", bad)
+    if version is not None:
+        f["dns.version"] = fv(version, f"{o}.dns.version")
+    ident = d.get("id")
+    if isinstance(ident, (int, str)) and not isinstance(ident, bool):
+        f["dns.id"] = fv(ident, f"{o}.dns.id")
+    elif ident is not None:
+        bad.append("dns.id")
     names, types = set(), set()
     if d.get("type") == "answer" and d.get("version") is None:
         answer = _dns_record(d, "dns", bad)

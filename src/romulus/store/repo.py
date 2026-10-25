@@ -12,6 +12,7 @@ from itertools import groupby, islice
 from typing import Any, ClassVar
 
 from sqlalchemy import (
+    DateTime,
     Engine,
     Integer,
     String,
@@ -168,6 +169,20 @@ def baseline_scope_series_query(scope_kind: str, scope: str, hunt_id: str, spec_
             .join(t.baseline_snapshot_segment, _snapshot_member(c.segment_id, hunt_id, spec_id))
             .where(c.scope_kind == scope_kind, c.scope == scope, *_hour_in_span(c, span))
             .order_by(c.scope_kind, c.scope, c.segment_id, c.hour))
+
+
+def baseline_host_hours_query(host: str, hunt_id: str,
+                              span: tuple[datetime, datetime] | None = None):
+    """Distinct hours where any frozen baseline spec directly observed a host scope."""
+    c = t.baseline_scope_hour.c
+    member = t.baseline_snapshot_segment.c
+    return (select(c.hour).distinct()
+            .join(t.baseline_snapshot_segment, and_(
+                member.segment_id == c.segment_id,
+                member.hunt_id == hunt_id,
+            ))
+            .where(c.scope_kind == "host", c.scope == f"host:{host}", *_hour_in_span(c, span))
+            .order_by(c.hour))
 
 
 # ---- baseline rows ---------------------------------------------------------------------------
@@ -2323,11 +2338,43 @@ class Repo:
                 baseline_key_history_query(key_id, scope_kind, scope, hunt_id, spec_id, span)).mappings()]
 
     def baseline_scope_series(self, scope_kind: str, scope: str, hunt_id: str, spec_id: str,
-                              span: tuple[datetime, datetime] | None = None) -> list[dict]:
-        """One scope's live hours in one spec's snapshot; at most one row per hour per target."""
-        with self.engine.connect() as c:
-            return [_with_utc(row, ("hour",)) for row in c.execute(
-                baseline_scope_series_query(scope_kind, scope, hunt_id, spec_id, span)).mappings()]
+                              span: tuple[datetime, datetime] | None = None, *,
+                              page_size: int = BASELINE_PAGE) -> Iterator[dict]:
+        """One scope's history rows in exact segment/hour order, read in keyset pages."""
+        if page_size < 1:
+            raise ValueError("page size must be positive")
+        table = t.baseline_scope_hour.c
+        after = None
+        while True:
+            query = baseline_scope_series_query(scope_kind, scope, hunt_id, spec_id, span)
+            if after is not None:
+                query = query.where(tuple_(table.segment_id, table.hour) > tuple_(*after))
+            query = query.limit(page_size)
+            with self.engine.connect() as connection:
+                page = [_with_utc(row, ("hour",)) for row in connection.execute(query).mappings()]
+            yield from page
+            if len(page) < page_size:
+                return
+            after = [page[-1]["segment_id"], page[-1]["hour"]]
+
+    def baseline_host_hours(self, host: str, hunt_id: str,
+                            span: tuple[datetime, datetime] | None = None, *,
+                            page_size: int = BASELINE_PAGE) -> Iterator[datetime]:
+        """Hours in which a host was live according to any host-scoped segment in the frozen snapshot."""
+        if page_size < 1:
+            raise ValueError("page size must be positive")
+        after = None
+        while True:
+            query = baseline_host_hours_query(host, hunt_id, span)
+            if after is not None:
+                query = query.where(t.baseline_scope_hour.c.hour > after)
+            query = query.limit(page_size)
+            with self.engine.connect() as connection:
+                page = [_stored_utc(hour) for hour in connection.execute(query).scalars()]
+            yield from page
+            if len(page) < page_size:
+                return
+            after = page[-1]
 
     def save_baseline_snapshot(self, row: dict) -> bool:
         """Atomically freeze the first snapshot and normalized membership for a hunt."""
@@ -2414,6 +2461,11 @@ class Repo:
                         t.baseline_parent_carry.c.target == target,
                         t.baseline_parent_carry.c.host == host,
                     ))
+                    c.execute(t.baseline_parent_observation.delete().where(
+                        t.baseline_parent_observation.c.hunt_id == hunt_id,
+                        t.baseline_parent_observation.c.target == target,
+                        t.baseline_parent_observation.c.host == host,
+                    ))
                 elif current_ts > latest_ts:
                     latest_ts = current_ts
             stmt = insert(t.baseline_parent_host_boot).values(
@@ -2494,6 +2546,26 @@ class Repo:
         at_previous = and_(~newer, ~at_current, same_instant(
             excluded.exec_ts, excluded.serial, table.previous_exec_ts, table.previous_serial))
 
+        evicted = case(
+            (and_(newer, table.previous_exec_ts.is_not(None)), table.previous_exec_ts),
+            (and_(older_candidate, table.previous_exec_ts.is_not(None)), table.previous_exec_ts),
+            (and_(~newer, ~at_current, ~older_candidate, ~at_previous), excluded.exec_ts),
+            else_=None,
+        )
+
+        def earlier(left, right):
+            return case(
+                (left.is_(None), right), (right.is_(None), left), (left <= right, left), else_=right,
+            )
+
+        def later(left, right):
+            return case(
+                (left.is_(None), right), (right.is_(None), left), (left >= right, left), else_=right,
+            )
+
+        incoming_earliest = earlier(excluded.evicted_earliest_ts, evicted)
+        incoming_latest = later(excluded.evicted_latest_ts, evicted)
+
         def flag(held, ambiguous, held_executable):
             return case((or_(held == 1, ambiguous == 1, excluded.executable != held_executable), 1), else_=0)
 
@@ -2515,6 +2587,8 @@ class Repo:
                     (at_current, flag(table.ambiguous, excluded.ambiguous, table.executable)),
                     else_=table.ambiguous,
                 ),
+                "evicted_earliest_ts": earlier(table.evicted_earliest_ts, incoming_earliest),
+                "evicted_latest_ts": later(table.evicted_latest_ts, incoming_latest),
             },
         )
         for chunk in _chunks(rows, BASELINE_CHUNK):
@@ -2544,11 +2618,304 @@ class Repo:
             })
         return out
 
+    def baseline_parent_eviction_bounds(self, hunt_id: str, target: str, host: str, pid: int,
+                                        boot: str | None) -> tuple[datetime, datetime] | None:
+        """The inclusive time bounds of exec generations displaced from the two exact carry slots."""
+        if isinstance(pid, bool) or not isinstance(pid, int) or pid < 0:
+            return None
+        table = t.baseline_parent_carry.c
+        with self.engine.connect() as connection:
+            row = connection.execute(select(
+                table.evicted_earliest_ts, table.evicted_latest_ts,
+            ).where(
+                table.hunt_id == hunt_id, table.target == target, table.host == host,
+                table.boot == (boot or ""), table.pid == pid,
+            )).first()
+        if row is None or row.evicted_earliest_ts is None or row.evicted_latest_ts is None:
+            return None
+        return _stored_utc(row.evicted_earliest_ts), _stored_utc(row.evicted_latest_ts)
+
     def baseline_parent_count(self, hunt_id: str) -> int:
         with self.engine.connect() as c:
             return int(c.execute(select(func.count()).select_from(t.baseline_parent_carry).where(
                 t.baseline_parent_carry.c.hunt_id == hunt_id,
             )).scalar_one())
+
+    def upsert_baseline_parent_observations(self, rows: Iterable[dict], *,
+                                            chunk_size: int = BASELINE_CHUNK) -> int:
+        """Persist process-image observations in bounded chunks; duplicate source views are idempotent."""
+        if chunk_size < 1:
+            raise ValueError("observation chunk size must be positive")
+
+        def normalized():
+            for row in rows:
+                yield {**row, "observed_ts": _utc(row["observed_ts"], "parent observation timestamp")}
+
+        written = 0
+        stmt = insert(t.baseline_parent_observation).on_conflict_do_nothing(
+            index_elements=[
+                "hunt_id", "target", "host", "boot", "pid", "observed_ts", "event_id",
+            ],
+        )
+        for chunk in _chunks(normalized(), chunk_size):
+            with write_txn(self.engine) as connection:
+                connection.exec_driver_sql("""
+                    CREATE TEMP TABLE IF NOT EXISTS baseline_parent_observation_incoming (
+                        hunt_id TEXT NOT NULL,
+                        target TEXT NOT NULL,
+                        host TEXT NOT NULL,
+                        boot TEXT NOT NULL,
+                        pid INTEGER NOT NULL,
+                        observed_ts DATETIME NOT NULL,
+                        event_id TEXT NOT NULL,
+                        PRIMARY KEY (hunt_id, target, host, boot, pid, observed_ts, event_id)
+                    ) WITHOUT ROWID
+                """)
+                connection.exec_driver_sql("DELETE FROM baseline_parent_observation_incoming")
+                incoming = text("""
+                    INSERT OR IGNORE INTO baseline_parent_observation_incoming
+                        (hunt_id, target, host, boot, pid, observed_ts, event_id)
+                    VALUES (:hunt_id, :target, :host, :boot, :pid, :observed_ts, :event_id)
+                """).bindparams(bindparam("observed_ts", type_=DateTime(timezone=True)))
+                connection.execute(incoming, chunk)
+                connection.execute(stmt, chunk)
+                # The table is already compact before this insert. Therefore only an incoming row or its former
+                # immediate neighbour can have become the interior of a state run. Indexed predecessor/successor
+                # lookups keep compaction proportional to this chunk even when the hunt retains millions of other
+                # boundaries, while applying the ordering after insert preserves out-of-order correctness.
+                connection.execute(text("""
+                    WITH incoming_rows AS MATERIALIZED (
+                        SELECT observation.rowid AS rid,
+                               observation.hunt_id,
+                               observation.target,
+                               observation.host,
+                               observation.boot,
+                               observation.pid,
+                               observation.observed_ts,
+                               observation.serial,
+                               observation.event_id
+                        FROM baseline_parent_observation_incoming AS incoming
+                        CROSS JOIN baseline_parent_observation AS observation
+                            INDEXED BY ix_baseline_parent_observation_lookup
+                        WHERE observation.hunt_id = incoming.hunt_id
+                          AND observation.target = incoming.target
+                          AND observation.host = incoming.host
+                          AND observation.boot = incoming.boot
+                          AND observation.pid = incoming.pid
+                          AND observation.observed_ts = incoming.observed_ts
+                          AND observation.event_id = incoming.event_id
+                    ), candidate_ids AS MATERIALIZED (
+                        SELECT rid FROM incoming_rows
+                        UNION
+                        SELECT (
+                            SELECT prior.rowid
+                            FROM baseline_parent_observation AS prior
+                                INDEXED BY ix_baseline_parent_observation_lookup
+                            WHERE prior.hunt_id = incoming.hunt_id
+                              AND prior.target = incoming.target
+                              AND prior.host = incoming.host
+                              AND prior.boot = incoming.boot
+                              AND prior.pid = incoming.pid
+                              AND prior.observed_ts <= incoming.observed_ts
+                              AND (prior.observed_ts,
+                                   prior.serial IS NULL,
+                                   COALESCE(prior.serial, 0),
+                                   prior.event_id)
+                                  < (incoming.observed_ts,
+                                     incoming.serial IS NULL,
+                                     COALESCE(incoming.serial, 0),
+                                     incoming.event_id)
+                            ORDER BY prior.observed_ts DESC,
+                                     prior.serial IS NULL DESC,
+                                     prior.serial DESC,
+                                     prior.event_id DESC
+                            LIMIT 1
+                        )
+                        FROM incoming_rows AS incoming
+                        UNION
+                        SELECT (
+                            SELECT following.rowid
+                            FROM baseline_parent_observation AS following
+                                INDEXED BY ix_baseline_parent_observation_lookup
+                            WHERE following.hunt_id = incoming.hunt_id
+                              AND following.target = incoming.target
+                              AND following.host = incoming.host
+                              AND following.boot = incoming.boot
+                              AND following.pid = incoming.pid
+                              AND following.observed_ts >= incoming.observed_ts
+                              AND (following.observed_ts,
+                                   following.serial IS NULL,
+                                   COALESCE(following.serial, 0),
+                                   following.event_id)
+                                  > (incoming.observed_ts,
+                                     incoming.serial IS NULL,
+                                     COALESCE(incoming.serial, 0),
+                                     incoming.event_id)
+                            ORDER BY following.observed_ts,
+                                     following.serial IS NULL,
+                                     following.serial,
+                                     following.event_id
+                            LIMIT 1
+                        )
+                        FROM incoming_rows AS incoming
+                    ), candidate_rows AS MATERIALIZED (
+                        SELECT observation.rowid AS rid,
+                               observation.*,
+                               (
+                                   SELECT prior.rowid
+                                   FROM baseline_parent_observation AS prior
+                                       INDEXED BY ix_baseline_parent_observation_lookup
+                                   WHERE prior.hunt_id = observation.hunt_id
+                                     AND prior.target = observation.target
+                                     AND prior.host = observation.host
+                                     AND prior.boot = observation.boot
+                                     AND prior.pid = observation.pid
+                                     AND prior.observed_ts <= observation.observed_ts
+                                     AND (prior.observed_ts,
+                                          prior.serial IS NULL,
+                                          COALESCE(prior.serial, 0),
+                                          prior.event_id)
+                                         < (observation.observed_ts,
+                                            observation.serial IS NULL,
+                                            COALESCE(observation.serial, 0),
+                                            observation.event_id)
+                                   ORDER BY prior.observed_ts DESC,
+                                            prior.serial IS NULL DESC,
+                                            prior.serial DESC,
+                                            prior.event_id DESC
+                                   LIMIT 1
+                               ) AS previous_rid,
+                               (
+                                   SELECT following.rowid
+                                   FROM baseline_parent_observation AS following
+                                       INDEXED BY ix_baseline_parent_observation_lookup
+                                   WHERE following.hunt_id = observation.hunt_id
+                                     AND following.target = observation.target
+                                     AND following.host = observation.host
+                                     AND following.boot = observation.boot
+                                     AND following.pid = observation.pid
+                                     AND following.observed_ts >= observation.observed_ts
+                                     AND (following.observed_ts,
+                                          following.serial IS NULL,
+                                          COALESCE(following.serial, 0),
+                                          following.event_id)
+                                         > (observation.observed_ts,
+                                            observation.serial IS NULL,
+                                            COALESCE(observation.serial, 0),
+                                            observation.event_id)
+                                   ORDER BY following.observed_ts,
+                                            following.serial IS NULL,
+                                            following.serial,
+                                            following.event_id
+                                   LIMIT 1
+                               ) AS next_rid
+                        FROM candidate_ids AS candidate
+                        CROSS JOIN baseline_parent_observation AS observation
+                          ON observation.rowid = candidate.rid
+                    )
+                    DELETE FROM baseline_parent_observation
+                    WHERE rowid IN (
+                        SELECT current.rid
+                        FROM candidate_rows AS current
+                        CROSS JOIN baseline_parent_observation AS previous
+                          ON previous.rowid = current.previous_rid
+                        CROSS JOIN baseline_parent_observation AS following
+                          ON following.rowid = current.next_rid
+                        WHERE current.executable = previous.executable
+                          AND current.parent_pid = previous.parent_pid
+                          AND current.session IS previous.session
+                          AND current.executable = following.executable
+                          AND current.parent_pid = following.parent_pid
+                          AND current.session IS following.session
+                    )
+                """))
+            written += len(chunk)
+        return written
+
+    def baseline_parent_observations(self, hunt_id: str, target: str, host: str, pid: int,
+                                     boot: str, at: datetime, serial: int | None = None) -> list[dict]:
+        """A bounded set of process states nearest one child instant in its strongest ordering domain."""
+        at = _utc(at, "parent observation lookup timestamp")
+        table = t.baseline_parent_observation.c
+        where = (
+            table.hunt_id == hunt_id, table.target == target, table.host == host,
+            table.boot == boot, table.pid == pid,
+        )
+        with self.engine.connect() as connection:
+            def states_at(timestamp, *extra):
+                if timestamp is None:
+                    return []
+                return connection.execute(
+                    select(t.baseline_parent_observation).where(
+                        *where, table.observed_ts == timestamp, *extra,
+                    ).group_by(table.executable, table.parent_pid, table.session, table.serial)
+                    .order_by(table.executable, table.parent_pid, table.session, table.serial)
+                    .limit(2),
+                ).mappings().all()
+
+            def states_at_serial(value):
+                if value is None:
+                    return []
+                return connection.execute(
+                    select(t.baseline_parent_observation).where(*where, table.serial == value)
+                    .group_by(table.executable, table.parent_pid, table.session, table.serial)
+                    .order_by(table.executable, table.parent_pid, table.session).limit(2),
+                ).mappings().all()
+
+            def ordered_states_at(timestamp, *, newest):
+                if timestamp is None:
+                    return []
+                order = table.serial.desc() if newest else table.serial.asc()
+                known = connection.execute(
+                    select(t.baseline_parent_observation).where(
+                        *where, table.observed_ts == timestamp, table.serial.is_not(None),
+                    ).order_by(order, table.event_id).limit(1),
+                ).mappings().all()
+                unknown = states_at(timestamp, table.serial.is_(None))
+                states = {
+                    tuple(row[name] for name in ("executable", "parent_pid", "session")): row
+                    for row in [*known, *unknown]
+                }
+                return list(states.values())[:2]
+
+            rows = []
+            if serial is not None:
+                prior_serial = connection.execute(select(func.max(table.serial)).where(
+                    *where, table.serial.is_not(None), table.serial < serial,
+                )).scalar_one_or_none()
+                later_serial = connection.execute(select(func.min(table.serial)).where(
+                    *where, table.serial.is_not(None), table.serial >= serial,
+                )).scalar_one_or_none()
+                rows.extend(states_at_serial(prior_serial))
+                rows.extend(states_at_serial(later_serial))
+                unknown = (table.serial.is_(None),)
+                latest_before = connection.execute(select(func.max(table.observed_ts)).where(
+                    *where, *unknown, table.observed_ts < at,
+                )).scalar_one_or_none()
+                earliest_after = connection.execute(select(func.min(table.observed_ts)).where(
+                    *where, *unknown, table.observed_ts > at,
+                )).scalar_one_or_none()
+                rows.extend(states_at(latest_before, *unknown))
+                rows.extend(states_at(at, *unknown))
+                rows.extend(states_at(earliest_after, *unknown))
+            else:
+                latest_before = connection.execute(select(func.max(table.observed_ts)).where(
+                    *where, table.observed_ts < at,
+                )).scalar_one_or_none()
+                earliest_after = connection.execute(select(func.min(table.observed_ts)).where(
+                    *where, table.observed_ts > at,
+                )).scalar_one_or_none()
+                rows.extend(ordered_states_at(latest_before, newest=True))
+                rows.extend(states_at(at))
+                rows.extend(ordered_states_at(earliest_after, newest=False))
+        unique = {row["event_id"]: row for row in rows}
+        return [_with_utc(row, ("observed_ts",)) for row in unique.values()]
+
+    def baseline_parent_observation_count(self, hunt_id: str) -> int:
+        with self.engine.connect() as connection:
+            return int(connection.execute(select(func.count()).select_from(
+                t.baseline_parent_observation,
+            ).where(t.baseline_parent_observation.c.hunt_id == hunt_id)).scalar_one())
 
     def _coalesce_range(self, table, keys: dict, start: datetime, end: datetime) -> None:
         """Add [start, end) to a range ledger keyed by `keys`, merging overlapping or touching rows in the
@@ -2652,7 +3019,8 @@ class Repo:
 
     def stage_baseline_window_cell(self, hunt_id: str, cell: dict, execs: Iterable[dict],
                                    observations: Iterable[dict], pendings: Iterable[dict],
-                                   counts: Iterable[dict] = (), scope_hours: Iterable[dict] = ()) -> None:
+                                   counts: Iterable[dict] = (), scope_hours: Iterable[dict] = (),
+                                   event_hours: Iterable[dict] = ()) -> None:
         """Replace one unresolved exec-pair cell with compact durable state."""
         key = (hunt_id, cell["target"], cell["partition"])
 
@@ -2703,7 +3071,7 @@ class Repo:
             ], ["hunt_id", "target", "partition", "ordinal"])
             self._replace_baseline_window_counter_rows(
                 connection, hunt_id, "bl.exec_pair", cell["spec_version"], key[1], key[2],
-                counts, scope_hours,
+                counts, scope_hours, event_hours,
             )
 
     def baseline_window_cells(self, hunt_id: str) -> list[dict]:
@@ -2755,6 +3123,21 @@ class Repo:
                 t.baseline_window_cell.c.target == target,
                 t.baseline_window_cell.c.partition == partition,
             ))
+
+    def reject_baseline_window_cell(self, hunt_id: str, spec_id: str,
+                                    target: str, partition: str) -> None:
+        """Discard one incompatible compact cell and only that spec's staged counter material."""
+        with write_txn(self.engine) as connection:
+            connection.execute(t.baseline_window_cell.delete().where(
+                t.baseline_window_cell.c.hunt_id == hunt_id,
+                t.baseline_window_cell.c.target == target,
+                t.baseline_window_cell.c.partition == partition,
+            ))
+            for table in (t.baseline_window_count, t.baseline_window_scope_hour, t.baseline_window_event_hour):
+                connection.execute(table.delete().where(
+                    table.c.hunt_id == hunt_id, table.c.spec_id == spec_id,
+                    table.c.target == target, table.c.partition == partition,
+                ))
 
     def clear_baseline_history_stage(self, hunt_id: str) -> None:
         """Forget every staged history hour of a hunt; a fill re-reads hours that hold no segment."""
@@ -2828,7 +3211,8 @@ class Repo:
 
     def save_baseline_window_cell(self, hunt_id: str, cell: dict, observations: Iterable[dict], *,
                                   counts: Iterable[dict] = (),
-                                  scope_hours: Iterable[dict] = ()) -> bool:
+                                  scope_hours: Iterable[dict] = (),
+                                  event_hours: Iterable[dict] = ()) -> bool:
         """Atomically add one cell's observations once and close its ordinary rule cell.
 
         The terminal rule cell is the idempotency marker. A killed or restarted sweep can process its direct
@@ -2878,7 +3262,7 @@ class Repo:
                 return False
             self._replace_baseline_window_counter_rows(
                 connection, hunt_id, cell["rule_id"], cell["version"], cell["target"],
-                cell["partition"], counts, scope_hours,
+                cell["partition"], counts, scope_hours, event_hours,
             )
             for chunk in _chunks(rows, BASELINE_CHUNK):
                 connection.execute(stmt, chunk)
@@ -2897,9 +3281,10 @@ class Repo:
 
     def _replace_baseline_window_counter_rows(self, connection, hunt_id: str, spec_id: str,
                                               spec_version: str, target: str, partition: str,
-                                              counts: Iterable[dict], scope_hours: Iterable[dict]) -> None:
+                                              counts: Iterable[dict], scope_hours: Iterable[dict],
+                                              event_hours: Iterable[dict]) -> None:
         """Replace one cell's segment material inside its caller's transaction."""
-        for table in (t.baseline_window_count, t.baseline_window_scope_hour):
+        for table in (t.baseline_window_count, t.baseline_window_scope_hour, t.baseline_window_event_hour):
             connection.execute(table.delete().where(
                 table.c.hunt_id == hunt_id, table.c.spec_id == spec_id,
                 table.c.target == target, table.c.partition == partition,
@@ -2918,6 +3303,9 @@ class Repo:
                     "key_digest": row["key_digest"],
                     "key": row["key"],
                     "bucket": _utc(row["bucket"], "window count bucket"),
+                    "material_hour": _utc(
+                        row.get("material_hour") or row["first_ts"], "window count material hour",
+                    ).replace(minute=0, second=0, microsecond=0),
                     "count": int(row["count"]),
                     "first_ts": _utc(row["first_ts"], "window count first_ts"),
                     "last_ts": _utc(row["last_ts"], "window count last_ts"),
@@ -2938,13 +3326,31 @@ class Repo:
                     "scope": row["scope"],
                     "hour": _utc(row["hour"], "window scope hour"),
                     "events": int(row["events"]),
+                    "first_event_id": row.get("first_event_id"),
+                    "first_event_refs": list(row.get("first_event_refs") or []),
                 }
                 for ordinal, row in enumerate(scope_hours)
             )
         for chunk in _chunks(hour_rows, BASELINE_CHUNK):
             connection.execute(t.baseline_window_scope_hour.insert(), chunk)
+        event_rows = (
+            {
+                "hunt_id": hunt_id,
+                "spec_id": spec_id,
+                "spec_version": spec_version,
+                "target": target,
+                "partition": partition,
+                "ordinal": ordinal,
+                "hour": _utc(row["hour"], "window event hour"),
+                "events": int(row["events"]),
+            }
+            for ordinal, row in enumerate(event_hours)
+        )
+        for chunk in _chunks(event_rows, BASELINE_CHUNK):
+            connection.execute(t.baseline_window_event_hour.insert(), chunk)
 
     def baseline_window_counts(self, hunt_id: str, spec_id: str, target: str, *,
+                               spec_version: str | None = None,
                                partition: str | None = None) -> list[dict]:
         """Compact count rows retained from complete sweep cells, in deterministic cell order."""
         table = t.baseline_window_count.c
@@ -2954,12 +3360,31 @@ class Repo:
                 table.spec_id == spec_id,
                 table.target == target,
             )
+            if spec_version is not None:
+                query = query.where(table.spec_version == spec_version)
             if partition is not None:
                 query = query.where(table.partition == partition)
             rows = connection.execute(query.order_by(table.partition, table.ordinal)).mappings()
-            return [_with_utc(row, ("bucket", "first_ts", "last_ts")) for row in rows]
+            return [_with_utc(row, ("bucket", "material_hour", "first_ts", "last_ts")) for row in rows]
+
+    def baseline_window_event_hours(self, hunt_id: str, spec_id: str, target: str, *,
+                                    spec_version: str | None = None,
+                                    partition: str | None = None) -> list[dict]:
+        """Per-hour evaluated-record totals retained from sweep cells."""
+        table = t.baseline_window_event_hour.c
+        with self.engine.connect() as connection:
+            query = select(t.baseline_window_event_hour).where(
+                table.hunt_id == hunt_id, table.spec_id == spec_id, table.target == target,
+            )
+            if spec_version is not None:
+                query = query.where(table.spec_version == spec_version)
+            if partition is not None:
+                query = query.where(table.partition == partition)
+            rows = connection.execute(query.order_by(table.partition, table.ordinal)).mappings()
+            return [_with_utc(row, ("hour",)) for row in rows]
 
     def baseline_window_scope_hours(self, hunt_id: str, spec_id: str, target: str, *,
+                                    spec_version: str | None = None,
                                     partition: str | None = None) -> list[dict]:
         """Compact scope-hour rows retained from complete sweep cells."""
         table = t.baseline_window_scope_hour.c
@@ -2969,18 +3394,52 @@ class Repo:
                 table.spec_id == spec_id,
                 table.target == target,
             )
+            if spec_version is not None:
+                query = query.where(table.spec_version == spec_version)
             if partition is not None:
                 query = query.where(table.partition == partition)
             rows = connection.execute(query.order_by(table.partition, table.ordinal)).mappings()
             return [_with_utc(row, ("hour",)) for row in rows]
 
+    def baseline_window_has_unplaced_counts(self, hunt_id: str, spec_id: str,
+                                            spec_version: str, target: str) -> bool:
+        """Whether legacy count material lacks the per-hour placement required for a clipped write."""
+        table = t.baseline_window_count.c
+        query = select(func.count()).select_from(t.baseline_window_count).where(
+            table.hunt_id == hunt_id, table.spec_id == spec_id,
+            table.spec_version == spec_version, table.target == target,
+            table.material_hour.is_(None),
+        )
+        with self.engine.connect() as connection:
+            return bool(connection.execute(query).scalar_one())
+
+    def baseline_window_dedup_bucket_spans_cells(self, hunt_id: str, spec_id: str,
+                                                 spec_version: str, target: str,
+                                                 span: tuple[datetime, datetime]) -> bool:
+        """Whether one counted key/bucket is distributed across cells whose dedup sets were independent."""
+        table = t.baseline_window_count.c
+        start, end = _utc(span[0], "dedup span start"), _utc(span[1], "dedup span end")
+        query = (select(table.scope_kind).where(
+            table.hunt_id == hunt_id, table.spec_id == spec_id,
+            table.spec_version == spec_version, table.target == target,
+            or_(
+                and_(table.material_hour.is_not(None),
+                     table.material_hour >= start, table.material_hour < end),
+                and_(table.material_hour.is_(None), table.first_ts >= start, table.last_ts < end),
+            ),
+        ).group_by(table.scope_kind, table.scope, table.key_digest, table.bucket)
+            .having(func.count(func.distinct(table.partition)) > 1).limit(1))
+        with self.engine.connect() as connection:
+            return connection.execute(query).first() is not None
+
     def baseline_window_merged_counts(self, hunt_id: str, spec_id: str, target: str, *,
+                                      spec_version: str | None = None,
                                       span: tuple[datetime, datetime] | None = None,
                                       page_size: int = BASELINE_PAGE) -> Iterator[dict]:
         """Merge a hunt's per-cell count rows in bounded pages, ordered like segment count rows.
 
-        With `span`, only rows of cells inside it are merged. A row's times are clamped into its cell, so a row
-        lies inside the span exactly when its cell does (the caller refuses cells that straddle its edges).
+        With `span`, per-hour material is selected even when its source cell straddles a span edge. Rows staged
+        before migration 0022 have no material hour and retain the conservative timestamp filter.
         """
         if page_size < 1:
             raise ValueError("page size must be positive")
@@ -2994,8 +3453,15 @@ class Repo:
                 func.max(table.last_ts).label("last_ts"),
             ).where(
                 table.hunt_id == hunt_id, table.spec_id == spec_id, table.target == target,
-                *(() if span is None else (table.first_ts >= _utc(span[0], "merge start"),
-                                           table.last_ts < _utc(span[1], "merge end"))),
+                *(() if spec_version is None else (table.spec_version == spec_version,)),
+                *(() if span is None else (or_(
+                    and_(table.material_hour.is_not(None),
+                         table.material_hour >= _utc(span[0], "merge start"),
+                         table.material_hour < _utc(span[1], "merge end")),
+                    and_(table.material_hour.is_(None),
+                         table.first_ts >= _utc(span[0], "merge start"),
+                         table.last_ts < _utc(span[1], "merge end")),
+                ),)),
             ).group_by(
                 table.scope_kind, table.scope, table.key_id, table.key_digest, table.key, table.bucket,
             ))
@@ -3011,6 +3477,7 @@ class Repo:
             after = [page[-1]["scope"], page[-1]["key_digest"], page[-1]["bucket"]]
 
     def baseline_window_merged_scope_hours(self, hunt_id: str, spec_id: str, target: str, *,
+                                           spec_version: str | None = None,
                                            span: tuple[datetime, datetime] | None = None,
                                            page_size: int = BASELINE_PAGE) -> Iterator[dict]:
         """Merge a hunt's per-cell scope-hour rows without collecting the hunt in memory."""
@@ -3024,6 +3491,7 @@ class Repo:
                 table.scope_kind, table.scope, table.hour, func.sum(table.events).label("events"),
             ).where(
                 table.hunt_id == hunt_id, table.spec_id == spec_id, table.target == target,
+                *(() if spec_version is None else (table.spec_version == spec_version,)),
                 *(() if span is None else (table.hour >= _utc(span[0], "merge start"),
                                            table.hour < _utc(span[1], "merge end"))),
             ).group_by(table.scope_kind, table.scope, table.hour))
@@ -3036,6 +3504,85 @@ class Repo:
             if len(page) < page_size:
                 return
             after = [page[-1]["scope"], page[-1]["hour"]]
+
+    def baseline_window_merged_event_hours(self, hunt_id: str, spec_id: str, target: str, *,
+                                           spec_version: str | None = None,
+                                           span: tuple[datetime, datetime],
+                                           page_size: int = BASELINE_PAGE) -> Iterator[dict]:
+        """Sum evaluated-record totals per hour without materializing the hunt window."""
+        if page_size < 1:
+            raise ValueError("page size must be positive")
+        table = t.baseline_window_event_hour.c
+        start, end = _utc(span[0], "event merge start"), _utc(span[1], "event merge end")
+        after = None
+        while True:
+            query = (select(table.hour, func.sum(table.events).label("events")).where(
+                table.hunt_id == hunt_id, table.spec_id == spec_id, table.target == target,
+                *(() if spec_version is None else (table.spec_version == spec_version,)),
+                table.hour >= start, table.hour < end,
+            ).group_by(table.hour))
+            if after is not None:
+                query = query.having(table.hour > after)
+            query = query.order_by(table.hour).limit(page_size)
+            with self.engine.connect() as connection:
+                page = [_with_utc(row, ("hour",)) for row in connection.execute(query).mappings()]
+            yield from page
+            if len(page) < page_size:
+                return
+            after = page[-1]["hour"]
+
+    def baseline_window_scope_series(self, hunt_id: str, spec_id: str, scope_kind: str, scope: str, *,
+                                     spec_version: str | None = None,
+                                     span: tuple[datetime, datetime],
+                                     page_size: int = BASELINE_PAGE) -> Iterator[dict]:
+        """One scope's window hours summed exactly across targets and partitions, keyset-paged."""
+        if page_size < 1:
+            raise ValueError("page size must be positive")
+        start, end = _utc(span[0], "window rate start"), _utc(span[1], "window rate end")
+        if start > end:
+            raise ValueError("window rate span is reversed")
+        table = t.baseline_window_scope_hour.c
+        after = None
+        current = None
+        while True:
+            order = (table.hour, table.target, table.partition, table.ordinal)
+            query = (select(
+                table.hour, table.events, table.first_event_id, table.first_event_refs,
+                table.target, table.partition, table.ordinal,
+            ).where(
+                table.hunt_id == hunt_id,
+                table.spec_id == spec_id,
+                *(() if spec_version is None else (table.spec_version == spec_version,)),
+                table.scope_kind == scope_kind,
+                table.scope == scope,
+                table.hour >= start,
+                table.hour < end,
+            ).order_by(*order).limit(page_size))
+            if after is not None:
+                query = query.where(tuple_(*order) > tuple_(*after))
+            with self.engine.connect() as connection:
+                page = [_with_utc(row, ("hour",)) for row in connection.execute(query).mappings()]
+            for row in page:
+                if current is None or row["hour"] != current["hour"]:
+                    if current is not None:
+                        yield current
+                    current = {
+                        "hour": row["hour"],
+                        "events": 0,
+                        "first_event_id": None,
+                        "first_event_refs": [],
+                    }
+                current["events"] += int(row["events"])
+                event_id = row.get("first_event_id")
+                if event_id is not None and (
+                        current["first_event_id"] is None or event_id < current["first_event_id"]):
+                    current["first_event_id"] = event_id
+                    current["first_event_refs"] = list(row.get("first_event_refs") or [])
+            if len(page) < page_size:
+                if current is not None:
+                    yield current
+                return
+            after = [page[-1][name] for name in ("hour", "target", "partition", "ordinal")]
 
     def baseline_window_release(self, hunt_id: str, spec_id: str, target: str) -> str | None:
         """Why one (hunt, spec, target)'s window counter material was released, or None while it is kept."""
@@ -3056,7 +3603,7 @@ class Repo:
                 hunt_id=hunt_id, spec_id=spec_id, target=target, reason=reason,
             ).on_conflict_do_nothing(index_elements=["hunt_id", "spec_id", "target"]))
         deleted = 0
-        for table in (t.baseline_window_count, t.baseline_window_scope_hour):
+        for table in (t.baseline_window_count, t.baseline_window_scope_hour, t.baseline_window_event_hour):
             c = table.c
             while True:
                 with write_txn(self.engine) as connection:

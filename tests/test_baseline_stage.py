@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from romulus.baseline.playbook import ExecPathBaseline
+from romulus.baseline.playbook import CommandShapeBaseline, ExecPathBaseline, SshTupleBaseline
 from romulus.baseline.protocol import HistoryFetch, HistoryPartition, HistoryPlan
 from romulus.baseline.spec import SPEC_BY_ID, KeyContext
 from romulus.config import Settings
@@ -13,7 +13,7 @@ from romulus.detect.netdef import SiteNetworks
 from romulus.evidence.normalize import NORMALIZER_VERSION
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
 from romulus.hunt import run as hunt_run
-from romulus.hunt.baseline_stage import BASELINE_CITATION_CAP, run_baseline_stage
+from romulus.hunt.baseline_stage import BASELINE_CITATION_CAP, SnapshotView, run_baseline_stage
 from romulus.hunt.manifest import build_manifest
 from romulus.hunt.packets import PACKET_NORMALIZER
 from romulus.hunt.sweep import BOOT_PLACEMENT_PARTITION
@@ -124,6 +124,53 @@ def _resolved_history(repo: Repo, *, known_key_id="known-id", known_digest="know
         "segment_id": "history", "scope_kind": "host", "scope": "host:web01",
         "hour": begin + timedelta(hours=hour), "events": 1,
     } for hour in range(48)])
+
+
+class _ClaimRepo:
+    def get_hunt(self, _hunt_id):
+        return {"manifest": {}}
+
+    def baseline_snapshot_exclusions(self, _hunt_id, _spec_id):
+        return {"segments": 0, "hunted_segments": 0, "excluded_keys": 0}
+
+
+def _claim(playbook, rows):
+    view = SnapshotView(
+        _ClaimRepo(), "h1", WINDOW,
+        {"digest": "snapshot", "plan": {}}, min_live_hours=48, networks_configured=True,
+    )
+    facts = {
+        "effective_start": (START - timedelta(hours=48)).isoformat(),
+        "effective_hours": 48, "live_hours": 48, "history_events": 96, "coverage": [],
+    }
+    return view._claim(playbook, "site", rows, facts, len(rows))
+
+
+def test_command_shape_claim_states_the_shape_and_its_masking_policy():
+    row = {
+        "key": {"executable": "/usr/bin/tool", "argv_shape": ["tool", "<ip>", "<b64:16-31>"]},
+        "window_count": 1, "peer_scopes": 1, "peer_scopes_with_key": 0,
+    }
+
+    claim = _claim(CommandShapeBaseline(), [row])
+
+    assert '"argv_shape":["tool","<ip>","<b64:16-31>"]' in claim
+    assert "argv masking replaces" in claim
+    assert all(name in claim for name in ("IP literals", "numbers", "UUIDs", "hexadecimal", "Base64"))
+    assert "random tmp/temp basenames" in claim and "preserving their directories" in claim
+    assert "chmod permission modes and non-temp path text remain literal" in claim
+
+
+@pytest.mark.parametrize(("peers", "present"), [(4, False), (5, True)])
+def test_ssh_claim_includes_peer_prevalence_only_with_at_least_five_peers(peers, present):
+    row = {
+        "key": {"kind": "source_ip", "source_ip": "192.0.2.19"},
+        "window_count": 1, "peer_scopes": peers, "peer_scopes_with_key": 1,
+    }
+
+    claim = _claim(SshTupleBaseline(), [row])
+
+    assert ("peer prevalence 1/" in claim) is present
 
 
 def test_no_pre_window_history_is_unresolved_without_a_lead_or_complete_negative():
@@ -601,8 +648,9 @@ def test_hunt_manifest_records_the_frozen_baseline_plan_and_network_definition()
     assert baseline["budget"] == {"queries": 200, "records": 5_000_000, "seconds": 1800}
     assert {item["id"] for item in baseline["specs"]} == {
         "bl.ssh_tuple", "bl.exec_path", "bl.exec_pair", "bl.cmd_shape", "bl.ext_dest",
+        "bl.svc_exec_rate",
     }
-    assert "bl.svc_exec_rate" not in {item["id"] for item in baseline["specs"]}
+    assert baseline["thresholds"]["rate"] == {"min_count": 5.0, "k": 3.0, "z": 4.0}
     assert baseline["internal_networks"]["source"] == "configured"
     assert baseline["store_cut_digest"]
     default_a = build_manifest(Settings(), WINDOW, {}, "broad", ["b", "a"], {})["baseline"]["site"]
@@ -775,12 +823,16 @@ def test_a_history_child_resolves_to_a_parent_in_an_older_history_hour():
     run_baseline_stage(repo, "h1", WINDOW, source=TimedHistory({"host-index": [parent, child]}))
 
     coverage = next(iter(repo.baseline_snapshot("h1")["coverage"].values()))
-    # Only the parent's own hour is unresolved: its parent is pid 1.
-    assert [gap["start"] for gap in coverage["gaps"]] == [(START - timedelta(hours=5)).isoformat()]
+    assert coverage["gaps"] == []
     segment = next(row for row in repo.baseline_segments(statuses=["active"])
                    if row["start"] == START - timedelta(hours=1))
     assert [row["key"] for row in repo.baseline_counts(segment["id"])] == [
         {"child_executable": "/bin/ls", "parent_executable": "/usr/sbin/sshd"},
+    ]
+    parent_segment = next(row for row in repo.baseline_segments(statuses=["active"])
+                          if row["start"] == START - timedelta(hours=5))
+    assert [row["key"] for row in repo.baseline_counts(parent_segment["id"])] == [
+        {"child_executable": "/usr/sbin/sshd", "parent_executable": "init"},
     ]
 
 
@@ -838,6 +890,8 @@ def test_a_segment_straddling_history_start_contributes_only_its_in_span_rows():
     row = next(repo.baseline_observations("h1"))
     assert row["verdict"] == "first_seen" and row["history_count"] == 0
     assert row["n_hours"] == 7 * 24
+    assert "history count 0" in repo.candidates("h1")[0]["claim"]
+    assert "at most 0" not in repo.candidates("h1")[0]["claim"]
 
 
 def test_history_stopped_on_budget_is_never_called_absent():
