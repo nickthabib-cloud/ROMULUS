@@ -31,6 +31,16 @@ def eve(_id, record, ts="2024-11-18T14:26:40.100Z"):
         "event": {"dataset": f"suricata.eve.{record['event_type']}", "original": json.dumps(record)}}}
 
 
+def zeek(_id="z1", *, source_port=8, destination_port=0, connection=None):
+    return {"_id": _id, "_index": "romulus-network-logs", "_source": {
+        "@timestamp": "2024-11-18T14:26:40.100Z", "host": {"name": "zeek1"},
+        "event": {"dataset": "zeek.connection"}, "network": {"transport": "icmp"},
+        "source": {"ip": "172.17.100.121", "port": source_port},
+        "destination": {"ip": "192.0.2.174", "port": destination_port},
+        "zeek": {"connection": connection or {"orig_bytes": 900, "resp_bytes": 4000,
+                                                "orig_pkts": 9, "resp_pkts": 8, "duration": 2.0}}}}
+
+
 def one(hit):
     events, skips, errors = normalize_hits([hit])
     assert errors == [] and skips == {}, (errors, skips)
@@ -180,6 +190,41 @@ def test_suricata_absent_tcp_fields_stay_absent_and_bad_types_are_not_coerced():
     assert malformed.get("parse.malformed") == [
         "tcp.state", "tcp.syn", "tcp.tcp_flags_tc", "tcp.tcp_flags_ts",
     ]
+
+
+def test_suricata_icmp_type_and_code_are_strict_typed_fields_and_absence_is_not_zero():
+    typed = one(eve("icmp", {"event_type": "flow", "proto": "ICMP", "icmp_type": 8, "icmp_code": 0,
+                             "flow": {"bytes_toserver": 900, "bytes_toclient": 4000,
+                                      "pkts_toserver": 9, "pkts_toclient": 8}}))
+    assert typed.get("icmp.type") == 8 and typed.get("icmp.code") == 0
+    absent = one(eve("icmp-absent", {"event_type": "flow", "proto": "ICMP", "flow": {"bytes": 10}}))
+    assert absent.get("icmp.type") is None and absent.get("icmp.code") is None
+    malformed = one(eve("icmp-bad", {"event_type": "flow", "proto": "ICMP", "icmp_type": "8",
+                                      "icmp_code": False, "flow": {"bytes": 10}}))
+    assert malformed.get("icmp.type") is None and malformed.get("icmp.code") is None
+    assert malformed.get("parse.malformed") == ["icmp.code", "icmp.type"]
+
+
+def test_arkime_icmp_session_types_explicit_type_and_code_without_coercion():
+    hit = arkime(ipProtocol=1, protocol=["icmp"], icmp={"type": 8, "code": 0},
+                 source={"ip": "172.17.100.121", "bytes": 900, "packets": 9},
+                 destination={"ip": "192.0.2.174", "bytes": 4000, "packets": 8})
+    typed = one(hit)
+    assert typed.get("icmp.type") == 8 and typed.get("icmp.code") == 0
+
+
+def test_zeek_icmp_connection_uses_documented_type_code_ports_and_types_flow_counters():
+    typed = one(zeek())
+    assert typed.family == "net_flow" and typed.get("observer.product") == "zeek"
+    assert typed.get("icmp.type") == 8 and typed.get("icmp.code") == 0
+    assert typed.get("flow.bytes_toserver") == 900 and typed.get("flow.bytes_toclient") == 4000
+    assert typed.get("flow.pkts_toserver") == 9 and typed.get("flow.pkts_toclient") == 8
+    assert typed.get("session.duration_s") == 2.0
+
+
+def test_zeek_icmp_absent_type_and_code_stay_absent():
+    typed = one(zeek(source_port=None, destination_port=None))
+    assert typed.get("icmp.type") is None and typed.get("icmp.code") is None
 
 
 # ---- Arkime DNS ------------------------------------------------------------------------------------------------

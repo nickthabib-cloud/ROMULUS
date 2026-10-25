@@ -12,6 +12,7 @@ import pytest
 from romulus.detect.flows import (
     FLOW_PLAYBOOKS,
     HorizontalSweep,
+    IcmpEchoTunnel,
     LongUnidentifiedSession,
     OutboundVolumeAsymmetry,
     ProtocolPortMismatch,
@@ -31,7 +32,7 @@ def _eve_time(t: datetime) -> str:
 
 def eve(_id, *, src="10.0.0.5", sport=50000, dst="10.0.1.1", dport=445, proto="TCP", start=T0, seconds=1.0,
         app_proto=None, c2s=200, s2c=0, pkts_c=2, pkts_s=0, state="new", event_type="flow", observer="sensor1",
-        community_id=None, drop=()):
+        community_id=None, icmp_type=None, icmp_code=None, drop=()):
     """One Suricata EVE flow (bidirectional) or netflow (unidirectional) record."""
     end = start + timedelta(seconds=seconds)
     record = {"timestamp": _eve_time(end), "event_type": event_type, "src_ip": src, "dest_ip": dst, "proto": proto}
@@ -43,6 +44,10 @@ def eve(_id, *, src="10.0.0.5", sport=50000, dst="10.0.1.1", dport=445, proto="T
         record["app_proto"] = app_proto
     if community_id:
         record["community_id"] = community_id
+    if icmp_type is not None:
+        record["icmp_type"] = icmp_type
+    if icmp_code is not None:
+        record["icmp_code"] = icmp_code
     if event_type == "flow":
         record["flow"] = {"start": _eve_time(start), "end": _eve_time(end), "bytes_toserver": c2s,
                           "bytes_toclient": s2c, "pkts_toserver": pkts_c, "pkts_toclient": pkts_s, "state": state}
@@ -117,7 +122,7 @@ def _attack_ids():
 def test_flow_rules_are_registered_with_cards_and_existing_attack_ids():
     ids = _attack_ids()
     pack = {type(pb) for pb in fresh_pack()}
-    assert PACK_VERSION == "pack@29"
+    assert PACK_VERSION == "pack@30"
     for cls in FLOW_PLAYBOOKS:
         assert cls in ALL_PLAYBOOKS and cls in pack
         assert cls.kind == "aggregate" and cls.staged and cls.anchor_class == "network_observation"
@@ -140,6 +145,54 @@ def test_flow_rule_releases_connection_and_stage_indexes():
     assert rule.sweeps == {}
     assert rule._seen == set()
     assert rule._staged == set()
+
+
+# ---- ICMP echo tunnel / exfiltration shape ----------------------------------------------------
+
+def echo(_id, *, src="10.0.0.5", dst=ATTACKER, kind=8, code=0, payload=1000, packets=10_000,
+         seconds=60, start=T0):
+    overhead = 42 * packets
+    return eve(_id, src=src, sport=None, dst=dst, dport=None, proto="ICMP", start=start, seconds=seconds,
+               c2s=overhead + payload * packets, s2c=0, pkts_c=packets, pkts_s=0,
+               icmp_type=kind, icmp_code=code)
+
+
+def test_large_echo_payload_volume_per_pair_is_a_high_honest_lead():
+    [match] = run(IcmpEchoTunnel(), events(echo("bulk")))
+    assert match.proposed_lane == "high" and match.group_key == f"10.0.0.5|{ATTACKER}|icmp"
+    assert "ICMP echo request" in match.claim and "estimated payload" in match.claim
+    assert "not payload entropy" in match.claim
+    assert {p.field for p in match.predicate} >= {"icmp.type", "icmp.code"}
+
+
+def test_large_echo_reply_orients_the_pair_back_to_the_requester():
+    reply = echo("reply", src=ATTACKER, dst="10.0.0.5", kind=0)
+    [match] = run(IcmpEchoTunnel(), events(reply))
+    assert match.group_key == f"10.0.0.5|{ATTACKER}|icmp"
+    assert "ICMP echo reply" in match.claim
+
+
+def test_long_lived_payload_heavy_echo_session_is_a_lead_below_bulk_volume():
+    [match] = run(IcmpEchoTunnel(), events(echo("long", payload=1400, packets=900, seconds=3600)))
+    assert match.proposed_lane == "lead" and "ran 60 minutes" in match.claim
+
+
+@pytest.mark.parametrize("name,hit", [
+    ("ordinary ping", echo("ping", payload=56, packets=3600, seconds=3600)),
+    ("path mtu", echo("pmtu", kind=3, code=4, payload=1400, packets=10_000)),
+    ("traceroute", echo("ttl", kind=11, code=0, payload=1400, packets=10_000)),
+])
+def test_routine_or_non_echo_icmp_does_not_publish(name, hit):
+    rule = IcmpEchoTunnel()
+    assert run(rule, events(hit)) == [], name
+
+
+def test_icmp_without_type_or_code_is_partial_not_assumed_to_be_echo():
+    rule = IcmpEchoTunnel()
+    unknown = eve("unknown-icmp", sport=None, dport=None, proto="ICMP", c2s=20 * MIB, pkts_c=10_000)
+    assert run(rule, events(unknown)) == []
+    assert rule.missing_required == 1 and not rule.assures_negative
+    assert "typed echo type/code" in rule.positive_only_reason
 
 
 def test_port_ranges_compress_runs():

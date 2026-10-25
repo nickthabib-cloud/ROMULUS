@@ -67,6 +67,8 @@ LINUX_DATASET_FAMILIES = {
     "linux.audit.auth": {"process_exec", "net_socket", "auth", "file_change", "process_observed"} | _AUDIT_ADMIN,
     "linux.audit.admin": _AUDIT_ADMIN,
     "arkime.session": {"net_session"},
+    "zeek.connection": {"net_flow"},
+    "zeek.conn": {"net_flow"},
     "systemd.journal": {"auth", "privilege_use", "service_change"},
     "apache.access": {"http_access"},
     "apache.error": {"web_error"},
@@ -103,7 +105,7 @@ _WINDOWS_FAMILIES = frozenset().union(*WINDOWS_DATASET_FAMILIES.values())
 _ROLE_FAMILIES = {
     "host": _families_of(HOST_DATASETS),
     "network": _families_of([*(name for name in DATASET_FAMILIES if name.startswith("suricata.eve.")),
-                             "arkime.session"]),
+                             "arkime.session", "zeek.connection", "zeek.conn"]),
 }
 
 

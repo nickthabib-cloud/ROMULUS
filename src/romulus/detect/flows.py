@@ -45,8 +45,8 @@ from romulus.detect.netdef import assume_direction
 from romulus.evidence.typed import TypedEvent
 
 EXAMPLE_LIMIT = 20
-SURICATA, ARKIME = "suricata", "arkime"
-SENSOR_NAMES = {SURICATA: "Suricata", ARKIME: "Arkime"}
+SURICATA, ARKIME, ZEEK = "suricata", "arkime", "zeek"
+SENSOR_NAMES = {SURICATA: "Suricata", ARKIME: "Arkime", ZEEK: "Zeek"}
 PORTED = ("tcp", "udp", "sctp")
 _DIRECTIONAL = ("flow.state", "flow.bytes_toserver", "flow.bytes_toclient", "flow.pkts_toserver",
                 "flow.pkts_toclient")
@@ -381,12 +381,16 @@ def flow_view(event: TypedEvent, kind: str) -> FlowView | None:
         syn = _int(event.get("tcp.flags.syn"))
         opened = transport == "tcp" and syn is not None and syn > 0
     else:
-        sensor = SURICATA
+        sensor = ZEEK if event.get("observer.product") == "zeek" else SURICATA
         c2s, s2c = _int(event.get("flow.bytes_toserver")), _int(event.get("flow.bytes_toclient"))
         s2c_packets = _int(event.get("flow.pkts_toclient"))
         c2s_packets = _int(event.get("flow.pkts_toserver"))
-        payload = _framed_payload(transport, c2s, c2s_packets, s2c, s2c_packets)
-        data_c, data_s = _framed_data(transport, c2s, c2s_packets), _framed_data(transport, s2c, s2c_packets)
+        if event.get("flow.bytes_are_payload") is True:
+            payload = None if c2s is None or s2c is None else c2s > 0 and s2c > 0
+            data_c, data_s = c2s, s2c
+        else:
+            payload = _framed_payload(transport, c2s, c2s_packets, s2c, s2c_packets)
+            data_c, data_s = _framed_data(transport, c2s, c2s_packets), _framed_data(transport, s2c, s2c_packets)
         # Suricata writes app_proto only once detection concluded; its absence is the record's own statement that
         # no protocol was identified, and 'failed' says detection gave up.
         app = event.get("network.app_proto")
@@ -414,7 +418,7 @@ def _per_sensor_cited(evs: list[TypedEvent], tallies: dict) -> str:
     parts = []
     for sensor, tally in sorted(tallies.items()):
         total = tally["records"]
-        kind = "flow record" if sensor == SURICATA else "session record"
+        kind = "session record" if sensor == ARKIME else "conn record" if sensor == ZEEK else "flow record"
         shown = min(cited[sensor], total)
         name = f"{SENSOR_NAMES[sensor]} {kind}"
         parts.append(f"the one {name}" if total == 1 and shown == 1 else f"all {total} {name}s" if shown == total
@@ -433,6 +437,8 @@ def _sensor_counts(counts: Counter) -> str:
         parts.append(_plural(counts[SURICATA], "Suricata flow record"))
     if counts.get(ARKIME):
         parts.append(_plural(counts[ARKIME], "Arkime session record"))
+    if counts.get(ZEEK):
+        parts.append(_plural(counts[ZEEK], "Zeek conn record"))
     return " and ".join(parts) or "no records"
 
 
@@ -528,6 +534,186 @@ class _FlowRule(Playbook):
     def _refused(self, what: str) -> None:
         """A store's disk budget is spent: the record is refused and coverage says so."""
         self.refuse("disk", f"the {what} disk budget is spent; a record needing a new one is not evaluated")
+
+
+# ---------------------------------------------------------------------------------------------
+# ICMP echo transfer / tunnel shape
+# ---------------------------------------------------------------------------------------------
+
+@dataclass
+class _IcmpEchoPair:
+    payload: Counter = field(default_factory=Counter)       # estimated payload bytes per sensor
+    packets: Counter = field(default_factory=Counter)
+    records: Counter = field(default_factory=Counter)
+    kinds: Counter = field(default_factory=Counter)         # request/reply records
+    first: float = float("inf")
+    last: float = float("-inf")
+    longest: tuple | None = None                            # duration, payload, packets, start, end, event id
+    cites: list[tuple[int, str]] = field(default_factory=list)
+    ends: Ends = field(default_factory=Ends)
+
+
+class IcmpEchoTunnel(_FlowRule):
+    """Payload-heavy ICMP echo traffic, measured from bounded flow/session aggregates."""
+    id = "net.icmp_echo_tunnel_shape"
+    version = "1"
+    title = "Payload-heavy or long-lived ICMP echo traffic between one pair"
+    severity, lane = "high", "lead"
+    attack = ("T1095", "T1572", "T1048.003")
+    assures_negative = False
+    positive_only_reason = (
+        "only typed echo type/code and complete byte/packet counters are evaluated; flow telemetry does not expose "
+        "payload bytes, so packet-size and volume shape cannot establish payload entropy or prove a tunnel")
+    benign = ("large diagnostic pings and link tests", "network appliance health checks", "authorized tunnel tests")
+    next_checks = ("packet payload entropy and repeated structure", "the processes owning the traffic on each host",
+                   "whether either endpoint is an approved monitoring or network-test system")
+    HOT = HOT_COUNT
+    # 8 MiB of estimated echo payload at an average of at least 256 bytes over at least 100 packets is well above
+    # ordinary 32/56-byte diagnostic pings while remaining low enough to catch a short transfer. A 30-minute session
+    # has a lower 1 MiB floor but still needs 120 packets averaging 128 bytes, excluding routine once-per-second pings.
+    BULK_PAYLOAD = 8 * 2**20
+    BULK_PACKETS = 100
+    BULK_AVERAGE = 256
+    LONG_SECONDS = 30 * 60
+    LONG_PAYLOAD = 2**20
+    LONG_PACKETS = 120
+    LONG_AVERAGE = 128
+    FIRST_CITES = 3
+    card: ClassVar[dict] = {
+        "behavior": "one endpoint pair exchanged ICMP echo request/reply traffic with at least 8 MiB of estimated "
+                    "payload in payload-heavy packets, or one payload-heavy echo session lasted at least 30 minutes",
+        "telemetry": "Suricata EVE ICMP type/code and directional flow byte/packet counters; Zeek conn ICMP type/code "
+                     "and orig/resp counters; Arkime ICMP session type/code, duration and side counters",
+        "fidelity": "ICMP echo type/code is direct typed evidence. Suricata and Arkime payload is conservatively "
+                    "estimated by subtracting Ethernet, IP and ICMP header bytes; Zeek orig/resp bytes are payload. "
+                    "No flow source here exposes payload entropy, and the claim says so",
+        "benign_and_cost": "large diagnostic pings, link tests and appliance health checks. One bounded state per "
+                           "oriented echo pair; cold states spill to the hunt's disk budget",
+        "query_cost": "none beyond the sweep",
+        "next_pivot": "packet payload and the owning processes on both endpoints",
+        "adds": "typed echo semantics distinguish transfers from PMTU errors, time-exceeded traceroute replies and "
+                "other portless ICMP already visible to generic flow rules",
+        "research_basis": "ATT&CK Enterprise 20.0 T1095, T1572 and T1048.003; ICMPv4 echo types 8/0 and ICMPv6 "
+                          "echo types 128/129",
+        "retrieval": "the sweep retrieves the complete Suricata, Zeek conn and Arkime session records in each "
+                     "partition; records without typed ICMP type/code or complete counters are explicitly partial",
+        "lanes": "high for at least 8 MiB of payload-heavy echo traffic; lead for a payload-heavy session lasting "
+                 "at least 30 minutes. Thresholds exclude ordinary small diagnostic pings but do not prove abuse",
+    }
+
+    def __init__(self):
+        super().__init__()
+        self.pairs = KeyedStore(self, "icmp_echo_pairs", self.HOT, candidate=self._reportable)
+
+    @classmethod
+    def _bulk(cls, payload: int, packets: int) -> bool:
+        return (payload >= cls.BULK_PAYLOAD and packets >= cls.BULK_PACKETS
+                and payload >= cls.BULK_AVERAGE * packets)
+
+    @classmethod
+    def _long(cls, longest: tuple | None) -> bool:
+        if longest is None:
+            return False
+        duration, payload, packets, *_rest = longest
+        return (duration >= cls.LONG_SECONDS and payload >= cls.LONG_PAYLOAD and packets >= cls.LONG_PACKETS
+                and payload >= cls.LONG_AVERAGE * packets)
+
+    @classmethod
+    def _reportable(cls, pair: _IcmpEchoPair) -> bool:
+        return any(cls._bulk(pair.payload[sensor], pair.packets[sensor]) for sensor in pair.payload) \
+            or cls._long(pair.longest)
+
+    @staticmethod
+    def _counters(view: FlowView, event: TypedEvent) -> tuple[int, int] | None:
+        if view.sensor == ARKIME:
+            values = (event.get("source.bytes"), event.get("destination.bytes"),
+                      event.get("source.packets"), event.get("destination.packets"))
+        else:
+            values = (event.get("flow.bytes_toserver"), event.get("flow.bytes_toclient"),
+                      event.get("flow.pkts_toserver"), event.get("flow.pkts_toclient"))
+        numbers = tuple(_int(value) for value in values)
+        if any(value is None for value in numbers):
+            return None
+        sent, received, sent_packets, received_packets = numbers
+        packets = sent_packets + received_packets
+        if packets <= 0:
+            return None
+        if event.get("flow.bytes_are_payload") is True:
+            payload = sent + received
+        else:
+            # Ethernet (14) + IPv4 (20) + ICMP (8), or Ethernet + IPv6 (40) + ICMPv6 (8).
+            header = 62 if view.transport in ("ipv6-icmp", "icmpv6") else 42
+            payload = max(sent + received - header * packets, 0)
+        return payload, packets
+
+    def take(self, view: FlowView, event: TypedEvent) -> bool | None:
+        if view.transport not in ("icmp", "ipv6-icmp", "icmpv6"):
+            return True
+        kind, code = event.get("icmp.type"), event.get("icmp.code")
+        if not (isinstance(kind, int) and not isinstance(kind, bool)
+                and isinstance(code, int) and not isinstance(code, bool)):
+            return False
+        request, reply = ((8, 0) if view.transport == "icmp" else (128, 129))
+        if code != 0 or kind not in (request, reply):
+            return True
+        counters = self._counters(view, event)
+        if counters is None:
+            return False
+        payload, packets = counters
+        client, peer = (view.src, view.dst) if kind == request else (view.dst, view.src)
+        key = (client, peer, view.transport)
+        pair = self.pairs.get(key)
+        if pair is None:
+            pair = _IcmpEchoPair()
+            if not self.pairs.put(key, pair):
+                return self._refused("ICMP echo pairs'")
+        pair.payload[view.sensor] += payload
+        pair.packets[view.sensor] += packets
+        pair.records[view.sensor] += 1
+        pair.kinds["request" if kind == request else "reply"] += 1
+        pair.first, pair.last = min(pair.first, view.start), max(pair.last, view.end)
+        duration = view.end - view.start
+        longest = (duration, payload, packets, view.start, view.end, event.id)
+        if pair.longest is None or longest[:-1] > pair.longest[:-1]:
+            pair.longest = longest
+        if len(pair.cites) < self.FIRST_CITES or payload >= self.LONG_PAYLOAD:
+            pair.cites.append((payload, event.id))
+            pair.cites = sorted(pair.cites, key=lambda item: (-item[0], item[1]))[:EXAMPLE_LIMIT]
+            self._stage(event)
+        self.bounds.offer(("icmp",) + key, pair.ends, view.start, view.end, event, stage=self._reportable(pair))
+        return True
+
+    def finalize(self):
+        matches = [self._match(key, self.pairs.peek(key)) for key in sorted(self.pairs.keys(candidates=True))]
+        return matches
+
+    def _match(self, key, pair: _IcmpEchoPair) -> Match:
+        client, peer, transport = key
+        sensor = max(sorted(pair.payload), key=lambda name: (pair.payload[name], pair.packets[name]))
+        payload, packets = pair.payload[sensor], pair.packets[sensor]
+        average = payload / packets
+        bulk = self._bulk(payload, packets)
+        longest = pair.longest[0]
+        ids = [event_id for _payload, event_id in pair.cites]
+        evs, missing = self._cite(pair.ends, ids)
+        kind_text = " and ".join(f"{count} echo {kind} record{'s' if count != 1 else ''}"
+                                 for kind, count in sorted(pair.kinds.items()))
+        claim = (f"{client} and {peer} exchanged {kind_text.replace('echo', transport.upper() + ' echo')} with "
+                 f"{payload:,} bytes "
+                 f"({payload / 2**20:.1f} MiB) of estimated payload across {packets:,} packets according to "
+                 f"{SENSOR_NAMES[sensor]} (average {average:.0f} bytes per packet; {_iso(pair.first)} – "
+                 f"{_iso(pair.last)}). The longest recorded echo session ran {longest / 60:.0f} minutes. "
+                 "This is packet-size and volume shape, not payload entropy or proof of tunneling."
+                 + cited_phrase(len(evs), sum(pair.records.values()), not missing) + bound_note(missing, pair.ends))
+        lane, severity = ("high", "high") if bulk else (self.lane, "medium")
+        match = Match(self.id, claim, self.claim_type, evs,
+                      _predicates(evs[0], ("source.ip", "destination.ip", "icmp.type", "icmp.code",
+                                           "flow.bytes_toserver", "source.bytes")),
+                      evs[0].ts, severity, lane, "medium", _entities(evs),
+                      group_key=f"{client}|{peer}|{transport}")
+        match.notes.append("ATT&CK context: T1095 / T1572 (ICMP protocol tunneling) and T1048.003 (unencrypted "
+                           "non-C2 exfiltration), if the traffic is unauthorized")
+        return match
 
 
 def _entities(events: list[TypedEvent]) -> list[tuple[str, str, str]]:
@@ -1967,4 +2153,5 @@ class OutboundVolumeAsymmetry(_FlowRule):
         return match
 
 
-FLOW_PLAYBOOKS = [HorizontalSweep, ProtocolPortMismatch, LongUnidentifiedSession, OutboundVolumeAsymmetry]
+FLOW_PLAYBOOKS = [HorizontalSweep, IcmpEchoTunnel, ProtocolPortMismatch, LongUnidentifiedSession,
+                  OutboundVolumeAsymmetry]

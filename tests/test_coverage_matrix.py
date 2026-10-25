@@ -33,7 +33,7 @@ def test_public_matrix_contains_versions_tactic_rollups_and_rule_card_links():
     text = render_public(catalog)
 
     assert "ATT&CK Enterprise 20.0" in text
-    assert "ROMULUS `pack@29`" in text
+    assert "ROMULUS `pack@30`" in text
     for rollup in catalog.tactic_rollups:
         assert f"| {rollup.tactic.id} | {rollup.tactic.name} |" in text
     assert "[host.ssh_password_guessing](#rule-host-ssh-password-guessing)" in text
