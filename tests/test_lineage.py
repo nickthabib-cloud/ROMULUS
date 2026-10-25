@@ -27,17 +27,18 @@ def _ev(family, ts, outcome=Outcome.success, host="app01", **fields):
 
 
 def exc(exe, pid, ts, *, ppid=None, argv=None, user=None, outcome=Outcome.success, host="app01", boot=None,
-        argv_complete=None):
+        argv_complete=None, serial=None):
     return _ev("process_exec", ts, outcome=outcome, host=host, process__executable=exe, process__pid=pid,
                process__ppid=ppid, process__argv=argv or [exe], process__user=user, host__boot__id=boot,
-               process__argv_complete=argv_complete)
+               process__argv_complete=argv_complete, audit__serial=serial)
 
 
 def sock(syscall, pid, ts, *, ip=EXT, port=4444, exe="/usr/bin/python3", user=None,
-         outcome=Outcome.success, host="app01", boot=None):
+         outcome=Outcome.success, host="app01", boot=None, serial=None):
     side = "destination" if syscall == "connect" else "source"
     fields = {"socket.syscall": syscall, "process.pid": pid, "process.executable": exe,
-              "process.user": user, "host.boot.id": boot, f"{side}.ip": ip, f"{side}.port": port}
+              "process.user": user, "host.boot.id": boot, "audit.serial": serial,
+              f"{side}.ip": ip, f"{side}.port": port}
     return _ev("net_socket", ts, outcome=outcome, host=host, **{k.replace(".", "__"): v for k, v in fields.items()})
 
 
@@ -525,3 +526,22 @@ def test_incomplete_argv_is_never_read_as_a_stdin_shell():
     pb, out = run(events)
     assert len(out) == 1 and out[0].proposed_lane == "lead"
     assert pb.missing_required >= 1
+
+
+def test_same_instant_socket_calls_choose_the_latest_audit_serial():
+    events = [
+        exc("/usr/bin/python3", 500, T0, ppid=1, user="www-data", serial=2453),
+        sock("connect", 500, T0 + timedelta(seconds=1), ip="203.0.113.57", port=6457,
+             user="www-data", serial=2457),
+        sock("connect", 500, T0 + timedelta(seconds=1), ip="203.0.113.54", port=6454,
+             user="www-data", serial=2454),
+        sock("connect", 500, T0 + timedelta(seconds=1), ip="203.0.113.55", port=6455,
+             user="www-data", serial=2455),
+        sock("connect", 500, T0 + timedelta(seconds=1), ip="203.0.113.56", port=6456,
+             user="www-data", serial=2456),
+        exc("/bin/sh", 501, T0 + timedelta(seconds=2), ppid=500, argv=["sh"], user="www-data", serial=2458),
+    ]
+
+    _pb, matches = run(events)
+
+    assert any("external address 203.0.113.57:6457" in match.claim for match in matches)

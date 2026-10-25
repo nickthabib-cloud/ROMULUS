@@ -1791,9 +1791,9 @@ class ExecLineage:
         for member in self.members:
             member.note_limit("lineage_observed", f"the store of processes' observed states took no new process from "
                                                   f"the record of {when} on (its share of the state budget is spent): "
-                                                  f"lineages are judged when the hunt ends, so no lineage lowers a lane "
-                                                  f"anywhere in this hunt (every lineage that would have is stated as "
-                                                  f"unknown)")
+                                                  f"recorded exec lineage is still used for attack-associated raises, "
+                                                  f"but package, cloud-init and log-rotation lineage cannot lower a "
+                                                  f"lane anywhere in this hunt")
 
     def _cite(self, entry: Observed, blob: bytes | None) -> bool:
         """Keep an observation's source pointer; False when it is unavailable or its store refuses it (a lineage
@@ -1995,11 +1995,10 @@ class ProcessLineage:
         """
         if ppid is None or ppid <= 1:
             return None
-        if self.execs.observed_incomplete:
-            return None
         view = self.execs.view(host, ppid, ts, serial, boot, inclusive=inclusive, order_domain=order_domain)
-        if view.image is None or any(not entry.cited for entry in view.used):
+        if view.image is None:
             return None
+        lowering_safe = not self.execs.observed_incomplete and all(entry.cited for entry in view.used)
         first, named = view.first, view.named
         entry = named.entry
         if isinstance(entry, ExecRecord):
@@ -2016,6 +2015,8 @@ class ProcessLineage:
                  if getattr(step.entry, "user", None) not in (None, "")),
                 None,
             )
+        if not lowering_safe:
+            marker = ""
         return Ancestor(first.ts, first.ppid, name, user, marker, entry.event_id,
                         first.boot or named.boot, first.serial, first.domain)
 

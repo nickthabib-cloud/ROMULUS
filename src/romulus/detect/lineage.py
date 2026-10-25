@@ -189,6 +189,7 @@ class _Socket:
     web: bool
     event_id: str
     boot: str | None = None
+    serial: int | None = None
 
 
 @dataclass
@@ -424,7 +425,7 @@ class ReverseShellByLineage(Playbook):
             return
         held.append(_Socket(
             ts=event.ts.timestamp(), syscall=str(syscall), peer_ip=ip, peer_port=port, exe=str(exe), user=user,
-            web=web, event_id=event.id, boot=boot_of(event)))
+            web=web, event_id=event.id, boot=boot_of(event), serial=_audit_serial(event)))
         self._stage(event)
 
     # ---------------------------------------------------------------- finalize
@@ -442,9 +443,11 @@ class ReverseShellByLineage(Playbook):
 
         def process_at(pid, ts, boot, serial, *, exclude=None):
             view = self.pids.execs.view(shell.host, pid, ts, serial, boot, inclusive=False, exclude=exclude)
-            if view.image is None or any(not entry.cited for entry in view.used):
+            if view.image is None:
                 return None
-            ids = [entry.event_id for entry in view.used]
+            # Citation capacity is independent of detection state. An observation whose pointer could not be
+            # retained still names the process and keeps this join; only that supporting citation is omitted.
+            ids = [entry.event_id for entry in view.used if entry.cited]
             for step in (view.named, view.first):
                 if step.kind == "exec" and step.entry.event_id not in ids:
                     ids.append(step.entry.event_id)
@@ -500,7 +503,7 @@ class ReverseShellByLineage(Playbook):
             window = sorted((s for s in held
                              if start <= s.ts < end and shell.ts - s.ts <= MAX_GAP
                              and not boots_conflict(shell.boot, s.boot)),
-                            key=lambda s: (s.ts, s.event_id))
+                            key=lambda s: (s.ts, (0, s.serial) if s.serial is not None else (1, s.event_id)))
             if not window:
                 continue
             # The headline socket is the latest one that could be a channel: a DNS or port-0 call made

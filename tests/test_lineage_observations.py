@@ -200,6 +200,52 @@ def test_reverse_shell_walks_a_no_exec_owner_and_cites_its_observation():
     assert any(event.family == "process_observed" and event.id in match.context_ids for event in match.events)
 
 
+def test_reverse_shell_survives_when_its_owner_observation_cannot_be_cited():
+    events, raw = normalized(
+        observe(T, 50, 500, 490, "/usr/sbin/apache2", "apache2", "33", "www-data"),
+        execd(T + 0.5, 51, 500, 490, "/usr/bin/python3", ["python3", "-c", "x"], "33", "www-data"),
+        connect(T + 1, 52, 500, 490, "/usr/bin/python3", "python3", success="yes", exit_code="0"),
+        execd(T + 2, 53, 501, 500, "/usr/bin/dash", ["sh"], "33", "www-data"),
+    )
+    rule = ReverseShellByLineage()
+    rule.pids.execs.citations.put = lambda *_args, **_kwargs: False
+
+    [match] = drive(rule, events, raw)
+
+    assert match.proposed_lane == "high"
+    assert "203.0.113.65:554" in match.claim
+    assert not any(event.family == "process_observed" for event in match.events)
+    assert "lineage_records" in rule.limits
+
+
+def test_unrelated_observation_refusal_does_not_hide_web_lineage(tmp_path):
+    rule = AccountOrGroupChange()
+    rule.spill_dir = tmp_path
+    rule.budget = StateBudget(tmp_path, disk_total=2**40, reserve=0)
+    rule.budget.force_full(
+        "the observed states' store is past its floor (test)",
+        lambda account: account.name.endswith("proc_observed"),
+    )
+    events, raw = normalized(
+        observe(T - 5, 59, 999, 998, "/usr/bin/foo", "foo"),
+        execd(T, 60, 600, 590, "/usr/sbin/php-fpm8.2", ["php-fpm"], "33", "www-data"),
+        execd(T + 1, 61, 601, 600, "/usr/bin/dash", ["sh", "-c", "x"], "33", "www-data"),
+        execd(T + 2, 62, 602, 601, "/usr/sbin/useradd", ["useradd", "backdoor"]),
+    )
+
+    [match] = drive(rule, events, raw)
+
+    assert match.proposed_lane == "high"
+    assert "web-service account" in match.claim
+    assert "lineage_observed" in rule.limits
+    assert "no lineage lowers a lane anywhere" not in " ".join(str(value) for value in rule.limits.values())
+
+
+def test_process_lineage_consumers_bump_versions_for_ambiguous_tie_semantics():
+    assert InterpreterExternalConnection.version == "8"
+    assert ProcessNetworkLink.version == "9"
+
+
 def test_persistence_change_uses_a_no_exec_package_parent_and_cites_its_observation():
     from tests.lineage_citation_fixture import source_copies
     from tests.test_kernel_files import change
@@ -687,7 +733,8 @@ def test_a_refused_observation_store_is_stated_on_the_rules_window_cell(monkeypa
     window = next(c for c in cells if c["rule_id"] == InterpreterExternalConnection.id and c["target"] == "*")
     assert window["state"] == "match_on_partial"
     assert any("took no new process from the record of 2024-11-18T10:21:21.941000+00:00 on" in r
-               and "no lineage lowers a lane anywhere in this hunt" in r for r in window["detail"]["reasons"])
+               and "recorded exec lineage is still used for attack-associated raises" in r
+               and "cannot lower a lane anywhere in this hunt" in r for r in window["detail"]["reasons"])
 
 
 def test_the_network_join_is_not_evaluated_by_a_partition_of_lineage_records_only(monkeypatch, tmp_path):
