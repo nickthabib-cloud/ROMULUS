@@ -5,10 +5,12 @@ import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy.dialects.sqlite import insert
 
 from romulus.baseline.carry import CarryInStore, ParentExec, ParentObservation, PendingResolver
 from romulus.baseline.spec import Pending
 from romulus.evidence.typed import Outcome, TypedEvent, fv
+from romulus.store import schema as tables
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
 
@@ -315,6 +317,42 @@ def test_parent_observations_keep_only_the_boundaries_of_each_process_state_run(
 
     assert written == len(rows)
     assert repo.baseline_parent_observation_count("hunt") == 6
+
+
+@pytest.mark.slow
+def test_parent_observation_chunk_cost_does_not_scale_with_untouched_history(tmp_path):
+    repo = Repo(make_engine(tmp_path / "parent-observations.db"))
+    migrate(repo.engine)
+    repo.create_hunt("hunt", {}, "d", "test")
+
+    def observations(start: int, count: int):
+        for index in range(start, start + count):
+            yield {
+                "hunt_id": "hunt", "target": "target", "host": f"host-{index % 50}",
+                "boot": "boot", "pid": index % 20_000,
+                "observed_ts": START + timedelta(seconds=index), "serial": index,
+                "executable": "/bin/a" if (index // 20_000) % 2 else "/bin/b",
+                "parent_pid": 1, "session": None, "event_id": f"event-{index}",
+            }
+
+    statement = insert(tables.baseline_parent_observation)
+    with repo.engine.begin() as connection:
+        connection.execute(statement, list(observations(0, 25_000)))
+
+    started = time.perf_counter()
+    repo.upsert_baseline_parent_observations(observations(25_000, 25_000), chunk_size=5_000)
+    small = time.perf_counter() - started
+
+    with repo.engine.begin() as connection:
+        for offset in range(50_000, 500_000, 25_000):
+            connection.execute(statement, list(observations(offset, 25_000)))
+
+    started = time.perf_counter()
+    repo.upsert_baseline_parent_observations(observations(500_000, 25_000), chunk_size=5_000)
+    large = time.perf_counter() - started
+    print(f"25k parent observations over 25k: {small:.2f}s; over 500k: {large:.2f}s")
+
+    assert large < max(1.0, small * 4)
 
 
 @pytest.mark.slow

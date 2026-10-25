@@ -12,6 +12,7 @@ from itertools import groupby, islice
 from typing import Any, ClassVar
 
 from sqlalchemy import (
+    DateTime,
     Engine,
     Integer,
     String,
@@ -2658,45 +2659,172 @@ class Repo:
         )
         for chunk in _chunks(normalized(), chunk_size):
             with write_txn(self.engine) as connection:
+                connection.exec_driver_sql("""
+                    CREATE TEMP TABLE IF NOT EXISTS baseline_parent_observation_incoming (
+                        hunt_id TEXT NOT NULL,
+                        target TEXT NOT NULL,
+                        host TEXT NOT NULL,
+                        boot TEXT NOT NULL,
+                        pid INTEGER NOT NULL,
+                        observed_ts DATETIME NOT NULL,
+                        event_id TEXT NOT NULL,
+                        PRIMARY KEY (hunt_id, target, host, boot, pid, observed_ts, event_id)
+                    ) WITHOUT ROWID
+                """)
+                connection.exec_driver_sql("DELETE FROM baseline_parent_observation_incoming")
+                incoming = text("""
+                    INSERT OR IGNORE INTO baseline_parent_observation_incoming
+                        (hunt_id, target, host, boot, pid, observed_ts, event_id)
+                    VALUES (:hunt_id, :target, :host, :boot, :pid, :observed_ts, :event_id)
+                """).bindparams(bindparam("observed_ts", type_=DateTime(timezone=True)))
+                connection.execute(incoming, chunk)
                 connection.execute(stmt, chunk)
-                # Repeated audit records often name the same long-lived process image. Only the two boundaries
-                # of each ordered state run can affect a child lookup; interior sightings carry no additional
-                # ordering information. Recompute after every bounded input chunk so out-of-order history and
-                # runs crossing chunk boundaries compact identically.
+                # The table is already compact before this insert. Therefore only an incoming row or its former
+                # immediate neighbour can have become the interior of a state run. Indexed predecessor/successor
+                # lookups keep compaction proportional to this chunk even when the hunt retains millions of other
+                # boundaries, while applying the ordering after insert preserves out-of-order correctness.
                 connection.execute(text("""
-                    WITH ordered AS (
-                        SELECT rowid AS rid,
-                               executable,
-                               parent_pid,
-                               session,
-                               LAG(executable) OVER lineage AS previous_executable,
-                               LAG(parent_pid) OVER lineage AS previous_parent_pid,
-                               LAG(session) OVER lineage AS previous_session,
-                               LEAD(executable) OVER lineage AS next_executable,
-                               LEAD(parent_pid) OVER lineage AS next_parent_pid,
-                               LEAD(session) OVER lineage AS next_session
-                        FROM baseline_parent_observation
-                        WHERE hunt_id = :hunt_id AND target = :target
-                        WINDOW lineage AS (
-                            PARTITION BY hunt_id, target, host, boot, pid
-                            ORDER BY observed_ts,
-                                     CASE WHEN serial IS NULL THEN 1 ELSE 0 END,
-                                     serial,
-                                     event_id
+                    WITH incoming_rows AS MATERIALIZED (
+                        SELECT observation.rowid AS rid,
+                               observation.hunt_id,
+                               observation.target,
+                               observation.host,
+                               observation.boot,
+                               observation.pid,
+                               observation.observed_ts,
+                               observation.serial,
+                               observation.event_id
+                        FROM baseline_parent_observation_incoming AS incoming
+                        CROSS JOIN baseline_parent_observation AS observation
+                            INDEXED BY ix_baseline_parent_observation_lookup
+                        WHERE observation.hunt_id = incoming.hunt_id
+                          AND observation.target = incoming.target
+                          AND observation.host = incoming.host
+                          AND observation.boot = incoming.boot
+                          AND observation.pid = incoming.pid
+                          AND observation.observed_ts = incoming.observed_ts
+                          AND observation.event_id = incoming.event_id
+                    ), candidate_ids AS MATERIALIZED (
+                        SELECT rid FROM incoming_rows
+                        UNION
+                        SELECT (
+                            SELECT prior.rowid
+                            FROM baseline_parent_observation AS prior
+                                INDEXED BY ix_baseline_parent_observation_lookup
+                            WHERE prior.hunt_id = incoming.hunt_id
+                              AND prior.target = incoming.target
+                              AND prior.host = incoming.host
+                              AND prior.boot = incoming.boot
+                              AND prior.pid = incoming.pid
+                              AND (prior.observed_ts,
+                                   prior.serial IS NULL,
+                                   COALESCE(prior.serial, 0),
+                                   prior.event_id)
+                                  < (incoming.observed_ts,
+                                     incoming.serial IS NULL,
+                                     COALESCE(incoming.serial, 0),
+                                     incoming.event_id)
+                            ORDER BY prior.observed_ts DESC,
+                                     prior.serial IS NULL DESC,
+                                     prior.serial DESC,
+                                     prior.event_id DESC
+                            LIMIT 1
                         )
-                    ), interior AS (
-                        SELECT rid
-                        FROM ordered
-                        WHERE executable = previous_executable
-                          AND parent_pid = previous_parent_pid
-                          AND session IS previous_session
-                          AND executable = next_executable
-                          AND parent_pid = next_parent_pid
-                          AND session IS next_session
+                        FROM incoming_rows AS incoming
+                        UNION
+                        SELECT (
+                            SELECT following.rowid
+                            FROM baseline_parent_observation AS following
+                                INDEXED BY ix_baseline_parent_observation_lookup
+                            WHERE following.hunt_id = incoming.hunt_id
+                              AND following.target = incoming.target
+                              AND following.host = incoming.host
+                              AND following.boot = incoming.boot
+                              AND following.pid = incoming.pid
+                              AND (following.observed_ts,
+                                   following.serial IS NULL,
+                                   COALESCE(following.serial, 0),
+                                   following.event_id)
+                                  > (incoming.observed_ts,
+                                     incoming.serial IS NULL,
+                                     COALESCE(incoming.serial, 0),
+                                     incoming.event_id)
+                            ORDER BY following.observed_ts,
+                                     following.serial IS NULL,
+                                     following.serial,
+                                     following.event_id
+                            LIMIT 1
+                        )
+                        FROM incoming_rows AS incoming
+                    ), candidate_rows AS MATERIALIZED (
+                        SELECT observation.rowid AS rid,
+                               observation.*,
+                               (
+                                   SELECT prior.rowid
+                                   FROM baseline_parent_observation AS prior
+                                       INDEXED BY ix_baseline_parent_observation_lookup
+                                   WHERE prior.hunt_id = observation.hunt_id
+                                     AND prior.target = observation.target
+                                     AND prior.host = observation.host
+                                     AND prior.boot = observation.boot
+                                     AND prior.pid = observation.pid
+                                     AND (prior.observed_ts,
+                                          prior.serial IS NULL,
+                                          COALESCE(prior.serial, 0),
+                                          prior.event_id)
+                                         < (observation.observed_ts,
+                                            observation.serial IS NULL,
+                                            COALESCE(observation.serial, 0),
+                                            observation.event_id)
+                                   ORDER BY prior.observed_ts DESC,
+                                            prior.serial IS NULL DESC,
+                                            prior.serial DESC,
+                                            prior.event_id DESC
+                                   LIMIT 1
+                               ) AS previous_rid,
+                               (
+                                   SELECT following.rowid
+                                   FROM baseline_parent_observation AS following
+                                       INDEXED BY ix_baseline_parent_observation_lookup
+                                   WHERE following.hunt_id = observation.hunt_id
+                                     AND following.target = observation.target
+                                     AND following.host = observation.host
+                                     AND following.boot = observation.boot
+                                     AND following.pid = observation.pid
+                                     AND (following.observed_ts,
+                                          following.serial IS NULL,
+                                          COALESCE(following.serial, 0),
+                                          following.event_id)
+                                         > (observation.observed_ts,
+                                            observation.serial IS NULL,
+                                            COALESCE(observation.serial, 0),
+                                            observation.event_id)
+                                   ORDER BY following.observed_ts,
+                                            following.serial IS NULL,
+                                            following.serial,
+                                            following.event_id
+                                   LIMIT 1
+                               ) AS next_rid
+                        FROM candidate_ids AS candidate
+                        JOIN baseline_parent_observation AS observation
+                          ON observation.rowid = candidate.rid
                     )
                     DELETE FROM baseline_parent_observation
-                    WHERE rowid IN (SELECT rid FROM interior)
-                """), {"hunt_id": chunk[0]["hunt_id"], "target": chunk[0]["target"]})
+                    WHERE rowid IN (
+                        SELECT current.rid
+                        FROM candidate_rows AS current
+                        JOIN baseline_parent_observation AS previous
+                          ON previous.rowid = current.previous_rid
+                        JOIN baseline_parent_observation AS following
+                          ON following.rowid = current.next_rid
+                        WHERE current.executable = previous.executable
+                          AND current.parent_pid = previous.parent_pid
+                          AND current.session IS previous.session
+                          AND current.executable = following.executable
+                          AND current.parent_pid = following.parent_pid
+                          AND current.session IS following.session
+                    )
+                """))
             written += len(chunk)
         return written
 
