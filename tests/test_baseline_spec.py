@@ -387,6 +387,11 @@ def test_command_shape_masks_base64_blobs_by_length_bucket(blob, bucket):
     assert _command_shape(["tool", blob]) == ["tool", bucket]
 
 
+def test_command_shape_rejects_structurally_invalid_base64_without_decoding_it():
+    invalid = "G" * 17
+    assert _command_shape(["tool", invalid]) == ["tool", invalid]
+
+
 @pytest.mark.parametrize(
     ("host", "fields", "missing"),
     [
@@ -903,9 +908,13 @@ def test_argv_shape_is_bounded_and_the_overflow_is_hashed_and_marked():
     assert changed_tail.key["argv_shape"] == bounded.key["argv_shape"]
     assert shape(list(long_argv)).key_digest == bounded.key_digest
 
-    giant = shape(["python3", "-c", "x" * 100_000, "--flag"])
+    giant = shape(["python3", "-c", "x" * 99_999 + "!", "--flag"])
     assert giant.key["argv_shape"] == ["python3", "-c"]
     assert giant.key["argv_overflow"]["tokens"] == 2
     assert len(canonical_json(giant.key)) < 2 * ARGV_SHAPE_MAX_CHARS
+
+    giant_base64 = shape(["python3", "-c", "x" * 100_000, "--flag"])
+    assert giant_base64.key["argv_shape"] == ["python3", "-c", "<b64:65536-131071>", "--flag"]
+    assert "argv_overflow" not in giant_base64.key
 
     assert "argv_overflow" not in shape(["tool", "--port=1"]).key

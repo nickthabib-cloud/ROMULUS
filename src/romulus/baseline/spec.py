@@ -14,7 +14,6 @@ When a present value already proves the event is not applicable, that answer win
 """
 from __future__ import annotations
 
-import base64
 import hashlib
 import ipaddress
 import json
@@ -449,9 +448,10 @@ def _base64_bucket(value: str) -> str | None:
     """A bounded description of a complete base64 token, excluding values already classed as long hex."""
     if len(value) < 16 or not _BASE64.fullmatch(value) or _HEX_BARE.fullmatch(value):
         return None
-    try:
-        base64.b64decode(value + "=" * (-len(value) % 4), validate=True)
-    except (ValueError, base64.binascii.Error):
+    payload = value.rstrip("=")
+    padding = len(value) - len(payload)
+    remainder = len(payload) % 4
+    if remainder == 1 or (padding and (len(value) % 4 or padding != 4 - remainder)):
         return None
     low = 1 << (len(value).bit_length() - 1)
     return f"<b64:{low}-{2 * low - 1}>"
