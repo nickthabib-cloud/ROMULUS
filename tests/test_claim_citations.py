@@ -405,6 +405,22 @@ def test_subdomain_and_tool_agent_groups_disclose_their_citations(tmp_path):
     assert "URLs include ['/u0', '/u1', '/u2'] and 37 more." in m.claim
 
 
+def test_a_tool_user_agent_is_quoted_as_recorded_and_its_signature_named_as_a_classification(tmp_path):
+    agents = ["Fuzz Faster U Fool v1.1.0", "Fuzz Faster U Fool v2.0.0"]
+    requests = [ev("http_tx", T0 + timedelta(seconds=i), host="sensor", source__ip="198.51.100.7",
+                   destination__ip="10.0.0.10", http__hostname="web1", user_agent__original=agents[i % 2],
+                   url__original=f"/w{i}") for i in range(30)]
+    [m] = staged(network.ToolUserAgentHttp(), batches(requests, 10), tmp_path)
+    clean([m])
+    assert ("with user agent(s) 'Fuzz Faster U Fool v1.1.0', 'Fuzz Faster U Fool v2.0.0' (" in m.claim
+            and "which matched the ffuf tool signature" in m.claim and "'fuzz'" not in m.claim)
+    # the guard holds a quoted user agent to a recorded value, never a token of one
+    assert "quotes user agent 'fuzz', which no cited record carries exactly" in problems(
+        "requests with user agent 'fuzz' and more", m.events)
+    # a recorded agent quoted in full passes
+    assert problems("requests with user agent 'Fuzz Faster U Fool v1.1.0'", m.events) == []
+
+
 def test_spraying_names_only_the_accounts_its_cited_records_show(tmp_path):
     from romulus.detect.auth import SshPasswordGuessing, SshPasswordSpraying
     from tests.test_ssh_auth_attacks import ssh
