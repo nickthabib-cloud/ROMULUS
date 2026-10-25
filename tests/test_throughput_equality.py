@@ -122,16 +122,21 @@ from tests import throughput_fixture as tf
 # report manifest change; findings, citations, evidence, entities, anchors, links, expansion and stats do not. The
 # baseline task also changes by its rate spec in fingerprint, intent and outcome: retaining the old row would falsely
 # say that the new spec did not run. Window scope-hour rows also retain a deterministic per-hour citation witness.
+# The service-rate scope can now fall back to a typed system uid when process.user is absent, so its key version is 2.
+# This fixture's named account produces the same semantic scope, but the versioned key id/digest changes its window
+# count, observation and exclusion rows. The snapshot plan/digest changes, and that digest flows into baseline rule
+# cells, the baseline task/audit summary and the manifest. Non-baseline candidates and all detection evidence remain
+# byte-identical.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
-    "audit": "76404a43b09a51d3f3eda92c190150dbe9d72db4ff504049b403332ad73fc449",
+    "audit": "45c0ee26e947bbd26d7938e1dc95acb9522328304ad221e6b151fb7ad6dfe6ef",
     "baseline_counts": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-    "baseline_hunt_exclusions": "ca27ee78be780d9cfdda5b7595d0387c7ca35152cbf230fbcfd30b9ceb6f613b",
-    "baseline_observations": "d588ac20afa79f85f3d13006700d2358c981e585c53dbc5dd275b9726e6d2582",
+    "baseline_hunt_exclusions": "9fa7360d4553f9c589a04e36599c5d5095ff74f128fad099750f6b8968a59440",
+    "baseline_observations": "d990cd2ea081352ceae05649cfbe2e6513e700bd1eca6a909841a0513e5a7c4f",
     "baseline_scope_hours": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     "baseline_segments": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-    "baseline_snapshot": "c0a38c167a376c3d71d9f1ab6bdbc021fd0078d743cb57780db153fad7a7007a",
-    "baseline_window_counts": "93292e451a3e9bcb371406ce7e86725f8b8304a607e4cb4489ec9c35f22e9e11",
+    "baseline_snapshot": "b5692f92a7259392c1d414e697fc653217eccdee9380604696a2d4e4fc368658",
+    "baseline_window_counts": "35a8bc3bcc261b30d5c2a84d2e26b38d2bc39ee3a83f8563394058c0f17abc3c",
     "baseline_window_scope_hours": "7b7140f83902290b9a95a85b61667d704a1c5e641e7c5730df1c476e6f4b071c",
     "candidates": "e8baaad0f844984320258730fa65318e2cea0e57c2df8b5b3674ded6fb78f89d",
     "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
@@ -140,11 +145,11 @@ GOLDEN_STACK = {
     "events": "46ff37261993417f3e0fa61de9c3aa24977b2e091ad29d7cf4d166e8261a1017",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "797137953f5a643e0297b450047aeec3fa79c4cb386118f10d0ec00d337fd023",
-    "manifest": "bfd89909b449992b9f4532520f348dce036b239f596090cd347979e7e856eb6d",
+    "manifest": "8d25db9cb24e2a76613aa493d29b362c39e4d58e398034cb77aa06aa99d53f98",
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
-    "rule_cells": "f3b1da9cfb8185f79c78541f60888e44e060595965930e5e73e7bf6ebbf9a4fc",
+    "rule_cells": "4de1c6d0109532794cff544d8c9be6b3c9c20aeebe0ef7bf85e6ce6a3264b4fd",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
-    "tasks": "8e098211575094164b1b2bc66782f9b7931a3864d59a74aa8ba805cbcee44ffc",
+    "tasks": "ddcb2963bd8260458389f04c7cd6914b7cdc45d37c615fe03c0aaa3f5dca08e3",
 }
 GOLDEN_NORMALIZED = {
     "arkime_sessions3-x": "20b597e7169ff4713f006bd7b69608eea69a2038505dfa92fdf393709af2fe54",

@@ -24,6 +24,8 @@ class BaselineCell:
     pendings: tuple[Pending, ...]
     partial: bool
     reasons: tuple[str, ...]
+    partial_hours: tuple[datetime, ...]
+    whole_cell_partial: bool
 
 
 class SnapshotView(Protocol):
@@ -89,7 +91,7 @@ class BaselinePlaybook(Playbook):
         for pending in self._counter.take_pendings():
             resolution = resolver.resolve(pending)
             if resolution.reason is not None:
-                self._counter.mark_partial(f"{pending.event_id}: {resolution.reason}")
+                self._counter.mark_partial(f"{pending.event_id}: {resolution.reason}", pending.ts)
             else:
                 self._counter.add_keys(
                     pending.ts, resolution.keys, event_id=pending.event_id,
@@ -109,6 +111,8 @@ class BaselinePlaybook(Playbook):
             pendings=counter.take_pendings(),
             partial=counter.partial,
             reasons=counter.reasons,
+            partial_hours=counter.partial_hours,
+            whole_cell_partial=counter.whole_cell_partial,
         )
 
     def judge(self, view: SnapshotView) -> Iterable[Match]:

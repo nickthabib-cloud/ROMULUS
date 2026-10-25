@@ -1070,6 +1070,12 @@ class Sweep:
                             task_id: str | None, events: list[TypedEvent], raw_sources: dict[str, dict]) -> None:
         """Persist observations and the cell's idempotency marker; citations are fetched only if published."""
         del task_id, events, raw_sources
+        detail = {"reasons": sorted(set(reasons))}
+        if playbook.spec.measure == "rate" and result.partial:
+            detail.update(
+                partial_hours=[hour.isoformat() for hour in result.partial_hours],
+                whole_cell_partial=result.whole_cell_partial,
+            )
         self.repo.save_baseline_window_cell(self.hunt_id, {
             "rule_id": playbook.id,
             "version": playbook.spec.version,
@@ -1078,7 +1084,7 @@ class Sweep:
             "state": state,
             "matched": 0,
             "evaluated": evaluated,
-            "detail": {"reasons": sorted(set(reasons))},
+            "detail": detail,
         }, self._baseline_observations(playbook, result),
             counts=result.counts, scope_hours=result.scope_hours)
 
