@@ -559,6 +559,11 @@ class _IcmpEchoPair:
     reply_packets: Counter = field(default_factory=Counter)
     records: Counter = field(default_factory=Counter)
     kinds: dict[str, Counter] = field(default_factory=dict)  # request/reply records per sensor
+    mixed_types: dict[str, set[int]] = field(default_factory=dict)
+    nonstandard_codes: dict[str, set[int]] = field(default_factory=dict)
+    orientation_proven: dict[str, bool] = field(default_factory=dict)
+    session_sources: dict[str, set[str]] = field(default_factory=dict)
+    two_sided: dict[str, bool] = field(default_factory=dict)
     first: dict[str, float] = field(default_factory=dict)
     last: dict[str, float] = field(default_factory=dict)
     longest: dict[str, tuple] = field(default_factory=dict)  # duration, payload, packets, start, end, event id
@@ -569,7 +574,7 @@ class _IcmpEchoPair:
 class IcmpEchoTunnel(_FlowRule):
     """Payload-heavy ICMP echo traffic, measured from bounded flow/session aggregates."""
     id = "net.icmp_echo_tunnel_shape"
-    version = "2"
+    version = "3"
     title = "Payload-heavy or long-lived ICMP echo traffic between one pair"
     severity, lane = "high", "lead"
     attack = ("T1095", "T1572", "T1048.003")
@@ -585,8 +590,9 @@ class IcmpEchoTunnel(_FlowRule):
     HOT = HOT_COUNT
     # 8 MiB of estimated echo payload at an average of at least 256 bytes over at least 100 packets is well above
     # ordinary 32/56-byte diagnostic pings while remaining low enough to catch a short transfer. Asymmetry requires
-    # comparable request/reply counts, a 2:1 payload-size ratio and at least 64 bytes of absolute difference: the
-    # ratio excludes small jitter, while the byte floor exceeds a normal Linux ping's entire 56-byte data field.
+    # request/reply counts within 20%, a 2:1 payload-size ratio and at least 64 bytes of absolute difference. Echo
+    # normally has one reply per request, so the count fence rejects loss/asymmetric capture before comparing sizes;
+    # the ratio excludes small jitter, while the byte floor exceeds a normal Linux ping's entire 56-byte data field.
     BULK_PAYLOAD = 8 * 2**20
     BULK_PACKETS = 100
     BULK_AVERAGE = 256
@@ -595,12 +601,13 @@ class IcmpEchoTunnel(_FlowRule):
     ASYM_PAYLOAD_RATIO = 2.0
     ASYM_ABSOLUTE = 64
     SUSTAINED_SECONDS = 30 * 60
-    SUSTAINED_ECHOES_PER_SECOND = 2.0
+    SUSTAINED_ECHOES_PER_SECOND = 1.0
     SUSTAINED_AVERAGE = 56
     FIRST_CITES = 3
     card: ClassVar[dict] = {
         "behavior": "one endpoint pair exchanged bulk ICMP echo payload, materially asymmetric request/reply "
-                    "payload, or echo traffic sustained for at least 30 minutes above two echoes per second",
+                    "payload, nonstandard echo codes, or echo traffic sustained for at least 30 minutes at one "
+                    "request/reply exchange per second with payload above normal operating-system defaults",
         "telemetry": "Suricata EVE ICMP type/code and directional flow byte/packet counters; Zeek conn ICMP type/code "
                      "and orig/resp counters; Arkime ICMP session type/code, duration and side counters",
         "fidelity": "ICMP echo type/code is direct typed evidence. Suricata and Arkime payload is conservatively "
@@ -616,8 +623,9 @@ class IcmpEchoTunnel(_FlowRule):
                           "echo types 128/129",
         "retrieval": "the sweep retrieves the complete Suricata, Zeek conn and Arkime session records in each "
                      "partition; records without typed ICMP type/code or complete counters are explicitly partial",
-        "lanes": "high for material request/reply payload asymmetry (including one-sided bulk); symmetric bulk or "
-                 "sustained high-rate traffic is lead. Thresholds exclude ordinary small pings but do not prove abuse",
+        "lanes": "high only for material two-sided request/reply payload asymmetry; one-sided or symmetric bulk, "
+                 "nonstandard echo codes and sustained above-default-payload traffic are leads. Thresholds exclude "
+                 "ordinary small pings but do not prove abuse",
     }
 
     def __init__(self):
@@ -642,10 +650,8 @@ class IcmpEchoTunnel(_FlowRule):
     def _asymmetric(cls, pair: _IcmpEchoPair, sensor: str) -> bool:
         request_packets, reply_packets = pair.request_packets[sensor], pair.reply_packets[sensor]
         request_payload, reply_payload = pair.request_payload[sensor], pair.reply_payload[sensor]
-        if min(request_packets, reply_packets) == 0:
-            # A one-sided record is not the RFC mirror comparison, but bulk in only one direction is both a volume
-            # and direction signal. Small unanswered pings do not qualify.
-            return cls._bulk(pair.payload[sensor], pair.packets[sensor])
+        if not pair.two_sided.get(sensor) or min(request_packets, reply_packets) == 0:
+            return False
         if min(request_packets, reply_packets) < cls.ASYM_PACKETS:
             return False
         if min(request_packets, reply_packets) / max(request_packets, reply_packets) < cls.ASYM_COUNT_RATIO:
@@ -662,14 +668,15 @@ class IcmpEchoTunnel(_FlowRule):
         packets = pair.packets[sensor]
         average = pair.payload[sensor] / packets if packets else 0
         return (duration >= cls.SUSTAINED_SECONDS
-                and echoes / duration > cls.SUSTAINED_ECHOES_PER_SECOND
+                and echoes / duration >= cls.SUSTAINED_ECHOES_PER_SECOND
                 and average > cls.SUSTAINED_AVERAGE)
 
     @classmethod
     def _sensor_reportable(cls, pair: _IcmpEchoPair, sensor: str) -> bool:
         return (cls._bulk(pair.payload[sensor], pair.packets[sensor])
                 or cls._asymmetric(pair, sensor)
-                or cls._sustained(pair, sensor))
+                or cls._sustained(pair, sensor)
+                or bool(pair.nonstandard_codes.get(sensor)))
 
     @classmethod
     def _reportable(cls, pair: _IcmpEchoPair) -> bool:
@@ -712,21 +719,38 @@ class IcmpEchoTunnel(_FlowRule):
         if kinds is None or (codes is None and view.sensor != ZEEK):
             return False
         request, reply = ((8, 0) if view.transport == "icmp" else (128, 129))
-        if (codes is not None and codes != {0}) or not kinds & {request, reply}:
+        echo_types = {request, reply}
+        if not kinds & echo_types:
             return True
         counters = self._counters(view, event)
         if counters is None:
             return False
         sent_payload, received_payload, sent_packets, received_packets = counters
+        orientation_proven = not (view.sensor == ARKIME and request in kinds and reply in kinds)
         source_is_requester = request in kinds
-        client, peer = (view.src, view.dst) if source_is_requester else (view.dst, view.src)
+        if orientation_proven:
+            client, peer = (view.src, view.dst) if source_is_requester else (view.dst, view.src)
+        else:
+            client, peer = sorted((view.src, view.dst))
         key = (client, peer, view.transport)
         pair = self.pairs.get(key)
         if pair is None:
             pair = _IcmpEchoPair()
             if not self.pairs.put(key, pair):
                 return self._refused("ICMP echo pairs'")
-        if source_is_requester:
+        if view.sensor == ARKIME and request in kinds and reply not in kinds:
+            request_payload, reply_payload = sent_payload, 0
+            request_packets, reply_packets = sent_packets, 0
+        elif view.sensor == ARKIME and reply in kinds and request not in kinds:
+            request_payload, reply_payload = 0, sent_payload
+            request_packets, reply_packets = 0, sent_packets
+        elif orientation_proven and source_is_requester:
+            request_payload, reply_payload = sent_payload, received_payload
+            request_packets, reply_packets = sent_packets, received_packets
+        elif orientation_proven:
+            request_payload, reply_payload = received_payload, sent_payload
+            request_packets, reply_packets = received_packets, sent_packets
+        elif view.src == client:
             request_payload, reply_payload = sent_payload, received_payload
             request_packets, reply_packets = sent_packets, received_packets
         else:
@@ -741,6 +765,16 @@ class IcmpEchoTunnel(_FlowRule):
         pair.request_packets[sensor] += request_packets
         pair.reply_packets[sensor] += reply_packets
         pair.records[sensor] += 1
+        pair.mixed_types.setdefault(sensor, set()).update(kinds - echo_types)
+        if codes is not None and 0 not in codes:
+            pair.nonstandard_codes.setdefault(sensor, set()).update(codes)
+        pair.orientation_proven[sensor] = pair.orientation_proven.get(sensor, True) and orientation_proven
+        if view.sensor == ARKIME:
+            pair.session_sources.setdefault(sensor, set()).add(view.src)
+        pair.two_sided[sensor] = pair.two_sided.get(sensor, False) or (
+            request_packets > 0 and reply_packets > 0
+            and (view.sensor != ARKIME or request in kinds and reply in kinds)
+        )
         label = "request/reply session" if request in kinds and reply in kinds else \
             "request record" if request in kinds else "reply record"
         pair.kinds.setdefault(sensor, Counter())[label] += 1
@@ -771,8 +805,9 @@ class IcmpEchoTunnel(_FlowRule):
         client, peer, transport = key
         sensors = [sensor for sensor in pair.payload if self._sensor_reportable(pair, sensor)]
         sensor = max(sorted(sensors), key=lambda name: (
-            self._asymmetric(pair, name), self._bulk(pair.payload[name], pair.packets[name]),
-            self._sustained(pair, name), pair.payload[name], pair.packets[name],
+            self._asymmetric(pair, name), bool(pair.nonstandard_codes.get(name)),
+            self._bulk(pair.payload[name], pair.packets[name]), self._sustained(pair, name),
+            pair.payload[name], pair.packets[name],
         ))
         payload, packets = pair.payload[sensor], pair.packets[sensor]
         average = payload / packets
@@ -791,13 +826,45 @@ class IcmpEchoTunnel(_FlowRule):
         if bulk:
             signals.append("bulk payload volume")
         if sustained:
-            signals.append("sustained high-rate echo traffic")
+            signals.append("sustained echo traffic above the normal operating-system payload size")
+        nonstandard_codes = sorted(pair.nonstandard_codes.get(sensor, set()))
+        if nonstandard_codes:
+            noun = "code" if len(nonstandard_codes) == 1 else "codes"
+            signals.append(f"nonstandard echo {noun} {', '.join(map(str, nonstandard_codes))}")
+        request_payload, reply_payload = pair.request_payload[sensor], pair.reply_payload[sensor]
+        request_packets, reply_packets = pair.request_packets[sensor], pair.reply_packets[sensor]
+        if pair.orientation_proven.get(sensor, True):
+            directions = (f"requests: {request_packets:,} packets / {request_payload:,} estimated payload bytes; "
+                          f"replies: {reply_packets:,} packets / {reply_payload:,} estimated payload bytes")
+        else:
+            directions = (f"{client} to {peer}: {request_packets:,} packets / {request_payload:,} estimated payload "
+                          f"bytes; {peer} to {client}: {reply_packets:,} packets / {reply_payload:,} estimated "
+                          "payload bytes")
+        direction_note = ""
+        if request_packets == 0:
+            direction_note = "; no echo requests were recorded by this sensor"
+        elif reply_packets == 0:
+            direction_note = "; no echo replies were recorded by this sensor"
+        elif min(request_packets, reply_packets) / max(request_packets, reply_packets) < self.ASYM_COUNT_RATIO:
+            direction_note = "; request/reply packet counts were not comparable, so their sizes were not compared"
+        orientation_note = ""
+        if not pair.orientation_proven.get(sensor, True):
+            sources = sorted(pair.session_sources.get(sensor, set()))
+            source_text = sources[0] if len(sources) == 1 else ", ".join(sources)
+            orientation_note = (f" Arkime recorded session source {source_text}; requester orientation is not proved "
+                                "by its session-wide ICMP type set.")
+        mixed = sorted(pair.mixed_types.get(sensor, set()))
+        mixed_note = ""
+        if mixed:
+            mixed_note = (f" The counters are an upper bound for echo because the session aggregates include "
+                          f"non-echo ICMP type(s) {', '.join(map(str, mixed))} between the pair.")
         claim = (f"{client} and {peer} exchanged {kind_text.replace('echo', transport.upper() + ' echo')} with "
                  f"{payload:,} bytes "
                  f"({payload / 2**20:.1f} MiB) of estimated payload across {packets:,} packets according to "
                  f"{SENSOR_NAMES[sensor]} (average {average:.0f} bytes per packet; {_iso(pair.first[sensor])} – "
                  f"{_iso(pair.last[sensor])}); qualifying shape: {', '.join(signals)}. The longest recorded echo "
-                 f"session ran {longest / 60:.0f} minutes. "
+                 f"session ran {longest / 60:.0f} minutes. Directional counters ({directions}{direction_note})."
+                 f"{orientation_note}{mixed_note} "
                  "This is packet-size and volume shape, not payload entropy or proof of tunneling."
                  + cited_phrase(len(evs), pair.records[sensor], not missing)
                  + bound_note(missing, pair.ends[sensor]))

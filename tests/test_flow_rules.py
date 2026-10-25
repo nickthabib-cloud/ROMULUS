@@ -123,7 +123,7 @@ def _attack_ids():
 def test_flow_rules_are_registered_with_cards_and_existing_attack_ids():
     ids = _attack_ids()
     pack = {type(pb) for pb in fresh_pack()}
-    assert PACK_VERSION == "pack@31"
+    assert PACK_VERSION == "pack@32"
     for cls in FLOW_PLAYBOOKS:
         assert cls in ALL_PLAYBOOKS and cls in pack
         assert cls.kind == "aggregate" and cls.staged and cls.anchor_class == "network_observation"
@@ -158,10 +158,12 @@ def echo(_id, *, src="10.0.0.5", dst=ATTACKER, kind=8, code=0, payload=1000, pac
                icmp_type=kind, icmp_code=code)
 
 
-def test_large_echo_payload_volume_per_pair_is_a_high_honest_lead():
+def test_one_sided_large_echo_payload_is_an_honest_lead_not_high_asymmetry():
     [match] = run(IcmpEchoTunnel(), events(echo("bulk")))
-    assert match.proposed_lane == "high" and match.group_key == f"10.0.0.5|{ATTACKER}|icmp"
+    assert match.proposed_lane == "lead" and match.group_key == f"10.0.0.5|{ATTACKER}|icmp"
     assert "ICMP echo request" in match.claim and "estimated payload" in match.claim
+    assert "no echo replies were recorded by this sensor" in match.claim
+    assert "payload asymmetry" not in match.claim
     assert "not payload entropy" in match.claim
     assert {p.field for p in match.predicate} >= {"icmp.type", "icmp.code"}
 
@@ -170,6 +172,8 @@ def test_large_echo_reply_orients_the_pair_back_to_the_requester():
     reply = echo("reply", src=ATTACKER, dst="10.0.0.5", kind=0)
     [match] = run(IcmpEchoTunnel(), events(reply))
     assert match.group_key == f"10.0.0.5|{ATTACKER}|icmp"
+    assert match.proposed_lane == "lead"
+    assert "no echo requests were recorded by this sensor" in match.claim
     assert "ICMP echo reply" in match.claim
 
 
@@ -210,10 +214,18 @@ def test_arkime_multivalue_echo_session_uses_session_orientation():
     assert match.group_key == f"10.0.0.5|{ATTACKER}|icmp"
     assert match.proposed_lane == "lead"
     assert "Arkime" in match.claim and "request/reply session" in match.claim
+    assert "session source 10.0.0.5; requester orientation is not proved" in match.claim
+
+    reverse = ark("ark-reverse", proto=1, sport=None, dport=None, src=ATTACKER, dst="10.0.0.5",
+                  c2s=20 * MIB, s2c=20 * MIB, pkts_c=10_000, pkts_s=10_000, seconds=600)
+    reverse["_source"]["icmp"] = {"type": [0, 8], "code": [0]}
+    [reversed_match] = run(IcmpEchoTunnel(), events(reverse))
+    assert reversed_match.group_key == f"10.0.0.5|{ATTACKER}|icmp"
+    assert f"session source {ATTACKER}; requester orientation is not proved" in reversed_match.claim
 
 
 def test_icmpsh_default_payload_and_rate_is_a_sustained_lead():
-    packets = 5 * 7200
+    packets = 7200
     hit = eve("icmpsh", src="10.0.0.5", sport=None, dst=ATTACKER, dport=None, proto="ICMP", seconds=7200,
               c2s=packets * (42 + 64), s2c=packets * (42 + 64), pkts_c=packets, pkts_s=packets,
               icmp_type=8, icmp_code=0)
@@ -221,6 +233,15 @@ def test_icmpsh_default_payload_and_rate_is_a_sustained_lead():
     [match] = run(IcmpEchoTunnel(), events(hit))
 
     assert match.proposed_lane == "lead" and "sustained" in match.claim
+
+
+@pytest.mark.parametrize("payload", [32, 56])
+def test_one_per_second_os_default_ping_payload_is_not_sustained(payload):
+    packets = 7200
+    hit = eve(f"default-{payload}", src="10.0.0.5", sport=None, dst=ATTACKER, dport=None, proto="ICMP",
+              seconds=7200, c2s=packets * (42 + payload), s2c=packets * (42 + payload),
+              pkts_c=packets, pkts_s=packets, icmp_type=8, icmp_code=0)
+    assert run(IcmpEchoTunnel(), events(hit)) == []
 
 
 def test_material_echo_payload_asymmetry_is_high():
@@ -232,6 +253,17 @@ def test_material_echo_payload_asymmetry_is_high():
     [match] = run(IcmpEchoTunnel(), events(hit))
 
     assert match.proposed_lane == "high" and "material request/reply payload asymmetry" in match.claim
+    assert "requests: 1,800 packets" in match.claim and "replies: 1,800 packets" in match.claim
+
+
+def test_heavy_reply_loss_is_not_called_payload_asymmetry():
+    hit = eve("lossy", src="10.0.0.5", sport=None, dst=ATTACKER, dport=None, proto="ICMP", seconds=1800,
+              c2s=10_000 * (42 + 1000), s2c=1000 * (42 + 60), pkts_c=10_000, pkts_s=1000,
+              icmp_type=8, icmp_code=0)
+    [match] = run(IcmpEchoTunnel(), events(hit))
+    assert match.proposed_lane == "lead"
+    assert "request/reply packet counts were not comparable" in match.claim
+    assert "payload asymmetry" not in match.claim
 
 
 def test_symmetric_bulk_tunnel_and_large_packet_monitoring_stay_leads():
@@ -263,7 +295,8 @@ def test_symmetric_bulk_tunnel_and_large_packet_monitoring_stay_leads():
 
 def test_two_sensor_lane_and_claim_use_the_qualifying_sensor():
     suricata = eve("suricata-bulk", src="10.0.0.5", sport=None, dst=ATTACKER, dport=None, proto="ICMP",
-                    seconds=600, c2s=10_000 * (42 + 1000), s2c=0, pkts_c=10_000, pkts_s=0,
+                    seconds=600, c2s=10_000 * (42 + 1000), s2c=10_000 * (42 + 60),
+                    pkts_c=10_000, pkts_s=10_000,
                     icmp_type=8, icmp_code=0)
     arkime = ark("arkime-small", proto=1, sport=None, dport=None, src="10.0.0.5", dst=ATTACKER,
                  c2s=10_000 * (42 + 1000) + 200_000 * (42 + 56), s2c=0,
@@ -275,6 +308,20 @@ def test_two_sensor_lane_and_claim_use_the_qualifying_sensor():
     assert match.proposed_lane == "high"
     assert "according to Suricata" in match.claim and "10,000 packets" in match.claim
     assert {event.raw[0].native_id for event in match.events} == {"suricata-bulk"}
+
+
+def test_one_sided_sensor_cannot_demote_or_promote_a_two_sided_qualifying_sensor():
+    one_sided = eve("suricata-one-way", src="10.0.0.5", sport=None, dst=ATTACKER, dport=None, proto="ICMP",
+                    seconds=600, c2s=10_000 * (42 + 1400), s2c=0, pkts_c=10_000, pkts_s=0,
+                    icmp_type=8, icmp_code=0)
+    arkime = ark("arkime-asymmetric", proto=1, sport=None, dport=None, src="10.0.0.5", dst=ATTACKER,
+                 c2s=10_000 * (42 + 1000), s2c=10_000 * (42 + 60),
+                 pkts_c=10_000, pkts_s=10_000, seconds=600)
+    arkime["_source"]["icmp"] = {"type": [0, 8], "code": [0]}
+    [match] = run(IcmpEchoTunnel(), events(one_sided, arkime))
+    assert match.proposed_lane == "high"
+    assert "according to Arkime" in match.claim
+    assert {event.raw[0].native_id for event in match.events} == {"arkime-asymmetric"}
 
 
 def test_longest_icmp_record_is_cited_and_stage_holds_stay_bounded():
@@ -302,9 +349,57 @@ def test_longest_icmp_record_is_cited_and_stage_holds_stay_bounded():
     assert "ran 60 minutes" in match.claim
 
 
-def test_nonzero_echo_code_is_evaluated_without_publishing():
+def _zeek_echo(_id, *, code=0):
+    return {"_id": _id, "_index": "romulus-network-logs", "_source": {
+        "@timestamp": "2024-11-18T14:00:00Z", "event": {"dataset": "zeek.connection"},
+        "network": {"transport": "icmp"}, "source": {"ip": "10.0.0.5", "port": 8},
+        "destination": {"ip": ATTACKER, "port": 0}, "zeek": {"connection": {
+            "proto": "icmp", "icmp_type": 8, "icmp_code": code, "orig_bytes": 64, "resp_bytes": 64,
+            "orig_pkts": 1, "resp_pkts": 1, "duration": 1.0,
+        }},
+    }}
+
+
+@pytest.mark.parametrize("source,hit", [
+    ("Suricata", echo("suricata-code-1", code=1, payload=64, packets=4)),
+    ("Zeek", _zeek_echo("zeek-code-1", code=1)),
+])
+def test_nonstandard_echo_code_is_a_worded_lead(source, hit):
     rule = IcmpEchoTunnel()
-    assert run(rule, events(echo("bad-code", code=4))) == []
+    [match] = run(rule, events(hit))
+    assert match.proposed_lane == "lead"
+    assert f"according to {source}" in match.claim
+    assert "nonstandard echo code 1" in match.claim
+    assert rule.evaluated == 1 and rule.missing_required == 0
+
+
+@pytest.mark.parametrize("types,codes", [
+    ([0, 3, 8], [0, 3]),
+    ([8, 11], [0]),
+    ([0, 8, 13], [0]),
+])
+def test_arkime_mixed_icmp_session_evaluates_echo_as_an_upper_bound(types, codes):
+    hit = ark("arkime-mixed", proto=1, sport=None, dport=None, src="10.0.0.5", dst=ATTACKER,
+              c2s=10_000 * (42 + 1000), s2c=10_000 * (42 + 60),
+              pkts_c=10_000, pkts_s=10_000, seconds=600)
+    hit["_source"]["icmp"] = {"type": types, "code": codes}
+    [match] = run(IcmpEchoTunnel(), events(hit))
+    assert "counters are an upper bound for echo" in match.claim
+    assert "include non-echo ICMP" in match.claim
+
+
+def test_arkime_nonstandard_echo_code_is_evaluated_but_non_echo_only_is_complete_no_match():
+    unusual = ark("arkime-code-1", proto=1, sport=None, dport=None, src="10.0.0.5", dst=ATTACKER,
+                  c2s=4 * (42 + 64), s2c=4 * (42 + 64), pkts_c=4, pkts_s=4)
+    unusual["_source"]["icmp"] = {"type": [0, 8], "code": [1]}
+    [match] = run(IcmpEchoTunnel(), events(unusual))
+    assert match.proposed_lane == "lead" and "nonstandard echo code 1" in match.claim
+
+    non_echo = ark("arkime-unreachable", proto=1, sport=None, dport=None, src="10.0.0.5", dst=ATTACKER,
+                   c2s=20 * MIB, s2c=0, pkts_c=10_000, pkts_s=0)
+    non_echo["_source"]["icmp"] = {"type": [3], "code": [4]}
+    rule = IcmpEchoTunnel()
+    assert run(rule, events(non_echo)) == []
     assert rule.evaluated == 1 and rule.missing_required == 0
 
 
