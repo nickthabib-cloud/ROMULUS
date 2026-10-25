@@ -158,7 +158,7 @@ def test_command_shape_claim_states_the_shape_and_its_masking_policy():
     assert "argv masking replaces" in claim
     assert all(name in claim for name in ("IP literals", "numbers", "UUIDs", "hexadecimal", "Base64"))
     assert "random tmp/temp basenames" in claim and "preserving their directories" in claim
-    assert "chmod permission modes and path tokens remain literal" in claim
+    assert "chmod permission modes and non-temp path text remain literal" in claim
 
 
 @pytest.mark.parametrize(("peers", "present"), [(4, False), (5, True)])

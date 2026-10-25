@@ -558,7 +558,7 @@ class SnapshotView:
             claim += (
                 "The argv masking replaces IP literals, numbers, UUIDs, long hexadecimal values, random "
                 "tmp/temp basenames while preserving their directories, and evidenced Base64 tokens with class "
-                "tokens; chmod permission modes and path tokens remain literal. "
+                "tokens; chmod permission modes and non-temp path text remain literal. "
             )
         if any(item.get("status") == "shortened" for item in facts["coverage"]):
             claim += "The complete baseline span was shortened by evidenced source absence. "

@@ -474,7 +474,7 @@ def _mask_temp_name(value: str) -> str | None:
     suffix = match.group(1)
     looks_random = set(suffix.casefold()) == {"x"} or (
         any(character.isalpha() for character in suffix)
-        and any(character.isdigit() for character in suffix)
+        and sum(character.isdigit() for character in suffix) >= 2
     )
     if not looks_random:
         return None

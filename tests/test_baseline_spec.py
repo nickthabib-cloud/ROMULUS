@@ -386,6 +386,7 @@ def test_command_shape_masks_only_the_mktemp_basename_and_preserves_its_director
         "/usr/local/sbin/backdoor",
         "/var/lib/docker/overlay2",
         "/etc/cron.d/tmp_backdoor",
+        "/etc/cron.d/tmp_persist1",
         "/etc/sudoers.d/temp-escalate",
     ],
 )
@@ -399,6 +400,9 @@ def test_command_shape_keeps_assignment_paths_and_chmod_targets_literal():
     ]
     assert _command_shape(["chmod", "4755", "/usr/local/bin/sshd"]) == [
         "chmod", "4755", "/usr/local/bin/sshd",
+    ]
+    assert _command_shape(["cp", "/tmp/tmp.A1b2C3", "/etc/cron.d/tmp.A1b2C3"]) == [
+        "cp", "/tmp/<tmp>", "/etc/cron.d/<tmp>",
     ]
 
 
