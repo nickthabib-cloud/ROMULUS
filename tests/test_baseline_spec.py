@@ -394,6 +394,9 @@ def test_command_shape_masks_only_the_mktemp_basename_and_preserves_its_director
         "/var/www/html/temp-uploads",
         "usr/local/bin/sshd",
         "../../etc/cron.d/x",
+        "Library/LaunchDaemons/ComAppleUpdate",
+        "Program/Files/Common/Files/Microsoft/Shared",
+        "Home/Admin/Ssh/AuthorizedKeys/Root",
     ],
 )
 def test_command_shape_never_masks_absolute_or_segmented_security_paths_as_base64_or_temp(path):
@@ -403,6 +406,9 @@ def test_command_shape_never_masks_absolute_or_segmented_security_paths_as_base6
 def test_command_shape_keeps_assignment_paths_and_chmod_targets_literal():
     assert _command_shape(["tool", "--output=/usr/lib/systemd/system"]) == [
         "tool", "--output=/usr/lib/systemd/system",
+    ]
+    assert _command_shape(["tool", "--prefix=Program/Files/Common/Files/Microsoft"]) == [
+        "tool", "--prefix=Program/Files/Common/Files/Microsoft",
     ]
 
 

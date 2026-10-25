@@ -433,6 +433,7 @@ _TEMP_BASENAME = re.compile(
 )
 _BASE64 = re.compile(r"[A-Za-z0-9+/]+={0,2}")
 _PATH_IDENTIFIER = re.compile(r"[a-z_][a-z0-9._-]*")
+_PATH_SEGMENT = re.compile(r"[A-Za-z_][A-Za-z0-9._-]*")
 
 
 def _replace_ipv4(match: re.Match[str]) -> str:
@@ -451,10 +452,12 @@ def _replace_bare_hex(match: re.Match[str]) -> str:
 def _base64_bucket(value: str) -> str | None:
     """A bounded description of a complete, evidenced Base64 token that is not path-shaped."""
     segments = value.split("/")
+    # Lowercase neighbours read as a path at once; mixed-case segments need at least two separators, which
+    # real Base64 (one "/" in about 64 characters, "+" as often) seldom pairs with identifier-shaped segments.
     path_shaped = value.startswith(("/", "./", "../")) or any(
         _PATH_IDENTIFIER.fullmatch(left) and _PATH_IDENTIFIER.fullmatch(right)
         for left, right in pairwise(segments)
-    )
+    ) or (len(segments) > 2 and all(_PATH_SEGMENT.fullmatch(segment) for segment in segments))
     if path_shaped or len(value) < 16 or not _BASE64.fullmatch(value) or _HEX_BARE.fullmatch(value):
         return None
     payload = value.rstrip("=")

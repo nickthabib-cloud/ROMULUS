@@ -2810,16 +2810,16 @@ class Repo:
                                    LIMIT 1
                                ) AS next_rid
                         FROM candidate_ids AS candidate
-                        JOIN baseline_parent_observation AS observation
+                        CROSS JOIN baseline_parent_observation AS observation
                           ON observation.rowid = candidate.rid
                     )
                     DELETE FROM baseline_parent_observation
                     WHERE rowid IN (
                         SELECT current.rid
                         FROM candidate_rows AS current
-                        JOIN baseline_parent_observation AS previous
+                        CROSS JOIN baseline_parent_observation AS previous
                           ON previous.rowid = current.previous_rid
-                        JOIN baseline_parent_observation AS following
+                        CROSS JOIN baseline_parent_observation AS following
                           ON following.rowid = current.next_rid
                         WHERE current.executable = previous.executable
                           AND current.parent_pid = previous.parent_pid

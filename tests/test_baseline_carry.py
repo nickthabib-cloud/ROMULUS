@@ -5,6 +5,7 @@ import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.dialects.sqlite import insert
 
 from romulus.baseline.carry import CarryInStore, ParentExec, ParentObservation, PendingResolver
@@ -353,6 +354,37 @@ def test_parent_observation_chunk_cost_does_not_scale_with_untouched_history(tmp
     print(f"25k parent observations over 25k: {small:.2f}s; over 500k: {large:.2f}s")
 
     assert large < max(1.0, small * 4)
+
+
+def test_parent_observation_compaction_plan_never_scans_the_observation_table():
+    repo, store = _store()
+    statements = []
+
+    def capture(connection, cursor, statement, parameters, context, executemany):
+        if "WITH incoming_rows" in statement:
+            statements.append((statement, parameters))
+
+    event.listen(repo.engine, "before_cursor_execute", capture)
+    store.observe_observation_rows(
+        [_observed(10 + second % 7, second, "/bin/a" if second % 3 else "/bin/b") for second in range(1, 400)],
+        chunk_size=100,
+    )
+    event.remove(repo.engine, "before_cursor_execute", capture)
+
+    statement, parameters = statements[-1]
+    with repo.engine.connect() as connection:
+        cursor = connection.connection.cursor()
+        cursor.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS baseline_parent_observation_incoming ("
+            "hunt_id TEXT, target TEXT, host TEXT, boot TEXT, pid INTEGER, observed_ts DATETIME,"
+            " event_id TEXT, PRIMARY KEY (hunt_id, target, host, boot, pid, observed_ts, event_id)"
+            ") WITHOUT ROWID"
+        )
+        plan = [row[-1] for row in cursor.execute("EXPLAIN QUERY PLAN " + statement, parameters)]
+
+    # Only the chunk-sized CTEs may be scanned; every observation-table access is an index or rowid lookup.
+    scanned = {detail.split()[1] for detail in plan if detail.startswith("SCAN")}
+    assert scanned <= {"incoming", "candidate", "current", "incoming_rows", "candidate_ids", "candidate_rows"}, plan
 
 
 @pytest.mark.slow
