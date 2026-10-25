@@ -51,7 +51,10 @@ def test_the_pack_holds_each_exec_once_in_one_compact_store(monkeypatch, tmp_pat
     n, per = 12_000, 3_000
     for b in range(n // per):
         batch = [benign_exec(b * per + i, T0 + timedelta(minutes=b, milliseconds=i)) for i in range(per)]
+        raw = {event.raw[0].key: {"@timestamp": event.ts.isoformat(), "message": "synthetic exec"}
+               for event in batch}
         for pb in pack:
+            pb.bind_raw(raw, "host-target")
             pb.consume(batch)
             if pb.staged:
                 pb.drain_staged()
@@ -63,17 +66,20 @@ def test_the_pack_holds_each_exec_once_in_one_compact_store(monkeypatch, tmp_pat
     assert len(readers) >= 8                # account, 3 tamper, interpreter, reverse shell, persistence, hijack
     per_exec = lineage[0].disk_bytes / lineage[0].on_disk
     assert lineage[0].on_disk >= n - 50 and per_exec <= 300, per_exec          # the pickled record: ~210 B
-    # each exec is also kept once for citation (the compressed typed record, in the same shared lineage), so a claim
-    # that names an exec ancestor cites it
+    # each exec also keeps one compact source pointer in the same shared lineage, so a claim can re-read and cite it
     records = [s for s in stores if s.name == "exec_records"]
     assert len(records) == 1 and records[0].on_disk >= n - 50
-    # the real database bytes of every rule's spill per exec (record, both key forms and the key index, and the record
-    # kept for citation): ~1 KB, the citation copy about 600 B of it
+    citation_per_exec = records[0].disk_bytes / records[0].on_disk
+    assert citation_per_exec <= 250, citation_per_exec
+    # the real database bytes of every rule's spill per exec include the record, both key forms and their indexes,
+    # and the compact pointer kept for citation
     spilled = 0
     for pb in pack:
         if pb._spill is not None:
             spilled += pb._spill.db.execute("PRAGMA page_count").fetchone()[0] * pb._spill._page
     assert spilled / n <= 1200, spilled / n
+    print(f"\n{n:,} execs; lineage {per_exec:.0f} B each, citation pointers {citation_per_exec:.0f} B each, "
+          f"all spill databases {spilled / n:.0f} B per exec")
     for pb in pack:
         pb.close_spill()
 

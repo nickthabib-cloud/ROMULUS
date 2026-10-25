@@ -100,31 +100,41 @@ from tests import throughput_fixture as tf
 # baseline coverage block and task count, the baseline observations (which keep first-event source identities only)
 # and the frozen snapshot. Candidates, events, event citations, entities, raw copies, anchors, links, expansion and
 # stats are those of the reference.
+# DNS client and server come from the DNS port, a process-network join cites a record of every sensor it names, a
+# grouped write lead cites the files that bound its span, and a port scan says how many of its ports are cited: those
+# rules carry new versions (rule_cells, candidates and the manifest's findings by rule_version). In the fixture only
+# the port scan's claim changes (it gains "K of the N ports are in cited records"); its DNS records, joins and writes
+# give the same roles and citations, so every other table is the reference's.
+# The external-destination baseline keys DNS records by the DNS port's side (a question whose ports do not tell is
+# read as sent), so bl.ext_dest carries version and key version 3. The fixture's DNS records give the same keys; the
+# new versions change the snapshot plan and digest (the baseline snapshot, the hunt.baseline_summary audit record, the
+# baseline task's id and outcome, and the snapshot_digest in every baseline rule cell and in the manifest's baseline
+# coverage block), bl.ext_dest's rule cells by rule_version, and its 20 observations by spec_version and key identity.
 # The hunt-derived writer publishes the complete window cells at finish, so segment/count/scope-hour and durable
 # exclusion-ledger tables join the golden. Its summary changes only the baseline audit and report manifest.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
-    "audit": "865bc4ae0f75103ef2a180b82ab4d9ca019ff9b0363e01c2e1c62c6c5b552558",
+    "audit": "4b1608c5b81972994420fc0f411bd4f37d3440d9cef29ad9ccd1b7bd5797fe1c",
     "baseline_counts": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-    "baseline_hunt_exclusions": "3b6dc5e330de0342d942001ec385b880f0725d37318f8a7bbacab119f07343be",
-    "baseline_observations": "0c275553cb80d70f1cf869bec3ab72d571ff3b6c3e07f0d6aa6ada13bf21c27b",
+    "baseline_hunt_exclusions": "1396a8d17f1e19d6da86ffa3cccf17ab47c05f05b51a18b4c48bfba54454aae8",
+    "baseline_observations": "a622940f3edc51095fae860c5247d8b9494c32522d92fca63ce77a73ffcd1856",
     "baseline_scope_hours": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     "baseline_segments": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-    "baseline_snapshot": "9f22530bb41075bab8270b9f525098e5504886ed16a1723340c3b15e098e140c",
-    "baseline_window_counts": "d9b1daf7289f7a62c23504f7d3dabd86ed3c4346aa8aa9460bb0434addb04c27",
-    "baseline_window_scope_hours": "ca6fb55fb576fc8656cd16e6b3d9b19e44e6facac1a894528fb29c0a5a53c1aa",
-    "candidates": "85aa8b8e1a1c218be7c2cd434bbb0097d5aab3c380ce138ea63cb55de9271fcb",
+    "baseline_snapshot": "ee69ca9a69bb202d32ea01780bd4832d6cb0972b4ecd8941ba6aaf5e9c8a2b6b",
+    "baseline_window_counts": "86ae9aaddb32e101784fb876d1bd3db544e3139f35c20d6b438db788e4327103",
+    "baseline_window_scope_hours": "5b23e9db42982af2cc4122ca8e0c1457a553409ff95569eb92ad2edaf7797160",
+    "candidates": "6063264ca908c73e4710d65d4799e5460e579f9e9f0cd55391c2b3854c1b28c8",
     "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
     "event_citations": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     "event_entities": "8224880134ac06339cbde46274c20ea7d2fa4a41e30f1426a576e0afd4270b58",
     "events": "46ff37261993417f3e0fa61de9c3aa24977b2e091ad29d7cf4d166e8261a1017",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "797137953f5a643e0297b450047aeec3fa79c4cb386118f10d0ec00d337fd023",
-    "manifest": "e81385daca5bcb12d0e9bca8bd478434219ebdf2cb0cbb224836b2884df5331c",
+    "manifest": "42f0ee6d23007581a4ee4811af29ba9dd5c9c477df0d076f9f847ac7a3fc5723",
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
-    "rule_cells": "cd18a41e572a8e6a96b11d2342b4e16d80bba294d83dc9aa0ec3f879732c66e1",
+    "rule_cells": "77f0e52a52d3609f1fe98712e3687b184dd5e67ed53bc35711e3b35d36f7541c",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
-    "tasks": "79a32a2c417b61351a7ce50d01b3a45b4d5789993e407fa5b00d4e911e8671f3",
+    "tasks": "0e7ef8a8240c951b30447cdc147395503b0a93e438972fdc25e5ff459dc5107c",
 }
 GOLDEN_NORMALIZED = {
     "arkime_sessions3-x": "20b597e7169ff4713f006bd7b69608eea69a2038505dfa92fdf393709af2fe54",

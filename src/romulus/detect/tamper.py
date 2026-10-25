@@ -448,7 +448,7 @@ class _TamperRule(Playbook):
             if marker is not None:
                 self._pending.append(marker)
             if e.family == "process_exec":
-                self.lineage.observe(e, self.raw_of(e))
+                self.lineage.observe(e, self.raw_of(e), self.raw_target())
                 if self.program_prefilter and not self._process_relevant(e):
                     self.evaluated += 1
                     self.missing_required += int(argv_incomplete(e))

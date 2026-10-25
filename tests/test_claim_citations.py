@@ -24,6 +24,7 @@ from romulus.evidence.typed import RawRef, TypedEvent, fv
 from romulus.hunt.stage import EventStage
 from tests import throughput_fixture as tf
 from tests.claim_citations import finding_problems, problems
+from tests.lineage_citation_fixture import bind_lineage
 
 T0 = datetime(2024, 11, 18, 14, 0, tzinfo=UTC)
 _n = 0
@@ -40,9 +41,13 @@ def ev(family, ts, host="web01", outcome="success", **fields):
 def staged(rule, batches, stage_dir):
     """Drive a staged rule as the sweep does: each batch's citations are put on a real event stage, its interval
     bounds held and released, then the rule finalizes with the stage's loader."""
+    batches = list(batches)
     stage = EventStage(stage_dir)
+    all_events = [event for batch in batches for event in batch]
+    raw = bind_lineage(rule, all_events)
     try:
         for batch in batches:
+            rule.bind_raw({ref.key: raw[ref.key] for event in batch for ref in event.raw}, "fixture-target")
             rule.consume(list(batch))
             drained = rule.drain_staged()
             held, released = rule.drain_bounds()
@@ -50,6 +55,7 @@ def staged(rule, batches, stage_dir):
             stage.put([e for e in {e.id: e for e in drained}.values() if copies[e.id] > holds[e.id]], {})
             stage.hold([(rule.id, e) for e in {e.id: e for e in drained}.values() for _ in range(holds[e.id])], {})
             stage.release(rule.id, released)
+        rule.bind_raw({})
         rule.bind_loader(stage.load)
         return rule.finalize()
     finally:
@@ -202,7 +208,8 @@ def test_a_reverse_lookup_sweep_cites_its_span_and_the_addresses_it_names(tmp_pa
 def dns_ptr(address, ts):
     name = ".".join(reversed(address.split("."))) + ".in-addr.arpa"
     return ev("dns_query", ts, host="sensor", source__ip="10.20.0.15", destination__ip="10.20.0.53",
-              dns__type="query", dns__question__name=name, dns__question__type="PTR")
+              source__port=40000, destination__port=53, dns__type="query", dns__question__name=name,
+              dns__question__type="PTR")
 
 
 def test_a_port_scan_and_its_reverse_pair_say_what_their_own_records_show(tmp_path):
@@ -369,7 +376,8 @@ def test_the_join_stages_what_it_can_cite_not_every_network_record(tmp_path):
 
 def test_nxdomain_names_and_servers_come_from_cited_records(tmp_path):
     answers = [ev("dns_query", T0 + timedelta(seconds=3 * i), host="sensor", source__ip=f"10.20.0.{53 + i % 7}",
-                  destination__ip="10.20.0.15", dns__type="answer", dns__response_code="NXDOMAIN",
+                  destination__ip="10.20.0.15", source__port=53, destination__port=40000 + i, dns__type="answer",
+                  dns__response_code="NXDOMAIN",
                   dns__question__name=f"q{i:04d}{'x' * (i % 40)}.example.test") for i in range(240)]
     [m] = staged(dns.DnsNxdomainBurst(), batches(answers, 30), tmp_path)
     clean([m])
@@ -385,7 +393,8 @@ def test_a_tunnel_shape_cites_its_example_names_and_span(tmp_path):
 
 def test_subdomain_and_tool_agent_groups_disclose_their_citations(tmp_path):
     queries = [ev("dns_query", T0 + timedelta(seconds=i), host="sensor", source__ip="10.20.0.15",
-                  destination__ip="10.20.0.53", dns__type="query", dns__question__name=f"n{i}.corp.example")
+                  destination__ip="10.20.0.53", source__port=40000 + i, destination__port=53, dns__type="query",
+                  dns__question__name=f"n{i}.corp.example")
                for i in range(150)]
     clean(staged(network.DnsSubdomainEnumeration(), batches(queries, 25), tmp_path / "a"))
     requests = [ev("http_tx", T0 + timedelta(seconds=i), host="sensor", source__ip="198.51.100.7",
@@ -519,7 +528,9 @@ def refused_reasons(tree):
     from romulus.detect.correlation import InterpreterExternalConnection
     from tests.test_network_correlation import _sock
     rule = InterpreterExternalConnection()
-    rule.consume([*tree, _sock()])
+    events = [*tree, _sock()]
+    bind_lineage(rule, events)
+    rule.consume(events)
     return rule.limit_reasons(), rule.coverage_notes()
 
 
@@ -661,7 +672,10 @@ def test_an_exec_record_dropped_for_detection_is_named_not_cited_and_changes_no_
         rule.spill_dir = tmp_path / ("drop" if drop else "keep")
         rule.spill_dir.mkdir()
         rule.budget = StateBudget(rule.spill_dir, disk_total=2**30, reserve=0)
-        rule.consume([*tree, _sock()])
+        events = [*tree, _sock()]
+        bind_lineage(rule, events)
+        rule.consume(events)
+        rule.bind_raw({})
         store = next(ref() for ref in rule.__dict__["_state_stores"] if ref().name == "exec_records")
         store.trim(keep=0)                      # the exec records go to disk
         if drop:
@@ -756,6 +770,33 @@ def test_a_process_with_no_linked_call_is_neither_named_nor_counted():
     assert not finding_problems(m.claim, m.notes, m.events)
 
 
+@pytest.mark.parametrize("network_first", [False, True])
+def test_a_join_cites_a_record_of_every_sensor_it_names(network_first):
+    """A connection two sensors recorded: however many records the first sensor wrote first, the join cites at least
+    one record of each sensor it names, whether the network records were read before the call or after."""
+    from datetime import UTC
+    from datetime import datetime as dt
+
+    from tests.test_network_correlation import T0 as SOCK_T0
+    from tests.test_network_correlation import _network, _sock, flow, history, link
+    hs, hn = history()
+    inetfw = []
+    for i in range(25):
+        start = dt.fromtimestamp(SOCK_T0 + 0.05 + i, UTC).isoformat()
+        inetfw += _network(flow(f"fw{i}", start=start, cid="1:abc="))
+    later = dt.fromtimestamp(SOCK_T0 + 30.05, UTC).isoformat()
+    server = [e.model_copy(update={"host": "server", "id": f"srv{i}"})
+              for i, e in enumerate(_network(*(flow(f"sv{i}", start=later, cid="1:abc=") for i in range(3))))]
+    host, net = hs + [_sock()], hn + inetfw + server
+    [m] = [m for m in link(*([net, host] if network_first else [host, net])) if "port 4444" in m.claim]
+    assert "network sensor(s) inetfw, server:" in m.claim
+    assert {e.host for e in m.events if e.family == "net_flow" and e.id in {x.id for x in inetfw + server}} == {
+        "inetfw", "server"}
+    assert not finding_problems(m.claim, m.notes, m.events)
+    # the guard catches a sensor named with no cited record of its own
+    assert finding_problems(m.claim, m.notes, [e for e in m.events if e.host != "server"])
+
+
 def test_a_group_the_connecting_store_cannot_take_is_still_published(monkeypatch):
     from romulus.detect import bounded
     from tests.test_network_correlation import SSHD, _network, _sock, alert, flow, history, link
@@ -795,8 +836,9 @@ def test_an_alert_stack_past_its_signature_cap_states_a_lower_bound(tmp_path, mo
 
 def test_subdomain_enumeration_past_its_name_cap_states_a_lower_bound(tmp_path, monkeypatch):
     monkeypatch.setattr(network.DnsSubdomainEnumeration, "NAMES_HELD", 120)
-    queries = [ev("dns_query", T0 + timedelta(seconds=i), source__ip="10.20.0.15", dns__type="query",
-                  dns__question__name=f"h{i}.example.test") for i in range(130)]
+    queries = [ev("dns_query", T0 + timedelta(seconds=i), source__ip="10.20.0.15", source__port=40000 + i,
+                  destination__port=53, dns__type="query", dns__question__name=f"h{i}.example.test")
+               for i in range(130)]
     rule = network.DnsSubdomainEnumeration()
     [m] = staged(rule, batches(queries, 50), tmp_path)
     clean([m])

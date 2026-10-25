@@ -27,6 +27,8 @@ unambiguously, and wording that says honestly what is not cited passes.
    quotes inside one of its string literals is wording, not a value, as are the few one-word protocol states in
    WORDING_WORDS ('failed' in "protocol detection 'failed'"); any other one-word quote, such as a program name
    ('curl', 'nc', 'perl'), is a value and must be cited. A pid in a 'K more' tail is counted, not named.
+5. Sensors. A sensor a claim names as having observed records ('network sensor(s) inetfw, server', 'on sensor(s)
+   inetfw', 'sensor inetfw saw') must be the observer (host) of a cited record.
 4. Attribution. A process named as making connect() calls ('(pid 200, ...) made 3 connect() call(s) to 192.0.2.1
    port 4444', '(pids 1, 2), ..., making 5 connect() call(s) to 2 address(es) ... on port 443') must be the process
    of a cited connect() record to that port (and that address, when one is named).
@@ -80,6 +82,9 @@ ATTRIBUTED = re.compile(
     r"\(pids?(?:\(s\))? (\d+(?:(?:, | and )\d+(?! more))*)[^)]*\)" + _SAME_SENTENCE
     + r"?\b(?:made|making) \d[\d,]* connect\(\) call\(s\) to (?:(\S+) port (\d{1,5})\b|"
     + _SAME_SENTENCE + r"?\bon port (\d{1,5})\b)")
+# a sensor named as having observed records
+SENSORS = (re.compile(r"\b(?:network sensor\(s\)|on sensor\(s\)) ([\w.-]+(?:, [\w.-]+)*)"),
+           re.compile(r"\bsensor ([\w.-]+) saw\b"))
 # one-word quotes the rules use as wording, not as values from a record: a protocol state, and the keyword of the
 # sshd log line a rule names as the kind of record it read
 WORDING_WORDS = frozenset({"failed", "Accepted"})
@@ -280,6 +285,12 @@ def problems(text: str, events: list[TypedEvent]) -> list[str]:
                 out.append(f"states {number} {noun} with {cited.count} records cited and does not say how many "
                            f"are cited")
     out += _misattributed(text, events)
+    observers = {e.host for e in events if e.host}
+    for regex in SENSORS:
+        for match in regex.finditer(text):
+            for sensor in match.group(1).split(", "):
+                if sensor not in observers:
+                    out.append(f"names sensor {sensor}, which observed no cited record")
     for match in PIDS.finditer(text):
         for pid in re.findall(r"\d+", match.group(1)):
             if int(pid) not in cited.pids:

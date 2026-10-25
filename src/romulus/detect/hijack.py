@@ -282,11 +282,25 @@ def _written(state: _File) -> bool:
     return bool(state.writes or state.kernel_writes)
 
 
+def _first_record(m: Match) -> TypedEvent:
+    """A per-file finding's own time-stamping record: the cited record its time is taken from (its first write)."""
+    ordered = sorted(m.events, key=lambda e: (e.ts, e.id))
+    return next((e for e in ordered if e.ts == m.ts), ordered[0])
+
+
+def _span_records(matches: list[Match]) -> list[TypedEvent]:
+    """The records that bound a group's stated span (from the earliest finding's time to the latest's): the
+    earliest finding's first record and the latest finding's first record."""
+    earliest = min(matches, key=lambda m: (m.ts, _first_record(m).id))
+    latest = max(matches, key=lambda m: (m.ts, _first_record(m).id))
+    return list({e.id: e for e in (_first_record(earliest), _first_record(latest))}.values())
+
+
 class NonRootWriteRootExecutedFile(Playbook):
     os_families = ("linux",)
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.nonroot_write_root_executed_file"
-    version = "8"
+    version = "9"
     title = "Non-root write-capable command on a file a root process runs, or on root's schedule"
     anchor_class = "persistence"
     kind = "aggregate"
@@ -483,7 +497,8 @@ class NonRootWriteRootExecutedFile(Playbook):
             series.count_after(state.kernel_writes[-1])
 
     def _exec(self, event: TypedEvent) -> None:
-        self.daemons.observe(event)             # held once, for every rule reading process ancestry
+        self.daemons.observe(event, self.raw_of(event), self.raw_target())
+        # Held once for every rule reading process ancestry; the first observer also records its source pointer.
         argv = event.get("process.argv")
         if not event.get("process.executable") or not isinstance(argv, list) or not argv:
             self.missing_required += 1
@@ -782,16 +797,19 @@ class NonRootWriteRootExecutedFile(Playbook):
         hosts = sorted(by_host)
         items = {host: sorted(by_host[host], key=lambda item: (item[1].ts, item[0])) for host in hosts}
         total = sum(len(v) for v in items.values())
-        firsts = {host: [min(m.events, key=lambda e: (e.ts, e.id)) for _p, m in items[host]] for host in hosts}
-        # every host's earliest file is cited, whatever the cap; later files fill up to the cap
-        cited: dict[str, TypedEvent] = {firsts[host][0].id: firsts[host][0] for host in hosts}
+        firsts = {host: [_first_record(m) for _p, m in items[host]] for host in hosts}
+        # the records that bound the stated span, and every host's earliest file, are cited whatever the cap; later
+        # files fill up to the cap
+        every = [m for v in items.values() for _p, m in v]
+        cited: dict[str, TypedEvent] = {e.id: e for e in _span_records(every)}
+        cited.update({firsts[host][0].id: firsts[host][0] for host in hosts})
         for rank in range(1, max(len(v) for v in firsts.values())):
             for host in hosts:
                 if rank < len(firsts[host]) and len(cited) < WRITE_CITE:
                     cited.setdefault(firsts[host][rank].id, firsts[host][rank])
         events = sorted(cited.values(), key=lambda e: (e.ts, e.id))
-        start = min(m.ts for v in items.values() for _p, m in v)
-        end = max(m.ts for v in items.values() for _p, m in v)
+        start = min(m.ts for m in every)
+        end = max(m.ts for m in every)
         shown = [f"{host}:{path}" for host in hosts for path, _m in items[host]]
         claim = (f"Across {len(hosts)} hosts, account '{account}' (an account of that name on each host) ran "
                  f"write-capable commands on, or changed (per kernel records), {total} files "
@@ -803,8 +821,8 @@ class NonRootWriteRootExecutedFile(Playbook):
                     if len(shown) > WRITE_CITE else "")
                  + ". Configuration management that writes a module on every host it manages and runs it with "
                  "privilege escalation looks like this; so does a sudo or su rule that runs files the account can "
-                 f"edit, which gives that account root on that host. The first record of {len(events)} of the files "
-                 "is cited, the earliest file of each host first.")
+                 f"edit, which gives that account root on that host. The first record of {len(events)} of the "
+                 f"{total} files is cited: the earliest and the latest file, then the earliest file of each host.")
         all_matches = [m for v in items.values() for _p, m in v]
         notes = sorted({n for m in all_matches for n in m.notes if n.startswith("T")})
         notes += [n for n in all_matches[0].notes if n.startswith("own elevation")]
@@ -825,11 +843,12 @@ class NonRootWriteRootExecutedFile(Playbook):
             return items[0][1]
         paths = [path for path, _m in items]
         directories = sorted({posixpath.dirname(path) for path in paths})
-        cited: dict[str, TypedEvent] = {}
+        # the records that bound the stated span are cited whatever the cap; the files fill up to it in order
+        cited: dict[str, TypedEvent] = {e.id: e for e in _span_records([m for _p, m in items])}
         for _path, m in items:
-            first = min(m.events, key=lambda e: (e.ts, e.id))
+            first = _first_record(m)
             if len(cited) < WRITE_CITE:
-                cited[first.id] = first
+                cited.setdefault(first.id, first)
         events = sorted(cited.values(), key=lambda e: (e.ts, e.id))
         start, end = items[0][1].ts, max(m.ts for _p, m in items)
         shown = paths[:WRITE_CITE]
@@ -840,7 +859,8 @@ class NonRootWriteRootExecutedFile(Playbook):
                  + (f"; and {len(paths) - len(shown)} more (every path is in the notes)" if len(paths) > len(shown)
                     else "") + ". Configuration management that writes a module and runs it with privilege "
                  "escalation looks like this; so does a sudo or su rule that runs files the account can edit, which "
-                 f"gives that account root. The first record of {len(events)} of the files is cited.")
+                 f"gives that account root. The first record of {len(events)} of the {len(paths)} files is cited, "
+                 f"the earliest and the latest file among them.")
         notes = sorted({n for _p, m in items for n in m.notes if n.startswith("T")})
         notes += [n for n in items[0][1].notes if n.startswith("own elevation")]
         notes += [f"file: {path}" for path in paths]

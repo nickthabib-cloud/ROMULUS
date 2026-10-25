@@ -118,7 +118,7 @@ def tunnel(ts, i) -> TypedEvent:
     name = f"{''.join(rng.choice(hexes) for _ in range(60))}.{''.join(rng.choice(hexes) for _ in range(30))}" \
            f".tun.example.test"
     return ev("dns_query", ts, host="sensor", source__ip="10.40.0.9", destination__ip="10.0.0.53",
-              dns__type="query", dns__question__name=name, dns__question__type="TXT", network__transport="udp",
+              source__port=40000, destination__port=53, dns__type="query", dns__question__name=name, dns__question__type="TXT", network__transport="udp",
               suricata__flow_id=100000 + i)
 
 

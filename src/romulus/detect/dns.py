@@ -1,11 +1,16 @@
 """DNS reconnaissance and DNS channel-shape aggregates over typed `dns_query` records.
 
 Typed fields read (no record text is ever searched):
-- `dns.type`: the record's role. `query` (or `request`) is a question sent by the client, so the client is
-  `source.ip` and the server `destination.ip`. `answer` (or `response`) is the server's reply, so the client is
-  `destination.ip` and the server `source.ip`. A record with no `dns.type` is a whole-transaction record (one
-  session-level view of a question and its reply, as a session indexer produces); its `source.ip` is the client
-  that initiated the session. Any other role value is not evaluated and is counted as missing.
+- `dns.type`: the record's role: `query` (or `request`) is a question, `answer` (or `response`) a reply, and a
+  record with no `dns.type` a whole-transaction record (one session-level view of a question and its reply). Any
+  other role value is not evaluated and is counted as missing.
+- `source.ip`/`source.port` and `destination.ip`/`destination.port`: which endpoint is the DNS server is decided by
+  the DNS service port (`DNS_PORTS`: 53, and 853 for DNS over TLS), not by an answer's orientation. Sensors orient
+  answers differently (Suricata writes an answer with the flow's client as `src_ip`; a per-packet view writes the
+  server as the source), so the server is the endpoint on a DNS port and the client the other one. A question
+  (a query or transaction record) is written as the client sent it, so when its ports do not tell (DNS on a
+  site-configured port, or a server-to-server query from port 53 to port 53) its source is the client. An answer whose
+  ports do not tell leaves the roles unknown: it is counted as missing, and no server is named.
 - `dns.question.names` (a list) or `dns.question.name`, and `dns.question.type`: the question. When the list is
   present every name in it is evaluated (a session record may hold several questions); otherwise the scalar name
   is. Rules that read names and types read them from question records (queries and transaction records) only: in
@@ -183,12 +188,43 @@ def role(event: TypedEvent) -> str | None:
     return {"query": "query", "request": "query", "answer": "answer", "response": "answer"}.get(str(value).lower())
 
 
-def endpoints(event: TypedEvent, record_role: str) -> tuple[str | None, str | None]:
-    """(client, server) addresses for the record's role."""
+DNS_PORTS = frozenset({53, 853})       # the DNS service port, and DNS over TLS
+
+
+def _port(value) -> int | None:
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return None
+    return port if 0 <= port <= 65535 else None
+
+
+def endpoints(event: TypedEvent, record_role: str | None = None) -> tuple[str | None, str | None]:
+    """(client, server) addresses: the server is the endpoint on a DNS service port, the client the other one, whatever
+    the record's orientation. When the ports do not tell (neither or both on a DNS port, or a port not typed), a
+    question (query or transaction record) is read as sent, source to destination; an answer gives (None, None)."""
     src, dst = event.get("source.ip"), event.get("destination.ip")
     src = str(src) if src not in (None, "") else None
     dst = str(dst) if dst not in (None, "") else None
-    return (dst, src) if record_role == "answer" else (src, dst)
+    side = server_side(event, record_role)
+    if side == "destination":
+        return src, dst
+    if side == "source":
+        return dst, src
+    return None, None
+
+
+def server_side(event: TypedEvent, record_role: str | None = None) -> str | None:
+    """'destination' or 'source': the side of the record on a DNS service port (the server). When the ports do not
+    tell (neither or both on a DNS port, or a port not typed), a question (query or transaction record, by
+    `record_role` or the record's own role) is read as sent and its server is the destination; an answer gives None."""
+    to_server = _port(event.get("destination.port")) in DNS_PORTS
+    from_server = _port(event.get("source.port")) in DNS_PORTS
+    if to_server and not from_server:
+        return "destination"
+    if from_server and not to_server:
+        return "source"
+    return "destination" if (record_role or role(event)) in ("query", "transaction") else None
 
 
 def flow_key(event: TypedEvent):
@@ -501,7 +537,7 @@ class _ZoneGroup:
 
 class DnsZoneTransferOrAnyRequest(_DnsAggregate):
     id = "net.dns_zone_transfer_or_any_request"
-    version = "4"
+    version = "5"
     title = "DNS zone-transfer (AXFR/IXFR) or ANY question sent by one client to one server"
     required_fields = ()
     severity, lane = "medium", "lead"
@@ -520,9 +556,10 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
         "behavior": "a client asked a DNS server for a full or incremental zone transfer (AXFR/IXFR) or for ANY "
                     "records of a name; answer records, where typed, show whether the server answered NOERROR or "
                     "refused",
-        "telemetry": "dns_query: dns.type, dns.question.name, dns.question.type, dns.response_code, source.ip, "
-                     "destination.ip (Suricata EVE dns: present and normalized in the lab profile; a session "
-                     "indexer's DNS block reads the same typed fields once it is normalized)",
+        "telemetry": "dns_query: dns.type, dns.question.name, dns.question.type, dns.response_code, source and "
+                     "destination ip and port (the server is the endpoint on the DNS port) (Suricata EVE dns: present "
+                     "and normalized in the lab profile; a session indexer's DNS block reads the same typed fields "
+                     "once it is normalized)",
         "fidelity": "direct observation of the question type in a typed field: 'requested' is proven by a query "
                     "record; 'answered' only by an answer record with rcode NOERROR, which does not show how many "
                     "zone records were sent; nothing here proves the zone's content left the server",
@@ -741,7 +778,7 @@ def _block_rank(entry: list) -> tuple:
 
 class DnsReverseLookupSweep(_DnsAggregate):
     id = "net.dns_reverse_lookup_sweep"
-    version = "4"
+    version = "5"
     title = "Many distinct reverse-lookup (in-addr.arpa / ip6.arpa) names queried by one client"
     required_fields = ()
     severity, lane = "medium", "lead"
@@ -757,8 +794,9 @@ class DnsReverseLookupSweep(_DnsAggregate):
     card: ClassVar[dict] = {
         "behavior": "one client queried many distinct names in the reverse-lookup trees, naming addresses packed "
                     "into one block (a reverse-DNS sweep: host discovery by name) or spread across many",
-        "telemetry": "dns_query question records: dns.question.name, dns.question.type (optional), source.ip "
-                     "(Suricata EVE dns query records: present in the lab profile)",
+        "telemetry": "dns_query question records: dns.question.name, dns.question.type (optional), source and "
+                     "destination ip and port (the client is the endpoint not on the DNS port) (Suricata EVE dns "
+                     "query records: present in the lab profile)",
         "fidelity": "direct observation of the questions; a query is a request and does not show whether a name "
                     "was returned",
         "benign_and_cost": "servers resolving their peers (scattered, external addresses), IPAM and monitoring "
@@ -1111,7 +1149,7 @@ class _Address:
 
 class DnsNxdomainBurst(_DnsAggregate):
     id = "net.dns_nxdomain_burst"
-    version = "5"
+    version = "6"
     title = "Many NXDOMAIN answers to one client within ten minutes"
     required_fields = ()
     severity, lane = "high", "lead"
@@ -1139,9 +1177,10 @@ class DnsNxdomainBurst(_DnsAggregate):
     card: ClassVar[dict] = {
         "behavior": "one client received many NXDOMAIN (name does not exist) answers within a ten-minute "
                     "interval, the shape of algorithmically generated domain lookups",
-        "telemetry": "dns_query answer records: dns.response_code, destination.ip (the client), source.ip (the "
-                     "server), dns.question.name (optional, for distinct names); transaction records use "
-                     "source.ip as the client (Suricata EVE dns v2 answer records: present in the lab profile)",
+        "telemetry": "dns_query answer records: dns.response_code, source/destination ip and port (the server is "
+                     "the endpoint on the DNS port, the client the other; a record whose ports do not tell is not "
+                     "evaluated), dns.question.name (optional, for distinct names) (Suricata EVE dns v2 answer "
+                     "records: present in the lab profile)",
         "fidelity": "direct observation of the rcode the client was sent; a deviation in volume, not proof of "
                     "malware",
         "benign_and_cost": "search-domain suffixing, stale software, DNSBL lookups, forwarders; one grouped "
@@ -1452,7 +1491,7 @@ class _TunnelKey:
 
 class DnsTunnelShape(_DnsAggregate):
     id = "net.dns_tunnel_shape"
-    version = "5"
+    version = "6"
     title = "Query names under one registered domain from one client with a DNS-tunnel shape"
     required_fields = ()
     severity, lane = "high", "lead"
@@ -1484,9 +1523,10 @@ class DnsTunnelShape(_DnsAggregate):
         "behavior": "one client sent many questions under one registered domain whose names are long, unique and "
                     "high-entropy, or whose question types are TXT/NULL/CNAME/MX/private-use: the query shape of "
                     "data encoded into names (DNS tunnelling, DNS exfiltration, DNS command and control)",
-        "telemetry": "dns_query question records: dns.question.name, dns.question.type, source.ip (Suricata EVE "
-                     "dns query records: present in the lab profile; the lab's names are short, so the shape is "
-                     "validated by fixtures only)",
+        "telemetry": "dns_query question records: dns.question.name, dns.question.type, source and destination "
+                     "ip and port (the client is the endpoint not on the DNS port) (Suricata EVE dns query records: "
+                     "present in the lab profile; the lab's names are short, so the shape is validated by fixtures "
+                     "only)",
         "fidelity": "a deviation computed from typed question names and types; not proof of a tunnel. Answers are "
                     "not read, so data flowing back is not shown",
         "benign_and_cost": "reputation and anti-virus lookups have the same shape (they stay lead); one grouped "
