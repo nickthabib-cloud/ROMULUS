@@ -100,11 +100,19 @@ from tests import throughput_fixture as tf
 # baseline coverage block and task count, the baseline observations (which keep first-event source identities only)
 # and the frozen snapshot. Candidates, events, event citations, entities, raw copies, anchors, links, expansion and
 # stats are those of the reference.
+# The hunt-derived writer publishes the complete window cells at finish, so segment/count/scope-hour and durable
+# exclusion-ledger tables join the golden. Its summary changes only the baseline audit and report manifest.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
-    "audit": "8adb5fe299d810a1c2aee9098bacb4dd3b48235d7353008873fa4c9968c3792b",
+    "audit": "865bc4ae0f75103ef2a180b82ab4d9ca019ff9b0363e01c2e1c62c6c5b552558",
+    "baseline_counts": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "baseline_hunt_exclusions": "3b6dc5e330de0342d942001ec385b880f0725d37318f8a7bbacab119f07343be",
     "baseline_observations": "0c275553cb80d70f1cf869bec3ab72d571ff3b6c3e07f0d6aa6ada13bf21c27b",
+    "baseline_scope_hours": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "baseline_segments": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     "baseline_snapshot": "9f22530bb41075bab8270b9f525098e5504886ed16a1723340c3b15e098e140c",
+    "baseline_window_counts": "d9b1daf7289f7a62c23504f7d3dabd86ed3c4346aa8aa9460bb0434addb04c27",
+    "baseline_window_scope_hours": "ca6fb55fb576fc8656cd16e6b3d9b19e44e6facac1a894528fb29c0a5a53c1aa",
     "candidates": "85aa8b8e1a1c218be7c2cd434bbb0097d5aab3c380ce138ea63cb55de9271fcb",
     "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
     "event_citations": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
@@ -112,7 +120,7 @@ GOLDEN_STACK = {
     "events": "46ff37261993417f3e0fa61de9c3aa24977b2e091ad29d7cf4d166e8261a1017",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "797137953f5a643e0297b450047aeec3fa79c4cb386118f10d0ec00d337fd023",
-    "manifest": "6195c36b863cf8cff722fede990ba3ffaf293bf5b3014762b28fd6a9f7aba223",
+    "manifest": "e81385daca5bcb12d0e9bca8bd478434219ebdf2cb0cbb224836b2884df5331c",
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
     "rule_cells": "cd18a41e572a8e6a96b11d2342b4e16d80bba294d83dc9aa0ec3f879732c66e1",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",

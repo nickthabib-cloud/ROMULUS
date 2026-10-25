@@ -109,9 +109,11 @@ def resolve_window_exec_pairs(repo: Repo, hunt_id: str, window: Window) -> None:
                 repo.drop_baseline_window_cell(hunt_id, target, cell["partition"])
                 continue
             reasons = list(cell["reasons"])
-            counter = KeyCounter(cell["partition"], spec, span=(cell["start"], cell["end"]),
-                                 retain_observations_when_partial=True)
-            counter.restore(
+            segment_counter = KeyCounter(
+                cell["partition"], spec, span=(cell["start"], cell["end"]),
+                retain_observations_when_partial=True,
+            )
+            segment_counter.restore(
                 repo.baseline_window_counts(
                     hunt_id, spec.id, target, partition=cell["partition"],
                 ),
@@ -119,21 +121,29 @@ def resolve_window_exec_pairs(repo: Repo, hunt_id: str, window: Window) -> None:
                     hunt_id, spec.id, target, partition=cell["partition"],
                 ),
             )
+            pending_counter = KeyCounter(
+                cell["partition"], spec, span=(cell["start"], cell["end"]),
+                retain_observations_when_partial=True,
+            )
             for body in repo.baseline_window_pendings(hunt_id, target, cell["partition"]):
                 pending = Pending(**body)
                 resolution = resolver.resolve(pending)
                 if resolution.reason is not None:
                     reasons.append(f"{pending.event_id}: {resolution.reason}")
-                    counter.mark_partial(reasons[-1])
+                    segment_counter.mark_partial(reasons[-1])
+                    pending_counter.mark_partial(reasons[-1])
                 else:
-                    counter.add_keys(
-                        pending.ts, resolution.keys, event_id=pending.event_id,
-                        event_refs=[{"target": source, "native_id": native}
-                                    for source, native in pending.raw_refs],
+                    refs = [{"target": source, "native_id": native}
+                            for source, native in pending.raw_refs]
+                    segment_counter.add_keys(
+                        pending.ts, resolution.keys, event_id=pending.event_id, event_refs=refs,
+                    )
+                    pending_counter.add_keys(
+                        pending.ts, resolution.keys, event_id=pending.event_id, event_refs=refs,
                     )
             observations = [
                 *repo.baseline_window_observations(hunt_id, target, cell["partition"]),
-                *counter.observation_rows(),
+                *pending_counter.observation_rows(),
             ]
             execs = repo.baseline_window_execs(hunt_id, target, cell["partition"])
             state = (
@@ -147,7 +157,7 @@ def resolve_window_exec_pairs(repo: Repo, hunt_id: str, window: Window) -> None:
                 "partition": cell["partition"], "state": state, "matched": 0,
                 "evaluated": cell["evaluated"], "detail": {"reasons": sorted(set(reasons))},
             }, (_pending_observation(hunt_id, spec, row) for row in observations),
-                counts=counter.count_rows(), scope_hours=counter.scope_hour_rows())
+                counts=segment_counter.count_rows(), scope_hours=segment_counter.scope_hour_rows())
             repo.drop_baseline_window_cell(hunt_id, target, cell["partition"])
 
 
