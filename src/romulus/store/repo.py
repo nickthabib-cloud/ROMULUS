@@ -2545,6 +2545,26 @@ class Repo:
         at_previous = and_(~newer, ~at_current, same_instant(
             excluded.exec_ts, excluded.serial, table.previous_exec_ts, table.previous_serial))
 
+        evicted = case(
+            (and_(newer, table.previous_exec_ts.is_not(None)), table.previous_exec_ts),
+            (and_(older_candidate, table.previous_exec_ts.is_not(None)), table.previous_exec_ts),
+            (and_(~newer, ~at_current, ~older_candidate, ~at_previous), excluded.exec_ts),
+            else_=None,
+        )
+
+        def earlier(left, right):
+            return case(
+                (left.is_(None), right), (right.is_(None), left), (left <= right, left), else_=right,
+            )
+
+        def later(left, right):
+            return case(
+                (left.is_(None), right), (right.is_(None), left), (left >= right, left), else_=right,
+            )
+
+        incoming_earliest = earlier(excluded.evicted_earliest_ts, evicted)
+        incoming_latest = later(excluded.evicted_latest_ts, evicted)
+
         def flag(held, ambiguous, held_executable):
             return case((or_(held == 1, ambiguous == 1, excluded.executable != held_executable), 1), else_=0)
 
@@ -2566,6 +2586,8 @@ class Repo:
                     (at_current, flag(table.ambiguous, excluded.ambiguous, table.executable)),
                     else_=table.ambiguous,
                 ),
+                "evicted_earliest_ts": earlier(table.evicted_earliest_ts, incoming_earliest),
+                "evicted_latest_ts": later(table.evicted_latest_ts, incoming_latest),
             },
         )
         for chunk in _chunks(rows, BASELINE_CHUNK):
@@ -2594,6 +2616,23 @@ class Repo:
                 "raw_id": row["previous_raw_id"], "ambiguous": bool(row["previous_ambiguous"]),
             })
         return out
+
+    def baseline_parent_eviction_bounds(self, hunt_id: str, target: str, host: str, pid: int,
+                                        boot: str | None) -> tuple[datetime, datetime] | None:
+        """The inclusive time bounds of exec generations displaced from the two exact carry slots."""
+        if isinstance(pid, bool) or not isinstance(pid, int) or pid < 0:
+            return None
+        table = t.baseline_parent_carry.c
+        with self.engine.connect() as connection:
+            row = connection.execute(select(
+                table.evicted_earliest_ts, table.evicted_latest_ts,
+            ).where(
+                table.hunt_id == hunt_id, table.target == target, table.host == host,
+                table.boot == (boot or ""), table.pid == pid,
+            )).first()
+        if row is None or row.evicted_earliest_ts is None or row.evicted_latest_ts is None:
+            return None
+        return _stored_utc(row.evicted_earliest_ts), _stored_utc(row.evicted_latest_ts)
 
     def baseline_parent_count(self, hunt_id: str) -> int:
         with self.engine.connect() as c:

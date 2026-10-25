@@ -159,6 +159,53 @@ def test_a_successful_exec_supersedes_an_older_observed_image():
     assert resolved.keys[0].key["parent_executable"] == "/usr/bin/reloaded"
 
 
+def test_an_evicted_exec_between_observation_and_child_never_restores_the_observed_image():
+    _repo, store = _store()
+    store.observe_observation_rows([_observed(10, 1, "/usr/sbin/nginx")])
+    store.observe_rows([
+        _row(10, 10, "/usr/bin/python3"),
+        _row(10, 30, "/bin/a"),
+        _row(10, 40, "/bin/b"),
+    ])
+
+    resolved = PendingResolver(store).resolve(Pending(
+        "host", "boot-a", 10, START + timedelta(seconds=20), "child", "/bin/sh",
+    ))
+
+    assert resolved.keys == () and "not carried" in resolved.reason
+
+
+def test_an_exec_evicted_before_the_observation_does_not_block_that_observed_image():
+    _repo, store = _store()
+    store.observe_rows([_row(10, 0, "/bin/old")])
+    store.observe_observation_rows([_observed(10, 1, "/usr/sbin/nginx")])
+    store.observe_rows([_row(10, 30, "/bin/a"), _row(10, 40, "/bin/b")])
+
+    resolved = PendingResolver(store).resolve(Pending(
+        "host", "boot-a", 10, START + timedelta(seconds=20), "child", "/bin/sh",
+    ))
+
+    assert resolved.reason is None
+    assert resolved.keys[0].key["parent_executable"] == "/usr/sbin/nginx"
+
+
+def test_a_single_exec_evicted_after_the_child_does_not_block_the_observed_image():
+    _repo, store = _store()
+    store.observe_observation_rows([_observed(10, 1, "/usr/sbin/nginx")])
+    store.observe_rows([
+        _row(10, 30, "/bin/after-child"),
+        _row(10, 40, "/bin/a"),
+        _row(10, 50, "/bin/b"),
+    ])
+
+    resolved = PendingResolver(store).resolve(Pending(
+        "host", "boot-a", 10, START + timedelta(seconds=20), "child", "/bin/sh",
+    ))
+
+    assert resolved.reason is None
+    assert resolved.keys[0].key["parent_executable"] == "/usr/sbin/nginx"
+
+
 def test_an_unknown_exec_between_observation_and_child_keeps_the_parent_unresolved():
     _repo, store = _store()
     store.observe_observation_rows([_observed(10, 1, "/usr/sbin/nginx")])

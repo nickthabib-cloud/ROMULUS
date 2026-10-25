@@ -551,6 +551,10 @@ baseline_parent_carry = Table(
     Column("previous_raw_id", String),
     Column("previous_serial", Integer),
     Column("previous_ambiguous", Integer, nullable=False, server_default="0"),
+    # Bounds over generations displaced from the two exact slots. A lookup may use them only to prove that
+    # every evicted exec lies outside an observation-to-child interval; overlap always fails closed.
+    Column("evicted_earliest_ts", DateTime(timezone=True)),
+    Column("evicted_latest_ts", DateTime(timezone=True)),
     PrimaryKeyConstraint("hunt_id", "target", "host", "boot", "pid", name="pk_baseline_parent_carry"),
     CheckConstraint("pid >= 0", name="ck_baseline_parent_carry_pid"),
     CheckConstraint("executable <> ''", name="ck_baseline_parent_carry_executable"),

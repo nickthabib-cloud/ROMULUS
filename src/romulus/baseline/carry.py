@@ -506,6 +506,13 @@ class CarryInStore:
         if self.repo.baseline_parent_break_overlaps(
                 self.hunt_id, self.target, host, observed_ts, _hour(ts) + _HOUR):
             return None, UNCARRIED_EXEC
+        evicted = self.repo.baseline_parent_eviction_bounds(
+            self.hunt_id, self.target, host, pid, boot,
+        )
+        if evicted is not None and not (evicted[1] < observed_ts or evicted[0] > ts):
+            # Only bounds are retained after the exact two generations. If their interval overlaps this
+            # observation-to-child interval, an evicted exec may have replaced the observed image.
+            return None, UNCARRIED_EXEC
         return (view.image.ts, view.image.exe, view.image.ppid, view.image.entry.event_id, boot), None
 
     def observe_rows(self, rows: Iterable[ParentExec], *, chunk_size: int = 100_000) -> int:
@@ -570,6 +577,7 @@ class CarryInStore:
                 "hunt_id": self.hunt_id, "target": self.target, "host": item.host, "boot": boot, "pid": item.pid,
                 "exec_ts": timestamp, "serial": item.serial, "executable": item.executable,
                 "parent_pid": item.parent_pid, "raw_id": item.raw_id, "ambiguous": 0,
+                "evicted_earliest_ts": None, "evicted_latest_ts": None,
             }
             _keep_latest_two(pending.setdefault(key, []), row)
             seen += 1
@@ -590,11 +598,30 @@ def _keep_latest_two(generations: list[dict], row: dict) -> None:
         if generation["exec_ts"] == row["exec_ts"] and _same_instant(generation["serial"], row["serial"]):
             if generation["executable"] != row["executable"]:
                 generation["ambiguous"] = 1
+            bounds = [
+                value for item in (generation, row)
+                for value in (item.get("evicted_earliest_ts"), item.get("evicted_latest_ts"))
+                if value is not None
+            ]
+            if bounds:
+                generation["evicted_earliest_ts"] = min(bounds)
+                generation["evicted_latest_ts"] = max(bounds)
             return
     generations.append(row)
     generations.sort(key=lambda item: (item["exec_ts"], item["serial"] if item["serial"] is not None else -1),
                      reverse=True)
+    evicted = generations[2:]
+    bounds = [
+        value for item in generations
+        for value in (item.get("evicted_earliest_ts"), item.get("evicted_latest_ts"))
+        if value is not None
+    ]
+    bounds.extend(item["exec_ts"] for item in evicted)
     del generations[2:]
+    if bounds:
+        for generation in generations:
+            generation["evicted_earliest_ts"] = min(bounds)
+            generation["evicted_latest_ts"] = max(bounds)
 
 
 class PendingResolver:
