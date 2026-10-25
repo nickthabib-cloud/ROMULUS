@@ -117,17 +117,22 @@ from tests import throughput_fixture as tf
 # the segment writer's, the hunt's stop reason names the baseline stage (its execution state was already partial),
 # and the manifest's baseline coverage block reports the stage as partial instead of not run. The partial hunt writes
 # no segment and keeps its window counter material.
+# Registering bl.svc_exec_rate adds one unresolved www-data observation and its exact window-hour count on this
+# no-history fixture. Baseline observations/window rows, the snapshot, exclusion ledger, rate rule cells, audit and
+# report manifest change; findings, citations, evidence, entities, anchors, links, expansion and stats do not. The
+# baseline task also changes by its rate spec in fingerprint, intent and outcome: retaining the old row would falsely
+# say that the new spec did not run.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
-    "audit": "234a968ea7a0cebda51c453371b28867670b7c9898dd1d05568ae00007305dbf",
+    "audit": "76404a43b09a51d3f3eda92c190150dbe9d72db4ff504049b403332ad73fc449",
     "baseline_counts": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-    "baseline_hunt_exclusions": "0d871301eb31d300f00eefeadae48aaa99381de0d8c6158e74e9bb351dd1bd52",
-    "baseline_observations": "a622940f3edc51095fae860c5247d8b9494c32522d92fca63ce77a73ffcd1856",
+    "baseline_hunt_exclusions": "ca27ee78be780d9cfdda5b7595d0387c7ca35152cbf230fbcfd30b9ceb6f613b",
+    "baseline_observations": "d588ac20afa79f85f3d13006700d2358c981e585c53dbc5dd275b9726e6d2582",
     "baseline_scope_hours": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     "baseline_segments": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-    "baseline_snapshot": "ee69ca9a69bb202d32ea01780bd4832d6cb0972b4ecd8941ba6aaf5e9c8a2b6b",
-    "baseline_window_counts": "86ae9aaddb32e101784fb876d1bd3db544e3139f35c20d6b438db788e4327103",
-    "baseline_window_scope_hours": "5b23e9db42982af2cc4122ca8e0c1457a553409ff95569eb92ad2edaf7797160",
+    "baseline_snapshot": "c0a38c167a376c3d71d9f1ab6bdbc021fd0078d743cb57780db153fad7a7007a",
+    "baseline_window_counts": "93292e451a3e9bcb371406ce7e86725f8b8304a607e4cb4489ec9c35f22e9e11",
+    "baseline_window_scope_hours": "fe291670db336a32d391d317d5c096e542e6c1ea74176c7441c7f1f63e97bc3d",
     "candidates": "e8baaad0f844984320258730fa65318e2cea0e57c2df8b5b3674ded6fb78f89d",
     "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
     "event_citations": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
@@ -135,11 +140,11 @@ GOLDEN_STACK = {
     "events": "46ff37261993417f3e0fa61de9c3aa24977b2e091ad29d7cf4d166e8261a1017",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "797137953f5a643e0297b450047aeec3fa79c4cb386118f10d0ec00d337fd023",
-    "manifest": "c47c0fee9ef788aee97ca9b712349f01d3fd95cb3496e479dd8b440f1c6a5ef4",
+    "manifest": "bfd89909b449992b9f4532520f348dce036b239f596090cd347979e7e856eb6d",
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
-    "rule_cells": "c6284aff25a94921755f8b0e8879a43d7292ab9d627ac81732c499f0edd05084",
+    "rule_cells": "f3b1da9cfb8185f79c78541f60888e44e060595965930e5e73e7bf6ebbf9a4fc",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
-    "tasks": "0e7ef8a8240c951b30447cdc147395503b0a93e438972fdc25e5ff459dc5107c",
+    "tasks": "8e098211575094164b1b2bc66782f9b7931a3864d59a74aa8ba805cbcee44ffc",
 }
 GOLDEN_NORMALIZED = {
     "arkime_sessions3-x": "20b597e7169ff4713f006bd7b69608eea69a2038505dfa92fdf393709af2fe54",

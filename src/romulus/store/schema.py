@@ -671,6 +671,16 @@ baseline_window_scope_hour = Table(
     ),
     CheckConstraint("events >= 0", name="ck_baseline_window_scope_hour_events"),
 )
+Index(
+    "ix_baseline_window_scope_rate",
+    baseline_window_scope_hour.c.hunt_id,
+    baseline_window_scope_hour.c.spec_id,
+    baseline_window_scope_hour.c.scope_kind,
+    baseline_window_scope_hour.c.scope,
+    baseline_window_scope_hour.c.hour,
+    baseline_window_scope_hour.c.target,
+    baseline_window_scope_hour.c.partition,
+)
 
 # A (hunt, spec, target) whose window counter material the segment writer has decided on and released. The marker
 # is written before the rows are deleted, so a writer that finds it never writes a segment from a partial remainder.

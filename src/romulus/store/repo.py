@@ -2323,11 +2323,24 @@ class Repo:
                 baseline_key_history_query(key_id, scope_kind, scope, hunt_id, spec_id, span)).mappings()]
 
     def baseline_scope_series(self, scope_kind: str, scope: str, hunt_id: str, spec_id: str,
-                              span: tuple[datetime, datetime] | None = None) -> list[dict]:
-        """One scope's live hours in one spec's snapshot; at most one row per hour per target."""
-        with self.engine.connect() as c:
-            return [_with_utc(row, ("hour",)) for row in c.execute(
-                baseline_scope_series_query(scope_kind, scope, hunt_id, spec_id, span)).mappings()]
+                              span: tuple[datetime, datetime] | None = None, *,
+                              page_size: int = BASELINE_PAGE) -> Iterator[dict]:
+        """One scope's history rows in exact segment/hour order, read in keyset pages."""
+        if page_size < 1:
+            raise ValueError("page size must be positive")
+        table = t.baseline_scope_hour.c
+        after = None
+        while True:
+            query = baseline_scope_series_query(scope_kind, scope, hunt_id, spec_id, span)
+            if after is not None:
+                query = query.where(tuple_(table.segment_id, table.hour) > tuple_(*after))
+            query = query.limit(page_size)
+            with self.engine.connect() as connection:
+                page = [_with_utc(row, ("hour",)) for row in connection.execute(query).mappings()]
+            yield from page
+            if len(page) < page_size:
+                return
+            after = [page[-1]["segment_id"], page[-1]["hour"]]
 
     def save_baseline_snapshot(self, row: dict) -> bool:
         """Atomically freeze the first snapshot and normalized membership for a hunt."""
@@ -3036,6 +3049,35 @@ class Repo:
             if len(page) < page_size:
                 return
             after = [page[-1]["scope"], page[-1]["hour"]]
+
+    def baseline_window_scope_series(self, hunt_id: str, spec_id: str, scope_kind: str, scope: str, *,
+                                     span: tuple[datetime, datetime],
+                                     page_size: int = BASELINE_PAGE) -> Iterator[dict]:
+        """One scope's window hours summed exactly across targets and partitions, keyset-paged."""
+        if page_size < 1:
+            raise ValueError("page size must be positive")
+        start, end = _utc(span[0], "window rate start"), _utc(span[1], "window rate end")
+        if start > end:
+            raise ValueError("window rate span is reversed")
+        table = t.baseline_window_scope_hour.c
+        after = None
+        while True:
+            query = (select(table.hour, func.sum(table.events).label("events")).where(
+                table.hunt_id == hunt_id,
+                table.spec_id == spec_id,
+                table.scope_kind == scope_kind,
+                table.scope == scope,
+                table.hour >= start,
+                table.hour < end,
+            ).group_by(table.hour).order_by(table.hour).limit(page_size))
+            if after is not None:
+                query = query.where(table.hour > after)
+            with self.engine.connect() as connection:
+                page = [_with_utc(row, ("hour",)) for row in connection.execute(query).mappings()]
+            yield from page
+            if len(page) < page_size:
+                return
+            after = page[-1]["hour"]
 
     def baseline_window_release(self, hunt_id: str, spec_id: str, target: str) -> str | None:
         """Why one (hunt, spec, target)'s window counter material was released, or None while it is kept."""

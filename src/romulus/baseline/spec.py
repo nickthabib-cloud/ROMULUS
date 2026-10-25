@@ -675,9 +675,9 @@ BASELINE_SPECS = (
     BaselineSpec(
         id="bl.svc_exec_rate", version="1", key_version="1", families=("process_exec",),
         datasets=("linux.audit",), scope="host_account", measure="rate", bucket="hour",
-        # the uid decides a service account; a configured account name decides one without it
-        required_fields={"process_exec": ("process.user", "process.uid")},
-        optional_fields={"process_exec": ()},
+        # A configured account name decides one without a uid; when present, uid is still projected and typed.
+        required_fields={"process_exec": ("process.user",)},
+        optional_fields={"process_exec": ("process.uid",)},
         _extract=_service_rate,
     ),
 )

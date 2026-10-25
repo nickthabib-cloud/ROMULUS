@@ -11,6 +11,7 @@ from romulus.baseline.carry import CarryInStore, PendingResolver
 from romulus.baseline.count import KeyCounter
 from romulus.baseline.lookback import LookbackBudget, LookbackResult, LookbackWriter
 from romulus.baseline.playbook import BASELINE_PLAYBOOKS, BaselinePlaybook
+from romulus.baseline.rate import RATE_MEAN_MULTIPLIER, RATE_MIN_COUNT, RATE_SIGMA_MULTIPLIER, threshold
 from romulus.baseline.snapshot import SnapshotPlanner
 from romulus.baseline.spec import BASELINE_SPECS, SPEC_BY_ID, KeyContext, Pending
 from romulus.decide.policy import decide
@@ -25,6 +26,7 @@ from romulus.sources.models import Window
 from romulus.store.repo import Repo
 
 BASELINE_CITATION_CAP = 20
+_HOUR = timedelta(hours=1)
 _COMPLETE_WINDOW_STATES = {"evaluated_complete", "not_applicable_no_events"}
 _PLAYBOOK_BY_SPEC = {playbook.spec.id: playbook for playbook in BASELINE_PLAYBOOKS}
 
@@ -183,6 +185,14 @@ class SnapshotView:
         # Member segments may straddle history_start; only their rows inside the frozen span are history.
         self.span = ((datetime.fromisoformat(plan["history_start"]), datetime.fromisoformat(plan["window_start"]))
                      if plan.get("history_start") and plan.get("window_start") else None)
+        hunt = repo.get_hunt(hunt_id) or {}
+        rate_config = ((((hunt.get("manifest") or {}).get("baseline") or {}).get("thresholds") or {})
+                       .get("rate") or {})
+        self.rate_parameters = {
+            "min_count": float(rate_config.get("min_count", RATE_MIN_COUNT)),
+            "k": float(rate_config.get("k", RATE_MEAN_MULTIPLIER)),
+            "z": float(rate_config.get("z", RATE_SIGMA_MULTIPLIER)),
+        }
         self._pending_group: tuple[str, list[dict]] | None = None
         self.spec_stats: dict[str, dict] = {}
 
@@ -222,8 +232,12 @@ class SnapshotView:
             reason = "internal networks not configured for this site; external destinations are unresolved"
         else:
             reason = _coverage_failure(coverage, self.min_live_hours)
-        live_hours = len({item["hour"] for item in series})
-        history_events = sum(int(item["events"]) for item in series)
+        live: set[datetime] = set()
+        history_events = 0
+        for item in series:
+            live.add(item["hour"])
+            history_events += int(item["events"])
+        live_hours = len(live)
         if reason is None and history_events < 1:
             reason = "scope is silent in history"
         if reason is None and live_hours < self.min_live_hours:
@@ -267,6 +281,157 @@ class SnapshotView:
             "rows": updated, "coverage": coverage, "live_hours": live_hours,
             "history_events": history_events, "effective_hours": effective_hours,
             "effective_start": effective_start, "reason": reason,
+        }
+
+    def _whole_window(self) -> tuple[datetime, datetime, list[tuple[datetime, datetime]]]:
+        start_floor = self.window.start.replace(minute=0, second=0, microsecond=0)
+        end_floor = self.window.end.replace(minute=0, second=0, microsecond=0)
+        whole_start = start_floor if self.window.start == start_floor else start_floor + _HOUR
+        whole_end = end_floor
+        edges = []
+        if self.window.start < min(whole_start, self.window.end):
+            edges.append((self.window.start, min(whole_start, self.window.end)))
+        if max(whole_end, self.window.start) < self.window.end:
+            tail = (max(whole_end, self.window.start), self.window.end)
+            if not edges or edges[-1] != tail:
+                edges.append(tail)
+        return whole_start, whole_end, edges
+
+    @staticmethod
+    def _edge_text(edges: list[tuple[datetime, datetime]]) -> str:
+        if not edges:
+            return ""
+        spans = ", ".join(f"{start.isoformat()} to {end.isoformat()}" for start, end in edges)
+        return f" The window edge fractions {spans} were not assessed."
+
+    def _rate_scope(self, playbook: BaselinePlaybook, rows: list[dict],
+                    window_failure: str | None) -> tuple[list[dict], list[dict], dict]:
+        first = rows[0]
+        coverage = self._history_coverage(playbook.id)
+        reason = window_failure or _coverage_failure(coverage, self.min_live_hours)
+        plan = self.snapshot.get("plan") or {}
+        history_end = datetime.fromisoformat(plan.get("window_start") or self.window.start.isoformat())
+        starts = [datetime.fromisoformat(str(item["effective_start"])) for item in coverage
+                  if item.get("effective_start")]
+        history_start = max(starts) if starts else history_end
+        sparse: dict[datetime, int] = {}
+        for item in self.repo.baseline_scope_series(
+                first["scope_kind"], first["scope"], self.hunt_id, playbook.id,
+                (history_start, history_end)):
+            sparse[item["hour"]] = sparse.get(item["hour"], 0) + int(item["events"])
+        history_events = sum(sparse.values())
+        n_hours = max(0, int((history_end - history_start) / _HOUR))
+        if reason is None and not sparse:
+            reason = "scope is silent in history"
+        if reason is None and n_hours < self.min_live_hours:
+            reason = f"scope has {n_hours} live history hour(s), below the required {self.min_live_hours}"
+        series = [sparse.get(history_start + index * _HOUR, 0) for index in range(n_hours)]
+        statistics = None
+        if reason is None:
+            statistics = threshold(series, **self.rate_parameters)
+
+        whole_start, whole_end, edges = self._whole_window()
+        if reason is None and whole_start >= whole_end:
+            reason = "window has no complete whole hour"
+        measurements = (list(self.repo.baseline_window_scope_series(
+            self.hunt_id, playbook.id, first["scope_kind"], first["scope"],
+            span=(whole_start, whole_end),
+        )) if whole_start < whole_end else [])
+        anomalous = ([] if reason or statistics is None else [
+            item for item in measurements if int(item["events"]) >= statistics.value
+        ])
+        verdict = "unresolved" if reason else "over_threshold" if anomalous else "within_threshold"
+        edge_text = self._edge_text(edges)
+        if reason:
+            verdict_reason = reason + edge_text
+        elif anomalous:
+            verdict_reason = (f"{len(anomalous)} complete window hour(s) met or exceeded threshold "
+                              f"{statistics.value}{edge_text}")
+        else:
+            verdict_reason = f"no complete window hour met threshold {statistics.value}{edge_text}"
+        updated = [{
+            **row,
+            "history_count": history_events,
+            "history_decayed": None,
+            "peer_scopes_with_key": None,
+            "peer_scopes": None,
+            "threshold": None if statistics is None else statistics.value,
+            "mean": None if statistics is None else statistics.mean,
+            "sigma": None if statistics is None else statistics.sigma,
+            "n_hours": n_hours,
+            "verdict": verdict,
+            "reason": verdict_reason,
+        } for row in rows]
+        return updated, anomalous, {
+            "coverage": coverage, "history_start": history_start, "history_end": history_end,
+            "history_events": history_events, "statistics": statistics, "edges": edges,
+        }
+
+    def _rate_claim(self, playbook: BaselinePlaybook, scope: str, anomalous: list[dict], facts: dict,
+                    cited: int) -> str:
+        statistics = facts["statistics"]
+        assert statistics is not None
+        hours = "; ".join(
+            f"{item['hour'].isoformat()} count {int(item['events'])}" for item in anomalous
+        )
+        claim = (
+            f"Between {self.window.start.isoformat()} and {self.window.end.isoformat()}, {scope} met or "
+            f"exceeded its service-account execution-rate threshold in {len(anomalous)} complete hour(s): "
+            f"{hours}. The threshold was {statistics.value} = max(min_count {statistics.min_count:g}, "
+            f"mean × k ({statistics.mean} × {statistics.k:g}), mean + z × sample sigma "
+            f"({statistics.mean} + {statistics.z:g} × {statistics.sigma})); n={statistics.n}. The exact "
+            f"history series spans {facts['history_start'].isoformat()} to {facts['history_end'].isoformat()} "
+            f"and contains {facts['history_events']} executions; rate-series decay is none. Seasonality is "
+            "not modelled."
+        )
+        claim += self._edge_text(facts["edges"])
+        claim += (
+            f" Baseline {self.snapshot['digest']} supplied the frozen history. This rate deviation is not "
+            f"evidence of malicious activity. The lead cites the first retained event for {cited} scope key(s)."
+        )
+        return claim
+
+    def _judge_rate(self, playbook: BaselinePlaybook) -> Iterator[Match]:
+        observations = self.repo.baseline_observations_for_spec(
+            self.hunt_id, playbook.id, playbook.spec.version,
+        )
+        updated_total = unresolved = over = within = groups = 0
+        window_failure = self._window_failure(playbook)
+        coverage = self._history_coverage(playbook.id)
+        history_failure = _coverage_failure(coverage, self.min_live_hours)
+        for scope, grouped in groupby(observations, key=lambda row: row["scope"]):
+            rows, anomalous, facts = self._rate_scope(playbook, list(grouped), window_failure)
+            self.repo.upsert_baseline_observations(rows)
+            updated_total += len(rows)
+            unresolved += sum(row["verdict"] == "unresolved" for row in rows)
+            over += sum(row["verdict"] == "over_threshold" for row in rows)
+            within += sum(row["verdict"] == "within_threshold" for row in rows)
+            if not anomalous:
+                continue
+            events, raw_copies = self._citation_events(rows[:BASELINE_CITATION_CAP])
+            if not events:
+                for row in rows:
+                    row.update(verdict="unresolved", reason="first citation event is not retained")
+                self.repo.upsert_baseline_observations(rows)
+                unresolved += len(rows)
+                over -= len(rows)
+                continue
+            group_key = f"baseline:{playbook.id}:{scope}"
+            self._pending_group = (group_key, rows)
+            groups += 1
+            yield Match(
+                playbook_id=playbook.id,
+                claim=self._rate_claim(playbook, scope, anomalous, facts, len(events)),
+                claim_type="anomaly", events=events, predicate=_predicate(events, playbook),
+                ts=min(event.ts for event in events), severity="info", proposed_lane="lead",
+                confidence="medium", entities=_entities(events),
+                notes=["baseline rate deviations are capped at the lead lane"], group_key=group_key,
+                raw_copies=raw_copies,
+            )
+        self.spec_stats[playbook.id] = {
+            "observations": updated_total, "unresolved": unresolved,
+            "common": 0, "first_seen": 0, "over_threshold": over, "within_threshold": within,
+            "groups": groups, "window_failure": window_failure, "history_failure": history_failure,
         }
 
     def _claim(self, playbook: BaselinePlaybook, scope: str, first_seen: list[dict], facts: dict,
@@ -327,6 +492,9 @@ class SnapshotView:
         return [stored[event_id] for event_id in ids if event_id in stored], raw_copies
 
     def judge(self, playbook: BaselinePlaybook) -> Iterator[Match]:
+        if playbook.spec.measure == "rate":
+            yield from self._judge_rate(playbook)
+            return
         observations = self.repo.baseline_observations_for_spec(
             self.hunt_id, playbook.id, playbook.spec.version,
         )

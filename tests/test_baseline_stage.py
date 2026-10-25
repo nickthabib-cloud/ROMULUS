@@ -601,8 +601,9 @@ def test_hunt_manifest_records_the_frozen_baseline_plan_and_network_definition()
     assert baseline["budget"] == {"queries": 200, "records": 5_000_000, "seconds": 1800}
     assert {item["id"] for item in baseline["specs"]} == {
         "bl.ssh_tuple", "bl.exec_path", "bl.exec_pair", "bl.cmd_shape", "bl.ext_dest",
+        "bl.svc_exec_rate",
     }
-    assert "bl.svc_exec_rate" not in {item["id"] for item in baseline["specs"]}
+    assert baseline["thresholds"]["rate"] == {"min_count": 5.0, "k": 3.0, "z": 4.0}
     assert baseline["internal_networks"]["source"] == "configured"
     assert baseline["store_cut_digest"]
     default_a = build_manifest(Settings(), WINDOW, {}, "broad", ["b", "a"], {})["baseline"]["site"]

@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 
 from romulus import __version__
 from romulus.baseline.playbook import BASELINE_PLAYBOOKS
+from romulus.baseline.rate import RATE_MEAN_MULTIPLIER, RATE_MIN_COUNT, RATE_SIGMA_MULTIPLIER
 from romulus.config import Settings
 from romulus.decide.policy import POLICY_VERSION
 from romulus.detect.netdef import SiteNetworks
@@ -68,7 +69,14 @@ def build_manifest(s: Settings, window: Window, original_input: dict, style: str
                 for playbook in sorted(BASELINE_PLAYBOOKS, key=lambda item: item.spec.id)
             ],
             "decay": {"first_seen": "none", "rare_half_life_days": 14, "rate": "none"},
-            "thresholds": {"rare": None},
+            "thresholds": {
+                "rare": None,
+                "rate": {
+                    "min_count": RATE_MIN_COUNT,
+                    "k": RATE_MEAN_MULTIPLIER,
+                    "z": RATE_SIGMA_MULTIPLIER,
+                },
+            },
             "budget": {"queries": 200, "records": 5_000_000, "seconds": 1800},
             "store_cut_digest": baseline_store_cut_digest or digest([]),
             "internal_networks": SiteNetworks.from_settings(s).record(),

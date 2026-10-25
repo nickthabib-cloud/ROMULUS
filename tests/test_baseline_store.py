@@ -312,11 +312,11 @@ def test_0016_drops_only_the_owners_implied_observations(tmp_path):
         assert rows() == sorted(observed, key=lambda row: (row[1], row[0]))
 
 
-def test_0019_is_the_single_head_and_0017_leaves_stored_candidates_about_every_record_they_cite(tmp_path):
+def test_0020_is_the_single_head_and_0017_leaves_stored_candidates_about_every_record_they_cite(tmp_path):
     engine = make_engine(tmp_path / "candidate-context.db")
     with engine.begin() as connection:
         cfg = _alembic_config(connection)
-        assert ScriptDirectory.from_config(cfg).get_heads() == ["0019"]
+        assert ScriptDirectory.from_config(cfg).get_heads() == ["0020"]
         command.upgrade(cfg, "0016")
         connection.exec_driver_sql(
             "INSERT INTO hunt (id, created_at, created_by, manifest, manifest_digest, execution_state) "

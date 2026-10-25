@@ -160,10 +160,21 @@ class ExternalDestinationBaseline(BaselinePlaybook):
     direction_dependent = True
 
 
+class ServiceExecRateBaseline(BaselinePlaybook):
+    id = "bl.svc_exec_rate"
+    title = "Service-account execution rate baseline"
+    spec = SPEC_BY_ID[id]
+    families = spec.families
+    os_families = ("linux",)
+    assures_negative = False
+    positive_only_reason = "service-account rate baselines publish positive deviations only"
+
+
 BASELINE_PLAYBOOKS = [
     SshTupleBaseline,
     ExecPathBaseline,
     ExecPairBaseline,
     CommandShapeBaseline,
     ExternalDestinationBaseline,
+    ServiceExecRateBaseline,
 ]
