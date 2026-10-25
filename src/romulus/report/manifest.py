@@ -12,6 +12,7 @@ from romulus.agent.provider import egress_banners
 from romulus.decide.policy import LANE_ORDER
 from romulus.detect.netdef import recorded_view
 from romulus.detect.registry import ALL_PLAYBOOKS
+from romulus.hunt.publish import subject_event_ids
 from romulus.report.incidents import build_incident_graph, incident_narrative
 from romulus.store import schema as t
 from romulus.store.db import digest, utcnow, write_txn
@@ -682,14 +683,36 @@ def _ai_agent(repo: Repo, hunt_id: str, hunt_manifest: dict) -> dict:
 
 
 def _content_candidate_key(repo: Repo, candidate: dict) -> str:
+    """A finding's cross-hunt identity: its rule and its evidence, which is its documented group key or the raw
+    records of its subject (the records it is about, not those cited only to support its claim's statements, as the
+    candidate id is built), so findings that cite each other's records for context keep identities of their own. A
+    candidate stored without `context_event_ids` is about every record it cites."""
+    subject = subject_event_ids(candidate)
     raw_keys = set()
-    for row in repo.citation_events(candidate["hunt_id"], candidate["event_ids"]):
+    for row in repo.citation_events(candidate["hunt_id"], subject):
         for reference in row["event"].get("raw", []):
             raw_keys.add(f"{reference['target']}/{reference['native_id']}")
-    evidence_identity = candidate.get("group_key") or sorted(raw_keys) or sorted(candidate["event_ids"])
+    evidence_identity = candidate.get("group_key") or sorted(raw_keys) or sorted(subject)
     return "F-" + digest({
         "rule_id": candidate["rule_id"], "evidence_identity": evidence_identity,
     })[:20]
+
+
+def _unique_candidate_keys(repo: Repo, candidates: list[dict]) -> dict[str, str]:
+    """Every candidate's content identity, made unique: candidates whose rule and evidence still coincide (an older
+    hunt's findings that cite each other's records, stored without `context_event_ids`) are told apart by their claim
+    and cited records, in that content order, so no published finding shares an id or is merged away."""
+    keys = {row["id"]: _content_candidate_key(repo, row) for row in candidates}
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for row in candidates:
+        groups[keys[row["id"]]].append(row)
+    for key, rows in groups.items():
+        if len(rows) < 2:
+            continue
+        ordered = sorted(rows, key=lambda row: (row["claim"], sorted(row["event_ids"]), row["id"]))
+        for rank, row in enumerate(ordered, 1):
+            keys[row["id"]] = f"{key}-{rank}"
+    return keys
 
 
 def _as_utc(value):
@@ -700,7 +723,7 @@ def canonical_manifest(repo: Repo, hunt_id: str, actor: str = "canonical") -> di
     """Return a cross-hunt deterministic report projection with content-scoped identities."""
     manifest = build_manifest(repo, hunt_id, actor)
     candidates = repo.candidates(hunt_id)
-    candidate_keys = {row["id"]: _content_candidate_key(repo, row) for row in candidates}
+    candidate_keys = _unique_candidate_keys(repo, candidates)
     candidate_rows = {row["id"]: row for row in candidates}
     link_rows = repo.expansion_links(hunt_id)
     link_keys = {}

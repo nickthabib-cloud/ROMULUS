@@ -42,9 +42,19 @@ def _coverage_failure(coverage: list[dict], minimum: int) -> str | None:
     coverage = [item for item in coverage if item.get("status") != "not_applicable"]
     if not coverage:
         return None
-    if not coverage or all(item.get("status") == "absent" for item in coverage):
-        return "no pre-window data"
     gaps = [gap for item in coverage for gap in item.get("gaps") or []]
+    if all(item.get("status") == "absent" for item in coverage):
+        # The hours read are complete and empty; absence is evidenced only where nothing was left unread. Hours the
+        # lookback budget never reached are not evidence that the source holds nothing there.
+        # every target's read stopped at or after the earliest end of its unread hours, so nothing before it was read
+        unread = [gap["end"] for gap in gaps if gap.get("state") == "omitted_budget" and gap.get("end")]
+        if unread:
+            return (f"no pre-window data in the hours read; history not read before {min(unread)}: lookback "
+                    f"budget exhausted")
+        if gaps:
+            reasons = "; ".join(sorted({str(gap.get("reason") or gap.get("state")) for gap in gaps}))
+            return f"no pre-window data in the hours read; history gap: {reasons}"
+        return "no pre-window data"
     if gaps:
         reasons = "; ".join(sorted({str(gap.get("reason") or gap.get("state")) for gap in gaps}))
         return f"history gap: {reasons}"

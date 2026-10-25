@@ -838,3 +838,22 @@ def test_a_segment_straddling_history_start_contributes_only_its_in_span_rows():
     row = next(repo.baseline_observations("h1"))
     assert row["verdict"] == "first_seen" and row["history_count"] == 0
     assert row["n_hours"] == 7 * 24
+
+
+def test_history_stopped_on_budget_is_never_called_absent():
+    """'no pre-window data' is said only when every hour was read and empty; hours the lookback budget never reached
+    are named as not read."""
+    from romulus.hunt.baseline_stage import _coverage_failure
+    read_all = [{"status": "absent", "gaps": []}]
+    assert _coverage_failure(read_all, 24) == "no pre-window data"
+    stopped = [{"status": "absent", "gaps": [
+        {"start": "2024-11-11T10:00:00+00:00", "end": "2024-11-15T16:00:00+00:00", "state": "omitted_budget",
+         "reason": "lookback query or wall-clock budget exhausted"}]},
+        {"status": "absent", "gaps": [
+            {"start": "2024-11-11T10:00:00+00:00", "end": "2024-11-15T15:00:00+00:00", "state": "omitted_budget",
+             "reason": "lookback query or wall-clock budget exhausted"}]}]
+    assert _coverage_failure(stopped, 24) == (
+        "no pre-window data in the hours read; history not read before 2024-11-15T15:00:00+00:00: lookback budget "
+        "exhausted")
+    failed = [{"status": "absent", "gaps": [{"start": "a", "end": "b", "state": "failed", "reason": "query failed"}]}]
+    assert _coverage_failure(failed, 24) == "no pre-window data in the hours read; history gap: query failed"
