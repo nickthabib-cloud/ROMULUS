@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import UTC, datetime, timedelta
-
 from romulus.detect.registry import ALL_PLAYBOOKS
 from romulus.store.db import digest
 from romulus.store.repo import Repo
@@ -13,38 +11,19 @@ _PLAYBOOKS = {playbook.id: playbook for playbook in ALL_PLAYBOOKS}
 # that each reach a different member of the group are not thereby related, so such a finding is a leaf: it
 # joins an incident only when everything it is observed-linked to is already one incident.
 GROUPING_KINDS = frozenset({"aggregate", "packet"})
-NARROW_INFERRED_RADIUS = timedelta(minutes=5)
 
 
 def _groups(rule_id: str) -> bool:
     return getattr(_PLAYBOOKS.get(rule_id), "kind", "direct") in GROUPING_KINDS
 
 
-def _utc(value) -> datetime:
-    parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
-    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
-
-
-def _incident_role(row: dict, finding_by_id: dict[str, dict]) -> str:
+def _incident_role(row: dict, _finding_by_id: dict[str, dict]) -> str:
     """Classify how a link participates in incident grouping.
 
-    Observed links are evidence. A deterministic inferred link may join findings only when the actual queried
-    window stays within five minutes of its anchor evidence on both sides. Wider windows and every agent-requested
-    link remain labelled hypotheses between incidents. The decision uses persisted time bounds, not a window label
-    or the number of records that happened to be present in a lab run.
+    Only observed links are evidence. Every deterministic inference and agent-requested relation remains a
+    labelled hypothesis between incidents regardless of how narrow its query window is.
     """
-    if row["strength"] == "observed":
-        return "evidence"
-    if row["strength"] != "inferred" or row["anchor_id"] not in finding_by_id:
-        return "hypothesis"
-    try:
-        anchor = _utc(finding_by_id[row["anchor_id"]]["observed_at"])
-        start, end = _utc(row["window_start"]), _utc(row["window_end"])
-    except (KeyError, TypeError, ValueError):
-        return "hypothesis"
-    if start <= anchor <= end and max(anchor - start, end - anchor) <= NARROW_INFERRED_RADIUS:
-        return "narrow_inferred"
-    return "hypothesis"
+    return "evidence" if row["strength"] == "observed" else "hypothesis"
 
 
 _TACTICS = {
@@ -212,7 +191,7 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
         if left_root != right_root:
             parent[max(left_root, right_root)] = min(left_root, right_root)
 
-    joining = [edge for edge in edges if edge["incident_role"] in {"evidence", "narrow_inferred"}]
+    joining = [edge for edge in edges if edge["incident_role"] == "evidence"]
     grouping = {item for item, finding in finding_by_id.items() if _groups(finding["rule_id"])}
     for edge in joining:
         if edge["from"] not in grouping and edge["to"] not in grouping:
@@ -264,8 +243,6 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
             "link_ids": [link["id"] for link in incident_links],
             "observed_edges": sum(edge["style"] == "observed" and edge["from"] in member_set
                                   for edge in edges),
-            "narrow_inferred_edges": sum(edge["incident_role"] == "narrow_inferred"
-                                         and edge["from"] in member_set for edge in edges),
             "hypothesis_edges": sum(edge["incident_role"] == "hypothesis"
                                     and edge["from"] in member_set for edge in edges),
             "inferred_edges": sum(edge["style"] in {"inferred", "agent_hypothesis"}

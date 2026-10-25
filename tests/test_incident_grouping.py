@@ -65,7 +65,7 @@ def test_ordinary_findings_still_join_through_observed_edges():
     assert _incidents(links, findings) == [("A1", "A2", "D3")]
 
 
-def test_narrow_inferred_edges_join_but_wide_inferred_edges_remain_hypotheses():
+def test_inferred_edges_never_merge_and_remain_visible_hypotheses():
     links = [
         _link("L-observed", "A1", ["e1"]),
         _link("L-narrow", "T1", ["e2"], strength="inferred", link_type="host_after_anchor",
@@ -78,11 +78,14 @@ def test_narrow_inferred_edges_join_but_wide_inferred_edges_remain_hypotheses():
 
     graph = build_incident_graph(_Repo(links), "h", findings)
 
-    assert sorted(tuple(i["finding_ids"]) for i in graph["incidents"]) == [("A1", "T1", "T2"), ("T3",)]
+    assert sorted(tuple(i["finding_ids"]) for i in graph["incidents"]) == [
+        ("A1", "T1"), ("T2",), ("T3",),
+    ]
     roles = {edge["link_id"]: edge["incident_role"] for edge in graph["edges"]}
-    assert roles == {"L-observed": "evidence", "L-narrow": "narrow_inferred", "L-wide": "hypothesis"}
-    wide = next(link for link in graph["links"] if link["id"] == "L-wide")
-    assert wide["incident_role"] == "hypothesis" and wide["style"] == "inferred"
+    assert roles == {"L-observed": "evidence", "L-narrow": "hypothesis", "L-wide": "hypothesis"}
+    inferred = [link for link in graph["links"] if link["style"] == "inferred"]
+    assert {link["id"] for link in inferred} == {"L-narrow", "L-wide"}
+    assert all(link["incident_role"] == "hypothesis" for link in inferred)
 
 
 def test_duplicate_pair_with_observed_and_wide_inferred_edges_joins_once_and_keeps_both_links():
