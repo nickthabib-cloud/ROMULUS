@@ -157,15 +157,18 @@ class SnapshotPlanner:
                 cursor = window_start
                 while cursor - _HOUR in claimed:
                     cursor -= _HOUR
-                # The first record within the run: the oldest covering segment that holds any. Earlier hours of
-                # the run are complete and empty, which is the only evidence of absence.
+                # The first record within the run: the oldest hour at or after its covering segment's first hour
+                # holding one of the spec's records. Earlier hours of the run are complete and empty, which is the
+                # only evidence of absence. Placement is per hour, so one multi-hour segment and the hourly segments
+                # of the same hours place it alike.
                 first_record = next((hour for hour in _hours(cursor, window_start)
-                                     if claimed[hour]["events_total"] > 0), None)
+                                     if claimed[hour]["first_event_hour"] is not None
+                                     and claimed[hour]["first_event_hour"] <= hour), None)
                 if first_record is None:
                     effective_start = window_start
                     absent_before = _iso(window_start) if cursor < window_start else None
                 else:
-                    effective_start = max(claimed[first_record]["start"], history_start)
+                    effective_start = max(first_record, history_start)
                     absent_before = _iso(effective_start) if effective_start > cursor else None
                 effective_hours = int((window_start - effective_start) / _HOUR)
                 if first_record is None and cursor < window_start:

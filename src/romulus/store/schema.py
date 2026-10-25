@@ -408,6 +408,12 @@ baseline_segment = Table(
     Column("excluded_keys", JSON, nullable=False),
     Column("hunted", Integer, nullable=False),
     Column("events_total", Integer, nullable=False),
+    # What events_total counts. Basis 2: the records of the spec's families that its playbook scope admits, per
+    # target hour, whichever writer built the segment. Only the current basis is selected for a cover.
+    Column("events_basis", Integer, nullable=False, server_default="1"),
+    # The first hour of the span holding one of those records (None when events_total is 0): history placement is
+    # per hour even when one segment spans several.
+    Column("first_event_hour", DateTime(timezone=True)),
     # order-independent digest of the segment's count and scope-hour rows, so a rewrite of the same id with
     # other content is refused without reading the stored rows back
     Column("rows_digest", String, nullable=False),
@@ -692,6 +698,17 @@ baseline_window_count = Table(
     ),
     CheckConstraint("count >= 1", name="ck_baseline_window_count_count"),
 )
+# The segment writer merges one (hunt, spec, target)'s rows in segment-row order and pages by that order, so each
+# page is an index range rather than a re-aggregation of the whole hunt.
+Index(
+    "ix_baseline_window_count_merge",
+    baseline_window_count.c.hunt_id,
+    baseline_window_count.c.spec_id,
+    baseline_window_count.c.target,
+    baseline_window_count.c.scope,
+    baseline_window_count.c.key_digest,
+    baseline_window_count.c.bucket,
+)
 
 baseline_window_event_hour = Table(
     "baseline_window_event_hour", metadata,
@@ -748,6 +765,14 @@ Index(
     baseline_window_scope_hour.c.target,
     baseline_window_scope_hour.c.partition,
 )
+Index(
+    "ix_baseline_window_scope_hour_merge",
+    baseline_window_scope_hour.c.hunt_id,
+    baseline_window_scope_hour.c.spec_id,
+    baseline_window_scope_hour.c.target,
+    baseline_window_scope_hour.c.scope,
+    baseline_window_scope_hour.c.hour,
+)
 
 # A (hunt, spec, target) whose window counter material the segment writer has decided on and released. The marker
 # is written before the rows are deleted, so a writer that finds it never writes a segment from a partial remainder.
@@ -758,6 +783,18 @@ baseline_window_release = Table(
     Column("target", String, nullable=False),
     Column("reason", String, nullable=False),
     PrimaryKeyConstraint("hunt_id", "spec_id", "target", name="pk_baseline_window_release"),
+)
+
+# A finished hunt whose window counter material is kept for a resume that may still change its cited keys. Every row
+# is charged, by its estimated bytes, to one store-wide disk budget; the oldest are released first when it is full.
+baseline_window_retention = Table(
+    "baseline_window_retention", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id", ondelete="CASCADE"), nullable=False),
+    Column("bytes", Integer, nullable=False),
+    Column("retained_at", DateTime(timezone=True), nullable=False),
+    Column("reason", String, nullable=False),
+    PrimaryKeyConstraint("hunt_id", name="pk_baseline_window_retention"),
+    CheckConstraint("bytes >= 0", name="ck_baseline_window_retention_bytes"),
 )
 
 # Durable cited-key facts used to derive each segment's exclusion set. The hunt window is retained on every

@@ -195,7 +195,12 @@ BASELINE_DELETE_CHUNK = 5000
 CLEANUP_OWNER = "\x00cleanup"
 _BUCKET_WIDTH = {"day": timedelta(days=1), "hour": timedelta(hours=1)}
 _SEGMENT_COLUMNS = frozenset(column.name for column in t.baseline_segment.columns) - {"rows_digest"}
-_SEGMENT_OPTIONAL = frozenset({"source_hunt_id", "built_by_hunt_id", "network_digest"})
+_SEGMENT_OPTIONAL = frozenset({"source_hunt_id", "built_by_hunt_id", "network_digest", "events_basis",
+                               "first_event_hour"})
+# What a segment's events_total counts (see the schema). Covers select only segments of this basis, so segments
+# counted another way are never mixed into one history.
+BASELINE_EVENTS_BASIS = 2
+_SEGMENT_TIMES = ("start", "end", "created_at", "first_event_hour")
 # What makes two writes of one segment id the same segment: everything but its lifecycle status and the time
 # this copy was written (the rows are compared through rows_digest).
 # The two hunt ids are provenance rather than content. A twin hunt reuses an immutable segment written by the
@@ -271,6 +276,22 @@ def _baseline_segment_row(row: dict) -> dict:
         raise ValueError("baseline segment span must be hour-aligned")
     if out["start"] >= out["end"]:
         raise ValueError("baseline segment start before end is required")
+    out["events_basis"] = row.get("events_basis", BASELINE_EVENTS_BASIS)
+    if out["events_basis"] != BASELINE_EVENTS_BASIS:
+        raise ValueError(f"baseline segment events_basis must be {BASELINE_EVENTS_BASIS}")
+    events_total = out["events_total"]
+    if isinstance(events_total, bool) or not isinstance(events_total, int) or events_total < 0:
+        raise ValueError("baseline segment events_total must be a non-negative integer")
+    if "first_event_hour" not in row:
+        # A caller that states no first hour claims records from the segment's start (an hourly segment).
+        out["first_event_hour"] = out["start"] if events_total else None
+    elif row["first_event_hour"] is not None:
+        out["first_event_hour"] = _utc(row["first_event_hour"], "first_event_hour")
+    if (out["first_event_hour"] is None) != (events_total == 0):
+        raise ValueError("baseline segment first_event_hour is set exactly when events_total is positive")
+    first = out["first_event_hour"]
+    if first is not None and (not _aligned(first, _BUCKET_WIDTH["hour"]) or not out["start"] <= first < out["end"]):
+        raise ValueError("baseline segment first_event_hour must be an hour inside the span")
     if out["bucket"] not in _BUCKET_WIDTH:
         raise ValueError(f"baseline segment bucket must be day or hour, not {out['bucket']!r}")
     return out
@@ -2037,7 +2058,7 @@ class Repo:
             existing = c.execute(select(t.baseline_segment).where(
                 t.baseline_segment.c.id == segment["id"])).mappings().first()
             if existing is not None:
-                stored = _with_utc(existing, ("start", "end", "created_at"))
+                stored = _with_utc(existing, _SEGMENT_TIMES)
                 if any(stored[name] != segment[name] for name in _SEGMENT_IDENTITY):
                     raise ValueError(f"baseline segment {segment['id']} exists with different content")
             else:
@@ -2130,7 +2151,7 @@ class Repo:
             if existing is None:
                 c.execute(t.baseline_segment.insert().values(**segment, rows_digest=""))
                 return "begun"
-            stored = _with_utc(existing, ("start", "end", "created_at"))
+            stored = _with_utc(existing, _SEGMENT_TIMES)
             if any(stored[name] != segment[name] for name in _BUILD_CONTENT):
                 raise ValueError(f"baseline segment {segment['id']} exists with different content")
             if stored["status"] != "building":
@@ -2175,7 +2196,7 @@ class Repo:
             )).mappings().first()
         if stored is None or stored["status"] != "building":
             raise ValueError(f"baseline segment {segment_id} is not building")
-        segment = _with_utc(stored, ("start", "end", "created_at"))
+        segment = _with_utc(stored, _SEGMENT_TIMES)
         longest = 0.0
         for table, rows, check in (
                 (t.baseline_count, counts, _baseline_count_row),
@@ -2253,7 +2274,7 @@ class Repo:
             t.baseline_segment.c.start, t.baseline_segment.c.end, t.baseline_segment.c.id,
         )
         with self.engine.connect() as c:
-            return [_with_utc(item, ("start", "end", "created_at")) for item in c.execute(query).mappings()]
+            return [_with_utc(item, _SEGMENT_TIMES) for item in c.execute(query).mappings()]
 
     def baseline_segments_for_cover(self, *, site: str, target: str, spec_id: str,
                                     spec_version: str, key_version: str, start: datetime,
@@ -2264,12 +2285,13 @@ class Repo:
         query = (select(t.baseline_segment).where(
             s.site == site, s.target == target, s.spec_id == spec_id,
             s.spec_version == spec_version, s.key_version == key_version,
-            s.status == "active", s.start < end, s.end > start, s.end <= end,
+            s.status == "active", s.events_basis == BASELINE_EVENTS_BASIS,
+            s.start < end, s.end > start, s.end <= end,
         ).order_by(s.start, s.end, s.id))
         if network_digest is not None:
             query = query.where(s.network_digest == network_digest)
         with self.engine.connect() as c:
-            return [_with_utc(item, ("start", "end", "created_at")) for item in c.execute(query).mappings()]
+            return [_with_utc(item, _SEGMENT_TIMES) for item in c.execute(query).mappings()]
 
     def baseline_segment_covers(self, *, site: str, target: str, spec_id: str, spec_version: str,
                                 key_version: str, start: datetime, end: datetime,
@@ -2280,7 +2302,7 @@ class Repo:
         query = select(s.id).where(
             s.site == site, s.target == target, s.spec_id == spec_id,
             s.spec_version == spec_version, s.key_version == key_version,
-            s.status == "active", s.start <= start, s.end >= end,
+            s.status == "active", s.events_basis == BASELINE_EVENTS_BASIS, s.start <= start, s.end >= end,
         ).limit(1)
         if network_digest is not None:
             query = query.where(s.network_digest == network_digest)
@@ -2322,6 +2344,53 @@ class Repo:
         with self.engine.connect() as c:
             return int(c.execute(baseline_prevalence_query(
                 key_id, scope_kind, hunt_id, spec_id, span)).scalar_one())
+
+    def baseline_key_prevalences(self, key_ids: list[str], scope_kind: str, hunt_id: str, spec_id: str,
+                                 span: tuple[datetime, datetime] | None = None) -> dict[str, int]:
+        """`baseline_key_prevalence` for a bounded batch of keys in one query; absent keys are 0."""
+        if not key_ids:
+            return {}
+        c = t.baseline_count.c
+        query = (select(c.key_id, func.count(c.scope.distinct()))
+                 .join(t.baseline_snapshot_segment, _snapshot_member(c.segment_id, hunt_id, spec_id))
+                 .where(c.key_id.in_(sorted(set(key_ids))), c.scope_kind == scope_kind, *_count_in_span(c, span))
+                 .group_by(c.key_id))
+        with self.engine.connect() as connection:
+            found = {str(key_id): int(count) for key_id, count in connection.execute(query)}
+        return {key_id: found.get(key_id, 0) for key_id in key_ids}
+
+    def baseline_key_history_counts(self, key_ids: list[str], scope_kind: str, scope: str, hunt_id: str,
+                                    spec_id: str, span: tuple[datetime, datetime] | None = None) -> dict[str, int]:
+        """The summed history count of each key of a bounded batch in one scope, in one query; absent keys are 0.
+
+        Equal, key by key, to summing `baseline_key_history` rows."""
+        if not key_ids:
+            return {}
+        c = t.baseline_count.c
+        query = (select(c.key_id, func.sum(c.count))
+                 .join(t.baseline_snapshot_segment, _snapshot_member(c.segment_id, hunt_id, spec_id))
+                 .where(c.key_id.in_(sorted(set(key_ids))), c.scope_kind == scope_kind, c.scope == scope,
+                        *_count_in_span(c, span))
+                 .group_by(c.key_id))
+        with self.engine.connect() as connection:
+            found = {str(key_id): int(total) for key_id, total in connection.execute(query)}
+        return {key_id: found.get(key_id, 0) for key_id in key_ids}
+
+    def update_baseline_scope_first_seen(self, hunt_id: str, spec_id: str, spec_version: str, scope: str, *,
+                                         candidate_id: str | None = None,
+                                         unresolved_reason: str | None = None) -> int:
+        """Tie one scope's first-seen observations to their published candidate, or make them unresolved with a
+        reason, in one statement however many keys the scope holds. Returns the rows changed."""
+        if (candidate_id is None) == (unresolved_reason is None):
+            raise ValueError("give exactly one of candidate_id and unresolved_reason")
+        table = t.baseline_observation.c
+        values = ({"candidate_id": candidate_id} if candidate_id is not None
+                  else {"verdict": "unresolved", "reason": unresolved_reason})
+        with write_txn(self.engine) as connection:
+            return connection.execute(t.baseline_observation.update().where(
+                table.hunt_id == hunt_id, table.spec_id == spec_id, table.spec_version == spec_version,
+                table.scope == scope, table.verdict == "first_seen",
+            ).values(**values)).rowcount
 
     def baseline_peer_scopes(self, scope_kind: str, hunt_id: str, spec_id: str,
                              span: tuple[datetime, datetime] | None = None) -> int:
@@ -3462,11 +3531,11 @@ class Repo:
                          table.first_ts >= _utc(span[0], "merge start"),
                          table.last_ts < _utc(span[1], "merge end")),
                 ),)),
-            ).group_by(
-                table.scope_kind, table.scope, table.key_id, table.key_digest, table.key, table.bucket,
-            ))
-            if after is not None:
-                query = query.having(tuple_(*order) > tuple_(*after))
+                # (scope, key_digest, bucket) identifies a group, so filtering rows before grouping keeps whole
+                # groups, and grouping in index order makes each page one range of ix_baseline_window_count_merge
+                # with no sort. scope_kind, key_id and key follow from the scoped key digest, so they are read bare.
+                *(() if after is None else (tuple_(*order) > tuple_(*after),)),
+            ).group_by(*order))
             query = query.order_by(*order).limit(page_size)
             with self.engine.connect() as connection:
                 page = [_with_utc(row, ("bucket", "first_ts", "last_ts"))
@@ -3494,9 +3563,10 @@ class Repo:
                 *(() if spec_version is None else (table.spec_version == spec_version,)),
                 *(() if span is None else (table.hour >= _utc(span[0], "merge start"),
                                            table.hour < _utc(span[1], "merge end"))),
-            ).group_by(table.scope_kind, table.scope, table.hour))
-            if after is not None:
-                query = query.having(tuple_(*order) > tuple_(*after))
+                # (scope, hour) is constant within a group: whole groups survive the filter, and each page is one
+                # range of ix_baseline_window_scope_hour_merge.
+                *(() if after is None else (tuple_(*order) > tuple_(*after),)),
+            ).group_by(table.scope, table.hour))
             query = query.order_by(*order).limit(page_size)
             with self.engine.connect() as connection:
                 page = [_with_utc(row, ("hour",)) for row in connection.execute(query).mappings()]
@@ -3620,6 +3690,96 @@ class Repo:
                 if len(keys) < BASELINE_DELETE_CHUNK:
                     break
         return deleted
+
+    _MATERIAL_TABLES = ("baseline_window_count", "baseline_window_scope_hour", "baseline_window_event_hour")
+
+    def baseline_window_released(self, hunt_id: str, spec_id: str) -> str | None:
+        """Why some target's window counter material of one spec was released, or None while all of it is kept."""
+        table = t.baseline_window_release.c
+        with self.engine.connect() as connection:
+            return connection.execute(select(table.reason).where(
+                table.hunt_id == hunt_id, table.spec_id == spec_id,
+            ).order_by(table.target).limit(1)).scalar_one_or_none()
+
+    def baseline_window_material_pairs(self, hunt_id: str) -> list[tuple[str, str]]:
+        """The (spec, target) pairs one hunt still holds window counter material for."""
+        pairs: set[tuple[str, str]] = set()
+        with self.engine.connect() as connection:
+            for name in self._MATERIAL_TABLES:
+                table = t.metadata.tables[name].c
+                pairs.update(tuple(row) for row in connection.execute(
+                    select(table.spec_id, table.target).where(table.hunt_id == hunt_id).distinct()))
+        return sorted(pairs)
+
+    def baseline_window_material_hunts(self) -> list[str]:
+        """Every hunt holding any window counter material: one primary-key seek per hunt and table, never a scan of
+        the material itself."""
+        hunt = t.hunt.c
+        held = or_(*(
+            select(literal(1)).where(t.metadata.tables[name].c.hunt_id == hunt.id).exists()
+            for name in self._MATERIAL_TABLES
+        ))
+        with self.engine.connect() as connection:
+            return list(connection.execute(select(hunt.id).where(held).order_by(hunt.id)).scalars())
+
+    def baseline_window_material_bytes(self, hunt_id: str) -> int:
+        """An estimate of the disk one hunt's window counter material occupies.
+
+        The stored text of every variable-width column plus a fixed per-row allowance for the integer and time
+        columns and the row header, doubled for the primary key and secondary indexes that repeat most of it.
+        """
+        count, hour, event = (t.baseline_window_count.c, t.baseline_window_scope_hour.c,
+                              t.baseline_window_event_hour.c)
+
+        def width(*columns):
+            return sum((func.coalesce(func.length(column), 0) for column in columns), literal(0))
+
+        queries = (
+            select(func.coalesce(func.sum(width(
+                count.hunt_id, count.spec_id, count.spec_version, count.target, count.partition, count.scope_kind,
+                count.scope, count.key_id, count.key_digest, count.key) + 64), 0)).where(count.hunt_id == hunt_id),
+            select(func.coalesce(func.sum(width(
+                hour.hunt_id, hour.spec_id, hour.spec_version, hour.target, hour.partition, hour.scope_kind,
+                hour.scope, hour.first_event_id, hour.first_event_refs) + 48), 0)).where(hour.hunt_id == hunt_id),
+            select(func.coalesce(func.sum(width(
+                event.hunt_id, event.spec_id, event.spec_version, event.target, event.partition) + 40), 0))
+            .where(event.hunt_id == hunt_id),
+        )
+        with self.engine.connect() as connection:
+            payload = sum(int(connection.execute(query).scalar_one()) for query in queries)
+        return 2 * payload
+
+    def baseline_window_retention(self, hunt_id: str) -> dict | None:
+        table = t.baseline_window_retention.c
+        with self.engine.connect() as connection:
+            row = connection.execute(select(t.baseline_window_retention).where(
+                table.hunt_id == hunt_id)).mappings().first()
+        return _with_utc(row, ("retained_at",)) if row else None
+
+    def baseline_window_retentions(self) -> list[dict]:
+        """Every retained hunt's charge, oldest first: the order the disk budget releases them in."""
+        table = t.baseline_window_retention.c
+        with self.engine.connect() as connection:
+            rows = connection.execute(select(t.baseline_window_retention).order_by(
+                table.retained_at, table.hunt_id)).mappings()
+            return [_with_utc(row, ("retained_at",)) for row in rows]
+
+    def retain_baseline_window_material(self, hunt_id: str, *, bytes_: int, retained_at: datetime,
+                                        reason: str) -> None:
+        """Charge one hunt's kept material to the disk budget; a later charge of the same hunt replaces it."""
+        stmt = insert(t.baseline_window_retention).values(
+            hunt_id=hunt_id, bytes=int(bytes_), retained_at=_utc(retained_at, "retention time"), reason=reason,
+        )
+        stmt = stmt.on_conflict_do_update(index_elements=["hunt_id"], set_={
+            "bytes": stmt.excluded.bytes, "reason": stmt.excluded.reason,
+        })
+        with write_txn(self.engine) as connection:
+            connection.execute(stmt)
+
+    def drop_baseline_window_retention(self, hunt_id: str) -> None:
+        with write_txn(self.engine) as connection:
+            connection.execute(t.baseline_window_retention.delete().where(
+                t.baseline_window_retention.c.hunt_id == hunt_id))
 
     def replace_baseline_hunt_exclusions(self, hunt_id: str, *, site: str,
                                          start: datetime, end: datetime,

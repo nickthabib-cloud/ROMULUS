@@ -624,6 +624,9 @@ def test_many_scopes_over_two_weeks_are_judged_one_scope_at_a_time_with_bounded_
         def baseline_window_scope_series(self, *_args, **_kwargs):
             return iter(({"hour": window.start, "events": 1},))
 
+        def baseline_window_released(self, _hunt_id, _spec_id):
+            return None
+
         def upsert_baseline_observations(self, rows):
             batch = list(rows)
             self.written += len(batch)

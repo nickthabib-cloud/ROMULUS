@@ -280,6 +280,44 @@ def test_0015_backfills_observations_and_round_trips_base_data(tmp_path):
         assert "event_citation" in tables and "event_observation" in tables
 
 
+def test_0024_marks_existing_segments_as_the_old_events_basis_and_never_selects_them(tmp_path):
+    """Segments written before 0024 counted events_total two ways; they keep basis 1 and are no cover's members."""
+    engine = make_engine(tmp_path / "events-basis.db")
+    with engine.begin() as connection:
+        cfg = _alembic_config(connection)
+        command.upgrade(cfg, "0023")
+        connection.exec_driver_sql(
+            "INSERT INTO baseline_segment (id, site, target, spec_id, spec_version, key_version, normalizer, start, "
+            "\"end\", bucket, origin, exclusion_digest, excluded_keys, hunted, events_total, rows_digest, status, "
+            "created_at) VALUES ('legacy', 'site', 'host', 'bl.exec_path', '1', '1', 'n', '2026-01-01 00:00:00.000000',"
+            " '2026-01-01 01:00:00.000000', 'day', 'lookback', 'none', '[]', 0, 9, 'd', 'active', "
+            "'2026-01-01 00:00:00.000000')")
+        command.upgrade(cfg, "0024")
+        assert connection.exec_driver_sql(
+            "SELECT events_basis, first_event_hour FROM baseline_segment").all() == [(1, None)]
+    repo = Repo(engine)
+    begin = datetime(2026, 1, 1, tzinfo=UTC)
+    common = {"site": "site", "target": "host", "spec_id": "bl.exec_path", "spec_version": "1", "key_version": "1"}
+    assert repo.baseline_segments_for_cover(**common, start=begin, end=begin + timedelta(hours=1)) == []
+    assert repo.baseline_segment_covers(**common, start=begin, end=begin + timedelta(hours=1)) is False
+    with engine.begin() as connection:
+        command.downgrade(_alembic_config(connection), "0023")
+        assert connection.exec_driver_sql("SELECT id, events_total FROM baseline_segment").all() == [("legacy", 9)]
+
+
+def test_a_segment_states_its_first_event_hour_only_with_events_inside_its_span():
+    repo = _repo()
+    with pytest.raises(ValueError, match="first_event_hour is set exactly"):
+        repo.save_baseline_segment(_segment("no-events", events_total=0, first_event_hour=T0), [], [])
+    with pytest.raises(ValueError, match="first_event_hour is set exactly"):
+        repo.save_baseline_segment(_segment("events", events_total=3, first_event_hour=None), [], [])
+    with pytest.raises(ValueError, match="an hour inside the span"):
+        repo.save_baseline_segment(_segment("outside", events_total=3,
+                                            first_event_hour=T0 - timedelta(hours=1)), [], [])
+    with pytest.raises(ValueError, match="events_basis must be"):
+        repo.save_baseline_segment(_segment("old-basis", events_basis=1), [], [])
+
+
 def test_0016_drops_only_the_owners_implied_observations(tmp_path):
     engine = make_engine(tmp_path / "event-observation-owner.db")
     with engine.begin() as connection:
@@ -312,11 +350,11 @@ def test_0016_drops_only_the_owners_implied_observations(tmp_path):
         assert rows() == sorted(observed, key=lambda row: (row[1], row[0]))
 
 
-def test_0023_is_the_single_head_and_0017_leaves_stored_candidates_about_every_record_they_cite(tmp_path):
+def test_0024_is_the_single_head_and_0017_leaves_stored_candidates_about_every_record_they_cite(tmp_path):
     engine = make_engine(tmp_path / "candidate-context.db")
     with engine.begin() as connection:
         cfg = _alembic_config(connection)
-        assert ScriptDirectory.from_config(cfg).get_heads() == ["0023"]
+        assert ScriptDirectory.from_config(cfg).get_heads() == ["0024"]
         command.upgrade(cfg, "0016")
         connection.exec_driver_sql(
             "INSERT INTO hunt (id, created_at, created_by, manifest, manifest_digest, execution_state) "
@@ -537,7 +575,7 @@ BASELINE_TABLES = ("baseline_segment", "baseline_count", "baseline_scope_hour", 
                    "baseline_window_observation", "baseline_window_pending", "baseline_window_count",
                    "baseline_window_scope_hour", "baseline_window_event_hour", "baseline_hunt_exclusion",
                    "baseline_history_cell",
-                   "baseline_history_row", "baseline_window_release")
+                   "baseline_history_row", "baseline_window_release", "baseline_window_retention")
 
 
 def _shape(engine) -> dict:

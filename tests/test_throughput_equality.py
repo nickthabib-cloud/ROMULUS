@@ -147,14 +147,29 @@ from tests import throughput_fixture as tf
 # and mktemp's mixed-case or `tmp.` random suffixes are masked without changing path-shaped or word-like names.
 # The fixture's command shapes are unchanged, so only versioned command-shape identities, their baseline rows and
 # the snapshot-derived baseline cells/task/audit/manifest change; non-baseline semantic projections stay identical.
+# The hunt-derived writer now decides per (target, spec, hour) from that hour's own window cells, so this hunt, partial
+# for reasons outside the baseline, writes the whole hours whose cells are complete:
+# - baseline_segments, baseline_counts, baseline_scope_hours: 14 hunt-derived segments of the 13:00-15:00 span for the
+#   five specs and targets that allow it (bl.ext_dest is refused: the fixture's internal networks are the default;
+#   the host target's exec-pair cut is refused for its unresolvable cited child); each carries events_basis 2 and
+#   its first_event_hour. Segments of targets that deliver none of a spec's records are empty.
+# - audit: the hunt.baseline_summary segment_writer per-spec reasons name the hours not written ("1 hour(s) not
+#   written: an incomplete window cell") instead of "hunt is partial", with counts written, and a material block (kept
+#   for a resume, its estimated bytes, the disk budget). The writer's measured write-lock time is wall clock, so the
+#   fixture now drops max_write_seconds like its other wall-clock fields.
+# - baseline_observations: every scope is unresolved by its spec's own history coverage, so the judge no longer
+#   probes history and prevalence for them: history_count, n_hours, peer_scopes and peer_scopes_with_key go from 0
+#   (probed over no history) to null (not assessed). Verdicts and reasons are unchanged.
+# The window counter material stays (the partial hunt keeps it for one resume), so the window tables are unchanged.
+# Candidates, rule cells, links, tasks, events and the manifest are unchanged.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
-    "audit": "d48d2621f6db2d9fc504f613ece9fb036cc20bc53b22cc0a5c128f9076288973",
-    "baseline_counts": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "audit": "651046e4d3d1cb7418e7bc6c7b6e5b88b20161de583ddab08ff47ce0edc9e88d",
+    "baseline_counts": "1a021de3254f91225689f1bdc8ce3e0cfd416c90a4148bcd4f1c93b6db9cb16d",
     "baseline_hunt_exclusions": "fe9edaf9efe3065352ae1bedc95ac7e78ddbe2d6e34f835203cfe56cb368ec56",
-    "baseline_observations": "629be8768a4e8e673f7145d30e61da1e157d0898f079c6d9ee41eb744cce861a",
-    "baseline_scope_hours": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-    "baseline_segments": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "baseline_observations": "cadd8d099153ba2ab6aafd8e7416d4024ce5b66ed164a03b2ec46f079ed5de88",
+    "baseline_scope_hours": "fe1ef875f82a6cad7d9c7884b1936614584a9f9e0e4c008e4790ee46edf6361d",
+    "baseline_segments": "295b0d02d765705d96e24685e7c181e6a8acae27dac2ff17bd0d006d7061c24e",
     "baseline_snapshot": "63b4c8094cb5450b1e707fd7be786e90324528e738b882358cae15cb8d53f776",
     "baseline_window_counts": "163b75766bc7cc487118b4e8bc24fe338d9e364898f9200887b89ba11b464acc",
     "baseline_window_event_hours": "bb58c65144b135443e75a690b7b2f8137ebac6b827f8e8bd8cc7606a01c53e52",

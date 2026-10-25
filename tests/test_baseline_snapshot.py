@@ -282,8 +282,8 @@ def test_planner_filters_a_store_of_ten_thousand_segments_in_bounded_time():
             "normalizer": "fixture@1", "start": start, "end": start + timedelta(hours=1),
             "bucket": "day", "origin": "lookback", "source_hunt_id": None,
             "built_by_hunt_id": None, "exclusion_digest": "none", "excluded_keys": [],
-            "hunted": 0, "events_total": 1, "rows_digest": "0:0:0", "status": "active",
-            "created_at": START,
+            "hunted": 0, "events_total": 1, "events_basis": 2, "first_event_hour": start,
+            "rows_digest": "0:0:0", "status": "active", "created_at": START,
         })
     with repo.engine.begin() as connection:
         connection.execute(insert(t.baseline_segment), rows)
