@@ -76,6 +76,7 @@ class KeyCounter:
         self._open_bucket: datetime | None = None
         self._partial_reasons: set[str] = set()
         self._partial_hours: set[datetime] = set()
+        self._partial_host_hours: dict[str, set[datetime]] = defaultdict(set)
         self._whole_cell_partial = False
         self._pendings: list[Pending] = []
         self.max_token_entries = 0
@@ -93,6 +94,10 @@ class KeyCounter:
         return tuple(sorted(self._partial_hours))
 
     @property
+    def partial_host_hours(self) -> tuple[tuple[str, tuple[datetime, ...]], ...]:
+        return tuple((host, tuple(sorted(hours))) for host, hours in sorted(self._partial_host_hours.items()))
+
+    @property
     def whole_cell_partial(self) -> bool:
         return self._whole_cell_partial
 
@@ -105,13 +110,16 @@ class KeyCounter:
         pending, self._pendings = tuple(self._pendings), []
         return pending
 
-    def mark_partial(self, reason: str, ts: datetime | None = None) -> None:
+    def mark_partial(self, reason: str, ts: datetime | None = None, host: str | None = None) -> None:
         """Make incompleteness explicit; partial counters never expose rows."""
         self._partial_reasons.add(reason)
         if ts is None:
             self._whole_cell_partial = True
         else:
-            self._partial_hours.add(_bucket(ts, "hour"))
+            hour = _bucket(ts, "hour")
+            self._partial_hours.add(hour)
+            if host:
+                self._partial_host_hours[host].add(hour)
 
     @property
     def token_entries(self) -> int:
@@ -170,7 +178,7 @@ class KeyCounter:
             self._event_hours[event_hour] += 1
         result = self.spec.keys(event, context)
         if isinstance(result, Missing):
-            self.mark_partial(f"{event.id}: {result.reason}", event.ts)
+            self.mark_partial(f"{event.id}: {result.reason}", event.ts, event.host)
         elif isinstance(result, Pending):
             result = replace(result, raw_refs=tuple((ref.target, ref.native_id) for ref in event.raw))
             if len(self._pendings) >= self.pending_cap:

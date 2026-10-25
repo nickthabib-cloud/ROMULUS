@@ -1075,6 +1075,10 @@ class Sweep:
         if playbook.spec.measure == "rate" and result.partial:
             detail.update(
                 partial_hours=[hour.isoformat() for hour in result.partial_hours],
+                partial_host_hours={
+                    host: [hour.isoformat() for hour in hours]
+                    for host, hours in result.partial_host_hours
+                },
                 whole_cell_partial=result.whole_cell_partial,
             )
         self.repo.save_baseline_window_cell(self.hunt_id, {

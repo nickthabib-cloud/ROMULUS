@@ -362,11 +362,25 @@ class SnapshotView:
                          if not (cell["target"] == "*" and cell["partition"] == "window")
                          and not cell["target"].startswith("baseline:")
                          and cell["state"] != "split" and cell["state"] not in _COMPLETE_WINDOW_STATES]
-        partial_hours = {
-            datetime.fromisoformat(value)
-            for cell in partial_cells
-            for value in (cell.get("detail") or {}).get("partial_hours") or []
-        }
+        partial_hours: set[datetime] = set()
+        for cell in partial_cells:
+            detail = cell.get("detail") or {}
+            host_hours = detail.get("partial_host_hours") or {}
+            localized = {
+                datetime.fromisoformat(value)
+                for values in host_hours.values()
+                for value in values
+            }
+            partial_hours.update(
+                datetime.fromisoformat(value)
+                for value in detail.get("partial_hours") or []
+                if datetime.fromisoformat(value) not in localized
+            )
+            if isinstance(host, str) and host:
+                partial_hours.update(
+                    datetime.fromisoformat(value)
+                    for value in host_hours.get(host) or []
+                )
         whole_cell_partial = any(
             (cell.get("detail") or {}).get("whole_cell_partial")
             or not (cell.get("detail") or {}).get("partial_hours")

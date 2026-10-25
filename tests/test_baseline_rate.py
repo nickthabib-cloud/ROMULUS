@@ -80,6 +80,7 @@ def test_a_missing_rate_identity_marks_only_its_own_hour_partial():
 
     assert cell.partial is True
     assert cell.partial_hours == (T0 + timedelta(hours=1),)
+    assert cell.partial_host_hours == (("other-host", (T0 + timedelta(hours=1),)),)
     assert cell.whole_cell_partial is False
 
 
@@ -239,7 +240,8 @@ _ALL_LIVE = object()
 def _rate_view(*, history_hours=48, history_values=None, window_counts=(5,),
                window_start=T0 + timedelta(days=10), edge_minutes=0,
                window_state="evaluated_complete", history_status=None, hunt_id="hunt",
-               live_history_hours=_ALL_LIVE, partial_window_hours=(), missing_witness_hours=()):
+               live_history_hours=_ALL_LIVE, partial_window_hours=(), partial_host_hours=None,
+               missing_witness_hours=()):
     history_values = {0: 1} if history_values is None else history_values
     start = window_start + timedelta(minutes=edge_minutes)
     window = Window(start=start, end=start + timedelta(hours=len(window_counts)))
@@ -323,6 +325,14 @@ def _rate_view(*, history_hours=48, history_values=None, window_counts=(5,),
                  + timedelta(hours=index)).isoformat()
                 for index in partial_window_hours
             ],
+            "partial_host_hours": {
+                host: [
+                    (window.start.replace(minute=0, second=0, microsecond=0)
+                     + timedelta(hours=index)).isoformat()
+                    for index in indexes
+                ]
+                for host, indexes in (partial_host_hours or {}).items()
+            },
         },
     }, (_pending_observation(hunt_id, row) for row in cell.observations),
         counts=cell.counts, scope_hours=cell.scope_hours)
@@ -425,8 +435,9 @@ def test_one_grouped_lead_lists_every_and_only_window_hour_at_or_above_threshold
 
 def test_a_partial_hour_on_another_host_does_not_silence_a_complete_anomalous_hour():
     repo, playbook, view, _scope = _rate_view(
-        history_values={index: 1 for index in range(48)}, window_counts=(5, 1),
-        window_state="evaluated_partial", partial_window_hours=(1,),
+        history_values={index: 1 for index in range(48)}, window_counts=(5,),
+        window_state="evaluated_partial", partial_window_hours=(0,),
+        partial_host_hours={"other-host": (0,)},
     )
 
     matches = list(playbook.judge(view))
