@@ -2716,6 +2716,7 @@ class Repo:
                               AND prior.host = incoming.host
                               AND prior.boot = incoming.boot
                               AND prior.pid = incoming.pid
+                              AND prior.observed_ts <= incoming.observed_ts
                               AND (prior.observed_ts,
                                    prior.serial IS NULL,
                                    COALESCE(prior.serial, 0),
@@ -2741,6 +2742,7 @@ class Repo:
                               AND following.host = incoming.host
                               AND following.boot = incoming.boot
                               AND following.pid = incoming.pid
+                              AND following.observed_ts >= incoming.observed_ts
                               AND (following.observed_ts,
                                    following.serial IS NULL,
                                    COALESCE(following.serial, 0),
@@ -2768,6 +2770,7 @@ class Repo:
                                      AND prior.host = observation.host
                                      AND prior.boot = observation.boot
                                      AND prior.pid = observation.pid
+                                     AND prior.observed_ts <= observation.observed_ts
                                      AND (prior.observed_ts,
                                           prior.serial IS NULL,
                                           COALESCE(prior.serial, 0),
@@ -2791,6 +2794,7 @@ class Repo:
                                      AND following.host = observation.host
                                      AND following.boot = observation.boot
                                      AND following.pid = observation.pid
+                                     AND following.observed_ts >= observation.observed_ts
                                      AND (following.observed_ts,
                                           following.serial IS NULL,
                                           COALESCE(following.serial, 0),
