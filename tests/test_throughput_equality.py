@@ -143,18 +143,22 @@ from tests import throughput_fixture as tf
 # identity change updates command-shape keys and version fields in window counts, witnesses, observations and
 # exclusions; the frozen plan/digest then flows into baseline rule cells, the baseline task/audit and the manifest.
 # Exact non-baseline candidate and rule-cell field projections remain equal to their S7 references below.
+# The second merge-gate correction moves bl.cmd_shape to version/key version 4. Evidenced Base64 may contain `/`,
+# and mktemp's mixed-case or `tmp.` random suffixes are masked without changing path-shaped or word-like names.
+# The fixture's command shapes are unchanged, so only versioned command-shape identities, their baseline rows and
+# the snapshot-derived baseline cells/task/audit/manifest change; non-baseline semantic projections stay identical.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
-    "audit": "cea615e0f55e64be997172ffa62f4cded65f3546b6519ea8f58046f421a2dd2e",
+    "audit": "d48d2621f6db2d9fc504f613ece9fb036cc20bc53b22cc0a5c128f9076288973",
     "baseline_counts": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-    "baseline_hunt_exclusions": "c5feb1be46e50a399e66a1f01e448015502013908c697fb72ff5e949cf9ff287",
-    "baseline_observations": "628d6918fbe897cc46814d641570c87afc4fccbcbbed4e82f0e33d5b66c7df5a",
+    "baseline_hunt_exclusions": "fe9edaf9efe3065352ae1bedc95ac7e78ddbe2d6e34f835203cfe56cb368ec56",
+    "baseline_observations": "629be8768a4e8e673f7145d30e61da1e157d0898f079c6d9ee41eb744cce861a",
     "baseline_scope_hours": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     "baseline_segments": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-    "baseline_snapshot": "4f0d2a31633054466c31e2dcd8ebc6b88c327467ec51cecc95f93a4368a881a3",
-    "baseline_window_counts": "3adb4066d800a8f0926e079fdca757fc49b202288b47ddcf34b2ba6565659ba2",
-    "baseline_window_event_hours": "ea291ba8dc44c2993f3acc99874eb9e8b8ebaea4773223511176db313e56f883",
-    "baseline_window_scope_hours": "a97fd23de1b705191a974ea0deda2a791aa6146c19ab6a1a2b18ee5fe7953a44",
+    "baseline_snapshot": "63b4c8094cb5450b1e707fd7be786e90324528e738b882358cae15cb8d53f776",
+    "baseline_window_counts": "163b75766bc7cc487118b4e8bc24fe338d9e364898f9200887b89ba11b464acc",
+    "baseline_window_event_hours": "bb58c65144b135443e75a690b7b2f8137ebac6b827f8e8bd8cc7606a01c53e52",
+    "baseline_window_scope_hours": "49a7182642abe3b848eb33b97e628395e57d806d9feeeaa8b9b198f0c07489d8",
     "candidates": "b5abecf132a0f5f4be6a541acb6a584f7b206821294991c5ae36ba89d2eb672b",
     "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
     "event_citations": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
@@ -162,11 +166,11 @@ GOLDEN_STACK = {
     "events": "d4eede2cca8fd1bac673b1abe0aa2327cf7a5a3f90f72683680d2af986679e39",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "e5bd8ec83459a57a14627ad2222f752e4c29e0415beddd54eaa11afd08e1b62f",
-    "manifest": "70a532de61db9f8d62bac44163ee4ecd76fba7e6cbe227b9c347806b9d4d1381",
+    "manifest": "04a003a9c55a069ee63954c0f7540fa4cc0bf91ca0e5570f120da48cffe91e61",
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
-    "rule_cells": "97e86d5713df546770fabd3e81ec5d1db13d474534f1ee993f4cae2cfee70bcb",
+    "rule_cells": "04cb50a84ef9c5f9edfc3e5983e9a9eea13e69a1ce19c462fb1af4f48face93e",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
-    "tasks": "9ba54d4e4d77629cd5db7d9ceaa795a2d8a74a816ff669bf9aad05f67ae60ad6",
+    "tasks": "f0c05a2a05135e822ab077a843472e4cb4d31b93b5c27050685bf6b9675e4cdc",
 }
 # Captured directly from the S7 fixture through _non_baseline_semantic_digests. Typed-event-derived hashes and
 # interchangeable predicate origins are normalized, while every decision, claim, lane, raw citation and gate is

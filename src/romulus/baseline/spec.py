@@ -23,6 +23,7 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from itertools import pairwise
 from typing import Any, Literal, Protocol, runtime_checkable
 
 import idna
@@ -431,6 +432,7 @@ _TEMP_BASENAME = re.compile(
     r"(?i)^(?:tmp|temp)(?:[-_.][a-z][a-z0-9-]*)?[-_.]([a-z0-9]{6,})$",
 )
 _BASE64 = re.compile(r"[A-Za-z0-9+/]+={0,2}")
+_PATH_IDENTIFIER = re.compile(r"[a-z_][a-z0-9._-]*")
 
 
 def _replace_ipv4(match: re.Match[str]) -> str:
@@ -448,7 +450,12 @@ def _replace_bare_hex(match: re.Match[str]) -> str:
 
 def _base64_bucket(value: str) -> str | None:
     """A bounded description of a complete, evidenced Base64 token that is not path-shaped."""
-    if "/" in value or len(value) < 16 or not _BASE64.fullmatch(value) or _HEX_BARE.fullmatch(value):
+    segments = value.split("/")
+    path_shaped = value.startswith(("/", "./", "../")) or any(
+        _PATH_IDENTIFIER.fullmatch(left) and _PATH_IDENTIFIER.fullmatch(right)
+        for left, right in pairwise(segments)
+    )
+    if path_shaped or len(value) < 16 or not _BASE64.fullmatch(value) or _HEX_BARE.fullmatch(value):
         return None
     payload = value.rstrip("=")
     padding = len(value) - len(payload)
@@ -472,9 +479,16 @@ def _mask_temp_name(value: str) -> str | None:
     if match is None:
         return None
     suffix = match.group(1)
-    looks_random = set(suffix.casefold()) == {"x"} or (
-        any(character.isalpha() for character in suffix)
-        and sum(character.isdigit() for character in suffix) >= 2
+    digits = sum(character.isdigit() for character in suffix)
+    letters = any(character.isalpha() for character in suffix)
+    mixed_case = any(character.islower() for character in suffix) and any(
+        character.isupper() for character in suffix
+    )
+    looks_random = (
+        set(suffix.casefold()) == {"x"}
+        or mixed_case
+        or (letters and digits and (len(suffix) == 6 or digits >= 2))
+        or (basename.startswith("tmp.") and suffix.islower() and suffix.isalpha())
     )
     if not looks_random:
         return None
@@ -735,7 +749,7 @@ BASELINE_SPECS = (
         _extract=_exec_pair,
     ),
     BaselineSpec(
-        id="bl.cmd_shape", version="3", key_version="3", families=("process_exec",),
+        id="bl.cmd_shape", version="4", key_version="4", families=("process_exec",),
         datasets=("linux.audit",), scope="host", measure="prevalence", bucket="day",
         required_fields={"process_exec": ("process.executable", "process.argv")},
         optional_fields={"process_exec": ("process.argv_complete",)},

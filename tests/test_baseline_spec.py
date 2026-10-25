@@ -74,7 +74,7 @@ def test_registry_has_the_six_accepted_specs_and_metadata():
     # The fourth external-destination key version also distinguishes v1 answer-name recovery from v2/v3 records.
     assert {spec.id: (spec.version, spec.key_version) for spec in BASELINE_SPECS} == {
         "bl.ssh_tuple": ("1", "1"), "bl.exec_path": ("1", "1"), "bl.exec_pair": ("2", "2"),
-        "bl.cmd_shape": ("3", "3"), "bl.ext_dest": ("4", "4"), "bl.svc_exec_rate": ("1", "2"),
+        "bl.cmd_shape": ("4", "4"), "bl.ext_dest": ("4", "4"), "bl.svc_exec_rate": ("1", "2"),
     }
 
 
@@ -372,6 +372,9 @@ def test_command_shape_keeps_security_relevant_chmod_modes_distinct():
         ("tmp.XXXXXXXXXX", "<tmp>"),
         ("/tmp/tmp.aB19zQ", "/tmp/<tmp>"),
         ("temp-session_A1b2C3d4", "<tmp>"),
+        ("/tmp/tmp.AbCdEfGhIj", "/tmp/<tmp>"),
+        ("/tmp/tmp.abcdefghij", "/tmp/<tmp>"),
+        ("tmp.Xa81kQ", "<tmp>"),
     ],
 )
 def test_command_shape_masks_only_the_mktemp_basename_and_preserves_its_directory(name, masked):
@@ -388,6 +391,9 @@ def test_command_shape_masks_only_the_mktemp_basename_and_preserves_its_director
         "/etc/cron.d/tmp_backdoor",
         "/etc/cron.d/tmp_persist1",
         "/etc/sudoers.d/temp-escalate",
+        "/var/www/html/temp-uploads",
+        "usr/local/bin/sshd",
+        "../../etc/cron.d/x",
     ],
 )
 def test_command_shape_never_masks_absolute_or_segmented_security_paths_as_base64_or_temp(path):
@@ -398,6 +404,11 @@ def test_command_shape_keeps_assignment_paths_and_chmod_targets_literal():
     assert _command_shape(["tool", "--output=/usr/lib/systemd/system"]) == [
         "tool", "--output=/usr/lib/systemd/system",
     ]
+
+
+@pytest.mark.parametrize("name", ["tmp_backdoor", "temp-escalate", "tmp_persist1"])
+def test_command_shape_keeps_wordlike_tmp_names_literal(name):
+    assert _command_shape(["tool", name]) == ["tool", name]
     assert _command_shape(["chmod", "4755", "/usr/local/bin/sshd"]) == [
         "chmod", "4755", "/usr/local/bin/sshd",
     ]
@@ -412,6 +423,18 @@ def test_command_shape_keeps_assignment_paths_and_chmod_targets_literal():
         ("aGVsbG8gd29ybGQhIQ==", "<b64:16-31>"),
         ("VGhlIHF1aWNrIGJyb3duIGZveCBqdW1wcw", "<b64:32-63>"),
         ("QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo+", "<b64:32-63>"),
+        (
+            ("AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKywtLi8wMTIzNDU2Nzg5"
+             "Ojs8PT4/QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl9gYWJjZGVmZ2hpamtsbW5vcHFy"
+             "c3R1dnd4"),
+            "<b64:128-255>",
+        ),
+        (
+            ("AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKywtLi8wMTIzNDU2Nzg5"
+             "Ojs8PT4/QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl9gYWJjZGVmZ2hpamtsbW5vcHFy"
+             "c3R1dnc="),
+            "<b64:128-255>",
+        ),
     ],
 )
 def test_command_shape_masks_base64_with_padding_symbol_or_length_and_entropy_evidence(blob, bucket):
