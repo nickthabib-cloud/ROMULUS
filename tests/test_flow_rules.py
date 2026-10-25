@@ -4,6 +4,7 @@ Fixtures go through the real normalizer (Suricata EVE flow and netflow records, 
 import gzip
 import json
 import random
+from collections import Counter
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -122,7 +123,7 @@ def _attack_ids():
 def test_flow_rules_are_registered_with_cards_and_existing_attack_ids():
     ids = _attack_ids()
     pack = {type(pb) for pb in fresh_pack()}
-    assert PACK_VERSION == "pack@30"
+    assert PACK_VERSION == "pack@31"
     for cls in FLOW_PLAYBOOKS:
         assert cls in ALL_PLAYBOOKS and cls in pack
         assert cls.kind == "aggregate" and cls.staged and cls.anchor_class == "network_observation"
@@ -173,7 +174,11 @@ def test_large_echo_reply_orients_the_pair_back_to_the_requester():
 
 
 def test_long_lived_payload_heavy_echo_session_is_a_lead_below_bulk_volume():
-    [match] = run(IcmpEchoTunnel(), events(echo("long", payload=1400, packets=900, seconds=3600)))
+    packets = 9000
+    hit = eve("long", src="10.0.0.5", sport=None, dst=ATTACKER, dport=None, proto="ICMP", seconds=3600,
+              c2s=packets * (42 + 100), s2c=packets * (42 + 100), pkts_c=packets, pkts_s=packets,
+              icmp_type=8, icmp_code=0)
+    [match] = run(IcmpEchoTunnel(), events(hit))
     assert match.proposed_lane == "lead" and "ran 60 minutes" in match.claim
 
 
@@ -193,6 +198,114 @@ def test_icmp_without_type_or_code_is_partial_not_assumed_to_be_echo():
     assert run(rule, events(unknown)) == []
     assert rule.missing_required == 1 and not rule.assures_negative
     assert "typed echo type/code" in rule.positive_only_reason
+
+
+def test_arkime_multivalue_echo_session_uses_session_orientation():
+    hit = ark("ark-echo", proto=1, sport=None, dport=None, src="10.0.0.5", dst=ATTACKER,
+              c2s=20 * MIB, s2c=20 * MIB, pkts_c=10_000, pkts_s=10_000, seconds=600)
+    hit["_source"]["icmp"] = {"type": [0, 8], "code": [0]}
+
+    [match] = run(IcmpEchoTunnel(), events(hit))
+
+    assert match.group_key == f"10.0.0.5|{ATTACKER}|icmp"
+    assert match.proposed_lane == "lead"
+    assert "Arkime" in match.claim and "request/reply session" in match.claim
+
+
+def test_icmpsh_default_payload_and_rate_is_a_sustained_lead():
+    packets = 5 * 7200
+    hit = eve("icmpsh", src="10.0.0.5", sport=None, dst=ATTACKER, dport=None, proto="ICMP", seconds=7200,
+              c2s=packets * (42 + 64), s2c=packets * (42 + 64), pkts_c=packets, pkts_s=packets,
+              icmp_type=8, icmp_code=0)
+
+    [match] = run(IcmpEchoTunnel(), events(hit))
+
+    assert match.proposed_lane == "lead" and "sustained" in match.claim
+
+
+def test_material_echo_payload_asymmetry_is_high():
+    packets = 1800
+    hit = eve("asymmetric", src="10.0.0.5", sport=None, dst=ATTACKER, dport=None, proto="ICMP", seconds=1800,
+              c2s=packets * (42 + 1000), s2c=packets * (42 + 8), pkts_c=packets, pkts_s=packets,
+              icmp_type=8, icmp_code=0)
+
+    [match] = run(IcmpEchoTunnel(), events(hit))
+
+    assert match.proposed_lane == "high" and "material request/reply payload asymmetry" in match.claim
+
+
+def test_symmetric_bulk_tunnel_and_large_packet_monitoring_stay_leads():
+    hans = []
+    for index in range(14):
+        packets = 750
+        hans.append(eve(
+            f"hans-{index}", src="10.0.0.5", sport=None, dst=ATTACKER, dport=None, proto="ICMP",
+            start=T0 + timedelta(seconds=1560 * index), seconds=1500,
+            c2s=packets * (42 + 1000), s2c=packets * (42 + 1000), pkts_c=packets, pkts_s=packets,
+            icmp_type=8, icmp_code=0,
+        ))
+    [tunnel] = run(IcmpEchoTunnel(), events(*hans))
+    assert tunnel.proposed_lane == "lead" and "bulk" in tunnel.claim
+
+    packets = 3600
+    monitor = echo("large-monitor", payload=1400, packets=packets, seconds=3600)
+    monitor["_source"]["event"]["original"] = json.dumps({
+        **json.loads(monitor["_source"]["event"]["original"]),
+        "flow": {
+            **json.loads(monitor["_source"]["event"]["original"])["flow"],
+            "bytes_toserver": packets * (42 + 1400), "bytes_toclient": packets * (42 + 1400),
+            "pkts_toserver": packets, "pkts_toclient": packets,
+        },
+    })
+    [large_ping] = run(IcmpEchoTunnel(), events(monitor))
+    assert large_ping.proposed_lane == "lead"
+
+
+def test_two_sensor_lane_and_claim_use_the_qualifying_sensor():
+    suricata = eve("suricata-bulk", src="10.0.0.5", sport=None, dst=ATTACKER, dport=None, proto="ICMP",
+                    seconds=600, c2s=10_000 * (42 + 1000), s2c=0, pkts_c=10_000, pkts_s=0,
+                    icmp_type=8, icmp_code=0)
+    arkime = ark("arkime-small", proto=1, sport=None, dport=None, src="10.0.0.5", dst=ATTACKER,
+                 c2s=10_000 * (42 + 1000) + 200_000 * (42 + 56), s2c=0,
+                 pkts_c=210_000, pkts_s=0, seconds=600)
+    arkime["_source"]["icmp"] = {"type": 8, "code": 0}
+
+    [match] = run(IcmpEchoTunnel(), events(suricata, arkime))
+
+    assert match.proposed_lane == "high"
+    assert "according to Suricata" in match.claim and "10,000 packets" in match.claim
+    assert {event.raw[0].native_id for event in match.events} == {"suricata-bulk"}
+
+
+def test_longest_icmp_record_is_cited_and_stage_holds_stay_bounded():
+    records = [
+        echo("bulk-short", payload=1000, packets=10_000, seconds=60),
+        echo("long-low", payload=100, packets=1000, seconds=3600, start=T0 + timedelta(minutes=2)),
+    ]
+    rule = IcmpEchoTunnel()
+    stage = {}
+    refs = Counter()
+    for hit in records:
+        rule.consume(events(hit))
+        drained = rule.drain_staged()
+        held, released = rule.drain_bounds()
+        stage.update((event.id, event) for event in drained)
+        refs.update(held)
+        refs.subtract(released)
+        refs += Counter()
+        assert sum(refs.values()) <= rule.FIRST_CITES + 3
+    rule.bind_loader(lambda ids: [stage[event_id] for event_id in ids if refs[event_id] > 0])
+
+    [match] = rule.finalize()
+
+    assert "long-low" in {event.raw[0].native_id for event in match.events}
+    assert "ran 60 minutes" in match.claim
+
+
+def test_nonzero_echo_code_is_evaluated_without_publishing():
+    rule = IcmpEchoTunnel()
+    assert run(rule, events(echo("bad-code", code=4))) == []
+    assert rule.evaluated == 1 and rule.missing_required == 0
 
 
 def test_port_ranges_compress_runs():

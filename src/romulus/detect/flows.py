@@ -39,7 +39,7 @@ from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
 from romulus.detect.bounded import HOT_COUNT, KeyedStore, Limit, RecentIds
-from romulus.detect.citing import BoundStage, Ends, bound_note, cite_with_bounds, cited_phrase, more
+from romulus.detect.citing import BoundStage, Ends, Holds, bound_note, cite_with_bounds, cited_phrase, drained_holds, more
 from romulus.detect.correlation import StageMissing, canon_ip, external, routable_remote
 from romulus.detect.netdef import assume_direction
 from romulus.evidence.typed import TypedEvent
@@ -476,7 +476,7 @@ class _FlowRule(Playbook):
     def release_state(self) -> None:
         self.load = lambda ids: []
         for value in list(vars(self).values()):
-            if isinstance(value, (dict, list, set, RecentIds, KeyedStore, BoundStage)):
+            if isinstance(value, (dict, list, set, RecentIds, KeyedStore, BoundStage, Holds)):
                 value.clear()
         self.close_spill()
 
@@ -544,44 +544,54 @@ class _FlowRule(Playbook):
 class _IcmpEchoPair:
     payload: Counter = field(default_factory=Counter)       # estimated payload bytes per sensor
     packets: Counter = field(default_factory=Counter)
+    request_payload: Counter = field(default_factory=Counter)
+    reply_payload: Counter = field(default_factory=Counter)
+    request_packets: Counter = field(default_factory=Counter)
+    reply_packets: Counter = field(default_factory=Counter)
     records: Counter = field(default_factory=Counter)
-    kinds: Counter = field(default_factory=Counter)         # request/reply records
-    first: float = float("inf")
-    last: float = float("-inf")
-    longest: tuple | None = None                            # duration, payload, packets, start, end, event id
-    cites: list[tuple[int, str]] = field(default_factory=list)
-    ends: Ends = field(default_factory=Ends)
+    kinds: dict[str, Counter] = field(default_factory=dict)  # request/reply records per sensor
+    first: dict[str, float] = field(default_factory=dict)
+    last: dict[str, float] = field(default_factory=dict)
+    longest: dict[str, tuple] = field(default_factory=dict)  # duration, payload, packets, start, end, event id
+    cites: dict[str, list[tuple[int, str]]] = field(default_factory=dict)
+    ends: dict[str, Ends] = field(default_factory=dict)
 
 
 class IcmpEchoTunnel(_FlowRule):
     """Payload-heavy ICMP echo traffic, measured from bounded flow/session aggregates."""
     id = "net.icmp_echo_tunnel_shape"
-    version = "1"
+    version = "2"
     title = "Payload-heavy or long-lived ICMP echo traffic between one pair"
     severity, lane = "high", "lead"
     attack = ("T1095", "T1572", "T1048.003")
     assures_negative = False
     positive_only_reason = (
-        "only typed echo type/code and complete byte/packet counters are evaluated; flow telemetry does not expose "
+        "only typed echo type/code (with code optional where the sensor does not record it) plus complete "
+        "byte/packet counters are "
+        "evaluated; flow telemetry does not expose "
         "payload bytes, so packet-size and volume shape cannot establish payload entropy or prove a tunnel")
     benign = ("large diagnostic pings and link tests", "network appliance health checks", "authorized tunnel tests")
     next_checks = ("packet payload entropy and repeated structure", "the processes owning the traffic on each host",
                    "whether either endpoint is an approved monitoring or network-test system")
     HOT = HOT_COUNT
     # 8 MiB of estimated echo payload at an average of at least 256 bytes over at least 100 packets is well above
-    # ordinary 32/56-byte diagnostic pings while remaining low enough to catch a short transfer. A 30-minute session
-    # has a lower 1 MiB floor but still needs 120 packets averaging 128 bytes, excluding routine once-per-second pings.
+    # ordinary 32/56-byte diagnostic pings while remaining low enough to catch a short transfer. Asymmetry requires
+    # comparable request/reply counts, a 2:1 payload-size ratio and at least 64 bytes of absolute difference: the
+    # ratio excludes small jitter, while the byte floor exceeds a normal Linux ping's entire 56-byte data field.
     BULK_PAYLOAD = 8 * 2**20
     BULK_PACKETS = 100
     BULK_AVERAGE = 256
-    LONG_SECONDS = 30 * 60
-    LONG_PAYLOAD = 2**20
-    LONG_PACKETS = 120
-    LONG_AVERAGE = 128
+    ASYM_PACKETS = 100
+    ASYM_COUNT_RATIO = 0.8
+    ASYM_PAYLOAD_RATIO = 2.0
+    ASYM_ABSOLUTE = 64
+    SUSTAINED_SECONDS = 30 * 60
+    SUSTAINED_ECHOES_PER_SECOND = 2.0
+    SUSTAINED_AVERAGE = 56
     FIRST_CITES = 3
     card: ClassVar[dict] = {
-        "behavior": "one endpoint pair exchanged ICMP echo request/reply traffic with at least 8 MiB of estimated "
-                    "payload in payload-heavy packets, or one payload-heavy echo session lasted at least 30 minutes",
+        "behavior": "one endpoint pair exchanged bulk ICMP echo payload, materially asymmetric request/reply "
+                    "payload, or echo traffic sustained for at least 30 minutes above two echoes per second",
         "telemetry": "Suricata EVE ICMP type/code and directional flow byte/packet counters; Zeek conn ICMP type/code "
                      "and orig/resp counters; Arkime ICMP session type/code, duration and side counters",
         "fidelity": "ICMP echo type/code is direct typed evidence. Suricata and Arkime payload is conservatively "
@@ -597,13 +607,22 @@ class IcmpEchoTunnel(_FlowRule):
                           "echo types 128/129",
         "retrieval": "the sweep retrieves the complete Suricata, Zeek conn and Arkime session records in each "
                      "partition; records without typed ICMP type/code or complete counters are explicitly partial",
-        "lanes": "high for at least 8 MiB of payload-heavy echo traffic; lead for a payload-heavy session lasting "
-                 "at least 30 minutes. Thresholds exclude ordinary small diagnostic pings but do not prove abuse",
+        "lanes": "high for material request/reply payload asymmetry (including one-sided bulk); symmetric bulk or "
+                 "sustained high-rate traffic is lead. Thresholds exclude ordinary small pings but do not prove abuse",
     }
 
     def __init__(self):
         super().__init__()
         self.pairs = KeyedStore(self, "icmp_echo_pairs", self.HOT, candidate=self._reportable)
+        self.examples = Holds()
+
+    def drain_staged(self) -> list[TypedEvent]:
+        out, self._pending = self._pending + self.bounds.drain() + self.examples.drain(), []
+        self.pairs.trim()
+        return out
+
+    def drain_bounds(self) -> tuple[list[str], list[str]]:
+        return drained_holds(self.bounds, self.examples)
 
     @classmethod
     def _bulk(cls, payload: int, packets: int) -> bool:
@@ -611,20 +630,44 @@ class IcmpEchoTunnel(_FlowRule):
                 and payload >= cls.BULK_AVERAGE * packets)
 
     @classmethod
-    def _long(cls, longest: tuple | None) -> bool:
-        if longest is None:
+    def _asymmetric(cls, pair: _IcmpEchoPair, sensor: str) -> bool:
+        request_packets, reply_packets = pair.request_packets[sensor], pair.reply_packets[sensor]
+        request_payload, reply_payload = pair.request_payload[sensor], pair.reply_payload[sensor]
+        if min(request_packets, reply_packets) == 0:
+            # A one-sided record is not the RFC mirror comparison, but bulk in only one direction is both a volume
+            # and direction signal. Small unanswered pings do not qualify.
+            return cls._bulk(pair.payload[sensor], pair.packets[sensor])
+        if min(request_packets, reply_packets) < cls.ASYM_PACKETS:
             return False
-        duration, payload, packets, *_rest = longest
-        return (duration >= cls.LONG_SECONDS and payload >= cls.LONG_PAYLOAD and packets >= cls.LONG_PACKETS
-                and payload >= cls.LONG_AVERAGE * packets)
+        if min(request_packets, reply_packets) / max(request_packets, reply_packets) < cls.ASYM_COUNT_RATIO:
+            return False
+        request_average = request_payload / request_packets
+        reply_average = reply_payload / reply_packets
+        smaller, larger = sorted((request_average, reply_average))
+        return larger - smaller >= cls.ASYM_ABSOLUTE and larger >= cls.ASYM_PAYLOAD_RATIO * smaller
+
+    @classmethod
+    def _sustained(cls, pair: _IcmpEchoPair, sensor: str) -> bool:
+        duration = pair.last.get(sensor, 0) - pair.first.get(sensor, 0)
+        echoes = min(pair.request_packets[sensor], pair.reply_packets[sensor])
+        packets = pair.packets[sensor]
+        average = pair.payload[sensor] / packets if packets else 0
+        return (duration >= cls.SUSTAINED_SECONDS
+                and echoes / duration > cls.SUSTAINED_ECHOES_PER_SECOND
+                and average > cls.SUSTAINED_AVERAGE)
+
+    @classmethod
+    def _sensor_reportable(cls, pair: _IcmpEchoPair, sensor: str) -> bool:
+        return (cls._bulk(pair.payload[sensor], pair.packets[sensor])
+                or cls._asymmetric(pair, sensor)
+                or cls._sustained(pair, sensor))
 
     @classmethod
     def _reportable(cls, pair: _IcmpEchoPair) -> bool:
-        return any(cls._bulk(pair.payload[sensor], pair.packets[sensor]) for sensor in pair.payload) \
-            or cls._long(pair.longest)
+        return any(cls._sensor_reportable(pair, sensor) for sensor in pair.payload)
 
     @staticmethod
-    def _counters(view: FlowView, event: TypedEvent) -> tuple[int, int] | None:
+    def _counters(view: FlowView, event: TypedEvent) -> tuple[int, int, int, int] | None:
         if view.sensor == ARKIME:
             values = (event.get("source.bytes"), event.get("destination.bytes"),
                       event.get("source.packets"), event.get("destination.packets"))
@@ -635,52 +678,80 @@ class IcmpEchoTunnel(_FlowRule):
         if any(value is None for value in numbers):
             return None
         sent, received, sent_packets, received_packets = numbers
-        packets = sent_packets + received_packets
-        if packets <= 0:
+        if sent_packets + received_packets <= 0:
             return None
         if event.get("flow.bytes_are_payload") is True:
-            payload = sent + received
+            sent_payload, received_payload = sent, received
         else:
             # Ethernet (14) + IPv4 (20) + ICMP (8), or Ethernet + IPv6 (40) + ICMPv6 (8).
             header = 62 if view.transport in ("ipv6-icmp", "icmpv6") else 42
-            payload = max(sent + received - header * packets, 0)
-        return payload, packets
+            sent_payload = max(sent - header * sent_packets, 0)
+            received_payload = max(received - header * received_packets, 0)
+        return sent_payload, received_payload, sent_packets, received_packets
+
+    @staticmethod
+    def _numbers(value) -> frozenset[int] | None:
+        values = value if isinstance(value, list) else [value]
+        if not values or any(not isinstance(item, int) or isinstance(item, bool) for item in values):
+            return None
+        return frozenset(values)
 
     def take(self, view: FlowView, event: TypedEvent) -> bool | None:
         if view.transport not in ("icmp", "ipv6-icmp", "icmpv6"):
             return True
-        kind, code = event.get("icmp.type"), event.get("icmp.code")
-        if not (isinstance(kind, int) and not isinstance(kind, bool)
-                and isinstance(code, int) and not isinstance(code, bool)):
+        kinds, codes = self._numbers(event.get("icmp.type")), self._numbers(event.get("icmp.code"))
+        if kinds is None or (codes is None and view.sensor != ZEEK):
             return False
         request, reply = ((8, 0) if view.transport == "icmp" else (128, 129))
-        if code != 0 or kind not in (request, reply):
+        if (codes is not None and codes != {0}) or not kinds & {request, reply}:
             return True
         counters = self._counters(view, event)
         if counters is None:
             return False
-        payload, packets = counters
-        client, peer = (view.src, view.dst) if kind == request else (view.dst, view.src)
+        sent_payload, received_payload, sent_packets, received_packets = counters
+        source_is_requester = request in kinds
+        client, peer = (view.src, view.dst) if source_is_requester else (view.dst, view.src)
         key = (client, peer, view.transport)
         pair = self.pairs.get(key)
         if pair is None:
             pair = _IcmpEchoPair()
             if not self.pairs.put(key, pair):
                 return self._refused("ICMP echo pairs'")
-        pair.payload[view.sensor] += payload
-        pair.packets[view.sensor] += packets
-        pair.records[view.sensor] += 1
-        pair.kinds["request" if kind == request else "reply"] += 1
-        pair.first, pair.last = min(pair.first, view.start), max(pair.last, view.end)
+        if source_is_requester:
+            request_payload, reply_payload = sent_payload, received_payload
+            request_packets, reply_packets = sent_packets, received_packets
+        else:
+            request_payload, reply_payload = received_payload, sent_payload
+            request_packets, reply_packets = received_packets, sent_packets
+        payload, packets = request_payload + reply_payload, request_packets + reply_packets
+        sensor = view.sensor
+        pair.payload[sensor] += payload
+        pair.packets[sensor] += packets
+        pair.request_payload[sensor] += request_payload
+        pair.reply_payload[sensor] += reply_payload
+        pair.request_packets[sensor] += request_packets
+        pair.reply_packets[sensor] += reply_packets
+        pair.records[sensor] += 1
+        label = "request/reply session" if request in kinds and reply in kinds else \
+            "request record" if request in kinds else "reply record"
+        pair.kinds.setdefault(sensor, Counter())[label] += 1
+        pair.first[sensor] = min(pair.first.get(sensor, float("inf")), view.start)
+        pair.last[sensor] = max(pair.last.get(sensor, float("-inf")), view.end)
         duration = view.end - view.start
         longest = (duration, payload, packets, view.start, view.end, event.id)
-        if pair.longest is None or longest[:-1] > pair.longest[:-1]:
-            pair.longest = longest
-        if len(pair.cites) < self.FIRST_CITES or payload >= self.LONG_PAYLOAD:
-            pair.cites.append((payload, event.id))
-            pair.cites = sorted(pair.cites, key=lambda item: (-item[0], item[1]))[:EXAMPLE_LIMIT]
-            self._stage(event)
-        self.bounds.offer(("icmp",) + key, pair.ends, view.start, view.end, event, stage=self._reportable(pair))
+        previous_longest = pair.longest.get(sensor)
+        if previous_longest is None or longest[:-1] > previous_longest[:-1]:
+            if previous_longest is not None:
+                self.examples.release(previous_longest[-1])
+            pair.longest[sensor] = longest
+            self.examples.hold(event)
+        cites = pair.cites.setdefault(sensor, [])
+        if len(cites) < self.FIRST_CITES:
+            cites.append((payload, event.id))
+            self.examples.hold(event)
+        ends = pair.ends.setdefault(sensor, Ends())
+        self.bounds.offer(("icmp",) + key + (sensor,), ends, view.start, view.end, event,
+                          stage=self._sensor_reportable(pair, sensor))
         return True
 
     def finalize(self):
@@ -689,23 +760,39 @@ class IcmpEchoTunnel(_FlowRule):
 
     def _match(self, key, pair: _IcmpEchoPair) -> Match:
         client, peer, transport = key
-        sensor = max(sorted(pair.payload), key=lambda name: (pair.payload[name], pair.packets[name]))
+        sensors = [sensor for sensor in pair.payload if self._sensor_reportable(pair, sensor)]
+        sensor = max(sorted(sensors), key=lambda name: (
+            self._asymmetric(pair, name), self._bulk(pair.payload[name], pair.packets[name]),
+            self._sustained(pair, name), pair.payload[name], pair.packets[name],
+        ))
         payload, packets = pair.payload[sensor], pair.packets[sensor]
         average = payload / packets
         bulk = self._bulk(payload, packets)
-        longest = pair.longest[0]
-        ids = [event_id for _payload, event_id in pair.cites]
-        evs, missing = self._cite(pair.ends, ids)
+        asymmetric = self._asymmetric(pair, sensor)
+        sustained = self._sustained(pair, sensor)
+        longest = pair.longest[sensor][0]
+        ids = [pair.longest[sensor][-1], *(event_id for _payload, event_id in pair.cites[sensor])]
+        evs, missing = self._cite(pair.ends[sensor], ids)
         kind_text = " and ".join(f"{count} echo {kind} record{'s' if count != 1 else ''}"
-                                 for kind, count in sorted(pair.kinds.items()))
+                                 for kind, count in sorted(pair.kinds[sensor].items()))
+        kind_text = kind_text.replace(" record record", " record").replace(" session record", " session")
+        signals = []
+        if asymmetric:
+            signals.append("material request/reply payload asymmetry")
+        if bulk:
+            signals.append("bulk payload volume")
+        if sustained:
+            signals.append("sustained high-rate echo traffic")
         claim = (f"{client} and {peer} exchanged {kind_text.replace('echo', transport.upper() + ' echo')} with "
                  f"{payload:,} bytes "
                  f"({payload / 2**20:.1f} MiB) of estimated payload across {packets:,} packets according to "
-                 f"{SENSOR_NAMES[sensor]} (average {average:.0f} bytes per packet; {_iso(pair.first)} – "
-                 f"{_iso(pair.last)}). The longest recorded echo session ran {longest / 60:.0f} minutes. "
+                 f"{SENSOR_NAMES[sensor]} (average {average:.0f} bytes per packet; {_iso(pair.first[sensor])} – "
+                 f"{_iso(pair.last[sensor])}); qualifying shape: {', '.join(signals)}. The longest recorded echo "
+                 f"session ran {longest / 60:.0f} minutes. "
                  "This is packet-size and volume shape, not payload entropy or proof of tunneling."
-                 + cited_phrase(len(evs), sum(pair.records.values()), not missing) + bound_note(missing, pair.ends))
-        lane, severity = ("high", "high") if bulk else (self.lane, "medium")
+                 + cited_phrase(len(evs), pair.records[sensor], not missing)
+                 + bound_note(missing, pair.ends[sensor]))
+        lane, severity = ("high", "high") if asymmetric else (self.lane, "medium")
         match = Match(self.id, claim, self.claim_type, evs,
                       _predicates(evs[0], ("source.ip", "destination.ip", "icmp.type", "icmp.code",
                                            "flow.bytes_toserver", "source.bytes")),

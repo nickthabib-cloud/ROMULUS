@@ -1482,6 +1482,20 @@ def _icmp_number(value, path: str, bad: list[str]) -> int | None:
     return number
 
 
+def _icmp_value(value, path: str, bad: list[str]) -> int | list[int] | None:
+    """An Arkime ICMP type/code field: one byte or its INT_GHASH multi-value representation."""
+    if not isinstance(value, list):
+        return _icmp_number(value, path, bad)
+    if not value:
+        return None
+    local_bad: list[str] = []
+    numbers = [_icmp_number(item, path, local_bad) for item in value]
+    if local_bad or any(number is None for number in numbers):
+        bad.append(path)
+        return None
+    return sorted(set(numbers))
+
+
 def _cert_time(value, path: str, bad: list[str]) -> str | None:
     """A certificate validity bound as ISO-8601 UTC. Arkime stores epoch milliseconds; Suricata writes ISO time
     without a zone, in UTC."""
@@ -1945,7 +1959,7 @@ def normalize_arkime_session(hit: dict) -> TypedEvent:
     icmp = src.get("icmp")
     if isinstance(icmp, dict):
         for typed, native in (("icmp.type", "type"), ("icmp.code", "code")):
-            number = _icmp_number(icmp.get(native), typed, bad)
+            number = _icmp_value(icmp.get(native), typed, bad)
             if number is not None:
                 f[typed] = fv(number, f"{nid}:icmp.{native}")
     elif not _absent(icmp):
@@ -1961,13 +1975,6 @@ def normalize_arkime_session(hit: dict) -> TypedEvent:
     proto = src.get("ipProtocol")
     if proto is not None:
         f["network.transport"] = fv(IP_PROTOCOLS.get(proto, str(proto)), f"{nid}:ipProtocol")
-    if IP_PROTOCOLS.get(proto) in ("icmp", "ipv6-icmp"):
-        # Arkime uses the port slots for ICMP type/code when the dedicated object is absent.
-        for typed, native in (("icmp.type", "source.port"), ("icmp.code", "destination.port")):
-            if typed not in f:
-                number = _icmp_number(_get(src, native), typed, bad)
-                if number is not None:
-                    f[typed] = fv(number, f"{nid}:{native}#icmp")
     f["flow.start"] = fv(first.isoformat(), f"{nid}:firstPacket")
     f["flow.end"] = fv(last.isoformat(), f"{nid}:lastPacket")
     f["session.duration_s"] = fv(round((last - first).total_seconds(), 3), f"{nid}:lastPacket-firstPacket")
@@ -1978,7 +1985,7 @@ def normalize_arkime_session(hit: dict) -> TypedEvent:
 
 
 def normalize_zeek_connection(hit: dict) -> TypedEvent:
-    """One Zeek conn record. For ICMP, Zeek stores type in the originator port and code in the responder port."""
+    """One Zeek ICMP conn record. ``orig_p`` is the originator type; ``resp_p`` is its counterpart type."""
     src, nid, ref = hit["_source"], hit["_id"], _ref(hit)
     conn = _get(src, "zeek.connection")
     if not isinstance(conn, dict):
@@ -1987,11 +1994,20 @@ def normalize_zeek_connection(hit: dict) -> TypedEvent:
     transport = transport.lower() if isinstance(transport, str) else None
     if transport not in ("icmp", "ipv6-icmp", "icmpv6"):
         raise Skip("zeek non-ICMP connection is not normalized")
+    source_ip = _get(src, "source.ip") or conn.get("orig_h")
+    destination_ip = _get(src, "destination.ip") or conn.get("resp_h")
+    try:
+        if any(ipaddress.ip_address(str(address)).version == 6 for address in (source_ip, destination_ip)):
+            transport = "ipv6-icmp"
+        else:
+            transport = "icmp"
+    except ValueError:
+        pass
     when = _ts(src["@timestamp"])
     bad: list[str] = []
     f = {
-        "source.ip": fv(_get(src, "source.ip") or conn.get("orig_h"), f"{nid}:source.ip|zeek.connection.orig_h"),
-        "destination.ip": fv(_get(src, "destination.ip") or conn.get("resp_h"),
+        "source.ip": fv(source_ip, f"{nid}:source.ip|zeek.connection.orig_h"),
+        "destination.ip": fv(destination_ip,
                              f"{nid}:destination.ip|zeek.connection.resp_h"),
         "source.port": fv(_get(src, "source.port"), f"{nid}:source.port"),
         "destination.port": fv(_get(src, "destination.port"), f"{nid}:destination.port"),
@@ -2015,14 +2031,15 @@ def normalize_zeek_connection(hit: dict) -> TypedEvent:
             f["session.duration_s"] = fv(seconds, f"{nid}:zeek.connection.duration")
             f["flow.end"] = fv((when + timedelta(seconds=seconds)).isoformat(),
                                f"{nid}:@timestamp+zeek.connection.duration")
-    if transport in ("icmp", "ipv6-icmp", "icmpv6"):
-        for typed, explicit, port in (("icmp.type", "icmp_type", "source.port"),
-                                      ("icmp.code", "icmp_code", "destination.port")):
-            raw = conn.get(explicit) if explicit in conn else _get(src, port)
-            number = _icmp_number(raw, typed, bad)
-            if number is not None:
-                origin = f"zeek.connection.{explicit}" if explicit in conn else f"{port}#zeek-icmp"
-                f[typed] = fv(number, f"{nid}:{origin}")
+    raw_type = conn.get("icmp_type") if "icmp_type" in conn else _get(src, "source.port")
+    number = _icmp_number(raw_type, "icmp.type", bad)
+    if number is not None:
+        origin = "zeek.connection.icmp_type" if "icmp_type" in conn else "source.port#zeek-icmp-type"
+        f["icmp.type"] = fv(number, f"{nid}:{origin}")
+    if "icmp_code" in conn:
+        number = _icmp_number(conn.get("icmp_code"), "icmp.code", bad)
+        if number is not None:
+            f["icmp.code"] = fv(number, f"{nid}:zeek.connection.icmp_code")
     if bad:
         f["parse.malformed"] = fv(sorted(set(bad)), f"{nid}:#malformed")
     return TypedEvent(id=event_id("net_flow", [ref]), family="net_flow", ts=when,

@@ -213,10 +213,24 @@ def test_arkime_icmp_session_types_explicit_type_and_code_without_coercion():
     assert typed.get("icmp.type") == 8 and typed.get("icmp.code") == 0
 
 
+def test_arkime_icmp_session_accepts_multivalued_types_and_never_uses_ports_as_fallback():
+    hit = arkime(ipProtocol=1, protocol=["icmp"], icmp={"type": [0, 8], "code": [0]},
+                 source={"ip": "172.17.100.121", "port": 0, "bytes": 900, "packets": 9},
+                 destination={"ip": "192.0.2.174", "port": 0, "bytes": 4000, "packets": 8})
+    typed = one(hit)
+    assert typed.get("icmp.type") == [0, 8] and typed.get("icmp.code") == [0]
+    assert typed.get("parse.malformed") is None
+
+    absent = one(arkime(ipProtocol=1, protocol=["icmp"],
+                        source={"ip": "172.17.100.121", "port": 0, "bytes": 900, "packets": 9},
+                        destination={"ip": "192.0.2.174", "port": 0, "bytes": 4000, "packets": 8}))
+    assert absent.get("icmp.type") is None and absent.get("icmp.code") is None
+
+
 def test_zeek_icmp_connection_uses_documented_type_code_ports_and_types_flow_counters():
     typed = one(zeek())
     assert typed.family == "net_flow" and typed.get("observer.product") == "zeek"
-    assert typed.get("icmp.type") == 8 and typed.get("icmp.code") == 0
+    assert typed.get("icmp.type") == 8 and typed.get("icmp.code") is None
     assert typed.get("flow.bytes_toserver") == 900 and typed.get("flow.bytes_toclient") == 4000
     assert typed.get("flow.pkts_toserver") == 9 and typed.get("flow.pkts_toclient") == 8
     assert typed.get("session.duration_s") == 2.0
@@ -225,6 +239,21 @@ def test_zeek_icmp_connection_uses_documented_type_code_ports_and_types_flow_cou
 def test_zeek_icmp_absent_type_and_code_stay_absent():
     typed = one(zeek(source_port=None, destination_port=None))
     assert typed.get("icmp.type") is None and typed.get("icmp.code") is None
+
+
+def test_zeek_icmp_counterpart_port_is_not_code_and_ipv6_is_typed_from_addresses():
+    timestamp = one(zeek("timestamp", source_port=13, destination_port=14))
+    assert timestamp.get("icmp.type") == 13 and timestamp.get("icmp.code") is None
+
+    reply_first = one(zeek("reply", source_port=0, destination_port=8))
+    assert reply_first.get("icmp.type") == 0 and reply_first.get("icmp.code") is None
+
+    v6 = zeek("v6", source_port=128, destination_port=129)
+    v6["_source"]["source"]["ip"] = "fd00::5"
+    v6["_source"]["destination"]["ip"] = "2001:db8::50"
+    typed_v6 = one(v6)
+    assert typed_v6.get("network.transport") == "ipv6-icmp"
+    assert typed_v6.get("icmp.type") == 128 and typed_v6.get("icmp.code") is None
 
 
 # ---- Arkime DNS ------------------------------------------------------------------------------------------------
