@@ -328,6 +328,51 @@ def test_package_manager_lineage_is_one_batched_lead_worded_as_package_activity(
     assert "a malicious or tampered package" in m.claim
 
 
+@pytest.mark.parametrize("manager", ["flatpak", "dnf-3", "rpmdb", "snap"])
+def test_restored_package_manager_corpus_groups_writer_and_parent_images(manager):
+    writer = change(f"/etc/cron.d/{manager}-writer", uid="0", exe=f"/usr/bin/{manager}", pid=100, ppid=90)
+    _pb, [direct] = run_persist([writer])
+    assert direct.group_key == f"app01|package:{manager}"
+    assert direct.proposed_lane == "lead" and "package activity" in direct.claim
+
+    parent = pexec(f"/usr/bin/{manager}", 200, 190)
+    child = change(f"/etc/cron.d/{manager}-child", ts=T0 + timedelta(seconds=1), uid="0",
+                   exe="/usr/bin/cp", pid=201, ppid=200)
+    _pb, [descendant] = run_persist([parent, child])
+    assert descendant.group_key == f"app01|package:{manager}"
+    assert descendant.proposed_lane == "lead" and "package activity" in descendant.claim
+
+
+def test_package_manager_under_lib_is_system_but_non_system_writer_or_parent_is_not():
+    _pb, [system] = run_persist([change("/etc/cron.d/system", uid="0", exe="/lib/dpkg", pid=100, ppid=90)])
+    assert system.group_key == "app01|package:dpkg"
+
+    outside = [
+        pexec("/tmp/dpkg", 200, 190),
+        change("/etc/cron.d/outside", ts=T0 + timedelta(seconds=1), uid="0",
+               exe="/usr/bin/cp", pid=201, ppid=200),
+    ]
+    _pb, [not_package] = run_persist(outside)
+    assert not_package.group_key.startswith("app01|0|/etc/cron.d|pid 201|/usr/bin/cp|")
+    assert "package activity" not in not_package.claim
+
+
+@pytest.mark.parametrize("ancestor", [
+    ev("process_exec", T0, host="app01", process__executable="/usr/bin/python3.11",
+       process__argv=["/usr/bin/python3", "/usr/bin/unattended-upgrade"], process__pid=300,
+       process__ppid=290, process__uid="0"),
+    ev("process_exec", T0, host="app01", process__executable="/usr/bin/dash",
+       process__argv=["/bin/sh", "/var/lib/dpkg/info/x.postinst", "configure"], process__pid=300,
+       process__ppid=290, process__uid="0"),
+])
+def test_persistence_does_not_use_broad_package_or_maintainer_script_markers(ancestor):
+    child = change("/etc/cron.d/not-package", ts=T0 + timedelta(seconds=1), uid="0",
+                   exe="/usr/bin/cp", pid=301, ppid=300)
+    _pb, [match] = run_persist([ancestor, child])
+    assert match.group_key.startswith("app01|0|/etc/cron.d|pid 301|/usr/bin/cp|")
+    assert "package activity" not in match.claim
+
+
 def test_package_lineage_needs_the_parent_exec_at_or_before_the_write():
     # the boundary: a parent exec at the same instant counts; one recorded after the write does not
     same = [pexec("/usr/bin/dpkg", 100, 90, ts=T0), change("/etc/init.d/x", ts=T0, uid="0", exe="/usr/bin/cp",

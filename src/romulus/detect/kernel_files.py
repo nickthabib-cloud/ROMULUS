@@ -26,6 +26,7 @@ from romulus.detect.citing import BoundStage, Ends, bound_note, cite_group, cite
 from romulus.detect.correlation import StageMissing, boot_of, merge_unknown_boot
 from romulus.detect.hijack import CHANGE_WORDS, _own_elevation, _Write, path_key
 from romulus.detect.host import (
+    Ancestor,
     WEB_SERVICE_USERS,
     Lineage,
     ProcessLineage,
@@ -761,7 +762,7 @@ class PersistencePathChange(Playbook):
 
     # ---------------------------------------------------------------- finalize
     def _manager(self, change: _Change) -> str | None:
-        """The package manager in the writer's observation-aware, parent-at-fork process lineage."""
+        """The exact package-manager image in the writer's observation-aware parent-at-fork lineage."""
         loaded = {event.id: event for event in self.load([change.event_id])}
         event = loaded.get(change.event_id)
         if event is None:
@@ -773,9 +774,45 @@ class PersistencePathChange(Playbook):
             )
             return None
         change.lineage = self.lineage.classify(event)
-        if change.lineage.kind != "package" or change.lineage.ancestor is None:
-            return None
-        return change.lineage.ancestor.name
+        host, exe, ppid = event.host, change.exe, change.ppid
+        ts, boot, serial = change.ts, change.boot, change.serial
+        order_domain = "audit" if serial is not None else None
+        current = ProcessLineage.entry(event)
+        for depth in range(LINEAGE_DEPTH):
+            name = posixpath.basename(exe)
+            if name in PACKAGE_MANAGERS and exe.startswith(_SYSTEM_EXE_DIRS):
+                ancestor = current._replace(name=name, marker="package")
+                change.lineage = Lineage("package", ancestor, depth)
+                return name
+            if not isinstance(ppid, int) or ppid <= 1:
+                return None
+            view = self.lineage.execs.view(
+                host, ppid, ts, serial, boot, inclusive=False, order_domain=order_domain,
+            )
+            if view.image is None:
+                return None
+            # An observation can prove the no-exec parent and its image only while that observation history is
+            # complete and the particular state is cited. Exec-only ancestry remains usable when an unrelated
+            # observation was refused; no missing observation is allowed to invent a package lowering.
+            if view.used and (self.lineage.execs.observed_incomplete or any(not item.cited for item in view.used)):
+                return None
+            first, named = view.first, view.named
+            entry = named.entry
+            exe = named.exe
+            current = Ancestor(
+                first.ts,
+                first.ppid,
+                posixpath.basename(exe),
+                getattr(entry, "user", None),
+                "",
+                entry.event_id,
+                first.boot or named.boot,
+                first.serial,
+                first.domain,
+            )
+            ts, ppid, serial, order_domain = first.ts, first.ppid, first.serial, first.domain
+            boot = boot if boot is not None else first.boot
+        return None
 
     def _events(self, ids: list[str]) -> dict[str, TypedEvent]:
         unique = sorted(set(ids))

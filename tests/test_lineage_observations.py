@@ -264,6 +264,51 @@ def test_persistence_change_uses_a_no_exec_package_parent_and_cites_its_observat
     assert any(event.family == "process_observed" and event.id in match.context_ids for event in match.events)
 
 
+def test_persistence_does_not_lower_from_an_uncited_no_exec_package_parent():
+    from tests.test_kernel_files import change
+
+    observed, raw = normalized(observe(T, 41, 410, 390, "/usr/bin/dpkg", "dpkg"))
+    changed = change(
+        "/etc/cron.d/pkg", ts=datetime.fromtimestamp(T + 1, UTC), uid="0",
+        exe="/usr/bin/cp", pid=411, ppid=410, host=HOST,
+    )
+    raw.update(source_copies([changed]))
+    rule = PersistencePathChange()
+    rule.lineage.execs.citations.put = lambda *_args, **_kwargs: False
+
+    [match] = drive(rule, [*observed, changed], raw)
+
+    assert match.group_key.endswith("|pid 411|/usr/bin/cp|2024-11-18T10:21:22.941000+00:00")
+    assert "package activity" not in match.claim
+    assert "lineage_records" in rule.limits
+
+
+def test_unrelated_observation_refusal_does_not_hide_an_exact_exec_package_parent(tmp_path):
+    from tests.test_kernel_files import change
+
+    rule = PersistencePathChange()
+    rule.spill_dir = tmp_path
+    rule.budget = StateBudget(tmp_path, disk_total=2**40, reserve=0)
+    rule.budget.force_full(
+        "the observed states' store is past its floor (test)",
+        lambda account: account.name.endswith("proc_observed"),
+    )
+    unrelated, raw = normalized(observe(T - 1, 42, 999, 998, "/usr/bin/true", "true"))
+    manager, manager_raw = normalized(execd(T, 43, 420, 390, "/usr/bin/dnf-3", ["dnf-3"]))
+    changed = change(
+        "/etc/cron.d/pkg", ts=datetime.fromtimestamp(T + 1, UTC), uid="0",
+        exe="/usr/bin/cp", pid=421, ppid=420, host=HOST,
+    )
+    raw.update(manager_raw)
+    raw.update(source_copies([changed]))
+
+    [match] = drive(rule, [*unrelated, *manager, changed], raw)
+
+    assert match.group_key.endswith("|package:dnf-3")
+    assert "package activity" in match.claim
+    assert "lineage_observed" in rule.limits
+
+
 def table(events, raw=None) -> PidTable:
     """A lineage over these records (with `raw`, their raw copies, as a sweep hands them over)."""
     pids = PidTable(observing=True)
