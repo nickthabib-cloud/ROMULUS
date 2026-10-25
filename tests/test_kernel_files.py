@@ -372,6 +372,34 @@ def test_non_root_changes_mixed_with_package_activity_stay_separate_and_high():
         ("app01|1002|/etc/profile.d|pid 4000|/usr/bin/tee|2030-01-06T09:00:05+00:00", "high"), ("app01|package:dpkg", "lead")]
 
 
+def test_a_missing_staged_root_change_does_not_empty_other_persistence_findings():
+    missing = change("/etc/cron.d/package", uid="0", exe="/usr/bin/dpkg", pid=100, ppid=90)
+    visible = change("/etc/cron.d/web", ts=T0 + timedelta(seconds=1))
+    rule = PersistencePathChange()
+    assert rule.consume([pexec("/usr/bin/dpkg", 100, 90), missing, visible]) == []
+    staged = {event.id: event for event in rule.drain_staged() if event.id != missing.id}
+    rule.bind_loader(lambda ids: [staged[event_id] for event_id in ids if event_id in staged])
+
+    matches = rule.finalize()
+
+    assert [match.group_key for match in matches] == [
+        "app01|33|/etc/cron.d|pid 4000|/usr/bin/dash|2030-01-06T09:00:01+00:00",
+    ]
+    assert "stage_missing" in rule.limits
+
+
+def test_persistence_package_attribution_corpus_is_unchanged():
+    from romulus.detect.kernel_files import PACKAGE_MANAGERS, _SYSTEM_EXE_DIRS
+
+    assert PACKAGE_MANAGERS == {
+        "dpkg", "apt", "apt-get", "aptitude", "rpm", "rpmdb", "dnf", "dnf-3", "yum", "microdnf",
+        "zypper", "snap", "snapd", "flatpak", "pacman", "apk", "packagekitd",
+    }
+    assert _SYSTEM_EXE_DIRS == (
+        "/usr/bin/", "/usr/sbin/", "/bin/", "/sbin/", "/usr/lib/", "/usr/libexec/", "/lib/",
+    )
+
+
 def test_failed_attempts_only_are_a_lead_and_any_success_keeps_high():
     _pb, out = run_persist([change("/etc/cron.d/job", outcome=Outcome.failure)])
     assert out[0].proposed_lane == "lead" and "these are attempts" in out[0].claim

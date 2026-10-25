@@ -686,6 +686,7 @@ class PersistencePathChange(Playbook):
         self.lineage = ProcessLineage(self, capacity=self.EXEC_CAPACITY)
         self.execs = self.lineage.execs       # compatibility alias; share_lineage replaces both with one store
         self._alone: list[Match] = []   # changes published on their own (the budget refused holding them)
+        self._stage_missing: set[str] = set()
 
     def drain_staged(self) -> list[TypedEvent]:
         out, self._pending = self._pending, []
@@ -761,18 +762,20 @@ class PersistencePathChange(Playbook):
     # ---------------------------------------------------------------- finalize
     def _manager(self, change: _Change) -> str | None:
         """The package manager in the writer's observation-aware, parent-at-fork process lineage."""
-        [event] = self._events([change.event_id]).values()
+        loaded = {event.id: event for event in self.load([change.event_id])}
+        event = loaded.get(change.event_id)
+        if event is None:
+            self._stage_missing.add(change.event_id)
+            self.note_limit(
+                "stage_missing",
+                "a staged persistence-location change was unavailable during finalization; that change is omitted "
+                "because its subject record cannot be cited, while other changes are still evaluated",
+            )
+            return None
         change.lineage = self.lineage.classify(event)
         if change.lineage.kind != "package" or change.lineage.ancestor is None:
             return None
         return change.lineage.ancestor.name
-
-    def _parent(self, host: str, ppid: int, ts: float, serial: int | None = None):
-        """Compatibility view of the parent's latest exec; package classification itself uses ProcessLineage."""
-        found = self.execs.latest(host, ppid, ts, where=lambda record: bool(record.exe), serial=serial)
-        if found is None and host == "":
-            found = self.execs.latest(None, ppid, ts, where=lambda record: bool(record.exe), serial=serial)
-        return found
 
     def _events(self, ids: list[str]) -> dict[str, TypedEvent]:
         unique = sorted(set(ids))
@@ -788,6 +791,8 @@ class PersistencePathChange(Playbook):
             # (host, uid, pid) and directory, so one editor run (file, swap and backup files) is one finding; without
             # a pid it is one finding per file. Every file is named and its first record cited.
             key = self._key(change)
+            if change.event_id in self._stage_missing:
+                continue
             need(groups.setdefault(key, list), self, "the persistence change grouping").append(change)
             if i % self.TRIM_EVERY == self.TRIM_EVERY - 1:
                 groups.trim()
