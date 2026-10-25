@@ -1082,3 +1082,39 @@ def test_a_rate_judgement_after_its_material_was_released_is_unresolved():
     failure = view._window_failure(ServiceExecRateBaseline())
 
     assert failure.startswith("window counter material was released before judgement")
+
+
+def _with_inapplicable_edge_cell(detail: dict):
+    repo = _repo()
+    _resolved_history(repo)
+    edge = Window(start=WINDOW.end, end=WINDOW.end + timedelta(minutes=30))
+    repo.set_rule_cell("h1", SPEC.id, SPEC.version, "host-index", edge.key(), "not_applicable_no_events", 0, 0,
+                       detail)
+    known = _event(0, "/bin/known")
+    repo.save_evidence("h1", [known], {known.raw[0].key: {"message": known.id}}, None)
+    repo.upsert_baseline_observation(_observation(known, key_id="known-id", key_digest="known-digest",
+                                                  path="/bin/known"))
+    summary = run_baseline_stage(repo, "h1", WINDOW, source=EmptyHistory())
+    rollup = next(cell for cell in repo.rule_cells("h1")
+                  if cell["rule_id"] == SPEC.id and cell["target"] == "*" and cell["partition"] == "window")
+    return repo, summary, rollup
+
+
+@pytest.mark.parametrize("detail", [
+    {"reasons": ["source result cap reached"], "retrieval_complete": False},
+    {"reasons": ["source result cap reached"]},   # recorded before the flag existed
+])
+def test_a_partial_retrieval_of_an_inapplicable_cell_never_supports_a_complete_negative(detail):
+    repo, summary, rollup = _with_inapplicable_edge_cell(detail)
+
+    assert next(repo.baseline_observations("h1"))["verdict"] == "common"
+    assert rollup["state"] == "evaluated_partial"
+    assert any("retrieval was partial in 1 cell(s) of inapplicable target(s) host-index" in reason
+               for reason in rollup["detail"]["reasons"])
+    assert summary["status"] == "partial"
+
+
+def test_a_complete_inapplicable_cell_still_allows_a_complete_negative():
+    _, _summary, rollup = _with_inapplicable_edge_cell({"reasons": [], "retrieval_complete": True})
+
+    assert rollup["state"] == "no_match_complete"

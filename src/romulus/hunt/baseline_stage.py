@@ -21,6 +21,7 @@ from romulus.detect.base import Match, PredicateField
 from romulus.evidence.normalize import NORMALIZER_VERSION
 from romulus.evidence.typed import TypedEvent
 from romulus.hunt.baseline_source import HuntHistorySource
+from romulus.hunt.baseline_writer import cell_complete
 from romulus.hunt.publish import publish_match
 from romulus.hunt.site_networks import contradiction_reason
 from romulus.hunt.sweep import baseline_applicability
@@ -246,6 +247,14 @@ class SnapshotView:
             reasons.append("no baseline window cell was evaluated")
         elif partial:
             reasons.append(f"window coverage is partial in {len(partial)} cell(s)")
+        # An inapplicable target's empty cell supports a negative only when its retrieval was complete: the same
+        # rule the segment writer applies, so a partial retrieval never yields a complete negative.
+        unretrieved = [cell for cell in cells
+                       if cell["state"] == "not_applicable_no_events" and not cell_complete(cell)]
+        if unretrieved:
+            targets = ", ".join(sorted({cell["target"] for cell in unretrieved}))
+            reasons.append(f"retrieval was partial in {len(unretrieved)} cell(s) of inapplicable target(s) "
+                           f"{targets}")
         if playbook.direction_dependent and self.direction_failure:
             reasons.append(self.direction_failure)
         if playbook.spec.measure == "rate":
