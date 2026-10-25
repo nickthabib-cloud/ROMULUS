@@ -136,6 +136,8 @@ from tests import throughput_fixture as tf
 # typed event id; candidates, links, tasks and their downstream audit/manifest references change by those identities.
 # The fixture's non-baseline finding claims, lanes, citations and detector decisions are unchanged. Anchors, raw
 # copies, entities, expansion, stats and the empty history/segment tables remain byte-identical.
+# Expansion link accounting is now content-sorted before the raw manifest is emitted, so only the manifest digest
+# changes; the links themselves and their canonical report order are unchanged.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
     "audit": "4ac18411fc75aaea0724492e2bf0b79894c772bb7ec32987b6b7833098cbbf93",
@@ -155,7 +157,7 @@ GOLDEN_STACK = {
     "events": "d4eede2cca8fd1bac673b1abe0aa2327cf7a5a3f90f72683680d2af986679e39",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "e5bd8ec83459a57a14627ad2222f752e4c29e0415beddd54eaa11afd08e1b62f",
-    "manifest": "fbfbe6c5f339ae46fd691ded3a29d3146abdfb0c996ce9e7e42a77b70327333d",
+    "manifest": "94adfc557008bdefd73431ccca205a80662cedc43e12a910c4a459d6ebc64408",
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
     "rule_cells": "17f4760cfde411877bac8e7762ce2555fa52a6aaeb5d2e48beb10b7ce677bafa",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
