@@ -156,6 +156,32 @@ def test_arkime_bad_tcp_flag_counter_is_malformed():
     assert e.get("parse.malformed") == ["tcpflags.syn"]
 
 
+def test_suricata_tcp_directional_flags_and_state_are_typed_without_inference():
+    e = one(eve("tcp-fields", {"event_type": "flow",
+                                "flow": {"bytes_toserver": 120, "bytes_toclient": 80,
+                                         "pkts_toserver": 2, "pkts_toclient": 1, "state": "established"},
+                                "tcp": {"syn": True, "tcp_flags_ts": "02", "tcp_flags_tc": "12",
+                                        "state": "established"}}))
+    assert e.get("tcp.syn") is True
+    assert e.get("tcp.tcp_flags_ts") == "02"
+    assert e.get("tcp.tcp_flags_tc") == "12"
+    assert e.get("tcp.state") == "established"
+    assert e.fields["tcp.tcp_flags_ts"].origin.endswith(".tcp.tcp_flags_ts")
+
+
+def test_suricata_absent_tcp_fields_stay_absent_and_bad_types_are_not_coerced():
+    absent = one(eve("tcp-absent", {"event_type": "flow", "flow": {"state": "closed"}}))
+    assert all(absent.get(name) is None for name in
+               ("tcp.syn", "tcp.tcp_flags_ts", "tcp.tcp_flags_tc", "tcp.state"))
+    malformed = one(eve("tcp-bad", {"event_type": "flow", "flow": {"state": "closed"},
+                                     "tcp": {"syn": 1, "tcp_flags_ts": 2, "tcp_flags_tc": [16], "state": 7}}))
+    assert all(malformed.get(name) is None for name in
+               ("tcp.syn", "tcp.tcp_flags_ts", "tcp.tcp_flags_tc", "tcp.state"))
+    assert malformed.get("parse.malformed") == [
+        "tcp.state", "tcp.syn", "tcp.tcp_flags_tc", "tcp.tcp_flags_ts",
+    ]
+
+
 # ---- Arkime DNS ------------------------------------------------------------------------------------------------
 
 def dns_obj(host, qt="A", status="NOERROR", answers=None):

@@ -72,13 +72,11 @@ EPHEMERAL_FLOOR = 32768
 #   new SYN lands on an older session Arkime picked up mid-stream and never saw close; the rule that reads this treats
 #   records of one connection that disagree about the opener as unknown. A SYN-ACK alone is not taken: it can land on
 #   such a session the same way.
-# - Suricata tracks a TCP session only from its opening SYN while stream.midstream is off (its default), marks the
-#   flow established or closed only for a session it tracked, and records the flow from the side that sent the first
-#   packet. A flow it picked up mid-stream stays 'new'. A sensor run with midstream pickup enabled marks picked-up
-#   sessions established too, and this reading does not hold there.
+# - Suricata's directional TCP flag summaries say which direction carried a SYN. Its aggregate tcp.syn field is
+#   sufficient only when the to-client flags are also present and prove the SYN was not in that direction.
 # Anything else (a session picked up mid-stream, UDP and other connectionless traffic, a record without the fields)
 # leaves the opener unknown.
-OPENED_STATES = frozenset({"established", "closed"})
+TCP_SYN = 0x02
 # States folded at finalize are written out to disk every this many reads.
 FINALIZE_TRIM = 10_000
 
@@ -292,7 +290,7 @@ class FlowView:
     payload: bool | None                # application data both ways; None when the counters are absent
     protocols: frozenset[str] | None    # identified application protocols; None when the sensor recorded no field
     failed: bool                        # Suricata reported that protocol detection failed
-    opened: bool = False                # a typed field shows the source opened the TCP connection (OPENED_STATES)
+    opened: bool = False                # a typed field shows the source opened the TCP connection
     c2s_data: int | None = None         # application bytes the source side sent (Arkime's own count, else estimated)
     s2c_data: int | None = None         # ... and the destination side; None when the counters are absent
 
@@ -324,6 +322,27 @@ def _framed_payload(transport, c2s_bytes, c2s_packets, s2c_bytes, s2c_packets) -
     header = HEADER_BYTES.get(transport, DEFAULT_HEADER_BYTES)
     return (c2s_bytes - header * c2s_packets >= MIN_PAYLOAD_BYTES
             and s2c_bytes - header * s2c_packets >= MIN_PAYLOAD_BYTES)
+
+
+def _tcp_flags(value) -> int | None:
+    """A Suricata directional TCP flag bitmask, recorded as hexadecimal text."""
+    if not isinstance(value, str) or not value or len(value) > 2:
+        return None
+    try:
+        return int(value, 16)
+    except ValueError:
+        return None
+
+
+def suricata_source_opened(event: TypedEvent) -> bool:
+    """Whether Suricata directly shows that its source sent a SYN toward its server side."""
+    if event.get("network.transport") != "tcp":
+        return False
+    to_server = _tcp_flags(event.get("tcp.tcp_flags_ts"))
+    if to_server is not None:
+        return bool(to_server & TCP_SYN)
+    to_client = _tcp_flags(event.get("tcp.tcp_flags_tc"))
+    return event.get("tcp.syn") is True and to_client is not None and not (to_client & TCP_SYN)
 
 
 def flow_view(event: TypedEvent, kind: str) -> FlowView | None:
@@ -374,8 +393,7 @@ def flow_view(event: TypedEvent, kind: str) -> FlowView | None:
         name = canonical_protocol(app) if isinstance(app, str) else ""
         failed = name == "failed"
         protocols = frozenset() if name in UNIDENTIFIED_NAMES else frozenset({name})
-        state = event.get("flow.state")
-        opened = transport == "tcp" and isinstance(state, str) and state in OPENED_STATES
+        opened = suricata_source_opened(event)
     return FlowView(sensor, src, sport, dst, dport, transport, start, end, timed, c2s, s2c, s2c_packets, payload,
                     protocols, failed, opened, data_c, data_s)
 
@@ -1488,14 +1506,13 @@ SERVER_SHAPED = "server-shaped"     # opener not recorded; external port ephemer
 UNSHAPED = "unshaped"               # opener not recorded; both ports ephemeral or both below that range
 PORTLESS = "portless"               # opener not recorded, on a transport without ports
 COUNTED = frozenset({OPENED_INSIDE, CLIENT_SHAPED, UNSHAPED, PORTLESS})
-# Connections not read as uploads, as the window cell names them: served and shown by an Arkime SYN (informational),
-# served and shown only by a Suricata flow state, and server-shaped (both partial: each can be wrong).
+# Connections not read as uploads, as the window cell names them: served and shown by a recorded SYN (informational),
+# and server-shaped (partial because the port shape can be wrong).
 SERVED_ARKIME, SERVED_SURICATA = "served (Arkime)", "served (Suricata only)"
 NOT_READ_LISTED = 10                # qualifying server-shaped pairs listed by name on the window cell
 # The typed fact that showed an opener (bit flags on _Connection.opened_inside / opened_outside).
-ARKIME_SYN, SURICATA_STATE = 1, 2
-SURICATA_STATE_NOTE = ("a Suricata flow in state established or closed, which shows a tracked handshake on a sensor "
-                       "that does not pick up mid-stream")
+ARKIME_SYN, SURICATA_SYN = 1, 2
+SURICATA_SYN_NOTE = "a Suricata directional TCP flag summary that records a SYN toward the server"
 UNKNOWN_REASONS = {"tcp": "TCP with no record of the opening (picked up mid-stream, or opened before the hunt window)",
                    "udp": "UDP, which has no opening to record", "sctp": "SCTP, whose opening no typed field shows",
                    "disagree": "TCP whose records disagree about which side opened it"}
@@ -1505,7 +1522,7 @@ UNKNOWN_REASONS = {"tcp": "TCP with no record of the opening (picked up mid-stre
 class _Connection:
     """One connection between an internal and an external address, from every record of it."""
     tallies: dict = field(default_factory=dict)     # sensor -> [bytes the internal address sent, received, records]
-    opened_inside: int = 0                          # the facts (ARKIME_SYN, SURICATA_STATE) showing the internal
+    opened_inside: int = 0                          # the facts (ARKIME_SYN, SURICATA_SYN) showing the internal
     opened_outside: int = 0                         # ... or the external address opened it
     first: float = float("inf")
     last: float = float("-inf")
@@ -1559,7 +1576,7 @@ class _PairTotals:
     inn: int = 0
     records: Counter = field(default_factory=Counter)
     readings: Counter = field(default_factory=Counter)      # counted connections per reading
-    suricata_only: int = 0                                  # opened inside, shown only by a Suricata flow state
+    suricata_only: int = 0                                  # opened inside, shown only by a Suricata SYN fact
     unknown: dict = field(default_factory=dict)             # reading -> Counter of why the opener is unknown
     inside_ports: dict = field(default_factory=dict)        # reading -> Counter of the internal address's ports
     outside_ports: dict = field(default_factory=dict)       # reading -> Counter of the external address's ports
@@ -1593,7 +1610,7 @@ class _PairTotals:
             self.records[name] += tally[2]
         self.readings[reading] += 1
         if reading == OPENED_INSIDE:
-            self.suricata_only += conn.opened_inside == SURICATA_STATE
+            self.suricata_only += conn.opened_inside == SURICATA_SYN
         else:
             why = "disagree" if conn.opened_inside else transport
             self.unknown.setdefault(reading, Counter())[why] += 1
@@ -1629,7 +1646,7 @@ class OutboundVolumeAsymmetry(_FlowRule):
     """An internal address sent far more to one external address than it received back, in absolute and relative
     terms, with the source's own outbound total as the denominator."""
     id = "net.outbound_volume_asymmetry"
-    version = "4"
+    version = "5"
     title = "Internal address sent much more data to one external address than it received"
     severity, lane = "high", "lead"
     attack = ("T1041", "T1048", "T1567")
@@ -1640,8 +1657,7 @@ class OutboundVolumeAsymmetry(_FlowRule):
         "internal server answering), and connections whose opener is not recorded but whose ports have an internal "
         "server's shape, are not read as uploads; those carrying data from the internal address are named on the "
         "window cell with their bytes, and server-shaped pairs that met the upload thresholds are listed. A Suricata "
-        "flow state counts as a recorded opening only on a sensor that does not pick up mid-stream (stream.midstream "
-        "off, its default); on one that does, such a connection may have been opened from inside. Transfers outside "
+        "opening counts only when its directional TCP flags record a SYN toward the server. Transfers outside "
         "that view are not seen, so the absence of a match proves nothing")
     benign = ("backups and cloud file synchronisation", "log and telemetry shipping", "video and media uploads",
               "software publishing to external repositories",
@@ -1661,16 +1677,15 @@ class OutboundVolumeAsymmetry(_FlowRule):
                     "connection, whether a recorded TCP opening shows the internal address opened it, or that the "
                     "opener is not recorded and what the ports show (a client's shape, or no shape, in which case "
                     "the bytes may be a server's answers)",
-        "telemetry": "Suricata EVE flow records (flow.bytes_toserver, flow.bytes_toclient, flow.state) and Arkime "
+        "telemetry": "Suricata EVE flow records (flow.bytes_toserver, flow.bytes_toclient, tcp.tcp_flags_ts, "
+                     "tcp.tcp_flags_tc, tcp.syn) and Arkime "
                      "sessions (source.bytes, destination.bytes, tcp.flags.syn): present in the lab profile on every "
-                     "record (Arkime counts SYNs on every TCP session; lab Suricata flows it picked up mid-stream "
-                     "carry state 'new'). Suricata netflow records are not read",
+                     "record (Arkime counts SYNs on every TCP session). Suricata netflow records are not read",
         "fidelity": "typed per-side byte counters (headers included), read for each address whichever side the "
                     "sensor recorded first; each connection is counted once, from the sensor that recorded the most "
                     "bytes for it. The opener is stated only from a recorded TCP opening: an Arkime session that "
-                    "counted a SYN (Arkime orients such a session by it), or a Suricata flow its TCP engine tracked "
-                    "from the handshake (state established or closed; valid while the sensor's stream.midstream is "
-                    "off, its default, and the claim says so where it is the only fact). Without one the claim says "
+                    "counted a SYN (Arkime orients such a session by it), or a Suricata flow whose directional TCP "
+                    "flags record a SYN toward the server. Without one the claim says "
                     "the opener is unknown and why. Volume and ratio are a deviation, not proof of theft",
         "benign_and_cost": "backups, cloud sync, log shipping, media uploads (the lab carries CCTV traffic). A "
                            "connection an outside address is shown to have opened to an internal server is not read "
@@ -1680,7 +1695,7 @@ class OutboundVolumeAsymmetry(_FlowRule):
                            "data (at least 64 bytes beyond packet headers, so a SYN-ACK or reset to a scanner is not "
                            "one) are named on the window cell with their count, the bytes and the largest pair: as an "
                            "informational line when an Arkime SYN shows the outside opener, and as a partial cell when "
-                           "only a Suricata flow state shows it or only the port shape does; server-shaped pairs that "
+                           "only the port shape shows it; server-shaped pairs that "
                            "met the upload thresholds are listed by name (ten, then how many more). Connections with no "
                            "recorded opener and no clear port shape (both ports ephemeral or both below that range, "
                            "or no ports at all) are counted and worded as possibly a server's answers. One item per "
@@ -1691,8 +1706,7 @@ class OutboundVolumeAsymmetry(_FlowRule):
         "adds": "no other rule measures byte asymmetry",
         "research_basis": "ATT&CK Enterprise 20.0 T1041, T1048 and T1567 (detection: network traffic flow, "
                           "uncommon data flows and outbound volume relative to inbound); Arkime capture/parsers/tcp.c "
-                          "(session orientation and SYN counts) and Suricata's stream engine documentation "
-                          "(stream.midstream) for the opener",
+                          "(session orientation and SYN counts) and Suricata's EVE TCP directional flag fields",
         "retrieval": "the sweep retrieves every record of the network flow datasets and the Arkime session index in "
                      "each partition (dataset filter only), a superset of what this evaluator reads",
         "lanes": "lead: large uploads are common and legitimate; severity high because exfiltration, if that is what "
@@ -1744,7 +1758,7 @@ class OutboundVolumeAsymmetry(_FlowRule):
         tally[2] += 1
         tally[3] += sent if data is None else data
         if view.opened:
-            fact = ARKIME_SYN if view.sensor == ARKIME else SURICATA_STATE
+            fact = ARKIME_SYN if view.sensor == ARKIME else SURICATA_SYN
             if inside_first:
                 conn.opened_inside |= fact
             else:
@@ -1838,13 +1852,13 @@ class OutboundVolumeAsymmetry(_FlowRule):
     def _note_not_read(self, not_read: Counter, largest: dict, shaped: list[tuple]) -> None:
         """Name, on the window cell, the connections whose internal-address data was not read as uploads: how many,
         the bytes, and the pair with the most. Served connections an Arkime SYN shows are an informational note; those
-        shown only by a Suricata flow state, and server-shaped ones, make the cell partial (each reading can be wrong),
+        shown by a Suricata directional SYN is informational; server-shaped ones make the cell partial,
         and server-shaped pairs that met the upload thresholds are listed by name."""
         texts = {
             SERVED_ARKIME: "connections an Arkime session shows an external address opened (it counted the SYN), so "
                            "the internal address answered as a server",
             SERVED_SURICATA: f"connections whose only record of the opening, by an external address, is "
-                             f"{SURICATA_STATE_NOTE}, so the internal address answered as a server",
+                             f"{SURICATA_SYN_NOTE}, so the internal address answered as a server",
             SERVER_SHAPED: f"connections whose opener is not recorded, with the internal address on a port below "
                            f"{EPHEMERAL_FLOOR} and the external address on one at or above it (the port shape of an "
                            f"internal server answering an outside client)",
@@ -1865,7 +1879,7 @@ class OutboundVolumeAsymmetry(_FlowRule):
                          f"{self.MIN_OUTBOUND_BYTES // 2**20} MiB sent and at least {self.MIN_RATIO:.0f} times what "
                          f"came back) on these connections and {'was' if qualifying == 1 else 'were'} not read as "
                          f"uploads only because of the port shape: {listed}{more}")
-            if kind == SERVED_ARKIME:
+            if kind in (SERVED_ARKIME, SERVED_SURICATA):
                 self._notes.append(f"not read as uploads (informational): {text} ({count} connection(s))")
             else:
                 self.limits[f"not_read_{kind}"] = _NotRead(text, records=count, hits=1)
@@ -1894,7 +1908,7 @@ class OutboundVolumeAsymmetry(_FlowRule):
             arkime = k - totals.suricata_only
             facts = ([f"Arkime counted the SYN{'' if n == 1 else f' for {arkime}'}"] if arkime else []) + (
                 [(f"{'the only' if n == 1 else f'for {totals.suricata_only} the only'} record of the opening is "
-                 f"{SURICATA_STATE_NOTE}")] if totals.suricata_only else [])
+                 f"{SURICATA_SYN_NOTE}")] if totals.suricata_only else [])
             parts.append(f"A recorded TCP opening shows {src} opened {which(k)}, to server port "
                          f"{_port_list(totals.outside_ports[OPENED_INSIDE])} on {dst} ({'; '.join(facts)}).")
         k = totals.readings[CLIENT_SHAPED]
@@ -1946,7 +1960,8 @@ class OutboundVolumeAsymmetry(_FlowRule):
         cited = next((e for e in evs if e.has("flow.bytes_toserver") or e.has("source.bytes")), evs[0])
         match = Match(self.id, claim, "aggregate_observation", evs,
                       _predicates(cited, ("source.ip", "destination.ip", "flow.bytes_toserver", "flow.bytes_toclient",
-                                          "source.bytes", "destination.bytes", "flow.state", "tcp.flags.syn")),
+                                          "source.bytes", "destination.bytes", "tcp.tcp_flags_ts",
+                                          "tcp.tcp_flags_tc", "tcp.syn", "tcp.flags.syn")),
                       evs[0].ts, self.severity, self.lane, "medium", _entities(evs), group_key=f"{src}|{dst}")
         match.notes.append("ATT&CK context: T1041 / T1048 / T1567 (exfiltration), if the transfer is unauthorized")
         return match

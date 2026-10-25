@@ -1754,6 +1754,18 @@ def normalize_suricata(hit: dict) -> TypedEvent:
         if k in flow:
             f[f"flow.{k}"] = fv(flow[k], f"{o}.flow.{k}")
     bad: list[str] = []
+    tcp = _app_block(eve, "tcp")
+    if tcp is not None:
+        syn = tcp.get("syn")
+        if syn is not None:
+            if isinstance(syn, bool):
+                f["tcp.syn"] = fv(syn, f"{o}.tcp.syn")
+            else:
+                bad.append("tcp.syn")
+        for name in ("tcp_flags_ts", "tcp_flags_tc", "state"):
+            value = _scalar_str(tcp.get(name), f"tcp.{name}", bad)
+            if value is not None:
+                f[f"tcp.{name}"] = fv(value, f"{o}.tcp.{name}")
     caveats: list[str] = []
     d = _app_block(eve, "dns")
     if d is not None:
