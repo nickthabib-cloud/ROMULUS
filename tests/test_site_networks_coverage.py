@@ -79,8 +79,8 @@ def test_each_changed_rule_carries_a_new_version():
     assert versions == {"bl.ext_dest": "1", "net.horizontal_sweep": "6", "net.long_external_connection": "4", "net.beaconing": "5",
                         "net.rare_client_fingerprint": "4", "net.tls_self_signed_certificate_outbound": "4",
                         "net.tls_short_lived_or_new_certificate_outbound": "4",
-                        "host.ssh_login_external_source": "6", "host.interpreter_external_connection": "7",
-                        "corr.process_network_link": "8", "net.outbound_volume_asymmetry": "5"}
+                        "host.ssh_login_external_source": "6", "host.interpreter_external_connection": "8",
+                        "corr.process_network_link": "9", "net.outbound_volume_asymmetry": "5"}
 
 
 def test_bl_ext_dest_requires_a_configured_internal_network():
