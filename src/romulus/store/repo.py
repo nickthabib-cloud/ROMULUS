@@ -1466,35 +1466,47 @@ class Repo:
                     if not reaches:
                         return False
 
-                    # The finding is identical; only its routes differ. Prefer an observed route's unqualified
-                    # claim over inferred wording, then stable ids. Persist every route separately from that
-                    # representative so evaluation order cannot affect the candidate.
-                    representative_reach = min(reaches, key=lambda reach: (
-                        {"observed": 0, "inferred": 1}.get(reach["strength"], 2),
-                        reach["anchor_id"] == row["id"],
-                        reach["anchor_id"], reach["link_id"], reach["link_type"],
-                    ))
-                    incoming_is_representative = (
-                        row.get("source_anchor_id") == representative_reach["anchor_id"]
-                        and row.get("source_link_id") == representative_reach["link_id"]
+                    # The finding has the same raw subject but may have been evaluated through routes with
+                    # different decision strength and wording. Select one complete row; synthesizing a claim
+                    # from one evaluation with gates, entities, or a lane from the other would be false
+                    # provenance. The final content and tie break are independent of arrival order.
+                    coherent_fields = (
+                        "rule_version", "claim", "claim_type", "event_ids", "context_event_ids",
+                        "predicate_fields", "entities", "ts", "severity", "confidence", "lane",
+                        "priority", "priority_reasons", "gate_results", "benign_alternatives",
+                        "next_checks", "group_key", "source_anchor_id", "source_link_id",
                     )
-                    representative = row if incoming_is_representative else before
+
+                    def representative_rank(candidate: dict) -> tuple:
+                        candidate_gates = dict(candidate.get("gate_results") or {})
+                        candidate_reaches = candidate_gates.pop("_context_reaches", [])
+                        route_strength = max(
+                            ({"inferred": 0, "observed": 1}.get(reach.get("strength"), -1)
+                             for reach in candidate_reaches),
+                            default=-1,
+                        )
+                        stable_material = {
+                            field: (candidate_gates if field == "gate_results" else candidate.get(field))
+                            for field in coherent_fields
+                        }
+                        return (
+                            LANE_STRENGTH.get(str(candidate.get("lane")), -1),
+                            SEVERITY_STRENGTH.get(str(candidate.get("severity")), -1),
+                            {"low": 0, "medium": 1, "high": 2}.get(
+                                str(candidate.get("confidence")), -1,
+                            ),
+                            float(candidate.get("priority") or 0),
+                            route_strength,
+                            candidate.get("source_anchor_id") != candidate.get("id"),
+                            json.dumps(stable_material, sort_keys=True, separators=(",", ":"), default=str),
+                        )
+
+                    representative = max((before, row), key=representative_rank)
                     gates = dict(representative["gate_results"] or {})
-                    notes = sorted({
-                        str(note)
-                        for candidate in (before, row)
-                        for note in (candidate["gate_results"] or {}).get("_notes", [])
-                    })
-                    if notes:
-                        gates["_notes"] = notes
                     gates["_context_reaches"] = reaches
                     values = {
-                        "rule_version": representative["rule_version"],
-                        "claim": representative["claim"],
-                        "claim_type": representative["claim_type"],
-                        "gate_results": gates,
-                        "source_anchor_id": representative_reach["anchor_id"],
-                        "source_link_id": representative_reach["link_id"],
+                        field: (gates if field == "gate_results" else representative.get(field))
+                        for field in coherent_fields
                     }
                     changed = (
                         reaches != existing_reaches
@@ -1506,7 +1518,10 @@ class Repo:
                             at=utcnow(), actor="system", action="candidate.merge_expansion_routes",
                             hunt_id=row["hunt_id"], detail={
                                 "candidate_id": row["id"], "routes": reaches,
-                                "representative": representative_reach,
+                                "representative": {
+                                    "anchor_id": representative.get("source_anchor_id"),
+                                    "link_id": representative.get("source_link_id"),
+                                },
                             },
                         ))
                     return False

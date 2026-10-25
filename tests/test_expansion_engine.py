@@ -590,6 +590,79 @@ def test_expansion_deduplicates_a_direct_finding_and_retains_both_routes_determi
     ]
 
 
+def _merge_same_subject_rows(order):
+    repo = repo_with_anchor(candidate_id="F-one")
+    add_anchor(repo, "F-two", "web1", ts=T0 + timedelta(seconds=1))
+    cited = [event(f"same-subject-{index}") for index in range(2)]
+    repo.save_evidence("h1", cited, {}, None)
+    common = {
+        "id": "same-subject-finding", "hunt_id": "h1", "rule_id": "host.same_subject",
+        "rule_version": "1", "claim_type": "aggregate_observation",
+        "event_ids": [item.id for item in cited], "context_event_ids": [],
+        "group_key": "web1|root|203.0.113.9", "source_case_id": None,
+    }
+    inferred = {
+        **common, "claim": "weaker inferred description",
+        "predicate_fields": [{"field": "weak", "value": True, "raw_path": "weak.path"}],
+        "entities": [["host", "weak-host", "host"]], "ts": T0,
+        "severity": "low", "confidence": "low", "lane": "context", "priority": 10.0,
+        "priority_reasons": ["weak priority"],
+        "gate_results": {"quality": "weak", "_notes": ["inferred wording"],
+                         "_context_reaches": [{"anchor_id": "F-one", "link_id": "L-one",
+                                               "link_type": "host_after_anchor",
+                                               "strength": "inferred"}]},
+        "benign_alternatives": ["weak alternative"], "next_checks": ["weak check"],
+        "source_anchor_id": "F-one", "source_link_id": "L-one",
+    }
+    observed = {
+        **common, "rule_version": "2", "claim": "strong observed description",
+        "claim_type": "observed_action",
+        "predicate_fields": [{"field": "strong", "value": True, "raw_path": "strong.path"}],
+        "entities": [["host", "web1", "host"]], "ts": T0 + timedelta(minutes=1),
+        "severity": "medium", "confidence": "high", "lane": "lead", "priority": 30.0,
+        "priority_reasons": ["strong priority"],
+        "gate_results": {"quality": "strong", "_notes": ["observed wording"],
+                         "_context_reaches": [{"anchor_id": "F-two", "link_id": "L-two",
+                                               "link_type": "host_after_anchor",
+                                               "strength": "observed"}]},
+        "benign_alternatives": ["strong alternative"], "next_checks": ["strong check"],
+        "source_anchor_id": "F-two", "source_link_id": "L-two",
+    }
+    rows = {"inferred": inferred, "observed": observed}
+    for name in order:
+        repo.save_candidate(copy.deepcopy(rows[name]))
+    return repo.candidate(common["id"]), observed
+
+
+def test_same_subject_route_merge_keeps_one_coherent_strongest_row_in_either_order():
+    inferred_first, expected = _merge_same_subject_rows(["inferred", "observed"])
+    observed_first, _ = _merge_same_subject_rows(["observed", "inferred"])
+
+    coherent_fields = (
+        "rule_version", "claim", "claim_type", "event_ids", "context_event_ids",
+        "predicate_fields", "entities", "ts", "severity", "confidence", "lane", "priority",
+        "priority_reasons", "benign_alternatives", "next_checks", "group_key",
+        "source_anchor_id", "source_link_id",
+    )
+    assert {field: inferred_first[field] for field in coherent_fields} == {
+        field: observed_first[field] for field in coherent_fields
+    }
+    for field in coherent_fields:
+        if field == "ts":
+            continue
+        assert inferred_first[field] == expected[field]
+    assert inferred_first["ts"].replace(tzinfo=UTC) == expected["ts"]
+    assert inferred_first["gate_results"] == {
+        "quality": "strong", "_notes": ["observed wording"],
+        "_context_reaches": [
+            {"anchor_id": "F-one", "link_id": "L-one", "link_type": "host_after_anchor",
+             "strength": "inferred"},
+            {"anchor_id": "F-two", "link_id": "L-two", "link_type": "host_after_anchor",
+             "strength": "observed"},
+        ],
+    }
+
+
 class _SameGroupDirect(Playbook):
     id = "test.same_group_direct"
     title = "same group direct"
