@@ -26,8 +26,8 @@ from romulus.detect.citing import BoundStage, Ends, bound_note, cite_group, cite
 from romulus.detect.correlation import StageMissing, boot_of, merge_unknown_boot
 from romulus.detect.hijack import CHANGE_WORDS, _own_elevation, _Write, path_key
 from romulus.detect.host import (
-    Ancestor,
     WEB_SERVICE_USERS,
+    Ancestor,
     Lineage,
     ProcessLineage,
     _audit_serial,
