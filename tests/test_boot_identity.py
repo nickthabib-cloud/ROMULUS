@@ -23,6 +23,7 @@ from romulus.detect.lineage import ReverseShellByLineage
 from romulus.evidence.normalize import normalize_hits
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
 from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkWindow
+from tests.lineage_citation_fixture import bind_lineage
 from tests.test_expansion_links import FakePivot
 
 BOOT_A = "0a" * 16
@@ -175,13 +176,16 @@ def exc(exe, pid, ts, *, ppid=None, argv=None, boot=None, **kw):
 
 
 def run(playbook, *partitions):
+    raw = bind_lineage(playbook, [event for partition in partitions for event in partition])
     store = {}
     for part in partitions:
+        playbook.bind_raw({ref.key: raw[ref.key] for event in part for ref in event.raw}, "fixture-target")
         assert playbook.consume(list(part)) == []
         for event in playbook.drain_staged() if playbook.staged else []:
             store[event.id] = event
     if playbook.staged:
         playbook.bind_loader(lambda ids: [store[i] for i in ids if i in store])
+    playbook.bind_raw({})
     return playbook.finalize()
 
 
@@ -219,7 +223,9 @@ def observed_ev(family, ts, *, boot=None, **fields):
     for name in ("process.pid", "process.ppid", "process.executable"):
         if name in event.fields:
             field = event.fields[name]
-            event.fields[name] = fv(field.value, f"{event.id}:event.original#auditd:SYSCALL.{name.split('.')[1]}")
+            native_id = event.raw[0].native_id
+            event.fields[name] = fv(field.value,
+                                    f"{native_id}:event.original#auditd:SYSCALL.{name.split('.')[1]}")
     return event
 
 
@@ -236,21 +242,15 @@ def test_service_manager_ancestry_in_another_boot_never_lowers_a_web_lane():
     forked = observed_ev("process_observed", T0 + timedelta(minutes=5), boot=BOOT_A, process__pid=301,
                          process__ppid=300, process__executable="/usr/lib/systemd/systemd")
     started = exc("/usr/bin/python3", 301, T0 + timedelta(minutes=5, milliseconds=3), ppid=300, boot=BOOT_A)
-    same = InterpreterExternalConnection()
-    same.consume([spawn, manager, forked, started, connect(BOOT_A)])
-    assert same.finalize()[0].proposed_lane == "lead"                              # a daemon of the account
-    other = InterpreterExternalConnection()
-    other.consume([spawn, manager, forked, started, connect(BOOT_B)])
-    assert other.finalize()[0].proposed_lane == "high"                             # pid 300 is another process
+    assert run(InterpreterExternalConnection(), [spawn, manager, forked, started, connect(BOOT_A)])[0].proposed_lane \
+        == "lead"                                                                  # a daemon of the account
+    assert run(InterpreterExternalConnection(), [spawn, manager, forked, started, connect(BOOT_B)])[0].proposed_lane \
+        == "high"                                                                 # pid 300 is another process
     # without the record of pid 301 before its exec, pid 300 (a service manager, which adopts orphans) may have
     # adopted it: unknown, the lane is kept
-    adopted = InterpreterExternalConnection()
-    adopted.consume([spawn, manager, started, connect(BOOT_A)])
-    assert adopted.finalize()[0].proposed_lane == "high"
+    assert run(InterpreterExternalConnection(), [spawn, manager, started, connect(BOOT_A)])[0].proposed_lane == "high"
     # a user's service manager is no proof of a start by pid 1 by itself
-    unproved = InterpreterExternalConnection()
-    unproved.consume([manager, forked, started, connect(BOOT_A)])
-    assert unproved.finalize()[0].proposed_lane == "high"
+    assert run(InterpreterExternalConnection(), [manager, forked, started, connect(BOOT_A)])[0].proposed_lane == "high"
 
 
 # ---------------------------------------------------------------- reverse shell by lineage

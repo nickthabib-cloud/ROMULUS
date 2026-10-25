@@ -497,7 +497,8 @@ class NonRootWriteRootExecutedFile(Playbook):
             series.count_after(state.kernel_writes[-1])
 
     def _exec(self, event: TypedEvent) -> None:
-        self.daemons.observe(event)             # held once, for every rule reading process ancestry
+        self.daemons.observe(event, self.raw_of(event), self.raw_target())
+        # Held once for every rule reading process ancestry; the first observer also records its source pointer.
         argv = event.get("process.argv")
         if not event.get("process.executable") or not isinstance(argv, list) or not argv:
             self.missing_required += 1

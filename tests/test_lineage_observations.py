@@ -22,6 +22,8 @@ from romulus.detect.host import ExecLineage
 from romulus.detect.observed import REPARENT_GAP, Observed, process_view
 from romulus.evidence.normalize import normalize_hits
 from romulus.evidence.typed import RawRef, TypedEvent, fv
+from romulus.hunt.publish import LineageCitationFetcher
+from tests.lineage_citation_fixture import source_copies
 
 HOST = "videoserver"
 EXT = "203.0.113.65"             # stands in for an address outside the site's internal networks
@@ -87,22 +89,44 @@ def normalized(*groups):
     return events, {f"{h['_index']}/{h['_id']}": h["_source"] for h in hits}
 
 
+class _CitationSource:
+    def __init__(self, raw_sources):
+        self.hits = [
+            {"_index": key.split("/", 1)[0], "_id": key.split("/", 1)[1], "_source": source}
+            for key, source in raw_sources.items()
+        ]
+
+    def search(self, _target, body):
+        filters = body["query"]["bool"]["filter"]
+        ids = set(next(item["ids"]["values"] for item in filters if "ids" in item))
+        indices = set(next(item["terms"]["_index"] for item in filters if "terms" in item))
+        return {"hits": {"hits": [
+            hit for hit in self.hits if hit["_id"] in ids and hit["_index"] in indices
+        ]}}
+
+
 def drive(rule, events, raw_sources=None):
     """Consume, stage and finalize the way the sweep does (raw copies bound while the rule reads the batch)."""
     stage = {}
-    rule.bind_raw(raw_sources or {})
+    raw_sources = raw_sources or {}
+    rule.bind_raw(raw_sources, "host-target")
     rule.consume([e for e in events if e.family in rule.families])
     rule.bind_raw({})
     stage.update({e.id: e for e in rule.drain_staged()})
     rule.bind_loader(lambda ids: [stage[i] for i in ids if i in stage])
+    from romulus.detect.host import bind_lineage_citation_loader
+    bind_lineage_citation_loader(
+        [rule], LineageCitationFetcher(_CitationSource(raw_sources), {"host-target": object()}).load,
+    )
     return rule.finalize()
 
 
 def table(events, raw=None) -> PidTable:
     """A lineage over these records (with `raw`, their raw copies, as a sweep hands them over)."""
     pids = PidTable(observing=True)
+    raw = raw or source_copies(events)
     for event in events:
-        pids.add(event, {r.key: raw[r.key] for r in event.raw if r.key in raw} if raw else None)
+        pids.add(event, {r.key: raw[r.key] for r in event.raw if r.key in raw}, "host-target")
     return pids
 
 
@@ -335,6 +359,7 @@ def test_a_refused_observation_makes_every_service_manager_verdict_unknown(tmp_p
     events, raw = lab_zmc()
     first, rest = events[:3], events[3:]
     drive_events = list(first)
+    rule.bind_raw(raw, "host-target")
     rule.consume([e for e in drive_events if e.family in rule.families])
     rule.budget.force_full("the observed states' store is past its floor (test)",
                            lambda account: account.name.endswith("proc_observed"))
@@ -347,6 +372,7 @@ def test_a_refused_observation_makes_every_service_manager_verdict_unknown(tmp_p
     rule = InterpreterExternalConnection()
     rule.spill_dir = tmp_path / "second"
     rule.budget = StateBudget(tmp_path, disk_total=2**40, reserve=0)
+    rule.bind_raw(raw, "host-target")
     rule.consume([e for e in events if e.family in rule.families])
     rule.budget.force_full("the observed states' store is past its floor (test)",
                            lambda account: account.name.endswith("proc_observed"))
@@ -579,9 +605,9 @@ def test_the_network_join_is_not_evaluated_by_a_partition_of_lineage_records_onl
 def test_mission_scale_observations_hold_one_entry_per_change_on_bounded_memory(tmp_path):
     """About 10M syscall records across 5,000 hosts with heavy pid reuse (each host cycles through 400 pids; each
     process makes records under its first parent, may be reparented to pid 1, and its pid is reused by a process with
-    another parent). The store holds exactly one entry per change of state, keeps a lab-sized raw copy for citation
-    only for each process's earliest record, moves cold state to disk under a small memory budget, and every record
-    is handled in bounded time."""
+    another parent). The store holds exactly one entry per change of state, keeps a compact source pointer only for
+    each process's earliest record, moves cold state to disk under a small memory budget, and every record is handled
+    in bounded time."""
     import time
     from types import SimpleNamespace
 
@@ -635,7 +661,7 @@ def test_mission_scale_observations_hold_one_entry_per_change_on_bounded_memory(
     assert cited == processes                                  # one record per process: a reparent cites nothing
     assert lineage.observed.on_disk > 0 and len(lineage.observed.hot) == 0
     entries_bytes, citation_bytes = lineage.observed.disk_bytes, lineage.citations.disk_bytes
-    assert citation_bytes / cited < 800                        # the raw copy only, compressed
+    assert citation_bytes / cited < 180                        # the compact pointer, compressed
     assert elapsed < 1800, elapsed
     print(f"\n{total:,} records, {stored:,} entries ({stored / total:.1%}) in {len(lineage.observed):,} pid keys, "
           f"{cited:,} cited records; entries {entries_bytes / 2**20:.0f} MiB ({entries_bytes / stored:.0f} B per entry "

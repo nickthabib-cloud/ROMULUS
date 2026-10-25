@@ -305,7 +305,7 @@ def lineage_notes(judged: list[Judged]) -> list[str]:
         ancestry = item.ancestry
         if ancestry.execs:
             notes.append(f"lineage of pid {item.pid}: {len(ancestry.execs)} exec record(s) it reads were not kept for "
-                         f"citation (the store of exec records was full); the chain names them by native id")
+                         f"citation; the chain names them by native id")
         if ancestry.verdict == "unknown":
             notes.append(f"lineage of pid {item.pid} not established: {ancestry.why}")
         elif ancestry.verdict == "web_server":
@@ -445,13 +445,18 @@ class PidTable:
                                  citing=observing)
         self.observing = observing
 
-    def add(self, e: TypedEvent, raw: dict[str, dict] | None = None) -> None:
+    def add(
+        self,
+        e: TypedEvent,
+        raw: dict[str, dict] | None = None,
+        source_target: str | None = None,
+    ) -> None:
         """Hold an exec record; with `observing`, also the process state any other audit SYSCALL record shows (its
         raw copies `raw` are kept for citation)."""
         if e.family == "process_exec":
-            self.execs.observe(e, raw)
+            self.execs.observe(e, raw, source_target)
         elif self.observing:
-            self.execs.observe_process(e, raw)
+            self.execs.observe_process(e, raw, source_target)
 
     def trim(self) -> None:
         """Move the least recently used processes beyond the capacity to disk (when a batch ends)."""
@@ -736,7 +741,7 @@ class InterpreterExternalConnection(Playbook):
         self._batch, out = events, []
         for e in events:
             if e.family in LINEAGE_FAMILIES:
-                self.pids.add(e, self.raw_of(e))
+                self.pids.add(e, self.raw_of(e), self.raw_target())
             if e.family != "net_socket" or e.get("socket.syscall") != "connect":
                 continue
             if not e.has("process.executable") or not e.has("destination.ip"):
@@ -1280,7 +1285,7 @@ class ProcessNetworkLink(Playbook):
     def consume(self, events):
         for e in events:
             if e.family in LINEAGE_FAMILIES:
-                self.pids.add(e, self.raw_of(e))
+                self.pids.add(e, self.raw_of(e), self.raw_target())
             if e.id in self._seen:
                 continue                      # re-reading a partition must not count a record twice
             if e.family == "net_socket":

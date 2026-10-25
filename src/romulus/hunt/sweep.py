@@ -16,6 +16,7 @@ from romulus.baseline.spec import KeyContext, exec_serial
 from romulus.detect import netdef
 from romulus.detect.base import Match, Playbook
 from romulus.detect.bounded import StateBudget, StateExhausted, live_stores
+from romulus.detect.host import bind_lineage_citation_loader
 from romulus.detect.netdef import DIRECTION_ASSUMED_REASON
 from romulus.detect.registry import fresh_pack
 from romulus.evidence.normalize import (
@@ -35,7 +36,7 @@ from romulus.evidence.windows_catalog import (
     event_classes_for_families,
     lookup_event_class,
 )
-from romulus.hunt.publish import publish_match
+from romulus.hunt.publish import LineageCitationFetcher, publish_match
 from romulus.hunt.stage import EventStage
 from romulus.site import SiteFacts, absent_site_facts
 from romulus.sources.es import ElasticClient, fetch_limit
@@ -224,6 +225,7 @@ class Sweep:
         # stage volume), and the memory their hot sets share. Read the stage volume's free space before the sweep.
         self.budget = state_budget(settings, stage_dir)
         self.pack: list[Playbook] = fresh_pack()
+        bind_lineage_citation_loader(self.pack, LineageCitationFetcher(client, contracts).load)
         for pb in self.pack:
             pb.spill_dir = stage_dir          # a playbook's on-disk join tables live beside the event stage
             pb.budget = self.budget
@@ -931,7 +933,7 @@ class Sweep:
             # Every rule reads every batch, whatever the state budget: a store in no-growth mode refuses only
             # records that need a new key in it (each rule's own refusal path), and every match that needs no new
             # state still publishes.
-            pb.bind_raw(raw_sources)
+            pb.bind_raw(raw_sources, target)
             try:
                 matches = pb.consume_scoped_partition(scoped_events)
             except StateExhausted as exc:

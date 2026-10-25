@@ -7,6 +7,7 @@ import pytest
 from romulus.detect.correlation import InterpreterExternalConnection, PidTable
 from romulus.detect.host import ProcessLineage
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
+from tests.lineage_citation_fixture import bind_lineage
 
 T0 = datetime(2024, 11, 4, 0, 0, tzinfo=UTC)
 
@@ -71,9 +72,13 @@ def _iec_run(events, capacity, directory):
         rule = InterpreterExternalConnection()
         rule.spill_dir = directory
         stage = {}
+        all_events = [event for batch in events for event in batch]
+        raw = bind_lineage(rule, all_events)
         for batch in events:
+            rule.bind_raw({ref.key: raw[ref.key] for event in batch for ref in event.raw}, "fixture-target")
             rule.consume(batch)
             stage.update({e.id: e for e in rule.drain_staged()})
+        rule.bind_raw({})
         rule.bind_loader(lambda ids: [stage[i] for i in ids if i in stage])
         return [(m.claim, m.proposed_lane, [e.id for e in m.events]) for m in rule.finalize()], rule
     finally:
