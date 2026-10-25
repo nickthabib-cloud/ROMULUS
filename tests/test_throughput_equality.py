@@ -11,6 +11,7 @@ the new digests below with the reason.
 """
 import hashlib
 import json
+import re
 
 import pytest
 
@@ -139,12 +140,12 @@ GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
     "audit": "4ac18411fc75aaea0724492e2bf0b79894c772bb7ec32987b6b7833098cbbf93",
     "baseline_counts": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-    "baseline_hunt_exclusions": "d3577183bfcf871f6712314c68522f64a01515a1e509d00925fcdca6eff143cf",
-    "baseline_observations": "df05e88604c0ac3883a6c0ec9db5e3ff6e4e634068fc4d0bec785a1bbb794799",
+    "baseline_hunt_exclusions": "9b1392a0693934bb7306f23f889b08106d2ebd89d87fa5c048447b2c5f322d8e",
+    "baseline_observations": "18f1d7c4cd7b042e90304af9cead36e9a2529be22f388ae374602f871a62be64",
     "baseline_scope_hours": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     "baseline_segments": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     "baseline_snapshot": "709fbd5828f6e5be380b34f2008f0b3937c4307ebcc33c4c16cdaa2267111068",
-    "baseline_window_counts": "2a91438dfc4a6aa624de8256789a998f6453fc07f9511ff203edfba8ecfd518d",
+    "baseline_window_counts": "74625a07035a319332e70b539a56a3d03dba3bb477db6cbd5dce0e091ef0208e",
     "baseline_window_event_hours": "d7ef5845a973ea1f92116e4c5660593b97316628436bf9ae58cf84af782d8ca4",
     "baseline_window_scope_hours": "b8b7eae859913f58f1fc355a778a3151c7082a1615bd63c6466a85b1ae87d89b",
     "candidates": "b5abecf132a0f5f4be6a541acb6a584f7b206821294991c5ae36ba89d2eb672b",
@@ -159,6 +160,46 @@ GOLDEN_STACK = {
     "rule_cells": "17f4760cfde411877bac8e7762ce2555fa52a6aaeb5d2e48beb10b7ce677bafa",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
     "tasks": "6de107dcab42d125ac48ea0aa135d46c74b431b216979513e4858afc85cbf580",
+}
+# Captured directly from the S7 fixture through _non_baseline_semantic_digests. Typed-event-derived hashes and
+# interchangeable predicate origins are normalized, while every decision, claim, lane, raw citation and gate is
+# checked field by field.
+GOLDEN_NON_BASELINE_SEMANTICS = {
+    "candidates": {
+        "all_fields": "1449f2eda5df5db8bba1f2953ecf743590fbccb5827ae924c4d7ff911e6370cc",
+        "benign_alternatives": "8e3c0bf9bd14733cc2b4a049393aded638eaa0e93632c2c69d1428a52a4cc221",
+        "claim": "94f373eede1b0deee042a316fc9ede39a619bbef58ded217ad94860f9fd4a2b0",
+        "claim_type": "1ccc0da03751218f3bb63463a348cd5519fb63c2eec9e0d2e83259f18bfc6681",
+        "confidence": "307872061aea17d3b0ed62d34865ad350c9b4cb9cc7d2cea041ca39011ee3e7e",
+        "context_event_records": "14e8dd60caac665ccc2c9570d79e5556b3cd929f6d77e471ee65e0ced5529799",
+        "count": 35,
+        "entities": "dfb7f8d1a995807f75365452dae6c80e325d1f2d1ad42f1fd1a2bb1292b98d21",
+        "event_records": "d1e3c446a09e2c4921cc3562b4cfa20f9be678868ba2976a65cd049fdabbae48",
+        "gate_results": "1494f3c1cd4853709e0ccaa599c397076f29a9b8ef2431c339d607cabb57f46e",
+        "group_key": "e568af201841df36a89a8f8cebf9384f4fae5219b5fa742761a17778c24e21db",
+        "lane": "2a992b1fbb25d9d7cddc90e6ada69d30c0eb0e743881c35e567bd8cc08828f3b",
+        "next_checks": "a8069762d98e73840e159485c7fd877c5bc891cb9eab67f139c75af1e1eb979f",
+        "predicate_fields": "578a1d5b70a2fcc8a4cb62c5c02ceb1bdae66cd8c85400a4da6412aa77b70c16",
+        "priority": "aa73edc71e40ea4964645f62817edb7b3e790121d824db413442d99a21c05d5d",
+        "priority_reasons": "b473ae5921bb2f50e3cc347ad18a3a5b6557ecacdaca7568e9f2f10b2fde3a9b",
+        "rule_id": "2ae926e61da026e299be84e4e716e9bd0a33eb9a6ea3c97196c3167fc017a257",
+        "rule_version": "2142bc3ed67292746dfe53ca60a03a13e3c92a2cffc7b02f5a9dbec3f551101f",
+        "severity": "b2e229e267531f35a076f4db58edc48cbea38cce613ae2a6954cb6b1bf5ea20c",
+        "source_presence": "4b20d257ae462d3a6c1af7eeddf340a1558a100d29f517eb7b5c7564fa778d1c",
+        "ts": "d8015c1ff0b135e082a5fef2ab1cb88206470e30beee157a0cfc7790d48b8310",
+    },
+    "rule_cells": {
+        "all_fields": "8e74a064318014defdc8084d3f44c5e64e91f002cd85268146431a9e0bb88f68",
+        "count": 3688,
+        "detail": "3b6af381df806efdc5499095d6bdada58f46a51ad0fe49ef73b7943cf00bd1f7",
+        "evaluated": "9a4cc79e7039a5e5987bfa7865f4e6e792c5b79bc164e5b8d12dd1a0ebfc790a",
+        "matched": "5f86646f1c45362a125a457db638a1bc775450b07628b809bd008c3fd15ee45f",
+        "partition": "b172589e7b406a22e7325bd06a8df239958a812c681c846dc588734b82a04807",
+        "rule_id": "10210f59a0598c51c024391f3880dea1cbbb8b9edb7d9d0236b06f3e2571934c",
+        "rule_version": "4fc681e6e7ff900d86bf15f7eb989457a3daefbcf56649989fae0f1597dd0390",
+        "state": "58b1b96d6f59540c4b4a12550f3aeca9bd5751269e49d4909a1899443f169442",
+        "target": "ab5599793d6b17b874ecfbb346dcffe738e30bcd85366dadcae28ac17c8e2545",
+    },
 }
 GOLDEN_NORMALIZED = {
     "arkime_sessions3-x": "49755f3034ebf83ec012716f283034f38087d5c7f1cabb0df5c1bf9a7db4eb10",
@@ -232,6 +273,112 @@ def _digest(value) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
 
 
+def _raw_event_identity(event_id, events):
+    event = events[event_id]
+    return sorted(event["raw_ids"])
+
+
+def _normalize_detail_citations(value, events, key=""):
+    citation_keys = {
+        "event_id", "event_ids", "evidence_id", "evidence_ids", "first_event_id",
+        "first_event_ids", "anchor_event_id", "anchor_event_ids",
+    }
+    if isinstance(value, dict):
+        return {name: _normalize_detail_citations(nested, events, name) for name, nested in value.items()}
+    if isinstance(value, list):
+        if key in citation_keys:
+            return sorted(_raw_event_identity(item, events) for item in value)
+        return [_normalize_detail_citations(item, events, key) for item in value]
+    if isinstance(value, str) and key in citation_keys:
+        return _raw_event_identity(value, events)
+    return value
+
+
+def _field_digests(rows, fields):
+    def ordered(values):
+        return sorted(values, key=lambda value: json.dumps(value, sort_keys=True, separators=(",", ":"), default=str))
+
+    return {
+        "all_fields": _digest(rows),
+        "count": len(rows),
+        **{field: _digest(ordered([row[field] for row in rows])) for field in fields},
+    }
+
+
+def _semantic_group_key(value):
+    return re.sub(r"(?<=\|lin:)[0-9a-f]+", "<typed-event-identity>", value)
+
+
+def _semantic_gate_results(value):
+    result = {key: nested for key, nested in value.items() if key != "_finalize_digest"}
+    if "_context_reaches" in result:
+        result["_context_reaches"] = sorted(
+            ({"link_type": row["link_type"], "strength": row["strength"]} for row in result["_context_reaches"]),
+            key=lambda row: (row["link_type"], row["strength"]),
+        )
+    return result
+
+
+def _non_baseline_semantic_digests(snapshot):
+    events = {row["id"]: row for row in snapshot["events"]}
+    candidates = []
+    for row in snapshot["candidates"]:
+        if row["rule_id"].startswith("bl."):
+            continue
+        candidates.append({
+            "rule_id": row["rule_id"],
+            "rule_version": row["rule_version"],
+            "ts": row["ts"],
+            "claim": row["claim"],
+            "claim_type": row["claim_type"],
+            "severity": row["severity"],
+            "confidence": row["confidence"],
+            "lane": row["lane"],
+            "priority": row["priority"],
+            "priority_reasons": row["priority_reasons"],
+            # Exact cited raw records are compared separately. Predicate origins may select a different one of
+            # two cited records that carry the same value when typed-event ids are rehashed.
+            "predicate_fields": [
+                {"field": item["field"], "value": item["value"]} for item in row["predicate_fields"]
+            ],
+            "entities": row["entities"],
+            # Context grouping/finalization hashes contain typed-event ids. Preserve their semantic shape and
+            # every gate outcome while excluding those derived identities.
+            "group_key": _semantic_group_key(row["group_key"]),
+            "gate_results": _semantic_gate_results(row["gate_results"]),
+            "benign_alternatives": row["benign_alternatives"],
+            "next_checks": row["next_checks"],
+            "event_records": sorted(_raw_event_identity(item, events) for item in (row["event_ids"] or [])),
+            "context_event_records": sorted(
+                _raw_event_identity(item, events) for item in (row["context_event_ids"] or [])
+            ),
+            "source_presence": {
+                "anchor": row["source_anchor_id"] is not None,
+                "case": row["source_case_id"] is not None,
+                "link": row["source_link_id"] is not None,
+            },
+        })
+    candidates.sort(key=lambda row: json.dumps(row, sort_keys=True, separators=(",", ":"), default=str))
+
+    rule_cells = [{
+        "rule_id": row["rule_id"],
+        "rule_version": row["rule_version"],
+        "target": row["target"],
+        "partition": row["partition"],
+        "state": row["state"],
+        "matched": row["matched"],
+        "evaluated": row["evaluated"],
+        "detail": _normalize_detail_citations(row["detail"], events),
+    } for row in snapshot["rule_cells"] if not row["rule_id"].startswith("bl.")]
+    rule_cells.sort(key=lambda row: (
+        row["rule_id"], row["rule_version"], row["target"], row["partition"],
+    ))
+    return {
+        "candidates": _field_digests(candidates, tuple(candidates[0])),
+        "rule_cells": _field_digests(rule_cells, tuple(rule_cells[0])),
+    }
+
+
 def _normalized(records, boots=None) -> dict:
     events, skips, errors = normalize_hits(records, boots)
     return {"events": [event.model_dump(mode="json") for event in events], "skips": skips, "errors": errors}
@@ -253,6 +400,7 @@ def test_the_sweep_and_expansion_stack_reproduces_the_captured_result(docs, tmp_
     assert snapshot["manifest"]["findings"]
     _assert_every_citation_resolves_with_raw(snapshot)
     assert tf.digests(snapshot) == GOLDEN_STACK
+    assert _non_baseline_semantic_digests(snapshot) == GOLDEN_NON_BASELINE_SEMANTICS
 
 
 def test_normalization_of_every_target_reproduces_the_captured_events(docs):
