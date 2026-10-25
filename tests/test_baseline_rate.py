@@ -597,7 +597,8 @@ def test_many_scopes_over_two_weeks_are_judged_one_scope_at_a_time_with_bounded_
         def rule_cells(self, _hunt_id, *, rule_id=None):
             assert rule_id == "bl.svc_exec_rate"
             return [{
-                "target": "host-index", "partition": window.key(), "state": "evaluated_complete",
+                    "target": "host-index", "partition": window.key(), "state": "evaluated_complete",
+                    "rule_version": "1",
             }]
 
         def baseline_observations_for_spec(self, _hunt_id, _spec_id, _version):
