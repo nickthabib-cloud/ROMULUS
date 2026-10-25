@@ -146,15 +146,14 @@ def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
     candidate_id = decision.candidate_id
     if source_case_id is None and source_anchor_id is not None:
         existing = repo.candidate(candidate_id)
-        same_agent_subject = (
+        same_subject = (
             existing is not None
-            and existing.get("source_case_id") is not None
             and repo.candidate_subject_raw_identity(existing)
             == repo.candidate_subject_raw_identity({
                 "event_ids": event_ids, "context_event_ids": context_event_ids,
             })
         )
-        if not same_agent_subject:
+        if not same_subject:
             candidate_id = expansion_candidate_id(candidate_id, match)
     row = {
         "id": candidate_id,

@@ -636,6 +636,28 @@ def test_cross_anchor_same_group_with_distinct_subjects_stays_separate_and_deter
     assert len({row["id"] for row in forward}) == 2
 
 
+def test_expansion_of_the_same_subject_reuses_an_existing_direct_finding():
+    repo = repo_with_anchor()
+    subject = event("direct-subject", ts=T0 + timedelta(minutes=2), argv=["/usr/bin/cat", "/etc/shadow"])
+    rule = _SameGroupDirect()
+    match = Match(
+        rule.id, "same direct subject", "observed_action", [subject],
+        [pf(subject, "process.executable")], subject.ts, "high", "high", "high",
+        subject.entities(), group_key="shared-subject",
+    )
+    direct = publish_match(repo, "h1", rule, match, None, {})
+
+    duplicate = publish_match(
+        repo, "h1", rule, match, None, {}, source_anchor_id="F-anchor", source_link_id="L-anchor",
+        context_reach={"anchor_id": "F-anchor", "link_id": "L-anchor",
+                       "link_type": "host_after_anchor", "strength": "observed"},
+    )
+
+    stored = [row for row in repo.candidates("h1") if row["rule_id"] == rule.id]
+    assert duplicate is None and len(stored) == 1 and stored[0]["id"] == direct["id"]
+    assert stored[0]["event_ids"] == [subject.id]
+
+
 def test_nested_windows_each_evaluate_the_event_but_publish_one_context_finding():
     repo = repo_with_anchor()
     discovery = event("discovery", ts=T0 + timedelta(minutes=1), argv=["/usr/bin/whoami"])
