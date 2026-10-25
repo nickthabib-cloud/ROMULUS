@@ -467,6 +467,13 @@ class CarryInStore:
         rows = self.repo.baseline_parent_observations(
             self.hunt_id, self.target, host, pid, boot, ts,
         )
+        prior_states = {
+            (row["executable"], row["parent_pid"], row["session"])
+            for row in rows if row["observed_ts"] < ts
+        }
+        if len(prior_states) > 1:
+            return None, (f"lineage ambiguous for pid {pid} on {host}: records at one instant without audit "
+                          "serials to order them show different states")
         observed = [Observed(
             row["observed_ts"].timestamp(), row["serial"], row["executable"], row["parent_pid"],
             row["session"], boot, row["event_id"], row["event_id"],

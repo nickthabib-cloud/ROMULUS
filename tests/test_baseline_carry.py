@@ -201,6 +201,26 @@ def test_observed_parent_same_instant_tie_without_serials_is_unresolved():
     assert resolved.keys == () and "ambiguous" in resolved.reason
 
 
+def test_observed_parent_prior_same_instant_states_require_serial_order_or_stay_ambiguous():
+    _repo, unordered = _store()
+    unordered.observe_observation_rows([
+        _observed(10, 1, "/usr/sbin/nginx"),
+        _observed(10, 1, "/usr/bin/unrelated"),
+    ])
+    child = Pending("host", "boot-a", 10, START + timedelta(seconds=2), "child", "/bin/sh")
+    unresolved = PendingResolver(unordered).resolve(child)
+    assert unresolved.keys == () and "ambiguous" in unresolved.reason
+
+    _repo, ordered = _store()
+    ordered.observe_observation_rows([
+        _observed(10, 1, "/usr/sbin/nginx", serial=100),
+        _observed(10, 1, "/usr/bin/reloaded", serial=101),
+    ])
+    resolved = PendingResolver(ordered).resolve(child)
+    assert resolved.reason is None
+    assert resolved.keys[0].key["parent_executable"] == "/usr/bin/reloaded"
+
+
 @pytest.mark.slow
 def test_ten_million_exec_history_is_bounded_by_live_pids():
     repo, store = _store()

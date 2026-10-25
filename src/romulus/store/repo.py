@@ -2633,10 +2633,31 @@ class Repo:
             table.boot == boot, table.pid == pid,
         )
         with self.engine.connect() as connection:
-            before = connection.execute(
-                select(t.baseline_parent_observation).where(*where, table.observed_ts < at)
-                .order_by(table.observed_ts.desc(), table.event_id.desc()).limit(1),
-            ).mappings().all()
+            latest_before = connection.execute(
+                select(func.max(table.observed_ts)).where(*where, table.observed_ts < at),
+            ).scalar_one_or_none()
+            before = []
+            if latest_before is not None:
+                known = connection.execute(
+                    select(t.baseline_parent_observation).where(
+                        *where, table.observed_ts == latest_before, table.serial.is_not(None),
+                    ).order_by(table.serial.desc(), table.event_id.desc()).limit(1),
+                ).mappings().all()
+                unknown = connection.execute(
+                    select(t.baseline_parent_observation).where(
+                        *where, table.observed_ts == latest_before, table.serial.is_(None),
+                    ).group_by(table.executable, table.parent_pid, table.session)
+                    .order_by(table.executable, table.parent_pid, table.session).limit(2),
+                ).mappings().all()
+                if known:
+                    before.extend(known)
+                    state = tuple(known[0][name] for name in ("executable", "parent_pid", "session"))
+                    before.extend(row for row in unknown if tuple(
+                        row[name] for name in ("executable", "parent_pid", "session")
+                    ) != state)
+                    before = before[:2]
+                else:
+                    before = list(unknown)
             exact = connection.execute(
                 select(t.baseline_parent_observation).where(*where, table.observed_ts == at)
                 .group_by(table.executable, table.parent_pid, table.session, table.serial)
@@ -2646,7 +2667,7 @@ class Repo:
                 select(t.baseline_parent_observation).where(*where, table.observed_ts > at)
                 .order_by(table.observed_ts, table.event_id).limit(1),
             ).mappings().all()
-        return [_with_utc(row, ("observed_ts",)) for row in [*reversed(before), *exact, *after]]
+        return [_with_utc(row, ("observed_ts",)) for row in [*before, *exact, *after]]
 
     def baseline_parent_observation_count(self, hunt_id: str) -> int:
         with self.engine.connect() as connection:
