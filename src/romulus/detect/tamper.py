@@ -393,6 +393,7 @@ class _TamperRule(Playbook):
     anchor_class = "execution"
     process_programs: ClassVar[set[str]] = set()
     process_editors: ClassVar[bool] = False
+    context_families = ("process_observed",)
 
     # Every record the rule may cite is staged, and the rule keeps its own copies on lists that never forget: the
     # HOT newest in memory, the rest on its disk spill. Command matches, unit stop records and audit configuration
@@ -439,11 +440,15 @@ class _TamperRule(Playbook):
         return False
 
     def consume(self, events):
-        order = {"process_exec": 0, "system_state": 1, "service_change": 2, "audit_config": 3}
-        fresh = [e for e in events if e.family in self.families and e.id not in self._seen]
+        order = {"process_observed": 0, "process_exec": 1, "system_state": 2,
+                 "service_change": 3, "audit_config": 4}
+        fresh = [e for e in events if e.family in self.families + self.context_families and e.id not in self._seen]
         self._batch = events
         for e in sorted(fresh, key=lambda x: (x.ts, order.get(x.family, 9), x.id)):
             self._seen.add(e.id)
+            if e.family == "process_observed":
+                self.lineage.observe(e, self.raw_of(e), self.raw_target())
+                continue
             marker = self.markers.observe(e)
             if marker is not None:
                 self._pending.append(marker)
@@ -545,7 +550,7 @@ class _TamperRule(Playbook):
 
 class SecurityOrLoggingServiceStop(_TamperRule):
     id = "host.security_or_logging_service_stop"
-    version = "4"
+    version = "5"
     title = "Logging, audit or security service stopped, disabled or killed (command or service manager record)"
     families = ("process_exec", "service_change", "system_state")
     severity, lane = "high", "high"
@@ -567,7 +572,8 @@ class SecurityOrLoggingServiceStop(_TamperRule):
     card: ClassVar[dict] = {
         "behavior": "a logging, audit or security service or daemon was stopped, disabled, masked or killed, or "
                     "SELinux/AppArmor enforcement was relaxed",
-        "telemetry": "auditd process_exec (process.executable, process.argv, process.pid, process.ppid, "
+        "telemetry": "auditd process_exec and process_observed lineage records (process.executable, process.argv, "
+                     "process.pid, process.ppid, "
                      "process.user): present; audit SERVICE_STOP/SERVICE_START (SERVICE_STOP present in the lab profile) and"
                      "journal systemd unit job records (UNIT, JOB_TYPE, JOB_RESULT or MESSAGE_ID; lab field set "
                      "unverified) as service_change; audit SYSTEM_SHUTDOWN/SYSTEM_RUNLEVEL as system_state",
@@ -930,7 +936,7 @@ def auditctl_requests(args: list[str]) -> list[tuple[str, str, str]]:
 
 class AuditRulesTamper(_TamperRule):
     id = "host.audit_rules_tamper"
-    version = "4"
+    version = "5"
     title = "Audit rules deleted, auditing switched off or audit configuration changed (command or kernel record)"
     families = ("process_exec", "audit_config", "service_change", "system_state")
     severity, lane = "high", "high"
@@ -949,7 +955,8 @@ class AuditRulesTamper(_TamperRule):
     card: ClassVar[dict] = {
         "behavior": "audit rules were deleted, auditing was switched off, the audit daemon was told to stop or "
                     "unregistered, or the audit configuration files were written",
-        "telemetry": "auditd process_exec of auditctl and of write-capable programs (process.argv, "
+        "telemetry": "auditd process_exec of auditctl and write-capable programs, plus process_observed records "
+                     "for lineage (process.argv, "
                      "process.executable, process.pid): present (no auditctl runs in the lab profile); kernel "
                      "CONFIG_CHANGE records as audit_config (audit.config.op/setting/value/old, process.auid, "
                      "process.session_id, process.pid from the SYSCALL companion): typed; the lab profile holds only "
@@ -1384,7 +1391,7 @@ def _history_assignments(words: list[str]) -> list[tuple[str, str, str, str]]:
 
 class LogOrHistoryClearing(_TamperRule):
     id = "host.log_or_history_clearing"
-    version = "4"
+    version = "5"
     title = "Log or shell history deleted, truncated, overwritten or switched off (command or shell text)"
     families = ("process_exec",)
     severity, lane = "high", "high"
@@ -1406,7 +1413,8 @@ class LogOrHistoryClearing(_TamperRule):
         "behavior": "log files under /var/log, login records (wtmp/btmp/lastlog/utmp), the journal, or shell "
                     "history files were deleted, truncated, overwritten, edited in place, moved away or linked to "
                     "/dev/null; the journal was vacuumed; or shell text switched history recording off",
-        "telemetry": "auditd process_exec (process.argv, process.executable, process.cwd, process.pid, "
+        "telemetry": "auditd process_exec and process_observed lineage records (process.argv, process.executable, "
+                     "process.cwd, process.pid, "
                      "process.ppid, process.user): present; lab profile: 0 vacuum, shred or truncate runs on "
                      "/var/log; file-change records are not read by this rule",
         "fidelity": "a command was started on the file, or shell text names the action; the file change itself is "

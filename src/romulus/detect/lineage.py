@@ -201,6 +201,7 @@ class _Hit:
     window: list[_Socket] = field(default_factory=list)   # every external call of the owner in the window
     judged: bool = False                  # joined when the shell was read: the budget had no room to hold it
     unrecorded: bool = False              # the owner's exec was not recorded (the exec store took no new process)
+    lineage_ids: tuple[str, ...] = ()     # process records used to identify the owner and its ancestors
 
     @property
     def helper(self) -> bool:
@@ -236,12 +237,13 @@ class ReverseShellByLineage(Playbook):
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.shell_spawned_by_connected_process"
     anchor_class = "execution"
-    version = "6"
+    version = "7"
     title = "Shell or interpreter executed by a process holding an external connection (reverse shell by lineage)"
     kind = "aggregate"
     staged = True
     claim_type = "correlated_observation"
     families = _FAMILIES
+    context_families = ("process_observed",)
     required_fields = ()
     assures_negative = False
     positive_only_reason = (
@@ -261,7 +263,8 @@ class ReverseShellByLineage(Playbook):
         "behavior": "a shell or interpreter (kernel exe) is executed by a process that, or whose recorded "
                     "ancestor, made a successful external connect() (port not 0) or accepted an external "
                     "connection, after its own latest exec and before its child on the chain was started",
-        "telemetry": "Linux auditd net_socket (socket.syscall connect/accept/accept4, destination.ip/port or "
+        "telemetry": "Linux auditd net_socket and process_observed lineage records (socket.syscall "
+                     "connect/accept/accept4, destination.ip/port or "
                      "source.ip/port, process.pid, process.executable, process.user, outcome, host.boot.id) and "
                      "process_exec (process.executable, process.pid, process.ppid, process.argv), joined by the "
                      "per-host PID table: present in the lab profile. Exec auditing appears to cover euid 0 or "
@@ -301,7 +304,7 @@ class ReverseShellByLineage(Playbook):
 
     def __init__(self):
         super().__init__()
-        self.pids = PidTable(PidTable.CAPACITY, owner=self)
+        self.pids = PidTable(PidTable.CAPACITY, owner=self, observing=True)
         self.shells = SpillList(self, "rs_shells", self.HOT)
         self.sockets = KeyedStore(self, "rs_sockets", self.HOT)         # (host, pid) -> [_Socket]
         self._judged: list[_Hit] = []
@@ -331,11 +334,13 @@ class ReverseShellByLineage(Playbook):
     # ---------------------------------------------------------------- consume
     def consume(self, events):
         for event in events:
-            if event.family not in _FAMILIES or event.id in self._seen:
+            if event.family not in self.families + self.context_families or event.id in self._seen:
                 continue                                # re-reading a partition must not double count
             self._seen.add(event.id)
+            self.pids.add(event, self.raw_of(event), self.raw_target())
+            if event.family == "process_observed":
+                continue
             if event.family == "process_exec":
-                self.pids.add(event)
                 self._consider_shell(event)
             else:
                 self._consider_socket(event)
@@ -433,26 +438,39 @@ class ReverseShellByLineage(Playbook):
         still joins its held sockets in the MAX_GAP before its child, and the finding says its exec was not
         recorded."""
         owners = []
-        incomplete = self.pids.execs.incomplete
-        prior = self.pids.exec_before(shell.host, shell.pid, shell.ts, shell.boot, serial=shell.serial,
-                                      exclude=shell.event_id)
+        incomplete = self.pids.execs.incomplete or self.pids.execs.observed_incomplete
+
+        def process_at(pid, ts, boot, serial, *, exclude=None):
+            view = self.pids.execs.view(shell.host, pid, ts, serial, boot, inclusive=False, exclude=exclude)
+            if view.image is None or any(not entry.cited for entry in view.used):
+                return None
+            ids = [entry.event_id for entry in view.used]
+            for step in (view.named, view.first):
+                if step.kind == "exec" and step.entry.event_id not in ids:
+                    ids.append(step.entry.event_id)
+            return view, tuple(ids)
+
+        prior = process_at(shell.pid, shell.ts, shell.boot, shell.serial, exclude=shell.event_id)
         if prior is not None:
-            owners.append((shell.pid, prior[0], shell.ts, "own process re-exec", False))
+            view, ids = prior
+            owners.append((shell.pid, view.named.ts, shell.ts, "own process re-exec", False, ids))
         elif incomplete:
-            owners.append((shell.pid, shell.ts - MAX_GAP, shell.ts, "own process re-exec", True))
+            owners.append((shell.pid, shell.ts - MAX_GAP, shell.ts, "own process re-exec", True, ()))
         pid, ts, boot, serial, child_ts = shell.ppid, shell.ts, shell.boot, shell.serial, shell.ts
         for _ in range(LINEAGE_DEPTH):
             if not isinstance(pid, int) or pid in (0, 1):
                 break
-            record = self.pids._record(shell.host, pid, ts, boot, serial=serial)
-            if record is None:
+            found = process_at(pid, ts, boot, serial)
+            if found is None:
                 if incomplete:
-                    owners.append((pid, child_ts - MAX_GAP, child_ts, "descendant", True))
+                    owners.append((pid, child_ts - MAX_GAP, child_ts, "descendant", True, ()))
                 break
-            owners.append((pid, record.ts, child_ts, "descendant", False))
-            child_ts = record.ts
-            pid, ts, serial = record.ppid, record.ts, record.serial
-            boot = boot if boot is not None else record.boot
+            view, ids = found
+            owners.append((pid, view.named.ts, child_ts, "descendant", False, ids))
+            first = view.first
+            child_ts = first.ts
+            pid, ts, serial = first.ppid, first.ts, first.serial
+            boot = boot if boot is not None else first.boot
         return owners
 
     def _events(self, ids: list[str]) -> dict[str, TypedEvent]:
@@ -477,7 +495,7 @@ class ReverseShellByLineage(Playbook):
     def _join(self, shell: _Shell) -> list[_Hit]:
         """The shell's hits: one per owner with an external socket call in its window."""
         out = []
-        for owner_pid, start, end, relation, unrecorded in self._owners(shell):
+        for owner_pid, start, end, relation, unrecorded, lineage_ids in self._owners(shell):
             held = self.sockets.get((shell.host, owner_pid)) or self.sockets.peek((shell.host, owner_pid), ())
             window = sorted((s for s in held
                              if start <= s.ts < end and shell.ts - s.ts <= MAX_GAP
@@ -492,8 +510,14 @@ class ReverseShellByLineage(Playbook):
             latest = channels[-1] if channels else window[-1]
             if latest.syscall in ACCEPT_SYSCALLS and latest.exe in SSHD_PATHS:
                 continue                            # the system sshd's accepted login: auth rules cover it
-            out.append(_Hit(shell, latest, owner_pid, relation, shell.ts - latest.ts, window, unrecorded=unrecorded))
+            out.append(_Hit(shell, latest, owner_pid, relation, shell.ts - latest.ts, window,
+                            unrecorded=unrecorded, lineage_ids=lineage_ids))
         return out
+
+    def _lineage_evidence(self, hits: list[_Hit]) -> tuple[list[TypedEvent], dict[str, dict]]:
+        ids = list(dict.fromkeys(event_id for hit in hits for event_id in hit.lineage_ids))
+        events, raw = self.pids.execs.cited(ids)
+        return list(events.values()), raw
 
     def finalize(self):
         groups = KeyedStore(self, "rs_groups", self.HOT)
@@ -619,9 +643,15 @@ class ReverseShellByLineage(Playbook):
                      f"by {MAX_GAP:.0f}s")
         if len(shells) > CITE_PER_GROUP:
             notes.append(f"{len(shells)} shell execs joined; the first {CITE_PER_GROUP} are cited")
-        match = Match(self.id, claim, self.claim_type, cited, preds, cited[0].ts, self.severity, "lead", "medium",
-                      list(dict.fromkeys(entity for e in cited for entity in e.entities())),
-                      group_key=f"{host}|{exe}|helpers")
+        when = cited[0].ts
+        entities = list(dict.fromkeys(entity for e in cited for entity in e.entities()))
+        lineage_events, lineage_raw = self._lineage_evidence(hits)
+        cited = sorted({event.id: event for event in [*cited, *lineage_events]}.values(),
+                       key=lambda event: (event.ts, event.id))
+        match = Match(self.id, claim, self.claim_type, cited, preds, when, self.severity, "lead", "medium",
+                      entities, group_key=f"{host}|{exe}|helpers",
+                      context_ids={event.id for event in lineage_events})
+        match.raw_copies.update(lineage_raw)
         match.notes = notes + _budget_notes(hits)
         return match
 
@@ -693,9 +723,16 @@ class ReverseShellByLineage(Playbook):
                      f"by {MAX_GAP:.0f}s")
         if len(shells) > CITE_PER_GROUP:
             notes.append(f"{len(shells)} shell execs joined; the first {CITE_PER_GROUP} are cited")
-        match = Match(self.id, claim, self.claim_type, cited, preds, cited[0].ts, self.severity, lane,
-                      "high" if lane == "high" else "medium", shell_event.entities(),
-                      group_key=f"{host}|{boot}|{owner_pid}|{peer_ip}")
+        when = cited[0].ts
+        entities = shell_event.entities()
+        lineage_events, lineage_raw = self._lineage_evidence(hits)
+        cited = sorted({event.id: event for event in [*cited, *lineage_events]}.values(),
+                       key=lambda event: (event.ts, event.id))
+        match = Match(self.id, claim, self.claim_type, cited, preds, when, self.severity, lane,
+                      "high" if lane == "high" else "medium", entities,
+                      group_key=f"{host}|{boot}|{owner_pid}|{peer_ip}",
+                      context_ids={event.id for event in lineage_events})
+        match.raw_copies.update(lineage_raw)
         match.notes = notes + _budget_notes(hits)
         return match
 

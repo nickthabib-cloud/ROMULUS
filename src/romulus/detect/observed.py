@@ -79,6 +79,7 @@ class Observed(NamedTuple):
     raw_id: str             # its SYSCALL record's native id
     last: float             # the latest record of this state so far
     cited: bool = True      # its record is held for citation
+    user: str | None = None # account named by the observation, when the audit record carries one
 
 
 def observation(event: TypedEvent) -> tuple[int, Observed, RawRef | None] | None:
@@ -101,8 +102,10 @@ def observation(event: TypedEvent) -> tuple[int, Observed, RawRef | None] | None
     session = event.get("process.session_id")
     boot = event.get("host.boot.id")
     ts = event.ts.timestamp()
+    user = event.get("process.user") or event.get("process.effective_user")
     return pid, Observed(ts, serial, str(exe), ppid, session if isinstance(session, int) else None,
-                         None if boot in (None, "") else str(boot), event.id, native, ts), ref
+                         None if boot in (None, "") else str(boot), event.id, native, ts,
+                         user=str(user) if user not in (None, "") else None), ref
 
 
 def observed_view_id(ref: RawRef) -> str:

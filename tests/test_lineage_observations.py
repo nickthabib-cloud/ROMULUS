@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from romulus.detect.auth import AccountOrGroupChange
 from romulus.detect.bounded import StateBudget
 from romulus.detect.correlation import (
     PROCESSES_JUDGED,
@@ -19,7 +20,10 @@ from romulus.detect.correlation import (
     ProcessNetworkLink,
 )
 from romulus.detect.host import ExecLineage
+from romulus.detect.kernel_files import PersistencePathChange
+from romulus.detect.lineage import ReverseShellByLineage
 from romulus.detect.observed import REPARENT_GAP, Observed, process_view
+from romulus.detect.tamper import SecurityOrLoggingServiceStop
 from romulus.evidence.normalize import normalize_hits
 from romulus.evidence.typed import RawRef, TypedEvent, fv
 from romulus.hunt.publish import LineageCitationFetcher
@@ -110,7 +114,8 @@ def drive(rule, events, raw_sources=None):
     stage = {}
     raw_sources = raw_sources or {}
     rule.bind_raw(raw_sources, "host-target")
-    rule.consume([e for e in events if e.family in rule.families])
+    accepted = set(rule.families) | set(rule.context_families)
+    rule.consume([e for e in events if e.family in accepted])
     rule.bind_raw({})
     stage.update({e.id: e for e in rule.drain_staged()})
     rule.bind_loader(lambda ids: [stage[i] for i in ids if i in stage])
@@ -119,6 +124,98 @@ def drive(rule, events, raw_sources=None):
         [rule], LineageCitationFetcher(_CitationSource(raw_sources), {"host-target": object()}).load,
     )
     return rule.finalize()
+
+
+def test_account_change_uses_a_no_exec_package_parent_and_cites_its_observation():
+    events, raw = normalized(
+        observe(T, 10, 100, 90, "/usr/bin/dpkg", "dpkg"),
+        execd(T + 1, 11, 101, 100, "/usr/sbin/useradd", ["useradd", "svc"]),
+    )
+
+    [match] = drive(AccountOrGroupChange(), events, raw)
+
+    assert match.proposed_lane == "lead" and "under package management" in match.claim
+    assert "o10" in {event.raw[0].native_id for event in match.events}
+    assert any(event.family == "process_observed" and event.id in match.context_ids for event in match.events)
+    assert all(ref.key in match.raw_copies for event in match.events if event.family == "process_observed"
+               for ref in event.raw)
+
+
+def test_tamper_change_uses_a_no_exec_package_parent_and_cites_its_observation():
+    events, raw = normalized(
+        observe(T, 20, 200, 190, "/usr/bin/dpkg", "dpkg"),
+        execd(T + 1, 21, 201, 200, "/usr/bin/systemctl", ["systemctl", "stop", "auditd"]),
+    )
+
+    [match] = drive(SecurityOrLoggingServiceStop(), events, raw)
+
+    assert match.proposed_lane == "lead" and "package management" in match.claim
+    assert "o20" in {event.raw[0].native_id for event in match.events}
+    assert any(event.family == "process_observed" and event.id in match.context_ids for event in match.events)
+
+
+def test_tamper_no_exec_parent_keeps_its_parent_at_fork_after_reparenting():
+    events, raw = normalized(
+        observe(T, 22, 220, 210, "/usr/bin/dpkg", "dpkg"),
+        observe(T + 0.5, 23, 220, 1, "/usr/bin/dpkg", "dpkg"),
+        execd(T + 1, 24, 221, 220, "/usr/bin/systemctl", ["systemctl", "stop", "auditd"]),
+    )
+
+    [match] = drive(SecurityOrLoggingServiceStop(), events, raw)
+
+    assert match.proposed_lane == "lead" and "package management" in match.claim
+    assert "o22" in {event.raw[0].native_id for event in match.events}
+
+
+def test_refused_no_exec_lineage_is_partial_and_never_lowers_tamper(tmp_path):
+    rule = SecurityOrLoggingServiceStop()
+    rule.spill_dir = tmp_path
+    rule.budget = StateBudget(tmp_path, disk_total=2**40, reserve=0)
+    rule.budget.force_full(
+        "the observed states' store is past its floor (test)",
+        lambda account: account.name.endswith("proc_observed"),
+    )
+    events, raw = normalized(
+        observe(T, 25, 250, 240, "/usr/bin/dpkg", "dpkg"),
+        execd(T + 1, 26, 251, 250, "/usr/bin/systemctl", ["systemctl", "stop", "auditd"]),
+    )
+
+    [match] = drive(rule, events, raw)
+
+    assert match.proposed_lane == "high" and "package management" not in match.claim
+    assert "lineage_observed" in rule.limits
+
+
+def test_reverse_shell_walks_a_no_exec_owner_and_cites_its_observation():
+    events, raw = normalized(
+        observe(T, 30, 300, 290, "/usr/bin/python3", "python3", "33", "www-data"),
+        connect(T + 1, 31, 300, 290, "/usr/bin/python3", "python3", success="yes", exit_code="0"),
+        execd(T + 2, 32, 301, 300, "/usr/bin/dash", ["sh"], "33", "www-data"),
+    )
+
+    [match] = drive(ReverseShellByLineage(), events, raw)
+
+    assert match.proposed_lane == "high" and "descendant" in match.claim
+    assert "o30" in {event.raw[0].native_id for event in match.events}
+    assert any(event.family == "process_observed" and event.id in match.context_ids for event in match.events)
+
+
+def test_persistence_change_uses_a_no_exec_package_parent_and_cites_its_observation():
+    from tests.lineage_citation_fixture import source_copies
+    from tests.test_kernel_files import change
+
+    observed, raw = normalized(observe(T, 40, 400, 390, "/usr/bin/dpkg", "dpkg"))
+    changed = change(
+        "/etc/cron.d/pkg", ts=datetime.fromtimestamp(T + 1, UTC), uid="0",
+        exe="/usr/bin/cp", pid=401, ppid=400, host=HOST,
+    )
+    raw.update(source_copies([changed]))
+
+    [match] = drive(PersistencePathChange(), [*observed, changed], raw)
+
+    assert match.proposed_lane == "lead" and match.group_key.endswith("|package:dpkg")
+    assert "o40" in {event.raw[0].native_id for event in match.events}
+    assert any(event.family == "process_observed" and event.id in match.context_ids for event in match.events)
 
 
 def table(events, raw=None) -> PidTable:

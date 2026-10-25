@@ -23,12 +23,12 @@ from romulus.detect.bounded import (
     StateExhausted,
 )
 from romulus.detect.citing import BoundStage, Ends, bound_note, cite_group, cited_phrase
-from romulus.detect.correlation import StageMissing, boot_of, boots_conflict, merge_unknown_boot
+from romulus.detect.correlation import StageMissing, boot_of, merge_unknown_boot
 from romulus.detect.hijack import CHANGE_WORDS, _own_elevation, _Write, path_key
 from romulus.detect.host import (
     WEB_SERVICE_USERS,
-    ExecLineage,
-    ExecRecord,
+    Lineage,
+    ProcessLineage,
     _audit_serial,
     add_unheld,
     alone,
@@ -604,19 +604,21 @@ class _Change:
     tty: str | None
     outcome: Outcome
     serial: int | None = None   # the record's audit serial: orders it among its parent's execs at one instant
+    lineage: Lineage | None = None
 
 
 class PersistencePathChange(Playbook):
     os_families = ("linux",)
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.persistence_path_change"
-    version = "6"
+    version = "7"
     title = "Kernel-recorded change to a file that a scheduler, init, the login path or the loader acts on"
     anchor_class = "persistence"
     kind = "aggregate"
     staged = True
     claim_type = "aggregate_observation"
     families = ("file_change", "process_exec")
+    context_families = ("process_observed",)
     required_fields = ("file.path", "process.uid")
     assures_negative = False
     positive_only_reason = (
@@ -640,7 +642,8 @@ class PersistencePathChange(Playbook):
                     "configuration and modules, the dynamic linker preload and search path, authorized_keys, "
                     "sudoers, login message scripts, udev rules, module load lists, autostart entries, sshd "
                     "configuration",
-        "telemetry": "Linux auditd SYSCALL+PATH(+CWD) of file-changing calls as file_change: file.path, "
+        "telemetry": "Linux auditd SYSCALL+PATH(+CWD) of file-changing calls as file_change, plus process_exec "
+                     "and process_observed records for package lineage: file.path, "
                      "file.change, file.nametype, process.uid, process.user, process.auid, process.tty, "
                      "process.pid, process.ppid, process.executable; process_exec for the package-manager "
                      "lineage. Coverage is watch-scoped: only locations the host's audit rules watch produce "
@@ -680,7 +683,8 @@ class PersistencePathChange(Playbook):
         self.changes = SpillList(self, "persistence_changes", self.HOT)
         # exec records per (host, pid), read for the writer's lineage: the hunt's one exec store in a sweep
         # (`share_lineage`), the most recent in memory, the rest on disk
-        self.execs = ExecLineage(self, self.EXEC_CAPACITY)
+        self.lineage = ProcessLineage(self)
+        self.execs = self.lineage.execs       # compatibility alias; share_lineage replaces both with one store
         self._alone: list[Match] = []   # changes published on their own (the budget refused holding them)
 
     def drain_staged(self) -> list[TypedEvent]:
@@ -691,23 +695,24 @@ class PersistencePathChange(Playbook):
         return []
 
     def consume(self, events):
-        fresh = [e for e in events if e.family in self.families and e.id not in self._seen]
+        fresh = [e for e in events if e.family in self.families + self.context_families and e.id not in self._seen]
         self._batch = events
         for event in sorted(fresh, key=lambda e: (e.ts, e.id)):
             self._seen.add(event.id)
-            if event.family == "process_exec":
+            if event.family in {"process_exec", "process_observed"}:
                 self._exec(event)
             else:
+                self.lineage.observe(event, self.raw_of(event), self.raw_target())
                 self._change(event)
         self.changes.trim()
-        self.execs.trim()
+        self.lineage.trim()
         self._batch = None
         out, self._alone = self._alone, []
         return out
 
     def _exec(self, event: TypedEvent) -> None:
-        """Process lineage only: the exec record is held (once) in the exec store."""
-        self.execs.observe(event, self.raw_of(event), self.raw_target())
+        """Process lineage only: hold an exec or other audit observation once in the shared lineage store."""
+        self.lineage.observe(event, self.raw_of(event), self.raw_target())
 
     def _change(self, event: TypedEvent) -> None:
         path, uid = event.get("file.path"), _str(event.get("process.uid"))
@@ -755,28 +760,18 @@ class PersistencePathChange(Playbook):
 
     # ---------------------------------------------------------------- finalize
     def _manager(self, change: _Change) -> str | None:
-        """The package manager in the writer's kernel-recorded lineage (its own executable, then parents)."""
-        exe, ppid, ts, boot, serial = change.exe, change.ppid, change.ts, change.boot, change.serial
-        for _ in range(LINEAGE_DEPTH):
-            name = posixpath.basename(exe)
-            if name in PACKAGE_MANAGERS and exe.startswith(_SYSTEM_EXE_DIRS):
-                return name
-            if not isinstance(ppid, int) or ppid <= 1:
-                return None
-            parent = self._parent(change.host, ppid, ts, serial)
-            if parent is None or boots_conflict(boot, parent.boot):
-                return None
-            ts, ppid, exe, parent_boot, serial = parent.ts, parent.ppid, parent.exe, parent.boot, parent.serial
-            boot = boot if boot is not None else parent_boot
-        return None
+        """The package manager in the writer's observation-aware, parent-at-fork process lineage."""
+        [event] = self._events([change.event_id]).values()
+        change.lineage = self.lineage.classify(event)
+        if change.lineage.kind != "package" or change.lineage.ancestor is None:
+            return None
+        return change.lineage.ancestor.name
 
-    def _parent(self, host: str, ppid: int, ts: float, serial: int | None = None) -> ExecRecord | None:
-        """The image of `ppid` (its latest exec naming its executable) when its child's record happened at (`ts`,
-        audit `serial`): strictly before it, ordered by serial at one instant; None when none or ambiguous. A change
-        records its host as "" when the record had none; that host's execs are held under None."""
-        found = self.execs.latest(host, ppid, ts, where=_named, serial=serial)
+    def _parent(self, host: str, ppid: int, ts: float, serial: int | None = None):
+        """Compatibility view of the parent's latest exec; package classification itself uses ProcessLineage."""
+        found = self.execs.latest(host, ppid, ts, where=lambda record: bool(record.exe), serial=serial)
         if found is None and host == "":
-            found = self.execs.latest(None, ppid, ts, where=_named, serial=serial)
+            found = self.execs.latest(None, ppid, ts, where=lambda record: bool(record.exe), serial=serial)
         return found
 
     def _events(self, ids: list[str]) -> dict[str, TypedEvent]:
@@ -796,7 +791,7 @@ class PersistencePathChange(Playbook):
             need(groups.setdefault(key, list), self, "the persistence change grouping").append(change)
             if i % self.TRIM_EVERY == self.TRIM_EVERY - 1:
                 groups.trim()
-                self.execs.trim()
+                self.lineage.trim()
         # one process's records whose boot is not recorded stay with it unless the records show a second boot
         keys = groups.keys()
         merged = {**{k: [k] for k in keys if k[0] != "account"},
@@ -965,14 +960,22 @@ class PersistencePathChange(Playbook):
                  f"This is how package installs and upgrades change these files; a malicious or tampered package "
                  f"would change them the same way. The {_tally(cited, 'calls')}.")
         claim += cited_phrase(len(cited), len(items), True)
-        match = Match(self.id, claim, self.claim_type, cited, predicate, cited[0].ts, self.severity, "lead",
-                      "high", cited[0].entities(), group_key=f"{host}|package:{manager}", context_ids=context)
+        when = cited[0].ts
+        entities = cited[0].entities()
+        lineage_events: dict[str, TypedEvent] = {}
+        lineage_raw: dict[str, dict] = {}
+        for lineage in (change.lineage for change in items if change.lineage is not None):
+            _phrase, events, raw = self.lineage.cited_phrase(lineage)
+            lineage_events.update({event.id: event for event in events})
+            lineage_raw.update(raw)
+        cited = sorted({event.id: event for event in [*cited, *lineage_events.values()]}.values(),
+                       key=lambda event: (event.ts, event.id))
+        context.update(lineage_events)
+        match = Match(self.id, claim, self.claim_type, cited, predicate, when, self.severity, "lead",
+                      "high", entities, group_key=f"{host}|package:{manager}", context_ids=context)
+        match.raw_copies.update(lineage_raw)
         match.notes = sorted({c.technique for c in items}) + [f"file: {path}" for path in files]
         return match
-
-
-def _named(record: ExecRecord) -> bool:
-    return bool(record.exe)
 
 
 def _root_session(items: list[_Change]) -> str:

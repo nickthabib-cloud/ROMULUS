@@ -613,7 +613,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-host-account-or-group-change"></a>
 ### `host.account_or_group_change` — Account or group created, deleted or modified (command or account-management audit record)
 
-- Version: `5`; status: `active`
+- Version: `6`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1098`](https://attack.mitre.org/techniques/T1098/), [`T1098.007`](https://attack.mitre.org/techniques/T1098/007/), [`T1136.001`](https://attack.mitre.org/techniques/T1136/001/), [`T1531`](https://attack.mitre.org/techniques/T1531/)
@@ -625,7 +625,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-host-audit-rules-tamper"></a>
 ### `host.audit_rules_tamper` — Audit rules deleted, auditing switched off or audit configuration changed (command or kernel record)
 
-- Version: `4`; status: `active`
+- Version: `5`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1685.004`](https://attack.mitre.org/techniques/T1685/004/)
@@ -698,7 +698,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-host-log-or-history-clearing"></a>
 ### `host.log_or_history_clearing` — Log or shell history deleted, truncated, overwritten or switched off (command or shell text)
 
-- Version: `4`; status: `active`
+- Version: `5`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1070.003`](https://attack.mitre.org/techniques/T1070/003/), [`T1685.006`](https://attack.mitre.org/techniques/T1685/006/), [`T1690`](https://attack.mitre.org/techniques/T1690/)
@@ -722,7 +722,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-host-persistence-path-change"></a>
 ### `host.persistence_path_change` — Kernel-recorded change to a file that a scheduler, init, the login path or the loader acts on
 
-- Version: `6`; status: `active`
+- Version: `7`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1037`](https://attack.mitre.org/techniques/T1037/), [`T1037.004`](https://attack.mitre.org/techniques/T1037/004/), [`T1053.002`](https://attack.mitre.org/techniques/T1053/002/), [`T1053.003`](https://attack.mitre.org/techniques/T1053/003/), [`T1098.004`](https://attack.mitre.org/techniques/T1098/004/), [`T1543.002`](https://attack.mitre.org/techniques/T1543/002/), [`T1546.004`](https://attack.mitre.org/techniques/T1546/004/), [`T1546.017`](https://attack.mitre.org/techniques/T1546/017/), [`T1547.006`](https://attack.mitre.org/techniques/T1547/006/), [`T1547.013`](https://attack.mitre.org/techniques/T1547/013/), [`T1548.003`](https://attack.mitre.org/techniques/T1548/003/), [`T1556.003`](https://attack.mitre.org/techniques/T1556/003/), [`T1574.006`](https://attack.mitre.org/techniques/T1574/006/)
@@ -766,7 +766,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-host-security-or-logging-service-stop"></a>
 ### `host.security_or_logging_service_stop` — Logging, audit or security service stopped, disabled or killed (command or service manager record)
 
-- Version: `4`; status: `active`
+- Version: `5`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1685`](https://attack.mitre.org/techniques/T1685/), [`T1685.004`](https://attack.mitre.org/techniques/T1685/004/)
@@ -778,7 +778,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-host-shell-spawned-by-connected-process"></a>
 ### `host.shell_spawned_by_connected_process` — Shell or interpreter executed by a process holding an external connection (reverse shell by lineage)
 
-- Version: `6`; status: `active`
+- Version: `7`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `critical`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1059.004`](https://attack.mitre.org/techniques/T1059/004/), [`T1059.006`](https://attack.mitre.org/techniques/T1059/006/), [`T1071`](https://attack.mitre.org/techniques/T1071/), [`T1095`](https://attack.mitre.org/techniques/T1095/)
