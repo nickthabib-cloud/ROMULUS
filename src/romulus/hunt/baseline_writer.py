@@ -221,6 +221,10 @@ def _write_target(repo: Repo, hunt_id: str, spec, target: str, *, site: str,
             cell_span[0] < span[0] < cell_span[1] for cell_span in spans.values()
     ):
         return "a deduplicated window cell straddles the retained whole-hour span", 0, 0.0
+    if spec.deduplicates_records and repo.baseline_window_dedup_bucket_spans_cells(
+            hunt_id, spec.id, spec.version, target, span
+    ):
+        return "a deduplicated bucket spans multiple window cells", 0, 0.0
     if span != window and repo.baseline_window_has_unplaced_counts(
             hunt_id, spec.id, spec.version, target
     ):

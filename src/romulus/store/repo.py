@@ -3204,6 +3204,25 @@ class Repo:
         with self.engine.connect() as connection:
             return bool(connection.execute(query).scalar_one())
 
+    def baseline_window_dedup_bucket_spans_cells(self, hunt_id: str, spec_id: str,
+                                                 spec_version: str, target: str,
+                                                 span: tuple[datetime, datetime]) -> bool:
+        """Whether one counted key/bucket is distributed across cells whose dedup sets were independent."""
+        table = t.baseline_window_count.c
+        start, end = _utc(span[0], "dedup span start"), _utc(span[1], "dedup span end")
+        query = (select(table.scope_kind).where(
+            table.hunt_id == hunt_id, table.spec_id == spec_id,
+            table.spec_version == spec_version, table.target == target,
+            or_(
+                and_(table.material_hour.is_not(None),
+                     table.material_hour >= start, table.material_hour < end),
+                and_(table.material_hour.is_(None), table.first_ts >= start, table.last_ts < end),
+            ),
+        ).group_by(table.scope_kind, table.scope, table.key_digest, table.bucket)
+            .having(func.count(func.distinct(table.partition)) > 1).limit(1))
+        with self.engine.connect() as connection:
+            return connection.execute(query).first() is not None
+
     def baseline_window_merged_counts(self, hunt_id: str, spec_id: str, target: str, *,
                                       spec_version: str | None = None,
                                       span: tuple[datetime, datetime] | None = None,

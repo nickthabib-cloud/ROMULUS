@@ -644,6 +644,43 @@ def test_deduplicated_token_crossing_a_clipped_left_edge_declines_the_segment():
     assert "deduplicated window cell straddles" in summary["specs"][spec.id]["reason"]
 
 
+def test_deduplicated_bucket_split_across_complete_cells_declines_the_segment():
+    spec = SPEC_BY_ID["bl.ext_dest"]
+    manifest = _manifest()
+    manifest["baseline"]["specs"] = [
+        {"id": spec.id, "version": spec.version, "key_version": spec.key_version},
+    ]
+    manifest["internal_networks"] = {"source": "configured", "digest": "network-a"}
+    repo = _repo()
+    repo.create_hunt("hunt-a", manifest, "manifest-a", "test")
+
+    def dns(event_id: str, minute: int, role: str) -> TypedEvent:
+        answer = role == "answer"
+        return TypedEvent(
+            id=event_id, family="dns_query", ts=START + timedelta(minutes=minute), host="sensor",
+            fields={
+                "dns.type": fv(role, "fixture"), "dns.version": fv(3, "fixture"),
+                "dns.id": fv(7, "fixture"), "dns.question.name": fv("www.example.com", "fixture"),
+                "source.ip": fv("10.0.0.53" if answer else "10.0.0.4", "fixture"),
+                "destination.ip": fv("10.0.0.4" if answer else "10.0.0.53", "fixture"),
+                "source.port": fv(53 if answer else 40000, "fixture"),
+                "destination.port": fv(40000 if answer else 53, "fixture"),
+                "suricata.flow_id": fv(99, "fixture"),
+            },
+            raw=[RawRef(target="host-index", native_id=event_id, digest=f"raw-{event_id}")],
+            normalizer="fixture@1",
+        )
+
+    middle = START + timedelta(hours=1)
+    _cell(repo, [dns("query", 59, "query")], START, middle, spec=spec)
+    _cell(repo, [dns("answer", 61, "answer")], middle, END, spec=spec)
+
+    summary = run_hunt_segment_writer(repo, "hunt-a", hunt_complete=True)
+
+    assert repo.baseline_segments() == []
+    assert "deduplicated bucket spans multiple window cells" in summary["specs"][spec.id]["reason"]
+
+
 def test_legacy_unplaced_count_spanning_a_clipped_edge_declines_the_segment():
     from romulus.store import schema
 
