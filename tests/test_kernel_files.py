@@ -389,7 +389,7 @@ def test_a_missing_staged_root_change_does_not_empty_other_persistence_findings(
 
 
 def test_persistence_package_attribution_corpus_is_unchanged():
-    from romulus.detect.kernel_files import PACKAGE_MANAGERS, _SYSTEM_EXE_DIRS
+    from romulus.detect.kernel_files import _SYSTEM_EXE_DIRS, PACKAGE_MANAGERS
 
     assert PACKAGE_MANAGERS == {
         "dpkg", "apt", "apt-get", "aptitude", "rpm", "rpmdb", "dnf", "dnf-3", "yum", "microdnf",

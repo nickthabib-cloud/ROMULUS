@@ -39,7 +39,16 @@ from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
 from romulus.detect.bounded import HOT_COUNT, KeyedStore, Limit, RecentIds
-from romulus.detect.citing import BoundStage, Ends, Holds, bound_note, cite_with_bounds, cited_phrase, drained_holds, more
+from romulus.detect.citing import (
+    BoundStage,
+    Ends,
+    Holds,
+    bound_note,
+    cite_with_bounds,
+    cited_phrase,
+    drained_holds,
+    more,
+)
 from romulus.detect.correlation import StageMissing, canon_ip, external, routable_remote
 from romulus.detect.netdef import assume_direction
 from romulus.evidence.typed import TypedEvent

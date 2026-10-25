@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+
 from romulus.detect.registry import ALL_PLAYBOOKS
 from romulus.store.db import digest
 from romulus.store.repo import Repo
