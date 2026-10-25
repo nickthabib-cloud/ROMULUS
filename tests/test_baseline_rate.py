@@ -651,3 +651,22 @@ def test_many_scopes_over_two_weeks_are_judged_one_scope_at_a_time_with_bounded_
     assert repo.written == scope_count and repo.max_batch == 1
     assert view.spec_stats["bl.svc_exec_rate"]["within_threshold"] == scope_count
     assert peak < 32 * 1024 * 1024
+
+
+def test_a_release_racing_the_window_read_is_unresolved_never_within_threshold(monkeypatch):
+    """The window failure check saw the material kept; it was released before the window hours were read. The
+    measurements are then unknown, so the verdict is unresolved, never a complete series below threshold."""
+    repo, playbook, view, _scope = _rate_view(history_values={0: 1}, window_counts=(1,))
+    answers = iter([None])
+
+    def released(_hunt_id, _spec_id):
+        return next(answers, "retained window material exceeded the disk budget of 1 bytes")
+
+    monkeypatch.setattr(repo, "baseline_window_released", released)
+
+    matches = list(playbook.judge(view))
+
+    row = next(repo.baseline_observations("hunt"))
+    assert matches == []
+    assert row["verdict"] == "unresolved"
+    assert "window counter material was released before judgement" in row["reason"]

@@ -190,10 +190,14 @@ def resolve_window_exec_pairs(repo: Repo, hunt_id: str, window: Window) -> None:
                 "evaluated_partial" if reasons or not cell["source_complete"] else
                 "evaluated_complete"
             )
+            detail: dict = {"reasons": sorted(set(reasons))}
+            if state == "not_applicable_no_events":
+                # an inapplicable target's empty cell is complete history only if its retrieval was complete
+                detail["retrieval_complete"] = bool(cell["source_complete"]) and not reasons
             repo.save_baseline_window_cell(hunt_id, {
                 "rule_id": spec.id, "version": spec.version, "target": target,
                 "partition": cell["partition"], "state": state, "matched": 0,
-                "evaluated": cell["evaluated"], "detail": {"reasons": sorted(set(reasons))},
+                "evaluated": cell["evaluated"], "detail": detail,
             }, (_pending_observation(hunt_id, spec, row) for row in observations),
                 counts=segment_counter.material_count_rows(), scope_hours=segment_counter.scope_hour_rows(),
                 event_hours=repo.baseline_window_event_hours(
@@ -420,7 +424,15 @@ class SnapshotView:
             spec_version=playbook.spec.version,
             span=(whole_start, whole_end),
         )) if whole_start < whole_end else [])
-        partial_cells = [cell for cell in self.repo.rule_cells(self.hunt_id, rule_id=playbook.id)
+        # A release that raced this read may have left only part of the material: the measurements are then unknown,
+        # never a complete series below threshold.
+        released = self.repo.baseline_window_released(self.hunt_id, playbook.id)
+        if released is not None:
+            measurements = []
+            raced = f"window counter material was released before judgement ({released})"
+            if raced not in (window_failure or ""):
+                window_failure = f"{window_failure}; {raced}" if window_failure else raced
+        partial_cells =[cell for cell in self.repo.rule_cells(self.hunt_id, rule_id=playbook.id)
                          if cell["rule_version"] == playbook.spec.version
                          if not (cell["target"] == "*" and cell["partition"] == "window")
                          and not cell["target"].startswith("baseline:")

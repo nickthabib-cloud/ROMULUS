@@ -292,14 +292,30 @@ def test_0024_marks_existing_segments_as_the_old_events_basis_and_never_selects_
             "created_at) VALUES ('legacy', 'site', 'host', 'bl.exec_path', '1', '1', 'n', '2026-01-01 00:00:00.000000',"
             " '2026-01-01 01:00:00.000000', 'day', 'lookback', 'none', '[]', 0, 9, 'd', 'active', "
             "'2026-01-01 00:00:00.000000')")
+        connection.exec_driver_sql(
+            "INSERT INTO hunt (id, created_at, created_by, manifest, manifest_digest, execution_state) "
+            "VALUES ('h1', '2026-01-01', 'test', '{}', 'd', 'running')")
+        connection.exec_driver_sql(
+            "INSERT INTO baseline_history_cell (hunt_id, target, spec_id, start, \"end\", events_total) VALUES "
+            "('h1', 'host', 'bl.exec_path', '2026-01-01 00:00:00.000000', '2026-01-01 01:00:00.000000', 9)")
         command.upgrade(cfg, "0024")
+        # old segments leave every cover and cut; a history hour staged under the old total is read again
         assert connection.exec_driver_sql(
-            "SELECT events_basis, first_event_hour FROM baseline_segment").all() == [(1, None)]
+            "SELECT events_basis, first_event_hour, status FROM baseline_segment").all() == [(1, None, "stale")]
+        assert connection.exec_driver_sql("SELECT count(*) FROM baseline_history_cell").scalar() == 0
     repo = Repo(engine)
     begin = datetime(2026, 1, 1, tzinfo=UTC)
     common = {"site": "site", "target": "host", "spec_id": "bl.exec_path", "spec_version": "1", "key_version": "1"}
     assert repo.baseline_segments_for_cover(**common, start=begin, end=begin + timedelta(hours=1)) == []
     assert repo.baseline_segment_covers(**common, start=begin, end=begin + timedelta(hours=1)) is False
+    with engine.begin() as connection:
+        connection.exec_driver_sql("UPDATE baseline_segment SET status = 'active'")
+    empty = Repo(make_engine(tmp_path / "empty-cut.db"))
+    migrate(empty.engine)
+    cut = {"site": "site", "targets": ["host"], "specs": [{"id": "bl.exec_path", "version": "1", "key_version": "1"}],
+           "start": begin, "end": begin + timedelta(hours=1)}
+    # even an active old-basis segment is not part of the store cut
+    assert repo.baseline_store_cut_digest(**cut) == empty.baseline_store_cut_digest(**cut)
     with engine.begin() as connection:
         command.downgrade(_alembic_config(connection), "0023")
         assert connection.exec_driver_sql("SELECT id, events_total FROM baseline_segment").all() == [("legacy", 9)]

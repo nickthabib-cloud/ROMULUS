@@ -467,3 +467,135 @@ def test_a_running_hunts_material_is_never_charged_or_released():
 
     assert repo.baseline_window_material_pairs("busy") == [(SPEC.id, "host-index")]
     assert repo.baseline_window_retention("busy") is None
+
+
+# ---- review corrections ------------------------------------------------------------------------------------
+
+def test_budget_eviction_never_releases_a_leased_hunts_material():
+    repo = _repo()
+    _retained_hunt(repo, "busy", 50)
+    run_hunt_segment_writer(repo, "busy", hunt_partial=True, now=datetime(2026, 3, 1, tzinfo=UTC))
+    repo.set_hunt_state("busy", "partial")
+    # resumed: it holds an active lease and its baseline stage may judge from this material
+    repo.claim_hunt("busy", 600, resume=True)
+    _hunt(repo, hours=1, hunt_id="other")
+    _sweep_cell(repo, [_event("o1", "/usr/bin/x", 5)], START, START + H, hunt_id="other")
+    size = repo.baseline_window_material_bytes("other")
+
+    summary = run_hunt_segment_writer(repo, "other", hunt_partial=True, retain_budget_bytes=size + 10,
+                                      now=datetime.now(UTC))
+
+    assert summary["material"]["released_hunts"] == []
+    assert summary["material"]["over_budget"] is True
+    assert repo.baseline_window_material_pairs("busy") == [(SPEC.id, "host-index")]
+    assert repo.baseline_window_release("busy", SPEC.id, "host-index") is None
+
+
+def test_a_hunt_whose_material_alone_exceeds_the_budget_is_released_before_older_material_that_fits():
+    repo = _repo()
+    _retained_hunt(repo, "small", 10)
+    run_hunt_segment_writer(repo, "small", hunt_partial=True, now=datetime(2026, 3, 1, tzinfo=UTC))
+    repo.set_hunt_state("small", "partial")
+    small = repo.baseline_window_material_bytes("small")
+    _retained_hunt(repo, "huge", 400)
+
+    summary = run_hunt_segment_writer(repo, "huge", hunt_partial=True, retain_budget_bytes=2 * small,
+                                      now=datetime(2026, 3, 2, tzinfo=UTC))
+
+    assert summary["material"]["kept"] is False and summary["material"]["released_hunts"] == []
+    assert repo.baseline_window_material_pairs("huge") == []
+    assert repo.baseline_window_material_pairs("small") == [(SPEC.id, "host-index")]
+
+
+def test_a_refused_segment_costs_only_its_run_and_the_material_is_still_settled(monkeypatch):
+    repo = _repo()
+    _hunt(repo, hours=1)
+    _sweep_cell(repo, [_event("a", "/usr/bin/id", 5)], START, START + H)
+
+    def collide(row, **_kwargs):
+        raise ValueError(f"baseline segment {row['id']} exists with different content")
+
+    monkeypatch.setattr(repo, "begin_baseline_segment", collide)
+
+    summary = run_hunt_segment_writer(repo, "hunt-a", hunt_partial=False)
+
+    assert summary["written"] == 0
+    assert "1 hour(s) not written: segment refused" in summary["specs"][SPEC.id]["reason"]
+    assert "exists with different content" in summary["specs"][SPEC.id]["reason"]
+    assert summary["material"]["kept"] is False
+    assert repo.baseline_window_material_pairs("hunt-a") == []
+
+
+def test_an_interrupted_writer_still_charges_its_kept_material_to_the_budget(monkeypatch):
+    import pytest as _pytest
+
+    repo = _repo()
+    _hunt(repo, hours=1)
+    _sweep_cell(repo, [_event("a", "/usr/bin/id", 5)], START, START + H)
+
+    def crash(*_args, **_kwargs):
+        raise RuntimeError("killed mid-write")
+
+    monkeypatch.setattr(repo, "append_baseline_segment_rows", crash)
+
+    with _pytest.raises(RuntimeError):
+        run_hunt_segment_writer(repo, "hunt-a", hunt_partial=False)
+
+    retention = repo.baseline_window_retention("hunt-a")
+    assert retention is not None and retention["bytes"] > 0 and "interrupted" in retention["reason"]
+    assert repo.baseline_window_material_pairs("hunt-a") == [(SPEC.id, "host-index")]
+
+
+def test_an_inapplicable_targets_empty_cell_from_a_partial_retrieval_is_never_written():
+    repo = _repo()
+    _hunt(repo, hours=2)
+    for hour, complete in ((0, True), (1, False)):
+        start = START + hour * H
+        repo.save_baseline_window_cell("hunt-a", {
+            "rule_id": SPEC.id, "version": SPEC.version, "target": "host-index",
+            "partition": f"{start.isoformat()}/{(start + H).isoformat()}", "state": "not_applicable_no_events",
+            "matched": 0, "evaluated": 0,
+            "detail": {"reasons": [] if complete else ["source result cap reached"], "retrieval_complete": complete},
+        }, ())
+
+    summary = run_hunt_segment_writer(repo, "hunt-a", hunt_partial=False)
+
+    assert [(row["start"], row["end"]) for row in repo.baseline_segments(statuses=["active"])] == [
+        (START, START + H)]
+    assert "1 hour(s) not written: an incomplete window cell" in summary["specs"][SPEC.id]["reason"]
+
+
+def test_a_hunt_segment_straddling_history_start_places_its_first_in_plan_record_like_the_lookback():
+    """Records in hours 1 and 4 of a six-hour span; a later hunt's history is hours 2-6. The hunt-derived segment's
+    first record overall (hour 1) is before the history: its first in-plan record is hour 4, as the lookback's."""
+    events = [_event("e1", "/usr/bin/id", 70), _event("e4", "/usr/bin/id", 250)]
+    hunt_repo = _repo()
+    _hunt(hunt_repo, hours=6)
+    for hour in range(6):
+        _sweep_cell(hunt_repo, [event for event in events if START + hour * H <= event.ts < START + (hour + 1) * H],
+                    START + hour * H, START + (hour + 1) * H)
+    run_hunt_segment_writer(hunt_repo, "hunt-a", hunt_partial=False)
+    lookback_repo = _repo()
+    lookback_repo.create_hunt("build", {}, "manifest-build", "test")
+    LookbackWriter(
+        lookback_repo, FakeHistory(events), site="site-a", specs=[SPEC], normalizer="fixture@1",
+        budget=LookbackBudget(queries=50, records=100, seconds=10), now=lambda: START + 6 * H,
+    ).fill(hunt_id="build", targets=["host-index"], start=START + 2 * H, end=START + 6 * H)
+
+    coverages = []
+    for repo in (hunt_repo, lookback_repo):
+        later = _manifest()
+        later["window"] = {"start": (START + 6 * H).isoformat(), "end": (START + 7 * H).isoformat()}
+        repo.create_hunt("later", later, "manifest-later", "test")
+        snapshot = SnapshotPlanner(repo).freeze(
+            hunt_id="later", window_start=START + 6 * H, lookback=4 * H, min_live_hours=1, site="site-a",
+            targets=["host-index"], specs=[SPEC],
+        )
+        coverage = snapshot["coverage"]["host-index|bl.exec_path"]
+        coverages.append({name: coverage[name] for name in ("effective_start", "effective_hours",
+                                                              "absent_before", "status")})
+
+    assert coverages[0] == coverages[1] == {
+        "effective_start": (START + 4 * H).isoformat(), "effective_hours": 2,
+        "absent_before": (START + 4 * H).isoformat(), "status": "shortened",
+    }

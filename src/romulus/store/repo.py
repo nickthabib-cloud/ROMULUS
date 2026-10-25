@@ -211,6 +211,7 @@ _SEGMENT_IDENTITY = tuple(sorted(
 _BUILD_CONTENT = _SEGMENT_IDENTITY
 _COUNT_COLUMNS = tuple(column.name for column in t.baseline_count.columns)
 _HOUR_COLUMNS = tuple(column.name for column in t.baseline_scope_hour.columns)
+_EVENT_HOUR_COLUMNS = ("segment_id", "hour", "events")
 _OBSERVATION_COLUMNS = tuple(column.name for column in t.baseline_observation.columns)
 _OBSERVATION_KEY = ("hunt_id", "spec_id", "spec_version", "scope", "key_digest")
 _OBSERVATION_REQUIRED = frozenset({*_OBSERVATION_KEY, "scope_kind", "key_id", "key", "window_count", "verdict"})
@@ -341,15 +342,50 @@ def _baseline_hour_row(row: dict, segment: dict) -> dict:
     return out
 
 
+def _baseline_event_hour_row(row: dict, segment: dict) -> dict:
+    """One hour of a segment holding its spec's records: an hour of the span and a positive total."""
+    out = {"segment_id": segment["id"], "hour": _utc(row["hour"], "event hour"), "events": row["events"]}
+    if row.get("segment_id", segment["id"]) != segment["id"]:
+        raise ValueError("baseline child row belongs to a different segment")
+    if isinstance(out["events"], bool) or not isinstance(out["events"], int) or out["events"] < 1:
+        raise ValueError("baseline event hour events must be a positive integer")
+    if not _aligned(out["hour"], _BUCKET_WIDTH["hour"]) or not segment["start"] <= out["hour"] < segment["end"]:
+        raise ValueError("baseline event hour must be an hour inside the segment span")
+    return out
+
+
+def _default_event_hours(segment: dict) -> list[dict]:
+    """A caller that states no event hours places every record in the segment's first event hour."""
+    if not segment["events_total"]:
+        return []
+    return [{"hour": segment["first_event_hour"], "events": segment["events_total"]}]
+
+
 def _jsonable(value: Any) -> Any:
     return value.isoformat() if isinstance(value, datetime) else value
+
+
+class _EventTally:
+    """Checks that a segment's event hours sum to its events_total and begin at its first_event_hour."""
+
+    def __init__(self, segment: dict) -> None:
+        self.segment, self.total, self.first = segment, 0, None
+
+    def add(self, row: dict) -> dict:
+        self.total += row["events"]
+        self.first = row["hour"] if self.first is None else min(self.first, row["hour"])
+        return row
+
+    def check(self) -> None:
+        if self.total != self.segment["events_total"] or self.first != self.segment["first_event_hour"]:
+            raise ValueError("baseline segment event hours must sum to events_total and begin at first_event_hour")
 
 
 class _RowsDigest:
     """Order-independent digest of a segment's child rows: a sum of per-row hashes, plus the row counts."""
 
     def __init__(self) -> None:
-        self.total, self.rows = 0, {"count": 0, "hour": 0}
+        self.total, self.rows = 0, {"count": 0, "hour": 0, "event": 0}
 
     def add(self, kind: str, columns: tuple[str, ...], rows: list[dict]) -> None:
         for row in rows:
@@ -359,7 +395,9 @@ class _RowsDigest:
         self.rows[kind] += len(rows)
 
     def hexdigest(self) -> str:
-        return hashlib.sha256(f"{self.rows['count']}|{self.rows['hour']}|{self.total:064x}".encode()).hexdigest()
+        return hashlib.sha256(
+            f"{self.rows['count']}|{self.rows['hour']}|{self.rows['event']}|{self.total:064x}".encode(),
+        ).hexdigest()
 
 
 def _chunks(rows: Iterable[dict], size: int) -> Iterator[list[dict]]:
@@ -2032,7 +2070,8 @@ class Repo:
                                     segment.spec_id == spec["id"],
                                     segment.spec_version == spec["version"],
                                     segment.key_version == spec["key_version"],
-                                    segment.status == "active", segment.start < end,
+                                    segment.status == "active",
+                                    segment.events_basis == BASELINE_EVENTS_BASIS, segment.start < end,
                                     segment.end > start, segment.end <= end)
                              .order_by(segment.id))
                     for segment_id, status in connection.execute(query):
@@ -2044,7 +2083,8 @@ class Repo:
                         hasher.update(b"\n")
         return hasher.hexdigest()
 
-    def save_baseline_segment(self, row: dict, counts: Iterable[dict], scope_hours: Iterable[dict], *,
+    def save_baseline_segment(self, row: dict, counts: Iterable[dict], scope_hours: Iterable[dict],
+                              event_hours: Iterable[dict] | None = None, *,
                               chunk_size: int = BASELINE_CHUNK) -> bool:
         """Insert one immutable, complete segment and its rows in one atomic transaction.
 
@@ -2063,13 +2103,18 @@ class Repo:
                     raise ValueError(f"baseline segment {segment['id']} exists with different content")
             else:
                 c.execute(t.baseline_segment.insert().values(**segment, rows_digest=""))
+            hours = _default_event_hours(segment) if event_hours is None else event_hours
+            tally = _EventTally(segment)
             for table, kind, columns, rows, check in (
                     (t.baseline_count, "count", _COUNT_COLUMNS, counts, _baseline_count_row),
-                    (t.baseline_scope_hour, "hour", _HOUR_COLUMNS, scope_hours, _baseline_hour_row)):
+                    (t.baseline_scope_hour, "hour", _HOUR_COLUMNS, scope_hours, _baseline_hour_row),
+                    (t.baseline_segment_event_hour, "event", _EVENT_HOUR_COLUMNS, hours,
+                     lambda item, segment: tally.add(_baseline_event_hour_row(item, segment)))):
                 for chunk in _chunks((check(item, segment) for item in rows), chunk_size):
                     digest.add(kind, columns, chunk)
                     if existing is None:
                         c.execute(table.insert(), chunk)
+            tally.check()
             if existing is not None:
                 if existing["rows_digest"] != digest.hexdigest():
                     raise ValueError(f"baseline segment {segment['id']} exists with different content")
@@ -2169,7 +2214,7 @@ class Repo:
     def _drop_baseline_children(self, segment_id: str) -> None:
         """Delete one segment's child rows, one short write transaction per bounded chunk."""
         chunk = BASELINE_DELETE_CHUNK
-        for table in (t.baseline_count, t.baseline_scope_hour):
+        for table in (t.baseline_count, t.baseline_scope_hour, t.baseline_segment_event_hour):
             statement = text(
                 f"DELETE FROM {table.name} WHERE rowid IN "
                 f"(SELECT rowid FROM {table.name} WHERE segment_id = :segment_id LIMIT :chunk)"
@@ -2181,7 +2226,7 @@ class Repo:
                     break
 
     def append_baseline_segment_rows(self, segment_id: str, counts: Iterable[dict],
-                                     scope_hours: Iterable[dict], *,
+                                     scope_hours: Iterable[dict], event_hours: Iterable[dict] | None = None, *,
                                      chunk_size: int = BASELINE_CHUNK) -> float:
         """Append validated rows to a building segment, one bounded write transaction per chunk.
 
@@ -2198,9 +2243,13 @@ class Repo:
             raise ValueError(f"baseline segment {segment_id} is not building")
         segment = _with_utc(stored, _SEGMENT_TIMES)
         longest = 0.0
+        hours = _default_event_hours(segment) if event_hours is None else event_hours
+        tally = _EventTally(segment)
         for table, rows, check in (
                 (t.baseline_count, counts, _baseline_count_row),
-                (t.baseline_scope_hour, scope_hours, _baseline_hour_row)):
+                (t.baseline_scope_hour, scope_hours, _baseline_hour_row),
+                (t.baseline_segment_event_hour, hours,
+                 lambda item, segment: tally.add(_baseline_event_hour_row(item, segment)))):
             for chunk in _chunks((check(item, segment) for item in rows), chunk_size):
                 started = time.perf_counter()
                 with write_txn(self.engine) as c:
@@ -2211,6 +2260,7 @@ class Repo:
                         raise ValueError(f"baseline segment {segment_id} stopped building")
                     c.execute(table.insert(), chunk)
                 longest = max(longest, time.perf_counter() - started)
+        tally.check()
         return longest
 
     def finalize_baseline_segment(self, segment_id: str) -> str:
@@ -2218,7 +2268,8 @@ class Repo:
         digest = _RowsDigest()
         for kind, columns, rows in (
                 ("count", _COUNT_COLUMNS, self.baseline_counts(segment_id)),
-                ("hour", _HOUR_COLUMNS, self.baseline_scope_hours(segment_id))):
+                ("hour", _HOUR_COLUMNS, self.baseline_scope_hours(segment_id)),
+                ("event", _EVENT_HOUR_COLUMNS, self.baseline_segment_event_hours(segment_id))):
             for chunk in _chunks(rows, BASELINE_PAGE):
                 digest.add(kind, columns, chunk)
         value = digest.hexdigest()
@@ -2331,6 +2382,21 @@ class Repo:
         """A segment's count rows in primary-key order (scope, key_digest, bucket), paged."""
         return self._keyset(t.baseline_count, [t.baseline_count.c.segment_id == segment_id],
                             ("scope", "key_digest", "bucket"), ("bucket", "first_ts", "last_ts"), page_size)
+
+    def baseline_segment_event_hours(self, segment_id: str, *, page_size: int = BASELINE_PAGE) -> Iterator[dict]:
+        """A segment's hours holding its spec's records, in hour order, paged."""
+        return self._keyset(t.baseline_segment_event_hour,
+                            [t.baseline_segment_event_hour.c.segment_id == segment_id], ("hour",), ("hour",),
+                            page_size)
+
+    def baseline_first_event_hour(self, segment_id: str, start: datetime, end: datetime) -> datetime | None:
+        """The first hour of [start, end) in which one segment holds a record of its spec (a primary-key seek)."""
+        c = t.baseline_segment_event_hour.c
+        with self.engine.connect() as connection:
+            value = connection.execute(select(func.min(c.hour)).where(
+                c.segment_id == segment_id, c.hour >= _utc(start, "event start"), c.hour < _utc(end, "event end"),
+            )).scalar_one_or_none()
+        return _stored_utc(value)
 
     def baseline_scope_hours(self, segment_id: str, *, page_size: int = BASELINE_PAGE) -> Iterator[dict]:
         """A segment's scope hours in primary-key order (scope, hour), paged."""

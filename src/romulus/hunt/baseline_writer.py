@@ -25,7 +25,6 @@ from romulus.hunt.site_networks import contradiction_reason
 from romulus.store.db import utcnow
 from romulus.store.repo import BASELINE_EVENTS_BASIS, Repo
 
-_COMPLETE_CELL_STATES = {"evaluated_complete", "not_applicable_no_events"}
 _HOUR = timedelta(hours=1)
 # Window counter material that finished hunts keep for a resume, across all hunts of the store.
 DEFAULT_RETAIN_BYTES = 2_000_000_000
@@ -88,6 +87,18 @@ _UNCOVERED = "no complete window cell covers all of it"
 _STRADDLE = "a deduplicated window cell straddles the start of its run"
 
 
+def cell_complete(cell: dict) -> bool:
+    """Whether a window cell's inputs were complete. An empty cell of an inapplicable target is complete only when
+    its retrieval was: a partial retrieval is never written as complete, empty history. A cell recorded before
+    the flag existed counts only if it states no reason."""
+    if cell["state"] == "evaluated_complete":
+        return True
+    if cell["state"] != "not_applicable_no_events":
+        return False
+    detail = cell.get("detail") or {}
+    return bool(detail.get("retrieval_complete", not detail.get("reasons")))
+
+
 def writable_runs(cells: list[dict], spans: dict[str, tuple[datetime, datetime]], span: tuple[datetime, datetime],
                   *, deduplicates: bool) -> tuple[list[tuple[datetime, datetime]], dict[str, int]]:
     """The runs of whole hours in `span` whose own window inputs are complete, and the hours not written by reason.
@@ -104,7 +115,7 @@ def writable_runs(cells: list[dict], spans: dict[str, tuple[datetime, datetime]]
     complete_spans: list[tuple[datetime, datetime]] = []
     for cell in cells:
         start, end = spans[cell["partition"]]
-        complete = cell["state"] in _COMPLETE_CELL_STATES
+        complete = cell_complete(cell)
         if complete:
             complete_spans.append((start, end))
         hour = max(_floor_hour(start), low)
@@ -253,28 +264,34 @@ def run_hunt_segment_writer(repo: Repo, hunt_id: str, *, hunt_partial: bool, bas
     summaries: dict[str, dict] = {}
     written = 0
     longest = 0.0
-    for spec_id in specs:
-        spec = SPEC_BY_ID[spec_id]
-        spec_written = 0
-        reasons: list[str] = []
-        for target in targets:
-            target_reasons, count, seconds = _write_target(
-                repo, hunt_id, spec, target, site=site, window=(start, end), normalizer=normalizer,
-                network_digest=network.get("digest"), networks_configured=networks_configured,
-                direction_failure=direction_failure, blocked=blocked.get((target, spec_id)), now=now,
-            )
-            reasons.extend(f"{target}: {reason}" for reason in target_reasons)
-            spec_written += count
-            longest = max(longest, seconds)
-        written += spec_written
-        summaries[spec_id] = {
-            "written": spec_written,
-            "reason": "; ".join(reasons) if reasons else None,
-        }
-    material = _settle_material(
-        repo, hunt_id, specs, targets, hunt_partial=hunt_partial, baseline_finished=baseline_finished,
-        budget=retain_budget_bytes, now=now,
-    )
+    finished = False
+    try:
+        for spec_id in specs:
+            spec = SPEC_BY_ID[spec_id]
+            spec_written = 0
+            reasons: list[str] = []
+            for target in targets:
+                target_reasons, count, seconds = _write_target(
+                    repo, hunt_id, spec, target, site=site, window=(start, end), normalizer=normalizer,
+                    network_digest=network.get("digest"), networks_configured=networks_configured,
+                    direction_failure=direction_failure, blocked=blocked.get((target, spec_id)), now=now,
+                )
+                reasons.extend(f"{target}: {reason}" for reason in target_reasons)
+                spec_written += count
+                longest = max(longest, seconds)
+            written += spec_written
+            summaries[spec_id] = {
+                "written": spec_written,
+                "reason": "; ".join(reasons) if reasons else None,
+            }
+        finished = True
+    finally:
+        # The material is always settled and charged to the budget. A writer interrupted part way keeps it (a later
+        # finish can still write from it) rather than releasing what it may not have written.
+        material = _settle_material(
+            repo, hunt_id, specs, targets, hunt_partial=hunt_partial or not finished,
+            baseline_finished=baseline_finished, budget=retain_budget_bytes, now=now, keep=not finished,
+        )
     return {
         "status": "complete", "written": written, "stale": stale,
         "max_write_seconds": longest, "specs": summaries, "material": material,
@@ -326,10 +343,14 @@ def _write_target(repo: Repo, hunt_id: str, spec, target: str, *, site: str,
             reasons.append(f"{hours} hour(s) not written: legacy window count material has no hour; the window "
                            "cell must be swept again")
             continue
-        reason, written, seconds = _write_run(
-            repo, hunt_id, spec, target, run, cells, spans, site=site, normalizer=normalizer,
-            network_digest=network_digest, now=now,
-        )
+        try:
+            reason, written, seconds = _write_run(
+                repo, hunt_id, spec, target, run, cells, spans, site=site, normalizer=normalizer,
+                network_digest=network_digest, now=now,
+            )
+        except ValueError as error:
+            # A refused segment (an id already stored with other content, an invalid row) costs only this run.
+            reason, written, seconds = f"segment refused: {error}"[:300], 0, 0.0
         if reason is not None:
             reasons.append(f"{hours} hour(s) not written: {reason}")
         count += written
@@ -343,13 +364,17 @@ def _write_run(repo: Repo, hunt_id: str, spec, target: str, run: tuple[datetime,
     """Write one run of complete hours as one segment: (the reason it was not written or None, written, seconds)."""
     event_total = 0
     first_hour: datetime | None = None
+    # one row per hour of the run holding records: bounded by the run's hours, never by its keys
+    event_hours: list[dict] = []
     for item in repo.baseline_window_merged_event_hours(
             hunt_id, spec.id, target, spec_version=spec.version, span=run
     ):
         events = int(item["events"])
         event_total += events
-        if events and first_hour is None:
-            first_hour = item["hour"]
+        if events:
+            event_hours.append({"hour": item["hour"], "events": events})
+            if first_hour is None:
+                first_hour = item["hour"]
     if event_total == 0:
         # Material staged before per-hour event totals existed carries only each cell's evaluated count: it cannot
         # place the run's first record in an hour, so such a run is not written.
@@ -394,6 +419,7 @@ def _write_run(repo: Repo, hunt_id: str, spec, target: str, run: tuple[datetime,
          repo.baseline_window_merged_scope_hours(
              hunt_id, spec.id, target, spec_version=spec.version, span=run,
          )),
+        event_hours,
     )
     repo.finalize_baseline_segment(segment_id)
     return None, 1, seconds
@@ -427,11 +453,18 @@ def _lease_active(hunt: dict, now: datetime) -> bool:
 
 
 def _settle_material(repo: Repo, hunt_id: str, specs: list[str], targets: list[str], *, hunt_partial: bool,
-                     baseline_finished: bool, budget: int, now: datetime) -> dict:
-    """Release this hunt's window counter material or keep it for a resume, then hold the store to the budget."""
+                     baseline_finished: bool, budget: int, now: datetime, keep: bool = False) -> dict:
+    """Release this hunt's window counter material or keep it for a resume, then hold the store to the budget.
+
+    With `keep` (the writer was interrupted) the material is kept and charged whatever the hunt's state."""
     retained = repo.baseline_window_retention(hunt_id)
     pairs = {(spec_id, target) for spec_id in specs for target in targets}
-    if baseline_finished and not hunt_partial:
+    if keep:
+        size = repo.baseline_window_material_bytes(hunt_id)
+        why = "kept: the segment writer was interrupted before it decided every hour"
+        repo.retain_baseline_window_material(hunt_id, bytes_=size, retained_at=now, reason=why)
+        decision = {"kept": True, "reason": why, "bytes": size}
+    elif baseline_finished and not hunt_partial:
         _release_hunt(repo, hunt_id, pairs, "the hunt finished complete and its segment writer ran")
         decision = {"kept": False, "reason": "the hunt finished complete"}
     elif baseline_finished and retained is not None:
@@ -465,17 +498,29 @@ def _settle_material(repo: Repo, hunt_id: str, specs: list[str], targets: list[s
     charges = repo.baseline_window_retentions()
     total = sum(int(item["bytes"]) for item in charges)
     evicted: list[str] = []
+    reason = f"retained window material exceeded the disk budget of {budget} bytes; the oldest is released first"
+    own = next((item for item in charges if item["hunt_id"] == hunt_id), None)
+    if own is not None and int(own["bytes"]) > budget:
+        # This hunt's material alone exceeds the budget: it goes first, and older material that fits stays.
+        _release_hunt(repo, hunt_id, pairs, f"this hunt's window material alone exceeded the disk budget of "
+                                            f"{budget} bytes")
+        total -= int(own["bytes"])
+        evicted.append(hunt_id)
+        charges = [item for item in charges if item["hunt_id"] != hunt_id]
     for item in charges:
         if total <= budget:
             break
-        _release_hunt(
-            repo, item["hunt_id"], _hunt_pairs(repo, item["hunt_id"]),
-            f"retained window material exceeded the disk budget of {budget} bytes; the oldest is released first",
-        )
+        if item["hunt_id"] != hunt_id:
+            # A hunt holding an active lease is running (for example, a resumed baseline stage judging from its
+            # material): its material is never released under it. Its own finish settles it.
+            row = repo.get_hunt(item["hunt_id"])
+            if row is not None and _lease_active(row, now):
+                continue
+        _release_hunt(repo, item["hunt_id"], _hunt_pairs(repo, item["hunt_id"]), reason)
         total -= int(item["bytes"])
         evicted.append(item["hunt_id"])
     if hunt_id in evicted:
         decision = {"kept": False, "reason": f"released: retained window material exceeded the disk budget of "
                                              f"{budget} bytes"}
-    return {**decision, "retained_bytes": total, "budget_bytes": budget,
+    return {**decision, "retained_bytes": total, "budget_bytes": budget, "over_budget": total > budget,
             "released_hunts": sorted(item for item in evicted if item != hunt_id)}

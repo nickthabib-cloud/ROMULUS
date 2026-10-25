@@ -20,6 +20,21 @@ def upgrade() -> None:
     with op.batch_alter_table("baseline_segment") as batch:
         batch.add_column(sa.Column("events_basis", sa.Integer(), nullable=False, server_default="1"))
         batch.add_column(sa.Column("first_event_hour", sa.DateTime(timezone=True), nullable=True))
+    # Old segments are never selected again: they leave every cover and store cut, and prune may remove them.
+    op.execute("UPDATE baseline_segment SET status = 'stale' WHERE events_basis = 1 AND status = 'active'")
+    op.create_table(
+        "baseline_segment_event_hour",
+        sa.Column("segment_id", sa.String(), nullable=False),
+        sa.Column("hour", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("events", sa.Integer(), nullable=False),
+        sa.CheckConstraint("events >= 1", name="ck_baseline_segment_event_hour_events"),
+        sa.ForeignKeyConstraint(["segment_id"], ["baseline_segment.id"], ondelete="CASCADE"),
+        sa.PrimaryKeyConstraint("segment_id", "hour", name="pk_baseline_segment_event_hour"),
+    )
+    # History hours staged by an interrupted fill carry the old events_total: they are read again, never written
+    # under the new basis.
+    op.execute("DELETE FROM baseline_history_row")
+    op.execute("DELETE FROM baseline_history_cell")
     op.create_table(
         "baseline_window_retention",
         sa.Column("hunt_id", sa.String(), nullable=False),
@@ -44,6 +59,7 @@ def downgrade() -> None:
     op.drop_index("ix_baseline_window_scope_hour_merge", table_name="baseline_window_scope_hour")
     op.drop_index("ix_baseline_window_count_merge", table_name="baseline_window_count")
     op.drop_table("baseline_window_retention")
+    op.drop_table("baseline_segment_event_hour")
     with op.batch_alter_table("baseline_segment") as batch:
         batch.drop_column("first_event_hour")
         batch.drop_column("events_basis")

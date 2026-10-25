@@ -886,10 +886,14 @@ class Sweep:
                     if not ordered and (not target_applicable or rule_partial or reasons):
                         state = ("evaluated_partial" if target_applicable and (rule_partial or reasons)
                                  else "not_applicable_no_events")
+                        detail = {"reasons": sorted(set(reasons))}
+                        if state == "not_applicable_no_events":
+                            # an inapplicable target's empty cell is complete history only if retrieval was
+                            detail["retrieval_complete"] = not rule_partial and not result.partial
                         self.repo.save_baseline_window_cell(self.hunt_id, {
                             "rule_id": pb.id, "version": pb.spec.version, "target": target,
                             "partition": pkey, "state": state, "matched": 0,
-                            "evaluated": evaluated, "detail": {"reasons": sorted(set(reasons))},
+                            "evaluated": evaluated, "detail": detail,
                         }, ())
                         continue
                     try:
@@ -932,6 +936,7 @@ class Sweep:
                     state = "evaluated_complete"
                 self._save_baseline_cell(
                     pb, target, pkey, state, evaluated, reasons, result, tid, ordered, raw_sources,
+                    retrieval_complete=not rule_partial and not result.partial,
                 )
                 continue
             before_eval, before_missing, before_os, before_capped = (
@@ -1068,10 +1073,14 @@ class Sweep:
 
     def _save_baseline_cell(self, playbook: BaselinePlaybook, target: str, partition: str,
                             state: str, evaluated: int, reasons: list[str], result: BaselineCell,
-                            task_id: str | None, events: list[TypedEvent], raw_sources: dict[str, dict]) -> None:
+                            task_id: str | None, events: list[TypedEvent], raw_sources: dict[str, dict], *,
+                            retrieval_complete: bool = True) -> None:
         """Persist observations and the cell's idempotency marker; citations are fetched only if published."""
         del task_id, events, raw_sources
-        detail = {"reasons": sorted(set(reasons))}
+        detail: dict = {"reasons": sorted(set(reasons))}
+        if state == "not_applicable_no_events":
+            # An inapplicable target's empty cell is complete history only if its retrieval was complete.
+            detail["retrieval_complete"] = retrieval_complete
         if playbook.spec.measure == "rate" and result.partial:
             detail.update(
                 partial_hours=[hour.isoformat() for hour in result.partial_hours],

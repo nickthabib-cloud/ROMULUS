@@ -866,7 +866,8 @@ def test_a_segment_straddling_history_start_contributes_only_its_in_span_rows():
         "spec_version": SPEC.version, "key_version": SPEC.key_version, "normalizer": "fixture@1",
         "start": begin, "end": window.start, "bucket": "day", "origin": "hunt",
         "source_hunt_id": "earlier", "built_by_hunt_id": "earlier", "exclusion_digest": "none",
-        "excluded_keys": [], "hunted": 1, "events_total": 8 * 24, "status": "active", "created_at": START,
+        "excluded_keys": [], "hunted": 1, "events_total": 8 * 24, "first_event_hour": begin,
+        "status": "active", "created_at": START,
     }, [{
         "segment_id": "straddle", "scope_kind": "host", "scope": "host:web01", "key_id": "old-id",
         "key_digest": "old-digest", "key": {"executable": "/bin/old", "exec_file_path": "/bin/old"},
@@ -879,7 +880,7 @@ def test_a_segment_straddling_history_start_contributes_only_its_in_span_rows():
     }], [{
         "segment_id": "straddle", "scope_kind": "host", "scope": "host:web01",
         "hour": begin + timedelta(hours=hour), "events": 1,
-    } for hour in range(8 * 24)])
+    } for hour in range(8 * 24)], [{"hour": begin + timedelta(hours=hour), "events": 1} for hour in range(8 * 24)])
     event = _event(1, "/bin/old")
     repo.save_evidence("h1", [event], {event.raw[0].key: {"message": "old"}}, None)
     repo.upsert_baseline_observation(_observation(event, key_id="old-id", key_digest="old-digest",

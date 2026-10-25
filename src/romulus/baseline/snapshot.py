@@ -81,6 +81,22 @@ class SnapshotPlanner:
     def __init__(self, repo: Repo):
         self.repo = repo
 
+    def _first_record(self, claimed: dict[datetime, dict], start: datetime, end: datetime) -> datetime | None:
+        """The first hour of [start, end) whose claiming segment holds a record there: one seek per segment, in
+        time order, stopping at the first found."""
+        hour = start
+        while hour < end:
+            row = claimed[hour]
+            stop = hour
+            while stop < end and claimed[stop]["id"] == row["id"]:
+                stop += _HOUR
+            if row["events_total"]:
+                found = self.repo.baseline_first_event_hour(row["id"], hour, stop)
+                if found is not None:
+                    return found
+            hour = stop
+        return None
+
     def freeze(self, *, hunt_id: str, window_start: datetime, lookback: timedelta,
                min_live_hours: int, site: str, targets: list[str],
                specs: list[BaselineSpec], history_gaps: Iterable[HistoryGap] = (),
@@ -157,13 +173,12 @@ class SnapshotPlanner:
                 cursor = window_start
                 while cursor - _HOUR in claimed:
                     cursor -= _HOUR
-                # The first record within the run: the oldest hour at or after its covering segment's first hour
-                # holding one of the spec's records. Earlier hours of the run are complete and empty, which is the
-                # only evidence of absence. Placement is per hour, so one multi-hour segment and the hourly segments
-                # of the same hours place it alike.
-                first_record = next((hour for hour in _hours(cursor, window_start)
-                                     if claimed[hour]["first_event_hour"] is not None
-                                     and claimed[hour]["first_event_hour"] <= hour), None)
+                # The first record within the run: the oldest run hour in which its covering segment holds one of
+                # the spec's records, read from the segment's per-hour totals. Earlier hours of the run are complete
+                # and empty, which is the only evidence of absence. Placement is per hour, so one multi-hour
+                # segment (even one straddling history_start, whose records before it do not count) and the hourly
+                # segments of the same hours place it alike.
+                first_record = self._first_record(claimed, cursor, window_start)
                 if first_record is None:
                     effective_start = window_start
                     absent_before = _iso(window_start) if cursor < window_start else None

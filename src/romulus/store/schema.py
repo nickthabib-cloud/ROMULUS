@@ -469,6 +469,17 @@ Index(
     baseline_scope_hour.c.segment_id, baseline_scope_hour.c.hour,
 )
 
+# The hours of a segment that hold one of its spec's records, with their totals (they sum to events_total). History
+# placement reads these, so a segment that straddles a hunt's history start places its first in-plan record exactly.
+baseline_segment_event_hour = Table(
+    "baseline_segment_event_hour", metadata,
+    Column("segment_id", String, ForeignKey("baseline_segment.id", ondelete="CASCADE"), nullable=False),
+    Column("hour", DateTime(timezone=True), nullable=False),
+    Column("events", Integer, nullable=False),
+    PrimaryKeyConstraint("segment_id", "hour", name="pk_baseline_segment_event_hour"),
+    CheckConstraint("events >= 1", name="ck_baseline_segment_event_hour_events"),
+)
+
 baseline_snapshot = Table(
     "baseline_snapshot", metadata,
     Column("hunt_id", String, ForeignKey("hunt.id"), primary_key=True),

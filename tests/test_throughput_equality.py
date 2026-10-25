@@ -162,14 +162,20 @@ from tests import throughput_fixture as tf
 #   (probed over no history) to null (not assessed). Verdicts and reasons are unchanged.
 # The window counter material stays (the partial hunt keeps it for one resume), so the window tables are unchanged.
 # Candidates, rule cells, links, tasks, events and the manifest are unchanged.
+# Review corrections then change baseline fields only:
+# - rule_cells: the 121 not_applicable_no_events window cells of the baseline specs record retrieval_complete (true
+#   here), so an inapplicable target's empty cell from a partial retrieval is never written as complete history.
+# - baseline_segments: rows_digest now also covers each segment's per-hour event totals (the new
+#   baseline_segment_event_hour rows that place a straddling segment's first in-plan record).
+# - audit: the segment writer's material block states over_budget (false).
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
-    "audit": "651046e4d3d1cb7418e7bc6c7b6e5b88b20161de583ddab08ff47ce0edc9e88d",
+    "audit": "abc5f86d644361c3d9e0acde1cf718e0e7d9fa53937c3a0980825600900a151b",
     "baseline_counts": "1a021de3254f91225689f1bdc8ce3e0cfd416c90a4148bcd4f1c93b6db9cb16d",
     "baseline_hunt_exclusions": "fe9edaf9efe3065352ae1bedc95ac7e78ddbe2d6e34f835203cfe56cb368ec56",
     "baseline_observations": "cadd8d099153ba2ab6aafd8e7416d4024ce5b66ed164a03b2ec46f079ed5de88",
     "baseline_scope_hours": "fe1ef875f82a6cad7d9c7884b1936614584a9f9e0e4c008e4790ee46edf6361d",
-    "baseline_segments": "295b0d02d765705d96e24685e7c181e6a8acae27dac2ff17bd0d006d7061c24e",
+    "baseline_segments": "e2ca9f003a97f77ac300789266c9e646610317f5577318c4b556b464a8a6fc48",
     "baseline_snapshot": "63b4c8094cb5450b1e707fd7be786e90324528e738b882358cae15cb8d53f776",
     "baseline_window_counts": "163b75766bc7cc487118b4e8bc24fe338d9e364898f9200887b89ba11b464acc",
     "baseline_window_event_hours": "bb58c65144b135443e75a690b7b2f8137ebac6b827f8e8bd8cc7606a01c53e52",
@@ -183,7 +189,7 @@ GOLDEN_STACK = {
     "links": "e5bd8ec83459a57a14627ad2222f752e4c29e0415beddd54eaa11afd08e1b62f",
     "manifest": "04a003a9c55a069ee63954c0f7540fa4cc0bf91ca0e5570f120da48cffe91e61",
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
-    "rule_cells": "04cb50a84ef9c5f9edfc3e5983e9a9eea13e69a1ce19c462fb1af4f48face93e",
+    "rule_cells": "f26679b30ddfad3b4cd12893545e07dd423a744e3e6bf78269fce9c15f0c96ee",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
     "tasks": "f0c05a2a05135e822ab077a843472e4cb4d31b93b5c27050685bf6b9675e4cdc",
 }
