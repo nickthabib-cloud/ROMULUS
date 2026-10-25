@@ -180,6 +180,9 @@ class BaselineSpec:
     # with an explicitly configured internal-network definition, and otherwise its result is unresolved, never
     # "no match" (the default RFC 1918 view reads a site in public space as entirely outside).
     requires_configured_networks: bool = False
+    # True when multiple source records can share one counting token. A hunt writer must retain enough material
+    # to re-deduplicate any clipped span, or decline that span rather than undercount it.
+    deduplicates_records: bool = False
 
     def keys(self, event: TypedEvent, context: KeyContext) -> KeyResult:
         if event.family not in self.families:
@@ -739,6 +742,7 @@ BASELINE_SPECS = (
         },
         _extract=_destination,
         requires_configured_networks=True,
+        deduplicates_records=True,
     ),
     BaselineSpec(
         id="bl.svc_exec_rate", version="1", key_version="2", families=("process_exec",),

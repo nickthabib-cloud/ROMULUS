@@ -216,6 +216,10 @@ def _write_target(repo: Repo, hunt_id: str, spec, target: str, *, site: str,
     span = whole_hour_span(*window, list(spans.values()))
     if span is None:
         return "the window holds no whole hour", 0, 0.0
+    if spec.deduplicates_records and any(
+            cell_span[0] < span[0] < cell_span[1] for cell_span in spans.values()
+    ):
+        return "a deduplicated window cell straddles the retained whole-hour span", 0, 0.0
     inside = [row for row in cells
               if span[0] <= spans[row["partition"]][0] and spans[row["partition"]][1] <= span[1]]
     event_total = event_rows = 0
