@@ -170,7 +170,10 @@ def resolve_window_exec_pairs(repo: Repo, hunt_id: str, window: Window) -> None:
                 "partition": cell["partition"], "state": state, "matched": 0,
                 "evaluated": cell["evaluated"], "detail": {"reasons": sorted(set(reasons))},
             }, (_pending_observation(hunt_id, spec, row) for row in observations),
-                counts=segment_counter.count_rows(), scope_hours=segment_counter.scope_hour_rows())
+                counts=segment_counter.material_count_rows(), scope_hours=segment_counter.scope_hour_rows(),
+                event_hours=repo.baseline_window_event_hours(
+                    hunt_id, spec.id, target, partition=cell["partition"],
+                ))
             repo.drop_baseline_window_cell(hunt_id, target, cell["partition"])
 
 

@@ -120,6 +120,10 @@ class EventStage:
             "CREATE TABLE baseline_scope_hour (target TEXT NOT NULL, partition TEXT NOT NULL, "
             "ordinal INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY (target, partition, ordinal))"
         )
+        self.db.execute(
+            "CREATE TABLE baseline_event_hour (target TEXT NOT NULL, partition TEXT NOT NULL, "
+            "ordinal INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY (target, partition, ordinal))"
+        )
         # One bounded-width key per normalized Windows event. The row count follows the hunt's retrieved Windows
         # records; unlike aggregate staging this seam never serializes event bodies or raw telemetry. Keeping the
         # table in the stage gives all transient sweep state the same private lifecycle and cleanup behavior.
@@ -303,7 +307,7 @@ class EventStage:
     def record_baseline_cell(self, *, target: str, partition: str, start, end,
                              target_applicable: bool, source_complete: bool, reasons: list[str],
                              task_id: str | None, events: list[TypedEvent], observations=(),
-                             pendings: tuple[Pending, ...] = (), counts=(), scope_hours=()) -> None:
+                             pendings: tuple[Pending, ...] = (), counts=(), scope_hours=(), event_hours=()) -> None:
         """Stage one exec-pair cell using compact rows only, atomically."""
         def body(value) -> str:
             return json.dumps(value, sort_keys=True, default=lambda item: item.isoformat())
@@ -315,7 +319,7 @@ class EventStage:
                  int(source_complete), json.dumps(sorted(set(reasons))), task_id),
             )
             for table in ("baseline_exec", "baseline_observation", "baseline_pending",
-                          "baseline_count", "baseline_scope_hour"):
+                          "baseline_count", "baseline_scope_hour", "baseline_event_hour"):
                 self.db.execute(f"DELETE FROM {table} WHERE target = ? AND partition = ?", (target, partition))
             self.db.executemany(
                 "INSERT INTO baseline_exec VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -346,6 +350,10 @@ class EventStage:
             self.db.executemany(
                 "INSERT INTO baseline_scope_hour VALUES (?, ?, ?, ?)",
                 [(target, partition, ordinal, body(row)) for ordinal, row in enumerate(scope_hours)],
+            )
+            self.db.executemany(
+                "INSERT INTO baseline_event_hour VALUES (?, ?, ?, ?)",
+                [(target, partition, ordinal, body(row)) for ordinal, row in enumerate(event_hours)],
             )
 
     def baseline_cells(self, target: str) -> list[dict]:
@@ -412,7 +420,7 @@ class EventStage:
         out = []
         for (body,) in rows:
             row = json.loads(body)
-            for name in ("bucket", "hour", "first_ts", "last_ts"):
+            for name in ("bucket", "material_hour", "hour", "first_ts", "last_ts"):
                 if row.get(name):
                     row[name] = datetime.fromisoformat(row[name])
             out.append(row)
@@ -424,11 +432,14 @@ class EventStage:
     def baseline_scope_hours(self, target: str, partition: str) -> list[dict]:
         return self._baseline_counter_rows("baseline_scope_hour", target, partition)
 
+    def baseline_event_hours(self, target: str, partition: str) -> list[dict]:
+        return self._baseline_counter_rows("baseline_event_hour", target, partition)
+
     def baseline_compact_bytes(self) -> int:
         """Logical bytes in compact baseline rows, excluding fixed empty-table page overhead."""
         total = 0
         for table in ("baseline_cell", "baseline_exec", "baseline_observation", "baseline_pending",
-                      "baseline_count", "baseline_scope_hour"):
+                      "baseline_count", "baseline_scope_hour", "baseline_event_hour"):
             columns = [row[1] for row in self.db.execute(f"PRAGMA table_info({table})")]
             expression = " + ".join(f"length(coalesce(cast({name} AS TEXT), ''))" for name in columns)
             total += int(self.db.execute(f"SELECT coalesce(sum({expression}), 0) FROM {table}").fetchone()[0])
@@ -437,7 +448,7 @@ class EventStage:
     def drop_baseline_cell(self, target: str, partition: str) -> None:
         with self.db:
             for table in ("baseline_exec", "baseline_observation", "baseline_pending",
-                          "baseline_count", "baseline_scope_hour", "baseline_cell"):
+                          "baseline_count", "baseline_scope_hour", "baseline_event_hour", "baseline_cell"):
                 self.db.execute(f"DELETE FROM {table} WHERE target = ? AND partition = ?", (target, partition))
 
     def close(self) -> None:

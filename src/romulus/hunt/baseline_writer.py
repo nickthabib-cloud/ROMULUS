@@ -47,20 +47,12 @@ def _cell_span(partition: str) -> tuple[datetime, datetime] | None:
 
 
 def whole_hour_span(start: datetime, end: datetime,
-                    cells: list[tuple[datetime, datetime]]) -> tuple[datetime, datetime] | None:
-    """The widest hour-aligned span inside [start, end) whose edges no cell straddles, or None.
+                    _cells: list[tuple[datetime, datetime]]) -> tuple[datetime, datetime] | None:
+    """The widest hour-aligned span inside [start, end), or None when the window holds no whole hour.
 
-    A segment spans whole hours. A cell's counts carry no finer time than its own interval, so a cell is either
-    wholly inside the segment or wholly outside it, never split.
+    Counts and evaluated-record totals are staged per hour, so a source cell may safely straddle either edge.
     """
-    def straddled(hour: datetime) -> bool:
-        return any(first < hour < last for first, last in cells)
-
     low, high = _ceil_hour(start), _floor_hour(end)
-    while low < high and straddled(low):
-        low += _HOUR
-    while high > low and straddled(high):
-        high -= _HOUR
     return (low, high) if low < high else None
 
 
@@ -223,9 +215,16 @@ def _write_target(repo: Repo, hunt_id: str, spec, target: str, *, site: str,
         return f"window cell {unplaced[0]} names no time interval", 0, 0.0
     span = whole_hour_span(*window, list(spans.values()))
     if span is None:
-        return "the window holds no whole hour that its cells do not straddle", 0, 0.0
+        return "the window holds no whole hour", 0, 0.0
     inside = [row for row in cells
               if span[0] <= spans[row["partition"]][0] and spans[row["partition"]][1] <= span[1]]
+    event_total = event_rows = 0
+    for item in repo.baseline_window_merged_event_hours(hunt_id, spec.id, target, span=span):
+        event_total += int(item["events"])
+        event_rows += 1
+    if event_rows == 0:
+        # Resume compatibility for material staged before migration 0022.
+        event_total = sum(int(cell.get("evaluated") or 0) for cell in inside)
     excluded = set(repo.baseline_exclusion_keys(
         site=site, target=target, spec_id=spec.id, spec_version=spec.version,
         key_version=spec.key_version, start=span[0], end=span[1],
@@ -244,7 +243,7 @@ def _write_target(repo: Repo, hunt_id: str, spec, target: str, *, site: str,
         "origin": "hunt", "source_hunt_id": hunt_id, "built_by_hunt_id": hunt_id,
         "exclusion_digest": digest, "excluded_keys": sorted(excluded), "hunted": 1,
         "network_digest": network_digest if spec.requires_configured_networks else None,
-        "events_total": sum(int(cell.get("evaluated") or 0) for cell in inside),
+        "events_total": event_total,
         "status": "building", "created_at": utcnow(),
     }
     state = repo.begin_baseline_segment(row, reclaim_owner=True)

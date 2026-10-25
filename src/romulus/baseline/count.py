@@ -46,10 +46,12 @@ class KeyCounter:
 
     def __init__(self, segment_id: str, spec: BaselineSpec, *,
                  token_cap: int = DEFAULT_TOKEN_CAP, row_cap: int = DEFAULT_ROW_CAP,
+                 material_row_cap: int | None = None,
                  pending_cap: int = DEFAULT_PENDING_CAP,
                  span: tuple[datetime, datetime] | None = None,
                  retain_observations_when_partial: bool = False):
-        if min(token_cap, row_cap, pending_cap) < 1:
+        material_row_cap = row_cap if material_row_cap is None else material_row_cap
+        if min(token_cap, row_cap, material_row_cap, pending_cap) < 1:
             raise ValueError("counter caps must be positive")
         if span is not None and not span[0] < span[1]:
             raise ValueError("counter span must be nonempty")
@@ -58,12 +60,15 @@ class KeyCounter:
         self.spec = spec
         self.token_cap = token_cap
         self.row_cap = row_cap
+        self.material_row_cap = material_row_cap
         self.pending_cap = pending_cap
         self.retain_observations_when_partial = retain_observations_when_partial
         self._counts: dict[tuple, dict] = {}
+        self._material_counts: dict[tuple, dict] = {}
         self._first_event_ids: dict[tuple, str | None] = {}
         self._first_event_refs: dict[tuple, list[dict]] = {}
         self._scope_hours: dict[tuple, int] = defaultdict(int)
+        self._event_hours: dict[datetime, int] = defaultdict(int)
         self._scope_first_event_ids: dict[tuple, str | None] = {}
         self._scope_first_event_refs: dict[tuple, list[dict]] = {}
         self._tokens: dict[tuple, set[str]] = defaultdict(set)
@@ -119,6 +124,8 @@ class KeyCounter:
         self.segment_id = segment_id
         for row in self._counts.values():
             row["segment_id"] = segment_id
+        for row in self._material_counts.values():
+            row["segment_id"] = segment_id
 
     def restore(self, count_rows: Iterable[dict], scope_hour_rows: Iterable[dict]) -> None:
         """Reload staged rows of this counter's segment so resolved keys can be added to them.
@@ -128,7 +135,19 @@ class KeyCounter:
         """
         for row in count_rows:
             identity = (row["scope_kind"], row["scope"], row["key_digest"], row["bucket"])
-            self._counts[identity] = {**row, "segment_id": self.segment_id}
+            material_hour = row.get("material_hour") or _bucket(row["first_ts"], "hour")
+            source = {name: value for name, value in row.items() if name != "material_hour"}
+            existing = self._counts.get(identity)
+            if existing is None:
+                self._counts[identity] = {**source, "segment_id": self.segment_id}
+            else:
+                existing["count"] += int(source["count"])
+                existing["first_ts"] = min(existing["first_ts"], source["first_ts"])
+                existing["last_ts"] = max(existing["last_ts"], source["last_ts"])
+            material_identity = (*identity, material_hour)
+            self._material_counts[material_identity] = {
+                **source, "segment_id": self.segment_id, "material_hour": material_hour,
+            }
             self._first_event_ids[identity] = None
             self._first_event_refs[identity] = []
             if self._open_bucket is None or row["bucket"] > self._open_bucket:
@@ -139,6 +158,16 @@ class KeyCounter:
     def consume(self, event: TypedEvent, context: KeyContext) -> None:
         if self.partial and not self.retain_observations_when_partial:
             return
+        instant = event.ts.astimezone(UTC)
+        if self.span is not None:
+            instant = min(max(instant, self.span[0]), self.span[1] - timedelta(microseconds=1))
+        event_hour = _bucket(instant, "hour")
+        if event_hour not in self._event_hours and len(self._event_hours) >= self.row_cap:
+            self.mark_partial(f"event-hour row cap {self.row_cap} exceeded")
+            if not self.retain_observations_when_partial:
+                return
+        else:
+            self._event_hours[event_hour] += 1
         result = self.spec.keys(event, context)
         if isinstance(result, Missing):
             self.mark_partial(f"{event.id}: {result.reason}", event.ts)
@@ -213,6 +242,14 @@ class KeyCounter:
                 self.max_token_entries = max(self.max_token_entries, self.token_entries)
             accepted.append(key)
 
+        material_identities = {
+            (key.scope_kind, key.scope, key.key_digest, bucket, hour) for key in accepted
+            if (key.scope_kind, key.scope, key.key_digest, bucket, hour) not in self._material_counts
+        }
+        if len(self._material_counts) + len(material_identities) > self.material_row_cap:
+            self.mark_partial(f"material count row cap {self.material_row_cap} exceeded")
+            return
+
         for key in accepted:
             identity = (key.scope_kind, key.scope, key.key_digest, bucket)
             row = self._counts.get(identity)
@@ -240,6 +277,28 @@ class KeyCounter:
                 row["first_ts"] = min(row["first_ts"], instant)
                 row["last_ts"] = max(row["last_ts"], instant)
 
+            material_identity = (key.scope_kind, key.scope, key.key_digest, bucket, hour)
+            material = self._material_counts.get(material_identity)
+            if material is None:
+                self._material_counts[material_identity] = {
+                    "segment_id": self.segment_id,
+                    "scope_kind": key.scope_kind,
+                    "scope": key.scope,
+                    "key_id": key.key_id,
+                    "key_digest": key.key_digest,
+                    "key": key.key,
+                    "bucket": bucket,
+                    "material_hour": hour,
+                    "count": 1,
+                    "first_ts": ts.astimezone(UTC),
+                    "last_ts": ts.astimezone(UTC),
+                }
+            else:
+                instant = ts.astimezone(UTC)
+                material["count"] += 1
+                material["first_ts"] = min(material["first_ts"], instant)
+                material["last_ts"] = max(material["last_ts"], instant)
+
         for scope_kind, scope in sorted(event_scopes):
             identity = (scope_kind, scope, hour)
             self._scope_hours[identity] += 1
@@ -253,6 +312,19 @@ class KeyCounter:
         if self.partial:
             return iter(())
         return iter(self._counts[key] for key in sorted(self._counts))
+
+    def material_count_rows(self):
+        """Per-hour count material for a hunt writer; merging all hours reproduces :meth:`count_rows`."""
+        if self.partial:
+            return iter(())
+        return iter(self._material_counts[key] for key in sorted(self._material_counts))
+
+    def event_hour_rows(self):
+        """Per-hour evaluated-record totals used for segment metadata at non-aligned cell edges."""
+        if self.partial:
+            return iter(())
+        return iter({"segment_id": self.segment_id, "hour": hour, "events": self._event_hours[hour]}
+                    for hour in sorted(self._event_hours))
 
     def scope_hour_rows(self, *, include_witnesses: bool = False):
         if self.partial:

@@ -2756,7 +2756,8 @@ class Repo:
 
     def stage_baseline_window_cell(self, hunt_id: str, cell: dict, execs: Iterable[dict],
                                    observations: Iterable[dict], pendings: Iterable[dict],
-                                   counts: Iterable[dict] = (), scope_hours: Iterable[dict] = ()) -> None:
+                                   counts: Iterable[dict] = (), scope_hours: Iterable[dict] = (),
+                                   event_hours: Iterable[dict] = ()) -> None:
         """Replace one unresolved exec-pair cell with compact durable state."""
         key = (hunt_id, cell["target"], cell["partition"])
 
@@ -2807,7 +2808,7 @@ class Repo:
             ], ["hunt_id", "target", "partition", "ordinal"])
             self._replace_baseline_window_counter_rows(
                 connection, hunt_id, "bl.exec_pair", cell["spec_version"], key[1], key[2],
-                counts, scope_hours,
+                counts, scope_hours, event_hours,
             )
 
     def baseline_window_cells(self, hunt_id: str) -> list[dict]:
@@ -2932,7 +2933,8 @@ class Repo:
 
     def save_baseline_window_cell(self, hunt_id: str, cell: dict, observations: Iterable[dict], *,
                                   counts: Iterable[dict] = (),
-                                  scope_hours: Iterable[dict] = ()) -> bool:
+                                  scope_hours: Iterable[dict] = (),
+                                  event_hours: Iterable[dict] = ()) -> bool:
         """Atomically add one cell's observations once and close its ordinary rule cell.
 
         The terminal rule cell is the idempotency marker. A killed or restarted sweep can process its direct
@@ -2982,7 +2984,7 @@ class Repo:
                 return False
             self._replace_baseline_window_counter_rows(
                 connection, hunt_id, cell["rule_id"], cell["version"], cell["target"],
-                cell["partition"], counts, scope_hours,
+                cell["partition"], counts, scope_hours, event_hours,
             )
             for chunk in _chunks(rows, BASELINE_CHUNK):
                 connection.execute(stmt, chunk)
@@ -3001,9 +3003,10 @@ class Repo:
 
     def _replace_baseline_window_counter_rows(self, connection, hunt_id: str, spec_id: str,
                                               spec_version: str, target: str, partition: str,
-                                              counts: Iterable[dict], scope_hours: Iterable[dict]) -> None:
+                                              counts: Iterable[dict], scope_hours: Iterable[dict],
+                                              event_hours: Iterable[dict]) -> None:
         """Replace one cell's segment material inside its caller's transaction."""
-        for table in (t.baseline_window_count, t.baseline_window_scope_hour):
+        for table in (t.baseline_window_count, t.baseline_window_scope_hour, t.baseline_window_event_hour):
             connection.execute(table.delete().where(
                 table.c.hunt_id == hunt_id, table.c.spec_id == spec_id,
                 table.c.target == target, table.c.partition == partition,
@@ -3022,6 +3025,9 @@ class Repo:
                     "key_digest": row["key_digest"],
                     "key": row["key"],
                     "bucket": _utc(row["bucket"], "window count bucket"),
+                    "material_hour": _utc(
+                        row.get("material_hour") or row["first_ts"], "window count material hour",
+                    ).replace(minute=0, second=0, microsecond=0),
                     "count": int(row["count"]),
                     "first_ts": _utc(row["first_ts"], "window count first_ts"),
                     "last_ts": _utc(row["last_ts"], "window count last_ts"),
@@ -3049,6 +3055,21 @@ class Repo:
             )
         for chunk in _chunks(hour_rows, BASELINE_CHUNK):
             connection.execute(t.baseline_window_scope_hour.insert(), chunk)
+        event_rows = (
+            {
+                "hunt_id": hunt_id,
+                "spec_id": spec_id,
+                "spec_version": spec_version,
+                "target": target,
+                "partition": partition,
+                "ordinal": ordinal,
+                "hour": _utc(row["hour"], "window event hour"),
+                "events": int(row["events"]),
+            }
+            for ordinal, row in enumerate(event_hours)
+        )
+        for chunk in _chunks(event_rows, BASELINE_CHUNK):
+            connection.execute(t.baseline_window_event_hour.insert(), chunk)
 
     def baseline_window_counts(self, hunt_id: str, spec_id: str, target: str, *,
                                partition: str | None = None) -> list[dict]:
@@ -3063,7 +3084,20 @@ class Repo:
             if partition is not None:
                 query = query.where(table.partition == partition)
             rows = connection.execute(query.order_by(table.partition, table.ordinal)).mappings()
-            return [_with_utc(row, ("bucket", "first_ts", "last_ts")) for row in rows]
+            return [_with_utc(row, ("bucket", "material_hour", "first_ts", "last_ts")) for row in rows]
+
+    def baseline_window_event_hours(self, hunt_id: str, spec_id: str, target: str, *,
+                                    partition: str | None = None) -> list[dict]:
+        """Per-hour evaluated-record totals retained from sweep cells."""
+        table = t.baseline_window_event_hour.c
+        with self.engine.connect() as connection:
+            query = select(t.baseline_window_event_hour).where(
+                table.hunt_id == hunt_id, table.spec_id == spec_id, table.target == target,
+            )
+            if partition is not None:
+                query = query.where(table.partition == partition)
+            rows = connection.execute(query.order_by(table.partition, table.ordinal)).mappings()
+            return [_with_utc(row, ("hour",)) for row in rows]
 
     def baseline_window_scope_hours(self, hunt_id: str, spec_id: str, target: str, *,
                                     partition: str | None = None) -> list[dict]:
@@ -3085,8 +3119,8 @@ class Repo:
                                       page_size: int = BASELINE_PAGE) -> Iterator[dict]:
         """Merge a hunt's per-cell count rows in bounded pages, ordered like segment count rows.
 
-        With `span`, only rows of cells inside it are merged. A row's times are clamped into its cell, so a row
-        lies inside the span exactly when its cell does (the caller refuses cells that straddle its edges).
+        With `span`, per-hour material is selected even when its source cell straddles a span edge. Rows staged
+        before migration 0022 have no material hour and retain the conservative timestamp filter.
         """
         if page_size < 1:
             raise ValueError("page size must be positive")
@@ -3100,8 +3134,14 @@ class Repo:
                 func.max(table.last_ts).label("last_ts"),
             ).where(
                 table.hunt_id == hunt_id, table.spec_id == spec_id, table.target == target,
-                *(() if span is None else (table.first_ts >= _utc(span[0], "merge start"),
-                                           table.last_ts < _utc(span[1], "merge end"))),
+                *(() if span is None else (or_(
+                    and_(table.material_hour.is_not(None),
+                         table.material_hour >= _utc(span[0], "merge start"),
+                         table.material_hour < _utc(span[1], "merge end")),
+                    and_(table.material_hour.is_(None),
+                         table.first_ts >= _utc(span[0], "merge start"),
+                         table.last_ts < _utc(span[1], "merge end")),
+                ),)),
             ).group_by(
                 table.scope_kind, table.scope, table.key_id, table.key_digest, table.key, table.bucket,
             ))
@@ -3142,6 +3182,30 @@ class Repo:
             if len(page) < page_size:
                 return
             after = [page[-1]["scope"], page[-1]["hour"]]
+
+    def baseline_window_merged_event_hours(self, hunt_id: str, spec_id: str, target: str, *,
+                                           span: tuple[datetime, datetime],
+                                           page_size: int = BASELINE_PAGE) -> Iterator[dict]:
+        """Sum evaluated-record totals per hour without materializing the hunt window."""
+        if page_size < 1:
+            raise ValueError("page size must be positive")
+        table = t.baseline_window_event_hour.c
+        start, end = _utc(span[0], "event merge start"), _utc(span[1], "event merge end")
+        after = None
+        while True:
+            query = (select(table.hour, func.sum(table.events).label("events")).where(
+                table.hunt_id == hunt_id, table.spec_id == spec_id, table.target == target,
+                table.hour >= start, table.hour < end,
+            ).group_by(table.hour))
+            if after is not None:
+                query = query.having(table.hour > after)
+            query = query.order_by(table.hour).limit(page_size)
+            with self.engine.connect() as connection:
+                page = [_with_utc(row, ("hour",)) for row in connection.execute(query).mappings()]
+            yield from page
+            if len(page) < page_size:
+                return
+            after = page[-1]["hour"]
 
     def baseline_window_scope_series(self, hunt_id: str, spec_id: str, scope_kind: str, scope: str, *,
                                      span: tuple[datetime, datetime],
@@ -3213,7 +3277,7 @@ class Repo:
                 hunt_id=hunt_id, spec_id=spec_id, target=target, reason=reason,
             ).on_conflict_do_nothing(index_elements=["hunt_id", "spec_id", "target"]))
         deleted = 0
-        for table in (t.baseline_window_count, t.baseline_window_scope_hour):
+        for table in (t.baseline_window_count, t.baseline_window_scope_hour, t.baseline_window_event_hour):
             c = table.c
             while True:
                 with write_txn(self.engine) as connection:

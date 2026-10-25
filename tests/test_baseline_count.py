@@ -51,6 +51,52 @@ def test_none_token_counts_each_record_and_scope_hour_once():
     }]
 
 
+def test_window_material_splits_a_day_bucket_by_hour_without_changing_the_day_count():
+    counter = KeyCounter("window", SPEC_BY_ID["bl.exec_path"])
+    counter.add_keys(T0, [_key("a", None)])
+    counter.add_keys(T0 + timedelta(hours=1), [_key("a", None)])
+
+    assert [(row["count"], row["bucket"]) for row in counter.count_rows()] == [(2, T0.replace(hour=0))]
+    assert [(row["count"], row["material_hour"]) for row in counter.material_count_rows()] == [
+        (1, T0.replace(minute=0)),
+        (1, (T0 + timedelta(hours=1)).replace(minute=0)),
+    ]
+
+
+def test_day_dedup_token_is_materialized_once_in_the_hour_that_accepted_it():
+    counter = KeyCounter("window", SPEC_BY_ID["bl.ext_dest"])
+    counter.add_keys(T0, [_key("a", "flow")])
+    counter.add_keys(T0 + timedelta(hours=1), [_key("a", "flow")])
+
+    assert next(counter.count_rows())["count"] == 1
+    assert [(row["count"], row["material_hour"]) for row in counter.material_count_rows()] == [
+        (1, T0.replace(minute=0)),
+    ]
+
+
+def test_per_hour_material_is_bounded_separately_from_day_rows():
+    counter = KeyCounter("window", SPEC_BY_ID["bl.exec_path"], row_cap=10, material_row_cap=1)
+    counter.add_keys(T0, [_key("a", None)])
+    counter.add_keys(T0 + timedelta(hours=1), [_key("a", None)])
+
+    assert counter.partial
+    assert counter.reasons == ("material count row cap 1 exceeded",)
+
+
+def test_consumed_events_have_bounded_per_hour_writer_totals():
+    counter = KeyCounter("window", SPEC_BY_ID["bl.exec_path"], row_cap=10)
+    for index in range(2):
+        counter.consume(_event("process_exec", f"event-{index}", T0 + timedelta(minutes=index),
+                               Outcome.success, **{
+                                   "process.executable": "/bin/id", "process.exec_file.path": "/bin/id",
+                                   "process.user": "svc",
+                               }), KeyContext())
+
+    assert list(counter.event_hour_rows()) == [
+        {"segment_id": "window", "hour": T0.replace(minute=0), "events": 2},
+    ]
+
+
 def test_token_cap_marks_counter_partial_and_refuses_segment_rows():
     counter = KeyCounter("segment", SPEC_BY_ID["bl.ext_dest"], token_cap=2)
     counter.add_keys(T0, [_key("a", "one")])

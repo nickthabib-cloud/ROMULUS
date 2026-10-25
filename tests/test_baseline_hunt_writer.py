@@ -108,8 +108,9 @@ def _stage_cell(repo: Repo, events: list[TypedEvent], *, hunt_id: str = "hunt-a"
             "detail": {"reasons": []},
         },
         (),
-        counts=counter.count_rows(),
+        counts=counter.material_count_rows(),
         scope_hours=counter.scope_hour_rows(),
+        event_hours=counter.event_hour_rows(),
     )
 
 
@@ -318,7 +319,8 @@ def test_exec_pair_citation_resolves_against_the_network_index_carry_before_excl
             "rule_id": spec.id, "version": spec.version, "target": "host-index",
             "partition": f"{START.isoformat()}/{END.isoformat()}", "state": "evaluated_complete", "matched": 0,
             "evaluated": 1, "detail": {"reasons": []},
-        }, (), counts=counter.count_rows(), scope_hours=counter.scope_hour_rows(),
+        }, (), counts=counter.material_count_rows(), scope_hours=counter.scope_hour_rows(),
+        event_hours=counter.event_hour_rows(),
     )
     _candidate(repo, child)
 
@@ -348,7 +350,8 @@ def test_hunt_and_lookback_writers_are_equivalent_at_clamped_hour_edges():
             "partition": f"{START.isoformat()}/{hour_end.isoformat()}", "state": "evaluated_complete",
             "matched": 0,
             "evaluated": 2, "detail": {"reasons": []},
-        }, (), counts=counter.count_rows(), scope_hours=counter.scope_hour_rows(),
+        }, (), counts=counter.material_count_rows(), scope_hours=counter.scope_hour_rows(),
+        event_hours=counter.event_hour_rows(),
     )
     run_hunt_segment_writer(hunt_repo, "hunt-a", hunt_complete=True)
 
@@ -492,7 +495,8 @@ def _cell(repo: Repo, events: list[TypedEvent], start: datetime, end: datetime, 
             "rule_id": spec.id, "version": spec.version, "target": "host-index",
             "partition": f"{start.isoformat()}/{end.isoformat()}", "state": "evaluated_complete",
             "matched": 0, "evaluated": len(events), "detail": {"reasons": []},
-        }, (), counts=counter.count_rows(), scope_hours=counter.scope_hour_rows(),
+        }, (), counts=counter.material_count_rows(), scope_hours=counter.scope_hour_rows(),
+        event_hours=counter.event_hour_rows(),
     )
 
 
@@ -533,7 +537,7 @@ def test_a_window_ending_on_the_half_hour_writes_its_whole_hours_and_leaves_the_
     assert max(row["hour"] for row in repo.baseline_scope_hours(segment["id"])) == START + timedelta(hours=1)
 
 
-def test_a_cell_straddling_the_last_whole_hour_shrinks_the_segment_to_hours_no_cell_straddles():
+def test_cells_straddling_hour_edges_still_write_their_per_hour_material():
     repo = _repo()
     end = START + timedelta(hours=2, minutes=30)
     manifest = _manifest()
@@ -547,11 +551,14 @@ def test_a_cell_straddling_the_last_whole_hour_shrinks_the_segment_to_hours_no_c
 
     segment = repo.baseline_segments(statuses=["active"])[0]
     assert summary["written"] == 1
-    assert (segment["start"], segment["end"]) == (START, START + timedelta(hours=1))
-    assert {row["key"]["executable"] for row in repo.baseline_counts(segment["id"])} == {"/usr/bin/id"}
+    assert (segment["start"], segment["end"]) == (START, START + timedelta(hours=2))
+    assert segment["events_total"] == 3
+    assert {row["key"]["executable"] for row in repo.baseline_counts(segment["id"])} == {
+        "/usr/bin/id", "/usr/bin/w", "/usr/bin/late",
+    }
 
 
-def test_a_window_whose_cells_straddle_every_hour_writes_nothing_and_says_why():
+def test_one_non_aligned_cell_writes_all_whole_hours_inside_it():
     repo = _repo()
     end = START + timedelta(hours=2, minutes=30)
     manifest = _manifest()
@@ -561,10 +568,40 @@ def test_a_window_whose_cells_straddle_every_hour_writes_nothing_and_says_why():
 
     summary = run_hunt_segment_writer(repo, "hunt-a", hunt_complete=True)
 
-    assert repo.baseline_segments() == []
-    assert summary["specs"][SPEC.id]["reason"] == (
-        "host-index: the window holds no whole hour that its cells do not straddle"
+    segment = repo.baseline_segments(statuses=["active"])[0]
+    assert summary["written"] == 1 and summary["specs"][SPEC.id]["reason"] is None
+    assert (segment["start"], segment["end"]) == (START, START + timedelta(hours=2))
+    assert segment["events_total"] == 1
+    assert {row["key"]["executable"] for row in repo.baseline_counts(segment["id"])} == {"/usr/bin/id"}
+
+
+def test_non_aligned_cell_excludes_edge_hours_field_by_field():
+    window_start, window_end = START + timedelta(minutes=30), START + timedelta(hours=3, minutes=30)
+    manifest = _manifest()
+    manifest["window"] = {"start": window_start.isoformat(), "end": window_end.isoformat()}
+    repo = _repo()
+    repo.create_hunt("hunt-a", manifest, "manifest-a", "test")
+    events = [
+        _event("left-edge", "/bin/left", 40),
+        _event("inside-a", "/bin/a", 70),
+        _event("inside-b", "/bin/b", 130),
+        _event("right-edge", "/bin/right", 200),
+    ]
+    _cell(repo, events, window_start, window_end)
+
+    summary = run_hunt_segment_writer(repo, "hunt-a", hunt_complete=True)
+
+    segment = repo.baseline_segments(statuses=["active"])[0]
+    assert summary["written"] == 1
+    assert (segment["start"], segment["end"], segment["events_total"]) == (
+        START + timedelta(hours=1), START + timedelta(hours=3), 2,
     )
+    assert {row["key"]["executable"] for row in repo.baseline_counts(segment["id"])} == {
+        "/bin/a", "/bin/b",
+    }
+    assert {row["hour"] for row in repo.baseline_scope_hours(segment["id"])} == {
+        START + timedelta(hours=1), START + timedelta(hours=2),
+    }
 
 
 def test_a_writer_failure_is_stated_in_the_baseline_summary_and_never_makes_the_hunt_partial(monkeypatch):

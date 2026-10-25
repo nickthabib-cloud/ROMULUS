@@ -677,6 +677,8 @@ baseline_window_count = Table(
     Column("key_digest", String, nullable=False),
     Column("key", JSON, nullable=False),
     Column("bucket", DateTime(timezone=True), nullable=False),
+    # Null only on material staged before migration 0022; new writers always identify the contributing hour.
+    Column("material_hour", DateTime(timezone=True)),
     Column("count", Integer, nullable=False),
     Column("first_ts", DateTime(timezone=True), nullable=False),
     Column("last_ts", DateTime(timezone=True), nullable=False),
@@ -685,6 +687,31 @@ baseline_window_count = Table(
         name="pk_baseline_window_count",
     ),
     CheckConstraint("count >= 1", name="ck_baseline_window_count_count"),
+)
+
+baseline_window_event_hour = Table(
+    "baseline_window_event_hour", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id", ondelete="CASCADE"), nullable=False),
+    Column("spec_id", String, nullable=False),
+    Column("spec_version", String, nullable=False),
+    Column("target", String, nullable=False),
+    Column("partition", String, nullable=False),
+    Column("ordinal", Integer, nullable=False),
+    Column("hour", DateTime(timezone=True), nullable=False),
+    Column("events", Integer, nullable=False),
+    PrimaryKeyConstraint(
+        "hunt_id", "spec_id", "target", "partition", "ordinal",
+        name="pk_baseline_window_event_hour",
+    ),
+    CheckConstraint("events >= 0", name="ck_baseline_window_event_hour_events"),
+)
+Index(
+    "ix_baseline_window_event_hour_merge",
+    baseline_window_event_hour.c.hunt_id,
+    baseline_window_event_hour.c.spec_id,
+    baseline_window_event_hour.c.target,
+    baseline_window_event_hour.c.hour,
+    baseline_window_event_hour.c.partition,
 )
 
 baseline_window_scope_hour = Table(
