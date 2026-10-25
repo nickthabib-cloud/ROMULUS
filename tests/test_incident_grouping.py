@@ -65,6 +65,17 @@ def test_ordinary_findings_still_join_through_observed_edges():
     assert _incidents(links, findings) == [("A1", "A2", "D3")]
 
 
+def test_claim_only_context_citation_does_not_make_a_finding_the_link_target():
+    links = [_link("L1", "A1", ["context-only"])]
+    findings = [_finding("A1", ["anchor"], second=1), _finding("T1", ["subject", "context-only"], second=2)]
+    findings[1]["context_event_ids"] = ["context-only"]
+
+    graph = build_incident_graph(_Repo(links), "h", findings)
+
+    assert sorted(tuple(incident["finding_ids"]) for incident in graph["incidents"]) == [("A1",), ("T1",)]
+    assert graph["edges"] == []
+
+
 def test_inferred_edges_never_merge_and_remain_visible_hypotheses():
     links = [
         _link("L-observed", "A1", ["e1"]),

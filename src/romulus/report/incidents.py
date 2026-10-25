@@ -148,8 +148,14 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
     for finding in findings:
         if finding.get("source_link_id"):
             children[finding["source_link_id"]].append(finding["id"])
-        cited = set(finding.get("event_ids") or [])
-        cited.update(citation["event_id"] for citation in finding.get("citations") or [])
+        stored = repo.candidate(finding["id"]) if hasattr(repo, "candidate") else None
+        event_ids = list((stored or finding).get("event_ids") or [])
+        context_ids = set((stored or finding).get("context_event_ids") or [])
+        cited = set(event_ids) - context_ids
+        if not cited:
+            cited = set(event_ids)
+        if not event_ids:
+            cited.update(citation["event_id"] for citation in finding.get("citations") or [])
         for event_id in cited:
             findings_by_event[event_id].add(finding["id"])
     links = []
