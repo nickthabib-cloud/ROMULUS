@@ -18,7 +18,8 @@ _n = 0
 def answer(client, ts, rcode="NXDOMAIN", name=None, server=RESOLVER):
     global _n
     _n += 1
-    fields = {"source.ip": server, "destination.ip": client, "dns.type": "answer",
+    fields = {"source.ip": server, "destination.ip": client, "source.port": 53, "destination.port": 40000,
+              "dns.type": "answer",
               "dns.question.name": name or f"n{_n}.example.test", "dns.response_code": rcode,
               "network.transport": "udp", "suricata.flow_id": _n}
     return TypedEvent(id=f"v{_n:09d}", family="dns_query", ts=ts, host="sensor",
@@ -29,7 +30,8 @@ def answer(client, ts, rcode="NXDOMAIN", name=None, server=RESOLVER):
 def question(client, name, ts, qtype="A"):
     global _n
     _n += 1
-    fields = {"source.ip": client, "destination.ip": RESOLVER, "dns.type": "query", "dns.question.name": name,
+    fields = {"source.ip": client, "destination.ip": RESOLVER, "source.port": 40000, "destination.port": 53,
+              "dns.type": "query", "dns.question.name": name,
               "dns.question.type": qtype, "network.transport": "udp", "suricata.flow_id": _n}
     return TypedEvent(id=f"q{_n:09d}", family="dns_query", ts=ts, host="sensor",
                       fields={k: fv(v, "fixture") for k, v in fields.items()},

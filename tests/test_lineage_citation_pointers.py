@@ -314,3 +314,40 @@ def test_exec_source_failure_drops_the_ancestor_citation_but_changes_no_verdict(
     assert "reaches the service manager with no web server" in match.claim
     assert any("exec record(s) it reads were not kept for citation" in note for note in match.notes)
     assert all("store of exec records was full" not in note for note in match.notes)
+
+
+class _BrokenClient:
+    def search(self, _target: str, _body: dict) -> dict:
+        raise RuntimeError("connection reset by peer")
+
+
+def test_any_failed_re_read_leaves_the_records_uncited_and_never_raises():
+    observed_hits = observe(T, 30, 410, 1, "/usr/lib/systemd/systemd")
+    events, raw = normalized(observed_hits)
+    observed_event = next(item for item in events if item.family == "process_observed")
+    lineage = ExecLineage(observing=True, citing=True)
+    lineage.observe_process(observed_event, raw, "host-target")
+    [entry] = lineage.observed.peek((HOST, 410))
+
+    rebuilt, copies = publish.LineageCitationFetcher(_BrokenClient(), {"host-target": object()}).load(
+        {entry.event_id: lineage.citations.peek(entry.event_id)},
+    )
+
+    assert rebuilt == {} and copies == {}
+
+
+def test_expansion_gives_its_direct_pack_the_verified_lineage_loader(monkeypatch):
+    from romulus.hunt import expansion as expansion_module
+    from tests.test_expansion_engine import WINDOW, repo_with_anchor
+    from tests.test_expansion_lane_budget import SteadyFetcher
+
+    bound = []
+    monkeypatch.setattr(expansion_module, "bind_lineage_citation_loader",
+                        lambda pack, load: bound.append((len(pack), load)))
+    repo = repo_with_anchor()
+    fetcher = SteadyFetcher(repo)
+    fetcher.executor.client, fetcher.executor.contracts = _BrokenClient(), {"host-target": object()}
+
+    expansion_module.ExpansionEngine(repo, "h1", WINDOW, fetcher, max_source_queries=20).run()
+
+    assert bound and all(size > 0 and callable(load) for size, load in bound)

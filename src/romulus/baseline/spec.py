@@ -27,6 +27,7 @@ from romulus.detect import netdef
 from romulus.detect.correlation import PidTable, boot_of, boots_conflict
 from romulus.detect.dns import registered_domain
 from romulus.detect.dns import role as dns_role
+from romulus.detect.dns import server_side as dns_server_side
 from romulus.evidence.typed import Outcome, TypedEvent
 
 type Scope = Literal["host", "account", "host_account", "internal_ip", "site"]
@@ -512,14 +513,21 @@ def _dns_destination(event: TypedEvent, context: KeyContext, spec: BaselineSpec)
     record_role = dns_role(event)
     if record_role is None:
         return NotApplicable(f"DNS record role {event.get('dns.type')} is neither a question nor an answer")
-    client_field = "destination.ip" if record_role == "answer" else "source.ip"
-    resolver_field = "source.ip" if record_role == "answer" else "destination.ip"
-    client = _ip(event, client_field)
-    if not isinstance(client, Missing) and not context.is_internal(client):
-        return NotApplicable("the DNS client is outside the site")
     if (record_role == "answer" and event.get("dns.question.names") is None
             and event.get("dns.question.name") is None):
         return NotApplicable("an answer resource record without its question; the query record carries it")
+    # The client is the endpoint not on a DNS service port, whatever the record's orientation (a sensor may write an
+    # answer in its flow's orientation, client first); a question whose ports do not tell is read as sent, source to
+    # destination, and an answer whose ports do not tell is Missing.
+    side = dns_server_side(event, record_role)
+    if side is None:
+        return Missing("the DNS ports do not tell the client from the server of an answer (neither or both on a DNS "
+                       "port, or a port not typed)", ("source.port", "destination.port"))
+    client_field, resolver_field = (("source.ip", "destination.ip") if side == "destination"
+                                    else ("destination.ip", "source.ip"))
+    client = _ip(event, client_field)
+    if not isinstance(client, Missing) and not context.is_internal(client):
+        return NotApplicable("the DNS client is outside the site")
     resolver = _ip(event, resolver_field)
     names = _question_names(event)
     for value in (client, resolver, names):
@@ -642,7 +650,7 @@ BASELINE_SPECS = (
         _extract=_cmd_shape,
     ),
     BaselineSpec(
-        id="bl.ext_dest", version="1", key_version="1",
+        id="bl.ext_dest", version="3", key_version="3",
         families=("net_flow", "dns_query", "tls_session", "net_session"),
         datasets=(
             "suricata.eve.flow", "suricata.eve.netflow", "suricata.eve.dns", "suricata.eve.tls",
@@ -657,7 +665,7 @@ BASELINE_SPECS = (
         },
         optional_fields={
             "net_flow": (*_FLOW_IDS,),
-            "dns_query": ("dns.type", *_FLOW_IDS),
+            "dns_query": ("dns.type", "source.port", "destination.port", *_FLOW_IDS),
             "tls_session": ("tls.client.server_name", *_FLOW_IDS),
             "net_session": ("tls.client.server_name", *_FLOW_IDS),
         },

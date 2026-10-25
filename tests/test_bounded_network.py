@@ -26,7 +26,8 @@ def flow(src, sport, dst, dport, ts):
 
 
 def dns_question(client, name, ts):
-    return event("dns_query", ts, source__ip=client, destination__ip="10.20.0.53", dns__type="query",
+    return event("dns_query", ts, source__ip=client, destination__ip="10.20.0.53", source__port=40000,
+                 destination__port=53, dns__type="query",
                  dns__question__name=name)
 
 

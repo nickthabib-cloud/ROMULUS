@@ -14,7 +14,7 @@ from romulus.agent.models import PivotCoverage
 from romulus.decide.policy import LANE_ORDER
 from romulus.detect import netdef
 from romulus.detect.correlation import routable_remote
-from romulus.detect.host import is_internal
+from romulus.detect.host import bind_lineage_citation_loader, is_internal
 from romulus.detect.netdef import DIRECTION_ASSUMED_REASON
 from romulus.detect.registry import fresh_direct_pack, rule_kind
 from romulus.evidence.typed import TypedEvent
@@ -32,7 +32,12 @@ from romulus.hunt.links import (
     written_community_id,
 )
 from romulus.hunt.pivot import HOST_AMBIGUOUS, HOST_LOOKUP_BUDGET, NO_HOST_RECORD
-from romulus.hunt.publish import mark_hypothesis_relation, publish_match, subject_event_ids
+from romulus.hunt.publish import (
+    LineageCitationFetcher,
+    mark_hypothesis_relation,
+    publish_match,
+    subject_event_ids,
+)
 from romulus.hunt.sweep import stored_boot_intervals
 from romulus.sources.models import Window
 from romulus.store.db import digest
@@ -578,7 +583,13 @@ class ExpansionEngine:
         # immediately. Context rules are judged once, after expansion ends, by finalize_context.
         events = self._events(result.event_ids)
         published = []
-        for playbook in fresh_direct_pack():
+        pack = fresh_direct_pack()
+        # The same verified re-read of cited lineage records the sweep's pack has, so a finding found here can rest
+        # on its lineage exactly as one found in the sweep can.
+        executor = getattr(self.fetcher, "executor", None)
+        if getattr(executor, "client", None) is not None and getattr(executor, "contracts", None):
+            bind_lineage_citation_loader(pack, LineageCitationFetcher(executor.client, executor.contracts).load)
+        for playbook in pack:
             for match in playbook.consume(events):
                 # The finding stands on its own cited records and keeps its machine lane. Only its relation to
                 # the anchor may be a hypothesis.

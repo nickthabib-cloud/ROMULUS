@@ -9,7 +9,6 @@ from romulus.detect.base import Match, Playbook
 from romulus.detect.observed import pointer_body
 from romulus.evidence.normalize import normalize_hits, observed_record
 from romulus.evidence.typed import TypedEvent, fv
-from romulus.sources.es import SourceError
 from romulus.store.repo import Repo
 
 LINEAGE_CITATION_BATCH = 500
@@ -61,7 +60,7 @@ class LineageCitationFetcher:
                     }
                     try:
                         response = self.client.search(target, query)
-                    except SourceError:
+                    except Exception:  # noqa: BLE001, S112 - a failed re-read leaves these records uncited
                         continue
                     batch_set = {(index, native_id) for native_id in batch}
                     for hit in response.get("hits", {}).get("hits", []):

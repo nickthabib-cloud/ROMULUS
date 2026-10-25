@@ -96,9 +96,15 @@ def _expected(events) -> dict:
     calls = [e for e in events if e.family == "net_socket"]
     network = [e for e in events if e.family != "net_socket"]
     alerts = [e for e in network if e.family == "net_alert"]
-    cited = sorted(network, key=lambda e: (e.family != "net_alert", e.ts, e.id))[:20]
+    # one record per connection first (each connection's first in citation order: alerts, then by time), for the
+    # connections that come first that way
+    order = sorted(network, key=lambda e: (e.family != "net_alert", e.ts, e.id))
+    first_of = {}
+    for e in order:
+        first_of.setdefault(e.get("source.port"), e)
+    cited = sorted(first_of.values(), key=lambda e: (e.family != "net_alert", e.ts, e.id))[:20]
     failed = sum(e.outcome == Outcome.failure for e in calls)
-    # the calls bounding the span, then the group's first calls; the earliest network records, alerts first
+    # the calls bounding the span, then the group's first calls; then the network records chosen above
     calls_cited = list(dict.fromkeys([calls[0].id, calls[-1].id, *(e.id for e in calls[:20])]))
     return {"calls": len(calls), "flows": len(network) - len(alerts), "alerts": len(alerts),
             "connections": len(calls), "failed": failed, "succeeded": len(calls) - failed,

@@ -8,6 +8,7 @@ from romulus.detect.base import Match, Playbook, pf
 from romulus.detect.bounded import HOT_COUNT, KeyedStore
 from romulus.detect.citing import BoundStage, Ends, Named, bound_note, cite_extra, cited_phrase, more
 from romulus.detect.correlation import StageMissing
+from romulus.detect.dns import endpoints
 from romulus.evidence.typed import TypedEvent
 
 # A Suricata TCP flow record in one of these states shows its engine tracked the connection from its handshake, so its
@@ -349,7 +350,7 @@ class DnsSubdomainEnumeration(_Grouped):
     this rule's lane, with a host-discovery claim and the swept address range. Question records are `query`
     (`request` in newer sensor output) or carry no role; answers (`answer`, `response`) are not evaluated."""
     id = "net.dns_subdomain_enumeration"
-    version = "5"
+    version = "6"
     title = "Many distinct subdomains of one domain queried by one source"
     families = ("dns_query",)
     required_fields = ("source.ip", "dns.question.name")
@@ -362,8 +363,9 @@ class DnsSubdomainEnumeration(_Grouped):
     REVERSE_TREES = ("in-addr.arpa", "ip6.arpa")
     card: ClassVar[dict] = {
         "behavior": "one source queried many distinct names under one forward registered domain (last two labels)",
-        "telemetry": "dns_query question records: source.ip, dns.question.name, dns.type (Suricata EVE dns: "
-                     "present in the lab profile)",
+        "telemetry": "dns_query question records: source and destination ip and port (the client is the endpoint "
+                     "not on the DNS port), dns.question.name, dns.type (Suricata EVE dns: present in the lab "
+                     "profile)",
         "fidelity": "direct observation of the questions; a query does not show which names exist",
         "benign_and_cost": "resolvers forwarding for many clients, CDN-heavy browsing, mail servers; one grouped "
                            "finding per (source, domain)",
@@ -393,7 +395,12 @@ class DnsSubdomainEnumeration(_Grouped):
                 self.evaluated -= 1
                 self.missing_required += 1
                 continue
-            key = (e.get("source.ip"), _registered(e.get("dns.question.name")))
+            client, _server = endpoints(e)       # the client is the endpoint not on the DNS port
+            if client is None:
+                self.evaluated -= 1
+                self.missing_required += 1
+                continue
+            key = (client, _registered(e.get("dns.question.name")))
             if key[1] in self.REVERSE_TREES:
                 continue
             state = self.keep(key, e)
@@ -502,7 +509,7 @@ class PortScan(_Grouped):
     # is held on the rule's disk spill while it is quiet. The index of requests to services (the earliest start of
     # each 4-tuple, to tell an answer from a probe) is a keyed store too, HOT entries in memory.
     REQUESTS_HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
-    version = "8"
+    version = "9"
     # Destination ports the claim names, each with a cited record (the first seen); and probed ports whose opening a
     # cited record shows (a Suricata TCP flow its engine tracked from the handshake).
     PORTS_NAMED = 12
@@ -612,6 +619,11 @@ class PortScan(_Grouped):
                     claim += (" The index of earlier flows reached its disk budget, so some answers may be counted as "
                               "probes.")
             claim += self.told(evs, state, missing, "flow records", "flow record")
+            # how many of the counted ports the cited records show
+            in_cited = {e.get("destination.port") for e in evs if isinstance(e.get("destination.port"), int)}
+            low = (f", and {len(in_cited & set(replies))} of the {len(replies)} reached from a source port below "
+                   f"1024," if replies else "")
+            claim += f" {len(in_cited & ports)} of the {len(ports)} ports{low} are in cited records."
             if len(probed) >= self.MIN_PORTS:
                 lane, severity = self.lane, self.severity
             else:
