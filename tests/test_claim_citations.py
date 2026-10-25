@@ -384,6 +384,23 @@ def test_nxdomain_names_and_servers_come_from_cited_records(tmp_path):
     assert "240 NXDOMAIN answer(s)" in m.claim and "of the 240 NXDOMAIN answer records are cited" in m.claim
 
 
+def test_an_nxdomain_burst_says_how_many_of_its_rcode_tally_are_cited():
+    from datetime import timedelta as td
+
+    from tests.test_dns_rules import T0 as DNS_T0
+    from tests.test_dns_rules import nx_answers
+    from tests.test_dns_rules import run as run_dns
+    events = nx_answers(60) + nx_answers(40, code="NOERROR", start=DNS_T0 + td(hours=1))
+    _pb, [m] = run_dns(dns.DnsNxdomainBurst, events)
+    assert "rcodes: NXDOMAIN x60, NOERROR x40" in m.claim
+    cited = sum(e.get("dns.response_code") is not None for e in m.events)
+    assert f"Of the 100 answer records in the rcode tally, {cited} of the 100 are cited (NXDOMAIN x{cited})." in m.claim
+    clean([m])
+    # without that sentence the tally is an undisclosed count
+    bare = m.claim.split(" Of the 100 answer records")[0]
+    assert any("tallies 100 records" in p for p in finding_problems(bare, m.notes, m.events))
+
+
 def test_a_tunnel_shape_cites_its_example_names_and_span(tmp_path):
     from tests.test_dns_rules import tunnel
     out = staged(dns.DnsTunnelShape(), batches(tunnel(400), 50), tmp_path)
@@ -403,6 +420,22 @@ def test_subdomain_and_tool_agent_groups_disclose_their_citations(tmp_path):
     [m] = staged(network.ToolUserAgentHttp(), batches(requests, 10), tmp_path / "b")
     clean([m])
     assert "URLs include ['/u0', '/u1', '/u2'] and 37 more." in m.claim
+
+
+def test_a_tool_user_agent_is_quoted_as_recorded_and_its_signature_named_as_a_classification(tmp_path):
+    agents = ["Fuzz Faster U Fool v1.1.0", "Fuzz Faster U Fool v2.0.0"]
+    requests = [ev("http_tx", T0 + timedelta(seconds=i), host="sensor", source__ip="198.51.100.7",
+                   destination__ip="10.0.0.10", http__hostname="web1", user_agent__original=agents[i % 2],
+                   url__original=f"/w{i}") for i in range(30)]
+    [m] = staged(network.ToolUserAgentHttp(), batches(requests, 10), tmp_path)
+    clean([m])
+    assert ("with user agent(s) 'Fuzz Faster U Fool v1.1.0', 'Fuzz Faster U Fool v2.0.0' (" in m.claim
+            and "which matched the ffuf tool signature" in m.claim and "'fuzz'" not in m.claim)
+    # the guard holds a quoted user agent to a recorded value, never a token of one
+    assert "quotes user agent 'fuzz', which no cited record carries exactly" in problems(
+        "requests with user agent 'fuzz' and more", m.events)
+    # a recorded agent quoted in full passes
+    assert problems("requests with user agent 'Fuzz Faster U Fool v1.1.0'", m.events) == []
 
 
 def test_spraying_names_only_the_accounts_its_cited_records_show(tmp_path):

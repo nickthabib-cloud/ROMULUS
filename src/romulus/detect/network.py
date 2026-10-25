@@ -14,8 +14,14 @@ from romulus.evidence.typed import TypedEvent
 # A Suricata TCP flow record in one of these states shows its engine tracked the connection from its handshake, so its
 # source opened it (romulus.detect.flows.OPENED_STATES); netflow records and other states show no opener.
 OPENED_STATES = frozenset({"established", "closed"})
-TOOL_UA_PREFIXES = ("curl/", "wget/", "python-requests/", "python-urllib/", "go-http-client/", "libwww-perl/",
-                    "powershell", "nmap", "sqlmap", "nikto", "fuzz faster u fool", "gobuster", "dirbuster")
+# Lower-cased user-agent prefixes of command-line HTTP tools, and the tool each one is the signature of.
+TOOL_UA_SIGNATURES = {
+    "curl/": "curl", "wget/": "wget", "python-requests/": "python-requests", "python-urllib/": "python-urllib",
+    "go-http-client/": "Go net/http", "libwww-perl/": "libwww-perl", "powershell": "PowerShell", "nmap": "nmap",
+    "sqlmap": "sqlmap", "nikto": "nikto", "fuzz faster u fool": "ffuf", "gobuster": "gobuster",
+    "dirbuster": "DirBuster",
+}
+TOOL_UA_PREFIXES = tuple(TOOL_UA_SIGNATURES)
 EXAMPLE_LIMIT = 20
 
 
@@ -441,8 +447,10 @@ class ToolUserAgentHttp(_Grouped):
     """Positive-only: the user agent is self-reported, attacker-controlled text, so its absence
     proves nothing; the prefix list also cannot see tools whose agent string does not start with the name."""
     id = "net.tool_user_agent_http"
-    version = "3"
+    version = "4"
     URLS_NAMED = 3
+    AGENTS_NAMED = 3            # recorded user agents quoted, each with a cited record
+    AGENTS_COUNTED = 50         # distinct recorded user agents counted per group; beyond it, "and possibly more"
     assures_negative = False
     title = "HTTP requests whose user agent begins with a known command-line tool name"
     families = ("http_tx",)
@@ -459,13 +467,18 @@ class ToolUserAgentHttp(_Grouped):
                 self.evaluated -= 1
                 self.missing_required += 1
                 continue
-            ua = ua.lower()
+            recorded, ua = ua, ua.lower()
             if not ua.startswith(TOOL_UA_PREFIXES):
                 continue
             key = (e.get("source.ip"), e.get("destination.ip"), e.get("http.hostname"), ua.split(" ")[0])
             state = self.keep(key, e)
             if state is None:
                 continue
+            state.bag("tools").add(next(TOOL_UA_SIGNATURES[p] for p in TOOL_UA_PREFIXES if ua.startswith(p)))
+            agents = state.bag("agents")
+            if len(agents) < self.AGENTS_COUNTED:
+                agents.add(recorded)
+            self.name(state, "agents", recorded, e, self.AGENTS_NAMED)
             urls = state.bag("urls")
             if len(urls) < 50:
                 urls.add(e.get("url.original"))
@@ -480,8 +493,14 @@ class ToolUserAgentHttp(_Grouped):
             src, dst, hostname, ua = key
             urls = sorted(u for u in state.names("urls", self.URLS_NAMED).values())
             every = len([u for u in state.bag("urls") if u])
-            claim = (f"{state.count} HTTP request(s) from {src} to {dst} (Host: {hostname}) with user agent "
-                     f"'{ua}' ({self.span(state)}); URLs include {urls}"
+            # the user agents as recorded (each quoted one with a cited record); the grouping token is not a value
+            agents = sorted(state.names("agents", self.AGENTS_NAMED).values())
+            n_agents = len(state.bag("agents"))
+            quoted = ", ".join(f"'{agent}'" for agent in agents) + (
+                more(len(agents), n_agents) if n_agents < self.AGENTS_COUNTED else " and possibly more")
+            tools = " or ".join(sorted(state.bag("tools")))
+            claim = (f"{state.count} HTTP request(s) from {src} to {dst} (Host: {hostname}) with user agent(s) "
+                     f"{quoted} ({self.span(state)}), which matched the {tools} tool signature; URLs include {urls}"
                      + (more(len(urls), every) if every < 50 else " and possibly more") + "."
                      + self.told(evs, state, missing, "requests", "request") + " The user agent is self-reported.")
             out.append(Match(self.id, claim, self.claim_type, evs, [pf(evs[0], "user_agent.original"),

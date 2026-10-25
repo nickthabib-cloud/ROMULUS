@@ -160,6 +160,55 @@ def test_canonical_candidate_content_key_prefers_persisted_group_key():
     )
 
 
+def _rare_shape_repo(tmp_path, *, with_context=True):
+    """A hunt with three rare web-shell shape leads, each citing every run of its shape (the other two runs only
+    for its claim's count)."""
+    from romulus.detect.host import WebServiceSpawnsInterpreter
+    from romulus.hunt.publish import publish_match
+    from tests.test_claim_citations import ev, staged
+    e = make_engine(":memory:")
+    migrate(e)
+    repo = Repo(e)
+    manifest = {"style": "broad", "agent_mode": "model",
+                "window": {"start": "2024-11-18T10:00:00+00:00", "end": "2024-11-18T17:30:00+00:00"},
+                "original_input": {}, "targets": ["fx"], "pack": {"version": "p"}, "normalizer": "n",
+                "policy": "d", "model": {}, "romulus_version": "0"}
+    repo.create_hunt("h1", manifest, "dig", "test")
+    repo.set_hunt_state("h1", "running")
+    runs = [ev("process_exec", T + timedelta(minutes=i), host="web1", process__argv=["/bin/sh", "-c", f"id; ls {i}"],
+               process__executable="/usr/bin/dash", process__user="www-data", process__uid="33",
+               process__pid=4000 + i, process__ppid=3999) for i in range(3)]
+    rule = WebServiceSpawnsInterpreter()
+    matches = staged(rule, [runs], tmp_path)
+    assert len(matches) == 3 and all(len(m.events) == 3 for m in matches)
+    for m in matches:
+        publish_match(repo, "h1", rule, m, None, {})
+    if not with_context:            # an older hunt's candidates, stored without the field
+        from romulus.store import schema as tables
+        with repo.engine.begin() as connection:
+            connection.execute(tables.candidate.update().values(context_event_ids=None))
+    repo.set_hunt_state("h1", "partial", detection_result="reportable_findings", stop_reason="test")
+    return repo
+
+
+def test_rare_shape_leads_citing_each_others_runs_keep_distinct_canonical_ids_and_render_apart(tmp_path):
+    repo = _rare_shape_repo(tmp_path)
+    canonical = canonical_manifest(repo, "h1", "test")
+    ids = [f["id"] for f in canonical["findings"] if f["rule_id"] == "host.web_service_spawns_interpreter"]
+    assert len(ids) == 3 and len(set(ids)) == 3 and all(re.fullmatch(r"F-[0-9a-f]{20}", i) for i in ids)
+    m = publish_revision(repo, "h1", "test")
+    md = render(m)
+    found = re.findall(r'<a id="f-([0-9a-f]+)"></a>', md)
+    assert len(found) == len(set(found)) == len(m["findings"]) == 3
+
+
+def test_older_candidates_whose_evidence_coincides_still_get_one_canonical_id_each(tmp_path):
+    repo = _rare_shape_repo(tmp_path / "old", with_context=False)
+    canonical = canonical_manifest(repo, "h1", "test")
+    ids = [f["id"] for f in canonical["findings"]]
+    assert len(ids) == len(set(ids)) == 3 and all(re.fullmatch(r"F-[0-9a-f]{20}-[123]", i) for i in ids)
+
+
 def test_manifest_citations_resolve_and_renderers_agree():
     repo, cid = _repo_with_finding()
     m = publish_revision(repo, "h1", "test")
