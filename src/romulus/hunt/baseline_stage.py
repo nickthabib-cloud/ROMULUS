@@ -157,7 +157,8 @@ def resolve_window_exec_pairs(repo: Repo, hunt_id: str, window: Window) -> None:
                 *repo.baseline_window_observations(hunt_id, target, cell["partition"]),
                 *pending_counter.observation_rows(),
             ]
-            execs = repo.baseline_window_execs(hunt_id, target, cell["partition"])
+            execs = [row for row in repo.baseline_window_execs(hunt_id, target, cell["partition"])
+                     if row.get("family", "process_exec") == "process_exec"]
             state = (
                 "not_applicable_no_events" if not cell["target_applicable"] else
                 "not_applicable_no_events" if not execs and cell["source_complete"] else

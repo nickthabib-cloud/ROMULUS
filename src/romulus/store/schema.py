@@ -556,6 +556,38 @@ baseline_parent_carry = Table(
     CheckConstraint("executable <> ''", name="ck_baseline_parent_carry_executable"),
 )
 
+# Non-exec audit observations can name a long-lived process whose exec predates the retained baseline. Rows stay
+# disk-backed and ordered; carry resolution reads only the nearest states around one child instant.
+baseline_parent_observation = Table(
+    "baseline_parent_observation", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id", ondelete="CASCADE"), nullable=False),
+    Column("target", String, nullable=False),
+    Column("host", String, nullable=False),
+    Column("boot", String, nullable=False),
+    Column("pid", Integer, nullable=False),
+    Column("observed_ts", DateTime(timezone=True), nullable=False),
+    Column("serial", Integer),
+    Column("executable", String, nullable=False),
+    Column("parent_pid", Integer, nullable=False),
+    Column("session", Integer),
+    Column("event_id", String, nullable=False),
+    PrimaryKeyConstraint(
+        "hunt_id", "target", "host", "boot", "pid", "observed_ts", "event_id",
+        name="pk_baseline_parent_observation",
+    ),
+    CheckConstraint("pid >= 0", name="ck_baseline_parent_observation_pid"),
+    CheckConstraint("executable <> ''", name="ck_baseline_parent_observation_executable"),
+)
+Index(
+    "ix_baseline_parent_observation_lookup",
+    baseline_parent_observation.c.hunt_id,
+    baseline_parent_observation.c.target,
+    baseline_parent_observation.c.host,
+    baseline_parent_observation.c.boot,
+    baseline_parent_observation.c.pid,
+    baseline_parent_observation.c.observed_ts,
+)
+
 # Compact, durable window state for exec-pair resolution after history fill. Full typed events and raw source
 # bodies are deliberately absent; first-event source identities live with the observation or Pending body.
 baseline_window_cell = Table(
@@ -580,12 +612,14 @@ baseline_window_exec = Table(
     Column("target", String, nullable=False),
     Column("partition", String, nullable=False),
     Column("ordinal", Integer, nullable=False),
+    Column("family", String, nullable=False, server_default="process_exec"),
     Column("host", String),
     Column("boot", String),
     Column("pid", Integer),
     Column("ppid", Integer),
     Column("ts", DateTime(timezone=True), nullable=False),
     Column("serial", Integer),
+    Column("session", Integer),
     Column("executable", String),
     Column("outcome", String, nullable=False),
     Column("event_id", String, nullable=False),

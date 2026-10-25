@@ -100,8 +100,9 @@ class EventStage:
         )
         self.db.execute(
             "CREATE TABLE baseline_exec (target TEXT NOT NULL, partition TEXT NOT NULL, ordinal INTEGER NOT NULL, "
-            "host TEXT, boot TEXT, pid INTEGER, ppid INTEGER, ts TEXT NOT NULL, serial INTEGER, executable TEXT, "
-            "outcome TEXT NOT NULL, event_id TEXT NOT NULL, PRIMARY KEY (target, partition, ordinal))"
+            "family TEXT NOT NULL, host TEXT, boot TEXT, pid INTEGER, ppid INTEGER, ts TEXT NOT NULL, "
+            "serial INTEGER, session INTEGER, executable TEXT, outcome TEXT NOT NULL, event_id TEXT NOT NULL, "
+            "PRIMARY KEY (target, partition, ordinal))"
         )
         self.db.execute(
             "CREATE TABLE baseline_observation (target TEXT NOT NULL, partition TEXT NOT NULL, "
@@ -317,12 +318,14 @@ class EventStage:
                           "baseline_count", "baseline_scope_hour"):
                 self.db.execute(f"DELETE FROM {table} WHERE target = ? AND partition = ?", (target, partition))
             self.db.executemany(
-                "INSERT INTO baseline_exec VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO baseline_exec VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [(
-                    target, partition, ordinal, event.host, boot_of(event),
+                    target, partition, ordinal, event.family, event.host, boot_of(event),
                     event.get("process.pid") if isinstance(event.get("process.pid"), int) else None,
                     event.get("process.ppid") if isinstance(event.get("process.ppid"), int) else None,
                     event.ts.isoformat(), exec_serial(event),
+                    event.get("process.session_id")
+                    if isinstance(event.get("process.session_id"), int) else None,
                     event.get("process.executable") if isinstance(event.get("process.executable"), str) else None,
                     event.outcome.value, event.id,
                 ) for ordinal, event in enumerate(events)],
@@ -364,14 +367,15 @@ class EventStage:
 
     def baseline_execs(self, target: str, partition: str) -> list[dict]:
         rows = self.db.execute(
-            "SELECT host, boot, pid, ppid, ts, serial, executable, outcome, event_id FROM baseline_exec "
+            "SELECT family, host, boot, pid, ppid, ts, serial, session, executable, outcome, event_id "
+            "FROM baseline_exec "
             "WHERE target = ? AND partition = ? ORDER BY ordinal", (target, partition),
         )
         return [{
-            "host": host, "boot": boot, "pid": pid, "ppid": ppid,
-            "ts": datetime.fromisoformat(ts), "serial": serial, "executable": executable,
+            "family": family, "host": host, "boot": boot, "pid": pid, "ppid": ppid,
+            "ts": datetime.fromisoformat(ts), "serial": serial, "session": session, "executable": executable,
             "outcome": outcome, "event_id": event_id,
-        } for host, boot, pid, ppid, ts, serial, executable, outcome, event_id in rows]
+        } for family, host, boot, pid, ppid, ts, serial, session, executable, outcome, event_id in rows]
 
     def baseline_observations(self, target: str, partition: str) -> list[dict]:
         rows = self.db.execute(

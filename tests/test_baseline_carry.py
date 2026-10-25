@@ -6,8 +6,9 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from romulus.baseline.carry import CarryInStore, ParentExec, PendingResolver
+from romulus.baseline.carry import CarryInStore, ParentExec, ParentObservation, PendingResolver
 from romulus.baseline.spec import Pending
+from romulus.evidence.typed import Outcome, TypedEvent, fv
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
 
@@ -75,9 +76,11 @@ def test_marker_cache_overflow_persists_advances_before_reboot_comparison(monkey
 def test_deleting_hunt_cascades_its_disk_carry_state():
     repo, store = _store()
     store.observe_rows([_row(10, 1, "/parent")])
+    store.observe_observation_rows([_observed(11, 2, "/observed")])
     repo.set_hunt_state("hunt", "canceled")
     repo.delete_hunt("hunt", actor="test")
     assert repo.baseline_parent_count("hunt") == 0
+    assert repo.baseline_parent_observation_count("hunt") == 0
 
 
 def test_pending_resolver_produces_key_or_explicit_unresolved_reason():
@@ -92,7 +95,110 @@ def test_pending_resolver_produces_key_or_explicit_unresolved_reason():
     init = resolver.resolve(Pending("host", "boot-a", 1, START, "init", "/bin/sh"))
     kthreadd = resolver.resolve(Pending("host", "boot-a", 2, START, "kthreadd", "/bin/sh"))
     assert before.reason == "parent exec before history" and before.keys == ()
-    assert init.reason == kthreadd.reason == "parent pid 1/2 out of scope"
+    assert init.reason is None and init.keys[0].key["parent_executable"] == "init"
+    assert kthreadd.reason is None and kthreadd.keys[0].key["parent_executable"] == "kthreadd"
+
+
+def _observed(pid: int, seconds: float, executable: str, *, ppid: int = 1,
+              boot: str = "boot-a", serial: int | None = None, session: int | None = 9) -> ParentObservation:
+    return ParentObservation(
+        "host", boot, pid, START + timedelta(seconds=seconds), executable, ppid,
+        session, f"observed-{pid}-{seconds}-{executable}", serial,
+    )
+
+
+def _unknown_exec(pid: int, seconds: float) -> TypedEvent:
+    return TypedEvent(
+        id=f"unknown-{pid}-{seconds}", family="process_exec",
+        ts=START + timedelta(seconds=seconds), host="host", outcome=Outcome.unknown,
+        fields={
+            "process.pid": fv(pid, "fixture"), "process.ppid": fv(1, "fixture"),
+            "process.executable": fv("/unknown", "fixture"), "host.boot.id": fv("boot-a", "fixture"),
+        },
+        raw=[], normalizer="fixture@1",
+    )
+
+
+def test_long_lived_parent_resolves_from_a_same_boot_observed_image():
+    repo, store = _store()
+    store.observe_observation_rows([_observed(10, 1, "/usr/sbin/nginx")])
+
+    resolved = PendingResolver(store).resolve(Pending(
+        "host", "boot-a", 10, START + timedelta(seconds=20), "child", "/bin/sh",
+    ))
+
+    assert resolved.reason is None
+    assert resolved.keys[0].key == {
+        "child_executable": "/bin/sh", "parent_executable": "/usr/sbin/nginx",
+    }
+    assert repo.baseline_parent_observation_count("hunt") == 1
+
+
+def test_an_observed_image_without_a_recorded_boot_is_never_used_as_carry_in():
+    repo, store = _store()
+    store.observe_observation_rows([_observed(10, 1, "/usr/sbin/nginx", boot="")])
+
+    resolved = PendingResolver(store).resolve(Pending(
+        "host", None, 10, START + timedelta(seconds=20), "child", "/bin/sh",
+    ))
+
+    assert repo.baseline_parent_observation_count("hunt") == 0
+    assert resolved.keys == () and resolved.reason == "parent boot is not recorded"
+
+
+def test_a_successful_exec_supersedes_an_older_observed_image():
+    _repo, store = _store()
+    store.observe_observation_rows([_observed(10, 1, "/usr/sbin/nginx")])
+    store.observe_rows([_row(10, 10, "/usr/bin/reloaded")])
+
+    resolved = PendingResolver(store).resolve(Pending(
+        "host", "boot-a", 10, START + timedelta(seconds=20), "child", "/bin/sh",
+    ))
+
+    assert resolved.reason is None
+    assert resolved.keys[0].key["parent_executable"] == "/usr/bin/reloaded"
+
+
+def test_an_unknown_exec_between_observation_and_child_keeps_the_parent_unresolved():
+    _repo, store = _store()
+    store.observe_observation_rows([_observed(10, 1, "/usr/sbin/nginx")])
+    store.observe_events([_unknown_exec(10, 10)])
+    uncarried, _hostless = store.take_uncarried()
+    store.record_breaks(uncarried)
+
+    resolved = PendingResolver(store).resolve(Pending(
+        "host", "boot-a", 10, START + timedelta(seconds=20), "child", "/bin/sh",
+    ))
+
+    assert resolved.keys == () and "not carried" in resolved.reason
+
+
+def test_observed_parent_pid_reuse_is_ambiguous_never_joined_to_the_old_process():
+    _repo, store = _store()
+    store.observe_observation_rows([
+        _observed(10, 1, "/usr/sbin/nginx", ppid=1, session=9),
+        _observed(10, 30, "/usr/bin/unrelated", ppid=20, session=10),
+    ])
+
+    resolved = PendingResolver(store).resolve(Pending(
+        "host", "boot-a", 10, START + timedelta(seconds=20), "child", "/bin/sh",
+    ))
+
+    assert resolved.keys == () and "ambiguous" in resolved.reason
+
+
+def test_observed_parent_same_instant_tie_without_serials_is_unresolved():
+    _repo, store = _store()
+    store.observe_observation_rows([
+        _observed(10, 20, "/usr/sbin/nginx"),
+        _observed(10, 20, "/usr/bin/unrelated"),
+    ])
+
+    resolved = PendingResolver(store).resolve(Pending(
+        "host", "boot-a", 10, START + timedelta(seconds=20), "child", "/bin/sh",
+    ))
+
+    assert resolved.keys == () and "ambiguous" in resolved.reason
 
 
 @pytest.mark.slow

@@ -16,6 +16,7 @@ from romulus.baseline.spec import (
     parent_at,
 )
 from romulus.detect.correlation import boot_of, boots_conflict
+from romulus.detect.observed import Observed, observation, process_view
 from romulus.evidence.typed import Outcome, TypedEvent
 from romulus.store.repo import Repo
 
@@ -35,6 +36,21 @@ class ParentExec:
     raw_id: str
     # The kernel's audit serial, which increases within a boot: it orders execs of one instant (a shebang's
     # env, then its interpreter, on the same pid). None when the record carries none.
+    serial: int | None = None
+
+
+@dataclass(frozen=True)
+class ParentObservation:
+    """One non-exec audit observation of a process image, compact enough for the disk carry."""
+
+    host: str
+    boot: str | None
+    pid: int
+    ts: datetime
+    executable: str
+    parent_pid: int
+    session: int | None
+    event_id: str
     serial: int | None = None
 
 
@@ -272,66 +288,206 @@ class CarryInStore:
 
     def observe_events(self, events: Iterable[TypedEvent], *, chunk_size: int = 100_000,
                        hour: tuple[datetime, datetime] | None = None) -> int:
-        """Feed execs; `hour` is the retrieval interval they came from, when known.
+        """Feed execs and non-exec process observations; `hour` is their retrieval interval, when known.
 
         A failed exec never replaced the PID's image, so it is skipped. An exec of unknown outcome may or may not
         have, so it is uncarried. Every other exec is stored, or recorded as uncarried (see the class note). With
         `hour`, an exec typed outside it is stored and also recorded as uncarried at both its typed and retrieval
         hours: the hours then no longer vouch for that host.
         """
-        def rows():
-            for event in events:
-                if event.family != "process_exec" or event.outcome == Outcome.failure:
-                    continue
+        if chunk_size < 1:
+            raise ValueError("carry-in chunk size must be positive")
+        parents: list[ParentExec] = []
+        observed: list[ParentObservation] = []
+        maximum = 0
+
+        def flush() -> None:
+            nonlocal maximum
+            if parents:
+                maximum = max(maximum, self.observe_rows(parents, chunk_size=chunk_size))
+                parents.clear()
+            if observed:
+                self.observe_observation_rows(observed, chunk_size=chunk_size)
+                observed.clear()
+
+        for event in events:
+            if event.family != "process_exec":
+                found = observation(event)
+                if found is not None and event.host and (hour is None or hour[0] <= event.ts < hour[1]):
+                    pid, item, _ref = found
+                    observed.append(ParentObservation(
+                        event.host, item.boot, pid, event.ts, item.exe, item.ppid,
+                        item.session, item.event_id, item.serial,
+                    ))
+            elif event.outcome != Outcome.failure:
                 if not event.host:
                     self._uncarry(None, event.ts)
-                    continue
-                if hour is not None and not hour[0] <= event.ts < hour[1]:
-                    self._uncarry(event.host, event.ts)
-                    self._uncarry(event.host, hour[0])
-                pid, executable = event.get("process.pid"), event.get("process.executable")
-                if (event.outcome != Outcome.success or isinstance(pid, bool) or not isinstance(pid, int)
-                        or pid < 0 or not isinstance(executable, str) or not executable):
-                    self._uncarry(event.host, event.ts)
-                    continue
-                ppid = event.get("process.ppid")
-                yield ParentExec(
-                    event.host, boot_of(event), pid, event.ts, executable,
-                    ppid if isinstance(ppid, int) and not isinstance(ppid, bool) else None,
-                    event.raw[0].native_id if event.raw else "", exec_serial(event),
-                )
-
-        return self.observe_rows(rows(), chunk_size=chunk_size)
+                else:
+                    if hour is not None and not hour[0] <= event.ts < hour[1]:
+                        self._uncarry(event.host, event.ts)
+                        self._uncarry(event.host, hour[0])
+                    pid, executable = event.get("process.pid"), event.get("process.executable")
+                    if (event.outcome != Outcome.success or isinstance(pid, bool) or not isinstance(pid, int)
+                            or pid < 0 or not isinstance(executable, str) or not executable):
+                        self._uncarry(event.host, event.ts)
+                    else:
+                        ppid = event.get("process.ppid")
+                        parents.append(ParentExec(
+                            event.host, boot_of(event), pid, event.ts, executable,
+                            ppid if isinstance(ppid, int) and not isinstance(ppid, bool) else None,
+                            event.raw[0].native_id if event.raw else "", exec_serial(event),
+                        ))
+            if len(parents) + len(observed) >= chunk_size:
+                flush()
+        flush()
+        return maximum
 
     def observe_window_rows(self, rows: Iterable[dict], *, hour: tuple[datetime, datetime],
                             chunk_size: int = 100_000) -> int:
-        """Feed durable compact window exec rows through the same continuity rules as typed events."""
-        def parents():
-            for row in rows:
-                ts = row["ts"]
-                outcome = Outcome(row["outcome"])
-                if outcome == Outcome.failure:
-                    continue
-                host = row.get("host")
-                if not host:
-                    self._uncarry(None, ts)
-                    continue
-                if not hour[0] <= ts < hour[1]:
-                    self._uncarry(host, ts)
-                    self._uncarry(host, hour[0])
-                pid, executable = row.get("pid"), row.get("executable")
-                if (outcome != Outcome.success or isinstance(pid, bool) or not isinstance(pid, int)
-                        or pid < 0 or not isinstance(executable, str) or not executable):
-                    self._uncarry(host, ts)
-                    continue
-                ppid = row.get("ppid")
-                yield ParentExec(
-                    host, row.get("boot"), pid, ts, executable,
-                    ppid if isinstance(ppid, int) and not isinstance(ppid, bool) else None,
-                    row["event_id"], row.get("serial"),
-                )
+        """Feed durable compact window process rows through the same rules as typed events."""
+        if chunk_size < 1:
+            raise ValueError("carry-in chunk size must be positive")
+        parents: list[ParentExec] = []
+        observed: list[ParentObservation] = []
+        maximum = 0
 
-        return self.observe_rows(parents(), chunk_size=chunk_size)
+        def flush() -> None:
+            nonlocal maximum
+            if parents:
+                maximum = max(maximum, self.observe_rows(parents, chunk_size=chunk_size))
+                parents.clear()
+            if observed:
+                self.observe_observation_rows(observed, chunk_size=chunk_size)
+                observed.clear()
+
+        for row in rows:
+            ts = row["ts"]
+            if row.get("family", "process_exec") != "process_exec":
+                host, boot = row.get("host"), row.get("boot")
+                pid, ppid, executable = row.get("pid"), row.get("ppid"), row.get("executable")
+                if (hour[0] <= ts < hour[1] and host and boot
+                        and isinstance(pid, int) and not isinstance(pid, bool)
+                        and isinstance(ppid, int) and not isinstance(ppid, bool)
+                        and isinstance(executable, str) and executable):
+                    observed.append(ParentObservation(
+                        host, boot, pid, ts, executable, ppid, row.get("session"),
+                        row["event_id"], row.get("serial"),
+                    ))
+            else:
+                outcome = Outcome(row["outcome"])
+                host = row.get("host")
+                if outcome != Outcome.failure:
+                    if not host:
+                        self._uncarry(None, ts)
+                    else:
+                        if not hour[0] <= ts < hour[1]:
+                            self._uncarry(host, ts)
+                            self._uncarry(host, hour[0])
+                        pid, executable = row.get("pid"), row.get("executable")
+                        if (outcome != Outcome.success or isinstance(pid, bool) or not isinstance(pid, int)
+                                or pid < 0 or not isinstance(executable, str) or not executable):
+                            self._uncarry(host, ts)
+                        else:
+                            ppid = row.get("ppid")
+                            parents.append(ParentExec(
+                                host, row.get("boot"), pid, ts, executable,
+                                ppid if isinstance(ppid, int) and not isinstance(ppid, bool) else None,
+                                row["event_id"], row.get("serial"),
+                            ))
+            if len(parents) + len(observed) >= chunk_size:
+                flush()
+        flush()
+        return maximum
+
+    def observe_observation_rows(self, rows: Iterable[ParentObservation], *,
+                                 chunk_size: int = 100_000) -> int:
+        """Stream process-image observations to disk; an unrecorded boot is never used for carry-in."""
+        if chunk_size < 1:
+            raise ValueError("observation chunk size must be positive")
+        pending: list[dict] = []
+        written = 0
+
+        def flush() -> None:
+            nonlocal written
+            if pending:
+                written += self.repo.upsert_baseline_parent_observations(pending, chunk_size=chunk_size)
+                pending.clear()
+
+        for item in rows:
+            if item.ts.tzinfo is None or item.ts.utcoffset() is None:
+                raise ValueError("parent observation timestamp must carry a timezone")
+            if (not item.host or not item.boot or isinstance(item.pid, bool) or not isinstance(item.pid, int)
+                    or item.pid < 0 or isinstance(item.parent_pid, bool) or not isinstance(item.parent_pid, int)
+                    or not item.executable):
+                continue
+            timestamp = item.ts.astimezone(UTC)
+            marker = self._marker(item.host)
+            if marker is None:
+                if not self.repo.set_baseline_parent_boot(
+                        self.hunt_id, self.target, item.host, item.boot, timestamp):
+                    continue
+                self._remember_marker(item.host, (item.boot, timestamp))
+            elif marker[0] != item.boot:
+                if marker[1] >= timestamp:
+                    continue
+                flush()
+                if not self.repo.set_baseline_parent_boot(
+                        self.hunt_id, self.target, item.host, item.boot, timestamp):
+                    continue
+                self._remember_marker(item.host, (item.boot, timestamp))
+            elif timestamp > marker[1]:
+                if (self.target, item.host) in self._markers:
+                    self._remember_marker(item.host, (item.boot, timestamp))
+                    self._dirty.add((self.target, item.host))
+                elif not self.repo.set_baseline_parent_boot(
+                        self.hunt_id, self.target, item.host, item.boot, timestamp):
+                    continue
+            pending.append({
+                "hunt_id": self.hunt_id, "target": self.target, "host": item.host,
+                "boot": item.boot, "pid": item.pid, "observed_ts": timestamp,
+                "serial": item.serial, "executable": item.executable, "parent_pid": item.parent_pid,
+                "session": item.session, "event_id": item.event_id,
+            })
+            if len(pending) >= chunk_size:
+                flush()
+        flush()
+        for key in sorted(key for key in self._dirty if key[0] == self.target):
+            boot, latest = self._markers[key]
+            self.repo.set_baseline_parent_boot(self.hunt_id, key[0], key[1], boot, latest)
+            self._dirty.discard(key)
+        return written
+
+    def observed_parent(self, host: str, pid: int, ts: datetime, boot: str | None,
+                        serial: int | None = None) -> tuple[tuple | None, str | None]:
+        """Resolve a long-lived parent from its nearest same-boot process observations, never by inference."""
+        if not boot:
+            return None, "parent boot is not recorded"
+        if len(self.repo.baseline_parent_targets(self.hunt_id, host)) > 1:
+            return None, SPANS_TARGETS
+        rows = self.repo.baseline_parent_observations(
+            self.hunt_id, self.target, host, pid, boot, ts,
+        )
+        observed = [Observed(
+            row["observed_ts"].timestamp(), row["serial"], row["executable"], row["parent_pid"],
+            row["session"], boot, row["event_id"], row["event_id"],
+            row["observed_ts"].timestamp(), False,
+        ) for row in rows]
+        view = process_view(
+            [], observed, ts.timestamp(), serial, boot, inclusive=False, pid=pid, host=host,
+        )
+        if view.image is None:
+            return None, view.why or BEFORE_HISTORY
+        if not view.prior:
+            return None, "parent observation follows child"
+        observed_ts = datetime.fromtimestamp(view.image.ts, UTC)
+        observed_end = max(_hour(ts) + _HOUR, self.horizon) if self.horizon is not None else _hour(ts) + _HOUR
+        if not self.repo.baseline_parent_observed_covers(
+                self.hunt_id, self.target, _hour(observed_ts), observed_end):
+            return None, UNOBSERVED_HOUR
+        if self.repo.baseline_parent_break_overlaps(
+                self.hunt_id, self.target, host, observed_ts, _hour(ts) + _HOUR):
+            return None, UNCARRIED_EXEC
+        return (view.image.ts, view.image.exe, view.image.ppid, view.image.entry.event_id, boot), None
 
     def observe_rows(self, rows: Iterable[ParentExec], *, chunk_size: int = 100_000) -> int:
         if chunk_size < 1:
@@ -430,10 +586,16 @@ class PendingResolver:
 
     def resolve(self, pending: Pending) -> PendingResolution:
         if pending.ppid in (1, 2):
-            return PendingResolution(pending.event_id, (), "parent pid 1/2 out of scope")
+            parent = "init" if pending.ppid == 1 else "kthreadd"
+            resolved = exec_pair_key(self.spec, pending.host, parent, pending.child_executable)
+            return PendingResolution(pending.event_id, (resolved,), None)
         if isinstance(self.parents, CarryInStore):
             parent, reason = self.parents.parent(
                 pending.host, pending.ppid, pending.ts, pending.boot, pending.serial)
+            if parent is None and reason == BEFORE_HISTORY:
+                parent, reason = self.parents.observed_parent(
+                    pending.host, pending.ppid, pending.ts, pending.boot, pending.serial,
+                )
         else:
             parent = parent_at(self.parents, pending.host, pending.ppid, pending.ts.timestamp(), pending.boot,
                                pending.serial)

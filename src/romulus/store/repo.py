@@ -2427,6 +2427,11 @@ class Repo:
                         t.baseline_parent_carry.c.target == target,
                         t.baseline_parent_carry.c.host == host,
                     ))
+                    c.execute(t.baseline_parent_observation.delete().where(
+                        t.baseline_parent_observation.c.hunt_id == hunt_id,
+                        t.baseline_parent_observation.c.target == target,
+                        t.baseline_parent_observation.c.host == host,
+                    ))
                 elif current_ts > latest_ts:
                     latest_ts = current_ts
             stmt = insert(t.baseline_parent_host_boot).values(
@@ -2562,6 +2567,59 @@ class Repo:
             return int(c.execute(select(func.count()).select_from(t.baseline_parent_carry).where(
                 t.baseline_parent_carry.c.hunt_id == hunt_id,
             )).scalar_one())
+
+    def upsert_baseline_parent_observations(self, rows: Iterable[dict], *,
+                                            chunk_size: int = BASELINE_CHUNK) -> int:
+        """Persist process-image observations in bounded chunks; duplicate source views are idempotent."""
+        if chunk_size < 1:
+            raise ValueError("observation chunk size must be positive")
+
+        def normalized():
+            for row in rows:
+                yield {**row, "observed_ts": _utc(row["observed_ts"], "parent observation timestamp")}
+
+        written = 0
+        stmt = insert(t.baseline_parent_observation).on_conflict_do_nothing(
+            index_elements=[
+                "hunt_id", "target", "host", "boot", "pid", "observed_ts", "event_id",
+            ],
+        )
+        for chunk in _chunks(normalized(), chunk_size):
+            with write_txn(self.engine) as connection:
+                connection.execute(stmt, chunk)
+            written += len(chunk)
+        return written
+
+    def baseline_parent_observations(self, hunt_id: str, target: str, host: str, pid: int,
+                                     boot: str, at: datetime) -> list[dict]:
+        """A bounded set of process states nearest one child instant, including two exact-time states."""
+        at = _utc(at, "parent observation lookup timestamp")
+        table = t.baseline_parent_observation.c
+        where = (
+            table.hunt_id == hunt_id, table.target == target, table.host == host,
+            table.boot == boot, table.pid == pid,
+        )
+        with self.engine.connect() as connection:
+            before = connection.execute(
+                select(t.baseline_parent_observation).where(*where, table.observed_ts < at)
+                .order_by(table.observed_ts.desc(), table.event_id.desc()).limit(1),
+            ).mappings().all()
+            exact = connection.execute(
+                select(t.baseline_parent_observation).where(*where, table.observed_ts == at)
+                .group_by(table.executable, table.parent_pid, table.session, table.serial)
+                .order_by(table.executable, table.parent_pid, table.session, table.serial).limit(2),
+            ).mappings().all()
+            after = connection.execute(
+                select(t.baseline_parent_observation).where(*where, table.observed_ts > at)
+                .order_by(table.observed_ts, table.event_id).limit(1),
+            ).mappings().all()
+        return [_with_utc(row, ("observed_ts",)) for row in [*reversed(before), *exact, *after]]
+
+    def baseline_parent_observation_count(self, hunt_id: str) -> int:
+        with self.engine.connect() as connection:
+            return int(connection.execute(select(func.count()).select_from(
+                t.baseline_parent_observation,
+            ).where(t.baseline_parent_observation.c.hunt_id == hunt_id)).scalar_one())
 
     def _coalesce_range(self, table, keys: dict, start: datetime, end: datetime) -> None:
         """Add [start, end) to a range ledger keyed by `keys`, merging overlapping or touching rows in the

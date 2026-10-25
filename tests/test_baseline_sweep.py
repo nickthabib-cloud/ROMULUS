@@ -66,6 +66,21 @@ def _exec(event_id: str, ts: datetime, *, host: str = "web01", pid: int = 20, pp
     )
 
 
+def _observed(event_id: str, ts: datetime, *, pid: int, ppid: int, executable: str) -> TypedEvent:
+    fields = {
+        "process.pid": fv(pid, f"x:{event_id}:event.original#auditd:SYSCALL.pid"),
+        "process.ppid": fv(ppid, "fixture:process.ppid"),
+        "process.executable": fv(executable, "fixture:process.executable"),
+        "process.session_id": fv(9, "fixture:process.session_id"),
+        "audit.serial": fv(100, "fixture:audit.serial"),
+        "host.boot.id": fv("boot-1", "fixture:host.boot.id"),
+    }
+    return TypedEvent(
+        id=event_id, family="process_observed", ts=ts, host="web01", outcome=Outcome.unknown,
+        fields=fields, raw=[], normalizer="fixture@1",
+    )
+
+
 def _contract(target: str = "x", hosts: tuple[str, ...] = ("web01",), os_family: str = "linux"):
     return contract_from_types(
         target,
@@ -537,6 +552,30 @@ def test_window_child_resolves_to_a_parent_from_an_earlier_cell(monkeypatch, tmp
     } for row in repo.baseline_observations("h1"))
     child_cell = next(row for row in repo.rule_cells("h1") if row["partition"] == second.key())
     assert child_cell["state"] == "evaluated_complete"
+    sweep.close_stage()
+
+
+def test_window_child_resolves_to_a_long_lived_parent_observed_without_its_exec(monkeypatch, tmp_path):
+    window = Window(start=START, end=END)
+    parent = _observed(
+        "observed-parent", START + timedelta(minutes=5), pid=10, ppid=1,
+        executable="/usr/sbin/nginx",
+    )
+    child = _exec("child", START + timedelta(minutes=20), pid=20, ppid=10, executable="/bin/curl")
+    _install_partition(monkeypatch, [parent, child], window=window)
+    repo = _repo()
+    sweep = sweep_module.Sweep(
+        repo, FakeClient(), "h1", window, {"x": _contract()}, stage_dir=tmp_path,
+    )
+    sweep.pack = [ExecPairBaseline()]
+
+    sweep.run_target("x")
+    resolve_window_exec_pairs(repo, "h1", window)
+
+    assert any(row["key"] == {
+        "child_executable": "/bin/curl", "parent_executable": "/usr/sbin/nginx",
+    } for row in repo.baseline_observations("h1"))
+    assert repo.baseline_parent_observation_count("h1") == 1
     sweep.close_stage()
 
 

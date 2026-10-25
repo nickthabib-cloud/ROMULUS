@@ -776,12 +776,16 @@ def test_a_history_child_resolves_to_a_parent_in_an_older_history_hour():
     run_baseline_stage(repo, "h1", WINDOW, source=TimedHistory({"host-index": [parent, child]}))
 
     coverage = next(iter(repo.baseline_snapshot("h1")["coverage"].values()))
-    # Only the parent's own hour is unresolved: its parent is pid 1.
-    assert [gap["start"] for gap in coverage["gaps"]] == [(START - timedelta(hours=5)).isoformat()]
+    assert coverage["gaps"] == []
     segment = next(row for row in repo.baseline_segments(statuses=["active"])
                    if row["start"] == START - timedelta(hours=1))
     assert [row["key"] for row in repo.baseline_counts(segment["id"])] == [
         {"child_executable": "/bin/ls", "parent_executable": "/usr/sbin/sshd"},
+    ]
+    parent_segment = next(row for row in repo.baseline_segments(statuses=["active"])
+                          if row["start"] == START - timedelta(hours=5))
+    assert [row["key"] for row in repo.baseline_counts(parent_segment["id"])] == [
+        {"child_executable": "/usr/sbin/sshd", "parent_executable": "init"},
     ]
 
 
