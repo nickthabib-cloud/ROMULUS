@@ -672,6 +672,17 @@ baseline_window_scope_hour = Table(
     CheckConstraint("events >= 0", name="ck_baseline_window_scope_hour_events"),
 )
 
+# A (hunt, spec, target) whose window counter material the segment writer has decided on and released. The marker
+# is written before the rows are deleted, so a writer that finds it never writes a segment from a partial remainder.
+baseline_window_release = Table(
+    "baseline_window_release", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id", ondelete="CASCADE"), nullable=False),
+    Column("spec_id", String, nullable=False),
+    Column("target", String, nullable=False),
+    Column("reason", String, nullable=False),
+    PrimaryKeyConstraint("hunt_id", "spec_id", "target", name="pk_baseline_window_release"),
+)
+
 # Durable cited-key facts used to derive each segment's exclusion set. The hunt window is retained on every
 # row so a later overlapping hunt can invalidate an older segment without retaining candidate event bodies.
 baseline_hunt_exclusion = Table(

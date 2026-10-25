@@ -112,9 +112,14 @@ from tests import throughput_fixture as tf
 # coverage block), bl.ext_dest's rule cells by rule_version, and its 20 observations by spec_version and key identity.
 # The hunt-derived writer publishes the complete window cells at finish, so segment/count/scope-hour and durable
 # exclusion-ledger tables join the golden. Its summary changes only the baseline audit and report manifest.
+# The fixture's finish now receives the baseline stage's summary, as a hunt's does. Its history is a failed gap, so
+# the stage summary says the stage failed: the finish's hunt.baseline_summary record carries the stage summary beside
+# the segment writer's, the hunt's stop reason names the baseline stage (its execution state was already partial),
+# and the manifest's baseline coverage block reports the stage as partial instead of not run. The partial hunt writes
+# no segment and keeps its window counter material.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
-    "audit": "4b1608c5b81972994420fc0f411bd4f37d3440d9cef29ad9ccd1b7bd5797fe1c",
+    "audit": "234a968ea7a0cebda51c453371b28867670b7c9898dd1d05568ae00007305dbf",
     "baseline_counts": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     "baseline_hunt_exclusions": "0d871301eb31d300f00eefeadae48aaa99381de0d8c6158e74e9bb351dd1bd52",
     "baseline_observations": "a622940f3edc51095fae860c5247d8b9494c32522d92fca63ce77a73ffcd1856",
@@ -130,7 +135,7 @@ GOLDEN_STACK = {
     "events": "46ff37261993417f3e0fa61de9c3aa24977b2e091ad29d7cf4d166e8261a1017",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "797137953f5a643e0297b450047aeec3fa79c4cb386118f10d0ec00d337fd023",
-    "manifest": "42f0ee6d23007581a4ee4811af29ba9dd5c9c477df0d076f9f847ac7a3fc5723",
+    "manifest": "b84d16be7381223cf27b274ec61143777af5152d402c483621861932f8475f17",
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
     "rule_cells": "77f0e52a52d3609f1fe98712e3687b184dd5e67ed53bc35711e3b35d36f7541c",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",

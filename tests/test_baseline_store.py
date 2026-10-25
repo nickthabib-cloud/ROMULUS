@@ -535,7 +535,7 @@ BASELINE_TABLES = ("baseline_segment", "baseline_count", "baseline_scope_hour", 
                    "baseline_observation", "baseline_window_cell", "baseline_window_exec",
                    "baseline_window_observation", "baseline_window_pending", "baseline_window_count",
                    "baseline_window_scope_hour", "baseline_hunt_exclusion", "baseline_history_cell",
-                   "baseline_history_row")
+                   "baseline_history_row", "baseline_window_release")
 
 
 def _shape(engine) -> dict:

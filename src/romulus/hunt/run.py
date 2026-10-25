@@ -202,8 +202,8 @@ def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
             "status": "failed", "written": 0, "stale": 0, "max_write_seconds": 0.0,
             "specs": {}, "reason": f"hunt-derived segment writer failed: {exc}"[:300],
         }
-        partial = True
-        partial_reasons.append("baseline_segment_writer:failed")
+        # The writer only stores this hunt's counts for later hunts' baselines. Its failure costs future history,
+        # stated in the baseline summary, and changes nothing this hunt evaluated.
     baseline_summary = {**(baseline_summary or {}), "segment_writer": segment_summary}
     repo.audit(
         "system", "hunt.baseline_summary", hunt_id, baseline_summary, owner_token=owner_token,

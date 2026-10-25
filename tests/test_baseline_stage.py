@@ -801,3 +801,40 @@ def test_a_lookback_budget_running_out_leaves_history_short_without_failing_the_
     gaps = [gap for coverage in repo.baseline_snapshot("h1")["coverage"].values() for gap in coverage["gaps"]]
     assert summary["stage_failed"] is False
     assert ("omitted_budget", "planning query budget exhausted") in {(g["state"], g["reason"]) for g in gaps}
+
+
+def test_a_segment_straddling_history_start_contributes_only_its_in_span_rows():
+    window = Window(start=START + timedelta(hours=12), end=START + timedelta(hours=13))
+    history_start = window.start - timedelta(days=7)
+    begin = history_start - timedelta(days=1)
+    old_seen = history_start - timedelta(hours=4)    # the same UTC day as history_start, before it
+    repo = _repo()
+    repo.save_baseline_segment({
+        "id": "straddle", "site": "site", "target": "host-index", "spec_id": SPEC.id,
+        "spec_version": SPEC.version, "key_version": SPEC.key_version, "normalizer": "fixture@1",
+        "start": begin, "end": window.start, "bucket": "day", "origin": "hunt",
+        "source_hunt_id": "earlier", "built_by_hunt_id": "earlier", "exclusion_digest": "none",
+        "excluded_keys": [], "hunted": 1, "events_total": 8 * 24, "status": "active", "created_at": START,
+    }, [{
+        "segment_id": "straddle", "scope_kind": "host", "scope": "host:web01", "key_id": "old-id",
+        "key_digest": "old-digest", "key": {"executable": "/bin/old", "exec_file_path": "/bin/old"},
+        "bucket": old_seen.replace(hour=0), "count": 1, "first_ts": old_seen, "last_ts": old_seen,
+    }, {
+        "segment_id": "straddle", "scope_kind": "host", "scope": "host:web01", "key_id": "known-id",
+        "key_digest": "known-digest", "key": {"executable": "/bin/known", "exec_file_path": "/bin/known"},
+        "bucket": window.start.replace(hour=0), "count": 1,
+        "first_ts": window.start - timedelta(hours=1), "last_ts": window.start - timedelta(hours=1),
+    }], [{
+        "segment_id": "straddle", "scope_kind": "host", "scope": "host:web01",
+        "hour": begin + timedelta(hours=hour), "events": 1,
+    } for hour in range(8 * 24)])
+    event = _event(1, "/bin/old")
+    repo.save_evidence("h1", [event], {event.raw[0].key: {"message": "old"}}, None)
+    repo.upsert_baseline_observation(_observation(event, key_id="old-id", key_digest="old-digest",
+                                                  path="/bin/old"))
+
+    run_baseline_stage(repo, "h1", window, source=EmptyHistory())
+
+    row = next(repo.baseline_observations("h1"))
+    assert row["verdict"] == "first_seen" and row["history_count"] == 0
+    assert row["n_hours"] == 7 * 24

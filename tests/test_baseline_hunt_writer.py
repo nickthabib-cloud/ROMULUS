@@ -101,7 +101,7 @@ def _stage_cell(repo: Repo, events: list[TypedEvent], *, hunt_id: str = "hunt-a"
             "rule_id": SPEC.id,
             "version": SPEC.version,
             "target": "host-index",
-            "partition": "window-cell",
+            "partition": f"{START.isoformat()}/{END.isoformat()}",
             "state": state,
             "matched": 0,
             "evaluated": len(events),
@@ -199,7 +199,7 @@ def test_finish_records_the_segment_writer_reason_in_the_baseline_audit():
 def test_twin_hunts_reuse_content_id_and_a_revoked_generation_is_rebuilt():
     repo = _repo()
     event = _event("routine", "/usr/bin/id", 5)
-    for hunt_id in ("hunt-a", "hunt-b"):
+    for hunt_id in ("hunt-a", "hunt-b", "hunt-c"):
         repo.create_hunt(hunt_id, _manifest(), f"manifest-{hunt_id}", "test")
         _stage_cell(repo, [event], hunt_id=hunt_id)
 
@@ -211,7 +211,7 @@ def test_twin_hunts_reuse_content_id_and_a_revoked_generation_is_rebuilt():
     assert original["source_hunt_id"] == "hunt-a"
 
     repo.set_baseline_segment_status(original["id"], "revoked")
-    rebuilt = run_hunt_segment_writer(repo, "hunt-b", hunt_complete=True)
+    rebuilt = run_hunt_segment_writer(repo, "hunt-c", hunt_complete=True)
 
     rows = repo.baseline_segments()
     assert rebuilt["written"] == 1
@@ -316,7 +316,7 @@ def test_exec_pair_citation_resolves_against_the_network_index_carry_before_excl
     repo.save_baseline_window_cell(
         "hunt-a", {
             "rule_id": spec.id, "version": spec.version, "target": "host-index",
-            "partition": "window-cell", "state": "evaluated_complete", "matched": 0,
+            "partition": f"{START.isoformat()}/{END.isoformat()}", "state": "evaluated_complete", "matched": 0,
             "evaluated": 1, "detail": {"reasons": []},
         }, (), counts=counter.count_rows(), scope_hours=counter.scope_hour_rows(),
     )
@@ -345,7 +345,8 @@ def test_hunt_and_lookback_writers_are_equivalent_at_clamped_hour_edges():
     hunt_repo.save_baseline_window_cell(
         "hunt-a", {
             "rule_id": SPEC.id, "version": SPEC.version, "target": "host-index",
-            "partition": "cell", "state": "evaluated_complete", "matched": 0,
+            "partition": f"{START.isoformat()}/{hour_end.isoformat()}", "state": "evaluated_complete",
+            "matched": 0,
             "evaluated": 2, "detail": {"reasons": []},
         }, (), counts=counter.count_rows(), scope_hours=counter.scope_hour_rows(),
     )
@@ -406,7 +407,8 @@ def test_weeks_long_hunt_streams_merged_rows_without_using_list_readers(monkeypa
     repo = _repo()
     repo.create_hunt("hunt-a", manifest, "manifest-a", "test")
     repo.set_rule_cell(
-        "hunt-a", SPEC.id, SPEC.version, "host-index", "weeks", "evaluated_complete", 0, 672,
+        "hunt-a", SPEC.id, SPEC.version, "host-index", f"{START.isoformat()}/{weeks_end.isoformat()}",
+        "evaluated_complete", 0, 672,
         {"reasons": []},
     )
 
@@ -478,3 +480,318 @@ def test_merged_window_rows_keyset_page_past_many_scopes():
     ))
     assert len(merged_counts) == len(merged_hours) == 5_001
     assert merged_counts[0]["scope"] == "host:00000" and merged_counts[-1]["scope"] == "host:05000"
+
+
+def _cell(repo: Repo, events: list[TypedEvent], start: datetime, end: datetime, *, spec=SPEC,
+          hunt_id: str = "hunt-a") -> None:
+    counter = KeyCounter("cell", spec, span=(start, end))
+    for event in events:
+        counter.consume(event, KeyContext())
+    repo.save_baseline_window_cell(
+        hunt_id, {
+            "rule_id": spec.id, "version": spec.version, "target": "host-index",
+            "partition": f"{start.isoformat()}/{end.isoformat()}", "state": "evaluated_complete",
+            "matched": 0, "evaluated": len(events), "detail": {"reasons": []},
+        }, (), counts=counter.count_rows(), scope_hours=counter.scope_hour_rows(),
+    )
+
+
+def _half_hour_hunt(repo: Repo) -> None:
+    end = START + timedelta(hours=2, minutes=30)
+    manifest = _manifest()
+    manifest["window"]["end"] = end.isoformat()
+    repo.create_hunt("hunt-a", manifest, "manifest-a", "test")
+    repo.set_hunt_state("hunt-a", "running")
+    _cell(repo, [_event("first", "/usr/bin/id", 5)], START, START + timedelta(hours=1))
+    _cell(repo, [_event("second", "/usr/bin/w", 70)], START + timedelta(hours=1), START + timedelta(hours=2))
+    _cell(repo, [_event("tail", "/usr/bin/tail-hour", 135)], START + timedelta(hours=2), end)
+
+
+def _finish_complete(repo: Repo) -> dict:
+    return _finish(
+        repo, "hunt-a", {"status": "disabled", "stop_reason": ""},
+        {"finished": True, "complete": True, "partial_reasons": [], "stats": {}},
+        baseline_summary={"finished": True, "status": "complete", "stage_failed": False},
+    )
+
+
+def test_a_window_ending_on_the_half_hour_writes_its_whole_hours_and_leaves_the_hunt_complete():
+    repo = _repo()
+    _half_hour_hunt(repo)
+
+    result = _finish_complete(repo)
+
+    assert result["execution_state"] == "completed_within_scope"
+    writer = repo.latest_audit("hunt-a", "hunt.baseline_summary")["detail"]["segment_writer"]
+    assert writer["written"] == 1 and writer["specs"][SPEC.id]["reason"] is None
+    segment = repo.baseline_segments(statuses=["active"])[0]
+    assert (segment["start"], segment["end"]) == (START, START + timedelta(hours=2))
+    assert segment["events_total"] == 2
+    assert {row["key"]["executable"] for row in repo.baseline_counts(segment["id"])} == {
+        "/usr/bin/id", "/usr/bin/w",
+    }
+    assert max(row["hour"] for row in repo.baseline_scope_hours(segment["id"])) == START + timedelta(hours=1)
+
+
+def test_a_cell_straddling_the_last_whole_hour_shrinks_the_segment_to_hours_no_cell_straddles():
+    repo = _repo()
+    end = START + timedelta(hours=2, minutes=30)
+    manifest = _manifest()
+    manifest["window"]["end"] = end.isoformat()
+    repo.create_hunt("hunt-a", manifest, "manifest-a", "test")
+    _cell(repo, [_event("first", "/usr/bin/id", 5)], START, START + timedelta(hours=1))
+    _cell(repo, [_event("middle", "/usr/bin/w", 70)], START + timedelta(hours=1), START + timedelta(minutes=90))
+    _cell(repo, [_event("late", "/usr/bin/late", 100)], START + timedelta(minutes=90), end)
+
+    summary = run_hunt_segment_writer(repo, "hunt-a", hunt_complete=True)
+
+    segment = repo.baseline_segments(statuses=["active"])[0]
+    assert summary["written"] == 1
+    assert (segment["start"], segment["end"]) == (START, START + timedelta(hours=1))
+    assert {row["key"]["executable"] for row in repo.baseline_counts(segment["id"])} == {"/usr/bin/id"}
+
+
+def test_a_window_whose_cells_straddle_every_hour_writes_nothing_and_says_why():
+    repo = _repo()
+    end = START + timedelta(hours=2, minutes=30)
+    manifest = _manifest()
+    manifest["window"]["end"] = end.isoformat()
+    repo.create_hunt("hunt-a", manifest, "manifest-a", "test")
+    _cell(repo, [_event("only", "/usr/bin/id", 5)], START, end)
+
+    summary = run_hunt_segment_writer(repo, "hunt-a", hunt_complete=True)
+
+    assert repo.baseline_segments() == []
+    assert summary["specs"][SPEC.id]["reason"] == (
+        "host-index: the window holds no whole hour that its cells do not straddle"
+    )
+
+
+def test_a_writer_failure_is_stated_in_the_baseline_summary_and_never_makes_the_hunt_partial(monkeypatch):
+    from romulus.hunt import run as hunt_run
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("segment store unavailable")
+
+    monkeypatch.setattr(hunt_run, "run_hunt_segment_writer", broken)
+    repo = _repo()
+    _half_hour_hunt(repo)
+
+    result = _finish_complete(repo)
+
+    assert result["execution_state"] == "completed_within_scope"
+    assert result["partial_reasons"] == []
+    writer = repo.latest_audit("hunt-a", "hunt.baseline_summary")["detail"]["segment_writer"]
+    assert writer["status"] == "failed" and "segment store unavailable" in writer["reason"]
+
+
+def _set_context(repo: Repo, ids: list[str]) -> None:
+    from romulus.store import schema
+
+    with repo.engine.begin() as connection:
+        connection.execute(schema.candidate.update().where(schema.candidate.c.id == "finding-a").values(
+            context_event_ids=ids))
+
+
+def test_a_findings_context_records_are_excluded_from_the_segment():
+    repo = _repo()
+    repo.create_hunt("hunt-a", _manifest(), "manifest-a", "test")
+    subject, context = _event("subject", "/tmp/implant", 5), _event("ctxrec", "/tmp/dropper", 4)
+    _stage_cell(repo, [subject, context, _event("routine", "/usr/bin/id", 6)])
+    repo.save_evidence("hunt-a", [context], {context.raw[0].key: {"event": context.id}}, None)
+    _candidate(repo, subject)
+    _set_context(repo, ["ctxrec"])
+
+    run_hunt_segment_writer(repo, "hunt-a", hunt_complete=True)
+
+    segment = repo.baseline_segments(statuses=["active"])[0]
+    assert {row["key"]["executable"] for row in repo.baseline_counts(segment["id"])} == {"/usr/bin/id"}
+    assert len(segment["excluded_keys"]) == 4
+
+
+def test_an_unresolvable_exec_pair_citation_blocks_the_segment_rather_than_risk_its_key():
+    repo = _repo()
+    spec = SPEC_BY_ID["bl.exec_pair"]
+    manifest = _manifest()
+    manifest["baseline"]["specs"] = [{"id": spec.id, "version": spec.version, "key_version": spec.key_version}]
+    repo.create_hunt("hunt-a", manifest, "manifest-a", "test")
+    child = _event("child", "/bin/curl", 5)
+    child.fields.update({
+        "process.pid": fv(20, "fixture"), "process.ppid": fv(10, "fixture"),
+        "host.boot.id": fv("boot-1", "fixture"),
+    })
+    _cell(repo, [], START, END, spec=spec)
+    _candidate(repo, child)
+
+    summary = run_hunt_segment_writer(repo, "hunt-a", hunt_complete=True)
+
+    assert repo.baseline_segments() == []
+    assert summary["written"] == 0
+    assert "cited record child has no resolvable key" in summary["specs"][spec.id]["reason"]
+
+
+def test_a_cited_record_that_is_not_retained_blocks_every_segment():
+    repo = _repo()
+    repo.create_hunt("hunt-a", _manifest(), "manifest-a", "test")
+    cited = _event("cited", "/tmp/implant", 5)
+    _stage_cell(repo, [cited, _event("routine", "/usr/bin/id", 6)])
+    _candidate(repo, cited)
+    _set_context(repo, ["never-stored"])
+
+    summary = run_hunt_segment_writer(repo, "hunt-a", hunt_complete=True)
+
+    assert repo.baseline_segments() == []
+    assert "not retained" in summary["specs"][SPEC.id]["reason"]
+
+
+def test_external_destination_segments_wait_for_a_configured_internal_network():
+    repo = _repo()
+    spec = SPEC_BY_ID["bl.ext_dest"]
+    manifest = _manifest()
+    manifest["baseline"]["specs"] = [{"id": spec.id, "version": spec.version, "key_version": spec.key_version}]
+    manifest["internal_networks"] = {"source": "default", "digest": "rfc1918"}
+    repo.create_hunt("hunt-a", manifest, "manifest-a", "test")
+    _cell(repo, [], START, END, spec=spec)
+
+    summary = run_hunt_segment_writer(repo, "hunt-a", hunt_complete=True)
+
+    assert repo.baseline_segments() == []
+    assert summary["specs"][spec.id]["reason"] == "host-index: internal networks not configured for this site"
+
+
+def test_window_material_is_released_after_the_decision_and_kept_through_a_crash_or_a_partial_hunt(monkeypatch):
+    repo = _repo()
+    repo.create_hunt("hunt-a", _manifest(), "manifest-a", "test")
+    _stage_cell(repo, [_event("routine", "/usr/bin/id", 5)])
+
+    assert run_hunt_segment_writer(repo, "hunt-a", hunt_complete=False)["status"] == "skipped"
+    assert repo.baseline_window_counts("hunt-a", SPEC.id, "host-index")
+
+    real_append = repo.append_baseline_segment_rows
+
+    def crash(*_args, **_kwargs):
+        raise RuntimeError("killed mid-write")
+
+    monkeypatch.setattr(repo, "append_baseline_segment_rows", crash)
+    try:
+        run_hunt_segment_writer(repo, "hunt-a", hunt_complete=True)
+    except RuntimeError:
+        pass
+    assert repo.baseline_window_counts("hunt-a", SPEC.id, "host-index")
+    assert repo.baseline_window_release("hunt-a", SPEC.id, "host-index") is None
+    monkeypatch.setattr(repo, "append_baseline_segment_rows", real_append)
+
+    resumed = run_hunt_segment_writer(repo, "hunt-a", hunt_complete=True)
+
+    assert resumed["written"] == 1
+    assert repo.baseline_window_counts("hunt-a", SPEC.id, "host-index") == []
+    assert repo.baseline_window_scope_hours("hunt-a", SPEC.id, "host-index") == []
+    assert repo.baseline_window_release("hunt-a", SPEC.id, "host-index") == "segment written"
+    again = run_hunt_segment_writer(repo, "hunt-a", hunt_complete=True)
+    assert again["written"] == 0 and "released earlier" in again["specs"][SPEC.id]["reason"]
+
+
+def test_a_release_interrupted_after_its_marker_never_writes_from_the_remainder():
+    from romulus.store import schema
+
+    repo = _repo()
+    repo.create_hunt("hunt-a", _manifest(), "manifest-a", "test")
+    _stage_cell(repo, [_event("routine", "/usr/bin/id", 5), _event("other", "/usr/bin/w", 6)])
+    with repo.engine.begin() as connection:
+        connection.execute(schema.baseline_window_release.insert().values(
+            hunt_id="hunt-a", spec_id=SPEC.id, target="host-index", reason="segment written"))
+
+    summary = run_hunt_segment_writer(repo, "hunt-a", hunt_complete=True)
+
+    assert summary["written"] == 0 and repo.baseline_segments() == []
+    assert repo.baseline_window_counts("hunt-a", SPEC.id, "host-index") == []
+
+
+def test_a_multi_hour_cell_writes_what_hourly_lookback_writes_for_records_typed_inside_it():
+    # The window counter clamps a record into its cell, the lookback into its hour. For a record typed inside its
+    # cell (every exec: its typed time is the retrieval time) both give the same day-bucket counts and scope
+    # hours. A record typed outside its multi-hour cell is placed at the cell's nearest edge, which can be up to
+    # the cell's width from where an hourly read places it; its count moves only if that crosses a day boundary.
+    two_hours = START + timedelta(hours=2)
+    events = [_event("a", "/usr/bin/id", 10), _event("b", "/usr/bin/id", 70), _event("c", "/usr/bin/w", 100)]
+    hunt_repo = _repo()
+    manifest = _manifest()
+    manifest["window"]["end"] = two_hours.isoformat()
+    hunt_repo.create_hunt("hunt-a", manifest, "manifest-a", "test")
+    _cell(hunt_repo, events, START, two_hours)
+    run_hunt_segment_writer(hunt_repo, "hunt-a", hunt_complete=True)
+
+    lookback_repo = _repo()
+    lookback_repo.create_hunt("build", {}, "manifest-build", "test")
+    LookbackWriter(
+        lookback_repo, FakeHistory(events), site="site-a", specs=[SPEC], normalizer="fixture@1",
+        budget=LookbackBudget(queries=10, records=10, seconds=10), now=lambda: two_hours,
+    ).fill(hunt_id="build", targets=["host-index"], start=START, end=two_hours)
+
+    hunt_segment = hunt_repo.baseline_segments(statuses=["active"])[0]
+    lookback_segments = lookback_repo.baseline_segments(statuses=["active"])
+    merged: dict[tuple, int] = {}
+    for segment in lookback_segments:
+        for row in lookback_repo.baseline_counts(segment["id"]):
+            key = (row["scope"], row["key_digest"], row["bucket"])
+            merged[key] = merged.get(key, 0) + row["count"]
+    assert sorted((row["scope"], row["key_digest"], row["bucket"], row["count"])
+                  for row in hunt_repo.baseline_counts(hunt_segment["id"])) == sorted(
+        (*key, count) for key, count in merged.items())
+    hours = lambda rows: sorted((row["scope"], row["hour"], row["events"]) for row in rows)
+    assert hours(hunt_repo.baseline_scope_hours(hunt_segment["id"])) == hours(
+        row for segment in lookback_segments for row in lookback_repo.baseline_scope_hours(segment["id"]))
+
+
+def test_staleness_marking_over_thousands_of_overlapping_segments_holds_the_write_lock_briefly(
+        monkeypatch, tmp_path):
+    import time
+
+    from romulus.store import repo as repo_module
+    from romulus.store import schema
+
+    repo = Repo(make_engine(tmp_path / "stale.db"))
+    migrate(repo.engine)
+    hours = 5_000
+    begin = START - timedelta(hours=hours)
+    with repo.engine.begin() as connection:
+        connection.execute(schema.baseline_segment.insert(), [{
+            "id": f"seg-{index:05d}", "site": "site-a", "target": "host-index", "spec_id": SPEC.id,
+            "spec_version": SPEC.version, "key_version": SPEC.key_version, "normalizer": "fixture@1",
+            "start": begin + timedelta(hours=index), "end": begin + timedelta(hours=index + 1),
+            "bucket": "day", "origin": "lookback", "source_hunt_id": None, "built_by_hunt_id": None,
+            "exclusion_digest": "none", "network_digest": None, "excluded_keys": [], "hunted": 0,
+            "events_total": 1, "rows_digest": "fixture", "status": "active", "created_at": START,
+        } for index in range(hours)])
+    repo.create_hunt("hunt-a", _manifest(), "manifest-a", "test")
+    repo.replace_baseline_hunt_exclusions(
+        "hunt-a", site="site-a", start=begin, end=START,
+        exclusions={("host-index", SPEC.id): {f"cited-{index}" for index in range(200)}},
+        spec_versions={SPEC.id: (SPEC.version, SPEC.key_version)},
+    )
+    holds: list[float] = []
+    real = repo_module.write_txn
+
+    class Timed:
+        def __init__(self, engine):
+            self.inner = real(engine)
+
+        def __enter__(self):
+            self.began = time.perf_counter()
+            return self.inner.__enter__()
+
+        def __exit__(self, *exc):
+            try:
+                return self.inner.__exit__(*exc)
+            finally:
+                holds.append(time.perf_counter() - self.began)
+
+    monkeypatch.setattr(repo_module, "write_txn", Timed)
+
+    stale = repo.stale_baseline_segments_for_exclusions(site="site-a", start=begin, end=START)
+
+    assert stale == hours
+    assert len(holds) == hours // 500
+    print(f"staleness: {hours} segments, {len(holds)} write transactions, longest hold {max(holds):.3f}s")
+    assert max(holds) < 2.0
+    assert {row["status"] for row in repo.baseline_segments()} == {"stale"}

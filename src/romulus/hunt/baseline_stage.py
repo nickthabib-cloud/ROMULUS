@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterator
-from datetime import timedelta
+from datetime import datetime, timedelta
 from itertools import groupby
 
 from romulus.baseline.carry import CarryInStore, PendingResolver
@@ -169,6 +169,10 @@ class SnapshotView:
         self.repo, self.hunt_id, self.window, self.snapshot = repo, hunt_id, window, snapshot
         self.min_live_hours, self.networks_configured = min_live_hours, networks_configured
         self.citation_source = citation_source
+        plan = snapshot.get("plan") or {}
+        # Member segments may straddle history_start; only their rows inside the frozen span are history.
+        self.span = ((datetime.fromisoformat(plan["history_start"]), datetime.fromisoformat(plan["window_start"]))
+                     if plan.get("history_start") and plan.get("window_start") else None)
         self._pending_group: tuple[str, list[dict]] | None = None
         self.spec_stats: dict[str, dict] = {}
 
@@ -197,7 +201,7 @@ class SnapshotView:
                       window_failure: str | None) -> tuple[list[dict], dict]:
         first = rows[0]
         series = self.repo.baseline_scope_series(
-            first["scope_kind"], first["scope"], self.hunt_id, playbook.id,
+            first["scope_kind"], first["scope"], self.hunt_id, playbook.id, self.span,
         )
         # A frozen spec is only as complete as its least-complete target. Observations do not carry a source
         # target, and one scope can be split across targets, so narrowing coverage from history liveness could
@@ -214,17 +218,17 @@ class SnapshotView:
             reason = "scope is silent in history"
         if reason is None and live_hours < self.min_live_hours:
             reason = f"scope has {live_hours} live history hour(s), below the required {self.min_live_hours}"
-        peers = (self.repo.baseline_peer_scopes(first["scope_kind"], self.hunt_id, playbook.id)
+        peers = (self.repo.baseline_peer_scopes(first["scope_kind"], self.hunt_id, playbook.id, self.span)
                  if playbook.spec.measure == "prevalence" else None)
         updated: list[dict] = []
         first_seen: list[dict] = []
         for source in rows:
             history = self.repo.baseline_key_history(
-                source["key_id"], source["scope_kind"], source["scope"], self.hunt_id, playbook.id,
+                source["key_id"], source["scope_kind"], source["scope"], self.hunt_id, playbook.id, self.span,
             )
             history_count = sum(int(item["count"]) for item in history)
             prevalence = (self.repo.baseline_key_prevalence(
-                source["key_id"], source["scope_kind"], self.hunt_id, playbook.id,
+                source["key_id"], source["scope_kind"], self.hunt_id, playbook.id, self.span,
             ) if peers is not None else None)
             verdict = "unresolved" if reason else "common" if history_count else "first_seen"
             item = {

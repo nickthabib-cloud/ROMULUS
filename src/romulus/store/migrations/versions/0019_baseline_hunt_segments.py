@@ -79,9 +79,19 @@ def upgrade() -> None:
         "ix_baseline_hunt_exclusion_overlap", "baseline_hunt_exclusion",
         ["site", "target", "spec_id", "spec_version", "key_version", "start", "end"], unique=False,
     )
+    op.create_table(
+        "baseline_window_release",
+        sa.Column("hunt_id", sa.String(), nullable=False),
+        sa.Column("spec_id", sa.String(), nullable=False),
+        sa.Column("target", sa.String(), nullable=False),
+        sa.Column("reason", sa.String(), nullable=False),
+        sa.ForeignKeyConstraint(["hunt_id"], ["hunt.id"], ondelete="CASCADE"),
+        sa.PrimaryKeyConstraint("hunt_id", "spec_id", "target", name="pk_baseline_window_release"),
+    )
 
 
 def downgrade() -> None:
+    op.drop_table("baseline_window_release")
     op.drop_index("ix_baseline_hunt_exclusion_overlap", table_name="baseline_hunt_exclusion")
     op.drop_table("baseline_hunt_exclusion")
     op.drop_table("baseline_window_scope_hour")

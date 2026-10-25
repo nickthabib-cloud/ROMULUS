@@ -657,7 +657,7 @@ def run_stack(stage_dir, *, scale: int = 1, docs: dict | None = None) -> dict:
                                 max_depth=3, max_source_queries=180, wall_clock_seconds=10**9).run()
     repo.audit("system", "hunt.expansion_summary", "h1", expansion)
     hunt_run._finish(repo, "h1", {"status": "disabled", "stop_reason": ""}, sweep_summary,
-                     partial_reasons=sweep.partial_reasons, expansion_summary=expansion)
+                     partial_reasons=sweep.partial_reasons, expansion_summary=expansion, baseline_summary=baseline)
     manifest = build_manifest(repo, "h1", "test")
 
     def table(name, order):
