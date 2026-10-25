@@ -138,18 +138,23 @@ from tests import throughput_fixture as tf
 # copies, entities, expansion, stats and the empty history/segment tables remain byte-identical.
 # Expansion link accounting is now content-sorted before the raw manifest is emitted, so only the manifest digest
 # changes; the links themselves and their canonical report order are unchanged.
+# The S8 merge-gate correction moves bl.cmd_shape to version/key version 3. Path-shaped argv tokens now remain
+# literal, while only evidenced Base64 and known random tmp/temp basenames are masked. That deliberate baseline-only
+# identity change updates command-shape keys and version fields in window counts, witnesses, observations and
+# exclusions; the frozen plan/digest then flows into baseline rule cells, the baseline task/audit and the manifest.
+# Exact non-baseline candidate and rule-cell field projections remain equal to their S7 references below.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
-    "audit": "4ac18411fc75aaea0724492e2bf0b79894c772bb7ec32987b6b7833098cbbf93",
+    "audit": "cea615e0f55e64be997172ffa62f4cded65f3546b6519ea8f58046f421a2dd2e",
     "baseline_counts": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-    "baseline_hunt_exclusions": "9b1392a0693934bb7306f23f889b08106d2ebd89d87fa5c048447b2c5f322d8e",
-    "baseline_observations": "18f1d7c4cd7b042e90304af9cead36e9a2529be22f388ae374602f871a62be64",
+    "baseline_hunt_exclusions": "c5feb1be46e50a399e66a1f01e448015502013908c697fb72ff5e949cf9ff287",
+    "baseline_observations": "628d6918fbe897cc46814d641570c87afc4fccbcbbed4e82f0e33d5b66c7df5a",
     "baseline_scope_hours": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     "baseline_segments": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-    "baseline_snapshot": "709fbd5828f6e5be380b34f2008f0b3937c4307ebcc33c4c16cdaa2267111068",
-    "baseline_window_counts": "74625a07035a319332e70b539a56a3d03dba3bb477db6cbd5dce0e091ef0208e",
-    "baseline_window_event_hours": "d7ef5845a973ea1f92116e4c5660593b97316628436bf9ae58cf84af782d8ca4",
-    "baseline_window_scope_hours": "b8b7eae859913f58f1fc355a778a3151c7082a1615bd63c6466a85b1ae87d89b",
+    "baseline_snapshot": "4f0d2a31633054466c31e2dcd8ebc6b88c327467ec51cecc95f93a4368a881a3",
+    "baseline_window_counts": "3adb4066d800a8f0926e079fdca757fc49b202288b47ddcf34b2ba6565659ba2",
+    "baseline_window_event_hours": "ea291ba8dc44c2993f3acc99874eb9e8b8ebaea4773223511176db313e56f883",
+    "baseline_window_scope_hours": "a97fd23de1b705191a974ea0deda2a791aa6146c19ab6a1a2b18ee5fe7953a44",
     "candidates": "b5abecf132a0f5f4be6a541acb6a584f7b206821294991c5ae36ba89d2eb672b",
     "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
     "event_citations": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
@@ -157,11 +162,11 @@ GOLDEN_STACK = {
     "events": "d4eede2cca8fd1bac673b1abe0aa2327cf7a5a3f90f72683680d2af986679e39",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "e5bd8ec83459a57a14627ad2222f752e4c29e0415beddd54eaa11afd08e1b62f",
-    "manifest": "94adfc557008bdefd73431ccca205a80662cedc43e12a910c4a459d6ebc64408",
+    "manifest": "70a532de61db9f8d62bac44163ee4ecd76fba7e6cbe227b9c347806b9d4d1381",
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
-    "rule_cells": "17f4760cfde411877bac8e7762ce2555fa52a6aaeb5d2e48beb10b7ce677bafa",
+    "rule_cells": "97e86d5713df546770fabd3e81ec5d1db13d474534f1ee993f4cae2cfee70bcb",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
-    "tasks": "6de107dcab42d125ac48ea0aa135d46c74b431b216979513e4858afc85cbf580",
+    "tasks": "9ba54d4e4d77629cd5db7d9ceaa795a2d8a74a816ff669bf9aad05f67ae60ad6",
 }
 # Captured directly from the S7 fixture through _non_baseline_semantic_digests. Typed-event-derived hashes and
 # interchangeable predicate origins are normalized, while every decision, claim, lane, raw citation and gate is
