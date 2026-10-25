@@ -76,6 +76,7 @@ class KeyCounter:
         self._open_bucket: datetime | None = None
         self._partial_reasons: set[str] = set()
         self._partial_hours: set[datetime] = set()
+        self._partial_unscoped_hours: set[datetime] = set()
         self._partial_host_hours: dict[str, set[datetime]] = defaultdict(set)
         self._whole_cell_partial = False
         self._pendings: list[Pending] = []
@@ -92,6 +93,10 @@ class KeyCounter:
     @property
     def partial_hours(self) -> tuple[datetime, ...]:
         return tuple(sorted(self._partial_hours))
+
+    @property
+    def partial_unscoped_hours(self) -> tuple[datetime, ...]:
+        return tuple(sorted(self._partial_unscoped_hours))
 
     @property
     def partial_host_hours(self) -> tuple[tuple[str, tuple[datetime, ...]], ...]:
@@ -120,6 +125,8 @@ class KeyCounter:
             self._partial_hours.add(hour)
             if host:
                 self._partial_host_hours[host].add(hour)
+            else:
+                self._partial_unscoped_hours.add(hour)
 
     @property
     def token_entries(self) -> int:

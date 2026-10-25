@@ -383,11 +383,15 @@ class SnapshotView:
                 for values in host_hours.values()
                 for value in values
             }
-            partial_hours.update(
-                datetime.fromisoformat(value)
-                for value in detail.get("partial_hours") or []
-                if datetime.fromisoformat(value) not in localized
-            )
+            unscoped = detail.get("partial_unscoped_hours")
+            if unscoped is None:  # resume compatibility for cells staged before explicit scope persistence
+                partial_hours.update(
+                    datetime.fromisoformat(value)
+                    for value in detail.get("partial_hours") or []
+                    if datetime.fromisoformat(value) not in localized
+                )
+            else:
+                partial_hours.update(datetime.fromisoformat(value) for value in unscoped)
             if isinstance(host, str) and host:
                 partial_hours.update(
                     datetime.fromisoformat(value)

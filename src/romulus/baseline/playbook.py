@@ -26,6 +26,7 @@ class BaselineCell:
     partial: bool
     reasons: tuple[str, ...]
     partial_hours: tuple[datetime, ...]
+    partial_unscoped_hours: tuple[datetime, ...]
     partial_host_hours: tuple[tuple[str, tuple[datetime, ...]], ...]
     whole_cell_partial: bool
 
@@ -115,6 +116,7 @@ class BaselinePlaybook(Playbook):
             partial=counter.partial,
             reasons=counter.reasons,
             partial_hours=counter.partial_hours,
+            partial_unscoped_hours=counter.partial_unscoped_hours,
             partial_host_hours=counter.partial_host_hours,
             whole_cell_partial=counter.whole_cell_partial,
         )

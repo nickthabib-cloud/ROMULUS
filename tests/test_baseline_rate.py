@@ -80,6 +80,7 @@ def test_a_missing_rate_identity_marks_only_its_own_hour_partial():
 
     assert cell.partial is True
     assert cell.partial_hours == (T0 + timedelta(hours=1),)
+    assert cell.partial_unscoped_hours == ()
     assert cell.partial_host_hours == (("other-host", (T0 + timedelta(hours=1),)),)
     assert cell.whole_cell_partial is False
 
@@ -241,7 +242,7 @@ def _rate_view(*, history_hours=48, history_values=None, window_counts=(5,),
                window_start=T0 + timedelta(days=10), edge_minutes=0,
                window_state="evaluated_complete", history_status=None, hunt_id="hunt",
                live_history_hours=_ALL_LIVE, partial_window_hours=(), partial_host_hours=None,
-               missing_witness_hours=()):
+               partial_unscoped_hours=None, missing_witness_hours=()):
     history_values = {0: 1} if history_values is None else history_values
     start = window_start + timedelta(minutes=edge_minutes)
     window = Window(start=start, end=start + timedelta(hours=len(window_counts)))
@@ -333,6 +334,13 @@ def _rate_view(*, history_hours=48, history_values=None, window_counts=(5,),
                 ]
                 for host, indexes in (partial_host_hours or {}).items()
             },
+            **({} if partial_unscoped_hours is None else {
+                "partial_unscoped_hours": [
+                    (window.start.replace(minute=0, second=0, microsecond=0)
+                     + timedelta(hours=index)).isoformat()
+                    for index in partial_unscoped_hours
+                ],
+            }),
         },
     }, (_pending_observation(hunt_id, row) for row in cell.observations),
         counts=cell.counts, scope_hours=cell.scope_hours)
@@ -446,6 +454,18 @@ def test_a_partial_hour_on_another_host_does_not_silence_a_complete_anomalous_ho
     assert f"{view.window.start.isoformat()} count 5" in matches[0].claim
     assert "other window cells were partial" in matches[0].claim.lower()
     assert next(repo.baseline_observations("hunt"))["verdict"] == "over_threshold"
+
+
+def test_an_unscoped_partial_hour_is_not_erased_by_another_hosts_partial_hour():
+    repo, playbook, view, _scope = _rate_view(
+        history_values={index: 1 for index in range(48)}, window_counts=(5,),
+        window_state="evaluated_partial", partial_window_hours=(0,),
+        partial_host_hours={"other-host": (0,)}, partial_unscoped_hours=(0,),
+    )
+
+    assert list(playbook.judge(view)) == []
+    row = next(repo.baseline_observations("hunt"))
+    assert row["verdict"] == "unresolved" and "window coverage is partial" in row["reason"]
 
 
 def test_a_partial_anomalous_hour_is_never_measured():
