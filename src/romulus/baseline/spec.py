@@ -598,9 +598,15 @@ def _uid(event: TypedEvent) -> int | Missing:
 
 
 def _service_rate(event: TypedEvent, context: KeyContext, spec: BaselineSpec) -> KeyResult:
+    raw_account = event.get("process.user")
     account = _text(event, "process.user")
     raw_uid = event.get("process.uid")
     uid = _uid(event)
+    if raw_account in (None, ""):
+        if isinstance(uid, Missing):
+            return Missing("neither process.user nor a usable process.uid is recorded",
+                           ("process.user", "process.uid"))
+        account = f"uid:{uid}"
     if account == "root" or uid == 0:
         return NotApplicable("root is not a service account")
     low, high = context.system_uid_range
@@ -673,11 +679,11 @@ BASELINE_SPECS = (
         requires_configured_networks=True,
     ),
     BaselineSpec(
-        id="bl.svc_exec_rate", version="1", key_version="1", families=("process_exec",),
+        id="bl.svc_exec_rate", version="1", key_version="2", families=("process_exec",),
         datasets=("linux.audit",), scope="host_account", measure="rate", bucket="hour",
         # A configured account name decides one without a uid; when present, uid is still projected and typed.
-        required_fields={"process_exec": ("process.user",)},
-        optional_fields={"process_exec": ("process.uid",)},
+        required_fields={"process_exec": (("process.user", "process.uid"),)},
+        optional_fields={"process_exec": ()},
         _extract=_service_rate,
     ),
 )

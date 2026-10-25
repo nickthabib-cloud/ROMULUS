@@ -308,7 +308,7 @@ class SnapshotView:
                     window_failure: str | None) -> tuple[list[dict], list[dict], dict]:
         first = rows[0]
         coverage = self._history_coverage(playbook.id)
-        reason = window_failure or _coverage_failure(coverage, self.min_live_hours)
+        reason = _coverage_failure(coverage, self.min_live_hours)
         plan = self.snapshot.get("plan") or {}
         history_end = datetime.fromisoformat(plan.get("window_start") or self.window.start.isoformat())
         starts = [datetime.fromisoformat(str(item["effective_start"])) for item in coverage
@@ -319,13 +319,25 @@ class SnapshotView:
                 first["scope_kind"], first["scope"], self.hunt_id, playbook.id,
                 (history_start, history_end)):
             sparse[item["hour"]] = sparse.get(item["hour"], 0) + int(item["events"])
-        history_events = sum(sparse.values())
-        n_hours = max(0, int((history_end - history_start) / _HOUR))
-        if reason is None and not sparse:
-            reason = "scope is silent in history"
+        host = None
+        if first["scope"].startswith("host_account:"):
+            try:
+                body = json.loads(first["scope"].removeprefix("host_account:"))
+                host = body.get("host") if isinstance(body, dict) else None
+            except (TypeError, ValueError):
+                pass
+        live = (sorted(set(self.repo.baseline_host_hours(
+            host, self.hunt_id, (history_start, history_end),
+        ))) if isinstance(host, str) and host else [])
+        history_events = sum(sparse.get(hour, 0) for hour in live)
+        n_hours = len(live)
+        if reason is None and not live:
+            reason = "host liveness is unavailable"
         if reason is None and n_hours < self.min_live_hours:
-            reason = f"scope has {n_hours} live history hour(s), below the required {self.min_live_hours}"
-        series = [sparse.get(history_start + index * _HOUR, 0) for index in range(n_hours)]
+            reason = f"fewer than {self.min_live_hours} live history hours"
+        if reason is None and history_events < 1:
+            reason = "scope is silent in history"
+        series = [sparse.get(hour, 0) for hour in live]
         statistics = None
         if reason is None:
             statistics = threshold(series, **self.rate_parameters)
@@ -337,9 +349,29 @@ class SnapshotView:
             self.hunt_id, playbook.id, first["scope_kind"], first["scope"],
             span=(whole_start, whole_end),
         )) if whole_start < whole_end else [])
+        partial_cells = [cell for cell in self.repo.rule_cells(self.hunt_id, rule_id=playbook.id)
+                         if not (cell["target"] == "*" and cell["partition"] == "window")
+                         and not cell["target"].startswith("baseline:")
+                         and cell["state"] != "split" and cell["state"] not in _COMPLETE_WINDOW_STATES]
+        partial_hours = {
+            datetime.fromisoformat(value)
+            for cell in partial_cells
+            for value in (cell.get("detail") or {}).get("partial_hours") or []
+        }
+        whole_cell_partial = any(
+            (cell.get("detail") or {}).get("whole_cell_partial")
+            or not (cell.get("detail") or {}).get("partial_hours")
+            for cell in partial_cells
+        )
+        if whole_cell_partial:
+            measurements = []
+        elif partial_hours:
+            measurements = [item for item in measurements if item["hour"] not in partial_hours]
         anomalous = ([] if reason or statistics is None else [
             item for item in measurements if int(item["events"]) >= statistics.value
         ])
+        if reason is None and window_failure and not anomalous:
+            reason = window_failure
         verdict = "unresolved" if reason else "over_threshold" if anomalous else "within_threshold"
         edge_text = self._edge_text(edges)
         if reason:
@@ -347,6 +379,8 @@ class SnapshotView:
         elif anomalous:
             verdict_reason = (f"{len(anomalous)} complete window hour(s) met or exceeded threshold "
                               f"{statistics.value}{edge_text}")
+            if window_failure:
+                verdict_reason += f"; other window cells were partial ({window_failure})"
         else:
             verdict_reason = f"no complete window hour met threshold {statistics.value}{edge_text}"
         updated = [{
@@ -365,18 +399,21 @@ class SnapshotView:
         return updated, anomalous, {
             "coverage": coverage, "history_start": history_start, "history_end": history_end,
             "history_events": history_events, "statistics": statistics, "edges": edges,
+            "window_failure": window_failure,
         }
 
-    def _rate_claim(self, playbook: BaselinePlaybook, scope: str, anomalous: list[dict], facts: dict,
-                    cited: int) -> str:
+    def _rate_claim(self, playbook: BaselinePlaybook, scope: str, cited_hours: list[dict], facts: dict,
+                    total_anomalous: int, unlisted: int, missing_witnesses: int) -> str:
         statistics = facts["statistics"]
         assert statistics is not None
         hours = "; ".join(
-            f"{item['hour'].isoformat()} count {int(item['events'])}" for item in anomalous
+            f"{item['hour'].isoformat()} count {int(item['events'])}" for item in cited_hours
         )
+        if unlisted:
+            hours += f"; and {unlisted} more hours (in the observation table)"
         claim = (
             f"Between {self.window.start.isoformat()} and {self.window.end.isoformat()}, {scope} met or "
-            f"exceeded its service-account execution-rate threshold in {len(anomalous)} complete hour(s): "
+            f"exceeded its service-account execution-rate threshold in {total_anomalous} complete hour(s): "
             f"{hours}. The threshold was {statistics.value} = max(min_count {statistics.min_count:g}, "
             f"mean × k ({statistics.mean} × {statistics.k:g}), mean + z × sample sigma "
             f"({statistics.mean} + {statistics.z:g} × {statistics.sigma})); n={statistics.n}. The exact "
@@ -385,9 +422,13 @@ class SnapshotView:
             "not modelled."
         )
         claim += self._edge_text(facts["edges"])
+        if facts.get("window_failure"):
+            claim += f" Other window cells were partial ({facts['window_failure']})."
+        if missing_witnesses:
+            claim += f" There were {missing_witnesses} anomalous hour(s) whose witness could not be retained."
         claim += (
             f" Baseline {self.snapshot['digest']} supplied the frozen history. This rate deviation is not "
-            f"evidence of malicious activity. The lead cites one retained event from each of the {cited} "
+            f"evidence of malicious activity. The lead cites one retained event from each of the {len(cited_hours)} "
             "anomalous hour(s)."
         )
         return claim
@@ -409,14 +450,18 @@ class SnapshotView:
             within += sum(row["verdict"] == "within_threshold" for row in rows)
             if not anomalous:
                 continue
+            shown = anomalous[:BASELINE_CITATION_CAP]
             witnesses = [{
                 "first_event_id": item.get("first_event_id"),
                 "first_event_refs": item.get("first_event_refs") or [],
-            } for item in anomalous]
+            } for item in shown]
             events, raw_copies = self._citation_events(witnesses)
-            if len(events) != len(anomalous):
+            retained_ids = {event.id for event in events}
+            cited_hours = [item for item in shown if item.get("first_event_id") in retained_ids]
+            missing_witnesses = len(shown) - len(cited_hours)
+            if not cited_hours:
                 for row in rows:
-                    row.update(verdict="unresolved", reason="an anomalous hour has no retained citation event")
+                    row.update(verdict="unresolved", reason="no anomalous hour has a retained citation event")
                 self.repo.upsert_baseline_observations(rows)
                 unresolved += len(rows)
                 over -= len(rows)
@@ -426,7 +471,10 @@ class SnapshotView:
             groups += 1
             yield Match(
                 playbook_id=playbook.id,
-                claim=self._rate_claim(playbook, scope, anomalous, facts, len(events)),
+                claim=self._rate_claim(
+                    playbook, scope, cited_hours, facts, len(anomalous), len(anomalous) - len(shown),
+                    missing_witnesses,
+                ),
                 claim_type="anomaly", events=events, predicate=_predicate(events, playbook),
                 ts=min(event.ts for event in events), severity="info", proposed_lane="lead",
                 confidence="medium", entities=_entities(events),

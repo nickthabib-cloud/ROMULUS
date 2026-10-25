@@ -170,6 +170,20 @@ def baseline_scope_series_query(scope_kind: str, scope: str, hunt_id: str, spec_
             .order_by(c.scope_kind, c.scope, c.segment_id, c.hour))
 
 
+def baseline_host_hours_query(host: str, hunt_id: str,
+                              span: tuple[datetime, datetime] | None = None):
+    """Distinct hours where any frozen baseline spec directly observed a host scope."""
+    c = t.baseline_scope_hour.c
+    member = t.baseline_snapshot_segment.c
+    return (select(c.hour).distinct()
+            .join(t.baseline_snapshot_segment, and_(
+                member.segment_id == c.segment_id,
+                member.hunt_id == hunt_id,
+            ))
+            .where(c.scope_kind == "host", c.scope == f"host:{host}", *_hour_in_span(c, span))
+            .order_by(c.hour))
+
+
 # ---- baseline rows ---------------------------------------------------------------------------
 BASELINE_CHUNK = 5000      # rows per executemany batch while streaming a segment or observations
 BASELINE_PAGE = 5000       # rows per keyset page on reads
@@ -2341,6 +2355,25 @@ class Repo:
             if len(page) < page_size:
                 return
             after = [page[-1]["segment_id"], page[-1]["hour"]]
+
+    def baseline_host_hours(self, host: str, hunt_id: str,
+                            span: tuple[datetime, datetime] | None = None, *,
+                            page_size: int = BASELINE_PAGE) -> Iterator[datetime]:
+        """Hours in which a host was live according to any host-scoped segment in the frozen snapshot."""
+        if page_size < 1:
+            raise ValueError("page size must be positive")
+        after = None
+        while True:
+            query = baseline_host_hours_query(host, hunt_id, span)
+            if after is not None:
+                query = query.where(t.baseline_scope_hour.c.hour > after)
+            query = query.limit(page_size)
+            with self.engine.connect() as connection:
+                page = [_stored_utc(hour) for hour in connection.execute(query).scalars()]
+            yield from page
+            if len(page) < page_size:
+                return
+            after = page[-1]
 
     def save_baseline_snapshot(self, row: dict) -> bool:
         """Atomically freeze the first snapshot and normalized membership for a hunt."""

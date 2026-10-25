@@ -75,7 +75,7 @@ def test_registry_has_the_six_accepted_specs_and_metadata():
     # not tell) since its third key version
     assert {spec.id: (spec.version, spec.key_version) for spec in BASELINE_SPECS} == {
         "bl.ssh_tuple": ("1", "1"), "bl.exec_path": ("1", "1"), "bl.exec_pair": ("1", "1"),
-        "bl.cmd_shape": ("1", "1"), "bl.ext_dest": ("3", "3"), "bl.svc_exec_rate": ("1", "1"),
+        "bl.cmd_shape": ("1", "1"), "bl.ext_dest": ("3", "3"), "bl.svc_exec_rate": ("1", "2"),
     }
 
 
@@ -581,11 +581,20 @@ def test_service_exec_rate_uid_range_is_configurable():
     assert isinstance(result, NotApplicable)
 
 
+@pytest.mark.parametrize("uid", (1, 114, 999, "114"))
+def test_service_exec_rate_keys_a_system_uid_when_account_name_is_absent(uid):
+    result = SPEC_BY_ID["bl.svc_exec_rate"].keys(
+        _event("process_exec", **{"process.uid": uid}), _ctx(),
+    )
+
+    assert len(result) == 1
+    assert result[0].scope == f'host_account:{{"account":"uid:{int(uid)}","host":"web01"}}'
+
+
 @pytest.mark.parametrize(
     ("host", "fields", "missing"),
     [
         (None, {"process.user": "postgres", "process.uid": "114"}, ("host",)),
-        ("web01", {"process.user": None, "process.uid": "114"}, ("process.user",)),
         ("web01", {"process.user": ["postgres"], "process.uid": "114"}, ("process.user",)),
         ("web01", {"process.user": "postgres"}, ("process.uid",)),
         ("web01", {"process.user": "postgres", "process.uid": True}, ("process.uid",)),
