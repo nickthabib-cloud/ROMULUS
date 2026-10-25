@@ -116,7 +116,7 @@ GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
     "audit": "4b1608c5b81972994420fc0f411bd4f37d3440d9cef29ad9ccd1b7bd5797fe1c",
     "baseline_counts": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-    "baseline_hunt_exclusions": "1396a8d17f1e19d6da86ffa3cccf17ab47c05f05b51a18b4c48bfba54454aae8",
+    "baseline_hunt_exclusions": "0d871301eb31d300f00eefeadae48aaa99381de0d8c6158e74e9bb351dd1bd52",
     "baseline_observations": "a622940f3edc51095fae860c5247d8b9494c32522d92fca63ce77a73ffcd1856",
     "baseline_scope_hours": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     "baseline_segments": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",

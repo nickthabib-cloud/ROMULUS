@@ -3004,7 +3004,8 @@ class Repo:
 
     def replace_baseline_hunt_exclusions(self, hunt_id: str, *, site: str,
                                          start: datetime, end: datetime,
-                                         exclusions: dict[tuple[str, str], set[str]]) -> None:
+                                         exclusions: dict[tuple[str, str], set[str]],
+                                         spec_versions: dict[str, tuple[str, str]]) -> None:
         """Replace one hunt's cited-key ledger atomically; a resumed finish is idempotent."""
         start, end = _utc(start, "exclusion start"), _utc(end, "exclusion end")
         if start >= end:
@@ -3012,6 +3013,7 @@ class Repo:
         rows = (
             {
                 "hunt_id": hunt_id, "site": site, "target": target, "spec_id": spec_id,
+                "spec_version": spec_versions[spec_id][0], "key_version": spec_versions[spec_id][1],
                 "key_digest": key_digest, "start": start, "end": end,
             }
             for (target, spec_id), keys in sorted(exclusions.items())
@@ -3025,12 +3027,14 @@ class Repo:
                 connection.execute(t.baseline_hunt_exclusion.insert(), chunk)
 
     def baseline_exclusion_keys(self, *, site: str, target: str, spec_id: str,
+                                spec_version: str, key_version: str,
                                 start: datetime, end: datetime) -> list[str]:
         """Distinct cited keys from every hunt whose half-open window overlaps the span."""
         start, end = _utc(start, "exclusion query start"), _utc(end, "exclusion query end")
         table = t.baseline_hunt_exclusion.c
         query = (select(table.key_digest).where(
             table.site == site, table.target == target, table.spec_id == spec_id,
+            table.spec_version == spec_version, table.key_version == key_version,
             table.start < end, table.end > start,
         ).distinct().order_by(table.key_digest))
         with self.engine.connect() as connection:
@@ -3059,6 +3063,8 @@ class Repo:
                 keys = list(connection.execute(select(exclusion.key_digest).where(
                     exclusion.site == site, exclusion.target == row["target"],
                     exclusion.spec_id == row["spec_id"], exclusion.start < row["end"],
+                    exclusion.spec_version == row["spec_version"],
+                    exclusion.key_version == row["key_version"],
                     exclusion.end > row["start"],
                 ).distinct().order_by(exclusion.key_digest)).scalars())
                 if (keys != sorted(row["excluded_keys"] or [])

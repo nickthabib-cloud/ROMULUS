@@ -680,6 +680,8 @@ baseline_hunt_exclusion = Table(
     Column("site", String, nullable=False),
     Column("target", String, nullable=False),
     Column("spec_id", String, nullable=False),
+    Column("spec_version", String, nullable=False),
+    Column("key_version", String, nullable=False),
     Column("key_digest", String, nullable=False),
     Column("start", DateTime(timezone=True), nullable=False),
     Column("end", DateTime(timezone=True), nullable=False),
@@ -691,6 +693,7 @@ baseline_hunt_exclusion = Table(
 Index(
     "ix_baseline_hunt_exclusion_overlap", baseline_hunt_exclusion.c.site,
     baseline_hunt_exclusion.c.target, baseline_hunt_exclusion.c.spec_id,
+    baseline_hunt_exclusion.c.spec_version, baseline_hunt_exclusion.c.key_version,
     baseline_hunt_exclusion.c.start, baseline_hunt_exclusion.c.end,
 )
 

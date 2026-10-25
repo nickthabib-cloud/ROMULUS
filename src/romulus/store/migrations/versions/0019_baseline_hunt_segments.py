@@ -63,6 +63,8 @@ def upgrade() -> None:
         sa.Column("site", sa.String(), nullable=False),
         sa.Column("target", sa.String(), nullable=False),
         sa.Column("spec_id", sa.String(), nullable=False),
+        sa.Column("spec_version", sa.String(), nullable=False),
+        sa.Column("key_version", sa.String(), nullable=False),
         sa.Column("key_digest", sa.String(), nullable=False),
         sa.Column("start", sa.DateTime(timezone=True), nullable=False),
         sa.Column("end", sa.DateTime(timezone=True), nullable=False),
@@ -75,7 +77,7 @@ def upgrade() -> None:
     )
     op.create_index(
         "ix_baseline_hunt_exclusion_overlap", "baseline_hunt_exclusion",
-        ["site", "target", "spec_id", "start", "end"], unique=False,
+        ["site", "target", "spec_id", "spec_version", "key_version", "start", "end"], unique=False,
     )
 
 

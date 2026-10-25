@@ -142,7 +142,8 @@ class LookbackWriter:
                        events_total: int, counter: KeyCounter, gaps: list[HistoryGap]) -> tuple[int, float]:
         """Write one complete hour's segment; (1 when the store holds it, longest write in seconds)."""
         excluded_keys = self.repo.baseline_exclusion_keys(
-            site=self.site, target=target, spec_id=spec.id, start=start, end=end,
+            site=self.site, target=target, spec_id=spec.id, spec_version=spec.version,
+            key_version=spec.key_version, start=start, end=end,
         )
         excluded = set(excluded_keys)
         row = self.segment_row(

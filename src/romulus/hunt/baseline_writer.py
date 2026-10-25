@@ -86,6 +86,8 @@ def run_hunt_segment_writer(repo: Repo, hunt_id: str, *, hunt_complete: bool) ->
     current_exclusions = _cited_exclusions(repo, hunt_id, set(targets), set(specs))
     repo.replace_baseline_hunt_exclusions(
         hunt_id, site=site, start=start, end=end, exclusions=current_exclusions,
+        spec_versions={spec_id: (SPEC_BY_ID[spec_id].version, SPEC_BY_ID[spec_id].key_version)
+                       for spec_id in specs},
     )
     stale = repo.stale_baseline_segments_for_exclusions(site=site, start=start, end=end)
     repo.cleanup_baseline_building(before=utcnow() - timedelta(hours=1))
@@ -108,7 +110,8 @@ def run_hunt_segment_writer(repo: Repo, hunt_id: str, *, hunt_complete: bool) ->
         reasons: list[str] = []
         for target in targets:
             cells = [row for row in repo.rule_cells(hunt_id, rule_id=spec_id)
-                     if row["target"] == target and row["partition"] != "window"]
+                     if row["target"] == target and row["partition"] != "window"
+                     and row["state"] != "split"]
             bad = [row for row in cells if row["state"] not in _COMPLETE_CELL_STATES]
             if not cells:
                 reasons.append(f"{target}: no window cells")
@@ -117,7 +120,8 @@ def run_hunt_segment_writer(repo: Repo, hunt_id: str, *, hunt_complete: bool) ->
                 reasons.append(f"{target}: {len(bad)} incomplete window cell(s)")
                 continue
             excluded = set(repo.baseline_exclusion_keys(
-                site=site, target=target, spec_id=spec_id, start=start, end=end,
+                site=site, target=target, spec_id=spec_id, spec_version=spec.version,
+                key_version=spec.key_version, start=start, end=end,
             ))
             digest = exclusion_digest(list(excluded))
             base_id = segment_content_id(

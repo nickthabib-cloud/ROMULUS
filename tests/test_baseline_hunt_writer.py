@@ -164,6 +164,21 @@ def test_complete_hunt_skips_a_spec_with_any_partial_cell_and_audits_the_reason(
     }
 
 
+def test_split_parent_cell_is_control_state_and_complete_children_still_write():
+    repo = _repo()
+    repo.create_hunt("hunt-a", _manifest(), "manifest-a", "test")
+    _stage_cell(repo, [_event("routine", "/usr/bin/id", 5)])
+    repo.set_rule_cell(
+        "hunt-a", SPEC.id, SPEC.version, "host-index", "parent", "split", 0, 0,
+        {"reasons": ["partition split"]},
+    )
+
+    summary = run_hunt_segment_writer(repo, "hunt-a", hunt_complete=True)
+
+    assert summary["written"] == 1
+    assert len(repo.baseline_segments(statuses=["active"])) == 1
+
+
 def test_finish_records_the_segment_writer_reason_in_the_baseline_audit():
     repo = _repo()
     repo.create_hunt("hunt-a", _manifest(), "manifest-a", "test")
@@ -225,6 +240,27 @@ def test_later_overlapping_citation_stales_old_segment_and_union_excludes_the_ke
     active = next(row for row in rows if row["status"] == "active")
     assert result["stale"] == 1
     assert {row["key"]["executable"] for row in repo.baseline_counts(active["id"])} == {"/usr/bin/id"}
+
+
+def test_exclusion_union_is_scoped_to_the_spec_and_key_versions():
+    repo = _repo()
+    repo.create_hunt("hunt-a", _manifest(), "manifest-a", "test")
+    repo.replace_baseline_hunt_exclusions(
+        "hunt-a", site="site-a", start=START, end=END,
+        exclusions={("host-index", SPEC.id): {"old-key"}},
+        spec_versions={SPEC.id: (SPEC.version, SPEC.key_version)},
+    )
+
+    common = {
+        "site": "site-a", "target": "host-index", "spec_id": SPEC.id,
+        "start": START, "end": END,
+    }
+    assert repo.baseline_exclusion_keys(
+        **common, spec_version=SPEC.version, key_version=SPEC.key_version,
+    ) == ["old-key"]
+    assert repo.baseline_exclusion_keys(
+        **common, spec_version="future", key_version=SPEC.key_version,
+    ) == []
 
 
 def test_partial_later_hunt_stales_the_old_segment_and_lookback_refills_with_union_exclusions():
@@ -404,3 +440,41 @@ def test_weeks_long_hunt_streams_merged_rows_without_using_list_readers(monkeypa
     assert result["written"] == 1 and result["max_write_seconds"] < 3
     assert sum(1 for _ in repo.baseline_counts(segment["id"])) == 672
     assert sum(1 for _ in repo.baseline_scope_hours(segment["id"])) == 672
+
+
+def test_merged_window_rows_keyset_page_past_many_scopes():
+    repo = _repo()
+    repo.create_hunt("hunt-a", _manifest(), "manifest-a", "test")
+
+    def counts():
+        for index in range(5_001):
+            yield {
+                "scope_kind": "host", "scope": f"host:{index:05d}",
+                "key_id": f"key-{index:05d}", "key_digest": f"digest-{index:05d}",
+                "key": {"executable": f"/bin/tool-{index:05d}"}, "bucket": START,
+                "count": 1, "first_ts": START, "last_ts": START,
+            }
+
+    def hours():
+        for index in range(5_001):
+            yield {
+                "scope_kind": "host", "scope": f"host:{index:05d}",
+                "hour": START, "events": 1,
+            }
+
+    repo.save_baseline_window_cell(
+        "hunt-a", {
+            "rule_id": SPEC.id, "version": SPEC.version, "target": "host-index",
+            "partition": "large-cell", "state": "evaluated_complete", "matched": 0,
+            "evaluated": 5_001, "detail": {"reasons": []},
+        }, (), counts=counts(), scope_hours=hours(),
+    )
+
+    merged_counts = list(repo.baseline_window_merged_counts(
+        "hunt-a", SPEC.id, "host-index", page_size=137,
+    ))
+    merged_hours = list(repo.baseline_window_merged_scope_hours(
+        "hunt-a", SPEC.id, "host-index", page_size=137,
+    ))
+    assert len(merged_counts) == len(merged_hours) == 5_001
+    assert merged_counts[0]["scope"] == "host:00000" and merged_counts[-1]["scope"] == "host:05000"
