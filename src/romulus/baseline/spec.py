@@ -17,7 +17,9 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+import math
 import re
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -425,8 +427,8 @@ _HEX_PREFIX = re.compile(r"(?i)(?<![0-9a-z])0x[0-9a-f]+(?![0-9a-z])")
 _HEX_BARE = re.compile(r"(?i)(?<![0-9a-z])[0-9a-f]{8,}(?![0-9a-z])")
 _NUMBER = re.compile(r"(?<![0-9a-zA-Z])[-+]?\d+(?:\.\d+)?(?![0-9a-zA-Z])")
 _CHMOD_MODE = re.compile(r"[0-7]{3,4}")
-_TEMP_NAME = re.compile(
-    r"(?i)(?:^|.*/)(?:tmp|temp)(?:[-_.][a-z][a-z0-9-]*)?[-_.][a-z0-9x]{6,}$",
+_TEMP_BASENAME = re.compile(
+    r"(?i)^(?:tmp|temp)(?:[-_.][a-z][a-z0-9-]*)?[-_.]([a-z0-9]{6,})$",
 )
 _BASE64 = re.compile(r"[A-Za-z0-9+/]+={0,2}")
 
@@ -445,28 +447,50 @@ def _replace_bare_hex(match: re.Match[str]) -> str:
 
 
 def _base64_bucket(value: str) -> str | None:
-    """A bounded description of a complete base64 token, excluding values already classed as long hex."""
-    if len(value) < 16 or not _BASE64.fullmatch(value) or _HEX_BARE.fullmatch(value):
+    """A bounded description of a complete, evidenced Base64 token that is not path-shaped."""
+    if "/" in value or len(value) < 16 or not _BASE64.fullmatch(value) or _HEX_BARE.fullmatch(value):
         return None
     payload = value.rstrip("=")
     padding = len(value) - len(payload)
     remainder = len(payload) % 4
     if remainder == 1 or (padding and (len(value) % 4 or padding != 4 - remainder)):
         return None
+    frequencies = Counter(payload)
+    entropy = -sum(
+        (count / len(payload)) * math.log2(count / len(payload)) for count in frequencies.values()
+    )
+    if "+" not in payload and not padding and (len(payload) < 32 or entropy < 3.5):
+        return None
     low = 1 << (len(value).bit_length() - 1)
     return f"<b64:{low}-{2 * low - 1}>"
 
 
+def _mask_temp_name(value: str) -> str | None:
+    """Mask a known random tmp/temp basename while retaining any directory verbatim."""
+    directory, separator, basename = value.rpartition("/")
+    match = _TEMP_BASENAME.fullmatch(basename)
+    if match is None:
+        return None
+    suffix = match.group(1)
+    looks_random = set(suffix.casefold()) == {"x"} or (
+        any(character.isalpha() for character in suffix)
+        and any(character.isdigit() for character in suffix)
+    )
+    if not looks_random:
+        return None
+    return f"{directory}{separator}<tmp>" if separator else "<tmp>"
+
+
 def mask_argv_token(value: str) -> str:
     """Mask variable identifiers within one already-tokenized argv value."""
-    if _TEMP_NAME.fullmatch(value):
-        return "<tmp>"
+    if (masked_temp := _mask_temp_name(value)) is not None:
+        return masked_temp
     if (bucket := _base64_bucket(value)) is not None:
         return bucket
     if "=" in value:
         prefix, candidate = value.rsplit("=", 1)
-        if _TEMP_NAME.fullmatch(candidate):
-            return f"{prefix}=<tmp>"
+        if (masked_temp := _mask_temp_name(candidate)) is not None:
+            return f"{prefix}={masked_temp}"
         if (bucket := _base64_bucket(candidate)) is not None:
             return f"{prefix}={bucket}"
     token = _UUID.sub("<uuid>", value)
@@ -711,7 +735,7 @@ BASELINE_SPECS = (
         _extract=_exec_pair,
     ),
     BaselineSpec(
-        id="bl.cmd_shape", version="2", key_version="2", families=("process_exec",),
+        id="bl.cmd_shape", version="3", key_version="3", families=("process_exec",),
         datasets=("linux.audit",), scope="host", measure="prevalence", bucket="day",
         required_fields={"process_exec": ("process.executable", "process.argv")},
         optional_fields={"process_exec": ("process.argv_complete",)},

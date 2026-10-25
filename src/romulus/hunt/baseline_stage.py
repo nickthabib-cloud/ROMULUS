@@ -529,7 +529,7 @@ class SnapshotView:
     def _claim(self, playbook: BaselinePlaybook, scope: str, first_seen: list[dict], facts: dict,
                cited: int) -> str:
         shown = first_seen[:BASELINE_CITATION_CAP]
-        history_label = "history count at most 0" if facts.get("history_count_upper_bound") else "history count 0"
+        history_label = "history count 0"
         keys = "; ".join(
             f"{_canonical(row['key'])} (window count {row['window_count']}, {history_label})"
             for row in shown
@@ -556,9 +556,9 @@ class SnapshotView:
         )
         if playbook.id == "bl.cmd_shape":
             claim += (
-                "The argv masking replaces variable IP addresses, numbers, UUIDs, long hexadecimal values, "
-                "mktemp-style random names, and base64 blobs with class tokens; chmod permission modes remain "
-                "literal. "
+                "The argv masking replaces IP literals, numbers, UUIDs, long hexadecimal values, random "
+                "tmp/temp basenames while preserving their directories, and evidenced Base64 tokens with class "
+                "tokens; chmod permission modes and path tokens remain literal. "
             )
         if any(item.get("status") == "shortened" for item in facts["coverage"]):
             claim += "The complete baseline span was shortened by evidenced source absence. "

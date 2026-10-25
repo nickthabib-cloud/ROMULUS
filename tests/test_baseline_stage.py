@@ -156,8 +156,9 @@ def test_command_shape_claim_states_the_shape_and_its_masking_policy():
 
     assert '"argv_shape":["tool","<ip>","<b64:16-31>"]' in claim
     assert "argv masking replaces" in claim
-    assert all(name in claim for name in ("IP addresses", "numbers", "UUIDs", "hexadecimal", "mktemp", "base64"))
-    assert "chmod permission modes remain literal" in claim
+    assert all(name in claim for name in ("IP literals", "numbers", "UUIDs", "hexadecimal", "Base64"))
+    assert "random tmp/temp basenames" in claim and "preserving their directories" in claim
+    assert "chmod permission modes and path tokens remain literal" in claim
 
 
 @pytest.mark.parametrize(("peers", "present"), [(4, False), (5, True)])
@@ -889,7 +890,8 @@ def test_a_segment_straddling_history_start_contributes_only_its_in_span_rows():
     row = next(repo.baseline_observations("h1"))
     assert row["verdict"] == "first_seen" and row["history_count"] == 0
     assert row["n_hours"] == 7 * 24
-    assert "history count at most 0" in repo.candidates("h1")[0]["claim"]
+    assert "history count 0" in repo.candidates("h1")[0]["claim"]
+    assert "at most 0" not in repo.candidates("h1")[0]["claim"]
 
 
 def test_history_stopped_on_budget_is_never_called_absent():

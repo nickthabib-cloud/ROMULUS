@@ -74,7 +74,7 @@ def test_registry_has_the_six_accepted_specs_and_metadata():
     # The fourth external-destination key version also distinguishes v1 answer-name recovery from v2/v3 records.
     assert {spec.id: (spec.version, spec.key_version) for spec in BASELINE_SPECS} == {
         "bl.ssh_tuple": ("1", "1"), "bl.exec_path": ("1", "1"), "bl.exec_pair": ("2", "2"),
-        "bl.cmd_shape": ("2", "2"), "bl.ext_dest": ("4", "4"), "bl.svc_exec_rate": ("1", "2"),
+        "bl.cmd_shape": ("3", "3"), "bl.ext_dest": ("4", "4"), "bl.svc_exec_rate": ("1", "2"),
     }
 
 
@@ -367,29 +367,61 @@ def test_command_shape_keeps_security_relevant_chmod_modes_distinct():
 
 
 @pytest.mark.parametrize(
-    "name",
-    ["tmp.XXXXXXXXXX", "/tmp/tmp.aB19zQ", "temp-session_A1b2C3d4"],
+    ("name", "masked"),
+    [
+        ("tmp.XXXXXXXXXX", "<tmp>"),
+        ("/tmp/tmp.aB19zQ", "/tmp/<tmp>"),
+        ("temp-session_A1b2C3d4", "<tmp>"),
+    ],
 )
-def test_command_shape_masks_mktemp_style_random_names(name):
-    assert _command_shape(["mktemp", name]) == ["mktemp", "<tmp>"]
+def test_command_shape_masks_only_the_mktemp_basename_and_preserves_its_directory(name, masked):
+    assert _command_shape(["mktemp", name]) == ["mktemp", masked]
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/usr/local/bin/sshd",
+        "/home/attacker/implant",
+        "/usr/local/sbin/backdoor",
+        "/var/lib/docker/overlay2",
+        "/etc/cron.d/tmp_backdoor",
+        "/etc/sudoers.d/temp-escalate",
+    ],
+)
+def test_command_shape_never_masks_absolute_or_segmented_security_paths_as_base64_or_temp(path):
+    assert _command_shape(["tool", path]) == ["tool", path]
+
+
+def test_command_shape_keeps_assignment_paths_and_chmod_targets_literal():
+    assert _command_shape(["tool", "--output=/usr/lib/systemd/system"]) == [
+        "tool", "--output=/usr/lib/systemd/system",
+    ]
+    assert _command_shape(["chmod", "4755", "/usr/local/bin/sshd"]) == [
+        "chmod", "4755", "/usr/local/bin/sshd",
+    ]
 
 
 @pytest.mark.parametrize(
     ("blob", "bucket"),
     [
-        ("YWJjZGVmZ2hpamts", "<b64:16-31>"),
-        ("GGGGGGGGGGGGGGGG", "<b64:16-31>"),
-        ("YWJjZGVmZ2hpamtsbQ", "<b64:16-31>"),
-        ("YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4", "<b64:32-63>"),
+        ("aGVsbG8gd29ybGQhIQ==", "<b64:16-31>"),
+        ("VGhlIHF1aWNrIGJyb3duIGZveCBqdW1wcw", "<b64:32-63>"),
+        ("QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo+", "<b64:32-63>"),
     ],
 )
-def test_command_shape_masks_base64_blobs_by_length_bucket(blob, bucket):
+def test_command_shape_masks_base64_with_padding_symbol_or_length_and_entropy_evidence(blob, bucket):
     assert _command_shape(["tool", blob]) == ["tool", bucket]
 
 
 def test_command_shape_rejects_structurally_invalid_base64_without_decoding_it():
     invalid = "G" * 17
     assert _command_shape(["tool", invalid]) == ["tool", invalid]
+
+
+def test_command_shape_does_not_mask_low_entropy_base64_alphabet_text():
+    repeated = "G" * 32
+    assert _command_shape(["tool", repeated]) == ["tool", repeated]
 
 
 @pytest.mark.parametrize(
@@ -913,7 +945,7 @@ def test_argv_shape_is_bounded_and_the_overflow_is_hashed_and_marked():
     assert giant.key["argv_overflow"]["tokens"] == 2
     assert len(canonical_json(giant.key)) < 2 * ARGV_SHAPE_MAX_CHARS
 
-    giant_base64 = shape(["python3", "-c", "x" * 100_000, "--flag"])
+    giant_base64 = shape(["python3", "-c", ("QWxhZGRpbjpvcGVuIHNlc2FtZQ" * 4000)[:100_000], "--flag"])
     assert giant_base64.key["argv_shape"] == ["python3", "-c", "<b64:65536-131071>", "--flag"]
     assert "argv_overflow" not in giant_base64.key
 
