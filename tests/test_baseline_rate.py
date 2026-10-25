@@ -106,14 +106,65 @@ def test_history_scope_series_is_keyset_paged_instead_of_collected():
     assert (rows[0]["hour"], rows[-1]["hour"]) == (T0, end - timedelta(hours=1))
 
 
+def test_history_rows_from_every_snapshot_segment_are_summed_before_thresholding():
+    repo = Repo(make_engine(":memory:"))
+    migrate(repo.engine)
+    history_end = T0 + timedelta(hours=48)
+    repo.create_hunt("hunt", {"baseline": {"thresholds": {"rate": {
+        "min_count": 5, "k": 3, "z": 4,
+    }}}}, "digest", "test")
+    scope = "host_account:web-svc"
+    for segment_id, target, events in (("part-a", "host-a", 2), ("part-b", "host-b", 3)):
+        repo.save_baseline_segment(
+            _rate_segment(segment_id, T0, history_end, target=target), (),
+            [_rate_hour(segment_id, T0, events, scope=scope)],
+        )
+    snapshot_row = {
+        "hunt_id": "hunt",
+        "plan": {"history_start": T0.isoformat(), "window_start": history_end.isoformat()},
+        "store_cut": {}, "segment_ids": ["part-a", "part-b"],
+        "coverage": {
+            f"{target}|bl.svc_exec_rate": {
+                "effective_start": T0.isoformat(), "effective_hours": 48,
+                "gaps": [], "status": "resolved", "segment_ids": [segment_id],
+            }
+            for segment_id, target in (("part-a", "host-a"), ("part-b", "host-b"))
+        },
+        "status": "resolved", "digest": "snapshot",
+    }
+    repo.save_baseline_snapshot(snapshot_row)
+    view = SnapshotView(
+        repo, "hunt", Window(start=history_end, end=history_end + timedelta(hours=1)),
+        repo.baseline_snapshot("hunt"), min_live_hours=48, networks_configured=True,
+    )
+
+    rows, anomalous, facts = view._rate_scope(
+        playbook_module.ServiceExecRateBaseline(),
+        [{"scope_kind": "host_account", "scope": scope}],
+        None,
+    )
+
+    assert anomalous == []
+    assert facts["history_events"] == 5
+    assert rows[0]["history_count"] == 5
+    assert rows[0]["n_hours"] == 48
+
+
 def test_window_scope_series_sums_partitions_and_targets_by_hour_with_keyset_pages():
     repo = Repo(make_engine(":memory:"))
     migrate(repo.engine)
     repo.create_hunt("hunt", {}, "digest", "test")
     for target, partition, rows in (
-        ("host-a", "p1", [_rate_hour("unused", T0, 2)]),
-        ("host-a", "p2", [_rate_hour("unused", T0, 3), _rate_hour("unused", T0 + timedelta(hours=1), 4)]),
-        ("host-b", "p1", [_rate_hour("unused", T0, 5)]),
+        ("host-a", "p1", [{**_rate_hour("unused", T0, 2),
+                            "first_event_id": "z", "first_event_refs": [{"target": "a", "native_id": "z"}]}]),
+        ("host-a", "p2", [
+            {**_rate_hour("unused", T0, 3),
+             "first_event_id": "b", "first_event_refs": [{"target": "a", "native_id": "b"}]},
+            {**_rate_hour("unused", T0 + timedelta(hours=1), 4),
+             "first_event_id": "h", "first_event_refs": [{"target": "a", "native_id": "h"}]},
+        ]),
+        ("host-b", "p1", [{**_rate_hour("unused", T0, 5),
+                            "first_event_id": "a", "first_event_refs": [{"target": "b", "native_id": "a"}]}]),
     ):
         repo.save_baseline_window_cell("hunt", {
             "rule_id": "bl.svc_exec_rate", "version": "1", "target": target,
@@ -128,6 +179,10 @@ def test_window_scope_series_sums_partitions_and_targets_by_hour_with_keyset_pag
 
     assert [(row["hour"], row["events"]) for row in rows] == [
         (T0, 10), (T0 + timedelta(hours=1), 4),
+    ]
+    assert [(row["first_event_id"], row["first_event_refs"]) for row in rows] == [
+        ("a", [{"target": "b", "native_id": "a"}]),
+        ("h", [{"target": "a", "native_id": "h"}]),
     ]
     indexes = {row["name"] for row in inspect(repo.engine).get_indexes("baseline_window_scope_hour")}
     assert "ix_baseline_window_scope_rate" in indexes
@@ -301,6 +356,10 @@ def test_fractional_window_edges_are_not_measured_and_are_stated_in_the_lead():
     assert f"{floor.isoformat()} count 20" not in claim
     assert f"{(floor + timedelta(hours=1)).isoformat()} count 5" in claim
     assert f"{(floor + timedelta(hours=3)).isoformat()} count 20" in claim
+    assert {event.ts.replace(minute=0, second=0, microsecond=0) for event in matches[0].events} == {
+        floor + timedelta(hours=1),
+        floor + timedelta(hours=3),
+    }
     assert next(repo.baseline_observations("hunt"))["window_count"] == 46
 
 

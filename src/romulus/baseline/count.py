@@ -64,6 +64,8 @@ class KeyCounter:
         self._first_event_ids: dict[tuple, str | None] = {}
         self._first_event_refs: dict[tuple, list[dict]] = {}
         self._scope_hours: dict[tuple, int] = defaultdict(int)
+        self._scope_first_event_ids: dict[tuple, str | None] = {}
+        self._scope_first_event_refs: dict[tuple, list[dict]] = {}
         self._tokens: dict[tuple, set[str]] = defaultdict(set)
         self._token_entries = 0
         self._open_bucket: datetime | None = None
@@ -225,23 +227,38 @@ class KeyCounter:
                 row["last_ts"] = max(row["last_ts"], instant)
 
         for scope_kind, scope in sorted(event_scopes):
-            self._scope_hours[(scope_kind, scope, hour)] += 1
+            identity = (scope_kind, scope, hour)
+            self._scope_hours[identity] += 1
+            current_id = self._scope_first_event_ids.get(identity)
+            if identity not in self._scope_first_event_ids or (
+                    event_id is not None and (current_id is None or event_id < current_id)):
+                self._scope_first_event_ids[identity] = event_id
+                self._scope_first_event_refs[identity] = list(event_refs or [])
 
     def count_rows(self):
         if self.partial:
             return iter(())
         return iter(self._counts[key] for key in sorted(self._counts))
 
-    def scope_hour_rows(self):
+    def scope_hour_rows(self, *, include_witnesses: bool = False):
         if self.partial:
             return iter(())
-        return iter({
-            "segment_id": self.segment_id,
-            "scope_kind": scope_kind,
-            "scope": scope,
-            "hour": hour,
-            "events": self._scope_hours[(scope_kind, scope, hour)],
-        } for scope_kind, scope, hour in sorted(self._scope_hours))
+        def row(identity):
+            scope_kind, scope, hour = identity
+            item = {
+                "segment_id": self.segment_id,
+                "scope_kind": scope_kind,
+                "scope": scope,
+                "hour": hour,
+                "events": self._scope_hours[identity],
+            }
+            if include_witnesses:
+                item.update(
+                    first_event_id=self._scope_first_event_ids.get(identity),
+                    first_event_refs=self._scope_first_event_refs.get(identity, []),
+                )
+            return item
+        return iter(row(identity) for identity in sorted(self._scope_hours))
 
     def observation_rows(self):
         """Window observations accumulated so far, including countable keys from a partial cell.

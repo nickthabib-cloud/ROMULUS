@@ -1,9 +1,10 @@
-"""index persisted window hours for per-scope rate judgement
+"""add witnesses and index persisted window hours for rate judgement
 
 Revision ID: 0020
 Revises: 0019
 """
 
+import sqlalchemy as sa
 from alembic import op
 
 revision = "0020"
@@ -13,6 +14,8 @@ depends_on = None
 
 
 def upgrade() -> None:
+    op.add_column("baseline_window_scope_hour", sa.Column("first_event_id", sa.String(), nullable=True))
+    op.add_column("baseline_window_scope_hour", sa.Column("first_event_refs", sa.JSON(), nullable=True))
     op.create_index(
         "ix_baseline_window_scope_rate",
         "baseline_window_scope_hour",
@@ -23,3 +26,5 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_index("ix_baseline_window_scope_rate", table_name="baseline_window_scope_hour")
+    op.drop_column("baseline_window_scope_hour", "first_event_refs")
+    op.drop_column("baseline_window_scope_hour", "first_event_id")

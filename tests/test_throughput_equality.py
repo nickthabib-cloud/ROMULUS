@@ -121,7 +121,7 @@ from tests import throughput_fixture as tf
 # no-history fixture. Baseline observations/window rows, the snapshot, exclusion ledger, rate rule cells, audit and
 # report manifest change; findings, citations, evidence, entities, anchors, links, expansion and stats do not. The
 # baseline task also changes by its rate spec in fingerprint, intent and outcome: retaining the old row would falsely
-# say that the new spec did not run.
+# say that the new spec did not run. Window scope-hour rows also retain a deterministic per-hour citation witness.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
     "audit": "76404a43b09a51d3f3eda92c190150dbe9d72db4ff504049b403332ad73fc449",
@@ -132,7 +132,7 @@ GOLDEN_STACK = {
     "baseline_segments": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     "baseline_snapshot": "c0a38c167a376c3d71d9f1ab6bdbc021fd0078d743cb57780db153fad7a7007a",
     "baseline_window_counts": "93292e451a3e9bcb371406ce7e86725f8b8304a607e4cb4489ec9c35f22e9e11",
-    "baseline_window_scope_hours": "fe291670db336a32d391d317d5c096e542e6c1ea74176c7441c7f1f63e97bc3d",
+    "baseline_window_scope_hours": "7b7140f83902290b9a95a85b61667d704a1c5e641e7c5730df1c476e6f4b071c",
     "candidates": "e8baaad0f844984320258730fa65318e2cea0e57c2df8b5b3674ded6fb78f89d",
     "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
     "event_citations": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",

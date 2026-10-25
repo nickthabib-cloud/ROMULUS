@@ -387,7 +387,8 @@ class SnapshotView:
         claim += self._edge_text(facts["edges"])
         claim += (
             f" Baseline {self.snapshot['digest']} supplied the frozen history. This rate deviation is not "
-            f"evidence of malicious activity. The lead cites the first retained event for {cited} scope key(s)."
+            f"evidence of malicious activity. The lead cites one retained event from each of the {cited} "
+            "anomalous hour(s)."
         )
         return claim
 
@@ -408,10 +409,14 @@ class SnapshotView:
             within += sum(row["verdict"] == "within_threshold" for row in rows)
             if not anomalous:
                 continue
-            events, raw_copies = self._citation_events(rows[:BASELINE_CITATION_CAP])
-            if not events:
+            witnesses = [{
+                "first_event_id": item.get("first_event_id"),
+                "first_event_refs": item.get("first_event_refs") or [],
+            } for item in anomalous]
+            events, raw_copies = self._citation_events(witnesses)
+            if len(events) != len(anomalous):
                 for row in rows:
-                    row.update(verdict="unresolved", reason="first citation event is not retained")
+                    row.update(verdict="unresolved", reason="an anomalous hour has no retained citation event")
                 self.repo.upsert_baseline_observations(rows)
                 unresolved += len(rows)
                 over -= len(rows)

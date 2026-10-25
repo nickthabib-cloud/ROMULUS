@@ -105,7 +105,7 @@ class BaselinePlaybook(Playbook):
             spec_id=self.spec.id,
             observations=tuple(counter.observation_rows()),
             counts=tuple(counter.count_rows()),
-            scope_hours=tuple(counter.scope_hour_rows()),
+            scope_hours=tuple(counter.scope_hour_rows(include_witnesses=self.spec.measure == "rate")),
             pendings=counter.take_pendings(),
             partial=counter.partial,
             reasons=counter.reasons,

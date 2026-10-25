@@ -2951,6 +2951,8 @@ class Repo:
                     "scope": row["scope"],
                     "hour": _utc(row["hour"], "window scope hour"),
                     "events": int(row["events"]),
+                    "first_event_id": row.get("first_event_id"),
+                    "first_event_refs": list(row.get("first_event_refs") or []),
                 }
                 for ordinal, row in enumerate(scope_hours)
             )
@@ -3061,23 +3063,45 @@ class Repo:
             raise ValueError("window rate span is reversed")
         table = t.baseline_window_scope_hour.c
         after = None
+        current = None
         while True:
-            query = (select(table.hour, func.sum(table.events).label("events")).where(
+            order = (table.hour, table.target, table.partition, table.ordinal)
+            query = (select(
+                table.hour, table.events, table.first_event_id, table.first_event_refs,
+                table.target, table.partition, table.ordinal,
+            ).where(
                 table.hunt_id == hunt_id,
                 table.spec_id == spec_id,
                 table.scope_kind == scope_kind,
                 table.scope == scope,
                 table.hour >= start,
                 table.hour < end,
-            ).group_by(table.hour).order_by(table.hour).limit(page_size))
+            ).order_by(*order).limit(page_size))
             if after is not None:
-                query = query.where(table.hour > after)
+                query = query.where(tuple_(*order) > tuple_(*after))
             with self.engine.connect() as connection:
                 page = [_with_utc(row, ("hour",)) for row in connection.execute(query).mappings()]
-            yield from page
+            for row in page:
+                if current is None or row["hour"] != current["hour"]:
+                    if current is not None:
+                        yield current
+                    current = {
+                        "hour": row["hour"],
+                        "events": 0,
+                        "first_event_id": None,
+                        "first_event_refs": [],
+                    }
+                current["events"] += int(row["events"])
+                event_id = row.get("first_event_id")
+                if event_id is not None and (
+                        current["first_event_id"] is None or event_id < current["first_event_id"]):
+                    current["first_event_id"] = event_id
+                    current["first_event_refs"] = list(row.get("first_event_refs") or [])
             if len(page) < page_size:
+                if current is not None:
+                    yield current
                 return
-            after = page[-1]["hour"]
+            after = [page[-1][name] for name in ("hour", "target", "partition", "ordinal")]
 
     def baseline_window_release(self, hunt_id: str, spec_id: str, target: str) -> str | None:
         """Why one (hunt, spec, target)'s window counter material was released, or None while it is kept."""

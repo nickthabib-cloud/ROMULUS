@@ -665,6 +665,8 @@ baseline_window_scope_hour = Table(
     Column("scope", String, nullable=False),
     Column("hour", DateTime(timezone=True), nullable=False),
     Column("events", Integer, nullable=False),
+    Column("first_event_id", String),
+    Column("first_event_refs", JSON),
     PrimaryKeyConstraint(
         "hunt_id", "spec_id", "target", "partition", "ordinal",
         name="pk_baseline_window_scope_hour",
