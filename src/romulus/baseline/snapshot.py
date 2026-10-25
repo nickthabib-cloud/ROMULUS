@@ -146,7 +146,10 @@ class SnapshotPlanner:
                 claimed: dict[datetime, dict] = {}
                 chosen: list[dict] = []
                 for row in ranked:
-                    span = _hours(row["start"], row["end"])
+                    # A hunt-derived segment may begin before the requested lookback. The lookback writer already
+                    # treats every contained hour as covered, so claim only its in-plan hours here as well. Segments
+                    # ending after the window start are excluded by the repository to prevent future-data leakage.
+                    span = _hours(max(row["start"], history_start), min(row["end"], window_start))
                     if span and not any(hour in claimed for hour in span):
                         chosen.append(row)
                         claimed.update(dict.fromkeys(span, row))
@@ -162,7 +165,7 @@ class SnapshotPlanner:
                     effective_start = window_start
                     absent_before = _iso(window_start) if cursor < window_start else None
                 else:
-                    effective_start = claimed[first_record]["start"]
+                    effective_start = max(claimed[first_record]["start"], history_start)
                     absent_before = _iso(effective_start) if effective_start > cursor else None
                 effective_hours = int((window_start - effective_start) / _HOUR)
                 if first_record is None and cursor < window_start:

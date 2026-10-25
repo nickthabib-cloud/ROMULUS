@@ -891,6 +891,7 @@ class Sweep:
                             target_applicable=target_applicable, source_complete=not rule_partial,
                             reasons=reasons, task_id=tid, events=ordered,
                             observations=result.observations, pendings=result.pendings,
+                            counts=result.counts, scope_hours=result.scope_hours,
                         )
                         # Compact rows share the stage volume with citations and are billed with them.
                         self._charge_stage(stage)
@@ -1070,7 +1071,8 @@ class Sweep:
             "matched": 0,
             "evaluated": evaluated,
             "detail": {"reasons": sorted(set(reasons))},
-        }, self._baseline_observations(playbook, result))
+        }, self._baseline_observations(playbook, result),
+            counts=result.counts, scope_hours=result.scope_hours)
 
     def _finalize_baseline_target(self, target: str) -> None:
         """Persist compact exec-pair cells for post-lookback resolution and resume."""
@@ -1093,6 +1095,8 @@ class Sweep:
                 stage.baseline_execs(target, item["partition"]),
                 stage.baseline_observations(target, item["partition"]),
                 [asdict(pending) for pending in stage.baseline_pendings(target, item["partition"])],
+                stage.baseline_counts(target, item["partition"]),
+                stage.baseline_scope_hours(target, item["partition"]),
             )
             stage.drop_baseline_cell(target, item["partition"])
 

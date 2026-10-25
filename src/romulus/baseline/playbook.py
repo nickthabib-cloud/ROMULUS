@@ -19,6 +19,8 @@ class BaselineCell:
 
     spec_id: str
     observations: tuple[dict, ...]
+    counts: tuple[dict, ...]
+    scope_hours: tuple[dict, ...]
     pendings: tuple[Pending, ...]
     partial: bool
     reasons: tuple[str, ...]
@@ -102,6 +104,8 @@ class BaselinePlaybook(Playbook):
         return BaselineCell(
             spec_id=self.spec.id,
             observations=tuple(counter.observation_rows()),
+            counts=tuple(counter.count_rows()),
+            scope_hours=tuple(counter.scope_hour_rows()),
             pendings=counter.take_pendings(),
             partial=counter.partial,
             reasons=counter.reasons,

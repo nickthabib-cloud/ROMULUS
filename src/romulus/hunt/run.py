@@ -10,6 +10,7 @@ from romulus.config import Settings
 from romulus.detect import netdef
 from romulus.evidence.normalize import NORMALIZER_VERSION
 from romulus.hunt.baseline_stage import run_baseline_stage
+from romulus.hunt.baseline_writer import run_hunt_segment_writer
 from romulus.hunt.expansion import PER_ANCHOR_SOURCE_QUERIES, ExpansionEngine
 from romulus.hunt.links import LinkFetcher, is_agent_reach
 from romulus.hunt.manifest import build_manifest, new_hunt_id
@@ -191,6 +192,22 @@ def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
     partial = (missing_summary or not sweep_complete or agent_status == "unavailable" or packets_incomplete
                or baseline_failed
                or (expansion_summary or {}).get("status") in {"partial", "failed"})
+    try:
+        segment_summary = run_hunt_segment_writer(
+            repo, hunt_id, hunt_complete=not partial and agent_status != "failed",
+        )
+    except Exception as exc:
+        log.exception("hunt-derived baseline segment writer failed")
+        segment_summary = {
+            "status": "failed", "written": 0, "stale": 0, "max_write_seconds": 0.0,
+            "specs": {}, "reason": f"hunt-derived segment writer failed: {exc}"[:300],
+        }
+        # The writer only stores this hunt's counts for later hunts' baselines. Its failure costs future history,
+        # stated in the baseline summary, and changes nothing this hunt evaluated.
+    baseline_summary = {**(baseline_summary or {}), "segment_writer": segment_summary}
+    repo.audit(
+        "system", "hunt.baseline_summary", hunt_id, baseline_summary, owner_token=owner_token,
+    )
     counts, result = _detection_result(repo, hunt_id)
     reasons = partial_reasons[:10]
     if missing_summary:

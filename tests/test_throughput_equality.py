@@ -110,15 +110,24 @@ from tests import throughput_fixture as tf
 # new versions change the snapshot plan and digest (the baseline snapshot, the hunt.baseline_summary audit record, the
 # baseline task's id and outcome, and the snapshot_digest in every baseline rule cell and in the manifest's baseline
 # coverage block), bl.ext_dest's rule cells by rule_version, and its 20 observations by spec_version and key identity.
-# A tool user-agent lead quotes the agents as recorded and names the tool signature as a classification, and an
-# NXDOMAIN burst says how many answers of its rcode tally are cited: both rules carry new versions (rule_cells,
-# candidates and the manifest's findings by rule_version). In the fixture only the tool user-agent lead's claim changes
-# ("with user agent(s) 'curl/...' ..., which matched the curl tool signature"); every other table is the reference's.
+# The hunt-derived writer publishes the complete window cells at finish, so segment/count/scope-hour and durable
+# exclusion-ledger tables join the golden. Its summary changes only the baseline audit and report manifest.
+# The fixture's finish now receives the baseline stage's summary, as a hunt's does. Its history is a failed gap, so
+# the stage summary says the stage failed: the finish's hunt.baseline_summary record carries the stage summary beside
+# the segment writer's, the hunt's stop reason names the baseline stage (its execution state was already partial),
+# and the manifest's baseline coverage block reports the stage as partial instead of not run. The partial hunt writes
+# no segment and keeps its window counter material.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
-    "audit": "0b80cc678442cceee405a79d719a896d06d00228559dccd07cc1e45b8821747b",
+    "audit": "234a968ea7a0cebda51c453371b28867670b7c9898dd1d05568ae00007305dbf",
+    "baseline_counts": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "baseline_hunt_exclusions": "0d871301eb31d300f00eefeadae48aaa99381de0d8c6158e74e9bb351dd1bd52",
     "baseline_observations": "a622940f3edc51095fae860c5247d8b9494c32522d92fca63ce77a73ffcd1856",
+    "baseline_scope_hours": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "baseline_segments": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     "baseline_snapshot": "ee69ca9a69bb202d32ea01780bd4832d6cb0972b4ecd8941ba6aaf5e9c8a2b6b",
+    "baseline_window_counts": "86ae9aaddb32e101784fb876d1bd3db544e3139f35c20d6b438db788e4327103",
+    "baseline_window_scope_hours": "5b23e9db42982af2cc4122ca8e0c1457a553409ff95569eb92ad2edaf7797160",
     "candidates": "e8baaad0f844984320258730fa65318e2cea0e57c2df8b5b3674ded6fb78f89d",
     "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
     "event_citations": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
@@ -126,7 +135,7 @@ GOLDEN_STACK = {
     "events": "46ff37261993417f3e0fa61de9c3aa24977b2e091ad29d7cf4d166e8261a1017",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "797137953f5a643e0297b450047aeec3fa79c4cb386118f10d0ec00d337fd023",
-    "manifest": "806eddba35d6ebef9b7e7d85032465765de13b9cbcb422c315bfae93c669b21d",
+    "manifest": "c47c0fee9ef788aee97ca9b712349f01d3fd95cb3496e479dd8b440f1c6a5ef4",
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
     "rule_cells": "c6284aff25a94921755f8b0e8879a43d7292ab9d627ac81732c499f0edd05084",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",

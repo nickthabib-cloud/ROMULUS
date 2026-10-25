@@ -657,7 +657,7 @@ def run_stack(stage_dir, *, scale: int = 1, docs: dict | None = None) -> dict:
                                 max_depth=3, max_source_queries=180, wall_clock_seconds=10**9).run()
     repo.audit("system", "hunt.expansion_summary", "h1", expansion)
     hunt_run._finish(repo, "h1", {"status": "disabled", "stop_reason": ""}, sweep_summary,
-                     partial_reasons=sweep.partial_reasons, expansion_summary=expansion)
+                     partial_reasons=sweep.partial_reasons, expansion_summary=expansion, baseline_summary=baseline)
     manifest = build_manifest(repo, "h1", "test")
 
     def table(name, order):
@@ -683,6 +683,18 @@ def run_stack(stage_dir, *, scale: int = 1, docs: dict | None = None) -> dict:
             "baseline_observation", ["spec_id", "spec_version", "scope", "key_digest"],
         ),
         "baseline_snapshot": table("baseline_snapshot", ["hunt_id"]),
+        "baseline_segments": table("baseline_segment", ["id"]),
+        "baseline_counts": table("baseline_count", ["segment_id", "scope", "key_digest", "bucket"]),
+        "baseline_scope_hours": table("baseline_scope_hour", ["segment_id", "scope", "hour"]),
+        "baseline_hunt_exclusions": table(
+            "baseline_hunt_exclusion", ["hunt_id", "target", "spec_id", "key_digest"],
+        ),
+        "baseline_window_counts": table(
+            "baseline_window_count", ["hunt_id", "spec_id", "target", "partition", "ordinal"],
+        ),
+        "baseline_window_scope_hours": table(
+            "baseline_window_scope_hour", ["hunt_id", "spec_id", "target", "partition", "ordinal"],
+        ),
         "anchors": table("expansion_anchor", ["id"]),
         "links": table("expansion_link", ["id"]),
         "tasks": tasks,

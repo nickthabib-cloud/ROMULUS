@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterator
-from datetime import timedelta
+from datetime import datetime, timedelta
 from itertools import groupby
 
 from romulus.baseline.carry import CarryInStore, PendingResolver
@@ -119,23 +119,41 @@ def resolve_window_exec_pairs(repo: Repo, hunt_id: str, window: Window) -> None:
                 repo.drop_baseline_window_cell(hunt_id, target, cell["partition"])
                 continue
             reasons = list(cell["reasons"])
-            counter = KeyCounter(cell["partition"], spec, span=(cell["start"], cell["end"]),
-                                 retain_observations_when_partial=True)
+            segment_counter = KeyCounter(
+                cell["partition"], spec, span=(cell["start"], cell["end"]),
+                retain_observations_when_partial=True,
+            )
+            segment_counter.restore(
+                repo.baseline_window_counts(
+                    hunt_id, spec.id, target, partition=cell["partition"],
+                ),
+                repo.baseline_window_scope_hours(
+                    hunt_id, spec.id, target, partition=cell["partition"],
+                ),
+            )
+            pending_counter = KeyCounter(
+                cell["partition"], spec, span=(cell["start"], cell["end"]),
+                retain_observations_when_partial=True,
+            )
             for body in repo.baseline_window_pendings(hunt_id, target, cell["partition"]):
                 pending = Pending(**body)
                 resolution = resolver.resolve(pending)
                 if resolution.reason is not None:
                     reasons.append(f"{pending.event_id}: {resolution.reason}")
-                    counter.mark_partial(reasons[-1])
+                    segment_counter.mark_partial(reasons[-1])
+                    pending_counter.mark_partial(reasons[-1])
                 else:
-                    counter.add_keys(
-                        pending.ts, resolution.keys, event_id=pending.event_id,
-                        event_refs=[{"target": source, "native_id": native}
-                                    for source, native in pending.raw_refs],
+                    refs = [{"target": source, "native_id": native}
+                            for source, native in pending.raw_refs]
+                    segment_counter.add_keys(
+                        pending.ts, resolution.keys, event_id=pending.event_id, event_refs=refs,
+                    )
+                    pending_counter.add_keys(
+                        pending.ts, resolution.keys, event_id=pending.event_id, event_refs=refs,
                     )
             observations = [
                 *repo.baseline_window_observations(hunt_id, target, cell["partition"]),
-                *counter.observation_rows(),
+                *pending_counter.observation_rows(),
             ]
             execs = repo.baseline_window_execs(hunt_id, target, cell["partition"])
             state = (
@@ -148,7 +166,8 @@ def resolve_window_exec_pairs(repo: Repo, hunt_id: str, window: Window) -> None:
                 "rule_id": spec.id, "version": spec.version, "target": target,
                 "partition": cell["partition"], "state": state, "matched": 0,
                 "evaluated": cell["evaluated"], "detail": {"reasons": sorted(set(reasons))},
-            }, (_pending_observation(hunt_id, spec, row) for row in observations))
+            }, (_pending_observation(hunt_id, spec, row) for row in observations),
+                counts=segment_counter.count_rows(), scope_hours=segment_counter.scope_hour_rows())
             repo.drop_baseline_window_cell(hunt_id, target, cell["partition"])
 
 
@@ -160,6 +179,10 @@ class SnapshotView:
         self.repo, self.hunt_id, self.window, self.snapshot = repo, hunt_id, window, snapshot
         self.min_live_hours, self.networks_configured = min_live_hours, networks_configured
         self.citation_source = citation_source
+        plan = snapshot.get("plan") or {}
+        # Member segments may straddle history_start; only their rows inside the frozen span are history.
+        self.span = ((datetime.fromisoformat(plan["history_start"]), datetime.fromisoformat(plan["window_start"]))
+                     if plan.get("history_start") and plan.get("window_start") else None)
         self._pending_group: tuple[str, list[dict]] | None = None
         self.spec_stats: dict[str, dict] = {}
 
@@ -188,7 +211,7 @@ class SnapshotView:
                       window_failure: str | None) -> tuple[list[dict], dict]:
         first = rows[0]
         series = self.repo.baseline_scope_series(
-            first["scope_kind"], first["scope"], self.hunt_id, playbook.id,
+            first["scope_kind"], first["scope"], self.hunt_id, playbook.id, self.span,
         )
         # A frozen spec is only as complete as its least-complete target. Observations do not carry a source
         # target, and one scope can be split across targets, so narrowing coverage from history liveness could
@@ -205,17 +228,17 @@ class SnapshotView:
             reason = "scope is silent in history"
         if reason is None and live_hours < self.min_live_hours:
             reason = f"scope has {live_hours} live history hour(s), below the required {self.min_live_hours}"
-        peers = (self.repo.baseline_peer_scopes(first["scope_kind"], self.hunt_id, playbook.id)
+        peers = (self.repo.baseline_peer_scopes(first["scope_kind"], self.hunt_id, playbook.id, self.span)
                  if playbook.spec.measure == "prevalence" else None)
         updated: list[dict] = []
         first_seen: list[dict] = []
         for source in rows:
             history = self.repo.baseline_key_history(
-                source["key_id"], source["scope_kind"], source["scope"], self.hunt_id, playbook.id,
+                source["key_id"], source["scope_kind"], source["scope"], self.hunt_id, playbook.id, self.span,
             )
             history_count = sum(int(item["count"]) for item in history)
             prevalence = (self.repo.baseline_key_prevalence(
-                source["key_id"], source["scope_kind"], self.hunt_id, playbook.id,
+                source["key_id"], source["scope_kind"], self.hunt_id, playbook.id, self.span,
             ) if peers is not None else None)
             verdict = "unresolved" if reason else "common" if history_count else "first_seen"
             item = {
