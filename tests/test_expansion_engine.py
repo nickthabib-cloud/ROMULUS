@@ -9,7 +9,7 @@ from romulus.config import Settings
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
 from romulus.hunt import run as hunt_run
 from romulus.hunt.expansion import ExpansionEngine
-from romulus.hunt.links import LinkResult
+from romulus.hunt.links import LinkResult, LinkWindow
 from romulus.report.manifest import build_manifest
 from romulus.sources.models import Window
 from romulus.store.db import digest, make_engine, migrate
@@ -532,6 +532,60 @@ def test_inferred_link_keeps_a_direct_finding_lane_and_labels_only_the_relation_
     assert "relation to f-anchor" in finding["claim"].lower() and "hypothesis" in finding["claim"].lower()
     assert any("relation to the anchor is a hypothesis" in note
                for note in finding["gate_results"]["_notes"])
+
+
+def _evaluate_shared_direct_finding(anchor_order):
+    repo = repo_with_anchor(candidate_id="F-one")
+    add_anchor(repo, "F-two", "web1", ts=T0 + timedelta(seconds=1))
+    linked = event(
+        "shared-credential-read", ts=T0 + timedelta(minutes=1),
+        argv=["/usr/bin/cat", "/etc/shadow"],
+    )
+    repo.save_evidence("h1", [linked], {}, None)
+    strengths = {"F-one": "inferred", "F-two": "observed"}
+    engine = ExpansionEngine(repo, "h1", WINDOW, ScriptedFetcher(repo))
+    for anchor_id in anchor_order:
+        link_id = f"L-{anchor_id}"
+        result = LinkResult(
+            id=link_id, anchor_id=anchor_id, link_type="host_after_anchor",
+            window=LinkWindow(start=T0 - timedelta(minutes=5), end=T0 + timedelta(minutes=5),
+                              label="anchor ±5 min"),
+            strength=strengths[anchor_id], key={"host": "web1"}, status="complete",
+            event_ids=[linked.id], evidence_ids=[linked.id], task_ids=[], coverage=[], query_spend=0,
+        )
+        repo.save_expansion_link({
+            "id": link_id, "hunt_id": "h1", "anchor_id": anchor_id,
+            "link_type": result.link_type, "window_label": result.window.label,
+            "window_start": result.window.start, "window_end": result.window.end,
+            "strength": result.strength, "key": result.key, "status": result.status,
+            "event_ids": result.event_ids, "evidence_ids": result.evidence_ids,
+            "task_ids": [], "coverage": [], "reasons": [], "duration_ms": 0,
+            "query_spend": 0, "evaluated": 0,
+        })
+        engine._evaluate(repo.candidate(anchor_id), result)
+    return next(
+        candidate for candidate in repo.candidates("h1")
+        if candidate["rule_id"] == "host.credential_store_read"
+    )
+
+
+def test_expansion_deduplicates_a_direct_finding_and_retains_both_routes_deterministically():
+    first = _evaluate_shared_direct_finding(["F-one", "F-two"])
+    reversed_order = _evaluate_shared_direct_finding(["F-two", "F-one"])
+
+    compared = (
+        "id", "rule_id", "claim", "event_ids", "lane", "severity", "priority",
+        "source_anchor_id", "source_link_id", "gate_results",
+    )
+    assert {key: first[key] for key in compared} == {key: reversed_order[key] for key in compared}
+    assert first["source_anchor_id"] == "F-two" and first["source_link_id"] == "L-F-two"
+    assert "relation to f-one" not in first["claim"].lower()
+    assert first["gate_results"]["_context_reaches"] == [
+        {"anchor_id": "F-one", "link_id": "L-F-one", "link_type": "host_after_anchor",
+         "strength": "inferred"},
+        {"anchor_id": "F-two", "link_id": "L-F-two", "link_type": "host_after_anchor",
+         "strength": "observed"},
+    ]
 
 
 def test_nested_windows_each_evaluate_the_event_but_publish_one_context_finding():

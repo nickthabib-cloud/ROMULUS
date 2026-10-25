@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import UTC, datetime, timedelta
 
 from romulus.detect.registry import ALL_PLAYBOOKS
 from romulus.store.db import digest
@@ -12,10 +13,40 @@ _PLAYBOOKS = {playbook.id: playbook for playbook in ALL_PLAYBOOKS}
 # that each reach a different member of the group are not thereby related, so such a finding is a leaf: it
 # joins an incident only when everything it is observed-linked to is already one incident.
 GROUPING_KINDS = frozenset({"aggregate", "packet"})
+NARROW_INFERRED_RADIUS = timedelta(minutes=5)
 
 
 def _groups(rule_id: str) -> bool:
     return getattr(_PLAYBOOKS.get(rule_id), "kind", "direct") in GROUPING_KINDS
+
+
+def _utc(value) -> datetime:
+    parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+
+
+def _incident_role(row: dict, finding_by_id: dict[str, dict]) -> str:
+    """Classify how a link participates in incident grouping.
+
+    Observed links are evidence. A deterministic inferred link may join findings only when the actual queried
+    window stays within five minutes of its anchor evidence on both sides. Wider windows and every agent-requested
+    link remain labelled hypotheses between incidents. The decision uses persisted time bounds, not a window label
+    or the number of records that happened to be present in a lab run.
+    """
+    if row["strength"] == "observed":
+        return "evidence"
+    if row["strength"] != "inferred" or row["anchor_id"] not in finding_by_id:
+        return "hypothesis"
+    try:
+        anchor = _utc(finding_by_id[row["anchor_id"]]["observed_at"])
+        start, end = _utc(row["window_start"]), _utc(row["window_end"])
+    except (KeyError, TypeError, ValueError):
+        return "hypothesis"
+    if start <= anchor <= end and max(anchor - start, end - anchor) <= NARROW_INFERRED_RADIUS:
+        return "narrow_inferred"
+    return "hypothesis"
+
+
 _TACTICS = {
     "T1190": ("initial-access",),
     "T1078": ("initial-access", "persistence", "privilege-escalation", "defense-evasion"),
@@ -123,7 +154,7 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
     nodes = [{
         "id": finding["id"], "kind": "finding", "lane": finding["lane"],
         "observed_at": finding["observed_at"], "rule_id": finding["rule_id"],
-    } for finding in findings]
+    } for finding in sorted(findings, key=lambda item: item["id"])]
     entity_nodes = {}
     finding_entities: dict[str, list[str]] = defaultdict(list)
     for finding in findings:
@@ -152,10 +183,12 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
         targets.discard(row["anchor_id"])
         targets = sorted(targets)
         link_kind = "agent_hypothesis" if row["strength"] == "agent_hypothesis" else "expansion"
+        incident_role = _incident_role(row, finding_by_id)
         links.append({
             "id": row["id"], "anchor_finding_id": row["anchor_id"],
             "target_finding_ids": targets, "link_type": row["link_type"],
-            "style": row["strength"], "kind": link_kind, "key": row["key"], "status": row["status"],
+            "style": row["strength"], "kind": link_kind, "incident_role": incident_role,
+            "key": row["key"], "status": row["status"],
             "window": {"label": row["window_label"], "start": str(row["window_start"]),
                        "end": str(row["window_end"])},
             "evidence_ids": row["evidence_ids"], "coverage": row["coverage"], "reasons": row["reasons"],
@@ -163,7 +196,7 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
         edges.extend({
             "id": f"{row['id']}:{target}", "from": row["anchor_id"], "to": target,
             "link_id": row["id"], "link_type": row["link_type"], "style": row["strength"],
-            "kind": link_kind,
+            "kind": link_kind, "incident_role": incident_role,
         } for target in targets if row["anchor_id"] in finding_by_id and target in finding_by_id)
 
     parent = {finding_id: finding_id for finding_id in finding_by_id}
@@ -179,13 +212,13 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
         if left_root != right_root:
             parent[max(left_root, right_root)] = min(left_root, right_root)
 
-    observed = [edge for edge in edges if edge["style"] == "observed"]
+    joining = [edge for edge in edges if edge["incident_role"] in {"evidence", "narrow_inferred"}]
     grouping = {item for item, finding in finding_by_id.items() if _groups(finding["rule_id"])}
-    for edge in observed:
+    for edge in joining:
         if edge["from"] not in grouping and edge["to"] not in grouping:
             union(edge["from"], edge["to"])
     for item in sorted(grouping):
-        neighbours = {find(edge["to"] if edge["from"] == item else edge["from"]) for edge in observed
+        neighbours = {find(edge["to"] if edge["from"] == item else edge["from"]) for edge in joining
                       if item in (edge["from"], edge["to"])
                       and (edge["to"] if edge["from"] == item else edge["from"]) not in grouping}
         if len(neighbours) == 1:
@@ -231,6 +264,10 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
             "link_ids": [link["id"] for link in incident_links],
             "observed_edges": sum(edge["style"] == "observed" and edge["from"] in member_set
                                   for edge in edges),
+            "narrow_inferred_edges": sum(edge["incident_role"] == "narrow_inferred"
+                                         and edge["from"] in member_set for edge in edges),
+            "hypothesis_edges": sum(edge["incident_role"] == "hypothesis"
+                                    and edge["from"] in member_set for edge in edges),
             "inferred_edges": sum(edge["style"] in {"inferred", "agent_hypothesis"}
                                   and edge["from"] in member_set
                                   for edge in edges),

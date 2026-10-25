@@ -157,6 +157,10 @@ from tests import throughput_fixture as tf
 # versions change. Claims, lanes, priorities, predicates, gates, group keys and candidate count remain identical.
 # The same version bumps change rule_cells only in rule_version; evaluated/matched/state/detail and cell count are
 # identical. Expansion selects the same records in this fixture, and raw source records remain byte-identical.
+# Incident grouping now labels every expansion link as evidence, narrow inference or hypothesis. Only persisted
+# windows within five minutes of their anchor evidence join components; wide inferred windows stay visible between
+# incidents. This changes only the manifest's incident projection in the fixture: candidates, links, lanes, claims,
+# citations, rule cells and raw source records remain byte-identical.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
     "audit": "35a014d61772867d22cdd88c0e516ea4f93ca384c5a45f6ef48dc911d346d1f5",
@@ -176,7 +180,7 @@ GOLDEN_STACK = {
     "events": "c629319b118e79cb4ef9e5c30c62a9b95495dbb9079feffbf07fe24743127f94",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "9cf8510b8927ae542fd58e7e798e7d68fd8a4a010aa7630e8bf753c9c00d7af0",
-    "manifest": "432c175fa78b60e0450a434b8ea6ba9afdc6afe0b54a7ad4b087104710b121cf",
+    "manifest": "8efd4a4a7d5ffdc824f9d9d6147ad9b3fb8050d7919b019fad8db3e91722d2dc",
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
     "rule_cells": "71abfc668da3e63f5c41e44d3b1b7524a03489bfe240648f9211095436b05264",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
