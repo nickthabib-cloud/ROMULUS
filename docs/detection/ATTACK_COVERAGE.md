@@ -722,7 +722,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-host-persistence-path-change"></a>
 ### `host.persistence_path_change` — Kernel-recorded change to a file that a scheduler, init, the login path or the loader acts on
 
-- Version: `7`; status: `active`
+- Version: `8`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1037`](https://attack.mitre.org/techniques/T1037/), [`T1037.004`](https://attack.mitre.org/techniques/T1037/004/), [`T1053.002`](https://attack.mitre.org/techniques/T1053/002/), [`T1053.003`](https://attack.mitre.org/techniques/T1053/003/), [`T1098.004`](https://attack.mitre.org/techniques/T1098/004/), [`T1543.002`](https://attack.mitre.org/techniques/T1543/002/), [`T1546.004`](https://attack.mitre.org/techniques/T1546/004/), [`T1546.017`](https://attack.mitre.org/techniques/T1546/017/), [`T1547.006`](https://attack.mitre.org/techniques/T1547/006/), [`T1547.013`](https://attack.mitre.org/techniques/T1547/013/), [`T1548.003`](https://attack.mitre.org/techniques/T1548/003/), [`T1556.003`](https://attack.mitre.org/techniques/T1556/003/), [`T1574.006`](https://attack.mitre.org/techniques/T1574/006/)

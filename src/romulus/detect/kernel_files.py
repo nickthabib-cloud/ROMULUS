@@ -612,7 +612,7 @@ class PersistencePathChange(Playbook):
     os_families = ("linux",)
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.persistence_path_change"
-    version = "7"
+    version = "8"
     title = "Kernel-recorded change to a file that a scheduler, init, the login path or the loader acts on"
     anchor_class = "persistence"
     kind = "aggregate"

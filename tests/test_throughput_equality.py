@@ -169,6 +169,12 @@ from tests import throughput_fixture as tf
 # version fields only: the field-level projections below prove the 35 claims, lanes, priorities, cited raw records,
 # gates and all other machine decisions are unchanged. Observed-only incident joining restores the exact a136ed2
 # incident membership while retaining inferred links as labelled hypotheses in the manifest.
+# The round-three corrections move host.persistence_path_change to version 8 (package attribution now accepts only
+# exact system-path package-manager images) and net.icmp_echo_tunnel_shape to version 3 (high requires comparable
+# two-sided counters; mixed/nonstandard codes and one-sided records are worded rather than hidden or overstated).
+# This fixture has no qualifying ICMP candidate, and its persistence result has the same grouping, claim and lane.
+# Candidate and rule-cell field projections change only in rule_version; the manifest follows that candidate version.
+# Every raw source record, citation, decision, lane, claim, gate, link, incident and other stack digest is identical.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
     "audit": "55a86da494923b154e307075440eb408f42b47a16273fc9a6b0cbd86c71b66af",
@@ -181,16 +187,16 @@ GOLDEN_STACK = {
     "baseline_window_counts": "163b75766bc7cc487118b4e8bc24fe338d9e364898f9200887b89ba11b464acc",
     "baseline_window_event_hours": "bb58c65144b135443e75a690b7b2f8137ebac6b827f8e8bd8cc7606a01c53e52",
     "baseline_window_scope_hours": "e3a243191b5431410f587f279c22b2f949717be2c5e5a228e43d4893caf2965f",
-    "candidates": "45e2b2d874c7491e1aa0c797428bfd2079500f16dff8a7943d5f3709246feefa",
+    "candidates": "3b23f98dbf25d34c4921bbec2cba932991746ad9d4a11e8963988d7c8c421bee",
     "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
     "event_citations": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     "event_entities": "40eefa75e2cfa03734adb2e57b3da8719aa150bcdc65e72a758d84ba3e1f31b7",
     "events": "0165d2807ffee33aaef17dd70ba004ec4c87fa4c5f29e9dc75ba833f57b93ff7",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "0fbedb27ca9a4cb72354178444ee9aabc49f377b2c933074fe03ef29c8fbb08a",
-    "manifest": "2d885acbc2b4495d78fe91942e534fa6b1202316e69e862fa9a9773802dac927",
+    "manifest": "e7f0f06c2bf744a08516f7b254454c3f5e517498d7275d9e80e85f5760a521f4",
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
-    "rule_cells": "936a3b8ed23431d6102dd8fe538369bbd2eff09d1f67532bca168db56b060f81",
+    "rule_cells": "529ba5e5fa121b1552a865436f0106208011fdbe6da0c1f6c7bc6dba60169697",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
     "tasks": "f0c05a2a05135e822ab077a843472e4cb4d31b93b5c27050685bf6b9675e4cdc",
 }
@@ -199,7 +205,7 @@ GOLDEN_STACK = {
 # checked field by field.
 GOLDEN_NON_BASELINE_SEMANTICS = {
     "candidates": {
-        "all_fields": "f3e3716ffb6bd774154855c4ce8c5a7ef234c70370aacf0e043c0c158b831a78",
+        "all_fields": "7b24cd315e4dd449433731f2405ada13616b0e1c647bb3c4bdd98e3ff4293e24",
         "benign_alternatives": "8e3c0bf9bd14733cc2b4a049393aded638eaa0e93632c2c69d1428a52a4cc221",
         "claim": "94f373eede1b0deee042a316fc9ede39a619bbef58ded217ad94860f9fd4a2b0",
         "claim_type": "1ccc0da03751218f3bb63463a348cd5519fb63c2eec9e0d2e83259f18bfc6681",
@@ -216,20 +222,20 @@ GOLDEN_NON_BASELINE_SEMANTICS = {
         "priority": "aa73edc71e40ea4964645f62817edb7b3e790121d824db413442d99a21c05d5d",
         "priority_reasons": "b473ae5921bb2f50e3cc347ad18a3a5b6557ecacdaca7568e9f2f10b2fde3a9b",
         "rule_id": "2ae926e61da026e299be84e4e716e9bd0a33eb9a6ea3c97196c3167fc017a257",
-        "rule_version": "85b0c4750795bbc5e83403c3f1b8c6e131e465581c0b08ab05ee12f559b964e7",
+        "rule_version": "cbca529ae2a2cea47a87d3595513d4d4fe63a44b80760ade9050ec23392a1647",
         "severity": "b2e229e267531f35a076f4db58edc48cbea38cce613ae2a6954cb6b1bf5ea20c",
         "source_presence": "4b20d257ae462d3a6c1af7eeddf340a1558a100d29f517eb7b5c7564fa778d1c",
         "ts": "d8015c1ff0b135e082a5fef2ab1cb88206470e30beee157a0cfc7790d48b8310",
     },
     "rule_cells": {
-        "all_fields": "011cc8d9a32f771c6069d860067ce2144bccb67e1650fb661117b38d2cb84982",
+        "all_fields": "5286716472ed525e78dd5eaabb70782b0325bd81fe37a7d87a96ac1a35b6107a",
         "count": 3759,
         "detail": "7dad162b4173d4b9f014717ab13d87382aded61790606b387cece6938b9b9798",
         "evaluated": "6f10cc3cc36af740c1a133d78b648916a0d0a463f51db238b4e4e15aad2ea62e",
         "matched": "1460c4f475a6c0a48415daab1be5e03906b62e10569c6b35c5e4398d35c72d0a",
         "partition": "6d893f4a6e8876b97fa5839af1065eb368ecd4008b4dc62d1692ba7a5bcf5f5a",
         "rule_id": "1712462d1ecbce33955ffb2201e0c99d313a625ffd4fa9126d74bb4f885167e4",
-        "rule_version": "465d7cb3975081a16fa65b5599bde8f0af08478b4a7ba724e9ef5efc6d2047ca",
+        "rule_version": "43077c7fcb092249a2880c625ca4629f0b173fd887988695ed54dae1542b9d5c",
         "state": "fac91f9282f733342d72de53553d08230fea025fe7a9e51904f5fb38d82da182",
         "target": "70109432b9c54dfed31dfefde5a7ab6e6f5e0dd28262f395027792e6c7d5ad96",
     },
