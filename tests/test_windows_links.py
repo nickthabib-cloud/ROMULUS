@@ -1,4 +1,5 @@
 """Typed Windows cross-family links and bounded expansion coverage."""
+import json
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 
@@ -274,7 +275,9 @@ def test_process_session_variants_link_distinct_4688_subject_and_target_logons()
     assert selected_by_session == {"0x44": ["subject"], "0x45": ["target"]}
 
 
-def test_process_session_anchor_variants_are_distinct_and_bounded():
+def test_process_session_anchor_scopes_are_distinct_and_bounded_when_planned():
+    from tests.test_expansion_engine import repo_with_aggregate_anchor
+
     events = [
         event(
             f"process-{ordinal}", "process_exec", event__code=4688,
@@ -284,17 +287,23 @@ def test_process_session_anchor_variants_are_distinct_and_bounded():
         for ordinal in range(MAX_ANCHOR_KEYS + 1)
     ]
 
-    variants, dropped = ExpansionEngine._link_anchors(
-        LinkAnchor(
-            finding_id="F-many-sessions", ts=START, host="ws01",
-            event_ids=[item.id for item in events], events=events,
-        ),
-        "process_session",
+    repo = repo_with_aggregate_anchor(events, candidate_id="F-many-sessions")
+    hunt_window = Window(start=START, end=END)
+    engine = ExpansionEngine(
+        repo, "h1", hunt_window, LinkFetcher(FakePivot([]), hunt_window.start, hunt_window.end),
+    )
+    engine._seed_anchors()
+    plan = engine._anchor_plan(repo.expansion_anchors("h1")[0])
+    anchor_reasons = defaultdict(list)
+
+    slots = engine._planned_slots(
+        plan, "process_session", "anchor ±5 min", anchor_reasons, root_cap=1_000,
     )
 
-    assert len(variants) == MAX_ANCHOR_KEYS
-    assert len(dropped) == MAX_ANCHOR_KEYS + 2
-    assert len({variant.link_key["process.session_id"] for variant in variants}) == MAX_ANCHOR_KEYS
+    assert len(plan.links["process_session"].variants) == 1
+    assert len(slots) == MAX_ANCHOR_KEYS
+    assert len({slot.anchor.link_key["process.session_id"] for slot in slots}) == MAX_ANCHOR_KEYS
+    assert any(reason.startswith("keys_not_expanded:") for reason in anchor_reasons[plan.row["id"]])
 
 
 def test_event_keyed_variants_use_the_keyed_events_host_and_time():
@@ -411,9 +420,115 @@ def test_same_key_and_host_with_the_same_effective_window_plans_one_slot():
         plan, "process_session", "anchor ±2 h", defaultdict(list), root_cap=1_000,
     )
 
-    assert len(plan.links["process_session"].variants) == 2
+    assert len(plan.links["process_session"].variants) == 1
     assert len(slots) == 1
     assert slots[0].window == LinkWindow(label="anchor ±2 h", start=hunt_window.start, end=hunt_window.end)
+
+
+def test_effective_window_dedup_happens_before_the_windows_key_cap():
+    from tests.test_expansion_engine import T0, repo_with_aggregate_anchor
+
+    events = [
+        event(
+            f"same-scope-{ordinal}", "process_exec", host="ws01",
+            ts=T0 + timedelta(minutes=ordinal), process__session_id="0x44",
+        )
+        for ordinal in range(1, MAX_ANCHOR_KEYS + 2)
+    ]
+    events.append(event(
+        "distinct-scope", "process_exec", host="ws02", ts=T0 + timedelta(minutes=45),
+        process__session_id="0x44",
+    ))
+    repo = repo_with_aggregate_anchor(events, candidate_id="F-cap-after-effective-window")
+    hunt_window = Window(start=T0, end=T0 + timedelta(hours=1))
+    engine = ExpansionEngine(
+        repo, "h1", hunt_window, LinkFetcher(FakePivot([]), hunt_window.start, hunt_window.end),
+    )
+    engine._seed_anchors()
+    plan = engine._anchor_plan(repo.expansion_anchors("h1")[0])
+
+    slots = engine._planned_slots(
+        plan, "process_session", "anchor ±2 h", defaultdict(list), root_cap=1_000,
+    )
+
+    assert len(slots) == 2
+    assert {slot.anchor.host for slot in slots} == {"ws01", "ws02"}
+
+
+def test_service_process_scopes_keep_distinct_forward_window_starts():
+    from tests.test_expansion_engine import T0, repo_with_aggregate_anchor
+
+    events = [
+        event(
+            "first-install", "service", host="ws01", ts=T0 + timedelta(minutes=5),
+            event__code=7045, service__image_path=r"C:\Tools\agent.exe",
+        ),
+        event(
+            "later-install", "service", host="ws01", ts=T0 + timedelta(minutes=45),
+            event__code=7045, service__image_path=r"C:\Tools\agent.exe",
+        ),
+    ]
+    repo = repo_with_aggregate_anchor(events, candidate_id="F-service-forward-windows")
+    hunt_window = Window(start=T0, end=T0 + timedelta(hours=1))
+    engine = ExpansionEngine(
+        repo, "h1", hunt_window, LinkFetcher(FakePivot([]), hunt_window.start, hunt_window.end),
+    )
+    engine._seed_anchors()
+    plan = engine._anchor_plan(repo.expansion_anchors("h1")[0])
+
+    slots = engine._planned_slots(
+        plan, "service_process", "anchor ±2 h", defaultdict(list), root_cap=1_000,
+    )
+
+    assert len(slots) == 2
+    assert {slot.window.start for slot in slots} == {event.ts for event in events}
+
+
+def test_windows_scope_planning_stays_bounded_for_many_duplicate_events():
+    from tests.test_expansion_engine import T0, repo_with_aggregate_anchor
+
+    events = [
+        event(
+            f"duplicate-{ordinal}", "process_exec", host="ws01",
+            ts=T0 + timedelta(minutes=ordinal % 50), process__session_id="0x01",
+        )
+        for ordinal in range(2_000)
+    ]
+    events.extend(
+        event(
+            f"other-{ordinal}", "process_exec", host=f"ws{ordinal + 10:02d}",
+            ts=T0 + timedelta(minutes=ordinal), process__session_id=f"0x{ordinal + 0x10:x}",
+        )
+        for ordinal in range(MAX_ANCHOR_KEYS + 2)
+    )
+    events.append(event(
+        "distinct-duplicate-key", "process_exec", host="aa-distinct", ts=T0 + timedelta(minutes=45),
+        process__session_id="0x01",
+    ))
+    repo = repo_with_aggregate_anchor(events, candidate_id="F-bounded-windows-scopes")
+    hunt_window = Window(start=T0, end=T0 + timedelta(hours=1))
+    engine = ExpansionEngine(
+        repo, "h1", hunt_window, LinkFetcher(FakePivot([]), hunt_window.start, hunt_window.end),
+    )
+    engine._seed_anchors()
+    plan = engine._anchor_plan(repo.expansion_anchors("h1")[0])
+    anchor_reasons = defaultdict(list)
+
+    slots = engine._planned_slots(
+        plan, "process_session", "anchor ±2 h", anchor_reasons, root_cap=1_000,
+    )
+
+    assert len(plan.links["process_session"].variants) == 1
+    assert len(slots) == MAX_ANCHOR_KEYS
+    assert "aa-distinct" in {slot.anchor.host for slot in slots}
+    [reason] = [
+        item for item in anchor_reasons[plan.row["id"]] if item.startswith("keys_not_expanded:")
+    ]
+    detail = json.loads(reason.removeprefix("keys_not_expanded:"))
+    assert detail["dropped_at_least"] == 4
+    assert len(detail["examples"]) == 3
+    assert detail["more"] is True
+    assert len(reason) < 2_048
 
 
 @pytest.mark.parametrize(
@@ -798,6 +913,8 @@ def test_account_link_routes_a_windows_anchor_only_to_windows_inventory():
 
 
 def test_windows_links_are_scheduled_in_bounded_expansion_tiers():
+    from tests.test_expansion_engine import repo_with_aggregate_anchor
+
     scheduled = {link_type for _tier, link_types, _window in WINDOWS_TIER_ADDITIONS for link_type in link_types}
     assert {
         "process_activity", "process_session", "kerberos_logon",
@@ -811,14 +928,17 @@ def test_windows_links_are_scheduled_in_bounded_expansion_tiers():
         )
         for ordinal in range(1, MAX_ANCHOR_KEYS + 3)
     ]
-    variants, dropped = ExpansionEngine._link_anchors(
-        LinkAnchor(
-            finding_id="F-many", ts=START, host="ws01",
-            event_ids=[item.id for item in events], events=events,
-        ),
-        "process_activity",
+    repo = repo_with_aggregate_anchor(events, candidate_id="F-many")
+    hunt_window = Window(start=START, end=END)
+    engine = ExpansionEngine(
+        repo, "h1", hunt_window, LinkFetcher(FakePivot([]), hunt_window.start, hunt_window.end),
+    )
+    engine._seed_anchors()
+    plan = engine._anchor_plan(repo.expansion_anchors("h1")[0])
+    slots = engine._planned_slots(
+        plan, "process_activity", "anchor ±5 min", defaultdict(list), root_cap=1_000,
     )
 
-    assert len(variants) == MAX_ANCHOR_KEYS
-    assert len(dropped) == 2
-    assert len({variant.link_key["process.guid"] for variant in variants}) == MAX_ANCHOR_KEYS
+    assert len(plan.links["process_activity"].variants) == 1
+    assert len(slots) == MAX_ANCHOR_KEYS
+    assert len({slot.anchor.link_key["process.guid"] for slot in slots}) == MAX_ANCHOR_KEYS

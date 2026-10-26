@@ -210,6 +210,13 @@ class LinkAnchor(BaseModel):
     link_key: dict[str, Any] = Field(default_factory=dict)
 
 
+def effective_link_window(anchor_ts: datetime, link_type: LinkType, window: LinkWindow) -> LinkWindow:
+    if link_type not in FORWARD_LINKS:
+        return window
+    anchor_ts = anchor_ts.astimezone(UTC) if anchor_ts.tzinfo else anchor_ts.replace(tzinfo=UTC)
+    return LinkWindow(label=window.label, start=max(anchor_ts, window.start), end=window.end)
+
+
 class Selection(NamedTuple):
     """A link's typed selection over the records it retrieved, with every step it could not decide. A link whose
     selection left a step unknown is partial, whatever its retrieval was: its negative is not complete."""
@@ -309,14 +316,10 @@ def _host_reason(anchor: LinkAnchor) -> str | None:
 
 
 def _target_has_host_os(executor, target: str, contract, os_family: str) -> bool:
-    """Use a target's inventoried datasets when it contains both Linux and Windows records."""
-    inventory = getattr(executor, "dataset_inventory", {}).get(target)
-    # A valid host contract can have an empty inventory when the shipper omits event.dataset (notably raw
-    # Winlogbeat records).  In that case the contract is the only observed OS classification; an empty set must
-    # not disable every host link for the target.
-    if not inventory:
-        return contract.os_family == os_family
-    datasets = set(inventory)
+    """Treat the contract as positive OS evidence and inventory as additive evidence for mixed targets."""
+    if contract.os_family == os_family:
+        return True
+    datasets = set(getattr(executor, "dataset_inventory", {}).get(target) or ())
     if os_family == "windows":
         return bool(datasets.intersection(WINDOWS_HOST_DATASETS))
     if os_family == "linux":
@@ -504,10 +507,7 @@ class LinkFetcher:
 
     @staticmethod
     def _effective_window(anchor: LinkAnchor, link_type: LinkType, window: LinkWindow) -> LinkWindow:
-        if link_type not in FORWARD_LINKS:
-            return window
-        anchor_ts = anchor.ts.astimezone(UTC) if anchor.ts.tzinfo else anchor.ts.replace(tzinfo=UTC)
-        return LinkWindow(label=window.label, start=max(anchor_ts, window.start), end=window.end)
+        return effective_link_window(anchor.ts, link_type, window)
 
     def result_id(self, anchor: LinkAnchor, link_type: LinkType, window: LinkWindow) -> str:
         plan_window = self._effective_window(anchor, link_type, window) if link_type == "service_process" else window
@@ -566,10 +566,7 @@ class LinkFetcher:
                         ))
             if not use_linux or not _supports(contract, "event.dataset"):
                 continue
-            inventoried = getattr(self.executor, "dataset_inventory", {}).get(target)
             for dataset in _host_datasets(contract, families, os_family="linux"):
-                if inventoried is not None and dataset not in inventoried:
-                    continue
                 filters = [Predicate(field="event.dataset", op="eq", value=dataset)]
                 if host is not None:
                     if not _supports(contract, "host.name"):
@@ -605,10 +602,7 @@ class LinkFetcher:
             if (not _target_has_host_os(self.executor, target, contract, "linux")
                     or not _supports(contract, "event.dataset")):
                 continue
-            inventoried = getattr(self.executor, "dataset_inventory", {}).get(target)
             for dataset in _host_datasets(contract, {"net_socket"}, os_family="linux"):
-                if inventoried is not None and dataset not in inventoried:
-                    continue
                 intents.append(SearchIntent(
                     kind="raw", target=target, window=Window(start=window.start, end=window.end),
                     filters=[Predicate(field="event.dataset", op="eq", value=dataset)],
@@ -1113,9 +1107,8 @@ class LinkFetcher:
             ):
                 continue
             windows_groups = _windows_source_groups(contract) if os_family == "windows" else []
-            inventoried = getattr(self.executor, "dataset_inventory", {}).get(target)
-            mixed_linux = os_family == "linux" and inventoried is not None and bool(
-                set(inventoried).intersection(WINDOWS_HOST_DATASETS)
+            mixed_linux = os_family == "linux" and _target_has_host_os(
+                self.executor, target, contract, "windows",
             )
             for query_field in fields:
                 if not _supports(contract, query_field):
@@ -1167,9 +1160,9 @@ class LinkFetcher:
             )
             inventories = getattr(self.executor, "dataset_inventory", {})
             has_mixed_target = any(
-                bool(set(datasets).intersection(WINDOWS_HOST_DATASETS))
-                and bool(set(datasets).intersection(HOST_TIMELINE_DATASETS))
-                for datasets in inventories.values()
+                _target_has_host_os(self.executor, target, contract, "windows")
+                and _target_has_host_os(self.executor, target, contract, "linux")
+                for target, contract in self.executor.contracts.items()
             )
             if not has_mixed_target:
                 intents = [
@@ -1195,8 +1188,7 @@ class LinkFetcher:
                 if os_family == "linux":
                     for intent in self._host_intents(window, None, anchor.host, "linux"):
                         contract = self.executor.contracts[intent.target]
-                        inventory = inventories.get(intent.target)
-                        mixed = inventory is not None and bool(set(inventory).intersection(WINDOWS_HOST_DATASETS))
+                        mixed = _target_has_host_os(self.executor, intent.target, contract, "windows")
                         if mixed and contract.os_family != "linux" and intent not in intents:
                             intents.append(intent)
         matches = lambda event: event.host == anchor.host and event.ts >= anchor.ts
