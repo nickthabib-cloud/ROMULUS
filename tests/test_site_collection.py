@@ -77,9 +77,54 @@ def test_valid_site_file_is_canonical_strict_and_host_scoped(tmp_path):
     assert "schema_name" in _SiteDocument.model_fields and "schema" not in _SiteDocument.model_fields
 
 
+def test_event_channels_attest_by_channel_name_and_agree_with_the_named_channel_facts(tmp_path):
+    _write(tmp_path, VALID.replace(
+        "    system_event_log: true\n",
+        "    system_event_log: false\n"
+        "    event_channels: [Microsoft-Windows-PowerShell/Operational, ' System ']\n",
+    ))
+
+    facts = load_site_facts(tmp_path)
+
+    assert facts.content["collection"][0]["event_channels"] == [
+        "Microsoft-Windows-PowerShell/Operational", "System",
+    ]
+    assert facts.attests("dc01", "event_channel", channel="microsoft-windows-powershell/operational") is True
+    assert facts.attests("dc01", "event_channel", channel="Microsoft-Windows-WinRM/Operational") is False
+    assert facts.attests("dc01", "event_channel") is False
+    # A listed channel and its named fact are one attestation, read either way.
+    assert facts.attests("dc01", "system_event_log") is True
+    assert facts.attests("dc01", "event_channel", channel="Security") is True
+    assert facts.attests("dc01", "event_channel", channel="Microsoft-Windows-Windows Defender/Operational") is True
+    assert facts.attests("dc01", "task_scheduler_operational") is False
+    assert facts.attests("unmatched", "event_channel", channel="System") is False
+
+
+def test_the_canonical_document_loads_back_as_itself(tmp_path):
+    from romulus.site import validate_site_content
+
+    _write(tmp_path, VALID + "internal_networks: [10.0.0.0/8]\nexternal_networks: [10.9.0.0/16]\n")
+    facts = load_site_facts(tmp_path)
+    again = validate_site_content(facts.content)
+    assert again.content == facts.content and again.digest == facts.digest
+    assert again.directory_sync_accounts == facts.directory_sync_accounts
+    assert facts.content["directory_sync_accounts"] == ["S-1-5-21-111-222-333-444", "example\\syncsvc"]
+
+
+def test_event_channel_order_and_case_do_not_change_the_digest(tmp_path):
+    _write(tmp_path, VALID.replace("    system_event_log: true\n", "    event_channels: [B/Operational, a/Operational]\n"))
+    first = load_site_facts(tmp_path).digest
+    _write(tmp_path, VALID.replace("    system_event_log: true\n", "    event_channels: [a/Operational, B/Operational]\n"))
+    assert load_site_facts(tmp_path).digest == first
+
+
 @pytest.mark.parametrize(
     ("body", "message"),
     [
+        (VALID.replace("    system_event_log: true\n", "    event_channels: [System, system]\n"), "duplicate event channel"),
+        (VALID.replace("    system_event_log: true\n", "    event_channels: ['']\n"), "invalid event channel"),
+        (VALID.replace("    system_event_log: true\n", "    event_channels: [1]\n"), "event_channels entries must be text"),
+        (VALID.replace("    system_event_log: true\n", "    event_channels: System\n"), "list of channel names"),
         (VALID.replace("schema:", "unexpected: true\nschema:"), "unknown key"),
         (VALID.replace("    sysmon:", "    mystery: true\n    sysmon:"), "unknown key"),
         (VALID.replace("WS-*.example.test", "../hosts/*"), "host glob"),
