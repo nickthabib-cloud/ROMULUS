@@ -32,7 +32,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.sqlite import insert
 
 from romulus.store import schema as t
-from romulus.store.db import utcnow, write_txn
+from romulus.store.db import read_snapshot, utcnow, write_txn
 
 # The origin suffix of a boot id a hunt's boot-interval map placed (the normalizer's BOOT_INTERVAL_ORIGIN; the
 # store does not import the evidence layer, and a test keeps the two equal).
@@ -3585,6 +3585,7 @@ class Repo:
                     "count": int(row["count"]),
                     "first_ts": _utc(row["first_ts"], "window count first_ts"),
                     "last_ts": _utc(row["last_ts"], "window count last_ts"),
+                    "token": row.get("token", ""),
                 }
                 for ordinal, row in enumerate(counts)
             )
@@ -3688,6 +3689,69 @@ class Repo:
         )
         with self.engine.connect() as connection:
             return bool(connection.execute(query).scalar_one())
+
+    def longest_baseline_history_days(self, *, default: int) -> int:
+        """The largest history_days any hunt with baseline specs configures, read in SQL without loading
+        manifests (`default` stands for a hunt that does not state one)."""
+        baseline = func.json_extract(t.hunt.c.manifest, "$.baseline")
+        days = func.coalesce(func.json_extract(t.hunt.c.manifest, "$.baseline.history_days"), default)
+        with self.engine.connect() as connection:
+            value = connection.execute(select(func.max(days)).where(
+                baseline.is_not(None), func.json_extract(t.hunt.c.manifest, "$.baseline.specs").is_not(None),
+            )).scalar_one_or_none()
+        return max(int(value), 1) if value is not None else default
+
+    def baseline_window_token_rows(self, hunt_id: str) -> int:
+        """How many dedup-token rows of window material a hunt keeps (one range of its rows)."""
+        table = t.baseline_window_count.c
+        with self.engine.connect() as connection:
+            return int(connection.execute(select(func.count()).select_from(t.baseline_window_count).where(
+                table.hunt_id == hunt_id, table.token.is_not(None), table.token != "")).scalar_one())
+
+    def baseline_window_has_untokened_material(self, hunt_id: str, spec_id: str, spec_version: str,
+                                               target: str) -> bool:
+        """Whether material staged before dedup tokens were kept exists: it cannot be merged across cells."""
+        table = t.baseline_window_count.c
+        query = select(literal(1)).where(
+            table.hunt_id == hunt_id, table.spec_id == spec_id, table.spec_version == spec_version,
+            table.target == target, table.token.is_(None),
+        ).limit(1)
+        with self.engine.connect() as connection:
+            return connection.execute(query).first() is not None
+
+    def baseline_window_merged_dedup_counts(self, hunt_id: str, spec_id: str, target: str, *,
+                                            spec_version: str, span: tuple[datetime, datetime],
+                                            page_size: int = BASELINE_PAGE) -> Iterator[dict]:
+        """A deduplicating spec's merged count rows: records of keys without a token, plus each key's distinct
+        tokens per hour across every cell. That is what hourly counters count, so a run written from cells of any
+        width equals the hourly segments of the same hours. Keyset-paged in segment-row order."""
+        if page_size < 1:
+            raise ValueError("page size must be positive")
+        table = t.baseline_window_count.c
+        order = (table.scope, table.key_digest, table.bucket)
+        start, end = _utc(span[0], "merge start"), _utc(span[1], "merge end")
+        tokened = and_(table.token.is_not(None), table.token != "")
+        after = None
+        while True:
+            query = (select(
+                table.scope_kind, table.scope, table.key_id, table.key_digest, table.key, table.bucket,
+                (func.coalesce(func.sum(case((tokened, 0), else_=table.count)), 0)
+                 + func.count(func.distinct(case((tokened, cast(table.material_hour, String) + "|"
+                                                  + table.token), else_=None)))).label("count"),
+                func.min(table.first_ts).label("first_ts"), func.max(table.last_ts).label("last_ts"),
+            ).where(
+                table.hunt_id == hunt_id, table.spec_id == spec_id, table.target == target,
+                table.spec_version == spec_version,
+                table.material_hour >= start, table.material_hour < end,
+                *(() if after is None else (tuple_(*order) > tuple_(*after),)),
+            ).group_by(*order).order_by(*order).limit(page_size))
+            with self.engine.connect() as connection:
+                page = [_with_utc(row, ("bucket", "first_ts", "last_ts"))
+                        for row in connection.execute(query).mappings()]
+            yield from page
+            if len(page) < page_size:
+                return
+            after = [page[-1]["scope"], page[-1]["key_digest"], page[-1]["bucket"]]
 
     def baseline_window_dedup_bucket_spans_cells(self, hunt_id: str, spec_id: str,
                                                  spec_version: str, target: str,
@@ -3899,6 +3963,133 @@ class Repo:
         return deleted
 
     _MATERIAL_TABLES = ("baseline_window_count", "baseline_window_scope_hour", "baseline_window_event_hour")
+
+    # Estimated stored bytes of carry rows: a row header and the fixed-width columns, plus the text columns' lengths.
+    _CARRY_EXEC_BYTES, _CARRY_OBSERVATION_BYTES, _CARRY_OTHER_BYTES = 48, 44, 24
+
+    def save_baseline_carry_hour(self, *, site: str, target: str, hour: datetime, normalizer: str, format_: int,
+                                 hostless: bool, hosts: list[tuple[str, str | None]], execs: list[dict],
+                                 observations: list[dict], breaks: list[dict]) -> bool:
+        """Persist one hour's carry input once, atomically; False when the store already holds it (the first
+        complete read of an hour is kept, so every later hunt replays the same input). Rows are typed: `hosts` is
+        the hour's (host, boot) dictionary, which the other rows reference by index; times are epoch microseconds.
+        One hour's rows are bounded by the pids exec'd in it."""
+        hour = _utc(hour, "carry hour")
+        size = (self._CARRY_OTHER_BYTES * (1 + len(hosts) + len(breaks))
+                + sum(len(host) + len(boot or "") for host, boot in hosts)
+                + sum(self._CARRY_EXEC_BYTES + len(row["executable"]) + len(row["raw_id"]) for row in execs)
+                + sum(self._CARRY_OBSERVATION_BYTES + len(row["executable"]) + len(row["event_id"])
+                      for row in observations))
+        with write_txn(self.engine) as connection:
+            seq = connection.execute(insert(t.baseline_carry_hour).values(
+                site=site, target=target, hour=hour, normalizer=normalizer, format=format_,
+                hostless=int(bool(hostless)), bytes=size, hosts=len(hosts), execs=len(execs),
+                observations=len(observations), breaks=len(breaks), created_at=utcnow(),
+            ).on_conflict_do_nothing(
+                index_elements=["site", "target", "hour", "normalizer", "format"],
+            ).returning(t.baseline_carry_hour.c.seq)).scalar_one_or_none()
+            if seq is None:
+                return False
+            for table, rows in (
+                    (t.baseline_carry_host, ({"carry_seq": seq, "ref": ref, "host": host, "boot": boot}
+                                             for ref, (host, boot) in enumerate(hosts))),
+                    (t.baseline_carry_exec, ({"carry_seq": seq, "ordinal": ordinal, **row}
+                                             for ordinal, row in enumerate(execs))),
+                    (t.baseline_carry_observation, ({"carry_seq": seq, "ordinal": ordinal, **row}
+                                                    for ordinal, row in enumerate(observations))),
+                    (t.baseline_carry_break, ({"carry_seq": seq, **row} for row in breaks))):
+                for chunk in _chunks(rows, BASELINE_CHUNK):
+                    connection.execute(table.insert(), chunk)
+        return True
+
+    def baseline_carry_hour(self, *, site: str, target: str, hour: datetime, normalizer: str,
+                            format_: int) -> dict | None:
+        """One persisted carry hour: {"hostless", "hosts", "exec", "observation", "break"}, or None.
+
+        Every read sees one snapshot (`read_snapshot`), so a concurrent prune yields all of the hour or none of it.
+        The header also records how many rows of each kind it holds; any other count read back means the hour is
+        not kept whole, and it is reported as not kept (the caller reads it again or leaves it unobserved), never
+        replayed short."""
+        head = t.baseline_carry_hour.c
+        with read_snapshot(self.engine) as connection:
+            row = connection.execute(select(
+                head.seq, head.hostless, head.hosts, head.execs, head.observations, head.breaks,
+            ).where(
+                head.site == site, head.target == target, head.hour == _utc(hour, "carry hour"),
+                head.normalizer == normalizer, head.format == format_,
+            )).first()
+            if row is None:
+                return None
+            seq = row.seq
+            out: dict = {"hostless": bool(row.hostless)}
+            hosts = t.baseline_carry_host.c
+            out["hosts"] = {ref: (host, boot) for ref, host, boot in connection.execute(
+                select(hosts.ref, hosts.host, hosts.boot).where(hosts.carry_seq == seq))}
+            for kind, table in (("exec", t.baseline_carry_exec), ("observation", t.baseline_carry_observation)):
+                out[kind] = [dict(item) for item in connection.execute(
+                    select(table).where(table.c.carry_seq == seq).order_by(table.c.ordinal)).mappings()]
+            breaks = t.baseline_carry_break.c
+            out["break"] = [dict(item) for item in connection.execute(
+                select(breaks.ref, breaks.hour_us).where(breaks.carry_seq == seq)).mappings()]
+        if (len(out["hosts"]), len(out["exec"]), len(out["observation"]), len(out["break"])) != (
+                row.hosts, row.execs, row.observations, row.breaks):
+            return None
+        return out
+
+    def baseline_carry_bytes(self) -> int:
+        with self.engine.connect() as connection:
+            return int(connection.execute(select(func.coalesce(func.sum(t.baseline_carry_hour.c.bytes), 0)))
+                       .scalar_one())
+
+    def _delete_carry_hours(self, where, *, chunk: int, limit: int | None = None) -> tuple[int, int]:
+        """Delete carry hours matching `where`, oldest first, `chunk` hours per short write transaction (each takes
+        its rows with it). Returns (hours, bytes) removed; `limit` stops once that many bytes are gone."""
+        head = t.baseline_carry_hour.c
+        hours = removed = 0
+        while limit is None or removed < limit:
+            with write_txn(self.engine) as connection:
+                batch = connection.execute(select(head.seq, head.bytes).where(where).order_by(
+                    head.hour, head.seq).limit(chunk)).all()
+                if not batch:
+                    break
+                if limit is not None:
+                    kept = []
+                    for seq, size in batch:
+                        kept.append((seq, size))
+                        if removed + sum(item[1] for item in kept) >= limit:
+                            break
+                    batch = kept
+                connection.execute(t.baseline_carry_hour.delete().where(head.seq.in_([seq for seq, _ in batch])))
+            hours += len(batch)
+            removed += sum(size for _, size in batch)
+        return hours, removed
+
+    def prune_baseline_carry_hours(self, *, site: str, target: str, before: datetime,
+                                   chunk: int = 4) -> tuple[int, int]:
+        """Delete one target's carry hours older than `before`: (hours, bytes) removed."""
+        head = t.baseline_carry_hour.c
+        return self._delete_carry_hours(
+            and_(head.site == site, head.target == target, head.hour < _utc(before, "carry prune horizon")),
+            chunk=chunk,
+        )
+
+    def trim_baseline_carry(self, budget: int, *, chunk: int = 4) -> tuple[int, int]:
+        """Delete the store's oldest carry hours until their estimated bytes fit `budget`: (hours, bytes)."""
+        excess = self.baseline_carry_bytes() - max(0, budget)
+        if excess <= 0:
+            return 0, 0
+        return self._delete_carry_hours(true(), chunk=chunk, limit=excess)
+
+    def baseline_carry_newest_hour(self, *, site: str, target: str,
+                                   at_most: datetime | None = None) -> datetime | None:
+        """A target's newest kept carry hour, ignoring any later than `at_most`."""
+        head = t.baseline_carry_hour.c
+        query = select(func.max(head.hour)).where(head.site == site, head.target == target)
+        if at_most is not None:
+            query = query.where(head.hour <= _utc(at_most, "carry anchor bound"))
+        with self.engine.connect() as connection:
+            value = connection.execute(query).scalar_one_or_none()
+        return _stored_utc(value)
 
     def baseline_window_released(self, hunt_id: str, spec_id: str) -> str | None:
         """Why some target's window counter material of one spec was released, or None while all of it is kept."""

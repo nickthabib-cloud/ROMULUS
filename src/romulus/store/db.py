@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -108,6 +109,23 @@ def write_txn(engine: Engine):
                 _write_lock.release()
 
     return _Txn()
+
+
+@contextmanager
+def read_snapshot(engine: Engine):
+    """A connection whose reads all see one database snapshot.
+
+    pysqlite's legacy transaction control begins a transaction only before a write, so SELECTs on one connection
+    otherwise each see the latest commit: a concurrent delete between two of them can show a header without its
+    rows. An explicit deferred BEGIN makes the first read fix the snapshot (WAL), and every later read on the
+    connection sees exactly it; the transaction is rolled back (it wrote nothing) when the block ends.
+    """
+    with engine.connect() as connection:
+        connection.exec_driver_sql("BEGIN")
+        try:
+            yield connection
+        finally:
+            connection.rollback()
 
 
 def integrity_check(engine: Engine) -> str:

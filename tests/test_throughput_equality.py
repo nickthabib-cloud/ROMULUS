@@ -199,16 +199,40 @@ from tests import throughput_fixture as tf
 # Combined with evidence version 14, baseline observation and scope-hour witness event identities retain the carried
 # branch's rehashed values, and the audit summary follows those rows. Rule cells combine S9's retrieval_complete
 # details with the persistence/ICMP rule versions above; the non-baseline field projection remains byte-identical.
+# Deduplicated window material then keeps each key's dedup token per hour, so hunts write external-destination
+# history from network cells of any width:
+# - baseline_window_counts: every row gains a token column ("" for the 885 rows of keys counted per record, which
+#   are otherwise unchanged); the 76 bl.ext_dest rows become 234 rows, one per (key, hour, token) seen in a cell,
+#   including tokens the cell's open-bucket set suppressed.
+# - audit: the material block's estimated bytes follow (807,272 -> 921,326), and the retention reason says what
+#   releases kept material ("kept while the hunt can still resume; released at its resumed finish, or by the disk
+#   budget, oldest first").
+# Merged with the carried detection bundle (evidence version 14, pack 32): against that tree only the two baseline
+# fields above differ (baseline_window_counts and the audit's material bytes and retention reason); every other
+# digest and the non-baseline semantic projection equal it exactly.
+# Kept carry input is bounded by a retention horizon and a disk budget: the baseline stage summary's lookback block
+# states the hours each removed (carry_hours_pruned and carry_hours_trimmed, 0 here), in the hunt.baseline_summary
+# audit records and the baseline task's outcome; nothing else changes.
+# An exec or process image of unrecorded boot is now a break for its host (it may be a pid reuse in the current
+# boot), never stored or silently superseded, and dedup tokens are kept only for hours a cell shares with others:
+# - rule_cells, manifest coverage gaps: 22 bl.exec_pair window cells' unresolved reasons for children whose lineage
+#   crosses such a record read "an exec of the host between parent and child was not carried" instead of "parent exec
+#   in an unobserved hour", and one child that resolved is now unresolved with that reason;
+# - baseline_observations: that child's key loses its window occurrence (window_count 2 -> 1, last_ts follows);
+# - baseline_window_counts: 1,119 -> 1,010 rows: tokens of the bl.ext_dest hours one cell covers whole are folded into
+#   per-key counts (token ""); hours shared by cells keep one row per token;
+# - audit: the material block's bytes follow (921,326 -> 842,654), and the exec-pair writer reason names the break.
+# Candidates, links, tasks, events and every non-baseline cell are unchanged.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
-    "audit": "b2a270205b6ea2874d1ff9acb7eaa34c9a0182d26060989744d11277ffd00025",
+    "audit": "dbc10a1f0da92c117fe9bf2eb2dd50f2cdb8f202d2deec0ed822d33fe1ab6151",
     "baseline_counts": "1a021de3254f91225689f1bdc8ce3e0cfd416c90a4148bcd4f1c93b6db9cb16d",
     "baseline_hunt_exclusions": "fe9edaf9efe3065352ae1bedc95ac7e78ddbe2d6e34f835203cfe56cb368ec56",
-    "baseline_observations": "b25abf252a28151beae7d2048372e8be9dcafc76622b1a5f79ca1fd85a597784",
+    "baseline_observations": "6e91c7a74e9b28873e4143ce745af745a8adbecf8d1fa4d489f63efe5722f147",
     "baseline_scope_hours": "fe1ef875f82a6cad7d9c7884b1936614584a9f9e0e4c008e4790ee46edf6361d",
     "baseline_segments": "e2ca9f003a97f77ac300789266c9e646610317f5577318c4b556b464a8a6fc48",
     "baseline_snapshot": "63b4c8094cb5450b1e707fd7be786e90324528e738b882358cae15cb8d53f776",
-    "baseline_window_counts": "163b75766bc7cc487118b4e8bc24fe338d9e364898f9200887b89ba11b464acc",
+    "baseline_window_counts": "d49fd2c0f6e022e17772d5ae5eb276796c3a3d95ff2cffbab0bc7f991c5075c6",
     "baseline_window_event_hours": "bb58c65144b135443e75a690b7b2f8137ebac6b827f8e8bd8cc7606a01c53e52",
     "baseline_window_scope_hours": "e3a243191b5431410f587f279c22b2f949717be2c5e5a228e43d4893caf2965f",
     "candidates": "3b23f98dbf25d34c4921bbec2cba932991746ad9d4a11e8963988d7c8c421bee",
@@ -218,11 +242,11 @@ GOLDEN_STACK = {
     "events": "0165d2807ffee33aaef17dd70ba004ec4c87fa4c5f29e9dc75ba833f57b93ff7",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "0fbedb27ca9a4cb72354178444ee9aabc49f377b2c933074fe03ef29c8fbb08a",
-    "manifest": "e7f0f06c2bf744a08516f7b254454c3f5e517498d7275d9e80e85f5760a521f4",
+    "manifest": "2c42a43857f923231101d6be0ac1a50963e25290fcb17b7b03f67c462d4647a0",
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
-    "rule_cells": "e1bc4bf141c508b8ca70ab69d34b64edc50b19112dd4d1d901623b41e42cf871",
+    "rule_cells": "6a521ccfc0ab6389987f2381e1424c4aad0f06d6e6c3a529d063f8fa6ba92b7e",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
-    "tasks": "f0c05a2a05135e822ab077a843472e4cb4d31b93b5c27050685bf6b9675e4cdc",
+    "tasks": "bc22ee3fc01cda9958faeb568c44597780645e884939b43f4158b0a9dbd47077",
 }
 # Captured directly from the S7 fixture through _non_baseline_semantic_digests. Typed-event-derived hashes and
 # interchangeable predicate origins are normalized, while every decision, claim, lane, raw citation and gate is

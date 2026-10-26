@@ -50,6 +50,10 @@ from romulus.store.repo import Repo
 log = logging.getLogger("romulus.sweep")
 
 PARTITION_MAX_DOCS = 120_000
+# Dedup-token rows of window material one hunt may keep (each about 800 bytes stored, with its key and indexes, so
+# about 400 MB): only hours a cell shares with other cells keep tokens, so this bounds deduplicating specs' material
+# by the flows of split hours, not of the window. Cells past it are never written as history.
+BASELINE_TOKEN_ROWS_PER_HUNT = 500_000
 # planned cells are written before any partition runs, this many partitions per transaction
 PLANNED_CHUNK = 500
 LINUX_HOST_DATASETS = ("linux.audit", "systemd.journal", "apache.access", "apache.error")
@@ -245,6 +249,8 @@ class Sweep:
         )
         self._stage_size = 0
         self._profiles: dict[str, dict] | None = None
+        # dedup-token rows of window material this hunt keeps, read from the store on first use (resume)
+        self._baseline_token_rows: int | None = None
         self.partial_reasons: list[str] = []
         preflight = self.budget.preflight()
         if preflight:
@@ -1132,6 +1138,22 @@ class Sweep:
                 },
                 whole_cell_partial=result.whole_cell_partial,
             )
+        counts = result.counts
+        tokens = sum(1 for row in counts if row.get("token"))
+        if tokens:
+            # Dedup tokens are kept only for hours a cell shares with other cells; they are charged to one budget
+            # per hunt. Over it, the cell's token material is not kept and the cell is never written as history
+            # (its detection counts are unaffected).
+            if self._baseline_token_rows is None:
+                self._baseline_token_rows = self.repo.baseline_window_token_rows(self.hunt_id)
+            if self._baseline_token_rows + tokens > BASELINE_TOKEN_ROWS_PER_HUNT:
+                counts = tuple(row for row in counts if not row.get("token"))
+                detail["material_complete"] = False
+                detail["reasons"] = sorted({*detail["reasons"], (
+                    f"dedup token material over the hunt's budget of {BASELINE_TOKEN_ROWS_PER_HUNT} rows: "
+                    "this cell's hours are not written as baseline history")})
+            else:
+                self._baseline_token_rows += tokens
         self.repo.save_baseline_window_cell(self.hunt_id, {
             "rule_id": playbook.id,
             "version": playbook.spec.version,
@@ -1142,7 +1164,7 @@ class Sweep:
             "evaluated": evaluated,
             "detail": detail,
         }, self._baseline_observations(playbook, result),
-            counts=result.counts, scope_hours=result.scope_hours, event_hours=result.event_hours)
+            counts=counts, scope_hours=result.scope_hours, event_hours=result.event_hours)
 
     def _finalize_baseline_target(self, target: str) -> None:
         """Persist compact exec-pair cells for post-lookback resolution and resume."""

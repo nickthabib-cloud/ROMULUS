@@ -346,13 +346,15 @@ def _packet_stage(s: Settings, repo: Repo, client: ElasticClient, hunt_id: str, 
 
 
 def _baseline_stage(repo: Repo, client: ElasticClient, hunt: dict, window: Window,
-                    contracts: dict, heartbeat, owner_token: str | None) -> dict:
+                    contracts: dict, heartbeat, owner_token: str | None,
+                    carry_budget_bytes: int | None = None) -> dict:
     """Run or resume the baseline stage; a crash is an explicit partial result, not a hunt stopper."""
     hunt_id = hunt["id"]
     try:
         summary = run_baseline_stage(
             repo, hunt_id, window, client=client, contracts=contracts,
             heartbeat=heartbeat, owner_token=owner_token,
+            **({} if carry_budget_bytes is None else {"carry_budget_bytes": carry_budget_bytes}),
         )
     except Exception as exc:
         log.exception("baseline stage failed")
@@ -464,6 +466,7 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool | None = None, on_candidate=
     packet_summary = _packet_stage(s, repo, client, hunt_id, window, contracts, heartbeat, owner_token)
     baseline_summary = _baseline_stage(
         repo, client, repo.get_hunt(hunt_id), window, contracts, heartbeat, owner_token,
+        int(s.baseline_carry_disk_gb * 1e9),
     )
     expansion_summary = _run_expansion_safely(
         s, repo, client, repo.get_hunt(hunt_id), contracts, window, owner_token,
@@ -563,6 +566,7 @@ def resume_hunt(s: Settings, hunt_id: str, agent_mode: str | None = None, ai_age
 
         baseline_summary = _baseline_stage(
             repo, client, hunt, window, contracts, heartbeat, owner_token,
+            int(s.baseline_carry_disk_gb * 1e9),
         )
     expansion_summary = _run_expansion_safely(
         s, repo, client, hunt, contracts, window, owner_token,

@@ -48,6 +48,7 @@ class KeyCounter:
                  token_cap: int = DEFAULT_TOKEN_CAP, row_cap: int = DEFAULT_ROW_CAP,
                  material_row_cap: int | None = None,
                  pending_cap: int = DEFAULT_PENDING_CAP,
+                 token_material_cap: int = DEFAULT_TOKEN_CAP,
                  span: tuple[datetime, datetime] | None = None,
                  retain_observations_when_partial: bool = False):
         material_row_cap = row_cap if material_row_cap is None else material_row_cap
@@ -62,9 +63,14 @@ class KeyCounter:
         self.row_cap = row_cap
         self.material_row_cap = material_row_cap
         self.pending_cap = pending_cap
+        self.token_material_cap = token_material_cap
         self.retain_observations_when_partial = retain_observations_when_partial
         self._counts: dict[tuple, dict] = {}
         self._material_counts: dict[tuple, dict] = {}
+        # Deduplicated keys' material: one entry per (scope, key, bucket, hour, token) the cell saw, including
+        # repeats its open-bucket token set suppressed, so a writer can count distinct tokens per hour across cells
+        # exactly as an hourly counter does. Value: [first_ts, last_ts, key_id, key].
+        self._token_material: dict[tuple, list] = {}
         self._first_event_ids: dict[tuple, str | None] = {}
         self._first_event_refs: dict[tuple, list[dict]] = {}
         self._scope_hours: dict[tuple, int] = defaultdict(int)
@@ -156,7 +162,7 @@ class KeyCounter:
         for row in count_rows:
             identity = (row["scope_kind"], row["scope"], row["key_digest"], row["bucket"])
             material_hour = row.get("material_hour") or _bucket(row["first_ts"], "hour")
-            source = {name: value for name, value in row.items() if name != "material_hour"}
+            source = {name: value for name, value in row.items() if name not in ("material_hour", "token")}
             existing = self._counts.get(identity)
             if existing is None:
                 self._counts[identity] = {**source, "segment_id": self.segment_id}
@@ -241,6 +247,8 @@ class KeyCounter:
             if key.dedup_token is not None:
                 token_key = (key.scope_kind, key.scope, key.key_digest, bucket)
                 tokens = self._tokens[token_key]
+                if not self._note_token(key, bucket, hour, ts):
+                    return
                 if key.dedup_token in tokens:
                     row = self._counts.get((key.scope_kind, key.scope, key.key_digest, bucket))
                     if row is not None:
@@ -264,7 +272,8 @@ class KeyCounter:
 
         material_identities = {
             (key.scope_kind, key.scope, key.key_digest, bucket, hour) for key in accepted
-            if (key.scope_kind, key.scope, key.key_digest, bucket, hour) not in self._material_counts
+            if key.dedup_token is None
+            and (key.scope_kind, key.scope, key.key_digest, bucket, hour) not in self._material_counts
         }
         if len(self._material_counts) + len(material_identities) > self.material_row_cap:
             self.mark_partial(f"material count row cap {self.material_row_cap} exceeded")
@@ -297,6 +306,8 @@ class KeyCounter:
                 row["first_ts"] = min(row["first_ts"], instant)
                 row["last_ts"] = max(row["last_ts"], instant)
 
+            if key.dedup_token is not None:
+                continue  # its material is the token entry noted above
             material_identity = (key.scope_kind, key.scope, key.key_digest, bucket, hour)
             material = self._material_counts.get(material_identity)
             if material is None:
@@ -328,16 +339,72 @@ class KeyCounter:
                 self._scope_first_event_ids[identity] = event_id
                 self._scope_first_event_refs[identity] = list(event_refs or [])
 
+    def _note_token(self, key: BaselineKey, bucket: datetime, hour: datetime, ts: datetime) -> bool:
+        """Record one occurrence of a deduplicated key's token in its hour; False when the cap made this partial."""
+        identity = (key.scope_kind, key.scope, key.key_digest, bucket, hour, key.dedup_token)
+        instant = ts.astimezone(UTC)
+        entry = self._token_material.get(identity)
+        if entry is not None:
+            entry[0], entry[1] = min(entry[0], instant), max(entry[1], instant)
+            return True
+        if len(self._material_counts) + len(self._token_material) >= self.material_row_cap:
+            self.mark_partial(f"material count row cap {self.material_row_cap} exceeded")
+            return False
+        if len(self._token_material) >= self.token_material_cap:
+            # the per-hour token set is held in memory for the whole cell: bounded, and honest when full
+            self.mark_partial(f"dedup token material cap {self.token_material_cap} exceeded in a cell")
+            return False
+        self._token_material[identity] = [instant, instant, key.key_id, key.key]
+        return True
+
     def count_rows(self):
         if self.partial:
             return iter(())
         return iter(self._counts[key] for key in sorted(self._counts))
 
+    def _whole_hour(self, hour: datetime) -> bool:
+        """Whether this cell covers all of `hour`: then no other cell holds any record of that hour."""
+        return self.span is not None and self.span[0] <= hour and hour + timedelta(hours=1) <= self.span[1]
+
     def material_count_rows(self):
-        """Per-hour count material for a hunt writer; merging all hours reproduces :meth:`count_rows`."""
+        """Per-hour count material for a hunt writer.
+
+        A key without a dedup token is one row per hour with its record count (token ""). A deduplicated key's
+        distinct tokens per hour are what an hourly counter counts:
+        - in an hour this cell covers whole, no other cell can repeat a token, so they are folded into that row's
+          count (token "");
+        - in an hour shared with other cells (the cell starts or ends inside it), each distinct token is its own
+          row (count 1, the token kept), including tokens this cell's open-bucket set suppressed, so the writer
+          counts them once across the cells.
+        """
         if self.partial:
             return iter(())
-        return iter(self._material_counts[key] for key in sorted(self._material_counts))
+        merged = {key: {**row, "token": ""} for key, row in self._material_counts.items()}
+        rows = []
+        for (scope_kind, scope, key_digest, bucket, hour, token), (first, last, key_id, key) in (
+                self._token_material.items()):
+            if self._whole_hour(hour):
+                identity = (scope_kind, scope, key_digest, bucket, hour)
+                row = merged.get(identity)
+                if row is None:
+                    merged[identity] = {
+                        "segment_id": self.segment_id, "scope_kind": scope_kind, "scope": scope, "key_id": key_id,
+                        "key_digest": key_digest, "key": key, "bucket": bucket, "material_hour": hour, "count": 1,
+                        "first_ts": first, "last_ts": last, "token": "",
+                    }
+                else:
+                    row["count"] += 1
+                    row["first_ts"], row["last_ts"] = min(row["first_ts"], first), max(row["last_ts"], last)
+                continue
+            rows.append({
+                "segment_id": self.segment_id, "scope_kind": scope_kind, "scope": scope, "key_id": key_id,
+                "key_digest": key_digest, "key": key, "bucket": bucket, "material_hour": hour, "count": 1,
+                "first_ts": first, "last_ts": last, "token": token,
+            })
+        rows.extend(merged.values())
+        return iter(sorted(rows, key=lambda row: (
+            row["scope_kind"], row["scope"], row["key_digest"], row["bucket"], row["material_hour"], row["token"],
+        )))
 
     def event_hour_rows(self):
         """Per-hour evaluated-record totals used for segment metadata at non-aligned cell edges."""

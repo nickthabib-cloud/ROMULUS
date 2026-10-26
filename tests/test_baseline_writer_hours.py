@@ -623,3 +623,164 @@ def test_a_hunt_segment_straddling_history_start_places_its_first_in_plan_record
         "effective_start": (START + 4 * H).isoformat(), "effective_hours": 2,
         "absent_before": (START + 4 * H).isoformat(), "status": "shortened",
     }
+
+
+# ---- external destinations: deduplicated material merged across the sweep's network cells ---------------------
+
+def _flow(event_id: str, minute: int, destination: str, flow_id: int) -> TypedEvent:
+    return TypedEvent(
+        id=event_id, family="net_flow", ts=START + timedelta(minutes=minute), host="sensor",
+        fields={"source.ip": fv("10.0.0.4", "fixture"), "destination.ip": fv(destination, "fixture"),
+                "suricata.flow_id": fv(flow_id, "fixture")},
+        raw=[RawRef(target="host-index", native_id=event_id, digest=f"raw-{event_id}")], normalizer="fixture@1",
+    )
+
+
+def _merged_counts(repo, segments):
+    totals: dict[tuple, list] = {}
+    for segment in segments:
+        for row in repo.baseline_counts(segment["id"]):
+            item = totals.setdefault((row["scope"], row["key_digest"], row["bucket"]),
+                                     [0, row["first_ts"], row["last_ts"]])
+            item[0] += row["count"]
+            item[1], item[2] = min(item[1], row["first_ts"]), max(item[2], row["last_ts"])
+    return totals
+
+
+def test_external_destinations_merge_across_sub_hour_cells_and_equal_the_hourly_lookback():
+    """Network cells are narrower than an hour. A flow's records split across two cells of one hour count once,
+    as one hourly counter counts them; the same flow in the next hour counts again there, as the next hourly
+    segment does. Every count, time and scope hour equals the lookback's."""
+    spec = SPEC_BY_ID["bl.ext_dest"]
+    events = [
+        _flow("f1a", 10, "192.0.2.1", 1), _flow("f1b", 40, "192.0.2.1", 1),   # one flow, two cells of hour 0
+        _flow("f2", 20, "192.0.2.1", 2),                                       # another flow, hour 0
+        _flow("f1c", 70, "192.0.2.1", 1),                                      # the first flow again, hour 1
+        _flow("f3", 100, "198.51.100.9", 3),
+    ]
+    hunt_repo = _repo()
+    _hunt(hunt_repo, hours=2, spec=spec, networks={"source": "configured", "digest": "network-a"})
+    for quarter in range(4):
+        start, end = START + quarter * timedelta(minutes=30), START + (quarter + 1) * timedelta(minutes=30)
+        _sweep_cell(hunt_repo, [event for event in events if start <= event.ts < end], start, end,
+                    playbook=ExternalDestinationBaseline())
+
+    summary = run_hunt_segment_writer(hunt_repo, "hunt-a", hunt_partial=False)
+
+    assert summary["specs"][spec.id]["reason"] is None and summary["written"] == 1
+    lookback_repo = _repo()
+    lookback_repo.create_hunt("build", {}, "manifest-build", "test")
+    result = LookbackWriter(
+        lookback_repo, FakeHistory(events), site="site-a", specs=[spec], normalizer="fixture@1",
+        budget=LookbackBudget(queries=10, records=100, seconds=10), now=lambda: START + 2 * H,
+        network_digest="network-a",
+    ).fill(hunt_id="build", targets=["host-index"], start=START, end=START + 2 * H)
+    assert result.complete == 2
+    hunt_segments = hunt_repo.baseline_segments(statuses=["active"])
+    lookback_segments = lookback_repo.baseline_segments(statuses=["active"])
+
+    assert _merged_counts(hunt_repo, hunt_segments) == _merged_counts(lookback_repo, lookback_segments)
+    dest = [row["count"] for segment in hunt_segments for row in hunt_repo.baseline_counts(segment["id"])
+            if row["key"].get("kind") == "dest_ip" and row["key"].get("dest_ip") == "192.0.2.1"]
+    # flow 1 counts once in hour 0 (two cells) and once in hour 1; flow 2 once in hour 0
+    assert dest == [3]
+    hours = lambda repo, segments: sorted(
+        (row["scope"], row["hour"], row["events"]) for segment in segments for row in repo.baseline_scope_hours(
+            segment["id"]))
+    assert hours(hunt_repo, hunt_segments) == hours(lookback_repo, lookback_segments)
+
+
+def test_material_staged_before_tokens_were_kept_still_refuses_buckets_spanning_cells():
+    spec = SPEC_BY_ID["bl.ext_dest"]
+    repo = _repo()
+    _hunt(repo, hours=1, spec=spec, networks={"source": "configured", "digest": "network-a"})
+    for half in range(2):
+        start = START + half * timedelta(minutes=30)
+        _sweep_cell(repo, [_flow(f"f{half}", half * 30 + 5, "192.0.2.1", 1)], start,
+                    start + timedelta(minutes=30), playbook=ExternalDestinationBaseline())
+    with repo.engine.begin() as connection:
+        connection.execute(schema.baseline_window_count.update().values(token=None))
+
+    summary = run_hunt_segment_writer(repo, "hunt-a", hunt_partial=False)
+
+    assert repo.baseline_segments() == []
+    assert "deduplicated bucket spans multiple window cells" in summary["specs"][spec.id]["reason"]
+
+
+def test_retention_wording_says_the_budget_not_a_resume_releases_kept_material():
+    repo = _repo()
+    _hunt(repo, hours=1)
+    _sweep_cell(repo, [_event("a", "/usr/bin/id", 5)], START, START + H)
+
+    summary = run_hunt_segment_writer(repo, "hunt-a", hunt_partial=True)
+
+    reason = repo.baseline_window_retention("hunt-a")["reason"]
+    assert reason == summary["material"]["reason"]
+    assert reason.startswith("kept while the hunt can still resume")
+    assert "disk budget, oldest first" in reason and "kept for a resumed run" not in reason
+
+
+# ---- dedup token material grows with split hours only, under a per-hunt budget ----------------------------------
+
+def test_an_hour_one_cell_covers_whole_keeps_per_key_counts_not_one_row_per_flow():
+    spec = SPEC_BY_ID["bl.ext_dest"]
+    repo = _repo()
+    _hunt(repo, hours=1, spec=spec, networks={"source": "configured", "digest": "network-a"})
+    events = [_flow(f"f{index}", index % 60, f"192.0.2.{index % 5 + 1}", index) for index in range(2_000)]
+
+    _sweep_cell(repo, events, START, START + H, playbook=ExternalDestinationBaseline())
+
+    rows = repo.baseline_window_counts("hunt-a", spec.id, "host-index")
+    assert len(rows) < 20 and not any(row["token"] for row in rows)
+    assert sorted(row["count"] for row in rows if row["key"].get("kind") == "dest_ip") == [400] * 5
+    run_hunt_segment_writer(repo, "hunt-a", hunt_partial=False)
+    lookback_repo = _repo()
+    lookback_repo.create_hunt("build", {}, "manifest-build", "test")
+    LookbackWriter(
+        lookback_repo, FakeHistory(events), site="site-a", specs=[spec], normalizer="fixture@1",
+        budget=LookbackBudget(queries=10, records=10_000, seconds=10), now=lambda: START + H,
+        network_digest="network-a",
+    ).fill(hunt_id="build", targets=["host-index"], start=START, end=START + H)
+    assert _merged_counts(repo, repo.baseline_segments(statuses=["active"])) == _merged_counts(
+        lookback_repo, lookback_repo.baseline_segments(statuses=["active"]))
+
+
+def test_token_material_over_the_hunts_budget_is_not_kept_and_its_cells_are_never_written(monkeypatch):
+    from romulus.hunt import sweep as sweep_module
+    from romulus.hunt.sweep import Sweep
+
+    spec = SPEC_BY_ID["bl.ext_dest"]
+    repo = _repo()
+    _hunt(repo, hours=1, spec=spec, networks={"source": "configured", "digest": "network-a"})
+    monkeypatch.setattr(sweep_module, "BASELINE_TOKEN_ROWS_PER_HUNT", 3)
+    sweep = Sweep.__new__(Sweep)
+    sweep.repo, sweep.hunt_id, sweep._baseline_token_rows = repo, "hunt-a", None
+    sweep._baseline_observations = lambda playbook, result: ()
+    playbook = ExternalDestinationBaseline()
+    half = START + timedelta(minutes=30)
+    for start, end, flows in ((START, half, range(5)), (half, START + H, range(5, 10))):
+        playbook.begin_cell(f"{start.isoformat()}/{end.isoformat()}", (start, end), KeyContext())
+        playbook.consume_scoped_partition(playbook.scope_partition(
+            [_flow(f"f{index}", int((start - START).total_seconds() // 60) + index % 5, "192.0.2.1", index)
+             for index in flows]))
+        result = playbook.finish_cell()
+        sweep._save_baseline_cell(playbook, "host-index", f"{start.isoformat()}/{end.isoformat()}",
+                                  "evaluated_complete", 5, [], result, None, [], {})
+
+    cells = [cell for cell in repo.rule_cells("hunt-a", rule_id=spec.id) if cell["target"] == "host-index"]
+    assert any(cell["detail"].get("material_complete") is False for cell in cells)
+    assert repo.baseline_window_token_rows("hunt-a") <= 3
+    summary = run_hunt_segment_writer(repo, "hunt-a", hunt_partial=False)
+    assert repo.baseline_segments() == []
+    assert "1 hour(s) not written: an incomplete window cell" in summary["specs"][spec.id]["reason"]
+
+
+def test_a_cells_in_memory_token_material_is_capped_honestly():
+    from romulus.baseline.count import KeyCounter
+
+    spec = SPEC_BY_ID["bl.ext_dest"]
+    counter = KeyCounter("cell", spec, span=(START, START + timedelta(minutes=30)), token_material_cap=10)
+    for index in range(30):
+        counter.consume(_flow(f"f{index}", index % 30, "192.0.2.1", index), KeyContext())
+
+    assert counter.partial and any("token" in reason for reason in counter.reasons)

@@ -30,6 +30,8 @@ _HOUR = timedelta(hours=1)
 DEFAULT_RETAIN_BYTES = 2_000_000_000
 # Hunt states no resume can follow: their material serves nothing once their writer has run.
 _UNRESUMABLE = {"completed_within_scope", "canceled"}
+# How kept material leaves the store when no resumed finish releases it.
+_RELEASED_BY = "released at its resumed finish, or by the disk budget, oldest first"
 
 
 def _canonical(value) -> str:
@@ -91,11 +93,14 @@ def cell_complete(cell: dict) -> bool:
     """Whether a window cell's inputs were complete. An empty cell of an inapplicable target is complete only when
     its retrieval was: a partial retrieval is never written as complete, empty history. A cell recorded before
     the flag existed counts only if it states no reason."""
+    detail = cell.get("detail") or {}
+    if detail.get("material_complete") is False:
+        # its counts are exact for detection, but its shared-hour token material was not kept (budget)
+        return False
     if cell["state"] == "evaluated_complete":
         return True
     if cell["state"] != "not_applicable_no_events":
         return False
-    detail = cell.get("detail") or {}
     return bool(detail.get("retrieval_complete", not detail.get("reasons")))
 
 
@@ -331,11 +336,16 @@ def _write_target(repo: Repo, hunt_id: str, spec, target: str, *, site: str,
     runs, skipped = writable_runs(cells, spans, whole, deduplicates=spec.deduplicates_records)
     reasons = [f"{hours} hour(s) not written: {reason}" for reason, hours in sorted(skipped.items())]
     legacy_unplaced = repo.baseline_window_has_unplaced_counts(hunt_id, spec.id, spec.version, target)
+    # Material that keeps each deduplicated key's tokens per hour merges across cells of any width exactly. Only
+    # material staged before tokens were kept still needs every bucket inside one cell.
+    legacy_tokens = spec.deduplicates_records and repo.baseline_window_has_untokened_material(
+        hunt_id, spec.id, spec.version, target,
+    )
     count = 0
     longest = 0.0
     for run in runs:
         hours = int((run[1] - run[0]) / _HOUR)
-        if spec.deduplicates_records and repo.baseline_window_dedup_bucket_spans_cells(
+        if legacy_tokens and repo.baseline_window_dedup_bucket_spans_cells(
                 hunt_id, spec.id, spec.version, target, run,
         ):
             reasons.append(f"{hours} hour(s) not written: a deduplicated bucket spans multiple window cells")
@@ -347,7 +357,7 @@ def _write_target(repo: Repo, hunt_id: str, spec, target: str, *, site: str,
         try:
             reason, written, seconds = _write_run(
                 repo, hunt_id, spec, target, run, cells, spans, site=site, normalizer=normalizer,
-                network_digest=network_digest, now=now,
+                network_digest=network_digest, now=now, legacy_tokens=legacy_tokens,
             )
         except ValueError as error:
             # A refused segment (an id already stored with other content, an invalid row) costs only this run.
@@ -361,7 +371,8 @@ def _write_target(repo: Repo, hunt_id: str, spec, target: str, *, site: str,
 
 def _write_run(repo: Repo, hunt_id: str, spec, target: str, run: tuple[datetime, datetime], cells: list[dict],
                spans: dict[str, tuple[datetime, datetime]], *, site: str, normalizer: str,
-               network_digest: str | None, now: datetime) -> tuple[str | None, int, float]:
+               network_digest: str | None, now: datetime, legacy_tokens: bool = False,
+               ) -> tuple[str | None, int, float]:
     """Write one run of complete hours as one segment: (the reason it was not written or None, written, seconds)."""
     event_total = 0
     first_hour: datetime | None = None
@@ -412,7 +423,9 @@ def _write_run(repo: Repo, hunt_id: str, spec, target: str, run: tuple[datetime,
     seconds = repo.append_baseline_segment_rows(
         segment_id,
         ({"segment_id": segment_id, **item} for item in _without_excluded(
-            repo.baseline_window_merged_counts(
+            repo.baseline_window_merged_dedup_counts(
+                hunt_id, spec.id, target, spec_version=spec.version, span=run,
+            ) if spec.deduplicates_records and not legacy_tokens else repo.baseline_window_merged_counts(
                 hunt_id, spec.id, target, spec_version=spec.version, span=run,
             ), excluded,
         )),
@@ -473,8 +486,10 @@ def _settle_material(repo: Repo, hunt_id: str, specs: list[str], targets: list[s
         decision = {"kept": False, "reason": "the resumed hunt finished; material is kept through one resume"}
     else:
         size = repo.baseline_window_material_bytes(hunt_id)
-        why = ("kept for a resumed run" if baseline_finished
-               else "kept for the resumed baseline stage, which judges from it")
+        # Nothing guarantees a resume: the budget is what bounds how long the material stays.
+        why = ("kept while the hunt can still resume" if baseline_finished
+               else "kept while the hunt can still resume: its resumed baseline stage judges from it")
+        why += f"; {_RELEASED_BY}"
         repo.retain_baseline_window_material(hunt_id, bytes_=size, retained_at=now, reason=why)
         decision = {"kept": True, "reason": why, "bytes": size}
     # Material of other hunts that no finish ever settled (a crashed run, or a store written before this ledger) is
@@ -494,7 +509,7 @@ def _settle_material(repo: Repo, hunt_id: str, specs: list[str], targets: list[s
                 since = since.replace(tzinfo=UTC)
             repo.retain_baseline_window_material(
                 other, bytes_=repo.baseline_window_material_bytes(other), retained_at=since,
-                reason="kept from an earlier unsettled finish",
+                reason=f"kept from an earlier unsettled finish while the hunt can still resume; {_RELEASED_BY}",
             )
         else:
             _release_hunt(repo, other, _hunt_pairs(repo, other),

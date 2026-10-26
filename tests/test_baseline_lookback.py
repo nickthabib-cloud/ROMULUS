@@ -588,7 +588,7 @@ def test_parent_across_a_failed_hour_is_unresolved_never_the_older_generation():
     assert "e3: parent exec in an unobserved hour" in child_gap[0].reason
 
 
-def test_parent_across_an_hour_another_hunt_built_is_unresolved_never_the_older_generation():
+def test_parent_in_an_hour_another_hunt_built_resolves_from_its_kept_carry_input_never_the_older_generation():
     repo = _repo()
     repo.create_hunt("A", {}, "d", "test")
     repo.create_hunt("B", {}, "d", "test")
@@ -611,11 +611,12 @@ def test_parent_across_an_hour_another_hunt_built_is_unresolved_never_the_older_
         result = _pair_writer(repo, source, carry_b).fill(
             hunt_id="B", targets=["host-index"], start=F_HOUR, end=START,
         )
-    # Hunt B skipped G because hunt A's segment covers it, so B's carry never saw /true_parent.
+    # Hunt A's segment covers G, so hunt B does not read it again; B's carry replays the carry input A kept for G,
+    # sees /true_parent, and the child resolves to it as on a store A never touched.
     assert G_HOUR not in [start for _, start in source.plans]
-    assert ("/old", "/bin/sh") not in [(parent, child) for _, parent, child in _pair_keys(repo)]
-    child_gap = [gap for gap in result.gaps if gap.start == H_HOUR]
-    assert child_gap and "e3: parent exec in an unobserved hour" in child_gap[0].reason
+    keys = [(parent, child) for _, parent, child in _pair_keys(repo)]
+    assert ("/old", "/bin/sh") not in keys and ("/true_parent", "/bin/sh") in keys
+    assert not [gap for gap in result.gaps if gap.start == H_HOUR]
 
 
 def test_partially_fetched_hour_breaks_parent_continuity():
