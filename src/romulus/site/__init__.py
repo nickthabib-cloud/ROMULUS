@@ -160,11 +160,11 @@ class CollectionGroup(BaseModel):
     @classmethod
     def _event_channels(cls, value):
         if not isinstance(value, (list, tuple)):
-            raise ValueError("event_channels must be a list of channel names")
+            raise ValueError("event_channels must be a list of channel names")  # noqa: TRY004 - pydantic reports ValueError
         normalized: dict[str, str] = {}
         for item in value:
             if not isinstance(item, str):
-                raise ValueError("event_channels entries must be text")
+                raise ValueError("event_channels entries must be text")  # noqa: TRY004 - pydantic reports ValueError
             name = item.strip()
             if not name or len(name) > _MAX_CHANNEL_NAME or any(ord(char) < 32 for char in name):
                 raise ValueError(f"invalid event channel name {item!r}")

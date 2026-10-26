@@ -190,7 +190,7 @@ def test_a_stale_page_never_overwrites_a_newer_file(site):
     ({"domain_controllers": "dc-*"}, "host names, not globs"),
 ])
 def test_an_invalid_form_is_shown_back_with_the_reason_and_writes_nothing(site, fields, message):
-    settings, repo, login = site
+    settings, _repo, login = site
     _write(settings.home)
     lead = login("lead1")
     page = lead.get("/site").text
