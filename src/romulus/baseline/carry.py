@@ -148,8 +148,12 @@ class PendingResolution:
 
 
 _HOUR = timedelta(hours=1)
+_MICRO = timedelta(microseconds=1)
 
 UNOBSERVED_HOUR = "parent exec in an unobserved hour"
+# Internal: no stored generation precedes the child, observation runs unbroken, but a break before the child could
+# hide its parent's exec. Only a process observation of the parent after that break can resolve it.
+BREAK_BEFORE = "an exec of the host before the child was not carried"
 UNCARRIED_EXEC = "an exec of the host between parent and child was not carried"
 BEFORE_HISTORY = "parent exec before history"
 SPANS_TARGETS = "host exec history spans targets"
@@ -157,6 +161,43 @@ SPANS_TARGETS = "host exec history spans targets"
 
 def _hour(value: datetime) -> datetime:
     return value.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
+
+
+def _widen(spans: dict[tuple[str, str], list[datetime]], key: tuple[str, str], ts: datetime) -> None:
+    span = spans.get(key)
+    if span is None:
+        spans[key] = [ts, ts]
+    else:
+        span[0], span[1] = min(span[0], ts), max(span[1], ts)
+
+
+class _BreakSet:
+    """Break ranges per host, bounded per host-hour: the span [first, last] of the instants of unstorable records
+    in each hour, or the whole hour where an instant cannot be trusted."""
+
+    def __init__(self) -> None:
+        self._instants: dict[str, dict[datetime, list[datetime]]] = {}
+        self._whole: dict[str, set[datetime]] = {}
+
+    def add(self, host: str, ts: datetime, *, whole_hour: bool = False) -> None:
+        instant = ts.astimezone(UTC)
+        hour = _hour(instant)
+        if whole_hour:
+            self._whole.setdefault(host, set()).add(hour)
+            return
+        span = self._instants.setdefault(host, {}).get(hour)
+        if span is None:
+            self._instants[host][hour] = [instant, instant]
+        else:
+            span[0], span[1] = min(span[0], instant), max(span[1], instant)
+
+    def ranges(self) -> dict[str, set[tuple[datetime, datetime]]]:
+        out: dict[str, set[tuple[datetime, datetime]]] = {}
+        for host, hours in self._instants.items():
+            out.setdefault(host, set()).update((first, last + _MICRO) for first, last in hours.values())
+        for host, hours in self._whole.items():
+            out.setdefault(host, set()).update((hour, hour + _HOUR) for hour in hours)
+        return out
 
 
 class CarryInStore:
@@ -192,9 +233,11 @@ class CarryInStore:
         self._markers: dict[tuple[str, str], tuple[str, datetime]] = {} if _markers is None else _markers
         # Cached markers advanced in memory but not yet on disk; a flush writes only these.
         self._dirty: set[tuple[str, str]] = set() if _dirty is None else _dirty
-        # Fed but not stored since the last take_uncarried(): host -> typed hours, and whether any had no host.
-        self._uncarried: dict[str, set[datetime]] = {}
+        # Fed but not stored since the last take_uncarried(): host -> break ranges, and whether any had no host.
+        self._uncarried = _BreakSet()
         self._hostless = False
+        # per host: (break ranges, boot spans) read for resolution; dropped whenever this carry writes either
+        self._resolution_cache: dict[str, tuple[list, dict]] = {}
 
     def for_target(self, target: str, *, horizon: datetime | None = None) -> CarryInStore:
         """The same hunt's carry for another target; the marker cache and its cap are shared."""
@@ -205,36 +248,103 @@ class CarryInStore:
         """Record that every record of this target in [start, end) has been fed to the carry."""
         self.repo.mark_baseline_parent_observed(self.hunt_id, self.target, start, end)
 
-    def _uncarry(self, host: str | None, ts: datetime) -> None:
+    def _uncarry(self, host: str | None, ts: datetime, *, whole_hour: bool = False) -> None:
+        """Record a record fed but not stored. Its own instant is the break, unless `whole_hour` (its instant is not
+        trustworthy, as for a record typed outside the hour it was retrieved in): then its whole hour is."""
         if not host:
             self._hostless = True
         else:
-            self._uncarried.setdefault(host, set()).add(_hour(ts))
+            self._uncarried.add(host, ts, whole_hour=whole_hour)
 
-    def take_uncarried(self) -> tuple[dict[str, set[datetime]], bool]:
-        """Return and reset the execs fed but not stored: {host: typed hours}, and whether one had no host."""
-        found, hostless = self._uncarried, self._hostless
-        self._uncarried, self._hostless = {}, False
+    def take_uncarried(self) -> tuple[dict[str, set[tuple[datetime, datetime]]], bool]:
+        """Return and reset the records fed but not stored: {host: break ranges}, and whether one had no host."""
+        found, hostless = self._uncarried.ranges(), self._hostless
+        self._uncarried, self._hostless = _BreakSet(), False
         return found, hostless
 
-    def record_breaks(self, uncarried: dict[str, set[datetime]]) -> None:
-        """Write each host's uncarried hours to its break ledger, adjacent hours as one range."""
+    def record_breaks(self, uncarried: dict[str, set[tuple[datetime, datetime]]]) -> None:
+        """Write each host's break ranges to its break ledger (touching ranges coalesce)."""
         for host in sorted(uncarried):
-            hours = sorted(uncarried[host])
-            run_start = previous = hours[0]
-            for hour in [*hours[1:], None]:
-                if hour is not None and hour == previous + _HOUR:
-                    previous = hour
-                    continue
-                self.repo.mark_baseline_parent_break(self.hunt_id, self.target, host, run_start, previous + _HOUR)
-                if hour is not None:
-                    run_start = previous = hour
+            self._resolution_cache.pop(host, None)
+            for start, end in sorted(uncarried[host]):
+                self.repo.mark_baseline_parent_break(self.hunt_id, self.target, host, start, end)
+
+    def _save_spans(self, spans: dict[tuple[str, str], list[datetime]]) -> None:
+        """Widen each (host, boot)'s recorded span of record times: the evidence of which boot ran when."""
+        if spans:
+            self.repo.widen_baseline_parent_boot_spans(self.hunt_id, self.target, [
+                {"host": host, "boot": boot, "earliest": first, "latest": last}
+                for (host, boot), (first, last) in sorted(spans.items())
+            ])
+            for host, _boot in spans:
+                self._resolution_cache.pop(host, None)
+            spans.clear()
+
+    def _breaks_and_spans(self, host: str) -> tuple[list, dict]:
+        cached = self._resolution_cache.get(host)
+        if cached is None:
+            cached = (self.repo.baseline_parent_breaks(self.hunt_id, self.target, host),
+                      self.repo.baseline_parent_boot_spans(self.hunt_id, self.target, host))
+            if len(self._resolution_cache) >= MARKER_CACHE_CAP:
+                self._resolution_cache.clear()
+            self._resolution_cache[host] = cached
+        return cached
+
+    def _reachable_break(self, host: str, boot: str | None, ts: datetime) -> bool:
+        """Whether a break of the host at or before `ts` could hide an exec of the child's boot.
+
+        A break wholly at or before the last record of another boot that itself precedes the child's boot cannot:
+        that boot was still running then, so the child's boot had not started. Without the child's boot, or
+        without evidence that another boot preceded it, every earlier break could.
+        """
+        breaks, spans = self._breaks_and_spans(host)
+        earlier = [(start, end) for start, end in breaks if start <= ts]
+        if not earlier:
+            return False
+        floor = None
+        own = spans.get(boot) if boot else None
+        if own is not None:
+            # the last record of any other boot seen before the child's boot's first record
+            prior = [latest for other, (_earliest, latest) in spans.items() if other != boot and latest < own[0]]
+            floor = max(prior, default=None)
+        if floor is None:
+            return True
+        return any(end - _MICRO > floor for _start, end in earlier)
 
     def parent(self, host: str, pid: int, ts: datetime, boot: str | None = None,
                serial: int | None = None) -> tuple[tuple | None, str | None]:
         """The parent identity for a child exec'd at (ts, serial), or None with the reason it cannot be known."""
+        found, reason, _blocked = self._stored_parent(host, pid, ts, boot, serial)
+        return found, reason
+
+    def resolve_parent(self, host: str, pid: int, ts: datetime, boot: str | None = None,
+                       serial: int | None = None) -> tuple[tuple | None, str | None]:
+        """`parent`, then a process observation of the parent where the stored execs cannot answer.
+
+        The observation must follow the latest stored generation before the child, when there is one: it then
+        shows the image after every exec the carry holds of that process before the child, and `observed_parent`
+        requires that no break, unobserved hour or evicted exec lies between it and the child, so nothing could
+        have replaced that image since. A stored generation after the observation would itself be the latest, so
+        an exec between the observation and the child always blocks. A store that kept less (an empty store, or
+        one under budget pressure) therefore never resolves more than a store that kept more.
+        """
+        found, reason, fallback = self._stored_parent(host, pid, ts, boot, serial)
+        if found is not None or fallback is None:
+            return found, reason
+        observed, why = self.observed_parent(host, pid, ts, boot, serial, after=fallback[0])
+        if observed is not None:
+            return observed, None
+        if reason == BEFORE_HISTORY:
+            return None, why
+        return None, UNCARRIED_EXEC if reason == BREAK_BEFORE else reason
+
+    def _stored_parent(self, host: str, pid: int, ts: datetime, boot: str | None,
+                       serial: int | None) -> tuple[tuple | None, str | None, tuple | None]:
+        """(parent, reason, fallback). `fallback` is None when no observation may answer instead; else it is
+        `(after,)`: the latest stored generation before the child as (instant, serial), which an observation must
+        follow, or None when no stored generation precedes the child."""
         if len(self.repo.baseline_parent_targets(self.hunt_id, host)) > 1:
-            return None, SPANS_TARGETS
+            return None, SPANS_TARGETS, None
         child_hour = _hour(ts)
         child_end = child_hour + _HOUR
         # Observation must also run on to the horizon: a later hour could hold an earlier-typed exec.
@@ -248,26 +358,28 @@ class CarryInStore:
         entry = place_child(generations, at, serial)
         if entry is None and any(held[0] == at and (held[1] is None or serial is None) for held in generations):
             # A held generation at the child's exact instant, with no order between them.
-            return None, UNCARRIED_EXEC
+            return None, UNCARRIED_EXEC, None
         if entry is None:
             # No stored generation precedes the child. An uncarried exec of the host before the child may be the
-            # parent. Only when observation runs unbroken from the start of this target's ledger through the
-            # child (and horizon) is the exec before history; otherwise it may sit in an unobserved hour.
-            if self.repo.baseline_parent_break_overlaps(
-                    self.hunt_id, self.target, host, datetime.fromtimestamp(0, UTC), child_end):
-                return None, UNCARRIED_EXEC
+            # parent, unless it provably lies in an earlier boot. Only when observation runs unbroken from the
+            # start of this target's ledger through the child (and horizon) is the exec before history; otherwise
+            # it may sit in an unobserved hour. With a reachable break before it, only a process observation of the
+            # parent after that break can still name it (`observed_parent` checks the break against its interval).
+            reachable = self._reachable_break(host, boot, ts)
             ranges = self.repo.baseline_parent_observed_ranges(self.hunt_id, self.target)
             if not ranges or (ranges[0][0] <= child_hour and observed_end <= ranges[0][1]):
-                return None, BEFORE_HISTORY
-            return None, UNOBSERVED_HOUR
-        exec_hour = _hour(datetime.fromtimestamp(entry[0], UTC))
+                return None, BREAK_BEFORE if reachable else BEFORE_HISTORY, (None,)
+            return None, UNCARRIED_EXEC if reachable else UNOBSERVED_HOUR, (None,)
+        exec_ts = datetime.fromtimestamp(entry[0], UTC)
+        exec_hour = _hour(exec_ts)
         if not self.repo.baseline_parent_observed_covers(self.hunt_id, self.target, exec_hour, observed_end):
-            return None, UNOBSERVED_HOUR
+            return None, UNOBSERVED_HOUR, ((exec_ts, entry[1]),)
+        # A break blocks only what it can fall inside: the interval from the parent's exec to the child, inclusive.
         if entry[6] or self.repo.baseline_parent_break_overlaps(
-                self.hunt_id, self.target, host, exec_hour, child_end):
+                self.hunt_id, self.target, host, exec_ts, ts + _MICRO):
             # An ambiguous generation (two images at one instant, unordered) is an uncarried exec too.
-            return None, UNCARRIED_EXEC
-        return (entry[0], entry[2], entry[3], entry[4], entry[5]), None
+            return None, UNCARRIED_EXEC, ((exec_ts, entry[1]),)
+        return (entry[0], entry[2], entry[3], entry[4], entry[5]), None, None
 
     def replay_hour(self, hour: CarryHour) -> bool:
         """Feed one persisted carry hour through the same rules as its records; True when the hour may join the
@@ -284,8 +396,8 @@ class CarryInStore:
             item.ts, -1 if item.serial is None else item.serial, item.event_id, item.host, item.pid,
         )))
         uncarried, _hostless = self.take_uncarried()
-        for host, hours in hour.breaks.items():
-            uncarried.setdefault(host, set()).update(hours)
+        for host, ranges in hour.breaks.items():
+            uncarried.setdefault(host, set()).update(ranges)
         if uncarried:
             self.record_breaks(uncarried)
         return not hour.hostless
@@ -351,8 +463,8 @@ class CarryInStore:
                     self._uncarry(None, event.ts)
                 else:
                     if hour is not None and not hour[0] <= event.ts < hour[1]:
-                        self._uncarry(event.host, event.ts)
-                        self._uncarry(event.host, hour[0])
+                        self._uncarry(event.host, event.ts, whole_hour=True)
+                        self._uncarry(event.host, hour[0], whole_hour=True)
                     pid, executable = event.get("process.pid"), event.get("process.executable")
                     if (event.outcome != Outcome.success or isinstance(pid, bool) or not isinstance(pid, int)
                             or pid < 0 or not isinstance(executable, str) or not executable):
@@ -409,8 +521,8 @@ class CarryInStore:
                         self._uncarry(None, ts)
                     else:
                         if not hour[0] <= ts < hour[1]:
-                            self._uncarry(host, ts)
-                            self._uncarry(host, hour[0])
+                            self._uncarry(host, ts, whole_hour=True)
+                            self._uncarry(host, hour[0], whole_hour=True)
                         pid, executable = row.get("pid"), row.get("executable")
                         if (outcome != Outcome.success or isinstance(pid, bool) or not isinstance(pid, int)
                                 or pid < 0 or not isinstance(executable, str) or not executable):
@@ -433,10 +545,12 @@ class CarryInStore:
         if chunk_size < 1:
             raise ValueError("observation chunk size must be positive")
         pending: list[dict] = []
+        spans: dict[tuple[str, str], list[datetime]] = {}
         written = 0
 
         def flush() -> None:
             nonlocal written
+            self._save_spans(spans)
             if pending:
                 written += self.repo.upsert_baseline_parent_observations(pending, chunk_size=chunk_size)
                 pending.clear()
@@ -454,6 +568,7 @@ class CarryInStore:
                 self._uncarry(item.host, item.ts)
                 continue
             timestamp = item.ts.astimezone(UTC)
+            _widen(spans, (item.host, item.boot), timestamp)
             marker = self._marker(item.host)
             if marker is None:
                 if not self.repo.set_baseline_parent_boot(
@@ -491,8 +606,12 @@ class CarryInStore:
         return written
 
     def observed_parent(self, host: str, pid: int, ts: datetime, boot: str | None,
-                        serial: int | None = None) -> tuple[tuple | None, str | None]:
-        """Resolve a long-lived parent from its nearest same-boot process observations, never by inference."""
+                        serial: int | None = None, *,
+                        after: tuple[datetime, int | None] | None = None) -> tuple[tuple | None, str | None]:
+        """Resolve a long-lived parent from its nearest same-boot process observations, never by inference.
+
+        `after`: a stored exec of the pid, as (instant, serial), that the observed state must provably follow (a
+        later instant, or the same instant and a greater audit serial)."""
         if not boot:
             return None, "parent boot is not recorded"
         if len(self.repo.baseline_parent_targets(self.hunt_id, host)) > 1:
@@ -532,12 +651,16 @@ class CarryInStore:
         if not view.prior:
             return None, "parent observation follows child"
         observed_ts = datetime.fromtimestamp(view.image.ts, UTC)
+        if after is not None and not (
+                observed_ts > after[0] or (observed_ts == after[0] and after[1] is not None
+                                           and view.image.serial is not None and view.image.serial > after[1])):
+            # the observed state may be the image before that exec
+            return None, UNCARRIED_EXEC
         observed_end = max(_hour(ts) + _HOUR, self.horizon) if self.horizon is not None else _hour(ts) + _HOUR
         if not self.repo.baseline_parent_observed_covers(
                 self.hunt_id, self.target, _hour(observed_ts), observed_end):
             return None, UNOBSERVED_HOUR
-        if self.repo.baseline_parent_break_overlaps(
-                self.hunt_id, self.target, host, observed_ts, _hour(ts) + _HOUR):
+        if self.repo.baseline_parent_break_overlaps(self.hunt_id, self.target, host, observed_ts, ts + _MICRO):
             return None, UNCARRIED_EXEC
         evicted = self.repo.baseline_parent_eviction_bounds(
             self.hunt_id, self.target, host, pid, boot,
@@ -552,10 +675,12 @@ class CarryInStore:
         if chunk_size < 1:
             raise ValueError("carry-in chunk size must be positive")
         pending: dict[tuple[str, str, int], list[dict]] = {}
+        spans: dict[tuple[str, str], list[datetime]] = {}
         seen = maximum = 0
 
         def flush() -> None:
             nonlocal maximum, seen
+            self._save_spans(spans)
             if pending:
                 self.repo.upsert_baseline_parents(
                     row for generations in pending.values() for row in generations
@@ -583,6 +708,7 @@ class CarryInStore:
                 # is a break for its host.
                 self._uncarry(item.host, timestamp)
                 continue
+            _widen(spans, (item.host, boot), timestamp)
             marker = self._marker(item.host)
             if marker is None:
                 if not self.repo.set_baseline_parent_boot(
@@ -665,7 +791,8 @@ def _keep_latest_two(generations: list[dict], row: dict) -> None:
 
 
 # Bumped whenever what a persisted carry hour holds, or how it is reduced, changes: other formats are never read.
-CARRY_FORMAT = 1
+# Format 2 keeps break instants (the span of a host's unstorable records in the hour) instead of whole hours.
+CARRY_FORMAT = 2
 
 
 @dataclass(frozen=True)
@@ -679,9 +806,10 @@ class CarryHour:
 
     execs: tuple[ParentExec, ...]
     observations: tuple[ParentObservation, ...]
-    # host -> hours holding an exec that could not be stored whatever the carry holds (no pid or executable, an
-    # unknown outcome, a typed time outside the hour)
-    breaks: dict[str, frozenset[datetime]]
+    # host -> break ranges of records that could not be stored whatever the carry holds (no pid or executable, an
+    # unknown outcome, an unrecorded boot: the span of their instants in each hour; a typed time outside the hour:
+    # the whole hour)
+    breaks: dict[str, frozenset[tuple[datetime, datetime]]]
     hostless: bool
 
 
@@ -696,11 +824,11 @@ class CarryHourBuilder:
         self.hour = hour
         self._generations: dict[tuple[str, str, int], list[dict]] = {}
         self._observations: dict[tuple[str, str, int], dict[tuple, ParentObservation]] = {}
-        self._breaks: dict[str, set[datetime]] = {}
+        self._breaks = _BreakSet()
         self._hostless = False
 
-    def _break(self, host: str, ts: datetime) -> None:
-        self._breaks.setdefault(host, set()).add(_hour(ts))
+    def _break(self, host: str, ts: datetime, *, whole_hour: bool = False) -> None:
+        self._breaks.add(host, ts, whole_hour=whole_hour)
 
     def add(self, events: Iterable[TypedEvent]) -> None:
         start, end = self.hour
@@ -726,8 +854,8 @@ class CarryHourBuilder:
                 self._hostless = True
                 continue
             if not start <= event.ts < end:
-                self._break(event.host, event.ts)
-                self._break(event.host, start)
+                self._break(event.host, event.ts, whole_hour=True)
+                self._break(event.host, start, whole_hour=True)
             pid, executable = event.get("process.pid"), event.get("process.executable")
             if (event.outcome != Outcome.success or isinstance(pid, bool) or not isinstance(pid, int) or pid < 0
                     or not isinstance(executable, str) or not executable):
@@ -763,11 +891,11 @@ class CarryHourBuilder:
                 if not (0 < index < len(ordered) - 1 and state[index - 1] == state[index] == state[index + 1])
             )
         return CarryHour(execs, tuple(observations),
-                         {host: frozenset(hours) for host, hours in sorted(self._breaks.items())}, self._hostless)
+                         {host: frozenset(ranges) for host, ranges in sorted(self._breaks.ranges().items())},
+                         self._hostless)
 
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
-_MICRO = timedelta(microseconds=1)
 
 
 def _us(value: datetime | None) -> int | None:
@@ -793,8 +921,8 @@ def save_carry_hour(repo: Repo, *, site: str, target: str, hour: datetime, norma
     observations = [{"ref": ref(item.host, item.boot), "pid": item.pid, "ts_us": _us(item.ts),
                      "serial": item.serial, "executable": item.executable, "parent_pid": item.parent_pid,
                      "session": item.session, "event_id": item.event_id} for item in carry.observations]
-    breaks = [{"ref": ref(host, None), "hour_us": _us(value)}
-              for host, hours in sorted(carry.breaks.items()) for value in sorted(hours)]
+    breaks = [{"ref": ref(host, None), "start_us": _us(start), "end_us": _us(end)}
+              for host, ranges in sorted(carry.breaks.items()) for start, end in sorted(ranges)]
     return repo.save_baseline_carry_hour(
         site=site, target=target, hour=hour, normalizer=normalizer, format_=CARRY_FORMAT, hostless=carry.hostless,
         hosts=sorted(refs, key=refs.__getitem__), execs=execs, observations=observations, breaks=breaks,
@@ -809,9 +937,9 @@ def load_carry_hour(repo: Repo, *, site: str, target: str, hour: datetime, norma
     if stored is None:
         return None
     hosts = stored["hosts"]
-    breaks: dict[str, set[datetime]] = {}
+    breaks: dict[str, set[tuple[datetime, datetime]]] = {}
     for row in stored["break"]:
-        breaks.setdefault(hosts[row["ref"]][0], set()).add(_from_us(row["hour_us"]))
+        breaks.setdefault(hosts[row["ref"]][0], set()).add((_from_us(row["start_us"]), _from_us(row["end_us"])))
     return CarryHour(
         tuple(ParentExec(hosts[row["ref"]][0], hosts[row["ref"]][1], row["pid"], _from_us(row["ts_us"]),
                          row["executable"], row["parent_pid"], row["raw_id"], row["serial"], bool(row["ambiguous"]),
@@ -837,12 +965,8 @@ class PendingResolver:
             resolved = exec_pair_key(self.spec, pending.host, parent, pending.child_executable)
             return PendingResolution(pending.event_id, (resolved,), None)
         if isinstance(self.parents, CarryInStore):
-            parent, reason = self.parents.parent(
+            parent, reason = self.parents.resolve_parent(
                 pending.host, pending.ppid, pending.ts, pending.boot, pending.serial)
-            if parent is None and reason == BEFORE_HISTORY:
-                parent, reason = self.parents.observed_parent(
-                    pending.host, pending.ppid, pending.ts, pending.boot, pending.serial,
-                )
         else:
             parent = parent_at(self.parents, pending.host, pending.ppid, pending.ts.timestamp(), pending.boot,
                                pending.serial)

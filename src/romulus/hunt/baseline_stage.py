@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
+import re
 from collections.abc import Iterable, Iterator
 from datetime import datetime, timedelta
 from itertools import groupby
@@ -18,6 +19,7 @@ from romulus.baseline.lookback import (
 )
 from romulus.baseline.playbook import BASELINE_PLAYBOOKS, BaselinePlaybook
 from romulus.baseline.rate import RATE_MEAN_MULTIPLIER, RATE_MIN_COUNT, RATE_SIGMA_MULTIPLIER, threshold
+from romulus.baseline.reasons import ReasonTally
 from romulus.baseline.snapshot import SnapshotPlanner
 from romulus.baseline.spec import BASELINE_SPECS, SPEC_BY_ID, KeyContext, Pending
 from romulus.decide.policy import decide
@@ -56,6 +58,32 @@ def _task_id(hunt_id: str, manifest: dict) -> str:
     return "baseline-" + hashlib.sha256(material.encode()).hexdigest()[:24]
 
 
+# Reason classes a coverage failure names; the per-hour gaps (each with its own bounded reason) stay in the snapshot's
+# coverage and the history cells, so this reason, copied into every observation row of a spec, stays short.
+GAP_CLASSES = 3
+_COUNTED = re.compile(r" \((?:\d+ record\(s\): [^)]*|\d+ times)\)")
+
+
+def _gap_classes(gaps) -> str:
+    """The history gaps' reason classes, each with the number of hours it affects, stated once and bounded."""
+    hours: dict[str, int] = {}
+    for gap in gaps:
+        try:
+            width = int((datetime.fromisoformat(str(gap["end"])) - datetime.fromisoformat(str(gap["start"])))
+                        / _HOUR)
+        except (KeyError, TypeError, ValueError):
+            width = 1
+        for part in str(gap.get("reason") or gap.get("state")).split("; "):
+            text = _COUNTED.sub("", part).strip()
+            if text:
+                hours[text] = hours.get(text, 0) + max(width, 1)
+    ranked = sorted(hours.items(), key=lambda item: (-item[1], item[0]))
+    named = "; ".join(f"{text} ({count} hour(s))" for text, count in ranked[:GAP_CLASSES])
+    if len(ranked) > GAP_CLASSES:
+        named += f"; and {len(ranked) - GAP_CLASSES} more reason class(es) (in the history coverage)"
+    return named
+
+
 def _coverage_failure(coverage: list[dict], minimum: int) -> str | None:
     coverage = [item for item in coverage if item.get("status") != "not_applicable"]
     if not coverage:
@@ -70,18 +98,16 @@ def _coverage_failure(coverage: list[dict], minimum: int) -> str | None:
         # the latest gap end over all targets: every target's complete run reaches back at least that far
         run_start = max(str(gap["end"]) for gap in gaps if gap.get("end"))
         parts = [f"no pre-window data in the complete hours from {run_start} to the window start"]
-        other = sorted({str(gap.get("reason") or gap.get("state")) for gap in gaps
-                        if gap.get("state") != "omitted_budget"})
+        other = _gap_classes(gap for gap in gaps if gap.get("state") != "omitted_budget")
         if other:
-            parts.append(f"history gap before them: {'; '.join(other)}")
+            parts.append(f"history gap before them: {other}")
         unread = [gap["end"] for gap in gaps if gap.get("state") == "omitted_budget" and gap.get("end")]
         if unread:
             # every target's read stopped at or after the earliest end of its unread hours
             parts.append(f"history not read before {min(unread)}: lookback budget exhausted")
         return "; ".join(parts)
     if gaps:
-        reasons = "; ".join(sorted({str(gap.get("reason") or gap.get("state")) for gap in gaps}))
-        return f"history gap: {reasons}"
+        return f"history gap: {_gap_classes(gaps)}"
     bad = [item for item in coverage if item.get("status") not in {"resolved", "shortened"}]
     if bad:
         shortest = min(int(item.get("effective_hours") or 0) for item in bad)
@@ -151,7 +177,9 @@ def resolve_window_exec_pairs(repo: Repo, hunt_id: str, window: Window) -> None:
                     hunt_id, spec.id, spec.version, target, cell["partition"]):
                 repo.drop_baseline_window_cell(hunt_id, target, cell["partition"])
                 continue
-            reasons = list(cell["reasons"])
+            reasons = ReasonTally()
+            for reason in cell["reasons"]:
+                reasons.add(reason)
             segment_counter = KeyCounter(
                 cell["partition"], spec, span=(cell["start"], cell["end"]),
                 retain_observations_when_partial=True,
@@ -172,9 +200,10 @@ def resolve_window_exec_pairs(repo: Repo, hunt_id: str, window: Window) -> None:
                 pending = Pending(**body)
                 resolution = resolver.resolve(pending)
                 if resolution.reason is not None:
-                    reasons.append(f"{pending.event_id}: {resolution.reason}")
-                    segment_counter.mark_partial(reasons[-1])
-                    pending_counter.mark_partial(reasons[-1])
+                    failure = f"{pending.event_id}: {resolution.reason}"
+                    reasons.add(failure)
+                    segment_counter.mark_partial(failure)
+                    pending_counter.mark_partial(failure)
                 else:
                     refs = [{"target": source, "native_id": native}
                             for source, native in pending.raw_refs]
@@ -196,7 +225,7 @@ def resolve_window_exec_pairs(repo: Repo, hunt_id: str, window: Window) -> None:
                 "evaluated_partial" if reasons or not cell["source_complete"] else
                 "evaluated_complete"
             )
-            detail: dict = {"reasons": sorted(set(reasons))}
+            detail: dict = {"reasons": list(reasons.summary())}
             if state == "not_applicable_no_events":
                 # an inapplicable target's empty cell is complete history only if its retrieval was complete
                 detail["retrieval_complete"] = bool(cell["source_complete"]) and not reasons

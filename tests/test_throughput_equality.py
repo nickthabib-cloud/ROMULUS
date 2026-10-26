@@ -223,18 +223,48 @@ from tests import throughput_fixture as tf
 #   per-key counts (token ""); hours shared by cells keep one row per token;
 # - audit: the material block's bytes follow (921,326 -> 842,654), and the exec-pair writer reason names the break.
 # Candidates, links, tasks, events and every non-baseline cell are unchanged.
+# A break now blocks only the parent-to-child intervals it can fall inside: each record not carried breaks at its own
+# instant (its whole hour only when its instant is untrusted), and coverage reasons fold into classes with counts:
+# - rule_cells: 4 bl.exec_pair window cells (14:10-14:15, 14:30-14:35, 14:36:15-14:36:33.75, 14:38:26.25-14:38:45)
+#   become evaluated_complete with no reasons: each held one web1 child whose parent exec 41 s earlier was carried
+#   and whose interval holds none of web1's unknown-boot exec instants (they fall before the parent or after the
+#   child), so the hour-wide break no longer blocks it. Children whose break instants all follow them read "parent
+#   exec in an unobserved hour" instead of "an exec of the host between parent and child was not carried". Every
+#   other exec-pair cell's reasons are the same reasons stated as classes with counts and example ids;
+# - baseline_window_counts (+43 rows), baseline_window_scope_hours (+9 rows), baseline_hunt_exclusions (+7 rows):
+#   the four complete cells' exec-pair keys are now counted; two keys are new and five gain one occurrence, so
+#   baseline_observations has 349 rows (exec_pair unresolved 203 -> 205, all "no pre-window history");
+# - baseline_observations, tasks, audit, manifest: the history failure states the hours its class covers ("history
+#   gap: fixture has no pre-window history (504 hour(s))"); exec-pair window_failure reads 22 partial cells (was
+#   26); the manifest rule coverage follows (exec_pair evaluated_complete 10 -> 14, evaluated_partial 27 -> 23) and
+#   its coverage gaps state 205 unresolved keys; the audit's material bytes follow (842,654 -> 876,222) and the
+#   exec-pair writer reason cites the first still-unresolved record.
+# Candidates, links, events and every non-baseline cell are unchanged.
+# Where the kept execs cannot name a child's parent, a process observation of it may, when it follows the latest
+# kept exec of that process and nothing between it and the child (a break, an unobserved hour, an evicted exec)
+# could have replaced its image; before, a gap in observation anywhere earlier (13:50-13:55 here) kept it unused:
+# - rule_cells: 6 bl.exec_pair children now resolve, each the child of a /usr/bin/vi process seen only in its own
+#   audit records about 39 s before the child, with observation unbroken from then on (5 read "parent exec in an
+#   unobserved hour", 1 on web1 "an exec of the host between parent and child was not carried"; that one's
+#   observation follows web1's break by 2 s). Window cells 4 more evaluated_complete (14 -> 18), two cells lose one
+#   reason, and the exec-pair summary cell states 18 partial cells and 211 unresolved keys;
+# - baseline_window_counts (+79 rows), baseline_window_scope_hours (+12 rows), baseline_observations (+6 rows, all
+#   unresolved for the fixture's absent history): the newly complete cells' keys are counted;
+# - audit, tasks, manifest: exec_pair observations and unresolved 205 -> 211, window_failure 22 -> 18 cells, rule
+#   coverage evaluated_complete 14 -> 18 and evaluated_partial 23 -> 19; material bytes 876,222 -> 936,342.
+# Every other digest and the non-baseline semantic projection are unchanged.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
-    "audit": "dbc10a1f0da92c117fe9bf2eb2dd50f2cdb8f202d2deec0ed822d33fe1ab6151",
+    "audit": "23d9b87c75d030df8ff5bcbf07deacc75416c325dd74bcc89243cc1b5488ae93",
     "baseline_counts": "1a021de3254f91225689f1bdc8ce3e0cfd416c90a4148bcd4f1c93b6db9cb16d",
-    "baseline_hunt_exclusions": "fe9edaf9efe3065352ae1bedc95ac7e78ddbe2d6e34f835203cfe56cb368ec56",
-    "baseline_observations": "6e91c7a74e9b28873e4143ce745af745a8adbecf8d1fa4d489f63efe5722f147",
+    "baseline_hunt_exclusions": "33dc264dde3965bf4aa1d58bf8c403124bb35f437643ab9c8f6c52026340da1f",
+    "baseline_observations": "814031e4a439a6faa3218d7b3687d2391534916c44f015b4d7b7993b7d15070f",
     "baseline_scope_hours": "fe1ef875f82a6cad7d9c7884b1936614584a9f9e0e4c008e4790ee46edf6361d",
     "baseline_segments": "e2ca9f003a97f77ac300789266c9e646610317f5577318c4b556b464a8a6fc48",
     "baseline_snapshot": "63b4c8094cb5450b1e707fd7be786e90324528e738b882358cae15cb8d53f776",
-    "baseline_window_counts": "d49fd2c0f6e022e17772d5ae5eb276796c3a3d95ff2cffbab0bc7f991c5075c6",
+    "baseline_window_counts": "7cc0f5555260b0533927f47cfe29e6a543e2d921b0cc79e4b6b89f418d6052f8",
     "baseline_window_event_hours": "bb58c65144b135443e75a690b7b2f8137ebac6b827f8e8bd8cc7606a01c53e52",
-    "baseline_window_scope_hours": "e3a243191b5431410f587f279c22b2f949717be2c5e5a228e43d4893caf2965f",
+    "baseline_window_scope_hours": "07f4081d18fb5be1dfc23c1eecd4e63eef7af093c1a70eaa7f4ea05fc772006f",
     "candidates": "3b23f98dbf25d34c4921bbec2cba932991746ad9d4a11e8963988d7c8c421bee",
     "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
     "event_citations": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
@@ -242,11 +272,11 @@ GOLDEN_STACK = {
     "events": "0165d2807ffee33aaef17dd70ba004ec4c87fa4c5f29e9dc75ba833f57b93ff7",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "0fbedb27ca9a4cb72354178444ee9aabc49f377b2c933074fe03ef29c8fbb08a",
-    "manifest": "2c42a43857f923231101d6be0ac1a50963e25290fcb17b7b03f67c462d4647a0",
+    "manifest": "09d18724cedc86dacfa661c74a211636e9be48338a09e40c9a51a3212e6333bb",
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
-    "rule_cells": "6a521ccfc0ab6389987f2381e1424c4aad0f06d6e6c3a529d063f8fa6ba92b7e",
+    "rule_cells": "c8a4cfd1937ef7b21db48c371024e7f0b085721a3e0e9324a5ce0b20641a4c92",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
-    "tasks": "bc22ee3fc01cda9958faeb568c44597780645e884939b43f4158b0a9dbd47077",
+    "tasks": "c65df4ab88c05661371cf32b49a1d22ef84d6753488bdb946c8e29376d486260",
 }
 # Captured directly from the S7 fixture through _non_baseline_semantic_digests. Typed-event-derived hashes and
 # interchangeable predicate origins are normalized, while every decision, claim, lane, raw citation and gate is

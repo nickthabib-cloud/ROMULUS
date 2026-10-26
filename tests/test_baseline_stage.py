@@ -914,7 +914,7 @@ def test_history_stopped_on_budget_is_never_called_absent():
                                              "state": "failed", "reason": "query failed"}]}]
     assert _coverage_failure(failed, 24) == (
         "no pre-window data in the complete hours from 2024-11-15T11:00:00+00:00 to the window start; history gap "
-        "before them: query failed")
+        "before them: query failed (1 hour(s))")
 
 
 def test_absent_history_names_every_gap_reason_not_only_the_budget():
@@ -926,13 +926,13 @@ def test_absent_history_names_every_gap_reason_not_only_the_budget():
         {"start": "2024-11-05T19:00:00+00:00", "end": "2024-11-10T17:00:00+00:00", "state": "omitted_budget",
          "reason": "lookback query or wall-clock budget exhausted"},
         {"start": "2024-11-12T16:00:00+00:00", "end": "2024-11-12T17:00:00+00:00", "state": "unresolved",
-         "reason": "bl.exec_path: event-9: process.exec_file.path is absent"}]}]
+         "reason": "bl.exec_path: process.exec_file.path is absent (1 record(s): event-9)"}]}]
 
     reason = _coverage_failure(coverage, 48)
 
     assert reason == (
         "no pre-window data in the complete hours from 2024-11-12T17:00:00+00:00 to the window start; history gap "
-        "before them: bl.exec_path: event-9: process.exec_file.path is absent; history not read before "
+        "before them: bl.exec_path: process.exec_file.path is absent (1 hour(s)); history not read before "
         "2024-11-10T17:00:00+00:00: lookback budget exhausted")
     assert "in the hours read" not in reason
 

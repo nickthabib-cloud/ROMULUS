@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
+from romulus.baseline.reasons import ReasonTally
 from romulus.baseline.spec import (
     BaselineKey,
     BaselineSpec,
@@ -80,7 +81,8 @@ class KeyCounter:
         self._tokens: dict[tuple, set[str]] = defaultdict(set)
         self._token_entries = 0
         self._open_bucket: datetime | None = None
-        self._partial_reasons: set[str] = set()
+        # why the counter is partial, folded into classes with counts (bounded however many records fail)
+        self._partial_reasons = ReasonTally()
         self._partial_hours: set[datetime] = set()
         self._partial_unscoped_hours: set[datetime] = set()
         self._partial_host_hours: dict[str, set[datetime]] = defaultdict(set)
@@ -94,7 +96,7 @@ class KeyCounter:
 
     @property
     def reasons(self) -> tuple[str, ...]:
-        return tuple(sorted(self._partial_reasons))
+        return self._partial_reasons.summary()
 
     @property
     def partial_hours(self) -> tuple[datetime, ...]:
