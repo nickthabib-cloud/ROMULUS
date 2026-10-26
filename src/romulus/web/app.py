@@ -343,7 +343,7 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
     @app.post("/site")
     async def save_site(request: Request):
         u = need_lead(request)
-        form = await request.form()
+        form = await request.form(max_fields=site_form.max_fields())
         if not csrf_ok(u, str(form.get("csrf", ""))):
             raise HTTPException(403, "bad CSRF token")
         digest = str(form.get("digest", ""))
@@ -351,18 +351,26 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
             content = site_form.parse_form(form)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from None
-        try:
-            before, after = save_site_facts(s.home, content, digest)
-        except SiteValidationError as exc:
-            return site_page(request, u, content, digest, bool(digest), error=str(exc), status_code=400)
-        except SiteChangedError as exc:
-            raise HTTPException(409, str(exc)) from None
-        if before.digest != after.digest:
+        if (content.get("internal_networks") or content.get("external_networks")) and (
+                s.internal_networks or s.external_networks):
+            # Saving would leave the networks set in two places, which every new hunt then refuses.
+            return site_page(request, u, content, digest, bool(digest), status_code=400, error=(
+                "internal networks are already set on this server in ROMULUS_INTERNAL_NETWORKS or "
+                "ROMULUS_EXTERNAL_NETWORKS: leave the network boxes empty, or remove those settings first"))
+
+        def record(before, after) -> None:
             changed = site_form.describe_change(before.content, after.content)
             detail = {"before_digest": before.digest or None, "after_digest": after.digest, "changed": changed}
             # Both versions fit in the record (the file is bounded); the audit log is then the file's history.
             detail |= {"before": before.content if before.present else None, "after": after.content}
             repo.audit(f"web:{u['u']}", "site.update", detail=detail)
+
+        try:
+            save_site_facts(s.home, content, digest, record=record)
+        except SiteValidationError as exc:
+            return site_page(request, u, content, digest, bool(digest), error=str(exc), status_code=400)
+        except SiteChangedError as exc:
+            raise HTTPException(409, str(exc)) from None
         return RedirectResponse("/site?saved=1", status_code=303)
 
     # ------------------------------------------------------------------ reports

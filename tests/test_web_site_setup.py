@@ -14,7 +14,14 @@ from romulus.config import Settings
 from romulus.detect.netdef import SiteNetworks
 from romulus.doctor import check_site_networks
 from romulus.hunt import run as hunt_run
-from romulus.site import COLLECTION_PATH, load_site_facts, validate_site_content
+from romulus.site import (
+    COLLECTION_PATH,
+    SiteChangedError,
+    ensure_site_unchanged,
+    load_site_facts,
+    save_site_facts,
+    validate_site_content,
+)
 from romulus.store import schema as t
 from romulus.web import site_form
 from romulus.web.app import create_app
@@ -190,7 +197,7 @@ def test_a_stale_page_never_overwrites_a_newer_file(site):
     ({"domain_controllers": "dc-*"}, "host names, not globs"),
 ])
 def test_an_invalid_form_is_shown_back_with_the_reason_and_writes_nothing(site, fields, message):
-    settings, repo, login = site
+    settings, _repo, login = site
     _write(settings.home)
     lead = login("lead1")
     page = lead.get("/site").text
@@ -260,3 +267,92 @@ def test_site_carve_outs_need_the_sites_own_ranges(tmp_path):
     _write(tmp_path, VALID + "external_networks: [10.9.0.0/24]\n")
     with pytest.raises(ValueError, match="external_networks needs internal_networks"):
         load_site_facts(tmp_path)
+
+
+def test_an_unchanged_save_writes_nothing_and_records_nothing(site):
+    settings, repo, login = site
+    _write(settings.home)
+    lead = login("lead1")
+    page = lead.get("/site").text
+    before = (settings.home / COLLECTION_PATH).read_bytes()
+    form = _form_from_view(load_site_facts(settings.home).content, csrf=_csrf(page), digest=_digest(page))
+
+    assert lead.post("/site", data=_post(form), follow_redirects=False).status_code == 303
+
+    assert (settings.home / COLLECTION_PATH).read_bytes() == before
+    assert not (settings.home / COLLECTION_PATH).with_name("collection.yaml.prev").exists()
+    with repo.engine.connect() as connection:
+        assert connection.execute(t.audit_event.select().where(t.audit_event.c.action == "site.update")).first() is None
+
+
+def test_networks_are_not_saved_while_the_environment_sets_them(tmp_path):
+    settings = Settings(home=tmp_path, secret_key=secrets.token_urlsafe(32), internal_networks=["10.2.0.0/16"])
+    app = create_app(settings)
+    password = secrets.token_urlsafe(18)
+    create_user(hunt_run.open_repo(settings).engine, "lead1", password, "lead")
+    lead = TestClient(app)
+    lead.post("/login", data={"username": "lead1", "password": password}, follow_redirects=False)
+    page = lead.get("/site").text
+    base = {"csrf": _csrf(page), "digest": "", "group_count": "1", "g0.new": "1", "g0.hosts": "dc01",
+            "g0.command_line": "1"}
+
+    refused = lead.post("/site", data={**base, "internal_networks": "10.1.0.0/16"})
+    assert refused.status_code == 400 and "already set on this server" in refused.text
+    assert not (tmp_path / COLLECTION_PATH).exists()
+    assert SiteNetworks.from_settings(settings) == SiteNetworks.from_lists(["10.2.0.0/16"])
+
+    assert lead.post("/site", data=base, follow_redirects=False).status_code == 303
+    assert load_site_facts(tmp_path).attests("dc01", "security_4688_command_line")
+
+
+def test_a_large_site_form_is_accepted(site):
+    settings, _repo, login = site
+    lead = login("lead1")
+    page = lead.get("/site").text
+    groups = [{"hosts": [f"ws-{index:03d}"], "security_event_log": True, "audit_policy": {"Logon": "both"}}
+              for index in range(150)]
+    content = {"schema": "romulus-site-collection@1", "collection": groups}
+    form = _form_from_view(validate_site_content(content).content, csrf=_csrf(page), digest="")
+
+    assert lead.post("/site", data=_post(form), follow_redirects=False).status_code == 303
+    facts = load_site_facts(settings.home)
+    assert len(facts.groups) == 150 and facts.attests("ws-149", "security_event_log")
+
+
+def test_list_entries_split_on_lines_only(site):
+    settings, _repo, login = site
+    lead = login("lead1")
+    page = lead.get("/site").text
+    form = {"csrf": _csrf(page), "digest": "", "group_count": "1", "g0.new": "1", "g0.hosts": "dc01",
+            "g0.channels_other": "Vendor-App/Operational, Extra", "g0.sysmon_installed": "1",
+            "g0.sysmon_other": "7, 10\n22"}
+    assert lead.post("/site", data=form, follow_redirects=False).status_code == 303
+    facts = load_site_facts(settings.home)
+    assert facts.groups[0].event_channels == ("vendor-app/operational, extra",)
+    assert facts.groups[0].sysmon.event_ids == (7, 10, 22)
+
+
+def test_a_change_that_cannot_be_audited_is_not_made(tmp_path):
+    _write(tmp_path)
+    before = load_site_facts(tmp_path)
+    changed = dict(before.content, domain_controllers=["dc02.example.test"])
+
+    def failing_record(_before, _after):
+        raise RuntimeError("audit store unavailable")
+
+    with pytest.raises(RuntimeError, match="audit store unavailable"):
+        save_site_facts(tmp_path, changed, before.digest, record=failing_record)
+    assert load_site_facts(tmp_path).digest == before.digest
+
+
+def test_a_stopped_hunt_cannot_resume_after_the_page_changes_the_file(site):
+    settings, _repo, login = site
+    _write(settings.home)
+    recorded = load_site_facts(settings.home).manifest_entry()
+    lead = login("lead1")
+    page = lead.get("/site").text
+    form = _form_from_view(load_site_facts(settings.home).content, csrf=_csrf(page), digest=_digest(page),
+                           domain_controllers="dc09.example.test")
+    assert lead.post("/site", data=_post(form), follow_redirects=False).status_code == 303
+    with pytest.raises(SiteChangedError, match="changed since the hunt was created"):
+        ensure_site_unchanged(settings.home, recorded)
