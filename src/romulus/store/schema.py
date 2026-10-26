@@ -480,6 +480,35 @@ baseline_segment_event_hour = Table(
     CheckConstraint("events >= 1", name="ck_baseline_segment_event_hour_events"),
 )
 
+# What one completely fetched target hour contributes to the parent carry (execs reduced to the latest two per pid,
+# observations to their state-run boundaries, hours of unstorable execs), kept beside the hour's segments so a later
+# hunt that finds the hour covered feeds its carry the same input as a hunt that reads it. Raw facts: they carry no
+# exclusions, so segment staleness never touches them; another normalizer or format is never read.
+baseline_carry_hour = Table(
+    "baseline_carry_hour", metadata,
+    Column("id", String, primary_key=True),
+    Column("site", String, nullable=False),
+    Column("target", String, nullable=False),
+    Column("hour", DateTime(timezone=True), nullable=False),
+    Column("normalizer", String, nullable=False),
+    Column("format", Integer, nullable=False),
+    Column("hostless", Integer, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint("hostless IN (0, 1)", name="ck_baseline_carry_hour_hostless"),
+)
+Index("ix_baseline_carry_hour_lookup", baseline_carry_hour.c.site, baseline_carry_hour.c.target,
+      baseline_carry_hour.c.hour, baseline_carry_hour.c.normalizer, baseline_carry_hour.c.format, unique=True)
+
+baseline_carry_row = Table(
+    "baseline_carry_row", metadata,
+    Column("carry_id", String, ForeignKey("baseline_carry_hour.id", ondelete="CASCADE"), nullable=False),
+    Column("kind", String, nullable=False),
+    Column("ordinal", Integer, nullable=False),
+    Column("body", JSON, nullable=False),
+    PrimaryKeyConstraint("carry_id", "kind", "ordinal", name="pk_baseline_carry_row"),
+    CheckConstraint("kind IN ('exec', 'observation', 'break')", name="ck_baseline_carry_row_kind"),
+)
+
 baseline_snapshot = Table(
     "baseline_snapshot", metadata,
     Column("hunt_id", String, ForeignKey("hunt.id"), primary_key=True),
@@ -700,6 +729,9 @@ baseline_window_count = Table(
     Column("bucket", DateTime(timezone=True), nullable=False),
     # Null only on material staged before migration 0022; new writers always identify the contributing hour.
     Column("material_hour", DateTime(timezone=True)),
+    # A deduplicated key's dedup token (one row per token per hour, count 1); "" for a key counted per record. Null
+    # only on material staged before tokens were kept: such material cannot be merged across cells.
+    Column("token", String),
     Column("count", Integer, nullable=False),
     Column("first_ts", DateTime(timezone=True), nullable=False),
     Column("last_ts", DateTime(timezone=True), nullable=False),

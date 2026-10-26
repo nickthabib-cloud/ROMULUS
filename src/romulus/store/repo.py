@@ -3444,6 +3444,7 @@ class Repo:
                     "count": int(row["count"]),
                     "first_ts": _utc(row["first_ts"], "window count first_ts"),
                     "last_ts": _utc(row["last_ts"], "window count last_ts"),
+                    "token": row.get("token", ""),
                 }
                 for ordinal, row in enumerate(counts)
             )
@@ -3547,6 +3548,51 @@ class Repo:
         )
         with self.engine.connect() as connection:
             return bool(connection.execute(query).scalar_one())
+
+    def baseline_window_has_untokened_material(self, hunt_id: str, spec_id: str, spec_version: str,
+                                               target: str) -> bool:
+        """Whether material staged before dedup tokens were kept exists: it cannot be merged across cells."""
+        table = t.baseline_window_count.c
+        query = select(literal(1)).where(
+            table.hunt_id == hunt_id, table.spec_id == spec_id, table.spec_version == spec_version,
+            table.target == target, table.token.is_(None),
+        ).limit(1)
+        with self.engine.connect() as connection:
+            return connection.execute(query).first() is not None
+
+    def baseline_window_merged_dedup_counts(self, hunt_id: str, spec_id: str, target: str, *,
+                                            spec_version: str, span: tuple[datetime, datetime],
+                                            page_size: int = BASELINE_PAGE) -> Iterator[dict]:
+        """A deduplicating spec's merged count rows: records of keys without a token, plus each key's distinct
+        tokens per hour across every cell. That is what hourly counters count, so a run written from cells of any
+        width equals the hourly segments of the same hours. Keyset-paged in segment-row order."""
+        if page_size < 1:
+            raise ValueError("page size must be positive")
+        table = t.baseline_window_count.c
+        order = (table.scope, table.key_digest, table.bucket)
+        start, end = _utc(span[0], "merge start"), _utc(span[1], "merge end")
+        tokened = and_(table.token.is_not(None), table.token != "")
+        after = None
+        while True:
+            query = (select(
+                table.scope_kind, table.scope, table.key_id, table.key_digest, table.key, table.bucket,
+                (func.coalesce(func.sum(case((tokened, 0), else_=table.count)), 0)
+                 + func.count(func.distinct(case((tokened, cast(table.material_hour, String) + "|"
+                                                  + table.token), else_=None)))).label("count"),
+                func.min(table.first_ts).label("first_ts"), func.max(table.last_ts).label("last_ts"),
+            ).where(
+                table.hunt_id == hunt_id, table.spec_id == spec_id, table.target == target,
+                table.spec_version == spec_version,
+                table.material_hour >= start, table.material_hour < end,
+                *(() if after is None else (tuple_(*order) > tuple_(*after),)),
+            ).group_by(*order).order_by(*order).limit(page_size))
+            with self.engine.connect() as connection:
+                page = [_with_utc(row, ("bucket", "first_ts", "last_ts"))
+                        for row in connection.execute(query).mappings()]
+            yield from page
+            if len(page) < page_size:
+                return
+            after = [page[-1]["scope"], page[-1]["key_digest"], page[-1]["bucket"]]
 
     def baseline_window_dedup_bucket_spans_cells(self, hunt_id: str, spec_id: str,
                                                  spec_version: str, target: str,
@@ -3758,6 +3804,49 @@ class Repo:
         return deleted
 
     _MATERIAL_TABLES = ("baseline_window_count", "baseline_window_scope_hour", "baseline_window_event_hour")
+
+    @staticmethod
+    def _carry_id(site: str, target: str, hour: datetime, normalizer: str, format_: int) -> str:
+        material = json.dumps([site, target, hour.isoformat(), normalizer, format_], separators=(",", ":"))
+        return "blc-" + hashlib.sha256(material.encode()).hexdigest()[:32]
+
+    def save_baseline_carry_hour(self, *, site: str, target: str, hour: datetime, normalizer: str, format_: int,
+                                 hostless: bool, execs: Iterable[dict], observations: Iterable[dict],
+                                 breaks: Iterable[dict]) -> bool:
+        """Persist one hour's carry input once, atomically; False when the store already holds it (the first
+        complete read of an hour is kept, so every later hunt replays the same input)."""
+        hour = _utc(hour, "carry hour")
+        carry_id = self._carry_id(site, target, hour, normalizer, format_)
+        with write_txn(self.engine) as connection:
+            inserted = connection.execute(insert(t.baseline_carry_hour).values(
+                id=carry_id, site=site, target=target, hour=hour, normalizer=normalizer, format=format_,
+                hostless=int(bool(hostless)), created_at=utcnow(),
+            ).on_conflict_do_nothing(index_elements=["id"])).rowcount
+            if not inserted:
+                return False
+            for kind, rows in (("exec", execs), ("observation", observations), ("break", breaks)):
+                bodies = ({"carry_id": carry_id, "kind": kind, "ordinal": ordinal,
+                           "body": json.loads(json.dumps(row, default=_jsonable))}
+                          for ordinal, row in enumerate(rows))
+                for chunk in _chunks(bodies, BASELINE_CHUNK):
+                    connection.execute(t.baseline_carry_row.insert(), chunk)
+        return True
+
+    def baseline_carry_hour(self, *, site: str, target: str, hour: datetime, normalizer: str,
+                            format_: int) -> dict | None:
+        """One persisted carry hour: {"hostless", "exec", "observation", "break"} (row bodies), or None."""
+        carry_id = self._carry_id(site, target, _utc(hour, "carry hour"), normalizer, format_)
+        with self.engine.connect() as connection:
+            head = connection.execute(select(t.baseline_carry_hour.c.hostless).where(
+                t.baseline_carry_hour.c.id == carry_id)).first()
+            if head is None:
+                return None
+            out: dict = {"hostless": bool(head[0]), "exec": [], "observation": [], "break": []}
+            row = t.baseline_carry_row.c
+            for kind, body in connection.execute(select(row.kind, row.body).where(
+                    row.carry_id == carry_id).order_by(row.kind, row.ordinal)):
+                out[kind].append(dict(body))
+        return out
 
     def baseline_window_released(self, hunt_id: str, spec_id: str) -> str | None:
         """Why some target's window counter material of one spec was released, or None while all of it is kept."""

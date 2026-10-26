@@ -9,7 +9,15 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-from romulus.baseline.carry import BEFORE_HISTORY, CarryInStore, HourParents, PendingResolver
+from romulus.baseline.carry import (
+    BEFORE_HISTORY,
+    CarryHourBuilder,
+    CarryInStore,
+    HourParents,
+    PendingResolver,
+    load_carry_hour,
+    save_carry_hour,
+)
 from romulus.baseline.count import KeyCounter
 from romulus.baseline.playbook import BASELINE_PLAYBOOKS
 from romulus.baseline.protocol import HistorySource
@@ -147,6 +155,14 @@ class LookbackWriter:
             "status": "building", "created_at": self.now(),
         }
 
+    def _keeps_carry(self, target: str) -> bool:
+        """Whether this target's hours matter to the parent carry: exec pairs resolve against it."""
+        return self.parent_carry is not None and any(
+            spec.id == "bl.exec_pair" and (self.applicable_specs is None
+                                           or spec.id in self.applicable_specs.get(target, set()))
+            for spec in self.specs
+        )
+
     def _covered(self, target: str, spec: BaselineSpec, start: datetime, end: datetime) -> bool:
         """An hour is covered by any active segment containing it, hourly or wider."""
         return self.repo.baseline_segment_covers(
@@ -233,13 +249,30 @@ class LookbackWriter:
                     or spec.id in self.applicable_specs.get(target, set()))
                 and not self._covered(target, spec, hour_start, hour_end)
             )
+            keeps_carry = self._keeps_carry(target)
             if not missing:
-                continue
+                if not keeps_carry:
+                    continue
+                # Every spec's segments cover the hour, but its execs still belong to the parent carry, or a
+                # parent exec'd before it could never be vouched for. The hour's persisted carry input feeds the
+                # carry exactly as reading it would; an hour without one is read again for the carry alone.
+                stored = load_carry_hour(self.repo, site=self.site, target=target, hour=hour_start,
+                                         normalizer=self.normalizer)
+                if stored is not None:
+                    carry = self.parent_carry.for_target(target, horizon=end)
+                    if carry.replay_hour(stored):
+                        carry.mark_observed(hour_start, hour_end)
+                    continue
+
+            def gap(state: str, reason: str, target=target, hour_start=hour_start, hour_end=hour_end,
+                    missing=missing) -> None:
+                # An hour read for the carry alone leaves no spec's history short; it only stays unobserved.
+                if missing:
+                    gaps.append(HistoryGap(target, hour_start, hour_end, state, reason,
+                                           tuple(spec.id for spec in missing)))
+
             if self.clock() - begun >= self.budget.seconds or queries >= self.budget.queries:
-                gaps.append(HistoryGap(
-                    target, hour_start, hour_end, "omitted_budget", "lookback query or wall-clock budget exhausted",
-                    tuple(spec.id for spec in missing),
-                ))
+                gap("omitted_budget", "lookback query or wall-clock budget exhausted")
                 continue
             try:
                 planned = self.source.plan(
@@ -248,31 +281,17 @@ class LookbackWriter:
                 queries += planned.query_count
             except Exception as error:  # noqa: BLE001 - source failure is a coverage fact
                 queries = min(self.budget.queries, queries + 1)
-                gaps.append(HistoryGap(
-                    target, hour_start, hour_end, "failed", f"partition planning failed: {error}"[:300],
-                    tuple(spec.id for spec in missing),
-                ))
+                gap("failed", f"partition planning failed: {error}"[:300])
                 continue
             if planned.completeness != "complete":
-                gaps.append(HistoryGap(
-                    target, hour_start, hour_end,
-                    planned.completeness if planned.completeness in {"failed", "omitted_budget"} else "partial",
-                    "; ".join(planned.reasons) or planned.completeness,
-                    tuple(spec.id for spec in missing),
-                ))
+                gap(planned.completeness if planned.completeness in {"failed", "omitted_budget"} else "partial",
+                    "; ".join(planned.reasons) or planned.completeness)
                 continue
             if len(planned.partitions) > MAX_PARTITIONS_PER_HOUR:
-                gaps.append(HistoryGap(
-                    target, hour_start, hour_end, "omitted_budget",
-                    f"history partition cap {MAX_PARTITIONS_PER_HOUR} exceeded",
-                    tuple(spec.id for spec in missing),
-                ))
+                gap("omitted_budget", f"history partition cap {MAX_PARTITIONS_PER_HOUR} exceeded")
                 continue
             if self.clock() - begun >= self.budget.seconds:
-                gaps.append(HistoryGap(
-                    target, hour_start, hour_end, "omitted_budget", "lookback wall-clock budget exhausted",
-                    tuple(spec.id for spec in missing),
-                ))
+                gap("omitted_budget", "lookback wall-clock budget exhausted")
                 continue
             counters = {spec.id: KeyCounter("pending", spec, span=(hour_start, hour_end)) for spec in missing}
             scopes = {spec.id: spec_records(spec) for spec in missing}
@@ -280,6 +299,7 @@ class LookbackWriter:
             # unbroken from its parent's exec through every later history hour.
             carry = (self.parent_carry.for_target(target, horizon=end)
                      if self.parent_carry is not None else None)
+            carry_input = CarryHourBuilder((hour_start, hour_end)) if carry is not None else None
             hour_parents = HourParents()
             hour_context = KeyContext(
                 pid_table=hour_parents,
@@ -321,8 +341,8 @@ class LookbackWriter:
                         f"received {fetched.record_count}"
                     ))
                     break
-                if carry is not None:
-                    carry.observe_events(fetched.events, hour=(hour_start, hour_end))
+                if carry_input is not None:
+                    carry_input.add(fetched.events)
                 # Time, then the audit serial, orders one instant's execs (a shebang's env, then its interpreter).
                 ordered_events = sorted(fetched.events, key=lambda item: (
                     item.ts, -1 if exec_serial(item) is None else exec_serial(item), item.id,
@@ -332,21 +352,24 @@ class LookbackWriter:
                 for spec_id, counter in counters.items():
                     for event in scopes[spec_id](ordered_events):
                         counter.consume(event, hour_context)
-            # Execs fed but not stored are breaks for their hosts whether or not the hour completes.
-            uncarried, hostless = carry.take_uncarried() if carry is not None else ({}, False)
-            if carry is not None:
-                carry.record_breaks(uncarried)
             if failure is not None:
-                gaps.append(HistoryGap(
-                    target, hour_start, hour_end, failure[0], failure[1], tuple(counter for counter in counters),
-                ))
+                # An incomplete hour feeds the carry nothing and never joins its observed ledger, so no parent
+                # continuity runs through it; its records are reread by a later hunt.
+                gap(failure[0], failure[1])
                 continue
-            # Every partition of the hour was fetched completely and fed to the carry, so the hour joins the
-            # carry's continuity ledger before its children are resolved against it. Failed, partial,
-            # budget-omitted and skipped (already covered) hours never do, and so break parent continuity;
-            # neither does an hour with an exec of no host, which could be any host's.
-            if carry is not None and not hostless:
-                carry.mark_observed(hour_start, hour_end)
+            # Every partition of the hour was fetched completely: its carry input is kept beside its segments and
+            # fed to the carry, and the hour joins the continuity ledger before its children are resolved against
+            # it. Failed, partial and budget-omitted hours never do, and so break parent continuity; neither does an
+            # hour with an exec of no host, which could be any host's.
+            if carry is not None and carry_input is not None:
+                hour_input = carry_input.finish()
+                if keeps_carry:
+                    save_carry_hour(self.repo, site=self.site, target=target, hour=hour_start,
+                                    normalizer=self.normalizer, carry=hour_input)
+                if carry.replay_hour(hour_input):
+                    carry.mark_observed(hour_start, hour_end)
+            if not missing:
+                continue
             # Children whose parent is not in their own hour wait for the whole fill: their parent may sit in an
             # older hour that newest-first filling has not read yet. Their hour is staged compactly and becomes a
             # segment only after every older hour has fed the carry.

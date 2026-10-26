@@ -401,11 +401,11 @@ def test_0024_downgrade_keeps_segment_children_and_snapshot_membership(tmp_path)
     assert not {"events_basis", "first_event_hour"} & columns
 
 
-def test_0024_is_the_single_head_and_0017_leaves_stored_candidates_about_every_record_they_cite(tmp_path):
+def test_0025_is_the_single_head_and_0017_leaves_stored_candidates_about_every_record_they_cite(tmp_path):
     engine = make_engine(tmp_path / "candidate-context.db")
     with engine.begin() as connection:
         cfg = _alembic_config(connection)
-        assert ScriptDirectory.from_config(cfg).get_heads() == ["0024"]
+        assert ScriptDirectory.from_config(cfg).get_heads() == ["0025"]
         command.upgrade(cfg, "0016")
         connection.exec_driver_sql(
             "INSERT INTO hunt (id, created_at, created_by, manifest, manifest_digest, execution_state) "
@@ -626,7 +626,8 @@ BASELINE_TABLES = ("baseline_segment", "baseline_count", "baseline_scope_hour", 
                    "baseline_window_observation", "baseline_window_pending", "baseline_window_count",
                    "baseline_window_scope_hour", "baseline_window_event_hour", "baseline_hunt_exclusion",
                    "baseline_history_cell",
-                   "baseline_history_row", "baseline_window_release", "baseline_window_retention")
+                   "baseline_history_row", "baseline_window_release", "baseline_window_retention",
+                   "baseline_carry_hour", "baseline_carry_row")
 
 
 def _shape(engine) -> dict:

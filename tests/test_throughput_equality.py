@@ -168,16 +168,24 @@ from tests import throughput_fixture as tf
 # - baseline_segments: rows_digest now also covers each segment's per-hour event totals (the new
 #   baseline_segment_event_hour rows that place a straddling segment's first in-plan record).
 # - audit: the segment writer's material block states over_budget (false).
+# Deduplicated window material then keeps each key's dedup token per hour, so hunts write external-destination
+# history from network cells of any width:
+# - baseline_window_counts: every row gains a token column ("" for the 885 rows of keys counted per record, which
+#   are otherwise unchanged); the 76 bl.ext_dest rows become 234 rows, one per (key, hour, token) seen in a cell,
+#   including tokens the cell's open-bucket set suppressed.
+# - audit: the material block's estimated bytes follow (807,272 -> 921,326), and the retention reason says what
+#   releases kept material ("kept while the hunt can still resume; released at its resumed finish, or by the disk
+#   budget, oldest first").
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
-    "audit": "abc5f86d644361c3d9e0acde1cf718e0e7d9fa53937c3a0980825600900a151b",
+    "audit": "6aa33f334afaee29e4e60a0a0724f262c7d7e9e03557dbcbcc638aacba4004b8",
     "baseline_counts": "1a021de3254f91225689f1bdc8ce3e0cfd416c90a4148bcd4f1c93b6db9cb16d",
     "baseline_hunt_exclusions": "fe9edaf9efe3065352ae1bedc95ac7e78ddbe2d6e34f835203cfe56cb368ec56",
     "baseline_observations": "cadd8d099153ba2ab6aafd8e7416d4024ce5b66ed164a03b2ec46f079ed5de88",
     "baseline_scope_hours": "fe1ef875f82a6cad7d9c7884b1936614584a9f9e0e4c008e4790ee46edf6361d",
     "baseline_segments": "e2ca9f003a97f77ac300789266c9e646610317f5577318c4b556b464a8a6fc48",
     "baseline_snapshot": "63b4c8094cb5450b1e707fd7be786e90324528e738b882358cae15cb8d53f776",
-    "baseline_window_counts": "163b75766bc7cc487118b4e8bc24fe338d9e364898f9200887b89ba11b464acc",
+    "baseline_window_counts": "425d3bd3047505695a79b62d375e007bdbc41eb0a840e856fbac4871c5a622e5",
     "baseline_window_event_hours": "bb58c65144b135443e75a690b7b2f8137ebac6b827f8e8bd8cc7606a01c53e52",
     "baseline_window_scope_hours": "49a7182642abe3b848eb33b97e628395e57d806d9feeeaa8b9b198f0c07489d8",
     "candidates": "b5abecf132a0f5f4be6a541acb6a584f7b206821294991c5ae36ba89d2eb672b",

@@ -63,14 +63,16 @@ def test_window_material_splits_a_day_bucket_by_hour_without_changing_the_day_co
     ]
 
 
-def test_day_dedup_token_is_materialized_once_in_the_hour_that_accepted_it():
+def test_a_day_dedup_token_is_kept_in_every_hour_it_occurs_so_a_writer_can_count_per_hour():
     counter = KeyCounter("window", SPEC_BY_ID["bl.ext_dest"])
     counter.add_keys(T0, [_key("a", "flow")])
+    counter.add_keys(T0 + timedelta(minutes=5), [_key("a", "flow")])
     counter.add_keys(T0 + timedelta(hours=1), [_key("a", "flow")])
 
+    # the window's own day count is unchanged; the material keeps the token once per hour it was seen
     assert next(counter.count_rows())["count"] == 1
-    assert [(row["count"], row["material_hour"]) for row in counter.material_count_rows()] == [
-        (1, T0.replace(minute=0)),
+    assert [(row["count"], row["material_hour"], row["token"]) for row in counter.material_count_rows()] == [
+        (1, T0.replace(minute=0), "flow"), (1, T0.replace(minute=0) + timedelta(hours=1), "flow"),
     ]
 
 

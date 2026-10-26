@@ -645,7 +645,7 @@ def test_deduplicated_token_crossing_a_clipped_left_edge_declines_the_segment():
     assert "deduplicated window cell straddles" in summary["specs"][spec.id]["reason"]
 
 
-def test_deduplicated_bucket_split_across_complete_cells_declines_the_segment():
+def test_deduplicated_bucket_split_across_complete_cells_merges_tokens_per_hour():
     spec = SPEC_BY_ID["bl.ext_dest"]
     manifest = _manifest()
     manifest["baseline"]["specs"] = [
@@ -678,8 +678,11 @@ def test_deduplicated_bucket_split_across_complete_cells_declines_the_segment():
 
     summary = run_hunt_segment_writer(repo, "hunt-a", hunt_partial=False)
 
-    assert repo.baseline_segments() == []
-    assert "deduplicated bucket spans multiple window cells" in summary["specs"][spec.id]["reason"]
+    # Every cell of the day bucket inside the span is complete, so the tokens merge per hour: the transaction's
+    # query (hour 0) and answer (hour 1) count once in each hour, as hourly lookback counters count them.
+    segment = repo.baseline_segments(statuses=["active"])[0]
+    assert summary["specs"][spec.id]["reason"] is None
+    assert [row["count"] for row in repo.baseline_counts(segment["id"])] == [2]
 
 
 def test_legacy_unplaced_count_spanning_a_clipped_edge_declines_the_segment():

@@ -37,6 +37,11 @@ class ParentExec:
     # The kernel's audit serial, which increases within a boot: it orders execs of one instant (a shebang's
     # env, then its interpreter, on the same pid). None when the record carries none.
     serial: int | None = None
+    # Set on a generation replayed from a persisted carry hour: whether two images shared its instant unordered,
+    # and the time bounds of the pid's execs that hour displaced from the two exact slots.
+    ambiguous: bool = False
+    evicted_earliest_ts: datetime | None = None
+    evicted_latest_ts: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -262,6 +267,27 @@ class CarryInStore:
             # An ambiguous generation (two images at one instant, unordered) is an uncarried exec too.
             return None, UNCARRIED_EXEC
         return (entry[0], entry[2], entry[3], entry[4], entry[5]), None
+
+    def replay_hour(self, hour: CarryHour) -> bool:
+        """Feed one persisted carry hour through the same rules as its records; True when the hour may join the
+        observed ledger (it held no exec without a host).
+
+        The hour's execs are already reduced to the latest two per (host, boot, pid) with the bounds of the rest,
+        and its observations to their state-run boundaries; boot, reuse and break decisions that depend on what
+        the carry already holds are made here, exactly as for records.
+        """
+        self.observe_rows(sorted(hour.execs, key=lambda item: (
+            item.ts, -1 if item.serial is None else item.serial, item.raw_id, item.host, item.pid,
+        )))
+        self.observe_observation_rows(sorted(hour.observations, key=lambda item: (
+            item.ts, -1 if item.serial is None else item.serial, item.event_id, item.host, item.pid,
+        )))
+        uncarried, _hostless = self.take_uncarried()
+        for host, hours in hour.breaks.items():
+            uncarried.setdefault(host, set()).update(hours)
+        if uncarried:
+            self.record_breaks(uncarried)
+        return not hour.hostless
 
     def lookup(self, host: str, pid: int, ts: float, boot: str | None = None) -> tuple | None:
         """ParentLookup: the continuity-checked parent identity, else None."""
@@ -576,8 +602,8 @@ class CarryInStore:
             row = {
                 "hunt_id": self.hunt_id, "target": self.target, "host": item.host, "boot": boot, "pid": item.pid,
                 "exec_ts": timestamp, "serial": item.serial, "executable": item.executable,
-                "parent_pid": item.parent_pid, "raw_id": item.raw_id, "ambiguous": 0,
-                "evicted_earliest_ts": None, "evicted_latest_ts": None,
+                "parent_pid": item.parent_pid, "raw_id": item.raw_id, "ambiguous": int(item.ambiguous),
+                "evicted_earliest_ts": item.evicted_earliest_ts, "evicted_latest_ts": item.evicted_latest_ts,
             }
             _keep_latest_two(pending.setdefault(key, []), row)
             seen += 1
@@ -596,7 +622,7 @@ def _keep_latest_two(generations: list[dict], row: dict) -> None:
     """
     for generation in generations:
         if generation["exec_ts"] == row["exec_ts"] and _same_instant(generation["serial"], row["serial"]):
-            if generation["executable"] != row["executable"]:
+            if generation["executable"] != row["executable"] or row.get("ambiguous"):
                 generation["ambiguous"] = 1
             bounds = [
                 value for item in (generation, row)
@@ -622,6 +648,143 @@ def _keep_latest_two(generations: list[dict], row: dict) -> None:
         for generation in generations:
             generation["evicted_earliest_ts"] = min(bounds)
             generation["evicted_latest_ts"] = max(bounds)
+
+
+# Bumped whenever what a persisted carry hour holds, or how it is reduced, changes: other formats are never read.
+CARRY_FORMAT = 1
+
+
+@dataclass(frozen=True)
+class CarryHour:
+    """What one completely fetched target hour contributes to the parent carry, compact enough to persist.
+
+    Built once per hour by `CarryHourBuilder`, stored beside the hour's segments, and replayed into any later hunt's
+    carry (`CarryInStore.replay_hour`). A hunt that reads the hour and a hunt that finds it already covered feed
+    their carries the same input, so their parents resolve alike.
+    """
+
+    execs: tuple[ParentExec, ...]
+    observations: tuple[ParentObservation, ...]
+    # host -> hours holding an exec that could not be stored whatever the carry holds (no pid or executable, an
+    # unknown outcome, a typed time outside the hour)
+    breaks: dict[str, frozenset[datetime]]
+    hostless: bool
+
+
+class CarryHourBuilder:
+    """Reduce one hour's records to its `CarryHour` as they are fetched, without holding the records.
+
+    Execs keep the latest two generations per (host, boot, pid) with the time bounds of the rest, the store's own
+    rule; observations keep their state-run boundaries, which is all the store keeps of them.
+    """
+
+    def __init__(self, hour: tuple[datetime, datetime]):
+        self.hour = hour
+        self._generations: dict[tuple[str, str, int], list[dict]] = {}
+        self._observations: dict[tuple[str, str, int], dict[tuple, ParentObservation]] = {}
+        self._breaks: dict[str, set[datetime]] = {}
+        self._hostless = False
+
+    def _break(self, host: str, ts: datetime) -> None:
+        self._breaks.setdefault(host, set()).add(_hour(ts))
+
+    def add(self, events: Iterable[TypedEvent]) -> None:
+        start, end = self.hour
+        for event in events:
+            if event.family != "process_exec":
+                found = observation(event)
+                if found is not None and event.host and start <= event.ts < end:
+                    pid, item, _ref = found
+                    if (item.boot and not isinstance(pid, bool) and isinstance(pid, int) and pid >= 0
+                            and not isinstance(item.ppid, bool) and isinstance(item.ppid, int) and item.exe):
+                        record = ParentObservation(event.host, item.boot, pid, event.ts.astimezone(UTC), item.exe,
+                                                   item.ppid, item.session, item.event_id, item.serial)
+                        self._observations.setdefault((event.host, item.boot, pid), {})[
+                            (record.ts, record.event_id)] = record
+                continue
+            if event.outcome == Outcome.failure:
+                continue
+            if not event.host:
+                self._hostless = True
+                continue
+            if not start <= event.ts < end:
+                self._break(event.host, event.ts)
+                self._break(event.host, start)
+            pid, executable = event.get("process.pid"), event.get("process.executable")
+            if (event.outcome != Outcome.success or isinstance(pid, bool) or not isinstance(pid, int) or pid < 0
+                    or not isinstance(executable, str) or not executable):
+                self._break(event.host, event.ts)
+                continue
+            ppid = event.get("process.ppid")
+            boot = boot_of(event) or ""
+            _keep_latest_two(self._generations.setdefault((event.host, boot, pid), []), {
+                "exec_ts": event.ts.astimezone(UTC), "serial": exec_serial(event), "executable": executable,
+                "parent_pid": ppid if isinstance(ppid, int) and not isinstance(ppid, bool) else None,
+                "raw_id": event.raw[0].native_id if event.raw else "", "ambiguous": 0,
+                "evicted_earliest_ts": None, "evicted_latest_ts": None,
+            })
+
+    def finish(self) -> CarryHour:
+        execs = tuple(
+            ParentExec(host, boot or None, pid, row["exec_ts"], row["executable"], row["parent_pid"], row["raw_id"],
+                       row["serial"], bool(row["ambiguous"]), row["evicted_earliest_ts"], row["evicted_latest_ts"])
+            for (host, boot, pid), rows in sorted(self._generations.items()) for row in rows
+        )
+        observations: list[ParentObservation] = []
+        for key in sorted(self._observations):
+            ordered = sorted(self._observations[key].values(), key=lambda item: (
+                item.ts, item.serial is None, item.serial or 0, item.event_id,
+            ))
+            state = [(item.executable, item.parent_pid, item.session) for item in ordered]
+            observations.extend(
+                item for index, item in enumerate(ordered)
+                if not (0 < index < len(ordered) - 1 and state[index - 1] == state[index] == state[index + 1])
+            )
+        return CarryHour(execs, tuple(observations),
+                         {host: frozenset(hours) for host, hours in sorted(self._breaks.items())}, self._hostless)
+
+
+def _time(value) -> datetime | None:
+    return None if value is None else datetime.fromisoformat(value)
+
+
+def save_carry_hour(repo: Repo, *, site: str, target: str, hour: datetime, normalizer: str,
+                    carry: CarryHour) -> bool:
+    """Persist a carry hour once (the first complete read of an hour is kept)."""
+    return repo.save_baseline_carry_hour(
+        site=site, target=target, hour=hour, normalizer=normalizer, format_=CARRY_FORMAT, hostless=carry.hostless,
+        execs=({"host": item.host, "boot": item.boot, "pid": item.pid, "ts": item.ts, "executable": item.executable,
+                "parent_pid": item.parent_pid, "raw_id": item.raw_id, "serial": item.serial,
+                "ambiguous": item.ambiguous, "evicted_earliest_ts": item.evicted_earliest_ts,
+                "evicted_latest_ts": item.evicted_latest_ts} for item in carry.execs),
+        observations=({"host": item.host, "boot": item.boot, "pid": item.pid, "ts": item.ts,
+                       "executable": item.executable, "parent_pid": item.parent_pid, "session": item.session,
+                       "event_id": item.event_id, "serial": item.serial} for item in carry.observations),
+        breaks=({"host": host, "hour": value} for host, hours in sorted(carry.breaks.items())
+                for value in sorted(hours)),
+    )
+
+
+def load_carry_hour(repo: Repo, *, site: str, target: str, hour: datetime, normalizer: str) -> CarryHour | None:
+    """A persisted carry hour of the current format, or None when none was kept."""
+    stored = repo.baseline_carry_hour(site=site, target=target, hour=hour, normalizer=normalizer,
+                                      format_=CARRY_FORMAT)
+    if stored is None:
+        return None
+    breaks: dict[str, set[datetime]] = {}
+    for row in stored["break"]:
+        breaks.setdefault(row["host"], set()).add(datetime.fromisoformat(row["hour"]))
+    return CarryHour(
+        tuple(ParentExec(row["host"], row["boot"], row["pid"], datetime.fromisoformat(row["ts"]),
+                         row["executable"], row["parent_pid"], row["raw_id"], row["serial"], bool(row["ambiguous"]),
+                         _time(row["evicted_earliest_ts"]), _time(row["evicted_latest_ts"]))
+              for row in stored["exec"]),
+        tuple(ParentObservation(row["host"], row["boot"], row["pid"], datetime.fromisoformat(row["ts"]),
+                                row["executable"], row["parent_pid"], row["session"], row["event_id"],
+                                row["serial"]) for row in stored["observation"]),
+        {host: frozenset(hours) for host, hours in sorted(breaks.items())},
+        bool(stored["hostless"]),
+    )
 
 
 class PendingResolver:
