@@ -607,7 +607,9 @@ def _merge_same_subject_rows(order):
         "entities": [["host", "weak-host", "host"]], "ts": T0,
         "severity": "low", "confidence": "low", "lane": "context", "priority": 10.0,
         "priority_reasons": ["weak priority"],
-        "gate_results": {"quality": "weak", "_notes": ["inferred wording"],
+        "gate_results": {"quality": "weak", "_notes": [
+                             "reached through an inferred host_after_anchor relation"
+                         ],
                          "_context_reaches": [{"anchor_id": "F-one", "link_id": "L-one",
                                                "link_type": "host_after_anchor",
                                                "strength": "inferred"}]},
@@ -653,7 +655,9 @@ def test_same_subject_route_merge_keeps_one_coherent_strongest_row_in_either_ord
         assert inferred_first[field] == expected[field]
     assert inferred_first["ts"].replace(tzinfo=UTC) == expected["ts"]
     assert inferred_first["gate_results"] == {
-        "quality": "strong", "_notes": ["observed wording"],
+        "quality": "strong", "_notes": [
+            "observed wording", "reached through an inferred host_after_anchor relation",
+        ],
         "_context_reaches": [
             {"anchor_id": "F-one", "link_id": "L-one", "link_type": "host_after_anchor",
              "strength": "inferred"},

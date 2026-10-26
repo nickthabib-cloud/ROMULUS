@@ -1503,6 +1503,20 @@ class Repo:
 
                     representative = max((before, row), key=representative_rank)
                     gates = dict(representative["gate_results"] or {})
+                    relation_notes = {
+                        str(note)
+                        for candidate in (before, row)
+                        for note in (candidate["gate_results"] or {}).get("_notes", [])
+                        if str(note).startswith((
+                            "reached through an inferred ",
+                            "reached through an agent-requested ",
+                        ))
+                    }
+                    if relation_notes:
+                        gates["_notes"] = sorted({
+                            *(str(note) for note in gates.get("_notes", [])),
+                            *relation_notes,
+                        })
                     gates["_context_reaches"] = reaches
                     values = {
                         field: (gates if field == "gate_results" else representative.get(field))
