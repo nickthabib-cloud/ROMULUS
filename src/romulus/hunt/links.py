@@ -51,7 +51,7 @@ _GENERIC_WINDOWS_SID_PREFIXES = (
 # Links that need a host identity: they search one host's own records.
 HOST_SIDE_LINKS = frozenset({"process_lineage", "login_session", "host_after_anchor"})
 RAW_FAMILIES_BY_LINK = {
-    "process_lineage": {"process_exec"},
+    "process_lineage": {"process_exec", "process_observed"},
     "network_flow": {"net_flow", "net_alert", "net_session"},
     "flow_host_side": {"net_socket"},
 }
@@ -470,7 +470,7 @@ class LinkFetcher:
             key["process.guid"] = process_guid
         process_key = usable_key(process_guid) or isinstance(pid, int)
         families = ({"process_exec", "process_termination", "system_state"}
-                    if os_family == "windows" else {"process_exec"})
+                    if os_family == "windows" else {"process_exec", "process_observed"})
         intents = self._host_intents(window, families, anchor.host, os_family) if process_key else []
 
         def select(events):
@@ -568,14 +568,14 @@ class LinkFetcher:
             # copies; their boot comes from the hunt's boot-interval map. One the map cannot place (a gap between
             # boots, near a boot's edge) is kept: a pid reused after a reboot cannot be excluded for it.
             all_events = {event.id: event for event in anchor.events + events
-                          if event.family == "process_exec" and event.host == anchor.host
+                          if event.family in {"process_exec", "process_observed"} and event.host == anchor.host
                           and not boots_conflict(boot_id, boot_of(event))}
             root = next((event for event in anchor.events if event.get("process.pid") == pid), None)
             if root is None:
                 return Selection([], [f"lineage undecided: no anchor record carries pid {pid}"])
             host = anchor.host or ""
             root_boot = boot_of(root) or boot_id
-            table = PidTable()
+            table = PidTable(observing=True)
             for event in all_events.values():
                 table.add(event)
             unknown: list[str] = []
@@ -638,17 +638,19 @@ class LinkFetcher:
             for _ in range(32):
                 if not isinstance(parent, int) or parent in (0, 1):
                     break
-                found = table.image(host, parent, when, boot, serial=serial)
-                ancestor = all_events.get(found.record.event_id) if found.record is not None else None
+                view = table.execs.view(host, parent, when, serial, boot, inclusive=False)
+                ancestor = all_events.get(view.named.entry.event_id) if view.image is not None else None
                 if ancestor is None:
-                    if found.why:
-                        unknown.append(found.why)
+                    if view.why:
+                        unknown.append(view.why)
                     break                       # an ancestor whose exec was not retrieved ends the chain
+                lineage_events = [all_events.get(step.entry.event_id) for step in view.span]
                 if ancestor.id in related:
                     break
-                related[ancestor.id] = ancestor
-                parent, when, serial = found.record.ppid, found.record.ts, found.record.serial
-                boot = boot or found.record.boot
+                related.update({event.id: event for event in lineage_events if event is not None})
+                first_step = view.first
+                parent, when, serial = first_step.ppid, first_step.ts, first_step.serial
+                boot = boot or first_step.boot
             # Descendants: a record whose parent chain reaches one of the process's images.
             for candidate in sorted(all_events.values(), key=_order):
                 if candidate.id in related or candidate.ts < first.ts:
@@ -658,20 +660,23 @@ class LinkFetcher:
                 for _ in range(32):
                     if not isinstance(parent, int) or parent in (0, 1):
                         break
-                    found = table.image(host, parent, when, boot, serial=serial)
-                    if found.record is None:
+                    view = table.execs.view(host, parent, when, serial, boot, inclusive=False)
+                    if view.image is None:
                         # Undecided only where the unordered execs could be the process's or its descendants'
                         # (not before its first image, where no chain reaches it).
-                        if found.why and found.at is not None and found.at >= first_ts:
-                            unknown.append(found.why)
+                        if view.why:
+                            unknown.append(view.why)
                         break
-                    if found.record.event_id in images:
+                    span_ids = {step.entry.event_id for step in view.span}
+                    if span_ids & images.keys():
                         related[candidate.id] = candidate
                         break
-                    if found.record.ts < first_ts or found.record.event_id not in all_events:
+                    named = view.named
+                    if named.ts < first_ts or named.entry.event_id not in all_events:
                         break                   # older than the process: this chain never reaches it
-                    parent, when, serial = found.record.ppid, found.record.ts, found.record.serial
-                    boot = boot or found.record.boot
+                    first_step = view.first
+                    parent, when, serial = first_step.ppid, first_step.ts, first_step.serial
+                    boot = boot or first_step.boot
             return Selection(list(related.values()), unknown)
 
         reason = _host_reason(anchor) or (None if process_key else "required typed key is unusable")

@@ -16,6 +16,17 @@ GROUPING_KINDS = frozenset({"aggregate", "packet"})
 
 def _groups(rule_id: str) -> bool:
     return getattr(_PLAYBOOKS.get(rule_id), "kind", "direct") in GROUPING_KINDS
+
+
+def _incident_role(row: dict, _finding_by_id: dict[str, dict]) -> str:
+    """Classify how a link participates in incident grouping.
+
+    Only observed links are evidence. Every deterministic inference and agent-requested relation remains a
+    labelled hypothesis between incidents regardless of how narrow its query window is.
+    """
+    return "evidence" if row["strength"] == "observed" else "hypothesis"
+
+
 _TACTICS = {
     "T1190": ("initial-access",),
     "T1078": ("initial-access", "persistence", "privilege-escalation", "defense-evasion"),
@@ -123,7 +134,7 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
     nodes = [{
         "id": finding["id"], "kind": "finding", "lane": finding["lane"],
         "observed_at": finding["observed_at"], "rule_id": finding["rule_id"],
-    } for finding in findings]
+    } for finding in sorted(findings, key=lambda item: item["id"])]
     entity_nodes = {}
     finding_entities: dict[str, list[str]] = defaultdict(list)
     for finding in findings:
@@ -138,8 +149,14 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
     for finding in findings:
         if finding.get("source_link_id"):
             children[finding["source_link_id"]].append(finding["id"])
-        cited = set(finding.get("event_ids") or [])
-        cited.update(citation["event_id"] for citation in finding.get("citations") or [])
+        stored = repo.candidate(finding["id"]) if hasattr(repo, "candidate") else None
+        event_ids = list((stored or finding).get("event_ids") or [])
+        context_ids = set((stored or finding).get("context_event_ids") or [])
+        cited = set(event_ids) - context_ids
+        if not cited:
+            cited = set(event_ids)
+        if not event_ids:
+            cited.update(citation["event_id"] for citation in finding.get("citations") or [])
         for event_id in cited:
             findings_by_event[event_id].add(finding["id"])
     links = []
@@ -152,10 +169,12 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
         targets.discard(row["anchor_id"])
         targets = sorted(targets)
         link_kind = "agent_hypothesis" if row["strength"] == "agent_hypothesis" else "expansion"
+        incident_role = _incident_role(row, finding_by_id)
         links.append({
             "id": row["id"], "anchor_finding_id": row["anchor_id"],
             "target_finding_ids": targets, "link_type": row["link_type"],
-            "style": row["strength"], "kind": link_kind, "key": row["key"], "status": row["status"],
+            "style": row["strength"], "kind": link_kind, "incident_role": incident_role,
+            "key": row["key"], "status": row["status"],
             "window": {"label": row["window_label"], "start": str(row["window_start"]),
                        "end": str(row["window_end"])},
             "evidence_ids": row["evidence_ids"], "coverage": row["coverage"], "reasons": row["reasons"],
@@ -163,7 +182,7 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
         edges.extend({
             "id": f"{row['id']}:{target}", "from": row["anchor_id"], "to": target,
             "link_id": row["id"], "link_type": row["link_type"], "style": row["strength"],
-            "kind": link_kind,
+            "kind": link_kind, "incident_role": incident_role,
         } for target in targets if row["anchor_id"] in finding_by_id and target in finding_by_id)
 
     parent = {finding_id: finding_id for finding_id in finding_by_id}
@@ -179,13 +198,13 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
         if left_root != right_root:
             parent[max(left_root, right_root)] = min(left_root, right_root)
 
-    observed = [edge for edge in edges if edge["style"] == "observed"]
+    joining = [edge for edge in edges if edge["incident_role"] == "evidence"]
     grouping = {item for item, finding in finding_by_id.items() if _groups(finding["rule_id"])}
-    for edge in observed:
+    for edge in joining:
         if edge["from"] not in grouping and edge["to"] not in grouping:
             union(edge["from"], edge["to"])
     for item in sorted(grouping):
-        neighbours = {find(edge["to"] if edge["from"] == item else edge["from"]) for edge in observed
+        neighbours = {find(edge["to"] if edge["from"] == item else edge["from"]) for edge in joining
                       if item in (edge["from"], edge["to"])
                       and (edge["to"] if edge["from"] == item else edge["from"]) not in grouping}
         if len(neighbours) == 1:
@@ -231,6 +250,8 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
             "link_ids": [link["id"] for link in incident_links],
             "observed_edges": sum(edge["style"] == "observed" and edge["from"] in member_set
                                   for edge in edges),
+            "hypothesis_edges": sum(edge["incident_role"] == "hypothesis"
+                                    and edge["from"] in member_set for edge in edges),
             "inferred_edges": sum(edge["style"] in {"inferred", "agent_hypothesis"}
                                   and edge["from"] in member_set
                                   for edge in edges),

@@ -6,10 +6,12 @@ import pytest
 
 from romulus.agent.models import PivotCoverage
 from romulus.config import Settings
+from romulus.detect.base import Match, Playbook, pf
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
 from romulus.hunt import run as hunt_run
 from romulus.hunt.expansion import ExpansionEngine
-from romulus.hunt.links import LinkResult
+from romulus.hunt.links import LinkResult, LinkWindow
+from romulus.hunt.publish import publish_match
 from romulus.report.manifest import build_manifest
 from romulus.sources.models import Window
 from romulus.store.db import digest, make_engine, migrate
@@ -532,6 +534,205 @@ def test_inferred_link_keeps_a_direct_finding_lane_and_labels_only_the_relation_
     assert "relation to f-anchor" in finding["claim"].lower() and "hypothesis" in finding["claim"].lower()
     assert any("relation to the anchor is a hypothesis" in note
                for note in finding["gate_results"]["_notes"])
+
+
+def _evaluate_shared_direct_finding(anchor_order):
+    repo = repo_with_anchor(candidate_id="F-one")
+    add_anchor(repo, "F-two", "web1", ts=T0 + timedelta(seconds=1))
+    linked = event(
+        "shared-credential-read", ts=T0 + timedelta(minutes=1),
+        argv=["/usr/bin/cat", "/etc/shadow"],
+    )
+    repo.save_evidence("h1", [linked], {}, None)
+    strengths = {"F-one": "inferred", "F-two": "observed"}
+    engine = ExpansionEngine(repo, "h1", WINDOW, ScriptedFetcher(repo))
+    for anchor_id in anchor_order:
+        link_id = f"L-{anchor_id}"
+        result = LinkResult(
+            id=link_id, anchor_id=anchor_id, link_type="host_after_anchor",
+            window=LinkWindow(start=T0 - timedelta(minutes=5), end=T0 + timedelta(minutes=5),
+                              label="anchor ±5 min"),
+            strength=strengths[anchor_id], key={"host": "web1"}, status="complete",
+            event_ids=[linked.id], evidence_ids=[linked.id], task_ids=[], coverage=[], query_spend=0,
+        )
+        repo.save_expansion_link({
+            "id": link_id, "hunt_id": "h1", "anchor_id": anchor_id,
+            "link_type": result.link_type, "window_label": result.window.label,
+            "window_start": result.window.start, "window_end": result.window.end,
+            "strength": result.strength, "key": result.key, "status": result.status,
+            "event_ids": result.event_ids, "evidence_ids": result.evidence_ids,
+            "task_ids": [], "coverage": [], "reasons": [], "duration_ms": 0,
+            "query_spend": 0, "evaluated": 0,
+        })
+        engine._evaluate(repo.candidate(anchor_id), result)
+    return next(
+        candidate for candidate in repo.candidates("h1")
+        if candidate["rule_id"] == "host.credential_store_read"
+    )
+
+
+def test_expansion_deduplicates_a_direct_finding_and_retains_both_routes_deterministically():
+    first = _evaluate_shared_direct_finding(["F-one", "F-two"])
+    reversed_order = _evaluate_shared_direct_finding(["F-two", "F-one"])
+
+    compared = (
+        "id", "rule_id", "claim", "event_ids", "lane", "severity", "priority",
+        "source_anchor_id", "source_link_id", "gate_results",
+    )
+    assert {key: first[key] for key in compared} == {key: reversed_order[key] for key in compared}
+    assert first["source_anchor_id"] == "F-two" and first["source_link_id"] == "L-F-two"
+    assert "relation to f-one" not in first["claim"].lower()
+    assert first["gate_results"]["_context_reaches"] == [
+        {"anchor_id": "F-one", "link_id": "L-F-one", "link_type": "host_after_anchor",
+         "strength": "inferred"},
+        {"anchor_id": "F-two", "link_id": "L-F-two", "link_type": "host_after_anchor",
+         "strength": "observed"},
+    ]
+
+
+def _merge_same_subject_rows(order):
+    repo = repo_with_anchor(candidate_id="F-one")
+    add_anchor(repo, "F-two", "web1", ts=T0 + timedelta(seconds=1))
+    cited = [event(f"same-subject-{index}") for index in range(2)]
+    repo.save_evidence("h1", cited, {}, None)
+    common = {
+        "id": "same-subject-finding", "hunt_id": "h1", "rule_id": "host.same_subject",
+        "rule_version": "1", "claim_type": "aggregate_observation",
+        "event_ids": [item.id for item in cited], "context_event_ids": [],
+        "group_key": "web1|root|203.0.113.9", "source_case_id": None,
+    }
+    inferred = {
+        **common, "claim": "weaker inferred description",
+        "predicate_fields": [{"field": "weak", "value": True, "raw_path": "weak.path"}],
+        "entities": [["host", "weak-host", "host"]], "ts": T0,
+        "severity": "low", "confidence": "low", "lane": "context", "priority": 10.0,
+        "priority_reasons": ["weak priority"],
+        "gate_results": {"quality": "weak", "_notes": [
+                             "reached through an inferred host_after_anchor relation"
+                         ],
+                         "_context_reaches": [{"anchor_id": "F-one", "link_id": "L-one",
+                                               "link_type": "host_after_anchor",
+                                               "strength": "inferred"}]},
+        "benign_alternatives": ["weak alternative"], "next_checks": ["weak check"],
+        "source_anchor_id": "F-one", "source_link_id": "L-one",
+    }
+    observed = {
+        **common, "rule_version": "2", "claim": "strong observed description",
+        "claim_type": "observed_action",
+        "predicate_fields": [{"field": "strong", "value": True, "raw_path": "strong.path"}],
+        "entities": [["host", "web1", "host"]], "ts": T0 + timedelta(minutes=1),
+        "severity": "medium", "confidence": "high", "lane": "lead", "priority": 30.0,
+        "priority_reasons": ["strong priority"],
+        "gate_results": {"quality": "strong", "_notes": ["observed wording"],
+                         "_context_reaches": [{"anchor_id": "F-two", "link_id": "L-two",
+                                               "link_type": "host_after_anchor",
+                                               "strength": "observed"}]},
+        "benign_alternatives": ["strong alternative"], "next_checks": ["strong check"],
+        "source_anchor_id": "F-two", "source_link_id": "L-two",
+    }
+    rows = {"inferred": inferred, "observed": observed}
+    for name in order:
+        repo.save_candidate(copy.deepcopy(rows[name]))
+    return repo.candidate(common["id"]), observed
+
+
+def test_same_subject_route_merge_keeps_one_coherent_strongest_row_in_either_order():
+    inferred_first, expected = _merge_same_subject_rows(["inferred", "observed"])
+    observed_first, _ = _merge_same_subject_rows(["observed", "inferred"])
+
+    coherent_fields = (
+        "rule_version", "claim", "claim_type", "event_ids", "context_event_ids",
+        "predicate_fields", "entities", "ts", "severity", "confidence", "lane", "priority",
+        "priority_reasons", "benign_alternatives", "next_checks", "group_key",
+        "source_anchor_id", "source_link_id",
+    )
+    assert {field: inferred_first[field] for field in coherent_fields} == {
+        field: observed_first[field] for field in coherent_fields
+    }
+    for field in coherent_fields:
+        if field == "ts":
+            continue
+        assert inferred_first[field] == expected[field]
+    assert inferred_first["ts"].replace(tzinfo=UTC) == expected["ts"]
+    assert inferred_first["gate_results"] == {
+        "quality": "strong", "_notes": [
+            "observed wording", "reached through an inferred host_after_anchor relation",
+        ],
+        "_context_reaches": [
+            {"anchor_id": "F-one", "link_id": "L-one", "link_type": "host_after_anchor",
+             "strength": "inferred"},
+            {"anchor_id": "F-two", "link_id": "L-two", "link_type": "host_after_anchor",
+             "strength": "observed"},
+        ],
+    }
+
+
+class _SameGroupDirect(Playbook):
+    id = "test.same_group_direct"
+    title = "same group direct"
+    families = ("process_exec",)
+    version = "1"
+
+
+def _publish_distinct_subjects(anchor_order):
+    repo = repo_with_anchor(candidate_id="F-one")
+    add_anchor(repo, "F-two", "web1", ts=T0 + timedelta(seconds=1))
+    events = {
+        "F-one": event("subject-two", ts=T0 + timedelta(minutes=2), argv=["/bin/sh", "-c", "two"]),
+        "F-two": event("subject-five", ts=T0 + timedelta(minutes=5), argv=["/bin/sh", "-c", "five"]),
+    }
+    rule = _SameGroupDirect()
+    for anchor_id in anchor_order:
+        subject = events[anchor_id]
+        match = Match(
+            rule.id, f"{anchor_id} cites {subject.id}", "observed_action", [subject],
+            [pf(subject, "process.executable")], subject.ts, "high", "high", "high",
+            subject.entities(), group_key="shared-subject",
+        )
+        publish_match(
+            repo, "h1", rule, match, None, {}, source_anchor_id=anchor_id,
+            source_link_id=f"L-{anchor_id}", context_reach={
+                "anchor_id": anchor_id, "link_id": f"L-{anchor_id}",
+                "link_type": "host_after_anchor", "strength": "observed",
+            },
+        )
+    return sorted(
+        ({key: row[key] for key in ("id", "claim", "event_ids", "lane", "severity", "source_anchor_id")}
+         for row in repo.candidates("h1") if row["rule_id"] == rule.id),
+        key=lambda row: row["claim"],
+    )
+
+
+def test_cross_anchor_same_group_with_distinct_subjects_stays_separate_and_deterministic():
+    forward = _publish_distinct_subjects(["F-one", "F-two"])
+    reversed_order = _publish_distinct_subjects(["F-two", "F-one"])
+
+    assert forward == reversed_order
+    assert len(forward) == 2
+    assert all(len(row["event_ids"]) == 1 and row["event_ids"][0] in row["claim"] for row in forward)
+    assert len({row["id"] for row in forward}) == 2
+
+
+def test_expansion_of_the_same_subject_reuses_an_existing_direct_finding():
+    repo = repo_with_anchor()
+    subject = event("direct-subject", ts=T0 + timedelta(minutes=2), argv=["/usr/bin/cat", "/etc/shadow"])
+    rule = _SameGroupDirect()
+    match = Match(
+        rule.id, "same direct subject", "observed_action", [subject],
+        [pf(subject, "process.executable")], subject.ts, "high", "high", "high",
+        subject.entities(), group_key="shared-subject",
+    )
+    direct = publish_match(repo, "h1", rule, match, None, {})
+
+    duplicate = publish_match(
+        repo, "h1", rule, match, None, {}, source_anchor_id="F-anchor", source_link_id="L-anchor",
+        context_reach={"anchor_id": "F-anchor", "link_id": "L-anchor",
+                       "link_type": "host_after_anchor", "strength": "observed"},
+    )
+
+    stored = [row for row in repo.candidates("h1") if row["rule_id"] == rule.id]
+    assert duplicate is None and len(stored) == 1 and stored[0]["id"] == direct["id"]
+    assert stored[0]["event_ids"] == [subject.id]
 
 
 def test_nested_windows_each_evaluate_the_event_but_publish_one_context_finding():

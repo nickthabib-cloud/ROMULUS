@@ -1,12 +1,13 @@
 """Flow and session claims state only what the records show.
 
-- Which side opened a connection comes from a record that shows the opening (an Arkime session that counted a SYN, a
-  Suricata TCP flow its engine tracked from the handshake), never from the side a sensor happened to record first: a
+- Which side opened a connection comes from a record that shows the opening (an Arkime session that counted a SYN, or
+  Suricata directional flags with a SYN toward the server), never from the side a sensor happened to record first: a
   session picked up mid-stream is recorded with whichever side spoke first as its source.
 - The records cited for a claim include the records that bound every interval it states, however many records the
   claim rests on, and the claim says how many it rests on and how many are cited.
 
 Fixtures go through the real normalizer (Suricata EVE flow records, Arkime SPI sessions)."""
+import json
 import random
 from collections import Counter
 from datetime import timedelta
@@ -37,6 +38,14 @@ def flagged(hit, syn=0, syn_ack=0):
     return hit
 
 
+def suricata_tcp(hit, **fields):
+    """Add the EVE TCP summary object to a Suricata fixture."""
+    record = json.loads(hit["_source"]["event"]["original"])
+    record["tcp"] = fields
+    hit["_source"]["event"]["original"] = json.dumps(record)
+    return hit
+
+
 def view(hit):
     [event] = events(hit)
     return flow_view(event, record_kind(event))
@@ -59,11 +68,32 @@ def test_an_arkime_session_without_a_counted_syn_does_not_show_the_opener(hit):
     assert not view(hit).opened
 
 
-@pytest.mark.parametrize("state,opened", [("established", True), ("closed", True), ("new", False),
-                                          ("bypassed", False)])
-def test_a_suricata_tcp_flow_shows_the_opener_only_when_its_engine_tracked_the_handshake(state, opened):
-    assert view(eve("s", state=state)).opened is opened
-    assert not view(eve("u", proto="UDP", dport=53, state=state)).opened
+@pytest.mark.parametrize("state", ["established", "closed", "new", "bypassed"])
+def test_a_suricata_tcp_flow_state_without_a_syn_leaves_the_opener_unknown(state):
+    assert not view(eve("s", state=state)).opened
+    assert not view(suricata_tcp(eve("u", proto="UDP", dport=53, state=state),
+                                 syn=True, tcp_flags_ts="02", tcp_flags_tc="12")).opened
+
+
+@pytest.mark.parametrize("tcp", [
+    {"syn": True, "tcp_flags_ts": "02", "tcp_flags_tc": "12"},
+    {"syn": True, "tcp_flags_ts": "12", "tcp_flags_tc": "12"},
+    # The aggregate SYN is sufficient only when the recorded to-client flags prove it did not come that way.
+    {"syn": True, "tcp_flags_tc": "10"},
+])
+def test_a_suricata_syn_toward_the_server_shows_the_source_opened_the_flow(tcp):
+    opened = view(suricata_tcp(eve("s", src=INSIDE, sport=50123, dst=OUTSIDE, dport=443,
+                                         state="established"), **tcp))
+    assert opened.opened and (opened.src, opened.dst) == (INSIDE, OUTSIDE)
+
+
+@pytest.mark.parametrize("tcp", [
+    {"syn": True, "tcp_flags_tc": "12"},
+    {"syn": False, "tcp_flags_ts": "10", "tcp_flags_tc": "12"},
+    {"tcp_flags_ts": "10", "tcp_flags_tc": "10"},
+])
+def test_a_suricata_syn_not_proved_toward_the_server_leaves_the_opener_unknown(tcp):
+    assert not view(suricata_tcp(eve("s", state="closed"), **tcp)).opened
 
 
 # ---- outbound volume asymmetry: the lab case and the populations ------------------------------------------------
@@ -122,13 +152,15 @@ def test_an_upload_the_internal_address_opened_says_so_and_cites_the_opening():
     assert {p.field: p.value for p in m.predicate}["tcp.flags.syn"] == 1
 
 
-def test_an_opening_shown_only_by_a_suricata_state_says_what_that_assumes():
-    flow = eve("s", sport=50001, dst=OUTSIDE, dport=443, state="established", c2s=60 * MIB, s2c=MIB, pkts_s=10)
+def test_an_opening_shown_by_a_suricata_directional_syn_says_exactly_what_it_shows():
+    flow = suricata_tcp(eve("s", sport=50001, dst=OUTSIDE, dport=443, state="established",
+                              c2s=60 * MIB, s2c=MIB, pkts_s=10),
+                          syn=True, tcp_flags_ts="02", tcp_flags_tc="12")
     [m] = run(OutboundVolumeAsymmetry(), events(flow))
     assert (f"shows {INSIDE} opened the connection, to server port tcp/443 (1 connection) on {OUTSIDE} (the only "
-            "record of the opening is a Suricata flow in state established or closed, which shows a tracked handshake "
-            "on a sensor that does not pick up mid-stream).") in m.claim
-    assert "stream.midstream" in OutboundVolumeAsymmetry.positive_only_reason
+            "record of the opening is a Suricata directional TCP flag summary that records a SYN toward the "
+            "server).") in m.claim
+    assert "directional TCP flags record a SYN toward the server" in OutboundVolumeAsymmetry.positive_only_reason
 
 
 def test_an_upload_with_no_recorded_opening_is_read_from_its_ports_and_says_the_opener_is_unknown():
@@ -143,16 +175,17 @@ def test_an_upload_with_no_recorded_opening_is_read_from_its_ports_and_says_the_
 
 
 def test_a_suricata_flow_an_outside_client_opened_to_an_internal_server_is_not_an_upload_and_is_named():
-    download = eve("dl", src=OUTSIDE, sport=51000, dst=INSIDE, dport=443, state="closed", seconds=60,
-                   c2s=MIB, s2c=600 * MIB, pkts_c=900, pkts_s=9000)
+    download = suricata_tcp(eve("dl", src=OUTSIDE, sport=51000, dst=INSIDE, dport=443, state="closed", seconds=60,
+                                  c2s=MIB, s2c=600 * MIB, pkts_c=900, pkts_s=9000),
+                              syn=True, tcp_flags_ts="02", tcp_flags_tc="12")
     rule = OutboundVolumeAsymmetry()
     assert run(rule, events(download)) == []
-    [reason] = rule.limit_reasons()             # a Suricata state alone can be wrong: the cell is partial
-    assert reason.startswith("not read as uploads: connections whose only record of the opening, by an external "
-                             "address, is a Suricata flow in state established or closed, which shows a tracked "
-                             "handshake on a sensor that does not pick up mid-stream, so the internal address answered "
-                             f"as a server: the internal addresses sent {600 * MIB:,} bytes on them")
-    assert rule.coverage_notes() == []
+    assert rule.limit_reasons() == []
+    [note] = rule.coverage_notes()
+    assert note.startswith("not read as uploads (informational): connections whose only record of the opening, by "
+                           "an external address, is a Suricata directional TCP flag summary that records a SYN toward "
+                           "the server, so the internal address answered as a server: the internal addresses sent "
+                           f"{600 * MIB:,} bytes on them")
 
 
 def test_a_servers_answers_from_its_service_port_with_no_recorded_opening_are_not_an_upload():
@@ -215,13 +248,16 @@ def test_records_that_disagree_about_the_opener_are_read_as_unknown():
 
 
 def test_a_mixed_pair_counts_each_reading_apart_and_names_the_served_connection():
-    hits = [eve("o", sport=50001, dst=OUTSIDE, dport=443, state="closed", c2s=40 * MIB, s2c=MIB, pkts_s=10),
+    hits = [suricata_tcp(eve("o", sport=50001, dst=OUTSIDE, dport=443, state="closed",
+                               c2s=40 * MIB, s2c=MIB, pkts_s=10),
+                           syn=True, tcp_flags_ts="02", tcp_flags_tc="12"),
             eve("n", sport=50002, dst=OUTSIDE, dport=8443, state="new", start=T0 + timedelta(minutes=5),
                 c2s=30 * MIB, s2c=MIB, pkts_s=10),
             eve("u", proto="UDP", sport=40000, dst=OUTSIDE, dport=51820, start=T0 + timedelta(minutes=6),
                 c2s=10 * MIB, s2c=0, pkts_s=0),
-            eve("s", src=OUTSIDE, sport=50003, dst=INSIDE, dport=22, state="closed", c2s=MIB, s2c=900 * MIB,
-                pkts_s=10)]
+            suricata_tcp(eve("s", src=OUTSIDE, sport=50003, dst=INSIDE, dport=22, state="closed", c2s=MIB,
+                               s2c=900 * MIB, pkts_s=10),
+                           syn=True, tcp_flags_ts="02", tcp_flags_tc="12")]
     rule = OutboundVolumeAsymmetry()
     [m] = run(rule, events(*hits))
     assert f"{INSIDE} sent {80 * MIB:,} bytes" in m.claim and "over 3 connections" in m.claim
@@ -229,8 +265,9 @@ def test_a_mixed_pair_counts_each_reading_apart_and_names_the_served_connection(
     assert "Which side opened 1 connection is not recorded: 1 is TCP" in m.claim and "tcp/8443 (1 connection)" in m.claim
     assert "Which side opened 1 connection is not recorded: 1 is UDP" in m.claim and "udp/51820" in m.claim
     assert "tcp/22" not in m.claim
-    [reason] = rule.limit_reasons()
-    assert f"sent {900 * MIB:,} bytes on them" in reason and reason.endswith("(1 connection(s))")
+    assert rule.limit_reasons() == []
+    [note] = rule.coverage_notes()
+    assert f"sent {900 * MIB:,} bytes on them" in note and note.endswith("(1 connection(s))")
 
 
 def test_outbound_citations_bound_the_stated_interval_beyond_the_example_limit():

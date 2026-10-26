@@ -125,7 +125,8 @@ def test_every_view_reads_the_one_store_and_answers_across_pid_reuse_and_reboots
     assert iec.pids.exec_before("h1", 500, t1.timestamp(), None)[1] == "/usr/sbin/apache2"
     assert iec.pids.lookup(None, 500, at_t2) is None                          # a record without a host
     # the package-lineage view
-    assert persistence._parent("h1", 500, at_t2).exe == "/usr/bin/python3"
+    assert persistence.execs.latest("h1", 500, at_t2, where=lambda record: bool(record.exe)).exe \
+        == "/usr/bin/python3"
     # the root-job daemon view: root, outside any login, with a program identity
     flags = {r.event_id: r.flags & DAEMON for pid in (500, 600, 700) for r in shared.entries("h1", pid)}
     assert flags == {"a": 0, "b": DAEMON, "c": 0, "d": DAEMON}

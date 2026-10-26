@@ -104,7 +104,7 @@ def event_os_family(event: TypedEvent) -> str:
 # therefore carries the evidence version: a hunt run with improved normalization stores its own rows instead of
 # silently reusing an older hunt's (stale rows missing a newly normalized field, such as process.session_id,
 # would hide every link that depends on it). Bump on any change to how raw records become typed events; tests/test_evidence_version.py enforces it.
-EVIDENCE_VERSION = 12
+EVIDENCE_VERSION = 14
 
 
 def event_id(family: str, refs: list[RawRef], producer: str = "") -> str:

@@ -23,7 +23,11 @@ EVIDENCE_FILES = ("__init__.py", "auditd.py", "normalize.py", "typed.py")
 PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf2116524009",
                    10: "e4dffd0944b86200b3c94aa301bead206967c58f565b30d426ee0071bd4f1aa9",
                    11: "150e5e4d74cb0f4891ef4cca7114a709f2038a42fc456e69f7952dcf0f6c9b32",
-                   12: "fcda4d383cdb9d9d56aadffc237dcab81d4902dd3893e7b673aafd6cb6bdfb64"}
+                   12: "fcda4d383cdb9d9d56aadffc237dcab81d4902dd3893e7b673aafd6cb6bdfb64",
+                   # Suricata TCP/ICMP, Arkime ICMP and Zeek ICMP conn fields gained strict typed contracts.
+                   13: "faf22327da69e63f594c999c9c5c68b909408308e37b0d1ab22ad86da1111b44",
+                   # Arkime ICMP lists and Zeek ICMP type/address-family semantics are normalized truthfully.
+                   14: "0be31c09e80229271ad2c738d37cc399069f0d3e9a510a59f6093d45c54f5e2e"}
 WINDOWS_EVIDENCE_FILES = ("windows.py", "windows_catalog.py")
 PINNED_WINDOWS = {
     "windows-ecs@1": "8c2f1668700a3f7d0a143eef00473770e2e5c746fadf6ce3b2c95ae6bbe6a419",

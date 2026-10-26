@@ -1098,11 +1098,12 @@ def _record_text(e: TypedEvent) -> str:
 class AccountOrGroupChange(Playbook):
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.account_or_group_change"
-    version = "5"
+    version = "6"
     title = "Account or group created, deleted or modified (command or account-management audit record)"
     anchor_class = "persistence"
     kind = "aggregate"
     families = ("process_exec", "account_change", "system_state")
+    context_families = ("process_observed",)
     os_families = ("linux",)
     claim_type = "aggregate_observation"
     assures_negative = False
@@ -1128,7 +1129,8 @@ class AccountOrGroupChange(Playbook):
         "behavior": "an account or group tool was run to create, delete or modify an account, group membership, "
                     "password or expiry; a command or shell text wrote /etc/passwd, /etc/shadow, /etc/group or "
                     "/etc/gshadow directly; or a tool's audit record reports such a change",
-        "telemetry": "auditd EXECVE+SYSCALL as process_exec (process.executable, process.argv, process.pid, "
+        "telemetry": "auditd EXECVE+SYSCALL as process_exec and other audit SYSCALL records as process_observed "
+                     "for lineage (process.executable, process.argv, process.pid, "
                      "process.ppid, process.user): present (root execs captured); audit ADD_USER/DEL_USER/ADD_GROUP/"
                      "DEL_GROUP/USER_MGMT/GRP_MGMT/USER_CHAUTHTOK/GRP_CHAUTHTOK/ACCT_LOCK/ACCT_UNLOCK as "
                      "account_change: typed; the lab profile holds password-change records only. Audit SYSTEM_BOOT as "
@@ -1201,10 +1203,14 @@ class AccountOrGroupChange(Playbook):
                 or name in SHELLS or is_editor(name))
 
     def consume(self, events):
-        fresh = [e for e in events if e.family in self.families and e.id not in self._seen]
+        fresh = [e for e in events if e.family in self.families + self.context_families and e.id not in self._seen]
         self._batch = events
-        for e in sorted(fresh, key=lambda x: (x.ts, x.family != "process_exec", x.id)):
+        order = {"process_observed": 0, "process_exec": 1, "account_change": 2, "system_state": 3}
+        for e in sorted(fresh, key=lambda x: (x.ts, order.get(x.family, 9), x.id)):
             self._seen.add(e.id)
+            if e.family == "process_observed":
+                self.lineage.observe(e, self.raw_of(e), self.raw_target())
+                continue
             if e.family == "process_exec":
                 self.lineage.observe(e, self.raw_of(e), self.raw_target())
                 if self.program_prefilter and not self._process_relevant(e):

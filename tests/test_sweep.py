@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from romulus.baseline.playbook import ExternalDestinationBaseline
 from romulus.detect.base import Playbook
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, event_os_family, fv
 from romulus.hunt import sweep as sw
@@ -27,6 +28,170 @@ def _repo():
     r = Repo(e)
     r.create_hunt("h1", {"targets": ["romulus-host-x"]}, "d", "t")
     return r
+
+
+def test_zeek_conn_profiles_do_not_claim_general_net_flow_and_queries_select_only_icmp():
+    contract = contract_from_types(
+        "zeek", {"@timestamp": "date", "event.dataset": "keyword", "network.transport": "keyword"},
+        role="network", os_family="unknown",
+    )
+    profile = {"role": "network", "datasets": {"zeek.connection": 1000}}
+
+    assert sw.delivered_families(profile, contract) == frozenset()
+
+    sweep = sw.Sweep(_repo(), FakeClient(), "h1", Window(
+        start=START, end=START + timedelta(minutes=5),
+    ), {"zeek": contract})
+    sweep._profiles = {"zeek": profile}
+    groups = sweep._any_of_for("zeek", contract)
+
+    assert [[predicate.model_dump() for predicate in group] for group in groups] == [
+        [
+            {"field": "event.dataset", "op": "in", "value": ["zeek.connection"]},
+            {"field": "network.transport", "op": "in", "value": ["icmp", "icmpv6", "ipv6-icmp"]},
+        ],
+        [
+            {"field": "event.dataset", "op": "in", "value": ["zeek.connection"]},
+            {"field": "network.transport", "op": "missing", "value": None},
+        ],
+        [{"field": "event.dataset", "op": "missing", "value": None}],
+    ]
+
+
+class _NetworkFlow(Playbook):
+    id = "test.network_flow"
+    version = 1
+    families = ("net_flow",)
+
+
+def _zeek_record(*, dataset=True, transport=None, proto="icmp"):
+    source = {
+        "@timestamp": "2024-11-18T14:00:00Z",
+        "host": {"name": "zeek1"},
+        "source": {"ip": "10.0.0.5", "port": 8},
+        "destination": {"ip": "203.0.113.9", "port": 0},
+        "zeek": {"connection": {"proto": proto, "orig_bytes": 64, "resp_bytes": 64,
+                                  "orig_pkts": 1, "resp_pkts": 1, "duration": 1.0}},
+    }
+    if dataset:
+        source["event"] = {"dataset": "zeek.connection"}
+    if transport is not None:
+        source["network"] = {"transport": transport}
+    return {"_id": "z1", "_index": "zeek", "_source": source}
+
+
+def _run_zeek_partition(monkeypatch, contract, record, profile, *, pack=None):
+    intents = []
+
+    def fake_execute(client, intent, source_contract):
+        intents.append(intent)
+        return _complete(intent, [record])
+
+    monkeypatch.setattr(sw, "execute", fake_execute)
+    repo = _repo()
+    sweep = sw.Sweep(repo, FakeClient(), "h1", Window(
+        start=START, end=START + timedelta(minutes=5),
+    ), {"zeek": contract})
+    sweep.pack = pack or [_NetworkFlow()]
+    sweep._profiles = {"zeek": profile}
+    any_of = sweep._any_of_for("zeek", contract)
+    sweep.run_partition(
+        "zeek", contract, [], Window(start=START, end=START + timedelta(minutes=5)),
+        est=1, any_of=any_of,
+    )
+    return repo, sweep, intents, any_of
+
+
+def test_zeek_missing_transport_is_fetched_and_normalized_from_conn_proto(monkeypatch):
+    contract = contract_from_types(
+        "zeek", {"@timestamp": "date", "event.dataset": "keyword",
+                 "network.transport": "keyword"}, role="network", os_family="unknown",
+    )
+    repo, _sweep, intents, any_of = _run_zeek_partition(
+        monkeypatch, contract, _zeek_record(),
+        {"role": "network", "datasets": {"zeek.connection": 1}},
+    )
+
+    assert any(
+        [(predicate.field, predicate.op) for predicate in group]
+        == [("event.dataset", "in"), ("network.transport", "missing")]
+        for group in any_of
+    )
+    assert intents[0].any_of == any_of
+    [cell] = repo.rule_cells("h1")
+    assert cell["evaluated"] == 1 and cell["state"] == "no_match_complete"
+
+
+def test_zeek_missing_dataset_is_fetched_and_marks_coverage_partial(monkeypatch):
+    contract = contract_from_types(
+        "zeek", {"@timestamp": "date", "event.dataset": "keyword",
+                 "network.transport": "keyword"}, role="network", os_family="unknown",
+    )
+    repo, sweep, _intents, any_of = _run_zeek_partition(
+        monkeypatch, contract, _zeek_record(dataset=False),
+        {"role": "network", "datasets": {"zeek.connection": 1}},
+    )
+
+    assert any(len(group) == 1 and group[0].field == "event.dataset"
+               and group[0].op == "missing" for group in any_of)
+    [cell] = repo.rule_cells("h1")
+    assert cell["state"] == "evaluated_partial"
+    assert "dataset: is not normalized" in cell["detail"]["reasons"][0]
+    assert sweep.partial_reasons
+
+
+def test_zeek_missing_dataset_keeps_baseline_inapplicable_but_retrieval_incomplete(monkeypatch):
+    contract = contract_from_types(
+        "zeek", {"@timestamp": "date", "event.dataset": "keyword",
+                 "network.transport": "keyword"}, role="network", os_family="unknown",
+    )
+    baseline = ExternalDestinationBaseline()
+    repo, sweep, _intents, _any_of = _run_zeek_partition(
+        monkeypatch, contract, _zeek_record(dataset=False),
+        {"role": "network", "datasets": {"zeek.connection": 1}}, pack=[baseline],
+    )
+
+    assert sweep._baseline_target_applicable("zeek", baseline) is False
+    [cell] = repo.rule_cells("h1")
+    assert cell["state"] == "not_applicable_no_events"
+    assert cell["detail"]["retrieval_complete"] is False
+
+
+def test_zeek_filter_falls_back_to_unfiltered_when_missing_or_transport_is_not_searchable(monkeypatch):
+    contract = contract_from_types(
+        "zeek", {"@timestamp": "date", "event.dataset": "keyword",
+                 "network.transport": "text"}, role="network", os_family="unknown",
+    )
+    repo, _sweep, intents, any_of = _run_zeek_partition(
+        monkeypatch, contract, _zeek_record(transport="tcp", proto="tcp"),
+        {"role": "network", "datasets": {"zeek.connection": 1}},
+    )
+
+    assert any_of == [] and intents[0].any_of == []
+    [cell] = repo.rule_cells("h1")
+    assert cell["state"] == "evaluated_partial"
+    assert "zeek non-ICMP connection is not normalized" in cell["detail"]["reasons"][0]
+
+
+def test_zeek_truncated_dataset_inventory_disables_optimized_filter():
+    contract = contract_from_types(
+        "zeek", {"@timestamp": "date", "event.dataset": "keyword",
+                 "network.transport": "keyword"}, role="network", os_family="unknown",
+    )
+    sweep = sw.Sweep(_repo(), FakeClient(), "h1", Window(
+        start=START, end=START + timedelta(minutes=5),
+    ), {"zeek": contract})
+    sweep._profiles = {"zeek": {
+        "role": "network", "datasets": {"zeek.connection": 1000},
+        "notes": ["ds inventory truncated after 100 terms"],
+    }}
+
+    assert sweep._any_of_for("zeek", contract) == []
+
+
+def test_unfiltered_zeek_non_icmp_skip_makes_coverage_partial():
+    skips = {"zeek non-ICMP connection is not normalized": 7}
+    assert sw.Sweep._unsupported_skips(skips) == skips
 
 
 def test_capped_partitions_split_until_complete(monkeypatch):

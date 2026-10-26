@@ -32,6 +32,7 @@ from __future__ import annotations
 import hashlib
 import json
 import zlib
+from datetime import UTC, datetime
 from typing import NamedTuple
 
 from romulus.evidence.typed import RawRef, TypedEvent, event_id
@@ -79,6 +80,7 @@ class Observed(NamedTuple):
     raw_id: str             # its SYSCALL record's native id
     last: float             # the latest record of this state so far
     cited: bool = True      # its record is held for citation
+    user: str | None = None # account named by the observation, when the audit record carries one
 
 
 def observation(event: TypedEvent) -> tuple[int, Observed, RawRef | None] | None:
@@ -101,8 +103,10 @@ def observation(event: TypedEvent) -> tuple[int, Observed, RawRef | None] | None
     session = event.get("process.session_id")
     boot = event.get("host.boot.id")
     ts = event.ts.timestamp()
+    user = event.get("process.user") or event.get("process.effective_user")
     return pid, Observed(ts, serial, str(exe), ppid, session if isinstance(session, int) else None,
-                         None if boot in (None, "") else str(boot), event.id, native, ts), ref
+                         None if boot in (None, "") else str(boot), event.id, native, ts,
+                         user=str(user) if user not in (None, "") else None), ref
 
 
 def observed_view_id(ref: RawRef) -> str:
@@ -269,7 +273,7 @@ def continues(prev, entry: Observed) -> bool:
 
 
 def process_view(execs: list, observed: list[Observed], ts: float, serial: int | None, boot: str | None, *,
-                 inclusive: bool, pid: int, host: str | None) -> ProcessView:
+                 inclusive: bool, pid: int, host: str | None, order_domain=None) -> ProcessView:
     """The process holding `pid` at (`ts`, audit `serial`): from its execs and observations, never across a recorded
     boot other than `boot`. `inclusive` counts an entry at the asked serial (the asking record's own process);
     otherwise only entries strictly before count (a parent when its child was recorded).
@@ -281,7 +285,10 @@ def process_view(execs: list, observed: list[Observed], ts: float, serial: int |
     The image is the latest exec at or before the instant, else an observation with no exec recorded between it and
     the instant (on either side). The nearest observations around the instant and that exec must agree, or the image
     is ambiguous (an unrecorded exec or a reused pid)."""
-    domain = "audit" if serial is not None else None
+    if serial is None:
+        domain = None
+    else:
+        domain = "audit" if order_domain is None else order_domain
     steps = [_exec_step(r) for r in execs] + [_observed_step(o) for o in observed]
     before, unsure, after = [], [], []
     in_boot = [s for s in steps if s.boot == boot] if boot is not None and serial is not None else []
@@ -305,6 +312,22 @@ def process_view(execs: list, observed: list[Observed], ts: float, serial: int |
                 after = after[:end]
             unsure = [s for s in unsure if s.boot in (None, boot)]
     where = f"pid {pid} on {host}"
+    if before:
+        latest_ts = before[-1].ts
+        tied = [entry for entry in before if entry.ts == latest_ts]
+        serials = [entry.serial for entry in tied]
+        domains = {entry.domain for entry in tied}
+        if (None not in serials and None not in domains and len(domains) == 1
+                and len(set(serials)) == len(serials)):
+            latest = max(tied, key=lambda entry: entry.serial)
+        elif len({(entry.exe, entry.ppid, entry.session, entry.boot) for entry in tied}) == 1:
+            latest = max(tied, key=lambda entry: entry.order)
+        else:
+            when = datetime.fromtimestamp(latest_ts, UTC).isoformat()
+            return ProcessView(None, [], [], f"lineage ambiguous at {when} for {where}: records at one instant "
+                                             f"without comparable ordering show different states")
+        # Keep the proven latest state last for the span walk below; the other entries share its instant.
+        before = [entry for entry in before if entry is not latest] + [latest]
     prev_exec = next((s for s in reversed(before) if s.kind == EXEC), None)
     # the nearest observations on either side with no exec between them and the instant
     before_obs = before[-1] if before and before[-1].kind == OBSERVED else None
@@ -320,7 +343,8 @@ def process_view(execs: list, observed: list[Observed], ts: float, serial: int |
     if unsure:
         # entries at the asked instant whose order is unknown: harmless only when they show the same state
         reference = image or unsure[0]
-        if any(s.exe != reference.exe or s.ppid != reference.ppid for s in unsure):
+        if any((s.exe, s.ppid, s.session, s.boot)
+               != (reference.exe, reference.ppid, reference.session, reference.boot) for s in unsure):
             return ProcessView(None, [], [], f"lineage ambiguous for {where}: records at one instant without audit "
                                              f"serials to order them show different states")
         if image is None:

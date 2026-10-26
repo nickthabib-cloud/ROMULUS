@@ -1462,15 +1462,142 @@ class Repo:
             return [dict(r) for r in c.execute(select(t.raw_record).where(t.raw_record.c.id.in_(ids))).mappings()]
 
     # ---- candidates -------------------------------------------------------------------------
+    @staticmethod
+    def _candidate_subject_raw_identity(c, row: dict) -> tuple[tuple[str, ...], ...]:
+        """Raw-record identity of the records a candidate is about, excluding claim-only context."""
+        event_ids = list(row.get("event_ids") or [])
+        context_ids = set(row.get("context_event_ids") or ())
+        subject_ids = [event_id for event_id in event_ids if event_id not in context_ids] or event_ids
+        stored = {
+            event_id: tuple(sorted(raw_ids or ()))
+            for event_id, raw_ids in c.execute(select(
+                t.typed_event.c.id, t.typed_event.c.raw_ids,
+            ).where(t.typed_event.c.id.in_(subject_ids)))
+        }
+        return tuple(sorted(stored.get(event_id) or (f"event:{event_id}",) for event_id in subject_ids))
+
+    def candidate_subject_raw_identity(self, row: dict) -> tuple[tuple[str, ...], ...]:
+        """Read-only subject identity used when deterministic publication may replace an agent-first candidate."""
+        with self.engine.connect() as c:
+            return self._candidate_subject_raw_identity(c, row)
+
     def save_candidate(self, row: dict, *, canonicalize_agent: bool = False,
                        owner_token: str | None = None) -> bool:
-        """Insert once, except that a deterministic pass may canonicalize an agent-first duplicate."""
+        """Insert once, while retaining deterministic provenance for the two supported duplicate cases."""
         with write_txn(self.engine) as c:
             self._fence_lease(c, row["hunt_id"], owner_token)
             existing = c.execute(select(t.candidate).where(
                 t.candidate.c.id == row["id"],
             )).mappings().first()
+            if (existing
+                    and existing["source_case_id"] is None
+                    and row.get("source_case_id") is None
+                    and existing["source_anchor_id"] is not None
+                    and row.get("source_anchor_id") is not None
+                    and self._candidate_subject_raw_identity(c, existing)
+                    != self._candidate_subject_raw_identity(c, row)):
+                # A legacy or hostile caller reused a group-key candidate id for different subject evidence.
+                # Keep both complete rows; the normal publication path already includes this digest up front.
+                subject = self._candidate_subject_raw_identity(c, row)
+                material = json.dumps(subject, sort_keys=True, separators=(",", ":"))
+                row["id"] = hashlib.sha256(f"{row['id']}|{material}".encode()).hexdigest()[:20]
+                existing = c.execute(select(t.candidate).where(
+                    t.candidate.c.id == row["id"],
+                )).mappings().first()
             if existing:
+                deterministic_expansion_duplicate = (
+                    existing["source_case_id"] is None
+                    and row.get("source_case_id") is None
+                    and existing["source_anchor_id"] is not None
+                    and row.get("source_anchor_id") is not None
+                    and self._candidate_subject_raw_identity(c, existing)
+                    == self._candidate_subject_raw_identity(c, row)
+                )
+                if deterministic_expansion_duplicate:
+                    before = dict(existing)
+                    existing_reaches = (existing["gate_results"] or {}).get("_context_reaches", [])
+                    incoming_reaches = (row.get("gate_results") or {}).get("_context_reaches", [])
+                    indexed = {
+                        (reach["anchor_id"], reach["link_id"], reach["link_type"], reach["strength"]): reach
+                        for reach in [*existing_reaches, *incoming_reaches]
+                    }
+                    reaches = [indexed[key] for key in sorted(indexed)]
+                    if not reaches:
+                        return False
+
+                    # The finding has the same raw subject but may have been evaluated through routes with
+                    # different decision strength and wording. Select one complete row; synthesizing a claim
+                    # from one evaluation with gates, entities, or a lane from the other would be false
+                    # provenance. The final content and tie break are independent of arrival order.
+                    coherent_fields = (
+                        "rule_version", "claim", "claim_type", "event_ids", "context_event_ids",
+                        "predicate_fields", "entities", "ts", "severity", "confidence", "lane",
+                        "priority", "priority_reasons", "gate_results", "benign_alternatives",
+                        "next_checks", "group_key", "source_anchor_id", "source_link_id",
+                    )
+
+                    def representative_rank(candidate: dict) -> tuple:
+                        candidate_gates = dict(candidate.get("gate_results") or {})
+                        candidate_reaches = candidate_gates.pop("_context_reaches", [])
+                        route_strength = max(
+                            ({"inferred": 0, "observed": 1}.get(reach.get("strength"), -1)
+                             for reach in candidate_reaches),
+                            default=-1,
+                        )
+                        stable_material = {
+                            field: (candidate_gates if field == "gate_results" else candidate.get(field))
+                            for field in coherent_fields
+                        }
+                        return (
+                            LANE_STRENGTH.get(str(candidate.get("lane")), -1),
+                            SEVERITY_STRENGTH.get(str(candidate.get("severity")), -1),
+                            {"low": 0, "medium": 1, "high": 2}.get(
+                                str(candidate.get("confidence")), -1,
+                            ),
+                            float(candidate.get("priority") or 0),
+                            route_strength,
+                            candidate.get("source_anchor_id") != candidate.get("id"),
+                            json.dumps(stable_material, sort_keys=True, separators=(",", ":"), default=str),
+                        )
+
+                    representative = max((before, row), key=representative_rank)
+                    gates = dict(representative["gate_results"] or {})
+                    relation_notes = {
+                        str(note)
+                        for candidate in (before, row)
+                        for note in (candidate["gate_results"] or {}).get("_notes", [])
+                        if str(note).startswith((
+                            "reached through an inferred ",
+                            "reached through an agent-requested ",
+                        ))
+                    }
+                    if relation_notes:
+                        gates["_notes"] = sorted({
+                            *(str(note) for note in gates.get("_notes", [])),
+                            *relation_notes,
+                        })
+                    gates["_context_reaches"] = reaches
+                    values = {
+                        field: (gates if field == "gate_results" else representative.get(field))
+                        for field in coherent_fields
+                    }
+                    changed = (
+                        reaches != existing_reaches
+                        or any(existing[field] != value for field, value in values.items())
+                    )
+                    if changed:
+                        c.execute(t.candidate.update().where(t.candidate.c.id == row["id"]).values(**values))
+                        c.execute(t.audit_event.insert().values(
+                            at=utcnow(), actor="system", action="candidate.merge_expansion_routes",
+                            hunt_id=row["hunt_id"], detail={
+                                "candidate_id": row["id"], "routes": reaches,
+                                "representative": {
+                                    "anchor_id": representative.get("source_anchor_id"),
+                                    "link_id": representative.get("source_link_id"),
+                                },
+                            },
+                        ))
+                    return False
                 if not (canonicalize_agent and existing["source_case_id"] is not None
                         and row.get("source_case_id") is None):
                     return False
@@ -1489,6 +1616,19 @@ class Repo:
                 # a record the deterministic pass cites only for its statements stays context; an agent-first
                 # citation of it keeps it the finding's own
                 context = sorted(set(row.get("context_event_ids") or ()) - set(existing["event_ids"] or ()))
+                # Preserve the stronger agent-first machine decision exactly as before; add only deterministic
+                # route provenance and the combined explanatory notes.
+                canonical_gates = dict(existing["gate_results"] or {})
+                incoming_reaches = (row["gate_results"] or {}).get("_context_reaches")
+                if incoming_reaches:
+                    canonical_gates["_context_reaches"] = incoming_reaches
+                canonical_notes = sorted({
+                    str(note)
+                    for candidate in (existing, row)
+                    for note in (candidate["gate_results"] or {}).get("_notes", [])
+                })
+                if canonical_notes:
+                    canonical_gates["_notes"] = canonical_notes
                 values = {
                     # The later deterministic pass owns canonical wording and provenance. It must
                     # never weaken the machine decision or discard evidence already cited.
@@ -1502,6 +1642,7 @@ class Repo:
                     "priority": max(existing_priority, incoming_priority),
                     "priority_reasons": (row["priority_reasons"] if incoming_priority > existing_priority
                                          else existing["priority_reasons"]),
+                    "gate_results": canonical_gates,
                     "source_case_id": None,
                     "source_anchor_id": row.get("source_anchor_id"),
                     "source_link_id": row.get("source_link_id"),

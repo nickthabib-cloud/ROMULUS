@@ -1791,9 +1791,9 @@ class ExecLineage:
         for member in self.members:
             member.note_limit("lineage_observed", f"the store of processes' observed states took no new process from "
                                                   f"the record of {when} on (its share of the state budget is spent): "
-                                                  f"lineages are judged when the hunt ends, so no lineage lowers a lane "
-                                                  f"anywhere in this hunt (every lineage that would have is stated as "
-                                                  f"unknown)")
+                                                  f"recorded exec lineage is still used for attack-associated raises, "
+                                                  f"but package, cloud-init and log-rotation lineage cannot lower a "
+                                                  f"lane anywhere in this hunt")
 
     def _cite(self, entry: Observed, blob: bytes | None) -> bool:
         """Keep an observation's source pointer; False when it is unavailable or its store refuses it (a lineage
@@ -1815,7 +1815,7 @@ class ExecLineage:
         self._citation_loader = load
 
     def view(self, host: str | None, pid: int, ts: float, serial: int | None, boot: str | None, *,
-             inclusive: bool) -> ProcessView:
+             inclusive: bool, exclude: str | None = None, order_domain=None) -> ProcessView:
         """The process holding `pid` at (`ts`, audit `serial`) from its execs and observations
         (`romulus.detect.observed.process_view`)."""
         observed = []
@@ -1823,8 +1823,11 @@ class ExecLineage:
             observed = self.observed.get((host, pid))
             if observed is None:
                 observed = self.observed.peek((host, pid), None) or []
-        return process_view(self.entries(host, pid), observed, ts, serial, boot, inclusive=inclusive, pid=pid,
-                            host=host)
+        execs = self.entries(host, pid)
+        if exclude is not None:
+            execs = [record for record in execs if record.event_id != exclude]
+        return process_view(execs, observed, ts, serial, boot, inclusive=inclusive, pid=pid, host=host,
+                            order_domain=order_domain)
 
     def cited(self, event_ids: list[str]) -> tuple[dict[str, TypedEvent], dict[str, dict]]:
         """The observed and exec records held for citation, by event id, and their raw copies (an id not held is
@@ -1924,8 +1927,8 @@ class ProcessLineage:
     DEPTH = 16
     CAPACITY = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
 
-    def __init__(self, owner=None, members: list | None = None):
-        self.execs = ExecLineage(owner, self.CAPACITY, citing=True)
+    def __init__(self, owner=None, members: list | None = None, capacity: int | None = None):
+        self.execs = ExecLineage(owner, self.CAPACITY if capacity is None else capacity, observing=True, citing=True)
         self.members = members if members is not None else [owner] if owner is not None else []
 
     @property
@@ -1967,6 +1970,8 @@ class ProcessLineage:
     ) -> None:
         if event.family == "process_exec":
             self.execs.observe(event, raw, source_target)
+        else:
+            self.execs.observe_process(event, raw, source_target)
 
     def cited_phrase(self, lineage: Lineage) -> tuple[str, list[TypedEvent], dict[str, dict]]:
         """`lineage_phrase` with the exec record of the ancestor it names, and that record's raw copies, to cite. A
@@ -1980,17 +1985,40 @@ class ProcessLineage:
         return phrase, list(found.values()), raw
 
     def parent(self, host: str | None, ppid: int | None, ts: float, boot: str | None = None,
-               serial: int | None = None, order_domain=None) -> Ancestor | None:
-        """The exec of `ppid` that was its image at (`ts`, audit `serial`) (`ExecLineage.latest`: None when that is
-        ambiguous), unless it was recorded in a boot other than `boot`: the pid restarted at the reboot, and every
-        earlier exec of it is in that boot or an earlier one."""
+               serial: int | None = None, order_domain=None, *, inclusive: bool = False) -> Ancestor | None:
+        """The process holding `ppid` at (`ts`, audit `serial`) from execs and other audit observations.
+
+        Its name is the latest image in that process, while the next walk step uses the parent recorded by the
+        process's earliest entry: the parent-at-fork rule. An observation that was refused or cannot be cited never
+        lowers a lane. `inclusive` is for the process that made the asking non-exec record itself; parents remain
+        strict-before their child's first record.
+        """
         if ppid is None or ppid <= 1:
             return None
-        found = self.execs.latest(host, ppid, ts, serial=serial, order_domain=order_domain)
-        if found is None or boots_conflict(boot, found.boot):
+        view = self.execs.view(host, ppid, ts, serial, boot, inclusive=inclusive, order_domain=order_domain)
+        if view.image is None:
             return None
-        return Ancestor(found.ts, found.ppid, found.name, found.user, found.marker, found.event_id, found.boot,
-                        found.serial, found.order_domain)
+        lowering_safe = not self.execs.observed_incomplete and all(entry.cited for entry in view.used)
+        first, named = view.first, view.named
+        entry = named.entry
+        if isinstance(entry, ExecRecord):
+            name, user, marker = entry.name, entry.user, entry.marker
+        else:
+            located = named.exe
+            name = canonical(basename(located))
+            system = located.startswith(SYSTEM_BIN_DIRS)
+            marker = ("package" if system and name in PACKAGE_TOOLS
+                      else "cloud-init" if system and name in CLOUD_INIT_TOOLS
+                      else "logrotate" if system and name in LOG_ROTATORS else "")
+            user = entry.user or next(
+                (step.entry.user for step in reversed(view.span)
+                 if getattr(step.entry, "user", None) not in (None, "")),
+                None,
+            )
+        if not lowering_safe:
+            marker = ""
+        return Ancestor(first.ts, first.ppid, name, user, marker, entry.event_id,
+                        first.boot or named.boot, first.serial, first.domain)
 
     def classify(self, event: TypedEvent) -> Lineage:
         """The record's own account or nearest exec ancestor that is a web-service account (which wins at any
@@ -2001,7 +2029,7 @@ class ProcessLineage:
                      serial: int | None = None) -> Lineage:
         """Lineage of the process with this pid at this time in `boot` (its exec record that was its image then),
         for records that name a process but are not exec records themselves."""
-        start = self.parent(host, pid, ts, boot, serial) if isinstance(pid, int) else None
+        start = self.parent(host, pid, ts, boot, serial, inclusive=True) if isinstance(pid, int) else None
         return self._walk(host, start, boot) if start is not None else Lineage("", None, 0)
 
     def _walk(self, host: str | None, current: Ancestor, boot: str | None = None) -> Lineage:

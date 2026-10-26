@@ -600,6 +600,10 @@ class ExpansionEngine:
                 row = publish_match(
                     self.repo, self.hunt_id, playbook, match, result.task_ids[0] if result.task_ids else None, {},
                     source_anchor_id=candidate["id"], source_link_id=result.id, owner_token=self.owner_token,
+                      context_reach={
+                          "anchor_id": candidate["id"], "link_id": result.id,
+                          "link_type": result.link_type, "strength": result.strength,
+                      },
                 )
                 if row is not None:
                     published.append(row)

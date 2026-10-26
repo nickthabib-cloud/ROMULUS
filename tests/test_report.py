@@ -584,8 +584,8 @@ def test_incident_graph_records_inferred_link_without_merging_incidents():
     })
     repo.save_expansion_link({
         "id": "link-inferred", "hunt_id": "h1", "anchor_id": first_id,
-        "link_type": "host_after_anchor", "window_label": "anchor ±5 min",
-        "window_start": T - timedelta(minutes=5), "window_end": T + timedelta(minutes=5),
+        "link_type": "host_after_anchor", "window_label": "anchor +/-30 min",
+        "window_start": T - timedelta(minutes=30), "window_end": T + timedelta(minutes=30),
         "strength": "inferred", "key": {"host.name": "web01", "actor": "inferred"},
         "status": "complete", "event_ids": ["ev1"], "evidence_ids": ["ev1"], "task_ids": [],
         "coverage": [], "reasons": [], "duration_ms": 1, "evaluated": 1,
