@@ -326,7 +326,9 @@ class Sweep:
             if (zeek and not any(str(note).startswith("ds inventory truncated")
                                  for note in profile.get("notes") or [])
                     and contract.supports("event.dataset", "in")
-                    and contract.supports("network.transport", "in")):
+                    and contract.supports("event.dataset", "missing")
+                    and contract.supports("network.transport", "in")
+                    and contract.supports("network.transport", "missing")):
                 groups = []
                 others = [dataset for dataset in datasets if dataset not in ZEEK_CONN_DATASETS]
                 if others:
@@ -335,6 +337,15 @@ class Sweep:
                     Predicate(field="event.dataset", op="in", value=zeek),
                     Predicate(field="network.transport", op="in", value=list(ZEEK_ICMP_TRANSPORTS)),
                 ])
+                # Some Zeek shippers leave ECS network.transport unset while conn.proto still records ICMP.
+                # Fetch those records for local normalization instead of treating their absence as non-ICMP.
+                groups.append([
+                    Predicate(field="event.dataset", op="in", value=zeek),
+                    Predicate(field="network.transport", op="missing"),
+                ])
+                # A missing dataset cannot be assigned to an inventoried class by the source query. Retrieve it
+                # so the normalizer's unsupported-record accounting makes every affected coverage cell partial.
+                groups.append([Predicate(field="event.dataset", op="missing")])
                 self.stats.setdefault("dataset_filter", {})[target] = others
                 self.stats.setdefault("zeek_transport_filter", {})[target] = list(ZEEK_ICMP_TRANSPORTS)
                 return groups
