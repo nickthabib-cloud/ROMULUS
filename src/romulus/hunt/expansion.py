@@ -17,9 +17,10 @@ from romulus.detect.correlation import routable_remote
 from romulus.detect.host import bind_lineage_citation_loader, is_internal
 from romulus.detect.netdef import DIRECTION_ASSUMED_REASON
 from romulus.detect.registry import fresh_direct_pack, rule_kind
-from romulus.evidence.typed import TypedEvent
+from romulus.evidence.typed import TypedEvent, event_os_family
+from romulus.evidence.windows_catalog import WINDOWS_HOST_DATASETS
 from romulus.hunt.context import finalize_context
-from romulus.hunt.expansion_plan import TIER_PLAN
+from romulus.hunt.expansion_plan import TIER_PLAN, WINDOWS_TIER_ADDITIONS
 from romulus.hunt.links import (
     HOST_SIDE_LINKS,
     LinkAnchor,
@@ -27,6 +28,10 @@ from romulus.hunt.links import (
     LinkResult,
     LinkType,
     LinkWindow,
+    _canonical_guid,
+    _event_code,
+    _first_label,
+    _session_id,
     is_agent_reach,
     usable_key,
     written_community_id,
@@ -51,8 +56,14 @@ MAX_ANCHOR_KEYS = 8
 # two-query floor of a physical fetch. The budget is shared, so an anchor with several keys draws on what one with
 # fewer did not use.
 PER_ANCHOR_SOURCE_QUERIES = 4 * sum(len(link_types) for _tier, link_types, _label in TIER_PLAN)
+WINDOWS_PER_ANCHOR_SOURCE_QUERIES = PER_ANCHOR_SOURCE_QUERIES + 4 * sum(
+    len(link_types) for _tier, link_types, _label in WINDOWS_TIER_ADDITIONS
+)
 NETWORK_FAMILIES = {"net_alert", "net_flow", "net_session", "dns_query", "http_tx",
                     "file_transfer", "tls_session", "ssh_session"}
+_WINDOWS_TIER_LINKS = {
+    (tier, label): links for tier, links, label in WINDOWS_TIER_ADDITIONS
+}
 
 
 def _utc(value: datetime) -> datetime:
@@ -216,8 +227,17 @@ class ExpansionEngine:
         default reads as outside, with the verdict (a host, no host, ambiguous, or why it is unresolved)."""
         if self._fallback is None:
             self._fallback, self._fallback_queries = {}, 0
+            executor = getattr(self.fetcher, "executor", None)
+            contracts = getattr(executor, "contracts", {}) or {}
+            inventories = getattr(executor, "dataset_inventory", {}) or {}
+            requires_typed_host_identity = any(
+                getattr(contract, "os_family", None) == "windows" for contract in contracts.values()
+            ) or any(set(datasets).intersection(WINDOWS_HOST_DATASETS) for datasets in inventories.values())
             for task in self.repo.host_resolution_tasks(self.hunt_id):
-                ip = (task.get("intent") or {}).get("resolve_host_ip")
+                intent = task.get("intent") or {}
+                if requires_typed_host_identity and intent.get("host_identity") != "typed-v2":
+                    continue
+                ip = intent.get("resolve_host_ip")
                 spent = int(task.get("source_queries") or 0)
                 try:
                     address = ipaddress.ip_address(str(ip))
@@ -302,16 +322,16 @@ class ExpansionEngine:
 
     @staticmethod
     def _link_anchors(anchor: LinkAnchor, link_type: LinkType) -> tuple[list[LinkAnchor], list[dict]]:
-        keyed: dict[str, tuple[dict, TypedEvent]] = {}
+        keyed: dict[str, tuple[dict, TypedEvent, str | None, datetime]] = {}
         for event in anchor.events:
-            key: dict | None = None
+            keys: list[dict] = []
             if link_type == "process_lineage" and usable_key(event.get("process.pid")):
-                key = {"process.pid": event.get("process.pid")}
+                keys = [{"process.pid": event.get("process.pid")}]
             elif link_type == "login_session" and usable_key(event.get("process.session_id")):
-                key = {
+                keys = [{
                     "process.session_id": event.get("process.session_id"),
                     "process.auid": event.get("process.auid") if usable_key(event.get("process.auid")) else None,
-                }
+                }]
             elif link_type in {"network_flow", "flow_host_side"}:
                 community_id = written_community_id(event)
                 flow_tuple = [event.get(field) for field in (
@@ -319,24 +339,93 @@ class ExpansionEngine:
                     "destination.ip", "destination.port",
                 )]
                 if usable_key(community_id):
-                    key = {"network.community_id": community_id}
+                    keys = [{"network.community_id": community_id}]
                 elif all(usable_key(value) for value in flow_tuple):
-                    key = {"five_tuple": flow_tuple}
+                    keys = [{"five_tuple": flow_tuple}]
             elif link_type == "source_ip" and usable_key(event.get("source.ip")):
-                key = {"source.ip": event.get("source.ip")}
+                keys = [{"source.ip": event.get("source.ip")}]
             elif link_type == "account":
                 if usable_key(event.get("user.name")):
-                    key = {"user.name": event.get("user.name")}
+                    keys = [{"user.name": event.get("user.name")}]
                 elif usable_key(event.get("process.auid")):
-                    key = {"process.auid": event.get("process.auid")}
-            if key is not None:
-                keyed.setdefault(json.dumps(key, sort_keys=True, separators=(",", ":")), (key, event))
+                    keys = [{"process.auid": event.get("process.auid")}]
+            elif link_type == "process_activity":
+                keys = [
+                    {"process.guid": guid}
+                    for field in ("process.guid", "source.guid", "target.guid")
+                    if (guid := _canonical_guid(event.get(field))) is not None
+                ]
+            elif link_type == "process_session":
+                keys = [
+                    {"process.session_id": session}
+                    for field in (
+                        "process.subject_session_id", "windows.event_data.SubjectLogonId",
+                        "process.target_session_id", "windows.event_data.TargetLogonId",
+                        "process.session_id",
+                    )
+                    if (session := _session_id(event.get(field))) is not None
+                ]
+            elif link_type == "kerberos_logon":
+                code = _event_code(event)
+                guid = _canonical_guid(event.get("auth.logon_guid"))
+                if code in {4624, 4769} and guid is not None:
+                    keys = [{"event.code": code, "auth.logon_guid": guid}]
+            elif link_type == "remote_logon_source":
+                code = _event_code(event)
+                logon_type = event.get("auth.logon_type")
+                try:
+                    logon_type = int(logon_type) if logon_type is not None else None
+                except (TypeError, ValueError):
+                    logon_type = None
+                eligible = code in {4624, 4778, 1149, 5140, 5145} and (
+                    code != 4624 or logon_type in {3, 10}
+                )
+                if eligible and usable_key(event.get("source.ip")):
+                    keys = [{
+                        "event.code": code, "auth.logon_type": logon_type,
+                        "source.ip": event.get("source.ip"),
+                    }]
+                elif eligible:
+                    workstation = next((
+                        event.get(field) for field in (
+                            "source.hostname", "source.workstation", "auth.workstation",
+                        ) if _first_label(event.get(field)) is not None
+                    ), None)
+                    if workstation is not None:
+                        keys = [{
+                            "event.code": code, "auth.logon_type": logon_type,
+                            "source.hostname": workstation,
+                        }]
+            elif link_type == "service_process":
+                code = _event_code(event)
+                image_path = event.get("service.image_path")
+                if code in {4697, 7045} and usable_key(image_path):
+                    keys = [{"event.code": code, "service.image_path": image_path}]
+            event_ts = _utc(event.ts)
+            # A network record's host is its observer, not the endpoint host. Preserve the resolved/unknown
+            # victim identity on those variants; host-attributed records use the host that wrote the key.
+            event_host = anchor.host if event.family in NETWORK_FAMILIES else event.host or anchor.host
+            for key in keys:
+                token = json.dumps(
+                    {"key": key, "host": event_host, "window_anchor": event_ts.isoformat()},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                keyed.setdefault(token, (key, event, event_host, event_ts))
         if not keyed:
             return [anchor], []
         ordered = [keyed[token] for token in sorted(keyed)]
         kept, dropped = ordered[:MAX_ANCHOR_KEYS], ordered[MAX_ANCHOR_KEYS:]
-        variants = [anchor.model_copy(update={"events": [event]}) for _key, event in kept]
-        return variants, [key for key, _event in dropped]
+        variants = [
+            anchor.model_copy(update={
+                "ts": event_ts,
+                "host": event_host,
+                "events": [event],
+                "link_key": key,
+            })
+            for key, event, event_host, event_ts in kept
+        ]
+        return variants, [key for key, _event, _host, _ts in dropped]
 
     def _anchor_plan(self, row: dict, *, candidate: dict | None = None,
                      events: list[TypedEvent] | None = None) -> _AnchorPlan:
@@ -436,8 +525,24 @@ class ExpansionEngine:
         can still be expanded (roots and discovered anchors alike, whichever run recorded them), up to the ceiling."""
         if self.per_anchor_source_queries is None:
             return self.max_source_queries
-        expandable = sum(1 for row in all_rows if row["depth"] < self.max_depth)
-        return min(self.max_source_queries, self.per_anchor_source_queries * expandable)
+        shares = 0
+        for row in all_rows:
+            if row["depth"] >= self.max_depth:
+                continue
+            share = self.per_anchor_source_queries
+            # The default manifest reserves the portable/Linux plan. Windows anchors add the same four-query
+            # allowance for each additional planned link; an explicit non-default setting remains authoritative.
+            if share == PER_ANCHOR_SOURCE_QUERIES:
+                is_windows = row.get("_windows_anchor")
+                if is_windows is None:
+                    is_windows = any(
+                        event_os_family(event) == "windows" for event in self._anchor_plan(row).events
+                    )
+                    row["_windows_anchor"] = is_windows
+                if is_windows:
+                    share = WINDOWS_PER_ANCHOR_SOURCE_QUERIES
+            shares += share
+        return min(self.max_source_queries, shares)
 
     def _root_cap(self, all_rows: list[dict], blocked: set[str], lane_rank: int) -> int:
         """Queries a root anchor may reach, given the most severe lane with work. A fifth of the total (the fixed
@@ -517,9 +622,28 @@ class ExpansionEngine:
         cached = link_plan.slots.get(window_label)
         if cached is not None:
             return cached
-        window = plan.windows[window_label]
         slots = []
+        seen_scopes: set[str] = set()
         for variant in link_plan.variants:
+            # A finding may cite keys from several hosts or widely separated events.  Each key is an observed
+            # event anchor, so its fetch window and host must follow that event rather than the candidate's first
+            # timestamp/host.
+            windows = {item.label: item for item in expansion_windows(variant.ts, self.window)}
+            window = windows.get(window_label)
+            if window is None:
+                continue
+            scope = json.dumps(
+                {
+                    "key": variant.link_key,
+                    "host": variant.host,
+                    "window": window.model_dump(mode="json"),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if scope in seen_scopes:
+                continue
+            seen_scopes.add(scope)
             if hasattr(self.fetcher, "result_id"):
                 stored = self.repo.expansion_link(self.fetcher.result_id(variant, link_type, window))
             else:
@@ -538,11 +662,16 @@ class ExpansionEngine:
     def _tier_slots(self, ordered: list[dict], anchor_reasons: dict[str, list[str]],
                     root_cap: int) -> list[_PlannedSlot]:
         """The unevaluated slots of the lowest unfinished tier, assembled from per-anchor plans."""
-        for _tier, link_types, window_label in TIER_PLAN:
+        for tier, link_types, window_label in TIER_PLAN:
             tier_slots = []
-            for link_type in link_types:
+            windows_links = _WINDOWS_TIER_LINKS.get((tier, window_label), ())
+            for link_type in (*link_types, *windows_links):
                 for anchor_row in ordered:
                     plan = self._anchor_plan(anchor_row)
+                    if link_type in windows_links and not any(
+                        event_os_family(event) == "windows" for event in plan.events
+                    ):
+                        continue
                     tier_slots.extend(
                         slot for slot in self._planned_slots(
                             plan, link_type, window_label, anchor_reasons, root_cap,

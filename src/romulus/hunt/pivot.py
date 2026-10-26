@@ -30,6 +30,7 @@ from romulus.evidence.windows_catalog import (
     channels_for_families,
     datasets_for_families,
 )
+from romulus.evidence.windows_reassembly import ScriptBlockAssembler
 from romulus.hunt.publish import publish_match
 from romulus.site import SiteFacts, absent_site_facts
 from romulus.sources.es import ElasticClient, SourceError
@@ -86,8 +87,14 @@ def _is_network(target: str, contract: FieldContract | None = None) -> bool:
     return bool(contract and contract.role == "network")
 
 
-def _host_datasets(contract: FieldContract, families: set[str] | None = None) -> tuple[str, ...]:
-    if contract.os_family == "windows":
+def _host_datasets(
+    contract: FieldContract,
+    families: set[str] | None = None,
+    *,
+    os_family: str | None = None,
+) -> tuple[str, ...]:
+    family = os_family or contract.os_family
+    if family == "windows":
         return datasets_for_families(families) if families else WINDOWS_HOST_DATASETS
     if families:
         by_family = {
@@ -150,6 +157,16 @@ def _summary(event: TypedEvent) -> dict:
         "id": event.id, "family": event.family, "ts": event.ts.isoformat(), "host": event.host,
         "outcome": str(event.outcome), "fields": fields, "caveats": event.caveats[:5],
     }
+
+
+def _script_metadata_reasons(events: list[TypedEvent]) -> list[str]:
+    count = sum(
+        any("script block part metadata is incomplete or invalid" in caveat for caveat in event.caveats)
+        for event in events
+    )
+    if not count:
+        return []
+    return [f"PowerShell script-block part metadata incomplete or invalid for {count} event(s)"]
 
 
 def _is_capped(reasons: list[str]) -> bool:
@@ -490,6 +507,12 @@ class PivotExecutor:
         parse = _AuditParses()
         selected = _prefilter_raw(records, raw_families, parse) if prefilter else records
         events, _skips, errors = normalize_hits(selected, audit_parse=parse)
+        script_blocks = getattr(self, "_script_blocks", None)
+        if script_blocks is not None and any(event.family == "script_block" for event in events):
+            raw_sources = {
+                f"{record['_index']}/{record['_id']}": record["_source"] for record in selected
+            }
+            events = script_blocks.consume(events, raw_sources)
         return events, errors
 
     def _execute(
@@ -818,9 +841,14 @@ class PivotExecutor:
             "end": end.isoformat(),
             "targets": [target for target, _ in targets],
         }
-        # Only Windows resolution semantics changed. Preserve Linux task identities byte-for-byte so existing
-        # durable results and deterministic Linux report goldens remain valid.
-        if any(contract.os_family == "windows" for _target, contract in targets):
+        # Mixed hunts include the typed identity model in the task key even when only a Linux target exposes
+        # a searchable host.ip field.
+        windows_identity = any(
+            contract.os_family == "windows"
+            or bool(set(self.dataset_inventory.get(target, ())).intersection(WINDOWS_HOST_DATASETS))
+            for target, contract in self.contracts.items()
+        )
+        if windows_identity:
             fingerprint_input["host_identity"] = "typed-v2"
         fingerprint = digest(fingerprint_input)
         task_id = "t-" + fingerprint[:20]
@@ -830,6 +858,8 @@ class PivotExecutor:
         if query_cap is not None and self.source_queries + len(targets) > query_cap:
             return None, f"victim host not resolved for {ip}: {HOST_LOOKUP_BUDGET}"
         intent_record = {"resolve_host_ip": ip, "targets": [target for target, _ in targets]}
+        if windows_identity:
+            intent_record["host_identity"] = "typed-v2"
         self.repo.upsert_task(task_id, self.hunt_id, _link_task_kind(self), "host-resolution", intent_record,
                               fingerprint, owner_token=self.owner_token)
         self.repo.update_task(task_id, "leased", attempt=True, owner_token=self.owner_token)
@@ -989,6 +1019,8 @@ class PivotExecutor:
         retained: dict[str, TypedEvent] = {}
         task_by_event: dict[str, str] = {}
         raw_sources: dict[str, dict] = {}
+        script_blocks = ScriptBlockAssembler()
+        self._script_blocks = script_blocks
         coverage: list[PivotCoverage] = list(planning_coverage or [])
         reasons: list[str] = [reason for cell in coverage for reason in cell.reasons]
         successful = 0
@@ -1024,8 +1056,20 @@ class PivotExecutor:
                 else:
                     successful += 1
                     task_successes += 1
+                    sources = {
+                        f"{record['_index']}/{record['_id']}": record["_source"]
+                        for record in outcome.records
+                    }
                     events, errors = self._normalize_pivot_records(outcome.records, raw_families)
-                    normalization_reasons = self._ip_normalization_reasons(leaf_intent, outcome.records)
+                    sources.update(script_blocks.sources_for(events))
+                    normalization_reasons = [
+                        *self._ip_normalization_reasons(leaf_intent, outcome.records),
+                        *_script_metadata_reasons(events),
+                    ]
+                    if script_blocks.refusal_reason:
+                        normalization_reasons.append(
+                            "PowerShell script-block reassembly partial: " + script_blocks.refusal_reason
+                        )
                     leaf_reasons.extend(normalization_reasons)
                     if errors or normalization_reasons:
                         if errors:
@@ -1038,10 +1082,6 @@ class PivotExecutor:
                             )))),
                         )]
                     selected = [event for event in events if retain(event)]
-                    sources = {
-                        f"{record['_index']}/{record['_id']}": record["_source"]
-                        for record in outcome.records
-                    }
                     raw_sources.update(sources)
                     for event in selected:
                         task_by_event.setdefault(event.id, task_id)
@@ -1080,6 +1120,28 @@ class PivotExecutor:
                 )
             else:
                 self.repo.update_task(task_id, "evaluated", outcome=outcome_digest, owner_token=self.owner_token)
+        unfinished = 0
+        fallback_task = task_ids[0] if task_ids else ""
+        for event in script_blocks.finalize():
+            unfinished += 1
+            sources = script_blocks.sources_for([event])
+            if not retain(event):
+                continue
+            raw_sources.update(sources)
+            retained.setdefault(event.id, event)
+            if fallback_task:
+                task_by_event.setdefault(event.id, fallback_task)
+        if unfinished:
+            reason = f"PowerShell script-block reassembly incomplete for {unfinished} block(s)"
+            incomplete = True
+            reasons.append(reason)
+            coverage = [cell.model_copy(update={
+                "status": "partial", "reasons": sorted(set(cell.reasons + [reason])),
+                "covered_ranges": [],
+                "unresolved_ranges": [_range(cell.start, cell.end, reason)],
+            }) for cell in coverage]
+        script_blocks.close()
+        del self._script_blocks
         budget_limited = (self.source_query_scope == "agent" and self.source_query_budget is not None
                           and any(reason == f"agent_source_query_budget:{self.source_query_budget}"
                                   for reason in reasons))
@@ -1412,6 +1474,7 @@ class PivotExecutor:
         retained: list[TypedEvent] = []
         task_by_event: dict[str, str] = {}
         raw_sources: dict[str, dict] = {}
+        script_blocks = ScriptBlockAssembler()
         reasons: list[str] = [reason for cell in planning_coverage for reason in cell.reasons]
         coverage: list[PivotCoverage] = list(planning_coverage)
         successful_outcomes = 0
@@ -1455,8 +1518,22 @@ class PivotExecutor:
                 else:
                     successful_outcomes += 1
                     target_successes += 1
+                    sources = {
+                        f"{record['_index']}/{record['_id']}": record["_source"]
+                        for record in outcome.records
+                    }
                     events, _skips, errors = normalize_hits(outcome.records)
-                    normalization_reasons = self._ip_normalization_reasons(leaf_intent, outcome.records)
+                    if any(event.family == "script_block" for event in events):
+                        events = script_blocks.consume(events, sources)
+                        sources.update(script_blocks.sources_for(events))
+                    normalization_reasons = [
+                        *self._ip_normalization_reasons(leaf_intent, outcome.records),
+                        *_script_metadata_reasons(events),
+                    ]
+                    if script_blocks.refusal_reason:
+                        normalization_reasons.append(
+                            "PowerShell script-block reassembly partial: " + script_blocks.refusal_reason
+                        )
                     leaf_reasons.extend(normalization_reasons)
                     if errors or normalization_reasons:
                         if errors:
@@ -1469,10 +1546,6 @@ class PivotExecutor:
                             )))),
                         )]
                     selected = [event for event in events if self._retain(request, event)]
-                    sources = {
-                        f"{record['_index']}/{record['_id']}": record["_source"]
-                        for record in outcome.records
-                    }
                     raw_sources.update(sources)
                     for event in selected:
                         task_by_event.setdefault(event.id, task_id)
@@ -1518,6 +1591,28 @@ class PivotExecutor:
                 task_id, "executed", outcome=outcome_digest, owner_token=self.owner_token,
             )
             self.repo.update_task(task_id, "evaluated", owner_token=self.owner_token)
+
+        unfinished = 0
+        fallback_task = task_ids[0] if task_ids else ""
+        for event in script_blocks.finalize():
+            unfinished += 1
+            sources = script_blocks.sources_for([event])
+            if not self._retain(request, event):
+                continue
+            retained.append(event)
+            raw_sources.update(sources)
+            if fallback_task:
+                task_by_event.setdefault(event.id, fallback_task)
+        if unfinished:
+            reason = f"PowerShell script-block reassembly incomplete for {unfinished} block(s)"
+            incomplete = True
+            reasons.append(reason)
+            coverage = [cell.model_copy(update={
+                "status": "partial", "reasons": sorted(set(cell.reasons + [reason])),
+                "covered_ranges": [],
+                "unresolved_ranges": [_range(cell.start, cell.end, reason)],
+            }) for cell in coverage]
+        script_blocks.close()
 
         if isinstance(request, ProcessTreeRequest):
             retained, fence_reason = self._select_process_tree_by_os(

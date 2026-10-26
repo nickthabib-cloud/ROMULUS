@@ -9,6 +9,7 @@ from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
+from itertools import batched
 
 from romulus.baseline.carry import HourParents
 from romulus.baseline.playbook import BaselineCell, BaselinePlaybook
@@ -28,9 +29,10 @@ from romulus.evidence.normalize import (
     normalize_hits,
 )
 from romulus.evidence.typed import TypedEvent
-from romulus.evidence.windows import RecordIdContinuity
+from romulus.evidence.windows import RecordIdContinuity, windows_record_signature
 from romulus.evidence.windows_catalog import (
     COLLECTION_CHANGE_EVENTS,
+    EVENT_CLASSES,
     WINDOWS_CHANNELS,
     WINDOWS_DATASET_FAMILIES,
     WINDOWS_HOST_DATASETS,
@@ -38,6 +40,7 @@ from romulus.evidence.windows_catalog import (
     event_classes_for_families,
     lookup_event_class,
 )
+from romulus.evidence.windows_reassembly import SCRIPT_FINALIZE_BATCH_SIZE, ScriptBlockAssembler
 from romulus.hunt.publish import LineageCitationFetcher, publish_match
 from romulus.hunt.stage import EventStage
 from romulus.site import SiteFacts, absent_site_facts
@@ -51,6 +54,8 @@ from romulus.store.repo import Repo
 log = logging.getLogger("romulus.sweep")
 
 PARTITION_MAX_DOCS = 120_000
+MAX_WINDOWS_CONTINUITY_COLLISION_KEYS = 128
+MAX_WINDOWS_CONTINUITY_COLLISION_RECORDS = 1_024
 # Dedup-token rows of window material one hunt may keep (each about 800 bytes stored, with its key and indexes, so
 # about 400 MB): only hours a cell shares with other cells keep tokens, so this bounds deduplicating specs' material
 # by the flows of split hours, not of the window. Cells past it are never written as history.
@@ -218,7 +223,10 @@ class Sweep:
         self.windows_liveness_tolerance = windows_liveness_tolerance
         self._windows_inventory: dict[str, set[str]] = {}
         self._windows_inventory_reasons: dict[str, list[str]] = {}
+        self._windows_read_tokens: dict[str, set[str]] = {}
+        self._windows_selective: set[str] = set()
         self._windows_record_ids: RecordIdContinuity | None = None
+        self._windows_scripts: ScriptBlockAssembler | None = None
         self.on_candidate = on_candidate or (lambda c: None)
         beat = heartbeat or (lambda: None)
 
@@ -242,12 +250,13 @@ class Sweep:
         # one guaranteed floor per live store of the pack (a store shared by several rules counts once), and one for
         # the event stage, which holds the citations of every rule. Windows hunts add independent floors for their
         # id-only delivery guard and continuity state, so event volume cannot take a detector store's floor.
-        self.budget.plan(live_stores(self.pack) + 1 + (2 if self._has_windows else 0))
+        self.budget.plan(live_stores(self.pack) + 1 + (3 if self._has_windows else 0))
         self._stage_account = self.budget.account("event_stage")
         self._windows_seen_account = self.budget.account("windows_seen") if self._has_windows else None
         self._windows_continuity_account = (
             self.budget.account("windows_continuity") if self._has_windows else None
         )
+        self._windows_scripts_account = self.budget.account("windows_scripts") if self._has_windows else None
         self._stage_size = 0
         self._profiles: dict[str, dict] | None = None
         # dedup-token rows of window material this hunt keeps, read from the store on first use (resume)
@@ -295,6 +304,50 @@ class Sweep:
                                            f"({self.budget.broken}); findings that cite them are not computed")
             return
         self._charge_stage(stage)
+
+    def _record_playbook_batch(
+        self,
+        pb: Playbook,
+        matches: list[Match],
+        raw_sources: dict[str, dict],
+        task_id: str | None,
+        staged: dict[str, TypedEvent],
+        held: list[tuple[str, TypedEvent]],
+        released: list[tuple[str, list[str]]],
+    ) -> None:
+        """Publish one consumed batch and retain everything its playbook may cite at finalize."""
+        for match in matches:
+            self._publish(
+                match,
+                task_id,
+                self._sources_for(match, raw_sources) if pb.staged else raw_sources,
+            )
+        if pb.staged:
+            # Joining aggregates keep full events and raw copies on disk, not in memory. Below the stage
+            # volume's reserve the stage takes only strong rules' citations; another rule's held examples are
+            # then not loadable, and its finalize says so.
+            drained = pb.drain_staged()
+            held_ids, released_ids = pb.drain_bounds()
+            if released_ids:
+                released.append((pb.id, released_ids))
+            if drained and self.budget.hard and pb.state_slice != "strong":
+                pb.note_limit(
+                    "stage",
+                    f"the event stage took no new citation of this rule ({self.budget.hard}); "
+                    "its findings that cite them are not computed",
+                )
+                return
+            # An event returned more often than it is held is also staged to be kept.
+            holds = Counter(held_ids)
+            copies = Counter(event.id for event in drained)
+            for event in drained:
+                if copies[event.id] > holds[event.id]:
+                    staged.setdefault(event.id, event)
+            for event in {event.id: event for event in drained if holds[event.id]}.values():
+                held.extend([(pb.id, event)] * holds[event.id])
+        elif pb.kind == "aggregate":
+            # Aggregates retain examples: stash raw copies of their retained events now.
+            self._retain_aggregate_raw(pb, raw_sources)
 
     def _charge_stage(self, stage: EventStage) -> None:
         """Charge the stage file's growth beyond the most it has held to the event stage's account."""
@@ -360,6 +413,22 @@ class Sweep:
         # Winlogbeat may omit event.dataset, so Windows also selects by native channel.
         if contract is None or contract.role != "host" or contract.os_family != "windows":
             return []
+        read_tokens = getattr(self, "_windows_read_tokens", {}).get(target)
+        if read_tokens is not None and all(contract.supports(field, "eq") for field in (
+                "event.channel", "event.provider", "event.code")):
+            control_tokens = {
+                event.token for event in EVENT_CLASSES
+                if event.key in COLLECTION_CHANGE_EVENTS
+            }
+            selected = [event for event in EVENT_CLASSES if event.token in read_tokens | control_tokens]
+            if selected:
+                self._windows_selective.add(target)
+                self.stats.setdefault("windows_class_filter", {})[target] = [event.token for event in selected]
+                return [[
+                    Predicate(field="event.channel", op="eq", value=event.channel),
+                    Predicate(field="event.provider", op="eq", value=event.provider),
+                    Predicate(field="event.code", op="eq", value=event.event_id),
+                ] for event in selected]
         groups: list[list[Predicate]] = []
         if contract.supports("event.dataset", "in"):
             groups.append([Predicate(field="event.dataset", op="in", value=list(WINDOWS_HOST_DATASETS))])
@@ -373,7 +442,20 @@ class Sweep:
         if contract is None or contract.os_family != "windows" or target in self._windows_inventory:
             return
         required = ("event.channel", "event.provider", "event.code")
-        if not all(contract.supports(field, "exists") for field in required):
+        unavailable = [
+            field for field in required
+            if (spec := contract.spec(field)) is None or not spec.aggregatable
+        ]
+        marker_groups = [
+            [Predicate(field=field, op="exists")]
+            for field in (*required, "host.name", "winlog.record_id")
+            if contract.supports(field, "exists")
+        ]
+        if contract.supports("event.dataset", "in"):
+            marker_groups.append([
+                Predicate(field="event.dataset", op="in", value=list(WINDOWS_HOST_DATASETS))
+            ])
+        if unavailable or not marker_groups:
             self._windows_inventory[target] = set()
             self._windows_inventory_reasons[target] = [
                 "event class inventory unavailable: channel/provider/event id fields are not searchable"
@@ -385,7 +467,7 @@ class Sweep:
                 kind="aggregate",
                 target=target,
                 window=self.window,
-                filters=[Predicate(field=field, op="exists") for field in required],
+                any_of=marker_groups,
                 group_by=list(required),
                 purpose="windows event class inventory",
             ),
@@ -398,11 +480,32 @@ class Sweep:
         uncatalogued_total = 0
         uncatalogued_overflow_classes = 0
         uncatalogued_overflow_records = 0
+        malformed_identity_buckets = 0
+        malformed_identity_records = 0
         for bucket in outcome.buckets:
             key = bucket.get("key") or {}
             count = int(bucket.get("count") or 0)
-            event_class = lookup_event_class(
-                key.get("event.channel"), key.get("event.provider"), key.get("event.code")
+            raw_channel = key.get("event.channel")
+            raw_provider = key.get("event.provider")
+            raw_event_id = key.get("event.code")
+            malformed_identity = (
+                not isinstance(raw_channel, str)
+                or not raw_channel.strip()
+                or not isinstance(raw_provider, str)
+                or not raw_provider.strip()
+                or isinstance(raw_event_id, bool)
+            )
+            if not malformed_identity:
+                try:
+                    int(raw_event_id)
+                except (TypeError, ValueError):
+                    malformed_identity = True
+            if malformed_identity:
+                malformed_identity_buckets += 1
+                malformed_identity_records += count
+            event_class = (
+                None if malformed_identity
+                else lookup_event_class(raw_channel, raw_provider, raw_event_id)
             )
             if event_class is not None:
                 inventory.add(event_class.token)
@@ -414,7 +517,6 @@ class Sweep:
                 uncatalogued_overflow_classes += 1
                 uncatalogued_overflow_records += count
                 continue
-            raw_event_id = key.get("event.code")
             try:
                 shown_event_id = int(raw_event_id)
             except (TypeError, ValueError):
@@ -427,6 +529,13 @@ class Sweep:
                 "uncatalogued": True,
             })
         reasons = []
+        if malformed_identity_records:
+            reasons.append(
+                "event class inventory incomplete: "
+                f"{malformed_identity_records:,} Windows record(s) have missing or invalid "
+                "channel/provider/event id across "
+                f"{malformed_identity_buckets:,} bucket(s)"
+            )
         if outcome.completeness != Completeness.complete:
             reasons.append(
                 "event class inventory incomplete: " + ", ".join(outcome.reasons or [outcome.error or "unknown"])
@@ -450,6 +559,7 @@ class Sweep:
                 read_tokens.update(
                     event_class.token for event_class in event_classes_for_families(set(playbook.families))
                 )
+        self._windows_read_tokens[target] = read_tokens
         unassessed = []
         for token in sorted(inventory - read_tokens):
             event_class = classes_by_token[token]
@@ -481,6 +591,266 @@ class Sweep:
                 hosts.add(computer)
         return tuple(sorted(hosts))
 
+    def _selective_windows_continuity(
+        self,
+        target: str,
+        contract: FieldContract,
+        partition: Window,
+    ) -> tuple[dict[tuple[str, str], tuple[datetime, datetime]], list[str]]:
+        """Read only host/channel/id/time metadata for all Windows records in one selective partition."""
+        group_by = ("@timestamp", "host.name", "event.channel", "winlog.record_id")
+        unavailable = [
+            field for field in group_by
+            if (spec := contract.spec(field)) is None or not spec.aggregatable
+        ]
+        if unavailable or not contract.supports("event.channel", "exists"):
+            missing = ", ".join(unavailable or ["event.channel exists query"])
+            return {}, [f"shipper gaps unresolved: continuity metadata unavailable for {missing}"]
+        outcome = execute(
+            self.client,
+            SearchIntent(
+                kind="aggregate",
+                target=target,
+                window=partition,
+                filters=[Predicate(field="event.channel", op="exists")],
+                group_by=list(group_by),
+                max_records=PARTITION_MAX_DOCS,
+                purpose="windows continuity metadata",
+            ),
+            contract,
+        )
+        stats = self.stats.setdefault("windows_continuity", {}).setdefault(target, {
+            "mode": "metadata_aggregate", "partitions": 0, "buckets": 0, "partial_partitions": 0,
+        })
+        stats["partitions"] += 1
+        stats["buckets"] += len(outcome.buckets)
+        reasons: list[str] = []
+        if outcome.completeness != Completeness.complete:
+            stats["partial_partitions"] += 1
+            detail = ", ".join(outcome.reasons or [outcome.error or "unknown source failure"])
+            reasons.append(f"shipper gaps unresolved: continuity metadata incomplete: {detail}")
+            return {}, reasons
+
+        observed: dict[tuple[str, str], tuple[datetime, datetime]] = {}
+        reconstructed: list[tuple[datetime, str, str, int, int]] = []
+        collisions: list[dict] = []
+        malformed_groups = 0
+        malformed_times = 0
+        malformed_ids = 0
+        for ordinal, bucket in enumerate(outcome.buckets):
+            key = bucket.get("key") or {}
+            native_host = str(key.get("host.name") or "").strip().rstrip(".")
+            host = native_host.casefold()
+            channel = str(key.get("event.channel") or "").strip()
+            if not host or not channel:
+                malformed_groups += 1
+                continue
+            first = last = None
+            try:
+                first = datetime.fromisoformat(str(bucket.get("first"))).astimezone(UTC)
+                last = datetime.fromisoformat(str(bucket.get("last"))).astimezone(UTC)
+            except (TypeError, ValueError):
+                malformed_times += 1
+                continue
+            raw_record_id = key.get("winlog.record_id")
+            if isinstance(raw_record_id, bool):
+                malformed_ids += 1
+                continue
+            try:
+                record_id = int(raw_record_id)
+            except (TypeError, ValueError):
+                malformed_ids += 1
+                continue
+            if first is not None and last is not None:
+                group = (host, channel.casefold())
+                prior = observed.get(group)
+                observed[group] = (
+                    first if prior is None else min(prior[0], first),
+                    last if prior is None else max(prior[1], last),
+                )
+            count = int(bucket.get("count") or 0)
+            if count > 1:
+                collisions.append({
+                    "when": first,
+                    "native_host": native_host,
+                    "host": host,
+                    "channel": channel,
+                    "record_id": record_id,
+                    "count": count,
+                })
+            else:
+                reconstructed.append((first, host, channel, record_id, ordinal))
+        if malformed_groups:
+            reasons.append(
+                f"shipper gaps unresolved: {malformed_groups} continuity metadata bucket(s) lack host or channel"
+            )
+        if malformed_times:
+            reasons.append(
+                f"shipper gaps unresolved: {malformed_times} continuity metadata bucket(s) lack valid timestamps"
+            )
+        if malformed_ids:
+            reasons.append(
+                f"shipper gaps unresolved: {malformed_ids} continuity metadata bucket(s) lack numeric record_id"
+            )
+        if reasons:
+            return {}, reasons
+
+        collision_records: list[dict] = []
+        if collisions:
+            followup_ops = (
+                ("host.name", "eq"), ("event.channel", "eq"), ("winlog.record_id", "eq"),
+            )
+            unsupported = [
+                f"{field} {op}" for field, op in followup_ops if not contract.supports(field, op)
+            ]
+            expected_records = sum(item["count"] for item in collisions)
+            if unsupported:
+                stats["partial_partitions"] += 1
+                reasons.append(
+                    "shipper gaps unresolved: continuity collision records unavailable for "
+                    + ", ".join(unsupported)
+                )
+                return {}, reasons
+            if len(collisions) > MAX_WINDOWS_CONTINUITY_COLLISION_KEYS:
+                stats["partial_partitions"] += 1
+                reasons.append(
+                    "shipper gaps unresolved: continuity collision key cap exceeded: "
+                    f"{len(collisions):,}>{MAX_WINDOWS_CONTINUITY_COLLISION_KEYS:,}"
+                )
+                return {}, reasons
+            if expected_records > MAX_WINDOWS_CONTINUITY_COLLISION_RECORDS:
+                stats["partial_partitions"] += 1
+                reasons.append(
+                    "shipper gaps unresolved: continuity collision record cap exceeded: "
+                    f"{expected_records:,}>{MAX_WINDOWS_CONTINUITY_COLLISION_RECORDS:,}"
+                )
+                return {}, reasons
+
+            by_time: dict[datetime, list[dict]] = {}
+            for item in collisions:
+                by_time.setdefault(item["when"], []).append(item)
+            fetched_records: list[dict] = []
+            for when, items in sorted(by_time.items()):
+                followup = execute(
+                    self.client,
+                    SearchIntent(
+                        kind="raw",
+                        target=target,
+                        window=Window(start=when, end=when + timedelta(microseconds=1)),
+                        any_of=[[
+                            Predicate(field="host.name", op="eq", value=item["native_host"]),
+                            Predicate(field="event.channel", op="eq", value=item["channel"]),
+                            Predicate(field="winlog.record_id", op="eq", value=item["record_id"]),
+                        ] for item in items],
+                        max_records=sum(item["count"] for item in items),
+                        purpose="windows continuity collision signatures",
+                    ),
+                    contract,
+                )
+                stats["collision_followups"] = stats.get("collision_followups", 0) + 1
+                if followup.completeness != Completeness.complete:
+                    stats["partial_partitions"] += 1
+                    detail = ", ".join(followup.reasons or [followup.error or "unknown source failure"])
+                    reasons.append(
+                        f"shipper gaps unresolved: continuity collision records incomplete: {detail}"
+                    )
+                    return {}, reasons
+                fetched_records.extend(followup.records)
+
+            expected: dict[tuple[datetime, str, str, int], int] = {}
+            for item in collisions:
+                key = (item["when"], item["host"], item["channel"].casefold(), item["record_id"])
+                expected[key] = expected.get(key, 0) + item["count"]
+            fetched: dict[tuple[datetime, str, str, int], list[dict]] = {
+                key: [] for key in expected
+            }
+            for record in fetched_records:
+                source = record.get("_source") or {}
+                winlog = source.get("winlog") or {}
+                raw_id = winlog.get("record_id")
+                if isinstance(raw_id, bool):
+                    continue
+                try:
+                    record_id = int(raw_id)
+                    when = datetime.fromisoformat(str(source.get("@timestamp"))).astimezone(UTC)
+                except (TypeError, ValueError):
+                    continue
+                key = (
+                    when,
+                    str(winlog.get("computer_name") or "").strip().rstrip(".").casefold(),
+                    str(winlog.get("channel") or "").strip().casefold(),
+                    record_id,
+                )
+                if key in fetched:
+                    fetched[key].append(record)
+
+            mismatched = [
+                (key, expected[key], len(records))
+                for key, records in fetched.items()
+                if len(records) != expected[key]
+            ]
+            if mismatched:
+                stats["partial_partitions"] += 1
+                expected_count = sum(item[1] for item in mismatched)
+                fetched_count = sum(item[2] for item in mismatched)
+                reasons.append(
+                    "shipper gaps unresolved: continuity collision records incomplete: "
+                    f"expected {expected_count:,} exact record(s), fetched {fetched_count:,}"
+                )
+                return {}, reasons
+            for key in sorted(fetched):
+                copies = fetched[key]
+                stats["collision_signature_conflicts"] = (
+                    stats.get("collision_signature_conflicts", 0)
+                    + int(len({windows_record_signature(record) for record in copies}) > 1)
+                )
+                for record in copies:
+                    source = record.get("_source") or {}
+                    agent = source.get("agent") if isinstance(source.get("agent"), dict) else {}
+                    collision_records.append({
+                        **record,
+                        "_source": {**source, "agent": {**agent, "type": "winlogbeat"}},
+                    })
+
+        records = [{
+                "_index": target,
+                "_id": f"continuity-{ordinal}",
+                "_source": {
+                    "@timestamp": first.isoformat() if first is not None else "",
+                    "agent": {"type": "winlogbeat"},
+                    "winlog": {
+                        "computer_name": host,
+                        "channel": channel,
+                        "record_id": record_id,
+                        "time_created": first.isoformat() if first is not None else "",
+                    },
+                },
+            }
+            for first, host, channel, record_id, ordinal in sorted(reconstructed)
+        ]
+        records.extend(collision_records)
+
+        def continuity_order(record: dict) -> tuple:
+            source = record.get("_source") or {}
+            winlog = source.get("winlog") or {}
+            raw_time = winlog.get("time_created") or source.get("@timestamp")
+            return (
+                datetime.fromisoformat(str(raw_time)).astimezone(UTC),
+                str(winlog.get("computer_name") or "").casefold(),
+                str(winlog.get("channel") or "").casefold(),
+                int(winlog.get("record_id")),
+                windows_record_signature(record),
+                str(record.get("_index") or ""),
+                str(record.get("_id") or ""),
+            )
+
+        records.sort(key=continuity_order)
+        if records:
+            reasons.extend(self._windows_continuity().observe(
+                target, records, liveness_tolerance=self.windows_liveness_tolerance,
+            ))
+        return observed, reasons
+
     def _windows_rule_reasons(
         self,
         target: str,
@@ -489,6 +859,7 @@ class Sweep:
         records: list[dict],
         gap_reasons: list[str],
         partition: Window | None = None,
+        continuity_times: dict[tuple[str, str], tuple[datetime, datetime]] | None = None,
     ) -> list[str]:
         if contract is None or contract.os_family != "windows" or "windows" not in playbook.os_families:
             return []
@@ -516,45 +887,44 @@ class Sweep:
                     f"{event_class.channel}|{event_class.provider}|{event_class.event_id}"
                 )
         reasons.extend(gap_reasons)
-        hosts = self._windows_hosts(contract, records)
+        hosts = set(self._windows_hosts(contract, records))
+        if continuity_times is not None:
+            hosts.update(host for host, _channel in continuity_times)
+        hosts = tuple(sorted(hosts))
         if not contract.host_inventory_complete:
             reasons.append("collection not attested: source host inventory truncated")
         if not hosts:
             reasons.append("collection not attested: source host inventory unavailable")
-        observed_channels = {
-            (
-                str(((record.get("_source") or {}).get("winlog") or {}).get("computer_name") or "")
-                .strip().rstrip(".").casefold(),
-                str(((record.get("_source") or {}).get("winlog") or {}).get("channel") or "").casefold(),
-            )
-            for record in records
-        }
-        observed_times: dict[tuple[str, str], tuple[datetime, datetime]] = {}
-        collection_changes: set[str] = set()
-        for record in records:
-            source = record.get("_source") or {}
-            winlog = source.get("winlog") or {}
-            host = str(winlog.get("computer_name") or "").strip().rstrip(".").casefold()
-            channel = str(winlog.get("channel") or "").casefold()
-            raw_time = winlog.get("time_created") or source.get("@timestamp")
-            try:
-                when = datetime.fromisoformat(str(raw_time)).astimezone(UTC)
-            except (TypeError, ValueError):
-                continue
-            key = (host, channel)
-            prior = observed_times.get(key)
-            observed_times[key] = (when, when) if prior is None else (min(prior[0], when), max(prior[1], when))
-            try:
-                event_id = int(winlog.get("event_id"))
-            except (TypeError, ValueError):
-                continue
-            provider = str(winlog.get("provider_name") or "").strip()
-            change = COLLECTION_CHANGE_EVENTS.get((channel, provider.casefold(), event_id))
-            if change and host:
-                collection_changes.add(
-                    f"collection changed on {host}: {winlog.get('channel')}|{provider}|{event_id} ({change})"
+        if continuity_times is None:
+            observed_channels = {
+                (
+                    str(((record.get("_source") or {}).get("winlog") or {}).get("computer_name") or "")
+                    .strip().rstrip(".").casefold(),
+                    str(((record.get("_source") or {}).get("winlog") or {}).get("channel") or "").casefold(),
                 )
-        reasons.extend(sorted(collection_changes))
+                for record in records
+            }
+            observed_times: dict[tuple[str, str], tuple[datetime, datetime]] = {}
+            for record in records:
+                source = record.get("_source") or {}
+                winlog = source.get("winlog") or {}
+                host = str(winlog.get("computer_name") or "").strip().rstrip(".").casefold()
+                channel = str(winlog.get("channel") or "").casefold()
+                raw_time = winlog.get("time_created") or source.get("@timestamp")
+                try:
+                    when = datetime.fromisoformat(str(raw_time)).astimezone(UTC)
+                except (TypeError, ValueError):
+                    continue
+                key = (host, channel)
+                prior = observed_times.get(key)
+                observed_times[key] = (
+                    (when, when) if prior is None else (min(prior[0], when), max(prior[1], when))
+                )
+        else:
+            observed_channels = set(continuity_times)
+            observed_times = dict(continuity_times)
+        collection_changes, cross_channel_collection_changes = self._windows_collection_changes(records)
+
         def summarize(label: str, affected: list[str], event_class) -> str | None:
             affected = sorted(set(affected))
             if not affected:
@@ -573,6 +943,8 @@ class Sweep:
             single_edge_details: dict[tuple[str, str], str] = {}
             for host in hosts:
                 channel_key = (host, event_class.channel.casefold())
+                reasons.extend(sorted(cross_channel_collection_changes.get(host, ())))
+                reasons.extend(sorted(collection_changes.get(channel_key, ())))
                 if channel_key not in observed_channels:
                     absent_hosts.append(host)
                 elif partition is not None and observed_times.get(channel_key):
@@ -611,6 +983,45 @@ class Sweep:
                 if summarized:
                     reasons.append(summarized)
         return sorted(set(reasons))
+
+    @staticmethod
+    def _windows_collection_changes(
+        records: list[dict],
+    ) -> tuple[dict[tuple[str, str], set[str]], dict[str, set[str]]]:
+        """Classify collection breaks by native host and either one channel or every channel on that host."""
+        collection_changes: dict[tuple[str, str], set[str]] = {}
+        cross_channel_collection_changes: dict[str, set[str]] = {}
+        for record in records:
+            source = record.get("_source") or {}
+            winlog = source.get("winlog") or {}
+            host = str(winlog.get("computer_name") or "").strip().rstrip(".").casefold()
+            channel = str(winlog.get("channel") or "").casefold()
+            raw_time = winlog.get("time_created") or source.get("@timestamp")
+            try:
+                when = datetime.fromisoformat(str(raw_time)).astimezone(UTC)
+            except (TypeError, ValueError):
+                continue
+            try:
+                event_id = int(winlog.get("event_id"))
+            except (TypeError, ValueError):
+                continue
+            provider = str(winlog.get("provider_name") or "").strip()
+            change = COLLECTION_CHANGE_EVENTS.get((channel, provider.casefold(), event_id))
+            if (change and provider.casefold() == "microsoft-windows-sysmon" and event_id == 4
+                    and str((winlog.get("event_data") or {}).get("State") or "").casefold() == "started"):
+                change = None
+            if change and host:
+                reason = (
+                    f"collection changed on {host} at {when.isoformat()}: "
+                    f"{winlog.get('channel')}|{provider}|{event_id} ({change})"
+                )
+                # Security/audit-service controls invalidate every Windows channel; provider-operational
+                # controls govern only the channel that emitted them.
+                if event_id in {104, 1102, 4719, 6006}:
+                    cross_channel_collection_changes.setdefault(host, set()).add(reason)
+                else:
+                    collection_changes.setdefault((host, channel), set()).add(reason)
+        return collection_changes, cross_channel_collection_changes
 
     @staticmethod
     def _unsupported_skips(skips: dict[str, int]) -> dict[str, int]:
@@ -815,6 +1226,8 @@ class Sweep:
         raw_sources = {f"{r['_index']}/{r['_id']}": r["_source"] for r in out.records}
         duplicate_events = []
         windows_state_reasons: list[str] = []
+        script_reassembly_reasons: list[str] = []
+        script_metadata_reasons: list[str] = []
         if any(event.normalizer.startswith("windows-") for event in events):
             stage = self._event_stage()
             events, duplicate_events = stage.unique_windows(events)
@@ -827,6 +1240,21 @@ class Sweep:
         if duplicate_events:
             skips["duplicate typed event across source partitions"] = len(duplicate_events)
             self.repo.merge_evidence_raw(self.hunt_id, duplicate_events, raw_sources)
+        if any(event.family == "script_block" for event in events):
+            assembler = self._windows_script_blocks()
+            events = assembler.consume(events, raw_sources)
+            raw_sources.update(assembler.sources_for(events))
+            script_reassembly_reasons.extend(assembler.partial_reasons)
+            incomplete_metadata = sum(
+                any("script block part metadata is incomplete or invalid" in caveat
+                    for caveat in event.caveats)
+                for event in events
+            )
+            if incomplete_metadata:
+                script_metadata_reasons.append(
+                    "PowerShell script-block part metadata incomplete or invalid for "
+                    f"{incomplete_metadata} event(s)"
+                )
         self.stats["events"] += len(events)
         self._count_boots(events)
         self.stats["errors"] += len(errors)
@@ -835,14 +1263,20 @@ class Sweep:
         # they contain, so no rule may claim a complete negative over this partition
         unsupported = self._unsupported_skips(skips)
         gap_reasons = list(windows_state_reasons)
+        continuity_times = None
         if contract is not None and contract.os_family == "windows":
             record_id = contract.spec("winlog.record_id")
             if record_id is None or record_id.type not in {"long", "integer", "short"}:
                 gap_reasons.append("shipper gaps unresolved: winlog.record_id mapping is not numeric")
-            else:
+            elif target not in self._windows_selective:
                 gap_reasons.extend(self._windows_continuity().observe(
                     target, out.records, liveness_tolerance=self.windows_liveness_tolerance,
                 ))
+            else:
+                continuity_times, continuity_reasons = self._selective_windows_continuity(
+                    target, contract, w,
+                )
+                gap_reasons.extend(continuity_reasons)
         partial = out.completeness != Completeness.complete or bool(errors) or bool(unsupported)
         if partial:
             self.partial_reasons.append(f"{target} {pkey}: {out.reasons or ''} normalization_errors={len(errors)}"
@@ -888,8 +1322,14 @@ class Sweep:
                 target_os == "unknown" or target_os in pb.os_families
             )
             windows_reasons = self._windows_rule_reasons(
-                target, contract, pb, out.records, gap_reasons, w,
+                target, contract, pb, out.records, gap_reasons, w, continuity_times,
             )
+            if (script_metadata_reasons and contract.os_family == "windows"
+                    and "script_block" in pb.families):
+                windows_reasons.extend(script_metadata_reasons)
+            if (script_reassembly_reasons and contract.os_family == "windows"
+                    and "script_block" in pb.families):
+                windows_reasons.extend(script_reassembly_reasons)
             windows_gate_reasons.update(windows_reasons)
             rule_partial = (affected is ALL_FAMILIES or bool(set(pb.families) & affected)
                             or bool(windows_reasons))
@@ -1009,31 +1449,7 @@ class Sweep:
                                       f"a write to the stage volume failed ({exc}); this rule's later records of "
                                       f"the batch are not evaluated")
             pb.bind_raw({})
-            for m in matches:
-                self._publish(m, tid, self._sources_for(m, raw_sources) if pb.staged else raw_sources)
-            if pb.staged:
-                # joining aggregates: full events and their raw copies go to disk, not memory. Below the stage
-                # volume's reserve the stage takes only strong rules' citations; another rule's held examples are
-                # then not loadable, and its finalize says so.
-                drained = pb.drain_staged()
-                held_ids, released_ids = pb.drain_bounds()
-                if released_ids:
-                    released.append((pb.id, released_ids))
-                if drained and self.budget.hard and pb.state_slice != "strong":
-                    pb.note_limit("stage", f"the event stage took no new citation of this rule "
-                                           f"({self.budget.hard}); its findings that cite them are not computed")
-                else:
-                    # an event returned more often than it is held is also staged to be kept
-                    holds = Counter(held_ids)
-                    copies = Counter(event.id for event in drained)
-                    for event in drained:
-                        if copies[event.id] > holds[event.id]:
-                            staged.setdefault(event.id, event)
-                    for event in {event.id: event for event in drained if holds[event.id]}.values():
-                        held.extend([(pb.id, event)] * holds[event.id])
-            elif pb.kind == "aggregate":
-                # aggregates retain examples: stash raw copies of their retained events now
-                self._retain_aggregate_raw(pb, raw_sources)
+            self._record_playbook_batch(pb, matches, raw_sources, tid, staged, held, released)
             evaluated = pb.evaluated - before_eval
             missing = pb.missing_required - before_missing
             target_applicable = target_fallback or pb.os_applicable > before_os
@@ -1267,6 +1683,64 @@ class Sweep:
             )
         return continuity
 
+    def _windows_script_blocks(self) -> ScriptBlockAssembler:
+        assembler = self._windows_scripts
+        if assembler is None:
+            assembler = self._windows_scripts = ScriptBlockAssembler(
+                self._event_stage().directory,
+                budget=self.budget,
+                account=self._windows_scripts_account,
+            )
+        return assembler
+
+    def _finalize_windows_script_blocks(self) -> None:
+        assembler = getattr(self, "_windows_scripts", None)
+        if assembler is None:
+            return
+        finalized = 0
+        matched: Counter[str] = Counter()
+        evaluated: Counter[str] = Counter()
+        for batch in batched(assembler.finalize(), SCRIPT_FINALIZE_BATCH_SIZE):
+            events = list(batch)
+            finalized += len(events)
+            raw_sources = assembler.sources_for(events)
+            self.repo.save_evidence(self.hunt_id, events, raw_sources, None)
+            staged: dict[str, TypedEvent] = {}
+            held: list[tuple[str, TypedEvent]] = []
+            released: list[tuple[str, list[str]]] = []
+            for pb in self.pack:
+                if isinstance(pb, BaselinePlaybook) or "script_block" not in pb.families:
+                    continue
+                scoped = pb.scope_partition(events)
+                if not scoped:
+                    continue
+                evaluated[pb.id] += len(scoped)
+                pb.bind_raw(raw_sources, "script-block-finalize")
+                try:
+                    matches = pb.consume_scoped_partition(scoped)
+                except StateExhausted as exc:
+                    pb.note_limit("script_reassembly", f"incomplete script blocks were not evaluated ({exc})")
+                    matches = []
+                finally:
+                    pb.bind_raw({})
+                matched[pb.id] += len(matches)
+                self._record_playbook_batch(pb, matches, raw_sources, None, staged, held, released)
+            if staged or held or released:
+                self._stage_put(list(staged.values()), raw_sources, held, released)
+            self.budget.check_free()
+        if not finalized:
+            return
+        reason = f"PowerShell script-block reassembly incomplete for {finalized} block(s); missing parts stated"
+        self.partial_reasons.append(reason)
+        for pb in self.pack:
+            if not evaluated[pb.id]:
+                continue
+            self.repo.set_rule_cell(
+                self.hunt_id, pb.id, pb.version, "script-block-finalize", "incomplete",
+                "match_on_partial" if matched[pb.id] else "evaluated_partial",
+                matched[pb.id], evaluated[pb.id], {"reasons": [reason]},
+            )
+
     def _retain_aggregate_raw(self, pb: Playbook, raw_sources: dict[str, dict]):
         keep = getattr(self, "_agg_raw", None)
         if keep is None:
@@ -1286,6 +1760,7 @@ class Sweep:
     def finalize(self):
         self.heartbeat()
         self.budget.finalizing = True           # finalize re-reads kept state: only the free-space reserve applies
+        self._finalize_windows_script_blocks()
         # Every partition has been read: record the whole map once, for expansion, the context pass and resume.
         self.repo.audit("system", BOOT_INTERVALS_AUDIT, self.hunt_id, self.boots.to_json())
         self._boot_summary()
@@ -1365,6 +1840,10 @@ class Sweep:
         if continuity is not None:
             continuity.close()
             self._windows_record_ids = None
+        scripts = getattr(self, "_windows_scripts", None)
+        if scripts is not None:
+            scripts.close()
+            self._windows_scripts = None
         stage = getattr(self, "_stage", None)
         if stage is not None:
             stage.close()
