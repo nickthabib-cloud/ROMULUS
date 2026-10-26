@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from romulus.detect.auth import AccountOrGroupChange
 from romulus.detect.bounded import StateBudget
 from romulus.detect.correlation import (
     PROCESSES_JUDGED,
@@ -19,7 +20,10 @@ from romulus.detect.correlation import (
     ProcessNetworkLink,
 )
 from romulus.detect.host import ExecLineage
+from romulus.detect.kernel_files import PersistencePathChange
+from romulus.detect.lineage import ReverseShellByLineage
 from romulus.detect.observed import REPARENT_GAP, Observed, process_view
+from romulus.detect.tamper import SecurityOrLoggingServiceStop
 from romulus.evidence.normalize import normalize_hits
 from romulus.evidence.typed import RawRef, TypedEvent, fv
 from romulus.hunt.publish import LineageCitationFetcher
@@ -110,7 +114,8 @@ def drive(rule, events, raw_sources=None):
     stage = {}
     raw_sources = raw_sources or {}
     rule.bind_raw(raw_sources, "host-target")
-    rule.consume([e for e in events if e.family in rule.families])
+    accepted = set(rule.families) | set(rule.context_families)
+    rule.consume([e for e in events if e.family in accepted])
     rule.bind_raw({})
     stage.update({e.id: e for e in rule.drain_staged()})
     rule.bind_loader(lambda ids: [stage[i] for i in ids if i in stage])
@@ -119,6 +124,189 @@ def drive(rule, events, raw_sources=None):
         [rule], LineageCitationFetcher(_CitationSource(raw_sources), {"host-target": object()}).load,
     )
     return rule.finalize()
+
+
+def test_account_change_uses_a_no_exec_package_parent_and_cites_its_observation():
+    events, raw = normalized(
+        observe(T, 10, 100, 90, "/usr/bin/dpkg", "dpkg"),
+        execd(T + 1, 11, 101, 100, "/usr/sbin/useradd", ["useradd", "svc"]),
+    )
+
+    [match] = drive(AccountOrGroupChange(), events, raw)
+
+    assert match.proposed_lane == "lead" and "under package management" in match.claim
+    assert "o10" in {event.raw[0].native_id for event in match.events}
+    assert any(event.family == "process_observed" and event.id in match.context_ids for event in match.events)
+    assert all(ref.key in match.raw_copies for event in match.events if event.family == "process_observed"
+               for ref in event.raw)
+
+
+def test_tamper_change_uses_a_no_exec_package_parent_and_cites_its_observation():
+    events, raw = normalized(
+        observe(T, 20, 200, 190, "/usr/bin/dpkg", "dpkg"),
+        execd(T + 1, 21, 201, 200, "/usr/bin/systemctl", ["systemctl", "stop", "auditd"]),
+    )
+
+    [match] = drive(SecurityOrLoggingServiceStop(), events, raw)
+
+    assert match.proposed_lane == "lead" and "package management" in match.claim
+    assert "o20" in {event.raw[0].native_id for event in match.events}
+    assert any(event.family == "process_observed" and event.id in match.context_ids for event in match.events)
+
+
+def test_tamper_no_exec_parent_keeps_its_parent_at_fork_after_reparenting():
+    events, raw = normalized(
+        observe(T, 22, 220, 210, "/usr/bin/dpkg", "dpkg"),
+        observe(T + 0.5, 23, 220, 1, "/usr/bin/dpkg", "dpkg"),
+        execd(T + 1, 24, 221, 220, "/usr/bin/systemctl", ["systemctl", "stop", "auditd"]),
+    )
+
+    [match] = drive(SecurityOrLoggingServiceStop(), events, raw)
+
+    assert match.proposed_lane == "lead" and "package management" in match.claim
+    assert "o22" in {event.raw[0].native_id for event in match.events}
+
+
+def test_refused_no_exec_lineage_is_partial_and_never_lowers_tamper(tmp_path):
+    rule = SecurityOrLoggingServiceStop()
+    rule.spill_dir = tmp_path
+    rule.budget = StateBudget(tmp_path, disk_total=2**40, reserve=0)
+    rule.budget.force_full(
+        "the observed states' store is past its floor (test)",
+        lambda account: account.name.endswith("proc_observed"),
+    )
+    events, raw = normalized(
+        observe(T, 25, 250, 240, "/usr/bin/dpkg", "dpkg"),
+        execd(T + 1, 26, 251, 250, "/usr/bin/systemctl", ["systemctl", "stop", "auditd"]),
+    )
+
+    [match] = drive(rule, events, raw)
+
+    assert match.proposed_lane == "high" and "package management" not in match.claim
+    assert "lineage_observed" in rule.limits
+
+
+def test_reverse_shell_walks_a_no_exec_owner_and_cites_its_observation():
+    events, raw = normalized(
+        observe(T, 30, 300, 290, "/usr/bin/python3", "python3", "33", "www-data"),
+        connect(T + 1, 31, 300, 290, "/usr/bin/python3", "python3", success="yes", exit_code="0"),
+        execd(T + 2, 32, 301, 300, "/usr/bin/dash", ["sh"], "33", "www-data"),
+    )
+
+    [match] = drive(ReverseShellByLineage(), events, raw)
+
+    assert match.proposed_lane == "high" and "descendant" in match.claim
+    assert "o30" in {event.raw[0].native_id for event in match.events}
+    assert any(event.family == "process_observed" and event.id in match.context_ids for event in match.events)
+
+
+def test_reverse_shell_survives_when_its_owner_observation_cannot_be_cited():
+    events, raw = normalized(
+        observe(T, 50, 500, 490, "/usr/sbin/apache2", "apache2", "33", "www-data"),
+        execd(T + 0.5, 51, 500, 490, "/usr/bin/python3", ["python3", "-c", "x"], "33", "www-data"),
+        connect(T + 1, 52, 500, 490, "/usr/bin/python3", "python3", success="yes", exit_code="0"),
+        execd(T + 2, 53, 501, 500, "/usr/bin/dash", ["sh"], "33", "www-data"),
+    )
+    rule = ReverseShellByLineage()
+    rule.pids.execs.citations.put = lambda *_args, **_kwargs: False
+
+    [match] = drive(rule, events, raw)
+
+    assert match.proposed_lane == "high"
+    assert "203.0.113.65:554" in match.claim
+    assert not any(event.family == "process_observed" for event in match.events)
+    assert "lineage_records" in rule.limits
+
+
+def test_unrelated_observation_refusal_does_not_hide_web_lineage(tmp_path):
+    rule = AccountOrGroupChange()
+    rule.spill_dir = tmp_path
+    rule.budget = StateBudget(tmp_path, disk_total=2**40, reserve=0)
+    rule.budget.force_full(
+        "the observed states' store is past its floor (test)",
+        lambda account: account.name.endswith("proc_observed"),
+    )
+    events, raw = normalized(
+        observe(T - 5, 59, 999, 998, "/usr/bin/foo", "foo"),
+        execd(T, 60, 600, 590, "/usr/sbin/php-fpm8.2", ["php-fpm"], "33", "www-data"),
+        execd(T + 1, 61, 601, 600, "/usr/bin/dash", ["sh", "-c", "x"], "33", "www-data"),
+        execd(T + 2, 62, 602, 601, "/usr/sbin/useradd", ["useradd", "backdoor"]),
+    )
+
+    [match] = drive(rule, events, raw)
+
+    assert match.proposed_lane == "high"
+    assert "web-service account" in match.claim
+    assert "lineage_observed" in rule.limits
+    assert "no lineage lowers a lane anywhere" not in " ".join(str(value) for value in rule.limits.values())
+
+
+def test_process_lineage_consumers_bump_versions_for_ambiguous_tie_semantics():
+    assert InterpreterExternalConnection.version == "8"
+    assert ProcessNetworkLink.version == "9"
+
+
+def test_persistence_change_uses_a_no_exec_package_parent_and_cites_its_observation():
+    from tests.lineage_citation_fixture import source_copies
+    from tests.test_kernel_files import change
+
+    observed, raw = normalized(observe(T, 40, 400, 390, "/usr/bin/dpkg", "dpkg"))
+    changed = change(
+        "/etc/cron.d/pkg", ts=datetime.fromtimestamp(T + 1, UTC), uid="0",
+        exe="/usr/bin/cp", pid=401, ppid=400, host=HOST,
+    )
+    raw.update(source_copies([changed]))
+
+    [match] = drive(PersistencePathChange(), [*observed, changed], raw)
+
+    assert match.proposed_lane == "lead" and match.group_key.endswith("|package:dpkg")
+    assert "o40" in {event.raw[0].native_id for event in match.events}
+    assert any(event.family == "process_observed" and event.id in match.context_ids for event in match.events)
+
+
+def test_persistence_does_not_lower_from_an_uncited_no_exec_package_parent():
+    from tests.test_kernel_files import change
+
+    observed, raw = normalized(observe(T, 41, 410, 390, "/usr/bin/dpkg", "dpkg"))
+    changed = change(
+        "/etc/cron.d/pkg", ts=datetime.fromtimestamp(T + 1, UTC), uid="0",
+        exe="/usr/bin/cp", pid=411, ppid=410, host=HOST,
+    )
+    raw.update(source_copies([changed]))
+    rule = PersistencePathChange()
+    rule.lineage.execs.citations.put = lambda *_args, **_kwargs: False
+
+    [match] = drive(rule, [*observed, changed], raw)
+
+    assert match.group_key.endswith("|pid 411|/usr/bin/cp|2024-11-18T10:21:22.941000+00:00")
+    assert "package activity" not in match.claim
+    assert "lineage_records" in rule.limits
+
+
+def test_unrelated_observation_refusal_does_not_hide_an_exact_exec_package_parent(tmp_path):
+    from tests.test_kernel_files import change
+
+    rule = PersistencePathChange()
+    rule.spill_dir = tmp_path
+    rule.budget = StateBudget(tmp_path, disk_total=2**40, reserve=0)
+    rule.budget.force_full(
+        "the observed states' store is past its floor (test)",
+        lambda account: account.name.endswith("proc_observed"),
+    )
+    unrelated, raw = normalized(observe(T - 1, 42, 999, 998, "/usr/bin/true", "true"))
+    manager, manager_raw = normalized(execd(T, 43, 420, 390, "/usr/bin/dnf-3", ["dnf-3"]))
+    changed = change(
+        "/etc/cron.d/pkg", ts=datetime.fromtimestamp(T + 1, UTC), uid="0",
+        exe="/usr/bin/cp", pid=421, ppid=420, host=HOST,
+    )
+    raw.update(manager_raw)
+    raw.update(source_copies([changed]))
+
+    [match] = drive(rule, [*unrelated, *manager, changed], raw)
+
+    assert match.group_key.endswith("|package:dnf-3")
+    assert "package activity" in match.claim
+    assert "lineage_observed" in rule.limits
 
 
 def table(events, raw=None) -> PidTable:
@@ -590,7 +778,8 @@ def test_a_refused_observation_store_is_stated_on_the_rules_window_cell(monkeypa
     window = next(c for c in cells if c["rule_id"] == InterpreterExternalConnection.id and c["target"] == "*")
     assert window["state"] == "match_on_partial"
     assert any("took no new process from the record of 2024-11-18T10:21:21.941000+00:00 on" in r
-               and "no lineage lowers a lane anywhere in this hunt" in r for r in window["detail"]["reasons"])
+               and "recorded exec lineage is still used for attack-associated raises" in r
+               and "cannot lower a lane anywhere in this hunt" in r for r in window["detail"]["reasons"])
 
 
 def test_the_network_join_is_not_evaluated_by_a_partition_of_lineage_records_only(monkeypatch, tmp_path):

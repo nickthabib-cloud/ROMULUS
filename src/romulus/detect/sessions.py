@@ -50,7 +50,7 @@ def _iso(epoch: float) -> str:
 
 def _syn(e: TypedEvent) -> bool | None:
     """Whether Arkime counted a SYN on this TCP record (None when the record carries no flag counts). Arkime orients a
-    session it saw open by the SYN, so the record's source sent it (romulus.detect.flows.OPENED_STATES)."""
+    session it saw open by the SYN, so the record's source sent it."""
     count = e.get("tcp.flags.syn")
     if not isinstance(count, int) or isinstance(count, bool):
         return None

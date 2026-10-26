@@ -328,6 +328,51 @@ def test_package_manager_lineage_is_one_batched_lead_worded_as_package_activity(
     assert "a malicious or tampered package" in m.claim
 
 
+@pytest.mark.parametrize("manager", ["flatpak", "dnf-3", "rpmdb", "snap"])
+def test_restored_package_manager_corpus_groups_writer_and_parent_images(manager):
+    writer = change(f"/etc/cron.d/{manager}-writer", uid="0", exe=f"/usr/bin/{manager}", pid=100, ppid=90)
+    _pb, [direct] = run_persist([writer])
+    assert direct.group_key == f"app01|package:{manager}"
+    assert direct.proposed_lane == "lead" and "package activity" in direct.claim
+
+    parent = pexec(f"/usr/bin/{manager}", 200, 190)
+    child = change(f"/etc/cron.d/{manager}-child", ts=T0 + timedelta(seconds=1), uid="0",
+                   exe="/usr/bin/cp", pid=201, ppid=200)
+    _pb, [descendant] = run_persist([parent, child])
+    assert descendant.group_key == f"app01|package:{manager}"
+    assert descendant.proposed_lane == "lead" and "package activity" in descendant.claim
+
+
+def test_package_manager_under_lib_is_system_but_non_system_writer_or_parent_is_not():
+    _pb, [system] = run_persist([change("/etc/cron.d/system", uid="0", exe="/lib/dpkg", pid=100, ppid=90)])
+    assert system.group_key == "app01|package:dpkg"
+
+    outside = [
+        pexec("/tmp/dpkg", 200, 190),
+        change("/etc/cron.d/outside", ts=T0 + timedelta(seconds=1), uid="0",
+               exe="/usr/bin/cp", pid=201, ppid=200),
+    ]
+    _pb, [not_package] = run_persist(outside)
+    assert not_package.group_key.startswith("app01|0|/etc/cron.d|pid 201|/usr/bin/cp|")
+    assert "package activity" not in not_package.claim
+
+
+@pytest.mark.parametrize("ancestor", [
+    ev("process_exec", T0, host="app01", process__executable="/usr/bin/python3.11",
+       process__argv=["/usr/bin/python3", "/usr/bin/unattended-upgrade"], process__pid=300,
+       process__ppid=290, process__uid="0"),
+    ev("process_exec", T0, host="app01", process__executable="/usr/bin/dash",
+       process__argv=["/bin/sh", "/var/lib/dpkg/info/x.postinst", "configure"], process__pid=300,
+       process__ppid=290, process__uid="0"),
+])
+def test_persistence_does_not_use_broad_package_or_maintainer_script_markers(ancestor):
+    child = change("/etc/cron.d/not-package", ts=T0 + timedelta(seconds=1), uid="0",
+                   exe="/usr/bin/cp", pid=301, ppid=300)
+    _pb, [match] = run_persist([ancestor, child])
+    assert match.group_key.startswith("app01|0|/etc/cron.d|pid 301|/usr/bin/cp|")
+    assert "package activity" not in match.claim
+
+
 def test_package_lineage_needs_the_parent_exec_at_or_before_the_write():
     # the boundary: a parent exec at the same instant counts; one recorded after the write does not
     same = [pexec("/usr/bin/dpkg", 100, 90, ts=T0), change("/etc/init.d/x", ts=T0, uid="0", exe="/usr/bin/cp",
@@ -370,6 +415,34 @@ def test_non_root_changes_mixed_with_package_activity_stay_separate_and_high():
     _pb, out = run_persist(writes)
     assert sorted((m.group_key, m.proposed_lane) for m in out) == [
         ("app01|1002|/etc/profile.d|pid 4000|/usr/bin/tee|2030-01-06T09:00:05+00:00", "high"), ("app01|package:dpkg", "lead")]
+
+
+def test_a_missing_staged_root_change_does_not_empty_other_persistence_findings():
+    missing = change("/etc/cron.d/package", uid="0", exe="/usr/bin/dpkg", pid=100, ppid=90)
+    visible = change("/etc/cron.d/web", ts=T0 + timedelta(seconds=1))
+    rule = PersistencePathChange()
+    assert rule.consume([pexec("/usr/bin/dpkg", 100, 90), missing, visible]) == []
+    staged = {event.id: event for event in rule.drain_staged() if event.id != missing.id}
+    rule.bind_loader(lambda ids: [staged[event_id] for event_id in ids if event_id in staged])
+
+    matches = rule.finalize()
+
+    assert [match.group_key for match in matches] == [
+        "app01|33|/etc/cron.d|pid 4000|/usr/bin/dash|2030-01-06T09:00:01+00:00",
+    ]
+    assert "stage_missing" in rule.limits
+
+
+def test_persistence_package_attribution_corpus_is_unchanged():
+    from romulus.detect.kernel_files import _SYSTEM_EXE_DIRS, PACKAGE_MANAGERS
+
+    assert PACKAGE_MANAGERS == {
+        "dpkg", "apt", "apt-get", "aptitude", "rpm", "rpmdb", "dnf", "dnf-3", "yum", "microdnf",
+        "zypper", "snap", "snapd", "flatpak", "pacman", "apk", "packagekitd",
+    }
+    assert _SYSTEM_EXE_DIRS == (
+        "/usr/bin/", "/usr/sbin/", "/bin/", "/sbin/", "/usr/lib/", "/usr/libexec/", "/lib/",
+    )
 
 
 def test_failed_attempts_only_are_a_lead_and_any_success_keeps_high():

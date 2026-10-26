@@ -216,9 +216,10 @@ def test_a_port_scan_and_its_reverse_pair_say_what_their_own_records_show(tmp_pa
     scanner, target = "192.0.2.66", "10.0.0.9"
     flows = [flow(scanner, 40000 + p, target, p, T0 + timedelta(seconds=p * 0.1)) for p in range(1, 400)]
     # the target's answers to the scan (from its service ports to the scanner's ephemeral ports), and a connection the
-    # target itself opened to the scanner on tcp/4444, which a Suricata flow state shows
+    # target itself opened to the scanner on tcp/4444, which Suricata's directional flags show
     flows += [flow(target, p, scanner, 40000 + p, T0 + timedelta(seconds=p * 0.1 + 0.01)) for p in range(1, 31)]
-    flows += [flow(target, 51000, scanner, 4444, T0 + timedelta(minutes=5), state="established")]
+    flows += [flow(target, 51000, scanner, 4444, T0 + timedelta(minutes=5), state="established",
+                   tcp_flags_ts="02", tcp_syn=True)]
     out = staged(network.PortScan(), batches(flows, 60), tmp_path)
     clean(out)
     by_src = {m.group_key.split("|")[0]: m for m in out}
@@ -228,10 +229,23 @@ def test_a_port_scan_and_its_reverse_pair_say_what_their_own_records_show(tmp_pa
     assert f"shows {target} opened the connection on tcp/4444" in reverse.claim
 
 
-def flow(src, sport, dst, dport, ts, state=None):
+def test_a_port_scan_state_without_a_syn_keeps_the_reverse_pair_but_does_not_claim_an_opener(tmp_path):
+    scanner, target = "192.0.2.66", "10.0.0.9"
+    flows = [flow(scanner, 40000 + p, target, p, T0 + timedelta(seconds=p * 0.1)) for p in range(1, 40)]
+    flows += [flow(target, p, scanner, 40000 + p, T0 + timedelta(seconds=p * 0.1 + 0.01))
+              for p in range(1, 31)]
+    flows += [flow(target, 51000, scanner, 4444, T0 + timedelta(minutes=5), state="established")]
+    out = staged(network.PortScan(), batches(flows, 60), tmp_path)
+    reverse = {m.group_key.split("|")[0]: m for m in out}[target]
+    assert reverse.proposed_lane == "lead"
+    assert "No cited record shows which side opened the connections on the probed ports." in reverse.claim
+    assert f"shows {target} opened" not in reverse.claim
+
+
+def flow(src, sport, dst, dport, ts, state=None, tcp_flags_ts=None, tcp_syn=None):
     return ev("net_flow", ts, host="fw1", source__ip=src, source__port=sport, destination__ip=dst,
               destination__port=dport, network__transport="tcp", flow__state=state,
-              flow__bytes_toserver=200 if state else None)
+              flow__bytes_toserver=200 if state else None, tcp__tcp_flags_ts=tcp_flags_ts, tcp__syn=tcp_syn)
 
 
 def test_a_root_run_series_cites_the_run_that_ends_its_span(tmp_path):

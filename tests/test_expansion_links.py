@@ -8,7 +8,7 @@ from romulus.detect.base import ContextAnchor, ContextLink
 from romulus.detect.context import EntryPointPromotion
 from romulus.evidence.normalize import normalize_hits
 from romulus.evidence.typed import RawRef, TypedEvent, fv
-from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkWindow, usable_key
+from romulus.hunt.links import RAW_FAMILIES_BY_LINK, LinkAnchor, LinkFetcher, LinkWindow, usable_key
 from romulus.hunt.pivot import PivotEventBatch, PivotExecutor
 from romulus.sources.models import Completeness, SearchOutcome
 from romulus.sources.profile import contract_from_types
@@ -388,6 +388,30 @@ def test_process_lineage_uses_latest_pid_identity_at_or_before_child_time():
 
     assert child.id in result.event_ids
     assert wrong_child.id not in result.event_ids
+
+
+def test_process_lineage_uses_a_no_exec_parent_without_exceeding_its_query_cap():
+    parent = event(
+        "parent-observed", "process_observed", ts=T0,
+        process__executable="/usr/bin/python3", process__pid=100, process__ppid=90,
+        process__session_id=42,
+    )
+    parent.fields["process.pid"] = fv(100, "parent-observed:event.original#auditd:SYSCALL.pid")
+    root = event(
+        "root", "process_exec", ts=T0 + timedelta(seconds=1),
+        process__executable="/bin/sh", process__pid=101, process__ppid=100,
+        process__session_id=42,
+    )
+    pivot = FakePivot([parent, root], status="partial")
+
+    result = LinkFetcher(pivot, T0, T1).fetch(
+        anchor("process_lineage", root), "process_lineage", window(), query_cap=1,
+    )
+
+    assert result.status == "partial" and result.event_ids == [parent.id]
+    assert pivot.calls[0][-1] == 1
+    assert "cap:2<total:3" in result.reasons
+    assert RAW_FAMILIES_BY_LINK["process_lineage"] == {"process_exec", "process_observed"}
 
 
 def test_login_session_never_crosses_session_ids_even_when_auid_matches():

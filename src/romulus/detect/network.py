@@ -9,11 +9,9 @@ from romulus.detect.bounded import HOT_COUNT, KeyedStore
 from romulus.detect.citing import BoundStage, Ends, Named, bound_note, cite_extra, cited_phrase, more
 from romulus.detect.correlation import StageMissing
 from romulus.detect.dns import endpoints
+from romulus.detect.flows import suricata_source_opened
 from romulus.evidence.typed import TypedEvent
 
-# A Suricata TCP flow record in one of these states shows its engine tracked the connection from its handshake, so its
-# source opened it (romulus.detect.flows.OPENED_STATES); netflow records and other states show no opener.
-OPENED_STATES = frozenset({"established", "closed"})
 # Lower-cased user-agent prefixes of command-line HTTP tools, and the tool each one is the signature of.
 TOOL_UA_SIGNATURES = {
     "curl/": "curl", "wget/": "wget", "python-requests/": "python-requests", "python-urllib/": "python-urllib",
@@ -528,9 +526,9 @@ class PortScan(_Grouped):
     # is held on the rule's disk spill while it is quiet. The index of requests to services (the earliest start of
     # each 4-tuple, to tell an answer from a probe) is a keyed store too, HOT entries in memory.
     REQUESTS_HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
-    version = "9"
+    version = "10"
     # Destination ports the claim names, each with a cited record (the first seen); and probed ports whose opening a
-    # cited record shows (a Suricata TCP flow its engine tracked from the handshake).
+    # cited record shows (a Suricata directional TCP flag summary with a SYN toward the server).
     PORTS_NAMED = 12
 
     def __init__(self):
@@ -581,9 +579,8 @@ class PortScan(_Grouped):
             # a port number is 0-65535, so the distinct ports are bounded by construction and counted exactly
             state.bag("ports").add(dport)
             self.name(state, "ports", dport, e, self.PORTS_NAMED)
-            if (e.get("network.transport") == "tcp" and e.get("flow.state") in OPENED_STATES
-                    and e.get("flow.bytes_toserver") is not None):
-                # a flow record (not netflow) its engine tracked from the handshake: its source opened the connection
+            if suricata_source_opened(e) and e.get("flow.bytes_toserver") is not None:
+                # a flow record (not netflow) whose directional flags show its source sent the opening SYN
                 self.name(state, "opened", dport, e, self.PORTS_NAMED)
             if sport is not None and sport >= 1024 > dport:
                 tuple_ = (src, sport, dst, dport)
@@ -661,9 +658,9 @@ class PortScan(_Grouped):
                           f"raised to the same lane: {n_answered} of its ports answer earlier requests from {dst}, "
                           f"and {n_probed} look probed in this direction.")
                 if opened:
-                    claim += (f" A cited Suricata flow record in state established or closed shows {src} opened the "
+                    claim += (f" A cited Suricata directional TCP flag summary shows {src} opened the "
                               f"connection on tcp/" + ", tcp/".join(str(port) for port in opened)
-                              + " (its engine tracked the handshake).")
+                              + " (it records a SYN toward the server).")
                 elif n_probed:
                     claim += " No cited record shows which side opened the connections on the probed ports."
             elif lane == "context":

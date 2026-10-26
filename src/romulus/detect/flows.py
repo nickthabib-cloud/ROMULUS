@@ -39,14 +39,23 @@ from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
 from romulus.detect.bounded import HOT_COUNT, KeyedStore, Limit, RecentIds
-from romulus.detect.citing import BoundStage, Ends, bound_note, cite_with_bounds, cited_phrase, more
+from romulus.detect.citing import (
+    BoundStage,
+    Ends,
+    Holds,
+    bound_note,
+    cite_with_bounds,
+    cited_phrase,
+    drained_holds,
+    more,
+)
 from romulus.detect.correlation import StageMissing, canon_ip, external, routable_remote
 from romulus.detect.netdef import assume_direction
 from romulus.evidence.typed import TypedEvent
 
 EXAMPLE_LIMIT = 20
-SURICATA, ARKIME = "suricata", "arkime"
-SENSOR_NAMES = {SURICATA: "Suricata", ARKIME: "Arkime"}
+SURICATA, ARKIME, ZEEK = "suricata", "arkime", "zeek"
+SENSOR_NAMES = {SURICATA: "Suricata", ARKIME: "Arkime", ZEEK: "Zeek"}
 PORTED = ("tcp", "udp", "sctp")
 _DIRECTIONAL = ("flow.state", "flow.bytes_toserver", "flow.bytes_toclient", "flow.pkts_toserver",
                 "flow.pkts_toclient")
@@ -72,13 +81,11 @@ EPHEMERAL_FLOOR = 32768
 #   new SYN lands on an older session Arkime picked up mid-stream and never saw close; the rule that reads this treats
 #   records of one connection that disagree about the opener as unknown. A SYN-ACK alone is not taken: it can land on
 #   such a session the same way.
-# - Suricata tracks a TCP session only from its opening SYN while stream.midstream is off (its default), marks the
-#   flow established or closed only for a session it tracked, and records the flow from the side that sent the first
-#   packet. A flow it picked up mid-stream stays 'new'. A sensor run with midstream pickup enabled marks picked-up
-#   sessions established too, and this reading does not hold there.
+# - Suricata's directional TCP flag summaries say which direction carried a SYN. Its aggregate tcp.syn field is
+#   sufficient only when the to-client flags are also present and prove the SYN was not in that direction.
 # Anything else (a session picked up mid-stream, UDP and other connectionless traffic, a record without the fields)
 # leaves the opener unknown.
-OPENED_STATES = frozenset({"established", "closed"})
+TCP_SYN = 0x02
 # States folded at finalize are written out to disk every this many reads.
 FINALIZE_TRIM = 10_000
 
@@ -292,7 +299,7 @@ class FlowView:
     payload: bool | None                # application data both ways; None when the counters are absent
     protocols: frozenset[str] | None    # identified application protocols; None when the sensor recorded no field
     failed: bool                        # Suricata reported that protocol detection failed
-    opened: bool = False                # a typed field shows the source opened the TCP connection (OPENED_STATES)
+    opened: bool = False                # a typed field shows the source opened the TCP connection
     c2s_data: int | None = None         # application bytes the source side sent (Arkime's own count, else estimated)
     s2c_data: int | None = None         # ... and the destination side; None when the counters are absent
 
@@ -324,6 +331,27 @@ def _framed_payload(transport, c2s_bytes, c2s_packets, s2c_bytes, s2c_packets) -
     header = HEADER_BYTES.get(transport, DEFAULT_HEADER_BYTES)
     return (c2s_bytes - header * c2s_packets >= MIN_PAYLOAD_BYTES
             and s2c_bytes - header * s2c_packets >= MIN_PAYLOAD_BYTES)
+
+
+def _tcp_flags(value) -> int | None:
+    """A Suricata directional TCP flag bitmask, recorded as hexadecimal text."""
+    if not isinstance(value, str) or not value or len(value) > 2:
+        return None
+    try:
+        return int(value, 16)
+    except ValueError:
+        return None
+
+
+def suricata_source_opened(event: TypedEvent) -> bool:
+    """Whether Suricata directly shows that its source sent a SYN toward its server side."""
+    if event.get("network.transport") != "tcp":
+        return False
+    to_server = _tcp_flags(event.get("tcp.tcp_flags_ts"))
+    if to_server is not None:
+        return bool(to_server & TCP_SYN)
+    to_client = _tcp_flags(event.get("tcp.tcp_flags_tc"))
+    return event.get("tcp.syn") is True and to_client is not None and not (to_client & TCP_SYN)
 
 
 def flow_view(event: TypedEvent, kind: str) -> FlowView | None:
@@ -362,20 +390,23 @@ def flow_view(event: TypedEvent, kind: str) -> FlowView | None:
         syn = _int(event.get("tcp.flags.syn"))
         opened = transport == "tcp" and syn is not None and syn > 0
     else:
-        sensor = SURICATA
+        sensor = ZEEK if event.get("observer.product") == "zeek" else SURICATA
         c2s, s2c = _int(event.get("flow.bytes_toserver")), _int(event.get("flow.bytes_toclient"))
         s2c_packets = _int(event.get("flow.pkts_toclient"))
         c2s_packets = _int(event.get("flow.pkts_toserver"))
-        payload = _framed_payload(transport, c2s, c2s_packets, s2c, s2c_packets)
-        data_c, data_s = _framed_data(transport, c2s, c2s_packets), _framed_data(transport, s2c, s2c_packets)
+        if event.get("flow.bytes_are_payload") is True:
+            payload = None if c2s is None or s2c is None else c2s > 0 and s2c > 0
+            data_c, data_s = c2s, s2c
+        else:
+            payload = _framed_payload(transport, c2s, c2s_packets, s2c, s2c_packets)
+            data_c, data_s = _framed_data(transport, c2s, c2s_packets), _framed_data(transport, s2c, s2c_packets)
         # Suricata writes app_proto only once detection concluded; its absence is the record's own statement that
         # no protocol was identified, and 'failed' says detection gave up.
         app = event.get("network.app_proto")
         name = canonical_protocol(app) if isinstance(app, str) else ""
         failed = name == "failed"
         protocols = frozenset() if name in UNIDENTIFIED_NAMES else frozenset({name})
-        state = event.get("flow.state")
-        opened = transport == "tcp" and isinstance(state, str) and state in OPENED_STATES
+        opened = suricata_source_opened(event)
     return FlowView(sensor, src, sport, dst, dport, transport, start, end, timed, c2s, s2c, s2c_packets, payload,
                     protocols, failed, opened, data_c, data_s)
 
@@ -396,7 +427,7 @@ def _per_sensor_cited(evs: list[TypedEvent], tallies: dict) -> str:
     parts = []
     for sensor, tally in sorted(tallies.items()):
         total = tally["records"]
-        kind = "flow record" if sensor == SURICATA else "session record"
+        kind = "session record" if sensor == ARKIME else "conn record" if sensor == ZEEK else "flow record"
         shown = min(cited[sensor], total)
         name = f"{SENSOR_NAMES[sensor]} {kind}"
         parts.append(f"the one {name}" if total == 1 and shown == 1 else f"all {total} {name}s" if shown == total
@@ -415,6 +446,8 @@ def _sensor_counts(counts: Counter) -> str:
         parts.append(_plural(counts[SURICATA], "Suricata flow record"))
     if counts.get(ARKIME):
         parts.append(_plural(counts[ARKIME], "Arkime session record"))
+    if counts.get(ZEEK):
+        parts.append(_plural(counts[ZEEK], "Zeek conn record"))
     return " and ".join(parts) or "no records"
 
 
@@ -452,7 +485,7 @@ class _FlowRule(Playbook):
     def release_state(self) -> None:
         self.load = lambda ids: []
         for value in list(vars(self).values()):
-            if isinstance(value, (dict, list, set, RecentIds, KeyedStore, BoundStage)):
+            if isinstance(value, (dict, list, set, RecentIds, KeyedStore, BoundStage, Holds)):
                 value.clear()
         self.close_spill()
 
@@ -510,6 +543,350 @@ class _FlowRule(Playbook):
     def _refused(self, what: str) -> None:
         """A store's disk budget is spent: the record is refused and coverage says so."""
         self.refuse("disk", f"the {what} disk budget is spent; a record needing a new one is not evaluated")
+
+
+# ---------------------------------------------------------------------------------------------
+# ICMP echo transfer / tunnel shape
+# ---------------------------------------------------------------------------------------------
+
+@dataclass
+class _IcmpEchoPair:
+    payload: Counter = field(default_factory=Counter)       # estimated payload bytes per sensor
+    packets: Counter = field(default_factory=Counter)
+    request_payload: Counter = field(default_factory=Counter)
+    reply_payload: Counter = field(default_factory=Counter)
+    request_packets: Counter = field(default_factory=Counter)
+    reply_packets: Counter = field(default_factory=Counter)
+    records: Counter = field(default_factory=Counter)
+    kinds: dict[str, Counter] = field(default_factory=dict)  # request/reply records per sensor
+    mixed_types: dict[str, set[int]] = field(default_factory=dict)
+    nonstandard_codes: dict[str, set[int]] = field(default_factory=dict)
+    orientation_proven: dict[str, bool] = field(default_factory=dict)
+    session_sources: dict[str, set[str]] = field(default_factory=dict)
+    two_sided: dict[str, bool] = field(default_factory=dict)
+    first: dict[str, float] = field(default_factory=dict)
+    last: dict[str, float] = field(default_factory=dict)
+    longest: dict[str, tuple] = field(default_factory=dict)  # duration, payload, packets, start, end, event id
+    cites: dict[str, list[tuple[int, str]]] = field(default_factory=dict)
+    ends: dict[str, Ends] = field(default_factory=dict)
+
+
+class IcmpEchoTunnel(_FlowRule):
+    """Payload-heavy ICMP echo traffic, measured from bounded flow/session aggregates."""
+    id = "net.icmp_echo_tunnel_shape"
+    version = "3"
+    title = "Payload-heavy or long-lived ICMP echo traffic between one pair"
+    severity, lane = "high", "lead"
+    attack = ("T1095", "T1572", "T1048.003")
+    assures_negative = False
+    positive_only_reason = (
+        "only typed echo type/code (with code optional where the sensor does not record it) plus complete "
+        "byte/packet counters are "
+        "evaluated; flow telemetry does not expose "
+        "payload bytes, so packet-size and volume shape cannot establish payload entropy or prove a tunnel")
+    benign = ("large diagnostic pings and link tests", "network appliance health checks", "authorized tunnel tests")
+    next_checks = ("packet payload entropy and repeated structure", "the processes owning the traffic on each host",
+                   "whether either endpoint is an approved monitoring or network-test system")
+    HOT = HOT_COUNT
+    # 8 MiB of estimated echo payload at an average of at least 256 bytes over at least 100 packets is well above
+    # ordinary 32/56-byte diagnostic pings while remaining low enough to catch a short transfer. Asymmetry requires
+    # request/reply counts within 20%, a 2:1 payload-size ratio and at least 64 bytes of absolute difference. Echo
+    # normally has one reply per request, so the count fence rejects loss/asymmetric capture before comparing sizes;
+    # the ratio excludes small jitter, while the byte floor exceeds a normal Linux ping's entire 56-byte data field.
+    BULK_PAYLOAD = 8 * 2**20
+    BULK_PACKETS = 100
+    BULK_AVERAGE = 256
+    ASYM_PACKETS = 100
+    ASYM_COUNT_RATIO = 0.8
+    ASYM_PAYLOAD_RATIO = 2.0
+    ASYM_ABSOLUTE = 64
+    SUSTAINED_SECONDS = 30 * 60
+    SUSTAINED_ECHOES_PER_SECOND = 1.0
+    SUSTAINED_AVERAGE = 56
+    FIRST_CITES = 3
+    card: ClassVar[dict] = {
+        "behavior": "one endpoint pair exchanged bulk ICMP echo payload, materially asymmetric request/reply "
+                    "payload, nonstandard echo codes, or echo traffic sustained for at least 30 minutes at one "
+                    "request/reply exchange per second with payload above normal operating-system defaults",
+        "telemetry": "Suricata EVE ICMP type/code and directional flow byte/packet counters; Zeek conn ICMP type/code "
+                     "and orig/resp counters; Arkime ICMP session type/code, duration and side counters",
+        "fidelity": "ICMP echo type/code is direct typed evidence. Suricata and Arkime payload is conservatively "
+                    "estimated by subtracting Ethernet, IP and ICMP header bytes; Zeek orig/resp bytes are payload. "
+                    "No flow source here exposes payload entropy, and the claim says so",
+        "benign_and_cost": "large diagnostic pings, link tests and appliance health checks. One bounded state per "
+                           "oriented echo pair; cold states spill to the hunt's disk budget",
+        "query_cost": "none beyond the sweep",
+        "next_pivot": "packet payload and the owning processes on both endpoints",
+        "adds": "typed echo semantics distinguish transfers from PMTU errors, time-exceeded traceroute replies and "
+                "other portless ICMP already visible to generic flow rules",
+        "research_basis": "ATT&CK Enterprise 20.0 T1095, T1572 and T1048.003; ICMPv4 echo types 8/0 and ICMPv6 "
+                          "echo types 128/129",
+        "retrieval": "the sweep retrieves the complete Suricata, Zeek conn and Arkime session records in each "
+                     "partition; records without typed ICMP type/code or complete counters are explicitly partial",
+        "lanes": "high only for material two-sided request/reply payload asymmetry; one-sided or symmetric bulk, "
+                 "nonstandard echo codes and sustained above-default-payload traffic are leads. Thresholds exclude "
+                 "ordinary small pings but do not prove abuse",
+    }
+
+    def __init__(self):
+        super().__init__()
+        self.pairs = KeyedStore(self, "icmp_echo_pairs", self.HOT, candidate=self._reportable)
+        self.examples = Holds()
+
+    def drain_staged(self) -> list[TypedEvent]:
+        out, self._pending = self._pending + self.bounds.drain() + self.examples.drain(), []
+        self.pairs.trim()
+        return out
+
+    def drain_bounds(self) -> tuple[list[str], list[str]]:
+        return drained_holds(self.bounds, self.examples)
+
+    @classmethod
+    def _bulk(cls, payload: int, packets: int) -> bool:
+        return (payload >= cls.BULK_PAYLOAD and packets >= cls.BULK_PACKETS
+                and payload >= cls.BULK_AVERAGE * packets)
+
+    @classmethod
+    def _asymmetric(cls, pair: _IcmpEchoPair, sensor: str) -> bool:
+        request_packets, reply_packets = pair.request_packets[sensor], pair.reply_packets[sensor]
+        request_payload, reply_payload = pair.request_payload[sensor], pair.reply_payload[sensor]
+        if not pair.two_sided.get(sensor) or min(request_packets, reply_packets) == 0:
+            return False
+        if min(request_packets, reply_packets) < cls.ASYM_PACKETS:
+            return False
+        if min(request_packets, reply_packets) / max(request_packets, reply_packets) < cls.ASYM_COUNT_RATIO:
+            return False
+        request_average = request_payload / request_packets
+        reply_average = reply_payload / reply_packets
+        smaller, larger = sorted((request_average, reply_average))
+        return larger - smaller >= cls.ASYM_ABSOLUTE and larger >= cls.ASYM_PAYLOAD_RATIO * smaller
+
+    @classmethod
+    def _echo_asymmetric(cls, pair: _IcmpEchoPair, sensor: str) -> bool:
+        """Asymmetry shown by echo-only counters. Arkime keys ICMP sessions by address pair, so error and
+        time-exceeded messages between the same hosts fold into the echo counters and can fake a size difference."""
+        return cls._asymmetric(pair, sensor) and not pair.mixed_types.get(sensor)
+
+    @classmethod
+    def _sustained(cls, pair: _IcmpEchoPair, sensor: str) -> bool:
+        duration = pair.last.get(sensor, 0) - pair.first.get(sensor, 0)
+        echoes = min(pair.request_packets[sensor], pair.reply_packets[sensor])
+        packets = pair.packets[sensor]
+        average = pair.payload[sensor] / packets if packets else 0
+        return (duration >= cls.SUSTAINED_SECONDS
+                and echoes / duration >= cls.SUSTAINED_ECHOES_PER_SECOND
+                and average > cls.SUSTAINED_AVERAGE)
+
+    @classmethod
+    def _sensor_reportable(cls, pair: _IcmpEchoPair, sensor: str) -> bool:
+        return (cls._bulk(pair.payload[sensor], pair.packets[sensor])
+                or cls._asymmetric(pair, sensor)
+                or cls._sustained(pair, sensor)
+                or bool(pair.nonstandard_codes.get(sensor)))
+
+    @classmethod
+    def _reportable(cls, pair: _IcmpEchoPair) -> bool:
+        return any(cls._sensor_reportable(pair, sensor) for sensor in pair.payload)
+
+    @staticmethod
+    def _counters(view: FlowView, event: TypedEvent) -> tuple[int, int, int, int] | None:
+        if view.sensor == ARKIME:
+            values = (event.get("source.bytes"), event.get("destination.bytes"),
+                      event.get("source.packets"), event.get("destination.packets"))
+        else:
+            values = (event.get("flow.bytes_toserver"), event.get("flow.bytes_toclient"),
+                      event.get("flow.pkts_toserver"), event.get("flow.pkts_toclient"))
+        numbers = tuple(_int(value) for value in values)
+        if any(value is None for value in numbers):
+            return None
+        sent, received, sent_packets, received_packets = numbers
+        if sent_packets + received_packets <= 0:
+            return None
+        if event.get("flow.bytes_are_payload") is True:
+            sent_payload, received_payload = sent, received
+        else:
+            # Ethernet (14) + IPv4 (20) + ICMP (8), or Ethernet + IPv6 (40) + ICMPv6 (8).
+            header = 62 if view.transport in ("ipv6-icmp", "icmpv6") else 42
+            sent_payload = max(sent - header * sent_packets, 0)
+            received_payload = max(received - header * received_packets, 0)
+        return sent_payload, received_payload, sent_packets, received_packets
+
+    @staticmethod
+    def _numbers(value) -> frozenset[int] | None:
+        values = value if isinstance(value, list) else [value]
+        if not values or any(not isinstance(item, int) or isinstance(item, bool) for item in values):
+            return None
+        return frozenset(values)
+
+    def take(self, view: FlowView, event: TypedEvent) -> bool | None:
+        if view.transport not in ("icmp", "ipv6-icmp", "icmpv6"):
+            return True
+        kinds, codes = self._numbers(event.get("icmp.type")), self._numbers(event.get("icmp.code"))
+        if kinds is None or (codes is None and view.sensor != ZEEK):
+            return False
+        request, reply = ((8, 0) if view.transport == "icmp" else (128, 129))
+        echo_types = {request, reply}
+        if not kinds & echo_types:
+            return True
+        counters = self._counters(view, event)
+        if counters is None:
+            return False
+        sent_payload, received_payload, sent_packets, received_packets = counters
+        orientation_proven = not (view.sensor == ARKIME and request in kinds and reply in kinds)
+        source_is_requester = request in kinds
+        if orientation_proven:
+            client, peer = (view.src, view.dst) if source_is_requester else (view.dst, view.src)
+        else:
+            client, peer = sorted((view.src, view.dst))
+        key = (client, peer, view.transport)
+        pair = self.pairs.get(key)
+        if pair is None:
+            pair = _IcmpEchoPair()
+            if not self.pairs.put(key, pair):
+                return self._refused("ICMP echo pairs'")
+        if view.sensor == ARKIME and request in kinds and reply not in kinds:
+            request_payload, reply_payload = sent_payload, 0
+            request_packets, reply_packets = sent_packets, 0
+        elif view.sensor == ARKIME and reply in kinds and request not in kinds:
+            request_payload, reply_payload = 0, sent_payload
+            request_packets, reply_packets = 0, sent_packets
+        elif orientation_proven and source_is_requester:
+            request_payload, reply_payload = sent_payload, received_payload
+            request_packets, reply_packets = sent_packets, received_packets
+        elif orientation_proven:
+            request_payload, reply_payload = received_payload, sent_payload
+            request_packets, reply_packets = received_packets, sent_packets
+        elif view.src == client:
+            request_payload, reply_payload = sent_payload, received_payload
+            request_packets, reply_packets = sent_packets, received_packets
+        else:
+            request_payload, reply_payload = received_payload, sent_payload
+            request_packets, reply_packets = received_packets, sent_packets
+        payload, packets = request_payload + reply_payload, request_packets + reply_packets
+        sensor = view.sensor
+        pair.payload[sensor] += payload
+        pair.packets[sensor] += packets
+        pair.request_payload[sensor] += request_payload
+        pair.reply_payload[sensor] += reply_payload
+        pair.request_packets[sensor] += request_packets
+        pair.reply_packets[sensor] += reply_packets
+        pair.records[sensor] += 1
+        pair.mixed_types.setdefault(sensor, set()).update(kinds - echo_types)
+        if codes is not None and 0 not in codes:
+            pair.nonstandard_codes.setdefault(sensor, set()).update(codes)
+        pair.orientation_proven[sensor] = pair.orientation_proven.get(sensor, True) and orientation_proven
+        if view.sensor == ARKIME:
+            pair.session_sources.setdefault(sensor, set()).add(view.src)
+        pair.two_sided[sensor] = pair.two_sided.get(sensor, False) or (
+            request_packets > 0 and reply_packets > 0
+            and (view.sensor != ARKIME or request in kinds and reply in kinds)
+        )
+        label = "request/reply session" if request in kinds and reply in kinds else \
+            "request record" if request in kinds else "reply record"
+        pair.kinds.setdefault(sensor, Counter())[label] += 1
+        pair.first[sensor] = min(pair.first.get(sensor, float("inf")), view.start)
+        pair.last[sensor] = max(pair.last.get(sensor, float("-inf")), view.end)
+        duration = view.end - view.start
+        longest = (duration, payload, packets, view.start, view.end, event.id)
+        previous_longest = pair.longest.get(sensor)
+        if previous_longest is None or longest[:-1] > previous_longest[:-1]:
+            if previous_longest is not None:
+                self.examples.release(previous_longest[-1])
+            pair.longest[sensor] = longest
+            self.examples.hold(event)
+        cites = pair.cites.setdefault(sensor, [])
+        if len(cites) < self.FIRST_CITES:
+            cites.append((payload, event.id))
+            self.examples.hold(event)
+        ends = pair.ends.setdefault(sensor, Ends())
+        self.bounds.offer(("icmp",) + key + (sensor,), ends, view.start, view.end, event,
+                          stage=self._sensor_reportable(pair, sensor))
+        return True
+
+    def finalize(self):
+        matches = [self._match(key, self.pairs.peek(key)) for key in sorted(self.pairs.keys(candidates=True))]
+        return matches
+
+    def _match(self, key, pair: _IcmpEchoPair) -> Match:
+        client, peer, transport = key
+        sensors = [sensor for sensor in pair.payload if self._sensor_reportable(pair, sensor)]
+        sensor = max(sorted(sensors), key=lambda name: (
+            self._echo_asymmetric(pair, name), self._asymmetric(pair, name),
+            bool(pair.nonstandard_codes.get(name)),
+            self._bulk(pair.payload[name], pair.packets[name]), self._sustained(pair, name),
+            pair.payload[name], pair.packets[name],
+        ))
+        payload, packets = pair.payload[sensor], pair.packets[sensor]
+        average = payload / packets
+        bulk = self._bulk(payload, packets)
+        asymmetric = self._asymmetric(pair, sensor)
+        sustained = self._sustained(pair, sensor)
+        longest = pair.longest[sensor][0]
+        ids = [pair.longest[sensor][-1], *(event_id for _payload, event_id in pair.cites[sensor])]
+        evs, missing = self._cite(pair.ends[sensor], ids)
+        kind_text = " and ".join(f"{count} echo {kind} record{'s' if count != 1 else ''}"
+                                 for kind, count in sorted(pair.kinds[sensor].items()))
+        kind_text = kind_text.replace(" record record", " record").replace(" session record", " session")
+        signals = []
+        if asymmetric and pair.mixed_types.get(sensor):
+            signals.append("request/reply payload asymmetry in counters that include non-echo ICMP, so not proved "
+                           "for the echo exchange")
+        elif asymmetric:
+            signals.append("material request/reply payload asymmetry")
+        if bulk:
+            signals.append("bulk payload volume")
+        if sustained:
+            signals.append("sustained echo traffic above the normal operating-system payload size")
+        nonstandard_codes = sorted(pair.nonstandard_codes.get(sensor, set()))
+        if nonstandard_codes:
+            noun = "code" if len(nonstandard_codes) == 1 else "codes"
+            signals.append(f"nonstandard echo {noun} {', '.join(map(str, nonstandard_codes))}")
+        request_payload, reply_payload = pair.request_payload[sensor], pair.reply_payload[sensor]
+        request_packets, reply_packets = pair.request_packets[sensor], pair.reply_packets[sensor]
+        if pair.orientation_proven.get(sensor, True):
+            directions = (f"requests: {request_packets:,} packets / {request_payload:,} estimated payload bytes; "
+                          f"replies: {reply_packets:,} packets / {reply_payload:,} estimated payload bytes")
+        else:
+            directions = (f"{client} to {peer}: {request_packets:,} packets / {request_payload:,} estimated payload "
+                          f"bytes; {peer} to {client}: {reply_packets:,} packets / {reply_payload:,} estimated "
+                          "payload bytes")
+        direction_note = ""
+        if request_packets == 0:
+            direction_note = "; no echo requests were recorded by this sensor"
+        elif reply_packets == 0:
+            direction_note = "; no echo replies were recorded by this sensor"
+        elif min(request_packets, reply_packets) / max(request_packets, reply_packets) < self.ASYM_COUNT_RATIO:
+            direction_note = "; request/reply packet counts were not comparable, so their sizes were not compared"
+        orientation_note = ""
+        if not pair.orientation_proven.get(sensor, True):
+            sources = sorted(pair.session_sources.get(sensor, set()))
+            source_text = sources[0] if len(sources) == 1 else ", ".join(sources)
+            orientation_note = (f" Arkime recorded session source {source_text}; requester orientation is not proved "
+                                "by its session-wide ICMP type set.")
+        mixed = sorted(pair.mixed_types.get(sensor, set()))
+        mixed_note = ""
+        if mixed:
+            mixed_note = (f" The counters are an upper bound for echo because the session aggregates include "
+                          f"non-echo ICMP type(s) {', '.join(map(str, mixed))} between the pair.")
+        claim = (f"{client} and {peer} exchanged {kind_text.replace('echo', transport.upper() + ' echo')} with "
+                 f"{payload:,} bytes "
+                 f"({payload / 2**20:.1f} MiB) of estimated payload across {packets:,} packets according to "
+                 f"{SENSOR_NAMES[sensor]} (average {average:.0f} bytes per packet; {_iso(pair.first[sensor])} – "
+                 f"{_iso(pair.last[sensor])}); qualifying shape: {', '.join(signals)}. The longest recorded echo "
+                 f"session ran {longest / 60:.0f} minutes. Directional counters ({directions}{direction_note})."
+                 f"{orientation_note}{mixed_note} "
+                 "This is packet-size and volume shape, not payload entropy or proof of tunneling."
+                 + cited_phrase(len(evs), pair.records[sensor], not missing)
+                 + bound_note(missing, pair.ends[sensor]))
+        lane, severity = ("high", "high") if self._echo_asymmetric(pair, sensor) else (self.lane, "medium")
+        match = Match(self.id, claim, self.claim_type, evs,
+                      _predicates(evs[0], ("source.ip", "destination.ip", "icmp.type", "icmp.code",
+                                           "flow.bytes_toserver", "source.bytes")),
+                      evs[0].ts, severity, lane, "medium", _entities(evs),
+                      group_key=f"{client}|{peer}|{transport}")
+        match.notes.append("ATT&CK context: T1095 / T1572 (ICMP protocol tunneling) and T1048.003 (unencrypted "
+                           "non-C2 exfiltration), if the traffic is unauthorized")
+        return match
 
 
 def _entities(events: list[TypedEvent]) -> list[tuple[str, str, str]]:
@@ -1488,14 +1865,13 @@ SERVER_SHAPED = "server-shaped"     # opener not recorded; external port ephemer
 UNSHAPED = "unshaped"               # opener not recorded; both ports ephemeral or both below that range
 PORTLESS = "portless"               # opener not recorded, on a transport without ports
 COUNTED = frozenset({OPENED_INSIDE, CLIENT_SHAPED, UNSHAPED, PORTLESS})
-# Connections not read as uploads, as the window cell names them: served and shown by an Arkime SYN (informational),
-# served and shown only by a Suricata flow state, and server-shaped (both partial: each can be wrong).
+# Connections not read as uploads, as the window cell names them: served and shown by a recorded SYN (informational),
+# and server-shaped (partial because the port shape can be wrong).
 SERVED_ARKIME, SERVED_SURICATA = "served (Arkime)", "served (Suricata only)"
 NOT_READ_LISTED = 10                # qualifying server-shaped pairs listed by name on the window cell
 # The typed fact that showed an opener (bit flags on _Connection.opened_inside / opened_outside).
-ARKIME_SYN, SURICATA_STATE = 1, 2
-SURICATA_STATE_NOTE = ("a Suricata flow in state established or closed, which shows a tracked handshake on a sensor "
-                       "that does not pick up mid-stream")
+ARKIME_SYN, SURICATA_SYN = 1, 2
+SURICATA_SYN_NOTE = "a Suricata directional TCP flag summary that records a SYN toward the server"
 UNKNOWN_REASONS = {"tcp": "TCP with no record of the opening (picked up mid-stream, or opened before the hunt window)",
                    "udp": "UDP, which has no opening to record", "sctp": "SCTP, whose opening no typed field shows",
                    "disagree": "TCP whose records disagree about which side opened it"}
@@ -1505,7 +1881,7 @@ UNKNOWN_REASONS = {"tcp": "TCP with no record of the opening (picked up mid-stre
 class _Connection:
     """One connection between an internal and an external address, from every record of it."""
     tallies: dict = field(default_factory=dict)     # sensor -> [bytes the internal address sent, received, records]
-    opened_inside: int = 0                          # the facts (ARKIME_SYN, SURICATA_STATE) showing the internal
+    opened_inside: int = 0                          # the facts (ARKIME_SYN, SURICATA_SYN) showing the internal
     opened_outside: int = 0                         # ... or the external address opened it
     first: float = float("inf")
     last: float = float("-inf")
@@ -1559,7 +1935,7 @@ class _PairTotals:
     inn: int = 0
     records: Counter = field(default_factory=Counter)
     readings: Counter = field(default_factory=Counter)      # counted connections per reading
-    suricata_only: int = 0                                  # opened inside, shown only by a Suricata flow state
+    suricata_only: int = 0                                  # opened inside, shown only by a Suricata SYN fact
     unknown: dict = field(default_factory=dict)             # reading -> Counter of why the opener is unknown
     inside_ports: dict = field(default_factory=dict)        # reading -> Counter of the internal address's ports
     outside_ports: dict = field(default_factory=dict)       # reading -> Counter of the external address's ports
@@ -1593,7 +1969,7 @@ class _PairTotals:
             self.records[name] += tally[2]
         self.readings[reading] += 1
         if reading == OPENED_INSIDE:
-            self.suricata_only += conn.opened_inside == SURICATA_STATE
+            self.suricata_only += conn.opened_inside == SURICATA_SYN
         else:
             why = "disagree" if conn.opened_inside else transport
             self.unknown.setdefault(reading, Counter())[why] += 1
@@ -1629,7 +2005,7 @@ class OutboundVolumeAsymmetry(_FlowRule):
     """An internal address sent far more to one external address than it received back, in absolute and relative
     terms, with the source's own outbound total as the denominator."""
     id = "net.outbound_volume_asymmetry"
-    version = "4"
+    version = "5"
     title = "Internal address sent much more data to one external address than it received"
     severity, lane = "high", "lead"
     attack = ("T1041", "T1048", "T1567")
@@ -1640,8 +2016,7 @@ class OutboundVolumeAsymmetry(_FlowRule):
         "internal server answering), and connections whose opener is not recorded but whose ports have an internal "
         "server's shape, are not read as uploads; those carrying data from the internal address are named on the "
         "window cell with their bytes, and server-shaped pairs that met the upload thresholds are listed. A Suricata "
-        "flow state counts as a recorded opening only on a sensor that does not pick up mid-stream (stream.midstream "
-        "off, its default); on one that does, such a connection may have been opened from inside. Transfers outside "
+        "opening counts only when its directional TCP flags record a SYN toward the server. Transfers outside "
         "that view are not seen, so the absence of a match proves nothing")
     benign = ("backups and cloud file synchronisation", "log and telemetry shipping", "video and media uploads",
               "software publishing to external repositories",
@@ -1661,16 +2036,15 @@ class OutboundVolumeAsymmetry(_FlowRule):
                     "connection, whether a recorded TCP opening shows the internal address opened it, or that the "
                     "opener is not recorded and what the ports show (a client's shape, or no shape, in which case "
                     "the bytes may be a server's answers)",
-        "telemetry": "Suricata EVE flow records (flow.bytes_toserver, flow.bytes_toclient, flow.state) and Arkime "
+        "telemetry": "Suricata EVE flow records (flow.bytes_toserver, flow.bytes_toclient, tcp.tcp_flags_ts, "
+                     "tcp.tcp_flags_tc, tcp.syn) and Arkime "
                      "sessions (source.bytes, destination.bytes, tcp.flags.syn): present in the lab profile on every "
-                     "record (Arkime counts SYNs on every TCP session; lab Suricata flows it picked up mid-stream "
-                     "carry state 'new'). Suricata netflow records are not read",
+                     "record (Arkime counts SYNs on every TCP session). Suricata netflow records are not read",
         "fidelity": "typed per-side byte counters (headers included), read for each address whichever side the "
                     "sensor recorded first; each connection is counted once, from the sensor that recorded the most "
                     "bytes for it. The opener is stated only from a recorded TCP opening: an Arkime session that "
-                    "counted a SYN (Arkime orients such a session by it), or a Suricata flow its TCP engine tracked "
-                    "from the handshake (state established or closed; valid while the sensor's stream.midstream is "
-                    "off, its default, and the claim says so where it is the only fact). Without one the claim says "
+                    "counted a SYN (Arkime orients such a session by it), or a Suricata flow whose directional TCP "
+                    "flags record a SYN toward the server. Without one the claim says "
                     "the opener is unknown and why. Volume and ratio are a deviation, not proof of theft",
         "benign_and_cost": "backups, cloud sync, log shipping, media uploads (the lab carries CCTV traffic). A "
                            "connection an outside address is shown to have opened to an internal server is not read "
@@ -1680,7 +2054,7 @@ class OutboundVolumeAsymmetry(_FlowRule):
                            "data (at least 64 bytes beyond packet headers, so a SYN-ACK or reset to a scanner is not "
                            "one) are named on the window cell with their count, the bytes and the largest pair: as an "
                            "informational line when an Arkime SYN shows the outside opener, and as a partial cell when "
-                           "only a Suricata flow state shows it or only the port shape does; server-shaped pairs that "
+                           "only the port shape shows it; server-shaped pairs that "
                            "met the upload thresholds are listed by name (ten, then how many more). Connections with no "
                            "recorded opener and no clear port shape (both ports ephemeral or both below that range, "
                            "or no ports at all) are counted and worded as possibly a server's answers. One item per "
@@ -1691,8 +2065,7 @@ class OutboundVolumeAsymmetry(_FlowRule):
         "adds": "no other rule measures byte asymmetry",
         "research_basis": "ATT&CK Enterprise 20.0 T1041, T1048 and T1567 (detection: network traffic flow, "
                           "uncommon data flows and outbound volume relative to inbound); Arkime capture/parsers/tcp.c "
-                          "(session orientation and SYN counts) and Suricata's stream engine documentation "
-                          "(stream.midstream) for the opener",
+                          "(session orientation and SYN counts) and Suricata's EVE TCP directional flag fields",
         "retrieval": "the sweep retrieves every record of the network flow datasets and the Arkime session index in "
                      "each partition (dataset filter only), a superset of what this evaluator reads",
         "lanes": "lead: large uploads are common and legitimate; severity high because exfiltration, if that is what "
@@ -1744,7 +2117,7 @@ class OutboundVolumeAsymmetry(_FlowRule):
         tally[2] += 1
         tally[3] += sent if data is None else data
         if view.opened:
-            fact = ARKIME_SYN if view.sensor == ARKIME else SURICATA_STATE
+            fact = ARKIME_SYN if view.sensor == ARKIME else SURICATA_SYN
             if inside_first:
                 conn.opened_inside |= fact
             else:
@@ -1838,13 +2211,13 @@ class OutboundVolumeAsymmetry(_FlowRule):
     def _note_not_read(self, not_read: Counter, largest: dict, shaped: list[tuple]) -> None:
         """Name, on the window cell, the connections whose internal-address data was not read as uploads: how many,
         the bytes, and the pair with the most. Served connections an Arkime SYN shows are an informational note; those
-        shown only by a Suricata flow state, and server-shaped ones, make the cell partial (each reading can be wrong),
+        shown by a Suricata directional SYN is informational; server-shaped ones make the cell partial,
         and server-shaped pairs that met the upload thresholds are listed by name."""
         texts = {
             SERVED_ARKIME: "connections an Arkime session shows an external address opened (it counted the SYN), so "
                            "the internal address answered as a server",
             SERVED_SURICATA: f"connections whose only record of the opening, by an external address, is "
-                             f"{SURICATA_STATE_NOTE}, so the internal address answered as a server",
+                             f"{SURICATA_SYN_NOTE}, so the internal address answered as a server",
             SERVER_SHAPED: f"connections whose opener is not recorded, with the internal address on a port below "
                            f"{EPHEMERAL_FLOOR} and the external address on one at or above it (the port shape of an "
                            f"internal server answering an outside client)",
@@ -1865,7 +2238,7 @@ class OutboundVolumeAsymmetry(_FlowRule):
                          f"{self.MIN_OUTBOUND_BYTES // 2**20} MiB sent and at least {self.MIN_RATIO:.0f} times what "
                          f"came back) on these connections and {'was' if qualifying == 1 else 'were'} not read as "
                          f"uploads only because of the port shape: {listed}{more}")
-            if kind == SERVED_ARKIME:
+            if kind in (SERVED_ARKIME, SERVED_SURICATA):
                 self._notes.append(f"not read as uploads (informational): {text} ({count} connection(s))")
             else:
                 self.limits[f"not_read_{kind}"] = _NotRead(text, records=count, hits=1)
@@ -1894,7 +2267,7 @@ class OutboundVolumeAsymmetry(_FlowRule):
             arkime = k - totals.suricata_only
             facts = ([f"Arkime counted the SYN{'' if n == 1 else f' for {arkime}'}"] if arkime else []) + (
                 [(f"{'the only' if n == 1 else f'for {totals.suricata_only} the only'} record of the opening is "
-                 f"{SURICATA_STATE_NOTE}")] if totals.suricata_only else [])
+                 f"{SURICATA_SYN_NOTE}")] if totals.suricata_only else [])
             parts.append(f"A recorded TCP opening shows {src} opened {which(k)}, to server port "
                          f"{_port_list(totals.outside_ports[OPENED_INSIDE])} on {dst} ({'; '.join(facts)}).")
         k = totals.readings[CLIENT_SHAPED]
@@ -1946,10 +2319,12 @@ class OutboundVolumeAsymmetry(_FlowRule):
         cited = next((e for e in evs if e.has("flow.bytes_toserver") or e.has("source.bytes")), evs[0])
         match = Match(self.id, claim, "aggregate_observation", evs,
                       _predicates(cited, ("source.ip", "destination.ip", "flow.bytes_toserver", "flow.bytes_toclient",
-                                          "source.bytes", "destination.bytes", "flow.state", "tcp.flags.syn")),
+                                          "source.bytes", "destination.bytes", "tcp.tcp_flags_ts",
+                                          "tcp.tcp_flags_tc", "tcp.syn", "tcp.flags.syn")),
                       evs[0].ts, self.severity, self.lane, "medium", _entities(evs), group_key=f"{src}|{dst}")
         match.notes.append("ATT&CK context: T1041 / T1048 / T1567 (exfiltration), if the transfer is unauthorized")
         return match
 
 
-FLOW_PLAYBOOKS = [HorizontalSweep, ProtocolPortMismatch, LongUnidentifiedSession, OutboundVolumeAsymmetry]
+FLOW_PLAYBOOKS = [HorizontalSweep, IcmpEchoTunnel, ProtocolPortMismatch, LongUnidentifiedSession,
+                  OutboundVolumeAsymmetry]

@@ -54,6 +54,8 @@ PARTITION_MAX_DOCS = 120_000
 PLANNED_CHUNK = 500
 LINUX_HOST_DATASETS = ("linux.audit", "systemd.journal", "apache.access", "apache.error")
 HOST_DATASETS = [*LINUX_HOST_DATASETS, *WINDOWS_HOST_DATASETS]
+ZEEK_CONN_DATASETS = frozenset({"zeek.connection", "zeek.conn"})
+ZEEK_ICMP_TRANSPORTS = ("icmp", "icmpv6", "ipv6-icmp")
 NET_FAMILIES = {"net_alert", "net_flow", "dns_query", "http_tx", "file_transfer", "tls_session", "ssh_session"}
 # linux.audit now also yields `auth` (USER_LOGIN/USER_START), so an unparseable audit group may hide one.
 # A login group that fails is tagged linux.audit.auth; it takes every record of its event, so it may also hide
@@ -314,7 +316,41 @@ class Sweep:
         return []
 
     def _any_of_for(self, target: str, contract: FieldContract | None = None) -> list[list[Predicate]]:
-        """Select Windows event logs by dataset or native channel; Winlogbeat may omit event.dataset."""
+        """Select only normalized source shapes while preserving each target's other known datasets."""
+        if contract is not None and contract.role == "network":
+            if self._profiles is None:
+                self._profiles = self.repo.source_profiles(self.hunt_id)
+            profile = self._profiles.get(target) or {}
+            datasets = sorted(profile.get("datasets") or {})
+            zeek = [dataset for dataset in datasets if dataset in ZEEK_CONN_DATASETS]
+            if (zeek and not any(str(note).startswith("ds inventory truncated")
+                                 for note in profile.get("notes") or [])
+                    and contract.supports("event.dataset", "in")
+                    and contract.supports("event.dataset", "missing")
+                    and contract.supports("network.transport", "in")
+                    and contract.supports("network.transport", "missing")):
+                groups = []
+                others = [dataset for dataset in datasets if dataset not in ZEEK_CONN_DATASETS]
+                if others:
+                    groups.append([Predicate(field="event.dataset", op="in", value=others)])
+                groups.append([
+                    Predicate(field="event.dataset", op="in", value=zeek),
+                    Predicate(field="network.transport", op="in", value=list(ZEEK_ICMP_TRANSPORTS)),
+                ])
+                # Some Zeek shippers leave ECS network.transport unset while conn.proto still records ICMP.
+                # Fetch those records for local normalization instead of treating their absence as non-ICMP.
+                groups.append([
+                    Predicate(field="event.dataset", op="in", value=zeek),
+                    Predicate(field="network.transport", op="missing"),
+                ])
+                # A missing dataset cannot be assigned to an inventoried class by the source query. Retrieve it
+                # so the normalizer's unsupported-record accounting makes every affected coverage cell partial.
+                groups.append([Predicate(field="event.dataset", op="missing")])
+                self.stats.setdefault("dataset_filter", {})[target] = others
+                self.stats.setdefault("zeek_transport_filter", {})[target] = list(ZEEK_ICMP_TRANSPORTS)
+                return groups
+            return []
+        # Winlogbeat may omit event.dataset, so Windows also selects by native channel.
         if contract is None or contract.role != "host" or contract.os_family != "windows":
             return []
         groups: list[list[Predicate]] = []
@@ -574,7 +610,7 @@ class Sweep:
         """Only unmodeled source formats poison rules; cataloged-source event classes are not-assessed data."""
         return {
             reason: count for reason, count in skips.items()
-            if reason.startswith(("dataset:", "suricata event_type"))
+            if reason.startswith(("dataset:", "suricata event_type", "zeek non-ICMP connection"))
         }
 
     @staticmethod
@@ -857,9 +893,14 @@ class Sweep:
                 ordered = sorted(pb.scope_partition(events), key=lambda item: (
                     item.ts, -1 if exec_serial(item) is None else exec_serial(item), item.id,
                 ))
-                # Records of no known format could hold any family, whatever the target's profile says.
-                target_applicable = (bool(ordered) or bool(unsupported) or error_affected is ALL_FAMILIES
-                                     or self._baseline_target_applicable(target, pb))
+                # Unknown or malformed records can hide behavior, so they make retrieval partial, but they do not
+                # attest that this source delivers the baseline family. Keep applicability profile/event based and
+                # carry the uncertainty through retrieval_complete instead.
+                target_applicable = (
+                    bool(ordered)
+                    or error_affected is ALL_FAMILIES
+                    or self._baseline_target_applicable(target, pb)
+                )
                 reasons = list(base_reasons)
                 reasons.extend(windows_reasons)
                 if error_reason and (error_affected is ALL_FAMILIES or set(pb.families) & error_affected):

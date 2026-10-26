@@ -1473,6 +1473,29 @@ def _count(value, path: str, bad: list[str]) -> int | None:
     return value
 
 
+def _icmp_number(value, path: str, bad: list[str]) -> int | None:
+    """An ICMP type or code: an unsigned byte, without string/bool coercion."""
+    number = _count(value, path, bad)
+    if number is not None and number > 255:
+        bad.append(path)
+        return None
+    return number
+
+
+def _icmp_value(value, path: str, bad: list[str]) -> int | list[int] | None:
+    """An Arkime ICMP type/code field: one byte or its INT_GHASH multi-value representation."""
+    if not isinstance(value, list):
+        return _icmp_number(value, path, bad)
+    if not value:
+        return None
+    local_bad: list[str] = []
+    numbers = [_icmp_number(item, path, local_bad) for item in value]
+    if local_bad or any(number is None for number in numbers):
+        bad.append(path)
+        return None
+    return sorted(set(numbers))
+
+
 def _cert_time(value, path: str, bad: list[str]) -> str | None:
     """A certificate validity bound as ISO-8601 UTC. Arkime stores epoch milliseconds; Suricata writes ISO time
     without a zone, in UTC."""
@@ -1754,6 +1777,22 @@ def normalize_suricata(hit: dict) -> TypedEvent:
         if k in flow:
             f[f"flow.{k}"] = fv(flow[k], f"{o}.flow.{k}")
     bad: list[str] = []
+    for typed, native in (("icmp.type", "icmp_type"), ("icmp.code", "icmp_code")):
+        number = _icmp_number(eve.get(native), typed, bad)
+        if number is not None:
+            f[typed] = fv(number, f"{o}.{native}")
+    tcp = _app_block(eve, "tcp")
+    if tcp is not None:
+        syn = tcp.get("syn")
+        if syn is not None:
+            if isinstance(syn, bool):
+                f["tcp.syn"] = fv(syn, f"{o}.tcp.syn")
+            else:
+                bad.append("tcp.syn")
+        for name in ("tcp_flags_ts", "tcp_flags_tc", "state"):
+            value = _scalar_str(tcp.get(name), f"tcp.{name}", bad)
+            if value is not None:
+                f[f"tcp.{name}"] = fv(value, f"{o}.tcp.{name}")
     caveats: list[str] = []
     d = _app_block(eve, "dns")
     if d is not None:
@@ -1917,6 +1956,14 @@ def normalize_arkime_session(hit: dict) -> TypedEvent:
                 f[f"tcp.flags.{typed}"] = fv(count, f"{nid}:tcpflags.{native}")
     elif not _absent(flags):
         bad.append("tcpflags")
+    icmp = src.get("icmp")
+    if isinstance(icmp, dict):
+        for typed, native in (("icmp.type", "type"), ("icmp.code", "code")):
+            number = _icmp_value(icmp.get(native), typed, bad)
+            if number is not None:
+                f[typed] = fv(number, f"{nid}:icmp.{native}")
+    elif not _absent(icmp):
+        bad.append("icmp")
     root = _scalar_str(src.get("rootId"), "rootId", bad)
     if root is not None:
         f["arkime.root_id"] = fv(root, f"{nid}:rootId")
@@ -1935,6 +1982,69 @@ def normalize_arkime_session(hit: dict) -> TypedEvent:
     return TypedEvent(id=event_id("net_session", [ref]), family="net_session", ts=first, host=src.get("node"),
                       fields={k: v for k, v in f.items() if v.value is not None}, raw=[ref],
                       normalizer=NORMALIZER_VERSION, caveats=caveats)
+
+
+def normalize_zeek_connection(hit: dict) -> TypedEvent:
+    """One Zeek ICMP conn record. ``orig_p`` is the originator type; ``resp_p`` is its counterpart type."""
+    src, nid, ref = hit["_source"], hit["_id"], _ref(hit)
+    conn = _get(src, "zeek.connection")
+    if not isinstance(conn, dict):
+        raise TypeError("zeek.connection is not an object")
+    transport = _get(src, "network.transport") or conn.get("proto")
+    transport = transport.lower() if isinstance(transport, str) else None
+    if transport not in ("icmp", "ipv6-icmp", "icmpv6"):
+        raise Skip("zeek non-ICMP connection is not normalized")
+    source_ip = _get(src, "source.ip") or conn.get("orig_h")
+    destination_ip = _get(src, "destination.ip") or conn.get("resp_h")
+    try:
+        if any(ipaddress.ip_address(str(address)).version == 6 for address in (source_ip, destination_ip)):
+            transport = "ipv6-icmp"
+        else:
+            transport = "icmp"
+    except ValueError:
+        pass
+    when = _ts(src["@timestamp"])
+    bad: list[str] = []
+    f = {
+        "source.ip": fv(source_ip, f"{nid}:source.ip|zeek.connection.orig_h"),
+        "destination.ip": fv(destination_ip,
+                             f"{nid}:destination.ip|zeek.connection.resp_h"),
+        "source.port": fv(_get(src, "source.port"), f"{nid}:source.port"),
+        "destination.port": fv(_get(src, "destination.port"), f"{nid}:destination.port"),
+        "network.transport": fv(transport, f"{nid}:network.transport|zeek.connection.proto"),
+        "observer.product": fv("zeek", f"{nid}:event.dataset#producer"),
+        "flow.start": fv(when.isoformat(), f"{nid}:@timestamp"),
+        # Zeek orig_bytes/resp_bytes are IP payload bytes rather than whole captured frames.
+        "flow.bytes_are_payload": fv(True, f"{nid}:zeek.connection.orig_bytes+resp_bytes#semantics"),
+    }
+    for typed, native in (("flow.bytes_toserver", "orig_bytes"), ("flow.bytes_toclient", "resp_bytes"),
+                          ("flow.pkts_toserver", "orig_pkts"), ("flow.pkts_toclient", "resp_pkts")):
+        number = _count(conn.get(native), f"zeek.connection.{native}", bad)
+        if number is not None:
+            f[typed] = fv(number, f"{nid}:zeek.connection.{native}")
+    duration = conn.get("duration")
+    if duration is not None:
+        if isinstance(duration, bool) or not isinstance(duration, (int, float)) or duration < 0:
+            bad.append("zeek.connection.duration")
+        else:
+            seconds = float(duration)
+            f["session.duration_s"] = fv(seconds, f"{nid}:zeek.connection.duration")
+            f["flow.end"] = fv((when + timedelta(seconds=seconds)).isoformat(),
+                               f"{nid}:@timestamp+zeek.connection.duration")
+    raw_type = conn.get("icmp_type") if "icmp_type" in conn else _get(src, "source.port")
+    number = _icmp_number(raw_type, "icmp.type", bad)
+    if number is not None:
+        origin = "zeek.connection.icmp_type" if "icmp_type" in conn else "source.port#zeek-icmp-type"
+        f["icmp.type"] = fv(number, f"{nid}:{origin}")
+    if "icmp_code" in conn:
+        number = _icmp_number(conn.get("icmp_code"), "icmp.code", bad)
+        if number is not None:
+            f["icmp.code"] = fv(number, f"{nid}:zeek.connection.icmp_code")
+    if bad:
+        f["parse.malformed"] = fv(sorted(set(bad)), f"{nid}:#malformed")
+    return TypedEvent(id=event_id("net_flow", [ref]), family="net_flow", ts=when,
+                      host=_get(src, "host.name"), fields={k: v for k, v in f.items() if v.value is not None},
+                      raw=[ref], normalizer=NORMALIZER_VERSION, caveats=[])
 
 
 # Companion record types an exec or socket event holds at most once (EXECVE may repeat: continuation records)
@@ -2024,6 +2134,8 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                 audit_hits.append(h)
             elif ds.startswith("suricata.eve"):
                 events.append(normalize_suricata(h))
+            elif ds in ("zeek.connection", "zeek.conn"):
+                events.append(normalize_zeek_connection(h))
             elif ds == "systemd.journal":
                 events.append(normalize_journal(h, journal_boots))
             elif ds in SINGLE:

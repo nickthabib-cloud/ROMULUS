@@ -11,6 +11,7 @@ from tests.test_flow_rules import ark, eve, events, run
 T0 = datetime(2024, 11, 18, 14, 0, 0, tzinfo=UTC)
 MIB = 2**20
 HOTS = {flows.HorizontalSweep: ("HOT_GROUPS", "HOT_DESTINATIONS"),
+        flows.IcmpEchoTunnel: ("HOT",),
         flows.ProtocolPortMismatch: ("HOT", "HOT_GROUPS"),
         flows.LongUnidentifiedSession: ("HOT",),
         flows.OutboundVolumeAsymmetry: ("HOT_PAIRS", "HOT_CONNECTIONS")}
@@ -59,7 +60,15 @@ def volume_hits():
     return hits
 
 
-SCENARIOS = [(flows.HorizontalSweep, sweep_hits), (flows.ProtocolPortMismatch, mismatch_hits),
+def icmp_hits():
+    hits = [eve(f"ic{i}", src=f"10.0.0.{i % 8 + 1}", sport=None, dst=f"198.51.100.{i % 7 + 1}", dport=None,
+                proto="ICMP", c2s=12 * MIB, s2c=0, pkts_c=12_000, pkts_s=0, icmp_type=8, icmp_code=0,
+                start=at(i)) for i in range(90)]
+    return hits
+
+
+SCENARIOS = [(flows.HorizontalSweep, sweep_hits), (flows.IcmpEchoTunnel, icmp_hits),
+             (flows.ProtocolPortMismatch, mismatch_hits),
              (flows.LongUnidentifiedSession, long_hits), (flows.OutboundVolumeAsymmetry, volume_hits)]
 
 

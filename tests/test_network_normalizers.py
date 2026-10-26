@@ -31,6 +31,16 @@ def eve(_id, record, ts="2024-11-18T14:26:40.100Z"):
         "event": {"dataset": f"suricata.eve.{record['event_type']}", "original": json.dumps(record)}}}
 
 
+def zeek(_id="z1", *, source_port=8, destination_port=0, connection=None):
+    return {"_id": _id, "_index": "romulus-network-logs", "_source": {
+        "@timestamp": "2024-11-18T14:26:40.100Z", "host": {"name": "zeek1"},
+        "event": {"dataset": "zeek.connection"}, "network": {"transport": "icmp"},
+        "source": {"ip": "172.17.100.121", "port": source_port},
+        "destination": {"ip": "192.0.2.174", "port": destination_port},
+        "zeek": {"connection": connection or {"orig_bytes": 900, "resp_bytes": 4000,
+                                                "orig_pkts": 9, "resp_pkts": 8, "duration": 2.0}}}}
+
+
 def one(hit):
     events, skips, errors = normalize_hits([hit])
     assert errors == [] and skips == {}, (errors, skips)
@@ -154,6 +164,96 @@ def test_arkime_bad_tcp_flag_counter_is_malformed():
     e = one(arkime(tcpflags={"syn": "one", "fin": 1}))
     assert e.get("tcp.flags.syn") is None and e.get("tcp.flags.fin") == 1
     assert e.get("parse.malformed") == ["tcpflags.syn"]
+
+
+def test_suricata_tcp_directional_flags_and_state_are_typed_without_inference():
+    e = one(eve("tcp-fields", {"event_type": "flow",
+                                "flow": {"bytes_toserver": 120, "bytes_toclient": 80,
+                                         "pkts_toserver": 2, "pkts_toclient": 1, "state": "established"},
+                                "tcp": {"syn": True, "tcp_flags_ts": "02", "tcp_flags_tc": "12",
+                                        "state": "established"}}))
+    assert e.get("tcp.syn") is True
+    assert e.get("tcp.tcp_flags_ts") == "02"
+    assert e.get("tcp.tcp_flags_tc") == "12"
+    assert e.get("tcp.state") == "established"
+    assert e.fields["tcp.tcp_flags_ts"].origin.endswith(".tcp.tcp_flags_ts")
+
+
+def test_suricata_absent_tcp_fields_stay_absent_and_bad_types_are_not_coerced():
+    absent = one(eve("tcp-absent", {"event_type": "flow", "flow": {"state": "closed"}}))
+    assert all(absent.get(name) is None for name in
+               ("tcp.syn", "tcp.tcp_flags_ts", "tcp.tcp_flags_tc", "tcp.state"))
+    malformed = one(eve("tcp-bad", {"event_type": "flow", "flow": {"state": "closed"},
+                                     "tcp": {"syn": 1, "tcp_flags_ts": 2, "tcp_flags_tc": [16], "state": 7}}))
+    assert all(malformed.get(name) is None for name in
+               ("tcp.syn", "tcp.tcp_flags_ts", "tcp.tcp_flags_tc", "tcp.state"))
+    assert malformed.get("parse.malformed") == [
+        "tcp.state", "tcp.syn", "tcp.tcp_flags_tc", "tcp.tcp_flags_ts",
+    ]
+
+
+def test_suricata_icmp_type_and_code_are_strict_typed_fields_and_absence_is_not_zero():
+    typed = one(eve("icmp", {"event_type": "flow", "proto": "ICMP", "icmp_type": 8, "icmp_code": 0,
+                             "flow": {"bytes_toserver": 900, "bytes_toclient": 4000,
+                                      "pkts_toserver": 9, "pkts_toclient": 8}}))
+    assert typed.get("icmp.type") == 8 and typed.get("icmp.code") == 0
+    absent = one(eve("icmp-absent", {"event_type": "flow", "proto": "ICMP", "flow": {"bytes": 10}}))
+    assert absent.get("icmp.type") is None and absent.get("icmp.code") is None
+    malformed = one(eve("icmp-bad", {"event_type": "flow", "proto": "ICMP", "icmp_type": "8",
+                                      "icmp_code": False, "flow": {"bytes": 10}}))
+    assert malformed.get("icmp.type") is None and malformed.get("icmp.code") is None
+    assert malformed.get("parse.malformed") == ["icmp.code", "icmp.type"]
+
+
+def test_arkime_icmp_session_types_explicit_type_and_code_without_coercion():
+    hit = arkime(ipProtocol=1, protocol=["icmp"], icmp={"type": 8, "code": 0},
+                 source={"ip": "172.17.100.121", "bytes": 900, "packets": 9},
+                 destination={"ip": "192.0.2.174", "bytes": 4000, "packets": 8})
+    typed = one(hit)
+    assert typed.get("icmp.type") == 8 and typed.get("icmp.code") == 0
+
+
+def test_arkime_icmp_session_accepts_multivalued_types_and_never_uses_ports_as_fallback():
+    hit = arkime(ipProtocol=1, protocol=["icmp"], icmp={"type": [0, 8], "code": [0]},
+                 source={"ip": "172.17.100.121", "port": 0, "bytes": 900, "packets": 9},
+                 destination={"ip": "192.0.2.174", "port": 0, "bytes": 4000, "packets": 8})
+    typed = one(hit)
+    assert typed.get("icmp.type") == [0, 8] and typed.get("icmp.code") == [0]
+    assert typed.get("parse.malformed") is None
+
+    absent = one(arkime(ipProtocol=1, protocol=["icmp"],
+                        source={"ip": "172.17.100.121", "port": 0, "bytes": 900, "packets": 9},
+                        destination={"ip": "192.0.2.174", "port": 0, "bytes": 4000, "packets": 8}))
+    assert absent.get("icmp.type") is None and absent.get("icmp.code") is None
+
+
+def test_zeek_icmp_connection_uses_documented_type_code_ports_and_types_flow_counters():
+    typed = one(zeek())
+    assert typed.family == "net_flow" and typed.get("observer.product") == "zeek"
+    assert typed.get("icmp.type") == 8 and typed.get("icmp.code") is None
+    assert typed.get("flow.bytes_toserver") == 900 and typed.get("flow.bytes_toclient") == 4000
+    assert typed.get("flow.pkts_toserver") == 9 and typed.get("flow.pkts_toclient") == 8
+    assert typed.get("session.duration_s") == 2.0
+
+
+def test_zeek_icmp_absent_type_and_code_stay_absent():
+    typed = one(zeek(source_port=None, destination_port=None))
+    assert typed.get("icmp.type") is None and typed.get("icmp.code") is None
+
+
+def test_zeek_icmp_counterpart_port_is_not_code_and_ipv6_is_typed_from_addresses():
+    timestamp = one(zeek("timestamp", source_port=13, destination_port=14))
+    assert timestamp.get("icmp.type") == 13 and timestamp.get("icmp.code") is None
+
+    reply_first = one(zeek("reply", source_port=0, destination_port=8))
+    assert reply_first.get("icmp.type") == 0 and reply_first.get("icmp.code") is None
+
+    v6 = zeek("v6", source_port=128, destination_port=129)
+    v6["_source"]["source"]["ip"] = "fd00::5"
+    v6["_source"]["destination"]["ip"] = "2001:db8::50"
+    typed_v6 = one(v6)
+    assert typed_v6.get("network.transport") == "ipv6-icmp"
+    assert typed_v6.get("icmp.type") == 128 and typed_v6.get("icmp.code") is None
 
 
 # ---- Arkime DNS ------------------------------------------------------------------------------------------------
