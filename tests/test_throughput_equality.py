@@ -175,14 +175,38 @@ from tests import throughput_fixture as tf
 # This fixture has no qualifying ICMP candidate, and its persistence result has the same grouping, claim and lane.
 # Candidate and rule-cell field projections change only in rule_version; the manifest follows that candidate version.
 # Every raw source record, citation, decision, lane, claim, gate, link, incident and other stack digest is identical.
+# The hunt-derived writer now decides per (target, spec, hour) from that hour's own window cells, so this hunt, partial
+# for reasons outside the baseline, writes the whole hours whose cells are complete:
+# - baseline_segments, baseline_counts, baseline_scope_hours: 14 hunt-derived segments of the 13:00-15:00 span for the
+#   five specs and targets that allow it (bl.ext_dest is refused: the fixture's internal networks are the default;
+#   the host target's exec-pair cut is refused for its unresolvable cited child); each carries events_basis 2 and
+#   its first_event_hour. Segments of targets that deliver none of a spec's records are empty.
+# - audit: the hunt.baseline_summary segment_writer per-spec reasons name the hours not written ("1 hour(s) not
+#   written: an incomplete window cell") instead of "hunt is partial", with counts written, and a material block (kept
+#   for a resume, its estimated bytes, the disk budget). The writer's measured write-lock time is wall clock, so the
+#   fixture now drops max_write_seconds like its other wall-clock fields.
+# - baseline_observations: every scope is unresolved by its spec's own history coverage, so the judge no longer
+#   probes history and prevalence for them: history_count, n_hours, peer_scopes and peer_scopes_with_key go from 0
+#   (probed over no history) to null (not assessed). Verdicts and reasons are unchanged.
+# The window counter material stays (the partial hunt keeps it for one resume), so the window tables are unchanged.
+# Candidates, rule cells, links, tasks, events and the manifest are unchanged.
+# Review corrections then change baseline fields only:
+# - rule_cells: the 121 not_applicable_no_events window cells of the baseline specs record retrieval_complete (true
+#   here), so an inapplicable target's empty cell from a partial retrieval is never written as complete history.
+# - baseline_segments: rows_digest now also covers each segment's per-hour event totals (the new
+#   baseline_segment_event_hour rows that place a straddling segment's first in-plan record).
+# - audit: the segment writer's material block states over_budget (false).
+# Combined with evidence version 14, baseline observation and scope-hour witness event identities retain the carried
+# branch's rehashed values, and the audit summary follows those rows. Rule cells combine S9's retrieval_complete
+# details with the persistence/ICMP rule versions above; the non-baseline field projection remains byte-identical.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
-    "audit": "55a86da494923b154e307075440eb408f42b47a16273fc9a6b0cbd86c71b66af",
-    "baseline_counts": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "audit": "b2a270205b6ea2874d1ff9acb7eaa34c9a0182d26060989744d11277ffd00025",
+    "baseline_counts": "1a021de3254f91225689f1bdc8ce3e0cfd416c90a4148bcd4f1c93b6db9cb16d",
     "baseline_hunt_exclusions": "fe9edaf9efe3065352ae1bedc95ac7e78ddbe2d6e34f835203cfe56cb368ec56",
-    "baseline_observations": "034eee444100bbb65bcf979625e56dcefcd7b180773cf623f6f4261e3a2b1721",
-    "baseline_scope_hours": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-    "baseline_segments": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "baseline_observations": "b25abf252a28151beae7d2048372e8be9dcafc76622b1a5f79ca1fd85a597784",
+    "baseline_scope_hours": "fe1ef875f82a6cad7d9c7884b1936614584a9f9e0e4c008e4790ee46edf6361d",
+    "baseline_segments": "e2ca9f003a97f77ac300789266c9e646610317f5577318c4b556b464a8a6fc48",
     "baseline_snapshot": "63b4c8094cb5450b1e707fd7be786e90324528e738b882358cae15cb8d53f776",
     "baseline_window_counts": "163b75766bc7cc487118b4e8bc24fe338d9e364898f9200887b89ba11b464acc",
     "baseline_window_event_hours": "bb58c65144b135443e75a690b7b2f8137ebac6b827f8e8bd8cc7606a01c53e52",
@@ -196,7 +220,7 @@ GOLDEN_STACK = {
     "links": "0fbedb27ca9a4cb72354178444ee9aabc49f377b2c933074fe03ef29c8fbb08a",
     "manifest": "e7f0f06c2bf744a08516f7b254454c3f5e517498d7275d9e80e85f5760a521f4",
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
-    "rule_cells": "529ba5e5fa121b1552a865436f0106208011fdbe6da0c1f6c7bc6dba60169697",
+    "rule_cells": "e1bc4bf141c508b8ca70ab69d34b64edc50b19112dd4d1d901623b41e42cf871",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
     "tasks": "f0c05a2a05135e822ab077a843472e4cb4d31b93b5c27050685bf6b9675e4cdc",
 }

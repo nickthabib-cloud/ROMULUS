@@ -11,10 +11,12 @@ from typing import Literal
 
 from romulus.baseline.carry import BEFORE_HISTORY, CarryInStore, HourParents, PendingResolver
 from romulus.baseline.count import KeyCounter
+from romulus.baseline.playbook import BASELINE_PLAYBOOKS
 from romulus.baseline.protocol import HistorySource
 from romulus.baseline.spec import BaselineSpec, KeyContext, Pending, exec_serial
+from romulus.evidence.typed import TypedEvent
 from romulus.store.db import utcnow
-from romulus.store.repo import Repo
+from romulus.store.repo import BASELINE_EVENTS_BASIS, Repo
 
 _HOUR = timedelta(hours=1)
 # A normal source can produce at most 720 five-second leaves in one hour. The defensive partition cap leaves
@@ -61,6 +63,19 @@ def _canonical(value) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+_PLAYBOOK_BY_SPEC = {playbook.spec.id: playbook for playbook in BASELINE_PLAYBOOKS}
+
+
+def spec_records(spec: BaselineSpec) -> Callable[[list[TypedEvent]], list[TypedEvent]]:
+    """The records one spec counts in a retrieved hour: exactly what the sweep gives the spec's playbook (its
+    families, in its OS scope). Both writers count and total the same records, so a segment's events_total and
+    keys do not depend on which writer read the hour."""
+    playbook = _PLAYBOOK_BY_SPEC.get(spec.id)
+    if playbook is None:
+        return lambda events: [event for event in events if event.family in spec.families]
+    return playbook().scope_partition
+
+
 def exclusion_digest(keys: list[str]) -> str:
     """Canonical digest of a segment's sorted cited-key exclusions."""
     keys = sorted(set(keys))
@@ -83,7 +98,7 @@ def segment_content_id(*, site: str, target: str, spec: BaselineSpec, start: dat
         "key_version": spec.key_version, "start": start.astimezone(UTC).isoformat(),
         "end": end.astimezone(UTC).isoformat(), "bucket": spec.bucket, "normalizer": normalizer,
         "exclusion_digest": exclusion_digest, "excluded_keys": sorted(set(excluded_keys)),
-        "origin": origin,
+        "origin": origin, "events_basis": BASELINE_EVENTS_BASIS,
     }
     if spec.requires_configured_networks:
         material["network_digest"] = network_digest
@@ -127,7 +142,9 @@ class LookbackWriter:
             "origin": "lookback", "source_hunt_id": None, "built_by_hunt_id": hunt_id,
             "exclusion_digest": exclusion_digest, "excluded_keys": excluded_keys, "hunted": 0,
             "network_digest": self.network_digest if spec.requires_configured_networks else None,
-            "events_total": events_total, "status": "building", "created_at": self.now(),
+            "events_total": events_total, "events_basis": BASELINE_EVENTS_BASIS,
+            "first_event_hour": start if events_total else None,
+            "status": "building", "created_at": self.now(),
         }
 
     def _covered(self, target: str, spec: BaselineSpec, start: datetime, end: datetime) -> bool:
@@ -258,6 +275,7 @@ class LookbackWriter:
                 ))
                 continue
             counters = {spec.id: KeyCounter("pending", spec, span=(hour_start, hour_end)) for spec in missing}
+            scopes = {spec.id: spec_records(spec) for spec in missing}
             # The horizon is the end of the history being filled: a child resolves only while observation runs
             # unbroken from its parent's exec through every later history hour.
             carry = (self.parent_carry.for_target(target, horizon=end)
@@ -269,7 +287,6 @@ class LookbackWriter:
                 system_uid_range=self.context.system_uid_range,
                 is_internal=self.context.is_internal,
             )
-            events_total = 0
             failure: tuple[str, str] | None = None
             for partition in planned.partitions:
                 if self.clock() - begun >= self.budget.seconds or queries >= self.budget.queries:
@@ -304,7 +321,6 @@ class LookbackWriter:
                         f"received {fetched.record_count}"
                     ))
                     break
-                events_total += len(fetched.events)
                 if carry is not None:
                     carry.observe_events(fetched.events, hour=(hour_start, hour_end))
                 # Time, then the audit serial, orders one instant's execs (a shebang's env, then its interpreter).
@@ -313,8 +329,8 @@ class LookbackWriter:
                 ))
                 for event in ordered_events:
                     hour_parents.add(event)
-                for event in ordered_events:
-                    for counter in counters.values():
+                for spec_id, counter in counters.items():
+                    for event in scopes[spec_id](ordered_events):
                         counter.consume(event, hour_context)
             # Execs fed but not stored are breaks for their hosts whether or not the hour completes.
             uncarried, hostless = carry.take_uncarried() if carry is not None else ({}, False)
@@ -346,7 +362,7 @@ class LookbackWriter:
                 try:
                     self.repo.stage_baseline_history_cell(
                         hunt_id, {"target": target, "spec_id": counter.spec.id, "start": hour_start,
-                                  "end": hour_end, "events_total": events_total},
+                                  "end": hour_end, "events_total": counter.events_counted},
                         counter.count_rows(), counter.scope_hour_rows(),
                         (asdict(pending) for pending in counter.take_pendings()),
                     )
@@ -370,8 +386,8 @@ class LookbackWriter:
                 counter = counters[spec.id]
                 if counter.partial or spec.id in deferred or spec.id in unstaged:
                     continue
-                written, seconds = self._write_segment(hunt_id, target, spec, hour_start, hour_end, events_total,
-                                                       counter, gaps)
+                written, seconds = self._write_segment(hunt_id, target, spec, hour_start, hour_end,
+                                                       counter.events_counted, counter, gaps)
                 built += written
                 longest = max(longest, seconds)
             if not partial and built + len(deferred) == len(missing):

@@ -34,14 +34,17 @@ def _repo(hunt_id="hunt"):
 
 
 def _segment(repo, segment_id, start, end, *, origin="lookback", created=START, target="host", events=1):
+    """A segment holding `events` of the spec's records in every one of its hours."""
+    hours = [start + timedelta(hours=index) for index in range(int((end - start) / timedelta(hours=1)))]
     repo.save_baseline_segment({
         "id": segment_id, "site": "site", "target": target, "spec_id": "bl.exec_path",
         "spec_version": "1", "key_version": "1", "normalizer": "fixture@1",
         "start": start, "end": end, "bucket": "day", "origin": origin,
         "source_hunt_id": None, "built_by_hunt_id": None, "exclusion_digest": "none",
-        "excluded_keys": [], "hunted": int(origin == "hunt"), "events_total": events,
+        "excluded_keys": [], "hunted": int(origin == "hunt"), "events_total": events * len(hours),
+        "first_event_hour": start if events else None,
         "status": "active", "created_at": created,
-    }, [], [])
+    }, [], [], [{"hour": hour, "events": events} for hour in hours] if events else [])
 
 
 def _freeze(repo, hunt_id="hunt", **overrides):
@@ -282,11 +285,13 @@ def test_planner_filters_a_store_of_ten_thousand_segments_in_bounded_time():
             "normalizer": "fixture@1", "start": start, "end": start + timedelta(hours=1),
             "bucket": "day", "origin": "lookback", "source_hunt_id": None,
             "built_by_hunt_id": None, "exclusion_digest": "none", "excluded_keys": [],
-            "hunted": 0, "events_total": 1, "rows_digest": "0:0:0", "status": "active",
-            "created_at": START,
+            "hunted": 0, "events_total": 1, "events_basis": 2, "first_event_hour": start,
+            "rows_digest": "0:0:0", "status": "active", "created_at": START,
         })
     with repo.engine.begin() as connection:
         connection.execute(insert(t.baseline_segment), rows)
+        connection.execute(insert(t.baseline_segment_event_hour), [
+            {"segment_id": row["id"], "hour": row["start"], "events": 1} for row in rows])
 
     before = time.perf_counter()
     snapshot = _freeze(repo, lookback=timedelta(hours=168), min_live_hours=48)

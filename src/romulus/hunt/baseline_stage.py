@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from datetime import datetime, timedelta
 from itertools import groupby
 
@@ -20,7 +21,9 @@ from romulus.detect.base import Match, PredicateField
 from romulus.evidence.normalize import NORMALIZER_VERSION
 from romulus.evidence.typed import TypedEvent
 from romulus.hunt.baseline_source import HuntHistorySource
+from romulus.hunt.baseline_writer import cell_complete
 from romulus.hunt.publish import publish_match
+from romulus.hunt.site_networks import contradiction_reason
 from romulus.hunt.sweep import baseline_applicability
 from romulus.sources.models import Window
 from romulus.store.repo import Repo
@@ -29,6 +32,14 @@ BASELINE_CITATION_CAP = 20
 _HOUR = timedelta(hours=1)
 _COMPLETE_WINDOW_STATES = {"evaluated_complete", "not_applicable_no_events"}
 _PLAYBOOK_BY_SPEC = {playbook.spec.id: playbook for playbook in BASELINE_PLAYBOOKS}
+# Observations judged, probed and written per batch: bounds the rows held and the size of each batched probe.
+_JUDGE_CHUNK = 1000
+
+
+def _chunks(rows: Iterable[dict], size: int) -> Iterator[list[dict]]:
+    iterator = iter(rows)
+    while chunk := list(itertools.islice(iterator, size)):
+        yield chunk
 
 
 def _canonical(value) -> str:
@@ -46,17 +57,23 @@ def _coverage_failure(coverage: list[dict], minimum: int) -> str | None:
         return None
     gaps = [gap for item in coverage for gap in item.get("gaps") or []]
     if all(item.get("status") == "absent" for item in coverage):
-        # The hours read are complete and empty; absence is evidenced only where nothing was left unread. Hours the
-        # lookback budget never reached are not evidence that the source holds nothing there.
-        # every target's read stopped at or after the earliest end of its unread hours, so nothing before it was read
+        # Absence is evidenced only by the complete, empty hours between the window start and each target's latest
+        # gap. Older hours may hold records (after an unresolved hour, for example), and hours the lookback budget
+        # never reached are not evidence that the source holds nothing there, so every gap is named with its reason.
+        if not gaps:
+            return "no pre-window data"
+        # the latest gap end over all targets: every target's complete run reaches back at least that far
+        run_start = max(str(gap["end"]) for gap in gaps if gap.get("end"))
+        parts = [f"no pre-window data in the complete hours from {run_start} to the window start"]
+        other = sorted({str(gap.get("reason") or gap.get("state")) for gap in gaps
+                        if gap.get("state") != "omitted_budget"})
+        if other:
+            parts.append(f"history gap before them: {'; '.join(other)}")
         unread = [gap["end"] for gap in gaps if gap.get("state") == "omitted_budget" and gap.get("end")]
         if unread:
-            return (f"no pre-window data in the hours read; history not read before {min(unread)}: lookback "
-                    f"budget exhausted")
-        if gaps:
-            reasons = "; ".join(sorted({str(gap.get("reason") or gap.get("state")) for gap in gaps}))
-            return f"no pre-window data in the hours read; history gap: {reasons}"
-        return "no pre-window data"
+            # every target's read stopped at or after the earliest end of its unread hours
+            parts.append(f"history not read before {min(unread)}: lookback budget exhausted")
+        return "; ".join(parts)
     if gaps:
         reasons = "; ".join(sorted({str(gap.get("reason") or gap.get("state")) for gap in gaps}))
         return f"history gap: {reasons}"
@@ -174,10 +191,14 @@ def resolve_window_exec_pairs(repo: Repo, hunt_id: str, window: Window) -> None:
                 "evaluated_partial" if reasons or not cell["source_complete"] else
                 "evaluated_complete"
             )
+            detail: dict = {"reasons": sorted(set(reasons))}
+            if state == "not_applicable_no_events":
+                # an inapplicable target's empty cell is complete history only if its retrieval was complete
+                detail["retrieval_complete"] = bool(cell["source_complete"]) and not reasons
             repo.save_baseline_window_cell(hunt_id, {
                 "rule_id": spec.id, "version": spec.version, "target": target,
                 "partition": cell["partition"], "state": state, "matched": 0,
-                "evaluated": cell["evaluated"], "detail": {"reasons": sorted(set(reasons))},
+                "evaluated": cell["evaluated"], "detail": detail,
             }, (_pending_observation(hunt_id, spec, row) for row in observations),
                 counts=segment_counter.material_count_rows(), scope_hours=segment_counter.scope_hour_rows(),
                 event_hours=repo.baseline_window_event_hours(
@@ -190,10 +211,14 @@ class SnapshotView:
     """Streaming judge over one immutable snapshot and the sweep's persisted observations."""
 
     def __init__(self, repo: Repo, hunt_id: str, window: Window, snapshot: dict, *,
-                 min_live_hours: int, networks_configured: bool, citation_source=None):
+                 min_live_hours: int, networks_configured: bool, citation_source=None,
+                 direction_failure: str | None = None):
         self.repo, self.hunt_id, self.window, self.snapshot = repo, hunt_id, window, snapshot
         self.min_live_hours, self.networks_configured = min_live_hours, networks_configured
         self.citation_source = citation_source
+        # Why the hunt's own hosts leave its internal-network definition unconfirmed: a direction-dependent spec
+        # can then still publish a deviation, but never a complete negative.
+        self.direction_failure = direction_failure
         plan = snapshot.get("plan") or {}
         # Member segments may straddle history_start; only their rows inside the frozen span are history.
         self.span = ((datetime.fromisoformat(plan["history_start"]), datetime.fromisoformat(plan["window_start"]))
@@ -206,7 +231,8 @@ class SnapshotView:
             "k": float(rate_config.get("k", RATE_MEAN_MULTIPLIER)),
             "z": float(rate_config.get("z", RATE_SIGMA_MULTIPLIER)),
         }
-        self._pending_group: tuple[str, list[dict]] | None = None
+        # (group key, (spec id, spec version, scope)) of a presence lead, or (group key, rows) of a rate lead
+        self._pending_group: tuple[str, tuple[str, str, str] | list[dict]] | None = None
         self.spec_stats: dict[str, dict] = {}
 
     def _window_failure(self, playbook: BaselinePlaybook) -> str | None:
@@ -215,12 +241,28 @@ class SnapshotView:
                  if not (cell["target"] == "*" and cell["partition"] == "window")
                  and not cell["target"].startswith("baseline:")
                  and cell["state"] != "split"]
-        if not cells:
-            return "no baseline window cell was evaluated"
+        reasons: list[str] = []
         partial = [cell for cell in cells if cell["state"] not in _COMPLETE_WINDOW_STATES]
-        if partial:
-            return f"window coverage is partial in {len(partial)} cell(s)"
-        return None
+        if not cells:
+            reasons.append("no baseline window cell was evaluated")
+        elif partial:
+            reasons.append(f"window coverage is partial in {len(partial)} cell(s)")
+        # An inapplicable target's empty cell supports a negative only when its retrieval was complete: the same
+        # rule the segment writer applies, so a partial retrieval never yields a complete negative.
+        unretrieved = [cell for cell in cells
+                       if cell["state"] == "not_applicable_no_events" and not cell_complete(cell)]
+        if unretrieved:
+            targets = ", ".join(sorted({cell["target"] for cell in unretrieved}))
+            reasons.append(f"retrieval was partial in {len(unretrieved)} cell(s) of inapplicable target(s) "
+                           f"{targets}")
+        if playbook.direction_dependent and self.direction_failure:
+            reasons.append(self.direction_failure)
+        if playbook.spec.measure == "rate":
+            # Rate measurements are read from the window counter material; released material measures nothing.
+            released = self.repo.baseline_window_released(self.hunt_id, playbook.id)
+            if released is not None:
+                reasons.append(f"window counter material was released before judgement ({released})")
+        return "; ".join(reasons) or None
 
     def _history_coverage(self, spec_id: str) -> list[dict]:
         coverage = self.snapshot.get("coverage") or {}
@@ -231,76 +273,98 @@ class SnapshotView:
                 if f"{target}|{spec_id}" in coverage
                 and coverage[f"{target}|{spec_id}"].get("status") != "not_applicable"]
 
-    def _update_scope(self, playbook: BaselinePlaybook, rows: list[dict],
-                      window_failure: str | None) -> tuple[list[dict], dict]:
-        first = rows[0]
-        series = self.repo.baseline_scope_series(
-            first["scope_kind"], first["scope"], self.hunt_id, playbook.id, self.span,
-        )
+    def _judge_scope(self, playbook: BaselinePlaybook, rows) -> tuple[list[dict], dict]:
+        """Judge one scope's observations in bounded chunks: (its first `BASELINE_CITATION_CAP` first-seen keys,
+        facts with the totals). Only the shown first-seen rows are held; every row is written as it is judged.
+
+        History and prevalence are probed only when the verdict depends on them: a scope that is unresolved for
+        a scope-level reason keeps those fields unassessed (None).
+        """
+        rows = iter(rows)
+        first = next(rows)
+        scope_kind, scope = first["scope_kind"], first["scope"]
+        series = self.repo.baseline_scope_series(scope_kind, scope, self.hunt_id, playbook.id, self.span)
         # A frozen spec is only as complete as its least-complete target. Observations do not carry a source
         # target, and one scope can be split across targets, so narrowing coverage from history liveness could
         # turn another target's gap into a false first-seen claim.
         coverage = self._history_coverage(playbook.id)
-        reason = None
-        if playbook.id == "bl.ext_dest" and not self.networks_configured:
-            reason = "internal networks not configured for this site; external destinations are unresolved"
-        else:
-            reason = _coverage_failure(coverage, self.min_live_hours)
         live: set[datetime] = set()
         history_events = 0
         for item in series:
             live.add(item["hour"])
             history_events += int(item["events"])
         live_hours = len(live)
-        if reason is None and history_events < 1:
+        reason = None
+        if history_events < 1:
             reason = "scope is silent in history"
-        if reason is None and live_hours < self.min_live_hours:
+        elif live_hours < self.min_live_hours:
             reason = f"scope has {live_hours} live history hour(s), below the required {self.min_live_hours}"
-        peers = (self.repo.baseline_peer_scopes(first["scope_kind"], self.hunt_id, playbook.id, self.span)
-                 if playbook.spec.measure == "prevalence" else None)
-        updated: list[dict] = []
-        first_seen: list[dict] = []
-        for source in rows:
-            history = self.repo.baseline_key_history(
-                source["key_id"], source["scope_kind"], source["scope"], self.hunt_id, playbook.id, self.span,
-            )
-            history_count = sum(int(item["count"]) for item in history)
-            prevalence = (self.repo.baseline_key_prevalence(
-                source["key_id"], source["scope_kind"], self.hunt_id, playbook.id, self.span,
-            ) if peers is not None else None)
-            verdict = "unresolved" if reason else "common" if history_count else "first_seen"
-            item = {
-                **source,
-                "history_count": history_count,
-                # Presence/common judgement has no decay. Rare is deliberately outside S5.
-                "history_decayed": None,
-                "peer_scopes_with_key": prevalence,
-                "peer_scopes": peers,
-                "threshold": None,
-                "mean": None,
-                "sigma": None,
-                "n_hours": live_hours,
-                "verdict": verdict,
-                "reason": reason or (
-                    f"absent from baseline {self.snapshot['digest']}" if verdict == "first_seen"
-                    else f"present in baseline {self.snapshot['digest']}"
-                ),
-            }
-            updated.append(item)
-            if verdict == "first_seen":
-                first_seen.append(item)
+        peers = (self.repo.baseline_peer_scopes(scope_kind, self.hunt_id, playbook.id, self.span)
+                 if playbook.spec.measure == "prevalence" and reason is None else None)
+        shown: list[dict] = []
+        totals = {"rows": 0, "unresolved": 0, "common": 0, "first_seen": 0}
+        for chunk in _chunks(itertools.chain((first,), rows), _JUDGE_CHUNK):
+            key_ids = [row["key_id"] for row in chunk]
+            history = ({} if reason else self.repo.baseline_key_history_counts(
+                key_ids, scope_kind, scope, self.hunt_id, playbook.id, self.span))
+            prevalence = (self.repo.baseline_key_prevalences(
+                key_ids, scope_kind, self.hunt_id, playbook.id, self.span) if peers is not None else {})
+            updated = []
+            for source in chunk:
+                history_count = None if reason else history[source["key_id"]]
+                verdict = "unresolved" if reason else "common" if history_count else "first_seen"
+                item = {
+                    **source,
+                    "history_count": history_count,
+                    # Presence/common judgement has no decay. Rare is deliberately outside S5.
+                    "history_decayed": None,
+                    "peer_scopes_with_key": prevalence.get(source["key_id"]) if peers is not None else None,
+                    "peer_scopes": peers,
+                    "threshold": None,
+                    "mean": None,
+                    "sigma": None,
+                    "n_hours": live_hours,
+                    "verdict": verdict,
+                    "reason": reason or (
+                        f"absent from baseline {self.snapshot['digest']}" if verdict == "first_seen"
+                        else f"present in baseline {self.snapshot['digest']}"
+                    ),
+                }
+                updated.append(item)
+                totals[verdict] += 1
+                if verdict == "first_seen" and len(shown) < BASELINE_CITATION_CAP:
+                    shown.append(item)
+            self.repo.upsert_baseline_observations(updated)
+            totals["rows"] += len(updated)
         effective_hours = min((int(item.get("effective_hours") or 0) for item in coverage), default=0)
         effective_start = max((str(item.get("effective_start")) for item in coverage), default=None)
         history_count_upper_bound = bool(
             playbook.spec.bucket == "day" and self.span is not None
             and self.span[0] != self.span[0].replace(hour=0, minute=0, second=0, microsecond=0)
         )
-        return first_seen, {
-            "rows": updated, "coverage": coverage, "live_hours": live_hours,
+        return shown, {
+            "scope_kind": scope_kind, "totals": totals, "coverage": coverage, "live_hours": live_hours,
             "history_events": history_events, "effective_hours": effective_hours,
             "effective_start": effective_start, "reason": reason,
             "history_count_upper_bound": history_count_upper_bound,
         }
+
+    def _fix_unresolved(self, playbook: BaselinePlaybook, observations, reason: str) -> int:
+        """Write every observation of a spec whose verdict its own history coverage already fixes as unresolved.
+
+        No scope of the spec can resolve, so nothing is probed: the history fields stay unassessed (None), the reason
+        is exact, and the rows stream through in bounded chunks.
+        """
+        if playbook.spec.measure == "rate":
+            reason = reason + self._edge_text(self._whole_window()[2])
+        written = 0
+        for chunk in _chunks(observations, _JUDGE_CHUNK):
+            written += self.repo.upsert_baseline_observations([{
+                **row, "history_count": None, "history_decayed": None, "peer_scopes_with_key": None,
+                "peer_scopes": None, "threshold": None, "mean": None, "sigma": None, "n_hours": None,
+                "verdict": "unresolved", "reason": reason,
+            } for row in chunk])
+        return written
 
     def _whole_window(self) -> tuple[datetime, datetime, list[tuple[datetime, datetime]]]:
         start_floor = self.window.start.replace(minute=0, second=0, microsecond=0)
@@ -369,7 +433,15 @@ class SnapshotView:
             spec_version=playbook.spec.version,
             span=(whole_start, whole_end),
         )) if whole_start < whole_end else [])
-        partial_cells = [cell for cell in self.repo.rule_cells(self.hunt_id, rule_id=playbook.id)
+        # A release that raced this read may have left only part of the material: the measurements are then unknown,
+        # never a complete series below threshold.
+        released = self.repo.baseline_window_released(self.hunt_id, playbook.id)
+        if released is not None:
+            measurements = []
+            raced = f"window counter material was released before judgement ({released})"
+            if raced not in (window_failure or ""):
+                window_failure = f"{window_failure}; {raced}" if window_failure else raced
+        partial_cells =[cell for cell in self.repo.rule_cells(self.hunt_id, rule_id=playbook.id)
                          if cell["rule_version"] == playbook.spec.version
                          if not (cell["target"] == "*" and cell["partition"] == "window")
                          and not cell["target"].startswith("baseline:")
@@ -480,6 +552,10 @@ class SnapshotView:
         window_failure = self._window_failure(playbook)
         coverage = self._history_coverage(playbook.id)
         history_failure = _coverage_failure(coverage, self.min_live_hours)
+        if history_failure:
+            # Every scope's verdict is already fixed by the spec's history coverage.
+            unresolved = updated_total = self._fix_unresolved(playbook, observations, history_failure)
+            observations = iter(())
         for scope, grouped in groupby(observations, key=lambda row: row["scope"]):
             rows, anomalous, facts = self._rate_scope(playbook, list(grouped), window_failure)
             self.repo.upsert_baseline_observations(rows)
@@ -527,14 +603,17 @@ class SnapshotView:
         }
 
     def _claim(self, playbook: BaselinePlaybook, scope: str, first_seen: list[dict], facts: dict,
-               cited: int) -> str:
+               cited: int, total: int | None = None) -> str:
+        """The lead's text. `first_seen` holds at least the shown keys; `total` counts all of the scope's first-seen
+        keys (default: the rows given)."""
         shown = first_seen[:BASELINE_CITATION_CAP]
+        total = len(first_seen) if total is None else total
         history_label = "history count 0"
         keys = "; ".join(
             f"{_canonical(row['key'])} (window count {row['window_count']}, {history_label})"
             for row in shown
         )
-        remaining = len(first_seen) - len(shown)
+        remaining = total - len(shown)
         if remaining:
             keys += f"; and {remaining} more keys (in the observation table)"
         peer_text = ""
@@ -545,10 +624,10 @@ class SnapshotView:
             )
             if remaining:
                 peer_text += f", and {remaining} more"
-        noun = "key" if len(first_seen) == 1 else "keys"
+        noun = "key" if total == 1 else "keys"
         claim = (
             f"Between {self.window.start.isoformat()} and {self.window.end.isoformat()}, "
-            f"{len(first_seen)} {noun} in {scope} {'was' if len(first_seen) == 1 else 'were'} absent from "
+            f"{total} {noun} in {scope} {'was' if total == 1 else 'were'} absent from "
             f"baseline {self.snapshot['digest']}: {keys}. "
             f"The effective baseline spans {facts['effective_start']} to {self.window.start.isoformat()} "
             f"({facts['effective_hours']} hours), with {facts['live_hours']} live scope hours and "
@@ -569,7 +648,7 @@ class SnapshotView:
             claim += f"The selected baseline excluded {exclusions['excluded_keys']} cited key(s). "
         claim += (
             "This is a deviation: absence from a baseline is a deviation, not evidence of malicious activity. "
-            f"The observation table retains all {len(first_seen)} keys; this lead cites the first event for "
+            f"The observation table retains all {total} keys; this lead cites the first event for "
             f"{cited} of them (citation cap {BASELINE_CITATION_CAP})."
         )
         return claim
@@ -603,31 +682,33 @@ class SnapshotView:
         history_failure = _coverage_failure(spec_coverage, self.min_live_hours)
         if playbook.id == "bl.ext_dest" and not self.networks_configured:
             history_failure = "internal networks not configured for this site; external destinations are unresolved"
+        if history_failure:
+            # Every scope's verdict is already fixed by the spec's history coverage.
+            updated_total = unresolved = self._fix_unresolved(playbook, observations, history_failure)
+            observations = iter(())
         for scope, grouped in groupby(observations, key=lambda row: row["scope"]):
-            first_seen, facts = self._update_scope(playbook, list(grouped), window_failure)
-            rows = facts["rows"]
-            self.repo.upsert_baseline_observations(rows)
-            updated_total += len(rows)
-            unresolved += sum(row["verdict"] == "unresolved" for row in rows)
-            common += sum(row["verdict"] == "common" for row in rows)
-            first_total += len(first_seen)
-            if not first_seen:
+            shown, facts = self._judge_scope(playbook, grouped)
+            totals = facts["totals"]
+            updated_total += totals["rows"]
+            unresolved += totals["unresolved"]
+            common += totals["common"]
+            if not totals["first_seen"]:
                 continue
-            cited_rows = first_seen[:BASELINE_CITATION_CAP]
-            events, raw_copies = self._citation_events(cited_rows)
+            events, raw_copies = self._citation_events(shown)
             if not events:
-                for row in first_seen:
-                    row.update(verdict="unresolved", reason="first citation event is not retained")
-                self.repo.upsert_baseline_observations(first_seen)
-                unresolved += len(first_seen)
-                first_total -= len(first_seen)
+                self.repo.update_baseline_scope_first_seen(
+                    self.hunt_id, playbook.id, playbook.spec.version, scope,
+                    unresolved_reason="first citation event is not retained",
+                )
+                unresolved += totals["first_seen"]
                 continue
+            first_total += totals["first_seen"]
             group_key = f"baseline:{playbook.id}:{scope}"
-            self._pending_group = (group_key, first_seen)
+            self._pending_group = (group_key, (playbook.id, playbook.spec.version, scope))
             groups += 1
             yield Match(
                 playbook_id=playbook.id,
-                claim=self._claim(playbook, scope, first_seen, facts, len(events)),
+                claim=self._claim(playbook, scope, shown, facts, len(events), totals["first_seen"]),
                 claim_type="anomaly", events=events, predicate=_predicate(events, playbook),
                 ts=min(event.ts for event in events), severity="info", proposed_lane="lead",
                 confidence="medium", entities=_entities(events),
@@ -644,9 +725,15 @@ class SnapshotView:
         pending = self._pending_group
         if pending is None or pending[0] != match.group_key:
             return
-        self.repo.upsert_baseline_observations(
-            {**row, "candidate_id": candidate_id} for row in pending[1]
-        )
+        key = pending[1]
+        if isinstance(key, tuple):
+            spec_id, spec_version, scope = key
+            self.repo.update_baseline_scope_first_seen(
+                self.hunt_id, spec_id, spec_version, scope, candidate_id=candidate_id,
+            )
+        else:
+            # A rate lead's rows are its one scope's observations (one host and account), held whole.
+            self.repo.upsert_baseline_observations({**row, "candidate_id": candidate_id} for row in key)
         self._pending_group = None
 
 
@@ -778,10 +865,13 @@ def run_baseline_stage(repo: Repo, hunt_id: str, window: Window, *, client=None,
             applicable_specs=applicable_specs,
         )
     _write_history_cells(repo, hunt_id, snapshot, specs, owner_token)
+    sweep_audit = repo.latest_audit(hunt_id, "hunt.sweep_summary")
+    site_check = ((sweep_audit or {}).get("detail") or {}).get("internal_networks")
     view = SnapshotView(
         repo, hunt_id, window, snapshot, min_live_hours=min_live_hours,
         networks_configured=networks_configured,
         citation_source=history_source,
+        direction_failure=contradiction_reason(site_check) if isinstance(site_check, dict) else None,
     )
     for spec in specs:
         playbook = _PLAYBOOK_BY_SPEC[spec.id]()

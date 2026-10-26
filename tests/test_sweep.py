@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from romulus.baseline.playbook import ExternalDestinationBaseline
 from romulus.detect.base import Playbook
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, event_os_family, fv
 from romulus.hunt import sweep as sw
@@ -79,7 +80,7 @@ def _zeek_record(*, dataset=True, transport=None, proto="icmp"):
     return {"_id": "z1", "_index": "zeek", "_source": source}
 
 
-def _run_zeek_partition(monkeypatch, contract, record, profile):
+def _run_zeek_partition(monkeypatch, contract, record, profile, *, pack=None):
     intents = []
 
     def fake_execute(client, intent, source_contract):
@@ -91,7 +92,7 @@ def _run_zeek_partition(monkeypatch, contract, record, profile):
     sweep = sw.Sweep(repo, FakeClient(), "h1", Window(
         start=START, end=START + timedelta(minutes=5),
     ), {"zeek": contract})
-    sweep.pack = [_NetworkFlow()]
+    sweep.pack = pack or [_NetworkFlow()]
     sweep._profiles = {"zeek": profile}
     any_of = sweep._any_of_for("zeek", contract)
     sweep.run_partition(
@@ -137,6 +138,23 @@ def test_zeek_missing_dataset_is_fetched_and_marks_coverage_partial(monkeypatch)
     assert cell["state"] == "evaluated_partial"
     assert "dataset: is not normalized" in cell["detail"]["reasons"][0]
     assert sweep.partial_reasons
+
+
+def test_zeek_missing_dataset_keeps_baseline_inapplicable_but_retrieval_incomplete(monkeypatch):
+    contract = contract_from_types(
+        "zeek", {"@timestamp": "date", "event.dataset": "keyword",
+                 "network.transport": "keyword"}, role="network", os_family="unknown",
+    )
+    baseline = ExternalDestinationBaseline()
+    repo, sweep, _intents, _any_of = _run_zeek_partition(
+        monkeypatch, contract, _zeek_record(dataset=False),
+        {"role": "network", "datasets": {"zeek.connection": 1}}, pack=[baseline],
+    )
+
+    assert sweep._baseline_target_applicable("zeek", baseline) is False
+    [cell] = repo.rule_cells("h1")
+    assert cell["state"] == "not_applicable_no_events"
+    assert cell["detail"]["retrieval_complete"] is False
 
 
 def test_zeek_filter_falls_back_to_unfiltered_when_missing_or_transport_is_not_searchable(monkeypatch):

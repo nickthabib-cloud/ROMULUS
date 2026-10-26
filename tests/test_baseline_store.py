@@ -280,6 +280,60 @@ def test_0015_backfills_observations_and_round_trips_base_data(tmp_path):
         assert "event_citation" in tables and "event_observation" in tables
 
 
+def test_0024_marks_existing_segments_as_the_old_events_basis_and_never_selects_them(tmp_path):
+    """Segments written before 0024 counted events_total two ways; they keep basis 1 and are no cover's members."""
+    engine = make_engine(tmp_path / "events-basis.db")
+    with engine.begin() as connection:
+        cfg = _alembic_config(connection)
+        command.upgrade(cfg, "0023")
+        connection.exec_driver_sql(
+            "INSERT INTO baseline_segment (id, site, target, spec_id, spec_version, key_version, normalizer, start, "
+            "\"end\", bucket, origin, exclusion_digest, excluded_keys, hunted, events_total, rows_digest, status, "
+            "created_at) VALUES ('legacy', 'site', 'host', 'bl.exec_path', '1', '1', 'n', '2026-01-01 00:00:00.000000',"
+            " '2026-01-01 01:00:00.000000', 'day', 'lookback', 'none', '[]', 0, 9, 'd', 'active', "
+            "'2026-01-01 00:00:00.000000')")
+        connection.exec_driver_sql(
+            "INSERT INTO hunt (id, created_at, created_by, manifest, manifest_digest, execution_state) "
+            "VALUES ('h1', '2026-01-01', 'test', '{}', 'd', 'running')")
+        connection.exec_driver_sql(
+            "INSERT INTO baseline_history_cell (hunt_id, target, spec_id, start, \"end\", events_total) VALUES "
+            "('h1', 'host', 'bl.exec_path', '2026-01-01 00:00:00.000000', '2026-01-01 01:00:00.000000', 9)")
+        command.upgrade(cfg, "0024")
+        # old segments leave every cover and cut; a history hour staged under the old total is read again
+        assert connection.exec_driver_sql(
+            "SELECT events_basis, first_event_hour, status FROM baseline_segment").all() == [(1, None, "stale")]
+        assert connection.exec_driver_sql("SELECT count(*) FROM baseline_history_cell").scalar() == 0
+    repo = Repo(engine)
+    begin = datetime(2026, 1, 1, tzinfo=UTC)
+    common = {"site": "site", "target": "host", "spec_id": "bl.exec_path", "spec_version": "1", "key_version": "1"}
+    assert repo.baseline_segments_for_cover(**common, start=begin, end=begin + timedelta(hours=1)) == []
+    assert repo.baseline_segment_covers(**common, start=begin, end=begin + timedelta(hours=1)) is False
+    with engine.begin() as connection:
+        connection.exec_driver_sql("UPDATE baseline_segment SET status = 'active'")
+    empty = Repo(make_engine(tmp_path / "empty-cut.db"))
+    migrate(empty.engine)
+    cut = {"site": "site", "targets": ["host"], "specs": [{"id": "bl.exec_path", "version": "1", "key_version": "1"}],
+           "start": begin, "end": begin + timedelta(hours=1)}
+    # even an active old-basis segment is not part of the store cut
+    assert repo.baseline_store_cut_digest(**cut) == empty.baseline_store_cut_digest(**cut)
+    with engine.begin() as connection:
+        command.downgrade(_alembic_config(connection), "0023")
+        assert connection.exec_driver_sql("SELECT id, events_total FROM baseline_segment").all() == [("legacy", 9)]
+
+
+def test_a_segment_states_its_first_event_hour_only_with_events_inside_its_span():
+    repo = _repo()
+    with pytest.raises(ValueError, match="first_event_hour is set exactly"):
+        repo.save_baseline_segment(_segment("no-events", events_total=0, first_event_hour=T0), [], [])
+    with pytest.raises(ValueError, match="first_event_hour is set exactly"):
+        repo.save_baseline_segment(_segment("events", events_total=3, first_event_hour=None), [], [])
+    with pytest.raises(ValueError, match="an hour inside the span"):
+        repo.save_baseline_segment(_segment("outside", events_total=3,
+                                            first_event_hour=T0 - timedelta(hours=1)), [], [])
+    with pytest.raises(ValueError, match="events_basis must be"):
+        repo.save_baseline_segment(_segment("old-basis", events_basis=1), [], [])
+
+
 def test_0016_drops_only_the_owners_implied_observations(tmp_path):
     engine = make_engine(tmp_path / "event-observation-owner.db")
     with engine.begin() as connection:
@@ -312,11 +366,46 @@ def test_0016_drops_only_the_owners_implied_observations(tmp_path):
         assert rows() == sorted(observed, key=lambda row: (row[1], row[0]))
 
 
-def test_0023_is_the_single_head_and_0017_leaves_stored_candidates_about_every_record_they_cite(tmp_path):
+def test_0024_downgrade_keeps_segment_children_and_snapshot_membership(tmp_path):
+    """A rebuild of baseline_segment would cascade-delete its count and scope-hour rows, or fail on snapshot
+    membership; the downgrade drops its columns in place and every child row survives."""
+    engine = make_engine(tmp_path / "events-basis-down.db")
+    with engine.begin() as connection:
+        cfg = _alembic_config(connection)
+        command.upgrade(cfg, "0023")
+        connection.exec_driver_sql(
+            "INSERT INTO hunt (id, created_at, created_by, manifest, manifest_digest, execution_state) "
+            "VALUES ('h1', '2026-01-01', 'test', '{}', 'd', 'partial')")
+        connection.exec_driver_sql(
+            "INSERT INTO baseline_segment (id, site, target, spec_id, spec_version, key_version, normalizer, start, "
+            "\"end\", bucket, origin, exclusion_digest, excluded_keys, hunted, events_total, rows_digest, status, "
+            "created_at) VALUES ('s1', 'site', 'host', 'bl.exec_path', '1', '1', 'n', '2026-01-01 00:00:00.000000',"
+            " '2026-01-01 01:00:00.000000', 'day', 'lookback', 'none', '[]', 0, 5, 'd', 'active', "
+            "'2026-01-01 00:00:00.000000')")
+        connection.exec_driver_sql(
+            "INSERT INTO baseline_scope_hour (segment_id, scope_kind, scope, hour, events) "
+            "VALUES ('s1', 'host', 'host:a', '2026-01-01 00:00:00.000000', 5)")
+        connection.exec_driver_sql(
+            "INSERT INTO baseline_snapshot (hunt_id, plan, store_cut, segment_ids, coverage, status, digest) "
+            "VALUES ('h1', '{}', '{}', '[]', '{}', 'resolved', 'dg')")
+        connection.exec_driver_sql(
+            "INSERT INTO baseline_snapshot_segment (hunt_id, spec_id, target, segment_id) "
+            "VALUES ('h1', 'bl.exec_path', 'host', 's1')")
+        command.upgrade(cfg, "0024")
+        command.downgrade(cfg, "0023")
+        counts = [connection.exec_driver_sql(f"SELECT count(*) FROM {table}").scalar_one()
+                  for table in ("baseline_segment", "baseline_scope_hour", "baseline_snapshot_segment")]
+        columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(baseline_segment)")}
+
+    assert counts == [1, 1, 1]
+    assert not {"events_basis", "first_event_hour"} & columns
+
+
+def test_0024_is_the_single_head_and_0017_leaves_stored_candidates_about_every_record_they_cite(tmp_path):
     engine = make_engine(tmp_path / "candidate-context.db")
     with engine.begin() as connection:
         cfg = _alembic_config(connection)
-        assert ScriptDirectory.from_config(cfg).get_heads() == ["0023"]
+        assert ScriptDirectory.from_config(cfg).get_heads() == ["0024"]
         command.upgrade(cfg, "0016")
         connection.exec_driver_sql(
             "INSERT INTO hunt (id, created_at, created_by, manifest, manifest_digest, execution_state) "
@@ -537,7 +626,7 @@ BASELINE_TABLES = ("baseline_segment", "baseline_count", "baseline_scope_hour", 
                    "baseline_window_observation", "baseline_window_pending", "baseline_window_count",
                    "baseline_window_scope_hour", "baseline_window_event_hour", "baseline_hunt_exclusion",
                    "baseline_history_cell",
-                   "baseline_history_row", "baseline_window_release")
+                   "baseline_history_row", "baseline_window_release", "baseline_window_retention")
 
 
 def _shape(engine) -> dict:
