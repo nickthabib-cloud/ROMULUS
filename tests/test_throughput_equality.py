@@ -210,9 +210,12 @@ from tests import throughput_fixture as tf
 # Merged with the carried detection bundle (evidence version 14, pack 32): against that tree only the two baseline
 # fields above differ (baseline_window_counts and the audit's material bytes and retention reason); every other
 # digest and the non-baseline semantic projection equal it exactly.
+# Kept carry input is bounded by a retention horizon and a disk budget: the baseline stage summary's lookback block
+# states the hours each removed (carry_hours_pruned and carry_hours_trimmed, 0 here), in the hunt.baseline_summary
+# audit records and the baseline task's outcome; nothing else changes.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
-    "audit": "614446dde4d3c43898b348d80f33a9f16fea73296f3902c17d0d4ca5f9a8b1ad",
+    "audit": "1895821b0108a0697f825c50ee6654e5ee6b46bd35163e444a04cd36a9e0e57e",
     "baseline_counts": "1a021de3254f91225689f1bdc8ce3e0cfd416c90a4148bcd4f1c93b6db9cb16d",
     "baseline_hunt_exclusions": "fe9edaf9efe3065352ae1bedc95ac7e78ddbe2d6e34f835203cfe56cb368ec56",
     "baseline_observations": "b25abf252a28151beae7d2048372e8be9dcafc76622b1a5f79ca1fd85a597784",
@@ -233,7 +236,7 @@ GOLDEN_STACK = {
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
     "rule_cells": "e1bc4bf141c508b8ca70ab69d34b64edc50b19112dd4d1d901623b41e42cf871",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
-    "tasks": "f0c05a2a05135e822ab077a843472e4cb4d31b93b5c27050685bf6b9675e4cdc",
+    "tasks": "bc22ee3fc01cda9958faeb568c44597780645e884939b43f4158b0a9dbd47077",
 }
 # Captured directly from the S7 fixture through _non_baseline_semantic_digests. Typed-event-derived hashes and
 # interchangeable predicate origins are normalized, while every decision, claim, lane, raw citation and gate is

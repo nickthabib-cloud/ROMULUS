@@ -744,42 +744,58 @@ class CarryHourBuilder:
                          {host: frozenset(hours) for host, hours in sorted(self._breaks.items())}, self._hostless)
 
 
-def _time(value) -> datetime | None:
-    return None if value is None else datetime.fromisoformat(value)
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+_MICRO = timedelta(microseconds=1)
+
+
+def _us(value: datetime | None) -> int | None:
+    return None if value is None else (value.astimezone(UTC) - _EPOCH) // _MICRO
+
+
+def _from_us(value: int | None) -> datetime | None:
+    return None if value is None else _EPOCH + value * _MICRO
 
 
 def save_carry_hour(repo: Repo, *, site: str, target: str, hour: datetime, normalizer: str,
                     carry: CarryHour) -> bool:
-    """Persist a carry hour once (the first complete read of an hour is kept)."""
+    """Persist a carry hour once (the first complete read of an hour is kept), in typed compact rows."""
+    refs: dict[tuple[str, str | None], int] = {}
+
+    def ref(host: str, boot: str | None) -> int:
+        return refs.setdefault((host, boot), len(refs))
+
+    execs = [{"ref": ref(item.host, item.boot), "pid": item.pid, "ts_us": _us(item.ts), "serial": item.serial,
+              "executable": item.executable, "parent_pid": item.parent_pid, "raw_id": item.raw_id,
+              "ambiguous": int(item.ambiguous), "evicted_earliest_us": _us(item.evicted_earliest_ts),
+              "evicted_latest_us": _us(item.evicted_latest_ts)} for item in carry.execs]
+    observations = [{"ref": ref(item.host, item.boot), "pid": item.pid, "ts_us": _us(item.ts),
+                     "serial": item.serial, "executable": item.executable, "parent_pid": item.parent_pid,
+                     "session": item.session, "event_id": item.event_id} for item in carry.observations]
+    breaks = [{"ref": ref(host, None), "hour_us": _us(value)}
+              for host, hours in sorted(carry.breaks.items()) for value in sorted(hours)]
     return repo.save_baseline_carry_hour(
         site=site, target=target, hour=hour, normalizer=normalizer, format_=CARRY_FORMAT, hostless=carry.hostless,
-        execs=({"host": item.host, "boot": item.boot, "pid": item.pid, "ts": item.ts, "executable": item.executable,
-                "parent_pid": item.parent_pid, "raw_id": item.raw_id, "serial": item.serial,
-                "ambiguous": item.ambiguous, "evicted_earliest_ts": item.evicted_earliest_ts,
-                "evicted_latest_ts": item.evicted_latest_ts} for item in carry.execs),
-        observations=({"host": item.host, "boot": item.boot, "pid": item.pid, "ts": item.ts,
-                       "executable": item.executable, "parent_pid": item.parent_pid, "session": item.session,
-                       "event_id": item.event_id, "serial": item.serial} for item in carry.observations),
-        breaks=({"host": host, "hour": value} for host, hours in sorted(carry.breaks.items())
-                for value in sorted(hours)),
+        hosts=sorted(refs, key=refs.__getitem__), execs=execs, observations=observations, breaks=breaks,
     )
 
 
 def load_carry_hour(repo: Repo, *, site: str, target: str, hour: datetime, normalizer: str) -> CarryHour | None:
-    """A persisted carry hour of the current format, or None when none was kept."""
+    """A persisted carry hour of the current format, or None when none is kept (never kept, pruned, or trimmed by
+    the disk budget): the caller then reads the hour again or leaves it unobserved."""
     stored = repo.baseline_carry_hour(site=site, target=target, hour=hour, normalizer=normalizer,
                                       format_=CARRY_FORMAT)
     if stored is None:
         return None
+    hosts = stored["hosts"]
     breaks: dict[str, set[datetime]] = {}
     for row in stored["break"]:
-        breaks.setdefault(row["host"], set()).add(datetime.fromisoformat(row["hour"]))
+        breaks.setdefault(hosts[row["ref"]][0], set()).add(_from_us(row["hour_us"]))
     return CarryHour(
-        tuple(ParentExec(row["host"], row["boot"], row["pid"], datetime.fromisoformat(row["ts"]),
+        tuple(ParentExec(hosts[row["ref"]][0], hosts[row["ref"]][1], row["pid"], _from_us(row["ts_us"]),
                          row["executable"], row["parent_pid"], row["raw_id"], row["serial"], bool(row["ambiguous"]),
-                         _time(row["evicted_earliest_ts"]), _time(row["evicted_latest_ts"]))
+                         _from_us(row["evicted_earliest_us"]), _from_us(row["evicted_latest_us"]))
               for row in stored["exec"]),
-        tuple(ParentObservation(row["host"], row["boot"], row["pid"], datetime.fromisoformat(row["ts"]),
+        tuple(ParentObservation(hosts[row["ref"]][0], hosts[row["ref"]][1], row["pid"], _from_us(row["ts_us"]),
                                 row["executable"], row["parent_pid"], row["session"], row["event_id"],
                                 row["serial"]) for row in stored["observation"]),
         {host: frozenset(hours) for host, hours in sorted(breaks.items())},

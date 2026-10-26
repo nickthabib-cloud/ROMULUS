@@ -65,6 +65,17 @@ class LookbackResult:
     queries: int
     records: int
     max_write_seconds: float
+    # kept carry hours removed after the fill: past the retention horizon, and the oldest over the disk budget
+    carry_hours_pruned: int = 0
+    carry_hours_trimmed: int = 0
+
+
+# Carry input is kept for the longest configured lookback plus this margin, measured back from a target's newest kept
+# hour: a later hunt whose window starts up to a day before that hour (a re-run, or overlapping daily hunts) still
+# finds the input for its whole history. Older hours are read again when a hunt needs them.
+CARRY_RETENTION_MARGIN = timedelta(hours=24)
+# Estimated bytes of kept carry input across the store; over it, the oldest hours go first.
+DEFAULT_CARRY_BUDGET_BYTES = 4_000_000_000
 
 
 def _canonical(value) -> str:
@@ -123,8 +134,13 @@ class LookbackWriter:
                  network_digest: str | None = None,
                  applicable_specs: dict[str, set[str]] | None = None,
                  clock: Callable[[], float] = time.monotonic,
-                 now: Callable[[], datetime] = utcnow):
+                 now: Callable[[], datetime] = utcnow,
+                 carry_retention: timedelta | None = None,
+                 carry_budget_bytes: int = DEFAULT_CARRY_BUDGET_BYTES):
         self.repo, self.source, self.site = repo, source, site
+        # the longest lookback any hunt of the site configures (default: this fill's span)
+        self.carry_retention = carry_retention
+        self.carry_budget_bytes = carry_budget_bytes
         self.specs = tuple(sorted(specs, key=lambda item: item.id))
         self.normalizer, self.budget = normalizer, budget
         self.context, self.clock = context or KeyContext(), clock
@@ -456,7 +472,29 @@ class LookbackWriter:
                 waiting[key] = waiting[key] - 1 if written else -len(self.specs)
                 if waiting[key] == 0:
                     complete += 1
-        return LookbackResult(complete, (*gaps, *omitted), queries, records, longest)
+        pruned, trimmed = self._bound_carry(ordered_targets, end - start)
+        return LookbackResult(complete, (*gaps, *omitted), queries, records, longest, pruned, trimmed)
+
+    def _bound_carry(self, targets: tuple[str, ...], span: timedelta) -> tuple[int, int]:
+        """Hold kept carry input to the retention horizon and the disk budget, after this fill has replayed what it
+        needed. Each delete is a few whole hours in a short transaction (an hour's rows go with it), and a reader
+        loads an hour in one transaction, so a concurrent hunt sees an hour whole or not at all and then reads it
+        again, under its budget, or leaves it unobserved. Removal never changes what any hunt resolves wrongly:
+        a removed hour is re-read input identical to what was kept."""
+        if self.parent_carry is None:
+            return 0, 0
+        retention = max(span, self.carry_retention or span) + CARRY_RETENTION_MARGIN
+        pruned = 0
+        for target in targets:
+            if not self._keeps_carry(target):
+                continue
+            newest = self.repo.baseline_carry_newest_hour(site=self.site, target=target)
+            if newest is not None:
+                pruned += self.repo.prune_baseline_carry_hours(
+                    site=self.site, target=target, before=newest + _HOUR - retention,
+                )[0]
+        trimmed = self.repo.trim_baseline_carry(self.carry_budget_bytes)[0]
+        return pruned, trimmed
 
 
 def _count_row(body: dict) -> dict:

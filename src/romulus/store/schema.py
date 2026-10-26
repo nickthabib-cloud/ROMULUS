@@ -483,30 +483,78 @@ baseline_segment_event_hour = Table(
 # What one completely fetched target hour contributes to the parent carry (execs reduced to the latest two per pid,
 # observations to their state-run boundaries, hours of unstorable execs), kept beside the hour's segments so a later
 # hunt that finds the hour covered feeds its carry the same input as a hunt that reads it. Raw facts: they carry no
-# exclusions, so segment staleness never touches them; another normalizer or format is never read.
+# exclusions, so segment staleness never touches them; another normalizer or format is never read. Child rows are
+# typed and compact (an integer hour key, a per-hour (host, boot) dictionary, times as epoch microseconds); `bytes`
+# is the hour's estimated size, charged to the carry disk budget. Deleting an hour removes its rows with it.
 baseline_carry_hour = Table(
     "baseline_carry_hour", metadata,
-    Column("id", String, primary_key=True),
+    Column("seq", Integer, primary_key=True, autoincrement=True),
     Column("site", String, nullable=False),
     Column("target", String, nullable=False),
     Column("hour", DateTime(timezone=True), nullable=False),
     Column("normalizer", String, nullable=False),
     Column("format", Integer, nullable=False),
     Column("hostless", Integer, nullable=False),
+    Column("bytes", Integer, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
     CheckConstraint("hostless IN (0, 1)", name="ck_baseline_carry_hour_hostless"),
+    CheckConstraint("bytes >= 0", name="ck_baseline_carry_hour_bytes"),
 )
 Index("ix_baseline_carry_hour_lookup", baseline_carry_hour.c.site, baseline_carry_hour.c.target,
       baseline_carry_hour.c.hour, baseline_carry_hour.c.normalizer, baseline_carry_hour.c.format, unique=True)
+Index("ix_baseline_carry_hour_age", baseline_carry_hour.c.hour, baseline_carry_hour.c.seq)
 
-baseline_carry_row = Table(
-    "baseline_carry_row", metadata,
-    Column("carry_id", String, ForeignKey("baseline_carry_hour.id", ondelete="CASCADE"), nullable=False),
-    Column("kind", String, nullable=False),
+baseline_carry_host = Table(
+    "baseline_carry_host", metadata,
+    Column("carry_seq", Integer, ForeignKey("baseline_carry_hour.seq", ondelete="CASCADE"), nullable=False),
+    Column("ref", Integer, nullable=False),
+    Column("host", String, nullable=False),
+    Column("boot", String),
+    PrimaryKeyConstraint("carry_seq", "ref", name="pk_baseline_carry_host"),
+    sqlite_with_rowid=False,
+)
+
+baseline_carry_exec = Table(
+    "baseline_carry_exec", metadata,
+    Column("carry_seq", Integer, ForeignKey("baseline_carry_hour.seq", ondelete="CASCADE"), nullable=False),
     Column("ordinal", Integer, nullable=False),
-    Column("body", JSON, nullable=False),
-    PrimaryKeyConstraint("carry_id", "kind", "ordinal", name="pk_baseline_carry_row"),
-    CheckConstraint("kind IN ('exec', 'observation', 'break')", name="ck_baseline_carry_row_kind"),
+    Column("ref", Integer, nullable=False),
+    Column("pid", Integer, nullable=False),
+    Column("ts_us", Integer, nullable=False),
+    Column("serial", Integer),
+    Column("executable", String, nullable=False),
+    Column("parent_pid", Integer),
+    Column("raw_id", String, nullable=False),
+    Column("ambiguous", Integer, nullable=False),
+    Column("evicted_earliest_us", Integer),
+    Column("evicted_latest_us", Integer),
+    PrimaryKeyConstraint("carry_seq", "ordinal", name="pk_baseline_carry_exec"),
+    sqlite_with_rowid=False,
+)
+
+baseline_carry_observation = Table(
+    "baseline_carry_observation", metadata,
+    Column("carry_seq", Integer, ForeignKey("baseline_carry_hour.seq", ondelete="CASCADE"), nullable=False),
+    Column("ordinal", Integer, nullable=False),
+    Column("ref", Integer, nullable=False),
+    Column("pid", Integer, nullable=False),
+    Column("ts_us", Integer, nullable=False),
+    Column("serial", Integer),
+    Column("executable", String, nullable=False),
+    Column("parent_pid", Integer, nullable=False),
+    Column("session", Integer),
+    Column("event_id", String, nullable=False),
+    PrimaryKeyConstraint("carry_seq", "ordinal", name="pk_baseline_carry_observation"),
+    sqlite_with_rowid=False,
+)
+
+baseline_carry_break = Table(
+    "baseline_carry_break", metadata,
+    Column("carry_seq", Integer, ForeignKey("baseline_carry_hour.seq", ondelete="CASCADE"), nullable=False),
+    Column("ref", Integer, nullable=False),
+    Column("hour_us", Integer, nullable=False),
+    PrimaryKeyConstraint("carry_seq", "ref", "hour_us", name="pk_baseline_carry_break"),
+    sqlite_with_rowid=False,
 )
 
 baseline_snapshot = Table(

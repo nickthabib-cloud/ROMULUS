@@ -52,22 +52,22 @@ def _observed(event_id, ts, pid, ppid, executable, *, host="web01", boot="boot-a
     )
 
 
-def _writer(repo, source, carry, *, queries=500):
+def _writer(repo, source, carry, *, queries=500, **bounds):
     return LookbackWriter(
         repo, source, site="site", specs=[PAIR], normalizer="fixture@1",
         budget=LookbackBudget(queries=queries, records=1_000_000, seconds=600), parent_carry=carry,
-        now=lambda: START,
+        now=lambda: START, **bounds,
     )
 
 
-def _resolve(repo, hunt_id, events, pendings, *, hours, queries=500):
+def _resolve(repo, hunt_id, events, pendings, *, hours, queries=500, window=START, **bounds):
     repo.create_hunt(hunt_id, {}, f"manifest-{hunt_id}", "test")
     root = CarryInStore(repo, hunt_id)
     source = FakeHistory(events)
-    result = _writer(repo, source, root, queries=queries).fill(
-        hunt_id=hunt_id, targets=["host-index"], start=START - hours * H, end=START)
-    carry = root.for_target("host-index", horizon=START + H)
-    carry.mark_observed(START, START + H)   # the window hour, as the window cells mark it
+    result = _writer(repo, source, root, queries=queries, **bounds).fill(
+        hunt_id=hunt_id, targets=["host-index"], start=window - hours * H, end=window)
+    carry = root.for_target("host-index", horizon=window + H)
+    carry.mark_observed(window, window + H)   # the window hour, as the window cells mark it
     resolver = PendingResolver(carry, PAIR)
     out = []
     for pending in pendings:
@@ -215,3 +215,99 @@ def test_many_hosts_and_pids_over_two_days_resolve_alike_on_built_and_empty_stor
     assert second == empty
     assert sum(1 for _, keys, _reason in empty if keys) > len(pendings) // 2
     print(f"carry replay: {len(events)} execs over {hours} hours replayed in {replayed_in:.1f}s")
+
+
+# ---- bounded carry input: typed rows, a retention horizon and a disk budget --------------------------------------
+
+def _hours_kept(repo) -> list[datetime]:
+    from sqlalchemy import select
+
+    from romulus.store import schema
+
+    with repo.engine.connect() as connection:
+        return sorted(row[0].replace(tzinfo=UTC) for row in connection.execute(
+            select(schema.baseline_carry_hour.c.hour)))
+
+
+def test_carry_input_rows_are_typed_and_compact():
+    events, pendings = _scenario()
+    repo = _repo()
+    _resolve(repo, "hunt-1", events, pendings, hours=6)
+
+    execs = sum(1 for event in events if event.family == "process_exec")
+    # the estimate charged to the budget stays near the measured size of a typed row, not a JSON body
+    assert repo.baseline_carry_bytes() < 120 * (execs + 20)
+    from romulus.store import schema
+    assert {column.name for column in schema.baseline_carry_exec.columns} >= {
+        "ref", "pid", "ts_us", "serial", "executable", "parent_pid", "raw_id", "ambiguous",
+        "evicted_earliest_us", "evicted_latest_us"}
+
+
+def test_carry_hours_past_the_retention_horizon_are_pruned_and_read_again_alike():
+    events, pendings = _scenario()
+    store = _repo()
+    _resolve(store, "hunt-1", events, pendings, hours=6)
+    old_hours = _hours_kept(store)
+    later = START + 48 * H
+    shifted = [event.model_copy(update={"ts": event.ts + 48 * H}) for event in events]
+    _later, _source, result = _resolve(store, "hunt-2", shifted, [], hours=6, window=later)
+
+    # newest kept hour minus (the 6-hour lookback plus a day): every hour of the first history is past it
+    assert result.carry_hours_pruned == len(old_hours)
+    assert not set(old_hours) & set(_hours_kept(store))
+    # a hunt over the old span reads those hours again and resolves exactly as an empty store does
+    again, source, _ = _resolve(store, "hunt-3", events, pendings, hours=6)
+    empty, _source, _ = _resolve(_repo(), "hunt-e", events, pendings, hours=6)
+    assert len(source.plans) == 6 and again == empty
+
+
+def test_a_configured_longer_lookback_keeps_carry_hours_longer():
+    events, pendings = _scenario()
+    store = _repo()
+    _resolve(store, "hunt-1", events, pendings, hours=6)
+    kept = _hours_kept(store)
+    shifted = [event.model_copy(update={"ts": event.ts + 48 * H}) for event in events]
+
+    _later, _source, result = _resolve(store, "hunt-2", shifted, [], hours=6, window=START + 48 * H,
+                                       carry_retention=timedelta(days=7))
+
+    assert result.carry_hours_pruned == 0 and set(kept) <= set(_hours_kept(store))
+
+
+def test_carry_input_over_the_disk_budget_drops_the_oldest_hours_which_are_then_read_again():
+    events, pendings = _scenario()
+    store = _repo()
+    _resolve(store, "hunt-1", events, pendings, hours=6)
+    kept = _hours_kept(store)
+    total = store.baseline_carry_bytes()
+
+    _again, _source, result = _resolve(store, "hunt-2", events, pendings, hours=6, carry_budget_bytes=total // 2)
+
+    remaining = _hours_kept(store)
+    assert result.carry_hours_trimmed > 0 and store.baseline_carry_bytes() <= total // 2
+    # the oldest go first
+    assert remaining == kept[len(kept) - len(remaining):]
+    later, source, _ = _resolve(store, "hunt-3", events, pendings, hours=6)
+    empty, _source, _ = _resolve(_repo(), "hunt-e", events, pendings, hours=6)
+    assert later == empty and len(source.plans) >= len(kept) - len(remaining)
+
+
+def test_a_pruned_hour_reads_as_absent_never_partial():
+    events, pendings = _scenario()
+    store = _repo()
+    _resolve(store, "hunt-1", events, pendings, hours=6)
+    hour = _hours_kept(store)[0]
+    assert store.baseline_carry_hour(site="site", target="host-index", hour=hour, normalizer="fixture@1",
+                                     format_=1) is not None
+
+    store.prune_baseline_carry_hours(site="site", target="host-index", before=hour + H)
+
+    from sqlalchemy import func, select
+
+    from romulus.store import schema
+    assert store.baseline_carry_hour(site="site", target="host-index", hour=hour, normalizer="fixture@1",
+                                     format_=1) is None
+    with store.engine.connect() as connection:
+        orphans = connection.execute(select(func.count()).select_from(schema.baseline_carry_exec).where(
+            schema.baseline_carry_exec.c.carry_seq.not_in(select(schema.baseline_carry_hour.c.seq)))).scalar_one()
+    assert orphans == 0

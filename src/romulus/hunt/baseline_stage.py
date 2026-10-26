@@ -10,7 +10,12 @@ from itertools import groupby
 
 from romulus.baseline.carry import CarryInStore, PendingResolver
 from romulus.baseline.count import KeyCounter
-from romulus.baseline.lookback import LookbackBudget, LookbackResult, LookbackWriter
+from romulus.baseline.lookback import (
+    DEFAULT_CARRY_BUDGET_BYTES,
+    LookbackBudget,
+    LookbackResult,
+    LookbackWriter,
+)
 from romulus.baseline.playbook import BASELINE_PLAYBOOKS, BaselinePlaybook
 from romulus.baseline.rate import RATE_MEAN_MULTIPLIER, RATE_MIN_COUNT, RATE_SIGMA_MULTIPLIER, threshold
 from romulus.baseline.snapshot import SnapshotPlanner
@@ -796,9 +801,17 @@ def _write_rollup(repo: Repo, hunt_id: str, playbook: BaselinePlaybook, stats: d
     )
 
 
+def _longest_lookback(repo: Repo) -> timedelta:
+    """The longest history any hunt of the store configures: kept carry input stays at least that long."""
+    days = [int(((hunt.get("manifest") or {}).get("baseline") or {}).get("history_days", 7))
+            for hunt in repo.list_hunts() if ((hunt.get("manifest") or {}).get("baseline") or {}).get("specs")]
+    return timedelta(days=max(days, default=7))
+
+
 def run_baseline_stage(repo: Repo, hunt_id: str, window: Window, *, client=None,
                        contracts: dict | None = None, source=None, heartbeat=lambda: None,
-                       owner_token: str | None = None) -> dict:
+                       owner_token: str | None = None,
+                       carry_budget_bytes: int = DEFAULT_CARRY_BUDGET_BYTES) -> dict:
     """Fill history once, freeze/reuse its cut, judge observations, and publish grouped leads."""
     hunt = repo.get_hunt(hunt_id)
     if hunt is None:
@@ -841,6 +854,7 @@ def run_baseline_stage(repo: Repo, hunt_id: str, window: Window, *, client=None,
             parent_carry=CarryInStore(repo, hunt_id),
             network_digest=network_record.get("digest") if networks_configured else None,
             applicable_specs=build_applicability,
+            carry_retention=_longest_lookback(repo), carry_budget_bytes=carry_budget_bytes,
         )
         try:
             result = writer.fill(
@@ -900,7 +914,9 @@ def run_baseline_stage(repo: Repo, hunt_id: str, window: Window, *, client=None,
         "snapshot_status": snapshot["status"], "specs": view.spec_stats,
         "stage_failed": source_failure or staging_failure,
         "lookback": {"complete": result.complete, "gaps": len(result.gaps),
-                     "queries": result.queries, "records": result.records},
+                     "queries": result.queries, "records": result.records,
+                     "carry_hours_pruned": result.carry_hours_pruned,
+                     "carry_hours_trimmed": result.carry_hours_trimmed},
     }
     # Hunt execution consumes `stage_failed`; the established baseline task outcome remains result-shaped so
     # this coverage truth does not perturb unrelated scheduler/task goldens.

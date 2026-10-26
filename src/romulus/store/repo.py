@@ -3946,48 +3946,118 @@ class Repo:
 
     _MATERIAL_TABLES = ("baseline_window_count", "baseline_window_scope_hour", "baseline_window_event_hour")
 
-    @staticmethod
-    def _carry_id(site: str, target: str, hour: datetime, normalizer: str, format_: int) -> str:
-        material = json.dumps([site, target, hour.isoformat(), normalizer, format_], separators=(",", ":"))
-        return "blc-" + hashlib.sha256(material.encode()).hexdigest()[:32]
+    # Estimated stored bytes of carry rows: a row header and the fixed-width columns, plus the text columns' lengths.
+    _CARRY_EXEC_BYTES, _CARRY_OBSERVATION_BYTES, _CARRY_OTHER_BYTES = 48, 44, 24
 
     def save_baseline_carry_hour(self, *, site: str, target: str, hour: datetime, normalizer: str, format_: int,
-                                 hostless: bool, execs: Iterable[dict], observations: Iterable[dict],
-                                 breaks: Iterable[dict]) -> bool:
+                                 hostless: bool, hosts: list[tuple[str, str | None]], execs: list[dict],
+                                 observations: list[dict], breaks: list[dict]) -> bool:
         """Persist one hour's carry input once, atomically; False when the store already holds it (the first
-        complete read of an hour is kept, so every later hunt replays the same input)."""
+        complete read of an hour is kept, so every later hunt replays the same input). Rows are typed: `hosts` is
+        the hour's (host, boot) dictionary, which the other rows reference by index; times are epoch microseconds.
+        One hour's rows are bounded by the pids exec'd in it."""
         hour = _utc(hour, "carry hour")
-        carry_id = self._carry_id(site, target, hour, normalizer, format_)
+        size = (self._CARRY_OTHER_BYTES * (1 + len(hosts) + len(breaks))
+                + sum(len(host) + len(boot or "") for host, boot in hosts)
+                + sum(self._CARRY_EXEC_BYTES + len(row["executable"]) + len(row["raw_id"]) for row in execs)
+                + sum(self._CARRY_OBSERVATION_BYTES + len(row["executable"]) + len(row["event_id"])
+                      for row in observations))
         with write_txn(self.engine) as connection:
-            inserted = connection.execute(insert(t.baseline_carry_hour).values(
-                id=carry_id, site=site, target=target, hour=hour, normalizer=normalizer, format=format_,
-                hostless=int(bool(hostless)), created_at=utcnow(),
-            ).on_conflict_do_nothing(index_elements=["id"])).rowcount
-            if not inserted:
+            seq = connection.execute(insert(t.baseline_carry_hour).values(
+                site=site, target=target, hour=hour, normalizer=normalizer, format=format_,
+                hostless=int(bool(hostless)), bytes=size, created_at=utcnow(),
+            ).on_conflict_do_nothing(
+                index_elements=["site", "target", "hour", "normalizer", "format"],
+            ).returning(t.baseline_carry_hour.c.seq)).scalar_one_or_none()
+            if seq is None:
                 return False
-            for kind, rows in (("exec", execs), ("observation", observations), ("break", breaks)):
-                bodies = ({"carry_id": carry_id, "kind": kind, "ordinal": ordinal,
-                           "body": json.loads(json.dumps(row, default=_jsonable))}
-                          for ordinal, row in enumerate(rows))
-                for chunk in _chunks(bodies, BASELINE_CHUNK):
-                    connection.execute(t.baseline_carry_row.insert(), chunk)
+            for table, rows in (
+                    (t.baseline_carry_host, ({"carry_seq": seq, "ref": ref, "host": host, "boot": boot}
+                                             for ref, (host, boot) in enumerate(hosts))),
+                    (t.baseline_carry_exec, ({"carry_seq": seq, "ordinal": ordinal, **row}
+                                             for ordinal, row in enumerate(execs))),
+                    (t.baseline_carry_observation, ({"carry_seq": seq, "ordinal": ordinal, **row}
+                                                    for ordinal, row in enumerate(observations))),
+                    (t.baseline_carry_break, ({"carry_seq": seq, **row} for row in breaks))):
+                for chunk in _chunks(rows, BASELINE_CHUNK):
+                    connection.execute(table.insert(), chunk)
         return True
 
     def baseline_carry_hour(self, *, site: str, target: str, hour: datetime, normalizer: str,
                             format_: int) -> dict | None:
-        """One persisted carry hour: {"hostless", "exec", "observation", "break"} (row bodies), or None."""
-        carry_id = self._carry_id(site, target, _utc(hour, "carry hour"), normalizer, format_)
-        with self.engine.connect() as connection:
-            head = connection.execute(select(t.baseline_carry_hour.c.hostless).where(
-                t.baseline_carry_hour.c.id == carry_id)).first()
-            if head is None:
+        """One persisted carry hour, read in one transaction so a concurrent prune yields all of it or none:
+        {"hostless", "hosts", "exec", "observation", "break"}, or None."""
+        head = t.baseline_carry_hour.c
+        with self.engine.connect() as connection, connection.begin():
+            row = connection.execute(select(head.seq, head.hostless).where(
+                head.site == site, head.target == target, head.hour == _utc(hour, "carry hour"),
+                head.normalizer == normalizer, head.format == format_,
+            )).first()
+            if row is None:
                 return None
-            out: dict = {"hostless": bool(head[0]), "exec": [], "observation": [], "break": []}
-            row = t.baseline_carry_row.c
-            for kind, body in connection.execute(select(row.kind, row.body).where(
-                    row.carry_id == carry_id).order_by(row.kind, row.ordinal)):
-                out[kind].append(dict(body))
+            seq = row.seq
+            out: dict = {"hostless": bool(row.hostless)}
+            hosts = t.baseline_carry_host.c
+            out["hosts"] = {ref: (host, boot) for ref, host, boot in connection.execute(
+                select(hosts.ref, hosts.host, hosts.boot).where(hosts.carry_seq == seq))}
+            for kind, table in (("exec", t.baseline_carry_exec), ("observation", t.baseline_carry_observation)):
+                out[kind] = [dict(item) for item in connection.execute(
+                    select(table).where(table.c.carry_seq == seq).order_by(table.c.ordinal)).mappings()]
+            breaks = t.baseline_carry_break.c
+            out["break"] = [dict(item) for item in connection.execute(
+                select(breaks.ref, breaks.hour_us).where(breaks.carry_seq == seq)).mappings()]
         return out
+
+    def baseline_carry_bytes(self) -> int:
+        with self.engine.connect() as connection:
+            return int(connection.execute(select(func.coalesce(func.sum(t.baseline_carry_hour.c.bytes), 0)))
+                       .scalar_one())
+
+    def _delete_carry_hours(self, where, *, chunk: int, limit: int | None = None) -> tuple[int, int]:
+        """Delete carry hours matching `where`, oldest first, `chunk` hours per short write transaction (each takes
+        its rows with it). Returns (hours, bytes) removed; `limit` stops once that many bytes are gone."""
+        head = t.baseline_carry_hour.c
+        hours = removed = 0
+        while limit is None or removed < limit:
+            with write_txn(self.engine) as connection:
+                batch = connection.execute(select(head.seq, head.bytes).where(where).order_by(
+                    head.hour, head.seq).limit(chunk)).all()
+                if not batch:
+                    break
+                if limit is not None:
+                    kept = []
+                    for seq, size in batch:
+                        kept.append((seq, size))
+                        if removed + sum(item[1] for item in kept) >= limit:
+                            break
+                    batch = kept
+                connection.execute(t.baseline_carry_hour.delete().where(head.seq.in_([seq for seq, _ in batch])))
+            hours += len(batch)
+            removed += sum(size for _, size in batch)
+        return hours, removed
+
+    def prune_baseline_carry_hours(self, *, site: str, target: str, before: datetime,
+                                   chunk: int = 4) -> tuple[int, int]:
+        """Delete one target's carry hours older than `before`: (hours, bytes) removed."""
+        head = t.baseline_carry_hour.c
+        return self._delete_carry_hours(
+            and_(head.site == site, head.target == target, head.hour < _utc(before, "carry prune horizon")),
+            chunk=chunk,
+        )
+
+    def trim_baseline_carry(self, budget: int, *, chunk: int = 4) -> tuple[int, int]:
+        """Delete the store's oldest carry hours until their estimated bytes fit `budget`: (hours, bytes)."""
+        excess = self.baseline_carry_bytes() - max(0, budget)
+        if excess <= 0:
+            return 0, 0
+        return self._delete_carry_hours(true(), chunk=chunk, limit=excess)
+
+    def baseline_carry_newest_hour(self, *, site: str, target: str) -> datetime | None:
+        head = t.baseline_carry_hour.c
+        with self.engine.connect() as connection:
+            value = connection.execute(select(func.max(head.hour)).where(
+                head.site == site, head.target == target)).scalar_one_or_none()
+        return _stored_utc(value)
 
     def baseline_window_released(self, hunt_id: str, spec_id: str) -> str | None:
         """Why some target's window counter material of one spec was released, or None while all of it is kept."""
