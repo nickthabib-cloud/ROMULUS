@@ -557,8 +557,9 @@ baseline_carry_break = Table(
     "baseline_carry_break", metadata,
     Column("carry_seq", Integer, ForeignKey("baseline_carry_hour.seq", ondelete="CASCADE"), nullable=False),
     Column("ref", Integer, nullable=False),
-    Column("hour_us", Integer, nullable=False),
-    PrimaryKeyConstraint("carry_seq", "ref", "hour_us", name="pk_baseline_carry_break"),
+    Column("start_us", Integer, nullable=False),
+    Column("end_us", Integer, nullable=False),
+    PrimaryKeyConstraint("carry_seq", "ref", "start_us", name="pk_baseline_carry_break"),
     sqlite_with_rowid=False,
 )
 
@@ -627,6 +628,20 @@ baseline_parent_break = Table(
     Column("end", DateTime(timezone=True), nullable=False),
     PrimaryKeyConstraint("hunt_id", "target", "host", "start", name="pk_baseline_parent_break"),
     CheckConstraint("end > start", name="ck_baseline_parent_break_span"),
+)
+
+# The earliest and latest record time the carry has seen of each (host, boot): evidence of which boot ran when, so a
+# break that provably lies in an earlier boot never blocks a child of a later one.
+baseline_parent_boot_span = Table(
+    "baseline_parent_boot_span", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id", ondelete="CASCADE"), nullable=False),
+    Column("target", String, nullable=False),
+    Column("host", String, nullable=False),
+    Column("boot", String, nullable=False),
+    Column("earliest", DateTime(timezone=True), nullable=False),
+    Column("latest", DateTime(timezone=True), nullable=False),
+    PrimaryKeyConstraint("hunt_id", "target", "host", "boot", name="pk_baseline_parent_boot_span"),
+    CheckConstraint("latest >= earliest", name="ck_baseline_parent_boot_span_order"),
 )
 
 baseline_parent_carry = Table(

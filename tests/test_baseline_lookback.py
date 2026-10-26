@@ -585,7 +585,7 @@ def test_parent_across_a_failed_hour_is_unresolved_never_the_older_generation():
     assert ("/old", "/bin/sh") not in [(parent, child) for _, parent, child in _pair_keys(repo)]
     child_gap = [gap for gap in result.gaps if gap.start == H_HOUR]
     assert child_gap and child_gap[0].state == "unresolved"
-    assert "e3: parent exec in an unobserved hour" in child_gap[0].reason
+    assert "parent exec in an unobserved hour (1 record(s): e3)" in child_gap[0].reason
 
 
 def test_parent_in_an_hour_another_hunt_built_resolves_from_its_kept_carry_input_never_the_older_generation():
@@ -653,7 +653,7 @@ def test_partially_fetched_hour_breaks_parent_continuity():
         )
     assert ("/old", "/bin/sh") not in [(parent, child) for _, parent, child in _pair_keys(repo)]
     child_gap = [gap for gap in result.gaps if gap.start == H_HOUR]
-    assert child_gap and "e4: parent exec in an unobserved hour" in child_gap[0].reason
+    assert child_gap and "parent exec in an unobserved hour (1 record(s): e4)" in child_gap[0].reason
 
 
 def test_parent_resolves_across_continuously_observed_hours():
@@ -873,7 +873,7 @@ def test_an_exec_the_carry_cannot_store_breaks_that_hosts_continuity(uncarried):
         )
     assert ("/old", "/bin/sh") not in [(parent, child) for _, parent, child in _pair_keys(repo)]
     child_gap = [gap for gap in result.gaps if gap.start == H_HOUR]
-    assert child_gap and "e3: an exec of the host between parent and child was not carried" in child_gap[0].reason
+    assert child_gap and "an exec of the host between parent and child was not carried (1 record(s): e3)" in child_gap[0].reason
     assert "e5:" not in child_gap[0].reason
 
 
@@ -906,7 +906,7 @@ def test_an_exec_retrieved_in_an_unobserved_later_hour_breaks_continuity():
         )
     assert ("/old", "/bin/sh") not in [(parent, child) for _, parent, child in _pair_keys(repo)]
     child_gap = [gap for gap in result.gaps if gap.start == G_HOUR]
-    assert child_gap and "e3: parent exec in an unobserved hour" in child_gap[0].reason
+    assert child_gap and "parent exec in an unobserved hour (1 record(s): e3)" in child_gap[0].reason
 
 
 def test_an_exec_typed_outside_its_retrieval_hour_breaks_the_hosts_continuity():
@@ -935,7 +935,7 @@ def test_an_exec_typed_outside_its_retrieval_hour_breaks_the_hosts_continuity():
         )
     assert ("/old", "/bin/sh") not in [(parent, child) for _, parent, child in _pair_keys(repo)]
     child_gap = [gap for gap in result.gaps if gap.start == G_HOUR]
-    assert child_gap and "e3: an exec of the host between parent and child was not carried" in child_gap[0].reason
+    assert child_gap and "an exec of the host between parent and child was not carried (1 record(s): e3)" in child_gap[0].reason
     assert repo.baseline_parent_breaks("build", "host-index", "web01") == [(G_HOUR, START)]
 
 
@@ -995,8 +995,9 @@ def test_an_equal_time_exec_chain_without_serials_is_ambiguous_never_a_guess():
             hunt_id="build", targets=["host-index"], start=G_HOUR, end=START,
         )
     assert not [parent for _, parent, child in _pair_keys(repo) if child == "/bin/sh"]
-    child_gap = [gap for gap in result.gaps if "e3:" in gap.reason]
-    assert child_gap and "e3: an exec of the host between parent and child was not carried" in child_gap[0].reason
+    child_gap = [gap for gap in result.gaps if "(1 record(s): e3)" in gap.reason]
+    assert child_gap and ("an exec of the host between parent and child was not carried (1 record(s): e3)"
+                          in child_gap[0].reason)
 
 
 def test_an_exec_of_unknown_outcome_is_never_a_parent_generation():
@@ -1014,7 +1015,7 @@ def test_an_exec_of_unknown_outcome_is_never_a_parent_generation():
             hunt_id="build", targets=["host-index"], start=G_HOUR, end=START,
         )
     assert not [parent for _, parent, child in _pair_keys(repo) if child == "/bin/sh"]
-    assert any("e3: an exec of the host between parent and child was not carried" in gap.reason
+    assert any("an exec of the host between parent and child was not carried (1 record(s): e3)" in gap.reason
                for gap in result.gaps)
 
 

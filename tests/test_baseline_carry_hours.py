@@ -298,7 +298,7 @@ def test_a_pruned_hour_reads_as_absent_never_partial():
     _resolve(store, "hunt-1", events, pendings, hours=6)
     hour = _hours_kept(store)[0]
     assert store.baseline_carry_hour(site="site", target="host-index", hour=hour, normalizer="fixture@1",
-                                     format_=1) is not None
+                                     format_=2) is not None
 
     store.prune_baseline_carry_hours(site="site", target="host-index", before=hour + H)
 
@@ -306,7 +306,7 @@ def test_a_pruned_hour_reads_as_absent_never_partial():
 
     from romulus.store import schema
     assert store.baseline_carry_hour(site="site", target="host-index", hour=hour, normalizer="fixture@1",
-                                     format_=1) is None
+                                     format_=2) is None
     with store.engine.connect() as connection:
         orphans = connection.execute(select(func.count()).select_from(schema.baseline_carry_exec).where(
             schema.baseline_carry_exec.c.carry_seq.not_in(select(schema.baseline_carry_hour.c.seq)))).scalar_one()
@@ -380,11 +380,11 @@ def test_an_hour_with_no_execs_still_loads():
 
     repo = _repo()
     save_carry_hour(repo, site="s", target="t", hour=START, normalizer="n",
-                    carry=CarryHour((), (), {"web01": frozenset({START})}, False))
+                    carry=CarryHour((), (), {"web01": frozenset({(START, START + H)})}, False))
 
     loaded = load_carry_hour(repo, site="s", target="t", hour=START, normalizer="n")
 
-    assert loaded is not None and loaded.execs == () and loaded.breaks == {"web01": frozenset({START})}
+    assert loaded is not None and loaded.execs == () and loaded.breaks == {"web01": frozenset({(START, START + H)})}
 
 
 # ---- unrecorded boots are breaks, never silent supersessions -------------------------------------------------
@@ -480,3 +480,157 @@ def test_the_longest_lookback_is_read_without_loading_manifests():
     store.create_hunt("no-baseline", {"baseline": {"history_days": 90}}, "m-x", "test")
 
     assert store.longest_baseline_history_days(default=7) == 14
+
+
+# ---- breaks block only the parent-to-child intervals they can fall inside -------------------------------------
+
+def _t(hours, minutes=0, seconds=0):
+    return START - hours * H + timedelta(minutes=minutes, seconds=seconds)
+
+
+def _keys_on_both_stores(events, pendings, hours=6):
+    built = _repo()
+    _resolve(built, "hunt-1", events, pendings, hours=hours)
+    second, _source, _ = _resolve(built, "hunt-2", events, pendings, hours=hours)
+    empty, _source, _ = _resolve(_repo(), "hunt-e", events, pendings, hours=hours)
+    assert second == empty
+    return {event_id: (keys, reason) for event_id, keys, reason in empty}
+
+
+def test_an_old_unknown_boot_break_in_a_prior_boot_never_blocks_a_current_boot_child():
+    """The lab shape: an exec of unrecorded boot in an earlier boot, records of that boot after it, then the current
+    boot whose long-lived parent is known only from process observations."""
+    from romulus.baseline.spec import exec_pair_key
+
+    events = [
+        _exec("old-1", _t(6, 0), 50, 1, "/usr/sbin/cron", host="video", boot="b-old"),
+        _exec("unknown", _t(5, 30), 60, 1, "/bin/x", host="video", boot=None),
+        _exec("old-2", _t(5, 50), 70, 1, "/usr/bin/id", host="video", boot="b-old"),
+        _observed("apache", _t(2, 10), 700, 1, "/usr/sbin/apache2", host="video", boot="b-new"),
+        _observed("apache-again", _t(1, 10), 700, 1, "/usr/sbin/apache2", host="video", boot="b-new"),
+    ]
+    child = Pending("video", "b-new", 700, START + timedelta(minutes=5), "child", "/bin/dash")
+
+    result = _keys_on_both_stores(events, [child])
+
+    assert result["child"][0] == (exec_pair_key(PAIR, "video", "/usr/sbin/apache2", "/bin/dash").key_digest,)
+
+
+def test_a_break_between_the_parent_and_the_child_still_blocks():
+    events = [
+        _exec("parent", _t(3, 0), 300, 1, "/usr/bin/old", host="db01", boot="b1"),
+        _exec("unknown", _t(2, 0), 300, 1, "/tmp/implant", host="db01", boot=None),
+        _observed("seen-before", _t(3, 30), 700, 1, "/usr/sbin/sshd", host="db01", boot="b1"),
+    ]
+    children = [Pending("db01", "b1", 300, START + timedelta(minutes=5), "via-exec", "/bin/sh"),
+                Pending("db01", "b1", 700, START + timedelta(minutes=6), "via-observation", "/bin/sh")]
+
+    result = _keys_on_both_stores(events, children)
+
+    assert result["via-exec"] == ((), "an exec of the host between parent and child was not carried")
+    # the parent seen only before the break, the child after it: blocked
+    assert result["via-observation"] == ((), "an exec of the host between parent and child was not carried")
+
+
+def test_a_parent_observed_after_a_break_resolves():
+    from romulus.baseline.spec import exec_pair_key
+
+    events = [
+        _exec("unknown", _t(3, 0), 300, 1, "/tmp/x", host="db01", boot=None),
+        _observed("seen-after", _t(2, 30), 700, 1, "/usr/sbin/sshd", host="db01", boot="b1"),
+    ]
+    child = Pending("db01", "b1", 700, START + timedelta(minutes=6), "child", "/bin/sh")
+
+    result = _keys_on_both_stores(events, [child])
+
+    assert result["child"][0] == (exec_pair_key(PAIR, "db01", "/usr/sbin/sshd", "/bin/sh").key_digest,)
+
+
+def test_records_naming_no_boot_at_a_boot_boundary_block_only_the_intervals_spanning_them():
+    """The corpdns shape: a burst of records without a boot id around the reboot. A parent exec'd after the burst
+    resolves its child; one exec'd before the burst, with its child after, does not."""
+    from romulus.baseline.spec import exec_pair_key
+
+    burst = [_exec(f"boundary-{index}", _t(2, 0, index), 900 + index, 1, "/usr/lib/systemd", host="dns",
+                   boot=None) for index in range(10)]
+    events = [
+        _exec("before-burst", _t(2, 0, 0) - timedelta(seconds=30), 400, 1, "/usr/sbin/named", host="dns",
+              boot="b2"),
+        *burst,
+        _exec("after-burst", _t(2, 5), 500, 1, "/usr/sbin/sshd", host="dns", boot="b2"),
+    ]
+    children = [Pending("dns", "b2", 500, START + timedelta(minutes=5), "after", "/bin/sh"),
+                Pending("dns", "b2", 400, START + timedelta(minutes=6), "spanning", "/bin/sh")]
+
+    result = _keys_on_both_stores(events, children)
+
+    assert result["after"][0] == (exec_pair_key(PAIR, "dns", "/usr/sbin/sshd", "/bin/sh").key_digest,)
+    assert result["spanning"] == ((), "an exec of the host between parent and child was not carried")
+
+
+def _truth(events, child, hidden):
+    """The parent image a child of (host, boot, ppid) truly had, or None when it is not knowable even with every
+    true boot: the latest record of that pid in the child's true boot before it."""
+    candidates = [event for event in events if event.host == child.host and event.ts < child.ts
+                  and event.get("process.pid") == child.ppid and hidden.get(event.id, event.get("host.boot.id"))
+                  == child.boot and event.outcome != Outcome.failure]
+    if not candidates:
+        return None
+    latest = max(candidates, key=lambda event: event.ts)
+    if latest.outcome == Outcome.unknown:
+        return None
+    return latest.get("process.executable")
+
+
+def _differential(seeds):
+    from romulus.baseline.spec import exec_pair_key
+
+    wrong = []
+    for seed in seeds:
+        rnd = random.Random(seed)
+        events, hidden = [], {}
+        # images change only by exec: an observation shows the image of its pid's latest successful exec in its
+        # boot (or any image when none was recorded)
+        plan = sorted((_t(hour, rnd.randrange(60), index % 60), index, hour)
+                      for index, hour in enumerate(rnd.randrange(1, 7) for _ in range(rnd.randint(10, 50))))
+        images: dict[tuple, str] = {}
+        for ts, index, hour in plan:
+            host = rnd.choice(["web01", "db01"])
+            boot = "b1" if hour >= 4 else "b2"
+            pid = rnd.choice([100, 200, 300])
+            exe = rnd.choice(["/a", "/b", "/c"])
+            hide = rnd.random() < 0.15
+            event_id = f"r{index}"
+            if rnd.random() < 0.2:
+                exe = images.get((host, boot, pid), exe)
+                event = _observed(event_id, ts, pid, 1, exe, host=host, boot=None if hide else boot)
+            else:
+                event = _exec(event_id, ts, pid, 1, exe, host=host, boot=None if hide else boot,
+                              outcome=rnd.choice([Outcome.success] * 8 + [Outcome.failure, Outcome.unknown]),
+                              serial=index)
+                if event.outcome == Outcome.success:
+                    images[(host, boot, pid)] = exe
+            if hide:
+                hidden[event_id] = boot
+            events.append(event)
+        children = [Pending(rnd.choice(["web01", "db01"]), "b2", rnd.choice([100, 200, 300]),
+                            START + timedelta(minutes=minute), f"child-{minute}", "/bin/sh")
+                    for minute in range(10)]
+        result = _keys_on_both_stores(events, children)
+        for child in children:
+            keys, _reason = result[child.event_id]
+            if not keys:
+                continue
+            truth = _truth(events, child, hidden)
+            if truth is None or keys != (exec_pair_key(PAIR, child.host, truth, "/bin/sh").key_digest,):
+                wrong.append((seed, child.event_id, truth, keys))
+    return wrong
+
+
+def test_randomized_breaks_never_give_a_looser_or_wrong_parent():
+    assert _differential(range(40)) == []
+
+
+@pytest.mark.slow
+def test_randomized_breaks_never_give_a_looser_or_wrong_parent_over_many_seeds():
+    assert _differential(range(40, 340)) == []

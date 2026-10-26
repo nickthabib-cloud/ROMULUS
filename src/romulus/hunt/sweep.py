@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 
 from romulus.baseline.carry import HourParents
 from romulus.baseline.playbook import BaselineCell, BaselinePlaybook
+from romulus.baseline.reasons import summarize
 from romulus.baseline.spec import KeyContext, exec_serial
 from romulus.detect import netdef
 from romulus.detect.base import Match, Playbook
@@ -933,7 +934,7 @@ class Sweep:
                     if not ordered and (not target_applicable or rule_partial or reasons):
                         state = ("evaluated_partial" if target_applicable and (rule_partial or reasons)
                                  else "not_applicable_no_events")
-                        detail = {"reasons": sorted(set(reasons))}
+                        detail = {"reasons": summarize(reasons)}
                         if state == "not_applicable_no_events":
                             # an inapplicable target's empty cell is complete history only if retrieval was
                             detail["retrieval_complete"] = not rule_partial and not result.partial
@@ -962,7 +963,7 @@ class Sweep:
                         self.repo.save_baseline_window_cell(self.hunt_id, {
                             "rule_id": pb.id, "version": pb.spec.version, "target": target,
                             "partition": pkey, "state": "evaluated_partial", "matched": 0,
-                            "evaluated": evaluated, "detail": {"reasons": sorted({*reasons, reason})},
+                            "evaluated": evaluated, "detail": {"reasons": summarize([*reasons, reason])},
                         }, ())
                     continue
                 pb.begin_cell(
@@ -1124,7 +1125,7 @@ class Sweep:
                             retrieval_complete: bool = True) -> None:
         """Persist observations and the cell's idempotency marker; citations are fetched only if published."""
         del task_id, events, raw_sources
-        detail: dict = {"reasons": sorted(set(reasons))}
+        detail: dict = {"reasons": summarize(reasons)}
         if state == "not_applicable_no_events":
             # An inapplicable target's empty cell is complete history only if its retrieval was complete.
             detail["retrieval_complete"] = retrieval_complete

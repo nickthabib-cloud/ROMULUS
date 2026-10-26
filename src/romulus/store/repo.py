@@ -3234,6 +3234,29 @@ class Repo:
             ).order_by(table.start.desc()).limit(1)).first()
         return row is not None and _stored_utc(row.end) > start
 
+    def widen_baseline_parent_boot_spans(self, hunt_id: str, target: str, rows: list[dict]) -> None:
+        """Widen each (host, boot)'s span of seen record times to include the given earliest and latest."""
+        table = t.baseline_parent_boot_span.c
+        stmt = insert(t.baseline_parent_boot_span)
+        stmt = stmt.on_conflict_do_update(index_elements=["hunt_id", "target", "host", "boot"], set_={
+            "earliest": func.min(table.earliest, stmt.excluded.earliest),
+            "latest": func.max(table.latest, stmt.excluded.latest),
+        })
+        values = [{"hunt_id": hunt_id, "target": target, "host": row["host"], "boot": row["boot"],
+                   "earliest": _utc(row["earliest"], "boot span earliest"),
+                   "latest": _utc(row["latest"], "boot span latest")} for row in rows]
+        for chunk in _chunks(values, BASELINE_CHUNK):
+            with write_txn(self.engine) as connection:
+                connection.execute(stmt, chunk)
+
+    def baseline_parent_boot_spans(self, hunt_id: str, target: str, host: str) -> dict[str, tuple]:
+        """{boot: (earliest, latest)} of the host's seen record times (a host's boots are few)."""
+        table = t.baseline_parent_boot_span.c
+        with self.engine.connect() as connection:
+            rows = connection.execute(select(table.boot, table.earliest, table.latest).where(
+                table.hunt_id == hunt_id, table.target == target, table.host == host)).all()
+        return {row.boot: (_stored_utc(row.earliest), _stored_utc(row.latest)) for row in rows}
+
     def baseline_parent_breaks(self, hunt_id: str, target: str, host: str) -> list[tuple[datetime, datetime]]:
         table = t.baseline_parent_break.c
         with self.engine.connect() as c:
@@ -4030,7 +4053,7 @@ class Repo:
                     select(table).where(table.c.carry_seq == seq).order_by(table.c.ordinal)).mappings()]
             breaks = t.baseline_carry_break.c
             out["break"] = [dict(item) for item in connection.execute(
-                select(breaks.ref, breaks.hour_us).where(breaks.carry_seq == seq)).mappings()]
+                select(breaks.ref, breaks.start_us, breaks.end_us).where(breaks.carry_seq == seq)).mappings()]
         if (len(out["hosts"]), len(out["exec"]), len(out["observation"]), len(out["break"])) != (
                 row.hosts, row.execs, row.observations, row.breaks):
             return None
