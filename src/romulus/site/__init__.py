@@ -7,8 +7,10 @@ import json
 import os
 import re
 import shutil
+import stat
 import tempfile
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from pathlib import Path
@@ -100,12 +102,13 @@ class SysmonFacts(BaseModel):
 
 
 # The named channel facts predate the generic list; each is the same attestation as listing its channel.
-_CHANNEL_FACTS = {
-    "security_event_log": "security",
-    "system_event_log": "system",
-    "defender_operational": "microsoft-windows-windows defender/operational",
-    "task_scheduler_operational": "microsoft-windows-taskscheduler/operational",
+_CHANNEL_NAMES = {
+    "security_event_log": "Security",
+    "system_event_log": "System",
+    "defender_operational": "Microsoft-Windows-Windows Defender/Operational",
+    "task_scheduler_operational": "Microsoft-Windows-TaskScheduler/Operational",
 }
+_CHANNEL_FACTS = {fact: channel.casefold() for fact, channel in _CHANNEL_NAMES.items()}
 _MAX_CHANNEL_NAME = 255
 
 
@@ -124,6 +127,32 @@ class CollectionGroup(BaseModel):
     # Event log channels collected and shipped for these hosts, by their Windows channel name.
     event_channels: tuple[str, ...] = ()
 
+    @model_validator(mode="before")
+    @classmethod
+    def _one_canonical_form(cls, value):
+        """Write each fact one way, so equal attestations have one digest however they were written: a named
+        channel fact becomes its listed channel, and a Sysmon block that attests nothing is dropped."""
+        if not isinstance(value, dict):
+            return value
+        value = dict(value)
+        listed = value.get("event_channels", [])
+        if not isinstance(listed, (list, tuple)):
+            return value
+        channels = list(listed)
+        folded = {item.strip().casefold() for item in channels if isinstance(item, str)}
+        for fact, channel in _CHANNEL_NAMES.items():
+            if value.get(fact) is True:
+                if channel.casefold() not in folded:
+                    channels.append(channel)
+                    folded.add(channel.casefold())
+                value[fact] = False
+        if channels or "event_channels" in value:
+            value["event_channels"] = channels
+        sysmon = value.get("sysmon")
+        if isinstance(sysmon, dict) and sysmon.get("installed") is False and not sysmon.get("event_ids"):
+            value["sysmon"] = None
+        return value
+
     @field_validator("hosts", mode="before")
     @classmethod
     def _hosts(cls, value):
@@ -135,6 +164,10 @@ class CollectionGroup(BaseModel):
             raise ValueError("hosts must be a non-empty list of host globs or the string 'all'")
         if any(not isinstance(item, str) for item in value):
             raise ValueError("host globs must be text")
+        if any(item.strip().casefold() == "all" for item in value):
+            # In a list, "all" would name one host called "all"; the catch-all is only ever `hosts: all`, so the
+            # two can never be confused (an editor showing either as the text "all" must not widen a group).
+            raise ValueError("'all' inside a host list is ambiguous: write hosts: all for every host")
         normalized = tuple(_host_glob(item) for item in value)
         if "*" in normalized:
             raise ValueError("catch-all host selector must use hosts: all")
@@ -171,7 +204,8 @@ class CollectionGroup(BaseModel):
             if name.casefold() in normalized:
                 raise ValueError(f"duplicate event channel {name!r}")
             normalized[name.casefold()] = name
-        return tuple(normalized[key] for key in sorted(normalized))
+        # Windows channel names are case-insensitive: one spelling per channel keeps one digest per meaning.
+        return tuple(sorted(normalized))
 
     def collects_channel(self, channel: str) -> bool:
         folded = channel.strip().casefold()
@@ -381,10 +415,17 @@ def validate_site_content(content: dict) -> SiteFacts:
 _SAVE_LOCK = threading.Lock()
 
 
-def save_site_facts(home: Path, content: dict, expected_digest: str) -> tuple[SiteFacts, SiteFacts]:
+def save_site_facts(
+    home: Path,
+    content: dict,
+    expected_digest: str,
+    record: Callable[[SiteFacts, SiteFacts], None] | None = None,
+) -> tuple[SiteFacts, SiteFacts]:
     """Validate `content` and replace the site file with its canonical form. `expected_digest` is the digest the
-    editor started from ("" for no file): a file changed since then is refused, never overwritten. Returns the
-    facts before and after. The previous file is kept beside it as `collection.yaml.prev`."""
+    editor started from ("" for no file): a file changed since then is refused, never overwritten. A document equal
+    to the current one writes nothing. `record(before, after)` runs before the file is replaced, so a change that
+    cannot be recorded is not made. Returns the facts before and after. The previous file is kept beside it as
+    `collection.yaml.prev`."""
     proposed = validate_site_content(content)
     path = Path(home) / COLLECTION_PATH
     with _SAVE_LOCK:
@@ -393,6 +434,8 @@ def save_site_facts(home: Path, content: dict, expected_digest: str) -> tuple[Si
             raise SiteChangedError(
                 f"{COLLECTION_PATH.as_posix()} changed since this page was loaded; reload it and apply the change again"
             )
+        if before.present and before.digest == proposed.digest:
+            return before, before
         text = yaml.safe_dump(proposed.content, sort_keys=False, allow_unicode=True, default_flow_style=False)
         if len(text.encode()) > MAX_SITE_BYTES:
             raise SiteValidationError(f"the site file would be larger than {MAX_SITE_BYTES} bytes")
@@ -404,7 +447,10 @@ def save_site_facts(home: Path, content: dict, expected_digest: str) -> tuple[Si
                 handle.flush()
                 os.fsync(handle.fileno())
             if path.exists():
+                os.chmod(temporary, stat.S_IMODE(path.stat().st_mode))
                 shutil.copy2(path, path.with_name(path.name + ".prev"))
+            if record is not None:
+                record(before, proposed)
             # One rename: a reader sees the old file or the new one, never none.
             os.replace(temporary, path)
         except BaseException:

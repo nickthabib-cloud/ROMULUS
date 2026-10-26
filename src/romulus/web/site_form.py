@@ -17,7 +17,8 @@ from romulus.site import COLLECTION_SCHEMA
 AUDIT_SETTINGS = ("success", "failure", "both")
 MAX_GROUPS = 200          # host groups one form may carry; far above a real site's
 MAX_LINES = 5_000         # entries one list field may carry
-_SPLIT = re.compile(r"[\r\n,]+")
+_LINES = re.compile(r"[\r\n]+")          # names may contain anything but a line break
+_IDS = re.compile(r"[\r\n,\s]+")
 
 
 def known_sysmon_ids() -> list[int]:
@@ -39,18 +40,17 @@ def known_channels() -> list[str]:
     return [channel for channel in WINDOWS_CHANNELS if channel.casefold() != SYSMON_CHANNEL.casefold()]
 
 
-_NAMED_CHANNELS = {
-    "security_event_log": "Security",
-    "system_event_log": "System",
-    "defender_operational": "Microsoft-Windows-Windows Defender/Operational",
-    "task_scheduler_operational": "Microsoft-Windows-TaskScheduler/Operational",
-}
+def max_fields() -> int:
+    """Form fields a full page may submit: per group, one field per known Sysmon id, audit subcategory (two for
+    each listed extra) and channel, plus its fixed fields; generous so a real site never meets the limit."""
+    per_group = 64 + len(known_sysmon_ids()) + 3 * len(known_audit_subcategories()) + len(known_channels())
+    return (MAX_GROUPS + 1) * per_group + 64
 
 
-def _lines(value: object) -> list[str]:
+def _lines(value: object, pattern: re.Pattern = _LINES) -> list[str]:
     if not isinstance(value, str):
         return []
-    items = [item.strip() for item in _SPLIT.split(value) if item.strip()]
+    items = [item.strip() for item in pattern.split(value) if item.strip()]
     if len(items) > MAX_LINES:
         raise ValueError(f"a list may hold at most {MAX_LINES} entries")
     return items
@@ -65,10 +65,8 @@ def group_view(group: dict) -> dict:
     policy = {str(key).casefold(): value for key, value in (group.get("audit_policy") or {}).items()}
     known = known_audit_subcategories()
     extra_policy = [(name, policy[name]) for name in sorted(policy) if name not in {k.casefold() for k in known}]
+    # The site validator has already written named channel facts as listed channels.
     listed = {str(item).casefold(): str(item) for item in group.get("event_channels") or []}
-    for fact, channel in _NAMED_CHANNELS.items():
-        if group.get(fact) is True:
-            listed.setdefault(channel.casefold(), channel)
     known_folded = {channel.casefold() for channel in known_channels()}
     return {
         "hosts": "all" if hosts == "all" else "\n".join(hosts or []),
@@ -100,7 +98,7 @@ def view(content: dict) -> dict:
 
 def _integers(text: str, label: str) -> list[int]:
     values = []
-    for item in _lines(text):
+    for item in _lines(text, _IDS):
         if not item.isdigit():
             raise ValueError(f"{label}: {item!r} is not an event id")
         values.append(int(item))
