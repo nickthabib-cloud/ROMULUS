@@ -413,32 +413,36 @@ class PsToken:
 
 _SINGLE_QUOTES = "'‘’‚‛"
 _DOUBLE_QUOTES = '"“”„'
-_WORD = re.compile(r"[A-Za-z0-9_\-–—―.\\/:?*`%]")
+_WORD = re.compile(r"[A-Za-z0-9_\-–—―.\\/:?*`%#]")
 
 
 def ps_tokens(text: str) -> list[PsToken]:
     """Code words, member names, string literals, variables and parameters of PowerShell script text.
 
     Comments are dropped and string contents are returned as strings only, so a name that appears only inside a
-    string or a comment never reads as a call. Code built at run time (string concatenation, ``$()`` inside an
-    expandable string, ``-f`` formatting) is not evaluated: such a call is not seen, which a positive-only rule
-    states."""
+    string or a comment never reads as a call. A ``#`` starts a line comment only at a token boundary: ``a#b`` is
+    one token, not ``a`` plus a comment. Code built at run time (string concatenation, ``$()`` inside an expandable
+    string, ``-f`` formatting) is not evaluated: such a call is not seen, which a positive-only rule states."""
     out: list[PsToken] = []
     i, n = 0, len(text)
     after_value = False                 # the previous token can take a member access (variable, ), ], string)
+    prev_sep = True                     # at a token boundary (start of input, or after whitespace/a delimiter)
     while i < n:
         char = text[i]
-        if char.isspace() or char in ";,|{}=+!":
+        if char.isspace() or char in ";,|{}=+!&":
             after_value = False
+            prev_sep = True
             i += 1
             continue
         if char == "<" and text.startswith("<#", i):
             end = text.find("#>", i + 2)
             i = n if end < 0 else end + 2
+            prev_sep = True
             continue
-        if char == "#":
+        if char == "#" and prev_sep:
             end = text.find("\n", i)
             i = n if end < 0 else end + 1
+            prev_sep = True
             continue
         if char == "@" and i + 1 < n and (text[i + 1] in _SINGLE_QUOTES or text[i + 1] in _DOUBLE_QUOTES):
             closing = text[i + 1] + "@"
@@ -446,11 +450,13 @@ def ps_tokens(text: str) -> list[PsToken]:
             out.append(PsToken("string", text[i + 2:n if end < 0 else end].casefold()))
             i = n if end < 0 else end + 2
             after_value = True
+            prev_sep = False
             continue
         if char in _SINGLE_QUOTES or char in _DOUBLE_QUOTES:
             value, i = _ps_string(text, i)
             out.append(PsToken("string", value.casefold()))
             after_value = True
+            prev_sep = False
             continue
         if char == "$":
             j = i + 1
@@ -465,17 +471,26 @@ def ps_tokens(text: str) -> list[PsToken]:
                 i = j
             out.append(PsToken("variable", name.casefold()))
             after_value = True
+            prev_sep = False
             continue
         if char in ")]":
             after_value = True
+            prev_sep = False
             i += 1
             continue
         if char in "([":
             after_value = False
+            prev_sep = True
             i += 1
             continue
         if char == "." and after_value or (char == ":" and text.startswith("::", i)):
             i += 2 if char == ":" else 1
+            if i < n and (text[i] in _SINGLE_QUOTES or text[i] in _DOUBLE_QUOTES):
+                value, i = _ps_string(text, i)           # a quoted member name ($wc."DownloadString")
+                out.append(PsToken("member", value.casefold()))
+                after_value = True
+                prev_sep = False
+                continue
             j = i
             while j < n and (text[j].isalnum() or text[j] in "_`"):
                 j += 1
@@ -484,6 +499,7 @@ def ps_tokens(text: str) -> list[PsToken]:
                 out.append(PsToken("member", name.casefold()))
             i = j
             after_value = True
+            prev_sep = False
             continue
         if _WORD.match(char):
             j = i
@@ -498,8 +514,10 @@ def ps_tokens(text: str) -> list[PsToken]:
             out.append(PsToken(kind, word.casefold()))
             i = j
             after_value = False
+            prev_sep = False
             continue
         after_value = False
+        prev_sep = False
         i += 1
     return out
 
@@ -532,8 +550,113 @@ def ps_parameter_matches(token: PsToken, name: str, smallest: str, aliases: tupl
     ``smallest`` is the shortest prefix that is unambiguous among that cmdlet's parameters."""
     if token.kind != "parameter":
         return False
-    key = token.text[1:].split(":", 1)[0]
-    return key in aliases or (name.startswith(key) and len(key) >= len(smallest))
+    key = token.text[1:].split(":", 1)[0].lstrip(DASHES)
+    return key in aliases or (len(key) >= len(smallest) and name.startswith(key))
+
+
+_TRUE_WORDS = frozenset({"true", "$true", "1"})
+_FALSE_WORDS = frozenset({"false", "$false", "0"})
+
+
+def ps_bool(value: object) -> bool | None:
+    """PowerShell truthiness of a switch argument token's text: True for $true/1/true, False for $false/0/false,
+    None when it is neither (so the caller does not guess)."""
+    text = str(value or "").strip().casefold().lstrip(":")
+    if text in _TRUE_WORDS:
+        return True
+    if text in _FALSE_WORDS:
+        return False
+    return None
+
+
+def ps_switch_argument(tokens: list[PsToken], index: int) -> tuple[bool | None, bool]:
+    """Read a PowerShell switch parameter's boolean argument at `tokens[index]`: (value, had_inline).
+
+    A trailing ``:value`` on the parameter token, else the following token (a variable or word), decides it. A bare
+    switch with no boolean argument is True (the switch is present). None means an argument was given that is not a
+    boolean, so the caller treats the record as undecided rather than guessing."""
+    token = tokens[index]
+    inline = token.text.split(":", 1)
+    if len(inline) == 2 and inline[1]:
+        return ps_bool(inline[1]), True
+    nxt = tokens[index + 1] if index + 1 < len(tokens) else None
+    if nxt is None or nxt.kind == "parameter":
+        return True, False                      # bare switch: present means "on"
+    if nxt.kind in {"variable", "word"}:
+        value = ps_bool(nxt.text if nxt.kind == "word" else f"${nxt.text}")
+        return value, True
+    return True, False
+
+
+def rundll32_target(argv: list[str]) -> tuple[str, str] | None:
+    """(dll basename without extension, entry point) for a `rundll32 <dll>,<entry> ...` or `rundll32 <dll> <entry>`
+    invocation, both casefolded, or None. Handles the comma- or space-joined forms, a quoted or path-qualified DLL,
+    a missing `.dll`, and an ordinal entry (`#24`, `#+24`, `#-4294967272`)."""
+    rest = [token for token in argv[1:] if token and not is_switch(token)]
+    if not rest:
+        return None
+    first = rest[0].strip().strip('"')
+    if "," in first:
+        dll, _sep, entry = first.partition(",")
+        entry = entry.strip() or (rest[1].strip().strip('"') if len(rest) > 1 else "")
+    else:
+        dll = first
+        entry = rest[1].strip().strip('"') if len(rest) > 1 else ""
+    base = ntpath.basename(dll.replace("/", "\\")).casefold().removesuffix(".dll")
+    return base, entry.casefold().lstrip(",").strip()
+
+
+def is_ordinal(entry: str) -> bool:
+    """Whether a rundll32 entry point is an ordinal reference (`#24`, `#+24`, `#-4294967272`)."""
+    text = entry.strip()
+    return bool(text) and text[0] == "#" and text[1:].lstrip("+-").isdigit()
+
+
+@dataclass
+class RegCommand:
+    """A parsed ``reg.exe`` invocation: its verb, the key operand (casefolded, forward slashes normalized), and the
+    ``/v`` value name, ``/d`` data and ``/t`` type when present."""
+    verb: str
+    key: str
+    value_name: str | None = None
+    data: str | None = None
+    data_type: str | None = None
+    import_file: str | None = None
+
+
+def parse_reg(argv: list[str]) -> RegCommand | None:
+    """Parse ``reg add|query|export|import|delete ...`` from argv (argv[0] is reg.exe). None when it is not reg."""
+    if len(argv) < 2:
+        return None
+    verb = argv[1].strip().casefold()
+    if verb not in {"add", "query", "export", "import", "delete", "copy", "save", "load", "unload", "restore"}:
+        return None
+    operands_list = []
+    value_name = data = data_type = None
+    i = 2
+    while i < len(argv):
+        token = argv[i]
+        low = token.casefold()
+        if low in {"/v", "-v"} and i + 1 < len(argv):
+            value_name = argv[i + 1]
+            i += 2
+            continue
+        if low in {"/d", "-d"} and i + 1 < len(argv):
+            data = argv[i + 1]
+            i += 2
+            continue
+        if low in {"/t", "-t"} and i + 1 < len(argv):
+            data_type = argv[i + 1]
+            i += 2
+            continue
+        if is_switch(token):
+            i += 1
+            continue
+        operands_list.append(token)
+        i += 1
+    import_file = operands_list[-1] if verb in {"import", "restore", "load"} and operands_list else None
+    key = operands_list[0].strip().strip('"').replace("/", "\\").casefold() if operands_list else ""
+    return RegCommand(verb, key, value_name, data, data_type, import_file)
 
 
 # ---- operands --------------------------------------------------------------------------------------------------------

@@ -18,6 +18,7 @@ from romulus.detect.packets import PACKET_PLAYBOOKS
 from romulus.detect.sessions import SESSION_PLAYBOOKS
 from romulus.detect.tamper import TAMPER_PLAYBOOKS
 from romulus.detect.tls import TLS_PLAYBOOKS
+from romulus.detect.windows_common import share_windows_lineage
 from romulus.detect.windows_credentials import WINDOWS_CREDENTIAL_PLAYBOOKS
 from romulus.detect.windows_defense import WINDOWS_DEFENSE_PLAYBOOKS
 from romulus.detect.windows_lineage import WINDOWS_LINEAGE_PLAYBOOKS
@@ -53,7 +54,8 @@ def fresh_pack():
     # context rules run only in expansion, packet rules only in the packet stage; baseline playbooks consume
     # window cells in the sweep and are judged by the later baseline stage.
     pack = [cls() for cls in ALL_PLAYBOOKS if cls.kind not in ("context", "packet")]
-    share_lineage(pack)           # one exec lineage for every rule that keeps one
+    share_lineage(pack)           # one Linux exec lineage for every rule that keeps one
+    share_windows_lineage(pack)   # one Windows process-history store for every parent-resolving Windows rule
     return pack
 
 

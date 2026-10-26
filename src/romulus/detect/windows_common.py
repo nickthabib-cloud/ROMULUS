@@ -1,29 +1,37 @@
 """Shared machinery for Windows process-creation rules.
 
-- Program identity comes from the OS-recorded image path (`process.executable_key`, `process.parent.executable_key`):
-  its last component, compared case-insensitively. Directory prefixes (`C:\\`, `\\Device\\HarddiskVolumeN\\`,
-  `\\\\?\\`), System32 versus SysWOW64 and the drive letter never matter. An image whose last component is an 8.3
-  short name (`POWERS~1.EXE`) cannot be identified without guessing, so the record is not decided (it counts as
-  missing a field, and the cell is partial).
-- When a Security 4688 record does not carry the parent's image, `WindowsPidLineage` resolves it from the parent's own
-  creation record: the latest recorded creation of the parent's process id on that host before the child, with no
-  recorded termination of that id (4689, Sysmon 5) and no boot of the host in between. Records of one instant are
-  ordered only inside one computer/channel record-id sequence; otherwise the parent is undecided.
-- `WindowsProcessRule` publishes each match immediately, and merges a repeating shape into one fleet-level finding:
-  the first `IMMEDIATE_HOSTS` hosts on which a shape (behaviour plus command line) appears are reported record by
-  record as they are read, and every later record of that shape (another host, or the same host again) is counted
-  into one finding for the shape, published when the sweep ends, at the lane of the shape's records. A shape that
-  repeats is either a fleet-wide routine or a fleet-wide campaign; either way an analyst triages it once, with the
-  host count and the bounding records cited, and nothing strong waits for the end of the hunt on a new host.
-  Groups, per-host membership and process history live in disk-backed stores (`romulus.detect.bounded`); only a
-  spent disk budget refuses, and then the match is published on its own and coverage says so.
+ROMULUS finds what is present and never asserts that nothing is present, so every rule here is positive-only: a
+window without a match is never a complete negative. Coverage cells still record what was searched and what was
+not (inventory, shipper completeness and unattested collection stay in the cell reasons); they never become
+``no_match_complete``.
+
+- Program identity comes from the OS-recorded image path (`process.executable_key`,
+  `process.parent.executable_key`): its last component, compared case-insensitively. Directory prefixes (`C:\\`,
+  `\\Device\\HarddiskVolumeN\\`, `\\\\?\\`), System32 versus SysWOW64 and the drive letter never matter. An image
+  whose last component is an 8.3 short name (`POWERS~1.EXE`) cannot be identified without guessing, so the record
+  is undecided (counted, the cell is partial), never judged benign.
+- When a Security 4688 record does not carry the parent's image, `WindowsPidLineage` resolves it from the parent's
+  own creation record: the latest recorded creation of the parent's process id on that host at or before the child,
+  provided no recorded termination of that id (4689, Sysmon 5) falls after that creation and before the child, and
+  no boot of the host falls between them. Records of one instant are ordered only inside one computer/channel
+  record-id sequence; otherwise the parent is undecided. A fenced or unknown parent is never matched and never
+  treated as a decided benign parent.
+- Fleet handling (never hides a match or an attacker's payload):
+  - the group key is the distinguishing content (behaviour, image, parent image for lineage rules, the normalized
+    command line, and any decoded payload the rule adds), so two different payloads are never one group;
+  - the first record of each (shape, host) is published immediately at its own lane, whatever the fleet size, with
+    its own content;
+  - only repeats on a host already reported for that shape merge, into one fleet finding per shape that lists its
+    member hosts and states only what they have in common, with counts and the first and last record cited; it is
+    published as soon as the first repeat exists, not only at finalize.
+  Groups, per-(shape, host) membership and process history live in disk-backed stores; only a spent disk budget
+  refuses, and then the record is published on its own and coverage says so.
 """
 from __future__ import annotations
 
 import hashlib
 import ntpath
 import re
-from bisect import insort
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import ClassVar
@@ -38,14 +46,17 @@ from romulus.evidence.windows_catalog import SECURITY, SYSMON, SYSMON_CHANNEL
 
 SYSMON_PROCESS_CREATE = (SYSMON_CHANNEL, SYSMON, 1)
 SECURITY_PROCESS_CREATE = ("Security", SECURITY, 4688)
+# Fence families the parent-resolving rules read as context (never an evaluation of the rule).
+FENCE_FAMILIES = ("process_termination", "system_state")
 
 _SHORT_NAME = re.compile(r"^[^.~\\]{1,6}~\d+(?:\.[^.\\]{0,3})?$")
 _LANE_RANK = {"urgent": 0, "high": 1, "lead": 2, "context": 3}
 _SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 CLAIM_TEXT_LIMIT = 300
+FLEET_HOST_SAMPLE = 20
 
-# Programs that run code they are handed: command shells, PowerShell, script hosts and the signed binaries most used to
-# proxy execution or fetch and decode payloads. Shared by the parent/child rules.
+# Programs that run code they are handed: command shells, PowerShell, script hosts and the signed binaries most used
+# to proxy execution or fetch and decode payloads. Shared by the parent/child rules.
 SHELLS_AND_SCRIPT_HOSTS = frozenset({
     "cmd.exe", "powershell.exe", "pwsh.exe", "powershell_ise.exe", "wscript.exe", "cscript.exe", "mshta.exe",
     "bash.exe", "wsl.exe",
@@ -105,6 +116,10 @@ def typed_field(event: TypedEvent, name: str) -> PredicateField:
     return PredicateField(field=name, value=item.value, origin=item.origin)
 
 
+def _normalized(text: object) -> str:
+    return " ".join(str(text or "").casefold().split())
+
+
 class Undecided(Exception):
     """The record cannot be judged by this rule (a field is missing or ambiguous); counted, never a no-match."""
 
@@ -124,25 +139,52 @@ class ParentImage:
     native_id: str           # its first raw record's native id
     ts: float
     resolved_by: str         # "record" (the child's own field) | "pid" (the parent's own creation record)
+    event: TypedEvent | None = None   # the parent's own creation event, for citation (pid resolution only)
 
 
-def _same_instant_order(a: tuple, b: tuple) -> int | None:
-    """-1/0/1 for two (record id, domain) orders, None when they are not in one record-id sequence."""
-    serial_a, domain_a = a
-    serial_b, domain_b = b
+def _order_of(event: TypedEvent) -> tuple[int | None, object | None]:
+    return exec_order(event)
+
+
+def _before(order_a, ts_a, order_b, ts_b) -> int | None:
+    """-1/0/1 comparing (ts, in-sequence record id) of A against B; None when a same-instant pair cannot be ordered
+    (their record ids are in different computer/channel sequences, or one is missing)."""
+    if ts_a < ts_b:
+        return -1
+    if ts_a > ts_b:
+        return 1
+    serial_a, domain_a = order_a
+    serial_b, domain_b = order_b
     if serial_a is None or serial_b is None or domain_a is None or domain_a != domain_b:
         return None
     return (serial_a > serial_b) - (serial_a < serial_b)
 
 
+@dataclass
+class _PidState:
+    exec_ts: float = 0.0
+    exec_order: tuple = (None, None)
+    exec_image: str = ""
+    exec_event_id: str = ""
+    exec_native_id: str = ""
+    exec_event: TypedEvent | None = None
+    has_exec: bool = False
+    term_ts: float = 0.0
+    term_order: tuple = (None, None)
+    has_term: bool = False
+
+
 class WindowsPidLineage:
-    """Process creations and terminations per (host, pid), and boots per host, held for parent lookups. Every pid's
-    history is kept (pids are reused) in a disk-backed store, so a lookup is exact however old the parent is; a store
-    that refuses a new key makes later lookups on that key undecided, and coverage says so."""
+    """One shared record, for every parent-resolving rule, of the latest creation and latest termination of each
+    (host, pid) and the boots of each host. It holds only the latest exec and latest fence per pid (not full
+    history), so memory is bounded at mission scale; a new key is refused only when the disk budget is spent, and
+    that is stated. Entries are compared by (time, in-sequence record id), so out-of-order and cross-partition
+    arrival give the same answer, and two same-instant records in different computer/channel sequences are
+    undecided rather than guessed."""
 
     def __init__(self, owner, members: list | None = None):
-        self.procs = KeyedStore(owner, "win_pid_history", HOT_COUNT)
-        self.boots = KeyedStore(owner, "win_boot_history", HOT_COUNT)
+        self.procs: KeyedStore = KeyedStore(owner, "win_pid_latest", HOT_COUNT)
+        self.boots: KeyedStore = KeyedStore(owner, "win_boot_history", HOT_COUNT)
         self.members = members if members is not None else [owner]
         self._seen = RecentIds()
         self.refused_keys = RecentIds()
@@ -159,9 +201,9 @@ class WindowsPidLineage:
     def _refused(self, what: str) -> None:
         self.incomplete = True
         for member in self.members:
-            member.note_limit("win_pid_history", f"the process-history store took no new {what} (its share of the "
-                                                 f"state budget is spent); a later parent lookup that needs it is "
-                                                 f"undecided")
+            member.note_limit("win_pid_history", f"the shared Windows process-history store took no new {what} (its "
+                                                 f"share of the state budget is spent); a later parent lookup that "
+                                                 f"needs it is undecided")
 
     def observe(self, event: TypedEvent) -> None:
         seen = (event.id, event.ts)
@@ -178,73 +220,102 @@ class WindowsPidLineage:
                     self.refused_keys.add(f"boot:{event.host}")
                     self._refused("host")
                 return
-            insort(boots, ts)
+            if ts not in boots:
+                boots.append(ts)
+                boots.sort()
             return
         pid = event.get("process.pid")
         if not isinstance(pid, int) or isinstance(pid, bool):
             return
-        if event.family == "process_exec":
-            kind = "exec"
-        elif event.family == "process_termination":
-            kind = "term"
-        else:
-            return
-        serial, domain = exec_order(event)
-        entry = (ts, serial if serial is not None else -1, repr(domain), kind,
-                 str(event.get("process.executable_key") or ""), event.id,
-                 event.raw[0].native_id if event.raw else "", serial, domain)
+        order = _order_of(event)
         key = (event.host, pid)
-        entries = self.procs.get(key)
-        if entries is None:
-            if not self.procs.put(key, [entry]):
+        state = self.procs.get(key)
+        if state is None:
+            state = _PidState()
+            if not self.procs.put(key, state):
                 self.refused_keys.add(f"pid:{event.host}:{pid}")
                 self._refused("process")
-            return
-        insort(entries, entry)
+                return
+        if event.family == "process_exec":
+            if not state.has_exec or self._later(ts, order, state.exec_ts, state.exec_order):
+                state.exec_ts, state.exec_order = ts, order
+                state.exec_image = str(event.get("process.executable_key") or "")
+                state.exec_event_id = event.id
+                state.exec_native_id = event.raw[0].native_id if event.raw else ""
+                state.exec_event = event
+                state.has_exec = True
+        elif event.family == "process_termination" and (
+                not state.has_term or self._later(ts, order, state.term_ts, state.term_order)):
+            state.term_ts, state.term_order = ts, order
+            state.has_term = True
 
-    def parent(self, child: TypedEvent) -> tuple[ParentImage | None, str]:
-        """The parent's image from its own creation record, or (None, why it is undecided)."""
+    @staticmethod
+    def _later(ts_a, order_a, ts_b, order_b) -> bool:
+        cmp = _before(order_b, ts_b, order_a, ts_a)
+        # keep the newer when strictly later, or when same instant but unorderable we prefer the newcomer
+        return cmp is None or cmp < 0
+
+    def parent(self, child: TypedEvent) -> ParentImage:
+        """The parent image from its own creation record, or raise Undecided (never a benign/no-match)."""
         ppid = child.get("process.ppid")
         if not isinstance(ppid, int) or isinstance(ppid, bool):
             raise Undecided("parent_pid", "the parent process id is not recorded")
         if ppid in (0, 4):
-            return ParentImage("system", "system", "", "", 0.0, "pid"), ""
+            return ParentImage("system", "system", "", "", 0.0, "pid")
         key = (child.host, ppid)
         if f"pid:{child.host}:{ppid}" in self.refused_keys or (self.incomplete and key not in self.procs):
-            raise Undecided("parent_refused", "the process-history store refused the parent's history")
-        entries = self.procs.get(key) or []
+            raise Undecided("parent_refused", "the shared process-history store refused the parent's history")
+        state = self.procs.get(key)
         child_ts = child.ts.timestamp()
-        child_order = exec_order(child)
-        for entry in reversed(entries):
-            ts, kind, image, event_id, native_id = entry[0], entry[3], entry[4], entry[5], entry[6]
-            if event_id == child.id:
-                continue
-            if ts > child_ts:
-                continue
-            if ts == child_ts:
-                relative = _same_instant_order((entry[7], entry[8]), child_order)
-                if relative is None:
-                    raise Undecided("parent_order", "the parent's record and the child's share an instant and cannot "
-                                                    "be ordered outside one record-id sequence")
-                if relative >= 0:
-                    continue
-            if kind == "term":
-                raise Undecided("parent_ended", "the latest recorded process with the parent's id ended before the "
-                                                "child was created, so the parent's creation is not recorded")
-            boots = self.boots.get(child.host) or []
-            if any(ts < boot <= child_ts for boot in boots):
-                raise Undecided("parent_boot", "a boot of the host lies between the parent id's latest recorded "
-                                               "creation and the child")
-            name, why = image_name(image)
-            if name is None:
-                raise Undecided("parent_image", f"the parent's image cannot be identified: {why}")
-            return ParentImage(image, name, event_id, native_id, ts, "pid"), ""
-        raise Undecided("parent_unrecorded", "no creation of the parent's process id is recorded on this host before "
-                                             "the child (the parent may have started before the hunt window)")
+        child_order = _order_of(child)
+        if state is None or not state.has_exec:
+            raise Undecided("parent_unrecorded", "no creation of the parent's process id is recorded on this host at "
+                                                 "or before the child (the parent may predate the hunt window)")
+        rel = _before(state.exec_order, state.exec_ts, child_order, child_ts)
+        if rel is None:
+            raise Undecided("parent_order", "the parent's creation record and the child share an instant and cannot "
+                                            "be ordered outside one computer/channel record-id sequence")
+        if rel > 0:
+            raise Undecided("parent_unrecorded", "the only recorded creation of the parent's process id is after the "
+                                                 "child, so the parent's own creation is not recorded")
+        if state.has_term:
+            term_vs_exec = _before(state.exec_order, state.exec_ts, state.term_order, state.term_ts)
+            term_vs_child = _before(state.term_order, state.term_ts, child_order, child_ts)
+            if term_vs_exec is not None and term_vs_exec < 0 and term_vs_child is not None and term_vs_child <= 0:
+                raise Undecided("parent_ended", "the process that held the parent's id terminated after its latest "
+                                                "recorded creation and before the child, so no live parent is "
+                                                "recorded")
+        boots = self.boots.get(child.host) or []
+        if any(state.exec_ts < boot <= child_ts for boot in boots):
+            raise Undecided("parent_boot", "a boot of the host lies between the parent id's latest recorded creation "
+                                           "and the child, so the recorded creation is from an earlier boot")
+        name, why = image_name(state.exec_image)
+        if name is None:
+            raise Undecided("parent_image", f"the parent's image cannot be identified: {why}")
+        return ParentImage(state.exec_image, name, state.exec_event_id, state.exec_native_id, state.exec_ts, "pid",
+                           state.exec_event)
+
+
+def parent_predicate(event: TypedEvent, parent: ParentImage) -> tuple[list[PredicateField], list[TypedEvent], str]:
+    """Predicate fields for a resolved parent, the records to cite, and how the parent was resolved. When the
+    parent came from the child's own Sysmon field, that field is the predicate. When it came from the parent's own
+    4688 creation record (pid resolution), the parent image is carried as a predicate field whose origin points at
+    that record, and the record itself is cited."""
+    predicate = [typed_field(event, "process.executable_key")]
+    context: list[TypedEvent] = []
+    if parent.resolved_by == "record":
+        predicate.append(typed_field(event, "process.parent.executable_key"))
+        return predicate, context, "its own image field"
+    origin = (f"{parent.native_id}:lineage:process.parent.executable_key" if parent.native_id
+              else f"{parent.event_id}:lineage:process.parent.executable_key")
+    predicate.append(PredicateField(field="process.parent.executable_key", value=parent.key, origin=origin))
+    if parent.event is not None:
+        context.append(parent.event)
+    return predicate, context, "its own creation record, matched by process id"
 
 
 def resolve_parent(event: TypedEvent, lineage: WindowsPidLineage | None) -> ParentImage:
-    """The parent image of a process-creation record: its own typed field, else the pid lineage."""
+    """The parent image of a process-creation record: its own typed field, else the shared pid lineage."""
     key = event.get("process.parent.executable_key")
     if key not in (None, ""):
         name, why = image_name(key)
@@ -253,16 +324,29 @@ def resolve_parent(event: TypedEvent, lineage: WindowsPidLineage | None) -> Pare
         return ParentImage(str(key), name, event.id, "", event.ts.timestamp(), "record")
     if lineage is None:
         raise Undecided("parent_image", "the parent's image is not recorded")
-    found, _why = lineage.parent(event)
-    assert found is not None
-    return found
+    return lineage.parent(event)
+
+
+def share_windows_lineage(pack: list) -> None:
+    """Give every parent-resolving Windows rule in a pack one shared `WindowsPidLineage` (observed once, held once)."""
+    holders = [pb for pb in pack if getattr(pb, "lineage", None) is not None
+               and isinstance(pb.lineage, WindowsPidLineage)]
+    if len(holders) < 2:
+        return
+    shared = WindowsPidLineage(holders[0], holders)
+    for pb in holders:
+        pb.lineage = shared
 
 
 # ---- the rule base ----------------------------------------------------------------------------------------------
 
 @dataclass
 class Hit:
-    """One behaviour a record shows: its wording, lane and severity, and the predicate values it rests on."""
+    """One behaviour a record shows: its wording, lane and severity, and the predicate values it rests on.
+
+    `content` is the distinguishing payload used (with the command line, image and parent) to key the fleet group,
+    so two different payloads are never merged. `common` is the wording a fleet finding uses for what members share.
+    """
     behavior: str
     text: str
     lane: str
@@ -270,57 +354,38 @@ class Hit:
     attack: tuple[str, ...]
     predicate: list[PredicateField]
     confidence: str = "high"
-    shape: str | None = None
+    content: str = ""
+    common: str = ""
     notes: tuple[str, ...] = ()
     context: list[TypedEvent] = field(default_factory=list)
 
 
+@dataclass
 class _Group:
-    """One repeating shape: how it was first described, its records beyond the immediate ones, and what they cite."""
-
-    __slots__ = (
-        "attack",
-        "behavior",
-        "ends",
-        "examples",
-        "folded",
-        "folded_hosts",
-        "immediate",
-        "lane",
-        "predicate",
-        "sample_hosts",
-        "severity",
-        "text",
-    )
-
-    def __init__(self, hit: Hit):
-        self.behavior = hit.behavior
-        self.text = clip(hit.text)
-        self.lane = hit.lane
-        self.severity = hit.severity
-        self.attack = hit.attack
-        self.immediate = 0
-        self.folded = 0
-        self.folded_hosts = 0
-        self.examples = HeldExamples(8)
-        self.ends = Ends()
-        self.sample_hosts: list[str] = []
-        self.predicate: list[tuple] = []
+    """One repeating shape across the fleet: what its members share, counts, member hosts and cited records."""
+    behavior: str
+    common: str
+    lane: str
+    severity: str
+    attack: tuple[str, ...]
+    predicate: list[tuple]
+    hosts: int = 0
+    records: int = 0
+    repeats: int = 0
+    emitted: bool = False
+    sample_hosts: list = field(default_factory=list)
+    ends: Ends = field(default_factory=Ends)
+    examples: HeldExamples = field(default_factory=lambda: HeldExamples(8))
 
     def __getstate__(self):
-        return {name: getattr(self, name) for name in self.__slots__}
+        return self.__dict__
 
     def __setstate__(self, state):
-        for name, value in state.items():
-            setattr(self, name, value)
-
-
-def _normalized(text: object) -> str:
-    return " ".join(str(text or "").casefold().split())
+        self.__dict__.update(state)
 
 
 class WindowsProcessRule(Playbook):
-    """A rule judged on one Windows process-creation record at a time (see the module notes)."""
+    """A positive-only rule judged on one Windows process-creation record at a time (see the module notes)."""
 
     os_families = ("windows",)
     families: ClassVar[tuple[str, ...]] = ("process_exec",)
@@ -329,21 +394,35 @@ class WindowsProcessRule(Playbook):
     state_slice = "strong"
     claim_type = "observed_action"
     windows_event_classes = (SYSMON_PROCESS_CREATE, SECURITY_PROCESS_CREATE)
+    assures_negative = False
+    positive_only_reason = ("ROMULUS reports what it finds and never asserts that a behaviour did not occur: absence "
+                            "cannot be confirmed from process-creation records, and the same behaviour can be reached "
+                            "by images, binaries and arguments this rule does not enumerate")
     reads_command_line: ClassVar[bool] = True
     uses_parent: ClassVar[bool] = False
-    IMMEDIATE_HOSTS: ClassVar[int] = 3
     HOT = HOT_COUNT
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        # A parent-resolving rule must read process terminations and boots so the pid lineage sees its fences; the
+        # sweep retrieves them because they are in `families`, and they are context (a partition of only fences is
+        # no evaluation of the rule) and never in `windows_event_classes`.
+        if getattr(cls, "uses_parent", False):
+            fences = tuple(f for f in FENCE_FAMILIES if f not in cls.families)
+            if fences:
+                cls.families = tuple(cls.families) + fences
+            cls.context_families = tuple(dict.fromkeys(tuple(cls.context_families) + FENCE_FAMILIES))
 
     def __init__(self):
         super().__init__()
-        self.groups = KeyedStore(self, "fleet_groups", self.HOT)
-        self.shape_hosts = KeyedStore(self, "fleet_shape_hosts", self.HOT)
-        self.order = SpillList(self, "fleet_order", self.HOT, refusable=False)
+        self.groups: KeyedStore = KeyedStore(self, "fleet_groups", self.HOT)
+        self.members_store: KeyedStore = KeyedStore(self, "fleet_members", self.HOT)   # (shape, host) -> [count]
+        self.order: SpillList = SpillList(self, "fleet_order", self.HOT, refusable=False)
         self.bounds = BoundStage()
         self._pending: list[TypedEvent] = []
         self._fresh: list[HeldExamples] = []
         self._seen = RecentIds()
-        self.lineage = WindowsPidLineage(self) if self.uses_parent else None
+        self.lineage: WindowsPidLineage | None = WindowsPidLineage(self) if self.uses_parent else None
         self.undecided: dict[str, int] = {}
         self.load = lambda ids: []
 
@@ -364,14 +443,14 @@ class WindowsProcessRule(Playbook):
 
     def _trim(self) -> None:
         self.groups.trim()
-        self.shape_hosts.trim()
+        self.members_store.trim()
         self.order.trim()
         if self.lineage is not None:
             self.lineage.trim()
 
     def release_state(self) -> None:
         self.groups.clear()
-        self.shape_hosts.clear()
+        self.members_store.clear()
         self.order.clear()
         self.bounds.clear()
         if self.lineage is not None:
@@ -388,7 +467,8 @@ class WindowsProcessRule(Playbook):
         rank = {"system_state": 0, "process_termination": 1, "process_exec": 2}
         fresh = [event for event in events if event.family in self.families and event.id not in self._seen]
         for event in sorted(fresh, key=lambda item: (item.ts, rank.get(item.family, 3),
-                                                     exec_order(item)[0] or 0, item.id)):
+                                                     exec_order(item)[0] if exec_order(item)[0] is not None else -1,
+                                                     item.id)):
             self._seen.add(event.id)
             if not self._events_pre_scoped:
                 if not self.event_in_os_scope(event):
@@ -419,49 +499,66 @@ class WindowsProcessRule(Playbook):
         return out
 
     def _shape(self, event: TypedEvent, hit: Hit) -> str:
-        text = hit.shape if hit.shape is not None else _normalized(event.get("process.command_line"))
-        material = f"{self.id}|{hit.behavior}|{image_name(event.get('process.executable_key'))[0]}|{text}"
+        image = image_name(event.get("process.executable_key"))[0]
+        parent = ""
+        if self.uses_parent:
+            parent_key = event.get("process.parent.executable_key")
+            parent = image_name(parent_key)[0] or _normalized(parent_key) if parent_key else ""
+        command = _normalized(event.get("process.command_line"))
+        material = f"{self.id}|{hit.behavior}|{image}|{parent}|{command}|{hit.content}"
         return hashlib.sha256(material.encode()).hexdigest()[:32]
 
     def _fold(self, event: TypedEvent, hit: Hit, out: list[Match]) -> None:
         shape = self._shape(event, hit)
-        host_key = (shape, event.host)
-        new_host = False
-        if self.shape_hosts.get(host_key) is None:
-            new_host = True
-            if not self.shape_hosts.put(host_key, 1):
-                self.note_limit("fleet_hosts", "the per-host membership of repeating shapes took no new host; such "
-                                               "records are published on their own")
+        member_key = (shape, event.host)
+        member = self.members_store.get(member_key)
+        if member is None:
+            if not self.members_store.put(member_key, [1]):
+                self.note_limit("fleet_members", "the per-(shape, host) membership store took no new host; this "
+                                                 "record is published on its own")
                 add_unheld(out, alone(self.record_match(event, hit), self, event))
                 return
+            # first record of this (shape, host): publish immediately at its own lane, with its own content
+            out.append(self.record_match(event, hit))
+            self._note_group(shape, hit, event, new_host=True)
+            return
+        # a repeat on a host already reported for this shape: merge
+        member[0] += 1
+        self.members_store.put(member_key, member)
+        group = self._note_group(shape, hit, event, new_host=False)
+        if group is not None and not group.emitted:
+            group.emitted = True
+            merged = self._fleet_match(shape, group)
+            if merged is not None:
+                out.append(merged)
+
+    def _note_group(self, shape: str, hit: Hit, event: TypedEvent, *, new_host: bool) -> _Group | None:
         group = self.groups.get(shape)
         if group is None:
-            group = _Group(hit)
+            group = _Group(hit.behavior, hit.common or hit.text, hit.lane, hit.severity, hit.attack,
+                           [(p.field, p.value, p.origin) for p in hit.predicate])
             if not self.groups.put(shape, group):
-                self.note_limit("fleet_groups", "the repeating-shape groups took no new shape; such records are "
+                self.note_limit("fleet_groups", "the repeating-shape groups took no new shape; records of it are "
                                                 "published on their own, not merged")
-                add_unheld(out, alone(self.record_match(event, hit), self, event))
-                return
+                return None
             self.order.append(shape)
-        if new_host and group.immediate < self.IMMEDIATE_HOSTS:
-            group.immediate += 1
-            out.append(self.record_match(event, hit))
-            return
-        group.folded += 1
+        group.records += 1
         if new_host:
-            group.folded_hosts += 1
-            if len(group.sample_hosts) < 10:
+            group.hosts += 1
+            if len(group.sample_hosts) < FLEET_HOST_SAMPLE:
                 group.sample_hosts.append(event.host)
+        else:
+            group.repeats += 1
         if _LANE_RANK[hit.lane] < _LANE_RANK[group.lane]:
             group.lane = hit.lane
         if _SEVERITY_RANK[hit.severity] < _SEVERITY_RANK[group.severity]:
             group.severity = hit.severity
-        if not group.predicate:
-            group.predicate = [(p.field, p.value, p.origin) for p in hit.predicate]
         self.bounds.offer_at(shape, group.ends, event)
         if group.examples.offer(event):
             self._pending.append(event)
             self._fresh.append(group.examples)
+        self.groups.put(shape, group)
+        return group
 
     def record_match(self, event: TypedEvent, hit: Hit) -> Match:
         command = event.get("process.command_line")
@@ -473,38 +570,44 @@ class WindowsProcessRule(Playbook):
                      hit.severity, hit.lane, hit.confidence, event.entities(), notes,
                      context_ids={item.id for item in context})
 
+    def _fleet_match(self, shape: str, group: _Group) -> Match | None:
+        try:
+            examples = group.examples.events(self.load)
+            cited, missing, context = cite_group(self.load, examples, self.bounds, group.ends)
+        except LookupError as exc:
+            self.note_limit("fleet_citations", f"a repeating shape's held records were not loadable ({exc}); its "
+                                               f"fleet finding is not published")
+            return None
+        if not cited:
+            return None
+        first = datetime.fromtimestamp(group.ends.first[0], UTC).isoformat() if group.ends.first else "?"
+        last = datetime.fromtimestamp(group.ends.last[0], UTC).isoformat() if group.ends.last else "?"
+        more = group.hosts - len(group.sample_hosts)
+        host_text = ", ".join(group.sample_hosts) + (f" and {more} more host(s)" if more > 0 else "")
+        claim = (f"{group.common} recurred as the same shape in {group.records} process-creation record(s) across "
+                 f"{group.hosts} host(s) ({group.repeats} of them repeats on a host already reported), "
+                 f"{first} – {last}. Hosts: {host_text}. This finding states only what the records share; each "
+                 f"record keeps its own finding and remains retrievable. Sysmon and Security can each record the "
+                 f"same process, so records are not processes."
+                 + cited_phrase(len(cited), group.records, not missing)
+                 + bound_note(missing, group.ends))
+        anchor = next((item for item in cited if item.id not in context), cited[0])
+        predicate = [PredicateField(field=name, value=value, origin=origin)
+                     for name, value, origin in group.predicate]
+        return Match(self.id, claim, "aggregate_observation", cited, predicate, anchor.ts, group.severity,
+                     group.lane, "high", anchor.entities(),
+                     [f"ATT&CK context (not proof): {', '.join(group.attack)}",
+                      ("a repeating shape is merged into one finding at the lane of its records; new hosts keep "
+                       "their own immediate findings")],
+                     group_key=f"{self.id}|fleet|{shape}", context_ids=context)
+
     def finalize(self) -> list[Match]:
         out: list[Match] = []
         for shape in self.order:
             group = self.groups.peek(shape)
-            if group is None or not group.folded:
+            if group is None or group.repeats == 0:
                 continue
-            try:
-                examples = group.examples.events(self.load)
-                cited, missing, context = cite_group(self.load, examples, self.bounds, group.ends)
-            except LookupError as exc:
-                self.note_limit("fleet_citations", f"a repeating shape's held records were not loadable ({exc}); "
-                                                   f"its fleet finding is not published")
-                continue
-            if not cited:
-                continue
-            first = datetime.fromtimestamp(group.ends.first[0], UTC).isoformat() if group.ends.first else "?"
-            last = datetime.fromtimestamp(group.ends.last[0], UTC).isoformat() if group.ends.last else "?"
-            hosts = ", ".join(group.sample_hosts) + (" and others" if group.folded_hosts > len(group.sample_hosts)
-                                                     else "")
-            claim = (f"{group.text}: the same shape recurred in {group.folded} further process-creation record(s) "
-                     f"({first} – {last}), {group.folded_hosts} of them on hosts not reported before"
-                     + (f" ({hosts})" if hosts else "")
-                     + f", after its first {group.immediate} host(s) were reported record by record. Sysmon and "
-                       f"Security can each record the same process, so records are not processes."
-                     + cited_phrase(len(cited), group.folded, not missing)
-                     + bound_note(missing, group.ends))
-            anchor = next((item for item in cited if item.id not in context), cited[0])
-            predicate = [PredicateField(field=name, value=value, origin=origin)
-                         for name, value, origin in group.predicate]
-            out.append(Match(self.id, claim, "aggregate_observation", cited, predicate, anchor.ts, group.severity,
-                             group.lane, "high", anchor.entities(),
-                             [f"ATT&CK context (not proof): {', '.join(group.attack)}",
-                              "a repeating shape is merged into one finding at the lane of its records"],
-                             group_key=f"{self.id}|fleet|{shape}", context_ids=context))
+            merged = self._fleet_match(shape, group)
+            if merged is not None:
+                out.append(merged)
         return out

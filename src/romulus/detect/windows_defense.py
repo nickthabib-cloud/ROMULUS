@@ -17,10 +17,14 @@ from typing import ClassVar
 
 from romulus.detect.windows_cmdline import (
     parse_powershell,
+    parse_reg,
+    ps_bool,
     ps_parameter_matches,
+    ps_switch_argument,
     ps_tokens,
     split_argv,
     switch_name,
+    switch_value,
 )
 from romulus.detect.windows_common import (
     Hit,
@@ -38,6 +42,30 @@ _SECURITY_SERVICES = {
     "mcafee", "savservice", "ekrn", "sepmasterservice", "xagt",
 }
 
+# Set-MpPreference/Add-MpPreference Disable* switches: (canonical, smallest unambiguous prefix, documented aliases).
+# https://learn.microsoft.com/powershell/module/defender/set-mppreference
+_DEFENDER_DISABLE = (
+    ("disablerealtimemonitoring", "disabler", ("drtm",)),
+    ("disablebehaviormonitoring", "disableb", ("dbm",)),
+    ("disableioavprotection", "disablei", ("dioavp",)),
+    ("disablescriptscanning", "disables", ("dscrptsc",)),
+    ("disablearchivescanning", "disablea", ("darchsc",)),
+    ("disableblockatfirstseen", "disableblock", ("dbafs",)),
+    ("disableremovabledrivescanning", "disablerem", ()),
+    ("disableintrusionpreventionsystem", "disablein", ("dips",)),
+)
+_DEFENDER_EXCLUSION = (
+    ("exclusionpath", "exclusionpa", ()),
+    ("exclusionprocess", "exclusionpr", ()),
+    ("exclusionextension", "exclusione", ()),
+    ("exclusionipaddress", "exclusioni", ()),
+)
+# Defender policy/registry paths (casefolded), compared as a path contains.
+_DEFENDER_KEY_MARK = ("windows defender", "windows advanced threat protection")
+_DEFENDER_DISABLE_VALUES = frozenset({"disableantispyware", "disablerealtimemonitoring", "disableantivirus",
+                                      "disablebehaviormonitoring", "disableioavprotection",
+                                      "disableonaccessprotection", "disablescanonrealtimeenable"})
+
 
 def _argv(event: TypedEvent) -> list[str]:
     argv = split_argv(str(event.get("process.command_line")))
@@ -46,13 +74,20 @@ def _argv(event: TypedEvent) -> list[str]:
     return argv
 
 
-def _names_of(argv: list[str]) -> set[str]:
-    return {switch_name(token) for token in argv if token[:1] in "-/–—―"}
+def _reg_bool(data: object) -> bool | None:
+    """A REG_DWORD value's truthiness: non-zero -> True, zero -> False, None when it is not a plain integer."""
+    text = str(data or "").strip().casefold()
+    if not text:
+        return None
+    try:
+        return int(text, 0) != 0
+    except ValueError:
+        return ps_bool(text)
 
 
 class InhibitRecovery(WindowsProcessRule):
     id = "win.inhibit_system_recovery"
-    version = "1"
+    version = "2"
     title = "shadow copies, backups or recovery settings were deleted or disabled"
     assures_negative = False
     positive_only_reason = ("the delete/disable request is read from argv; a window without a match proves nothing, "
@@ -80,13 +115,24 @@ class InhibitRecovery(WindowsProcessRule):
                      "records",
     }
 
+    # The smallest VSS allocation is ~320 MB; a resize of shadow storage below it forces Windows to delete the
+    # existing shadow copies, so a tiny maxsize is a recovery-inhibition shape (a genuine resize uses GB or %).
+    _MIN_SHADOW_STORAGE_BYTES = 320 * 1024 * 1024
+
     def judge(self, event: TypedEvent) -> list[Hit]:
         name = image_name(event.get("process.executable_key"))[0]
         argv = _argv(event)
         lowered = [token.casefold() for token in argv[1:]]
         if name == "vssadmin.exe" and "delete" in lowered and "shadows" in lowered:
             return [self._hit(event, argv, "vssadmin delete shadows", "vssadmin")]
-        if name == "wmic.exe" and "shadowcopy" in lowered and "delete" in lowered:
+        if name == "vssadmin.exe" and "resize" in lowered and "shadowstorage" in lowered:
+            size = self._maxsize_bytes(argv[1:])
+            if size is not None and size < self._MIN_SHADOW_STORAGE_BYTES:
+                return [self._hit(event, argv, f"vssadmin resize shadowstorage to {size:,} bytes (below the minimum "
+                                               f"allocation, which deletes existing shadow copies)", "vssadmin-resize")]
+            return []
+        if name == "wmic.exe" and any(token.casefold() in {"shadowcopy", "win32_shadowcopy"} for token in argv[1:]) \
+                and "delete" in lowered:
             return [self._hit(event, argv, "wmic shadowcopy delete", "wmic")]
         if name == "wbadmin.exe" and "delete" in lowered and (
                 "catalog" in lowered or "systemstatebackup" in lowered or "backup" in lowered):
@@ -97,10 +143,35 @@ class InhibitRecovery(WindowsProcessRule):
             return [self._hit(event, argv, "bcdedit disabling recovery", "bcdedit")]
         return []
 
+    @staticmethod
+    def _maxsize_bytes(args: list[str]) -> int | None:
+        """The /maxsize= value in bytes, or None (UNBOUNDED, a percentage, or unparseable: not a deletion shape)."""
+        raw = None
+        for token in args:
+            if token.casefold().startswith(("/maxsize", "-maxsize")):
+                raw = switch_value(token)
+                break
+        if raw is None:
+            return None
+        text = raw.strip().strip('"').casefold()
+        if text in {"unbounded", ""} or text.endswith("%"):
+            return None
+        units = {"kb": 1024, "mb": 1024**2, "gb": 1024**3, "tb": 1024**4}
+        multiplier = 1
+        for suffix, factor in units.items():
+            if text.endswith(suffix):
+                multiplier = factor
+                text = text[:-2]
+                break
+        try:
+            return int(float(text) * multiplier)
+        except ValueError:
+            return None
+
     def _hit(self, event: TypedEvent, argv: list[str], label: str, shape: str) -> Hit:
         return Hit("inhibit_recovery", f"{label} was run (system recovery was being removed or disabled)", self.lane,
                    self.severity, self.attack, [parsed_field(event, clip(" ".join(argv[1:])))],
-                   shape=f"recovery:{shape}")
+                   content=f"recovery:{shape}")
 
 
 class PowerShellShadowCopyDeletion(WindowsProcessRule):
@@ -145,13 +216,13 @@ class PowerShellShadowCopyDeletion(WindowsProcessRule):
         if shadow and deletes:
             value = parsed_field(event, clip(call.script))
             return [Hit("ps_shadow_delete", "a PowerShell script deleted shadow copies", self.lane, self.severity,
-                        self.attack, [value], shape="recovery:ps-shadow")]
+                        self.attack, [value], content="recovery:ps-shadow")]
         return []
 
 
 class DefenderImpairment(WindowsProcessRule):
     id = "win.defender_impairment"
-    version = "1"
+    version = "2"
     title = "Microsoft Defender was disabled or given an exclusion"
     assures_negative = False
     positive_only_reason = ("the preference change is read from PowerShell argv/script or reg.exe argv; a window "
@@ -193,38 +264,83 @@ class DefenderImpairment(WindowsProcessRule):
         if call.script is None:
             return []
         tokens = ps_tokens(call.script)
-        words = [token for token in tokens if token.kind == "word"]
-        if not any(token.text in {"set-mppreference", "add-mppreference"} for token in words):
+        words = {token.text for token in tokens if token.kind == "word"}
+        if words & {"set-mppreference", "add-mppreference"}:
+            return self._mppreference(event, call.script, tokens)
+        if words & {"set-itemproperty", "new-itemproperty"}:
+            return self._itemproperty(event, call.script, tokens)
+        return []
+
+    def _mppreference(self, event: TypedEvent, script: str, tokens: list) -> list[Hit]:
+        what = None
+        for idx, token in enumerate(tokens):
+            if token.kind != "parameter":
+                continue
+            if any(ps_parameter_matches(token, canon, small, aliases)
+                   for canon, small, aliases in _DEFENDER_EXCLUSION):
+                what = "an exclusion"
+                break
+            for canon, small, aliases in _DEFENDER_DISABLE:
+                if ps_parameter_matches(token, canon, small, aliases):
+                    value, _inline = ps_switch_argument(tokens, idx)
+                    if value is True:                       # $false / 0 re-enables: never claimed as disabling
+                        what = "real-time protection or a scanning component disabled"
+                    break
+            if what is not None:
+                break
+        if what is None:
             return []
-        params = [token for token in tokens if token.kind == "parameter"]
-        exclusion = any(ps_parameter_matches(token, "exclusionpath", "exclusionp")
-                        or ps_parameter_matches(token, "exclusionprocess", "exclusionpr")
-                        or ps_parameter_matches(token, "exclusionextension", "exclusione") for token in params)
-        disable = any(ps_parameter_matches(token, "disablerealtimemonitoring", "disabler")
-                      or ps_parameter_matches(token, "disableioavprotection", "disableioav")
-                      or ps_parameter_matches(token, "disablebehaviormonitoring", "disableb") for token in params)
-        if not (exclusion or disable):
-            return []
-        what = "an exclusion" if exclusion else "real-time protection disabled"
         return [Hit("defender_impairment", f"a Defender preference command set {what}", self.lane, self.severity,
-                    self.attack, [parsed_field(event, clip(call.script))],
-                    shape=f"defender:{'exclusion' if exclusion else 'disable'}")]
+                    self.attack, [parsed_field(event, clip(script))],
+                    content=f"defender:{'exclusion' if 'exclusion' in what else 'disable'}")]
+
+    def _itemproperty(self, event: TypedEvent, script: str, tokens: list) -> list[Hit]:
+        strings = [token.text for token in tokens if token.kind in {"string", "word"}]
+        if not any(mark in s for s in strings for mark in _DEFENDER_KEY_MARK):
+            return []
+        is_exclusion = any("exclusions" in s for s in strings)
+        names_disable = any(name in s for s in strings for name in _DEFENDER_DISABLE_VALUES)
+        if not (is_exclusion or names_disable):
+            return []
+        what = "an exclusion" if is_exclusion else "a Defender policy value"
+        return [Hit("defender_impairment",
+                    f"a PowerShell registry write ({'Set' if 'set-itemproperty' in strings else 'New'}-ItemProperty) "
+                    f"set {what} under a Windows Defender key", self.lane, self.severity, self.attack,
+                    [parsed_field(event, clip(script))],
+                    content=f"defender:ps-reg:{'exclusion' if is_exclusion else 'disable'}")]
 
     def _reg(self, event: TypedEvent, argv: list[str]) -> list[Hit]:
-        joined = " ".join(argv[1:]).casefold()
-        if "windows defender" not in joined and "windows advanced threat protection" not in joined:
+        reg = parse_reg(argv)
+        if reg is None or not any(mark in reg.key for mark in _DEFENDER_KEY_MARK):
             return []
-        if "exclusions" in joined or "disableantispyware" in joined or "disablerealtimemonitoring" in joined:
-            what = "an exclusion" if "exclusions" in joined else "protection disabled"
-            return [Hit("defender_impairment", f"reg.exe wrote a Windows Defender policy value ({what})", self.lane,
-                        self.severity, self.attack, [parsed_field(event, clip(" ".join(argv[1:])))],
-                        shape=f"defender:reg:{'exclusion' if 'exclusions' in joined else 'disable'}")]
+        if reg.verb in {"query", "export", "save", "copy"}:
+            return []                                        # reading or exporting is not a change
+        if reg.verb in {"import", "restore", "load"}:
+            return [Hit("defender_impairment",
+                        f"reg {reg.verb} applied a registry file ({reg.import_file or 'unnamed'}) touching a Windows "
+                        f"Defender key; its contents are not in the command line", "lead", "medium", self.attack,
+                        [parsed_field(event, clip(" ".join(argv[1:])))], content="defender:reg:import")]
+        if reg.verb != "add":
+            return []
+        if "exclusions" in reg.key:
+            return [self._reg_hit(event, argv, "an exclusion", "exclusion")]
+        value = (reg.value_name or "").strip().casefold()
+        if value in _DEFENDER_DISABLE_VALUES:
+            state = _reg_bool(reg.data)
+            if state is True:                               # /d 0 re-enables: never claimed as disabling
+                return [self._reg_hit(event, argv, f"the Defender policy value '{reg.value_name}' to disabled",
+                                      "disable")]
         return []
+
+    def _reg_hit(self, event: TypedEvent, argv: list[str], what: str, shape: str) -> Hit:
+        return Hit("defender_impairment", f"reg.exe set {what} under a Windows Defender policy key", self.lane,
+                   self.severity, self.attack, [parsed_field(event, clip(" ".join(argv[1:])))],
+                   content=f"defender:reg:{shape}")
 
 
 class HostFirewallDisable(WindowsProcessRule):
     id = "win.host_firewall_disable"
-    version = "1"
+    version = "2"
     title = "the Windows host firewall was turned off"
     assures_negative = False
     positive_only_reason = ("the firewall state change is read from argv; a window without a match proves nothing, "
@@ -255,26 +371,26 @@ class HostFirewallDisable(WindowsProcessRule):
                 ("advfirewall" in lowered and "state" in lowered and "off" in lowered)
                 or ("firewall" in lowered and "opmode" in lowered and "disable" in lowered)):
             return [Hit("firewall_disable", "netsh was run to turn the host firewall off", self.lane, self.severity,
-                        self.attack, [parsed_field(event, clip(" ".join(argv[1:])))], shape="firewall:netsh")]
+                        self.attack, [parsed_field(event, clip(" ".join(argv[1:])))], content="firewall:netsh")]
         if name in {"powershell.exe", "pwsh.exe"}:
             call = parse_powershell(argv[1:])
             if call.script is not None:
                 tokens = ps_tokens(call.script)
                 words = {token.text for token in tokens if token.kind == "word"}
-                params = [token for token in tokens if token.kind == "parameter"]
-                values = {token.text for token in tokens if token.kind in {"word", "string"}}
-                if "set-netfirewallprofile" in words and any(
-                        ps_parameter_matches(token, "enabled", "en") for token in params) and (
-                        "false" in values or "$false" in {token.text for token in tokens if token.kind == "variable"}):
-                    return [Hit("firewall_disable", "Set-NetFirewallProfile was run with -Enabled False", self.lane,
-                                self.severity, self.attack, [parsed_field(event, clip(call.script))],
-                                shape="firewall:ps")]
+                if "set-netfirewallprofile" in words:
+                    for idx, token in enumerate(tokens):
+                        if token.kind == "parameter" and ps_parameter_matches(token, "enabled", "en"):
+                            value, _inline = ps_switch_argument(tokens, idx)
+                            if value is False:              # -Enabled False turns the profile off; True re-enables
+                                return [Hit("firewall_disable", "Set-NetFirewallProfile was run with -Enabled False",
+                                            self.lane, self.severity, self.attack,
+                                            [parsed_field(event, clip(call.script))], content="firewall:ps")]
         return []
 
 
 class SecurityServiceTampering(WindowsProcessRule):
     id = "win.security_service_tampering"
-    version = "1"
+    version = "2"
     title = "a security service or the Sysmon driver was stopped or reconfigured"
     assures_negative = False
     positive_only_reason = ("the service and verb are read from argv; a window without a match proves nothing, as a "
@@ -305,9 +421,13 @@ class SecurityServiceTampering(WindowsProcessRule):
     def judge(self, event: TypedEvent) -> list[Hit]:
         name = image_name(event.get("process.executable_key"))[0]
         argv = _argv(event)
-        lowered = [token.casefold() for token in argv[1:]]
-        if name in {"sc.exe"} and lowered[:1] and lowered[0] in {"stop", "config", "delete"}:
-            service = next((token.casefold() for token in argv[2:3]), "")
+        rest = argv[1:]
+        # sc may target a remote host: `sc \\host stop <svc>`. Drop a leading \\server operand.
+        if name == "sc.exe" and rest and rest[0].startswith("\\\\"):
+            rest = rest[1:]
+        lowered = [token.casefold() for token in rest]
+        if name == "sc.exe" and lowered[:1] and lowered[0] in {"stop", "config", "delete"}:
+            service = next((token.casefold() for token in rest[1:2]), "")
             if self._is_security(service):
                 return [self._hit(event, argv, f"sc {lowered[0]} on security service '{service}'", "sc")]
         if name in {"net.exe", "net1.exe"} and lowered[:1] == ["stop"]:
@@ -325,12 +445,12 @@ class SecurityServiceTampering(WindowsProcessRule):
 
     def _hit(self, event: TypedEvent, argv: list[str], label: str, shape: str) -> Hit:
         return Hit("security_service_tamper", f"{label} was run", self.lane, self.severity, self.attack,
-                   [parsed_field(event, clip(" ".join(argv[1:])))], shape=f"svc:{shape}")
+                   [parsed_field(event, clip(" ".join(argv[1:])))], content=f"svc:{shape}")
 
 
 class LogClearingByCommand(WindowsProcessRule):
     id = "win.log_clearing_command"
-    version = "1"
+    version = "2"
     title = "an event log or the audit policy was cleared by command"
     assures_negative = False
     positive_only_reason = ("the clear request is read from argv; a window without a match proves nothing, and logs "
@@ -364,29 +484,40 @@ class LogClearingByCommand(WindowsProcessRule):
         lowered = [token.casefold() for token in argv[1:]]
         if name == "wevtutil.exe" and lowered[:1] and lowered[0] in {"cl", "clear-log"}:
             return [self._hit(event, argv, "wevtutil cleared an event log", "wevtutil-cl")]
-        if name == "wevtutil.exe" and lowered[:1] and lowered[0] in {"sl", "set-log"} and (
-                "/e:false" in lowered or ("/e" in [self._flag(token) for token in argv[1:]])):
-            return [self._hit(event, argv, "wevtutil disabled an event-log channel", "wevtutil-sl")]
-        if name == "auditpol.exe" and ("/clear" in lowered or (
+        if name == "wevtutil.exe" and lowered[:1] and lowered[0] in {"sl", "set-log"}:
+            # /e:<value> and /enabled:<value> enable (true/1) or disable (false/0) the channel: fire only on false.
+            enabled = self._channel_enabled(argv[1:])
+            if enabled is False:
+                return [self._hit(event, argv, "wevtutil disabled an event-log channel", "wevtutil-sl")]
+            return []
+        if name == "auditpol.exe" and ("/clear" in lowered or "/remove" in lowered or (
                 "/set" in lowered and any("success:disable" in token.casefold()
                                           or "failure:disable" in token.casefold() for token in argv[1:]))):
-            return [self._hit(event, argv, "auditpol cleared or disabled auditing", "auditpol")]
+            return [self._hit(event, argv, "auditpol cleared, removed or disabled auditing", "auditpol")]
         if name in {"powershell.exe", "pwsh.exe"}:
             call = parse_powershell(argv[1:])
             if call.script is not None:
                 tokens = ps_tokens(call.script)
                 if any(token.kind == "word" and token.text == "clear-eventlog" for token in tokens):
                     return [Hit("log_clear", "a PowerShell script cleared an event log", self.lane, self.severity,
-                                self.attack, [parsed_field(event, clip(call.script))], shape="log:ps-clear")]
+                                self.attack, [parsed_field(event, clip(call.script))], content="log:ps-clear")]
         return []
 
     @staticmethod
-    def _flag(token: str) -> str:
-        return token.split(":", 1)[0].casefold() if token[:1] in "-/" else ""
+    def _channel_enabled(args: list[str]) -> bool | None:
+        """The value of `/e:` or `/enabled:` (true/false/1/0, case-insensitive, quoted), or None when absent or not a
+        boolean. `wevtutil sl <channel> /e:false` disables the channel; `/e:true` enables it and must not fire."""
+        for token in args:
+            if token[:1] not in "-/":
+                continue
+            flag = switch_name(token)
+            if flag in {"e", "enabled"}:
+                return ps_bool(switch_value(token))
+        return None
 
     def _hit(self, event: TypedEvent, argv: list[str], label: str, shape: str) -> Hit:
         return Hit("log_clear", f"{label}", self.lane, self.severity, self.attack,
-                   [parsed_field(event, clip(" ".join(argv[1:])))], shape=f"log:{shape}")
+                   [parsed_field(event, clip(" ".join(argv[1:])))], content=f"log:{shape}")
 
 
 WINDOWS_DEFENSE_PLAYBOOKS = [

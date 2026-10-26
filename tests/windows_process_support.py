@@ -70,4 +70,19 @@ def run(rule, events):
         rule.drain_staged()
         rule.drain_bounds()
     matches.extend(rule.finalize())
-    return matches
+    # A fleet finding is emitted when it first forms (during consume) and again at finalize with final counts; both
+    # carry the same group_key, and the candidate store keeps one per key. Mirror that: keep the last per non-empty
+    # group_key, and every per-record finding (empty group_key) as-is.
+    deduped: list = []
+    latest: dict = {}
+    for match in matches:
+        if not match.group_key:
+            deduped.append(match)
+            continue
+        key = (match.playbook_id, match.group_key)
+        if key in latest:
+            deduped[latest[key]] = match
+        else:
+            latest[key] = len(deduped)
+            deduped.append(match)
+    return deduped

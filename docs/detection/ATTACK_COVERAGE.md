@@ -27,14 +27,14 @@ A technique is covered only by a rule that explicitly declares that ATT&CK id.
 
 | Tactic | Name | Covered / total | Negative-capable | Positive-only | Context-only | Not covered |
 |---|---|---:|---:|---:|---:|---:|
-| TA0001 | Initial Access | 3 / 22 | 1 | 2 | 0 | 19 |
-| TA0002 | Execution | 20 / 66 | 6 | 14 | 0 | 46 |
+| TA0001 | Initial Access | 3 / 22 | 0 | 3 | 0 | 19 |
+| TA0002 | Execution | 20 / 66 | 0 | 20 | 0 | 46 |
 | TA0003 | Persistence | 19 / 113 | 0 | 19 | 0 | 94 |
 | TA0004 | Privilege Escalation | 19 / 96 | 0 | 16 | 3 | 77 |
 | TA0005 | Stealth | 25 / 151 | 0 | 24 | 1 | 126 |
 | TA0006 | Credential Access | 15 / 68 | 0 | 9 | 6 | 53 |
 | TA0007 | Discovery | 16 / 49 | 2 | 0 | 14 | 33 |
-| TA0008 | Lateral Movement | 7 / 23 | 2 | 2 | 3 | 16 |
+| TA0008 | Lateral Movement | 7 / 23 | 0 | 4 | 3 | 16 |
 | TA0009 | Collection | 2 / 41 | 0 | 0 | 2 | 39 |
 | TA0010 | Exfiltration | 5 / 20 | 2 | 3 | 0 | 15 |
 | TA0011 | Command and Control | 11 / 45 | 9 | 1 | 1 | 34 |
@@ -58,7 +58,7 @@ A technique is covered only by a rule that explicitly declares that ATT&CK id.
 | [`T1199`](https://attack.mitre.org/techniques/T1199/) | Trusted Relationship | — | none | — | — |
 | [`T1200`](https://attack.mitre.org/techniques/T1200/) | Hardware Additions | — | none | — | — |
 | [`T1566`](https://attack.mitre.org/techniques/T1566/) | Phishing | [`T1566.002`](https://attack.mitre.org/techniques/T1566/002/) Spearphishing Link — not covered<br>[`T1566.003`](https://attack.mitre.org/techniques/T1566/003/) Spearphishing via Service — not covered<br>[`T1566.004`](https://attack.mitre.org/techniques/T1566/004/) Spearphishing Voice — not covered<br>1 covered sub-technique(s) listed separately: [`T1566.001`](https://attack.mitre.org/techniques/T1566/001/) | none | — | — |
-| [`T1566.001`](https://attack.mitre.org/techniques/T1566/001/) | Spearphishing Attachment | sub-technique of [`T1566`](https://attack.mitre.org/techniques/T1566/) | negative-capable | [win.lure_app_spawns_code_runner](#rule-win-lure-app-spawns-code-runner) (negative-capable) | process_exec |
+| [`T1566.001`](https://attack.mitre.org/techniques/T1566/001/) | Spearphishing Attachment | sub-technique of [`T1566`](https://attack.mitre.org/techniques/T1566/) | positive-only | [win.lure_app_spawns_code_runner](#rule-win-lure-app-spawns-code-runner) (positive-only) | process_exec<br>process_termination<br>system_state |
 | [`T1659`](https://attack.mitre.org/techniques/T1659/) | Content Injection | — | none | — | — |
 | [`T1669`](https://attack.mitre.org/techniques/T1669/) | Wi-Fi Networks | — | none | — | — |
 
@@ -66,14 +66,14 @@ A technique is covered only by a rule that explicitly declares that ATT&CK id.
 
 | Technique | Name | Sub-techniques | Strength | Covering rules | Telemetry families |
 |---|---|---|---|---|---|
-| [`T1047`](https://attack.mitre.org/techniques/T1047/) | Windows Management Instrumentation | — | negative-capable | [win.remote_execution_child](#rule-win-remote-execution-child) (negative-capable) | process_exec |
+| [`T1047`](https://attack.mitre.org/techniques/T1047/) | Windows Management Instrumentation | — | positive-only | [win.remote_execution_child](#rule-win-remote-execution-child) (positive-only) | process_exec<br>process_termination<br>system_state |
 | [`T1053`](https://attack.mitre.org/techniques/T1053/) | Scheduled Task/Job | [`T1053.005`](https://attack.mitre.org/techniques/T1053/005/) Scheduled Task — not covered<br>[`T1053.007`](https://attack.mitre.org/techniques/T1053/007/) Container Orchestration Job — not covered<br>3 covered sub-technique(s) listed separately: [`T1053.002`](https://attack.mitre.org/techniques/T1053/002/), [`T1053.003`](https://attack.mitre.org/techniques/T1053/003/), [`T1053.006`](https://attack.mitre.org/techniques/T1053/006/) | positive-only | [host.nonroot_write_root_executed_file](#rule-host-nonroot-write-root-executed-file) (positive-only)<br>[host.root_exec_nonroot_modifiable_file](#rule-host-root-exec-nonroot-modifiable-file) (positive-only) | auth<br>file_change<br>process_exec |
 | [`T1053.002`](https://attack.mitre.org/techniques/T1053/002/) | At | sub-technique of [`T1053`](https://attack.mitre.org/techniques/T1053/) | positive-only | [host.nonroot_write_root_executed_file](#rule-host-nonroot-write-root-executed-file) (positive-only)<br>[host.persistence_path_change](#rule-host-persistence-path-change) (positive-only) | auth<br>file_change<br>process_exec |
 | [`T1053.003`](https://attack.mitre.org/techniques/T1053/003/) | Cron | sub-technique of [`T1053`](https://attack.mitre.org/techniques/T1053/) | positive-only | [host.nonroot_write_root_executed_file](#rule-host-nonroot-write-root-executed-file) (positive-only)<br>[host.persistence_path_change](#rule-host-persistence-path-change) (positive-only) | auth<br>file_change<br>process_exec |
 | [`T1053.006`](https://attack.mitre.org/techniques/T1053/006/) | Systemd Timers | sub-technique of [`T1053`](https://attack.mitre.org/techniques/T1053/) | positive-only | [host.nonroot_write_root_executed_file](#rule-host-nonroot-write-root-executed-file) (positive-only) | auth<br>file_change<br>process_exec |
-| [`T1059`](https://attack.mitre.org/techniques/T1059/) | Command and Scripting Interpreter | [`T1059.002`](https://attack.mitre.org/techniques/T1059/002/) AppleScript — not covered<br>[`T1059.008`](https://attack.mitre.org/techniques/T1059/008/) Network Device CLI — not covered<br>[`T1059.009`](https://attack.mitre.org/techniques/T1059/009/) Cloud API — not covered<br>[`T1059.010`](https://attack.mitre.org/techniques/T1059/010/) AutoHotKey & AutoIT — not covered<br>[`T1059.011`](https://attack.mitre.org/techniques/T1059/011/) Lua — not covered<br>[`T1059.012`](https://attack.mitre.org/techniques/T1059/012/) Hypervisor CLI — not covered<br>[`T1059.013`](https://attack.mitre.org/techniques/T1059/013/) Container CLI/API — not covered<br>6 covered sub-technique(s) listed separately: [`T1059.001`](https://attack.mitre.org/techniques/T1059/001/), [`T1059.003`](https://attack.mitre.org/techniques/T1059/003/), [`T1059.004`](https://attack.mitre.org/techniques/T1059/004/), [`T1059.005`](https://attack.mitre.org/techniques/T1059/005/), [`T1059.006`](https://attack.mitre.org/techniques/T1059/006/), [`T1059.007`](https://attack.mitre.org/techniques/T1059/007/) | negative-capable | [host.exec_from_temp_dir](#rule-host-exec-from-temp-dir) (positive-only)<br>[host.interpreter_external_connection](#rule-host-interpreter-external-connection) (positive-only)<br>[host.script_from_temp_dir](#rule-host-script-from-temp-dir) (positive-only)<br>[pcap.disguised_script_or_executable](#rule-pcap-disguised-script-or-executable) (positive-only)<br>[win.dcom_activated_child](#rule-win-dcom-activated-child) (negative-capable)<br>[win.lure_app_spawns_code_runner](#rule-win-lure-app-spawns-code-runner) (negative-capable)<br>[win.remote_execution_child](#rule-win-remote-execution-child) (negative-capable) | file_change<br>http_body<br>net_socket<br>process_exec<br>process_observed |
+| [`T1059`](https://attack.mitre.org/techniques/T1059/) | Command and Scripting Interpreter | [`T1059.002`](https://attack.mitre.org/techniques/T1059/002/) AppleScript — not covered<br>[`T1059.008`](https://attack.mitre.org/techniques/T1059/008/) Network Device CLI — not covered<br>[`T1059.009`](https://attack.mitre.org/techniques/T1059/009/) Cloud API — not covered<br>[`T1059.010`](https://attack.mitre.org/techniques/T1059/010/) AutoHotKey & AutoIT — not covered<br>[`T1059.011`](https://attack.mitre.org/techniques/T1059/011/) Lua — not covered<br>[`T1059.012`](https://attack.mitre.org/techniques/T1059/012/) Hypervisor CLI — not covered<br>[`T1059.013`](https://attack.mitre.org/techniques/T1059/013/) Container CLI/API — not covered<br>6 covered sub-technique(s) listed separately: [`T1059.001`](https://attack.mitre.org/techniques/T1059/001/), [`T1059.003`](https://attack.mitre.org/techniques/T1059/003/), [`T1059.004`](https://attack.mitre.org/techniques/T1059/004/), [`T1059.005`](https://attack.mitre.org/techniques/T1059/005/), [`T1059.006`](https://attack.mitre.org/techniques/T1059/006/), [`T1059.007`](https://attack.mitre.org/techniques/T1059/007/) | positive-only | [host.exec_from_temp_dir](#rule-host-exec-from-temp-dir) (positive-only)<br>[host.interpreter_external_connection](#rule-host-interpreter-external-connection) (positive-only)<br>[host.script_from_temp_dir](#rule-host-script-from-temp-dir) (positive-only)<br>[pcap.disguised_script_or_executable](#rule-pcap-disguised-script-or-executable) (positive-only)<br>[win.dcom_activated_child](#rule-win-dcom-activated-child) (positive-only)<br>[win.lure_app_spawns_code_runner](#rule-win-lure-app-spawns-code-runner) (positive-only)<br>[win.remote_execution_child](#rule-win-remote-execution-child) (positive-only) | file_change<br>http_body<br>net_socket<br>process_exec<br>process_observed<br>process_termination<br>system_state |
 | [`T1059.001`](https://attack.mitre.org/techniques/T1059/001/) | PowerShell | sub-technique of [`T1059`](https://attack.mitre.org/techniques/T1059/) | positive-only | [win.powershell_encoded_or_cradle](#rule-win-powershell-encoded-or-cradle) (positive-only) | process_exec |
-| [`T1059.003`](https://attack.mitre.org/techniques/T1059/003/) | Windows Command Shell | sub-technique of [`T1059`](https://attack.mitre.org/techniques/T1059/) | positive-only | [pcap.cleartext_interactive_shell](#rule-pcap-cleartext-interactive-shell) (positive-only)<br>[win.service_child_output_to_admin_share](#rule-win-service-child-output-to-admin-share) (positive-only) | process_exec<br>tcp_stream |
+| [`T1059.003`](https://attack.mitre.org/techniques/T1059/003/) | Windows Command Shell | sub-technique of [`T1059`](https://attack.mitre.org/techniques/T1059/) | positive-only | [pcap.cleartext_interactive_shell](#rule-pcap-cleartext-interactive-shell) (positive-only)<br>[win.service_child_output_to_admin_share](#rule-win-service-child-output-to-admin-share) (positive-only) | process_exec<br>process_termination<br>system_state<br>tcp_stream |
 | [`T1059.004`](https://attack.mitre.org/techniques/T1059/004/) | Unix Shell | sub-technique of [`T1059`](https://attack.mitre.org/techniques/T1059/) | positive-only | [host.download_piped_to_shell](#rule-host-download-piped-to-shell) (positive-only)<br>[host.downloader_feeds_interpreter](#rule-host-downloader-feeds-interpreter) (positive-only)<br>[host.shell_spawned_by_connected_process](#rule-host-shell-spawned-by-connected-process) (positive-only)<br>[host.web_service_spawns_interpreter](#rule-host-web-service-spawns-interpreter) (positive-only)<br>[net.arkime_ssh_reverse_shell_tag](#rule-net-arkime-ssh-reverse-shell-tag) (positive-only)<br>[pcap.cleartext_interactive_shell](#rule-pcap-cleartext-interactive-shell) (positive-only) | net_session<br>net_socket<br>process_exec<br>tcp_stream |
 | [`T1059.005`](https://attack.mitre.org/techniques/T1059/005/) | Visual Basic | sub-technique of [`T1059`](https://attack.mitre.org/techniques/T1059/) | positive-only | [win.mshta_remote_or_inline](#rule-win-mshta-remote-or-inline) (positive-only)<br>[win.regsvr32_scriptlet](#rule-win-regsvr32-scriptlet) (positive-only)<br>[win.rundll32_proxy](#rule-win-rundll32-proxy) (positive-only)<br>[win.script_host_untrusted_script](#rule-win-script-host-untrusted-script) (positive-only) | process_exec |
 | [`T1059.006`](https://attack.mitre.org/techniques/T1059/006/) | Python | sub-technique of [`T1059`](https://attack.mitre.org/techniques/T1059/) | positive-only | [host.python_pty_spawn](#rule-host-python-pty-spawn) (positive-only)<br>[host.shell_spawned_by_connected_process](#rule-host-shell-spawned-by-connected-process) (positive-only) | net_socket<br>process_exec |
@@ -84,13 +84,13 @@ A technique is covered only by a rule that explicitly declares that ATT&CK id.
 | [`T1127.001`](https://attack.mitre.org/techniques/T1127/001/) | MSBuild | sub-technique of [`T1127`](https://attack.mitre.org/techniques/T1127/) | positive-only | [win.dotnet_lolbin_proxy](#rule-win-dotnet-lolbin-proxy) (positive-only) | process_exec |
 | [`T1129`](https://attack.mitre.org/techniques/T1129/) | Shared Modules | — | none | — | — |
 | [`T1197`](https://attack.mitre.org/techniques/T1197/) | BITS Jobs | — | positive-only | [win.bitsadmin_transfer](#rule-win-bitsadmin-transfer) (positive-only) | process_exec |
-| [`T1203`](https://attack.mitre.org/techniques/T1203/) | Exploitation for Client Execution | — | negative-capable | [win.lure_app_spawns_code_runner](#rule-win-lure-app-spawns-code-runner) (negative-capable) | process_exec |
+| [`T1203`](https://attack.mitre.org/techniques/T1203/) | Exploitation for Client Execution | — | positive-only | [win.lure_app_spawns_code_runner](#rule-win-lure-app-spawns-code-runner) (positive-only) | process_exec<br>process_termination<br>system_state |
 | [`T1204`](https://attack.mitre.org/techniques/T1204/) | User Execution | [`T1204.001`](https://attack.mitre.org/techniques/T1204/001/) Malicious Link — not covered<br>[`T1204.003`](https://attack.mitre.org/techniques/T1204/003/) Malicious Image — not covered<br>[`T1204.004`](https://attack.mitre.org/techniques/T1204/004/) Malicious Copy and Paste — not covered<br>[`T1204.005`](https://attack.mitre.org/techniques/T1204/005/) Malicious Library — not covered<br>1 covered sub-technique(s) listed separately: [`T1204.002`](https://attack.mitre.org/techniques/T1204/002/) | none | — | — |
-| [`T1204.002`](https://attack.mitre.org/techniques/T1204/002/) | Malicious File | sub-technique of [`T1204`](https://attack.mitre.org/techniques/T1204/) | negative-capable | [win.lure_app_spawns_code_runner](#rule-win-lure-app-spawns-code-runner) (negative-capable) | process_exec |
+| [`T1204.002`](https://attack.mitre.org/techniques/T1204/002/) | Malicious File | sub-technique of [`T1204`](https://attack.mitre.org/techniques/T1204/) | positive-only | [win.lure_app_spawns_code_runner](#rule-win-lure-app-spawns-code-runner) (positive-only) | process_exec<br>process_termination<br>system_state |
 | [`T1559`](https://attack.mitre.org/techniques/T1559/) | Inter-Process Communication | [`T1559.002`](https://attack.mitre.org/techniques/T1559/002/) Dynamic Data Exchange — not covered<br>[`T1559.003`](https://attack.mitre.org/techniques/T1559/003/) XPC Services — not covered<br>1 covered sub-technique(s) listed separately: [`T1559.001`](https://attack.mitre.org/techniques/T1559/001/) | none | — | — |
-| [`T1559.001`](https://attack.mitre.org/techniques/T1559/001/) | Component Object Model | sub-technique of [`T1559`](https://attack.mitre.org/techniques/T1559/) | negative-capable | [win.dcom_activated_child](#rule-win-dcom-activated-child) (negative-capable) | process_exec |
+| [`T1559.001`](https://attack.mitre.org/techniques/T1559/001/) | Component Object Model | sub-technique of [`T1559`](https://attack.mitre.org/techniques/T1559/) | positive-only | [win.dcom_activated_child](#rule-win-dcom-activated-child) (positive-only) | process_exec<br>process_termination<br>system_state |
 | [`T1569`](https://attack.mitre.org/techniques/T1569/) | System Services | [`T1569.001`](https://attack.mitre.org/techniques/T1569/001/) Launchctl — not covered<br>[`T1569.003`](https://attack.mitre.org/techniques/T1569/003/) Systemctl — not covered<br>1 covered sub-technique(s) listed separately: [`T1569.002`](https://attack.mitre.org/techniques/T1569/002/) | none | — | — |
-| [`T1569.002`](https://attack.mitre.org/techniques/T1569/002/) | Service Execution | sub-technique of [`T1569`](https://attack.mitre.org/techniques/T1569/) | negative-capable | [win.remote_execution_child](#rule-win-remote-execution-child) (negative-capable)<br>[win.service_child_output_to_admin_share](#rule-win-service-child-output-to-admin-share) (positive-only) | process_exec |
+| [`T1569.002`](https://attack.mitre.org/techniques/T1569/002/) | Service Execution | sub-technique of [`T1569`](https://attack.mitre.org/techniques/T1569/) | positive-only | [win.remote_execution_child](#rule-win-remote-execution-child) (positive-only)<br>[win.service_child_output_to_admin_share](#rule-win-service-child-output-to-admin-share) (positive-only) | process_exec<br>process_termination<br>system_state |
 | [`T1574`](https://attack.mitre.org/techniques/T1574/) | Hijack Execution Flow | [`T1574.001`](https://attack.mitre.org/techniques/T1574/001/) DLL — not covered<br>[`T1574.004`](https://attack.mitre.org/techniques/T1574/004/) Dylib Hijacking — not covered<br>[`T1574.005`](https://attack.mitre.org/techniques/T1574/005/) Executable Installer File Permissions Weakness — not covered<br>[`T1574.007`](https://attack.mitre.org/techniques/T1574/007/) Path Interception by PATH Environment Variable — not covered<br>[`T1574.008`](https://attack.mitre.org/techniques/T1574/008/) Path Interception by Search Order Hijacking — not covered<br>[`T1574.009`](https://attack.mitre.org/techniques/T1574/009/) Path Interception by Unquoted Path — not covered<br>[`T1574.010`](https://attack.mitre.org/techniques/T1574/010/) Services File Permissions Weakness — not covered<br>[`T1574.011`](https://attack.mitre.org/techniques/T1574/011/) Services Registry Permissions Weakness — not covered<br>[`T1574.012`](https://attack.mitre.org/techniques/T1574/012/) COR_PROFILER — not covered<br>[`T1574.013`](https://attack.mitre.org/techniques/T1574/013/) KernelCallbackTable — not covered<br>[`T1574.014`](https://attack.mitre.org/techniques/T1574/014/) AppDomainManager — not covered<br>1 covered sub-technique(s) listed separately: [`T1574.006`](https://attack.mitre.org/techniques/T1574/006/) | positive-only | [host.nonroot_write_root_executed_file](#rule-host-nonroot-write-root-executed-file) (positive-only)<br>[host.root_exec_nonroot_modifiable_file](#rule-host-root-exec-nonroot-modifiable-file) (positive-only) | auth<br>file_change<br>process_exec |
 | [`T1574.006`](https://attack.mitre.org/techniques/T1574/006/) | Dynamic Linker Hijacking | sub-technique of [`T1574`](https://attack.mitre.org/techniques/T1574/) | positive-only | [host.persistence_path_change](#rule-host-persistence-path-change) (positive-only) | file_change<br>process_exec |
 | [`T1609`](https://attack.mitre.org/techniques/T1609/) | Container Administration Command | — | none | — | — |
@@ -309,10 +309,10 @@ A technique is covered only by a rule that explicitly declares that ATT&CK id.
 |---|---|---|---|---|---|
 | [`T1021`](https://attack.mitre.org/techniques/T1021/) | Remote Services | [`T1021.005`](https://attack.mitre.org/techniques/T1021/005/) VNC — not covered<br>[`T1021.007`](https://attack.mitre.org/techniques/T1021/007/) Cloud Services — not covered<br>[`T1021.008`](https://attack.mitre.org/techniques/T1021/008/) Direct Cloud VM Connections — not covered<br>5 covered sub-technique(s) listed separately: [`T1021.001`](https://attack.mitre.org/techniques/T1021/001/), [`T1021.002`](https://attack.mitre.org/techniques/T1021/002/), [`T1021.003`](https://attack.mitre.org/techniques/T1021/003/), [`T1021.004`](https://attack.mitre.org/techniques/T1021/004/), [`T1021.006`](https://attack.mitre.org/techniques/T1021/006/) | context-only | [context.lateral_movement](#rule-context-lateral-movement) (context-only) | net_socket<br>process_exec |
 | [`T1021.001`](https://attack.mitre.org/techniques/T1021/001/) | Remote Desktop Protocol | sub-technique of [`T1021`](https://attack.mitre.org/techniques/T1021/) | context-only | [context.lateral_movement](#rule-context-lateral-movement) (context-only) | net_socket<br>process_exec |
-| [`T1021.002`](https://attack.mitre.org/techniques/T1021/002/) | SMB/Windows Admin Shares | sub-technique of [`T1021`](https://attack.mitre.org/techniques/T1021/) | positive-only | [context.lateral_movement](#rule-context-lateral-movement) (context-only)<br>[win.service_child_output_to_admin_share](#rule-win-service-child-output-to-admin-share) (positive-only) | net_socket<br>process_exec |
-| [`T1021.003`](https://attack.mitre.org/techniques/T1021/003/) | Distributed Component Object Model | sub-technique of [`T1021`](https://attack.mitre.org/techniques/T1021/) | negative-capable | [win.dcom_activated_child](#rule-win-dcom-activated-child) (negative-capable) | process_exec |
+| [`T1021.002`](https://attack.mitre.org/techniques/T1021/002/) | SMB/Windows Admin Shares | sub-technique of [`T1021`](https://attack.mitre.org/techniques/T1021/) | positive-only | [context.lateral_movement](#rule-context-lateral-movement) (context-only)<br>[win.service_child_output_to_admin_share](#rule-win-service-child-output-to-admin-share) (positive-only) | net_socket<br>process_exec<br>process_termination<br>system_state |
+| [`T1021.003`](https://attack.mitre.org/techniques/T1021/003/) | Distributed Component Object Model | sub-technique of [`T1021`](https://attack.mitre.org/techniques/T1021/) | positive-only | [win.dcom_activated_child](#rule-win-dcom-activated-child) (positive-only) | process_exec<br>process_termination<br>system_state |
 | [`T1021.004`](https://attack.mitre.org/techniques/T1021/004/) | SSH | sub-technique of [`T1021`](https://attack.mitre.org/techniques/T1021/) | positive-only | [context.entry_point_promotion](#rule-context-entry-point-promotion) (context-only)<br>[context.lateral_movement](#rule-context-lateral-movement) (context-only)<br>[context.staging_and_transfer](#rule-context-staging-and-transfer) (context-only)<br>[host.ssh_login_external_source](#rule-host-ssh-login-external-source) (positive-only)<br>[host.ssh_success_after_failures](#rule-host-ssh-success-after-failures) (positive-only)<br>[net.arkime_ssh_reverse_shell_tag](#rule-net-arkime-ssh-reverse-shell-tag) (positive-only)<br>[net.rare_client_fingerprint](#rule-net-rare-client-fingerprint) (context-only) | auth<br>net_session<br>net_socket<br>process_exec<br>ssh_session<br>tls_session |
-| [`T1021.006`](https://attack.mitre.org/techniques/T1021/006/) | Windows Remote Management | sub-technique of [`T1021`](https://attack.mitre.org/techniques/T1021/) | negative-capable | [context.lateral_movement](#rule-context-lateral-movement) (context-only)<br>[win.remote_execution_child](#rule-win-remote-execution-child) (negative-capable) | net_socket<br>process_exec |
+| [`T1021.006`](https://attack.mitre.org/techniques/T1021/006/) | Windows Remote Management | sub-technique of [`T1021`](https://attack.mitre.org/techniques/T1021/) | positive-only | [context.lateral_movement](#rule-context-lateral-movement) (context-only)<br>[win.remote_execution_child](#rule-win-remote-execution-child) (positive-only) | net_socket<br>process_exec<br>process_termination<br>system_state |
 | [`T1072`](https://attack.mitre.org/techniques/T1072/) | Software Deployment Tools | — | none | — | — |
 | [`T1080`](https://attack.mitre.org/techniques/T1080/) | Taint Shared Content | — | none | — | — |
 | [`T1091`](https://attack.mitre.org/techniques/T1091/) | Replication Through Removable Media | — | none | — | — |
@@ -1172,7 +1172,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-curl-download-to-disk"></a>
 ### `win.curl_download_to_disk` — curl.exe downloaded to a file
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1105`](https://attack.mitre.org/techniques/T1105/)
@@ -1184,18 +1184,19 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-dcom-activated-child"></a>
 ### `win.dcom_activated_child` — a shell or script host was started by a DCOM-activated application
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `high`
-- Coverage strength: **negative-capable**
+- Coverage strength: **positive-only**
 - ATT&CK: [`T1021.003`](https://attack.mitre.org/techniques/T1021/003/), [`T1059`](https://attack.mitre.org/techniques/T1059/), [`T1559.001`](https://attack.mitre.org/techniques/T1559/001/)
-- Telemetry families: process_exec
+- Telemetry families: process_exec<br>process_termination<br>system_state
 - Required typed fields: —
 - Behavior: a process whose image is a shell or script host and whose parent image is mmc.exe or an Office application (winword/excel/powerpnt/outlook/mspub/visio) started with -Embedding
+- Positive-only reason: ROMULUS reports what it finds and never asserts that a behaviour did not occur: absence cannot be confirmed from process-creation records, and the same behaviour can be reached by images, binaries and arguments this rule does not enumerate
 
 <a id="rule-win-defender-impairment"></a>
 ### `win.defender_impairment` — Microsoft Defender was disabled or given an exclusion
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1685`](https://attack.mitre.org/techniques/T1685/), [`T1685.007`](https://attack.mitre.org/techniques/T1685/007/)
@@ -1231,7 +1232,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-host-firewall-disable"></a>
 ### `win.host_firewall_disable` — the Windows host firewall was turned off
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1686`](https://attack.mitre.org/techniques/T1686/), [`T1686.003`](https://attack.mitre.org/techniques/T1686/003/)
@@ -1243,7 +1244,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-inhibit-system-recovery"></a>
 ### `win.inhibit_system_recovery` — shadow copies, backups or recovery settings were deleted or disabled
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1490`](https://attack.mitre.org/techniques/T1490/)
@@ -1255,7 +1256,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-log-clearing-command"></a>
 ### `win.log_clearing_command` — an event log or the audit policy was cleared by command
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1685`](https://attack.mitre.org/techniques/T1685/), [`T1685.001`](https://attack.mitre.org/techniques/T1685/001/), [`T1685.005`](https://attack.mitre.org/techniques/T1685/005/)
@@ -1265,15 +1266,16 @@ Invalid mappings are excluded from coverage:
 - Positive-only reason: the clear request is read from argv; a window without a match proves nothing, and logs can be cleared through the API. The cleared-log event (1102/104) is the OS record of it
 
 <a id="rule-win-lure-app-spawns-code-runner"></a>
-### `win.lure_app_spawns_code_runner` — A document, mail, browser or reader application created a shell, script host or LOLBin
+### `win.lure_app_spawns_code_runner` — A document, mail, reader or browser application created a shell, script host or LOLBin
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
-- Coverage strength: **negative-capable**
+- Coverage strength: **positive-only**
 - ATT&CK: [`T1059`](https://attack.mitre.org/techniques/T1059/), [`T1203`](https://attack.mitre.org/techniques/T1203/), [`T1204.002`](https://attack.mitre.org/techniques/T1204/002/), [`T1566.001`](https://attack.mitre.org/techniques/T1566/001/)
-- Telemetry families: process_exec
+- Telemetry families: process_exec<br>process_termination<br>system_state
 - Required typed fields: —
-- Behavior: a process whose image is an Office, mail, browser, PDF-reader or archive application created a child whose image is a command shell, PowerShell, a script host (wscript/cscript/mshta) or a signed proxy-execution binary
+- Behavior: a process whose image is an Office, mail, reader or archive application created a child whose image is a command shell, PowerShell, a script host (wscript/cscript/mshta) or a signed proxy-execution binary (high); a browser that spawns a code runner that is not a native-messaging host is a lead (installer children are a lead; native-messaging launches are excluded)
+- Positive-only reason: ROMULUS reports what it finds and never asserts that a behaviour did not occur: absence cannot be confirmed from process-creation records, and the same behaviour can be reached by images, binaries and arguments this rule does not enumerate
 
 <a id="rule-win-mshta-remote-or-inline"></a>
 ### `win.mshta_remote_or_inline` — mshta ran a remote HTA or inline script
@@ -1374,18 +1376,19 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-remote-execution-child"></a>
 ### `win.remote_execution_child` — a shell, script host or LOLBin was started by a remote-execution service
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
-- Coverage strength: **negative-capable**
+- Coverage strength: **positive-only**
 - ATT&CK: [`T1021.006`](https://attack.mitre.org/techniques/T1021/006/), [`T1047`](https://attack.mitre.org/techniques/T1047/), [`T1059`](https://attack.mitre.org/techniques/T1059/), [`T1569.002`](https://attack.mitre.org/techniques/T1569/002/)
-- Telemetry families: process_exec
+- Telemetry families: process_exec<br>process_termination<br>system_state
 - Required typed fields: —
 - Behavior: a process whose image is a shell, script host or signed proxy-execution binary and whose parent image is wmiprvse.exe, wsmprovhost.exe, winrshost.exe, or a PsExec-style service (PSEXESVC/PAExec/CSExec)
+- Positive-only reason: ROMULUS reports what it finds and never asserts that a behaviour did not occur: absence cannot be confirmed from process-creation records, and the same behaviour can be reached by images, binaries and arguments this rule does not enumerate
 
 <a id="rule-win-rundll32-proxy"></a>
 ### `win.rundll32_proxy` — rundll32 proxied execution (script protocol, remote DLL, or LSASS MiniDump)
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1003.001`](https://attack.mitre.org/techniques/T1003/001/), [`T1059.005`](https://attack.mitre.org/techniques/T1059/005/), [`T1059.007`](https://attack.mitre.org/techniques/T1059/007/), [`T1218.011`](https://attack.mitre.org/techniques/T1218/011/)
@@ -1409,7 +1412,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-security-service-tampering"></a>
 ### `win.security_service_tampering` — a security service or the Sysmon driver was stopped or reconfigured
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1685`](https://attack.mitre.org/techniques/T1685/), [`T1685.001`](https://attack.mitre.org/techniques/T1685/001/), [`T1685.007`](https://attack.mitre.org/techniques/T1685/007/)
@@ -1419,16 +1422,16 @@ Invalid mappings are excluded from coverage:
 - Positive-only reason: the service and verb are read from argv; a window without a match proves nothing, as a service can be stopped or disabled through the service-control API
 
 <a id="rule-win-service-child-output-to-admin-share"></a>
-### `win.service_child_output_to_admin_share` — a service-hosted command redirected its output to an admin share
+### `win.service_child_output_to_admin_share` — a service-hosted command sent its output to an admin share (Impacket smbexec/atexec)
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1021.002`](https://attack.mitre.org/techniques/T1021/002/), [`T1059.003`](https://attack.mitre.org/techniques/T1059/003/), [`T1569.002`](https://attack.mitre.org/techniques/T1569/002/)
-- Telemetry families: process_exec
+- Telemetry families: process_exec<br>process_termination<br>system_state
 - Required typed fields: —
 - Behavior: cmd.exe /c started by services.exe (or a PsExec-style service) whose payload redirects output to a UNC admin share (\\\\host\\ADMIN$, C$, IPC$), the Impacket/PsExec remote-command shape
-- Positive-only reason: the output redirection is read from the cmd payload's argv; a window without a match proves nothing, and the same result can be achieved without a redirection on the command line
+- Positive-only reason: ROMULUS reports what it finds and never asserts that a behaviour did not occur: absence cannot be confirmed from process-creation records, and the same behaviour can be reached by images, binaries and arguments this rule does not enumerate
 
 <a id="rule-win-shadow-copy-create-for-harvest"></a>
 ### `win.shadow_copy_create_for_harvest` — a shadow copy was created by a tool used to harvest NTDS or hives

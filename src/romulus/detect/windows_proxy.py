@@ -22,10 +22,12 @@ from romulus.detect.windows_cmdline import (
     PARSED,
     PARSED_DECODED,
     has_switch,
+    is_ordinal,
     is_user_writable,
     operands,
     parse_powershell,
     ps_tokens,
+    rundll32_target,
     split_argv,
     switch_name,
     switch_value,
@@ -106,12 +108,12 @@ class MshtaExecution(WindowsProcessRule):
 
     def _hit(self, event: TypedEvent, token: str, what: str, shape: str) -> Hit:
         return Hit("mshta_execution", f"mshta was run with {what}", self.lane, self.severity, self.attack,
-                   [parsed_field(event, token)], shape=f"mshta:{shape}")
+                   [parsed_field(event, token)], content=f"mshta:{shape}")
 
 
 class Rundll32Execution(WindowsProcessRule):
     id = "win.rundll32_proxy"
-    version = "1"
+    version = "2"
     title = "rundll32 proxied execution (script protocol, remote DLL, or LSASS MiniDump)"
     assures_negative = False
     positive_only_reason = ("rundll32 and its target are read from argv; the same proxying can be done by other means, "
@@ -140,23 +142,25 @@ class Rundll32Execution(WindowsProcessRule):
         if image_name(event.get("process.executable_key"))[0] != "rundll32.exe":
             return []
         argv = _command_argv(event)
-        joined = " ".join(argv[1:]).casefold()
         for token in argv[1:]:
             url = url_in(token)
             lowered = token.strip().strip('"').casefold()
             if lowered.startswith(("javascript:", "vbscript:")):
                 return [Hit("rundll32_proxy", "rundll32 was run with an inline script protocol", self.lane,
                             self.severity, ("T1218.011", "T1059.007", "T1059.005"),
-                            [parsed_field(event, token)], shape="rundll32:script")]
+                            [parsed_field(event, token)], content="rundll32:script")]
             if url or lowered.startswith("\\\\"):
                 return [Hit("rundll32_proxy", f"rundll32 was asked to load a remote DLL ({token.strip()})", self.lane,
                             self.severity, ("T1218.011", "T1105"), [parsed_field(event, token)],
-                            shape="rundll32:remote")]
-        if "comsvcs.dll" in joined and "minidump" in joined:
-            return [Hit("rundll32_comsvcs_minidump",
-                        "rundll32 was run with comsvcs.dll MiniDump, the shape used to dump a process's memory",
-                        self.lane, self.severity, ("T1003.001", "T1218.011"),
-                        [parsed_field(event, clip(" ".join(argv[1:])))], shape="rundll32:comsvcs")]
+                            content="rundll32:remote")]
+        target = rundll32_target(argv)
+        if target is not None:
+            dll, entry = target
+            if dll == "comsvcs" and (entry == "minidump" or is_ordinal(entry)):
+                return [Hit("rundll32_comsvcs_minidump",
+                            f"rundll32 was run with comsvcs.dll MiniDump (entry '{entry}'), the shape used to dump a "
+                            f"process's memory", self.lane, self.severity, ("T1003.001", "T1218.011"),
+                            [parsed_field(event, clip(" ".join(argv[1:])))], content="rundll32:comsvcs")]
         return []
 
 
@@ -199,7 +203,7 @@ class Regsvr32Execution(WindowsProcessRule):
                     what = "a remote target" if remote else "a scriptlet (.sct)"
                     return [Hit("regsvr32_scriptlet", f"regsvr32 was run with /i: naming {what} ({clip(target)})",
                                 self.lane, self.severity, self.attack, [parsed_field(event, token)],
-                                shape=f"regsvr32:{'remote' if remote else 'sct'}")]
+                                content=f"regsvr32:{'remote' if remote else 'sct'}")]
         return []
 
 
@@ -239,11 +243,11 @@ class CertutilDownloadDecode(WindowsProcessRule):
             what = f" against {url}" if url else ""
             hits.append(Hit("certutil_download", f"certutil was run with a URL-cache download flag{what}", self.lane,
                             self.severity, ("T1105",), [parsed_field(event, clip(" ".join(argv[1:])))],
-                            shape="certutil:download"))
+                            content="certutil:download"))
         if {"decode", "decodehex"} & names:
             hits.append(Hit("certutil_decode", "certutil was run with a decode flag (file deobfuscation)", self.lane,
                             self.severity, ("T1140",), [parsed_field(event, clip(" ".join(argv[1:])))],
-                            shape="certutil:decode"))
+                            content="certutil:decode"))
         return hits
 
 
@@ -280,13 +284,13 @@ class BitsadminTransfer(WindowsProcessRule):
             what = f" ({url})" if url else ""
             return [Hit("bitsadmin_transfer", f"bitsadmin was run with a transfer verb{what}", self.lane,
                         self.severity, self.attack, [parsed_field(event, clip(" ".join(argv[1:])))],
-                        shape="bitsadmin:transfer")]
+                        content="bitsadmin:transfer")]
         return []
 
 
 class CurlDownload(WindowsProcessRule):
     id = "win.curl_download_to_disk"
-    version = "1"
+    version = "2"
     title = "curl.exe downloaded to a file"
     assures_negative = False
     positive_only_reason = ("curl and its output flag are read from argv; a window without a match proves nothing, as "
@@ -314,9 +318,14 @@ class CurlDownload(WindowsProcessRule):
         argv = _command_argv(event)
         if not any(url_in(token) for token in argv[1:]):
             return []
-        if has_switch(argv, "o", "O", "output", "remote-name"):
+        # -o/-O/--output/--remote-name, or 'o'/'O' bundled into a grouped short flag (curl -sko file)
+        writes = has_switch(argv, "o", "O", "output", "remote-name") or any(
+            token.startswith("-") and not token.startswith("--") and ("o" in token[1:] or "O" in token[1:])
+            for token in argv[1:]
+        )
+        if writes:
             return [Hit("curl_download", "curl was run to download a URL to a file", self.lane, self.severity,
-                        self.attack, [parsed_field(event, clip(" ".join(argv[1:])))], shape="curl:download")]
+                        self.attack, [parsed_field(event, clip(" ".join(argv[1:])))], content="curl:download")]
         return []
 
 
@@ -357,7 +366,7 @@ class ScriptHostRemoteOrWritable(WindowsProcessRule):
                 where = "a UNC path" if token.strip().strip('"').startswith("\\\\") else "a user-writable location"
                 return [Hit("script_host_untrusted", f"a script host was given a script in {where} ({clip(token)})",
                             self.lane, self.severity, self.attack, [parsed_field(event, token)],
-                            shape="scripthost:untrusted")]
+                            content="scripthost:untrusted")]
         return []
 
 
@@ -396,7 +405,7 @@ class MsiexecRemotePackage(WindowsProcessRule):
             if url or token.strip().strip('"').startswith("\\\\"):
                 return [Hit("msiexec_remote", f"msiexec was asked to install a remote package ({clip(token)})",
                             self.lane, self.severity, self.attack, [parsed_field(event, token)],
-                            shape="msiexec:remote")]
+                            content="msiexec:remote")]
         return []
 
 
@@ -450,7 +459,7 @@ class CompilerProxyExecution(WindowsProcessRule):
     def _hit(self, event: TypedEvent, rest: list[str], label: str, attack_id: str, shape: str) -> Hit:
         return Hit("dotnet_lolbin_proxy", f"{label} was run with a proxy-execution argument shape", self.lane,
                    self.severity, (attack_id, *self.attack[:0]), [parsed_field(event, clip(" ".join(rest)))],
-                   shape=f"dotnet:{shape}")
+                   content=f"dotnet:{shape}")
 
 
 class PowerShellEncodedOrCradle(WindowsProcessRule):
@@ -503,7 +512,7 @@ class PowerShellEncodedOrCradle(WindowsProcessRule):
                 hits.append(Hit("powershell_encoded",
                                 f"PowerShell was run with an encoded command; decoded: '{clip(call.script)}'",
                                 self.lane, self.severity, ("T1059.001", "T1027.010"), [value],
-                                shape="ps:encoded", notes=tuple(n for n in (note,) if n)))
+                                content="ps:encoded", notes=tuple(n for n in (note,) if n)))
             else:
                 reason = call.decode_error or "no value followed -EncodedCommand"
                 value = PredicateField(field="process.command_line",
@@ -512,7 +521,7 @@ class PowerShellEncodedOrCradle(WindowsProcessRule):
                 hits.append(Hit("powershell_encoded",
                                 f"PowerShell was run with -EncodedCommand but its value could not be decoded "
                                 f"({reason})", self.lane, self.severity, ("T1059.001", "T1027.010"), [value],
-                                shape="ps:encoded-bad"))
+                                content="ps:encoded-bad"))
         cradle = self._cradle(event, call)
         if cradle is not None:
             hits.append(cradle)
@@ -541,7 +550,7 @@ class PowerShellEncodedOrCradle(WindowsProcessRule):
         return Hit("powershell_cradle",
                    f"PowerShell script called {download}{tail} (a download cradle)", lane, self.severity,
                    ("T1059.001", "T1105") + (("T1140",) if executes else ()), [value],
-                   shape=f"ps:cradle:{download}{'+iex' if executes else ''}")
+                   content=f"ps:cradle:{download}{'+iex' if executes else ''}")
 
 
 WINDOWS_PROXY_PLAYBOOKS = [

@@ -77,7 +77,7 @@ class ProcdumpLsass(WindowsProcessRule):
         argv = _argv(event)
         if any("lsass" in token.casefold() for token in argv[1:]):
             return [Hit("procdump_lsass", "procdump was run with LSASS as its target", self.lane, self.severity,
-                        self.attack, [parsed_field(event, clip(" ".join(argv[1:])))], shape="procdump:lsass")]
+                        self.attack, [parsed_field(event, clip(" ".join(argv[1:])))], content="procdump:lsass")]
         return []
 
 
@@ -117,7 +117,7 @@ class RegSaveHive(WindowsProcessRule):
             if parts and parts[0] in {"hklm", "hkey_local_machine"} and len(parts) >= 2 and parts[1] in _HIVES:
                 return [Hit("reg_save_hive", f"reg.exe was run to save the {parts[1].upper()} registry hive",
                             self.lane, self.severity, self.attack, [parsed_field(event, clip(" ".join(argv[1:])))],
-                            shape=f"reg:save:{parts[1]}")]
+                            content=f"reg:save:{parts[1]}")]
         return []
 
 
@@ -155,7 +155,7 @@ class NtdsutilExtract(WindowsProcessRule):
                 token.casefold().startswith("ac i ntds") for token in argv[1:]):
             return [Hit("ntdsutil_ifm", "ntdsutil was run with an IFM / NTDS snapshot sequence", self.lane,
                         self.severity, self.attack, [parsed_field(event, clip(" ".join(argv[1:])))],
-                        shape="ntdsutil:ifm")]
+                        content="ntdsutil:ifm")]
         return []
 
 
@@ -197,7 +197,7 @@ class EsentutlCopy(WindowsProcessRule):
             if "ntds.dit" in lowered or _names_hive(token) or "globalroot" in lowered:
                 return [Hit("esentutl_copy", "esentutl was run to copy a credential database or hive", self.lane,
                             self.severity, self.attack, [parsed_field(event, clip(" ".join(argv[1:])))],
-                            shape="esentutl:copy")]
+                            content="esentutl:copy")]
         return []
 
 
@@ -244,7 +244,7 @@ class ShadowCopyForHarvest(WindowsProcessRule):
     def _hit(self, event: TypedEvent, argv: list[str], label: str, shape: str) -> Hit:
         return Hit("shadow_copy_create", f"{label} was run (a shadow copy was requested; a later read would harvest "
                                          f"NTDS or a hive)", self.lane, self.severity, self.attack,
-                   [parsed_field(event, clip(" ".join(argv[1:])))], shape=f"shadow:{shape}")
+                   [parsed_field(event, clip(" ".join(argv[1:])))], content=f"shadow:{shape}")
 
 
 WINDOWS_CREDENTIAL_PLAYBOOKS = [

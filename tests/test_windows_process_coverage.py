@@ -1,12 +1,16 @@
-"""Coverage honesty for the negative-capable Windows process rules: a complete negative needs inventory, shipper
-completeness and attested collection; the positive-only rules never claim one."""
+"""Coverage honesty for the Windows process rules.
+
+ROMULUS never asserts absence: every W1a rule is positive-only, so no W1a rule ever writes `no_match_complete`.
+Coverage cells still record what was searched and what was not — unattested or incomplete collection is stated in
+the cell reasons — but that never becomes a complete negative.
+"""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+from romulus.detect.registry import WINDOWS_PROCESS_PLAYBOOKS
 from romulus.detect.windows_lineage import LureAppSpawnsCodeRunner
-from romulus.detect.windows_remote import RemoteExecutionParent
 from romulus.evidence.windows_catalog import SECURITY, SYSMON, SYSMON_CHANNEL, lookup_event_class
 from romulus.hunt.sweep import Sweep
 from romulus.site import load_site_facts
@@ -36,24 +40,6 @@ def _hit(record_id: int, event_id: int, provider: str, channel: str):
     }
 
 
-def _both_attested_site(tmp_path):
-    path = tmp_path / "site" / "collection.yaml"
-    path.parent.mkdir(parents=True)
-    path.write_text(
-        "schema: romulus-site-collection@1\n"
-        "collection:\n"
-        "  - hosts: [ws*.example.test]\n"
-        "    sysmon:\n"
-        "      installed: true\n"
-        "      event_ids: [1]\n"
-        "    security_4688_command_line: true\n"
-        "    audit_policy:\n"
-        '      "Process Creation": success\n',
-        encoding="utf-8",
-    )
-    return load_site_facts(tmp_path)
-
-
 def _sweep(tmp_path, rule, site_facts):
     contract = _contract()
     window = Window(start=START, end=START + timedelta(hours=1))
@@ -67,38 +53,27 @@ def _sweep(tmp_path, rule, site_facts):
     return sweep, contract, records
 
 
-def test_lineage_rule_is_negative_capable_only_when_both_collectors_are_attested(tmp_path):
-    rule = LureAppSpawnsCodeRunner()
-    assert rule.assures_negative is True
-    sweep, contract, records = _sweep(tmp_path, rule, _both_attested_site(tmp_path))
-    # attested: no coverage reason blocks a complete negative
-    assert sweep._windows_rule_reasons(contract.target, contract, rule, records, []) == []
+def test_every_windows_process_rule_is_positive_only_with_a_reason():
+    for cls in WINDOWS_PROCESS_PLAYBOOKS:
+        assert cls.assures_negative is False, cls.id
+        assert cls.positive_only_reason, cls.id
+        # the reason must never point at another rule as its assurance
+        assert cls.id not in cls.positive_only_reason
 
 
-def test_lineage_rule_unattested_collection_is_partial_not_a_negative(tmp_path):
+def test_unattested_collection_is_stated_in_the_cell_reasons(tmp_path):
+    # Even positive-only, the coverage cell still records what collection was not attested — it just never claims a
+    # complete negative. The lineage rule declares both process-creation classes, so both wants attestation.
     rule = LureAppSpawnsCodeRunner()
     sweep, contract, records = _sweep(tmp_path, rule, load_site_facts(tmp_path))  # no site file
     reasons = sweep._windows_rule_reasons(contract.target, contract, rule, records, [])
     assert any("collection not attested" in reason for reason in reasons)
 
 
-def test_lineage_rule_completeness_unknown_is_carried_through(tmp_path):
-    rule = RemoteExecutionParent()
-    assert rule.assures_negative is True
-    sweep, contract, records = _sweep(tmp_path, rule, _both_attested_site(tmp_path))
+def test_incomplete_shipper_reason_is_carried_through(tmp_path):
+    rule = LureAppSpawnsCodeRunner()
+    sweep, contract, records = _sweep(tmp_path, rule, load_site_facts(tmp_path))
     reasons = sweep._windows_rule_reasons(
         contract.target, contract, rule, records, ["shipper gaps unresolved: winlog.record_id mapping is not numeric"],
     )
     assert "shipper gaps unresolved: winlog.record_id mapping is not numeric" in reasons
-
-
-def test_positive_only_rules_declare_a_reason_and_never_assure_negatives():
-    from romulus.detect.registry import WINDOWS_PROCESS_PLAYBOOKS
-    for cls in WINDOWS_PROCESS_PLAYBOOKS:
-        if cls.assures_negative:
-            # negative-capable rules read images only, never the command line
-            assert cls.reads_command_line is False, cls.id
-        else:
-            assert cls.positive_only_reason, cls.id
-            # the reason must not point at another rule as its assurance
-            assert cls.id not in cls.positive_only_reason

@@ -3,14 +3,14 @@
 When a remote tool runs a command on a host, the child process carries a recognisable parent: WMI's provider
 (wmiprvse.exe), WinRM/PowerShell Remoting (wsmprovhost.exe), legacy WinRS (winrshost.exe), a DCOM-activated server
 (mmc.exe or an Office application started with -Embedding), or a PsExec-style service (PSEXESVC.exe or a service
-binary under services.exe). The parent/child image shape is OS-recorded, so the image-based rule can assure a
-negative under attestation. The PsExec output-redirection shape reads the command line and is positive-only.
+binary under services.exe). The parent/child image shape is OS-recorded. ROMULUS never asserts absence, so these
+rules are positive-only: a window without the shape is not evidence that none occurred.
 """
 from __future__ import annotations
 
 from typing import ClassVar
 
-from romulus.detect.windows_cmdline import is_remote_path, split_argv
+from romulus.detect.windows_cmdline import is_remote_path, parse_cmd_payload, split_argv
 from romulus.detect.windows_common import (
     SPAWNED_CODE_RUNNERS,
     Hit,
@@ -18,9 +18,9 @@ from romulus.detect.windows_common import (
     WindowsProcessRule,
     clip,
     image_name,
+    parent_predicate,
     parsed_field,
     resolve_parent,
-    typed_field,
 )
 from romulus.evidence.typed import TypedEvent
 
@@ -37,7 +37,7 @@ _REMOTE_PARENTS = {
 
 class RemoteExecutionParent(WindowsProcessRule):
     id = "win.remote_execution_child"
-    version = "1"
+    version = "2"
     title = "a shell, script host or LOLBin was started by a remote-execution service"
     uses_parent = True
     reads_command_line = False
@@ -70,8 +70,6 @@ class RemoteExecutionParent(WindowsProcessRule):
         "adds": "the first Windows remote-execution-trace rule (WMI/WinRM/PsExec parentage)",
         "research_basis": "ATT&CK Enterprise 20.0 T1047, T1021.006, T1569.002, T1059; Impacket and PsExec procedure "
                           "artifacts (behaviour, reimplemented)",
-        "negative": "negative-capable: images only. A complete negative needs Sysmon 1 (or 4688 with "
-                    "Process Creation auditing) inventoried, shipper completeness, and collection attested.",
         "lanes": "high: remote execution is a lateral-movement step; merged fleet repeats keep the lane. Severity "
                  "high because, if adverse, this is remote code execution on the host.",
         "retrieval": "the sweep retrieves every Windows process-creation record; this reads those whose image is a "
@@ -89,11 +87,7 @@ class RemoteExecutionParent(WindowsProcessRule):
         if mechanism is None:
             return []
         label, attack_id = mechanism
-        how = ("its own image field" if parent.resolved_by == "record"
-               else "its creation record, matched by process id")
-        predicate = [typed_field(event, "process.executable_key")]
-        if parent.resolved_by == "record":
-            predicate.append(typed_field(event, "process.parent.executable_key"))
+        predicate, context, how = parent_predicate(event, parent)
         return [Hit(
             behavior="remote_execution_child",
             text=f"the code runner '{child_name}' was started by {label} (parent resolved from {how})",
@@ -101,13 +95,15 @@ class RemoteExecutionParent(WindowsProcessRule):
             severity=self.severity,
             attack=(attack_id, "T1059"),
             predicate=predicate,
-            shape=f"{parent.name}>{child_name}",
+            content=f"{parent.name}>{child_name}",
+            common=f"{label} starting '{child_name}'",
+            context=context,
         )]
 
 
 class DcomActivatedChild(WindowsProcessRule):
     id = "win.dcom_activated_child"
-    version = "1"
+    version = "2"
     title = "a shell or script host was started by a DCOM-activated application"
     uses_parent = True
     reads_command_line = False
@@ -137,7 +133,6 @@ class DcomActivatedChild(WindowsProcessRule):
         "adds": "the DCOM lateral-movement parentage shape",
         "research_basis": "ATT&CK Enterprise 20.0 T1021.003, T1559.001, T1059; DCOM lateral-movement research "
                           "(behaviour, reimplemented)",
-        "negative": "negative-capable for the image shape; the -Embedding confirmation needs Sysmon 1.",
         "lanes": "lead: DCOM-activated shells are suspicious but legitimate COM automation exists; merged per shape.",
         "retrieval": "the sweep retrieves every Windows process-creation record; this reads those whose image is a "
                      "shell or script host (a provable subset).",
@@ -155,15 +150,14 @@ class DcomActivatedChild(WindowsProcessRule):
         parent = resolve_parent(event, self.lineage)
         if parent.name not in self._DCOM_PARENTS:
             return []
-        predicate = [typed_field(event, "process.executable_key")]
-        notes: tuple[str, ...] = ()
+        predicate, context, _how = parent_predicate(event, parent)
         embedding = ""
         if parent.resolved_by == "record":
-            predicate.append(typed_field(event, "process.parent.executable_key"))
             parent_command = event.get("process.parent.command_line")
             if parent_command is not None:
                 tokens = [token.casefold() for token in split_argv(str(parent_command))]
                 embedding = " started with -Embedding" if "-embedding" in tokens or "/embedding" in tokens else ""
+                notes: tuple[str, ...] = ()
             else:
                 notes = (("the parent's command line is not recorded, so -Embedding (DCOM activation) could not be "
                           "confirmed"),)
@@ -177,21 +171,19 @@ class DcomActivatedChild(WindowsProcessRule):
             severity=self.severity,
             attack=self.attack,
             predicate=predicate,
-            shape=f"dcom:{parent.name}>{child_name}",
+            content=f"dcom:{parent.name}>{child_name}",
+            common=f"'{parent.name}' starting '{child_name}' (DCOM)",
             notes=notes,
+            context=context,
         )]
 
 
 class ServiceChildToAdminShare(WindowsProcessRule):
     id = "win.service_child_output_to_admin_share"
-    version = "1"
-    title = "a service-hosted command redirected its output to an admin share"
+    version = "2"
+    title = "a service-hosted command sent its output to an admin share (Impacket smbexec/atexec)"
     reads_command_line = True
     uses_parent = True
-    assures_negative = False
-    positive_only_reason = ("the output redirection is read from the cmd payload's argv; a window without a match "
-                            "proves nothing, and the same result can be achieved without a redirection on the command "
-                            "line")
     severity, lane = "high", "high"
     attack = ("T1021.002", "T1569.002", "T1059.003")
     benign = ("administrative scripts that write output to a share, where that is the known workflow",)
@@ -216,10 +208,21 @@ class ServiceChildToAdminShare(WindowsProcessRule):
     _SERVICE_PARENTS = frozenset({"services.exe", "psexesvc.exe", "paexec.exe", "csexecsvc.exe"})
     _ADMIN_SHARES = ("admin$", "c$", "ipc$")
 
+    @classmethod
+    def _admin_share(cls, target: object) -> str | None:
+        """The `\\\\host\\ADMIN$` (or C$/IPC$) share a UNC path names, or None."""
+        text = str(target or "")
+        if not is_remote_path(text):
+            return None
+        parts = text.strip().strip('"').replace("/", "\\").lstrip("\\").split("\\")
+        if len(parts) >= 2 and parts[1].casefold() in cls._ADMIN_SHARES:
+            return f"\\\\{parts[0]}\\{parts[1]}"
+        return None
+
     def judge(self, event: TypedEvent) -> list[Hit]:
         if image_name(event.get("process.executable_key"))[0] != "cmd.exe":
             return []
-        from romulus.detect.windows_cmdline import cmd_payload, parse_cmd_payload
+        from romulus.detect.windows_cmdline import cmd_payload
         command = str(event.get("process.command_line"))
         payload = cmd_payload(command)
         if payload is None:
@@ -230,19 +233,34 @@ class ServiceChildToAdminShare(WindowsProcessRule):
             parent = None
         if parent is not None and parent.name not in self._SERVICE_PARENTS:
             return []
-        for cmd in parse_cmd_payload(payload):
+        who = (f"a cmd process started by '{parent.name}'" if parent is not None
+               else "a cmd process (its parent process could not be resolved, so this finding is limited to the "
+                    "recorded redirection)")
+        commands = parse_cmd_payload(payload)
+        stages_bat = any(str(target).strip().strip('"').casefold().endswith(".bat")
+                         for cmd in commands for _op, target in cmd.redirects)
+        for cmd in commands:
+            # atexec/wmiexec: the command redirects its output straight to an admin share
             for _operator, target in cmd.redirects:
-                if is_remote_path(target):
-                    share = target.strip().strip('"').replace("/", "\\").lstrip("\\")
-                    parts = share.split("\\")
-                    if len(parts) >= 2 and parts[1].casefold() in self._ADMIN_SHARES:
-                        label = (f"started by '{parent.name}'" if parent is not None
-                                 else "a service-hosted cmd")
-                        return [Hit("service_output_to_share",
-                                    f"a cmd command {label} redirected output to the admin share "
-                                    f"\\\\{parts[0]}\\{parts[1]}", self.lane, self.severity, self.attack,
-                                    [parsed_field(event, clip(command))], shape=f"smbexec:{parts[1].casefold()}")]
+                share = self._admin_share(target)
+                if share is not None:
+                    return [self._hit(event, command, f"{who} redirected output to the admin share {share}",
+                                      f"direct:{share.casefold()}")]
+            # smbexec: `echo <cmd> ^> \\host\C$\__output 2^>^&1 > %TEMP%\execute.bat & ... execute.bat & del ...`
+            if cmd.argv and cmd.argv[0].casefold() == "echo" and stages_bat:
+                for token in cmd.argv[1:]:
+                    share = self._admin_share(token)
+                    if share is not None:
+                        return [self._hit(
+                            event, command,
+                            f"{who} staged a batch file that writes command output to the admin share {share} "
+                            f"(the Impacket smbexec shape)", f"smbexec:{share.casefold()}")]
         return []
+
+    def _hit(self, event: TypedEvent, command: str, text: str, content: str) -> Hit:
+        return Hit("service_output_to_share", text, self.lane, self.severity, self.attack,
+                   [parsed_field(event, clip(command))], content=content,
+                   common="a service-hosted cmd sending output to an admin share")
 
 
 WINDOWS_REMOTE_PLAYBOOKS = [RemoteExecutionParent, DcomActivatedChild, ServiceChildToAdminShare]
