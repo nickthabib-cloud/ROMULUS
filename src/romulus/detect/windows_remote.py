@@ -37,7 +37,7 @@ _REMOTE_PARENTS = {
 
 class RemoteExecutionParent(WindowsProcessRule):
     id = "win.remote_execution_child"
-    version = "2"
+    version = "3"
     title = "a shell, script host or LOLBin was started by a remote-execution service"
     uses_parent = True
     reads_command_line = False
@@ -103,7 +103,7 @@ class RemoteExecutionParent(WindowsProcessRule):
 
 class DcomActivatedChild(WindowsProcessRule):
     id = "win.dcom_activated_child"
-    version = "2"
+    version = "3"
     title = "a shell or script host was started by a DCOM-activated application"
     uses_parent = True
     reads_command_line = False
@@ -180,7 +180,7 @@ class DcomActivatedChild(WindowsProcessRule):
 
 class ServiceChildToAdminShare(WindowsProcessRule):
     id = "win.service_child_output_to_admin_share"
-    version = "2"
+    version = "3"
     title = "a service-hosted command sent its output to an admin share (Impacket smbexec/atexec)"
     reads_command_line = True
     uses_parent = True

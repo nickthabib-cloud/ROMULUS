@@ -265,6 +265,9 @@ from tests import throughput_fixture as tf
 # security-service, log-clearing, rundll32, curl). On this Linux-only fixture those rules still produce no finding,
 # so the candidates semantic projection stays byte-identical; their window cells move from not_applicable/complete
 # to positive_only and carry the new versions, changing rule_cells and the manifest coverage block only.
+# The reviewer's second fix round (shared interval-history lineage, exact native-messaging recognition, Defender
+# key path-components) bumps the versions of the parent-resolving and Defender rules again; on this Linux-only
+# fixture only those rules' rule_version in rule_cells changes (candidates still byte-identical, manifest stable).
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
     "audit": "23d9b87c75d030df8ff5bcbf07deacc75416c325dd74bcc89243cc1b5488ae93",
@@ -286,7 +289,7 @@ GOLDEN_STACK = {
     "links": "0fbedb27ca9a4cb72354178444ee9aabc49f377b2c933074fe03ef29c8fbb08a",
     "manifest": "0979618bc0ba0da8eae2946b942d0eb9e8b03b04a18e4a995d967e38cdeefb48",
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
-    "rule_cells": "a2b6a85205d50647489cebe1bfce131288075fb5d096e40bf6b9f775548faa87",
+    "rule_cells": "960e54b27409d525a7d28036d92c7be22f9fc407b57e55d3d8491b0ce300e7fd",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
     "tasks": "c65df4ab88c05661371cf32b49a1d22ef84d6753488bdb946c8e29376d486260",
 }
@@ -318,14 +321,14 @@ GOLDEN_NON_BASELINE_SEMANTICS = {
         "ts": "d8015c1ff0b135e082a5fef2ab1cb88206470e30beee157a0cfc7790d48b8310",
     },
     "rule_cells": {
-        "all_fields": "1fa92c66cc09e27746ead6ee0c7a8ad92e25266aa3d0f09d72068219b1c22da5",
+        "all_fields": "213bf5cc537ff46385993cb9f5ddea8e5106993246a6d089a5ec3f2c07b469ee",
         "count": 5534,
         "detail": "c174e2cb56c91f760f17ec89574d8fcaa2cbe4d479bf33a58d4893bbfad3e294",
         "evaluated": "f5a4a4e3c2f8aeaa483813029dda529f094f61e69d9b32759fde7c3f60f8f111",
         "matched": "4759fb925992f6e2069bbd2e8280b61086649acff76f2d84b26fea5072401e14",
         "partition": "3d4d6dcdebe7338195de1d0b9f200572e188623027d2f5697ecab2daaa0b876e",
         "rule_id": "ee3c478d32a1f3bbf3a055629a2e28b483605a354bf5e6e7ac1044f218cb3077",
-        "rule_version": "f84c4ee860d711bba286ff14fe2ce4a6f078ee530646208350c423720ec47187",
+        "rule_version": "65bc1c892bf073bfb44d79122a26a7f9f6a3ccf27e2437dce6be55e3cd4d508b",
         "state": "584fd98280615d93f01b6b247c30cdd8237b68ae738df1e0eef0df598b586014",
         "target": "e44ab979d5d8b44a6d713c765b284dfc7fdd95a24b9569d6b68e443fd9449fcd",
     },

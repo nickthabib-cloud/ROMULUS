@@ -152,10 +152,13 @@ class CmdCommand:
     redirects: list[tuple[str, str]] = field(default_factory=list)
 
 
-def cmd_payload(line: str) -> str | None:
-    """The text cmd.exe runs for ``/c``, ``/k`` or ``/r`` (switches may be grouped, ``/q/c``), or None."""
+def cmd_run(line: str) -> tuple[frozenset[str], str] | None:
+    """(the set of switch letters cmd.exe was given, the text it runs) for a ``/c``, ``/k`` or ``/r`` invocation
+    (switches may be grouped, ``/q/c``), or None when it is not such an invocation. Switch letters are casefolded
+    and a ``/t:``-style value switch contributes its bare letter."""
     n = len(line)
     i = 0
+    flags: set[str] = set()
     while i < n and line[i] in _SPACE:
         i += 1
     if i < n and line[i] == '"':
@@ -177,11 +180,19 @@ def cmd_payload(line: str) -> str | None:
             i += 1
         name = line[start + 1:i].casefold()
         if name in {"c", "k", "r"}:
-            return line[i:].lstrip(_SPACE)
+            flags.add(name)
+            return frozenset(flags), line[i:].lstrip(_SPACE)
         if name.startswith(("t:", "e:", "f:", "v:")) or name in {"q", "d", "a", "u", "s", "x", "y", "e", "f", "v"}:
+            flags.add(name[0])
             continue
         return None
     return None
+
+
+def cmd_payload(line: str) -> str | None:
+    """The text cmd.exe runs for ``/c``, ``/k`` or ``/r`` (switches may be grouped, ``/q/c``), or None."""
+    run = cmd_run(line)
+    return None if run is None else run[1]
 
 
 def _strip_outer_quotes(payload: str) -> str:
@@ -258,6 +269,39 @@ def parse_cmd_payload(payload: str) -> list[CmdCommand]:
         i += 1
     flush()
     return commands
+
+
+_EXTENSION_URL = re.compile(r"^chrome-extension://[a-p]{32}/?$", re.IGNORECASE)
+_PARENT_WINDOW = re.compile(r"^--parent-window=\d+$", re.IGNORECASE)
+_NM_PIPE = "\\\\.\\pipe\\chrome.nativemessaging"
+
+
+def is_chromium_native_messaging(command: str) -> bool:
+    """True only for the exact Chromium native-messaging host launch, read from parsed tokens:
+
+    ``cmd.exe /d /s /c "<host>.exe chrome-extension://<32 a-p>/ [--parent-window=<n>]" [< \\\\.\\pipe\\chrome.
+    nativeMessaging.*] [> \\\\.\\pipe\\chrome.nativeMessaging.*]`` — one command, no command separators, argv[0] the
+    host, argv[1] exactly the extension URL, any extra argument only ``--parent-window=<n>``, and any redirect only
+    to a ``chrome.nativeMessaging`` pipe. Anything else is not recognised (so it is never silently dropped)."""
+    run = cmd_run(command)
+    if run is None:
+        return False
+    flags, payload = run
+    if not {"d", "s", "c"} <= flags:
+        return False
+    commands = parse_cmd_payload(payload)
+    if len(commands) != 1:              # any & && | || separator disqualifies it
+        return False
+    argv = commands[0].argv
+    if len(argv) < 2 or not _EXTENSION_URL.match(argv[1].strip().strip('"')):
+        return False
+    if any(not _PARENT_WINDOW.match(extra.strip().strip('"')) for extra in argv[2:]):
+        return False
+    for _operator, target in commands[0].redirects:
+        normalized = target.strip().strip('"').replace("/", "\\").casefold()
+        if not normalized.startswith(_NM_PIPE):
+            return False
+    return True
 
 
 def _redirect_target(text: str, i: int) -> tuple[str, int]:
@@ -566,6 +610,27 @@ def ps_bool(value: object) -> bool | None:
         return True
     if text in _FALSE_WORDS:
         return False
+    return None
+
+
+def ps_named_argument(tokens: list[PsToken], *names: tuple[str, ...]) -> str | None:
+    """The argument value of the first matching named parameter (`-Path C:\\x`, `-Name:DisableAntiSpyware`), by
+    PowerShell's prefix rule. Each ``names`` entry is ``(canonical, smallest_prefix, *aliases)``. Returns the value
+    token's text (a word's text, a string's content, or a variable's name), or None when none matches."""
+    for index, token in enumerate(tokens):
+        if token.kind != "parameter":
+            continue
+        for spec in names:
+            canon, smallest = spec[0], spec[1]
+            aliases = tuple(spec[2:])
+            if ps_parameter_matches(token, canon, smallest, aliases):
+                inline = token.text.split(":", 1)
+                if len(inline) == 2 and inline[1]:
+                    return inline[1]
+                nxt = tokens[index + 1] if index + 1 < len(tokens) else None
+                if nxt is not None and nxt.kind in {"word", "string", "variable"}:
+                    return nxt.text
+                return None
     return None
 
 

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from romulus.detect.windows_cmdline import cmd_payload, parse_cmd_payload, split_argv
+from romulus.detect.windows_cmdline import is_chromium_native_messaging
 from romulus.detect.windows_common import (
     SPAWNED_CODE_RUNNERS,
     Hit,
@@ -62,29 +62,19 @@ def _document_kind(name: str) -> str | None:
     return None
 
 
-def _has_extension_operand(tokens: list[str]) -> bool:
-    return any(token.strip().strip('"').casefold().startswith("chrome-extension://") for token in tokens)
-
-
 def _is_native_messaging(event: TypedEvent, child_name: str) -> bool:
-    """A Chromium native-messaging host launch: `cmd.exe /d /s /c "<host>.exe" chrome-extension://<id>/ ...`, or any
-    operand that is a chrome-extension URL. Read from the parsed argv (and, for a cmd.exe child, from its parsed
-    payload so the nested quoting is handled), never a substring of the raw line."""
-    command = event.get("process.command_line")
-    if not command:
+    """True only for the exact Chromium native-messaging host launch (a cmd.exe child). Any other command with a
+    browser parent — a chrome-extension operand bolted onto an unrelated command, a rundll32 launch — is not a
+    native-messaging host and is never dropped here; it stays a lead."""
+    if child_name != "cmd.exe":
         return False
-    if _has_extension_operand(split_argv(str(command))):
-        return True
-    if child_name == "cmd.exe":
-        payload = cmd_payload(str(command))
-        if payload is not None:
-            return any(_has_extension_operand(cmd.argv) for cmd in parse_cmd_payload(payload))
-    return False
+    command = event.get("process.command_line")
+    return bool(command) and is_chromium_native_messaging(str(command))
 
 
 class LureAppSpawnsCodeRunner(WindowsProcessRule):
     id = "win.lure_app_spawns_code_runner"
-    version = "2"
+    version = "3"
     title = "A document, mail, reader or browser application created a shell, script host or LOLBin"
     uses_parent = True
     reads_command_line = False            # the match is images only; the command line is read only to exclude NM

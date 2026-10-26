@@ -32,6 +32,7 @@ from __future__ import annotations
 import hashlib
 import ntpath
 import re
+from bisect import insort
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import ClassVar
@@ -161,29 +162,38 @@ def _before(order_a, ts_a, order_b, ts_b) -> int | None:
 
 
 @dataclass
-class _PidState:
-    exec_ts: float = 0.0
-    exec_order: tuple = (None, None)
-    exec_image: str = ""
-    exec_event_id: str = ""
-    exec_native_id: str = ""
-    exec_event: TypedEvent | None = None
-    has_exec: bool = False
-    term_ts: float = 0.0
-    term_order: tuple = (None, None)
-    has_term: bool = False
+class _ProcEntry:
+    """One recorded process-lifecycle event of a (host, pid): a creation ("exec") or a termination ("term")."""
+    ts: float
+    serial: int | None
+    domain: object
+    kind: str                       # "exec" | "term"
+    image: str = ""
+    event_id: str = ""
+    native_id: str = ""
+    event: TypedEvent | None = None  # kept for an exec, so a lineage claim can cite the parent's creation record
+
+    @property
+    def order(self) -> tuple:
+        return (self.serial, self.domain)
+
+    def sort_key(self) -> tuple:
+        return (self.ts, self.serial is None, self.serial or 0, repr(self.domain), self.kind, self.event_id)
 
 
 class WindowsPidLineage:
-    """One shared record, for every parent-resolving rule, of the latest creation and latest termination of each
-    (host, pid) and the boots of each host. It holds only the latest exec and latest fence per pid (not full
-    history), so memory is bounded at mission scale; a new key is refused only when the disk budget is spent, and
-    that is stated. Entries are compared by (time, in-sequence record id), so out-of-order and cross-partition
-    arrival give the same answer, and two same-instant records in different computer/channel sequences are
-    undecided rather than guessed."""
+    """One shared, time-ordered history, for every parent-resolving rule, of the creation and termination records of
+    each (host, pid) and the boots of each host.
+
+    It never forgets: entries are appended per (host, pid) in order and the whole history is kept, spilling to a
+    disk-backed store when cold (only the disk budget may refuse a new key, and that refusal is stated). A parent
+    lookup asks which exec of the pid was live at the child's time with no fence between, so the answer is exact
+    whatever the arrival order, whichever rule asks, and whichever target (Sysmon or Security) was swept first: the
+    latest-only state that lost a reused-pid parent is gone. Records of one instant are ordered only inside one
+    computer/channel record-id sequence; anything else stays undecided rather than guessed."""
 
     def __init__(self, owner, members: list | None = None):
-        self.procs: KeyedStore = KeyedStore(owner, "win_pid_latest", HOT_COUNT)
+        self.procs: KeyedStore = KeyedStore(owner, "win_pid_history", HOT_COUNT)
         self.boots: KeyedStore = KeyedStore(owner, "win_boot_history", HOT_COUNT)
         self.members = members if members is not None else [owner]
         self._seen = RecentIds()
@@ -207,7 +217,7 @@ class WindowsPidLineage:
 
     def observe(self, event: TypedEvent) -> None:
         seen = (event.id, event.ts)
-        if seen in self._seen:
+        if seen in self._seen:          # the same record handed over again (another rule, or a re-read/resume) is a no-op
             return
         self._seen.add(seen)
         ts = event.ts.timestamp()
@@ -227,36 +237,29 @@ class WindowsPidLineage:
         pid = event.get("process.pid")
         if not isinstance(pid, int) or isinstance(pid, bool):
             return
-        order = _order_of(event)
+        kind = "exec" if event.family == "process_exec" else "term" if event.family == "process_termination" else None
+        if kind is None:
+            return
+        serial, domain = _order_of(event)
+        entry = _ProcEntry(ts, serial, domain, kind)
+        if kind == "exec":
+            entry.image = str(event.get("process.executable_key") or "")
+            entry.event_id = event.id
+            entry.native_id = event.raw[0].native_id if event.raw else ""
+            entry.event = event
         key = (event.host, pid)
-        state = self.procs.get(key)
-        if state is None:
-            state = _PidState()
-            if not self.procs.put(key, state):
+        entries = self.procs.get(key)
+        if entries is None:
+            if not self.procs.put(key, [entry]):
                 self.refused_keys.add(f"pid:{event.host}:{pid}")
                 self._refused("process")
-                return
-        if event.family == "process_exec":
-            if not state.has_exec or self._later(ts, order, state.exec_ts, state.exec_order):
-                state.exec_ts, state.exec_order = ts, order
-                state.exec_image = str(event.get("process.executable_key") or "")
-                state.exec_event_id = event.id
-                state.exec_native_id = event.raw[0].native_id if event.raw else ""
-                state.exec_event = event
-                state.has_exec = True
-        elif event.family == "process_termination" and (
-                not state.has_term or self._later(ts, order, state.term_ts, state.term_order)):
-            state.term_ts, state.term_order = ts, order
-            state.has_term = True
-
-    @staticmethod
-    def _later(ts_a, order_a, ts_b, order_b) -> bool:
-        cmp = _before(order_b, ts_b, order_a, ts_a)
-        # keep the newer when strictly later, or when same instant but unorderable we prefer the newcomer
-        return cmp is None or cmp < 0
+            return
+        insort(entries, entry, key=_ProcEntry.sort_key)
 
     def parent(self, child: TypedEvent) -> ParentImage:
-        """The parent image from its own creation record, or raise Undecided (never a benign/no-match)."""
+        """The image of the process that held the child's parent pid when the child was created: the latest recorded
+        exec of that pid at or before the child with no termination between it and the child and no boot between.
+        Raises Undecided (never a benign/no-match) when it cannot be decided."""
         ppid = child.get("process.ppid")
         if not isinstance(ppid, int) or isinstance(ppid, bool):
             raise Undecided("parent_pid", "the parent process id is not recorded")
@@ -265,35 +268,42 @@ class WindowsPidLineage:
         key = (child.host, ppid)
         if f"pid:{child.host}:{ppid}" in self.refused_keys or (self.incomplete and key not in self.procs):
             raise Undecided("parent_refused", "the shared process-history store refused the parent's history")
-        state = self.procs.get(key)
+        entries = self.procs.get(key)
         child_ts = child.ts.timestamp()
         child_order = _order_of(child)
-        if state is None or not state.has_exec:
+        if not entries:
             raise Undecided("parent_unrecorded", "no creation of the parent's process id is recorded on this host at "
                                                  "or before the child (the parent may predate the hunt window)")
-        rel = _before(state.exec_order, state.exec_ts, child_order, child_ts)
-        if rel is None:
-            raise Undecided("parent_order", "the parent's creation record and the child share an instant and cannot "
-                                            "be ordered outside one computer/channel record-id sequence")
-        if rel > 0:
-            raise Undecided("parent_unrecorded", "the only recorded creation of the parent's process id is after the "
-                                                 "child, so the parent's own creation is not recorded")
-        if state.has_term:
-            term_vs_exec = _before(state.exec_order, state.exec_ts, state.term_order, state.term_ts)
-            term_vs_child = _before(state.term_order, state.term_ts, child_order, child_ts)
-            if term_vs_exec is not None and term_vs_exec < 0 and term_vs_child is not None and term_vs_child <= 0:
-                raise Undecided("parent_ended", "the process that held the parent's id terminated after its latest "
-                                                "recorded creation and before the child, so no live parent is "
-                                                "recorded")
-        boots = self.boots.get(child.host) or []
-        if any(state.exec_ts < boot <= child_ts for boot in boots):
-            raise Undecided("parent_boot", "a boot of the host lies between the parent id's latest recorded creation "
-                                           "and the child, so the recorded creation is from an earlier boot")
-        name, why = image_name(state.exec_image)
-        if name is None:
-            raise Undecided("parent_image", f"the parent's image cannot be identified: {why}")
-        return ParentImage(state.exec_image, name, state.exec_event_id, state.exec_native_id, state.exec_ts, "pid",
-                           state.exec_event)
+        # The newest exec at or before the child is the live parent, unless a fence falls between it and the child.
+        execs = [entry for entry in entries if entry.kind == "exec"]
+        for exec_entry in sorted(execs, key=_ProcEntry.sort_key, reverse=True):
+            rel = _before(exec_entry.order, exec_entry.ts, child_order, child_ts)
+            if rel is None:
+                raise Undecided("parent_order", "the parent's creation record and the child share an instant and "
+                                                "cannot be ordered outside one computer/channel record-id sequence")
+            if rel > 0:
+                continue                                    # this exec is after the child: not the parent
+            # exec_entry is the newest exec at/before the child. Is it still live at the child's time?
+            for term in entries:
+                if term.kind != "term":
+                    continue
+                after_exec = _before(exec_entry.order, exec_entry.ts, term.order, term.ts)
+                before_child = _before(term.order, term.ts, child_order, child_ts)
+                if after_exec is not None and after_exec < 0 and before_child is not None and before_child <= 0:
+                    raise Undecided("parent_ended", "the process that held the parent's id terminated after its "
+                                                    "recorded creation and before the child, so no live parent is "
+                                                    "recorded")
+            boots = self.boots.get(child.host) or []
+            if any(exec_entry.ts < boot <= child_ts for boot in boots):
+                raise Undecided("parent_boot", "a boot of the host lies between the parent id's recorded creation and "
+                                               "the child, so the recorded creation is from an earlier boot")
+            name, why = image_name(exec_entry.image)
+            if name is None:
+                raise Undecided("parent_image", f"the parent's image cannot be identified: {why}")
+            return ParentImage(exec_entry.image, name, exec_entry.event_id, exec_entry.native_id, exec_entry.ts,
+                               "pid", exec_entry.event)
+        raise Undecided("parent_unrecorded", "no creation of the parent's process id is recorded at or before the "
+                                             "child, so the parent's own creation is not recorded")
 
 
 def parent_predicate(event: TypedEvent, parent: ParentImage) -> tuple[list[PredicateField], list[TypedEvent], str]:
@@ -424,6 +434,12 @@ class WindowsProcessRule(Playbook):
         self._seen = RecentIds()
         self.lineage: WindowsPidLineage | None = WindowsPidLineage(self) if self.uses_parent else None
         self.undecided: dict[str, int] = {}
+        # A parent-resolving rule observes creations, terminations and boots during consume but defers judging its
+        # candidate children to finalize, when the whole interval history exists. That way the answer does not
+        # depend on which target (Sysmon or Security) or partition was swept first. Candidate children wait in a
+        # disk-backed list (only the disk budget refuses, and that is stated).
+        self._defer = self.uses_parent
+        self.children: SpillList | None = SpillList(self, "parent_children", self.HOT) if self._defer else None
         self.load = lambda ids: []
 
     # ---- sweep protocol ----
@@ -445,6 +461,8 @@ class WindowsProcessRule(Playbook):
         self.groups.trim()
         self.members_store.trim()
         self.order.trim()
+        if self.children is not None:
+            self.children.trim()
         if self.lineage is not None:
             self.lineage.trim()
 
@@ -453,6 +471,8 @@ class WindowsProcessRule(Playbook):
         self.members_store.clear()
         self.order.clear()
         self.bounds.clear()
+        if self.children is not None:
+            self.children.clear()
         if self.lineage is not None:
             self.lineage.clear()
 
@@ -460,6 +480,13 @@ class WindowsProcessRule(Playbook):
     def judge(self, event: TypedEvent) -> list[Hit]:
         """The behaviours this record shows (empty: none). Raises Undecided when the record cannot be judged."""
         raise NotImplementedError
+
+    def candidate_child(self, event: TypedEvent) -> bool:
+        """A cheap pre-filter (parent-resolving rules only): could this creation be a child this rule judges? Only
+        candidates are kept for the deferred finalize pass, so the rest of the fleet's execs are not re-judged. A
+        record whose image cannot be identified is kept too, so the partial it causes is still counted honestly."""
+        name, _why = image_name(event.get("process.executable_key"))
+        return name is None or name in SPAWNED_CODE_RUNNERS
 
     def consume(self, events: list[TypedEvent]) -> list[Match]:
         out: list[Match] = []
@@ -478,25 +505,35 @@ class WindowsProcessRule(Playbook):
                 self.lineage.observe(event)
             if event.family != "process_exec":
                 continue
-            try:
-                if event.get("process.executable_key") in (None, ""):
-                    raise Undecided("image", "the process image is not recorded")
-                if self.reads_command_line and event.get("process.command_line") in (None, ""):
-                    raise Undecided("command_line", "the command line is not recorded (Security 4688 records it only "
-                                                    "with command-line inclusion enabled)")
-                hits = self.judge(event)
-            except Undecided as undecided:
-                self.missing_required += 1
-                self.undecided[undecided.kind] = self.undecided.get(undecided.kind, 0) + 1
-                self.note_coverage(f"undecided_{undecided.kind}",
-                                   f"records not judged: {undecided.text} (first seen {event.ts.isoformat()} on "
-                                   f"{event.host})")
+            if self._defer:
+                # observe now, judge at finalize (the interval history is complete only then, so the answer does
+                # not depend on target/partition order). Keep only candidate children.
+                if self.candidate_child(event) and not self.children.append(event):
+                    self.note_limit("parent_children", "the deferred-child store took no new candidate; a later "
+                                                       "parent-resolved finding may be missing")
                 continue
-            self.evaluated += 1
-            for hit in hits:
-                self._fold(event, hit, out)
+            self._judge_and_fold(event, out)
         self._batch = None
         return out
+
+    def _judge_and_fold(self, event: TypedEvent, out: list[Match]) -> None:
+        try:
+            if event.get("process.executable_key") in (None, ""):
+                raise Undecided("image", "the process image is not recorded")
+            if self.reads_command_line and event.get("process.command_line") in (None, ""):
+                raise Undecided("command_line", "the command line is not recorded (Security 4688 records it only "
+                                                "with command-line inclusion enabled)")
+            hits = self.judge(event)
+        except Undecided as undecided:
+            self.missing_required += 1
+            self.undecided[undecided.kind] = self.undecided.get(undecided.kind, 0) + 1
+            self.note_coverage(f"undecided_{undecided.kind}",
+                               f"records not judged: {undecided.text} (first seen {event.ts.isoformat()} on "
+                               f"{event.host})")
+            return
+        self.evaluated += 1
+        for hit in hits:
+            self._fold(event, hit, out)
 
     def _shape(self, event: TypedEvent, hit: Hit) -> str:
         image = image_name(event.get("process.executable_key"))[0]
@@ -603,6 +640,13 @@ class WindowsProcessRule(Playbook):
 
     def finalize(self) -> list[Match]:
         out: list[Match] = []
+        # Parent-resolving rules judge their deferred candidate children now, against the complete interval history,
+        # so a reused-pid parent is never lost and the answer is independent of target and partition order. Each
+        # child's first (shape, host) is a finding of its own; repeats merge, exactly as in the immediate path.
+        if self._defer and self.children is not None:
+            self._batch = None
+            for event in self.children:
+                self._judge_and_fold(event, out)
         for shape in self.order:
             group = self.groups.peek(shape)
             if group is None or group.repeats == 0:

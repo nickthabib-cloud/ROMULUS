@@ -19,6 +19,7 @@ from romulus.detect.windows_cmdline import (
     parse_powershell,
     parse_reg,
     ps_bool,
+    ps_named_argument,
     ps_parameter_matches,
     ps_switch_argument,
     ps_tokens,
@@ -83,6 +84,21 @@ def _reg_bool(data: object) -> bool | None:
         return int(text, 0) != 0
     except ValueError:
         return ps_bool(text)
+
+
+def _registry_components(path: object) -> list[str]:
+    """The casefolded path components of a registry key or path string, handling `\\`, `/` and a hive prefix."""
+    text = str(path or "").strip().strip('"').strip("'").replace("/", "\\")
+    text = text.removeprefix("registry::").removeprefix("microsoft.powershell.core\\registry::")
+    return [part for part in text.casefold().split("\\") if part]
+
+
+def _defender_key(path: object) -> tuple[bool, bool]:
+    """(is a Windows Defender key, is one of its Exclusions sub-keys), by exact path-component comparison."""
+    parts = _registry_components(path)
+    is_defender = any(part in _DEFENDER_KEY_MARK for part in parts)
+    is_exclusion = is_defender and "exclusions" in parts
+    return is_defender, is_exclusion
 
 
 class InhibitRecovery(WindowsProcessRule):
@@ -222,7 +238,7 @@ class PowerShellShadowCopyDeletion(WindowsProcessRule):
 
 class DefenderImpairment(WindowsProcessRule):
     id = "win.defender_impairment"
-    version = "2"
+    version = "3"
     title = "Microsoft Defender was disabled or given an exclusion"
     assures_negative = False
     positive_only_reason = ("the preference change is read from PowerShell argv/script or reg.exe argv; a window "
@@ -295,23 +311,37 @@ class DefenderImpairment(WindowsProcessRule):
                     content=f"defender:{'exclusion' if 'exclusion' in what else 'disable'}")]
 
     def _itemproperty(self, event: TypedEvent, script: str, tokens: list) -> list[Hit]:
-        strings = [token.text for token in tokens if token.kind in {"string", "word"}]
-        if not any(mark in s for s in strings for mark in _DEFENDER_KEY_MARK):
+        verb = "set" if any(t.kind == "word" and t.text == "set-itemproperty" for t in tokens) else "new"
+        # -Path/-LiteralPath points at a key; -Name is the value name; -Value is the data (reg bool semantics).
+        path_value = ps_named_argument(tokens, ("path", "p"), ("literalpath", "literalp"))
+        name_value = ps_named_argument(tokens, ("name", "n"), ("propertyname", "propertyn"))
+        data_value = ps_named_argument(tokens, ("value", "v"))
+        # a key component may also appear as a bare string operand (Set-ItemProperty "HKLM:\...\Windows Defender")
+        is_defender = is_exclusion = False
+        for candidate in [path_value, *[t.text for t in tokens if t.kind == "string"]]:
+            defender, exclusion = _defender_key(candidate)
+            is_defender = is_defender or defender
+            is_exclusion = is_exclusion or exclusion
+        if not is_defender:
             return []
-        is_exclusion = any("exclusions" in s for s in strings)
-        names_disable = any(name in s for s in strings for name in _DEFENDER_DISABLE_VALUES)
-        if not (is_exclusion or names_disable):
-            return []
-        what = "an exclusion" if is_exclusion else "a Defender policy value"
+        if is_exclusion:
+            what = "an exclusion"
+        else:
+            value_name = (name_value or "").strip().casefold()
+            if value_name not in _DEFENDER_DISABLE_VALUES or _reg_bool(data_value) is not True:
+                return []                                   # -Value 0 re-enables, or not a Defender disable value
+            what = "a Defender policy value"
         return [Hit("defender_impairment",
-                    f"a PowerShell registry write ({'Set' if 'set-itemproperty' in strings else 'New'}-ItemProperty) "
-                    f"set {what} under a Windows Defender key", self.lane, self.severity, self.attack,
-                    [parsed_field(event, clip(script))],
+                    f"a PowerShell registry write ({verb.capitalize()}-ItemProperty) set {what} under a Windows "
+                    f"Defender key", self.lane, self.severity, self.attack, [parsed_field(event, clip(script))],
                     content=f"defender:ps-reg:{'exclusion' if is_exclusion else 'disable'}")]
 
     def _reg(self, event: TypedEvent, argv: list[str]) -> list[Hit]:
         reg = parse_reg(argv)
-        if reg is None or not any(mark in reg.key for mark in _DEFENDER_KEY_MARK):
+        if reg is None:
+            return []
+        is_defender, is_exclusion = _defender_key(reg.key)
+        if not is_defender:
             return []
         if reg.verb in {"query", "export", "save", "copy"}:
             return []                                        # reading or exporting is not a change
@@ -322,14 +352,11 @@ class DefenderImpairment(WindowsProcessRule):
                         [parsed_field(event, clip(" ".join(argv[1:])))], content="defender:reg:import")]
         if reg.verb != "add":
             return []
-        if "exclusions" in reg.key:
+        if is_exclusion:
             return [self._reg_hit(event, argv, "an exclusion", "exclusion")]
         value = (reg.value_name or "").strip().casefold()
-        if value in _DEFENDER_DISABLE_VALUES:
-            state = _reg_bool(reg.data)
-            if state is True:                               # /d 0 re-enables: never claimed as disabling
-                return [self._reg_hit(event, argv, f"the Defender policy value '{reg.value_name}' to disabled",
-                                      "disable")]
+        if value in _DEFENDER_DISABLE_VALUES and _reg_bool(reg.data) is True:  # /d 0 re-enables: never "disabled"
+            return [self._reg_hit(event, argv, f"the Defender policy value '{reg.value_name}' to disabled", "disable")]
         return []
 
     def _reg_hit(self, event: TypedEvent, argv: list[str], what: str, shape: str) -> Hit:
