@@ -662,6 +662,12 @@ class IcmpEchoTunnel(_FlowRule):
         return larger - smaller >= cls.ASYM_ABSOLUTE and larger >= cls.ASYM_PAYLOAD_RATIO * smaller
 
     @classmethod
+    def _echo_asymmetric(cls, pair: _IcmpEchoPair, sensor: str) -> bool:
+        """Asymmetry shown by echo-only counters. Arkime keys ICMP sessions by address pair, so error and
+        time-exceeded messages between the same hosts fold into the echo counters and can fake a size difference."""
+        return cls._asymmetric(pair, sensor) and not pair.mixed_types.get(sensor)
+
+    @classmethod
     def _sustained(cls, pair: _IcmpEchoPair, sensor: str) -> bool:
         duration = pair.last.get(sensor, 0) - pair.first.get(sensor, 0)
         echoes = min(pair.request_packets[sensor], pair.reply_packets[sensor])
@@ -805,7 +811,8 @@ class IcmpEchoTunnel(_FlowRule):
         client, peer, transport = key
         sensors = [sensor for sensor in pair.payload if self._sensor_reportable(pair, sensor)]
         sensor = max(sorted(sensors), key=lambda name: (
-            self._asymmetric(pair, name), bool(pair.nonstandard_codes.get(name)),
+            self._echo_asymmetric(pair, name), self._asymmetric(pair, name),
+            bool(pair.nonstandard_codes.get(name)),
             self._bulk(pair.payload[name], pair.packets[name]), self._sustained(pair, name),
             pair.payload[name], pair.packets[name],
         ))
@@ -821,7 +828,10 @@ class IcmpEchoTunnel(_FlowRule):
                                  for kind, count in sorted(pair.kinds[sensor].items()))
         kind_text = kind_text.replace(" record record", " record").replace(" session record", " session")
         signals = []
-        if asymmetric:
+        if asymmetric and pair.mixed_types.get(sensor):
+            signals.append("request/reply payload asymmetry in counters that include non-echo ICMP, so not proved "
+                           "for the echo exchange")
+        elif asymmetric:
             signals.append("material request/reply payload asymmetry")
         if bulk:
             signals.append("bulk payload volume")
@@ -868,7 +878,7 @@ class IcmpEchoTunnel(_FlowRule):
                  "This is packet-size and volume shape, not payload entropy or proof of tunneling."
                  + cited_phrase(len(evs), pair.records[sensor], not missing)
                  + bound_note(missing, pair.ends[sensor]))
-        lane, severity = ("high", "high") if asymmetric else (self.lane, "medium")
+        lane, severity = ("high", "high") if self._echo_asymmetric(pair, sensor) else (self.lane, "medium")
         match = Match(self.id, claim, self.claim_type, evs,
                       _predicates(evs[0], ("source.ip", "destination.ip", "icmp.type", "icmp.code",
                                            "flow.bytes_toserver", "source.bytes")),

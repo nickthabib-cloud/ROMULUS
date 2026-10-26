@@ -388,6 +388,22 @@ def test_arkime_mixed_icmp_session_evaluates_echo_as_an_upper_bound(types, codes
     assert "include non-echo ICMP" in match.claim
 
 
+@pytest.mark.parametrize("types, codes, packets, extra", [
+    ([0, 3, 8], [0, 3], (1000, 1200), 200 * 590),     # ordinary pings and port-unreachables from the router
+    ([0, 8, 11], [0], (1000, 1250), 250 * 590),       # ordinary pings and time-exceeded messages
+    ([0, 3, 8], [0, 4], (600, 700), 100 * 590),       # Windows pings and fragmentation-needed messages
+])
+def test_arkime_error_messages_folded_into_echo_counters_never_make_high_asymmetry(types, codes, packets, extra):
+    requests, replies = packets
+    frame = 98 if requests == 1000 else 74
+    hit = ark("arkime-errors", proto=1, sport=None, dport=None, src="10.0.0.5", dst="10.0.0.1",
+              c2s=requests * frame, s2c=requests * frame + extra, pkts_c=requests, pkts_s=replies, seconds=1200)
+    hit["_source"]["icmp"] = {"type": types, "code": codes}
+    for match in run(IcmpEchoTunnel(), events(hit)):
+        assert match.proposed_lane != "high"
+        assert "not proved for the echo exchange" in match.claim
+
+
 def test_arkime_nonstandard_echo_code_is_evaluated_but_non_echo_only_is_complete_no_match():
     unusual = ark("arkime-code-1", proto=1, sport=None, dport=None, src="10.0.0.5", dst=ATTACKER,
                   c2s=4 * (42 + 64), s2c=4 * (42 + 64), pkts_c=4, pkts_s=4)
