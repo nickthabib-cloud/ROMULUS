@@ -23,6 +23,7 @@ from romulus.hunt.context import finalize_context
 from romulus.hunt.expansion_plan import TIER_PLAN, WINDOWS_TIER_ADDITIONS
 from romulus.hunt.links import (
     HOST_SIDE_LINKS,
+    WINDOWS_LINK_TYPES,
     LinkAnchor,
     LinkFetcher,
     LinkResult,
@@ -323,6 +324,7 @@ class ExpansionEngine:
     @staticmethod
     def _link_anchors(anchor: LinkAnchor, link_type: LinkType) -> tuple[list[LinkAnchor], list[dict]]:
         keyed: dict[str, tuple[dict, TypedEvent, str | None, datetime]] = {}
+        windows_link = link_type in WINDOWS_LINK_TYPES
         for event in anchor.events:
             keys: list[dict] = []
             if link_type == "process_lineage" and usable_key(event.get("process.pid")):
@@ -407,7 +409,8 @@ class ExpansionEngine:
             event_host = anchor.host if event.family in NETWORK_FAMILIES else event.host or anchor.host
             for key in keys:
                 token = json.dumps(
-                    {"key": key, "host": event_host, "window_anchor": event_ts.isoformat()},
+                    {"key": key, "host": event_host, "window_anchor": event_ts.isoformat()}
+                    if windows_link else key,
                     sort_keys=True,
                     separators=(",", ":"),
                 )
@@ -416,15 +419,21 @@ class ExpansionEngine:
             return [anchor], []
         ordered = [keyed[token] for token in sorted(keyed)]
         kept, dropped = ordered[:MAX_ANCHOR_KEYS], ordered[MAX_ANCHOR_KEYS:]
-        variants = [
-            anchor.model_copy(update={
-                "ts": event_ts,
-                "host": event_host,
-                "events": [event],
-                "link_key": key,
-            })
-            for key, event, event_host, event_ts in kept
-        ]
+        if windows_link:
+            variants = [
+                anchor.model_copy(update={
+                    "ts": event_ts,
+                    "host": event_host,
+                    "events": [event],
+                    "link_key": key,
+                })
+                for key, event, event_host, event_ts in kept
+            ]
+        else:
+            variants = [
+                anchor.model_copy(update={"events": [event]})
+                for _key, event, _event_host, _event_ts in kept
+            ]
         return variants, [key for key, _event, _host, _ts in dropped]
 
     def _anchor_plan(self, row: dict, *, candidate: dict | None = None,
@@ -624,26 +633,32 @@ class ExpansionEngine:
             return cached
         slots = []
         seen_scopes: set[str] = set()
+        windows_link = link_type in WINDOWS_LINK_TYPES
+        portable_window = plan.windows.get(window_label)
         for variant in link_plan.variants:
-            # A finding may cite keys from several hosts or widely separated events.  Each key is an observed
-            # event anchor, so its fetch window and host must follow that event rather than the candidate's first
-            # timestamp/host.
-            windows = {item.label: item for item in expansion_windows(variant.ts, self.window)}
-            window = windows.get(window_label)
+            if windows_link:
+                # A Windows finding may cite keys from several hosts or widely separated events. Each key is an
+                # observed event anchor, so its fetch window and host follow that event rather than the candidate.
+                windows = {item.label: item for item in expansion_windows(variant.ts, self.window)}
+                window = windows.get(window_label)
+            else:
+                # Preserve the portable expansion identity and window contract byte-for-byte.
+                window = portable_window
             if window is None:
                 continue
-            scope = json.dumps(
-                {
-                    "key": variant.link_key,
-                    "host": variant.host,
-                    "window": window.model_dump(mode="json"),
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-            if scope in seen_scopes:
-                continue
-            seen_scopes.add(scope)
+            if windows_link:
+                scope = json.dumps(
+                    {
+                        "key": variant.link_key,
+                        "host": variant.host,
+                        "window": window.model_dump(mode="json"),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                if scope in seen_scopes:
+                    continue
+                seen_scopes.add(scope)
             if hasattr(self.fetcher, "result_id"):
                 stored = self.repo.expansion_link(self.fetcher.result_id(variant, link_type, window))
             else:

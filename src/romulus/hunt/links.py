@@ -37,6 +37,9 @@ LinkType = Literal[
     "process_session", "kerberos_logon", "remote_logon_source", "service_process",
 ]
 LinkStrength = Literal["observed", "inferred"]
+WINDOWS_LINK_TYPES = frozenset({
+    "process_activity", "process_session", "kerberos_logon", "remote_logon_source", "service_process",
+})
 # Links that look only forward from the anchor: they fetch [anchor, window end), and say so.
 FORWARD_LINKS = frozenset({"source_ip", "account", "host_after_anchor", "service_process"})
 # A flow key (community ID, 5-tuple) is time-free: port reuse and fixed-port UDP (123, 514) can join different
@@ -491,10 +494,13 @@ class LinkFetcher:
 
     @staticmethod
     def _fetch_key(anchor: LinkAnchor, link_type: LinkType, window: LinkWindow, key: dict) -> str:
-        return digest({
-            "anchor": anchor.finding_id, "anchor_host": anchor.host, "link": link_type,
+        payload = {
+            "anchor": anchor.finding_id, "link": link_type,
             "window": window.model_dump(mode="json"), "key": key,
-        })
+        }
+        if link_type in WINDOWS_LINK_TYPES:
+            payload["anchor_host"] = anchor.host
+        return digest(payload)
 
     @staticmethod
     def _effective_window(anchor: LinkAnchor, link_type: LinkType, window: LinkWindow) -> LinkWindow:
