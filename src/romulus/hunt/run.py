@@ -10,7 +10,7 @@ from romulus.config import Settings
 from romulus.detect import netdef
 from romulus.evidence.normalize import NORMALIZER_VERSION
 from romulus.hunt.baseline_stage import run_baseline_stage
-from romulus.hunt.baseline_writer import run_hunt_segment_writer
+from romulus.hunt.baseline_writer import DEFAULT_RETAIN_BYTES, run_hunt_segment_writer
 from romulus.hunt.expansion import PER_ANCHOR_SOURCE_QUERIES, ExpansionEngine
 from romulus.hunt.links import LinkFetcher, is_agent_reach
 from romulus.hunt.manifest import build_manifest, new_hunt_id
@@ -174,7 +174,7 @@ def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
             *, stats: dict | None = None, partial_reasons: list[str] | None = None,
             expansion_summary: dict | None = None, packet_summary: dict | None = None,
             baseline_summary: dict | None = None, ai_agent_summary: dict | None = None,
-            owner_token: str | None = None) -> dict:
+            owner_token: str | None = None, retain_budget_bytes: int | None = None) -> dict:
     partial_reasons = list(partial_reasons or sweep_summary.get("partial_reasons") or [])
     sweep_complete = bool(sweep_summary.get("complete"))
     missing_summary = not sweep_summary
@@ -193,8 +193,13 @@ def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
                or baseline_failed
                or (expansion_summary or {}).get("status") in {"partial", "failed"})
     try:
+        # The writer decides per hour from each hour's own window cells, so a hunt left partial by another stage still
+        # writes the hours whose baseline inputs were complete; whether it is partial decides only how long its window
+        # material is kept (for a resume).
         segment_summary = run_hunt_segment_writer(
-            repo, hunt_id, hunt_complete=not partial and agent_status != "failed",
+            repo, hunt_id, hunt_partial=partial or agent_status == "failed",
+            baseline_finished=bool((baseline_summary or {}).get("finished")),
+            retain_budget_bytes=(DEFAULT_RETAIN_BYTES if retain_budget_bytes is None else retain_budget_bytes),
         )
     except Exception as exc:
         log.exception("hunt-derived baseline segment writer failed")
@@ -487,6 +492,7 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool | None = None, on_candidate=
         expansion_summary=expansion_summary, packet_summary=packet_summary,
         baseline_summary=baseline_summary,
         ai_agent_summary=ai_agent_summary, owner_token=owner_token,
+        retain_budget_bytes=int(s.baseline_retain_disk_gb * 1e9),
     )
 
 
@@ -584,4 +590,5 @@ def resume_hunt(s: Settings, hunt_id: str, agent_mode: str | None = None, ai_age
         expansion_summary=expansion_summary, packet_summary=packet_summary,
         baseline_summary=baseline_summary,
         ai_agent_summary=ai_agent_summary, owner_token=owner_token,
+        retain_budget_bytes=int(s.baseline_retain_disk_gb * 1e9),
     )

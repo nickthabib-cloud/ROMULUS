@@ -866,7 +866,8 @@ def test_a_segment_straddling_history_start_contributes_only_its_in_span_rows():
         "spec_version": SPEC.version, "key_version": SPEC.key_version, "normalizer": "fixture@1",
         "start": begin, "end": window.start, "bucket": "day", "origin": "hunt",
         "source_hunt_id": "earlier", "built_by_hunt_id": "earlier", "exclusion_digest": "none",
-        "excluded_keys": [], "hunted": 1, "events_total": 8 * 24, "status": "active", "created_at": START,
+        "excluded_keys": [], "hunted": 1, "events_total": 8 * 24, "first_event_hour": begin,
+        "status": "active", "created_at": START,
     }, [{
         "segment_id": "straddle", "scope_kind": "host", "scope": "host:web01", "key_id": "old-id",
         "key_digest": "old-digest", "key": {"executable": "/bin/old", "exec_file_path": "/bin/old"},
@@ -879,7 +880,7 @@ def test_a_segment_straddling_history_start_contributes_only_its_in_span_rows():
     }], [{
         "segment_id": "straddle", "scope_kind": "host", "scope": "host:web01",
         "hour": begin + timedelta(hours=hour), "events": 1,
-    } for hour in range(8 * 24)])
+    } for hour in range(8 * 24)], [{"hour": begin + timedelta(hours=hour), "events": 1} for hour in range(8 * 24)])
     event = _event(1, "/bin/old")
     repo.save_evidence("h1", [event], {event.raw[0].key: {"message": "old"}}, None)
     repo.upsert_baseline_observation(_observation(event, key_id="old-id", key_digest="old-digest",
@@ -907,7 +908,213 @@ def test_history_stopped_on_budget_is_never_called_absent():
             {"start": "2024-11-11T10:00:00+00:00", "end": "2024-11-15T15:00:00+00:00", "state": "omitted_budget",
              "reason": "lookback query or wall-clock budget exhausted"}]}]
     assert _coverage_failure(stopped, 24) == (
-        "no pre-window data in the hours read; history not read before 2024-11-15T15:00:00+00:00: lookback budget "
-        "exhausted")
-    failed = [{"status": "absent", "gaps": [{"start": "a", "end": "b", "state": "failed", "reason": "query failed"}]}]
-    assert _coverage_failure(failed, 24) == "no pre-window data in the hours read; history gap: query failed"
+        "no pre-window data in the complete hours from 2024-11-15T16:00:00+00:00 to the window start; history not "
+        "read before 2024-11-15T15:00:00+00:00: lookback budget exhausted")
+    failed = [{"status": "absent", "gaps": [{"start": "2024-11-15T10:00:00+00:00", "end": "2024-11-15T11:00:00+00:00",
+                                             "state": "failed", "reason": "query failed"}]}]
+    assert _coverage_failure(failed, 24) == (
+        "no pre-window data in the complete hours from 2024-11-15T11:00:00+00:00 to the window start; history gap "
+        "before them: query failed")
+
+
+def test_absent_history_names_every_gap_reason_not_only_the_budget():
+    """The S9 repro: the run before the window is complete and empty back to an unresolved hour (an exec without
+    process.exec_file.path), older hours hold records, and older still the budget stopped the read. The reason names
+    the unresolved hour's cause and never implies that no hour read held records."""
+    from romulus.hunt.baseline_stage import _coverage_failure
+    coverage = [{"status": "absent", "effective_hours": 0, "gaps": [
+        {"start": "2024-11-05T19:00:00+00:00", "end": "2024-11-10T17:00:00+00:00", "state": "omitted_budget",
+         "reason": "lookback query or wall-clock budget exhausted"},
+        {"start": "2024-11-12T16:00:00+00:00", "end": "2024-11-12T17:00:00+00:00", "state": "unresolved",
+         "reason": "bl.exec_path: event-9: process.exec_file.path is absent"}]}]
+
+    reason = _coverage_failure(coverage, 48)
+
+    assert reason == (
+        "no pre-window data in the complete hours from 2024-11-12T17:00:00+00:00 to the window start; history gap "
+        "before them: bl.exec_path: event-9: process.exec_file.path is absent; history not read before "
+        "2024-11-10T17:00:00+00:00: lookback budget exhausted")
+    assert "in the hours read" not in reason
+
+
+def test_a_spec_whose_coverage_fixes_every_verdict_probes_no_key_and_streams_its_rows(monkeypatch):
+    """No pre-window data: every scope is unresolved whatever its keys, so no per-key or per-scope probe runs. The
+    reason stays exact, the history fields are left unassessed, and the rows are written in bounded chunks."""
+    from romulus.hunt import baseline_stage
+
+    repo = _repo()
+    rows = []
+    for index in range(2_500):
+        event = _event(index, f"/opt/tool-{index:05d}")
+        rows.append({**_observation(event, key_id=f"id-{index:05d}", key_digest=f"d-{index:05d}",
+                                    path=f"/opt/tool-{index:05d}"), "scope": f"host:web{index % 7:02d}"})
+    repo.upsert_baseline_observations(rows)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("a probe ran for a verdict the spec's coverage already fixed")
+
+    for name in ("baseline_key_history", "baseline_key_prevalence", "baseline_key_history_counts",
+                 "baseline_key_prevalences", "baseline_scope_series", "baseline_peer_scopes"):
+        monkeypatch.setattr(repo, name, forbidden)
+    batches: list[int] = []
+    real_upsert = repo.upsert_baseline_observations
+
+    def upsert(items, **kwargs):
+        items = list(items)
+        batches.append(len(items))
+        return real_upsert(items, **kwargs)
+
+    monkeypatch.setattr(repo, "upsert_baseline_observations", upsert)
+
+    summary = run_baseline_stage(repo, "h1", WINDOW, source=EmptyHistory())
+
+    observed = list(repo.baseline_observations("h1"))
+    assert len(observed) == 2_500 and {row["verdict"] for row in observed} == {"unresolved"}
+    assert {row["reason"] for row in observed} == {summary["specs"][SPEC.id]["history_failure"]}
+    assert summary["specs"][SPEC.id]["history_failure"] == "no pre-window data"
+    assert all(row[name] is None for row in observed
+               for name in ("history_count", "n_hours", "peer_scopes", "peer_scopes_with_key"))
+    assert max(batches) <= baseline_stage._JUDGE_CHUNK and sum(batches) == 2_500
+    assert summary["specs"][SPEC.id]["unresolved"] == 2_500
+
+
+def test_batched_history_and_prevalence_probes_equal_the_per_key_probes():
+    repo = _repo()
+    _resolved_history(repo)
+    span = (START - timedelta(hours=48), START)
+    repo.save_baseline_snapshot({
+        "hunt_id": "h1", "plan": {}, "store_cut": {}, "segment_ids": ["history"], "coverage": {},
+        "status": "resolved", "digest": "snap",
+    })
+    key_ids = ["known-id", "absent-id"]
+
+    history = repo.baseline_key_history_counts(key_ids, "host", "host:web01", "h1", SPEC.id, span)
+    prevalence = repo.baseline_key_prevalences(key_ids, "host", "h1", SPEC.id, span)
+
+    for key_id in key_ids:
+        assert history[key_id] == sum(int(row["count"]) for row in repo.baseline_key_history(
+            key_id, "host", "host:web01", "h1", SPEC.id, span))
+        assert prevalence[key_id] == repo.baseline_key_prevalence(key_id, "host", "h1", SPEC.id, span)
+    assert history == {"known-id": 48, "absent-id": 0} and prevalence == {"known-id": 1, "absent-id": 0}
+
+
+def test_resolved_scopes_are_judged_in_bounded_chunks_with_one_batched_probe_per_chunk(monkeypatch):
+    from romulus.hunt import baseline_stage
+
+    repo = _repo()
+    _resolved_history(repo)
+    rows, events = [], []
+    for index in range(2_300):
+        event = _event(index, f"/opt/new-{index:05d}")
+        events.append(event)
+        rows.append(_observation(event, key_id=f"new-id-{index:05d}", key_digest=f"new-{index:05d}",
+                                 path=f"/opt/new-{index:05d}"))
+    cited = events[:BASELINE_CITATION_CAP]
+    repo.save_evidence("h1", cited, {event.raw[0].key: {"message": event.id} for event in cited}, None)
+    repo.upsert_baseline_observations(rows)
+    calls: list[int] = []
+    real = repo.baseline_key_history_counts
+
+    def counted(key_ids, *args, **kwargs):
+        calls.append(len(key_ids))
+        return real(key_ids, *args, **kwargs)
+
+    def per_key(*_args, **_kwargs):
+        raise AssertionError("a per-key probe ran")
+
+    monkeypatch.setattr(repo, "baseline_key_history_counts", counted)
+    monkeypatch.setattr(repo, "baseline_key_history", per_key)
+    monkeypatch.setattr(repo, "baseline_key_prevalence", per_key)
+
+    run_baseline_stage(repo, "h1", WINDOW, source=EmptyHistory())
+
+    assert calls == [baseline_stage._JUDGE_CHUNK, baseline_stage._JUDGE_CHUNK, 300]
+    observed = list(repo.baseline_observations("h1"))
+    assert {row["verdict"] for row in observed} == {"first_seen"}
+    candidate = repo.candidates("h1")[0]
+    # every key of the scope is tied to the one lead, though the judge held only the cited ones
+    assert all(row["candidate_id"] == candidate["id"] for row in observed)
+    assert "2300 keys in host:web01 were absent" in candidate["claim"]
+    assert "and 2280 more keys (in the observation table)" in candidate["claim"]
+
+
+def test_a_contradicted_internal_network_definition_keeps_external_destinations_from_a_complete_negative():
+    ext = SPEC_BY_ID["bl.ext_dest"]
+    repo = _repo(spec_ids=(ext.id,), configured=True)
+    begin = START - timedelta(hours=48)
+    repo.save_baseline_segment({
+        "id": "ext-history", "site": "site", "target": "host-index", "spec_id": ext.id,
+        "spec_version": ext.version, "key_version": ext.key_version, "normalizer": "fixture@1",
+        "start": begin, "end": START, "bucket": "day", "origin": "lookback",
+        "source_hunt_id": None, "built_by_hunt_id": None, "exclusion_digest": "none",
+        "network_digest": "fixture", "excluded_keys": [], "hunted": 0, "events_total": 48, "status": "active",
+        "created_at": START,
+    }, [], [{
+        "segment_id": "ext-history", "scope_kind": "internal_ip", "scope": "internal_ip:10.0.0.5",
+        "hour": begin + timedelta(hours=hour), "events": 1,
+    } for hour in range(48)])
+    repo.audit("system", "hunt.sweep_summary", "h1", {
+        "finished": True, "complete": False, "partial_reasons": [], "stats": {},
+        "internal_networks": {"outside": 2, "examples": ["198.51.100.7", "198.51.100.8"]},
+    })
+
+    summary = run_baseline_stage(repo, "h1", WINDOW, source=EmptyHistory())
+
+    rollup = next(cell for cell in repo.rule_cells("h1")
+                  if cell["rule_id"] == ext.id and cell["target"] == "*" and cell["partition"] == "window")
+    assert rollup["state"] == "evaluated_partial"
+    assert any("outside the internal-network definition" in reason for reason in rollup["detail"]["reasons"])
+    assert "outside the internal-network definition" in summary["specs"][ext.id]["window_failure"]
+
+
+def test_a_rate_judgement_after_its_material_was_released_is_unresolved():
+    from romulus.baseline.playbook import ServiceExecRateBaseline
+
+    rate = SPEC_BY_ID["bl.svc_exec_rate"]
+    repo = _repo(spec_ids=(rate.id,))
+    repo.release_baseline_window_material(
+        "h1", rate.id, "host-index",
+        "retained window material exceeded the disk budget of 1 bytes; the oldest is released first",
+    )
+    view = SnapshotView(repo, "h1", WINDOW, {"digest": "snap", "plan": {}, "coverage": {}}, min_live_hours=48,
+                        networks_configured=True)
+
+    failure = view._window_failure(ServiceExecRateBaseline())
+
+    assert failure.startswith("window counter material was released before judgement")
+
+
+def _with_inapplicable_edge_cell(detail: dict):
+    repo = _repo()
+    _resolved_history(repo)
+    edge = Window(start=WINDOW.end, end=WINDOW.end + timedelta(minutes=30))
+    repo.set_rule_cell("h1", SPEC.id, SPEC.version, "host-index", edge.key(), "not_applicable_no_events", 0, 0,
+                       detail)
+    known = _event(0, "/bin/known")
+    repo.save_evidence("h1", [known], {known.raw[0].key: {"message": known.id}}, None)
+    repo.upsert_baseline_observation(_observation(known, key_id="known-id", key_digest="known-digest",
+                                                  path="/bin/known"))
+    summary = run_baseline_stage(repo, "h1", WINDOW, source=EmptyHistory())
+    rollup = next(cell for cell in repo.rule_cells("h1")
+                  if cell["rule_id"] == SPEC.id and cell["target"] == "*" and cell["partition"] == "window")
+    return repo, summary, rollup
+
+
+@pytest.mark.parametrize("detail", [
+    {"reasons": ["source result cap reached"], "retrieval_complete": False},
+    {"reasons": ["source result cap reached"]},   # recorded before the flag existed
+])
+def test_a_partial_retrieval_of_an_inapplicable_cell_never_supports_a_complete_negative(detail):
+    repo, summary, rollup = _with_inapplicable_edge_cell(detail)
+
+    assert next(repo.baseline_observations("h1"))["verdict"] == "common"
+    assert rollup["state"] == "evaluated_partial"
+    assert any("retrieval was partial in 1 cell(s) of inapplicable target(s) host-index" in reason
+               for reason in rollup["detail"]["reasons"])
+    assert summary["status"] == "partial"
+
+
+def test_a_complete_inapplicable_cell_still_allows_a_complete_negative():
+    _, _summary, rollup = _with_inapplicable_edge_cell({"reasons": [], "retrieval_complete": True})
+
+    assert rollup["state"] == "no_match_complete"

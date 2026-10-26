@@ -129,6 +129,11 @@ class KeyCounter:
                 self._partial_unscoped_hours.add(hour)
 
     @property
+    def events_counted(self) -> int:
+        """Records this counter consumed, its segment's events_total: the spec's records its scope admits."""
+        return sum(self._event_hours.values())
+
+    @property
     def token_entries(self) -> int:
         return self._token_entries
 

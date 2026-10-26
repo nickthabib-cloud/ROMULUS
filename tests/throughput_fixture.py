@@ -564,7 +564,9 @@ WINDOW_START, WINDOW_END = T0 - timedelta(hours=1), T0 + timedelta(hours=1)
 TEST_PARTITION_MAX_DOCS = 400
 TEST_PIVOT_RECORDS = 600
 _VOLATILE = {"created_at", "updated_at", "retrieved_at", "at", "captured_at", "started_at", "ended_at",
-             "heartbeat_at", "lease_until", "lease_owner", "duration_ms"}
+             "heartbeat_at", "lease_until", "lease_owner", "duration_ms",
+             # the segment writer's longest measured write-lock hold
+             "max_write_seconds"}
 
 
 def _row(row) -> dict:

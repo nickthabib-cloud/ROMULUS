@@ -79,6 +79,9 @@ class Settings(BaseModel):
     state_disk_gb: float = Field(default=0.0, ge=0.0)
     state_disk_reserve_gb: float = Field(default=2.0, ge=0.0)
     state_memory_mb: int = Field(default=1536, ge=64)
+    # Database space for the per-hunt counts a partial hunt keeps so that its resumed run can still write baseline
+    # history. Over the limit, the oldest kept counts are released first; the hunts' findings are never affected.
+    baseline_retain_disk_gb: float = Field(default=2.0, ge=0.0)
     # Post-sweep expansion: every anchor brings its own share of source queries, so the total grows with the findings
     # to follow. This ceiling bounds that total (expansion queries run one at a time, so it is about what its wall
     # clock admits), and the wall clock is the expansion phase's own, so a long sweep never leaves it no time.
@@ -215,7 +218,7 @@ ENV_MAP = {
     "ES_INDEX_PATTERNS": "es_index_patterns", "ES_COMPRESSION": "es_compression",
     "ROMULUS_SWEEP_PREFETCH": "sweep_prefetch",
     "ROMULUS_STAGE_DIR": "stage_dir", "ROMULUS_STATE_DISK_GB": "state_disk_gb", "ROMULUS_STATE_DISK_RESERVE_GB": "state_disk_reserve_gb",
-    "ROMULUS_STATE_MEMORY_MB": "state_memory_mb",
+    "ROMULUS_STATE_MEMORY_MB": "state_memory_mb", "ROMULUS_BASELINE_RETAIN_DISK_GB": "baseline_retain_disk_gb",
     "ROMULUS_EXPANSION_MAX_SOURCE_QUERIES": "expansion_max_source_queries",
     "ROMULUS_EXPANSION_WALL_CLOCK_MINUTES": "expansion_wall_clock_minutes",
     "ARKIME_URL": "arkime_url", "ARKIME_USERNAME": "arkime_username", "ARKIME_PASSWORD": "arkime_password",
