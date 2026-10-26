@@ -253,6 +253,13 @@ from tests import throughput_fixture as tf
 # - audit, tasks, manifest: exec_pair observations and unresolved 205 -> 211, window_failure 22 -> 18 cells, rule
 #   coverage evaluated_complete 14 -> 18 and evaluated_partial 23 -> 19; material bytes 876,222 -> 936,342.
 # Every other digest and the non-baseline semantic projection are unchanged.
+# The first Windows process-centric rules join the pack. They are scoped to Windows telemetry and read no Linux
+# family, so on this Linux-only fixture they produce no finding: every candidate, lane, claim, citation, link,
+# anchor, expansion row and the candidates semantic projection are byte-identical. They do add their own coverage
+# cells (every rule gets a cell per target and partition): the rule_cells table gains the 25 rules' per-partition
+# not_applicable_no_events and split cells and their positive-only window cells (3,759 -> 5,534 non-baseline cells),
+# and the report manifest's coverage block lists them. rule_cells and manifest change by those cells only; events,
+# raw, entities, tasks, baseline rows, anchors, links and expansion are unchanged.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
     "audit": "23d9b87c75d030df8ff5bcbf07deacc75416c325dd74bcc89243cc1b5488ae93",
@@ -272,9 +279,9 @@ GOLDEN_STACK = {
     "events": "0165d2807ffee33aaef17dd70ba004ec4c87fa4c5f29e9dc75ba833f57b93ff7",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "0fbedb27ca9a4cb72354178444ee9aabc49f377b2c933074fe03ef29c8fbb08a",
-    "manifest": "09d18724cedc86dacfa661c74a211636e9be48338a09e40c9a51a3212e6333bb",
+    "manifest": "95844d125280443a3b6f6bf9c171e04dd691feb32cfb3b52260462e75a779666",
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
-    "rule_cells": "c8a4cfd1937ef7b21db48c371024e7f0b085721a3e0e9324a5ce0b20641a4c92",
+    "rule_cells": "e6db6fa124bdb787b866d63496ea4a28d109f0dcecf770f177a4690df7342c32",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
     "tasks": "c65df4ab88c05661371cf32b49a1d22ef84d6753488bdb946c8e29376d486260",
 }
@@ -306,16 +313,16 @@ GOLDEN_NON_BASELINE_SEMANTICS = {
         "ts": "d8015c1ff0b135e082a5fef2ab1cb88206470e30beee157a0cfc7790d48b8310",
     },
     "rule_cells": {
-        "all_fields": "5286716472ed525e78dd5eaabb70782b0325bd81fe37a7d87a96ac1a35b6107a",
-        "count": 3759,
-        "detail": "7dad162b4173d4b9f014717ab13d87382aded61790606b387cece6938b9b9798",
-        "evaluated": "6f10cc3cc36af740c1a133d78b648916a0d0a463f51db238b4e4e15aad2ea62e",
-        "matched": "1460c4f475a6c0a48415daab1be5e03906b62e10569c6b35c5e4398d35c72d0a",
-        "partition": "6d893f4a6e8876b97fa5839af1065eb368ecd4008b4dc62d1692ba7a5bcf5f5a",
-        "rule_id": "1712462d1ecbce33955ffb2201e0c99d313a625ffd4fa9126d74bb4f885167e4",
-        "rule_version": "43077c7fcb092249a2880c625ca4629f0b173fd887988695ed54dae1542b9d5c",
-        "state": "fac91f9282f733342d72de53553d08230fea025fe7a9e51904f5fb38d82da182",
-        "target": "70109432b9c54dfed31dfefde5a7ab6e6f5e0dd28262f395027792e6c7d5ad96",
+        "all_fields": "9d502d45e342dae8f11e129cfab45b414b9b9984bc53d36c8bfab95531720ab4",
+        "count": 5534,
+        "detail": "c174e2cb56c91f760f17ec89574d8fcaa2cbe4d479bf33a58d4893bbfad3e294",
+        "evaluated": "f5a4a4e3c2f8aeaa483813029dda529f094f61e69d9b32759fde7c3f60f8f111",
+        "matched": "4759fb925992f6e2069bbd2e8280b61086649acff76f2d84b26fea5072401e14",
+        "partition": "3d4d6dcdebe7338195de1d0b9f200572e188623027d2f5697ecab2daaa0b876e",
+        "rule_id": "ee3c478d32a1f3bbf3a055629a2e28b483605a354bf5e6e7ac1044f218cb3077",
+        "rule_version": "ddb24336b4c1143d34a8ac3260d18ac172fce820e77ce252cf13af4afe88e251",
+        "state": "302b9d4cd181d2b4812de5be4226095d75b1201762b4059faac54b50e216b814",
+        "target": "e44ab979d5d8b44a6d713c765b284dfc7fdd95a24b9569d6b68e443fd9449fcd",
     },
 }
 GOLDEN_NORMALIZED = {

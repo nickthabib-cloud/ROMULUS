@@ -659,16 +659,22 @@ def test_a_target_without_a_dataset_inventory_still_says_what_was_not_retrieved(
 
 
 def test_an_error_from_an_unmapped_dataset_marks_every_rule_partial_and_says_why(monkeypatch):
+    from romulus.detect.registry import ALL_PLAYBOOKS
     from romulus.evidence.normalize import normalize_hits
+    # A rule scoped to another OS cannot be evaluated on this Linux host and is honestly not-applicable, never
+    # partial: Linux data of an unknown family cannot hide a Windows (or other OS-only) event.
+    applicable = {cls.id for cls in ALL_PLAYBOOKS if "linux" in cls.os_families}
     events, _skips, _errors = normalize_hits([_access_doc(0, T0)])
     error = ("bad", "suricata.eve.smb: suricata event.original is not JSON")
     repo, sweep = _sweep_records(monkeypatch, [_access_doc(0, T0)], normalized=(events, {}, [error]))
-    cells = [c for c in repo.rule_cells("h1") if c["target"] == HOST_TARGET]
+    cells = [c for c in repo.rule_cells("h1") if c["target"] == HOST_TARGET and c["rule_id"] in applicable]
     assert cells and all(c["state"] not in ("no_match_complete", "evaluated_complete", "not_applicable_no_events",
                                             "positive_only", "matched") for c in cells)
     manifest, _text = _report(repo)
     gap = next(g for g in manifest["coverage"]["gaps"] if g["target"] == HOST_TARGET)
-    assert gap["every_rule_there"]
+    celled = {c["rule_id"] for c in repo.rule_cells("h1")
+              if c["target"] == HOST_TARGET and c["partition"] == gap["partition"] and c["rule_id"] in applicable}
+    assert celled and celled <= set(gap["rules"])     # every Linux-applicable rule evaluated here is unresolved
     assert any("suricata.eve.smb feeds no known event family, so every rule is partial" in r for r in gap["reasons"])
     assert sweep.partial_reasons
 

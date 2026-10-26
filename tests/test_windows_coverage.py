@@ -607,6 +607,8 @@ def test_playbook_os_families_filter_before_required_field_evaluation():
 
 
 def test_existing_linux_rules_do_not_silently_widen_to_windows_events():
+    from romulus.detect.registry import WINDOWS_PROCESS_PLAYBOOKS
+
     windows_families = {event.family for event in EVENT_CLASSES}
     windows_enabled = {
         playbook.id
@@ -614,7 +616,9 @@ def test_existing_linux_rules_do_not_silently_widen_to_windows_events():
         if windows_families.intersection(playbook.families) and "windows" in playbook.os_families
     }
 
-    assert windows_enabled == {"ioc.indicator_match"}
+    # Only the cross-platform indicator rule and the purpose-built Windows process rules read Windows families;
+    # every Linux host rule stays scoped to linux.
+    assert windows_enabled == {"ioc.indicator_match"} | {cls.id for cls in WINDOWS_PROCESS_PLAYBOOKS}
 
 
 def test_wrong_os_same_family_is_not_a_complete_negative(monkeypatch):

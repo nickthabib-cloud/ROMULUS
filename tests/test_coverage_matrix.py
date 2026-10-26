@@ -32,8 +32,10 @@ def test_public_matrix_contains_versions_tactic_rollups_and_rule_card_links():
     catalog = build_catalog()
     text = render_public(catalog)
 
+    from romulus.detect.registry import PACK_VERSION
+
     assert "ATT&CK Enterprise 20.0" in text
-    assert "ROMULUS `pack@32`" in text
+    assert f"ROMULUS `{PACK_VERSION}`" in text
     for rollup in catalog.tactic_rollups:
         assert f"| {rollup.tactic.id} | {rollup.tactic.name} |" in text
     assert "[host.ssh_password_guessing](#rule-host-ssh-password-guessing)" in text
