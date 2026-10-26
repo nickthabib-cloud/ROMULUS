@@ -314,8 +314,37 @@ class CarryInStore:
     def parent(self, host: str, pid: int, ts: datetime, boot: str | None = None,
                serial: int | None = None) -> tuple[tuple | None, str | None]:
         """The parent identity for a child exec'd at (ts, serial), or None with the reason it cannot be known."""
+        found, reason, _blocked = self._stored_parent(host, pid, ts, boot, serial)
+        return found, reason
+
+    def resolve_parent(self, host: str, pid: int, ts: datetime, boot: str | None = None,
+                       serial: int | None = None) -> tuple[tuple | None, str | None]:
+        """`parent`, then a process observation of the parent where the stored execs cannot answer.
+
+        The observation must follow the latest stored generation before the child, when there is one: it then
+        shows the image after every exec the carry holds of that process before the child, and `observed_parent`
+        requires that no break, unobserved hour or evicted exec lies between it and the child, so nothing could
+        have replaced that image since. A stored generation after the observation would itself be the latest, so
+        an exec between the observation and the child always blocks. A store that kept less (an empty store, or
+        one under budget pressure) therefore never resolves more than a store that kept more.
+        """
+        found, reason, fallback = self._stored_parent(host, pid, ts, boot, serial)
+        if found is not None or fallback is None:
+            return found, reason
+        observed, why = self.observed_parent(host, pid, ts, boot, serial, after=fallback[0])
+        if observed is not None:
+            return observed, None
+        if reason == BEFORE_HISTORY:
+            return None, why
+        return None, UNCARRIED_EXEC if reason == BREAK_BEFORE else reason
+
+    def _stored_parent(self, host: str, pid: int, ts: datetime, boot: str | None,
+                       serial: int | None) -> tuple[tuple | None, str | None, tuple | None]:
+        """(parent, reason, fallback). `fallback` is None when no observation may answer instead; else it is
+        `(after,)`: the latest stored generation before the child as (instant, serial), which an observation must
+        follow, or None when no stored generation precedes the child."""
         if len(self.repo.baseline_parent_targets(self.hunt_id, host)) > 1:
-            return None, SPANS_TARGETS
+            return None, SPANS_TARGETS, None
         child_hour = _hour(ts)
         child_end = child_hour + _HOUR
         # Observation must also run on to the horizon: a later hour could hold an earlier-typed exec.
@@ -329,7 +358,7 @@ class CarryInStore:
         entry = place_child(generations, at, serial)
         if entry is None and any(held[0] == at and (held[1] is None or serial is None) for held in generations):
             # A held generation at the child's exact instant, with no order between them.
-            return None, UNCARRIED_EXEC
+            return None, UNCARRIED_EXEC, None
         if entry is None:
             # No stored generation precedes the child. An uncarried exec of the host before the child may be the
             # parent, unless it provably lies in an earlier boot. Only when observation runs unbroken from the
@@ -339,18 +368,18 @@ class CarryInStore:
             reachable = self._reachable_break(host, boot, ts)
             ranges = self.repo.baseline_parent_observed_ranges(self.hunt_id, self.target)
             if not ranges or (ranges[0][0] <= child_hour and observed_end <= ranges[0][1]):
-                return None, BREAK_BEFORE if reachable else BEFORE_HISTORY
-            return None, UNCARRIED_EXEC if reachable else UNOBSERVED_HOUR
+                return None, BREAK_BEFORE if reachable else BEFORE_HISTORY, (None,)
+            return None, UNCARRIED_EXEC if reachable else UNOBSERVED_HOUR, (None,)
         exec_ts = datetime.fromtimestamp(entry[0], UTC)
         exec_hour = _hour(exec_ts)
         if not self.repo.baseline_parent_observed_covers(self.hunt_id, self.target, exec_hour, observed_end):
-            return None, UNOBSERVED_HOUR
+            return None, UNOBSERVED_HOUR, ((exec_ts, entry[1]),)
         # A break blocks only what it can fall inside: the interval from the parent's exec to the child, inclusive.
         if entry[6] or self.repo.baseline_parent_break_overlaps(
                 self.hunt_id, self.target, host, exec_ts, ts + _MICRO):
             # An ambiguous generation (two images at one instant, unordered) is an uncarried exec too.
-            return None, UNCARRIED_EXEC
-        return (entry[0], entry[2], entry[3], entry[4], entry[5]), None
+            return None, UNCARRIED_EXEC, ((exec_ts, entry[1]),)
+        return (entry[0], entry[2], entry[3], entry[4], entry[5]), None, None
 
     def replay_hour(self, hour: CarryHour) -> bool:
         """Feed one persisted carry hour through the same rules as its records; True when the hour may join the
@@ -577,8 +606,12 @@ class CarryInStore:
         return written
 
     def observed_parent(self, host: str, pid: int, ts: datetime, boot: str | None,
-                        serial: int | None = None) -> tuple[tuple | None, str | None]:
-        """Resolve a long-lived parent from its nearest same-boot process observations, never by inference."""
+                        serial: int | None = None, *,
+                        after: tuple[datetime, int | None] | None = None) -> tuple[tuple | None, str | None]:
+        """Resolve a long-lived parent from its nearest same-boot process observations, never by inference.
+
+        `after`: a stored exec of the pid, as (instant, serial), that the observed state must provably follow (a
+        later instant, or the same instant and a greater audit serial)."""
         if not boot:
             return None, "parent boot is not recorded"
         if len(self.repo.baseline_parent_targets(self.hunt_id, host)) > 1:
@@ -618,6 +651,11 @@ class CarryInStore:
         if not view.prior:
             return None, "parent observation follows child"
         observed_ts = datetime.fromtimestamp(view.image.ts, UTC)
+        if after is not None and not (
+                observed_ts > after[0] or (observed_ts == after[0] and after[1] is not None
+                                           and view.image.serial is not None and view.image.serial > after[1])):
+            # the observed state may be the image before that exec
+            return None, UNCARRIED_EXEC
         observed_end = max(_hour(ts) + _HOUR, self.horizon) if self.horizon is not None else _hour(ts) + _HOUR
         if not self.repo.baseline_parent_observed_covers(
                 self.hunt_id, self.target, _hour(observed_ts), observed_end):
@@ -927,15 +965,8 @@ class PendingResolver:
             resolved = exec_pair_key(self.spec, pending.host, parent, pending.child_executable)
             return PendingResolution(pending.event_id, (resolved,), None)
         if isinstance(self.parents, CarryInStore):
-            parent, reason = self.parents.parent(
+            parent, reason = self.parents.resolve_parent(
                 pending.host, pending.ppid, pending.ts, pending.boot, pending.serial)
-            if parent is None and reason in (BEFORE_HISTORY, BREAK_BEFORE):
-                broken = reason == BREAK_BEFORE
-                parent, reason = self.parents.observed_parent(
-                    pending.host, pending.ppid, pending.ts, pending.boot, pending.serial,
-                )
-                if parent is None and broken:
-                    reason = UNCARRIED_EXEC
         else:
             parent = parent_at(self.parents, pending.host, pending.ppid, pending.ts.timestamp(), pending.boot,
                                pending.serial)
