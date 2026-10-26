@@ -231,7 +231,7 @@ def test_doctor_is_ok_for_a_configured_site_whose_hosts_are_all_inside():
 def test_doctor_warns_when_the_setting_is_unset_even_with_no_host_addresses():
     fake = FakeES({HOST: []})
     check = check_site_networks(Settings(es_url="http://es.invalid", es_index_patterns=["logs-*"]), _client(fake))
-    assert check.status == "warn" and "ROMULUS_INTERNAL_NETWORKS is not set" in check.detail
+    assert check.status == "warn" and "internal networks are not set (Site setup page or ROMULUS_INTERNAL_NETWORKS)" in check.detail
     assert "no host.ip value" in check.detail
 
 

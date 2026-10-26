@@ -20,7 +20,8 @@ from romulus.decide.policy import LANE_ORDER
 from romulus.hunt.run import open_repo
 from romulus.report.manifest import internal_networks_view, investigations_for_hunt, publish_revision
 from romulus.report.markdown import render as render_md
-from romulus.site import load_site_facts
+from romulus.site import SiteChangedError, SiteValidationError, load_site_facts, save_site_facts
+from romulus.web import site_form
 from romulus.web.auth import RateLimiter, Sessions, csrf_ok, verify
 
 HERE = Path(__file__).resolve().parent
@@ -273,7 +274,7 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
             row = c.execute(_select(_t.user.c.role, _t.user.c.disabled)
                             .where(_t.user.c.username == u.get("u"))).first()
         if u.get("r") != "lead" or row is None or row.disabled or row.role != "lead":
-            raise HTTPException(403, "only an active lead account can delete hunts")
+            raise HTTPException(403, "only an active lead account can do this")
         return u
 
     @app.get("/hunts/{hunt_id}/delete", response_class=HTMLResponse)
@@ -313,6 +314,64 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
             except Exception:  # noqa: BLE001, S110 - best-effort; the deletion already committed
                 pass
         return RedirectResponse(f"/?deleted={hunt_id}&removed={counts.get('candidates', 0)}", status_code=303)
+
+    # ------------------------------------------------------------------ site setup
+    def site_page(request: Request, u: dict, content: dict, digest: str, present: bool, error: str = "",
+                  status_code: int = 200):
+        from romulus.detect.netdef import SiteNetworks
+        try:
+            networks = SiteNetworks.from_settings(s).summary()
+        except ValueError as exc:
+            networks = f"not usable: {exc}"
+        response = page(request, "site.html", u, form=site_form.view(content), digest=digest, present=present,
+                        error=error, saved=request.query_params.get("saved") == "1", networks=networks,
+                        env_networks=bool(s.internal_networks or s.external_networks),
+                        running=repo.hunts_with_live_lease())
+        response.status_code = status_code
+        return response
+
+    @app.get("/site", response_class=HTMLResponse)
+    def site_setup(request: Request):
+        u = need_lead(request)
+        try:
+            facts = load_site_facts(s.home)
+        except SiteValidationError as exc:
+            raise HTTPException(409, f"{exc}. Fix or remove the file on the server; the page edits only a valid "
+                                     "file.") from None
+        return site_page(request, u, facts.content, facts.digest, facts.present)
+
+    @app.post("/site")
+    async def save_site(request: Request):
+        u = need_lead(request)
+        form = await request.form(max_fields=site_form.max_fields())
+        if not csrf_ok(u, str(form.get("csrf", ""))):
+            raise HTTPException(403, "bad CSRF token")
+        digest = str(form.get("digest", ""))
+        try:
+            content = site_form.parse_form(form)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        if (content.get("internal_networks") or content.get("external_networks")) and (
+                s.internal_networks or s.external_networks):
+            # Saving would leave the networks set in two places, which every new hunt then refuses.
+            return site_page(request, u, content, digest, bool(digest), status_code=400, error=(
+                "internal networks are already set on this server in ROMULUS_INTERNAL_NETWORKS or "
+                "ROMULUS_EXTERNAL_NETWORKS: leave the network boxes empty, or remove those settings first"))
+
+        def record(before, after) -> None:
+            changed = site_form.describe_change(before.content, after.content)
+            detail = {"before_digest": before.digest or None, "after_digest": after.digest, "changed": changed}
+            # Both versions fit in the record (the file is bounded); the audit log is then the file's history.
+            detail |= {"before": before.content if before.present else None, "after": after.content}
+            repo.audit(f"web:{u['u']}", "site.update", detail=detail)
+
+        try:
+            save_site_facts(s.home, content, digest, record=record)
+        except SiteValidationError as exc:
+            return site_page(request, u, content, digest, bool(digest), error=str(exc), status_code=400)
+        except SiteChangedError as exc:
+            raise HTTPException(409, str(exc)) from None
+        return RedirectResponse("/site?saved=1", status_code=303)
 
     # ------------------------------------------------------------------ reports
     @app.post("/hunts/{hunt_id}/report")

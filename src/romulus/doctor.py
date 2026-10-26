@@ -73,11 +73,15 @@ def check_es(s: Settings) -> list[Check]:
 def check_site_networks(s: Settings, client: ElasticClient | None = None) -> Check:
     """The internal-network definition, checked against the addresses of the site's own hosts (host.ip in host
     telemetry). Outside addresses, or no definition at all, are warnings that name the setting; never a failure."""
-    definition = SiteNetworks.from_settings(s)
+    try:
+        definition = SiteNetworks.from_settings(s)
+    except ValueError as error:
+        return Check("site.internal_networks", "fail", str(error))
     notes = []
     if not definition.configured:
-        notes.append(f"{INTERNAL_SETTING} is not set: {definition.summary()}; rules whose negative depends on "
-                     "traffic direction report partial coverage")
+        notes.append(f"internal networks are not set (Site setup page or {INTERNAL_SETTING}): "
+                     f"{definition.summary()}; rules whose negative depends on traffic direction report partial "
+                     "coverage")
     client = client or ElasticClient(s)
     try:
         contracts = {target: contract_from_types(target, flatten_mapping(client.mapping(target)))
