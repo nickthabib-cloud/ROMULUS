@@ -546,6 +546,30 @@ def test_an_interrupted_writer_still_charges_its_kept_material_to_the_budget(mon
     assert repo.baseline_window_material_pairs("hunt-a") == [(SPEC.id, "host-index")]
 
 
+def test_material_an_interrupted_writer_kept_for_a_hunt_that_cannot_resume_is_released_at_the_next_finish(
+        monkeypatch):
+    repo = _repo()
+    _hunt(repo, hours=1)
+    _sweep_cell(repo, [_event("a", "/usr/bin/id", 5)], START, START + H)
+    write = repo.append_baseline_segment_rows
+
+    def crash(*_args, **_kwargs):
+        raise RuntimeError("disk I/O error")
+
+    monkeypatch.setattr(repo, "append_baseline_segment_rows", crash)
+    with pytest.raises(RuntimeError):
+        run_hunt_segment_writer(repo, "hunt-a", hunt_partial=False)
+    monkeypatch.setattr(repo, "append_baseline_segment_rows", write)
+    repo.set_hunt_state("hunt-a", "completed_within_scope")
+    assert repo.baseline_window_retention("hunt-a") is not None
+
+    _hunt(repo, hours=1, hunt_id="hunt-b")
+    run_hunt_segment_writer(repo, "hunt-b", hunt_partial=False, now=datetime.now(UTC) + timedelta(hours=1))
+
+    assert repo.baseline_window_retention("hunt-a") is None
+    assert repo.baseline_window_material_pairs("hunt-a") == []
+
+
 def test_an_inapplicable_targets_empty_cell_from_a_partial_retrieval_is_never_written():
     repo = _repo()
     _hunt(repo, hours=2)

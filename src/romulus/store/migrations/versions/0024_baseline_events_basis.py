@@ -60,6 +60,7 @@ def downgrade() -> None:
     op.drop_index("ix_baseline_window_count_merge", table_name="baseline_window_count")
     op.drop_table("baseline_window_retention")
     op.drop_table("baseline_segment_event_hour")
-    with op.batch_alter_table("baseline_segment") as batch:
-        batch.drop_column("first_event_hour")
-        batch.drop_column("events_basis")
+    # A batch rebuild of baseline_segment would follow its children's foreign keys (CASCADE deletes count and
+    # scope-hour rows; RESTRICT snapshot membership fails the drop). DROP COLUMN alters it in place.
+    op.execute(sa.text("ALTER TABLE baseline_segment DROP COLUMN first_event_hour"))
+    op.execute(sa.text("ALTER TABLE baseline_segment DROP COLUMN events_basis"))

@@ -366,6 +366,41 @@ def test_0016_drops_only_the_owners_implied_observations(tmp_path):
         assert rows() == sorted(observed, key=lambda row: (row[1], row[0]))
 
 
+def test_0024_downgrade_keeps_segment_children_and_snapshot_membership(tmp_path):
+    """A rebuild of baseline_segment would cascade-delete its count and scope-hour rows, or fail on snapshot
+    membership; the downgrade drops its columns in place and every child row survives."""
+    engine = make_engine(tmp_path / "events-basis-down.db")
+    with engine.begin() as connection:
+        cfg = _alembic_config(connection)
+        command.upgrade(cfg, "0023")
+        connection.exec_driver_sql(
+            "INSERT INTO hunt (id, created_at, created_by, manifest, manifest_digest, execution_state) "
+            "VALUES ('h1', '2026-01-01', 'test', '{}', 'd', 'partial')")
+        connection.exec_driver_sql(
+            "INSERT INTO baseline_segment (id, site, target, spec_id, spec_version, key_version, normalizer, start, "
+            "\"end\", bucket, origin, exclusion_digest, excluded_keys, hunted, events_total, rows_digest, status, "
+            "created_at) VALUES ('s1', 'site', 'host', 'bl.exec_path', '1', '1', 'n', '2026-01-01 00:00:00.000000',"
+            " '2026-01-01 01:00:00.000000', 'day', 'lookback', 'none', '[]', 0, 5, 'd', 'active', "
+            "'2026-01-01 00:00:00.000000')")
+        connection.exec_driver_sql(
+            "INSERT INTO baseline_scope_hour (segment_id, scope_kind, scope, hour, events) "
+            "VALUES ('s1', 'host', 'host:a', '2026-01-01 00:00:00.000000', 5)")
+        connection.exec_driver_sql(
+            "INSERT INTO baseline_snapshot (hunt_id, plan, store_cut, segment_ids, coverage, status, digest) "
+            "VALUES ('h1', '{}', '{}', '[]', '{}', 'resolved', 'dg')")
+        connection.exec_driver_sql(
+            "INSERT INTO baseline_snapshot_segment (hunt_id, spec_id, target, segment_id) "
+            "VALUES ('h1', 'bl.exec_path', 'host', 's1')")
+        command.upgrade(cfg, "0024")
+        command.downgrade(cfg, "0023")
+        counts = [connection.exec_driver_sql(f"SELECT count(*) FROM {table}").scalar_one()
+                  for table in ("baseline_segment", "baseline_scope_hour", "baseline_snapshot_segment")]
+        columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(baseline_segment)")}
+
+    assert counts == [1, 1, 1]
+    assert not {"events_basis", "first_event_hour"} & columns
+
+
 def test_0024_is_the_single_head_and_0017_leaves_stored_candidates_about_every_record_they_cite(tmp_path):
     engine = make_engine(tmp_path / "candidate-context.db")
     with engine.begin() as connection:

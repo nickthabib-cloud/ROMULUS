@@ -286,8 +286,9 @@ def run_hunt_segment_writer(repo: Repo, hunt_id: str, *, hunt_partial: bool, bas
             }
         finished = True
     finally:
-        # The material is always settled and charged to the budget. A writer interrupted part way keeps it (a later
-        # finish can still write from it) rather than releasing what it may not have written.
+        # The material is always settled and charged to the budget. A writer interrupted part way keeps it rather
+        # than releasing what it may not have written: a resumed run's finish can still write from it, and material
+        # of a hunt that cannot resume is released at the next finish that settles the store.
         material = _settle_material(
             repo, hunt_id, specs, targets, hunt_partial=hunt_partial or not finished,
             baseline_finished=baseline_finished, budget=retain_budget_bytes, now=now, keep=not finished,
@@ -477,14 +478,17 @@ def _settle_material(repo: Repo, hunt_id: str, specs: list[str], targets: list[s
         repo.retain_baseline_window_material(hunt_id, bytes_=size, retained_at=now, reason=why)
         decision = {"kept": True, "reason": why, "bytes": size}
     # Material of other hunts that no finish ever settled (a crashed run, or a store written before this ledger) is
-    # charged too, so nothing outside the budget accumulates. A hunt that holds an active lease is still running.
+    # charged too, so nothing outside the budget accumulates. A hunt that can no longer resume has no writer left to
+    # use its material, charged or not, so it is released. A hunt that holds an active lease is still running.
     for other in repo.baseline_window_material_hunts():
-        if other == hunt_id or repo.baseline_window_retention(other) is not None:
+        if other == hunt_id:
             continue
         row = repo.get_hunt(other)
         if row is None or row["execution_state"] == "planned" or _lease_active(row, now):
             continue
         if row["execution_state"] not in _UNRESUMABLE:
+            if repo.baseline_window_retention(other) is not None:
+                continue
             since = row.get("ended_at") or row.get("heartbeat_at") or row["created_at"]
             if since.tzinfo is None:
                 since = since.replace(tzinfo=UTC)
