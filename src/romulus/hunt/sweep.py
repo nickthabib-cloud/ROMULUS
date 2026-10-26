@@ -896,7 +896,11 @@ class Sweep:
                 # Unknown or malformed records can hide behavior, so they make retrieval partial, but they do not
                 # attest that this source delivers the baseline family. Keep applicability profile/event based and
                 # carry the uncertainty through retrieval_complete instead.
-                target_applicable = bool(ordered) or self._baseline_target_applicable(target, pb)
+                target_applicable = (
+                    bool(ordered)
+                    or error_affected is ALL_FAMILIES
+                    or self._baseline_target_applicable(target, pb)
+                )
                 reasons = list(base_reasons)
                 reasons.extend(windows_reasons)
                 if error_reason and (error_affected is ALL_FAMILIES or set(pb.families) & error_affected):
