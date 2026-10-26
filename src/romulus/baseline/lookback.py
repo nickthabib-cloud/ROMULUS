@@ -472,6 +472,7 @@ class LookbackWriter:
                 waiting[key] = waiting[key] - 1 if written else -len(self.specs)
                 if waiting[key] == 0:
                     complete += 1
+        self._fill_end = end
         pruned, trimmed = self._bound_carry(ordered_targets, end - start)
         return LookbackResult(complete, (*gaps, *omitted), queries, records, longest, pruned, trimmed)
 
@@ -488,7 +489,11 @@ class LookbackWriter:
         for target in targets:
             if not self._keeps_carry(target):
                 continue
-            newest = self.repo.baseline_carry_newest_hour(site=self.site, target=target)
+            # The anchor is the newest kept hour no later than this fill's end plus the margin: hours a hunt with a
+            # future-dated or bogus window kept never make real input look old.
+            newest = self.repo.baseline_carry_newest_hour(
+                site=self.site, target=target, at_most=self._fill_end + CARRY_RETENTION_MARGIN,
+            )
             if newest is not None:
                 pruned += self.repo.prune_baseline_carry_hours(
                     site=self.site, target=target, before=newest + _HOUR - retention,

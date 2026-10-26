@@ -311,3 +311,172 @@ def test_a_pruned_hour_reads_as_absent_never_partial():
         orphans = connection.execute(select(func.count()).select_from(schema.baseline_carry_exec).where(
             schema.baseline_carry_exec.c.carry_seq.not_in(select(schema.baseline_carry_hour.c.seq)))).scalar_one()
     assert orphans == 0
+
+
+# ---- atomic carry-hour reads -----------------------------------------------------------------------------------
+
+def _two_engines(tmp_path):
+    from romulus.baseline.carry import CarryHour, ParentExec, save_carry_hour
+
+    path = tmp_path / "race.db"
+    reader = Repo(make_engine(path))
+    migrate(reader.engine)
+    writer = Repo(make_engine(path))
+    carry = CarryHour((ParentExec("web01", "b1", 100, START + timedelta(minutes=5), "/usr/bin/bash", 1, "r1", 7),),
+                      (), {}, False)
+    save_carry_hour(writer, site="s", target="t", hour=START, normalizer="n", carry=carry)
+    return reader, writer
+
+
+def _prune_between_header_and_rows(reader, writer):
+    from sqlalchemy import event
+
+    fired = []
+
+    @event.listens_for(reader.engine, "before_cursor_execute")
+    def interleave(_conn, _cursor, statement, *_args):
+        if "FROM baseline_carry_host" in statement and not fired:
+            fired.append(writer.prune_baseline_carry_hours(site="s", target="t", before=START + H))
+
+    return fired
+
+
+def test_a_prune_between_the_header_and_its_rows_never_yields_an_empty_observed_hour(tmp_path):
+    from romulus.baseline.carry import load_carry_hour
+
+    reader, writer = _two_engines(tmp_path)
+    fired = _prune_between_header_and_rows(reader, writer)
+
+    loaded = load_carry_hour(reader, site="s", target="t", hour=START, normalizer="n")
+
+    assert [hours for hours, _bytes in fired] == [1]
+    # the read saw one snapshot: the whole hour as it was when the header was read
+    assert loaded is not None and [item.executable for item in loaded.execs] == ["/usr/bin/bash"]
+    assert load_carry_hour(reader, site="s", target="t", hour=START, normalizer="n") is None
+
+
+def test_an_hour_read_back_with_other_row_counts_is_not_kept(tmp_path, monkeypatch):
+    """Defence in depth: even without a snapshot, the header's row counts expose an hour read short."""
+    from contextlib import contextmanager
+
+    from romulus.baseline.carry import load_carry_hour
+    from romulus.store import repo as repo_module
+
+    reader, writer = _two_engines(tmp_path)
+
+    @contextmanager
+    def no_snapshot(engine):
+        with engine.connect() as connection:
+            yield connection
+
+    monkeypatch.setattr(repo_module, "read_snapshot", no_snapshot)
+    _prune_between_header_and_rows(reader, writer)
+
+    assert load_carry_hour(reader, site="s", target="t", hour=START, normalizer="n") is None
+
+
+def test_an_hour_with_no_execs_still_loads():
+    from romulus.baseline.carry import CarryHour, load_carry_hour, save_carry_hour
+
+    repo = _repo()
+    save_carry_hour(repo, site="s", target="t", hour=START, normalizer="n",
+                    carry=CarryHour((), (), {"web01": frozenset({START})}, False))
+
+    loaded = load_carry_hour(repo, site="s", target="t", hour=START, normalizer="n")
+
+    assert loaded is not None and loaded.execs == () and loaded.breaks == {"web01": frozenset({START})}
+
+
+# ---- unrecorded boots are breaks, never silent supersessions -------------------------------------------------
+
+def _child_of(events, pid, *, host="db01", boot="b1"):
+    from romulus.baseline.spec import exec_pair_key
+
+    child = Pending(host, boot, pid, START + timedelta(minutes=10), "child", "/bin/sh")
+    results = []
+    for ordered in (events, list(reversed(events))):
+        built = _repo()
+        _resolve(built, "hunt-1", ordered, [child], hours=2)
+        second, _source, _ = _resolve(built, "hunt-2", ordered, [child], hours=2)
+        empty, _source, _ = _resolve(_repo(), "hunt-e", ordered, [child], hours=2)
+        assert second == empty
+        results.append(empty[0])
+    return results, exec_pair_key
+
+
+def test_an_unknown_boot_reuse_of_a_pid_is_a_break_never_the_pre_reuse_image():
+    t = lambda hours, minutes=0: START - hours * H + timedelta(minutes=minutes)
+    events = [
+        _exec("old-image", t(2, 0), 300, 1, "/usr/bin/old", host="db01", boot="b1"),
+        # pid 300 exec'd again by a record whose boot was not recorded: it may be a reuse in boot b1
+        _exec("reuse-unknown-boot", t(1, 5), 300, 1, "/tmp/implant", host="db01", boot=None),
+        _exec("later", t(1, 59), 400, 1, "/usr/bin/id", host="db01", boot="b1"),
+    ]
+
+    results, exec_pair_key = _child_of(events, 300)
+
+    old = exec_pair_key(PAIR, "db01", "/usr/bin/old", "/bin/sh").key_digest
+    for _event_id, keys, reason in results:
+        assert old not in keys and keys == ()
+        assert reason == "an exec of the host between parent and child was not carried"
+
+
+@pytest.mark.parametrize("first_boot, second_boot", [(None, "b1"), ("b1", None), (None, None)],
+                         ids=["unknown-then-known", "known-then-unknown", "unknown-on-both-sides"])
+def test_an_unrecorded_boot_on_either_side_never_proves_continuity(first_boot, second_boot):
+    t = lambda hours, minutes=0: START - hours * H + timedelta(minutes=minutes)
+    events = [
+        _exec("parent", t(2, 0), 300, 1, "/usr/bin/old", host="db01", boot=first_boot),
+        _exec("other", t(1, 30), 400, 1, "/usr/bin/id", host="db01", boot=second_boot),
+    ]
+
+    results, _key = _child_of(events, 300, boot=second_boot)
+
+    # an unknown boot never resolves through the carry; a known parent resolves only when no unknown-boot exec of
+    # the host lies between it and the child
+    for _event_id, keys, _reason in results:
+        assert keys == ()
+
+
+def test_a_process_image_in_an_unrecorded_boot_is_a_break_for_its_host():
+    t = lambda hours, minutes=0: START - hours * H + timedelta(minutes=minutes)
+    events = [
+        _exec("parent", t(2, 0), 300, 1, "/usr/bin/old", host="db01", boot="b1"),
+        _observed("image", t(1, 20), 300, 1, "/tmp/implant", host="db01", boot=None),
+    ]
+
+    results, _key = _child_of(events, 300)
+
+    for _event_id, keys, reason in results:
+        assert keys == () and reason == "an exec of the host between parent and child was not carried"
+
+
+
+# ---- prune anchor and the longest configured lookback -------------------------------------------------------
+
+def test_a_future_dated_kept_hour_never_anchors_the_prune_of_real_input():
+    from romulus.baseline.carry import CarryHour, save_carry_hour
+
+    events, pendings = _scenario()
+    store = _repo()
+    _resolve(store, "hunt-1", events, pendings, hours=6)
+    kept = _hours_kept(store)
+    # a bogus window kept an hour a year ahead
+    save_carry_hour(store, site="site", target="host-index", hour=START + 24 * 365 * H, normalizer="fixture@1",
+                    carry=CarryHour((), (), {}, False))
+
+    _again, _source, result = _resolve(store, "hunt-2", events, pendings, hours=6)
+
+    assert result.carry_hours_pruned == 0 and set(kept) <= set(_hours_kept(store))
+
+
+def test_the_longest_lookback_is_read_without_loading_manifests():
+    store = _repo()
+    for index, days in enumerate((3, 14, None)):
+        baseline = {"specs": [{"id": "bl.exec_pair"}]}
+        if days is not None:
+            baseline["history_days"] = days
+        store.create_hunt(f"h{index}", {"baseline": baseline}, f"m{index}", "test")
+    store.create_hunt("no-baseline", {"baseline": {"history_days": 90}}, "m-x", "test")
+
+    assert store.longest_baseline_history_days(default=7) == 14

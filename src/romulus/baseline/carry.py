@@ -174,8 +174,9 @@ class CarryInStore:
       skipped hour could hold a later exec of the same PID, including one whose typed time is earlier than the
       hour it is retrieved in, so the answer is then unknown;
     - the break ledger records, per host, the hours holding an exec that was fed but not stored: no pid or
-      executable, an unknown boot against a recorded one (or a recorded boot not provably older than an
-      unknown one), or a typed time outside the hour it was retrieved in. Such an exec may be the PID's
+      executable, an unrecorded boot (an exec or process image whose boot is unknown: nothing proves it is
+      not a reuse in the current boot, even beside other unknown-boot records), or a typed time outside the
+      hour it was retrieved in. Such an exec may be the PID's
       reuse, so a break between the generation and the child makes that host's answer unknown. Breaks are
       per host, so one host's unstorable exec never blanks the others. Only an exec of a recorded boot that is
       provably older than the host's recorded current boot is dropped without a break: no child of the
@@ -391,10 +392,11 @@ class CarryInStore:
             if row.get("family", "process_exec") != "process_exec":
                 host, boot = row.get("host"), row.get("boot")
                 pid, ppid, executable = row.get("pid"), row.get("ppid"), row.get("executable")
-                if (hour[0] <= ts < hour[1] and host and boot
+                if (hour[0] <= ts < hour[1] and host
                         and isinstance(pid, int) and not isinstance(pid, bool)
                         and isinstance(ppid, int) and not isinstance(ppid, bool)
                         and isinstance(executable, str) and executable):
+                    # an unrecorded boot becomes a break in observe_observation_rows
                     observed.append(ParentObservation(
                         host, boot, pid, ts, executable, ppid, row.get("session"),
                         row["event_id"], row.get("serial"),
@@ -442,9 +444,14 @@ class CarryInStore:
         for item in rows:
             if item.ts.tzinfo is None or item.ts.utcoffset() is None:
                 raise ValueError("parent observation timestamp must carry a timezone")
-            if (not item.host or not item.boot or isinstance(item.pid, bool) or not isinstance(item.pid, int)
+            if (not item.host or isinstance(item.pid, bool) or not isinstance(item.pid, int)
                     or item.pid < 0 or isinstance(item.parent_pid, bool) or not isinstance(item.parent_pid, int)
                     or not item.executable):
+                continue
+            if not item.boot:
+                # A process image seen in an unrecorded boot may be a reuse of its pid in the current boot: its
+                # hour is a break for its host, as for an unknown-boot exec.
+                self._uncarry(item.host, item.ts)
                 continue
             timestamp = item.ts.astimezone(UTC)
             marker = self._marker(item.host)
@@ -569,6 +576,13 @@ class CarryInStore:
                 self._uncarry(item.host, item.ts)
                 continue
             timestamp, boot = item.ts.astimezone(UTC), item.boot or ""
+            if not boot:
+                # An exec whose boot is not recorded may be a reuse of its pid in any boot, the current one
+                # included, and nothing proves continuity across it, even against other unknown-boot execs (a
+                # reboot between them is invisible). It is never stored and never moves the boot marker: its hour
+                # is a break for its host.
+                self._uncarry(item.host, timestamp)
+                continue
             marker = self._marker(item.host)
             if marker is None:
                 if not self.repo.set_baseline_parent_boot(
@@ -578,8 +592,8 @@ class CarryInStore:
                 self._remember_marker(item.host, (boot, timestamp))
             elif marker[0] != boot:
                 if marker[1] >= timestamp:
-                    # Dropped silently only when both boots are recorded: then the exec is provably in an older
-                    # boot. An unknown boot on either side may be the current one.
+                    # Dropped silently only when both boots are recorded (an unknown-boot exec never gets here,
+                    # and never sets a marker): then the exec is provably in an older boot.
                     if not (boot and marker[0]):
                         self._uncarry(item.host, timestamp)
                     continue
@@ -695,8 +709,12 @@ class CarryHourBuilder:
                 found = observation(event)
                 if found is not None and event.host and start <= event.ts < end:
                     pid, item, _ref = found
-                    if (item.boot and not isinstance(pid, bool) and isinstance(pid, int) and pid >= 0
-                            and not isinstance(item.ppid, bool) and isinstance(item.ppid, int) and item.exe):
+                    valid = (not isinstance(pid, bool) and isinstance(pid, int) and pid >= 0
+                             and not isinstance(item.ppid, bool) and isinstance(item.ppid, int) and bool(item.exe))
+                    if valid and not item.boot:
+                        # an image in an unrecorded boot may be a reuse of its pid: a break, as when replayed
+                        self._break(event.host, event.ts)
+                    elif valid:
                         record = ParentObservation(event.host, item.boot, pid, event.ts.astimezone(UTC), item.exe,
                                                    item.ppid, item.session, item.event_id, item.serial)
                         self._observations.setdefault((event.host, item.boot, pid), {})[
@@ -717,6 +735,10 @@ class CarryHourBuilder:
                 continue
             ppid = event.get("process.ppid")
             boot = boot_of(event) or ""
+            if not boot:
+                # never stored when replayed (an unrecorded boot is a break): keep only the break
+                self._break(event.host, event.ts)
+                continue
             _keep_latest_two(self._generations.setdefault((event.host, boot, pid), []), {
                 "exec_ts": event.ts.astimezone(UTC), "serial": exec_serial(event), "executable": executable,
                 "parent_pid": ppid if isinstance(ppid, int) and not isinstance(ppid, bool) else None,

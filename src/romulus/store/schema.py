@@ -496,6 +496,11 @@ baseline_carry_hour = Table(
     Column("format", Integer, nullable=False),
     Column("hostless", Integer, nullable=False),
     Column("bytes", Integer, nullable=False),
+    # how many rows of each kind the hour holds: a load that finds other counts treats the hour as not kept
+    Column("hosts", Integer, nullable=False),
+    Column("execs", Integer, nullable=False),
+    Column("observations", Integer, nullable=False),
+    Column("breaks", Integer, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
     CheckConstraint("hostless IN (0, 1)", name="ck_baseline_carry_hour_hostless"),
     CheckConstraint("bytes >= 0", name="ck_baseline_carry_hour_bytes"),

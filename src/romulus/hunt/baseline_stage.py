@@ -803,9 +803,7 @@ def _write_rollup(repo: Repo, hunt_id: str, playbook: BaselinePlaybook, stats: d
 
 def _longest_lookback(repo: Repo) -> timedelta:
     """The longest history any hunt of the store configures: kept carry input stays at least that long."""
-    days = [int(((hunt.get("manifest") or {}).get("baseline") or {}).get("history_days", 7))
-            for hunt in repo.list_hunts() if ((hunt.get("manifest") or {}).get("baseline") or {}).get("specs")]
-    return timedelta(days=max(days, default=7))
+    return timedelta(days=repo.longest_baseline_history_days(default=7))
 
 
 def run_baseline_stage(repo: Repo, hunt_id: str, window: Window, *, client=None,

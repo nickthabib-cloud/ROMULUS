@@ -93,11 +93,14 @@ def cell_complete(cell: dict) -> bool:
     """Whether a window cell's inputs were complete. An empty cell of an inapplicable target is complete only when
     its retrieval was: a partial retrieval is never written as complete, empty history. A cell recorded before
     the flag existed counts only if it states no reason."""
+    detail = cell.get("detail") or {}
+    if detail.get("material_complete") is False:
+        # its counts are exact for detection, but its shared-hour token material was not kept (budget)
+        return False
     if cell["state"] == "evaluated_complete":
         return True
     if cell["state"] != "not_applicable_no_events":
         return False
-    detail = cell.get("detail") or {}
     return bool(detail.get("retrieval_complete", not detail.get("reasons")))
 
 

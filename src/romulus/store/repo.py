@@ -32,7 +32,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.sqlite import insert
 
 from romulus.store import schema as t
-from romulus.store.db import utcnow, write_txn
+from romulus.store.db import read_snapshot, utcnow, write_txn
 
 # The origin suffix of a boot id a hunt's boot-interval map placed (the normalizer's BOOT_INTERVAL_ORIGIN; the
 # store does not import the evidence layer, and a test keeps the two equal).
@@ -3690,6 +3690,24 @@ class Repo:
         with self.engine.connect() as connection:
             return bool(connection.execute(query).scalar_one())
 
+    def longest_baseline_history_days(self, *, default: int) -> int:
+        """The largest history_days any hunt with baseline specs configures, read in SQL without loading
+        manifests (`default` stands for a hunt that does not state one)."""
+        baseline = func.json_extract(t.hunt.c.manifest, "$.baseline")
+        days = func.coalesce(func.json_extract(t.hunt.c.manifest, "$.baseline.history_days"), default)
+        with self.engine.connect() as connection:
+            value = connection.execute(select(func.max(days)).where(
+                baseline.is_not(None), func.json_extract(t.hunt.c.manifest, "$.baseline.specs").is_not(None),
+            )).scalar_one_or_none()
+        return max(int(value), 1) if value is not None else default
+
+    def baseline_window_token_rows(self, hunt_id: str) -> int:
+        """How many dedup-token rows of window material a hunt keeps (one range of its rows)."""
+        table = t.baseline_window_count.c
+        with self.engine.connect() as connection:
+            return int(connection.execute(select(func.count()).select_from(t.baseline_window_count).where(
+                table.hunt_id == hunt_id, table.token.is_not(None), table.token != "")).scalar_one())
+
     def baseline_window_has_untokened_material(self, hunt_id: str, spec_id: str, spec_version: str,
                                                target: str) -> bool:
         """Whether material staged before dedup tokens were kept exists: it cannot be merged across cells."""
@@ -3965,7 +3983,8 @@ class Repo:
         with write_txn(self.engine) as connection:
             seq = connection.execute(insert(t.baseline_carry_hour).values(
                 site=site, target=target, hour=hour, normalizer=normalizer, format=format_,
-                hostless=int(bool(hostless)), bytes=size, created_at=utcnow(),
+                hostless=int(bool(hostless)), bytes=size, hosts=len(hosts), execs=len(execs),
+                observations=len(observations), breaks=len(breaks), created_at=utcnow(),
             ).on_conflict_do_nothing(
                 index_elements=["site", "target", "hour", "normalizer", "format"],
             ).returning(t.baseline_carry_hour.c.seq)).scalar_one_or_none()
@@ -3985,11 +4004,17 @@ class Repo:
 
     def baseline_carry_hour(self, *, site: str, target: str, hour: datetime, normalizer: str,
                             format_: int) -> dict | None:
-        """One persisted carry hour, read in one transaction so a concurrent prune yields all of it or none:
-        {"hostless", "hosts", "exec", "observation", "break"}, or None."""
+        """One persisted carry hour: {"hostless", "hosts", "exec", "observation", "break"}, or None.
+
+        Every read sees one snapshot (`read_snapshot`), so a concurrent prune yields all of the hour or none of it.
+        The header also records how many rows of each kind it holds; any other count read back means the hour is
+        not kept whole, and it is reported as not kept (the caller reads it again or leaves it unobserved), never
+        replayed short."""
         head = t.baseline_carry_hour.c
-        with self.engine.connect() as connection, connection.begin():
-            row = connection.execute(select(head.seq, head.hostless).where(
+        with read_snapshot(self.engine) as connection:
+            row = connection.execute(select(
+                head.seq, head.hostless, head.hosts, head.execs, head.observations, head.breaks,
+            ).where(
                 head.site == site, head.target == target, head.hour == _utc(hour, "carry hour"),
                 head.normalizer == normalizer, head.format == format_,
             )).first()
@@ -4006,6 +4031,9 @@ class Repo:
             breaks = t.baseline_carry_break.c
             out["break"] = [dict(item) for item in connection.execute(
                 select(breaks.ref, breaks.hour_us).where(breaks.carry_seq == seq)).mappings()]
+        if (len(out["hosts"]), len(out["exec"]), len(out["observation"]), len(out["break"])) != (
+                row.hosts, row.execs, row.observations, row.breaks):
+            return None
         return out
 
     def baseline_carry_bytes(self) -> int:
@@ -4052,11 +4080,15 @@ class Repo:
             return 0, 0
         return self._delete_carry_hours(true(), chunk=chunk, limit=excess)
 
-    def baseline_carry_newest_hour(self, *, site: str, target: str) -> datetime | None:
+    def baseline_carry_newest_hour(self, *, site: str, target: str,
+                                   at_most: datetime | None = None) -> datetime | None:
+        """A target's newest kept carry hour, ignoring any later than `at_most`."""
         head = t.baseline_carry_hour.c
+        query = select(func.max(head.hour)).where(head.site == site, head.target == target)
+        if at_most is not None:
+            query = query.where(head.hour <= _utc(at_most, "carry anchor bound"))
         with self.engine.connect() as connection:
-            value = connection.execute(select(func.max(head.hour)).where(
-                head.site == site, head.target == target)).scalar_one_or_none()
+            value = connection.execute(query).scalar_one_or_none()
         return _stored_utc(value)
 
     def baseline_window_released(self, hunt_id: str, spec_id: str) -> str | None:
