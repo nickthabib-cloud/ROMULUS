@@ -164,7 +164,7 @@ class CollectionGroup(BaseModel):
             raise ValueError("hosts must be a non-empty list of host globs or the string 'all'")
         if any(not isinstance(item, str) for item in value):
             raise ValueError("host globs must be text")
-        if any(item.strip().casefold() == "all" for item in value):
+        if any(_canonical_host(item).casefold() == "all" for item in value):
             # In a list, "all" would name one host called "all"; the catch-all is only ever `hosts: all`, so the
             # two can never be confused (an editor showing either as the text "all" must not widen a group).
             raise ValueError("'all' inside a host list is ambiguous: write hosts: all for every host")

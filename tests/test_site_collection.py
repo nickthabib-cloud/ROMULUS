@@ -114,7 +114,7 @@ def test_the_canonical_document_loads_back_as_itself(tmp_path):
     assert facts.content["directory_sync_accounts"] == ["S-1-5-21-111-222-333-444", "example\\syncsvc"]
 
 
-@pytest.mark.parametrize("hosts", ["[all]", "[ALL]", "[ws-1, ' All ']"])
+@pytest.mark.parametrize("hosts", ["[all]", "[ALL]", "[ws-1, ' All ']", "[all.]", "[ALL.]"])
 def test_all_inside_a_host_list_is_refused_so_it_never_reads_as_the_catch_all(tmp_path, hosts):
     _write(tmp_path, VALID.replace("hosts: [WS-*.example.test, dc01]", f"hosts: {hosts}"))
     with pytest.raises(SiteValidationError, match="write hosts: all"):
