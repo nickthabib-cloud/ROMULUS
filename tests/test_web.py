@@ -189,3 +189,117 @@ def test_stream_tells_the_client_whether_a_finding_was_revised(client):
     _login(c, pw)
     body = c.get("/hunts/h1/stream").text
     assert f'"id": "{cid}"' in body and '"revised": false' in body
+
+
+def test_running_stream_releases_sqlite_readers_before_yield_and_sleep(tmp_path, monkeypatch):
+    import asyncio
+    import json
+    import sqlite3
+    from contextlib import closing
+
+    from starlette.requests import Request
+
+    from romulus.hunt.run import open_repo
+    from romulus.store import schema as tables
+    from romulus.store.db import read_snapshot
+    from romulus.web import app as web
+    from romulus.web.auth import Sessions
+
+    settings = Settings(home=tmp_path, secret_key=secrets.token_urlsafe(32))
+    repo = open_repo(settings)
+    source, cid = _repo_with_finding()
+    try:
+        with source.engine.connect() as read, repo.engine.begin() as write:
+            for table in (tables.hunt, tables.candidate):
+                write.execute(table.insert(), [dict(row) for row in read.execute(table.select()).mappings()])
+    finally:
+        source.engine.dispose()
+    repo.set_hunt_state("h1", "running")
+    # Share the real, file-backed repository so its pool can also be checked at every suspension.
+    monkeypatch.setattr(web, "open_repo", lambda _: repo)
+    app = create_app(settings)
+    endpoint = next(route.endpoint for route in app.routes
+                    if getattr(route, "path", None) == "/hunts/{hunt_id}/stream")
+    cookie = Sessions(settings.secret_key.get_secret_value()).issue({"username": "test", "role": "analyst"})
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def exercise(writer):
+        sleeping, resume = asyncio.Event(), asyncio.Event()
+
+        async def poll_sleep(delay):
+            assert delay == 2
+            sleeping.set()
+            await resume.wait()
+
+        monkeypatch.setattr(web.asyncio, "sleep", poll_sleep)
+        request = Request({"type": "http", "headers": [(b"cookie", f"{web.COOKIE}={cookie}".encode())]},
+                          receive)
+        response = await endpoint(request, "h1")
+        stream = response.body_iterator
+
+        def checkpoint():
+            assert repo.engine.pool.checkedout() == 0
+            writer.execute("INSERT INTO wal_probe VALUES (zeroblob(1048576))")
+            writer.commit()
+            assert settings.db_path.with_name(settings.db_path.name + "-wal").stat().st_size > 0
+            busy, frames, done = writer.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+            assert busy == 0 and frames > 0 and done == frames
+            assert writer.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone() == (0, 0, 0)
+            assert settings.db_path.with_name(settings.db_path.name + "-wal").stat().st_size == 0
+
+        pending = None
+        try:
+            assert '"revised": false' in await anext(stream)
+            checkpoint()  # Backpressure can suspend the generator at either kind of event.
+            assert "event: state" in await anext(stream)
+            checkpoint()
+            # Positive control: the same probe detects a real snapshot held across a write.
+            with read_snapshot(repo.engine) as reader:
+                reader.exec_driver_sql("SELECT count(*) FROM wal_probe").scalar_one()
+                writer.execute("INSERT INTO wal_probe VALUES (zeroblob(1048576))")
+                writer.commit()
+                _, frames, done = writer.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+                assert frames > done
+            checkpoint()
+
+            pending = asyncio.create_task(anext(stream))
+            await asyncio.wait_for(sleeping.wait(), timeout=2)
+            checkpoint()  # The stream stays open during its polling delay.
+            with repo.engine.begin() as connection:
+                connection.execute(tables.candidate.update().where(tables.candidate.c.id == cid).values(
+                    claim="Revised finding", gate_results={"_revision": {"digest": "second"}},
+                ))
+            resume.set()
+            revised = await asyncio.wait_for(pending, timeout=2)
+            payload = json.loads(revised.split("data: ", 1)[1])
+            assert payload["id"] == cid and payload["revised"] and payload["claim"] == "Revised finding"
+            checkpoint()
+            assert "event: state" in await anext(stream)
+            checkpoint()
+
+            sleeping.clear()
+            resume.clear()
+            pending = asyncio.create_task(anext(stream))
+            await asyncio.wait_for(sleeping.wait(), timeout=2)
+            pending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+            checkpoint()
+        finally:
+            if pending is not None and not pending.done():
+                pending.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await pending
+            await stream.aclose()
+
+    try:
+        with closing(sqlite3.connect(settings.db_path, timeout=0)) as writer:
+            assert writer.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+            writer.execute("PRAGMA wal_autocheckpoint=0")
+            writer.execute("CREATE TABLE wal_probe (payload BLOB)")
+            writer.commit()
+            asyncio.run(exercise(writer))
+    finally:
+        repo.engine.dispose()
