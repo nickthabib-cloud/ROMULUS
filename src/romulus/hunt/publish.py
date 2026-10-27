@@ -144,7 +144,9 @@ def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
     event_ids = [event.id for event in match.events]
     context_event_ids = sorted({event.id for event in match.events} & match.context_ids)
     candidate_id = decision.candidate_id
-    if source_case_id is None and source_anchor_id is not None:
+    view_field = playbook.evidence_view_field if match.group_key else ""
+    existing_view = repo.candidate(candidate_id) if view_field else None
+    if source_case_id is None and source_anchor_id is not None and not view_field:
         existing = repo.candidate(candidate_id)
         same_subject = (
             existing is not None
@@ -187,6 +189,28 @@ def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
         "source_anchor_id": source_anchor_id,
         "source_link_id": source_link_id,
     }
+    if view_field:
+        # This is an independently reportable, canonical script block observation, even if discovered by
+        # expansion. Preserve its discovery reach without making a new raw-subject-owned expansion candidate.
+        origin = ((existing_view or {}).get("gate_results") or {}).get("_evidence_view_origin")
+        if origin is None and any(value is not None for value in (source_case_id, source_anchor_id, source_link_id)):
+            origin = {"source_case_id": source_case_id, "source_anchor_id": source_anchor_id,
+                      "source_link_id": source_link_id}
+        if origin is not None:
+            row["gate_results"]["_evidence_view_origin"] = origin
+        row.update(source_case_id=None, source_anchor_id=None, source_link_id=None)
+    if view_field and existing_view is not None:
+        # The stable group identifies the same script regardless of which source/pivot supplied its view.
+        # Fresh evaluator instances cannot remember the prior view, so compare its persisted predicate.
+        ranks = {"fragment": 0, "single": 1, "joined": 2}
+        old_rank = max((ranks.get(item["value"], -1) for item in existing_view["predicate_fields"]
+                        if item["field"] == view_field), default=-1)
+        new_rank = max((ranks.get(item.value, -1) for item in match.predicate if item.field == view_field), default=-1)
+        if new_rank <= old_rank:
+            return None
+        repo.revise_candidate(row, match.revision_reason or "A preferred evidence view replaces the prior citations",
+                              owner_token=owner_token)
+        return None
     if match.revision_reason and source_case_id is None and source_anchor_id is None:
         # the corrected decision for a direct finding already published under this id: revised in place. A revision
         # is not a new candidate, so it returns None (the sweep's new-candidate count and live callback are

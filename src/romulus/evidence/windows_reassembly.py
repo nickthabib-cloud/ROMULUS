@@ -106,6 +106,10 @@ class ScriptBlockAssembler:
             self.budget.charge(self.account, growth)
             self.budget.grew(growth)
         self._size = size
+        # Other hunt stores share this budget and can grow after this database was opened.
+        headroom = self.budget.headroom()
+        ceiling = self.max_bytes if headroom is None else min(self.max_bytes, size + headroom)
+        self.db.execute(f"PRAGMA max_page_count = {max(1, ceiling // self._page)}")
         if size > self.max_bytes:
             self.refusal_reason = f"script-block reassembly state exceeded {self.max_bytes} bytes"
             self._refusal_reasons[self.refusal_reason] = None
@@ -146,6 +150,7 @@ class ScriptBlockAssembler:
         result = event.model_copy(deep=True)
         origin = result.fields.get("script.text") or result.fields["event.code"]
         result.fields["script.complete"] = fv(False, origin.origin + "#reassembly-refused")
+        result.fields["script.view"] = fv("fragment", origin.origin + "#script-view")
         result.caveats.append(f"script block reassembly state refused: {reason}")
         return result
 
@@ -154,6 +159,7 @@ class ScriptBlockAssembler:
         result = event.model_copy(deep=True)
         origin = result.fields.get("script.text") or result.fields["event.code"]
         result.fields["script.complete"] = fv(False, origin.origin + "#reassembly-conflict")
+        result.fields["script.view"] = fv("fragment", origin.origin + "#script-view")
         result.caveats.extend(reasons)
         return result
 
@@ -162,6 +168,7 @@ class ScriptBlockAssembler:
         result = event.model_copy(deep=True)
         origin = result.fields.get("script.text") or result.fields["event.code"]
         result.fields["script.complete"] = fv(False, origin.origin + "#reassembly-invalid-metadata")
+        result.fields["script.view"] = fv("fragment", origin.origin + "#script-view")
         caveat = "script block part metadata is incomplete or invalid"
         if caveat not in result.caveats:
             result.caveats.append(caveat)
@@ -285,6 +292,7 @@ class ScriptBlockAssembler:
                 if total > 1 or len(text) > self.text_cap:
                     part = event.model_copy(deep=True)
                     part.fields["script.part_number"] = fv(number, "ScriptBlockText#part-view")
+                    part.fields["script.view"] = fv("fragment", "ScriptBlockText#part-view")
                     part.fields["script.complete"] = fv(False, "ScriptBlockText#part-view")
                     part.caveats.append("script block fragment; joined view supplies cross-part context")
                     output.append(part)
@@ -380,6 +388,9 @@ class ScriptBlockAssembler:
             result.ts = datetime.fromisoformat(str(latest_ts))
         text_origin = (result.fields.get("script.text") or result.fields["event.code"]).origin
         result.fields["script.text"] = fv(joined, text_origin + "#reassembled:message-order")
+        result.fields["script.view"] = fv(
+            "joined" if int(total) > 1 or truncated else "single", text_origin + "#reassembled:script-view",
+        )
         result.fields["script.part_count"] = fv(len(numbers), text_origin + "#reassembled:part-count")
         result.fields["script.part_event_ids"] = fv(
             part_ids if int(total) > 1 or truncated else [], text_origin + "#reassembled:part-citations",

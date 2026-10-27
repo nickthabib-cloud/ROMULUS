@@ -34,6 +34,7 @@ PINNED_WINDOWS = {
     "windows-ecs@2": "c8931d60bb8eeb86c02b50d07950baea0e4225e01d3b9999cd12454609093255",
     "windows-ecs@3": "f0a941924e4c0b95b0e2f9dbc2635ae325708c7739b3fcf780e803e7dbfdf203",
     "windows-ecs@4": "6d31ffa710c230e79dc39509fd40740e69c35240028cfbc0a4759cb587dafd7d",
+    "windows-ecs@5": "7ee0edd8506debc8fe682226a6ce8b87a9dc689e56e0fe58363a01e50262b0d6",
 }
 # The packet stage's normalizer: HTTP bodies rebuilt by TShark -> http_body events, and TCP connections rebuilt
 # from per-segment payload -> tcp_stream events (with the shell analysis and the tables it reads).

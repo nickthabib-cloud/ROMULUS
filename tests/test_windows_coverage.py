@@ -1428,6 +1428,7 @@ def test_existing_linux_rules_do_not_silently_widen_to_windows_events():
         WINDOWS_HOST_PLAYBOOKS,
         WINDOWS_LINKED_PLAYBOOKS,
         WINDOWS_PROCESS_PLAYBOOKS,
+        WINDOWS_SCRIPT_PLAYBOOKS,
     )
 
     windows_families = {event.family for event in EVENT_CLASSES}
@@ -1440,7 +1441,8 @@ def test_existing_linux_rules_do_not_silently_widen_to_windows_events():
     # Only the cross-platform indicator rule and the purpose-built Windows rules read Windows families;
     # every Linux host rule stays scoped to linux.
     assert windows_enabled == {"ioc.indicator_match"} | {
-        cls.id for cls in WINDOWS_PROCESS_PLAYBOOKS + WINDOWS_HOST_PLAYBOOKS + WINDOWS_DOMAIN_PLAYBOOKS + list(WINDOWS_LINKED_PLAYBOOKS)
+        cls.id for cls in WINDOWS_PROCESS_PLAYBOOKS + WINDOWS_HOST_PLAYBOOKS + WINDOWS_DOMAIN_PLAYBOOKS
+        + list(WINDOWS_LINKED_PLAYBOOKS) + list(WINDOWS_SCRIPT_PLAYBOOKS)
     }
 
 

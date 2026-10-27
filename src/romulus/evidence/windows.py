@@ -24,7 +24,7 @@ from romulus.evidence.windows_catalog import WINDOWS_DATASETS, WindowsEventClass
 if TYPE_CHECKING:
     from romulus.detect.bounded import Account, StateBudget
 
-WINDOWS_NORMALIZER = "windows-ecs@4"
+WINDOWS_NORMALIZER = "windows-ecs@5"
 # This is already far beyond what the 64 MiB assembler can retain at normal 4104 chunk sizes, while bounding every
 # completeness vector even when hostile metadata claims billions of parts.
 SCRIPT_BLOCK_MAX_PARTS = 4_096
@@ -1684,6 +1684,10 @@ def _semantic_fields(fields: dict[str, FieldValue], record: WindowsRecord, host:
         fields["script.complete"] = fv(
             complete,
             fields["event.code"].origin + "#computed:single-part",
+        )
+        fields["script.view"] = fv(
+            "single" if event_id != 4104 or complete else "fragment",
+            fields["event.code"].origin + "#computed:script-view",
         )
         return Outcome.success
     if family in {"directory_access", "directory_change"}:
