@@ -47,7 +47,7 @@ POWERSHELL = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 EXPLORER = r"C:\Windows\explorer.exe"
 
 
-# ---- class 2: lure application spawns a code runner (image-based, negative-capable) ----
+# ---- class 2: lure application spawns a code runner (image-based) ----
 
 def test_office_spawning_powershell_is_a_high_lineage_finding_from_sysmon():
     event = sysmon1(image=POWERSHELL, parent_image=WINWORD, command="powershell.exe -nop -w hidden -enc ZQBj")

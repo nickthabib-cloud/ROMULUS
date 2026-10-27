@@ -3,7 +3,7 @@
 Many mission networks use public address space internally, and partner or VPN networks may use RFC 1918
 space, so "internal" is a per-site setting (`ROMULUS_INTERNAL_NETWORKS`, with carve-outs in
 `ROMULUS_EXTERNAL_NETWORKS`). Unset, the definition is the default list of RFC 1918 and reserved ranges and is
-labelled as such: rules whose negative depends on direction then state that the direction was assumed.
+labelled as such: rules that depend on direction then state that the direction was assumed.
 
 One definition is installed per hunt, before the sweep, and every address test in the detectors reads it
 (`romulus.detect.host.is_internal`, `romulus.detect.correlation.external`). Lookups take the most specific

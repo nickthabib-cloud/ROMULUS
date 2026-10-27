@@ -52,7 +52,7 @@ def test_attack_loader_enforces_its_uncompressed_byte_bound(tmp_path):
 @pytest.mark.parametrize(
     ("kind", "lane", "assures_negative", "expected"),
     [
-        ("direct", "high", True, CoverageStrength.NEGATIVE_CAPABLE),
+        ("direct", "high", True, CoverageStrength.FULL_SEARCH),
         ("aggregate", "lead", False, CoverageStrength.POSITIVE_ONLY),
         ("aggregate", "context", True, CoverageStrength.CONTEXT_ONLY),
         ("context", "high", True, CoverageStrength.CONTEXT_ONLY),
@@ -82,7 +82,7 @@ def test_context_lane_cannot_overclaim_negative_capability():
 
 def test_catalog_exposes_only_strengths_supported_by_typed_metadata():
     assert tuple(strength.value for strength in CoverageStrength) == (
-        "negative-capable",
+        "full-search",
         "positive-only",
         "context-only",
         "none",

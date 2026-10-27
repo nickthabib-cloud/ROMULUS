@@ -10,7 +10,7 @@ from enum import Enum
 class CoverageStrength(str, Enum):
     """What a rule mapping can establish when its required telemetry is complete."""
 
-    NEGATIVE_CAPABLE = "negative-capable"
+    FULL_SEARCH = "full-search"
     POSITIVE_ONLY = "positive-only"
     CONTEXT_ONLY = "context-only"
     NONE = "none"
@@ -22,24 +22,24 @@ TECHNIQUE_STRENGTH_POLICY = (
 
 COVERAGE_STRENGTH_LEGEND: tuple[tuple[CoverageStrength, str], ...] = (
     (
-        CoverageStrength.NEGATIVE_CAPABLE,
+        CoverageStrength.FULL_SEARCH,
         (
-            "A covering rule can report a complete negative for its own predicate when runtime "
-            "coverage is complete; this never means the ATT&CK technique is absent."
+            "A covering rule reads fields that record every occurrence it looks for, so a hunt reports "
+            "'searched in full' when every partition in scope was evaluated. That is a statement about the "
+            "search, never that the ATT&CK technique is absent."
         ),
     ),
     (
         CoverageStrength.POSITIVE_ONLY,
         (
-            "A covering rule can report matching evidence, but a non-match cannot support a "
-            "complete negative."
+            "A covering rule reports matching evidence; a non-match says nothing about what was "
+            "not seen."
         ),
     ),
     (
         CoverageStrength.CONTEXT_ONLY,
         (
-            "A covering rule can provide investigation context, but it cannot support a complete "
-            "negative."
+            "A covering rule provides investigation context around other findings."
         ),
     ),
     (
