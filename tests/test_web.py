@@ -182,3 +182,10 @@ def test_unknown_agent_option_is_refused(client):
     r = c.post("/hunts", data={"start": "2024-11-18T10:00:00Z", "end": "2024-11-18T17:30:00Z",
                                "csrf": _csrf(page), "agent": "deterministic; rm -rf /"})
     assert r.status_code == 400
+
+
+def test_stream_tells_the_client_whether_a_finding_was_revised(client):
+    c, pw, cid = client
+    _login(c, pw)
+    body = c.get("/hunts/h1/stream").text
+    assert f'"id": "{cid}"' in body and '"revised": false' in body

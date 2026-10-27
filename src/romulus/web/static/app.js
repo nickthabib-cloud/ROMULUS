@@ -9,20 +9,22 @@
   const section = document.getElementById("newfeed");
   const known = new Set(Array.from(document.querySelectorAll('a[href^="/findings/"]'))
     .map(a => a.getAttribute("href").split("/").pop()));
+  const shown = new Map();   // id -> feed line, so a finding revised in place updates its line
   const es = new EventSource(live.dataset.stream);
   es.addEventListener("finding", ev => {
     const f = JSON.parse(ev.data);
-    if (known.has(f.id)) return;
+    if (known.has(f.id) && !f.revised) return;
     known.add(f.id);
-    const li = document.createElement("li");
+    const li = shown.get(f.id) || document.createElement("li");
+    li.replaceChildren();
     const pill = document.createElement("span");
     pill.className = "pill l-" + f.lane;
     pill.textContent = f.lane;
     const a = document.createElement("a");
     a.href = "/findings/" + encodeURIComponent(f.id);
-    a.textContent = " " + f.rule + ": " + f.claim;
+    a.textContent = (f.revised ? " (revised) " : " ") + f.rule + ": " + f.claim;
     li.append(pill, a);
-    feed.prepend(li);
+    if (!shown.has(f.id)) { shown.set(f.id, li); feed.prepend(li); }
     section.hidden = false;
   });
   es.addEventListener("state", ev => {
