@@ -3,8 +3,9 @@
 {% block content %}
 <h1>Site setup</h1>
 <p class="help">What this site collects, its domain controllers and directory sync accounts, and its internal networks.
-  ROMULUS reports a Windows rule as "no match" only where the collection that rule needs is attested here; anywhere
-  else the result says what was not attested. Saved to <span class="mono">site/collection.yaml</span> on the server,
+  Windows logs cannot show whether a kind of event was being recorded at all, so results name the collection that
+  was not attested: the places a hunt may have been blind. ROMULUS reports what it finds; it never claims that
+  nothing is there. Saved to <span class="mono">site/collection.yaml</span> on the server,
   which stays the source of truth (saving rewrites it in canonical form, so hand-written comments are not kept;
   the previous version is kept as <span class="mono">collection.yaml.prev</span>).</p>
 

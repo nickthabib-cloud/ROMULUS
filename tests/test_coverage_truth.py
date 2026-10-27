@@ -221,9 +221,9 @@ def _assert_no_complete_negative(repo: Repo, manifest: dict, text: str, rule_id:
     states = [cell["state"] for cell in repo.rule_cells("h1")]
     assert "no_match_complete" not in states
     row = _coverage_row(manifest, rule_id)
-    assert row["negative_claim"] != "complete" and not row["negative_claim"].startswith("not applicable")
+    assert not row["search_result"].startswith(("searched in full", "no data in scope"))
     for line in _markdown_rows(text, rule_id):
-        assert "| complete |" not in line, line
+        assert "| searched in full" not in line, line
 
 
 # ---- the sweep -----------------------------------------------------------------------------------------
@@ -243,9 +243,9 @@ def test_control_sweep_reaches_a_complete_negative():
     result = _finish(repo, sweep=sweep)
     manifest, text = _report(repo)
     assert sweep.partial_reasons == [] and result["execution_state"] == "completed_within_scope"
-    assert _coverage_row(manifest, NEGATIVE_RULE)["negative_claim"] == "complete"
+    assert _coverage_row(manifest, NEGATIVE_RULE)["search_result"].startswith("searched in full")
     assert manifest["coverage"]["gaps"] == []
-    assert any("| complete |" in line for line in _markdown_rows(text, NEGATIVE_RULE))
+    assert any("| searched in full: " in line for line in _markdown_rows(text, NEGATIVE_RULE))
 
 
 @pytest.mark.parametrize("fault", ES_FAULTS + RECORD_FAULTS)
@@ -261,20 +261,20 @@ def test_sweep_fault_never_yields_a_complete_negative(fault):
         assert sweep.partial_reasons
         assert result["execution_state"] == "partial" and manifest["execution_state"] == "partial"
     _assert_no_complete_negative(repo, manifest, text, NEGATIVE_RULE)
-    assert _coverage_row(manifest, NEGATIVE_RULE)["negative_claim"].startswith("unresolved")
+    assert _coverage_row(manifest, NEGATIVE_RULE)["search_result"].startswith("searched in part")
     _assert_gap_listed(manifest, text, fault, HOST_TARGET)
 
 
-def test_the_outcome_sentence_points_at_unresolved_negatives():
+def test_the_outcome_sentence_points_at_partly_searched_rules():
     repo, sweep = _sweep("timed_out")
     _finish(repo, sweep=sweep)
     manifest, text = _report(repo)
     rules = {rule for gap in manifest["coverage"]["gaps"] for rule in gap["rules"]}
     outcome = text.split("## Outcome", 1)[1].split("| Item |", 1)[0]
-    assert rules and f"{len(rules)} rule(s) have unresolved negatives; see Coverage gaps." in outcome
+    assert rules and f"{len(rules)} rule(s) searched only part of their scope; see Coverage gaps." in outcome
     control_repo, control = _sweep("none")
     _finish(control_repo, sweep=control)
-    assert "unresolved negatives" not in _report(control_repo)[1]
+    assert "searched only part of their scope" not in _report(control_repo)[1]
 
 
 def test_a_target_with_no_coverage_at_all_is_a_listed_gap():
@@ -288,7 +288,7 @@ def test_a_target_with_no_coverage_at_all_is_a_listed_gap():
     manifest, text = _report(repo)
     gap = next(g for g in manifest["coverage"]["gaps"] if g["target"] == "romulus-host-y")
     assert gap["reasons"] == ["no coverage was recorded for this target"] and NEGATIVE_RULE in gap["rules"]
-    assert _coverage_row(manifest, NEGATIVE_RULE)["negative_claim"].startswith("unresolved")
+    assert _coverage_row(manifest, NEGATIVE_RULE)["search_result"].startswith("searched in part")
     assert "romulus-host-y" in text.split("### Coverage gaps", 1)[1]
 
 
@@ -419,7 +419,7 @@ def test_expansion_fault_reports_partial_links_and_anchors(fault):
     link_rows = text.split("**Expansion links**", 1)[1].split("## Investigations", 1)[0]
     for row in fetched:
         line = next(line for line in link_rows.splitlines() if line.startswith(f"| {markdown.esc(row['id'])} |"))
-        assert "| complete |" not in line
+        assert "| searched in full" not in line
     assert "no_match_complete" not in {cell["state"] for cell in repo.rule_cells("h1")}
 
 
@@ -480,7 +480,7 @@ def test_packet_fault_is_partial_everywhere_it_is_reported(tmp_path, monkeypatch
     manifest, text = _report(repo)
     assert result["execution_state"] == "partial"
     _assert_no_complete_negative(repo, manifest, text, packet_fixtures.RULE)
-    assert "coverage incomplete" in _coverage_row(manifest, packet_fixtures.RULE)["negative_claim"]
+    assert "coverage incomplete" in _coverage_row(manifest, packet_fixtures.RULE)["search_result"]
     _assert_gap_listed(manifest, text, fault, f"{hp.PCAP_TARGET}:{packet_fixtures.TARGET}")
 
 
@@ -494,7 +494,7 @@ def test_every_unresolved_cell_is_a_listed_gap_and_never_complete(state):
     gap = {"rule_id": "r", "target": "a", "partition": "p2", "state": state, "evaluated": 0,
            "detail": {"reasons": ["timed_out"]} if state != "planned" else {}}
     coverage = _coverage([done, gap], targets=["a"])
-    assert coverage["rules"][0]["negative_claim"] != "complete"
+    assert coverage["rules"][0]["search_result"].startswith("searched in full") is False
     assert [(g["target"], g["partition"]) for g in coverage["gaps"]] == [("a", "p2")]
     assert coverage["gaps"][0]["reasons"]
 
@@ -564,7 +564,7 @@ def test_unknown_windows_event_classes_are_listed_but_do_not_poison_unrelated_ru
     )[0]
 
     manifest, _text = _report(repo)
-    assert _coverage_row(manifest, NEGATIVE_RULE)["negative_claim"] == "complete"
+    assert _coverage_row(manifest, NEGATIVE_RULE)["search_result"].startswith("searched in full")
     item = next(item for item in manifest["coverage"]["not_assessed"] if reason in item["reason"])
     assert item["records"] == 1
 

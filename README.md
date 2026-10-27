@@ -165,7 +165,9 @@ Repository layout:
 
 ## Roadmap
 
-- **Next:** the AI investigating agent; deeper network and packet analysis; host rules that can prove negatives from kernel file records.
-- **Then:** detection breadth (Windows/AD, Zeek, Sigma import, ATT&CK coverage matrix), testing on unseen datasets, the executive DOCX report and hardening.
+- **Now:** detection breadth. Windows and Active Directory first (process, logon, persistence, registry, WMI, Kerberos and directory rules on Windows event logs and Sysmon), then indicator-list import, Sigma import, Zeek and the OpenSearch/Malcolm source contract.
+- **Then:** testing on unseen datasets, the executive DOCX report and hardening, and the AI investigating agent last.
+
+ROMULUS is built to find what is there. It reports what each rule searched and where it was blind, and never claims that nothing is there.
 
 

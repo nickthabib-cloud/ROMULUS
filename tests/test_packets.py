@@ -503,9 +503,9 @@ def test_coverage_counts_pcap_cells_for_their_target_and_states_the_selection(tm
                                                          "logs-lab": "not_applicable_no_events"}
     row = next(r for r in rm._coverage(repo.rule_cells("h1"), targets=[TARGET, "logs-lab"])["rules"]
                if r["rule_id"] == RULE)
-    assert "no evaluation recorded" not in row["negative_claim"]
-    assert f"examined on {TARGET}: {hp.SELECTION_OVERLAP}" in row["negative_claim"]
-    assert "7 HTTP session(s) there had no body type" in row["negative_claim"]
+    assert "no evaluation recorded" not in row["search_result"]
+    assert f"examined on {TARGET}: {hp.SELECTION_OVERLAP}" in row["search_result"]
+    assert "7 HTTP session(s) there had no body type" in row["search_result"]
 
 
 def test_candidate_selection_overlaps_the_window(tmp_path, monkeypatch):

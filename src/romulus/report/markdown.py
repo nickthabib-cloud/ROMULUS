@@ -39,13 +39,13 @@ def outcome_sentence(m: dict) -> str:
         s = (f"ROMULUS reports {urgent_high} urgent/high finding(s) and {n - urgent_high} investigative lead(s) "
              f"for review.")
     else:
-        s = ("No qualifying behavior was observed in the assessed scope listed below. This is not a statement "
-             "that the environment is clean.")
+        s = ("ROMULUS found no qualifying behavior in what it searched, listed below. That does not mean nothing "
+             "is there.")
     if partial:
-        s += f" The hunt is {m['execution_state']}: some sources, windows or tasks were not fully assessed."
+        s += f" The hunt is {m['execution_state']}: some sources, windows or tasks were not fully searched."
     unresolved = {rule for gap in (m.get("coverage") or {}).get("gaps") or [] for rule in gap["rules"]}
     if unresolved:
-        s += f" {len(unresolved)} rule(s) have unresolved negatives; see Coverage gaps."
+        s += f" {len(unresolved)} rule(s) searched only part of their scope; see Coverage gaps."
     return s
 
 
@@ -329,14 +329,16 @@ def render(m: dict, banner: str = BANNER) -> str:
         out.append("")
 
     out += ["## Coverage", "",
-            ("A negative statement applies only where a rule's coverage is `complete`. `unresolved` means at least one "
-             "partition was partial, failed, or had records missing required fields. `not assessable by design` marks "
-             "positive-only rules that identify behaviour from text (argv, script content, log messages, self-reported "
-             "user agents): they flag findings but never prove absence. Each rule row "
+            ("What each rule searched. ROMULUS reports what it finds and never claims that nothing is there. "
+             "`searched in full` says every partition in scope was evaluated and none matched; it is a statement "
+             "about the search, not about the network. `searched in part` means at least one partition was partial, "
+             "failed, or had records missing required fields: those blind spots are listed under Coverage gaps. "
+             "`not assessable by design` marks rules that identify behaviour from text (argv, script content, log "
+             "messages, self-reported user agents): they flag what they find and cannot show absence. Each rule row "
              "states what, if any, complementary assurance exists."), "",
-            "| Rule | Records evaluated | Negative claim | Cell states |", "|---|---|---|---|"]
+            "| Rule | Records evaluated | Search result | Cell states |", "|---|---|---|---|"]
     for r in m["coverage"]["rules"]:
-        out.append(f"| {esc(r['rule_id'])} | {r['records_evaluated']} | {esc(r['negative_claim'])} | "
+        out.append(f"| {esc(r['rule_id'])} | {r['records_evaluated']} | {esc(r['search_result'])} | "
                    f"{esc(json.dumps(r['states'], sort_keys=True))} |")
     baseline = m["coverage"].get("baseline") or {}
     baseline_specs = baseline.get("specs") or []
@@ -354,8 +356,8 @@ def render(m: dict, banner: str = BANNER) -> str:
             )
     gaps = m["coverage"].get("gaps") or []
     out += ["", "### Coverage gaps", "",
-            ("Every source partition or link where at least one rule was left unresolved, and why. No negative "
-             "statement covers these."), "",
+            ("Every source partition or link where at least one rule was not fully searched, and why. These are the "
+             "hunt's blind spots."), "",
             "| Target | Partition | Rules left unresolved | Reasons |", "|---|---|---|---|"]
     for gap in gaps:
         rules = gap["rules"]
@@ -367,7 +369,7 @@ def render(m: dict, banner: str = BANNER) -> str:
         out.append("| none | none | none | none |")
     unassessed = m["coverage"].get("not_assessed") or []
     out += ["", "### Data not assessed", "",
-            "Data in scope that no rule evaluated. It is not counted as evaluated and no negative covers it.", "",
+            "Data in scope that no rule evaluated. It was not searched and is not counted as evaluated.", "",
             "| Target | Dataset | Records | Count scope | Reason |", "|---|---|---|---|---|"]
     for item in unassessed:
         records = "unknown" if item.get("records") is None else item["records"]

@@ -253,10 +253,11 @@ def _not_assessed(hunt_manifest: dict, sweep_detail: dict) -> list[dict]:
 
 def _coverage(cells: list[dict], targets: list[str] | None = None, rule_ids: list[str] | None = None,
               sweep_finished: bool = True) -> dict:
-    """Per-rule negative claim. 'complete' requires: the sweep finished, every manifest target has
-    cells for the rule, no cell is planned/failed/partial, and at least one complete no-match.
-    Anything less is 'unresolved' with the reason; absence of data is 'not applicable', never a
-    negative. Every unresolved (target, partition) is also listed as a gap with its reasons."""
+    """Per-rule search result: what each rule searched, never a claim that nothing is there. 'searched in full'
+    requires: the sweep finished, every manifest target has cells for the rule, no cell is planned/failed/partial,
+    and at least one evaluated partition with no match. Anything less is 'searched in part' with the reason;
+    absence of data is 'no data in scope'. Every partly searched (target, partition) is also listed as a gap with
+    its reasons."""
     cells = [c for c in cells if c["state"] != "split"]          # superseded by their children
     by_rule: dict[str, Counter] = defaultdict(Counter)
     evaluated: Counter = Counter()
@@ -297,14 +298,14 @@ def _coverage(cells: list[dict], targets: list[str] | None = None, rule_ids: lis
             claim = base + "".join(f"; {s}" for s in dict.fromkeys(scope[rule])) \
                 + ("; coverage incomplete: " + "; ".join(reasons) if reasons else "")
         elif reasons:
-            claim = "unresolved: " + "; ".join(reasons)
+            claim = "searched in part: " + "; ".join(reasons)
         elif states.get("no_match_complete") and not (states.get("not_applicable_no_events") and
                                                       set(states) <= {"not_applicable_no_events"}):
-            claim = "complete"
+            claim = f"searched in full: {evaluated[rule]} record(s) evaluated, none matched"
         else:
-            claim = "not applicable to the data in scope"
+            claim = "no data in scope for this rule"
         rows.append({"rule_id": rule, "states": dict(states), "records_evaluated": evaluated[rule],
-                     "negative_claim": claim})
+                     "search_result": claim})
     return {"rules": rows, "gaps": _gaps(cells, targets, rule_ids)}
 
 
