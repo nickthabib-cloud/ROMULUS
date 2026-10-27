@@ -187,6 +187,12 @@ def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
         "source_anchor_id": source_anchor_id,
         "source_link_id": source_link_id,
     }
+    if match.revision_reason and source_case_id is None and source_anchor_id is None:
+        # the corrected decision for a direct finding already published under this id: revised in place. A revision
+        # is not a new candidate, so it returns None (the sweep's new-candidate count and live callback are
+        # unchanged); only a first publication under the id returns the row.
+        status = repo.revise_candidate(row, match.revision_reason, owner_token=owner_token)
+        return row if status == "inserted" else None
     return row if repo.save_candidate(
         row, canonicalize_agent=source_case_id is None, owner_token=owner_token,
     ) else None

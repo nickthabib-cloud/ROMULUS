@@ -74,17 +74,18 @@ def run(rule, events):
 
 
 def stored(matches: list) -> list:
-    """What the candidate store keeps: it stores a candidate once per id and ignores a later publish of the same id
-    (for a sweep finding the id is the rule plus its group key, or plus the raw records it is about). Mirror that by
-    keeping the first match per identity."""
+    """What the candidate store keeps: one candidate per id (for a sweep finding, the rule plus its group key, or plus
+    the raw records it is about). A later ordinary publish of the same id is ignored; a revision (a match with a
+    revision reason) replaces it in place. Mirror that."""
     kept: list = []
-    seen: set = set()
+    index: dict = {}
     for match in matches:
         subject = sorted((ref.target, ref.native_id) for event in match.events if event.id not in match.context_ids
                          for ref in event.raw)
         identity = (match.playbook_id, match.group_key or repr(subject))
-        if identity in seen:
-            continue
-        seen.add(identity)
-        kept.append(match)
+        if identity not in index:
+            index[identity] = len(kept)
+            kept.append(match)
+        elif match.revision_reason:
+            kept[index[identity]] = match
     return kept

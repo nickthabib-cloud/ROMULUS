@@ -43,6 +43,10 @@ class Match:
     # named value comes from, an exec ancestor a lineage names) rather than being what the finding is about. Expansion
     # starts from the finding's other records only, so citing more never widens what it reaches.
     context_ids: set[str] = field(default_factory=set)
+    # Non-empty when this match is the corrected decision for a finding the same rule already published under the
+    # same identity (a later record changed the answer, or a merged finding's final tally): the publication revises
+    # that candidate in place, and this is the stated reason. Empty for every ordinary match.
+    revision_reason: str = ""
 
     def __post_init__(self) -> None:
         # A positive stays valid on a command line some of whose arguments were lost; the claim says so.

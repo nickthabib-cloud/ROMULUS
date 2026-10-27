@@ -65,7 +65,7 @@ def _command_argv(event: TypedEvent) -> list[str]:
 
 class MshtaExecution(WindowsProcessRule):
     id = "win.mshta_remote_or_inline"
-    version = "1"
+    version = "2"
     title = "mshta ran a remote HTA or inline script"
     assures_negative = False
     positive_only_reason = ("mshta is recognised from argv, and a payload can also be delivered by other binaries "
@@ -113,7 +113,7 @@ class MshtaExecution(WindowsProcessRule):
 
 class Rundll32Execution(WindowsProcessRule):
     id = "win.rundll32_proxy"
-    version = "2"
+    version = "3"
     title = "rundll32 proxied execution (script protocol, remote DLL, or LSASS MiniDump)"
     assures_negative = False
     positive_only_reason = ("rundll32 and its target are read from argv; the same proxying can be done by other means, "
@@ -166,7 +166,7 @@ class Rundll32Execution(WindowsProcessRule):
 
 class Regsvr32Execution(WindowsProcessRule):
     id = "win.regsvr32_scriptlet"
-    version = "1"
+    version = "2"
     title = "regsvr32 registered a remote or scriptlet payload (Squiblydoo)"
     assures_negative = False
     positive_only_reason = ("regsvr32's install flag and target are read from argv; a window without a match proves "
@@ -209,7 +209,7 @@ class Regsvr32Execution(WindowsProcessRule):
 
 class CertutilDownloadDecode(WindowsProcessRule):
     id = "win.certutil_download_decode"
-    version = "1"
+    version = "2"
     title = "certutil used to download or decode a file"
     assures_negative = False
     positive_only_reason = ("certutil's download and decode flags are read from argv; a window without a match proves "
@@ -253,7 +253,7 @@ class CertutilDownloadDecode(WindowsProcessRule):
 
 class BitsadminTransfer(WindowsProcessRule):
     id = "win.bitsadmin_transfer"
-    version = "1"
+    version = "2"
     title = "bitsadmin created a transfer job"
     assures_negative = False
     positive_only_reason = ("bitsadmin's transfer verb and URL are read from argv; a window without a match proves "
@@ -290,7 +290,7 @@ class BitsadminTransfer(WindowsProcessRule):
 
 class CurlDownload(WindowsProcessRule):
     id = "win.curl_download_to_disk"
-    version = "2"
+    version = "3"
     title = "curl.exe downloaded to a file"
     assures_negative = False
     positive_only_reason = ("curl and its output flag are read from argv; a window without a match proves nothing, as "
@@ -331,7 +331,7 @@ class CurlDownload(WindowsProcessRule):
 
 class ScriptHostRemoteOrWritable(WindowsProcessRule):
     id = "win.script_host_untrusted_script"
-    version = "1"
+    version = "2"
     title = "wscript or cscript ran a script from a user-writable or remote location"
     assures_negative = False
     positive_only_reason = ("the script path is read from argv and a path can be renamed or relocated; a window "
@@ -372,7 +372,7 @@ class ScriptHostRemoteOrWritable(WindowsProcessRule):
 
 class MsiexecRemotePackage(WindowsProcessRule):
     id = "win.msiexec_remote_package"
-    version = "1"
+    version = "2"
     title = "msiexec installed a package from a remote source"
     assures_negative = False
     positive_only_reason = ("the package source is read from argv; a window without a match proves nothing")
@@ -411,7 +411,7 @@ class MsiexecRemotePackage(WindowsProcessRule):
 
 class CompilerProxyExecution(WindowsProcessRule):
     id = "win.dotnet_lolbin_proxy"
-    version = "1"
+    version = "2"
     title = "a .NET LOLBin (InstallUtil, Regasm, Regsvcs, MSBuild, odbcconf, cmstp) proxied execution"
     assures_negative = False
     positive_only_reason = ("the LOLBin and its payload flag are read from argv; a window without a match proves "
@@ -464,7 +464,7 @@ class CompilerProxyExecution(WindowsProcessRule):
 
 class PowerShellEncodedOrCradle(WindowsProcessRule):
     id = "win.powershell_encoded_or_cradle"
-    version = "1"
+    version = "2"
     title = "PowerShell ran an encoded command or a download cradle"
     assures_negative = False
     positive_only_reason = ("the command is read from PowerShell's argv and script text, which can be obfuscated or "

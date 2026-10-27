@@ -103,7 +103,7 @@ def _defender_key(path: object) -> tuple[bool, bool]:
 
 class InhibitRecovery(WindowsProcessRule):
     id = "win.inhibit_system_recovery"
-    version = "2"
+    version = "3"
     title = "shadow copies, backups or recovery settings were deleted or disabled"
     assures_negative = False
     positive_only_reason = ("the delete/disable request is read from argv; a window without a match proves nothing, "
@@ -192,7 +192,7 @@ class InhibitRecovery(WindowsProcessRule):
 
 class PowerShellShadowCopyDeletion(WindowsProcessRule):
     id = "win.powershell_shadow_copy_deletion"
-    version = "1"
+    version = "2"
     title = "PowerShell deleted shadow copies"
     assures_negative = False
     positive_only_reason = ("the cmdlet call is read from parsed script text, which can be obfuscated or built at run "
@@ -238,7 +238,7 @@ class PowerShellShadowCopyDeletion(WindowsProcessRule):
 
 class DefenderImpairment(WindowsProcessRule):
     id = "win.defender_impairment"
-    version = "3"
+    version = "4"
     title = "Microsoft Defender was disabled or given an exclusion"
     assures_negative = False
     positive_only_reason = ("the preference change is read from PowerShell argv/script or reg.exe argv; a window "
@@ -367,7 +367,7 @@ class DefenderImpairment(WindowsProcessRule):
 
 class HostFirewallDisable(WindowsProcessRule):
     id = "win.host_firewall_disable"
-    version = "2"
+    version = "3"
     title = "the Windows host firewall was turned off"
     assures_negative = False
     positive_only_reason = ("the firewall state change is read from argv; a window without a match proves nothing, "
@@ -417,7 +417,7 @@ class HostFirewallDisable(WindowsProcessRule):
 
 class SecurityServiceTampering(WindowsProcessRule):
     id = "win.security_service_tampering"
-    version = "2"
+    version = "3"
     title = "a security service or the Sysmon driver was stopped or reconfigured"
     assures_negative = False
     positive_only_reason = ("the service and verb are read from argv; a window without a match proves nothing, as a "
@@ -477,7 +477,7 @@ class SecurityServiceTampering(WindowsProcessRule):
 
 class LogClearingByCommand(WindowsProcessRule):
     id = "win.log_clearing_command"
-    version = "2"
+    version = "3"
     title = "an event log or the audit policy was cleared by command"
     assures_negative = False
     positive_only_reason = ("the clear request is read from argv; a window without a match proves nothing, and logs "

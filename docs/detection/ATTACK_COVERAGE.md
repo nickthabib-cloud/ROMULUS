@@ -1148,7 +1148,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-bitsadmin-transfer"></a>
 ### `win.bitsadmin_transfer` — bitsadmin created a transfer job
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1105`](https://attack.mitre.org/techniques/T1105/), [`T1197`](https://attack.mitre.org/techniques/T1197/)
@@ -1160,7 +1160,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-certutil-download-decode"></a>
 ### `win.certutil_download_decode` — certutil used to download or decode a file
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1027`](https://attack.mitre.org/techniques/T1027/), [`T1105`](https://attack.mitre.org/techniques/T1105/), [`T1140`](https://attack.mitre.org/techniques/T1140/)
@@ -1172,7 +1172,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-curl-download-to-disk"></a>
 ### `win.curl_download_to_disk` — curl.exe downloaded to a file
 
-- Version: `2`; status: `active`
+- Version: `3`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1105`](https://attack.mitre.org/techniques/T1105/)
@@ -1184,7 +1184,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-dcom-activated-child"></a>
 ### `win.dcom_activated_child` — a shell or script host was started by a DCOM-activated application
 
-- Version: `4`; status: `active`
+- Version: `5`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1021.003`](https://attack.mitre.org/techniques/T1021/003/), [`T1059`](https://attack.mitre.org/techniques/T1059/), [`T1559.001`](https://attack.mitre.org/techniques/T1559/001/)
@@ -1196,7 +1196,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-defender-impairment"></a>
 ### `win.defender_impairment` — Microsoft Defender was disabled or given an exclusion
 
-- Version: `3`; status: `active`
+- Version: `4`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1685`](https://attack.mitre.org/techniques/T1685/), [`T1685.007`](https://attack.mitre.org/techniques/T1685/007/)
@@ -1208,7 +1208,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-dotnet-lolbin-proxy"></a>
 ### `win.dotnet_lolbin_proxy` — a .NET LOLBin (InstallUtil, Regasm, Regsvcs, MSBuild, odbcconf, cmstp) proxied execution
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1127.001`](https://attack.mitre.org/techniques/T1127/001/), [`T1218.003`](https://attack.mitre.org/techniques/T1218/003/), [`T1218.004`](https://attack.mitre.org/techniques/T1218/004/), [`T1218.008`](https://attack.mitre.org/techniques/T1218/008/), [`T1218.009`](https://attack.mitre.org/techniques/T1218/009/)
@@ -1220,7 +1220,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-esentutl-credential-copy"></a>
 ### `win.esentutl_credential_copy` — esentutl copied a credential database or hive, often from a shadow copy
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1003.002`](https://attack.mitre.org/techniques/T1003/002/), [`T1003.003`](https://attack.mitre.org/techniques/T1003/003/), [`T1006`](https://attack.mitre.org/techniques/T1006/)
@@ -1232,7 +1232,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-host-firewall-disable"></a>
 ### `win.host_firewall_disable` — the Windows host firewall was turned off
 
-- Version: `2`; status: `active`
+- Version: `3`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1686`](https://attack.mitre.org/techniques/T1686/), [`T1686.003`](https://attack.mitre.org/techniques/T1686/003/)
@@ -1244,7 +1244,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-inhibit-system-recovery"></a>
 ### `win.inhibit_system_recovery` — shadow copies, backups or recovery settings were deleted or disabled
 
-- Version: `2`; status: `active`
+- Version: `3`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1490`](https://attack.mitre.org/techniques/T1490/)
@@ -1256,7 +1256,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-log-clearing-command"></a>
 ### `win.log_clearing_command` — an event log or the audit policy was cleared by command
 
-- Version: `2`; status: `active`
+- Version: `3`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1685`](https://attack.mitre.org/techniques/T1685/), [`T1685.001`](https://attack.mitre.org/techniques/T1685/001/), [`T1685.005`](https://attack.mitre.org/techniques/T1685/005/)
@@ -1268,7 +1268,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-lure-app-spawns-code-runner"></a>
 ### `win.lure_app_spawns_code_runner` — A document, mail, reader or browser application created a shell, script host or LOLBin
 
-- Version: `4`; status: `active`
+- Version: `5`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1059`](https://attack.mitre.org/techniques/T1059/), [`T1203`](https://attack.mitre.org/techniques/T1203/), [`T1204.002`](https://attack.mitre.org/techniques/T1204/002/), [`T1566.001`](https://attack.mitre.org/techniques/T1566/001/)
@@ -1280,7 +1280,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-mshta-remote-or-inline"></a>
 ### `win.mshta_remote_or_inline` — mshta ran a remote HTA or inline script
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1059.005`](https://attack.mitre.org/techniques/T1059/005/), [`T1059.007`](https://attack.mitre.org/techniques/T1059/007/), [`T1105`](https://attack.mitre.org/techniques/T1105/), [`T1218.005`](https://attack.mitre.org/techniques/T1218/005/)
@@ -1292,7 +1292,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-msiexec-remote-package"></a>
 ### `win.msiexec_remote_package` — msiexec installed a package from a remote source
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1105`](https://attack.mitre.org/techniques/T1105/), [`T1218.007`](https://attack.mitre.org/techniques/T1218/007/)
@@ -1304,7 +1304,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-ntdsutil-ifm"></a>
 ### `win.ntdsutil_ifm` — ntdsutil was used to create an Active Directory database copy (IFM)
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1003.003`](https://attack.mitre.org/techniques/T1003/003/)
@@ -1316,7 +1316,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-powershell-encoded-or-cradle"></a>
 ### `win.powershell_encoded_or_cradle` — PowerShell ran an encoded command or a download cradle
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1027.010`](https://attack.mitre.org/techniques/T1027/010/), [`T1059.001`](https://attack.mitre.org/techniques/T1059/001/), [`T1105`](https://attack.mitre.org/techniques/T1105/), [`T1140`](https://attack.mitre.org/techniques/T1140/)
@@ -1328,7 +1328,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-powershell-shadow-copy-deletion"></a>
 ### `win.powershell_shadow_copy_deletion` — PowerShell deleted shadow copies
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1490`](https://attack.mitre.org/techniques/T1490/)
@@ -1340,7 +1340,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-procdump-lsass"></a>
 ### `win.procdump_lsass` — procdump was aimed at LSASS
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1003.001`](https://attack.mitre.org/techniques/T1003/001/)
@@ -1352,7 +1352,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-reg-save-cred-hive"></a>
 ### `win.reg_save_cred_hive` — reg.exe saved a credential registry hive (SAM, SYSTEM or SECURITY)
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1003.002`](https://attack.mitre.org/techniques/T1003/002/), [`T1003.004`](https://attack.mitre.org/techniques/T1003/004/)
@@ -1364,7 +1364,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-regsvr32-scriptlet"></a>
 ### `win.regsvr32_scriptlet` — regsvr32 registered a remote or scriptlet payload (Squiblydoo)
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1059.005`](https://attack.mitre.org/techniques/T1059/005/), [`T1105`](https://attack.mitre.org/techniques/T1105/), [`T1218.010`](https://attack.mitre.org/techniques/T1218/010/)
@@ -1376,7 +1376,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-remote-execution-child"></a>
 ### `win.remote_execution_child` — a shell, script host or LOLBin was started by a remote-execution service
 
-- Version: `4`; status: `active`
+- Version: `5`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1021.006`](https://attack.mitre.org/techniques/T1021/006/), [`T1047`](https://attack.mitre.org/techniques/T1047/), [`T1059`](https://attack.mitre.org/techniques/T1059/), [`T1569.002`](https://attack.mitre.org/techniques/T1569/002/)
@@ -1388,7 +1388,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-rundll32-proxy"></a>
 ### `win.rundll32_proxy` — rundll32 proxied execution (script protocol, remote DLL, or LSASS MiniDump)
 
-- Version: `2`; status: `active`
+- Version: `3`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1003.001`](https://attack.mitre.org/techniques/T1003/001/), [`T1059.005`](https://attack.mitre.org/techniques/T1059/005/), [`T1059.007`](https://attack.mitre.org/techniques/T1059/007/), [`T1218.011`](https://attack.mitre.org/techniques/T1218/011/)
@@ -1400,7 +1400,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-script-host-untrusted-script"></a>
 ### `win.script_host_untrusted_script` — wscript or cscript ran a script from a user-writable or remote location
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1059.005`](https://attack.mitre.org/techniques/T1059/005/), [`T1059.007`](https://attack.mitre.org/techniques/T1059/007/), [`T1218`](https://attack.mitre.org/techniques/T1218/)
@@ -1412,7 +1412,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-security-service-tampering"></a>
 ### `win.security_service_tampering` — a security service or the Sysmon driver was stopped or reconfigured
 
-- Version: `2`; status: `active`
+- Version: `3`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1685`](https://attack.mitre.org/techniques/T1685/), [`T1685.001`](https://attack.mitre.org/techniques/T1685/001/), [`T1685.007`](https://attack.mitre.org/techniques/T1685/007/)
@@ -1424,7 +1424,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-service-child-output-to-admin-share"></a>
 ### `win.service_child_output_to_admin_share` — a service-hosted command sent its output to an admin share (Impacket smbexec/atexec)
 
-- Version: `4`; status: `active`
+- Version: `5`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1021.002`](https://attack.mitre.org/techniques/T1021/002/), [`T1059.003`](https://attack.mitre.org/techniques/T1059/003/), [`T1569.002`](https://attack.mitre.org/techniques/T1569/002/)
@@ -1436,7 +1436,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-shadow-copy-create-for-harvest"></a>
 ### `win.shadow_copy_create_for_harvest` — a shadow copy was created by a tool used to harvest NTDS or hives
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1003.003`](https://attack.mitre.org/techniques/T1003/003/), [`T1006`](https://attack.mitre.org/techniques/T1006/)

@@ -61,11 +61,17 @@ def test_a_late_termination_between_parent_and_child_corrects_the_early_match():
     early, final = _drive(LureAppSpawnsCodeRunner(), [[parent, child], [late_term]])
     assert [m.proposed_lane for m in early] == ["high"]
     [correction] = final
-    assert correction.group_key.endswith(f"|correction|{child.id}")
+    # same identity as the early finding (same rule, same subject record, no group key): it revises it in place
+    assert correction.group_key == "" and correction.revision_reason
+    assert [e.id for e in correction.events if e.id not in correction.context_ids] == [child.id]
     assert correction.proposed_lane == "lead"                       # the parent is no longer resolved
-    assert "Correction" in correction.claim and "withdrawn" in correction.claim
+    assert "Revised decision" in correction.claim and "withdrawn" in correction.claim
     assert "terminated" in correction.claim                         # says what changed and why
-    assert child.id in {e.id for e in correction.events}
+    assert late_term.id in correction.context_ids                   # cites the record that changed the answer
+    # (its raw copy travels with the match inside a sweep; the sweep-level test checks it is stored)
+    # what the store keeps: one candidate, the revised one
+    [kept] = stored(early + final)
+    assert kept is correction
 
 
 def test_a_late_record_outside_the_childs_window_changes_nothing():
@@ -201,9 +207,16 @@ def test_every_citation_of_every_windows_finding_has_its_raw_record_stored(tmp_p
 
     candidates = repo.candidates("h1")
     assert after_sec, "pid-resolved findings are published while the sweep reads, before finalize"
-    claims = " ".join(c["claim"] for c in candidates)
-    assert "Correction" in claims                                   # the late termination corrected one finding
-    assert len(candidates) >= 5
+    [revised] = [c for c in candidates if "Revised decision" in c["claim"]]
+    assert revised["id"] in after_sec                               # the early finding, revised in place
+    assert revised["lane"] == "lead" and revised["gate_results"]["_revision"]["count"] == 1
+    with repo.engine.connect() as connection:
+        families = {row.family for row in connection.execute(select(t.typed_event.c.family).where(
+            t.typed_event.c.id.in_(revised["event_ids"])))}
+    assert "process_termination" in families                       # it cites the record that changed the answer
+    # one candidate per record: the two immediate 4688 findings (one revised), the deferred one, the Sysmon lure
+    # finding and the mshta finding
+    assert len(candidates) == 5
     for candidate in candidates:
         with repo.engine.connect() as connection:
             rows = connection.execute(select(t.typed_event.c.id, t.typed_event.c.raw_ids).where(

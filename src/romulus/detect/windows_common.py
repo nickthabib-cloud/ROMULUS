@@ -287,18 +287,41 @@ class WindowsPidLineage:
                 return
         else:
             insort(entries, entry, key=_ProcEntry.sort_key)
-        self._mark_late(key, ts, (serial, domain))
+        self._mark_late(key, ts, (serial, domain), event, raw)
 
-    def _mark_late(self, key: tuple, ts: float, order: tuple) -> None:
+    # The late records kept per dirty child, cited by a revision (the first few; the claim says how many arrived).
+    LATE_RECORDS_KEPT = 4
+
+    def _mark_late(self, key: tuple, ts: float, order: tuple, event: TypedEvent, raw: dict | None) -> None:
         """A record of pid `key` arrived: every child already judged against that pid whose time is at or after it
-        may now have a different parent, so it is re-judged at finalize."""
+        may now have a different parent, so it is re-judged at finalize. The record itself (with its raw copy) is
+        kept with the child, so a revision can cite the evidence that changed the answer."""
         watched = self.watch.get(key)
         if not watched:
             return
         for child_ts, child_serial, child_domain, child_id in watched:
             relation = _before(order, ts, (child_serial, child_domain), child_ts)
             if relation is None or relation <= 0:
-                self.dirty.put(child_id, 1)
+                late = self.dirty.get(child_id)
+                if late is None:
+                    late = [0, []]
+                    if not self.dirty.put(child_id, late):
+                        for member in self.members:
+                            member.note_limit("win_child_dirty", "the store of children to re-judge took no new "
+                                                                 "child; a later record that changes such a child's "
+                                                                 "parent is not applied to it")
+                        continue
+                late[0] += 1
+                if len(late[1]) < self.LATE_RECORDS_KEPT:
+                    late[1].append((event, tuple(sorted((raw or {}).items()))))
+                self.dirty.put(child_id, late)
+
+    def late_records(self, child_id: str) -> tuple[int, list[tuple[TypedEvent, dict]]]:
+        """(how many late records of the parent pid fell inside the child's window, the first few with raw copies)."""
+        late = self.dirty.peek(child_id)
+        if not late:
+            return 0, []
+        return int(late[0]), [(event, dict(raw)) for event, raw in late[1]]
 
     def watch_child(self, child: TypedEvent) -> None:
         """Watch a child judged on the pid path (once, however many rules judge it)."""
@@ -465,6 +488,11 @@ class _Group:
 
     def __setstate__(self, state):
         self.__dict__.update(state)
+
+
+def _late_phrase(item: TypedEvent) -> str:
+    what = "a termination" if item.family == "process_termination" else "a creation"
+    return f"{what} of pid {item.get('process.pid')} at {item.ts.isoformat()}"
 
 
 def _signature(hits: list[Hit]) -> tuple:
@@ -706,6 +734,8 @@ class WindowsProcessRule(Playbook):
                      raw_copies=dict(hit.raw_copies), context_ids={item.id for item in context})
 
     def _fleet_match(self, shape: str, group: _Group, *, final: bool) -> Match | None:
+        """The merged finding of a repeating shape, under one identity (`<rule>|fleet|<shape>`). Published at the
+        first repeat with the count so far, and revised in place to the exact tally when the sweep ends."""
         try:
             examples = group.examples.events(self.load)
             cited, missing, context = cite_group(self.load, examples, self.bounds, group.ends)
@@ -720,21 +750,22 @@ class WindowsProcessRule(Playbook):
         more = group.hosts - len(group.sample_hosts)
         host_text = ", ".join(group.sample_hosts) + (f" and {more} more host(s)" if more > 0 else "")
         if final:
-            claim = (f"{group.common}: final tally of the same shape, {group.records} process-creation record(s) "
+            claim = (f"{group.common} recurred as the same shape in {group.records} process-creation record(s) "
                      f"across {group.hosts} host(s) ({group.repeats} of them repeats on a host already reported), "
                      f"{first} – {last}. Hosts: {host_text}. This finding states only what the records share; each "
                      f"host's first record keeps its own finding and remains retrievable. Sysmon and Security can "
                      f"each record the same process, so records are not processes."
                      + cited_phrase(len(cited), group.records, not missing)
                      + bound_note(missing, group.ends))
-            key = f"{self.id}|fleet-final|{shape}"
+            reason = ("the final tally at the end of the sweep replaces the running count stated when the first "
+                      "repeat was read")
         else:
-            claim = (f"{group.common} recurred as the same shape on a host already reported for it: at least "
-                     f"{group.records} process-creation record(s) across at least {group.hosts} host(s) so far "
-                     f"(hosts so far: {host_text}). Later repeats are not reflected here; the final tally is a "
-                     f"separate summary published when the sweep ends. Each host's first record keeps its own "
-                     f"finding." + cited_phrase(len(cited), group.records, not missing))
-            key = f"{self.id}|fleet|{shape}"
+            claim = (f"{group.common} recurred as the same shape on a host already reported for it: "
+                     f"{group.records} process-creation record(s) across {group.hosts} host(s) so far (hosts so "
+                     f"far: {host_text}). This running count is revised in place to the final tally when the sweep "
+                     f"ends. Each host's first record keeps its own finding."
+                     + cited_phrase(len(cited), group.records, not missing))
+            reason = ""
         anchor = next((item for item in cited if item.id not in context), cited[0])
         predicate = [PredicateField(field=name, value=value, origin=origin)
                      for name, value, origin in group.predicate]
@@ -743,7 +774,7 @@ class WindowsProcessRule(Playbook):
                      [f"ATT&CK context (not proof): {', '.join(group.attack)}",
                       ("a repeating shape is merged into one finding at the lane of its records; new hosts keep "
                        "their own findings")],
-                     group_key=key, context_ids=context)
+                     group_key=f"{self.id}|fleet|{shape}", context_ids=context, revision_reason=reason)
 
     # ---- finalize ----
     def _load_one(self, child_id: str) -> TypedEvent | None:
@@ -761,6 +792,16 @@ class WindowsProcessRule(Playbook):
             return [], undecided
 
     def _correction(self, event: TypedEvent, early: tuple, hits: list[Hit], undecided: Undecided | None) -> Match:
+        """The corrected decision for a child whose earlier finding a late record of its parent pid changed. It has
+        the earlier finding's identity (same rule, same subject record, no group key), so publishing it revises that
+        candidate in place; it cites the child, the corrected parent's record when there is one, and the late
+        records that changed the answer, with their raw copies."""
+        count, late = self.lineage.late_records(event.id)
+        late_events = [item for item, _raw in late if item.id != event.id]
+        late_raw = {key: value for _item, raw in late for key, value in raw.items()}
+        described = "; ".join(_late_phrase(item) for item in late_events) or "a later record of the parent pid"
+        if count > len(late_events):
+            described += f" (and {count - len(late_events)} more)"
         before = "; ".join(f"{behavior} at {lane} with parent '{parent or '?'}'"
                            for behavior, lane, _severity, parent in early) or "a finding"
         if hits:
@@ -772,20 +813,22 @@ class WindowsProcessRule(Playbook):
             raw = {key: value for hit in hits for key, value in hit.raw_copies.items()}
         else:
             reason = undecided.text if undecided is not None else "the parent no longer matches this rule"
-            after = f"the parent attribution is withdrawn: {reason}"
+            after = f"the parent attribution is withdrawn, so this is a lead: {reason}"
             lane, severity = "lead", "medium"
             predicate = [typed_field(event, "process.executable_key")]
             context, raw = [], {}
-        claim = (f"Correction for the {event_source(event)} record of {event.host} at {event.ts.isoformat()}: when "
-                 f"first judged, from the records then received, this rule reported {before}. Records of the parent "
-                 f"process id that arrived later (a termination or creation inside the child's window) change the "
-                 f"answer: {after}. The earlier finding stays stored; this correction supersedes its parent "
-                 f"attribution.")
+        context = list({item.id: item for item in [*context, *late_events]}.values())
+        claim = (f"Revised decision for the {event_source(event)} record of {event.host} at {event.ts.isoformat()}: "
+                 f"when first read, from the records then received, this rule reported {before}. Records of the "
+                 f"parent process id that arrived later and fall inside the child's window ({described}) change the "
+                 f"answer: {after}. The earlier version is kept in this finding's revision history.")
+        revision = (f"later records of the parent pid inside the child's window ({described}) changed the parent "
+                    f"decision" + ("" if hits else ": the parent is no longer resolved, so the lane is lowered to lead"))
         return Match(self.id, claim, self.claim_type, [event, *context], predicate, event.ts, severity, lane,
                      "medium", event.entities(),
-                     ["a correction of an earlier pid-resolved finding after later records of the parent pid"],
-                     raw_copies=raw, group_key=f"{self.id}|correction|{event.id}",
-                     context_ids={item.id for item in context})
+                     ["revised in place after later records of the parent pid changed the earlier decision"],
+                     raw_copies={**raw, **late_raw}, context_ids={item.id for item in context},
+                     revision_reason=revision)
 
     def finalize(self) -> list[Match]:
         out: list[Match] = []
@@ -821,9 +864,10 @@ class WindowsProcessRule(Playbook):
                         self._fold(event, hit, out)
                 elif _signature(hits) != early:
                     out.append(self._correction(event, early, hits, undecided))
+        # 3. every merged finding is revised in place to its exact final tally (idempotent: a re-run writes nothing)
         for shape in self.order.keys():  # noqa: SIM118 (a KeyedStore: first-insertion order, keys on disk too)
             group = self.groups.peek(shape)
-            if group is None or group.repeats == 0 or group.records <= group.emitted_records:
+            if group is None or group.repeats == 0:
                 continue
             merged = self._fleet_match(shape, group, final=True)
             if merged is not None:

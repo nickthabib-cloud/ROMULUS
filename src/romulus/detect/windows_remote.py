@@ -37,7 +37,7 @@ _REMOTE_PARENTS = {
 
 class RemoteExecutionParent(WindowsProcessRule):
     id = "win.remote_execution_child"
-    version = "4"
+    version = "5"
     title = "a shell, script host or LOLBin was started by a remote-execution service"
     uses_parent = True
     parent_images = frozenset(_REMOTE_PARENTS)
@@ -73,6 +73,7 @@ class RemoteExecutionParent(WindowsProcessRule):
                           "artifacts (behaviour, reimplemented)",
         "lanes": "high: remote execution is a lateral-movement step; merged fleet repeats keep the lane. Severity "
                  "high because, if adverse, this is remote code execution on the host.",
+        "limits": "when a Security 4688 child names no parent image, its parent is resolved by process id and the finding is published as soon as that is decided. If the only termination of the parent pid that falls between parent and child is recorded in another stream that the sweep reads later (a Sysmon 5 record on a different target), the outcome depends on target order: read first, the finding is published and then revised in place to a lead when the termination arrives; read second, the child is undecided and no finding is published. Findings are never deleted, so the two orders end differently in this case only.",
         "retrieval": "the sweep retrieves every Windows process-creation record; this reads those whose image is a "
                      "code runner (a provable subset).",
     }
@@ -106,7 +107,7 @@ class RemoteExecutionParent(WindowsProcessRule):
 
 class DcomActivatedChild(WindowsProcessRule):
     id = "win.dcom_activated_child"
-    version = "4"
+    version = "5"
     title = "a shell or script host was started by a DCOM-activated application"
     uses_parent = True
     reads_command_line = False
@@ -137,6 +138,7 @@ class DcomActivatedChild(WindowsProcessRule):
         "research_basis": "ATT&CK Enterprise 20.0 T1021.003, T1559.001, T1059; DCOM lateral-movement research "
                           "(behaviour, reimplemented)",
         "lanes": "lead: DCOM-activated shells are suspicious but legitimate COM automation exists; merged per shape.",
+        "limits": "when a Security 4688 child names no parent image, its parent is resolved by process id and the finding is published as soon as that is decided. If the only termination of the parent pid that falls between parent and child is recorded in another stream that the sweep reads later (a Sysmon 5 record on a different target), the outcome depends on target order: read first, the finding is published and then revised in place to a lead when the termination arrives; read second, the child is undecided and no finding is published. Findings are never deleted, so the two orders end differently in this case only.",
         "retrieval": "the sweep retrieves every Windows process-creation record; this reads those whose image is a "
                      "shell or script host (a provable subset).",
     }
@@ -186,7 +188,7 @@ class DcomActivatedChild(WindowsProcessRule):
 
 class ServiceChildToAdminShare(WindowsProcessRule):
     id = "win.service_child_output_to_admin_share"
-    version = "4"
+    version = "5"
     title = "a service-hosted command sent its output to an admin share (Impacket smbexec/atexec)"
     reads_command_line = True
     uses_parent = True
@@ -208,6 +210,7 @@ class ServiceChildToAdminShare(WindowsProcessRule):
         "research_basis": "ATT&CK Enterprise 20.0 T1021.002, T1569.002, T1059.003; Impacket smbexec/atexec artifacts "
                           "(behaviour, reimplemented)",
         "lanes": "high",
+        "limits": "when a Security 4688 child names no parent image, its parent is resolved by process id and the finding is published as soon as that is decided. If the only termination of the parent pid that falls between parent and child is recorded in another stream that the sweep reads later (a Sysmon 5 record on a different target), the outcome depends on target order: read first, the finding is published and then revised in place to a lead when the termination arrives; read second, the child is undecided and no finding is published. Findings are never deleted, so the two orders end differently in this case only.",
         "retrieval": "the sweep retrieves every process-creation record; this reads cmd.exe records with a "
                      "service-process parent",
     }

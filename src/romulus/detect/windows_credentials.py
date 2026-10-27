@@ -47,7 +47,7 @@ def _names_hive(token: str) -> bool:
 
 class ProcdumpLsass(WindowsProcessRule):
     id = "win.procdump_lsass"
-    version = "1"
+    version = "2"
     title = "procdump was aimed at LSASS"
     assures_negative = False
     positive_only_reason = ("procdump and its target are read from argv; a window without a match proves nothing, and "
@@ -83,7 +83,7 @@ class ProcdumpLsass(WindowsProcessRule):
 
 class RegSaveHive(WindowsProcessRule):
     id = "win.reg_save_cred_hive"
-    version = "1"
+    version = "2"
     title = "reg.exe saved a credential registry hive (SAM, SYSTEM or SECURITY)"
     assures_negative = False
     positive_only_reason = ("the hive and verb are read from reg.exe argv; a window without a match proves nothing, "
@@ -123,7 +123,7 @@ class RegSaveHive(WindowsProcessRule):
 
 class NtdsutilExtract(WindowsProcessRule):
     id = "win.ntdsutil_ifm"
-    version = "1"
+    version = "2"
     title = "ntdsutil was used to create an Active Directory database copy (IFM)"
     assures_negative = False
     positive_only_reason = ("the ntdsutil sub-commands are read from argv; a window without a match proves nothing, "
@@ -161,7 +161,7 @@ class NtdsutilExtract(WindowsProcessRule):
 
 class EsentutlCopy(WindowsProcessRule):
     id = "win.esentutl_credential_copy"
-    version = "1"
+    version = "2"
     title = "esentutl copied a credential database or hive, often from a shadow copy"
     assures_negative = False
     positive_only_reason = ("the source and verb are read from esentutl argv; a window without a match proves nothing")
@@ -203,7 +203,7 @@ class EsentutlCopy(WindowsProcessRule):
 
 class ShadowCopyForHarvest(WindowsProcessRule):
     id = "win.shadow_copy_create_for_harvest"
-    version = "1"
+    version = "2"
     title = "a shadow copy was created by a tool used to harvest NTDS or hives"
     assures_negative = False
     positive_only_reason = ("the create-shadow request is read from argv; a window without a match proves nothing, "
