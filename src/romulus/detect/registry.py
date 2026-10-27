@@ -21,17 +21,24 @@ from romulus.detect.tls import TLS_PLAYBOOKS
 from romulus.detect.windows_common import share_windows_lineage
 from romulus.detect.windows_credentials import WINDOWS_CREDENTIAL_PLAYBOOKS
 from romulus.detect.windows_defense import WINDOWS_DEFENSE_PLAYBOOKS
+from romulus.detect.windows_endpoint_events import WINDOWS_ENDPOINT_PLAYBOOKS
+from romulus.detect.windows_events import WindowsEventRule
+from romulus.detect.windows_file_events import WINDOWS_FILE_PLAYBOOKS
 from romulus.detect.windows_lineage import WINDOWS_LINEAGE_PLAYBOOKS
+from romulus.detect.windows_memory_events import WINDOWS_MEMORY_PLAYBOOKS
 from romulus.detect.windows_proxy import WINDOWS_PROXY_PLAYBOOKS
+from romulus.detect.windows_registry_events import WINDOWS_REGISTRY_PLAYBOOKS
 from romulus.detect.windows_remote import WINDOWS_REMOTE_PLAYBOOKS
 
-PACK_VERSION = "pack@33"
+PACK_VERSION = "pack@34"
 WINDOWS_PROCESS_PLAYBOOKS = (WINDOWS_LINEAGE_PLAYBOOKS + WINDOWS_PROXY_PLAYBOOKS + WINDOWS_CREDENTIAL_PLAYBOOKS
                              + WINDOWS_DEFENSE_PLAYBOOKS + WINDOWS_REMOTE_PLAYBOOKS)
+WINDOWS_HOST_PLAYBOOKS = list(WINDOWS_MEMORY_PLAYBOOKS + WINDOWS_REGISTRY_PLAYBOOKS
+                            + WINDOWS_ENDPOINT_PLAYBOOKS + WINDOWS_FILE_PLAYBOOKS)
 ALL_PLAYBOOKS = (HOST_PLAYBOOKS + HIJACK_PLAYBOOKS + KERNEL_FILE_PLAYBOOKS + LINEAGE_PLAYBOOKS + AUTH_PLAYBOOKS
                  + TAMPER_PLAYBOOKS + NETWORK_PLAYBOOKS + DNS_PLAYBOOKS + SESSION_PLAYBOOKS + TLS_PLAYBOOKS + FLOW_PLAYBOOKS
                  + CORRELATION_PLAYBOOKS + INDICATOR_PLAYBOOKS + CONTEXT_PLAYBOOKS + PACKET_PLAYBOOKS
-                 + WINDOWS_PROCESS_PLAYBOOKS + BASELINE_PLAYBOOKS)
+                 + WINDOWS_PROCESS_PLAYBOOKS + WINDOWS_HOST_PLAYBOOKS + BASELINE_PLAYBOOKS)
 _ANCHOR_CLASSES = {playbook.id: playbook.anchor_class for playbook in ALL_PLAYBOOKS}
 
 
@@ -61,7 +68,13 @@ def fresh_pack():
 
 def fresh_direct_pack():
     """Fresh evaluators safe for a bounded pivot subset."""
-    return [cls() for cls in ALL_PLAYBOOKS if cls.kind == "direct"]
+    pack = [cls() for cls in ALL_PLAYBOOKS if cls.kind == "direct"
+            or (cls.kind == "aggregate" and getattr(cls, "direct_eligible", False))]
+    for rule in pack:
+        if isinstance(rule, WindowsEventRule):
+            rule.one_shot = True
+            rule.kind = "direct"
+    return pack
 
 
 def fresh_context_pack():
