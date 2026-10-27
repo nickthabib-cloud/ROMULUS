@@ -18,7 +18,8 @@ def test_direct_batches_publish_every_positive_without_staged_recurrence_state()
 
 
 def test_sweep_instances_retain_disk_backed_folding_and_all_new_rules_are_positive_only():
-    rules = [rule for rule in fresh_pack() if isinstance(rule, WindowsEventRule)]
+    ids = {cls.id for cls in WINDOWS_HOST_PLAYBOOKS}
+    rules = [rule for rule in fresh_pack() if rule.id in ids and isinstance(rule, WindowsEventRule)]
     assert len(rules) == len(WINDOWS_HOST_PLAYBOOKS)
     assert all(rule.kind == "aggregate" and rule.direct_eligible and not rule.one_shot
                and rule.staged and not rule.assures_negative for rule in rules)

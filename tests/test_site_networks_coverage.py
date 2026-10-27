@@ -63,9 +63,10 @@ def tls_record(src, dst, **extra):
 
 def test_the_direction_dependent_rules_are_exactly_these():
     flagged = {pb.id for pb in ALL_PLAYBOOKS if getattr(pb, "direction_dependent", False)}
-    assert flagged == AFFECTED
+    assert flagged == AFFECTED | {"win.rdp_external_source"}
     # each can write a complete negative, which is what the reason protects
     assert all(pb.assures_negative for pb in ALL_PLAYBOOKS if pb.id in AFFECTED)
+    assert all(not pb.assures_negative for pb in ALL_PLAYBOOKS if pb.id == "win.rdp_external_source")
 
 
 WORDING = {"host.ssh_login_external_source", "host.interpreter_external_connection", "corr.process_network_link",

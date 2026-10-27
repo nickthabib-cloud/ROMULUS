@@ -21,7 +21,7 @@ from romulus.detect.bounded import StateBudget, StateExhausted, live_stores
 from romulus.detect.host import bind_lineage_citation_loader
 from romulus.detect.netdef import DIRECTION_ASSUMED_REASON
 from romulus.detect.observed import observation
-from romulus.detect.registry import fresh_pack
+from romulus.detect.registry import bind_windows_site, fresh_pack
 from romulus.evidence.normalize import (
     BOOT_FILL_FAMILIES,
     BOOT_INTERVAL_ORIGIN,
@@ -240,7 +240,7 @@ class Sweep:
         # One state budget for the hunt: the disk every playbook's spill may use (and the free space left on the
         # stage volume), and the memory their hot sets share. Read the stage volume's free space before the sweep.
         self.budget = state_budget(settings, stage_dir)
-        self.pack: list[Playbook] = fresh_pack()
+        self.pack: list[Playbook] = bind_windows_site(fresh_pack(), self.site_facts)
         bind_lineage_citation_loader(self.pack, LineageCitationFetcher(client, contracts).load)
         for pb in self.pack:
             pb.spill_dir = stage_dir          # a playbook's on-disk join tables live beside the event stage
@@ -1786,7 +1786,9 @@ class Sweep:
                 pb.bind_loader(stage.load)
                 pb.heartbeat = self.heartbeat
             ms = self._finalize_rule(pb)
+            finalized_matches = 0
             for m in ms:
+                finalized_matches += 1
                 raw_sources = ({**agg_raw, **self._merge_staged_match_raw(m)} if pb.staged else agg_raw)
                 self._publish(m, None, raw_sources)
             cells = [c for c in self.repo.rule_cells(self.hunt_id, rule_id=pb.id)
@@ -1799,7 +1801,7 @@ class Sweep:
             any_partial = any_partial or bool(limits)
             evaluated = sum(c["evaluated"] or 0 for c in cells)
             consumed_matches = sum(c["matched"] or 0 for c in cells)
-            matched_any = bool(ms) or consumed_matches > 0
+            matched_any = finalized_matches > 0 or consumed_matches > 0
             if not pb.assures_negative and not matched_any:
                 # positive-only aggregate (argv/text-identified): never a complete negative
                 state = "positive_only_partial" if (any_partial or not cells) else "positive_only"
@@ -1818,7 +1820,7 @@ class Sweep:
                 reasons.append(DIRECTION_ASSUMED_REASON)
             reasons += limits + pb.coverage_notes()
             self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, "*", "window", state,
-                                    len(ms) + consumed_matches, evaluated, {"reasons": reasons})
+                                    finalized_matches + consumed_matches, evaluated, {"reasons": reasons})
             pb.release_state()
         agg_raw.clear()
         if self.budget.spent:
@@ -1831,20 +1833,31 @@ class Sweep:
         self.close_stage()
 
     @staticmethod
-    def _finalize_rule(pb: Playbook) -> list[Match]:
+    def _finalize_rule(pb: Playbook):
         """A rule's finalize. When it needs disk the stage volume cannot give, the rule publishes what it can from
         state readable without writing (`finalize_fallback`: strong per-record items), and its window cell says
         which results were not computed (the hunt goes on)."""
         from romulus.detect.correlation import StageMissing
-        try:
-            return pb.finalize()
-        except (StateExhausted, StageMissing, LookupError) as exc:
+        def fallback(exc):
             pb.note_limit("state_disk", f"finalize stopped: {exc}; this rule's groupings were not computed, only "
                                         f"what it could publish without disk")
             try:
                 return pb.finalize_fallback(str(exc))
             except (StateExhausted, StageMissing, LookupError):
                 return []
+        try:
+            matches = pb.finalize()
+        except (StateExhausted, StageMissing, LookupError) as exc:
+            return fallback(exc)
+        if isinstance(matches, (list, tuple)):
+            return matches
+
+        def stream():
+            try:
+                yield from matches
+            except (StateExhausted, StageMissing, LookupError) as exc:
+                yield from fallback(exc)
+        return stream()
 
     def close_stage(self) -> None:
         """Remove the disk stage, Windows continuity state and playbook spills on every controlled exit path."""

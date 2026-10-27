@@ -16,7 +16,7 @@ from romulus.detect import netdef
 from romulus.detect.correlation import routable_remote
 from romulus.detect.host import bind_lineage_citation_loader, is_internal
 from romulus.detect.netdef import DIRECTION_ASSUMED_REASON
-from romulus.detect.registry import fresh_direct_pack, rule_kind
+from romulus.detect.registry import bind_windows_site, fresh_direct_pack, rule_kind
 from romulus.evidence.typed import TypedEvent, event_os_family
 from romulus.evidence.windows_catalog import WINDOWS_HOST_DATASETS
 from romulus.hunt.context import finalize_context
@@ -46,6 +46,7 @@ from romulus.hunt.publish import (
     subject_event_ids,
 )
 from romulus.hunt.sweep import stored_boot_intervals
+from romulus.hunt.windows_context import publish_windows_link_context
 from romulus.sources.models import Window
 from romulus.store.db import digest
 from romulus.store.repo import Repo
@@ -832,7 +833,7 @@ class ExpansionEngine:
         # immediately. Context rules are judged once, after expansion ends, by finalize_context.
         events = self._events(result.event_ids)
         published = []
-        pack = fresh_direct_pack()
+        pack = bind_windows_site(fresh_direct_pack(), getattr(getattr(self.fetcher, "executor", None), "site_facts", None))
         # The same verified re-read of cited lineage records the sweep's pack has, so a finding found here can rest
         # on its lineage exactly as one found in the sweep can.
         executor = getattr(self.fetcher, "executor", None)
@@ -856,6 +857,8 @@ class ExpansionEngine:
                 )
                 if row is not None:
                     published.append(row)
+        published.extend(publish_windows_link_context(self.repo, self.hunt_id, candidate, result, events,
+                                                      owner_token=self.owner_token))
         self.repo.mark_expansion_link_evaluated(result.id, owner_token=self.owner_token)
         return published
 

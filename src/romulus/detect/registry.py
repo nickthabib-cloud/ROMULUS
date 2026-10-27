@@ -18,27 +18,37 @@ from romulus.detect.packets import PACKET_PLAYBOOKS
 from romulus.detect.sessions import SESSION_PLAYBOOKS
 from romulus.detect.tamper import TAMPER_PLAYBOOKS
 from romulus.detect.tls import TLS_PLAYBOOKS
+from romulus.detect.windows_account_events import WINDOWS_ACCOUNT_PLAYBOOKS
+from romulus.detect.windows_auth_events import WINDOWS_AUTH_EVENT_PLAYBOOKS
 from romulus.detect.windows_common import share_windows_lineage
+from romulus.detect.windows_correlations import WINDOWS_CORRELATION_PLAYBOOKS
 from romulus.detect.windows_credentials import WINDOWS_CREDENTIAL_PLAYBOOKS
 from romulus.detect.windows_defense import WINDOWS_DEFENSE_PLAYBOOKS
+from romulus.detect.windows_directory_events import WINDOWS_DIRECTORY_PLAYBOOKS
 from romulus.detect.windows_endpoint_events import WINDOWS_ENDPOINT_PLAYBOOKS
 from romulus.detect.windows_events import WindowsEventRule
 from romulus.detect.windows_file_events import WINDOWS_FILE_PLAYBOOKS
 from romulus.detect.windows_lineage import WINDOWS_LINEAGE_PLAYBOOKS
+from romulus.detect.windows_linked import WINDOWS_LINKED_PLAYBOOKS
 from romulus.detect.windows_memory_events import WINDOWS_MEMORY_PLAYBOOKS
 from romulus.detect.windows_proxy import WINDOWS_PROXY_PLAYBOOKS
+from romulus.detect.windows_registration_events import WINDOWS_REGISTRATION_PLAYBOOKS
 from romulus.detect.windows_registry_events import WINDOWS_REGISTRY_PLAYBOOKS
 from romulus.detect.windows_remote import WINDOWS_REMOTE_PLAYBOOKS
 
-PACK_VERSION = "pack@34"
+PACK_VERSION = "pack@35"
 WINDOWS_PROCESS_PLAYBOOKS = (WINDOWS_LINEAGE_PLAYBOOKS + WINDOWS_PROXY_PLAYBOOKS + WINDOWS_CREDENTIAL_PLAYBOOKS
                              + WINDOWS_DEFENSE_PLAYBOOKS + WINDOWS_REMOTE_PLAYBOOKS)
 WINDOWS_HOST_PLAYBOOKS = list(WINDOWS_MEMORY_PLAYBOOKS + WINDOWS_REGISTRY_PLAYBOOKS
                             + WINDOWS_ENDPOINT_PLAYBOOKS + WINDOWS_FILE_PLAYBOOKS)
+WINDOWS_DOMAIN_PLAYBOOKS = list(WINDOWS_AUTH_EVENT_PLAYBOOKS + WINDOWS_ACCOUNT_PLAYBOOKS
+                              + WINDOWS_REGISTRATION_PLAYBOOKS + WINDOWS_DIRECTORY_PLAYBOOKS
+                              + WINDOWS_CORRELATION_PLAYBOOKS)
 ALL_PLAYBOOKS = (HOST_PLAYBOOKS + HIJACK_PLAYBOOKS + KERNEL_FILE_PLAYBOOKS + LINEAGE_PLAYBOOKS + AUTH_PLAYBOOKS
                  + TAMPER_PLAYBOOKS + NETWORK_PLAYBOOKS + DNS_PLAYBOOKS + SESSION_PLAYBOOKS + TLS_PLAYBOOKS + FLOW_PLAYBOOKS
                  + CORRELATION_PLAYBOOKS + INDICATOR_PLAYBOOKS + CONTEXT_PLAYBOOKS + PACKET_PLAYBOOKS
-                 + WINDOWS_PROCESS_PLAYBOOKS + WINDOWS_HOST_PLAYBOOKS + BASELINE_PLAYBOOKS)
+                 + WINDOWS_PROCESS_PLAYBOOKS + WINDOWS_HOST_PLAYBOOKS + WINDOWS_DOMAIN_PLAYBOOKS
+                 + list(WINDOWS_LINKED_PLAYBOOKS) + BASELINE_PLAYBOOKS)
 _ANCHOR_CLASSES = {playbook.id: playbook.anchor_class for playbook in ALL_PLAYBOOKS}
 
 
@@ -79,7 +89,15 @@ def fresh_direct_pack():
 
 def fresh_context_pack():
     """Fresh context-only evaluators; never called by the sweep."""
-    return [cls() for cls in ALL_PLAYBOOKS if cls.kind == "context"]
+    return [cls() for cls in ALL_PLAYBOOKS if cls.kind == "context" and not getattr(cls, "per_link_evidence", False)]
+
+
+def bind_windows_site(pack, site_facts):
+    """Forward the caller's already-frozen site snapshot; rules never reload configuration."""
+    for rule in pack:
+        if isinstance(rule, WindowsEventRule):
+            rule.site_facts = site_facts
+    return pack
 
 
 def pack_manifest() -> list[dict]:

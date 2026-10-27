@@ -1,0 +1,267 @@
+"""Positive Windows service/task configuration and logging-state observations."""
+from __future__ import annotations
+
+import re
+from xml.etree import ElementTree
+
+from romulus.detect.windows_cmdline import parse_powershell, split_argv
+from romulus.detect.windows_events import WindowsEventRule, basename, integer, signal, writable
+from romulus.evidence.windows_catalog import (
+    EVENTLOG,
+    SECURITY,
+    SYSMON,
+    SYSMON_CHANNEL,
+    TASK_CHANNEL,
+    TASK_PROVIDER,
+)
+
+_HOSTS = frozenset({"cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "pwsh.exe",
+                    "wscript", "wscript.exe", "cscript", "cscript.exe", "mshta", "mshta.exe"})
+_PS_HOSTS = frozenset({"powershell", "powershell.exe", "pwsh", "pwsh.exe"})
+_REMOTE_NAMES = frozenset({"psexesvc", "remcomsvc", "paexec"})
+_SERVICE_DOC = "https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4697"
+_TASK_DOC = "https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4698"
+_SYSMON_DOC = "https://learn.microsoft.com/sysinternals/downloads/sysmon"
+
+
+def _command(line: object) -> tuple[str | None, list[str], str]:
+    """Keep uncertain executable boundaries as leads instead of guessing an unquoted path."""
+    if not isinstance(line, str) or not line.strip():
+        return None, [], "the recorded command is missing"
+    text = line.strip()
+    if text.startswith('"'):
+        close = text.find('"', 1)
+        if close < 2 or (len(text) > close + 1 and not text[close + 1].isspace()):
+            return None, [], "the quoted executable boundary is ambiguous"
+    else:
+        first = text.split(maxsplit=1)[0]
+        if len(first) != len(text) and not (
+                re.search(r"\.(?:exe|com|bat|cmd)$", first, re.IGNORECASE) or basename(first) in _HOSTS):
+            return None, [], "the unquoted executable boundary is ambiguous"
+    argv = split_argv(text)
+    return (argv[0], argv[1:], "") if argv else (None, [], "the command did not parse")
+
+
+def _risks(executable: str, args: list[str]) -> list[str]:
+    name = basename(executable)
+    risks = []
+    if name in _PS_HOSTS:
+        call = parse_powershell(args)
+        risks.append("PowerShell encoded-command argument" if call.source == "encodedcommand"
+                     else "PowerShell host")
+    elif name in _HOSTS:
+        risks.append("shell or script host")
+    if writable(executable):
+        risks.append("executable path in a standard profile or temporary location")
+    return risks
+
+
+class ServiceRegistration(WindowsEventRule):
+    id = "win.service_registration"
+    version = "1"
+    title = "Service registration contains a risky executable configuration"
+    families = ("service_change",)
+    windows_event_classes = (("Security", SECURITY, 4697), ("System", "Service Control Manager", 7045))
+    attack = ("T1543.003",)
+    benign = ("approved deployment tools and services can use script hosts or temporary staging paths",
+              "authorized remote administration uses the same default service names")
+    next_checks = ("inspect the registered binary and its signature", "find a subsequent service process record")
+    research = (_SERVICE_DOC, "https://learn.microsoft.com/sysinternals/downloads/psexec",
+                "https://github.com/kavika13/RemCom", "https://www.poweradmin.com/paexec/")
+
+    def judge(self, event):
+        if integer(event.get("event.code")) not in {4697, 7045}:
+            return []
+        fields = ("service.name", "service.image_path", "service.start_type", "service.account", "service.type")
+        image = event.get("service.image_path")
+        executable, args, reason = _command(image)
+        risks = _risks(executable, args) if executable else []
+        remote = str(event.get("service.name") or "").casefold() in _REMOTE_NAMES
+        if not risks and not remote and not reason:
+            return []
+        text = (f"Service installation record registered name {self.describe(event.get('service.name'))} "
+                f"with ImagePath {self.describe(image)}")
+        if risks:
+            text += ": " + "; ".join(risks)
+        elif remote:
+            text += "; the service name matches a documented remote-administration default"
+        if reason:
+            text += f"; {reason}"
+        return [signal(event, "service_configuration", text, self.attack, fields,
+                       lane="high" if risks else "lead", severity="high" if risks else "medium",
+                       notes=(("Registration does not establish that the configured payload executed. Service names "
+                               "are controllable, and path indicators do not establish effective filesystem ACLs."),))]
+
+
+def _local(tag: object) -> str:
+    return str(tag).rsplit("}", 1)[-1]
+
+
+def _task_structure(event) -> bool:
+    """Validate the Exec locations before trusting the normalizer's broad XML walk for a strong lane."""
+    xml = event.get("task.xml")
+    actions = event.get("task.actions")
+    if not isinstance(xml, str) or not isinstance(actions, list):
+        return False
+    if "<!DOCTYPE" in xml.upper() or "<!ENTITY" in xml.upper():
+        return False
+    try:
+        if len(xml.encode("utf-8")) > 1_048_576:
+            return False
+        root = ElementTree.fromstring(xml)
+    except (ElementTree.ParseError, UnicodeError, ValueError):
+        return False
+    containers = [child for child in root if _local(child.tag) == "Actions"]
+    if _local(root.tag) != "Task" or len(containers) != 1:
+        return False
+    direct = []
+    for action in containers[0]:
+        if _local(action.tag) != "Exec":
+            continue
+        value = {"kind": "exec"}
+        for child in action:
+            key = {"Command": "command", "Arguments": "arguments", "WorkingDirectory": "working_directory"}.get(
+                _local(child.tag))
+            if key:
+                if key in value:
+                    return False
+                if child.text and child.text.strip():
+                    value[key] = child.text.strip()
+        direct.append(value)
+    return direct == [action for action in actions if isinstance(action, dict) and action.get("kind") == "exec"]
+
+
+class ScheduledTaskRegistration(WindowsEventRule):
+    id = "win.scheduled_task_registration"
+    version = "1"
+    title = "Scheduled task record contains a risky action configuration"
+    families = ("scheduled_task",)
+    windows_event_classes = tuple(("Security", SECURITY, code) for code in (4698, 4702)) + tuple(
+        (TASK_CHANNEL, TASK_PROVIDER, code) for code in (106, 140, 200))
+    attack = ("T1053.005",)
+    benign = ("administration, updaters and inventory tasks often run hidden, as SYSTEM, or through a script host",)
+    next_checks = ("validate the complete task definition and all actions", "inspect the configured files and task results")
+    research = (_TASK_DOC, "https://learn.microsoft.com/windows/win32/taskschd/task-scheduler-schema")
+
+    def judge(self, event):
+        code = integer(event.get("event.code"))
+        if code not in {4698, 4702, 106, 140, 200}:
+            return []
+        fields = ("task.name", "task.actions", "task.action_name", "task.hidden", "task.principal.user_id",
+                  "task.principal.run_level", "task.xml_parse", "task.xml_parse_reason", "task.result_code")
+        labels = []
+        uncertain = False
+        risky = False
+        if code == 200:
+            action = event.get("task.action_name")
+            executable, args, reason = _command(action)
+            risks = _risks(executable, args) if executable else []
+            if not risks and not reason:
+                return []
+            text = (f"Task action-started record named {self.describe(action)} for task "
+                    f"{self.describe(event.get('task.name'))}")
+            labels.extend(risks)
+            risky = bool(risks)
+            if reason:
+                labels.append(reason)
+                uncertain = True
+        else:
+            actions = event.get("task.actions")
+            structural = _task_structure(event)
+            if isinstance(actions, list):
+                if not actions:
+                    uncertain = True
+                for action in actions:
+                    if not isinstance(action, dict):
+                        uncertain = True
+                        continue
+                    if action.get("kind") != "exec":
+                        continue
+                    command = action.get("command")
+                    if not isinstance(command, str) or not command:
+                        uncertain = True
+                        continue
+                    # XML Command is an executable field, not a command line: spaces inside it are literal.
+                    args = split_argv("host.exe " + str(action.get("arguments") or ""))[1:]
+                    risks = _risks(command, args)
+                    if risks:
+                        risky = True
+                        labels.append(f"parsed Exec Command {self.describe(command)}: " + "; ".join(risks))
+            else:
+                uncertain = True
+            if labels and not structural:
+                uncertain = True
+            if event.get("task.hidden") is True:
+                labels.append("Hidden=true in parsed configuration")
+            principal = str(event.get("task.principal.user_id") or "").casefold()
+            if principal in {"s-1-5-18", "system", "nt authority\\system"}:
+                labels.append("SYSTEM principal in parsed configuration")
+            if not labels and not uncertain:
+                return []
+            action = "updated" if code in {4702, 140} else "registered"
+            text = f"Task {action} record for {self.describe(event.get('task.name'))}"
+            if labels and not structural:
+                labels.append("XML action structure was not independently established")
+        if labels:
+            text += ": " + "; ".join(labels)
+        if uncertain:
+            text += "; configuration interpretation remains uncertain"
+        high = risky and not uncertain
+        return [signal(event, "task_configuration", text, self.attack, fields,
+                       lane="high" if high else "lead", severity="high" if high else "medium",
+                       notes=(("Parsed configuration and an action-started name do not establish that the configured "
+                               "payload executed successfully. Hidden and SYSTEM alone are administration leads."),))]
+
+
+class WindowsAuditTamper(WindowsEventRule):
+    id = "win.audit_state_change"
+    version = "1"
+    title = "Windows logging state, configuration, or log contents changed"
+    families = ("audit_config",)
+    windows_event_classes = tuple(("Security", EVENTLOG, code) for code in (1100, 1102, 1104, 1108)) + (
+        ("System", "Microsoft-Windows-Eventlog", 104), ("Security", SECURITY, 4719),
+    ) + tuple((SYSMON_CHANNEL, SYSMON, code) for code in (4, 16, 255))
+    attack = ("T1685.001", "T1685.005", "T1685.007")
+    benign = ("approved log maintenance, policy changes and Sysmon upgrades", "normal system shutdown and logging errors")
+    next_checks = ("identify the change initiator and approved maintenance", "check collection continuity and actual policy")
+    research = (_SYSMON_DOC, "https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4719",
+                "https://learn.microsoft.com/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-1102")
+
+    def judge(self, event):
+        code = integer(event.get("event.code"))
+        fields = ("audit.config.action", "audit.config.subcategory_guid", "audit.config.changes", "audit.config.state",
+                  "audit.config.configuration", "audit.config.error", "user.entity_id")
+        high = True
+        attack = self.attack
+        if code in {1102, 104}:
+            text = "Windows recorded an event log cleared"
+            attack = ("T1685.005",)
+        elif code == 4719:
+            text = "Windows recorded an audit policy change; the event alone does not establish disabled auditing"
+            attack = ("T1685.001",)
+        elif code == 1100:
+            text = "Windows recorded the event logging service shutting down"
+            attack = ("T1685.001",)
+        elif code == 16:
+            text = "Sysmon recorded a configuration change; its effect on collection is not established"
+        elif code == 4:
+            state = str(event.get("audit.config.state") or "").casefold()
+            if state == "started":
+                return []
+            high = state == "stopped"
+            text = ("Sysmon recorded its service stopped" if high else
+                    "Sysmon recorded a service state change whose stopping effect is not established")
+        elif code in {1104, 1108, 255}:
+            high = False
+            text = {1104: "Windows recorded the security log full", 1108: "Windows recorded an event processing error",
+                    255: "Sysmon recorded an error"}[code]
+        else:
+            return []
+        details = "; ".join(f"{name}={self.describe(event.get(name))}" for name in fields if event.has(name))
+        if details:
+            text += ": " + details
+        return [signal(event, f"audit_{code}", text, attack, fields,
+                       lane="high" if high else "lead", severity="high" if high else "medium")]
+
+
+WINDOWS_REGISTRATION_PLAYBOOKS = (ServiceRegistration, ScheduledTaskRegistration, WindowsAuditTamper)
