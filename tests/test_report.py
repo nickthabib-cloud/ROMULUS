@@ -313,7 +313,7 @@ def test_coverage_legend_defers_to_each_rules_assurance_statement():
     manifest["coverage"]["rules"] = [{
         "rule_id": "host.ssh_authorized_keys_write",
         "records_evaluated": 1,
-        "negative_claim": (
+        "search_result": (
             "not assessable by design: positive-only rule; "
             "no process-level assurance exists for authorized_keys writes"
         ),

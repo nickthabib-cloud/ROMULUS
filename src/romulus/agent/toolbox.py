@@ -359,8 +359,8 @@ class Toolbox:
                              "every_requested_rule_there": set(selected) == set(rule_ids)})
         not_assessed = canonical["not_assessed"]
         unresolved = any(
-            row["negative_claim"].startswith("unresolved:")
-            or "coverage incomplete:" in row["negative_claim"]
+            row["search_result"].startswith("searched in part:")
+            or "coverage incomplete:" in row["search_result"]
             for row in rules
         )
         return {
@@ -417,7 +417,7 @@ class Toolbox:
                 "kind": "rule", **base, "states": _jsonable(row["states"]),
                 "records_evaluated": row["records_evaluated"],
             }
-            yield from text_parts("rule_text", base, "negative_claim", row["negative_claim"])
+            yield from text_parts("rule_text", base, "search_result", row["search_result"])
         for gap_number, gap in enumerate(coverage["gaps"], 1):
             base = {
                 "gap": gap_number, "target": _bounded_text(gap["target"]),

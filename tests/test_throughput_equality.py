@@ -56,7 +56,7 @@ from tests import throughput_fixture as tf
 # The flow and session rules name the side that opened a connection only from a record that shows the opening, and
 # cite the records that bound each interval they state. Seven of them carry new versions (rule_cells, candidates and
 # manifest findings change by rule_version only), and net.outbound_volume_asymmetry's positive-only reason now names
-# the connections it does not read as uploads, so the manifest's negative_claim for it changes. Its window cell
+# the connections it does not read as uploads, so the manifest's per-rule coverage text for it changes. Its window cell
 # stays positive_only and gains one informational reason (rule_cells only): the 301 connections that an Arkime SYN
 # shows outside clients opened to the fixture's internal servers, with the 451,500 bytes the servers sent on them.
 # Findings and citations are unchanged; the port-scan probes to db1 have no recorded opener and a server's port
@@ -276,6 +276,9 @@ from tests import throughput_fixture as tf
 # A merged finding now takes out records whose parent a later record withdrew (and the admin-share rule cites the
 # parent it resolves), so the four parent-resolving rules carry new versions: again only their rule_version in
 # rule_cells changes on this fixture, and the candidates stay byte-identical.
+# The report's per-rule coverage field states what each rule searched instead of a negative claim (search_result:
+# 'searched in full: N record(s) evaluated, none matched', 'searched in part: ...', 'no data in scope for this rule',
+# and the positive-only texts no longer present absence as a later goal), so only the manifest digest changes; findings, cells and every other digest are unchanged.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
     "audit": "23d9b87c75d030df8ff5bcbf07deacc75416c325dd74bcc89243cc1b5488ae93",
@@ -295,7 +298,7 @@ GOLDEN_STACK = {
     "events": "0165d2807ffee33aaef17dd70ba004ec4c87fa4c5f29e9dc75ba833f57b93ff7",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "0fbedb27ca9a4cb72354178444ee9aabc49f377b2c933074fe03ef29c8fbb08a",
-    "manifest": "0979618bc0ba0da8eae2946b942d0eb9e8b03b04a18e4a995d967e38cdeefb48",
+    "manifest": "6e4c0053d5276fb990ca5061be81e7f5e6add2db2498b6fe96411827d25d784a",
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
     "rule_cells": "d70340c4fa4480f5548aec33f1229cf9061b74e729325f4acde8472b4f3d735b",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",

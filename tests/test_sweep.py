@@ -400,13 +400,13 @@ def test_report_coverage_never_complete_with_unexecuted_or_missing_work():
     done = {"rule_id": "r", "target": "a", "partition": "p1", "state": "no_match_complete", "evaluated": 10}
     planned = {"rule_id": "r", "target": "a", "partition": "p2", "state": "planned", "evaluated": 0}
     split = {"rule_id": "r", "target": "a", "partition": "p0", "state": "split", "evaluated": 0}
-    claim = lambda cells, **kw: _coverage(cells, **kw)["rules"][0]["negative_claim"]
-    assert claim([done, split], targets=["a"]) == "complete"
-    assert claim([done, planned], targets=["a"]).startswith("unresolved")
+    claim = lambda cells, **kw: _coverage(cells, **kw)["rules"][0]["search_result"]
+    assert claim([done, split], targets=["a"]).startswith("searched in full")
+    assert claim([done, planned], targets=["a"]).startswith("searched in part")
     assert "target(s) ['b']" in claim([done], targets=["a", "b"])
     assert "sweep did not finish" in claim([done], targets=["a"], sweep_finished=False)
     never = _coverage([done], targets=["a"], rule_ids=["r", "other"])["rules"]
-    assert next(r["negative_claim"] for r in never if r["rule_id"] == "other").startswith("unresolved")
+    assert next(r["search_result"] for r in never if r["rule_id"] == "other").startswith("searched in part")
 
 
 def test_positive_only_and_matched_claims_retain_all_coverage_caveats():
@@ -422,7 +422,7 @@ def test_positive_only_and_matched_claims_retain_all_coverage_caveats():
     }
     positive = _coverage(
         [partial, failed], targets=["a", "b"], sweep_finished=False,
-    )["rules"][0]["negative_claim"]
+    )["rules"][0]["search_result"]
 
     assert positive.startswith("not assessable by design")
     assert "sweep did not finish" in positive
@@ -433,7 +433,7 @@ def test_positive_only_and_matched_claims_retain_all_coverage_caveats():
     matched = dict(partial, state="matched")
     matched_claim = _coverage(
         [matched, failed], targets=["a", "b"], sweep_finished=False,
-    )["rules"][0]["negative_claim"]
+    )["rules"][0]["search_result"]
 
     assert matched_claim.startswith("none (rule matched)")
     assert "sweep did not finish" in matched_claim
@@ -615,7 +615,7 @@ def test_aggregate_consume_time_match_is_never_a_complete_negative(monkeypatch):
     from romulus.report.manifest import _coverage
     row = next(r for r in _coverage(repo.rule_cells("h1"), targets=["romulus-host-x"])["rules"]
                if r["rule_id"] == "host.web_service_spawns_interpreter")
-    assert row["negative_claim"].startswith("none (rule matched)"), row
+    assert row["search_result"].startswith("none (rule matched)"), row
 
 
 
@@ -625,15 +625,15 @@ def test_script_text_rules_never_claim_a_complete_negative(monkeypatch):
     from romulus.report.manifest import _coverage
     rows = {r["rule_id"]: r for r in _coverage(repo.rule_cells("h1"), targets=["romulus-host-x"])["rules"]}
     for rid in ("host.download_piped_to_shell", "host.ssh_authorized_keys_write"):
-        assert rows[rid]["negative_claim"].startswith("not assessable by design"), rows[rid]
+        assert rows[rid]["search_result"].startswith("not assessable by design"), rows[rid]
     # no false pointer to another positive-only rule
-    assert "typed inventory of what the host's audit rules record" in rows["host.download_piped_to_shell"]["negative_claim"]
-    assert "can prove absence" in rows["host.ssh_authorized_keys_write"]["negative_claim"]
+    assert "typed inventory of what the host's audit rules record" in rows["host.download_piped_to_shell"]["search_result"]
+    assert "can show absence" in rows["host.ssh_authorized_keys_write"]["search_result"]
     # no argv/text-identified host rule may claim a complete negative
     from romulus.detect.host import HOST_PLAYBOOKS
     for cls in HOST_PLAYBOOKS:
-        assert not rows[cls.id]["negative_claim"].startswith("complete"), (cls.id, rows[cls.id])
-    assert rows["host.credential_store_read"]["negative_claim"].startswith("not assessable by design")
+        assert not rows[cls.id]["search_result"].startswith("searched in full"), (cls.id, rows[cls.id])
+    assert rows["host.credential_store_read"]["search_result"].startswith("not assessable by design")
 
 
 def test_temp_script_operand_rule_is_positive_only_for_unmodelled_interpreter_options(monkeypatch):
@@ -646,8 +646,8 @@ def test_temp_script_operand_rule_is_positive_only_for_unmodelled_interpreter_op
     )
 
     assert row["states"] == {"positive_only": 1}
-    assert row["negative_claim"].startswith("not assessable by design")
-    assert "interpreter argv" in row["negative_claim"]
+    assert row["search_result"].startswith("not assessable by design")
+    assert "interpreter argv" in row["search_result"]
 
 
 
@@ -699,7 +699,7 @@ def test_cells_stored_before_a_rule_became_positive_only_never_render_complete()
     from romulus.report.manifest import _coverage
     cells = [{"rule_id": "host.credential_store_read", "target": "idx", "partition": "p",
               "state": "no_match_complete", "evaluated": 5}]          # stored under an older pack
-    claim = _coverage(cells, targets=["idx"])["rules"][0]["negative_claim"]
+    claim = _coverage(cells, targets=["idx"])["rules"][0]["search_result"]
     assert claim.startswith("not assessable by design"), claim
 
 

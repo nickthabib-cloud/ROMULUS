@@ -83,12 +83,12 @@
 </table>
 
 <h2>Coverage</h2>
-<p class="help">A rule supports a negative ("not seen") only where its negative claim is <b>complete</b>. <b>Unresolved</b> means some partitions were partial, failed, or had records missing required fields.</p>
+<p class="help">What each rule searched. ROMULUS reports what it finds; it never claims that nothing is there. <b>Searched in full</b> means every partition in scope was evaluated and none matched: a statement about the search, not about the network. <b>Searched in part</b> means some partitions were partial, failed, or had records missing required fields: those are blind spots, listed with their reasons. <b>No data in scope</b> means the rule had nothing to read.</p>
 <table class="grid">
-<thead><tr><th>Rule</th><th>Records evaluated</th><th>Negative claim</th><th>Cell states</th></tr></thead>
+<thead><tr><th>Rule</th><th>Records evaluated</th><th>Search result</th><th>Cell states</th></tr></thead>
 <tbody>
 {% for r in coverage %}
-<tr><td class="mono">{{ r.rule_id }}</td><td class="n">{{ r.records_evaluated }}</td><td>{{ r.negative_claim }}</td>
+<tr><td class="mono">{{ r.rule_id }}</td><td class="n">{{ r.records_evaluated }}</td><td>{{ r.search_result }}</td>
 <td class="mono small">{% for k, v in r.states.items() %}{{ k }}={{ v }} {% endfor %}</td></tr>
 {% endfor %}
 </tbody>

@@ -835,9 +835,9 @@ def test_a_contradicted_sweep_placement_is_reported_with_the_sweep(monkeypatch):
     # every rule that reads boot-placed families loses its complete negative, with the reason; others keep it
     from romulus.evidence.normalize import BOOT_FILL_FAMILIES
     from romulus.report.manifest import _coverage
-    rows = {row["rule_id"]: row["negative_claim"] for row in _coverage(repo.rule_cells("h1"))["rules"]}
+    rows = {row["rule_id"]: row["search_result"] for row in _coverage(repo.rule_cells("h1"))["rules"]}
     boot_rules = {pb.id for pb in sweep.pack if set(pb.families) & BOOT_FILL_FAMILIES}
-    assert boot_rules and all(rows[rule] != "complete" for rule in boot_rules)
+    assert boot_rules and all(not rows[rule].startswith("searched in full") for rule in boot_rules)
     cells = [c for c in repo.rule_cells("h1") if c["partition"] == sw.BOOT_PLACEMENT_PARTITION]
     assert {c["rule_id"] for c in cells} == boot_rules
     assert all(c["state"] == "evaluated_partial" and c["detail"]["reasons"][0].startswith("boot placement:")

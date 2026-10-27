@@ -154,13 +154,13 @@ def contradiction_reason(check: dict) -> str | None:
     failed. None when the check ran and found every host inside, or found no host address at all."""
     if check.get("error"):
         return (f"the internal-network definition could not be checked against this hunt's host addresses "
-                f"({check['error']}); direction-dependent negatives are not complete")
+                f"({check['error']}); direction-dependent rules were searched only in part")
     if check.get("outside"):
         shown = ", ".join(check["examples"][:CITED_EXAMPLES])
         more = " and more" if check["outside"] > CITED_EXAMPLES or check.get("at_least") else ""
         return (f"{'at least ' if check.get('at_least') else ''}{check['outside']} distinct {HOST_ADDRESS_FIELD} "
                 f"address(es) in this hunt's host telemetry are outside the internal-network definition ({shown}"
-                f"{more}); direction-dependent negatives are not complete")
+                f"{more}); direction-dependent rules were searched only in part")
     return None
 
 
