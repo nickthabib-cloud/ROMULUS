@@ -273,6 +273,9 @@ from tests import throughput_fixture as tf
 # In-place revision of published findings (a late record's correction, a merged finding's final tally) changes the
 # wording of every Windows process rule's revised claims, so all of them carry new versions; on this Linux-only
 # fixture only their rule_version in rule_cells changes.
+# A merged finding now takes out records whose parent a later record withdrew (and the admin-share rule cites the
+# parent it resolves), so the four parent-resolving rules carry new versions: again only their rule_version in
+# rule_cells changes on this fixture, and the candidates stay byte-identical.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
     "audit": "23d9b87c75d030df8ff5bcbf07deacc75416c325dd74bcc89243cc1b5488ae93",
@@ -294,7 +297,7 @@ GOLDEN_STACK = {
     "links": "0fbedb27ca9a4cb72354178444ee9aabc49f377b2c933074fe03ef29c8fbb08a",
     "manifest": "0979618bc0ba0da8eae2946b942d0eb9e8b03b04a18e4a995d967e38cdeefb48",
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
-    "rule_cells": "73e2ed41559d40f19fa15dc257c990fe19aeb43bd625c84a62e84bc34ac9b28f",
+    "rule_cells": "d70340c4fa4480f5548aec33f1229cf9061b74e729325f4acde8472b4f3d735b",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
     "tasks": "c65df4ab88c05661371cf32b49a1d22ef84d6753488bdb946c8e29376d486260",
 }
@@ -326,14 +329,14 @@ GOLDEN_NON_BASELINE_SEMANTICS = {
         "ts": "d8015c1ff0b135e082a5fef2ab1cb88206470e30beee157a0cfc7790d48b8310",
     },
     "rule_cells": {
-        "all_fields": "7ca16e8cb0070e2cc1e6fbc97b4135bfce2082ac35d81b85eecf932febb8e054",
+        "all_fields": "ace432fd442b09ac96a22cc64e07b0a5d8b868c7baf15e146e210b1b6d52140f",
         "count": 5534,
         "detail": "c174e2cb56c91f760f17ec89574d8fcaa2cbe4d479bf33a58d4893bbfad3e294",
         "evaluated": "f5a4a4e3c2f8aeaa483813029dda529f094f61e69d9b32759fde7c3f60f8f111",
         "matched": "4759fb925992f6e2069bbd2e8280b61086649acff76f2d84b26fea5072401e14",
         "partition": "3d4d6dcdebe7338195de1d0b9f200572e188623027d2f5697ecab2daaa0b876e",
         "rule_id": "ee3c478d32a1f3bbf3a055629a2e28b483605a354bf5e6e7ac1044f218cb3077",
-        "rule_version": "7921339d17f79e6c25b15b2877b9549b9b1d9e518af36a974fd64f6c4082e18b",
+        "rule_version": "0e3977af9d00d33c113579a4829cb4ebfd56b8343f695bd38413cf62ef474f79",
         "state": "584fd98280615d93f01b6b247c30cdd8237b68ae738df1e0eef0df598b586014",
         "target": "e44ab979d5d8b44a6d713c765b284dfc7fdd95a24b9569d6b68e443fd9449fcd",
     },

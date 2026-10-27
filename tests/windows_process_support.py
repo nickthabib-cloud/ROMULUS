@@ -31,12 +31,14 @@ def sysmon1(*, image, command, host="ws01.example.test", parent_image=None, pid=
 
 
 def security4688(*, image, command, host="ws01.example.test", pid=0x2bc, ppid=0x300, offset=0,
-                 computer=None, shape="elastic_agent"):
+                 computer=None, shape="elastic_agent", parent_name=None):
     data = {
         "SubjectUserSid": "S-1-5-21-1-2-3-1001", "SubjectDomainName": "EXAMPLE", "SubjectUserName": "analyst",
         "SubjectLogonId": "0x44", "NewProcessId": hex(pid), "ProcessId": hex(ppid),
         "NewProcessName": image, "CommandLine": command,
     }
+    if parent_name is not None:
+        data["ParentProcessName"] = parent_name
     event = LogicalWindowsEvent("Security", SECURITY, 4688, computer or host, next(_record_id),
                                 (_START + timedelta(seconds=offset)).isoformat().replace("+00:00", "Z"), data)
     return normalize_windows(windows_hit(event, shape))

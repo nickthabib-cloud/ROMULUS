@@ -222,6 +222,9 @@ class WindowsPidLineage:
         self._watched = RecentIds()
         self.refused_keys = RecentIds()
         self.incomplete = False
+        # Rules holding this history that have not yet released it. The sweep finalizes and releases rules one by
+        # one, so the history is cleared only when its last holder releases: every holder's finalize reads it whole.
+        self._holding = {id(member) for member in self.members}
 
     def _stores(self) -> tuple[KeyedStore, ...]:
         return (self.procs, self.boots, self.cites, self.watch, self.dirty)
@@ -233,6 +236,13 @@ class WindowsPidLineage:
     def clear(self) -> None:
         for store in self._stores():
             store.clear()
+
+    def release(self, holder) -> None:
+        """A holder lets go of the history (a second release by the same holder counts once); it is cleared when no
+        holder is left."""
+        self._holding.discard(id(holder))
+        if not self._holding:
+            self.clear()
 
     def _refused(self, what: str) -> None:
         self.incomplete = True
@@ -416,8 +426,8 @@ def parent_predicate(event: TypedEvent, parent: ParentImage
 
 
 def resolve_parent(event: TypedEvent, lineage: WindowsPidLineage | None) -> ParentImage:
-    """The parent image of a process-creation record: its own typed field when present (Sysmon 1 `ParentImage`, and
-    Security 4688 `ParentProcessName` once typed), used and cited from the child record; else the shared pid lineage."""
+    """The parent image of a process-creation record: its own typed field when present (Sysmon 1 `ParentImage`,
+    Security 4688 `ParentProcessName`), used and cited from the child record; else the shared pid lineage."""
     key = event.get("process.parent.executable_key")
     if key not in (None, ""):
         name, why = image_name(key)
@@ -482,12 +492,22 @@ class _Group:
     sample_hosts: list = field(default_factory=list)
     ends: Ends = field(default_factory=Ends)
     examples: HeldExamples = field(default_factory=lambda: HeldExamples(8))
+    # members a later record of their parent pid withdrew (taken out of the counts), the ids of those that were
+    # held examples (cited as context of the final tally, at most WITHDRAWN_CITED), and of those that bound the
+    # stated interval (at most two; never counted as a remaining member)
+    excluded: int = 0
+    withdrawn: list = field(default_factory=list)
+    withdrawn_bounds: list = field(default_factory=list)
 
     def __getstate__(self):
         return self.__dict__
 
     def __setstate__(self, state):
+        self.__dict__.update({"excluded": 0, "withdrawn": [], "withdrawn_bounds": []})
         self.__dict__.update(state)
+
+
+WITHDRAWN_CITED = 4
 
 
 def _late_phrase(item: TypedEvent) -> str:
@@ -582,7 +602,7 @@ class WindowsProcessRule(Playbook):
             store.clear()
         self.bounds.clear()
         if self.lineage is not None:
-            self.lineage.clear()
+            self.lineage.release(self)
 
     # ---- evaluation ----
     def judge(self, event: TypedEvent) -> list[Hit]:
@@ -649,10 +669,9 @@ class WindowsProcessRule(Playbook):
         self.evaluated += 1
         if pid_path:
             self._stage_child(event)
-            if hits:
-                self.early.put(event.id, _signature(hits))
-        for hit in hits:
-            self._fold(event, hit, out)
+        folds = [self._fold(event, hit, out) for hit in hits]
+        if pid_path and hits:
+            self.early.put(event.id, (_signature(hits), tuple(folds)))
 
     def _stage_child(self, event: TypedEvent) -> None:
         """Hand a pid-path child to the sweep's event stage (one copy per id, whichever rule hands it over) so it can
@@ -670,7 +689,9 @@ class WindowsProcessRule(Playbook):
         material = f"{self.id}|{hit.behavior}|{image}|{parent}|{command}|{hit.content}"
         return hashlib.sha256(material.encode()).hexdigest()[:32]
 
-    def _fold(self, event: TypedEvent, hit: Hit, out: list[Match]) -> None:
+    def _fold(self, event: TypedEvent, hit: Hit, out: list[Match]) -> tuple[str | None, str]:
+        """Publish or merge one hit. Returns (shape, "own") when the record got its own finding (shape None when it
+        was published alone, outside any group) or (shape, "repeat") when it merged into the shape's fleet finding."""
         shape = self._shape(event, hit)
         member_key = (shape, event.host)
         member = self.members_store.get(member_key)
@@ -679,11 +700,11 @@ class WindowsProcessRule(Playbook):
                 self.note_limit("fleet_members", "the per-(shape, host) membership store took no new host; this "
                                                  "record is published on its own")
                 add_unheld(out, alone(self.record_match(event, hit), self, event))
-                return
+                return None, "own"
             # first record of this (shape, host): published at its own lane, with its own content
             out.append(self.record_match(event, hit))
             self._note_group(shape, hit, event, new_host=True)
-            return
+            return shape, "own"
         # a repeat on a host already reported for this shape: merge
         member[0] += 1
         self.members_store.put(member_key, member)
@@ -694,6 +715,37 @@ class WindowsProcessRule(Playbook):
                 group.emitted_records = group.records
                 self.groups.put(shape, group)
                 out.append(merged)
+        return shape, "repeat"
+
+    def _exclude(self, event: TypedEvent, folds: tuple) -> None:
+        """Take a member whose parent a later record withdrew out of every group it was counted in: the counts, the
+        hosts and the held examples (a held example stays cited as context of the final tally)."""
+        for shape, _role in folds:
+            if shape is None:
+                continue
+            member_key = (shape, event.host)
+            member = self.members_store.get(member_key)
+            if member is not None:
+                member[0] -= 1
+                self.members_store.put(member_key, member)
+            group = self.groups.get(shape)
+            if group is None:
+                continue
+            group.records -= 1
+            group.excluded += 1
+            if member is not None and member[0] <= 0:
+                group.hosts -= 1
+                if event.host in group.sample_hosts:
+                    group.sample_hosts.remove(event.host)
+            else:
+                group.repeats -= 1
+            held = len(group.examples.items)
+            group.examples.items = [item for item in group.examples.items if item[0][1] != event.id]
+            if len(group.examples.items) < held and len(group.withdrawn) < WITHDRAWN_CITED:
+                group.withdrawn.append(event.id)
+            if event.id in group.ends.ids() and event.id not in group.withdrawn_bounds:
+                group.withdrawn_bounds.append(event.id)
+            self.groups.put(shape, group)
 
     def _note_group(self, shape: str, hit: Hit, event: TypedEvent, *, new_host: bool) -> _Group | None:
         group = self.groups.get(shape)
@@ -738,7 +790,7 @@ class WindowsProcessRule(Playbook):
         first repeat with the count so far, and revised in place to the exact tally when the sweep ends."""
         try:
             examples = group.examples.events(self.load)
-            cited, missing, context = cite_group(self.load, examples, self.bounds, group.ends)
+            cited, missing, context = cite_group(self.load, examples, self.bounds, group.ends, named=group.withdrawn)
         except LookupError as exc:
             self.note_limit("fleet_citations", f"a repeating shape's held records were not loadable ({exc}); its "
                                                f"fleet finding is not published")
@@ -749,14 +801,32 @@ class WindowsProcessRule(Playbook):
         last = datetime.fromtimestamp(group.ends.last[0], UTC).isoformat() if group.ends.last else "?"
         more = group.hosts - len(group.sample_hosts)
         host_text = ", ".join(group.sample_hosts) + (f" and {more} more host(s)" if more > 0 else "")
-        if final:
+        lane = group.lane
+        withdrawn = set(group.withdrawn) | set(group.withdrawn_bounds)
+        members = [item for item in cited if item.id not in withdrawn]
+        excluded = (f" {group.excluded} record(s) were excluded after later records withdrew their parent (a "
+                    f"record of the parent process id inside the child's window); the interval was computed before "
+                    f"that and may be wider than the remaining records'." if group.excluded else "")
+        if final and group.excluded and (group.repeats <= 0 or not any(item.id not in context for item in members)):
+            # no recurrence the records still support: the merged finding is lowered to a lead and says why; every
+            # remaining record keeps its own finding at its own lane
+            lane = "lead"
+            held = ("" if any(item.id not in context for item in members)
+                    else " None of the remaining records is held for citation here.")
+            claim = (f"{group.common} no longer recurs as the same shape: of the records counted while the sweep "
+                     f"read, {group.excluded} were excluded after later records withdrew their parent, leaving "
+                     f"{max(group.records, 0)} record(s) across {max(group.hosts, 0)} host(s), each with its own "
+                     f"finding.{held} The withdrawn records held for citation are cited as context.")
+            reason = (f"{group.excluded} record(s) were excluded after later records withdrew their parent, so no "
+                      f"recurrence remains")
+        elif final:
             claim = (f"{group.common} recurred as the same shape in {group.records} process-creation record(s) "
                      f"across {group.hosts} host(s) ({group.repeats} of them repeats on a host already reported), "
                      f"{first} – {last}. Hosts: {host_text}. This finding states only what the records share; each "
                      f"host's first record keeps its own finding and remains retrievable. Sysmon and Security can "
                      f"each record the same process, so records are not processes."
-                     + cited_phrase(len(cited), group.records, not missing)
-                     + bound_note(missing, group.ends))
+                     + cited_phrase(len(members), group.records, not missing)
+                     + bound_note(missing, group.ends) + excluded)
             reason = ("the final tally at the end of the sweep replaces the running count stated when the first "
                       "repeat was read")
         else:
@@ -766,11 +836,11 @@ class WindowsProcessRule(Playbook):
                      f"ends. Each host's first record keeps its own finding."
                      + cited_phrase(len(cited), group.records, not missing))
             reason = ""
-        anchor = next((item for item in cited if item.id not in context), cited[0])
+        anchor = next((item for item in members if item.id not in context), members[0] if members else cited[0])
         predicate = [PredicateField(field=name, value=value, origin=origin)
                      for name, value, origin in group.predicate]
         return Match(self.id, claim, "aggregate_observation", cited, predicate, anchor.ts, group.severity,
-                     group.lane, "high", anchor.entities(),
+                     lane, "high", anchor.entities(),
                      [f"ATT&CK context (not proof): {', '.join(group.attack)}",
                       ("a repeating shape is merged into one finding at the lane of its records; new hosts keep "
                        "their own findings")],
@@ -862,12 +932,26 @@ class WindowsProcessRule(Playbook):
                 if early is None:
                     for hit in hits:                        # a match that a late record revealed
                         self._fold(event, hit, out)
-                elif _signature(hits) != early:
-                    out.append(self._correction(event, early, hits, undecided))
-        # 3. every merged finding is revised in place to its exact final tally (idempotent: a re-run writes nothing)
+                    continue
+                signature, folds = early
+                if _signature(hits) == signature:
+                    continue
+                # the earlier decision no longer holds: the record leaves every group it was counted in; its own
+                # finding (when it had one) is revised in place, and a record that was only a merged repeat has
+                # its new decision published as any record's would be
+                self._exclude(event, folds)
+                if any(role == "own" for _shape, role in folds):
+                    out.append(self._correction(event, signature, hits, undecided))
+                else:
+                    if undecided is not None:
+                        self._count_undecided(event, undecided)
+                    for hit in hits:
+                        self._fold(event, hit, out)
+        # 3. every merged finding is revised in place to its exact final tally (idempotent: a re-run writes nothing);
+        #    one already published is revised even when exclusions left it no repeat
         for shape in self.order.keys():  # noqa: SIM118 (a KeyedStore: first-insertion order, keys on disk too)
             group = self.groups.peek(shape)
-            if group is None or group.repeats == 0:
+            if group is None or (group.repeats <= 0 and not group.emitted_records):
                 continue
             merged = self._fleet_match(shape, group, final=True)
             if merged is not None:

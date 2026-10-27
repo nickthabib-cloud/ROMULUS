@@ -74,7 +74,7 @@ def _is_native_messaging(event: TypedEvent, child_name: str) -> bool:
 
 class LureAppSpawnsCodeRunner(WindowsProcessRule):
     id = "win.lure_app_spawns_code_runner"
-    version = "5"
+    version = "6"
     title = "A document, mail, reader or browser application created a shell, script host or LOLBin"
     uses_parent = True
     reads_command_line = False            # the match is images only; the command line is read only to exclude NM
@@ -119,7 +119,7 @@ class LureAppSpawnsCodeRunner(WindowsProcessRule):
         "lanes": "high for an Office/reader/archiver parent (process creation from a lure application is rarely "
                  "benign and is an execution step); lead for a browser parent (browsers spawn helpers legitimately), "
                  "with the reason; never context. Severity high if adverse (code execution from a lure).",
-        "limits": "when a Security 4688 child names no parent image, its parent is resolved by process id and the finding is published as soon as that is decided. If the only termination of the parent pid that falls between parent and child is recorded in another stream that the sweep reads later (a Sysmon 5 record on a different target), the outcome depends on target order: read first, the finding is published and then revised in place to a lead when the termination arrives; read second, the child is undecided and no finding is published. Findings are never deleted, so the two orders end differently in this case only.",
+        "limits": "when a Security 4688 child names no parent image, its parent is resolved by process id and the finding is published as soon as that is decided. If the only termination of the parent pid that falls between parent and child is recorded in another stream that the sweep reads later (a Sysmon 5 record on a different target), the outcome depends on target order: read first, the finding is published and then revised in place to a lead when the termination arrives; read second, the child is undecided and no finding is published. Findings are never deleted, so the two orders end differently in this case only. A merged fleet finding takes out a record whose parent a later record withdrew, says how many it took out, and is lowered to a lead when no recurrence remains (each remaining record keeps its own finding).",
         "retrieval": "the sweep retrieves every Windows process-creation record of the window; this evaluator reads "
                      "a provable subset (process-creation records whose image is a code runner).",
     }

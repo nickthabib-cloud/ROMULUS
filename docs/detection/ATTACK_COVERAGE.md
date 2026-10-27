@@ -1184,7 +1184,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-dcom-activated-child"></a>
 ### `win.dcom_activated_child` — a shell or script host was started by a DCOM-activated application
 
-- Version: `5`; status: `active`
+- Version: `6`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1021.003`](https://attack.mitre.org/techniques/T1021/003/), [`T1059`](https://attack.mitre.org/techniques/T1059/), [`T1559.001`](https://attack.mitre.org/techniques/T1559/001/)
@@ -1268,7 +1268,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-lure-app-spawns-code-runner"></a>
 ### `win.lure_app_spawns_code_runner` — A document, mail, reader or browser application created a shell, script host or LOLBin
 
-- Version: `5`; status: `active`
+- Version: `6`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1059`](https://attack.mitre.org/techniques/T1059/), [`T1203`](https://attack.mitre.org/techniques/T1203/), [`T1204.002`](https://attack.mitre.org/techniques/T1204/002/), [`T1566.001`](https://attack.mitre.org/techniques/T1566/001/)
@@ -1376,7 +1376,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-remote-execution-child"></a>
 ### `win.remote_execution_child` — a shell, script host or LOLBin was started by a remote-execution service
 
-- Version: `5`; status: `active`
+- Version: `6`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1021.006`](https://attack.mitre.org/techniques/T1021/006/), [`T1047`](https://attack.mitre.org/techniques/T1047/), [`T1059`](https://attack.mitre.org/techniques/T1059/), [`T1569.002`](https://attack.mitre.org/techniques/T1569/002/)
@@ -1424,7 +1424,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-service-child-output-to-admin-share"></a>
 ### `win.service_child_output_to_admin_share` — a service-hosted command sent its output to an admin share (Impacket smbexec/atexec)
 
-- Version: `5`; status: `active`
+- Version: `6`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1021.002`](https://attack.mitre.org/techniques/T1021/002/), [`T1059.003`](https://attack.mitre.org/techniques/T1059/003/), [`T1569.002`](https://attack.mitre.org/techniques/T1569/002/)

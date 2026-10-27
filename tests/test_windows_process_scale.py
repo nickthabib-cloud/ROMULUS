@@ -103,3 +103,39 @@ def test_mission_volume_streams_in_batches_without_unbounded_growth():
     assert seen >= 60_000
     assert rule.finalize() == []
     assert len(rule.groups) == 0 and len(rule.members_store) == 0
+
+
+def test_withdrawn_members_at_volume_leave_an_exact_tally_and_bounded_citations():
+    # 200 hosts, each with one Word process and 20 identical PowerShell children; a termination of Word read later
+    # falls between the 10th and 11th child on every host, withdrawing the parent of 10 children per host.
+    from romulus.detect.windows_common import WITHDRAWN_CITED
+    from romulus.detect.windows_lineage import LureAppSpawnsCodeRunner
+    from tests.windows_process_support import security4688, security4689
+
+    word = r"C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE"
+    ps = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+    first, late = [], []
+    for index in range(200):
+        host = f"ws{index:04d}.example.test"
+        first.append(security4688(image=word, command="winword.exe", host=host, pid=0x700, ppid=0x10, offset=0))
+        first += [security4688(image=ps, command="powershell.exe -nop", host=host, pid=0x1000 + 4 * child,
+                               ppid=0x700, offset=10 + child) for child in range(20)]
+        late.append(security4689(image=word, host=host, pid=0x700, offset=19.5))
+    rule = LureAppSpawnsCodeRunner()
+    by_id = {e.id: e for e in first + late}
+    rule.load = lambda ids: [by_id[i] for i in ids if i in by_id]
+    immediate = list(rule.consume(first))
+    rule.drain_staged()
+    rule.drain_bounds()
+    immediate += rule.consume(late)
+    rule.drain_staged()
+    final = rule.finalize()
+    assert len([m for m in immediate if not m.group_key]) == 200          # every host's first record, at once
+    [tally] = [m for m in final if "|fleet|" in m.group_key]
+    assert tally.proposed_lane == "high"
+    assert "in 2000 process-creation record(s) across 200 host(s) (1800 of them repeats" in tally.claim
+    assert "2000 record(s) were excluded after later records withdrew their parent" in tally.claim
+    [group] = [rule.groups.peek(key) for key in rule.order.keys()]  # noqa: SIM118 (a KeyedStore)
+    assert len(group.withdrawn) <= WITHDRAWN_CITED and len(group.withdrawn_bounds) <= 2
+    assert len(tally.events) <= 8 + WITHDRAWN_CITED + 2
+    assert rule.undecided == {"parent_ended": 2000}

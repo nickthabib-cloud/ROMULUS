@@ -14,6 +14,7 @@ from romulus.detect.windows_cmdline import is_remote_path, parse_cmd_payload, sp
 from romulus.detect.windows_common import (
     SPAWNED_CODE_RUNNERS,
     Hit,
+    ParentImage,
     Undecided,
     WindowsProcessRule,
     clip,
@@ -37,7 +38,7 @@ _REMOTE_PARENTS = {
 
 class RemoteExecutionParent(WindowsProcessRule):
     id = "win.remote_execution_child"
-    version = "5"
+    version = "6"
     title = "a shell, script host or LOLBin was started by a remote-execution service"
     uses_parent = True
     parent_images = frozenset(_REMOTE_PARENTS)
@@ -73,7 +74,7 @@ class RemoteExecutionParent(WindowsProcessRule):
                           "artifacts (behaviour, reimplemented)",
         "lanes": "high: remote execution is a lateral-movement step; merged fleet repeats keep the lane. Severity "
                  "high because, if adverse, this is remote code execution on the host.",
-        "limits": "when a Security 4688 child names no parent image, its parent is resolved by process id and the finding is published as soon as that is decided. If the only termination of the parent pid that falls between parent and child is recorded in another stream that the sweep reads later (a Sysmon 5 record on a different target), the outcome depends on target order: read first, the finding is published and then revised in place to a lead when the termination arrives; read second, the child is undecided and no finding is published. Findings are never deleted, so the two orders end differently in this case only.",
+        "limits": "when a Security 4688 child names no parent image, its parent is resolved by process id and the finding is published as soon as that is decided. If the only termination of the parent pid that falls between parent and child is recorded in another stream that the sweep reads later (a Sysmon 5 record on a different target), the outcome depends on target order: read first, the finding is published and then revised in place to a lead when the termination arrives; read second, the child is undecided and no finding is published. Findings are never deleted, so the two orders end differently in this case only. A merged fleet finding takes out a record whose parent a later record withdrew, says how many it took out, and is lowered to a lead when no recurrence remains (each remaining record keeps its own finding).",
         "retrieval": "the sweep retrieves every Windows process-creation record; this reads those whose image is a "
                      "code runner (a provable subset).",
     }
@@ -107,7 +108,7 @@ class RemoteExecutionParent(WindowsProcessRule):
 
 class DcomActivatedChild(WindowsProcessRule):
     id = "win.dcom_activated_child"
-    version = "5"
+    version = "6"
     title = "a shell or script host was started by a DCOM-activated application"
     uses_parent = True
     reads_command_line = False
@@ -138,7 +139,7 @@ class DcomActivatedChild(WindowsProcessRule):
         "research_basis": "ATT&CK Enterprise 20.0 T1021.003, T1559.001, T1059; DCOM lateral-movement research "
                           "(behaviour, reimplemented)",
         "lanes": "lead: DCOM-activated shells are suspicious but legitimate COM automation exists; merged per shape.",
-        "limits": "when a Security 4688 child names no parent image, its parent is resolved by process id and the finding is published as soon as that is decided. If the only termination of the parent pid that falls between parent and child is recorded in another stream that the sweep reads later (a Sysmon 5 record on a different target), the outcome depends on target order: read first, the finding is published and then revised in place to a lead when the termination arrives; read second, the child is undecided and no finding is published. Findings are never deleted, so the two orders end differently in this case only.",
+        "limits": "when a Security 4688 child names no parent image, its parent is resolved by process id and the finding is published as soon as that is decided. If the only termination of the parent pid that falls between parent and child is recorded in another stream that the sweep reads later (a Sysmon 5 record on a different target), the outcome depends on target order: read first, the finding is published and then revised in place to a lead when the termination arrives; read second, the child is undecided and no finding is published. Findings are never deleted, so the two orders end differently in this case only. A merged fleet finding takes out a record whose parent a later record withdrew, says how many it took out, and is lowered to a lead when no recurrence remains (each remaining record keeps its own finding).",
         "retrieval": "the sweep retrieves every Windows process-creation record; this reads those whose image is a "
                      "shell or script host (a provable subset).",
     }
@@ -188,7 +189,7 @@ class DcomActivatedChild(WindowsProcessRule):
 
 class ServiceChildToAdminShare(WindowsProcessRule):
     id = "win.service_child_output_to_admin_share"
-    version = "5"
+    version = "6"
     title = "a service-hosted command sent its output to an admin share (Impacket smbexec/atexec)"
     reads_command_line = True
     uses_parent = True
@@ -210,11 +211,12 @@ class ServiceChildToAdminShare(WindowsProcessRule):
         "research_basis": "ATT&CK Enterprise 20.0 T1021.002, T1569.002, T1059.003; Impacket smbexec/atexec artifacts "
                           "(behaviour, reimplemented)",
         "lanes": "high",
-        "limits": "when a Security 4688 child names no parent image, its parent is resolved by process id and the finding is published as soon as that is decided. If the only termination of the parent pid that falls between parent and child is recorded in another stream that the sweep reads later (a Sysmon 5 record on a different target), the outcome depends on target order: read first, the finding is published and then revised in place to a lead when the termination arrives; read second, the child is undecided and no finding is published. Findings are never deleted, so the two orders end differently in this case only.",
+        "limits": "when a Security 4688 child names no parent image, its parent is resolved by process id and the finding is published as soon as that is decided. If the only termination of the parent pid that falls between parent and child is recorded in another stream that the sweep reads later (a Sysmon 5 record on a different target), the outcome depends on target order: read first, the finding is published and then revised in place to a lead when the termination arrives; read second, the child is undecided and no finding is published. Findings are never deleted, so the two orders end differently in this case only. A merged fleet finding takes out a record whose parent a later record withdrew, says how many it took out, and is lowered to a lead when no recurrence remains (each remaining record keeps its own finding).",
         "retrieval": "the sweep retrieves every process-creation record; this reads cmd.exe records with a "
                      "service-process parent",
     }
     _SERVICE_PARENTS = frozenset({"services.exe", "psexesvc.exe", "paexec.exe", "csexecsvc.exe"})
+    parent_images = _SERVICE_PARENTS
     _ADMIN_SHARES = ("admin$", "c$", "ipc$")
 
     @classmethod
@@ -254,7 +256,7 @@ class ServiceChildToAdminShare(WindowsProcessRule):
                 share = self._admin_share(target)
                 if share is not None:
                     return [self._hit(event, command, f"{who} redirected output to the admin share {share}",
-                                      f"direct:{share.casefold()}")]
+                                      f"direct:{share.casefold()}", parent)]
             # smbexec: `echo <cmd> ^> \\host\C$\__output 2^>^&1 > %TEMP%\execute.bat & ... execute.bat & del ...`
             if cmd.argv and cmd.argv[0].casefold() == "echo" and stages_bat:
                 for token in cmd.argv[1:]:
@@ -263,13 +265,21 @@ class ServiceChildToAdminShare(WindowsProcessRule):
                         return [self._hit(
                             event, command,
                             f"{who} staged a batch file that writes command output to the admin share {share} "
-                            f"(the Impacket smbexec shape)", f"smbexec:{share.casefold()}")]
+                            f"(the Impacket smbexec shape)", f"smbexec:{share.casefold()}", parent)]
         return []
 
-    def _hit(self, event: TypedEvent, command: str, text: str, content: str) -> Hit:
-        return Hit("service_output_to_share", text, self.lane, self.severity, self.attack,
-                   [parsed_field(event, clip(command))], content=content,
-                   common="a service-hosted cmd sending output to an admin share")
+    def _hit(self, event: TypedEvent, command: str, text: str, content: str, parent: ParentImage | None) -> Hit:
+        """The finding; a resolved parent is part of its predicate and cited (its creation record when resolved by
+        process id), so a later record that withdraws that parent revises the finding."""
+        predicate = [parsed_field(event, clip(command))]
+        context: list[TypedEvent] = []
+        raw: dict = {}
+        if parent is not None:
+            parent_fields, context, _how, raw = parent_predicate(event, parent)
+            predicate += parent_fields[1:]                 # the image field is not this rule's evidence
+        return Hit("service_output_to_share", text, self.lane, self.severity, self.attack, predicate,
+                   content=content, common="a service-hosted cmd sending output to an admin share",
+                   context=context, raw_copies=raw, parent_name=parent.name if parent is not None else "")
 
 
 WINDOWS_REMOTE_PLAYBOOKS = [RemoteExecutionParent, DcomActivatedChild, ServiceChildToAdminShare]

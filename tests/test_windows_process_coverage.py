@@ -77,3 +77,22 @@ def test_incomplete_shipper_reason_is_carried_through(tmp_path):
         contract.target, contract, rule, records, ["shipper gaps unresolved: winlog.record_id mapping is not numeric"],
     )
     assert "shipper gaps unresolved: winlog.record_id mapping is not numeric" in reasons
+
+
+def test_parent_rules_retrieve_their_fences_as_context_and_are_not_gated_on_them(tmp_path):
+    # The sweep's selective Windows retrieval reads the classes of every family a rule declares (its own and its
+    # context): a parent-resolving rule thereby gets process terminations and boots, which its pid lineage needs.
+    from romulus.detect.windows_proxy import MshtaExecution
+    from romulus.evidence.windows_catalog import event_classes_for_families
+
+    rule = LureAppSpawnsCodeRunner()
+    families = set(rule.families) | set(rule.context_families)
+    read = {(c.channel, c.event_id) for c in event_classes_for_families(families)}
+    assert {("Security", 4689), (SYSMON_CHANNEL, 5), ("System", 12)} <= read
+    assert {"process_termination", "system_state"} <= set(rule.context_families)
+    plain = MshtaExecution()
+    assert not {"process_termination", "system_state"} & (set(plain.families) | set(plain.context_families))
+    # the fences are context: a source that does not collect them never makes the rule partial on that account
+    sweep, contract, records = _sweep(tmp_path, rule, load_site_facts(tmp_path))
+    reasons = sweep._windows_rule_reasons(contract.target, contract, rule, records, [])
+    assert reasons and not any("4689" in reason or f"{SYSMON}|5" in reason for reason in reasons)
