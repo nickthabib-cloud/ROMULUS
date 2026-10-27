@@ -37,9 +37,10 @@ _REMOTE_PARENTS = {
 
 class RemoteExecutionParent(WindowsProcessRule):
     id = "win.remote_execution_child"
-    version = "3"
+    version = "4"
     title = "a shell, script host or LOLBin was started by a remote-execution service"
     uses_parent = True
+    parent_images = frozenset(_REMOTE_PARENTS)
     reads_command_line = False
     severity, lane = "high", "high"
     attack = ("T1047", "T1021.006", "T1569.002", "T1059")
@@ -87,7 +88,7 @@ class RemoteExecutionParent(WindowsProcessRule):
         if mechanism is None:
             return []
         label, attack_id = mechanism
-        predicate, context, how = parent_predicate(event, parent)
+        predicate, context, how, raw = parent_predicate(event, parent)
         return [Hit(
             behavior="remote_execution_child",
             text=f"the code runner '{child_name}' was started by {label} (parent resolved from {how})",
@@ -98,12 +99,14 @@ class RemoteExecutionParent(WindowsProcessRule):
             content=f"{parent.name}>{child_name}",
             common=f"{label} starting '{child_name}'",
             context=context,
+            raw_copies=raw,
+            parent_name=parent.name,
         )]
 
 
 class DcomActivatedChild(WindowsProcessRule):
     id = "win.dcom_activated_child"
-    version = "3"
+    version = "4"
     title = "a shell or script host was started by a DCOM-activated application"
     uses_parent = True
     reads_command_line = False
@@ -140,6 +143,7 @@ class DcomActivatedChild(WindowsProcessRule):
     _DCOM_PARENTS = frozenset({
         "mmc.exe", "winword.exe", "excel.exe", "powerpnt.exe", "outlook.exe", "mspub.exe", "visio.exe",
     })
+    parent_images = _DCOM_PARENTS
 
     def judge(self, event: TypedEvent) -> list[Hit]:
         child_name, why = image_name(event.get("process.executable_key"))
@@ -150,7 +154,7 @@ class DcomActivatedChild(WindowsProcessRule):
         parent = resolve_parent(event, self.lineage)
         if parent.name not in self._DCOM_PARENTS:
             return []
-        predicate, context, _how = parent_predicate(event, parent)
+        predicate, context, _how, raw = parent_predicate(event, parent)
         embedding = ""
         if parent.resolved_by == "record":
             parent_command = event.get("process.parent.command_line")
@@ -175,12 +179,14 @@ class DcomActivatedChild(WindowsProcessRule):
             common=f"'{parent.name}' starting '{child_name}' (DCOM)",
             notes=notes,
             context=context,
+            raw_copies=raw,
+            parent_name=parent.name,
         )]
 
 
 class ServiceChildToAdminShare(WindowsProcessRule):
     id = "win.service_child_output_to_admin_share"
-    version = "3"
+    version = "4"
     title = "a service-hosted command sent its output to an admin share (Impacket smbexec/atexec)"
     reads_command_line = True
     uses_parent = True

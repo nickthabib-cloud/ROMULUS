@@ -70,19 +70,21 @@ def run(rule, events):
         rule.drain_staged()
         rule.drain_bounds()
     matches.extend(rule.finalize())
-    # A fleet finding is emitted when it first forms (during consume) and again at finalize with final counts; both
-    # carry the same group_key, and the candidate store keeps one per key. Mirror that: keep the last per non-empty
-    # group_key, and every per-record finding (empty group_key) as-is.
-    deduped: list = []
-    latest: dict = {}
+    return stored(matches)
+
+
+def stored(matches: list) -> list:
+    """What the candidate store keeps: it stores a candidate once per id and ignores a later publish of the same id
+    (for a sweep finding the id is the rule plus its group key, or plus the raw records it is about). Mirror that by
+    keeping the first match per identity."""
+    kept: list = []
+    seen: set = set()
     for match in matches:
-        if not match.group_key:
-            deduped.append(match)
+        subject = sorted((ref.target, ref.native_id) for event in match.events if event.id not in match.context_ids
+                         for ref in event.raw)
+        identity = (match.playbook_id, match.group_key or repr(subject))
+        if identity in seen:
             continue
-        key = (match.playbook_id, match.group_key)
-        if key in latest:
-            deduped[latest[key]] = match
-        else:
-            latest[key] = len(deduped)
-            deduped.append(match)
-    return deduped
+        seen.add(identity)
+        kept.append(match)
+    return kept

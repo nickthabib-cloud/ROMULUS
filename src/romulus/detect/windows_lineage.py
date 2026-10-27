@@ -74,10 +74,11 @@ def _is_native_messaging(event: TypedEvent, child_name: str) -> bool:
 
 class LureAppSpawnsCodeRunner(WindowsProcessRule):
     id = "win.lure_app_spawns_code_runner"
-    version = "3"
+    version = "4"
     title = "A document, mail, reader or browser application created a shell, script host or LOLBin"
     uses_parent = True
     reads_command_line = False            # the match is images only; the command line is read only to exclude NM
+    parent_images = _OFFICE | _READERS_AND_MAIL | _ARCHIVERS | _BROWSERS
     severity, lane = "high", "high"
     attack = ("T1204.002", "T1566.001", "T1059", "T1203")
     benign = (
@@ -135,7 +136,7 @@ class LureAppSpawnsCodeRunner(WindowsProcessRule):
         if document is None and not browser:
             return []
 
-        predicate, context, how = parent_predicate(event, parent)
+        predicate, context, how, raw = parent_predicate(event, parent)
 
         if browser:
             if _is_native_messaging(event, child_name):
@@ -149,7 +150,8 @@ class LureAppSpawnsCodeRunner(WindowsProcessRule):
                 behavior="browser_spawns_code_runner",
                 text=f"{what} (parent resolved from {how})",
                 lane=lane, severity="medium", attack=self.attack, predicate=predicate,
-                common=f"a browser spawning '{child_name}'", context=context,
+                common=f"a browser spawning '{child_name}'", context=context, raw_copies=raw,
+                parent_name=parent.name,
                 notes=(("lead: browsers legitimately spawn helpers and installers; the discriminating pivot is what "
                         "the child did"),),
             )]
@@ -158,7 +160,8 @@ class LureAppSpawnsCodeRunner(WindowsProcessRule):
             behavior="lure_app_spawns_code_runner",
             text=f"{document} ('{parent.name}') created the code runner '{child_name}' (parent resolved from {how})",
             lane=self.lane, severity=self.severity, attack=self.attack, predicate=predicate,
-            common=f"{document} spawning '{child_name}'", context=context,
+            common=f"{document} spawning '{child_name}'", context=context, raw_copies=raw,
+            parent_name=parent.name,
         )]
 
 

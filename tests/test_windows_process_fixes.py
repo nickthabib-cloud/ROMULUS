@@ -293,13 +293,14 @@ def test_n1_reused_pid_parent_is_not_lost_when_lineage_is_shared_across_rules():
     by = {e.id: e for e in evs}
     for rule in (lure, remote):
         rule.load = lambda ids, _by=by: [_by[i] for i in ids if i in _by]
-    # the first rule consumes the whole batch (leaving the shared state at end-of-batch), then the second judges
-    # its deferred children at finalize against the complete shared interval history
+    # the first rule consumes the whole batch (leaving the shared state at end-of-batch, svchost now holding the pid),
+    # then the second judges: the interval history still names wmiprvse as live at the child's time, so the high is
+    # published immediately, and finalize adds nothing (no later record changed the answer)
     lure.consume(evs)
-    remote.consume(evs)
+    out = remote.consume(evs)
     remote.drain_staged()
     remote.drain_bounds()
-    out = remote.finalize()
+    out += remote.finalize()
     assert len(out) == 1 and out[0].proposed_lane == "high"       # wmiprvse was live at the child, not svchost
     assert remote.undecided == {}
 
