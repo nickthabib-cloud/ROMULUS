@@ -218,15 +218,22 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
             raise HTTPException(404)
 
         async def gen():
-            seen: set[str] = set()
+            # A finding revised in place keeps its id; its revision digest tells a client what it saw is stale.
+            sent: dict[str, str] = {}
+
+            def revision(c: dict) -> str:
+                return str(((c.get("gate_results") or {}).get("_revision") or {}).get("digest") or "")
+
             while not await request.is_disconnected():
                 h = repo.get_hunt(hunt_id)
-                fresh = [c for c in repo.candidates(hunt_id, ["urgent", "high", "lead"]) if c["id"] not in seen]
+                fresh = [c for c in repo.candidates(hunt_id, ["urgent", "high", "lead"])
+                         if sent.get(c["id"]) != revision(c)]
                 for c in sorted(fresh, key=lambda c: str(c["ts"])):
-                    seen.add(c["id"])
+                    revised = c["id"] in sent
+                    sent[c["id"]] = revision(c)
                     yield "event: finding\ndata: " + json.dumps({"id": c["id"], "lane": c["lane"],
                                                                  "rule": c["rule_id"], "claim": c["claim"][:300],
-                                                                 "ts": str(c["ts"])}) + "\n\n"
+                                                                 "ts": str(c["ts"]), "revised": revised}) + "\n\n"
                 yield "event: state\ndata: " + json.dumps({"state": h["execution_state"],
                                                            "lanes": repo.lane_counts(hunt_id)}) + "\n\n"
                 if h["execution_state"] not in ("planned", "running"):

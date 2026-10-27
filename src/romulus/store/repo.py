@@ -1680,6 +1680,90 @@ class Repo:
                                                           status="new", note="machine decision"))
             return True
 
+    # The candidate fields a revision of a direct (sweep) finding replaces with the corrected decision.
+    _REVISION_FIELDS = (
+        "rule_version", "claim", "claim_type", "event_ids", "context_event_ids", "predicate_fields", "entities",
+        "severity", "confidence", "lane", "priority", "priority_reasons", "gate_results",
+    )
+    # How many revision summaries the candidate itself carries (the audit table holds every previous version whole).
+    REVISION_SUMMARIES = 8
+
+    def revise_candidate(self, row: dict, reason: str, *, owner_token: str | None = None) -> str:
+        """Revise a direct (sweep) finding in place under the same id, in one transaction. Returns "inserted" (no
+        candidate had the id), "revised", or "" (nothing written).
+
+        - Inserted as a new candidate when the id does not exist yet (nothing was published to revise).
+        - Idempotent: a candidate whose recorded revision digest equals this revision's writes nothing (a re-run
+          finalize or a resume).
+        - Nothing is lost: every record the earlier version cited stays cited (as context when the corrected claim is
+          not about it); the earlier version (claim, lane, severity, event ids, rule version) with the reason and time
+          is appended to the audit table, and the candidate keeps a bounded list of revision summaries; analyst
+          dispositions recorded against the id are untouched; expansion anchors keep pointing at the same id (their
+          copied lane and severity follow the revision).
+        - It never deletes a candidate and never moves one to the context lane. The caller states the reason; a lane
+          is lowered only by a revision whose evidence changed, which the reason must say."""
+        if not reason:
+            raise ValueError("a candidate revision needs its reason")
+        if row.get("lane") == "context":
+            raise ValueError("a revision never moves a direct finding to the context lane")
+        if row.get("source_case_id") is not None or row.get("source_anchor_id") is not None:
+            raise ValueError("only direct (sweep) findings are revised in place")
+        revised = {field: row[field] for field in self._REVISION_FIELDS if field != "gate_results"}
+        digest = hashlib.sha256(json.dumps(
+            {**revised, "gate_results": {k: v for k, v in (row["gate_results"] or {}).items()
+                                         if not str(k).startswith("_")}},
+            sort_keys=True, separators=(",", ":"), default=str,
+        ).encode()).hexdigest()
+        with write_txn(self.engine) as c:
+            self._fence_lease(c, row["hunt_id"], owner_token)
+            existing = c.execute(select(t.candidate).where(t.candidate.c.id == row["id"])).mappings().first()
+            if existing is None:
+                gates = {**(row["gate_results"] or {}), "_revision": {"digest": digest, "count": 0}}
+                c.execute(t.candidate.insert().values(**{**row, "gate_results": gates}, created_at=utcnow()))
+                c.execute(t.disposition_event.insert().values(candidate_id=row["id"], actor="romulus", at=utcnow(),
+                                                              status="new", note="machine decision"))
+                return "inserted"
+            previous_gates = dict(existing["gate_results"] or {})
+            history = dict(previous_gates.get("_revision") or {})
+            if history.get("digest") == digest:
+                return ""
+            if existing["lane"] == "context":
+                raise ValueError("a context finding is never revised through the direct path")
+            old_events = list(existing["event_ids"] or [])
+            old_context = set(existing["context_event_ids"] or [])
+            new_events = list(row["event_ids"] or [])
+            new_context = set(row.get("context_event_ids") or [])
+            subject = [event_id for event_id in new_events if event_id not in new_context]
+            event_ids = list(dict.fromkeys([*new_events, *old_events]))
+            context = sorted(set(event_ids) - set(subject))
+            at = utcnow()
+            summary = {"at": at.isoformat(), "reason": reason, "lane": existing["lane"],
+                       "severity": existing["severity"], "claim": str(existing["claim"])[:500],
+                       "rule_version": existing["rule_version"]}
+            summaries = [*list(history.get("summaries") or []), summary][-self.REVISION_SUMMARIES:]
+            gates = dict(row["gate_results"] or {})
+            gates["_notes"] = sorted({*(str(note) for note in gates.get("_notes", [])),
+                                      f"revised in place: {reason}"})
+            gates["_revision"] = {"digest": digest, "count": int(history.get("count") or 0) + 1,
+                                  "summaries": summaries}
+            values = {**revised, "event_ids": event_ids, "context_event_ids": context, "gate_results": gates}
+            c.execute(t.candidate.update().where(t.candidate.c.id == row["id"]).values(**values))
+            c.execute(t.expansion_anchor.update().where(t.expansion_anchor.c.candidate_id == row["id"]).values(
+                lane=values["lane"], severity=values["severity"], updated_at=at))
+            c.execute(t.audit_event.insert().values(
+                at=at, actor="system", action="candidate.revised", hunt_id=row["hunt_id"], detail={
+                    "candidate_id": row["id"], "reason": reason, "digest": digest,
+                    "previous": {
+                        "claim": existing["claim"], "lane": existing["lane"], "severity": existing["severity"],
+                        "event_ids": old_events, "context_event_ids": sorted(old_context),
+                        "rule_version": existing["rule_version"],
+                    },
+                    "revised": {"lane": values["lane"], "severity": values["severity"],
+                                "event_ids": event_ids},
+                },
+            ))
+            return "revised"
+
     def candidates(self, hunt_id: str, lanes: list[str] | None = None) -> list[dict]:
         q = select(t.candidate).where(t.candidate.c.hunt_id == hunt_id)
         if lanes:
