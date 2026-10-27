@@ -331,7 +331,8 @@ def render(m: dict, banner: str = BANNER) -> str:
     out += ["## Coverage", "",
             ("What each rule searched. ROMULUS reports what it finds and never claims that nothing is there. "
              "`searched in full` says every partition in scope was evaluated and none matched; it is a statement "
-             "about the search, not about the network. `searched in part` means at least one partition was partial, "
+             "about the search, not about the network, and data no rule could read is listed under Data not "
+             "assessed. `searched in part` means at least one partition was partial, "
              "failed, or had records missing required fields: those blind spots are listed under Coverage gaps. "
              "`not assessable by design` marks rules that identify behaviour from text (argv, script content, log "
              "messages, self-reported user agents): they flag what they find and cannot show absence. Each rule row "
@@ -358,7 +359,7 @@ def render(m: dict, banner: str = BANNER) -> str:
     out += ["", "### Coverage gaps", "",
             ("Every source partition or link where at least one rule was not fully searched, and why. These are the "
              "hunt's blind spots."), "",
-            "| Target | Partition | Rules left unresolved | Reasons |", "|---|---|---|---|"]
+            "| Target | Partition | Rules searched in part | Reasons |", "|---|---|---|---|"]
     for gap in gaps:
         rules = gap["rules"]
         named = (f"every rule evaluated there ({len(rules)})" if gap.get("every_rule_there")

@@ -52,7 +52,7 @@ UNRESOLVED_STATES = (
     "planned", "executed_failed", "evaluated_partial", "match_on_partial", "positive_only_partial",
     "partial", "failed", "omitted_budget",
 )
-_NO_ASSURANCE = ("no rule in this pack can prove absence for this behavior yet; a negative from kernel records "
+_NO_ASSURANCE = ("no rule in this pack can show absence for this behavior; a full search from kernel records "
                  "needs a typed inventory of what the host's audit rules record, which the telemetry does not carry")
 
 

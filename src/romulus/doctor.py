@@ -80,7 +80,7 @@ def check_site_networks(s: Settings, client: ElasticClient | None = None) -> Che
     notes = []
     if not definition.configured:
         notes.append(f"internal networks are not set (Site setup page or {INTERNAL_SETTING}): "
-                     f"{definition.summary()}; rules whose negative depends on traffic direction report partial "
+                     f"{definition.summary()}; rules that depend on traffic direction report that they searched only in part "
                      "coverage")
     client = client or ElasticClient(s)
     try:

@@ -628,7 +628,7 @@ def test_script_text_rules_never_claim_a_complete_negative(monkeypatch):
         assert rows[rid]["search_result"].startswith("not assessable by design"), rows[rid]
     # no false pointer to another positive-only rule
     assert "typed inventory of what the host's audit rules record" in rows["host.download_piped_to_shell"]["search_result"]
-    assert "can prove absence" in rows["host.ssh_authorized_keys_write"]["search_result"]
+    assert "can show absence" in rows["host.ssh_authorized_keys_write"]["search_result"]
     # no argv/text-identified host rule may claim a complete negative
     from romulus.detect.host import HOST_PLAYBOOKS
     for cls in HOST_PLAYBOOKS:

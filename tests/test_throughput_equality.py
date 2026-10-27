@@ -277,8 +277,8 @@ from tests import throughput_fixture as tf
 # parent it resolves), so the four parent-resolving rules carry new versions: again only their rule_version in
 # rule_cells changes on this fixture, and the candidates stay byte-identical.
 # The report's per-rule coverage field states what each rule searched instead of a negative claim (search_result:
-# 'searched in full: N record(s) evaluated, none matched', 'searched in part: ...', 'no data in scope for this rule'),
-# so only the manifest digest changes; findings, cells and every other digest are unchanged.
+# 'searched in full: N record(s) evaluated, none matched', 'searched in part: ...', 'no data in scope for this rule',
+# and the positive-only texts no longer present absence as a later goal), so only the manifest digest changes; findings, cells and every other digest are unchanged.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
     "audit": "23d9b87c75d030df8ff5bcbf07deacc75416c325dd74bcc89243cc1b5488ae93",
@@ -298,7 +298,7 @@ GOLDEN_STACK = {
     "events": "0165d2807ffee33aaef17dd70ba004ec4c87fa4c5f29e9dc75ba833f57b93ff7",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "0fbedb27ca9a4cb72354178444ee9aabc49f377b2c933074fe03ef29c8fbb08a",
-    "manifest": "e0e4c828611567f3c8ea31e639039dbc91cc28e73485bdd8c7e724e39de6b2bc",
+    "manifest": "6e4c0053d5276fb990ca5061be81e7f5e6add2db2498b6fe96411827d25d784a",
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
     "rule_cells": "d70340c4fa4480f5548aec33f1229cf9061b74e729325f4acde8472b4f3d735b",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
