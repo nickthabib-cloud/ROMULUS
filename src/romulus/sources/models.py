@@ -52,7 +52,7 @@ class SearchIntent(BaseModel):
     any_of: list[list[Predicate]] = []           # OR of AND-groups, ANDed with filters
     group_by: list[str] = []                     # aggregate
     interval_seconds: int | None = None          # histogram
-    max_records: int = Field(default=10_000, ge=1, le=2_000_000)
+    max_records: int = Field(default=10_000, ge=1, le=2_000_000)  # raw hits or aggregate buckets
     order: Literal["asc", "desc"] = "asc"       # raw retrieval order; never model supplied
     purpose: str = ""
 

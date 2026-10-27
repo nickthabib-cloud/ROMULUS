@@ -1231,6 +1231,19 @@ class Repo:
             ids = sorted({event.id for event in events})
             existing = self._stored_events(c, ids)
             own_ids = {event_id for event_id, row in existing.items() if row["hunt_id"] == hunt_id}
+            # Admit one copy of each new Windows identity before deriving dependent rows, so duplicate source
+            # copies cannot contribute uncited raw records or entities. Other evidence keeps every observation.
+            # Existing rows also keep every observation because hunt-scoped citation overlays merge the copies
+            # retrieved by this hunt.
+            first_new: set[str] = set()
+            admitted = []
+            for event in events:
+                windows_event = str(getattr(event, "normalizer", "")).startswith("windows-ecs@")
+                if not windows_event or event.id in existing or event.id not in first_new:
+                    admitted.append(event)
+                    if windows_event and event.id not in existing:
+                        first_new.add(event.id)
+            events = admitted
             raw_rows = self._new_raw_rows(c, events, raw_sources, task_id)
             ev_rows: dict[str, dict] = {}
             ent_rows: dict[str, dict] = {}

@@ -253,6 +253,30 @@ def test_source_ip_link_keeps_unsearchable_inventory_coverage_partial():
     assert "dataset_not_normalized:zoneminder" in result.reasons
 
 
+@pytest.mark.parametrize("inventory", [set(), {"apache.access"}, {"zoneminder"}])
+def test_incomplete_inventory_does_not_suppress_bounded_linux_host_queries(inventory):
+    pivot = FakePivot([])
+    pivot.contracts = {
+        "host-x": contract_from_types(
+            "host-x",
+            {
+                "@timestamp": "date", "event.dataset": "keyword", "host.name": "keyword",
+                "destination.ip": "ip", "destination.port": "integer", "process.pid": "long",
+            },
+            role="host", os_family="linux",
+        ),
+    }
+    pivot.dataset_inventory = {"host-x": inventory}
+    fetcher = LinkFetcher(pivot, T0, T1)
+
+    host_intents = fetcher._host_intents(window(), {"process_exec"}, "web1", "linux")
+    endpoint_intents = fetcher._endpoint_intents(window(), [[IP, 443]])
+
+    assert [intent.purpose for intent in host_intents] == ["expansion:linux.audit"]
+    assert [intent.purpose for intent in endpoint_intents] == ["expansion:flow_host_side"]
+    assert endpoint_intents[0].filters[0].value == "linux.audit"
+
+
 @pytest.mark.parametrize("link_type", sorted(cases()))
 def test_each_link_fetcher_returns_only_typed_matches(link_type):
     anchor_event, linked = cases(matched=True)[link_type]

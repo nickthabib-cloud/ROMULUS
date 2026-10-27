@@ -254,6 +254,30 @@ def test_linux_host_resolution_preserves_its_full_typed_host_name():
     assert task["id"] == "t-" + legacy_fingerprint[:20]
 
 
+def test_mixed_hunt_marks_linux_host_resolution_with_windows_typed_identity_version():
+    repo = network_anchor_repo()
+    marker = ev(
+        "linux-ip", "process_exec", host="linux01.example.test", target="host-x",
+        host__ip="10.0.0.2", process__pid=1,
+    )
+    contract_map = contracts(host_ip=True)
+    contract_map["windows-without-host-ip"] = contract_from_types(
+        "windows-without-host-ip",
+        {
+            "@timestamp": "date", "winlog.channel": "keyword",
+            "winlog.computer_name": "keyword", "winlog.event_id": "keyword",
+        },
+        role="host", os_family="windows",
+    )
+    executor = PredicateExecutor(repo, [marker], contract_map)
+
+    assert executor.resolve_host_ip(
+        "F-net", "10.0.0.2", WINDOW.start, WINDOW.end,
+    ) == ("linux01.example.test", None)
+    [task] = repo.host_resolution_tasks("h1")
+    assert task["intent"]["host_identity"] == "typed-v2"
+
+
 def test_an_ambiguous_endpoint_is_unsupported_with_the_candidates():
     repo = network_anchor_repo()
     events = [ev(f"{h}-ip", "process_exec", host=h, target="host-x", host__ip="10.0.0.2", process__pid=1)

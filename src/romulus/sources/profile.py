@@ -50,13 +50,16 @@ class FieldContract(BaseModel):
     """Single mapping from ROMULUS typed fields to native fields for one target."""
     target: str
     fields: dict[str, FieldSpec]
+    linux_fields: dict[str, FieldSpec] = {}
     time_field: str = "@timestamp"
     role: Literal["host", "network"] = "host"
     os_family: Literal["linux", "windows", "unknown"] = "linux"
     hosts: tuple[str, ...] = ()
     host_inventory_complete: bool = True
 
-    def spec(self, typed: str) -> FieldSpec | None:
+    def spec(self, typed: str, *, os_family: str | None = None) -> FieldSpec | None:
+        if os_family == "linux" and self.linux_fields:
+            return self.linux_fields.get(typed)
         return self.fields.get(typed)
 
     def supports(self, typed: str, op: str) -> bool:
@@ -114,6 +117,7 @@ WINDOWS_FIELD_MAPPINGS: dict[str, tuple[str, ...]] = {
     "process.executable": (
         "winlog.event_data.Image", "winlog.event_data.NewProcessName", "winlog.event_data.ProcessName",
     ),
+    "process.parent.executable": ("winlog.event_data.ParentImage", "winlog.event_data.ParentProcessName"),
     "process.pid": ("winlog.event_data.ProcessId", "winlog.event_data.NewProcessId"),
     "process.ppid": (
         "winlog.event_data.ParentProcessId", "winlog.event_data.CreatorProcessId",
@@ -121,16 +125,28 @@ WINDOWS_FIELD_MAPPINGS: dict[str, tuple[str, ...]] = {
     ),
     "process.guid": ("winlog.event_data.ProcessGuid",),
     "process.parent.guid": ("winlog.event_data.ParentProcessGuid",),
+    "source.guid": ("winlog.event_data.SourceProcessGuid", "winlog.event_data.SourceProcessGUID"),
+    "target.guid": ("winlog.event_data.TargetProcessGuid", "winlog.event_data.TargetProcessGUID"),
+    "process.session_id": (
+        "winlog.event_data.LogonId", "winlog.event_data.SubjectLogonId", "winlog.event_data.TargetLogonId",
+    ),
     "auth.session_id": ("winlog.event_data.TargetLogonId", "winlog.event_data.SubjectLogonId"),
+    "auth.logon_guid": ("winlog.event_data.LogonGuid",),
+    "auth.logon_type": ("winlog.event_data.LogonType",),
     "user.name": ("winlog.event_data.SubjectUserName",),
     "user.entity_id": (
         "winlog.event_data.SubjectUserSid", "winlog.event_data.SubjectUserName", "winlog.event_data.User",
     ),
     "auth.target_account": ("winlog.event_data.TargetUserSid", "winlog.event_data.TargetUserName"),
     "source.ip": ("winlog.event_data.SourceIp", "winlog.event_data.IpAddress"),
+    "source.hostname": (
+        "winlog.event_data.SourceHostname", "winlog.event_data.WorkstationName",
+        "winlog.event_data.Workstation", "winlog.event_data.ClientName",
+    ),
     "source.port": ("winlog.event_data.SourcePort", "winlog.event_data.IpPort"),
     "destination.ip": ("winlog.event_data.DestinationIp",),
     "destination.port": ("winlog.event_data.DestinationPort",),
+    "service.image_path": ("winlog.event_data.ImagePath", "winlog.event_data.ServiceFileName"),
 }
 
 
@@ -195,6 +211,7 @@ def contract_from_types(
         )
         for name, t in field_types.items()
     }
+    direct_fields = dict(fields)
     mappings = dict(field_mappings or {})
     if any(field == "winlog" or field.startswith("winlog.") for field in field_types):
         mappings = {**WINDOWS_FIELD_MAPPINGS, **mappings}
@@ -221,6 +238,9 @@ def contract_from_types(
     resolved_os = os_family or source_os_family(field_types, resolved_role)
     return FieldContract(
         target=target, fields=fields, time_field=time_field, role=resolved_role, os_family=resolved_os,
+        linux_fields=direct_fields if any(
+            field == "winlog" or field.startswith("winlog.") for field in field_types
+        ) else {},
         hosts=hosts, host_inventory_complete=host_inventory_complete,
     )
 

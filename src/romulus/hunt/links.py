@@ -1,6 +1,8 @@
 """Typed deterministic link fetchers for post-sweep expansion."""
 from __future__ import annotations
 
+import ntpath
+import re
 from datetime import UTC, datetime, timedelta
 from ipaddress import ip_address
 from typing import Any, Literal, NamedTuple
@@ -13,8 +15,10 @@ from romulus.detect.correlation import PidTable, boot_of, boots_conflict
 from romulus.detect.host import exec_order
 from romulus.evidence.normalize import BootIntervals
 from romulus.evidence.typed import TypedEvent, event_os_family
+from romulus.evidence.windows_catalog import WINDOWS_HOST_DATASETS
 from romulus.hunt.pivot import (
     HOST_LOOKUP_BUDGET,
+    HOST_TIMELINE_DATASETS,
     MAX_PIVOT_RECORDS,
     PivotExecutor,
     _and_any_of,
@@ -29,11 +33,15 @@ from romulus.store.db import digest
 
 LinkType = Literal[
     "process_lineage", "login_session", "network_flow", "flow_host_side",
-    "source_ip", "account", "host_after_anchor",
+    "source_ip", "account", "host_after_anchor", "process_activity",
+    "process_session", "kerberos_logon", "remote_logon_source", "service_process",
 ]
 LinkStrength = Literal["observed", "inferred"]
+WINDOWS_LINK_TYPES = frozenset({
+    "process_activity", "process_session", "kerberos_logon", "remote_logon_source", "service_process",
+})
 # Links that look only forward from the anchor: they fetch [anchor, window end), and say so.
-FORWARD_LINKS = frozenset({"source_ip", "account", "host_after_anchor"})
+FORWARD_LINKS = frozenset({"source_ip", "account", "host_after_anchor", "service_process"})
 # A flow key (community ID, 5-tuple) is time-free: port reuse and fixed-port UDP (123, 514) can join different
 # flows far apart in time, so a flow join is observed only close to the anchor.
 OBSERVED_FLOW_SPAN = timedelta(minutes=10)
@@ -54,7 +62,26 @@ RAW_FAMILIES_BY_LINK = {
     "process_lineage": {"process_exec", "process_observed"},
     "network_flow": {"net_flow", "net_alert", "net_session"},
     "flow_host_side": {"net_socket"},
+    "process_activity": {
+        "process_exec", "net_socket", "file_change", "registry_change", "image_load",
+        "process_access", "pipe_event", "dns_lookup", "remote_thread",
+    },
+    "process_session": {"auth", "system_state"},
+    "kerberos_logon": {"auth"},
+    "service_process": {"process_exec"},
 }
+
+_PROCESS_ACTIVITY_FAMILIES = RAW_FAMILIES_BY_LINK["process_activity"]
+_ZERO_GUID = "00000000-0000-0000-0000-000000000000"
+_WINDOWS_SESSION_SENTINELS = {"", "0", "0x0", "0x3e4", "0x3e5", "0x3e7"}
+_REMOTE_LOGON_CODES = {4624, 4778, 1149, 5140, 5145}
+_REMOTE_ADDRESS_CAVEAT = (
+    "Address-to-host attribution is inferred: NAT, VPN, proxy paths, and DHCP changes can make the "
+    "observed source address belong to another host at the logon time."
+)
+_REMOTE_WORKSTATION_CAVEAT = (
+    "Workstation-name attribution is weaker than address evidence and uses only the canonical first DNS label."
+)
 
 
 def is_agent_reach(link_type: str | None, strength: str | None) -> bool:
@@ -78,6 +105,81 @@ def usable_key(value: Any) -> bool:
             return True
         return not (address.is_unspecified or address.is_loopback)
     return True
+
+
+def _event_code(event: TypedEvent) -> int | None:
+    value = event.get("event.code")
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(str(value), 10)
+    except (TypeError, ValueError):
+        return None
+
+
+def _canonical_guid(value: Any) -> str | None:
+    text = str(value or "").strip().strip("{}").casefold()
+    if not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", text):
+        return None
+    return None if text == _ZERO_GUID else text
+
+
+def _guid_query_values(guid: str) -> list[str]:
+    """Native Windows GUID keywords occur with or without braces and with either hex case."""
+    upper = guid.upper()
+    return [guid, upper, "{" + guid + "}", "{" + upper + "}"]
+
+
+def _session_id(value: Any) -> str | None:
+    text = str(value or "").strip().casefold()
+    if not text:
+        return None
+    try:
+        numeric = int(text, 16 if text.startswith("0x") else 10)
+    except ValueError:
+        return text if text not in _WINDOWS_SESSION_SENTINELS else None
+    canonical = f"0x{numeric:x}"
+    return canonical if canonical not in _WINDOWS_SESSION_SENTINELS else None
+
+
+def _first_label(value: Any) -> str | None:
+    text = str(value or "").strip().rstrip(".").casefold()
+    if text in {"", "-"}:
+        return None
+    return text.split(".", 1)[0]
+
+
+def _windows_path_key(value: Any) -> str | None:
+    text = str(value or "").strip().strip('"').replace("/", "\\")
+    if not text:
+        return None
+    if text.startswith(("\\\\?\\", "\\??\\")):
+        text = text[4:]
+        if text.casefold().startswith("unc\\"):
+            text = "\\\\" + text[4:]
+    return ntpath.normpath(text).casefold()
+
+
+def _service_binary(value: Any) -> tuple[str | None, str | None]:
+    """Parse only service command lines whose executable boundary Windows recorded unambiguously."""
+    text = str(value or "").strip()
+    if not text:
+        return None, "required service image path is unusable"
+    if text.startswith('"'):
+        closing = text.find('"', 1)
+        if closing < 2:
+            return None, "quoted service image path has no closing quote"
+        binary = text[1:closing]
+    else:
+        first = text.split(maxsplit=1)[0]
+        if len(first) != len(text) and not re.search(r"\.(?:exe|com|bat|cmd)$", first, re.IGNORECASE):
+            return None, "unquoted service image path with spaces is ambiguous"
+        binary = first
+    if ntpath.basename(binary).casefold() == "svchost.exe":
+        return None, "svchost service groups are not attributed to one service"
+    if _windows_path_key(binary) is None:
+        return None, "required service image path is unusable"
+    return binary, None
 
 
 def _portable_windows_account(value: Any) -> bool:
@@ -105,6 +207,14 @@ class LinkAnchor(BaseModel):
     host_reason: str | None = None           # why no host identity is available for victim_ip
     event_ids: list[str] = Field(default_factory=list)
     events: list[TypedEvent] = Field(default_factory=list)
+    link_key: dict[str, Any] = Field(default_factory=dict)
+
+
+def effective_link_window(anchor_ts: datetime, link_type: LinkType, window: LinkWindow) -> LinkWindow:
+    if link_type not in FORWARD_LINKS:
+        return window
+    anchor_ts = anchor_ts.astimezone(UTC) if anchor_ts.tzinfo else anchor_ts.replace(tzinfo=UTC)
+    return LinkWindow(label=window.label, start=max(anchor_ts, window.start), end=window.end)
 
 
 class Selection(NamedTuple):
@@ -205,6 +315,18 @@ def _host_reason(anchor: LinkAnchor) -> str | None:
     return anchor.host_reason or "required typed key is unusable"
 
 
+def _target_has_host_os(executor, target: str, contract, os_family: str) -> bool:
+    """Treat the contract as positive OS evidence and inventory as additive evidence for mixed targets."""
+    if contract.os_family == os_family:
+        return True
+    datasets = set(getattr(executor, "dataset_inventory", {}).get(target) or ())
+    if os_family == "windows":
+        return bool(datasets.intersection(WINDOWS_HOST_DATASETS))
+    if os_family == "linux":
+        return bool(datasets.intersection(HOST_TIMELINE_DATASETS))
+    return False
+
+
 COMPUTED_COMMUNITY_ID = "#computed:community_id_v1"
 
 
@@ -285,15 +407,16 @@ class LinkFetcher:
         *,
         query_cap: int | None = None,
     ) -> LinkResult:
+        # Forward links hash the requested symmetric window and persist the clipped searched window.
+        # Service-process links plan from installation time so they do not query pre-install process starts.
+        plan_window = self._effective_window(anchor, link_type, window) if link_type == "service_process" else window
         key, strength, intents, retain, select, unsupported_reason, planning_coverage = self._plan(
-            anchor, link_type, window,
+            anchor, link_type, plan_window,
         )
-        fetch_key = self._fetch_key(anchor, link_type, window, key)
+        fetch_key = self._fetch_key(anchor, link_type, plan_window, key)
         if fetch_key in self._cache:
             return self._cache[fetch_key]
-        if link_type in FORWARD_LINKS:          # persist the window actually searched
-            anchor_ts = anchor.ts.astimezone(UTC) if anchor.ts.tzinfo else anchor.ts.replace(tzinfo=UTC)
-            window = LinkWindow(label=window.label, start=max(anchor_ts, window.start), end=window.end)
+        window = self._effective_window(anchor, link_type, window)
         if not intents:
             if unsupported_reason:
                 result = LinkResult(
@@ -355,6 +478,11 @@ class LinkFetcher:
         if selected.unresolved:
             status = "partial" if status == "complete" else status
             reasons += [reason for reason in _unresolved(selected.unresolved) if reason not in reasons]
+        if link_type == "remote_logon_source":
+            advisory = (_REMOTE_ADDRESS_CAVEAT if key.get("source.ip")
+                        else _REMOTE_WORKSTATION_CAVEAT)
+            if advisory not in reasons:
+                reasons.append(advisory)
         result = LinkResult(
             id="link-" + fetch_key[:20], anchor_id=anchor.finding_id, link_type=link_type,
             window=window, strength=strength, key=key, status=status,
@@ -369,16 +497,25 @@ class LinkFetcher:
 
     @staticmethod
     def _fetch_key(anchor: LinkAnchor, link_type: LinkType, window: LinkWindow, key: dict) -> str:
-        return digest({
+        payload = {
             "anchor": anchor.finding_id, "link": link_type,
             "window": window.model_dump(mode="json"), "key": key,
-        })
+        }
+        if link_type in WINDOWS_LINK_TYPES:
+            payload["anchor_host"] = anchor.host
+        return digest(payload)
+
+    @staticmethod
+    def _effective_window(anchor: LinkAnchor, link_type: LinkType, window: LinkWindow) -> LinkWindow:
+        return effective_link_window(anchor.ts, link_type, window)
 
     def result_id(self, anchor: LinkAnchor, link_type: LinkType, window: LinkWindow) -> str:
-        key, *_rest = self._plan(anchor, link_type, window)
-        return "link-" + self._fetch_key(anchor, link_type, window, key)[:20]
+        plan_window = self._effective_window(anchor, link_type, window) if link_type == "service_process" else window
+        key, *_rest = self._plan(anchor, link_type, plan_window)
+        return "link-" + self._fetch_key(anchor, link_type, plan_window, key)[:20]
 
     def _plan(self, anchor: LinkAnchor, link_type: LinkType, window: LinkWindow):
+        self._planning_host_gaps: list[PivotCoverage] = []
         handlers = {
             "process_lineage": self._lineage,
             "login_session": self._session,
@@ -387,35 +524,67 @@ class LinkFetcher:
             "source_ip": self._source_ip,
             "account": self._account,
             "host_after_anchor": self._host_after,
+            "process_activity": self._process_activity,
+            "process_session": self._process_session,
+            "kerberos_logon": self._kerberos_logon,
+            "remote_logon_source": self._remote_logon_source,
+            "service_process": self._service_process,
         }
-        return handlers[link_type](anchor, window)
+        result = handlers[link_type](anchor, window)
+        if self._planning_host_gaps:
+            return (*result[:5], None, [*result[-1], *self._planning_host_gaps])
+        return result
 
-    def _host_intents(self, window: LinkWindow, families: set[str], host: str | None = None,
+    def _native_windows_hosts(self, target, contract, host, window):
+        native = [candidate for candidate in contract.hosts
+                  if _first_label(candidate) == _first_label(host)]
+        if not native and not contract.host_inventory_complete:
+            reason = f"host {host!r} absent from truncated source host inventory; native host spelling unresolved"
+            gaps = getattr(self, "_planning_host_gaps", None)
+            if gaps is not None:
+                gaps.append(PivotCoverage(
+                    target=target, dataset="windows", start=window.start, end=window.end,
+                    status="partial", reasons=[reason], returned=0, total=None,
+                    unresolved_ranges=[_range(window.start, window.end, reason)],
+                ))
+            return []
+        return native or [host]
+
+    def _host_intents(self, window: LinkWindow, families: set[str] | None, host: str | None = None,
                       os_family: str | None = None):
         intents = []
         for target, contract in sorted(self.executor.contracts.items()):
             if _is_network(target, contract):
                 continue
-            if os_family is not None and contract.os_family != os_family:
-                continue
-            if contract.os_family == "windows":
+            use_windows = os_family in (None, "windows") and _target_has_host_os(
+                self.executor, target, contract, "windows",
+            )
+            use_linux = os_family in (None, "linux") and _target_has_host_os(
+                self.executor, target, contract, "linux",
+            )
+            if use_windows:
                 source_groups = _windows_source_groups(contract, families)
-                if not source_groups:
-                    continue
-                filters = []
-                if host is not None:
-                    if not _supports(contract, "host.name"):
-                        continue
-                    filters.append(Predicate(field="host.name", op="eq", value=host))
-                intents.append(SearchIntent(
-                    kind="raw", target=target, window=Window(start=window.start, end=window.end),
-                    filters=filters, any_of=source_groups, max_records=MAX_PIVOT_RECORDS,
-                    purpose="expansion:windows-events",
-                ))
+                if source_groups:
+                    filters = []
+                    if host is not None and not _supports(contract, "host.name"):
+                        source_groups = []
+                    elif host is not None:
+                        native_hosts = self._native_windows_hosts(target, contract, host, window)
+                        if not native_hosts:
+                            source_groups = []
+                        elif len(native_hosts) > 1 and _supports(contract, "host.name", "in"):
+                            filters.append(Predicate(field="host.name", op="in", value=native_hosts))
+                        elif native_hosts:
+                            filters.append(Predicate(field="host.name", op="eq", value=native_hosts[0]))
+                    if source_groups:
+                        intents.append(SearchIntent(
+                            kind="raw", target=target, window=Window(start=window.start, end=window.end),
+                            filters=filters, any_of=source_groups, max_records=MAX_PIVOT_RECORDS,
+                            purpose="expansion:windows-events",
+                        ))
+            if not use_linux or not _supports(contract, "event.dataset"):
                 continue
-            if not _supports(contract, "event.dataset"):
-                continue
-            for dataset in _host_datasets(contract, families):
+            for dataset in _host_datasets(contract, families, os_family="linux"):
                 filters = [Predicate(field="event.dataset", op="eq", value=dataset)]
                 if host is not None:
                     if not _supports(contract, "host.name"):
@@ -440,7 +609,7 @@ class LinkFetcher:
                  Predicate(field="destination.port", op="eq", value=port)]
                 for ip, port in endpoints
             ]
-            if contract.os_family == "windows":
+            if _target_has_host_os(self.executor, target, contract, "windows"):
                 source_groups = _windows_source_groups(contract, {"net_socket"})
                 if source_groups:
                     intents.append(SearchIntent(
@@ -448,10 +617,10 @@ class LinkFetcher:
                         any_of=_and_any_of(source_groups, endpoint_groups),
                         max_records=MAX_PIVOT_RECORDS, purpose="expansion:flow_host_side",
                     ))
+            if (not _target_has_host_os(self.executor, target, contract, "linux")
+                    or not _supports(contract, "event.dataset")):
                 continue
-            if not _supports(contract, "event.dataset"):
-                continue
-            for dataset in _host_datasets(contract, {"net_socket"}):
+            for dataset in _host_datasets(contract, {"net_socket"}, os_family="linux"):
                 intents.append(SearchIntent(
                     kind="raw", target=target, window=Window(start=window.start, end=window.end),
                     filters=[Predicate(field="event.dataset", op="eq", value=dataset)],
@@ -459,6 +628,88 @@ class LinkFetcher:
                     max_records=MAX_PIVOT_RECORDS, purpose="expansion:flow_host_side",
                 ))
         return intents
+
+    def _windows_field_intents(
+        self,
+        window: LinkWindow,
+        families: set[str],
+        field_values: dict[str, list[Any]],
+        *,
+        host: str | None = None,
+        purpose: str,
+    ) -> list[SearchIntent]:
+        """Push a normalized Windows key through its native aliases without an unkeyed dataset scan."""
+        intents = []
+        for target, contract in sorted(self.executor.contracts.items()):
+            if (_is_network(target, contract)
+                    or not _target_has_host_os(self.executor, target, contract, "windows")):
+                continue
+            source_groups = _windows_source_groups(contract, families)
+            if not source_groups:
+                continue
+            filters = []
+            if host is not None:
+                if not _supports(contract, "host.name"):
+                    continue
+                native_hosts = self._native_windows_hosts(target, contract, host, window)
+                if not native_hosts:
+                    continue
+                if len(native_hosts) > 1 and _supports(contract, "host.name", "in"):
+                    filters.append(Predicate(field="host.name", op="in", value=native_hosts))
+                else:
+                    filters.append(Predicate(field="host.name", op="eq", value=native_hosts[0]))
+            key_groups: list[list[Predicate]] = []
+            for field, raw_values in field_values.items():
+                values = list(dict.fromkeys(value for value in raw_values if value is not None))
+                if not values:
+                    continue
+                if len(values) > 1 and _supports(contract, field, "in"):
+                    key_groups.append([Predicate(field=field, op="in", value=values)])
+                elif _supports(contract, field):
+                    key_groups.extend([[Predicate(field=field, op="eq", value=value)] for value in values])
+            if not key_groups:
+                continue
+            intents.append(SearchIntent(
+                kind="raw", target=target, window=Window(start=window.start, end=window.end),
+                filters=filters, any_of=_and_any_of(source_groups, key_groups),
+                max_records=MAX_PIVOT_RECORDS, purpose=purpose,
+            ))
+        return intents
+
+    def _windows_host_identity_intents(
+        self, window: LinkWindow, label: str,
+    ) -> tuple[list[SearchIntent], set[str], list[PivotCoverage]]:
+        """Plan exact host predicates from complete inventories matching one canonical first label."""
+        intents: list[SearchIntent] = []
+        matched_hosts: set[str] = set()
+        incomplete: list[PivotCoverage] = []
+        for target, contract in sorted(self.executor.contracts.items()):
+            if (_is_network(target, contract)
+                    or not _target_has_host_os(self.executor, target, contract, "windows")):
+                continue
+            if not contract.host_inventory_complete:
+                reason = "workstation host inventory is incomplete"
+                incomplete.append(PivotCoverage(
+                    target=target, dataset="windows", start=window.start, end=window.end,
+                    status="partial", reasons=[reason], returned=0, total=None,
+                    unresolved_ranges=[_range(window.start, window.end, reason)],
+                ))
+            if not _supports(contract, "host.name"):
+                continue
+            source_groups = _windows_source_groups(contract)
+            if not source_groups:
+                continue
+            for host in contract.hosts:
+                if _first_label(host) != label:
+                    continue
+                matched_hosts.add(host.casefold())
+                intents.append(SearchIntent(
+                    kind="raw", target=target, window=Window(start=window.start, end=window.end),
+                    filters=[Predicate(field="host.name", op="eq", value=host)],
+                    any_of=source_groups, max_records=MAX_PIVOT_RECORDS,
+                    purpose="expansion:remote_logon_workstation",
+                ))
+        return intents, matched_hosts, incomplete
 
     def _lineage(self, anchor: LinkAnchor, window: LinkWindow):
         pid = _value(anchor, "process.pid")
@@ -868,14 +1119,37 @@ class LinkFetcher:
         for target, contract in sorted(self.executor.contracts.items()):
             if _is_network(target, contract):
                 continue
+            if os_family not in {"linux", "windows"} or not _target_has_host_os(
+                self.executor, target, contract, os_family,
+            ):
+                continue
+            windows_groups = _windows_source_groups(contract) if os_family == "windows" else []
+            mixed_linux = os_family == "linux" and _target_has_host_os(
+                self.executor, target, contract, "windows",
+            )
             for query_field in fields:
                 if not _supports(contract, query_field):
                     continue
-                intents.append(SearchIntent(
-                    kind="raw", target=target, window=Window(start=forward.start, end=forward.end),
-                    filters=[Predicate(field=query_field, op="eq", value=account)],
-                    max_records=MAX_PIVOT_RECORDS, purpose="expansion:account",
-                ))
+                if os_family == "windows":
+                    if windows_groups:
+                        intents.append(SearchIntent(
+                            kind="raw", target=target,
+                            window=Window(start=forward.start, end=forward.end),
+                            filters=[Predicate(field=query_field, op="eq", value=account)],
+                            any_of=windows_groups,
+                            max_records=MAX_PIVOT_RECORDS, purpose="expansion:account",
+                        ))
+                    continue
+                datasets = _host_datasets(contract, os_family="linux") if mixed_linux else (None,)
+                for dataset in datasets:
+                    filters = [Predicate(field=query_field, op="eq", value=account)]
+                    if dataset is not None:
+                        filters.insert(0, Predicate(field="event.dataset", op="eq", value=dataset))
+                    intents.append(SearchIntent(
+                        kind="raw", target=target,
+                        window=Window(start=forward.start, end=forward.end), filters=filters,
+                        max_records=MAX_PIVOT_RECORDS, purpose="expansion:account",
+                    ))
 
         def matches(event):
             values = {event.get(name) for name in fields}
@@ -890,16 +1164,319 @@ class LinkFetcher:
         reason = _host_reason(anchor)
         if reason:
             return (key, "inferred", [], lambda _event: False, lambda _events: [], reason, [])
-        request = EntityTimelineRequest(tool="entity_timeline", arguments=EntityTimelineArgs(
-            entity={"kind": "host", "value": anchor.host, "role": "host"},
-            start=max(anchor.ts, window.start), end=window.end,
-        ))
         os_family = _os_family(anchor)
-        intents = [
-            intent for intent in self.executor._intents(request)
-            if os_family is None or self.executor.contracts[intent.target].os_family == os_family
-        ]
+        if os_family == "windows":
+            intents = self._host_intents(window, None, anchor.host, "windows")
+        else:
+            request = EntityTimelineRequest(tool="entity_timeline", arguments=EntityTimelineArgs(
+                entity={"kind": "host", "value": anchor.host, "role": "host"},
+                start=max(anchor.ts, window.start), end=window.end,
+            ))
+            planned = self.executor.plan(request)[0] if hasattr(self.executor, "plan") else self.executor._intents(
+                request,
+            )
+            inventories = getattr(self.executor, "dataset_inventory", {})
+            has_mixed_target = any(
+                _target_has_host_os(self.executor, target, contract, "windows")
+                and _target_has_host_os(self.executor, target, contract, "linux")
+                for target, contract in self.executor.contracts.items()
+            )
+            if not has_mixed_target:
+                intents = [
+                    intent for intent in planned
+                    if os_family is None or self.executor.contracts[intent.target].os_family == os_family
+                ]
+            else:
+                intents = []
+                for intent in planned:
+                    contract = self.executor.contracts[intent.target]
+                    if os_family is not None and not _target_has_host_os(
+                        self.executor, intent.target, contract, os_family,
+                    ):
+                        continue
+                    inventory = inventories.get(intent.target)
+                    if os_family == "linux" and inventory is not None:
+                        dataset = PivotExecutor._intent_dataset(intent)
+                        if dataset not in HOST_TIMELINE_DATASETS:
+                            continue
+                    intents.append(intent)
+                # A mixed target whose profile is Windows needs explicit native Linux dataset intents because one
+                # target-level OS label cannot produce both native host plans.
+                if os_family == "linux":
+                    for intent in self._host_intents(window, None, anchor.host, "linux"):
+                        contract = self.executor.contracts[intent.target]
+                        mixed = _target_has_host_os(self.executor, intent.target, contract, "windows")
+                        if mixed and contract.os_family != "linux" and intent not in intents:
+                            intents.append(intent)
         matches = lambda event: event.host == anchor.host and event.ts >= anchor.ts
         reason = None if intents else "key not pushable; full-dataset scan refused"
+        return (key, "inferred", intents, matches,
+                lambda events: [event for event in events if matches(event)], reason, [])
+
+    def _process_activity(self, anchor: LinkAnchor, window: LinkWindow):
+        guid = _canonical_guid(anchor.link_key.get("process.guid")) or next((
+            _canonical_guid(_value(anchor, field))
+            for field in ("process.guid", "source.guid", "target.guid")
+            if _canonical_guid(_value(anchor, field)) is not None
+        ), None)
+        boot_id = _boot(anchor)
+        key = {"host.name": anchor.host, "process.guid": guid}
+        if boot_id:
+            key["host.boot.id"] = boot_id
+        reason = _host_reason(anchor) or (None if guid else "required nonzero process GUID is unusable")
+        intents = [] if reason else self._windows_field_intents(
+            window, _PROCESS_ACTIVITY_FAMILIES,
+            {
+                "process.guid": _guid_query_values(guid),
+                "source.guid": _guid_query_values(guid),
+                "target.guid": _guid_query_values(guid),
+            },
+            host=anchor.host, purpose="expansion:process_activity",
+        )
+        if reason is None and not intents:
+            reason = "key not pushable; full-dataset scan refused"
+
+        def matches(event: TypedEvent) -> bool:
+            if event.family not in _PROCESS_ACTIVITY_FAMILIES or event.host != anchor.host:
+                return False
+            event_boot = event.get("host.boot.id")
+            if boot_id and event_boot and str(event_boot) != boot_id:
+                return False
+            # ParentProcessGuid names another process and is deliberately never a process-activity key.
+            return any(
+                _canonical_guid(event.get(field)) == guid
+                for field in ("process.guid", "source.guid", "target.guid")
+            )
+
+        return (key, "observed", intents, matches,
+                lambda events: [event for event in events if matches(event)], reason, [])
+
+    def _process_session(self, anchor: LinkAnchor, window: LinkWindow):
+        subject_session = _session_id(
+            _value(anchor, "process.subject_session_id")
+            or _value(anchor, "windows.event_data.SubjectLogonId")
+        )
+        target_session = _session_id(
+            _value(anchor, "process.target_session_id")
+            or _value(anchor, "windows.event_data.TargetLogonId")
+            or _value(anchor, "process.session_id")
+        )
+        session = _session_id(anchor.link_key.get("process.session_id")) or subject_session or target_session
+        boot_id = _boot(anchor)
+        key = {"host.name": anchor.host, "process.session_id": session}
+        if subject_session:
+            key["process.subject_session_id"] = subject_session
+        if target_session:
+            key["process.target_session_id"] = target_session
+        if boot_id:
+            key["host.boot.id"] = boot_id
+        reason = _host_reason(anchor) or (
+            None if session else "required process logon session key is unusable"
+        )
+        # Logon ids may be decimal or variably padded hexadecimal in the native field. Fetch the bounded host
+        # auth class and compare the canonical numeric session id locally rather than missing another spelling.
+        auth_intents = ([] if reason else
+                        self._host_intents(window, {"auth"}, anchor.host, "windows"))
+        if reason is None and not auth_intents:
+            reason = "key not pushable; full-dataset scan refused"
+        intents = [] if reason else [
+            *auth_intents, *self._host_intents(window, {"system_state"}, anchor.host, "windows"),
+        ]
+
+        def retain(event: TypedEvent) -> bool:
+            return event.host == anchor.host and (
+                event.family == "system_state"
+                or (event.family == "auth" and _session_id(event.get("auth.session_id")) == session)
+            )
+
+        def select(events):
+            candidates = sorted(anchor.events + list(events), key=lambda item: (item.ts, item.id))
+            lower, upper = window.start, window.end
+            saw_fence = False
+            for event in candidates:
+                if event.host != anchor.host or event.get("process.fence") != "boot":
+                    continue
+                saw_fence = True
+                if event.ts <= anchor.ts:
+                    lower = max(lower, event.ts)
+                elif event.ts < upper:
+                    upper = event.ts
+            selected = []
+            for event in candidates:
+                event_boot = event.get("host.boot.id")
+                if (
+                    event.id not in anchor.event_ids
+                    and lower <= event.ts < upper
+                    and event.host == anchor.host
+                    and event.family == "auth"
+                    and _event_code(event) == 4624
+                    and _session_id(event.get("auth.session_id")) == session
+                    and not (boot_id and str(event_boot or "") != boot_id)
+                ):
+                    selected.append(event)
+            attested = getattr(self.executor, "system_log_attested", lambda _host: False)(anchor.host)
+            unresolved = []
+            if not boot_id and not saw_fence and not attested:
+                unresolved.append("process session same-boot boundary is unavailable")
+            return Selection(selected, unresolved)
+
+        return key, "observed", intents, retain, select, reason, []
+
+    def _kerberos_logon(self, anchor: LinkAnchor, window: LinkWindow):
+        code = anchor.link_key.get("event.code")
+        if code not in {4624, 4769}:
+            code = next((_event_code(event) for event in anchor.events if _event_code(event) in {4624, 4769}), None)
+        guid = _canonical_guid(anchor.link_key.get("auth.logon_guid")) or next((
+            _canonical_guid(event.get("auth.logon_guid")) for event in anchor.events
+            if _canonical_guid(event.get("auth.logon_guid")) is not None
+        ), None)
+        key = {"auth.logon_guid": guid, "event.code": code}
+        reason = None
+        if code not in {4624, 4769}:
+            reason = "anchor is not a 4624 logon or 4769 service-ticket event"
+        elif guid is None:
+            reason = "required nonzero logon GUID is unusable"
+        intents = [] if reason else self._windows_field_intents(
+            window, {"auth"}, {"auth.logon_guid": _guid_query_values(guid)},
+            purpose="expansion:kerberos_logon",
+        )
+        if reason is None and not intents:
+            reason = "key not pushable; full-dataset scan refused"
+        expected = 4624 if code == 4769 else 4769
+
+        def matches(event: TypedEvent) -> bool:
+            return (
+                event.family == "auth"
+                and _event_code(event) == expected
+                and _canonical_guid(event.get("auth.logon_guid")) == guid
+            )
+
+        return (key, "observed", intents, matches,
+                lambda events: [event for event in events if matches(event)], reason, [])
+
+    def _remote_logon_source(self, anchor: LinkAnchor, window: LinkWindow):
+        code = anchor.link_key.get("event.code")
+        if code is None:
+            code = next((_event_code(event) for event in anchor.events if _event_code(event) is not None), None)
+        logon_type = anchor.link_key.get("auth.logon_type")
+        if logon_type is None:
+            logon_type = next((event.get("auth.logon_type") for event in anchor.events
+                               if event.get("auth.logon_type") is not None), None)
+        try:
+            logon_type = int(logon_type) if logon_type is not None else None
+        except (TypeError, ValueError):
+            logon_type = None
+        eligible = code in _REMOTE_LOGON_CODES and (code != 4624 or logon_type in {3, 10})
+        source_ip = anchor.link_key.get("source.ip")
+        if not usable_key(source_ip):
+            source_ip = next((event.get("source.ip") for event in anchor.events
+                              if usable_key(event.get("source.ip"))), None)
+        workstation = anchor.link_key.get("source.hostname")
+        if not usable_key(workstation):
+            workstation = next((
+            event.get(field) for event in anchor.events
+            for field in ("source.hostname", "source.workstation", "auth.workstation")
+            if _first_label(event.get(field)) is not None
+            ), None)
+        label = _first_label(workstation)
+        key: dict[str, Any] = {"event.code": code, "actor": "inferred"}
+        if not eligible:
+            return (key, "inferred", [], lambda _event: False, lambda _events: [],
+                    "anchor is not an eligible remote logon or share event", [])
+
+        if source_ip is not None:
+            key.update({"source.ip": source_ip, "identity_strength": "observed_address_holder"})
+            intents = self._windows_field_intents(
+                window, {"net_socket"}, {"source.ip": [source_ip]},
+                purpose="expansion:remote_logon_source_ip",
+            )
+            reason = None if intents else "source address is not pushable to Sysmon network evidence"
+
+            def retain(event: TypedEvent) -> bool:
+                return (
+                    event.family == "net_socket" and event.get("source.ip") == source_ip
+                    and event.get("network.direction") == "egress" and bool(event.host)
+                    and _first_label(event.host) != _first_label(anchor.host)
+                )
+
+            def select(events):
+                matches = [event for event in events if retain(event)]
+                hosts = {
+                    str(event.get("host.full_name") or event.host).strip().rstrip(".").casefold()
+                    for event in matches if event.get("host.full_name") or event.host
+                }
+                if len(hosts) > 1:
+                    return Selection([], [
+                        ("remote source address was observed on multiple hosts; NAT, VPN, proxy, or DHCP "
+                         "changes prevent unique attribution")
+                    ])
+                if not hosts:
+                    return Selection([], [
+                        ("remote source address has no observed egress holder other than the anchor host; "
+                         "inbound records do not establish address ownership")
+                    ])
+                return Selection(matches, [])
+
+            return key, "inferred", intents, retain, select, reason, []
+
+        if label is None:
+            return (key, "inferred", [], lambda _event: False, lambda _events: [],
+                    "remote event has no usable source address or workstation name", [])
+        key.update({"source.hostname": workstation, "canonical_label": label,
+                    "identity_strength": "workstation_first_label"})
+        intents, known_hosts, incomplete = self._windows_host_identity_intents(window, label)
+        reason = None
+        if incomplete:
+            reason = None
+        elif len(known_hosts) != 1 or not intents:
+            reason = "workstation first label is not uniquely present in source inventory"
+
+        def retain(event: TypedEvent) -> bool:
+            return bool(event.host) and _first_label(event.host) == label
+
+        def select(events):
+            matches = [event for event in events if retain(event)]
+            hosts = {str(event.host).casefold() for event in matches}
+            if len(hosts) > 1:
+                return Selection([], ["workstation first label maps to multiple hosts"])
+            return Selection(matches, [])
+
+        return key, "inferred", intents if reason is None else [], retain, select, reason, incomplete
+
+    def _service_process(self, anchor: LinkAnchor, window: LinkWindow):
+        code = anchor.link_key.get("event.code")
+        if code is None:
+            code = next((_event_code(event) for event in anchor.events if _event_code(event) is not None), None)
+        raw_path = anchor.link_key.get("service.image_path") or _value(anchor, "service.image_path")
+        binary, parse_reason = _service_binary(raw_path)
+        binary_key = _windows_path_key(binary)
+        key = {
+            "host.name": anchor.host, "service.image_path": raw_path,
+            "service.binary_key": binary_key, "process.parent": "services.exe", "actor": "inferred",
+        }
+        reason = _host_reason(anchor)
+        if reason is None and code not in {4697, 7045}:
+            reason = "anchor is not a service-install event"
+        if reason is None:
+            reason = parse_reason
+        # Native Windows path keywords are case-sensitive while Windows path identity is not. Fetch the
+        # host's bounded process class and compare the normalized key locally rather than risking a false negative.
+        intents = ([] if reason else
+                   self._host_intents(window, {"process_exec"}, anchor.host, "windows"))
+        if reason is None and not intents:
+            reason = "compatible Windows process source is unavailable"
+
+        def matches(event: TypedEvent) -> bool:
+            executable = _windows_path_key(
+                event.get("process.executable_key") or event.get("process.executable")
+            )
+            parent = _windows_path_key(
+                event.get("process.parent.executable_key") or event.get("process.parent.executable")
+            )
+            return (
+                event.family == "process_exec" and event.host == anchor.host and event.ts >= anchor.ts
+                and executable == binary_key and ntpath.basename(str(parent or "")).casefold() == "services.exe"
+            )
+
         return (key, "inferred", intents, matches,
                 lambda events: [event for event in events if matches(event)], reason, [])

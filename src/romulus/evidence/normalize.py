@@ -1,13 +1,11 @@
 """Per-event-family normalizers for the lab schema. Dispatch on authoritative type fields only."""
 from __future__ import annotations
 
-import base64
 import hashlib
 import ipaddress
 import json
 import posixpath
 import re
-import struct
 from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
 from collections.abc import Callable
@@ -34,6 +32,7 @@ from romulus.evidence.auditd import (
     socket_syscall,
     syscall_arg,
 )
+from romulus.evidence.community import community_id
 from romulus.evidence.typed import EVIDENCE_VERSION, Outcome, RawRef, TypedEvent, event_id, fv
 from romulus.evidence.windows import (
     WindowsNotNormalized,
@@ -1707,30 +1706,6 @@ def _app_block(eve: dict, key: str) -> dict | None:
     if not isinstance(block, dict):
         raise TypeError(f"suricata {key} block is {type(block).__name__}, not an object")
     return block
-
-
-# Community ID v1 (corelight/community-id-spec): the transports whose two ports it hashes, by IP protocol number.
-COMMUNITY_ID_PROTOCOLS = {"tcp": 6, "udp": 17, "sctp": 132}
-
-
-def community_id(src, sport, dst, dport, transport) -> str | None:
-    """Community ID v1 with seed 0 of a connection's 5-tuple (the id Suricata and Arkime write when configured to),
-    or None for a transport without ports or an endpoint that is not an address and a port. The two endpoints are
-    ordered as the specification orders them, so either direction of a connection gives the same id."""
-    number = COMMUNITY_ID_PROTOCOLS.get(str(transport or "").lower())
-    if (number is None or not isinstance(sport, int) or not isinstance(dport, int) or isinstance(sport, bool)
-            or isinstance(dport, bool) or not (0 <= sport <= 65535 and 0 <= dport <= 65535)):
-        return None
-    try:
-        a, b = ipaddress.ip_address(str(src)).packed, ipaddress.ip_address(str(dst)).packed
-    except ValueError:
-        return None
-    if len(a) != len(b):
-        return None
-    if (a, sport) > (b, dport):
-        a, b, sport, dport = b, a, dport, sport
-    data = struct.pack("!H", 0) + a + b + struct.pack("!BBHH", number, 0, sport, dport)
-    return "1:" + base64.b64encode(hashlib.sha1(data).digest()).decode()
 
 
 def _suricata_community_id(eve: dict, o: str):

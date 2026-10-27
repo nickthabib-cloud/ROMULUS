@@ -50,13 +50,40 @@ def _pred_native(p: Predicate, native: str) -> dict:
     raise CompileError(f"unknown op {p.op}")
 
 
-def _pred(p: Predicate, contract: FieldContract) -> dict:
-    spec = contract.spec(p.field)
+_LINUX_HOST_DATASETS = frozenset({"linux.audit", "systemd.journal", "apache.access", "apache.error"})
+
+
+def _intent_os_family(intent: SearchIntent) -> str | None:
+    values: set[str] = set()
+    for predicate in [*intent.filters, *(item for group in intent.any_of for item in group)]:
+        if predicate.field != "event.dataset" or predicate.op not in {"eq", "in"}:
+            continue
+        candidates = predicate.value if isinstance(predicate.value, list) else [predicate.value]
+        values.update(str(value) for value in candidates)
+    return "linux" if values and values <= _LINUX_HOST_DATASETS else None
+
+
+def _pred(p: Predicate, contract: FieldContract, *, os_family: str | None = None) -> dict:
+    spec = contract.spec(p.field, os_family=os_family)
     if spec is None:
         raise CompileError(f"field {p.field!r} not in field contract for {contract.target}")
     if p.op not in spec.ops:
         raise CompileError(f"op {p.op!r} not supported on {p.field} ({spec.type}) with superset guarantee")
     natives = spec.natives or (spec.native,)
+    if (
+        p.op == "eq"
+        and p.field in {"event.channel", "event.provider"}
+        and spec.native in {"winlog.channel", "winlog.provider_name"}
+    ):
+        clauses = [
+            {"wildcard": {native: {
+                "value": _escape_wildcard(str(p.value)), "case_insensitive": True,
+            }}}
+            for native in natives
+        ]
+        return clauses[0] if len(clauses) == 1 else {
+            "bool": {"should": clauses, "minimum_should_match": 1}
+        }
     if p.op == "eq" and p.field in {"user.entity_id", "auth.target_account"}:
         value = str(p.value)
         if value.startswith("sid:"):
@@ -99,12 +126,15 @@ def _pred(p: Predicate, contract: FieldContract) -> dict:
 
 def build_query(intent: SearchIntent, contract: FieldContract) -> dict:
     tf = contract.time_field
+    os_family = _intent_os_family(intent)
     must = [{"range": {tf: {"gte": intent.window.start.isoformat(), "lt": intent.window.end.isoformat(),
                             "format": "strict_date_optional_time"}}}]
-    must += [_pred(p, contract) for p in intent.filters]
+    must += [_pred(p, contract, os_family=os_family) for p in intent.filters]
     query: dict = {"bool": {"filter": must}}
     if intent.any_of:
-        groups = [{"bool": {"filter": [_pred(p, contract) for p in g]}} for g in intent.any_of]
+        groups = [{"bool": {"filter": [
+            _pred(p, contract, os_family=os_family) for p in g
+        ]}} for g in intent.any_of]
         query["bool"]["should"] = groups
         query["bool"]["minimum_should_match"] = 1
     return query
@@ -129,12 +159,12 @@ def compile_es(intent: SearchIntent, contract: FieldContract, flavor: str = "ela
             raise CompileError("aggregate intent needs group_by")
         sources = []
         for g in intent.group_by:
-            spec = contract.spec(g)
+            spec = contract.spec(g, os_family=_intent_os_family(intent))
             if spec is None or not spec.aggregatable:
                 raise CompileError(f"field {g!r} is not aggregatable on {contract.target}")
             sources.append({g: {"terms": {"field": spec.native, "missing_bucket": True}}})
         body = {"size": 0, "query": query, "track_total_hits": True,
-                "aggs": {"g": {"composite": {"size": 1000, "sources": sources},
+                "aggs": {"g": {"composite": {"size": min(1000, intent.max_records), "sources": sources},
                                "aggs": {"first": {"min": {"field": contract.time_field}},
                                         "last": {"max": {"field": contract.time_field}}}}}}
     elif intent.kind == "histogram":

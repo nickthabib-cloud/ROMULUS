@@ -58,6 +58,7 @@ def execute(client: ElasticClient, intent: SearchIntent, contract: FieldContract
         if intent.kind == "aggregate":
             buckets, reasons, total, rel = [], [], None, "unknown"
             body = q.body
+            capped = False
             for _ in range(MAX_COMPOSITE_PAGES):
                 d = client.search(q.target, body)
                 if d.get("timed_out"):
@@ -68,18 +69,36 @@ def execute(client: ElasticClient, intent: SearchIntent, contract: FieldContract
                 total, rel = t.get("value"), t.get("relation", "unknown")
                 agg = d.get("aggregations", {}).get("g", {})
                 for b in agg.get("buckets", []):
+                    if len(buckets) >= intent.max_records:
+                        capped = True
+                        break
                     buckets.append({"key": b["key"], "count": b["doc_count"],
                                     "first": b.get("first", {}).get("value_as_string"),
                                     "last": b.get("last", {}).get("value_as_string")})
                 after = agg.get("after_key")
+                represented = sum(bucket["count"] for bucket in buckets)
+                if len(buckets) >= intent.max_records:
+                    capped = rel != "eq" or represented != (total or 0)
+                    break
                 if not after or not agg.get("buckets"):
                     break
+                remaining = intent.max_records - len(buckets)
                 body = {**body, "aggs": {"g": {**body["aggs"]["g"],
-                                               "composite": {**body["aggs"]["g"]["composite"], "after": after}}}}
+                                               "composite": {
+                                                   **body["aggs"]["g"]["composite"],
+                                                   "size": min(
+                                                       body["aggs"]["g"]["composite"]["size"], remaining,
+                                                   ),
+                                                   "after": after,
+                                               }}}}
             else:
                 reasons.append(f"composite_page_cap:{MAX_COMPOSITE_PAGES}")
-            if sum(b["count"] for b in buckets) != (total or 0) and rel == "eq":
+            if capped:
+                reasons.append(f"aggregate_bucket_cap:{intent.max_records}")
+            elif sum(b["count"] for b in buckets) != (total or 0) and rel == "eq":
                 reasons.append("bucket_sum_mismatch")
+            if rel != "eq":
+                reasons.append(f"total_relation:{rel}")
             return outcome(completeness=Completeness.partial if reasons else Completeness.complete,
                            reasons=sorted(set(reasons)), total=total, total_relation=rel,
                            returned=len(buckets), buckets=buckets)
