@@ -520,7 +520,8 @@ def test_windows_scope_planning_stays_bounded_for_many_duplicate_events():
 
     assert len(plan.links["process_session"].variants) == 1
     assert len(slots) == MAX_ANCHOR_KEYS
-    assert "aa-distinct" in {slot.anchor.host for slot in slots}
+    assert "aa-distinct" not in {slot.anchor.host for slot in slots}
+    assert max(slot.anchor.ts for slot in slots) <= T0 + timedelta(minutes=6)
     [reason] = [
         item for item in anchor_reasons[plan.row["id"]] if item.startswith("keys_not_expanded:")
     ]
@@ -528,6 +529,7 @@ def test_windows_scope_planning_stays_bounded_for_many_duplicate_events():
     assert detail["dropped_at_least"] == 4
     assert len(detail["examples"]) == 3
     assert detail["more"] is True
+    assert all(set(example) == {"host", "key", "window"} for example in detail["examples"])
     assert len(reason) < 2_048
 
 
@@ -589,7 +591,7 @@ def test_kerberos_logon_matches_4769_to_cross_host_4624_by_nonzero_logon_guid():
     selected = plan[4]([member, same_host, wrong_kind])
 
     assert plan[1] == "observed"
-    assert [item.id for item in selected] == ["logon"]
+    assert [item.id for item in selected] == ["logon", "same-host"]
 
 
 def test_kerberos_logon_refuses_the_zero_guid():
@@ -608,7 +610,7 @@ def test_remote_logon_source_uses_observed_sysmon_source_address_and_states_cave
     root = event(
         "logon", "auth", event__code=4624, auth__logon_type=10, source__ip="10.0.0.8",
     )
-    proof = event("proof", "net_socket", host="client01", source__ip="10.0.0.8")
+    proof = event("proof", "net_socket", host="client01", source__ip="10.0.0.8", network__direction="egress")
     result = LinkFetcher(FakePivot([proof]), START, END).fetch(
         anchor(root), "remote_logon_source", window(),
     )
@@ -624,8 +626,8 @@ def test_remote_logon_source_marks_an_address_held_by_multiple_hosts_unresolved(
     root = event(
         "logon", "auth", event__code=4624, auth__logon_type=3, source__ip="10.0.0.8",
     )
-    first = event("first", "net_socket", host="client01", source__ip="10.0.0.8")
-    second = event("second", "net_socket", host="client02", source__ip="10.0.0.8")
+    first = event("first", "net_socket", host="client01", source__ip="10.0.0.8", network__direction="egress")
+    second = event("second", "net_socket", host="client02", source__ip="10.0.0.8", network__direction="egress")
     result = LinkFetcher(
         FakePivot([first, second], hosts=("client01", "client02", "ws01")), START, END,
     ).fetch(anchor(root), "remote_logon_source", window())
@@ -642,10 +644,12 @@ def test_remote_logon_source_uses_full_host_names_to_detect_short_label_collisio
     first = event(
         "first", "net_socket", host="client01", source__ip="10.0.0.8",
         host__full_name="client01.branch-a.example",
+        network__direction="egress",
     )
     second = event(
         "second", "net_socket", host="client01", source__ip="10.0.0.8",
         host__full_name="client01.branch-b.example",
+        network__direction="egress",
     )
 
     result = LinkFetcher(FakePivot([first, second]), START, END).fetch(

@@ -418,11 +418,9 @@ def _data(provider: str, event_id: int, ordinal: int) -> dict[str, object]:
         }
     if provider == "PowerShell":
         return {
-            "Payload": "Get-CimInstance Win32_OperatingSystem",
-            "HostApplication": "powershell.exe -NoProfile -File inventory.ps1",
-            "EngineVersion": "5.1.22621.2506",
-            "RunspaceId": _guid(ordinal + 40_000),
-            "PipelineId": _guid(ordinal + 50_000),
+            "param1": "Available" if event_id in {400, 403} else "Get-CimInstance Win32_OperatingSystem",
+            "param2": "None" if event_id in {400, 403} else "Pipeline execution details",
+            "param3": "HostApplication=powershell.exe -NoProfile -File inventory.ps1\nEngineVersion=2.0",
         }
     if provider == "Microsoft-Windows-Windows Defender":
         return {
@@ -557,7 +555,8 @@ def windows_xml_hit(event: LogicalWindowsEvent, shape: Shape = "winlogbeat_8") -
     data = winlog.pop("event_data")
     winlog.pop("time_created", None)
     rendered = "".join(
-        f"<Data Name={quoteattr(str(name))}>{escape(str(value))}</Data>"
+        (f"<Data>{escape(str(value))}</Data>" if event.provider == "PowerShell" and name.startswith("param")
+         else f"<Data Name={quoteattr(str(name))}>{escape(str(value))}</Data>")
         for name, value in data.items()
     )
     hit["_source"]["event"] = {

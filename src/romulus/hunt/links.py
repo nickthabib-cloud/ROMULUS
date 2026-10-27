@@ -515,6 +515,7 @@ class LinkFetcher:
         return "link-" + self._fetch_key(anchor, link_type, plan_window, key)[:20]
 
     def _plan(self, anchor: LinkAnchor, link_type: LinkType, window: LinkWindow):
+        self._planning_host_gaps: list[PivotCoverage] = []
         handlers = {
             "process_lineage": self._lineage,
             "login_session": self._session,
@@ -529,7 +530,25 @@ class LinkFetcher:
             "remote_logon_source": self._remote_logon_source,
             "service_process": self._service_process,
         }
-        return handlers[link_type](anchor, window)
+        result = handlers[link_type](anchor, window)
+        if self._planning_host_gaps:
+            return (*result[:5], None, [*result[-1], *self._planning_host_gaps])
+        return result
+
+    def _native_windows_hosts(self, target, contract, host, window):
+        native = [candidate for candidate in contract.hosts
+                  if _first_label(candidate) == _first_label(host)]
+        if not native and not contract.host_inventory_complete:
+            reason = f"host {host!r} absent from truncated source host inventory; native host spelling unresolved"
+            gaps = getattr(self, "_planning_host_gaps", None)
+            if gaps is not None:
+                gaps.append(PivotCoverage(
+                    target=target, dataset="windows", start=window.start, end=window.end,
+                    status="partial", reasons=[reason], returned=0, total=None,
+                    unresolved_ranges=[_range(window.start, window.end, reason)],
+                ))
+            return []
+        return native or [host]
 
     def _host_intents(self, window: LinkWindow, families: set[str] | None, host: str | None = None,
                       os_family: str | None = None):
@@ -550,13 +569,12 @@ class LinkFetcher:
                     if host is not None and not _supports(contract, "host.name"):
                         source_groups = []
                     elif host is not None:
-                        native_hosts = [
-                            candidate for candidate in contract.hosts
-                            if _first_label(candidate) == _first_label(host)
-                        ] or [host]
-                        if len(native_hosts) > 1 and _supports(contract, "host.name", "in"):
+                        native_hosts = self._native_windows_hosts(target, contract, host, window)
+                        if not native_hosts:
+                            source_groups = []
+                        elif len(native_hosts) > 1 and _supports(contract, "host.name", "in"):
                             filters.append(Predicate(field="host.name", op="in", value=native_hosts))
-                        else:
+                        elif native_hosts:
                             filters.append(Predicate(field="host.name", op="eq", value=native_hosts[0]))
                     if source_groups:
                         intents.append(SearchIntent(
@@ -633,10 +651,9 @@ class LinkFetcher:
             if host is not None:
                 if not _supports(contract, "host.name"):
                     continue
-                native_hosts = [
-                    candidate for candidate in contract.hosts
-                    if _first_label(candidate) == _first_label(host)
-                ] or [host]
+                native_hosts = self._native_windows_hosts(target, contract, host, window)
+                if not native_hosts:
+                    continue
                 if len(native_hosts) > 1 and _supports(contract, "host.name", "in"):
                     filters.append(Predicate(field="host.name", op="in", value=native_hosts))
                 else:
@@ -1329,7 +1346,7 @@ class LinkFetcher:
 
         def matches(event: TypedEvent) -> bool:
             return (
-                event.family == "auth" and event.host != anchor.host
+                event.family == "auth"
                 and _event_code(event) == expected
                 and _canonical_guid(event.get("auth.logon_guid")) == guid
             )
@@ -1376,7 +1393,11 @@ class LinkFetcher:
             reason = None if intents else "source address is not pushable to Sysmon network evidence"
 
             def retain(event: TypedEvent) -> bool:
-                return event.family == "net_socket" and event.get("source.ip") == source_ip and bool(event.host)
+                return (
+                    event.family == "net_socket" and event.get("source.ip") == source_ip
+                    and event.get("network.direction") == "egress" and bool(event.host)
+                    and _first_label(event.host) != _first_label(anchor.host)
+                )
 
             def select(events):
                 matches = [event for event in events if retain(event)]
@@ -1388,6 +1409,11 @@ class LinkFetcher:
                     return Selection([], [
                         ("remote source address was observed on multiple hosts; NAT, VPN, proxy, or DHCP "
                          "changes prevent unique attribution")
+                    ])
+                if not hosts:
+                    return Selection([], [
+                        ("remote source address has no observed egress holder other than the anchor host; "
+                         "inbound records do not establish address ownership")
                     ])
                 return Selection(matches, [])
 

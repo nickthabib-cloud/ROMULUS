@@ -1790,12 +1790,14 @@ def test_cross_partition_script_completion_uses_completion_time_and_partition(tm
     sweep.run_partition(contract.target, contract, [], second, est=len(second_records))
 
     assert rule.seen_times == [
+        START + timedelta(minutes=1),
         START + timedelta(minutes=4),
+        START + timedelta(minutes=6),
         START + timedelta(minutes=6),
     ]
     cells = {cell["partition"]: cell for cell in repo.rule_cells("h1")}
-    assert cells[first.key()]["evaluated"] == 1
-    assert cells[second.key()]["evaluated"] == 1
+    assert cells[first.key()]["evaluated"] == 2
+    assert cells[second.key()]["evaluated"] == 2
     sweep.close_stage()
 
 
@@ -1837,7 +1839,8 @@ def test_end_of_sweep_incomplete_scripts_use_staged_and_aggregate_bookkeeping(tm
     retained = FinalizedRetainedWindowsScriptRule()
     sweep.pack = [staged, retained]
 
-    assert sweep._windows_script_blocks().consume(events, raw_sources) == []
+    fragments = sweep._windows_script_blocks().consume(events, raw_sources)
+    assert all(event.has("script.part_number") for event in fragments)
     sweep._finalize_windows_script_blocks()
 
     stage = sweep._event_stage()
@@ -1889,7 +1892,8 @@ def test_end_of_sweep_incomplete_scripts_are_consumed_in_bounded_batches(tmp_pat
     rule = FinalizedBatchRecordingWindowsScriptRule()
     sweep.pack = [rule]
 
-    assert sweep._windows_script_blocks().consume(events, raw_sources) == []
+    fragments = sweep._windows_script_blocks().consume(events, raw_sources)
+    assert len(fragments) == count and all(event.has("script.part_number") for event in fragments)
     sweep._finalize_windows_script_blocks()
 
     assert rule.batch_sizes == [SCRIPT_FINALIZE_BATCH_SIZE, SCRIPT_FINALIZE_BATCH_SIZE, 1]

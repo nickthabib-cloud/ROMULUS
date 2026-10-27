@@ -555,10 +555,11 @@ class Sweep:
                     event_class = lookup_event_class(channel, provider, event_id)
                     if event_class is not None:
                         read_tokens.add(event_class.token)
-            else:
-                read_tokens.update(
-                    event_class.token for event_class in event_classes_for_families(set(playbook.families))
+            read_tokens.update(
+                event_class.token for event_class in event_classes_for_families(
+                    set(playbook.families) | set(playbook.context_families)
                 )
+            )
         self._windows_read_tokens[target] = read_tokens
         unassessed = []
         for token in sorted(inventory - read_tokens):
@@ -1244,6 +1245,10 @@ class Sweep:
             assembler = self._windows_script_blocks()
             events = assembler.consume(events, raw_sources)
             raw_sources.update(assembler.sources_for(events))
+            parts = [event for event in events if event.has("script.part_number")]
+            if parts:
+                # Part views keep every raw citation retrievable even when the joined view samples its refs.
+                self.repo.save_evidence(self.hunt_id, parts, raw_sources, tid)
             script_reassembly_reasons.extend(assembler.partial_reasons)
             incomplete_metadata = sum(
                 any("script block part metadata is incomplete or invalid" in caveat
@@ -1700,8 +1705,13 @@ class Sweep:
         finalized = 0
         matched: Counter[str] = Counter()
         evaluated: Counter[str] = Counter()
+        truncation_reasons: set[str] = set()
         for batch in batched(assembler.finalize(), SCRIPT_FINALIZE_BATCH_SIZE):
             events = list(batch)
+            truncation_reasons.update(
+                caveat for event in events if event.get("script.truncated")
+                for caveat in event.caveats if "joined text capped" in caveat
+            )
             finalized += len(events)
             raw_sources = assembler.sources_for(events)
             self.repo.save_evidence(self.hunt_id, events, raw_sources, None)
@@ -1731,6 +1741,8 @@ class Sweep:
         if not finalized:
             return
         reason = f"PowerShell script-block reassembly incomplete for {finalized} block(s); missing parts stated"
+        if truncation_reasons:
+            reason += "; " + "; ".join(sorted(truncation_reasons))
         self.partial_reasons.append(reason)
         for pb in self.pack:
             if not evaluated[pb.id]:

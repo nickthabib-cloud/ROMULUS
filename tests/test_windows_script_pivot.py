@@ -170,8 +170,8 @@ def test_parts_across_fetch_intents_form_one_event_with_every_raw_reference(monk
     )
 
     assert batch.status == "complete"
-    assert len(batch.events) == 1
-    [event] = batch.events
+    assert len(batch.events) == 3
+    [event] = [item for item in batch.events if not item.has("script.part_number")]
     assert event.get("script.text") == "$value = 'one'; Write-Output 'two'"
     assert event.get("script.complete") is True
     assert event.get("script.part_count") == 2
@@ -215,8 +215,8 @@ def test_single_fetched_part_is_emitted_as_incomplete_and_marks_coverage_partial
 
     assert batch.status == "partial"
     assert batch.reasons == ["PowerShell script-block reassembly incomplete for 1 block(s)"]
-    assert len(batch.events) == 1
-    [event] = batch.events
+    assert len(batch.events) == 2
+    [event] = [item for item in batch.events if not item.has("script.part_number")]
     assert event.get("script.text") == "$value = 'one'; "
     assert event.get("script.complete") is False
     assert event.get("script.part_count") == 1
@@ -360,5 +360,5 @@ def test_run_drains_completed_reassembly_sources_immediately(monkeypatch):
     result = executor.run("case-1", request)
 
     assert result.status == "complete"
-    assert result.matched_event_count == 1
+    assert result.matched_event_count == 3
     assert TrackingAssembler.instances[0]._emitted_sources == {}

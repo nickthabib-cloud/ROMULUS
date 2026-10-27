@@ -4,10 +4,13 @@ from __future__ import annotations
 import json
 import math
 import re
+import tempfile
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from functools import wraps
+from pathlib import Path
 from time import perf_counter
 
 from romulus.agent.models import EntityRef, PivotCoverage, PivotResult, PivotTimeRange
@@ -19,6 +22,7 @@ from romulus.agent.tools import (
     ProcessTreeRequest,
     ToolRequest,
 )
+from romulus.detect.bounded import StateBudget
 from romulus.detect.host import ExecLineage
 from romulus.detect.registry import fresh_direct_pack
 from romulus.evidence.auditd import AuditParseError, AuditRecord, parse_record
@@ -164,9 +168,34 @@ def _script_metadata_reasons(events: list[TypedEvent]) -> list[str]:
         any("script block part metadata is incomplete or invalid" in caveat for caveat in event.caveats)
         for event in events
     )
-    if not count:
-        return []
-    return [f"PowerShell script-block part metadata incomplete or invalid for {count} event(s)"]
+    reasons = ([f"PowerShell script-block part metadata incomplete or invalid for {count} event(s)"]
+               if count else [])
+    reasons.extend(sorted({
+        caveat for event in events if event.get("script.truncated")
+        for caveat in event.caveats if "joined text capped" in caveat
+    }))
+    return reasons
+
+
+def _with_script_blocks(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        settings = getattr(self.client, "settings", None)
+        root = self.stage_dir or getattr(settings, "stage_path", None)
+        if root is not None:
+            Path(root).mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="romulus-pivot-scripts-", dir=root) as directory:
+            budget = StateBudget(
+                directory, disk_total=int(getattr(settings, "state_disk_gb", 0) * 2**30) or None,
+                reserve_floor=int(getattr(settings, "state_disk_reserve_gb", 2) * 2**30),
+            )
+            assembler = self._script_blocks = ScriptBlockAssembler(directory, budget=budget)
+            try:
+                return method(self, *args, **kwargs)
+            finally:
+                assembler.close()
+                del self._script_blocks
+    return wrapped
 
 
 def _is_capped(reasons: list[str]) -> bool:
@@ -473,7 +502,7 @@ class PivotExecutor:
                  source_query_scope: str | None = None,
                  dataset_inventory: dict[str, set[str] | list[str] | tuple[str, ...]] | None = None,
                  optimize_normalization: bool = True,
-                 site_facts: SiteFacts | None = None):
+                 site_facts: SiteFacts | None = None, stage_dir=None):
         self.repo = repo
         self.client = client
         self.hunt_id = hunt_id
@@ -489,6 +518,7 @@ class PivotExecutor:
         self.optimize_normalization = optimize_normalization
         self.raw_family_prefilter = optimize_normalization
         self.site_facts = site_facts or absent_site_facts()
+        self.stage_dir = stage_dir
 
     def process_termination_attested(self, host: str | None) -> bool:
         return bool(host) and self.site_facts.attests(
@@ -996,6 +1026,7 @@ class PivotExecutor:
                 self.hunt_id, selected.values(), raw_sources, task_id, owner_token=self.owner_token,
             )
 
+    @_with_script_blocks
     def fetch_intents(
         self,
         owner: str,
@@ -1019,8 +1050,7 @@ class PivotExecutor:
         retained: dict[str, TypedEvent] = {}
         task_by_event: dict[str, str] = {}
         raw_sources: dict[str, dict] = {}
-        script_blocks = ScriptBlockAssembler()
-        self._script_blocks = script_blocks
+        script_blocks = self._script_blocks
         coverage: list[PivotCoverage] = list(planning_coverage or [])
         reasons: list[str] = [reason for cell in coverage for reason in cell.reasons]
         successful = 0
@@ -1121,9 +1151,11 @@ class PivotExecutor:
             else:
                 self.repo.update_task(task_id, "evaluated", outcome=outcome_digest, owner_token=self.owner_token)
         unfinished = 0
+        final_script_reasons: set[str] = set()
         fallback_task = task_ids[0] if task_ids else ""
         for event in script_blocks.finalize():
             unfinished += 1
+            final_script_reasons.update(_script_metadata_reasons([event]))
             sources = script_blocks.sources_for([event])
             if not retain(event):
                 continue
@@ -1133,6 +1165,8 @@ class PivotExecutor:
                 task_by_event.setdefault(event.id, fallback_task)
         if unfinished:
             reason = f"PowerShell script-block reassembly incomplete for {unfinished} block(s)"
+            if final_script_reasons:
+                reason += "; " + "; ".join(sorted(final_script_reasons))
             incomplete = True
             reasons.append(reason)
             coverage = [cell.model_copy(update={
@@ -1140,8 +1174,6 @@ class PivotExecutor:
                 "covered_ranges": [],
                 "unresolved_ranges": [_range(cell.start, cell.end, reason)],
             }) for cell in coverage]
-        script_blocks.close()
-        del self._script_blocks
         budget_limited = (self.source_query_scope == "agent" and self.source_query_budget is not None
                           and any(reason == f"agent_source_query_budget:{self.source_query_budget}"
                                   for reason in reasons))
@@ -1450,6 +1482,7 @@ class PivotExecutor:
         )
         return [*other, *selected], reason
 
+    @_with_script_blocks
     def run(self, case_id: str, request: ToolRequest, *,
             anchor_ts: datetime | None = None) -> PivotResult:
         started = perf_counter()
@@ -1474,7 +1507,7 @@ class PivotExecutor:
         retained: list[TypedEvent] = []
         task_by_event: dict[str, str] = {}
         raw_sources: dict[str, dict] = {}
-        script_blocks = ScriptBlockAssembler()
+        script_blocks = self._script_blocks
         reasons: list[str] = [reason for cell in planning_coverage for reason in cell.reasons]
         coverage: list[PivotCoverage] = list(planning_coverage)
         successful_outcomes = 0
@@ -1593,9 +1626,11 @@ class PivotExecutor:
             self.repo.update_task(task_id, "evaluated", owner_token=self.owner_token)
 
         unfinished = 0
+        final_script_reasons: set[str] = set()
         fallback_task = task_ids[0] if task_ids else ""
         for event in script_blocks.finalize():
             unfinished += 1
+            final_script_reasons.update(_script_metadata_reasons([event]))
             sources = script_blocks.sources_for([event])
             if not self._retain(request, event):
                 continue
@@ -1605,6 +1640,8 @@ class PivotExecutor:
                 task_by_event.setdefault(event.id, fallback_task)
         if unfinished:
             reason = f"PowerShell script-block reassembly incomplete for {unfinished} block(s)"
+            if final_script_reasons:
+                reason += "; " + "; ".join(sorted(final_script_reasons))
             incomplete = True
             reasons.append(reason)
             coverage = [cell.model_copy(update={
@@ -1612,7 +1649,6 @@ class PivotExecutor:
                 "covered_ranges": [],
                 "unresolved_ranges": [_range(cell.start, cell.end, reason)],
             }) for cell in coverage]
-        script_blocks.close()
 
         if isinstance(request, ProcessTreeRequest):
             retained, fence_reason = self._select_process_tree_by_os(

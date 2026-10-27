@@ -24,7 +24,7 @@ from romulus.evidence.windows_catalog import WINDOWS_DATASETS, WindowsEventClass
 if TYPE_CHECKING:
     from romulus.detect.bounded import Account, StateBudget
 
-WINDOWS_NORMALIZER = "windows-ecs@3"
+WINDOWS_NORMALIZER = "windows-ecs@4"
 # This is already far beyond what the 64 MiB assembler can retain at normal 4104 chunk sizes, while bounding every
 # completeness vector even when hostile metadata claims billions of parts.
 SCRIPT_BLOCK_MAX_PARTS = 4_096
@@ -59,11 +59,22 @@ _MESSAGE_CODES = {
     "%%1843": False,
     "%%1904": "new_registry_value_created",
     "%%1905": "existing_registry_value_modified",
+    "%%1906": "registry_value_deleted",
     "%%1936": "default",
     "%%1937": "full",
     "%%1938": "limited",
     "%%1832": "identification",
     "%%1833": "impersonation",
+    "%%1840": "delegation",
+    "%%2304": "error_during_logon",
+    "%%2305": "account_expired",
+    "%%2306": "netlogon_not_started",
+    "%%2307": "account_locked_out",
+    "%%2308": "logon_type_not_granted",
+    "%%2309": "password_expired",
+    "%%2310": "account_disabled",
+    "%%2311": "logon_time_restriction",
+    "%%2312": "workstation_restriction",
     "%%2313": "unknown_user_name_or_bad_password",
 }
 
@@ -116,6 +127,7 @@ _UAC_MESSAGE_CODES = {
 }
 
 _ACCESS_CODES = {
+    "%%7688": "control_access",
     "%%1537": "delete",
     "%%1538": "read_control",
     "%%1539": "write_dac",
@@ -564,7 +576,16 @@ def windows_record_signature(hit: dict) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+EVENT_XML_MAX_BYTES = 1_048_576
+
+
+def _original_too_large(original: str) -> bool:
+    return len(original) > EVENT_XML_MAX_BYTES or len(original.encode("utf-8")) > EVENT_XML_MAX_BYTES
+
+
 def _xml_data(original: str, native_id: str) -> dict[str, FieldValue]:
+    if _original_too_large(original):
+        raise WindowsInputError(f"event.original exceeds {EVENT_XML_MAX_BYTES} bytes; XML was not parsed")
     upper = original.upper()
     if "<!DOCTYPE" in upper or "<!ENTITY" in upper:
         raise WindowsInputError("event.original XML may not contain DOCTYPE or ENTITY declarations")
@@ -573,6 +594,7 @@ def _xml_data(original: str, native_id: str) -> dict[str, FieldValue]:
     except ElementTree.ParseError as exc:
         raise WindowsInputError(f"event.original is not valid XML: {exc}") from exc
     values: dict[str, FieldValue] = {}
+    unnamed = 0
     for element in root.iter():
         tag = element.tag.rsplit("}", 1)[-1]
         if tag == "TimeCreated" and element.attrib.get("SystemTime"):
@@ -580,6 +602,10 @@ def _xml_data(original: str, native_id: str) -> dict[str, FieldValue]:
             value = element.attrib["SystemTime"]
         elif tag == "Data" and element.attrib.get("Name"):
             name = element.attrib["Name"]
+            value = element.text or ""
+        elif tag == "Data":
+            unnamed += 1
+            name = f"param{unnamed}"
             value = element.text or ""
         elif element is not root and element.text and tag not in {"System", "EventData", "UserData"}:
             name = tag
@@ -641,7 +667,10 @@ def read_windows_event(hit: dict) -> WindowsRecord:
         )
     data = _structured_data(winlog, hit["_id"])
     original = _get(source, "event.original")
-    if not data and original not in (None, ""):
+    caveats = []
+    if isinstance(original, str) and _original_too_large(original):
+        caveats.append(f"event.original exceeds {EVENT_XML_MAX_BYTES} bytes; XML was not parsed")
+    elif not data and original not in (None, ""):
         if not isinstance(original, str):
             raise WindowsInputError("event.original must be text")
         data = _xml_data(original, hit["_id"])
@@ -649,7 +678,7 @@ def read_windows_event(hit: dict) -> WindowsRecord:
     if time_created not in (None, "") and "TimeCreated" not in data:
         data["TimeCreated"] = fv(time_created, f"{hit['_id']}:winlog.time_created")
     _parsed_hashes(data)
-    return WindowsRecord(hit, event_class, data, [])
+    return WindowsRecord(hit, event_class, data, caveats)
 
 
 def _raw_ref(hit: dict) -> RawRef:
@@ -812,22 +841,27 @@ def _uac_changes(record: WindowsRecord) -> tuple[list[str], str] | None:
 
 
 def _powershell_data_fields(fields: dict[str, FieldValue], record: WindowsRecord) -> None:
-    item = record.data.get("Data")
-    if item is None or _native_value_is_absent("Data", item.value):
-        return
-    values = item.value if isinstance(item.value, (list, tuple)) else (item.value,)
-    text = "\n".join(str(value) for value in values)
-    if len(text.encode("utf-8")) > _POWERSHELL_DATA_MAX_BYTES:
-        record.caveats.append(f"Data exceeds {_POWERSHELL_DATA_MAX_BYTES} bytes and was not parsed")
-        return
-    parsed = {key.casefold(): value for key, value in _key_value_lines(text).items()}
-    for typed, native in (
-        ("script.host_application", "HostApplication"),
-        ("script.engine_version", "EngineVersion"),
-    ):
-        value = parsed.get(native.casefold())
-        if typed not in fields and value not in (None, ""):
-            fields[typed] = fv(value, item.origin + "#parsed:powershell-data")
+    names = ("param3",) if record.event_class.event_id in {400, 403} else ("param2", "param3")
+    remaining = _POWERSHELL_DATA_MAX_BYTES
+    for name in (*names, "Data"):
+        item = record.data.get(name)
+        if item is None or _native_value_is_absent(name, item.value):
+            continue
+        values = item.value if isinstance(item.value, (list, tuple)) else (item.value,)
+        text = "\n".join(str(value) for value in values)
+        size = len(text.encode("utf-8")) if len(text) <= remaining else remaining + 1
+        if size > remaining:
+            record.caveats.append(f"{name} exceeds {_POWERSHELL_DATA_MAX_BYTES} bytes and was not parsed")
+            continue
+        remaining -= size
+        parsed = {key.casefold(): value for key, value in _key_value_lines(text).items()}
+        for typed, native in (
+            ("script.host_application", "HostApplication"),
+            ("script.engine_version", "EngineVersion"),
+        ):
+            value = parsed.get(native.casefold())
+            if typed not in fields and value not in (None, ""):
+                fields[typed] = fv(value, item.origin + "#parsed:powershell-data")
 
 
 def _access_fields(
@@ -1773,8 +1807,11 @@ def normalize_windows(hit: dict) -> TypedEvent:
         or record.data.get("SystemTime")
     )
     if event_time:
-        timestamp = _event_time(event_time.value)
-        fields["event.created"] = fv(timestamp.isoformat(), event_time.origin)
+        try:
+            timestamp = _event_time(event_time.value)
+            fields["event.created"] = fv(timestamp.isoformat(), event_time.origin)
+        except (ValueError, TypeError, OverflowError):
+            record.caveats.append(f"malformed native event time at {event_time.origin}; @timestamp used")
     fields["event.ingested"] = fv(
         datetime.fromisoformat(str(source["@timestamp"])).astimezone(UTC).isoformat(),
         f"{hit['_id']}:@timestamp",

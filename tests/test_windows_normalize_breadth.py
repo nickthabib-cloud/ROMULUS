@@ -198,7 +198,7 @@ def test_each_new_family_normalizes_as_typed_evidence(event_id, family, provider
     event = normalize_windows(_hit(event_id, {}, provider=provider, channel=channel))
     assert event.family == family
     assert event.get("host.os.family") == "windows"
-    assert event.normalizer == "windows-ecs@3"
+    assert event.normalizer == "windows-ecs@4"
 
 
 def test_task_xml_is_namespace_safe_and_extracts_actions_principal_and_flags():

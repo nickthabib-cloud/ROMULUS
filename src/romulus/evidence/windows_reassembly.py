@@ -13,17 +13,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from romulus.detect.bounded import StateBudget
 from romulus.evidence.typed import RawRef, TypedEvent, event_id, fv
 from romulus.evidence.windows import SCRIPT_BLOCK_MAX_PARTS, WINDOWS_NORMALIZER
 
 if TYPE_CHECKING:
-    from romulus.detect.bounded import Account, StateBudget
+    from romulus.detect.bounded import Account
 
 
 SCRIPT_TEXT_CAP = 1_048_576
-SCRIPT_STATE_BYTES = 64 * 1024 * 1024
 SCRIPT_FINALIZE_BATCH_SIZE = 128
-_TRUNCATION_MARKER = "\n...[Romulus joined-text cap]...\n"
+SCRIPT_JOINED_REFS = SCRIPT_BLOCK_MAX_PARTS
+SCRIPT_SOURCE_PAGE = 128
 
 
 class ScriptBlockAssembler:
@@ -38,7 +39,7 @@ class ScriptBlockAssembler:
         directory: str | Path | None = None,
         *,
         text_cap: int = SCRIPT_TEXT_CAP,
-        max_bytes: int = SCRIPT_STATE_BYTES,
+        max_bytes: int | None = None,
         budget: StateBudget | None = None,
         account: Account | None = None,
     ) -> None:
@@ -50,9 +51,9 @@ class ScriptBlockAssembler:
         self.db = sqlite3.connect(self.path)
         self.path.chmod(0o600)
         self.text_cap = max(1, int(text_cap))
-        self.max_bytes = max(1, int(max_bytes))
-        self.budget = budget
-        self.account = account
+        self.budget = budget if budget is not None else StateBudget(root)
+        self.account = account if account is not None else self.budget.account("windows_scripts")
+        self.max_bytes = max(1, int(max_bytes if max_bytes is not None else self.budget.disk_total))
         self.refusal_reason = ""
         self._refusal_reasons: dict[str, None] = {}
         self.partial_reasons: list[str] = []
@@ -60,21 +61,23 @@ class ScriptBlockAssembler:
         # sources_for() drains it lets finalized batches avoid rescanning every still-pending refs row.
         self._emitted_sources: dict[str, dict | None] = {}
         self.db.executescript(
-            "CREATE TABLE blocks ("
+            "CREATE TABLE IF NOT EXISTS blocks ("
             "host TEXT NOT NULL, block_id TEXT NOT NULL, total INTEGER NOT NULL, base_number INTEGER NOT NULL, "
             "base_event TEXT NOT NULL, conflicts TEXT NOT NULL, emitted INTEGER NOT NULL DEFAULT 0, "
             "latest_ts TEXT NOT NULL, "
             "PRIMARY KEY (host, block_id)) WITHOUT ROWID;"
-            "CREATE TABLE parts ("
+            "CREATE TABLE IF NOT EXISTS parts ("
             "host TEXT NOT NULL, block_id TEXT NOT NULL, number INTEGER NOT NULL, text TEXT NOT NULL, "
-            "text_digest TEXT NOT NULL, "
+            "text_digest TEXT NOT NULL, event_id TEXT NOT NULL, "
             "PRIMARY KEY (host, block_id, number)) WITHOUT ROWID;"
-            "CREATE TABLE refs ("
+            "CREATE TABLE IF NOT EXISTS refs ("
             "host TEXT NOT NULL, block_id TEXT NOT NULL, number INTEGER NOT NULL, target TEXT NOT NULL, "
             "native_id TEXT NOT NULL, digest TEXT NOT NULL, source TEXT, "
             "PRIMARY KEY (host, block_id, target, native_id)) WITHOUT ROWID;"
+            "CREATE INDEX IF NOT EXISTS refs_native ON refs(target, native_id);"
         )
         self.db.commit()
+        self.db.execute("PRAGMA cache_size = -4096")
         self._page = int(self.db.execute("PRAGMA page_size").fetchone()[0])
         self._size = self._db_size()
         if self._size > self.max_bytes:
@@ -83,7 +86,9 @@ class ScriptBlockAssembler:
             )
             self._refusal_reasons[self.refusal_reason] = None
         else:
-            pages = max(1, self.max_bytes // self._page)
+            headroom = self.budget.headroom()
+            ceiling = self.max_bytes if headroom is None else min(self.max_bytes, self._size + headroom)
+            pages = max(1, ceiling // self._page)
             self.db.execute(f"PRAGMA max_page_count = {pages}")
         if self.budget is not None and self.account is not None:
             self.budget.charge(self.account, self._size)
@@ -92,8 +97,9 @@ class ScriptBlockAssembler:
     def _db_size(self) -> int:
         return int(self.db.execute("PRAGMA page_count").fetchone()[0]) * self._page
 
-    def _checkpoint(self) -> None:
-        self.db.commit()
+    def _checkpoint(self, *, commit: bool = True) -> None:
+        if commit:
+            self.db.commit()
         size = self._db_size()
         growth = size - self._size
         if growth > 0 and self.budget is not None and self.account is not None:
@@ -177,10 +183,16 @@ class ScriptBlockAssembler:
         return ""
 
     def consume(self, events: list[TypedEvent], raw_sources: dict[str, dict] | None = None) -> list[TypedEvent]:
-        """Return non-parts immediately and each completed multi-part block once."""
+        """Stream part views with the input batch, and add each completed bounded join once.
+
+        Every multipart record is independently evaluable immediately. Joins can therefore cap text without
+        hiding a middle part from rules. A record matching across a boundary beyond the joined prefix remains
+        unresolved; the fragment views do not pretend to preserve such cross-part matches.
+        """
         raw_sources = raw_sources or {}
         self.partial_reasons = []
         output: list[TypedEvent] = []
+        self.db.execute("BEGIN")
         for event in events:
             key = self._part_key(event)
             if key is None:
@@ -200,10 +212,15 @@ class ScriptBlockAssembler:
                 output.append(self._partial(event, reason))
                 continue
             try:
+                self.db.execute("SAVEPOINT script_part")
+                base = event.model_copy(deep=True)
+                base.fields.pop("windows.event_data.ScriptBlockText", None)
+                if "script.text" in base.fields:
+                    base.fields["script.text"] = fv("", base.fields["script.text"].origin)
                 if row is None:
                     self.db.execute(
                         "INSERT INTO blocks VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
-                        (host, block, total, number, event.model_dump_json(), "[]", event.ts.isoformat()),
+                        (host, block, total, number, base.model_dump_json(), "[]", event.ts.isoformat()),
                     )
                     stored_total, base_number, conflicts, emitted = total, number, [], 0
                 else:
@@ -233,6 +250,7 @@ class ScriptBlockAssembler:
                                     "PowerShell script-block reassembly conflict: " + conflict
                                 )
                             output.append(self._conflicted(event, late_conflicts))
+                        self.db.execute("RELEASE script_part")
                         continue
                     conflicts = json.loads(conflicts_json)
                     if total != stored_total:
@@ -242,7 +260,7 @@ class ScriptBlockAssembler:
                     if number < base_number:
                         self.db.execute(
                             "UPDATE blocks SET base_number = ?, base_event = ? WHERE host = ? AND block_id = ?",
-                            (number, event.model_dump_json(), host, block),
+                            (number, base.model_dump_json(), host, block),
                         )
                         base_number = number
                     latest = max(datetime.fromisoformat(str(latest_ts)), event.ts)
@@ -257,13 +275,21 @@ class ScriptBlockAssembler:
                 text = str(event.get("script.text") or "")
                 if existing is None:
                     self.db.execute(
-                        "INSERT INTO parts VALUES (?, ?, ?, ?, ?)",
-                        (host, block, number, text, self._text_digest(text)),
+                        "INSERT INTO parts VALUES (?, ?, ?, ?, ?, ?)",
+                        (host, block, number, text, self._text_digest(text), event.id),
                     )
                 elif existing[0] != text:
                     conflict = f"conflicting part {number}; first text retained"
                     conflicts.append(conflict)
                     self._note_partial("PowerShell script-block reassembly conflict: " + conflict)
+                if total > 1 or len(text) > self.text_cap:
+                    part = event.model_copy(deep=True)
+                    part.fields["script.part_number"] = fv(number, "ScriptBlockText#part-view")
+                    part.fields["script.complete"] = fv(False, "ScriptBlockText#part-view")
+                    part.caveats.append("script block fragment; joined view supplies cross-part context")
+                    output.append(part)
+                    for ref in part.raw:
+                        self._emitted_sources[ref.key] = raw_sources.get(ref.key)
                 self.db.execute(
                     "UPDATE blocks SET conflicts = ? WHERE host = ? AND block_id = ?",
                     (json.dumps(sorted(set(conflicts))), host, block),
@@ -276,21 +302,26 @@ class ScriptBlockAssembler:
                          json.dumps(source, sort_keys=True, separators=(",", ":"), default=str)
                          if source is not None else None),
                     )
-                self._checkpoint()
+                self.db.execute("RELEASE script_part")
+                self._checkpoint(commit=False)
             except sqlite3.OperationalError as exc:
-                self.db.rollback()
+                if self.db.in_transaction:
+                    with contextlib.suppress(sqlite3.OperationalError):
+                        self.db.execute("ROLLBACK TO script_part")
+                        self.db.execute("RELEASE script_part")
                 self.refusal_reason = f"writing script-block reassembly state failed ({exc})"
                 if self.budget is not None:
                     self.budget.fail(self.refusal_reason)
                 self._note_refusal(self.refusal_reason)
                 output.append(self._partial(event, self.refusal_reason))
                 continue
-            numbers = [int(value) for value, in self.db.execute(
-                "SELECT number FROM parts WHERE host = ? AND block_id = ? ORDER BY number", (host, block),
-            )]
-            if (len(numbers) == stored_total
-                    and all(number == expected for expected, number in enumerate(numbers, 1))):
+            count, minimum, maximum = self.db.execute(
+                "SELECT count(*), min(number), max(number) FROM parts WHERE host = ? AND block_id = ?",
+                (host, block),
+            ).fetchone()
+            if count == stored_total and minimum == 1 and maximum == stored_total:
                 output.append(self._emit(host, block, complete=True))
+        self._checkpoint()
         return output
 
     def _emit(self, host: str, block: str, *, complete: bool) -> TypedEvent:
@@ -299,32 +330,49 @@ class ScriptBlockAssembler:
             (host, block),
         ).fetchone()
         base = TypedEvent.model_validate_json(base_json)
-        parts = [(int(number), str(text)) for number, text in self.db.execute(
-            "SELECT number, text FROM parts WHERE host = ? AND block_id = ? ORDER BY number", (host, block),
-        )]
+        chunks, numbers, part_ids, retained_parts = [], [], [], []
+        text_length = 0
+        for number, text, part_id in self.db.execute(
+            "SELECT number, text, event_id FROM parts WHERE host = ? AND block_id = ? ORDER BY number",
+            (host, block),
+        ):
+            numbers.append(int(number))
+            part_ids.append(part_id)
+            remaining = max(0, self.text_cap - text_length)
+            if remaining and text:
+                chunks.append(text[:remaining])
+                retained_parts.append(int(number))
+            text_length += len(text)
+        ref_count = self.db.execute(
+            "SELECT count(*) FROM refs WHERE host = ? AND block_id = ?", (host, block),
+        ).fetchone()[0]
+        ref_query = (
+            "SELECT number, target, native_id, digest FROM refs WHERE host = ? AND block_id = ? "
+            "ORDER BY number, target, native_id LIMIT ?"
+        )
+        if ref_count > SCRIPT_JOINED_REFS:
+            # One ref per part preserves citation coverage of the entire joined text. Extra shipper copies
+            # remain retrievable through the independently persisted fragment events.
+            ref_query = (
+                "SELECT number, target, native_id, digest FROM ("
+                "SELECT number, target, native_id, digest, row_number() OVER ("
+                "PARTITION BY number ORDER BY target, native_id) AS ordinal FROM refs "
+                "WHERE host = ? AND block_id = ?) WHERE ordinal = 1 ORDER BY number LIMIT ?"
+            )
         refs = [RawRef(target=target, native_id=native_id, digest=digest)
                 for _number, target, native_id, digest in self.db.execute(
-                    "SELECT number, target, native_id, digest FROM refs WHERE host = ? AND block_id = ? "
-                    "ORDER BY number, target, native_id", (host, block),
+                    ref_query, (host, block, SCRIPT_JOINED_REFS),
                 )]
-        emitted_sources = {
-            f"{target}/{native_id}": json.loads(source) if source is not None else None
-            for target, native_id, source in self.db.execute(
-                "SELECT target, native_id, source FROM refs WHERE host = ? AND block_id = ?",
-                (host, block),
-            )
-        }
-        joined = "".join(text for _number, text in parts)
-        truncated = len(joined) > self.text_cap
-        if truncated:
-            marker = _TRUNCATION_MARKER if self.text_cap > len(_TRUNCATION_MARKER) + 1 else "…"
-            remaining = max(0, self.text_cap - len(marker))
-            head = (remaining + 1) // 2
-            tail = remaining - head
-            first_text = parts[0][1]
-            last_text = parts[-1][1]
-            joined = first_text[:head] + marker + (last_text[-tail:] if tail else "")
+        for ref in refs[:SCRIPT_SOURCE_PAGE]:
+            source = self.db.execute(
+                "SELECT source FROM refs WHERE host = ? AND block_id = ? AND target = ? AND native_id = ?",
+                (host, block, ref.target, ref.native_id),
+            ).fetchone()[0]
+            self._emitted_sources[ref.key] = json.loads(source) if source is not None else None
+        joined = "".join(chunks)
+        truncated = text_length > self.text_cap
         result = base.model_copy(deep=True)
+        result.normalizer = WINDOWS_NORMALIZER
         if complete:
             # A block becomes evaluable only when its final required part has arrived. Using that completion
             # instant keeps stateful rules monotonic across source partitions; end-of-sweep incomplete blocks
@@ -332,41 +380,48 @@ class ScriptBlockAssembler:
             result.ts = datetime.fromisoformat(str(latest_ts))
         text_origin = (result.fields.get("script.text") or result.fields["event.code"]).origin
         result.fields["script.text"] = fv(joined, text_origin + "#reassembled:message-order")
-        result.fields["script.part_count"] = fv(len(parts), text_origin + "#reassembled:part-count")
-        present = {number for number, _text in parts}
+        result.fields["script.part_count"] = fv(len(numbers), text_origin + "#reassembled:part-count")
+        result.fields["script.part_event_ids"] = fv(
+            part_ids if int(total) > 1 or truncated else [], text_origin + "#reassembled:part-citations",
+        )
+        present = set(numbers)
         missing = [number for number in range(1, int(total) + 1) if number not in present]
         conflicts = json.loads(conflicts_json)
         result.fields["script.complete"] = fv(
-            complete and not missing and not conflicts,
+            complete and not missing and not conflicts and not truncated,
             text_origin + "#reassembled:completeness",
         )
         result.fields["script.missing_parts"] = fv(missing, text_origin + "#reassembled:missing-parts")
         result.fields["script.truncated"] = fv(truncated, text_origin + "#reassembled:text-cap")
         if truncated:
             result.fields["script.retained_parts"] = fv(
-                sorted({parts[0][0], parts[-1][0]}), text_origin + "#reassembled:text-cap",
+                retained_parts, text_origin + "#reassembled:text-cap",
             )
         result.fields.pop("script.message_number", None)
         result.fields.pop("script.message_total", None)
         result.raw = refs
         result.id = event_id("script_block", refs, WINDOWS_NORMALIZER)
+        if truncated and len(numbers) == 1:
+            result.id += "-joined"
         result.caveats.extend(conflicts)
         for conflict in conflicts:
             self._note_partial("PowerShell script-block reassembly conflict: " + conflict)
         if missing:
             result.caveats.append("script block incomplete; missing parts " + ", ".join(map(str, missing)))
         if truncated:
-            result.caveats.append(
-                f"script block joined text capped at {self.text_cap} characters; first and last text retained"
+            reason = (
+                f"script block joined text capped at {self.text_cap} characters; ordered prefix retained; "
+                "every fragment is evaluated separately and cited by script.part_event_ids; "
+                "cross-part matches beyond the prefix are unresolved"
             )
-        self._emitted_sources.update(emitted_sources)
+            result.caveats.append(reason)
+            self._note_partial(reason)
         self.db.execute("UPDATE parts SET text = '' WHERE host = ? AND block_id = ?", (host, block))
         self.db.execute("DELETE FROM refs WHERE host = ? AND block_id = ?", (host, block))
         self.db.execute(
             "UPDATE blocks SET emitted = 1, base_event = '', conflicts = '[]' "
             "WHERE host = ? AND block_id = ?", (host, block),
         )
-        self._checkpoint()
         return result
 
     def finalize(self) -> Iterator[TypedEvent]:
@@ -390,7 +445,9 @@ class ScriptBlockAssembler:
                 return
             for host, block in keys:
                 after = (str(host), str(block))
-                yield self._emit(host, block, complete=False)
+                event = self._emit(host, block, complete=False)
+                self._checkpoint()
+                yield event
 
     def sources_for(self, events: list[TypedEvent]) -> dict[str, dict]:
         keys = {raw.key for event in events for raw in event.raw}
@@ -407,12 +464,14 @@ class ScriptBlockAssembler:
                 sources[key] = source
         if not unresolved:
             return sources
-        for target, native_id, source in self.db.execute(
-            "SELECT target, native_id, source FROM refs WHERE source IS NOT NULL",
-        ):
-            key = f"{target}/{native_id}"
-            if key in unresolved:
-                sources[key] = json.loads(source)
+        for key in unresolved:
+            target, native_id = key.split("/", 1)
+            row = self.db.execute(
+                "SELECT source FROM refs WHERE target = ? AND native_id = ? AND source IS NOT NULL LIMIT 1",
+                (target, native_id),
+            ).fetchone()
+            if row:
+                sources[key] = json.loads(row[0])
         return sources
 
     def close(self) -> None:

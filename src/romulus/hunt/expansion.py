@@ -68,15 +68,16 @@ _WINDOWS_TIER_LINKS = {
     (tier, label): links for tier, links, label in WINDOWS_TIER_ADDITIONS
 }
 
-def _retain_smallest[T](mapping: dict[str, T], token: str, value: T, limit: int) -> bool:
+def _retain_smallest[T](mapping: dict[str, T], token: str, value: T, limit: int, *, rank=None) -> bool:
     """Keep the lexicographically first unique tokens in fixed space; return whether one fell outside it."""
     if token in mapping:
         return False
     if len(mapping) < limit:
         mapping[token] = value
         return False
-    largest = max(mapping)
-    if token < largest:
+    rank = rank or (lambda item, _value: item)
+    largest = max(mapping, key=lambda item: rank(item, mapping[item]))
+    if rank(token, value) < rank(largest, mapping[largest]):
         del mapping[largest]
         mapping[token] = value
     return True
@@ -436,12 +437,16 @@ class ExpansionEngine:
                 if windows_link:
                     overflow |= _retain_smallest(
                         keyed, token, value, MAX_ANCHOR_KEYS + WINDOWS_DROPPED_SCOPE_EXAMPLES,
+                        rank=lambda token, value: (abs(value[3] - _utc(anchor.ts)), token),
                     )
                 else:
                     keyed.setdefault(token, value)
         if not keyed:
             return [anchor], []
-        ordered = [keyed[token] for token in sorted(keyed)]
+        tokens = sorted(keyed, key=lambda token: (
+            (abs(keyed[token][3] - _utc(anchor.ts)), token) if windows_link else (timedelta(0), token)
+        ))
+        ordered = [keyed[token] for token in tokens]
         kept, dropped = ordered[:MAX_ANCHOR_KEYS], ordered[MAX_ANCHOR_KEYS:]
         if windows_link:
             variants = [
@@ -691,11 +696,14 @@ class ExpansionEngine:
                 value = (key, event, event_host, event_ts, window)
                 existing = scopes.get(token)
                 if existing is not None:
-                    if (event_ts, event.id) < (existing[3], existing[1].id):
+                    if (abs(event_ts - _utc(anchor.ts)), event_ts, event.id) < (
+                        abs(existing[3] - _utc(anchor.ts)), existing[3], existing[1].id,
+                    ):
                         scopes[token] = value
                     continue
                 overflow |= _retain_smallest(
                     scopes, token, value, limit,
+                    rank=lambda token, value: (abs(value[3] - _utc(anchor.ts)), token),
                 )
         if not saw_key:
             windows = {item.label: item for item in expansion_windows(anchor.ts, self.window)}
@@ -706,7 +714,7 @@ class ExpansionEngine:
                     window = None
             return ([(anchor, window)] if window is not None else []), None
 
-        ordered = [(token, scopes[token]) for token in sorted(scopes)]
+        ordered = sorted(scopes.items(), key=lambda item: (abs(item[1][3] - _utc(anchor.ts)), item[0]))
         kept, dropped = ordered[:MAX_ANCHOR_KEYS], ordered[MAX_ANCHOR_KEYS:]
         scoped = [
             (
@@ -722,7 +730,11 @@ class ExpansionEngine:
         ]
         if not dropped:
             return scoped, None
-        examples = [digest(token)[:16] for token, _scope in dropped]
+        examples = [{
+            "host": str(host)[:128],
+            "key": {name: str(value)[:128] for name, value in key.items()},
+            "window": window.model_dump(mode="json"),
+        } for _token, (key, _event, host, _ts, window) in dropped]
         return scoped, {
             "limit": MAX_ANCHOR_KEYS,
             "window_label": window_label,

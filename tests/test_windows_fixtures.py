@@ -36,7 +36,7 @@ _REPRESENTATIVE_FIELDS = {
     "pipe_event": ("pipe.name",),
     "wmi_subscription": ("wmi.name", "wmi.consumer"),
     "dns_lookup": ("dns.question.name",),
-    "script_block": ("script.text",),
+    "script_block": ("script.text", "script.engine_version"),
     "directory_access": ("directory.object.dn",),
     "directory_change": ("directory.object.dn",),
     "share_access": ("share.name",),
