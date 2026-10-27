@@ -169,8 +169,9 @@ class Settings(BaseModel):
 
     @model_validator(mode="after")
     def _site_networks(self):
-        # a carve-out must sit inside the internal set: checked once both lists are known
-        SiteNetworks.from_settings(self)
+        # a carve-out must sit inside the internal set: checked once both lists are known (the site file is
+        # validated where it is read, not while settings load)
+        SiteNetworks.from_lists(self.internal_networks, self.external_networks)
         return self
 
     @property

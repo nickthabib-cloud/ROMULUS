@@ -106,6 +106,14 @@ All settings live in `$ROMULUS_HOME/.env` (template: [`.env.example`](.env.examp
 - **Arkime and packets:** `ARKIME_URL`, credentials, `PCAP_ALLOWED_DIRS`, `TSHARK_BIN`
 - **Model (optional):** see below
 
+**Site facts** live in `$ROMULUS_HOME/site/collection.yaml`. A lead edits them on the web UI's **Site setup** page:
+
+- what each group of Windows hosts collects (Sysmon event ids, audit policy subcategories, command lines in 4688, PowerShell script blocks, event log channels);
+- the domain controllers and directory-sync accounts;
+- the site's internal networks. These can be set here or with `ROMULUS_INTERNAL_NETWORKS`/`ROMULUS_EXTERNAL_NETWORKS` in `.env`, but not both.
+
+Windows logs cannot show whether a kind of event was being recorded at all. Results therefore name the collection that was not attested, so analysts can see where the hunt was blind. ROMULUS reports what it finds; it never claims that nothing is there. Every change is validated and audited, and hunts record the file's digest. A stopped hunt cannot resume after the file changes; start a new hunt over its window instead.
+
 ## AI investigating agent (In progress)
 
 After the deterministic hunt, an AI agent will read everything ROMULUS found, form hypotheses about what the attacker did, follow leads through typed, read-only pivots, and open the report with a cited **AI assessment**, labelled as AI-generated and unconfirmed. It can add findings (marked as agent findings), but it can never hide, close or demote anything the deterministic layer found.

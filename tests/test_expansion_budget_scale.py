@@ -8,10 +8,16 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from romulus.config import Settings
+from romulus.evidence.typed import fv
 from romulus.hunt import run as hunt_run
-from romulus.hunt.expansion import PER_ANCHOR_SOURCE_QUERIES, RESERVED_REASON, ExpansionEngine
-from romulus.hunt.expansion_plan import TIER_PLAN
-from tests.test_expansion_engine import T0, WINDOW, add_anchor, repo_with_anchor, stable_state
+from romulus.hunt.expansion import (
+    PER_ANCHOR_SOURCE_QUERIES,
+    RESERVED_REASON,
+    WINDOWS_PER_ANCHOR_SOURCE_QUERIES,
+    ExpansionEngine,
+)
+from romulus.hunt.expansion_plan import TIER_PLAN, WINDOWS_TIER_ADDITIONS
+from tests.test_expansion_engine import T0, WINDOW, add_anchor, event, repo_with_anchor, stable_state
 from tests.test_expansion_lane_budget import SteadyFetcher, set_lane
 
 LINKS_PER_ANCHOR = sum(len(link_types) for _tier, link_types, _label in TIER_PLAN)
@@ -47,6 +53,46 @@ def test_every_anchor_runs_its_whole_plan_while_the_shares_are_below_the_ceiling
     assert all(len(links) == LINKS_PER_ANCHOR for links in served.values())   # T4 and the wide windows included
     assert summary["source_queries"] == 40 * LINKS_PER_ANCHOR * 2
     assert not any("budget" in reason for row in repo.expansion_anchors("h1") for reason in row["reasons"])
+
+
+def test_default_share_covers_the_complete_windows_plan_without_changing_the_linux_share():
+    repo = repo_with_anchor()
+    windows_event = event("windows-anchor").model_copy(update={
+        "normalizer": "windows-ecs@3",
+        "fields": {
+            **event("windows-anchor").fields,
+            "host.os.family": fv("windows", "windows-anchor:host.os.family"),
+        },
+    })
+    repo.save_evidence("h1", [windows_event], {}, None)
+    from romulus.store import schema as tables
+    with repo.engine.begin() as connection:
+        connection.execute(tables.candidate.update().where(
+            tables.candidate.c.id == "F-anchor",
+        ).values(event_ids=[windows_event.id], ts=windows_event.ts))
+
+    class FourQueryFetcher(SteadyFetcher):
+        def fetch(self, anchor, link_type, window, *, query_cap=None):
+            assert query_cap is not None and query_cap >= 4
+            result = super().fetch(anchor, link_type, window, query_cap=query_cap)
+            self.executor.source_queries += 2
+            for _ in range(2):
+                self.repo.record_task_source_query(result.task_ids[0])
+            result.query_spend = 4
+            return result
+
+    fetcher = FourQueryFetcher(repo)
+    summary = ExpansionEngine(
+        repo, "h1", WINDOW, fetcher, max_source_queries=10_000,
+        per_anchor_source_queries=PER_ANCHOR_SOURCE_QUERIES,
+    ).run()
+
+    windows_links = sum(len(link_types) for _tier, link_types, _label in WINDOWS_TIER_ADDITIONS)
+    assert len(fetcher.calls) == LINKS_PER_ANCHOR + windows_links
+    assert summary["source_queries"] == WINDOWS_PER_ANCHOR_SOURCE_QUERIES
+    assert summary["budget"]["per_anchor_source_queries"] == PER_ANCHOR_SOURCE_QUERIES
+    assert summary["budget"]["source_query_budget"] == WINDOWS_PER_ANCHOR_SOURCE_QUERIES
+    assert repo.expansion_anchors("h1")[0]["status"] == "expanded_complete"
 
 
 def test_the_same_anchors_under_a_fixed_total_stop_in_the_narrow_tiers():

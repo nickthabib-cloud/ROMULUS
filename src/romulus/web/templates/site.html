@@ -1,0 +1,134 @@
+{% extends "base.html" %}
+{% block title %}Site setup · ROMULUS{% endblock %}
+{% block content %}
+<h1>Site setup</h1>
+<p class="help">What this site collects, its domain controllers and directory sync accounts, and its internal networks.
+  ROMULUS reports a Windows rule as "no match" only where the collection that rule needs is attested here; anywhere
+  else the result says what was not attested. Saved to <span class="mono">site/collection.yaml</span> on the server,
+  which stays the source of truth (saving rewrites it in canonical form, so hand-written comments are not kept;
+  the previous version is kept as <span class="mono">collection.yaml.prev</span>).</p>
+
+{% if saved %}<p class="ok" role="status">Saved. New hunts use these facts.</p>{% endif %}
+{% if error %}<p class="err" role="alert"><b>Not saved.</b> {{ error }}</p>{% endif %}
+{% if running %}
+<p class="warn">Hunts running now ({{ running | join(', ') }}) keep the facts they started with. After a change, a
+  stopped hunt that recorded the old facts cannot be resumed; start a new hunt over its window instead.</p>
+{% else %}
+<p class="help">A hunt records these facts when it starts. After a change, a stopped hunt that recorded the old facts
+  cannot be resumed; start a new hunt over its window instead.</p>
+{% endif %}
+
+<form method="post" action="/site" class="site-form">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="digest" value="{{ digest }}">
+  {% set total = form.groups | length + 1 %}
+  <input type="hidden" name="group_count" value="{{ total }}">
+
+  <h2>Windows collection, by host group</h2>
+  <p class="help">Hosts are names or patterns (<span class="mono">ws-*</span>, <span class="mono">dc01</span>), one
+    per line, or <span class="mono">all</span>. A host uses the groups that name it, or the <span class="mono">all</span>
+    group when none does; when several groups name it, each must attest a fact for it to count.</p>
+  {% for g in form.groups + [None] %}
+  {% set i = loop.index0 %}{% set new = g is none %}
+  {% set g = g or {"hosts": "", "sysmon_installed": false, "sysmon_ids": [], "sysmon_other": "", "command_line": false,
+     "script_block": false, "audit": {}, "audit_extra": [], "channels": [], "channels_other": ""} %}
+  <fieldset class="card group">
+    <legend>{% if new %}Add a host group{% else %}Host group {{ i + 1 }}{% endif %}</legend>
+    {% if new %}<input type="hidden" name="g{{ i }}.new" value="1">{% endif %}
+    <label>Hosts<textarea name="g{{ i }}.hosts" rows="2" class="mono"
+      {% if new %}placeholder="Leave empty to add no group"{% endif %}>{{ g.hosts }}</textarea></label>
+    {% if not new %}<label class="check"><input type="checkbox" name="g{{ i }}.remove" value="1"> Remove this group</label>{% endif %}
+
+    <div class="two">
+      <div>
+        <h3>Sysmon</h3>
+        <label class="check"><input type="checkbox" name="g{{ i }}.sysmon_installed" value="1"
+          {% if g.sysmon_installed %}checked{% endif %}> Sysmon is installed</label>
+        <p class="help small">Event ids its configuration emits and that are shipped:</p>
+        <div class="checks">
+        {% for eid in form.known_sysmon_ids %}
+          <label class="check"><input type="checkbox" name="g{{ i }}.sysmon_ids" value="{{ eid }}"
+            {% if eid in g.sysmon_ids %}checked{% endif %}> {{ eid }}</label>
+        {% endfor %}
+        </div>
+        <label>Other Sysmon event ids<input name="g{{ i }}.sysmon_other" value="{{ g.sysmon_other }}" class="mono"
+          placeholder="for example 7, 10"></label>
+
+        <h3>Process and script logging</h3>
+        <label class="check"><input type="checkbox" name="g{{ i }}.command_line" value="1"
+          {% if g.command_line %}checked{% endif %}> Security 4688 includes the command line</label>
+        <label class="check"><input type="checkbox" name="g{{ i }}.script_block" value="1"
+          {% if g.script_block %}checked{% endif %}> PowerShell script block logging is on</label>
+
+        <h3>Event log channels collected</h3>
+        <div class="checks">
+        {% for channel in form.known_channels %}
+          <label class="check"><input type="checkbox" name="g{{ i }}.channels" value="{{ channel }}"
+            {% if channel | lower in g.channels %}checked{% endif %}> {{ channel }}</label>
+        {% endfor %}
+        </div>
+        <label>Other channels (one per line)<textarea name="g{{ i }}.channels_other" rows="2"
+          class="mono">{{ g.channels_other }}</textarea></label>
+      </div>
+      <div>
+        <h3>Audit policy</h3>
+        <table class="grid small">
+          <thead><tr><th>Subcategory</th><th>Audited</th></tr></thead>
+          <tbody>
+          {% for name in form.known_audit %}
+          {% set setting = g.audit.get(name, '') %}
+          <tr><td>{{ name }}</td><td>
+            <select name="g{{ i }}.audit.{{ loop.index0 }}" aria-label="{{ name }}">
+              <option value="" {% if not setting %}selected{% endif %}>not attested</option>
+              {% for option in form.audit_settings %}
+              <option value="{{ option }}" {% if setting == option %}selected{% endif %}>{{ option }}</option>
+              {% endfor %}
+            </select></td></tr>
+          {% endfor %}
+          {% for name, setting in g.audit_extra %}
+          <tr><td><input type="hidden" name="g{{ i }}.audit_extra_name" value="{{ name }}">{{ name }}</td><td>
+            <select name="g{{ i }}.audit_extra_setting" aria-label="{{ name }}">
+              <option value="">not attested</option>
+              {% for option in form.audit_settings %}
+              <option value="{{ option }}" {% if setting == option %}selected{% endif %}>{{ option }}</option>
+              {% endfor %}
+            </select></td></tr>
+          {% endfor %}
+          <tr><td><input name="g{{ i }}.audit_new_name" placeholder="Another subcategory" aria-label="Another subcategory"></td>
+            <td><select name="g{{ i }}.audit_new_setting" aria-label="Its setting">
+              <option value="">not attested</option>
+              {% for option in form.audit_settings %}<option value="{{ option }}">{{ option }}</option>{% endfor %}
+            </select></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </fieldset>
+  {% endfor %}
+
+  <h2>Active Directory</h2>
+  <div class="two">
+    <label>Domain controllers (host names, one per line)<textarea name="domain_controllers" rows="4"
+      class="mono">{{ form.domain_controllers }}</textarea></label>
+    <label>Directory sync accounts (SIDs or <span class="mono">DOMAIN\name</span>, one per line)<textarea
+      name="directory_sync_accounts" rows="4" class="mono">{{ form.directory_sync_accounts }}</textarea></label>
+  </div>
+  <p class="help">Rules about directory replication need both lists; without them they report "not configured".</p>
+
+  <h2>Internal networks</h2>
+  <p class="help">Now in use: {{ networks }}</p>
+  {% if env_networks %}
+  <p class="warn">This server also sets <span class="mono">ROMULUS_INTERNAL_NETWORKS</span> or
+    <span class="mono">ROMULUS_EXTERNAL_NETWORKS</span>. Set the networks in one place only: leave these boxes empty,
+    or remove those settings from the server's <span class="mono">.env</span> first.</p>
+  {% endif %}
+  <div class="two">
+    <label>The site's own ranges (CIDR, one per line)<textarea name="internal_networks" rows="4"
+      class="mono">{{ form.internal_networks }}</textarea></label>
+    <label>Carve-outs: parts of those ranges that are outside the site, such as partner or VPN ranges<textarea
+      name="external_networks" rows="4" class="mono">{{ form.external_networks }}</textarea></label>
+  </div>
+
+  <p><button type="submit">Save</button> <a href="/site">Discard changes</a></p>
+</form>
+{% endblock %}

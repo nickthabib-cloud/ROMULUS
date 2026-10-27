@@ -126,6 +126,17 @@ class SiteNetworks:
 
     @classmethod
     def from_settings(cls, settings) -> SiteNetworks:
+        """The definition from the site file when it names one, else from the environment settings. Setting it in
+        both places is refused rather than resolved: either answer could silently disagree with the other."""
+        from romulus.site import COLLECTION_PATH, load_site_facts
+
+        site = load_site_facts(settings.home)
+        if site.internal_networks:
+            if settings.internal_networks or settings.external_networks:
+                raise ValueError(
+                    f"internal networks are set both in {COLLECTION_PATH.as_posix()} and in {INTERNAL_SETTING}/"
+                    f"{EXTERNAL_SETTING}; keep one (the Site setup page edits the site file)")
+            return cls.from_lists(site.internal_networks, site.external_networks)
         return cls.from_lists(settings.internal_networks, settings.external_networks)
 
     @classmethod

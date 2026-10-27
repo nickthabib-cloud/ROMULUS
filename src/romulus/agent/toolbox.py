@@ -151,7 +151,8 @@ class FollowLinkArgs(_Args):
     anchor: AliasArg
     link_type: Literal[
         "process_lineage", "login_session", "network_flow", "flow_host_side",
-        "source_ip", "account", "host_after_anchor",
+        "source_ip", "account", "host_after_anchor", "process_activity",
+        "process_session", "kerberos_logon", "remote_logon_source", "service_process",
     ]
     window: Literal["anchor ±5 min", "anchor ±30 min", "anchor ±2 h"] | None = None
     page: int = Field(default=1, ge=1)

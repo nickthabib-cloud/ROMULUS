@@ -73,6 +73,50 @@ def test_contains_escapes_wildcard_metacharacters():
     assert wc["value"] == r"*a\*b\?*" and wc["case_insensitive"] is True
 
 
+def test_windows_event_class_identity_is_retrieved_case_insensitively():
+    contract = contract_from_types(
+        "idx",
+        {
+            "@timestamp": "date",
+            "winlog.channel": "keyword",
+            "winlog.provider_name": "keyword",
+            "winlog.event_id": "long",
+        },
+    )
+    query = compile_es(
+        SearchIntent(
+            kind="raw",
+            target="idx",
+            window=W,
+            any_of=[[
+                Predicate(field="event.channel", op="eq", value="Security"),
+                Predicate(
+                    field="event.provider",
+                    op="eq",
+                    value="Microsoft-Windows-Security-Auditing",
+                ),
+                Predicate(field="event.code", op="eq", value=4769),
+            ]],
+        ),
+        contract,
+    )
+
+    [group] = query.body["query"]["bool"]["should"]
+    channel, provider, event_id = group["bool"]["filter"]
+    assert channel == {
+        "wildcard": {"winlog.channel": {"value": "Security", "case_insensitive": True}}
+    }
+    assert provider == {
+        "wildcard": {
+            "winlog.provider_name": {
+                "value": "Microsoft-Windows-Security-Auditing",
+                "case_insensitive": True,
+            }
+        }
+    }
+    assert event_id == {"term": {"winlog.event_id": 4769}}
+
+
 def test_window_is_half_open_utc():
     q = compile_es(SearchIntent(kind="raw", target="idx", window=W), C)
     rng = q.body["query"]["bool"]["filter"][0]["range"]["@timestamp"]
@@ -221,6 +265,121 @@ def test_raw_retrieval_complete_only_when_everything_fetched():
     # max_records=2 caps below total=3 -> partial with explicit reason
     assert out.completeness == Completeness.partial
     assert any(r.startswith("cap:") for r in out.reasons)
+
+
+def test_aggregate_retrieval_stops_at_its_bucket_cap_and_is_explicitly_partial():
+    class AggregateClient:
+        settings = type("Settings", (), {"es_flavor": "elasticsearch"})()
+        version = "test"
+
+        def __init__(self):
+            self.calls = 0
+
+        def search(self, _target, body):
+            self.calls += 1
+            composite = body["aggs"]["g"]["composite"]
+            after = (composite.get("after") or {}).get("host.name", "")
+            keys = [key for key in ("a", "b", "c", "d") if key > after]
+            page = keys[:composite["size"]]
+            buckets = [{
+                "key": {"host.name": key},
+                "doc_count": 1,
+                "first": {"value_as_string": W.start.isoformat()},
+                "last": {"value_as_string": W.start.isoformat()},
+            } for key in page]
+            return {
+                "timed_out": False,
+                "_shards": {"failed": 0},
+                "hits": {"total": {"value": 4, "relation": "eq"}},
+                "aggregations": {"g": {
+                    "buckets": buckets,
+                    **({"after_key": {"host.name": page[-1]}} if page else {}),
+                }},
+            }
+
+    client = AggregateClient()
+    out = execute(
+        client,
+        SearchIntent(kind="aggregate", target="idx", window=W, group_by=["host.name"], max_records=2),
+        C,
+    )
+
+    assert client.calls == 1
+    assert out.returned == 2
+    assert out.completeness == Completeness.partial
+    assert out.reasons == ["aggregate_bucket_cap:2"]
+
+
+def test_aggregate_retrieval_shrinks_the_last_composite_page_to_its_remaining_cap():
+    class AggregateClient:
+        settings = type("Settings", (), {"es_flavor": "elasticsearch"})()
+        version = "test"
+
+        def __init__(self):
+            self.page_sizes = []
+
+        def search(self, _target, body):
+            composite = body["aggs"]["g"]["composite"]
+            self.page_sizes.append(composite["size"])
+            start = int((composite.get("after") or {"destination.port": -1})["destination.port"]) + 1
+            stop = min(start + composite["size"], 2_000)
+            page = list(range(start, stop))
+            return {
+                "timed_out": False,
+                "_shards": {"failed": 0},
+                "hits": {"total": {"value": 2_000, "relation": "eq"}},
+                "aggregations": {"g": {
+                    "buckets": [{
+                        "key": {"destination.port": key}, "doc_count": 1,
+                        "first": {"value_as_string": W.start.isoformat()},
+                        "last": {"value_as_string": W.start.isoformat()},
+                    } for key in page],
+                    **({"after_key": {"destination.port": page[-1]}} if page else {}),
+                }},
+            }
+
+    client = AggregateClient()
+    out = execute(
+        client,
+        SearchIntent(
+            kind="aggregate", target="idx", window=W,
+            group_by=["destination.port"], max_records=1_500,
+        ),
+        C,
+    )
+
+    assert client.page_sizes == [1_000, 500]
+    assert out.returned == 1_500
+    assert out.completeness == Completeness.partial
+    assert out.reasons == ["aggregate_bucket_cap:1500"]
+
+
+def test_aggregate_lower_bound_total_is_explicitly_partial():
+    class AggregateClient:
+        settings = type("Settings", (), {"es_flavor": "elasticsearch"})()
+        version = "test"
+
+        @staticmethod
+        def search(_target, _body):
+            return {
+                "timed_out": False,
+                "_shards": {"failed": 0},
+                "hits": {"total": {"value": 1, "relation": "gte"}},
+                "aggregations": {"g": {"buckets": [{
+                    "key": {"host.name": "a"}, "doc_count": 1,
+                    "first": {"value_as_string": W.start.isoformat()},
+                    "last": {"value_as_string": W.start.isoformat()},
+                }]}},
+            }
+
+    out = execute(
+        AggregateClient(),
+        SearchIntent(kind="aggregate", target="idx", window=W, group_by=["host.name"]),
+        C,
+    )
+
+    assert out.completeness == Completeness.partial
+    assert out.reasons == ["total_relation:gte"]
 
 
 def test_raw_retrieval_stops_at_physical_page_and_deadline_budgets():

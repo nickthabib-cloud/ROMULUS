@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import shutil
+import stat
+import tempfile
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from pathlib import Path
@@ -15,6 +21,8 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_
 
 COLLECTION_SCHEMA = "romulus-site-collection@1"
 COLLECTION_PATH = Path("site") / "collection.yaml"
+# Far above any real site's facts (host globs, lists of DCs, accounts and ranges); bounds what is read and audited.
+MAX_SITE_BYTES = 1_048_576
 _HOST_GLOB = re.compile(r"^[a-z0-9*?](?:[a-z0-9._*?-]*[a-z0-9*?])?$")
 _SID = re.compile(r"^s-\d+(?:-\d+)+$", re.IGNORECASE)
 _ACCOUNT = re.compile(r"^[^\\/\s]+\\[^\\/\r\n]+$")
@@ -93,6 +101,17 @@ class SysmonFacts(BaseModel):
         return self
 
 
+# The named channel facts predate the generic list; each is the same attestation as listing its channel.
+_CHANNEL_NAMES = {
+    "security_event_log": "Security",
+    "system_event_log": "System",
+    "defender_operational": "Microsoft-Windows-Windows Defender/Operational",
+    "task_scheduler_operational": "Microsoft-Windows-TaskScheduler/Operational",
+}
+_CHANNEL_FACTS = {fact: channel.casefold() for fact, channel in _CHANNEL_NAMES.items()}
+_MAX_CHANNEL_NAME = 255
+
+
 class CollectionGroup(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -105,6 +124,34 @@ class CollectionGroup(BaseModel):
     task_scheduler_operational: StrictBool = False
     security_event_log: StrictBool = False
     system_event_log: StrictBool = False
+    # Event log channels collected and shipped for these hosts, by their Windows channel name.
+    event_channels: tuple[str, ...] = ()
+
+    @model_validator(mode="before")
+    @classmethod
+    def _one_canonical_form(cls, value):
+        """Write each fact one way, so equal attestations have one digest however they were written: a named
+        channel fact becomes its listed channel, and a Sysmon block that attests nothing is dropped."""
+        if not isinstance(value, dict):
+            return value
+        value = dict(value)
+        listed = value.get("event_channels", [])
+        if not isinstance(listed, (list, tuple)):
+            return value
+        channels = list(listed)
+        folded = {item.strip().casefold() for item in channels if isinstance(item, str)}
+        for fact, channel in _CHANNEL_NAMES.items():
+            if value.get(fact) is True:
+                if channel.casefold() not in folded:
+                    channels.append(channel)
+                    folded.add(channel.casefold())
+                value[fact] = False
+        if channels or "event_channels" in value:
+            value["event_channels"] = channels
+        sysmon = value.get("sysmon")
+        if isinstance(sysmon, dict) and sysmon.get("installed") is False and not sysmon.get("event_ids"):
+            value["sysmon"] = None
+        return value
 
     @field_validator("hosts", mode="before")
     @classmethod
@@ -117,6 +164,10 @@ class CollectionGroup(BaseModel):
             raise ValueError("hosts must be a non-empty list of host globs or the string 'all'")
         if any(not isinstance(item, str) for item in value):
             raise ValueError("host globs must be text")
+        if any(_canonical_host(item).casefold() == "all" for item in value):
+            # In a list, "all" would name one host called "all"; the catch-all is only ever `hosts: all`, so the
+            # two can never be confused (an editor showing either as the text "all" must not widen a group).
+            raise ValueError("'all' inside a host list is ambiguous: write hosts: all for every host")
         normalized = tuple(_host_glob(item) for item in value)
         if "*" in normalized:
             raise ValueError("catch-all host selector must use hosts: all")
@@ -138,6 +189,30 @@ class CollectionGroup(BaseModel):
             normalized[folded] = setting
         return normalized
 
+    @field_validator("event_channels", mode="before")
+    @classmethod
+    def _event_channels(cls, value):
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("event_channels must be a list of channel names")  # noqa: TRY004 - pydantic reports ValueError
+        normalized: dict[str, str] = {}
+        for item in value:
+            if not isinstance(item, str):
+                raise ValueError("event_channels entries must be text")  # noqa: TRY004 - pydantic reports ValueError
+            name = item.strip()
+            if not name or len(name) > _MAX_CHANNEL_NAME or any(ord(char) < 32 for char in name):
+                raise ValueError(f"invalid event channel name {item!r}")
+            if name.casefold() in normalized:
+                raise ValueError(f"duplicate event channel {name!r}")
+            normalized[name.casefold()] = name
+        # Windows channel names are case-insensitive: one spelling per channel keeps one digest per meaning.
+        return tuple(sorted(normalized))
+
+    def collects_channel(self, channel: str) -> bool:
+        folded = channel.strip().casefold()
+        if any(item.casefold() == folded for item in self.event_channels):
+            return True
+        return any(getattr(self, fact) and name == folded for fact, name in _CHANNEL_FACTS.items())
+
     def matches(self, host: str) -> bool:
         if self.hosts == "all":
             return True
@@ -153,6 +228,23 @@ class _SiteDocument(BaseModel):
     collection: tuple[CollectionGroup, ...] = ()
     domain_controllers: tuple[str, ...] = ()
     directory_sync_accounts: tuple[str, ...] = ()
+    # The site's internal-network definition, the same lists as ROMULUS_INTERNAL_NETWORKS and
+    # ROMULUS_EXTERNAL_NETWORKS; only one of the two places may set it.
+    internal_networks: tuple[str, ...] = ()
+    external_networks: tuple[str, ...] = ()
+
+    @field_validator("internal_networks", "external_networks", mode="before")
+    @classmethod
+    def _network_lists(cls, value, info):
+        if not isinstance(value, (list, tuple)) or any(not isinstance(item, str) for item in value):
+            raise ValueError(f"{info.field_name} must be a list of CIDR networks")
+        from romulus.detect.netdef import parse_networks
+
+        parsed = parse_networks(value, info.field_name)
+        if len(set(parsed)) != len(parsed):
+            raise ValueError(f"{info.field_name} must not contain duplicates")
+        return tuple(str(network) for network in sorted(parsed, key=lambda n: (n.version, int(n.network_address),
+                                                                                n.prefixlen)))
 
     @field_validator("domain_controllers")
     @classmethod
@@ -171,10 +263,12 @@ class _SiteDocument(BaseModel):
     def _directory_sync_accounts(cls, value):
         if any(not isinstance(item, str) for item in value):
             raise ValueError("directory_sync_accounts entries must be text")
-        normalized = tuple(canonical_account(item) for item in value)
-        if len(set(normalized)) != len(normalized):
+        keys = [canonical_account(item) for item in value]
+        if len(set(keys)) != len(keys):
             raise ValueError("directory_sync_accounts must not contain duplicates")
-        return normalized
+        # The document keeps a form the loader accepts again; SiteFacts holds the comparison keys.
+        return tuple(key.removeprefix("sid:").upper() if key.startswith("sid:") else key.removeprefix("name:")
+                     for key in keys)
 
     @model_validator(mode="after")
     def _unique_groups(self):
@@ -187,6 +281,18 @@ class _SiteDocument(BaseModel):
             selectors.update(group_selectors)
         return self
 
+    @model_validator(mode="after")
+    def _networks_define_a_site(self):
+        if self.external_networks and not self.internal_networks:
+            # Carve-outs alone do not say where the site is; the environment settings allow it only because
+            # the default ranges stand in, and a site file that names carve-outs should name the site too.
+            raise ValueError("external_networks needs internal_networks: a carve-out is part of an internal range")
+        if self.internal_networks:
+            from romulus.detect.netdef import SiteNetworks
+
+            SiteNetworks.from_lists(self.internal_networks, self.external_networks)
+        return self
+
 
 @dataclass(frozen=True)
 class SiteFacts:
@@ -196,6 +302,8 @@ class SiteFacts:
     groups: tuple[CollectionGroup, ...]
     domain_controllers: tuple[str, ...]
     directory_sync_accounts: tuple[str, ...]
+    internal_networks: tuple[str, ...] = ()
+    external_networks: tuple[str, ...] = ()
 
     def _groups_for(self, host: str) -> tuple[CollectionGroup, ...]:
         matches = tuple(group for group in self.groups if group.hosts != "all" and group.matches(host))
@@ -211,6 +319,7 @@ class SiteFacts:
         event_id: int | None = None,
         subcategory: str | None = None,
         outcome: Literal["success", "failure"] | None = None,
+        channel: str | None = None,
     ) -> bool:
         """Conservatively require every equally specific matching group to attest the requested fact."""
         groups = self._groups_for(host)
@@ -225,14 +334,11 @@ class SiteFacts:
             elif fact == "audit_policy":
                 setting = group.audit_policy.get((subcategory or "").casefold())
                 values.append(setting == "both" or setting == outcome)
-            elif fact in {
-                "security_4688_command_line",
-                "powershell_script_block",
-                "defender_operational",
-                "task_scheduler_operational",
-                "security_event_log",
-                "system_event_log",
-            }:
+            elif fact == "event_channel":
+                values.append(bool(channel) and group.collects_channel(channel))
+            elif fact in _CHANNEL_FACTS:
+                values.append(group.collects_channel(_CHANNEL_FACTS[fact]))
+            elif fact in {"security_4688_command_line", "powershell_script_block"}:
                 values.append(bool(getattr(group, fact)))
             else:
                 return False
@@ -258,22 +364,21 @@ def absent_site_facts() -> SiteFacts:
     return _absent()
 
 
-def load_site_facts(home: Path) -> SiteFacts:
-    path = Path(home) / COLLECTION_PATH
-    if not path.exists():
-        return _absent()
+def _validated(loaded: object) -> _SiteDocument:
     try:
-        loaded = yaml.load(path.read_text(encoding="utf-8-sig"), Loader=_UniqueKeyLoader)
         if not isinstance(loaded, dict):
             raise SiteValidationError("collection.yaml must contain one mapping")
-        document = _SiteDocument.model_validate(loaded)
+        return _SiteDocument.model_validate(loaded)
     except SiteValidationError:
         raise
-    except (OSError, yaml.YAMLError, ValueError) as exc:
+    except ValueError as exc:
         detail = str(exc)
         if "Extra inputs are not permitted" in detail:
             detail = f"unknown key: {detail}"
         raise SiteValidationError(f"invalid {COLLECTION_PATH.as_posix()}: {detail}") from exc
+
+
+def _facts(document: _SiteDocument) -> SiteFacts:
     content = document.model_dump(mode="json", by_alias=True)
     return SiteFacts(
         True,
@@ -281,8 +386,80 @@ def load_site_facts(home: Path) -> SiteFacts:
         content,
         document.collection,
         document.domain_controllers,
-        document.directory_sync_accounts,
+        tuple(canonical_account(item) for item in document.directory_sync_accounts),
+        document.internal_networks,
+        document.external_networks,
     )
+
+
+def load_site_facts(home: Path) -> SiteFacts:
+    path = Path(home) / COLLECTION_PATH
+    if not path.exists():
+        return _absent()
+    try:
+        if path.stat().st_size > MAX_SITE_BYTES:
+            raise SiteValidationError(f"{COLLECTION_PATH.as_posix()} is larger than {MAX_SITE_BYTES} bytes")
+        loaded = yaml.load(path.read_text(encoding="utf-8-sig"), Loader=_UniqueKeyLoader)
+    except SiteValidationError:
+        raise
+    except (OSError, yaml.YAMLError) as exc:
+        raise SiteValidationError(f"invalid {COLLECTION_PATH.as_posix()}: {exc}") from exc
+    return _facts(_validated(loaded))
+
+
+def validate_site_content(content: dict) -> SiteFacts:
+    """The facts a proposed document would give, or SiteValidationError; nothing is written."""
+    return _facts(_validated(content))
+
+
+_SAVE_LOCK = threading.Lock()
+
+
+def save_site_facts(
+    home: Path,
+    content: dict,
+    expected_digest: str,
+    record: Callable[[SiteFacts, SiteFacts], None] | None = None,
+) -> tuple[SiteFacts, SiteFacts]:
+    """Validate `content` and replace the site file with its canonical form. `expected_digest` is the digest the
+    editor started from ("" for no file): a file changed since then is refused, never overwritten. A document equal
+    to the current one writes nothing. `record(before, after)` runs before the file is replaced, so a change that
+    cannot be recorded is not made. Returns the facts before and after. The previous file is kept beside it as
+    `collection.yaml.prev`."""
+    proposed = validate_site_content(content)
+    path = Path(home) / COLLECTION_PATH
+    with _SAVE_LOCK:
+        before = load_site_facts(home)
+        if before.digest != expected_digest:
+            raise SiteChangedError(
+                f"{COLLECTION_PATH.as_posix()} changed since this page was loaded; reload it and apply the change again"
+            )
+        if before.present and before.digest == proposed.digest:
+            return before, before
+        text = yaml.safe_dump(proposed.content, sort_keys=False, allow_unicode=True, default_flow_style=False)
+        if len(text.encode()) > MAX_SITE_BYTES:
+            raise SiteValidationError(f"the site file would be larger than {MAX_SITE_BYTES} bytes")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".collection-", suffix=".yaml")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            if path.exists():
+                os.chmod(temporary, stat.S_IMODE(path.stat().st_mode))
+                shutil.copy2(path, path.with_name(path.name + ".prev"))
+            if record is not None:
+                record(before, proposed)
+            # One rename: a reader sees the old file or the new one, never none.
+            os.replace(temporary, path)
+        except BaseException:
+            Path(temporary).unlink(missing_ok=True)
+            raise
+        after = load_site_facts(home)
+    if after.digest != proposed.digest:  # pragma: no cover - the written text must read back as itself
+        raise SiteValidationError("the saved site file does not read back as the validated document")
+    return before, after
 
 
 def ensure_site_unchanged(home: Path, recorded: dict | None) -> SiteFacts:

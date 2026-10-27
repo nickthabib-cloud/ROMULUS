@@ -58,6 +58,15 @@ details { background: var(--panel); border: 1px solid var(--line); border-radius
   background: var(--urgent); color: #fff; text-decoration: none; cursor: pointer; font: inherit; }
 .danger-zone { margin-top: 28px; }
 
+/* site setup */
+.site-form fieldset.group { margin: 12px 0; }
+.site-form legend { font-weight: 700; padding: 0 6px; }
+.site-form h3 { font-size: 13px; margin: 14px 0 4px; }
+label.check { display: flex; gap: 6px; align-items: center; margin: 4px 0; color: var(--ink); }
+label.check input { width: auto; }
+.checks { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 0 10px; }
+.site-form .checks label.check { overflow-wrap: anywhere; }
+
 /* attack-path timeline */
 .filters { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; margin: 10px 0; }
 .filters fieldset { border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; }
