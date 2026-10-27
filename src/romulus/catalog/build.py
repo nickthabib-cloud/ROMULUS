@@ -28,7 +28,7 @@ _STRENGTH_RANK = {
     CoverageStrength.NONE: 0,
     CoverageStrength.CONTEXT_ONLY: 1,
     CoverageStrength.POSITIVE_ONLY: 2,
-    CoverageStrength.NEGATIVE_CAPABLE: 3,
+    CoverageStrength.FULL_SEARCH: 3,
 }
 
 _ROOT = Path(__file__).resolve().parents[3]
@@ -56,7 +56,7 @@ def strength_for_rule(playbook: type) -> CoverageStrength:
     if kind == "context" or lane == "context":
         return CoverageStrength.CONTEXT_ONLY
     if bool(getattr(playbook, "assures_negative", True)):
-        return CoverageStrength.NEGATIVE_CAPABLE
+        return CoverageStrength.FULL_SEARCH
     return CoverageStrength.POSITIVE_ONLY
 
 

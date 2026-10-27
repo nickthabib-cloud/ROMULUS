@@ -68,13 +68,13 @@ def test_catalog_export_explains_strength_and_labels_each_covering_rule():
     assert document["technique_strength_policy"] == (
         "A technique's strength is the strongest strength among its active covering rules."
     )
-    assert document["coverage_strength_legend"]["negative-capable"] == (
-        "A covering rule can report a complete negative for its own predicate when runtime "
-        "coverage is complete; this never means the ATT&CK technique is absent."
+    assert document["coverage_strength_legend"]["full-search"] == (
+        "A covering rule reads fields that record every occurrence it looks for, so a hunt reports "
+        "'searched in full' when every partition in scope was evaluated. That is a statement about the "
+        "search, never that the ATT&CK technique is absent."
     )
     assert document["coverage_strength_legend"]["context-only"] == (
-        "A covering rule can provide investigation context, but it cannot support a complete "
-        "negative."
+        "A covering rule provides investigation context around other findings."
     )
     assert web_protocols["covering_rules"] == [
         {"rule_id": "net.rare_client_fingerprint", "strength": "context-only"}
