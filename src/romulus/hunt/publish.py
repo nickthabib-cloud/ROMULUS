@@ -130,13 +130,22 @@ def mark_hypothesis_relation(match: Match, *, anchor_id: str, link_type: str,
     )
 
 
+def _view_preference(predicates, view_field):
+    quality = [item["value"] for item in predicates if item["field"] == "script.view_quality"
+               and isinstance(item["value"], int) and not isinstance(item["value"], bool)]
+    if quality:
+        return max(quality)
+    ranks = {"fragment": 0, "single": 1, "joined": 2}
+    return max((ranks.get(item["value"], -1) for item in predicates if item["field"] == view_field), default=-1)
+
+
 def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
                   task_id: str | None, raw_sources: dict[str, dict],
                   source_case_id: str | None = None, source_anchor_id: str | None = None,
                   source_link_id: str | None = None, context_reach: dict | None = None,
                   *, owner_token: str | None = None) -> dict | None:
-    """Persist cited evidence and publish a machine-decided candidate once. Direct (sweep) findings only;
-    context findings are published by the single post-expansion pass (romulus.hunt.context.finalize_context)."""
+    """Persist cited evidence and publish a machine-decided finding once, with stable script-view revisions.
+    Context findings are published by the post-expansion pass (romulus.hunt.context.finalize_context)."""
     decision = decide(match, hunt_id)
     if match.raw_copies:
         raw_sources = {**match.raw_copies, **raw_sources}
@@ -193,23 +202,30 @@ def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
         # This is an independently reportable, canonical script block observation, even if discovered by
         # expansion. Preserve its discovery reach without making a new raw-subject-owned expansion candidate.
         origin = ((existing_view or {}).get("gate_results") or {}).get("_evidence_view_origin")
-        if origin is None and any(value is not None for value in (source_case_id, source_anchor_id, source_link_id)):
-            origin = {"source_case_id": source_case_id, "source_anchor_id": source_anchor_id,
-                      "source_link_id": source_link_id}
-        if origin is not None:
-            row["gate_results"]["_evidence_view_origin"] = origin
-        row.update(source_case_id=None, source_anchor_id=None, source_link_id=None)
+        if origin is None:
+            first_discovery = existing_view if existing_view is not None else row
+            origin = {name: first_discovery.get(name)
+                      for name in ("source_case_id", "source_anchor_id", "source_link_id")}
+        row["gate_results"]["_evidence_view_origin"] = origin
+        if existing_view is not None:
+            # The first discovery owns this observation even when a sweep or a
+            # different investigator later supplies the preferred evidence view.
+            for name in ("source_case_id", "source_anchor_id", "source_link_id"):
+                row[name] = existing_view.get(name)
     if view_field and existing_view is not None:
         # The stable group identifies the same script regardless of which source/pivot supplied its view.
         # Fresh evaluator instances cannot remember the prior view, so compare its persisted predicate.
-        ranks = {"fragment": 0, "single": 1, "joined": 2}
-        old_rank = max((ranks.get(item["value"], -1) for item in existing_view["predicate_fields"]
-                        if item["field"] == view_field), default=-1)
-        new_rank = max((ranks.get(item.value, -1) for item in match.predicate if item.field == view_field), default=-1)
+        old_rank = _view_preference(existing_view["predicate_fields"], view_field)
+        new_rank = _view_preference(row["predicate_fields"], view_field)
         if new_rank <= old_rank:
+            retained = {**existing_view, "gate_results": {**existing_view["gate_results"],
+                "_evidence_view_origin": origin,
+                **({"_context_reaches": [context_reach]} if context_reach else {})}}
+            repo.revise_candidate(retained, "Additional discovery context for the retained script evidence view",
+                                  owner_token=owner_token, evidence_view=True)
             return None
         repo.revise_candidate(row, match.revision_reason or "A preferred evidence view replaces the prior citations",
-                              owner_token=owner_token)
+                              owner_token=owner_token, evidence_view=True)
         return None
     if match.revision_reason and source_case_id is None and source_anchor_id is None:
         # the corrected decision for a direct finding already published under this id: revised in place. A revision

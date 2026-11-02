@@ -18,7 +18,8 @@ from romulus.evidence.typed import fv
 from romulus.evidence.windows import normalize_windows
 from romulus.evidence.windows_catalog import SECURITY
 from romulus.site import SiteFacts, absent_site_facts
-from tests.windows_event_support import event, run
+from tests.test_windows_c_identity_review import event
+from tests.windows_event_support import run
 from tests.windows_fixtures import SHAPES, LogicalWindowsEvent, windows_hit
 
 REPLICATION = "1131f6ad-9c07-11d1-f79f-00c04fc2dcd2"
@@ -346,7 +347,7 @@ def test_wrong_os_or_event_class_never_matches(rule, code, data):
 
 def test_all_rule_metadata_attack_ids_and_assurance_are_valid():
     knowledge = load_attack_bundle()
-    assert len(WINDOWS_DIRECTORY_PLAYBOOKS) == 6
+    assert len(WINDOWS_DIRECTORY_PLAYBOOKS) == 7
     for rule in WINDOWS_DIRECTORY_PLAYBOOKS:
         assert rule.benign and rule.next_checks and rule.research and rule.windows_event_classes
         assert rule.assures_negative is False and rule.positive_only_reason and rule.card

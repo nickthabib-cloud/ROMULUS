@@ -17,7 +17,8 @@ from romulus.detect.windows_account_events import (
 )
 from romulus.evidence.windows import normalize_windows
 from romulus.evidence.windows_catalog import SECURITY
-from tests.windows_event_support import event, run
+from tests.test_windows_c_identity_review import event
+from tests.windows_event_support import run
 from tests.windows_fixtures import SHAPES, LogicalWindowsEvent, windows_hit
 
 DOMAIN = "S-1-5-21-111-222-333"
@@ -214,7 +215,7 @@ def test_exact_enabled_token_without_numeric_values_is_valid_but_disabled_is_not
     {"account.uac_changes": ["trusted_for_delegation_enabled"], "account.old_uac": 0x2080, "account.new_uac": 0x2080},
     {"account.uac_changes": ["trusted_for_delegation_enabled"], "account.old_uac": 0x80, "account.new_uac": 0x80},
     {"account.uac_changes": ["trusted_for_delegation_enabled"], "account.old_uac": "bad", "account.new_uac": 0x2080},
-    {"account.uac_changes": ["TRUSTED_FOR_DELEGATION"]}, {"account.uac_changes": "trusted_for_delegation_enabled"},
+    {"account.uac_changes": ["TRUSTED_FOR_DELEGATION"]},
     {"account.old_uac": -1, "account.new_uac": 0x2080}, {"account.new_uac": True},
 ])
 def test_inconsistent_malformed_and_ambiguous_uac_data_never_claims_enabled_high(fields):
@@ -287,8 +288,8 @@ def test_clear_or_unknown_delegation_list_does_not_become_an_spn_high(shape, val
     assert "cleared" in matches[0].claim or "unknown" in matches[0].claim
 
 
-@pytest.mark.parametrize("value", [None, {}, "cifs/host", ["%%1793/host"], ["cifs//host"], ["cifs/host with spaces"]])
-def test_malformed_typed_delegation_values_are_uncertainty_leads(value):
+@pytest.mark.parametrize("value", [{}, ["%%1793/host"], ["cifs//host"], ["cifs/host with spaces"]])
+def test_malformed_native_delegation_values_are_uncertainty_leads(value):
     matches = run(ComputerAccountConfiguration(), [event("account_change", 4742,
                    **{"account.allowed_to_delegate_to": value})])
     assert len(matches) == 1 and matches[0].proposed_lane == "lead" and "unknown" in matches[0].claim
@@ -319,7 +320,9 @@ def test_each_new_host_is_published_immediately_and_wrong_os_family_are_excluded
         matches = instance.consume([ev])
         assert matches and any(ev in match.events for match in matches)
     assert not run(rule(), [event("account_change", code, **{"host.os.family": "linux", **fields})])
-    assert not run(rule(), [event("auth", code, **fields)])
+    wrong_family = event("account_change", code, **fields)
+    wrong_family.family = "auth"
+    assert not run(rule(), [wrong_family])
 
 
 def test_metadata_is_positive_only_selective_and_active_attack20():

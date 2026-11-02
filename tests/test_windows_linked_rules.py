@@ -1,7 +1,7 @@
 """Windows link consumers cite actual GUID/session equality without inventing causality."""
 from romulus.detect.base import ContextAnchor, ContextLink
 from romulus.detect.windows_linked import WindowsKerberosLogonLink, WindowsProcessSessionLink
-from tests.windows_event_support import event
+from tests.windows_link_support import event
 
 GUID = "00112233-4455-6677-8899-aabbccddeeff"
 

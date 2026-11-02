@@ -582,18 +582,25 @@ def _investigations(repo: Repo, hunt_id: str, candidates: list[dict], agent: dic
     }
 
 
+def _discovery_origin(candidate: dict) -> dict:
+    """Older evidence-view rows kept discovery ownership in their gate metadata."""
+    origin = (candidate.get("gate_results") or {}).get("_evidence_view_origin") or {}
+    return {**candidate, **{name: candidate.get(name) if candidate.get(name) is not None else origin.get(name)
+                            for name in ("source_case_id", "source_anchor_id", "source_link_id")}}
+
+
 def investigations_for_hunt(repo: Repo, hunt_id: str) -> dict:
     """Shared live/report projection for every investigator summary renderer."""
     agent_audit = repo.latest_audit(hunt_id, "hunt.agent_summary")
     agent = agent_audit["detail"] if agent_audit else {"status": "unknown"}
-    return _investigations(repo, hunt_id, repo.candidates(hunt_id), agent)
+    return _investigations(repo, hunt_id, [_discovery_origin(row) for row in repo.candidates(hunt_id)], agent)
 
 
 def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
     h = repo.get_hunt(hunt_id)
     if h is None:
         raise KeyError(hunt_id)
-    cands = repo.candidates(hunt_id)
+    cands = [_discovery_origin(row) for row in repo.candidates(hunt_id)]
     cands.sort(key=lambda c: (LANE_ORDER.get(c["lane"], 9), -c["priority"], str(c["ts"])))
     findings = []
     for c in cands:

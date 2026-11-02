@@ -38,8 +38,8 @@ def make_engine(db_path: Path | str) -> Engine:
         cur.execute("PRAGMA synchronous=NORMAL")
         cur.execute("PRAGMA foreign_keys=ON")
         cur.execute("PRAGMA busy_timeout=30000")
-        # after a checkpoint, shrink the write-ahead log back to this size: one large transaction
-        # (deleting a big hunt) must not leave a gigabyte-sized log file behind
+        # SQLite applies this at the next WAL reset. A large final transaction can leave a larger file;
+        # explicit compaction checkpoints again after VACUUM to release that allocation immediately.
         cur.execute(f"PRAGMA journal_size_limit={WAL_SIZE_LIMIT}")
         cur.close()
 
@@ -66,14 +66,18 @@ def compact(engine: Engine) -> dict:
     VACUUM rewrites the file and blocks writers while it runs, so callers make sure no hunt is active."""
     before = space_report(engine)
     raw = engine.raw_connection()
+    dbapi = raw.driver_connection
+    isolation = dbapi.isolation_level
     try:
-        dbapi = raw.driver_connection
         dbapi.isolation_level = None
         dbapi.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         dbapi.execute("VACUUM")
         dbapi.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     finally:
-        raw.close()
+        try:
+            dbapi.isolation_level = isolation
+        finally:
+            raw.close()
     return {"before": before, "after": space_report(engine)}
 
 

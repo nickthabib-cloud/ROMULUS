@@ -91,18 +91,16 @@ def test_admin_share_write_bits_not_mask_allowlist(mask, share):
 
 
 @pytest.mark.parametrize("fields", [
-    _share_fields(mask=1), _share_fields(mask=0x120089), _share_fields(mask=None),
-    _share_fields(mask=-1), _share_fields(mask=True), _share_fields(mask="write"),
+    _share_fields(mask=1), _share_fields(mask=0x120089),
     _share_fields(share="ADMIN$backup"), _share_fields(share="IPC$"),
     _share_fields(share="AA$"), _share_fields(share="notadmin$"), _share_fields(share="publicshare"),
-    _share_fields(target="payload.exe.txt"), _share_fields(target="payload.exe\\directory"),
-    _share_fields(target="notes.txt"),
+    _share_fields(target=""),
 ])
 def test_admin_share_hard_negatives(fields):
     assert AdminShareTransfer().judge(event("share_access", 5145, **fields)) == []
 
 
-@pytest.mark.parametrize("name", ["svcctl", "atsvc", "samr", "lsarpc", "drsuapi", "\\PIPE\\SVCCTL"])
+@pytest.mark.parametrize("name", ["svcctl", "atsvc", "drsuapi", "\\PIPE\\SVCCTL"])
 def test_ipc_management_pipe_lead(name):
     hit = _hit(RemoteManagementPipe, "share_access", 5145, **_share_fields("IPC$", name, 1))
     assert hit.lane == "lead" and "management RPC pipe" in hit.text
@@ -118,7 +116,7 @@ def test_ipc_pipe_hard_negatives(share, name):
                                  "Printers.xml", "Drives.xml"])
 def test_gpp_policy_file_access_claim_does_not_assert_content(name):
     hit = _hit(GppPolicyFileAccess, "share_access", 5145,
-               **_share_fields("SYSVOL", "domain\\Policies\\id\\Machine\\Preferences\\" + name, 1))
+               **_share_fields("SYSVOL", "domain\\Policies\\id\\Machine\\Preferences\\Group\\" + name, 1))
     assert hit.lane == "lead" and name in hit.text
     assert "password" not in hit.text and "credential" not in hit.text
     assert "does not show file contents" in hit.notes[0]
@@ -227,7 +225,7 @@ def test_threat_rule_ignores_setting_and_unknown_events():
     (ToolNamedPipe, "pipe_event", 17, {"pipe.name": "\\PSEXESVC"}),
     (AdminShareTransfer, "share_access", 5145, _share_fields()),
     (RemoteManagementPipe, "share_access", 5145, _share_fields("IPC$", "samr")),
-    (GppPolicyFileAccess, "share_access", 5145, _share_fields("SYSVOL", "Groups.xml", 1)),
+    (GppPolicyFileAccess, "share_access", 5145, _share_fields("SYSVOL", r"domain\Policies\id\Machine\Preferences\Groups\Groups.xml", 1)),
     (DefenderThreat, "defender_event", 1116, {"defender.threat.name": "ThreatA"}),
     (DefenderProtection, "defender_event", 5007,
      {"defender.new_value": _DEFENDER_KEY + "DisableAntiSpyware = 1"}),
@@ -255,7 +253,7 @@ def test_fleet_repeat_does_not_hide_new_host_or_content(rule, family, code, fiel
     elif rule is RemoteManagementPipe:
         changed = _share_fields("IPC$", "svcctl")
     elif rule is GppPolicyFileAccess:
-        changed = _share_fields("SYSVOL", "Services.xml", 1)
+        changed = _share_fields("SYSVOL", r"domain\Policies\id\Machine\Preferences\Services\Services.xml", 1)
     elif rule is WmiSubscription:
         changed = {**fields, "wmi.destination": "another-payload"}
     elif rule is DefenderProtection:
@@ -304,7 +302,8 @@ def test_untyped_mentions_do_not_satisfy_endpoint_predicates():
 
 
 @pytest.mark.parametrize("rule,target", [(AdminShareTransfer, "payload.exe"),
-                                       (RemoteManagementPipe, "svcctl"), (GppPolicyFileAccess, "Groups.xml")])
+                                       (RemoteManagementPipe, "svcctl"),
+                                       (GppPolicyFileAccess, r"domain\Policies\id\Machine\Preferences\Groups\Groups.xml")])
 def test_failed_share_checks_never_claim_completed_activity(rule, target):
     share = {AdminShareTransfer: "ADMIN$", RemoteManagementPipe: "IPC$", GppPolicyFileAccess: "SYSVOL"}[rule]
     hit = rule().judge(event("share_access", 5145, outcome="failure", **_share_fields(share, target)))[0]

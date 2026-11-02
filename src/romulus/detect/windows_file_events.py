@@ -1,6 +1,7 @@
 """Recorded Windows file and resolver signals; content is never treated as execution."""
 from __future__ import annotations
 
+import json
 import ntpath
 import re
 
@@ -31,6 +32,10 @@ def executable_path(value):
     return ntpath.splitext(str(value or ""))[1].casefold() in EXECUTABLE_SUFFIXES
 
 
+def _content(event, fields=_FILE_FIELDS):
+    return json.dumps({name: event.get(name) for name in fields}, sort_keys=True, separators=(",", ":"))
+
+
 def startup_path(value):
     parts = components(ntpath.normpath(str(value or "")))
     marker = ("microsoft", "windows", "start menu", "programs", "startup")
@@ -51,7 +56,8 @@ def startup_path(value):
 
 class StartupFileWrite(WindowsEventRule):
     id = "win.startup_file_write"
-    title = "Executable or script file created in a Windows startup folder"
+    version = "2"
+    title = "File created in a Windows startup folder"
     families = ("file_change",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 11),)
     attack = ("T1547.001",)
@@ -61,17 +67,18 @@ class StartupFileWrite(WindowsEventRule):
 
     def judge(self, event):
         path = event.get("file.path_key") or event.get("file.path")
-        if event.get("event.code") != 11 or not executable_path(path) or not startup_path(path):
+        if event.get("event.code") != 11 or not startup_path(path):
             return []
         writer = event.get("process.executable")
         text = f"Windows recorded creation of startup artifact '{self.describe(path)}'"
         text += f" by '{self.describe(writer)}'" if writer else "; the writer image is unresolved"
-        return [signal(event, "startup_file", text, self.attack, _FILE_FIELDS)]
+        return [signal(event, "startup_file", text, self.attack, _FILE_FIELDS, content=_content(event))]
 
 
 class LureApplicationFileWrite(WindowsEventRule):
     id = "win.lure_application_file_write"
-    title = "Office or browser process wrote an executable or script in a user-writable directory"
+    version = "2"
+    title = "Office or browser process wrote a file in a user-writable directory"
     families = ("file_change",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 11),)
     attack = ("T1204.002", "T1105")
@@ -82,18 +89,23 @@ class LureApplicationFileWrite(WindowsEventRule):
     def judge(self, event):
         path = event.get("file.path_key") or event.get("file.path")
         writer = event.get("process.executable_key") or event.get("process.executable")
-        if event.get("event.code") != 11 or not executable_path(path) or not writable(path):
+        if event.get("event.code") != 11 or not path or not writable(path):
             return []
         if basename(writer) not in LURE_WRITERS:
             return []
+        parts = components(path)
+        if basename(path).endswith(".lnk") and ("microsoft", "office", "recent") in {
+                parts[index:index + 3] for index in range(max(0, len(parts) - 2))}:
+            return []
         return [signal(event, "lure_write", f"Recorded writer '{self.describe(writer)}' created "
                        f"'{self.describe(path)}' in a user-writable location; execution is not established",
-                       self.attack, _FILE_FIELDS)]
+                       self.attack, _FILE_FIELDS, content=_content(event))]
 
 
 class ExecutableAlternateStream(WindowsEventRule):
     id = "win.executable_alternate_stream"
-    title = "Alternate data stream contains executable-like content or an executable name"
+    version = "2"
+    title = "An alternate file stream was recorded"
     families = ("file_change",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 15),)
     attack = ("T1564.004",)
@@ -109,18 +121,21 @@ class ExecutableAlternateStream(WindowsEventRule):
         pe = content.startswith("MZ")
         script = bool(_SCRIPT_START.match(content))
         named = executable_path(name.removesuffix(":$DATA").removesuffix(":$data"))
-        if not (pe or script or named):
+        if not event.get("file.path") and not event.get("file.path_key") and not event.get("file.stream.base_path"):
             return []
-        what = "an MZ prefix" if pe else "script-like starting syntax" if script else "an executable/script suffix"
+        what = ("an MZ prefix" if pe else "script-like starting syntax" if script else
+                "an executable/script suffix" if named else "no recorded executable-content qualifier")
         return [signal(event, "executable_ads", f"Alternate stream '{self.describe(name)}' of "
                        f"'{self.describe(event.get('file.stream.base_path'))}' was recorded with {what}; "
                        "this does not establish execution or a complete executable",
-                       self.attack, (*_FILE_FIELDS, "file.stream.name", "file.stream.content", "file.stream.base_path"))]
+                       self.attack, (*_FILE_FIELDS, "file.stream.name", "file.stream.content", "file.stream.base_path"),
+                       content=_content(event, (*_FILE_FIELDS, "file.stream.name", "file.stream.content", "file.stream.base_path")))]
 
 
 class ExecutableCreationTimeChange(WindowsEventRule):
     id = "win.executable_creation_time_change"
-    title = "Creation time changed on a Windows executable or script"
+    version = "2"
+    title = "Creation time changed on a Windows file"
     families = ("file_change",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 2),)
     attack = ("T1070.006",)
@@ -130,7 +145,7 @@ class ExecutableCreationTimeChange(WindowsEventRule):
 
     def judge(self, event):
         path = event.get("file.path_key") or event.get("file.path")
-        if event.get("event.code") != 2 or not executable_path(path):
+        if event.get("event.code") != 2 or not path:
             return []
         before, after = event.get("file.previous_creation_time"), event.get("file.creation_time")
         if before is not None and before == after:
@@ -139,12 +154,14 @@ class ExecutableCreationTimeChange(WindowsEventRule):
             f"from '{self.describe(before)}' to '{self.describe(after)}'")
         return [signal(event, "creation_time", f"Windows recorded a creation-time change for "
                        f"'{self.describe(path)}'; {qualifier}", self.attack,
-                       (*_FILE_FIELDS, "file.previous_creation_time", "file.creation_time"))]
+                       (*_FILE_FIELDS, "file.previous_creation_time", "file.creation_time"),
+                       content=_content(event, (*_FILE_FIELDS, "file.previous_creation_time", "file.creation_time")))]
 
 
 class WritableExecutableDeletion(WindowsEventRule):
     id = "win.writable_executable_deletion"
-    title = "Executable or script deleted from a user-writable or startup location"
+    version = "2"
+    title = "File deleted from a user-writable or startup location"
     families = ("file_change",)
     windows_event_classes = tuple((SYSMON_CHANNEL, SYSMON, code) for code in (23, 26))
     attack = ("T1070.004",)
@@ -154,15 +171,16 @@ class WritableExecutableDeletion(WindowsEventRule):
 
     def judge(self, event):
         path = event.get("file.path_key") or event.get("file.path")
-        if (event.get("event.code") not in {23, 26} or not executable_path(path)
+        if (event.get("event.code") not in {23, 26} or not path
                 or not (writable(path) or startup_path(path))):
             return []
         return [signal(event, "artifact_deleted", f"Windows recorded deletion of '{self.describe(path)}'; "
-                       "the purpose of the deletion is unresolved", self.attack, _FILE_FIELDS)]
+                       "the purpose of the deletion is unresolved", self.attack, _FILE_FIELDS, content=_content(event))]
 
 
 class CodeRunnerDnsLookup(WindowsEventRule):
     id = "win.code_runner_dns_lookup"
+    version = "2"
     title = "Script host or proxy-execution binary requested DNS resolution"
     families = ("dns_lookup",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 22),)
@@ -178,7 +196,8 @@ class CodeRunnerDnsLookup(WindowsEventRule):
             return []
         return [signal(event, "code_runner_dns", f"Recorded image '{self.describe(image)}' requested DNS "
                        f"resolution of '{self.describe(question)}'; the image identity is the signal, not the domain",
-                       self.attack, ("process.executable", "process.executable_key", "dns.question.name", "dns.status"))]
+                       self.attack, ("process.executable", "process.executable_key", "dns.question.name", "dns.status"),
+                       content=_content(event, ("process.executable", "process.executable_key", "dns.question.name", "dns.status")))]
 
 
 WINDOWS_FILE_PLAYBOOKS = (StartupFileWrite, LureApplicationFileWrite, ExecutableAlternateStream,

@@ -290,7 +290,11 @@ def check_db(s: Settings) -> Check:
 
 def check_db_space(s: Settings) -> Check:
     """Warn when most of the database file is reclaimable (free pages or an oversized write-ahead log)."""
-    rep = space_report(make_engine(s.db_path))
+    engine = make_engine(s.db_path)
+    try:
+        rep = space_report(engine)
+    finally:
+        engine.dispose()
     reclaim = rep["free_bytes"] + rep["wal_bytes"]
     total = rep["file_bytes"] + rep["wal_bytes"]
     detail = (f"file {rep['file_bytes'] / 1e6:.0f} MB, write-ahead log {rep['wal_bytes'] / 1e6:.0f} MB, "

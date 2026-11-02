@@ -11,7 +11,7 @@ from romulus.hunt.sweep import Sweep
 from romulus.site import SiteFacts
 from romulus.sources.models import Window
 from tests.test_context_catalog import _repo, _seed_anchor, _seed_link
-from tests.windows_event_support import START, event
+from tests.windows_link_support import START, event
 
 FACTS = SiteFacts(True, "frozen-test", {}, (), ("dc01.example.test",), ("name:example\\sync",))
 

@@ -21,6 +21,7 @@ from romulus.hunt.run import open_repo
 from romulus.report.manifest import internal_networks_view, investigations_for_hunt, publish_revision
 from romulus.report.markdown import render as render_md
 from romulus.site import SiteChangedError, SiteValidationError, load_site_facts, save_site_facts
+from romulus.store.db import compact
 from romulus.web import site_form
 from romulus.web.auth import RateLimiter, Sessions, csrf_ok, verify
 
@@ -316,8 +317,7 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         # for the next deletion made while nothing is running.
         if not repo.hunts_with_live_lease():
             try:
-                with repo.engine.connect() as c:
-                    c.exec_driver_sql("VACUUM")
+                compact(repo.engine)
             except Exception:  # noqa: BLE001, S110 - best-effort; the deletion already committed
                 pass
         return RedirectResponse(f"/?deleted={hunt_id}&removed={counts.get('candidates', 0)}", status_code=303)

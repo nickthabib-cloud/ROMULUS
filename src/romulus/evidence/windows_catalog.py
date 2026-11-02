@@ -313,6 +313,8 @@ EVENT_CLASSES = (
         _POWERSHELL_DOCS,
     ),
     _security(4662, "directory_access", "directory service object operation"),
+    _security(4706, "directory_change", "trust created"),
+    _security(4716, "directory_change", "trust modified"),
     _security(5136, "directory_change", "directory service object modified"),
     _security(5137, "directory_change", "directory service object created"),
     _security(5138, "directory_change", "directory service object undeleted"),

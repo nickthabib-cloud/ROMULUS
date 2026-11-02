@@ -1688,8 +1688,9 @@ class Repo:
     # How many revision summaries the candidate itself carries (the audit table holds every previous version whole).
     REVISION_SUMMARIES = 8
 
-    def revise_candidate(self, row: dict, reason: str, *, owner_token: str | None = None) -> str:
-        """Revise a direct (sweep) finding in place under the same id, in one transaction. Returns "inserted" (no
+    def revise_candidate(self, row: dict, reason: str, *, owner_token: str | None = None,
+                         evidence_view: bool = False) -> str:
+        """Revise a direct finding or opted-in script evidence view under the same id, in one transaction. Returns "inserted" (no
         candidate had the id), "revised", or "" (nothing written).
 
         - Inserted as a new candidate when the id does not exist yet (nothing was published to revise).
@@ -1701,12 +1702,23 @@ class Repo:
           dispositions recorded against the id are untouched; expansion anchors keep pointing at the same id (their
           copied lane and severity follow the revision).
         - It never deletes a candidate and never moves one to the context lane. The caller states the reason; a lane
-          is lowered only by a revision whose evidence changed, which the reason must say."""
+          is lowered only by a revision whose evidence changed, which the reason must say.
+        - evidence_view explicitly permits grouped script-content revisions owned by an investigator or expansion.
+          Existing hunt/rule/group identity and discovery ownership remain fixed; discovery routes merge without
+          creating an evidence revision when the preferred content is unchanged."""
         if not reason:
             raise ValueError("a candidate revision needs its reason")
         if row.get("lane") == "context":
             raise ValueError("a revision never moves a direct finding to the context lane")
-        if row.get("source_case_id") is not None or row.get("source_anchor_id") is not None:
+
+        def script_view(candidate):
+            return (candidate.get("claim_type") == "script_content" and bool(candidate.get("group_key"))
+                    and any(item.get("field") == "script.view" and item.get("value") in {"fragment", "single", "joined"}
+                            for item in candidate.get("predicate_fields", [])))
+
+        if evidence_view and not script_view(row):
+            raise ValueError("an evidence view revision requires grouped script content with a script.view predicate")
+        if not evidence_view and (row.get("source_case_id") is not None or row.get("source_anchor_id") is not None):
             raise ValueError("only direct (sweep) findings are revised in place")
         revised = {field: row[field] for field in self._REVISION_FIELDS if field != "gate_results"}
         digest = hashlib.sha256(json.dumps(
@@ -1717,6 +1729,10 @@ class Repo:
         with write_txn(self.engine) as c:
             self._fence_lease(c, row["hunt_id"], owner_token)
             existing = c.execute(select(t.candidate).where(t.candidate.c.id == row["id"])).mappings().first()
+            if evidence_view and existing is not None and (
+                    not script_view(existing) or any(existing[field] != row.get(field)
+                                                      for field in ("hunt_id", "rule_id", "group_key"))):
+                raise ValueError("an evidence view revision must retain the existing hunt, rule and group identity")
             if existing is None:
                 gates = {**(row["gate_results"] or {}), "_revision": {"digest": digest, "count": 0}}
                 c.execute(t.candidate.insert().values(**{**row, "gate_results": gates}, created_at=utcnow()))
@@ -1725,6 +1741,46 @@ class Repo:
                 return "inserted"
             previous_gates = dict(existing["gate_results"] or {})
             history = dict(previous_gates.get("_revision") or {})
+            incoming_gates = dict(row["gate_results"] or {})
+            if evidence_view:
+                def preference(candidate):
+                    predicates = candidate.get("predicate_fields") or []
+                    quality = [item["value"] for item in predicates if item.get("field") == "script.view_quality"
+                               and isinstance(item.get("value"), int) and not isinstance(item["value"], bool)]
+                    if quality:
+                        return max(quality)
+                    ranks = {"fragment": 0, "single": 1, "joined": 2}
+                    return max((ranks.get(item.get("value"), -1) for item in predicates
+                                if item.get("field") == "script.view"), default=-1)
+
+                indexed = {
+                    (reach["anchor_id"], reach["link_id"], reach["link_type"], reach["strength"]): reach
+                    for reach in [*previous_gates.get("_context_reaches", []), *incoming_gates.get("_context_reaches", [])]
+                }
+                if indexed:
+                    incoming_gates["_context_reaches"] = [indexed[key] for key in sorted(indexed)]
+                origin = previous_gates.get("_evidence_view_origin")
+                if origin is not None:
+                    incoming_gates["_evidence_view_origin"] = origin
+                # A rediscovery may add a route without providing a preferred view.
+                # Merge that provenance atomically without changing the claim,
+                # analyst disposition, ownership, or evidence-revision history.
+                same_view = all(existing[field] == value for field, value in revised.items())
+                same_gates = ({k: v for k, v in previous_gates.items() if not str(k).startswith("_")}
+                              == {k: v for k, v in incoming_gates.items() if not str(k).startswith("_")})
+                if preference(row) <= preference(existing) or history.get("digest") == digest or same_view and same_gates:
+                    gates = dict(previous_gates)
+                    for key in ("_context_reaches", "_evidence_view_origin"):
+                        if key in incoming_gates:
+                            gates[key] = incoming_gates[key]
+                    if gates != previous_gates:
+                        c.execute(t.candidate.update().where(t.candidate.c.id == row["id"]).values(gate_results=gates))
+                        c.execute(t.audit_event.insert().values(
+                            at=utcnow(), actor="system", action="candidate.merge_evidence_view_routes",
+                            hunt_id=row["hunt_id"], detail={"candidate_id": row["id"],
+                                                          "routes": gates.get("_context_reaches", [])},
+                        ))
+                    return ""
             if history.get("digest") == digest:
                 return ""
             if existing["lane"] == "context":
@@ -1741,7 +1797,7 @@ class Repo:
                        "severity": existing["severity"], "claim": str(existing["claim"])[:500],
                        "rule_version": existing["rule_version"]}
             summaries = [*list(history.get("summaries") or []), summary][-self.REVISION_SUMMARIES:]
-            gates = dict(row["gate_results"] or {})
+            gates = incoming_gates
             gates["_notes"] = sorted({*(str(note) for note in gates.get("_notes", [])),
                                       f"revised in place: {reason}"})
             gates["_revision"] = {"digest": digest, "count": int(history.get("count") or 0) + 1,

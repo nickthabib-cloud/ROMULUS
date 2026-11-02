@@ -1,7 +1,7 @@
 """Positive observations of WMI, named pipes, share access and Defender event records."""
 from __future__ import annotations
 
-import ntpath
+import json
 import re
 
 from romulus.detect.windows_events import WindowsEventRule, basename, components, integer, signal
@@ -26,9 +26,17 @@ def _description(event: TypedEvent, fields: tuple[str, ...]) -> str:
     return "; ".join(f"{name}={WindowsEventRule.describe(event.get(name))}" for name in fields if event.has(name))
 
 
+def _content(event, fields):
+    return json.dumps({"outcome": event.outcome, "fields": {name: event.get(name) for name in fields}},
+                      sort_keys=True, separators=(",", ":"))
+
+
+_SHARE_FIELDS = ("share.name", "share.relative_target", "share.access_mask", "share.accesses", "source.ip")
+
+
 class WmiSubscription(WindowsEventRule):
     id = "win.wmi_subscription"
-    version = "1"
+    version = "2"
     title = "WMI permanent-subscription component activity"
     families = ("wmi_subscription",)
     windows_event_classes = tuple((SYSMON_CHANNEL, SYSMON, code) for code in (19, 20, 21)) + (
@@ -56,6 +64,7 @@ class WmiSubscription(WindowsEventRule):
         text = f"WMI recorded {component}" + (f": {detail}" if detail else "; component fields were not recorded")
         return [signal(event, f"wmi_{code}", text, self.attack, fields,
                        lane="high" if high else "lead", severity="high" if high else "medium",
+                       content=_content(event, fields),
                        notes=("A component record does not establish execution or a complete working subscription.",))]
 
 
@@ -70,14 +79,16 @@ def _pipe_name(value: object) -> str:
 
 
 # Each # in Cobalt Strike's documented default templates expands to one hexadecimal character.
-_COBALT_PIPE = re.compile(r"(?:msse-[0-9a-f]{3}-server|status_[0-9a-f]{2}|msagent_[0-9a-f]{2}|"
+_COBALT_PIPE = re.compile(r"(?:msse-(?:[0-9]{1,4}|[0-9a-f]{3})-server|status_[0-9a-f]{2}|msagent_[0-9a-f]{2}|"
                           r"postex_[0-9a-f]{4}|postex_ssh_[0-9a-f]{4})")
 _REMCOM_STREAM = re.compile(r"remcom_(?:stdin|stdout|stderr)[a-z]{4}[0-9]+")
+_PSEXEC_STREAM = re.compile(r"psexesvc-[^\\/]+-[0-9]+-(?:stdin|stdout|stderr)")
+_PAEXEC_PIPE = re.compile(r"paexec-[0-9]+-[^\\/]+(?:\.exe)?|paexec(?:in|out|err)[^\\/]+[0-9]+")
 
 
 class ToolNamedPipe(WindowsEventRule):
     id = "win.tool_named_pipe"
-    version = "1"
+    version = "2"
     title = "Named pipe matches a documented remote-tool default"
     families = ("pipe_event",)
     windows_event_classes = tuple((SYSMON_CHANNEL, SYSMON, code) for code in (17, 18))
@@ -86,20 +97,35 @@ class ToolNamedPipe(WindowsEventRule):
     next_checks = ("inspect the process creating or connecting to the pipe", "review remote service and SMB activity")
     research = (_SYSMON_DOC,
                 "https://www.cobaltstrike.com/blog/learn-pipe-fitting-for-all-of-your-offense-projects",
+                "https://blog.nviso.eu/2021/04/26/anatomy-of-cobalt-strike-dll-stagers/",
                 "https://github.com/fortra/impacket/blob/master/examples/psexec.py",
+                "https://github.com/poweradminllc/PAExec/blob/master/Remote.cpp",
+                "https://github.com/poweradminllc/PAExec/blob/master/ConsoleRedir.cpp",
                 "https://www.microsoft.com/security/blog/2022/10/18/defenders-beware-a-case-for-post-ransomware-investigations/")
 
     def judge(self, event):
         if integer(event.get("event.code")) not in {17, 18}:
             return []
         name = _pipe_name(event.get("pipe.name"))
-        tool = ("PsExec" if name == "psexesvc" else
+        tool = ("PsExec" if name == "psexesvc" or _PSEXEC_STREAM.fullmatch(name) else
+                "PAExec" if _PAEXEC_PIPE.fullmatch(name) else
                 "Impacket RemCom" if name == "remcom_communicaton" or _REMCOM_STREAM.fullmatch(name) else
                 "Cobalt Strike" if _COBALT_PIPE.fullmatch(name) else "")
         if not tool:
             return []
+        # Template identity excludes random characters and embedded process IDs.
+        if tool == "PsExec":
+            template = name.rsplit("-", 1)[-1] if _PSEXEC_STREAM.fullmatch(name) else "control"
+        elif tool == "Impacket RemCom":
+            template = next((stream for stream in ("stdin", "stdout", "stderr") if name.startswith("remcom_" + stream)), "control")
+        elif tool == "PAExec":
+            template = next((stream for stream in ("in", "out", "err") if name.startswith("paexec" + stream)), "control")
+        else:
+            template = "msse-#-server" if name.startswith("msse-") else re.sub(r"[0-9a-f]{2,4}$", "#", name)
         return [signal(event, "tool_pipe", f"Named pipe {self.describe(event.get('pipe.name'))} matched a "
                        f"documented {tool} default name", self.attack, ("pipe.name", "pipe.action", "process.executable"),
+                       content=json.dumps([tool, template, event.get("pipe.action"), event.get("process.executable")]),
+                       common=f"Named pipes matched the documented {tool} default template {template}",
                        notes=("Pipe names are attacker-controllable; the name alone does not establish tool identity.",))]
 
 
@@ -110,8 +136,8 @@ def _share(event: TypedEvent) -> str:
 
 class AdminShareTransfer(WindowsEventRule):
     id = "win.admin_share_transfer"
-    version = "1"
-    title = "Executable or script write access through an administrative share"
+    version = "2"
+    title = "Write or unresolved access to a file through an administrative share"
     families = ("share_access",)
     windows_event_classes = _SECURITY_5145
     attack = ("T1021.002", "T1570")
@@ -125,26 +151,29 @@ class AdminShareTransfer(WindowsEventRule):
         if integer(event.get("event.code")) != 5145 or not (share == "admin$" or re.fullmatch(r"[a-z]\$", share)):
             return []
         path = str(event.get("share.relative_target") or "")
-        if ntpath.splitext(path)[1].casefold() not in {
-                ".exe", ".dll", ".sys", ".scr", ".com", ".msi", ".ps1", ".psm1", ".bat", ".cmd",
-                ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".hta"}:
+        if not path:
             return []
         mask = integer(event.get("share.access_mask"))
-        if mask is None or mask < 0 or not mask & 0x6:
+        accesses = event.get("share.accesses")
+        tokens = accesses if isinstance(accesses, list) else [str(accesses or "")]
+        writes = any(re.search(r"(?:%%441[78]|\b(?:writedata|appenddata|addfile|addsubdirectory)\b)",
+                               str(token), re.IGNORECASE) for token in tokens)
+        if mask is not None and not mask & 0x6 and not writes:
             return []
-        text = (f"Administrative share access check recorded write/append access for executable or script "
+        qualifier = "write/append access" if writes or (mask is not None and mask & 0x6) else "access with unresolved rights"
+        text = (f"Administrative share access check recorded {qualifier} for file "
                 f"{self.describe(path)} on {self.describe(event.get('share.name'))}")
         if event.outcome == Outcome.failure:
             text += "; the access check failed"
         else:
             text += "; this is a transfer lead, and does not establish a completed file write"
         return [signal(event, "admin_share_write", text, self.attack,
-                       ("share.name", "share.relative_target", "share.access_mask", "source.ip", "share.session_id"))]
+                       (*_SHARE_FIELDS, "share.session_id"), content=_content(event, _SHARE_FIELDS))]
 
 
 class RemoteManagementPipe(WindowsEventRule):
     id = "win.remote_management_pipe"
-    version = "1"
+    version = "2"
     title = "IPC share access to a management RPC pipe"
     families = ("share_access",)
     windows_event_classes = _SECURITY_5145
@@ -159,17 +188,20 @@ class RemoteManagementPipe(WindowsEventRule):
         name = _pipe_name(event.get("share.relative_target"))
         if name not in {"svcctl", "atsvc", "samr", "lsarpc", "drsuapi"}:
             return []
+        mask = integer(event.get("share.access_mask"))
+        if name in {"samr", "lsarpc"} and mask is not None and not mask & 0x6 and event.outcome != Outcome.failure:
+            return []
         text = f"IPC$ access check named the {name} management RPC pipe"
         if event.outcome == Outcome.failure:
             text += "; the access check failed"
         return [signal(event, "management_pipe", text, self.attack,
-                       ("share.name", "share.relative_target", "share.access_mask", "source.ip", "share.session_id"),
+                       (*_SHARE_FIELDS, "share.session_id"), content=_content(event, _SHARE_FIELDS),
                        notes=("Pipe access alone does not establish service execution or credential extraction.",))]
 
 
 class GppPolicyFileAccess(WindowsEventRule):
     id = "win.gpp_policy_file_access"
-    version = "1"
+    version = "2"
     title = "SYSVOL access names a Group Policy Preferences policy file"
     families = ("share_access",)
     windows_event_classes = _SECURITY_5145
@@ -185,17 +217,21 @@ class GppPolicyFileAccess(WindowsEventRule):
         if basename(path) not in {"groups.xml", "services.xml", "scheduledtasks.xml", "datasources.xml",
                                   "printers.xml", "drives.xml"}:
             return []
+        parts = components(path)
+        if not any(parts[i] == "policies" and len(parts[i:]) >= 6 and parts[i + 2] in {"machine", "user"}
+                   and parts[i + 3] == "preferences" for i in range(len(parts))):
+            return []
         text = f"SYSVOL access check named Group Policy Preferences file {self.describe(path)}"
         if event.outcome == Outcome.failure:
             text += "; the access check failed"
         return [signal(event, "gpp_file", text, self.attack,
-                       ("share.name", "share.relative_target", "share.access_mask", "source.ip", "share.session_id"),
+                       (*_SHARE_FIELDS, "share.session_id"), content=_content(event, _SHARE_FIELDS),
                        notes=("The access record does not show file contents or whether credentials were present.",))]
 
 
 class DefenderThreat(WindowsEventRule):
     id = "win.defender_threat"
-    version = "1"
+    version = "2"
     title = "Defender recorded a threat detection or remediation result"
     families = ("defender_event",)
     windows_event_classes = tuple((DEFENDER_CHANNEL, DEFENDER_PROVIDER, code)
@@ -215,11 +251,13 @@ class DefenderThreat(WindowsEventRule):
                   1119: "recorded a critical threat-remediation error"}.get(code)
         if not action:
             return []
-        fields = ("defender.threat.name", "defender.threat.id", "defender.path", "defender.process",
+        fields = ("defender.threat.name", "defender.threat.id", "defender.severity", "defender.category", "defender.path", "defender.process",
                   "defender.recorded_action", "defender.error_code", "defender.error_description")
         detail = _description(event, fields)
+        low = str(event.get("defender.severity") or "").casefold() in {"low", "informational", "1"}
         return [signal(event, f"defender_{code}", f"Defender {action}" + (f": {detail}" if detail else ""),
-                       self.attack, fields, lane="high", severity="high",
+                       self.attack, fields, lane="lead" if low else "high", severity="low" if low else "high",
+                       content=_content(event, fields),
                        notes=("An action record does not establish eradication or that the threat executed.",))]
 
 
@@ -241,7 +279,7 @@ _DEFENDER_ROOTS = (
 def _setting(value: object) -> tuple[tuple[str, ...], str] | None:
     if not isinstance(value, str) or "=" not in value:
         return None
-    key, data = value.split("=", 1)
+    key, data = value.rsplit("=", 1)
     path = components(key.strip())
     for root in _DEFENDER_ROOTS:
         if path[:len(root)] == root and len(path) > len(root):
@@ -262,7 +300,7 @@ def _dword(value: str) -> int | None:
 
 class DefenderProtection(WindowsEventRule):
     id = "win.defender_protection"
-    version = "1"
+    version = "2"
     title = "Defender protection state or configuration change"
     families = ("defender_event",)
     windows_event_classes = tuple((DEFENDER_CHANNEL, DEFENDER_PROVIDER, code)
@@ -281,7 +319,7 @@ class DefenderProtection(WindowsEventRule):
                   5013: "Defender tamper protection blocked a settings change"}
         if code in direct:
             return [signal(event, f"defender_{code}", direct[code], self.attack, fields,
-                           lane="high", severity="high")]
+                           lane="high", severity="high", content=_content(event, fields))]
         if code not in {5004, 5007}:
             return []
         new, old = _setting(event.get("defender.new_value")), _setting(event.get("defender.old_value"))
@@ -305,7 +343,8 @@ class DefenderProtection(WindowsEventRule):
         if detail:
             text += f"; {detail}"
         return [signal(event, f"defender_{code}", text, self.attack, fields,
-                       lane="high" if unsafe else "lead", severity="high" if unsafe else "medium")]
+                       lane="high" if unsafe else "lead", severity="high" if unsafe else "medium",
+                       content=_content(event, fields))]
 
 
 WINDOWS_ENDPOINT_PLAYBOOKS = (WmiSubscription, ToolNamedPipe, AdminShareTransfer, RemoteManagementPipe,

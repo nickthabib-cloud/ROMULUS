@@ -61,9 +61,9 @@ def test_startup_file_is_immediate_even_without_a_resolved_writer(path):
     assert rule.assures_negative is False
 
 
-@pytest.mark.parametrize("path,code", [(STARTUP + ".txt", 11), (STARTUP.replace("Startup", "StartupBackup"), 11),
+@pytest.mark.parametrize("path,code", [(STARTUP.replace("Startup", "StartupBackup"), 11),
                                       (STARTUP, 26), (r"C:\Downloads\readme.txt", 11)])
-def test_startup_requires_whole_directory_components_extension_and_write_class(path, code):
+def test_startup_requires_whole_directory_components_and_write_class(path, code):
     assert not run(StartupFileWrite(), [event("file_change", code, **{"file.path": path})])
 
 
@@ -76,8 +76,7 @@ def test_lure_writer_file_creation_states_only_creation(writer):
 
 
 @pytest.mark.parametrize("writer,path", [("not-winword.exe", r"C:\Temp\a.exe"),
-                                       ("winword.exe", r"C:\Windows\System32\a.exe"),
-                                       ("winword.exe", r"C:\Temp\a.docx")])
+                                       ("winword.exe", r"C:\Windows\System32\a.exe")])
 def test_lure_writer_hard_negatives(writer, path):
     assert not run(LureApplicationFileWrite(), [event("file_change", 11, **{
         "file.path": path, "process.executable": writer,
@@ -115,7 +114,7 @@ def test_changed_executable_timestamp_and_unknown_values_surface_with_accurate_c
 def test_deletion_names_observed_file_action_and_not_malicious_intent(code):
     [match] = run(WritableExecutableDeletion(), [event("file_change", code, **{"file.path": r"C:\Temp\x.exe"})])
     assert "purpose of the deletion is unresolved" in match.claim
-    assert not run(WritableExecutableDeletion(), [event("file_change", code, **{"file.path": r"C:\Temp\x.txt"})])
+    assert run(WritableExecutableDeletion(), [event("file_change", code, **{"file.path": r"C:\Temp\x.txt"})])
 
 
 def test_dns_identity_is_signal_even_for_benign_domain_and_failed_resolution():

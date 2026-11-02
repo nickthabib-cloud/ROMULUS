@@ -38,7 +38,7 @@ _REPRESENTATIVE_FIELDS = {
     "dns_lookup": ("dns.question.name",),
     "script_block": ("script.text", "script.engine_version"),
     "directory_access": ("directory.object.dn",),
-    "directory_change": ("directory.object.dn",),
+    "directory_change": ("directory.object.dn", "directory.trust.domain_name"),
     "share_access": ("share.name",),
     "defender_event": ("defender.threat.name",),
     "remote_access": ("source.ip", "bits.job_id"),

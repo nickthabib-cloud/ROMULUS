@@ -64,8 +64,8 @@ CASES = [
     (RegistryAppInit, SOFT + "Windows", "AppInit_DLLs", "unknown.dll", "high"),
     (RegistryAppInit, SOFT + "Windows", "LoadAppInit_DLLs", "DWORD (0x00000001)", "lead"),
     (RegistryAppCert, SYSTEM + r"Control\Session Manager\AppCertDlls", "anything", "unknown.dll", "high"),
-    (RegistryUserCom, CLSID + r"\InprocServer32", "(Default)", "unknown.dll", "high"),
-    (RegistryUserCom, CLSID + r"\LocalServer32", "", "unknown.exe /start", "high"),
+    (RegistryUserCom, CLSID + r"\InprocServer32", "(Default)", "unknown.dll", "lead"),
+    (RegistryUserCom, CLSID + r"\LocalServer32", "", "unknown.exe /start", "lead"),
     (RegistryLsaPackages, SYSTEM + r"Control\Lsa", "Authentication Packages", "unknown", "high"),
     (RegistryLsaPackages, SYSTEM + r"Control\Lsa", "Security Packages", ["kerberos", "unknown"], "high"),
     (RegistryLsaPackages, SYSTEM + r"Control\Lsa", "Notification Packages", "unknown", "high"),
@@ -113,9 +113,9 @@ def test_missing_or_malformed_data_is_explicit_uncertainty(rule, key, name, valu
 
 
 @pytest.mark.parametrize("rule,key,name,value,lane", CASES)
-def test_truncation_never_establishes_unsafe_value(rule, key, name, value, lane):
+def test_truncation_preserves_recorded_winlogon_signal_without_asserting_complete_payload(rule, key, name, value, lane):
     matches = run(rule(), [change(key, name, value, **{"registry.details_truncated": True})])
-    assert len(matches) == 1 and matches[0].proposed_lane == "lead"
+    assert len(matches) == 1 and matches[0].proposed_lane == ("high" if rule is RegistryWinlogon else "lead")
     assert "truncated" in matches[0].claim
 
 

@@ -24,7 +24,7 @@ from romulus.evidence.windows_catalog import WINDOWS_DATASETS, WindowsEventClass
 if TYPE_CHECKING:
     from romulus.detect.bounded import Account, StateBudget
 
-WINDOWS_NORMALIZER = "windows-ecs@5"
+WINDOWS_NORMALIZER = "windows-ecs@6"
 # This is already far beyond what the 64 MiB assembler can retain at normal 4104 chunk sizes, while bounding every
 # completeness vector even when hostile metadata claims billions of parts.
 SCRIPT_BLOCK_MAX_PARTS = 4_096
@@ -914,6 +914,16 @@ def _native_value_is_absent(name: str, value: object) -> bool:
 def _put(fields: dict[str, FieldValue], record: WindowsRecord, typed: str, *native: str, transform=None) -> None:
     for name in native:
         item = record.data.get(name)
+        if item is None:
+            folded = record.__dict__.get("_folded_data")
+            if folded is None:
+                folded = {}
+                for key, field in record.data.items():
+                    folded.setdefault(key.casefold(), []).append(field)
+                record.__dict__["_folded_data"] = folded
+            candidates = folded.get(name.casefold(), [])
+            if candidates and all(field.value == candidates[0].value for field in candidates):
+                item = candidates[0]
         if item is None or _native_value_is_absent(name, item.value):
             continue
         try:
@@ -1306,7 +1316,7 @@ def _account_change_fields(fields: dict[str, FieldValue], record: WindowsRecord)
     if uac_changes:
         changes, origin = uac_changes
         fields["account.uac_changes"] = fv(changes, origin + "#parsed:uac-flags")
-    return Outcome.failure if event_id == 4766 or _status_failed(record) else Outcome.success
+    return Outcome.failure if event_id == 4766 or _status_failed(record) else _audit_outcome(record)
 
 
 def _local_name(element) -> str:
@@ -1609,6 +1619,7 @@ def _semantic_fields(fields: dict[str, FieldValue], record: WindowsRecord, host:
                                    fields["event.code"].origin)
         for typed, native in (("wmi.operation", "Operation"), ("wmi.namespace", "EventNamespace"),
                               ("wmi.namespace", "NamespaceName"),
+                              ("wmi.namespace", "Namespace"), ("wmi.filter", "ESS"),
                               ("wmi.name", "Name"), ("wmi.query", "Query"),
                               ("wmi.type", "Type"), ("wmi.destination", "Destination"),
                               ("wmi.consumer", "Consumer"), ("wmi.filter", "Filter"),
@@ -1692,7 +1703,8 @@ def _semantic_fields(fields: dict[str, FieldValue], record: WindowsRecord, host:
         return Outcome.success
     if family in {"directory_access", "directory_change"}:
         prefix = "directory.access" if family == "directory_access" else "directory.change"
-        fields[f"{prefix}.action"] = fv({4662: "accessed", 5136: "modified", 5137: "created",
+        fields[f"{prefix}.action"] = fv({4662: "accessed", 4706: "trust_created", 4716: "trust_modified",
+                                         5136: "modified", 5137: "created",
                                          5138: "undeleted", 5139: "moved", 5141: "deleted"}.get(event_id),
                                         fields["event.code"].origin)
         _put(fields, record, "directory.object.server", "ObjectServer")
@@ -1705,6 +1717,14 @@ def _semantic_fields(fields: dict[str, FieldValue], record: WindowsRecord, host:
         _put(fields, record, f"{prefix}.operation_type", "OperationType", transform=_message_value)
         _put(fields, record, "directory.attribute.ldap_name", "AttributeLDAPDisplayName")
         _put(fields, record, "directory.attribute.value", "AttributeValue")
+        for suffix, names, transform in (
+            ("domain_name", ("DomainName",), None), ("domain_sid", ("DomainSid",), None),
+            ("type", ("TdoType", "TrustType"), _integer),
+            ("direction", ("TdoDirection", "TrustDirection"), _integer),
+            ("attributes", ("TdoAttributes", "TrustAttributes"), _integer),
+            ("sid_filtering_enabled", ("SidFilteringEnabled",), None),
+        ):
+            _put(fields, record, f"directory.trust.{suffix}", *names, transform=transform)
         properties = record.data.get("Properties")
         if properties:
             guids = [match.group(1).casefold() for match in _GUID_IN_TEXT.finditer(str(properties.value))]

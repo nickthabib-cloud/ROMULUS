@@ -67,10 +67,11 @@ def integer(value: object) -> int | None:
 
 
 def signal(event: TypedEvent, behavior: str, text: str, attack: tuple[str, ...], fields: tuple[str, ...],
-           *, lane: str = "lead", severity: str = "medium", notes: tuple[str, ...] = (), content: str = "") -> Hit:
+           *, lane: str = "lead", severity: str = "medium", notes: tuple[str, ...] = (), content: str = "",
+           common: str = "") -> Hit:
     names = tuple(dict.fromkeys(("event.code", "event.channel", *fields)))
     predicate = [pf(event, name) for name in names if event.has(name)]
-    return Hit(behavior, text, lane, severity, attack, predicate, content=content, common=text, notes=notes)
+    return Hit(behavior, text, lane, severity, attack, predicate, content=content, common=common or text, notes=notes)
 
 
 class WindowsEventRule(WindowsProcessRule):
@@ -137,7 +138,7 @@ class WindowsEventRule(WindowsProcessRule):
 
     def _shape(self, event, hit):
         material = {"rule": self.id, "behavior": hit.behavior, "content": hit.content,
-                    "predicate": [(item.field, item.value) for item in hit.predicate], "lane": hit.lane}
+                    "lane": hit.lane}
         return hashlib.sha256(json.dumps(material, sort_keys=True, default=str).encode()).hexdigest()[:32]
 
     def record_match(self, event, hit):

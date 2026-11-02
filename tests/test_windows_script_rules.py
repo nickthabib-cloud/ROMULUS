@@ -42,7 +42,8 @@ def test_each_script_shape_is_an_immediate_positive_content_lead(name, text):
     observation = script(text)
     [match] = RULES[name]().consume([observation])
     assert match.claim_type == "script_content"
-    assert match.proposed_lane == "lead"
+    assert match.proposed_lane == ("high" if name in {"amsi_bypass", "etw_bypass", "offensive_function",
+                                                      "lsass_access", "sam_access"} else "lead")
     assert match.events == [observation]
     assert any(p.field == "script.text" and "#parsed:powershell" in p.origin for p in match.predicate)
     assert "executed successfully" not in match.claim.lower()
@@ -167,15 +168,15 @@ def test_many_script_blocks_spill_and_old_identity_still_revises(tmp_path):
     first = None
     try:
         for index in range(2500):
-            item = script("Invoke-Mimikatz", block=f"block-{index}", view="fragment", complete=False,
+            item = script(f"Invoke-Mimikatz -Marker {index}", block=f"block-{index}", view="fragment", complete=False,
                           native=f"script-{index}")
             [match] = rule.consume([item])
             first = first or match
         assert rule.views.on_disk > 0
         assert len(rule.views.hot) < 2500
-        [joined] = rule.consume([script("Invoke-Mimikatz", block="block-0", view="joined", native="joined-0")])
+        [joined] = rule.consume([script("Invoke-Mimikatz -Marker 0", block="block-0", view="joined", native="joined-0")])
         assert joined.group_key == first.group_key and joined.revision_reason
-        assert not rule.consume([script("Invoke-Mimikatz", block="block-0", view="fragment", native="late-copy")])
+        assert not rule.consume([script("Invoke-Mimikatz -Marker 0", block="block-0", view="fragment", native="late-copy")])
     finally:
         rule.release_state()
         rule.close_spill()

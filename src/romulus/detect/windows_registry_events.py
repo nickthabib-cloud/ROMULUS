@@ -5,10 +5,12 @@ No writer or payload-name allowlist can hide an otherwise relevant recorded chan
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 
 from romulus.detect.windows_events import WindowsEventRule, basename, components, integer, signal
+from romulus.detect.windows_memory_events import _writable_indicator
 from romulus.evidence.typed import TypedEvent
 
 _LM = "hkey_local_machine"
@@ -39,8 +41,12 @@ class _Target:
     action: str
 
 
-def _target(event: TypedEvent) -> _Target | None:
-    parts = components(event.get("registry.path_key"))
+def _target(event: TypedEvent, path=None) -> _Target | None:
+    path = event.get("registry.path_key") if path is None else path
+    parts = components(path)
+    aliases = {"hklm": _LM, "hkcu": _CU, "hku": _USERS}
+    if parts:
+        parts = (aliases.get(parts[0], parts[0]), *parts[1:])
     if not parts or parts[0] not in {_LM, _CU, _USERS}:
         return None
     action = str(event.get("registry.action", "")).casefold()
@@ -66,10 +72,10 @@ def _target(event: TypedEvent) -> _Target | None:
                           and parts[index + 2] == "exclusions"
                           and len(parts) > index + 4
                           and parts[index + 3] in {"paths", "processes", "extensions", "ipaddresses"}), None)
-        if str(event.get("registry.path_key")).endswith("\\"):
-            name = ""
-        elif exclusion is not None:
+        if exclusion is not None:
             parts, name = parts[:exclusion + 4], "\\".join(parts[exclusion + 4:])
+        elif str(path).endswith("\\"):
+            name = ""
         else:
             parts, name = parts[:-1], parts[-1]
     else:
@@ -78,9 +84,14 @@ def _target(event: TypedEvent) -> _Target | None:
         return None
     root, key = parts[0], parts[1:]
     if root == _USERS:
-        if not key or _SID.fullmatch(key[0]) is None:
+        if not key:
             return None
-        root, key = _CU, key[1:]
+        if key[0].endswith("_classes") and _SID.fullmatch(key[0][:-8]):
+            root, key = _CU, ("software", "classes", *key[1:])
+        elif _SID.fullmatch(key[0]) or key[0] == ".default":
+            root, key = _CU, key[1:]
+        else:
+            return None
     return _Target(root, key, name, action)
 
 
@@ -148,45 +159,63 @@ class _RegistryRule(WindowsEventRule):
     required_fields = ("registry.path_key",)
     positive_only_reason = "Registry data is recorded content; a write does not prove execution or effective policy."
 
+    def judge(self, event):
+        targets = [_target(event)]
+        if event.get("event.code") == 14 and event.get("registry.new_path"):
+            targets.append(_target(event, event.get("registry.new_path")))
+        out = []
+        for target in dict.fromkeys(targets):
+            if target is not None:
+                out.extend(self._judge_target(event, target))
+        return out
+
     def report(self, event, target, behavior, description, *, high=False, numeric=None, mask=None,
                known_numeric=(0, 1), multi=False):
         """A deletion/rename is always an observation, never a payload installation."""
         action = target.action
         value = event.get("registry.value")
+        content = json.dumps([target.root, target.key, target.name, action, value,
+                              event.get("registry.value_type"), event.get("registry.details_truncated")],
+                             sort_keys=True, separators=(",", ":"))
         notes = ("A registry change does not establish that the referenced code executed or the policy took effect.",)
         if action != "written":
             text = f"{description} registry target was {action}; resulting value and effective state are unknown"
-            return [signal(event, behavior + ":" + action, text, self.attack, _FIELDS, notes=notes)]
+            return [signal(event, behavior + ":" + action, text, self.attack, _FIELDS, notes=notes, content=content)]
         if (_uncertain(event) or (isinstance(value, (list, tuple))
                                  and (not multi or any(not isinstance(item, str) for item in value)))):
             text = f"{description} registry value was written; data is missing, malformed or truncated, so its effect is unknown"
-            return [signal(event, behavior + ":unknown", text, self.attack, _FIELDS, notes=notes)]
+            observed_high = (high and behavior.startswith("winlogon_") and event.get("registry.details_truncated") is True
+                             and isinstance(value, str) and bool(value.strip())
+                             and not _default_winlogon(value.removesuffix("...").strip(), target.name or ""))
+            return [signal(event, behavior + ":unknown", text, self.attack, _FIELDS, notes=notes, content=content,
+                           lane="high" if observed_high else "lead", severity="high" if observed_high else "medium")]
         if numeric is not None:
             if not _recorded_dword(event):
                 text = f"{description} registry value was written without a supported DWORD type; its effect is unknown"
-                return [signal(event, behavior + ":unknown", text, self.attack, _FIELDS, notes=notes)]
+                return [signal(event, behavior + ":unknown", text, self.attack, _FIELDS, notes=notes, content=content)]
             number = integer(value)
             if number is None or number < 0 or number > 0xffffffff:
                 text = f"{description} registry value was written with ambiguous DWORD data; its effect is unknown"
-                return [signal(event, behavior + ":unknown", text, self.attack, _FIELDS, notes=notes)]
+                return [signal(event, behavior + ":unknown", text, self.attack, _FIELDS, notes=notes, content=content)]
             if not (number & mask if mask is not None else number in numeric):
                 if mask is None and number not in known_numeric:
                     text = f"{description} registry value was written with unrecognised DWORD data; its effect is unknown"
-                    return [signal(event, behavior + ":unknown", text, self.attack, _FIELDS, notes=notes)]
+                    return [signal(event, behavior + ":unknown", text, self.attack, _FIELDS, notes=notes, content=content)]
                 return []
         elif (isinstance(value, str) and not value.strip()) or value in ([], ()):
             text = f"{description} registry value was cleared; no executable payload is established by this write"
-            return [signal(event, behavior + ":cleared", text, self.attack, _FIELDS, notes=notes)]
+            return [signal(event, behavior + ":cleared", text, self.attack, _FIELDS, notes=notes, content=content)]
         elif not isinstance(value, (str, list, tuple)):
             text = f"{description} registry value was written with malformed text data; its effect is unknown"
-            return [signal(event, behavior + ":unknown", text, self.attack, _FIELDS, notes=notes)]
+            return [signal(event, behavior + ":unknown", text, self.attack, _FIELDS, notes=notes, content=content)]
         text = f"{description} registry value was written as {self.describe(value)!r}"
         return [signal(event, behavior, text, self.attack, _FIELDS,
-                       lane="high" if high else "lead", severity="high" if high else "medium", notes=notes)]
+                       lane="high" if high else "lead", severity="high" if high else "medium", notes=notes, content=content)]
 
 
 class RegistryRunKeys(_RegistryRule):
     id = "win.registry_run_keys"
+    version = "2"
     title = "Run, RunOnce or RunOnceEx registry entry changed"
     attack = ("T1547.001",)
     benign = ("application installers and per-user startup preferences",)
@@ -194,10 +223,15 @@ class RegistryRunKeys(_RegistryRule):
     research = ("https://attack.mitre.org/techniques/T1547/001/",
                 "https://learn.microsoft.com/en-us/troubleshoot/windows-client/shell-experience/standard-user-cannot-run-commnad-via-runonce")
 
-    def judge(self, event):
-        target = _target(event)
+    def _judge_target(self, event, target):
         key = _software(target) if target else None
         prefix = ("microsoft", "windows", "currentversion")
+        if key == (*prefix, "policies", "explorer", "run"):
+            return self.report(event, target, "explorer_run", "Explorer policy logon Run entry")
+        if key == (*_NT, "windows") and target.name in {"load", "run"}:
+            return self.report(event, target, "windows_load", "Windows logon load/run entry")
+        if key == (*prefix, "explorer", "user shell folders") and target.name == "startup":
+            return self.report(event, target, "startup_folder", "Per-user Startup folder location")
         if key and key[:-1] == prefix and key[-1] in {"run", "runonce"}:
             return self.report(event, target, "run_key", "Logon Run/RunOnce entry")
         # Section names need not be numbered; Depend belongs immediately beneath a section.
@@ -209,6 +243,7 @@ class RegistryRunKeys(_RegistryRule):
 
 class RegistryWinlogon(_RegistryRule):
     id = "win.registry_winlogon"
+    version = "2"
     title = "Winlogon shell, user initialization or notification registration changed"
     attack = ("T1547.004",)
     benign = ("approved custom shells and legacy logon software",)
@@ -216,8 +251,7 @@ class RegistryWinlogon(_RegistryRule):
                    "inspect notification DLLs and logon executions")
     research = ("https://attack.mitre.org/techniques/T1547/004/",)
 
-    def judge(self, event):
-        target = _target(event)
+    def _judge_target(self, event, target):
         key = _software(target) if target else None
         prefix = (*_NT, "winlogon")
         if key == prefix and target.name in {"shell", "userinit"}:
@@ -234,6 +268,7 @@ class RegistryWinlogon(_RegistryRule):
 
 class RegistryImageExecution(_RegistryRule):
     id = "win.registry_image_execution"
+    version = "2"
     title = "IFEO debugger or silent-exit monitoring registration changed"
     attack = ("T1546.012",)
     benign = ("debugging and application crash diagnostics",)
@@ -241,12 +276,14 @@ class RegistryImageExecution(_RegistryRule):
     research = ("https://attack.mitre.org/techniques/T1546/012/",
                 "https://learn.microsoft.com/en-us/windows-hardware/drivers/debugger/registry-entries-for-silent-process-exit")
 
-    def judge(self, event):
-        target = _target(event)
+    def _judge_target(self, event, target):
         key = _software(target) if target and target.root == _LM else None
         if not key or key[:3] != _NT or len(key) not in {5, 6}:
             return []
         family = key[3]
+        if (target.action == "renamed" and target.name is None
+                and family in {"image file execution options", "silentprocessexit"}):
+            return self.report(event, target, "image_execution_key", "Image execution monitoring configuration key")
         if family == "image file execution options" and target.name == "debugger":
             return self.report(event, target, "ifeo_debugger", "IFEO Debugger registration", high=True)
         if family == "image file execution options" and len(key) == 5 and target.name == "globalflag":
@@ -261,14 +298,14 @@ class RegistryImageExecution(_RegistryRule):
 
 class RegistryAppInit(_RegistryRule):
     id = "win.registry_appinit"
+    version = "2"
     title = "AppInit DLL registration or loading flag changed"
     attack = ("T1546.010",)
     benign = ("legacy application compatibility or security software",)
     next_checks = ("inspect DLL signatures and image-load events", "check Secure Boot and the effective AppInit policy")
     research = ("https://attack.mitre.org/techniques/T1546/010/",)
 
-    def judge(self, event):
-        target = _target(event)
+    def _judge_target(self, event, target):
         key = _software(target) if target and target.root == _LM else None
         if key == (*_NT, "windows"):
             if target.name == "appinit_dlls":
@@ -280,14 +317,14 @@ class RegistryAppInit(_RegistryRule):
 
 class RegistryAppCert(_RegistryRule):
     id = "win.registry_appcert"
+    version = "2"
     title = "AppCert DLL registration changed"
     attack = ("T1546.009",)
     benign = ("legacy certified application hooks",)
     next_checks = ("inspect the registered DLL and subsequent image loads", "identify the writer and configuration owner")
     research = ("https://attack.mitre.org/techniques/T1546/009/",)
 
-    def judge(self, event):
-        target = _target(event)
+    def _judge_target(self, event, target):
         if target and _system(target) == ("control", "session manager", "appcertdlls"):
             return self.report(event, target, "appcert_dll", "AppCert DLL registration", high=True)
         return []
@@ -295,32 +332,40 @@ class RegistryAppCert(_RegistryRule):
 
 class RegistryUserCom(_RegistryRule):
     id = "win.registry_user_com"
+    version = "2"
     title = "Per-user COM server registration changed"
     attack = ("T1546.015",)
     benign = ("per-user COM application installation and repair",)
     next_checks = ("compare the per-user CLSID with its machine registration", "inspect the server payload and invoking process")
-    research = ("https://attack.mitre.org/techniques/T1546/015/",)
+    research = ("https://attack.mitre.org/techniques/T1546/015/",
+                "https://learn.microsoft.com/windows/win32/winprog64/shared-registry-keys",
+                "https://devblogs.microsoft.com/oldnewthing/20121205-00/?p=5913",
+                "https://learn.microsoft.com/windows/win32/com/treatas")
 
-    def judge(self, event):
-        target = _target(event)
+    def _judge_target(self, event, target):
         key = _software(target) if target and target.root == _CU else None
+        if key and key[:2] == ("classes", "wow6432node"):
+            key = ("classes", *key[2:])
         if (key and len(key) == 4 and key[:2] == ("classes", "clsid")
-                and _GUID.fullmatch(key[2]) and key[3] in {"inprocserver32", "localserver32"}
+                and _GUID.fullmatch(key[2]) and key[3] in {"inprocserver32", "localserver32", "treatas"}
                 and target.name in {None, "", "(default)"}):
-            return self.report(event, target, "user_com_server", "Per-user COM server registration", high=True)
+            value = event.get("registry.value")
+            high = isinstance(value, str) and bool(value.strip()) and (
+                _writable_indicator(value.strip().lstrip('"')) and key[3] != "treatas")
+            return self.report(event, target, "user_com_server", "Per-user COM server registration", high=high)
         return []
 
 
 class RegistryLsaPackages(_RegistryRule):
     id = "win.registry_lsa_packages"
+    version = "2"
     title = "LSA authentication, security or notification packages changed"
     attack = ("T1547.002", "T1547.005", "T1112")
     benign = ("approved authentication providers, password filters and security products",)
     next_checks = ("compare the complete package list with the expected baseline", "inspect package DLL signatures and LSASS loads")
     research = ("https://attack.mitre.org/techniques/T1547/002/", "https://attack.mitre.org/techniques/T1547/005/")
 
-    def judge(self, event):
-        target = _target(event)
+    def _judge_target(self, event, target):
         key = _system(target) if target else None
         if (key in {("control", "lsa"), ("control", "lsa", "osconfig")}
                 and target.name in {"authentication packages", "security packages", "notification packages"}):
@@ -330,6 +375,7 @@ class RegistryLsaPackages(_RegistryRule):
 
 class RegistryCredentialProtection(_RegistryRule):
     id = "win.registry_credential_protection"
+    version = "2"
     title = "WDigest credential retention or LSA protection registry setting changed"
     attack = ("T1112", "T1685")
     benign = ("legacy authentication troubleshooting and authorized compatibility work",)
@@ -337,8 +383,7 @@ class RegistryCredentialProtection(_RegistryRule):
     research = ("https://learn.microsoft.com/en-us/windows-server/security/credentials-protection-and-management/configuring-additional-lsa-protection",
                 "https://support.microsoft.com/help/2871997")
 
-    def judge(self, event):
-        target = _target(event)
+    def _judge_target(self, event, target):
         key = _system(target) if target else None
         if key == ("control", "securityproviders", "wdigest") and target.name == "uselogoncredential":
             return self.report(event, target, "wdigest_credentials", "WDigest plaintext credential retention request",
@@ -351,6 +396,7 @@ class RegistryCredentialProtection(_RegistryRule):
 
 class RegistryDefender(_RegistryRule):
     id = "win.registry_defender"
+    version = "2"
     title = "Defender policy or exclusion registry setting changed"
     attack = ("T1685", "T1112")
     benign = ("managed antivirus policy and approved performance exclusions",)
@@ -358,12 +404,12 @@ class RegistryDefender(_RegistryRule):
     research = ("https://learn.microsoft.com/en-us/defender-endpoint/microsoft-defender-antivirus-exclusions-overview",
                 "https://learn.microsoft.com/en-us/defender-endpoint/microsoft-defender-antivirus-exclusions-configure")
 
-    def judge(self, event):
-        target = _target(event)
+    def _judge_target(self, event, target):
         key = _software(target) if target and target.root == _LM else None
         if not key:
             return []
-        if key[:1] == ("policies",):
+        policy = key[:1] == ("policies",)
+        if policy:
             key = key[1:]
         prefix = ("microsoft", "windows defender")
         if key[:2] != prefix:
@@ -382,19 +428,20 @@ class RegistryDefender(_RegistryRule):
         if target.name in disabling.get(tail, set()):
             return self.report(event, target, "defender_disable", "Defender protection disablement request", numeric=(1,), high=True)
         # Unrecognised policy values are still sensitive configuration observations, with no disabling claim.
-        return self.report(event, target, "defender_policy", "Defender policy (effective protection impact unknown)")
+        return (self.report(event, target, "defender_policy", "Defender policy (effective protection impact unknown)")
+                if policy else [])
 
 
 class RegistryRdp(_RegistryRule):
     id = "win.registry_rdp"
+    version = "2"
     title = "Remote Desktop registry enablement setting changed"
     attack = ("T1021.001", "T1112")
     benign = ("authorized remote administration enablement",)
     next_checks = ("check firewall and effective RDP exposure", "look for subsequent type-10 logons and their source")
     research = ("https://learn.microsoft.com/en-us/troubleshoot/windows-server/remote/remote-desktop-cannot-connect-remote-computer",)
 
-    def judge(self, event):
-        target = _target(event)
+    def _judge_target(self, event, target):
         if target and _system(target) == ("control", "terminal server") and target.name == "fdenytsconnections":
             return self.report(event, target, "rdp_enable", "Remote Desktop connection enablement request", numeric=(0,))
         return []
@@ -402,15 +449,17 @@ class RegistryRdp(_RegistryRule):
 
 class RegistryServiceCommand(_RegistryRule):
     id = "win.registry_service_command"
+    version = "2"
     title = "Service image or failure command registry setting changed"
     attack = ("T1543.003",)
     benign = ("service installation, upgrades and recovery configuration",)
     next_checks = ("inspect the service executable and failure command", "compare service installation and execution events")
     research = ("https://attack.mitre.org/techniques/T1543/003/",)
 
-    def judge(self, event):
-        target = _target(event)
+    def _judge_target(self, event, target):
         key = _system(target) if target else None
+        if key and len(key) == 3 and key[0] == "services" and key[2] == "parameters" and target.name == "servicedll":
+            return self.report(event, target, "service_dll", "Service implementation DLL registration")
         if key and len(key) == 2 and key[0] == "services" and target.name in {"imagepath", "failurecommand"}:
             # Basename is descriptive only; a familiar binary name never suppresses a recorded command.
             name = basename(event.get("registry.value"))

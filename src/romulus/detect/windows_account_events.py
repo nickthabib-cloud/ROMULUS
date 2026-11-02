@@ -1,24 +1,36 @@
 """Positive account-management signals from typed Windows Security events."""
 from __future__ import annotations
 
+import json
 import re
 
-from romulus.detect.windows_events import WindowsEventRule, integer, signal
+from romulus.detect.windows_events import WindowsEventRule, integer
+from romulus.detect.windows_events import signal as _signal
 from romulus.evidence.typed import Outcome, TypedEvent
 from romulus.evidence.windows_catalog import SECURITY
 
 _DOMAIN_SID = re.compile(r"s-1-5-21-(\d{1,10})-(\d{1,10})-(\d{1,10})-(\d{1,10})", re.ASCII)
 _GROUPS = {
-    512: "Domain Admins", 516: "Domain Controllers", 517: "Cert Publishers", 518: "Schema Admins",
+    498: "Enterprise Read-only Domain Controllers", 512: "Domain Admins", 516: "Domain Controllers", 517: "Cert Publishers", 518: "Schema Admins",
     519: "Enterprise Admins", 520: "Group Policy Creator Owners", 521: "Read-only Domain Controllers",
     526: "Key Admins", 527: "Enterprise Key Admins",
 }
 _BUILTIN = {544: "Administrators", 548: "Account Operators", 549: "Server Operators", 550: "Print Operators",
-            551: "Backup Operators", 552: "Replicator", 555: "Remote Desktop Users", 580: "Remote Management Users"}
+            551: "Backup Operators", 552: "Replicator", 555: "Remote Desktop Users", 562: "Distributed COM Users",
+            578: "Hyper-V Administrators", 580: "Remote Management Users"}
+_NAMED_GROUPS = frozenset({"dnsadmins", "exchange windows permissions"})
+_WEAK_GROUPS = frozenset({"s-1-5-32-555", "s-1-5-32-562", "s-1-5-32-580"})
 _IDENTITY = ("account.group_id", "auth.target_account", "account.name", "account.domain", "account.sam_name",
              "user.entity_id", "user.name", "user.domain")
 _MEMBERSHIP = (*_IDENTITY, "account.member_id", "account.member_name", "account.group_name", "account.action")
 _ACCOUNT_DOC = "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-"
+
+
+def signal(event, behavior, text, attack, fields, **kwargs):
+    # Account identities and changed values define behavior; logon instances do not.
+    kwargs.setdefault("content", json.dumps({"outcome": event.outcome.value, "event.code": event.get("event.code"),
+                                            **{name: event.get(name) for name in fields}}, sort_keys=True))
+    return _signal(event, behavior, text, attack, fields, **kwargs)
 
 
 def _domain_sid(value: object) -> str | None:
@@ -56,6 +68,14 @@ def privileged_group_sid(value: object) -> str | None:
     return None
 
 
+def sensitive_group_lane(value: object) -> str:
+    """Membership alone in access-oriented roles supports a lead, not an administrator claim."""
+    group = privileged_group_sid(value)
+    if group is None or group in _WEAK_GROUPS or (group.startswith("s-1-5-21-") and group.endswith("-517")):
+        return "lead"
+    return "high"
+
+
 def creation_target_sid(event: TypedEvent) -> str | None:
     """The target account's SID, not its creator or target account name.
 
@@ -83,6 +103,7 @@ def _target_text(event: TypedEvent) -> str:
 
 
 class _AccountRule(WindowsEventRule):
+    version = "2"
     families = ("account_change",)
     positive_only_reason = "These are positive account-management records; collection and history cannot prove absence."
     required_fields = ("event.code",)
@@ -104,6 +125,11 @@ class PrivilegedGroupAddition(_AccountRule):
         raw_group = event.get("account.group_id")
         group = privileged_group_sid(raw_group)
         if group is None:
+            name = str(event.get("account.group_name") or "").strip().casefold()
+            if name in _NAMED_GROUPS:
+                return [signal(event, "named_sensitive_group", "Windows recorded a group-member addition event "
+                               f"naming {name}; the name alone does not establish the group's privilege or operation outcome",
+                               self.attack, _MEMBERSHIP)]
             if _sid(raw_group):
                 return []
             return [signal(event, "group_identity_unknown", "Windows recorded a group-member addition; the group SID "
@@ -121,8 +147,10 @@ class PrivilegedGroupAddition(_AccountRule):
             return [signal(event, "sensitive_group_member_unknown", f"Windows recorded a member addition to "
                            f"{label} ({group}); the member SID is missing or malformed", self.attack, _MEMBERSHIP,
                            notes=notes)]
+        high = sensitive_group_lane(group) == "high"
         return [signal(event, "sensitive_group_added", f"Windows recorded member {member} added to {label} ({group})",
-                       self.attack, _MEMBERSHIP, lane="high", severity="high", notes=notes)]
+                       self.attack, _MEMBERSHIP, lane="high" if high else "lead",
+                       severity="high" if high else "medium", notes=notes)]
 
 
 class SidHistoryChange(_AccountRule):
@@ -166,8 +194,8 @@ class DsrmPasswordAttempt(_AccountRule):
             return []
         return [signal(event, "dsrm_password_attempt", "Windows recorded a Directory Services Restore Mode "
                        "administrator password-setting attempt", self.attack, _IDENTITY,
-                       notes=(("This signal claims an attempt. The account-change normalizer does not retain the "
-                               "native status field or honor every audit outcome marker, so success is not inferred."),))]
+                       notes=(("This signal claims a password-setting attempt; it does not establish a usable "
+                               "recovery credential or subsequent DSRM access."),))]
 
 
 class AccountCreation(_AccountRule):
@@ -215,16 +243,16 @@ _SPN = re.compile(r"[^\s/<>]+/[^\s/<>]+(?:/[^\s/<>]+)?", re.ASCII)
 
 class ComputerAccountConfiguration(_AccountRule):
     id = "win.computer_account_configuration"
-    title = "Computer-account delegation or sensitive SAMR flags changed"
-    windows_event_classes = (("Security", SECURITY, 4742),)
+    title = "User or computer account delegation or sensitive SAMR flags changed"
+    windows_event_classes = tuple(("Security", SECURITY, code) for code in (4738, 4742))
     attack = ("T1098",)
     benign = ("approved service delegation, compatibility work and account-policy changes",)
     next_checks = ("validate the full delegation list and SAMR flag changes", "inspect the operator and related directory changes")
-    research = (_ACCOUNT_DOC + "4742", "https://attack.mitre.org/techniques/T1098/",
+    research = (_ACCOUNT_DOC + "4738", _ACCOUNT_DOC + "4742", "https://attack.mitre.org/techniques/T1098/",
                 "https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-samr/b10cfda1-f24f-441b-8f43-80cb93e786ec")
 
     def judge(self, event):
-        if event.get("event.code") != 4742:
+        if event.get("event.code") not in {4738, 4742}:
             return []
         fields = (*_IDENTITY, "account.allowed_to_delegate_to", "account.old_uac", "account.new_uac", "account.uac_changes")
         hits = []
@@ -251,7 +279,11 @@ class ComputerAccountConfiguration(_AccountRule):
         token_set = {token.casefold() for token in tokens} if not malformed else set()
         malformed |= any(name in event.fields and integer(event.get(name)) is None
                          for name in ("account.old_uac", "account.new_uac"))
+        malformed |= any(event.has("windows.event_data." + name) and integer(event.get("windows.event_data." + name)) is None
+                         and event.get("windows.event_data." + name) not in ("-", "")
+                         for name in ("OldUacValue", "NewUacValue"))
         known = {name + suffix for _, name, _ in _FLAGS for suffix in ("_enabled", "_disabled")}
+        known.update({"account_enabled", "account_disabled", "account_unlocked"})
         if malformed or token_set - known:
             hits.append(signal(event, "computer_uac_unknown", "Computer-account SAMR changes contain missing, "
                                "malformed or unrecognized flag data; their security effect is unknown", self.attack, fields))
@@ -275,6 +307,9 @@ class ComputerAccountConfiguration(_AccountRule):
                 text, high = f"{label} change has a non-success outcome; its effect is unknown", False
             hits.append(signal(event, "computer_flag_" + name, "Computer-account " + text, self.attack, fields,
                                lane="high" if high else "lead", severity="high" if high else "medium"))
+        if event.get("event.code") == 4738:
+            for hit in hits:
+                hit.text = hit.text.replace("Computer-account", "User-account")
         if len(hits) <= 1:
             return hits
         # The publisher identifies direct candidates by rule and cited record. Keep every
@@ -286,5 +321,25 @@ class ComputerAccountConfiguration(_AccountRule):
                        severity="high" if high else "medium", notes=notes)]
 
 
+class AccountRename(_AccountRule):
+    id = "win.account_rename"
+    version = "1"
+    title = "An account rename was recorded"
+    windows_event_classes = (("Security", SECURITY, 4781),)
+    attack = ("T1098",)
+    benign = ("approved account naming maintenance",)
+    next_checks = ("validate the target SID, old name, new name and change approval",)
+    research = (_ACCOUNT_DOC + "4781",)
+
+    def judge(self, event):
+        if event.get("event.code") != 4781:
+            return []
+        fields = (*_IDENTITY, "account.old_name", "account.new_name", "account.action")
+        result = "recorded an account rename" if event.outcome == Outcome.success else "recorded an account rename event with unresolved success"
+        return [signal(event, "account_rename", f"Windows {result}: "
+                       f"{self.describe(event.get('account.old_name'))} to {self.describe(event.get('account.new_name'))}",
+                       self.attack, fields)]
+
+
 WINDOWS_ACCOUNT_PLAYBOOKS = (PrivilegedGroupAddition, SidHistoryChange, DsrmPasswordAttempt, AccountCreation,
-                             ComputerAccountConfiguration)
+                             ComputerAccountConfiguration, AccountRename)

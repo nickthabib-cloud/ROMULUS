@@ -24,7 +24,7 @@ _DOCUMENTED_EVENT_KEYS = (
         4688, 4689, 4624, 4625, 4648, 4672, 4634, 4647, 4720, 4722, 4724, 4726,
         4728, 4732, 4756, 4738, 4740, 4697, 4698, 4702,
         4768, 4769, 4770, 4771, 4776, 4778, 4779, 4964,
-        4704, 4705, 4725, 4729, 4733, 4741, 4742, 4743, 4757, 4765, 4766, 4767, 4781, 4794,
+        4704, 4705, 4706, 4716, 4725, 4729, 4733, 4741, 4742, 4743, 4757, 4765, 4766, 4767, 4781, 4794,
         4699, 4700, 4701, 4657, 4656, 4663, 4670, 4662,
         5136, 5137, 5138, 5139, 5141, 5140, 5145,
     )],
@@ -262,6 +262,15 @@ def _security_data(event_id: int, ordinal: int) -> dict[str, object]:
             "TargetDomainName": "EXAMPLE",
             "TargetUserName": "example-user",
             "PrivilegeList": "SeServiceLogonRight",
+        }
+    if event_id in {4706, 4716}:
+        return {
+            **subject,
+            "DomainName": "partner.example.test",
+            "DomainSid": "S-1-5-21-444-555-666",
+            "TdoType": "2",
+            "TdoDirection": "3",
+            "TdoAttributes": "32",
         }
     if event_id in {4741, 4742, 4743}:
         return {

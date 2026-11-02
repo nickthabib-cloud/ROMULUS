@@ -5,10 +5,12 @@ prove credential extraction, offline password cracking or ticket forgery.
 """
 from __future__ import annotations
 
+import json
 import re
 
 from romulus.detect.base import PredicateField
-from romulus.detect.windows_events import WindowsEventRule, integer, signal
+from romulus.detect.windows_events import WindowsEventRule, integer
+from romulus.detect.windows_events import signal as _signal
 from romulus.evidence.typed import Outcome
 from romulus.evidence.windows_catalog import SECURITY
 from romulus.site import SiteFacts, absent_site_facts
@@ -29,6 +31,13 @@ _DIRECTORY = (*_ACTOR, "directory.change.action", "directory.object.dn", "direct
               "directory.change.operation_type")
 _MOVE_DNS = ("windows.event_data.OldObjectDN", "windows.event_data.NewObjectDN")
 _CHANGES = {5136: "modification", 5137: "creation", 5138: "restoration", 5139: "move", 5141: "deletion"}
+
+
+def signal(event, behavior, text, attack, fields, **kwargs):
+    semantic = {name: event.get(name) for name in fields if name != "auth.logon_guid"}
+    kwargs.setdefault("content", json.dumps({"outcome": event.outcome.value, "event.code": event.get("event.code"),
+                                            **semantic}, sort_keys=True))
+    return _signal(event, behavior, text, attack, fields, **kwargs)
 
 
 def _security(*codes):
@@ -80,13 +89,22 @@ def _listed_actor(event, facts):
     if not name.endswith("$"):
         return False
     machine = name[:-1].rstrip(".")
-    return any(machine in {dc.casefold().rstrip("."), dc.casefold().rstrip(".").split(".", 1)[0]}
-               for dc in facts.domain_controllers)
+    domain = _text(event.get("user.domain"))
+    for dc in facts.domain_controllers:
+        full = dc.casefold().rstrip(".")
+        host, separator, suffix = full.partition(".")
+        if machine not in {full, host}:
+            continue
+        # DNS and NetBIOS domains have no general string conversion. Require an
+        # exact recorded domain or the DNS suffix's first label for a DC hint.
+        if domain and separator and domain in {suffix, suffix.split(".", 1)[0]}:
+            return True
+    return False
 
 
 class DirectoryReplicationAccess(WindowsEventRule):
     id = "win.directory_replication_access"
-    version = "1"
+    version = "2"
     title = "A directory access record named replication extended rights"
     families = ("directory_access",)
     windows_event_classes = _security(4662)
@@ -102,7 +120,8 @@ class DirectoryReplicationAccess(WindowsEventRule):
         if event.get("event.code") != 4662 or not _replication_rights(event):
             return []
         facts = self.site_facts or absent_site_facts()
-        configured = bool(facts.present and facts.domain_controllers and facts.directory_sync_accounts)
+        declared_sync = bool(facts.directory_sync_accounts) or "directory_sync_accounts" in facts.content
+        configured = bool(facts.present and facts.domain_controllers and declared_sync)
         listed = _listed_actor(event, facts)
         mask = integer(event.get("directory.access.access_mask"))
         actor_complete = bool(_actor_keys(event) and event.get("user.name") and event.get("user.domain"))
@@ -127,7 +146,7 @@ class DirectoryReplicationAccess(WindowsEventRule):
 
 class WeakKerberosTicketEncryption(WindowsEventRule):
     id = "win.weak_kerberos_ticket_encryption"
-    version = "1"
+    version = "2"
     title = "A Kerberos ticket record reported DES or RC4 encryption"
     families = ("auth",)
     windows_event_classes = _security(4768, 4769, 4770)
@@ -155,7 +174,7 @@ class WeakKerberosTicketEncryption(WindowsEventRule):
 
 class KerberosNoPreauthentication(WindowsEventRule):
     id = "win.kerberos_no_preauthentication"
-    version = "1"
+    version = "2"
     title = "A TGT request recorded pre-authentication type zero"
     families = ("auth",)
     windows_event_classes = _security(4768)
@@ -304,7 +323,7 @@ class _DirectoryChangeRule(WindowsEventRule):
 
 class AdminSdHolderChange(_DirectoryChangeRule):
     id = "win.adminsdholder_change"
-    version = "1"
+    version = "2"
     title = "A directory change named the exact AdminSDHolder object"
     behavior, subject = "adminsdholder_change", "the domain AdminSDHolder object"
     attack = ("T1098",)
@@ -320,7 +339,7 @@ class AdminSdHolderChange(_DirectoryChangeRule):
 
 class GroupPolicyDirectoryChange(_DirectoryChangeRule):
     id = "win.group_policy_directory_change"
-    version = "1"
+    version = "2"
     title = "A directory change named a GPO object, policy container or policy link attribute"
     behavior, subject = "group_policy_directory_change", "a group-policy object, policy container or link attribute"
     attack = ("T1484.001",)
@@ -335,13 +354,25 @@ class GroupPolicyDirectoryChange(_DirectoryChangeRule):
 
 class TrustDirectoryChange(_DirectoryChangeRule):
     id = "win.trust_directory_change"
-    version = "1"
+    version = "2"
+    windows_event_classes = _security(*_CHANGES, 4706, 4716)
     title = "A directory change named a trust object or exact trust attribute"
     behavior, subject = "trust_directory_change", "a trust object or trust attribute"
     attack = ("T1484.002",)
     benign = ("authorized forest/domain trust maintenance, rotation and recovery",)
     next_checks = ("review trust direction, attributes and authentication material", "verify partner domain and actor authorization")
-    research = (_AUDIT + "event-5136", _AUDIT + "event-5139", "https://attack.mitre.org/techniques/T1484/002/")
+    research = (_AUDIT + "event-4706", _AUDIT + "event-4716", _AUDIT + "event-5136", _AUDIT + "event-5139",
+                "https://attack.mitre.org/techniques/T1484/002/")
+
+    def judge(self, event):
+        code = event.get("event.code")
+        if code not in {4706, 4716}:
+            return super().judge(event)
+        fields = (*_ACTOR, "directory.trust.domain_name", "directory.trust.domain_sid", "directory.trust.type",
+                  "directory.trust.direction", "directory.trust.attributes", "directory.trust.sid_filtering_enabled")
+        action = "creation" if code == 4706 else "modification"
+        return [signal(event, "trust_directory_change", f"Windows recorded a domain trust {action} event; "
+                       "the recorded values do not establish a malicious trust effect", self.attack, fields)]
 
     def selected(self, event, rdns):
         return (_text(event.get("directory.object.class")) == "trusteddomain"
@@ -351,7 +382,26 @@ class TrustDirectoryChange(_DirectoryChangeRule):
                 })
 
 
+class SensitiveDirectoryAttributeChange(_DirectoryChangeRule):
+    id = "win.sensitive_directory_attribute_change"
+    version = "1"
+    title = "A directory change names a credential, delegation or domain-root permissions attribute"
+    windows_event_classes = _security(5136)
+    behavior, subject = "sensitive_directory_attribute_change", "a credential, delegation or domain-root permissions attribute"
+    attack = ("T1098",)
+    benign = ("authorized delegation, key provisioning, SPN registration and directory permission changes",)
+    next_checks = ("inspect added and deleted values and the target object's effective permissions",)
+    research = (_AUDIT + "event-5136", "https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-ada2/45916e5b-d66f-444e-b1e5-5b0666ed4d66",
+                "https://learn.microsoft.com/en-us/windows/win32/adschema/a-msds-allowedtoactonbehalfofotheridentity")
+
+    def selected(self, event, rdns):
+        attribute = _text(event.get("directory.attribute.ldap_name"))
+        return (event.get("event.code") == 5136 and (attribute in {
+            "msds-allowedtoactonbehalfofotheridentity", "msds-keycredentiallink", "serviceprincipalname",
+        } or attribute == "ntsecuritydescriptor" and _domain_suffix(rdns)))
+
+
 WINDOWS_DIRECTORY_PLAYBOOKS = (
     DirectoryReplicationAccess, WeakKerberosTicketEncryption, KerberosNoPreauthentication,
-    AdminSdHolderChange, GroupPolicyDirectoryChange, TrustDirectoryChange,
+    AdminSdHolderChange, GroupPolicyDirectoryChange, TrustDirectoryChange, SensitiveDirectoryAttributeChange,
 )

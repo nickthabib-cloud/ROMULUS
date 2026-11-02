@@ -1442,6 +1442,13 @@ class Sweep:
             # records that need a new key in it (each rule's own refusal path), and every match that needs no new
             # state still publishes.
             pb.bind_raw(raw_sources, target)
+            if getattr(pb, "needs_live_loader", False):
+                current_events = {event.id: event for event in events}
+                def load_live(ids, current_events=current_events):
+                    missing = [identity for identity in ids if identity not in current_events]
+                    return ([current_events[identity] for identity in ids if identity in current_events]
+                            + self._event_stage().load(missing))
+                pb.bind_loader(load_live)
             try:
                 matches = pb.consume_scoped_partition(scoped_events)
             except StateExhausted as exc:

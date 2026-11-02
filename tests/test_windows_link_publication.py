@@ -7,7 +7,7 @@ from romulus.hunt.windows_context import publish_windows_link_context
 from romulus.sources.models import Window
 from romulus.store.repo import raw_id
 from tests.test_context_catalog import _repo, _seed_anchor
-from tests.windows_event_support import START, event
+from tests.windows_link_support import START, event
 
 
 def test_windows_link_fact_is_published_with_both_raw_records_and_is_idempotent():

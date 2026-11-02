@@ -1,13 +1,20 @@
 """A nonexecuting PowerShell lexer and conservative call-shape reader.
 
 This is not the PowerShell grammar or a runtime. It separates comments and literal data from commands,
-member calls and constant call targets. Unknown/dynamic syntax is never evaluated. All text is scanned;
+member calls and constant call targets. Unknown/dynamic syntax is never executed. Work caps are explicit and partial;
 state lives only for the current bounded telemetry record, never for the hunt.
 """
 from __future__ import annotations
 
+import ntpath
 import re
 from dataclasses import dataclass, field
+
+MAX_TOKENS = 60_000
+MAX_READ_CHARS = 2_097_152
+_VARIABLE = re.compile(r"\$(?:\{[^}]*\}|[\w?]+(?::(?!:)[\w?]+)?)")
+_HERE = {quote: re.compile(r"(?m)^" + re.escape(quote) + "@") for quote in "'\""}
+_QUOTES = {c: "'" for c in "'\u2018\u2019\u201a\u201b"} | {c: '"' for c in '\"\u201c\u201d\u201e'}
 
 
 @dataclass(frozen=True)
@@ -15,6 +22,7 @@ class Token:
     kind: str
     value: str
     escaped: bool = False
+    transforms: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -28,6 +36,13 @@ class Script:
     variables: set[str] = field(default_factory=set)
     obfuscation: set[str] = field(default_factory=set)
     dynamic_invocation: bool = False
+    obfuscated_execution: bool = False
+    evaluates_code: bool = False
+    reflection_filter: bool = False
+    inert_words: set[str] = field(default_factory=set)
+    constant_folds: list[tuple] = field(default_factory=list)
+    module_binding_data: bool = False
+    module_bindings: list[tuple[str, str, str]] = field(default_factory=list)
     partial: bool = False
 
 
@@ -53,6 +68,7 @@ def _expression_end(text: str, start: int) -> int:
                     continue
                 quote = ""
         elif text.startswith("<#", i):
+            start = i
             comment, i = 1, i + 2
             continue
         elif text[i] == "#":
@@ -74,7 +90,8 @@ def _expression_end(text: str, start: int) -> int:
 def lex(text: str, *, csharp: bool = False) -> tuple[list[Token], bool]:
     """Tokenize strings, here-strings, comments, variables, operators and escaped bare words."""
     tokens, i, partial = [], 0, False
-    while i < len(text):
+    word_end = -1
+    while i < len(text) and len(tokens) < MAX_TOKENS:
         c = text[i]
         if csharp and text.startswith("//", i):
             end = text.find("\n", i)
@@ -88,6 +105,7 @@ def lex(text: str, *, csharp: bool = False) -> tuple[list[Token], bool]:
         elif c in " \t\r":
             i += 1
         elif text.startswith("<#", i):
+            start = i
             depth, i = 1, i + 2
             while i < len(text) and depth:
                 if text.startswith("<#", i):
@@ -97,17 +115,19 @@ def lex(text: str, *, csharp: bool = False) -> tuple[list[Token], bool]:
                 else:
                     i += 1
             partial |= bool(depth)
+            tokens.append(Token("inert", text[start:i]))
         elif c == "#":
             end = text.find("\n", i)
+            tokens.append(Token("inert", text[i:len(text) if end < 0 else end]))
             i = len(text) if end < 0 else end
-        elif c == "@" and i + 2 < len(text) and text[i+1] in "'\"" and text[i+2] in "\r\n":
-            quote, start = text[i+1], i + 2
-            end = re.search(r"(?m)^" + re.escape(quote) + "@", text[start:])
+        elif c == "@" and i + 2 < len(text) and text[i+1] in _QUOTES and text[i+2] in "\r\n":
+            quote, start = _QUOTES[text[i+1]], i + 2
+            end = _HERE[quote].search(text, start)
             if end is None:
                 tokens.append(Token("data", text[start:]))
                 partial, i = True, len(text)
             else:
-                body = text[start:start+end.start()]
+                body = text[start:end.start()]
                 j = 0
                 if quote == '"':
                     while j < len(body):
@@ -121,9 +141,10 @@ def lex(text: str, *, csharp: bool = False) -> tuple[list[Token], bool]:
                         else:
                             j += 1
                 tokens.append(Token("data" if quote == '"' and "$" in body else "string", body))
-                i = start + end.end()
-        elif c in "'\"":
-            quote, i, value, dynamic = c, i + 1, [], False
+                i = end.end()
+        elif c in _QUOTES:
+            start = i
+            quote, i, value, dynamic = _QUOTES[c], i + 1, [], False
             closed = False
             while i < len(text):
                 if quote == '"' and text.startswith("$(", i):
@@ -131,8 +152,8 @@ def lex(text: str, *, csharp: bool = False) -> tuple[list[Token], bool]:
                     tokens.append(Token("expression", text[i+2:end]))
                     partial |= end == len(text)
                     dynamic, i = True, min(len(text), end + 1)
-                elif text[i] == quote:
-                    if i + 1 < len(text) and text[i+1] == quote:
+                elif _QUOTES.get(text[i]) == quote:
+                    if i + 1 < len(text) and _QUOTES.get(text[i+1]) == quote:
                         value.append(quote)
                         i += 2
                     else:
@@ -146,9 +167,16 @@ def lex(text: str, *, csharp: bool = False) -> tuple[list[Token], bool]:
                     value.append(text[i])
                     i += 1
             partial |= not closed
-            tokens.append(Token("data" if dynamic or not closed else "string", "".join(value)))
+            value = "".join(value)
+            if word_end == start and tokens and tokens[-1].kind == "word" and not dynamic and closed:
+                old = tokens.pop()
+                tokens.append(Token("word", old.value + value.casefold(), old.escaped,
+                                    old.transforms | {"embedded-quotes"}))
+                word_end = i
+            else:
+                tokens.append(Token("data" if dynamic or not closed else "string", value))
         elif c == "$":
-            match = re.match(r"\$(?:\{[^}]*\}|[\w?]+(?::(?!:)[\w?]+)?)", text[i:])
+            match = _VARIABLE.match(text, i)
             if match:
                 tokens.append(Token("variable", match[0].casefold()))
                 i += len(match[0])
@@ -158,13 +186,14 @@ def lex(text: str, *, csharp: bool = False) -> tuple[list[Token], bool]:
         elif text.startswith("::", i):
             tokens.append(Token("op", "::"))
             i += 2
-        elif c in "\n;|&(){}[],=+.@":
+        elif c in "\n;|&(){}[],=+.@" and not text.startswith((".\\", "./"), i):
             tokens.append(Token("op", c))
             i += 1
         else:
+            start = i
             value, escaped = [], False
-            member = bool(tokens and tokens[-1].value in {".", "::"})
-            while i < len(text) and text[i] not in " \t\r\n;|&(){}[],=+@'\"#$":
+            member = bool(tokens and tokens[-1].value in {".", "::"} and not text.startswith((".\\", "./"), i))
+            while i < len(text) and text[i] not in " \t\r\n;|&(){}[],=+@$" and text[i] not in _QUOTES:
                 if text[i] == "." and member:
                     break
                 if text[i] == "`" and i + 1 < len(text):
@@ -174,31 +203,51 @@ def lex(text: str, *, csharp: bool = False) -> tuple[list[Token], bool]:
                 else:
                     value.append(text[i])
                     i += 1
-            tokens.append(Token("word", "".join(value).casefold(), escaped))
-    return tokens, partial
+            value = "".join(value).casefold()
+            if value.startswith(("\u2013", "\u2014", "\u2015")):
+                value = "-" + value[1:]
+            if word_end == start and tokens and tokens[-1].kind == "word":
+                old = tokens.pop()
+                value, escaped = old.value + value, old.escaped or escaped
+                transforms = old.transforms
+            else:
+                transforms = frozenset()
+            tokens.append(Token("word", value, escaped, transforms | ({"backtick"} if escaped else set())))
+            word_end = i
+    return tokens, partial or i < len(text)
 
 
-def _read_tokens(tokens: list[Token], partial: bool) -> Script:
+def _read_tokens(tokens: list[Token], partial: bool, constant_budget=None) -> Script:
+    from romulus.detect.powershell_constants import OBFUSCATING, fold_constants
+
     result = Script(partial=partial)
-    # Fold only adjacent constant string additions. This never executes telemetry or substitutes variables.
-    folded, i = [], 0
-    while i < len(tokens):
-        token = tokens[i]
-        if token.kind == "string":
-            value, end = token.value, i + 1
-            while end + 1 < len(tokens) and tokens[end].value == "+" and tokens[end+1].kind == "string":
-                value += tokens[end+1].value
-                end += 2
-            if end > i + 1:
-                result.obfuscation.add("concatenation")
-            folded.append(Token("string", value))
-            i = end
-        else:
-            folded.append(token)
-            i += 1
-    tokens = folded
-    stack = []
-    start, called, command, args = True, False, "", []
+    for token in tokens:
+        if token.kind == 'variable':
+            result.variables.add(token.value)
+        if token.kind == 'string':
+            result.literals.add(token.value.casefold())
+        if token.kind in {'string', 'data', 'inert'}:
+            result.inert_words.update(re.findall(r'[a-z][\w-]*', token.value.casefold()))
+    tokens, result.constant_folds, limited = fold_constants(tokens, constant_budget)
+    result.partial |= limited
+    stack, contexts = [], []
+    start, called, command, args, evaluating = True, False, '', [], False
+    type_depth = 0
+    pending_switch_depth = None
+    switch_bodies = set()
+    switch_depths = []
+    reflection_pattern = False
+    evaluators = {'iex', 'invoke-expression'}
+    keywords = {'function', 'filter', 'if', 'elseif', 'else', 'while', 'for', 'foreach', 'switch',
+                'param', 'begin', 'process', 'end', 'try', 'catch', 'finally', 'return', 'throw', 'class', 'enum'}
+
+    def command_name(value):
+        name = value.casefold()
+        if ':' in name and name.split(':', 1)[0] in {'global', 'script', 'local', 'private'}:
+            name = name.split(':', 1)[1]
+        if '\\' in name or '/' in name:
+            name = ntpath.basename(name.replace('/', '\\'))
+        return name.removesuffix('.ps1')
 
     def finish():
         if command:
@@ -207,69 +256,183 @@ def _read_tokens(tokens: list[Token], partial: bool) -> Script:
     for i, token in enumerate(tokens):
         value, previous = token.value, tokens[i-1].value if i else ""
         following = tokens[i+1].value if i + 1 < len(tokens) else ""
-        if value in {"(", "[", "{"}:
+        transforms = token.transforms & OBFUSCATING
+        result.obfuscation.update(transforms)
+        if token.kind in {'inert', 'data'}:
+            if command and token.kind == 'data':
+                args.append(value.casefold())
+            continue
+        if token.kind == 'string':
+            result.literals.add(value.casefold())
+        if token.kind == 'word' and value == 'switch' and start:
+            pending_switch_depth = len(stack)
+        if token.kind == "op" and value in {"(", "[", "{"}:
             stack.append(value)
-        elif value in {")", "]", "}"}:
+            if value == '{' and pending_switch_depth == len(stack) - 1:
+                switch_bodies.add(len(stack))
+                switch_depths.append(len(stack))
+                pending_switch_depth = None
+        elif token.kind == "op" and value in {")", "]", "}"}:
             want = {")": "(", "]": "[", "}": "{"}[value]
             if not stack or stack.pop() != want:
                 result.partial = True
-        if token.kind == "variable":
-            result.variables.add(value)
-        if token.kind == "string":
-            result.literals.add(value.casefold())
-        if value == "-join" and any(t.value.casefold() == "char" for t in tokens[max(0, i-12):i+8]):
-            result.obfuscation.add("char-join")
-        if value == "-f" and i and tokens[i-1].kind == "string" and re.search(r"\{\d+(?:[^}]*)\}", previous):
-            result.obfuscation.add("format-string")
-        if token.kind in {"word", "string"} and previous in {".", "::"} and following == "(":
+            while switch_depths and switch_depths[-1] > len(stack):
+                switch_bodies.discard(switch_depths.pop())
+        if token.kind in {'word', 'string'} and len(stack) in switch_bodies:
+            # Bare switch labels are patterns; the code inside their action blocks is read normally.
+            result.inert_words.add(value.casefold())
+            start = False
+            continue
+        if token.kind == 'word' and value == '-join' and evaluating:
+            result.obfuscation.add('char-join')
+            result.obfuscated_execution = True
+        if token.kind == 'word' and value == '-like' and i + 1 < len(tokens) and tokens[i+1].kind == 'string':
+            pattern = tokens[i+1].value.casefold()
+            reflection_pattern |= '*' in pattern and pattern.endswith('iutils')
+        if (token.kind in {"word", "string"} and i and tokens[i-1].kind == 'op'
+                and previous in {".", "::"} and following == "("):
             result.members.add(value.casefold())
-            if previous == "::" and i > 2 and tokens[i-2].value == "]":
+            if value.casefold() == 'invoke' and i >= 3 and tokens[i-3].value in {'.', '::'} and tokens[i-2].kind in {'word', 'string'}:
+                result.members.add(tokens[i-2].value.casefold())
+            if value.casefold() == 'invokescript':
+                result.evaluates_code = True
+            if previous == "::" and i > 2 and tokens[i-2].kind == "op" and tokens[i-2].value == "]":
                 j = i - 3
-                while j >= 0 and tokens[j].value not in {"[", ";", "\n"}:
+                lower = max(0, i - 64)
+                while j >= lower and not (tokens[j].kind == 'op' and tokens[j].value in {"[", ";", "\n"}):
                     j -= 1
-                if j >= 0 and tokens[j].value == "[":
+                if j >= lower and tokens[j].kind == 'op' and tokens[j].value == "[":
                     typename = "".join(t.value for t in tokens[j+1:i-2])
                     result.static_calls.add((typename.casefold(), value.casefold()))
         if value in {";", "\n", "|", "{", "}"} and token.kind == "op":
             finish()
             start, called, command, args = True, False, "", []
             continue
-        if token.kind == "word" and previous in {"function", "filter"}:
-            result.definitions.add(value)
-        if value == "&" and token.kind == "op":
+        if token.kind == "word" and i and tokens[i-1].kind == 'word' and previous in {"function", "filter"}:
+            result.definitions.add(command_name(value))
+            start = False
+            continue
+        if value in {"&", "."} and token.kind == "op" and (start or value == "&"):
+            if value == "&" and re.search(r"(?:\d*>>?|\*>)$", previous):
+                continue
             start, called = True, True
             result.dynamic_invocation = True
             continue
-        if token.kind == "op" and value in {"=", "("}:
+        if token.kind == 'op' and value == '(':
+            member_arguments = i > 1 and tokens[i-1].kind in {'word', 'string'} and tokens[i-2].value in {'.', '::'}
+            contexts.append((start, called, command, args, evaluating))
+            evaluating = evaluating or called or command in evaluators or (member_arguments and previous.casefold() == 'invokescript')
+            start, called, command, args = not member_arguments, False, '', []
+            continue
+        if token.kind == 'op' and value == ')':
+            finish()
+            if contexts:
+                start, called, command, args, evaluating = contexts.pop()
+                if called:
+                    start, called = False, False
+            continue
+        if token.kind == 'op' and value == '[':
+            type_depth += 1
+            continue
+        if token.kind == 'op' and value == ']':
+            type_depth = max(0, type_depth - 1)
+            start = False
+            continue
+        if type_depth:
+            continue
+        if token.kind == "op" and value == "=":
             start = True
             continue
         if token.kind in {"word", "string"} and start:
-            # Type literals and cast names are expressions, not command invocations.
-            if ((token.kind == "word" or called) and previous not in {"[", ".", "::"}
-                    and following not in {"::", ".", "="}):
-                command = value.casefold()
+            name = command_name(value)
+            if ((token.kind == "word" or called) and (called or previous not in {"[", ".", "::"})
+                    and following not in {"::", ".", "=", "["} and name not in keywords
+                    and re.fullmatch(r'[a-z_][\w.-]*', name, re.ASCII)):
+                command = name
                 result.commands.add(command)
-                if token.escaped:
-                    result.obfuscation.add("backtick")
+                result.evaluates_code |= command in evaluators
+                result.obfuscated_execution |= bool(transforms)
             start, called = False, False
         elif command and token.kind in {"word", "string", "variable"}:
             args.append(value.casefold())
+            if command in evaluators:
+                result.obfuscated_execution |= bool(transforms)
+        if evaluating and transforms:
+            result.obfuscated_execution = True
     finish()
+    result.reflection_filter = reflection_pattern and 'gettypes' in result.members
     result.partial |= bool(stack)
     return result
 
 
 def read_script(text: str) -> Script:
     """Read expandable-string code iteratively, without a recursion or executable-evaluation path."""
-    result, pending = Script(), [text]
-    while pending:
-        tokens, partial = lex(pending.pop())
+    result, pending, remaining = Script(), [text], MAX_READ_CHARS
+    constant_budget = [MAX_READ_CHARS]
+    while pending and remaining > 0:
+        source = pending.pop()
+        clipped = len(source) > remaining
+        tokens, partial = lex(source[:remaining] if clipped else source)
+        remaining -= len(source)
+        partial |= clipped
         pending.extend(token.value for token in tokens if token.kind == "expression")
-        parsed = _read_tokens([token for token in tokens if token.kind != "expression"], partial)
-        for name in ("commands", "definitions", "members", "static_calls", "literals", "variables", "obfuscation"):
+        parsed = _read_tokens([token for token in tokens if token.kind != "expression"], partial, constant_budget)
+        for name in ("commands", "definitions", "members", "static_calls", "literals", "variables", "obfuscation", "inert_words"):
             getattr(result, name).update(getattr(parsed, name))
         for command, arguments in parsed.arguments.items():
             result.arguments.setdefault(command, []).extend(arguments)
         result.dynamic_invocation |= parsed.dynamic_invocation
+        result.obfuscated_execution |= parsed.obfuscated_execution
+        result.evaluates_code |= parsed.evaluates_code
+        result.reflection_filter |= parsed.reflection_filter
+        room = max(0, 256 - len(result.constant_folds))
+        result.constant_folds.extend(parsed.constant_folds[:room])
+        result.partial |= len(parsed.constant_folds) > room
         result.partial |= parsed.partial
+    result.partial |= bool(pending)
+    return result
+
+
+def read_event_script(event):
+    """Share one bounded reading on the live batch object; the cache is never serialized or hunt-global."""
+    text = str(event.get("script.text") or "")
+    code = event.get('event.code')
+    previous = event.__dict__.get("_powershell_reading")
+    if previous is None or previous[0] != (code, text):
+        parsed = _read_module_payload(text) if code == 4103 else read_script(text)
+        previous = ((code, text), parsed)
+        event.__dict__["_powershell_reading"] = previous
+    return previous[1]
+
+
+_MODULE_COMMAND = re.compile(r'^CommandInvocation\(([\w.\\/-]+)\):\s*"([^"\r\n]*)"\s*$', re.IGNORECASE)
+_MODULE_BINDING = re.compile(r'^ParameterBinding\(([\w.\\/-]+)\):\s*name="([^"\r\n]*)";\s*value="(.*)"\s*$', re.IGNORECASE)
+
+
+def _read_module_payload(text):
+    """Module-log bindings are data, never executable PowerShell source.
+
+    Microsoft documents these records as CommandInvocation and ParameterBinding lines.
+    Missing source/binding completeness remains partial, including otherwise valid records.
+    """
+    result = Script(partial=True)
+    header = True
+    for line in text[:MAX_READ_CHARS].splitlines()[:MAX_TOKENS]:
+        if not line.strip():
+            continue
+        command = _MODULE_COMMAND.fullmatch(line.strip()) if header else None
+        header = False
+        if command and command[1].casefold() == command[2].casefold():
+            name = command[1].casefold()
+            result.commands.add(name)
+            result.evaluates_code |= name in {'iex', 'invoke-expression'}
+        else:
+            binding = _MODULE_BINDING.fullmatch(line.strip())
+            if binding:
+                result.module_binding_data = True
+                result.inert_words.update(re.findall(r'[a-z][\w-]*', binding[3].casefold()))
+                # Keep serialized bindings as evidence, separate from executable command arguments.
+                result.module_bindings.append((binding[1].casefold(), binding[2].casefold(), binding[3]))
+            else:
+                result.inert_words.update(re.findall(r'[a-z][\w-]*', line.casefold()))
     return result

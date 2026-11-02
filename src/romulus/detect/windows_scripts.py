@@ -7,7 +7,7 @@ import re
 
 from romulus.detect.base import PredicateField
 from romulus.detect.bounded import KeyedStore
-from romulus.detect.powershell_tokens import lex, read_script
+from romulus.detect.powershell_tokens import lex, read_event_script
 from romulus.detect.windows_cmdline import parse_powershell, split_argv
 from romulus.detect.windows_events import WindowsEventRule, basename, signal
 from romulus.evidence.windows_catalog import (
@@ -35,9 +35,17 @@ TOOLS = frozenset({
     "get-netdomain", "get-netuser", "get-netcomputer", "invoke-userhunter", "find-localadminaccess",
     "get-netlocalgroupmember", "get-domainspnticket", "get-domainobjectacl", "add-domainobjectacl",
 })
+HIGH_TOOLS = frozenset({"invoke-mimikatz", "invoke-kerberoast", "invoke-reflectivepeinjection",
+                        "invoke-shellcode", "invoke-dllinjection", "invoke-tokenmanipulation",
+                        "get-gpppassword", "get-keystrokes", "invoke-ninjacopy"})
+CONTENT_COMMANDS = TOOLS | EXECUTORS | {"get-process", "gps", "ps", "out-minidump", "reg", "reg.exe",
+    "add-type", "get-credential", "out-file", "set-content", "add-content", "export-csv",
+    "invoke-webrequest", "iwr", "wget", "curl", "invoke-restmethod", "irm", "start-bitstransfer",
+    "set-itemproperty", "new-itemproperty", "sp", "get-command", "gcm"}
 
 
 class ScriptRule(WindowsEventRule):
+    version = "2"
     families = ("script_block",)
     windows_event_classes = SCRIPT_CLASSES
     claim_type = "script_content"
@@ -52,9 +60,38 @@ class ScriptRule(WindowsEventRule):
     def __init__(self):
         super().__init__()
         self.views = KeyedStore(self, "script_views", self.HOT)
+        self.block_views = KeyedStore(self, "script_blocks", self.HOT)
+        self.content_views = KeyedStore(self, "script_content", self.HOT)
+        self.unresolved = 0
+        self.folded_views = 0
 
     def _owned_stores(self):
-        return [*super()._owned_stores(), self.views]
+        return [*super()._owned_stores(), self.views, self.block_views, self.content_views]
+
+    def _proof(self, event, parsed):
+        if self.id == "win.script_encoded_command":
+            return {"host_command": str(event.get("script.host_application") or "").strip()}
+        if self.id == "win.script_engine_v2":
+            return {"engine": event.get("script.engine_version")}
+        return {"commands": sorted(parsed.commands & CONTENT_COMMANDS),
+                "arguments": {name: values for name, values in parsed.arguments.items() if name in CONTENT_COMMANDS},
+                "definitions": sorted(parsed.definitions & TOOLS), "members": sorted(parsed.members),
+                "static_calls": sorted(parsed.static_calls), "constants": sorted(parsed.literals),
+                "obfuscation": sorted(parsed.obfuscation)}
+
+    def _lane(self, event, parsed, complete):
+        if not complete:
+            return "lead"
+        if self.id in {"win.script_amsi_bypass", "win.script_etw_bypass", "win.script_lsass_access"}:
+            return "high"
+        if self.id == "win.script_offensive_function" and parsed.commands & HIGH_TOOLS:
+            return "high"
+        if self.id == "win.script_sam_access" and any(
+            len(args) > 1 and args[1].rstrip("\\") in {"hklm\\sam", "hklm\\security",
+                "hkey_local_machine\\sam", "hkey_local_machine\\security"}
+            for name in ("reg", "reg.exe") for args in parsed.arguments.get(name, [])):
+            return "high"
+        return "lead"
 
     def consume(self, events):
         output = []
@@ -68,29 +105,73 @@ class ScriptRule(WindowsEventRule):
             if not self._events_pre_scoped:
                 self.os_applicable += 1
             self.evaluated += 1
-            text = str(event.get("script.text") or "")
-            parsed = read_script(text)
-            if parsed.partial or event.get("script.complete") is False or event.get("script.truncated") is True:
+            parsed = read_event_script(event)
+            if not event.get("script.text") and self.id not in {"win.script_encoded_command", "win.script_engine_v2"}:
+                self.missing_required += 1
+                self.note_limit("script_text", "This record has no script source text; content rules cannot judge it", 1)
+                continue
+            if event.get("event.code") == 4103:
+                self.note_coverage("module_binding", "Module logs expose invocation names; bound parameter values are "
+                                   "data, not complete script source")
+            complete = (event.get("script.complete") is True and event.get("script.truncated") is not True
+                        and not parsed.partial and event.get("script.view") in {"joined", "single"})
+            block = str(event.get("script.block_id") or "").strip().casefold()
+            block_key = (str(event.host or "").casefold(), block) if block else None
+            prior_block = self.block_views.get(block_key) if block_key else None
+            if block_key and not complete and prior_block is None:
+                self.unresolved += 1
+                self.block_views.put(block_key, {"identity": None, "open": True})
+            elif block_key and complete and prior_block and prior_block["open"]:
+                self.unresolved -= 1
+                prior_block["open"] = False
+                self.block_views.put(block_key, prior_block)
+            if parsed.partial or event.get("script.truncated") is True:
                 self.note_limit("script_partial", "Script text is partial or has unresolved lexical structure; "
                                 "unevaluated portions and dynamic code remain unresolved")
             labels = self.shapes(event, parsed)
+            correction = False
+            if not labels and complete and prior_block and prior_block["identity"]:
+                old = self.views.get(prior_block["identity"])
+                if old is not None and not old.get("confirmed"):
+                    correction = True
+                    labels = [(self.id, ("Complete recorded code places the earlier fragment token in comment, data "
+                               "or argument context; the partial observation is retained as a lead for review"),
+                               ("script.text",))]
             for shape, description, fields in labels:
-                block = str(event.get("script.block_id") or "").strip().casefold()
-                key = (str(event.host).casefold(), block) if event.host and block else ("record", event.id)
-                identity = hashlib.sha256(json.dumps((self.id, key, shape)).encode()).hexdigest()[:32]
-                preference = rank.get(event.get("script.view"), 0)
+                proof = self._proof(event, parsed)
+                content = hashlib.sha256(json.dumps(proof, sort_keys=True).encode()).hexdigest()
+                content_key = (event.host or event.id, content)
+                identity = self.content_views.get(content_key)
+                if correction:
+                    identity = prior_block["identity"]
+                elif identity is None:
+                    identity = (prior_block["identity"] if prior_block and prior_block["identity"] else
+                                hashlib.sha256(json.dumps((self.id, content_key, shape)).encode()).hexdigest()[:32])
+                    self.content_views.put(content_key, identity)
+                preference = 2 * rank.get(event.get("script.view"), 0) + int(complete)
+                if complete and not correction:
+                    preference += 10
                 previous = self.views.get(identity)
-                if previous is not None and preference <= previous:
+                if block_key:
+                    self.block_views.put(block_key, {"identity": identity, "open": not complete})
+                if previous is not None and preference <= previous["preference"]:
+                    self.folded_views += 1
                     continue
-                hit = signal(event, shape, description, self.attack, ("script.block_id", "script.view", *fields))
+                hit = signal(event, shape, description, self.attack, ("script.block_id", "script.view", *fields),
+                             lane=self._lane(event, parsed, complete) if not correction else "lead",
+                             content=json.dumps(proof, sort_keys=True))
+                hit.severity = "high" if hit.lane == "high" else "medium"
                 hit.predicate = [
-                    PredicateField(item.field, {"shape": shape, "reading": description},
+                    PredicateField(item.field, {"shape": shape, "reading": description,
+                                               "content_digest": content,
+                                               "calls": sorted(parsed.commands & CONTENT_COMMANDS),
+                                               "definitions": sorted(parsed.definitions & TOOLS)},
                                    item.origin + "#parsed:powershell-call-shapes")
                     if item.field == "script.text" else item for item in hit.predicate
                 ]
-                partial = (event.get("script.complete") is False or event.get("script.truncated") is True
-                           or parsed.partial or event.get("script.view") == "fragment")
-                if partial:
+                origin = (event.fields.get("script.text") or event.fields["event.code"]).origin
+                hit.predicate.append(PredicateField("script.view_quality", preference, origin + "#parsed:view-quality"))
+                if not complete:
                     hit.text += "; partial script view: missing, truncated or lexically unresolved text may change context"
                 hit.notes += (("Script content is not proof that the described action ran or succeeded. "
                                "The lexer does not execute dynamic expressions or resolve runtime aliases/variables."),)
@@ -101,13 +182,20 @@ class ScriptRule(WindowsEventRule):
                 if previous is not None:
                     match.revision_reason = "A matching joined script view replaces the earlier fragment evidence"
                 output.append(match)
-                if not self.views.put(identity, preference):
+                if not self.views.put(identity, {"preference": preference, "confirmed": complete and not correction}):
                     self.note_limit("script_identity", "Disk budget refused script view deduplication; "
                                     "the positive was retained but later duplicate/revision handling is partial")
                 self.views.trim()
+                self.block_views.trim()
+                self.content_views.trim()
         return output
 
     def finalize(self):
+        if self.unresolved:
+            self.note_limit("script_partial", f"{self.unresolved} script blocks have unresolved fragment context")
+        if self.folded_views:
+            self.note_coverage("script_folding", f"{self.folded_views} additional equivalent content views were folded; "
+                               "this is not a count of successful executions")
         return []
 
     def shapes(self, event, parsed):
@@ -124,9 +212,12 @@ class ScriptDownload(ScriptRule):
 
     def test(self, event, p):
         downloads = bool(p.members & {"downloadstring", "downloaddata", "downloadfile"}
+                         or "getresponsestream" in p.members
+                         or ({"send", "open"} <= p.members and bool(p.literals & {"msxml2.xmlhttp", "microsoft.xmlhttp"}))
                          or p.commands & {"invoke-webrequest", "iwr", "wget", "curl", "invoke-restmethod", "irm",
                                           "start-bitstransfer"})
-        return downloads and bool(p.commands & EXECUTORS or ("scriptblock", "create") in p.static_calls
+        return downloads and bool(getattr(p, "evaluates_code", False) or p.commands & EXECUTORS
+                                  or "invokescript" in p.members or ("scriptblock", "create") in p.static_calls
                                   or ("system.management.automation.scriptblock", "create") in p.static_calls)
 
 
@@ -172,9 +263,9 @@ class ScriptAmsiBypass(ScriptRule):
     description = "Recorded script contains AMSI reflection or patching call shapes; bypass success is unresolved"
 
     def test(self, event, p):
-        reflection = ("system.management.automation.amsiutils" in p.literals
+        reflection = (("system.management.automation.amsiutils" in p.literals or getattr(p, "reflection_filter", False))
                       and bool(p.literals & {"amsiinitfailed", "amsicontext", "amsisession"})
-                      and {"gettype", "getfield", "setvalue"} <= p.members)
+                      and bool(p.members & {"gettype", "gettypes"}) and {"getfield", "setvalue"} <= p.members)
         patch = ("amsiscanbuffer" in p.literals and "getprocaddress" in p.members
                  and bool(p.members & {"virtualprotect", "copy", "writebyte", "writeint32"}))
         return reflection or patch
@@ -202,8 +293,25 @@ class ScriptObfuscatedExecution(ScriptRule):
     description = "Recorded script combines character, format, backtick or concatenation obfuscation with call/evaluation syntax"
 
     def test(self, event, p):
-        return bool(p.obfuscation and (p.commands & EXECUTORS or p.commands & TOOLS
-                                      or "create" in p.members or p.dynamic_invocation))
+        return bool(getattr(p, "obfuscated_execution", False))
+
+
+class ScriptDecodeEvaluation(ScriptRule):
+    id = "win.script_decode_evaluation"
+    version = "1"
+    title = "PowerShell script contains decoding followed by code evaluation"
+    attack = ("T1140", "T1059.001")
+    description = "Recorded code combines Base64/decompression reading and a code-evaluation call; runtime data flow is unverified"
+
+    def test(self, event, p):
+        decompress = (bool(p.static_calls & {(name, "new") for name in
+                      ("io.compression.gzipstream", "system.io.compression.gzipstream",
+                       "io.compression.deflatestream", "system.io.compression.deflatestream")})
+                      or any(any(value in {"system.io.compression.gzipstream", "io.compression.gzipstream",
+                                            "system.io.compression.deflatestream", "io.compression.deflatestream"}
+                                 for value in args) for args in p.arguments.get("new-object", [])))
+        return ("frombase64string" in p.members or decompress) and bool(
+            getattr(p, "evaluates_code", False) or p.commands & EXECUTORS or "invokescript" in p.members)
 
 
 class ScriptOffensiveFunction(ScriptRule):
@@ -223,7 +331,8 @@ class ScriptLsassAccess(ScriptRule):
     description = "Recorded script combines an LSASS process selection with a dump call; no credential read is established"
 
     def test(self, event, p):
-        selects = any(set(args) & {"lsass", "lsass.exe"} for args in p.arguments.get("get-process", []))
+        selects = any(set(args) & {"lsass", "lsass.exe"}
+                      for name in ("get-process", "gps", "ps") for args in p.arguments.get(name, []))
         return selects and bool(p.commands & {"out-minidump", "get-processdump", "invoke-procdump"}
                                 or "minidumpwritedump" in p.members)
 
@@ -270,7 +379,21 @@ class ScriptCredentialHarvest(ScriptRule):
 
 
 def disables(p, suffix, name):
-    for command in ("set-itemproperty", "new-itemproperty", "sp", "set"):
+    for command in ("reg", "reg.exe"):
+        for args in p.arguments.get(command, []):
+            if len(args) < 2 or args[0] != "add":
+                continue
+            path = args[1].replace("/", "\\").rstrip("\\")
+            if path not in {"hklm\\" + suffix, "hkcu\\" + suffix,
+                            "hkey_local_machine\\" + suffix, "hkey_current_user\\" + suffix}:
+                continue
+            try:
+                if (args[args.index("/v") + 1] == name and args[args.index("/t") + 1] == "reg_dword"
+                        and args[args.index("/d") + 1] in {"0", "0x0"}):
+                    return True
+            except (ValueError, IndexError):
+                continue
+    for command in ("set-itemproperty", "new-itemproperty", "sp"):
         for args in p.arguments.get(command, []):
             def argument(parameter, args=args):
                 try:
@@ -345,4 +468,5 @@ WINDOWS_SCRIPT_PLAYBOOKS = (
     ScriptDownload, ScriptReflectiveLoad, ScriptPInvoke, ScriptAmsiBypass, ScriptEtwBypass,
     ScriptObfuscatedExecution, ScriptOffensiveFunction, ScriptLsassAccess, ScriptSamAccess, ScriptDpapiAccess,
     ScriptCredentialHarvest, ScriptLoggingDisable, ScriptAmsiDisable, ScriptEncodedCommand, ScriptEngineV2,
+    ScriptDecodeEvaluation,
 )

@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import json
 
 from romulus.detect.base import Match, pf
 from romulus.detect.netdef import DIRECTION_ASSUMED_REASON, assume_direction, current
+from romulus.detect.windows_burst_rows import BurstRows
 from romulus.detect.windows_events import WindowsEventRule, integer, signal
-from romulus.detect.windows_rows import WindowsRows, row_key
+from romulus.detect.windows_rows import row_key
 from romulus.evidence.typed import Outcome
 from romulus.evidence.windows_catalog import (
     RDP_LSM_CHANNEL,
@@ -18,7 +20,7 @@ from romulus.evidence.windows_catalog import (
 )
 
 _DOC = "https://learn.microsoft.com/windows/security/threat-protection/auditing/event-"
-_FIELDS = ("event.code", "source.ip", "auth.target_account", "account.name", "account.domain", "user.entity_id",
+_FIELDS = ("event.code", "source.ip", "source.hostname", "host.full_name", "auth.target_account", "account.name", "account.domain", "user.entity_id",
            "auth.status", "auth.sub_status", "auth.failure_code", "auth.target_server", "auth.service_name")
 
 
@@ -44,10 +46,13 @@ def source_key(event):
     workstation = event.get("source.hostname")
     if isinstance(workstation, str) and workstation.strip() not in {"", "-"}:
         return "reported workstation " + workstation.strip().rstrip(".").casefold()
-    return None
+    reporter = event.get("host.full_name") or event.host
+    return "source unresolved, reported by " + str(reporter).rstrip(".").casefold() if reporter else None
 
 
 class _Burst(WindowsEventRule):
+    version = "2"
+    needs_live_loader = True
     direct_eligible = False
     kind, claim_type, anchor_class = "aggregate", "aggregate_observation", "credential_access"
     families = ("auth",)
@@ -60,7 +65,8 @@ class _Burst(WindowsEventRule):
 
     def __init__(self):
         super().__init__()
-        self.rows = WindowsRows(self)
+        self.rows = BurstRows(self)
+        self._batch = {}
 
     def eligible(self, event):
         return event.get("event.code") in {4625, 4771, 4776} and event.outcome == Outcome.failure
@@ -68,26 +74,45 @@ class _Burst(WindowsEventRule):
     def key_value(self, event):
         raise NotImplementedError
 
-    def _maybe(self, key, event, value, *, phase):
-        bucket = int(event.ts.timestamp() // self.seconds)
-        identity = row_key(self.id, key, event.host, bucket)
+    def _load_witnesses(self, ids):
+        found = {event.id: event for event in self.load([key for key in ids if key not in self._batch])}
+        found.update({key: self._batch[key] for key in ids if key in self._batch})
+        if any(key not in found for key in ids):
+            self.note_limit("burst_citations", "Authentication witnesses were not loadable from the shared event stage; "
+                            "the affected concentration could not be published.")
+            return []
+        return [found[key] for key in ids]
+
+    def _maybe(self, key, event_id, stamp, value, host, *, phase):
+        bucket = int(stamp // self.seconds)
+        identity = row_key(self.id, key, host, bucket)
         mark = ("finalized:" if phase == "finalize" else "published:") + identity
         if self.rows.marked(mark):
             return []
         qualified = row_key("qualified", phase, key, bucket)
-        if (self.distinct and not self.rows.first(row_key("checked", phase, key, event.host, bucket, value))
+        # In a bucket no wider than the window, another occurrence of a value already seen
+        # cannot add breadth. After a threshold, re-check to publish newly observed hosts too.
+        if (self.distinct and self.rows.prior_value(key, stamp, value, host, event_id, bucket*self.seconds)
                 and not self.rows.marked(qualified)):
             return []
-        evidence = self.rows.witnesses(key, event.ts.timestamp(), self.seconds, self.threshold, distinct=self.distinct)
-        if len(evidence) != self.threshold or not self.rows.first(mark):
+        evidence = self.rows.witnesses(key, stamp, self.seconds, self.threshold, distinct=self.distinct)
+        if len(evidence) != self.threshold:
+            return []
+        loaded = self._load_witnesses(list(dict.fromkeys([event_id, *(item[0] for item in evidence)])))
+        if not loaded:
+            return []
+        event = loaded[0]
+        by_id = {item.id: item for item in loaded}
+        witnesses = [by_id[item[0]] for item in evidence]
+        selected = {item.id: item for item in loaded}
+        if not self.rows.first(mark):
             return []
         self.rows.first(qualified)
-        witnesses = [item for item, copies in evidence]
-        selected = {item.id: item for item in [event, *witnesses]}
-        raw = {name: body for item, copies in evidence for name, body in copies.items()}
-        raw.update(self.raw_of(event))
+        reporter = key.startswith('["reporter",')
+        key_text = ("reporting host " + str(event.get("host.full_name") or host) +
+                    "; recorded sources may be unresolved or unrelated" if reporter else self.key_description(event))
         claim = (f"{self.description}: at least {self.threshold} {self.units} within {self.seconds} seconds "
-                 f"for {self.describe(self.key_description(event))}. The {self.threshold} cited witnesses span "
+                 f"for {self.describe(key_text)}. The {self.threshold} cited witnesses span "
                  f"{min(item.ts for item in witnesses).isoformat()} to {max(item.ts for item in witnesses).isoformat()}. "
                  f"The current supporting record is on {event.host}. This is a concentration signal, not proof of intent.")
         signature = hashlib.sha256(row_key(claim, sorted(selected)).encode()).hexdigest()
@@ -101,14 +126,16 @@ class _Burst(WindowsEventRule):
                       "medium", "lead", "medium", event.entities(),
                       [self.rationale, "Counts are records; several channels may describe one authentication attempt.",
                        "Reported workstation labels do not establish verified host identities or IP ownership."],
-                      group_key="windows-burst:" + hashlib.sha256(identity.encode()).hexdigest(), raw_copies=raw,
+                      group_key="windows-burst:" + hashlib.sha256(identity.encode()).hexdigest(),
                       context_ids=set(selected) - {event.id},
                       revision_reason=("Chronological replay selected the earliest qualifying cited witnesses "
                                        "after late records arrived." if phase == "finalize" and previous else ""))]
 
     def consume(self, events):
         out = []
-        for event in sorted(self.scope_partition(events), key=lambda item: (item.ts, item.id)):
+        scoped = self.scope_partition(events)
+        self._batch = {event.id: event for event in scoped}
+        for event in sorted(scoped, key=lambda item: (item.ts, item.id)):
             if not self._events_pre_scoped:
                 self.os_applicable += 1
             if not self.eligible(event):
@@ -121,26 +148,73 @@ class _Burst(WindowsEventRule):
                 continue
             key, value = pair
             if self.rows.put(key, event, value):
-                out.extend(self._maybe(key, event, value, phase="consume"))
+                self._pending.append(event)
+                out.extend(self._maybe(key, event.id, event.ts.timestamp(), value, event.host, phase="consume"))
+                if isinstance(self, WindowsPasswordSpray):
+                    reporter = str(event.get("host.full_name") or event.host).casefold()
+                    report_key = row_key("reporter", reporter)
+                    self.rows.put(report_key, event, value)
+                    out.extend(self._maybe(report_key, event.id, event.ts.timestamp(), value, event.host, phase="consume"))
+                    self.rows.put(row_key("daily-source", source_key(event)), event, value)
+                    self.rows.put(row_key("daily-reporter", reporter), event, value)
+        self._batch = {}
         return out
 
     def finalize(self):
         # Stream replay catches windows made visible by late or out-of-order target arrivals.
-        for key, event, raw, value in self.rows.iterate():
-            for match in self._maybe(key, event, value, phase="finalize"):
-                match.raw_copies.update(raw)
-                yield match
+        for key, event_id, stamp, value, host in self.rows.iterate():
+            if key.startswith('["daily-'):
+                continue
+            yield from self._maybe(key, event_id, stamp, value, host, phase="finalize")
+        if isinstance(self, WindowsPasswordSpray):
+            yield from self._daily()
+
+    def _daily(self):
+        # Calendar days are explicit UTC partitions, not an assumed rolling lifetime or an absence test.
+        threshold = 100
+        for key, day, count in self.rows.daily_groups(threshold):
+            identity = "windows-daily-auth:" + hashlib.sha256(row_key(key, day).encode()).hexdigest()
+            signature = str(count)
+            previous = self.rows.marker(identity)
+            if previous == signature:
+                continue
+            evidence = self.rows.daily_witnesses(key, day, threshold)
+            witnesses = self._load_witnesses([item[0] for item in evidence])
+            if len(witnesses) != threshold:
+                continue
+            self.rows.remember(identity, signature)
+            label, subject = json.loads(key)
+            scope = "reporting host" if label == "daily-reporter" else "recorded source"
+            claim = (f"Failed authentication records named {count} distinct target-account identities during UTC day "
+                     f"{witnesses[0].ts.date().isoformat()} for {scope} {self.describe(subject)}; "
+                     f"{threshold} distinct-account witnesses are cited. This daily account breadth can expose "
+                     "slow or rotating-source guessing; it is not proof of intent or a verified common source.")
+            yield Match(self.id, claim, self.claim_type, witnesses,
+                        [pf(item, name) for item in witnesses for name in _FIELDS if item.has(name)], witnesses[-1].ts,
+                        "medium", "lead", "medium", witnesses[0].entities(),
+                        [("One hundred distinct accounts per UTC day tests sustained account breadth beyond the short "
+                         "burst window. This absolute review threshold is independent of fleet size; central DCs, "
+                         "outages and legitimate automation can exceed it and require site review."),
+                         ("UTC day boundaries may split a campaign; no negative assurance is made. "
+                         "Account/source keys and late-record replay are disk-backed; only a stated disk refusal "
+                         "can leave records unassessed.")], group_key=identity,
+                        context_ids={item.id for item in witnesses[1:]},
+                        revision_reason="Later records changed the daily distinct-account count." if previous else "")
 
     def release_state(self):
+        self._batch = {}
+        self._pending = []
         self.rows.close()
         super().release_state()
 
 
 class WindowsPasswordSpray(_Burst):
-    id, title = "win.password_spray", "One source failed authentication against many accounts"
+    id, title = "win.password_spray", "Failed authentication against many accounts by source or reporting host"
     attack = ("T1110.003",)
     description, units = "Many target accounts were named by failed authentication records", "distinct target-account identities"
-    rationale = "Twenty distinct accounts in ten minutes tests concentrated account breadth per source, independent of fleet size."
+    rationale = ("Twenty distinct accounts in ten minutes tests concentrated account breadth per recorded source or "
+                 "reporting host, independent of fleet size. Reporting-host concentration does not attribute a "
+                 "common source; central authentication servers and outages can produce benign concentrations.")
 
     def key_value(self, event):
         source, account = source_key(event), account_key(event)
@@ -151,9 +225,10 @@ class WindowsPasswordSpray(_Burst):
 
 
 class WindowsBruteForce(_Burst):
-    id, title = "win.brute_force", "Repeated failures against one account from one source"
+    id, title = "win.brute_force", "Repeated failures against one account by source or reporting host"
     attack = ("T1110.001",)
-    description, units, distinct = "One source repeatedly failed authentication for one account", "failed authentication records", False
+    description, units, distinct = ("Failed authentication records repeatedly named one account",
+                                    "failed authentication records", False)
 
     def key_value(self, event):
         source, account = source_key(event), account_key(event)
@@ -167,7 +242,8 @@ class WindowsDistributedGuessing(_Burst):
     id, title = "win.distributed_auth_failures", "Many sources failed authentication against one account"
     attack = ("T1110.001",)
     threshold = 10
-    description, units = "Many source identifiers had failed authentication records naming one account", "distinct recorded source identifiers"
+    description, units = ("Many source or unresolved-source reporter identifiers had failed authentication records "
+                          "naming one account"), "distinct source or reporter identifiers"
     rationale = "Ten source identifiers in ten minutes tests distributed concentration; workstation labels are unverified."
 
     def key_value(self, event):
@@ -221,6 +297,7 @@ class WindowsKerberoastDiversity(_Burst):
 
 
 class WindowsHashLogonShape(WindowsEventRule):
+    version = "2"
     id, title = "win.hash_logon_shape", "Logon fields have a pass-the-hash-associated shape"
     families = ("auth",)
     windows_event_classes = (("Security", SECURITY, 4624),)
@@ -242,10 +319,14 @@ class WindowsHashLogonShape(WindowsEventRule):
             return []
         return [signal(event, "hash_logon_shape", text + "; this shape alone does not prove pass-the-hash", self.attack,
                        (*_FIELDS, "auth.logon_type", "auth.logon_process", "auth.package", "auth.key_length",
-                        "auth.logon_guid", "auth.session_key"))]
+                        "auth.logon_guid", "auth.session_key"),
+                       content=row_key(kind, event.get("auth.logon_process"), event.get("auth.package"),
+                                       event.get("auth.key_length"), account_key(event), source_ip(event),
+                                       event.get("source.hostname")))]
 
 
 class WindowsExternalRdp(WindowsEventRule):
+    version = "2"
     id, title = "win.rdp_external_source", "RDP source outside the site's internal-network definition"
     direction_dependent = True
     families = ("auth", "remote_access")
@@ -265,18 +346,23 @@ class WindowsExternalRdp(WindowsEventRule):
             activity = {1149: "an RDP authentication record", 21: "an RDP logon record", 25: "an RDP reconnection record"}.get(event.get("event.code"))
             if not activity or event.get("remote.action") not in {"rdp_authentication", "rdp_logon", "rdp_reconnect"}:
                 return []
+            if (event.get("event.code") in {21, 25}
+                    and str(event.get("windows.event_data.Address") or "").strip().casefold() == "local"):
+                return []
         source = source_ip(event)
         if not source:
             self.note_limit("rdp_source", "An RDP record's source address is missing or unusable.")
             return [signal(event, "rdp_source_unknown", activity + " has an unresolved source address", self.attack,
-                           ("source.ip", "auth.logon_type", "remote.action"))]
+                           ("source.ip", "auth.logon_type", "remote.action"),
+                           content=row_key(activity, account_key(event), event.get("remote.user")))]
         assume_direction(self)
         if current().is_internal(ipaddress.ip_address(source)):
             return []
         notes = () if current().configured else (DIRECTION_ASSUMED_REASON,)
         return [signal(event, "rdp_external", f"Windows recorded {activity} from {source}, outside the site's internal-network "
                        "definition; authorization and resulting session activity are unresolved", self.attack,
-                       (*_FIELDS, "auth.logon_type", "remote.action", "remote.user", "remote.session_id"), notes=notes)]
+                       (*_FIELDS, "auth.logon_type", "remote.action", "remote.user", "remote.session_id"), notes=notes,
+                       content=row_key(activity, source, account_key(event), event.get("remote.user")))]
 
 
 WINDOWS_AUTH_EVENT_PLAYBOOKS = (WindowsPasswordSpray, WindowsBruteForce, WindowsDistributedGuessing,

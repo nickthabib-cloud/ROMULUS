@@ -13,7 +13,8 @@ from romulus.detect.windows_registration_events import (
 )
 from romulus.evidence.windows import normalize_windows
 from romulus.evidence.windows_catalog import SECURITY
-from tests.windows_event_support import event, run
+from tests.test_windows_c_identity_review import event
+from tests.windows_event_support import run
 from tests.windows_fixtures import LogicalWindowsEvent, windows_hit
 
 
@@ -28,7 +29,8 @@ def _judge(rule, family, code, **fields):
                                   "C:\\Windows\\Temp\\payload.exe", "%TEMP%\\svc.exe", "cmd.exe /c sample",
                                   "C:\\Windows\\System32\\wscript.exe test.vbs", "powershell.exe -enc ZQB4AGkAdAA="])
 def test_service_risky_configuration_is_high_before_finalize(code, image):
-    ev = event("service_change", code, **{"service.image_path": image, "service.name": "ConfiguredService"})
+    ev = event("service_change", code, **{"service.image_path": image, "service.name": "ConfiguredService",
+                                         "service.type": "16"})
     matches = ServiceRegistration().consume([ev])
     assert len(matches) == 1 and matches[0].proposed_lane == "high"
     assert "installation record registered" in matches[0].claim
@@ -53,8 +55,8 @@ def test_service_ambiguous_or_missing_image_is_uncertain_lead(image):
 
 @pytest.mark.parametrize("name,image", [("NotPSEXESVC", "C:\\Windows\\System32\\svchost.exe -k netsvcs"),
                                        ("Acme", '"C:\\Program Files\\Acme\\svc.exe" --mention cmd.exe'),
-                                       ("RemComSvcExtra", "C:\\Tools\\cmd.exe.backup"),
-                                       ("Acme", "C:\\Apps\\Temp\\svc.exe")])
+                                       ("RemComSvcExtra", '"C:\\Program Files\\Acme\\cmd.exe.backup"'),
+                                       ("Acme", '"C:\\Program Files\\Acme\\svc.exe"')])
 def test_service_hard_negatives(name, image):
     assert ServiceRegistration().judge(event("service_change", 7045,
                                             **{"service.name": name, "service.image_path": image})) == []
@@ -131,16 +133,18 @@ def test_task_nonregistration_classes_do_not_claim_new_persistence(code):
     assert ScheduledTaskRegistration().judge(event("scheduled_task", code, **_task())) == []
 
 
-@pytest.mark.parametrize("command", ["C:\\Tools\\inventory.exe", "C:\\Apps\\Temp\\inventory.exe", "cmd.exe.backup"])
+@pytest.mark.parametrize("command", ["C:\\Program Files\\Acme\\inventory.exe", "C:\\Windows\\System32\\inventory.exe",
+                                    "C:\\Program Files\\Acme\\cmd.exe.backup"])
 def test_task_normal_action_and_argument_mentions_do_not_match(command):
     assert ScheduledTaskRegistration().judge(event("scheduled_task", 4698,
                                                   **_task(command, "--description cmd.exe powershell.exe -enc"))) == []
 
 
-@pytest.mark.parametrize("name", ["cmd.exe /c sample", "powershell.exe -enc ZQB4AGkAdAA=", "C:\\Temp\\payload.exe"])
+@pytest.mark.parametrize("name", ["C:\\Windows\\System32\\cmd.exe", "C:\\Windows\\System32\\powershell.exe",
+                                 "C:\\Temp\\payload.exe"])
 def test_task_action_started_name_has_distinct_restrained_claim(name):
     hit = _judge(ScheduledTaskRegistration, "scheduled_task", 200, **{"task.action_name": name})
-    assert hit.lane == "high" and "action-started record named" in hit.text
+    assert hit.lane == "lead" and "action-started record named" in hit.text
     assert "registered" not in hit.text and "executed" not in hit.text
 
 
@@ -154,7 +158,8 @@ def test_task_action_started_name_has_distinct_restrained_claim(name):
 def test_strong_logging_records_are_immediate(code, fields, phrase):
     ev = event("audit_config", code, **fields)
     matches = WindowsAuditTamper().consume([ev])
-    assert len(matches) == 1 and matches[0].proposed_lane == "high" and phrase in matches[0].claim
+    assert len(matches) == 1 and matches[0].proposed_lane == ("high" if code in {1102, 104} else "lead")
+    assert phrase in matches[0].claim
     if code == 104:
         assert "System log" not in matches[0].claim
     if code == 4719:

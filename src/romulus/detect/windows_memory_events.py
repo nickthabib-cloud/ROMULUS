@@ -5,6 +5,8 @@ loads and thread creation likewise retain their recorded meaning without asserti
 """
 from __future__ import annotations
 
+import json
+import ntpath
 import re
 
 from romulus.detect.windows_events import WindowsEventRule, basename, components, integer, signal, writable
@@ -14,12 +16,6 @@ _SYSMON = "https://learn.microsoft.com/en-us/sysinternals/downloads/sysmon"
 _LSASS = "https://attack.mitre.org/techniques/T1003/001/"
 _RIGHTS = "https://learn.microsoft.com/en-us/windows/win32/procthread/process-security-and-access-rights"
 _DUMP_DLLS = frozenset({"dbghelp.dll", "dbgcore.dll", "comsvcs.dll"})
-# These names explain potential benign use, but cannot establish trusted software identity.
-_DIAGNOSTIC = frozenset({
-    "werfault.exe", "werfaultsecure.exe", "taskmgr.exe", "procexp.exe", "procexp64.exe",
-    "windbg.exe", "cdb.exe", "vsdebugconsole.exe", "msmpeng.exe", "mssense.exe",
-    "senseir.exe", "csfalconservice.exe", "sentinelagent.exe", "avp.exe", "savservice.exe",
-})
 _DOTNET_HOSTS = frozenset({
     "dotnet.exe", "powershell.exe", "powershell_ise.exe", "pwsh.exe", "msbuild.exe",
     "csc.exe", "vbc.exe", "regasm.exe", "regsvcs.exe", "installutil.exe", "devenv.exe",
@@ -42,7 +38,7 @@ def _process(event, role="process"):
 def _bad_signature(event):
     status = str(event.get("image.signature_status") or "").strip().casefold()
     return event.get("image.signed") is False or status in {
-        "invalid", "untrusted", "revoked", "expired", "unsigned", "not signed", "not trusted",
+        "invalid", "untrusted", "revoked", "unsigned", "not signed", "not trusted",
         "invalid chain", "invalid signature",
     }
 
@@ -67,7 +63,7 @@ def _system_directory(path):
 
 def _installation_parts(path):
     """Components below a recorded local volume or Windows-root placeholder."""
-    parts = components(path)
+    parts = components(ntpath.normpath(str(path or "")))
     if parts and parts[0] in {"?", "??"}:
         parts = parts[1:]
     if parts and re.fullmatch(r"[a-z]:", parts[0]):
@@ -79,6 +75,39 @@ def _installation_parts(path):
     else:
         return ()
     return parts
+
+
+def _installed_path(path):
+    """Installation-directory scope, not trust or a claim about effective ACLs."""
+    parts = _installation_parts(path)
+    return bool(parts and parts[0] in {"windows", "program files", "program files (x86)"}
+                and not (parts[0] == "windows" and len(parts) > 1
+                         and parts[1] in {"temp", "tasks", "tracing"}))
+
+
+def _writable_indicator(path):
+    parts = _installation_parts(path)
+    return writable(path) or bool(parts and (parts[0] in {"programdata", "perflogs"}
+                                 or parts[:2] in {("windows", "tasks"), ("windows", "tracing")}))
+
+
+def _content(event, *fields):
+    return json.dumps({name: event.get(name) for name in fields}, sort_keys=True, separators=(",", ":"))
+
+
+def _image_content(event):
+    return _content(event, "process.executable_key", "process.executable", "image.kind", "image.path_key",
+                    "image.path", "image.signed", "image.signature_status", "image.signature",
+                    "image.hash.sha256", "image.hash.sha1")
+
+
+def _trace_modules(event):
+    """Keep module identity while discarding ASLR addresses and call-site offsets."""
+    modules = event.get("process.access.call_trace_modules")
+    if not isinstance(modules, list) or not modules:
+        modules = str(event.get("process.access.call_trace") or "").split("|")
+    return tuple(re.sub(r"\+[0-9a-fx]+$", "", re.sub(r"unknown\([^)]*\)", "unknown", str(frame).strip().casefold()))
+                 for frame in modules if str(frame).strip())
 
 
 def _expected_clr_path(path):
@@ -119,18 +148,25 @@ def _expected_dotnet_host(path):
 
 class LsassProcessAccess(WindowsEventRule):
     id = "win.lsass_process_access"
-    version = "1"
+    version = "2"
     title = "A process opened LSASS with memory-related access or a notable call trace"
     families = ("process_access",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 10),)
     attack = ("T1003.001",)
     benign = ("security inspection, crash diagnostics and Task Manager can open LSASS",)
     next_checks = ("verify the source executable and signer independently", "inspect access trace and dump-file writes")
-    research = (_SYSMON, _LSASS, _RIGHTS)
+    research = (_SYSMON, _LSASS, _RIGHTS, "https://github.com/antonioCoco/MalSeclogon/blob/master/MalSeclogon.c")
 
     def judge(self, event):
-        if event.get("event.code") != 10 or basename(_process(event, "target")) != "lsass.exe":
+        if event.get("event.code") != 10:
             return []
+        target = _process(event, "target")
+        if target and basename(target) != "lsass.exe":
+            return []
+        if not target:
+            return [signal(event, "access_target_unresolved", "A process-access record has no target image; LSASS relevance is unresolved",
+                           self.attack, (*_ROLE_FIELDS, "process.access.mask", "process.access.call_trace"),
+                           content=_content(event, "source.executable_key", "source.executable", "process.access.mask"))]
         mask = integer(event.get("process.access.mask"))
         modules = event.get("process.access.call_trace_modules") or []
         names = {basename(module) for module in modules} if isinstance(modules, list) else set()
@@ -138,27 +174,33 @@ class LsassProcessAccess(WindowsEventRule):
         unknown = any(re.fullmatch(r"unknown(?:\([0-9a-fx]+\))?", name) for name in names)
         unknown |= any(re.fullmatch(r"unknown(?:\([0-9a-fx]+\))?(?:\+[0-9a-fx]+)?", frame.strip())
                        for frame in trace.split("|"))
-        notable_trace = bool(names & _DUMP_DLLS or unknown)
+        trace_modules = _trace_modules(event)
+        names |= {basename(module) for module in trace_modules}
+        notable_trace = bool(names & (_DUMP_DLLS | {"seclogon.dll"}) or unknown or "unknown" in names)
         # VM_READ is a bit, not a fixed mask. VM_OPERATION, VM_WRITE and CREATE_THREAD
         # are independently notable rights, though none proves a completed memory operation.
         memory_rights = mask is not None and mask >= 0 and bool(mask & (0x10 | 0x08 | 0x20 | 0x02))
-        if mask is not None and not memory_rights and not notable_trace:
+        related_rights = mask is not None and bool(mask & (0x40 | 0x80))
+        if mask is not None and not memory_rights and not related_rights and not notable_trace:
             return []
         source = _process(event, "source")
-        diagnostic = basename(source) in _DIAGNOSTIC and not writable(source)
-        high = memory_rights and bool(source) and not diagnostic
+        high = memory_rights and bool(source) and (not _installed_path(source) or notable_trace)
         rights = "including PROCESS_VM_READ" if mask is not None and mask & 0x10 else "with memory-related qualifiers"
-        text = f"A recorded source opened lsass.exe {rights}" if memory_rights else "A source opened lsass.exe"
+        actor = f"Recorded source '{self.describe(source)}'" if source else "An unresolved source image"
+        text = f"{actor} opened lsass.exe {rights}" if memory_rights else f"{actor} opened lsass.exe"
+        if related_rights and not memory_rights:
+            text += " with handle-duplication or parent-process access rights"
         return [signal(event, "lsass_access", text, self.attack,
                        (*_ROLE_FIELDS, "process.access.action", "process.access.mask",
                         "process.access.call_trace", "process.access.call_trace_modules"),
                        lane="high" if high else "lead", severity="high" if high else "medium",
+                       content=json.dumps([source, target, mask, trace_modules], separators=(",", ":")),
                        notes=("The record shows granted access, not a completed read or credential dump.",))]
 
 
 class RemoteThreadCreation(WindowsEventRule):
     id = "win.remote_thread_creation"
-    version = "1"
+    version = "2"
     title = "Sysmon recorded a thread created in another process"
     families = ("remote_thread",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 8),)
@@ -170,19 +212,22 @@ class RemoteThreadCreation(WindowsEventRule):
     def judge(self, event):
         if event.get("event.code") != 8:
             return []
-        complete = all(any(event.get(f"{role}.{field}") not in (None, "")
-                           for field in ("executable", "executable_key", "guid", "pid"))
-                       for role in ("source", "target"))
+        source, target = _process(event, "source"), _process(event, "target")
+        module = event.get("thread.start_module")
+        high = bool(source and target and (
+            not module or str(module).casefold() in {"unknown", "-"} or not _installed_path(source)
+            or basename(target) in {"lsass.exe", "winlogon.exe"}))
         return [signal(event, "remote_thread", "Sysmon recorded creation of a thread in another process",
                        self.attack, (*_ROLE_FIELDS, "thread.id", "thread.start_address", "thread.start_module",
-                                     "thread.start_function"), lane="high" if complete else "lead",
-                       severity="high" if complete else "medium",
+                                     "thread.start_function"), lane="high" if high else "lead",
+                       severity="high" if high else "medium",
+                       content=json.dumps([source, target, module, event.get("thread.start_function")], separators=(",", ":")),
                        notes=("Start module and function are Sysmon inferences; this event alone does not prove injection.",))]
 
 
 class ProcessImageTampering(WindowsEventRule):
     id = "win.process_image_tampering"
-    version = "1"
+    version = "2"
     title = "Sysmon reported process image tampering"
     families = ("process_tampering",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 25),)
@@ -194,22 +239,23 @@ class ProcessImageTampering(WindowsEventRule):
     def judge(self, event):
         if event.get("event.code") != 25:
             return []
-        detailed = bool(_process(event) and event.get("process.tampering.type"))
+        detailed = bool(_process(event) and event.get("process.tampering.type") and not _installed_path(_process(event)))
         return [signal(event, "process_tampering", "Sysmon reported process image tampering", self.attack,
                        (*_PROCESS_FIELDS, "process.tampering.type"), lane="high" if detailed else "lead",
-                       severity="high" if detailed else "medium")]
+                       severity="high" if detailed else "medium",
+                       content=_content(event, "process.executable_key", "process.executable", "process.tampering.type"))]
 
 
 class UnsignedDriverLoad(WindowsEventRule):
     id = "win.unsigned_driver_load"
-    version = "1"
+    version = "2"
     title = "A driver loaded without a recorded valid signature"
     families = ("image_load",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 6),)
-    attack = ("T1068",)
+    attack = ("T1547.006",)
     benign = ("test-signed development drivers and legacy drivers can lack valid signatures",)
     next_checks = ("verify the driver hash, signature and provenance", "inspect the service that loaded the driver")
-    research = (_SYSMON, "https://attack.mitre.org/techniques/T1068/")
+    research = (_SYSMON, "https://attack.mitre.org/techniques/T1547/006/")
 
     def judge(self, event):
         if event.get("event.code") != 6 or event.get("image.kind") != "driver" or _signature_known_good(event):
@@ -217,14 +263,16 @@ class UnsignedDriverLoad(WindowsEventRule):
         bad = _bad_signature(event)
         text = ("A driver loaded with a recorded absent or invalid signature" if bad
                 else "A driver loaded with signature validity unrecorded")
+        if str(event.get("image.signature_status") or "").casefold() == "expired" and event.get("image.signed") is True:
+            text = "A driver loaded with a recorded signature status of expired"
         return [signal(event, "driver_signature", text, self.attack, _IMAGE_FIELDS,
-                       lane="high" if bad else "lead", severity="high" if bad else "medium")]
+                       lane="high" if bad else "lead", severity="high" if bad else "medium", content=_image_content(event))]
 
 
 class WritableUnsignedDllLoad(WindowsEventRule):
     id = "win.writable_unsigned_dll_load"
-    version = "1"
-    title = "A process loaded a DLL from a user-writable location without a recorded valid signature"
+    version = "2"
+    title = "A process loaded a module outside standard installation directories without a recorded valid signature"
     families = ("image_load",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 7),)
     attack = ("T1574.001",)
@@ -236,19 +284,19 @@ class WritableUnsignedDllLoad(WindowsEventRule):
     def judge(self, event):
         path = _image(event)
         if (event.get("event.code") != 7 or event.get("image.kind") != "image"
-                or not basename(path).endswith(".dll") or not writable(path) or _signature_known_good(event)):
+                or not path or _installed_path(path) or _signature_known_good(event)):
             return []
-        high = _bad_signature(event) and _system_directory(_process(event))
-        return [signal(event, "writable_dll", "A process loaded a DLL from a user-writable path without a recorded "
+        high = _bad_signature(event) and _system_directory(_process(event)) and _writable_indicator(path)
+        return [signal(event, "writable_dll", "A process loaded a module outside standard installation directories without a recorded "
                        "valid signature", self.attack, _IMAGE_FIELDS, lane="high" if high else "lead",
-                       severity="high" if high else "medium",
+                       severity="high" if high else "medium", content=_image_content(event),
                        notes=(("A system-directory path does not establish a trusted process identity. "
                                "The loading process signature is unavailable in this event schema."),))]
 
 
 class DumpLibraryLoad(WindowsEventRule):
     id = "win.dump_library_load"
-    version = "1"
+    version = "2"
     title = "A process loaded a library that provides diagnostic or dump functionality"
     families = ("image_load",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 7),)
@@ -261,15 +309,18 @@ class DumpLibraryLoad(WindowsEventRule):
         if (event.get("event.code") != 7 or event.get("image.kind") != "image"
                 or basename(_image(event)) not in _DUMP_DLLS):
             return []
+        if (_signature_known_good(event) and _system_directory(_image(event))
+                and _installed_path(_process(event))):
+            return []
         return [signal(event, "dump_library", "A process loaded a library with diagnostic or dump functionality",
-                       self.attack, _IMAGE_FIELDS,
+                       self.attack, _IMAGE_FIELDS, content=_image_content(event),
                        notes=(("A library load does not prove a dump occurred. Stronger access, tampering or "
                                "unsigned writable-load observations are evaluated separately."),))]
 
 
 class UnexpectedClrLoad(WindowsEventRule):
     id = "win.unexpected_clr_load"
-    version = "1"
+    version = "2"
     title = "A CLR load did not meet the expected loader, module path and signature checks"
     families = ("image_load",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 7),)
@@ -287,7 +338,7 @@ class UnexpectedClrLoad(WindowsEventRule):
             return []
         return [signal(event, "unexpected_clr", "A CLR load did not meet the expected loader, module path and "
                        "signature checks",
-                       self.attack, _IMAGE_FIELDS,
+                       self.attack, _IMAGE_FIELDS, content=_image_content(event),
                        notes=(("A CLR load does not prove reflective code loading. The host exclusion requires an "
                                "expected loader, a canonical CLR installation path and a recorded valid module "
                                "signature; an unknown module signature remains a lead."),))]

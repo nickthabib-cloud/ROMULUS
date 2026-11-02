@@ -15,6 +15,19 @@
   </div>
 </section>
 
+{% set origin = gates.get('_evidence_view_origin') or {} %}
+{% set origin_case = c.source_case_id or origin.get('source_case_id') %}
+{% set origin_anchor = c.source_anchor_id or origin.get('source_anchor_id') %}
+{% set origin_link = c.source_link_id or origin.get('source_link_id') %}
+{% if origin_case or origin_anchor or origin_link %}
+<h2>Discovery origin</h2>
+<ul>
+  {% if origin_case %}<li>Investigator case: <span class="mono">{{ origin_case }}</span></li>{% endif %}
+  {% if origin_anchor %}<li>Expansion anchor: <span class="mono">{{ origin_anchor }}</span></li>{% endif %}
+  {% if origin_link %}<li>Discovery link: <span class="mono">{{ origin_link }}</span></li>{% endif %}
+</ul>
+{% endif %}
+
 <h2>What the claim rests on</h2>
 <table class="grid">
 <thead><tr><th>Field</th><th>Value</th><th>Origin (record:field)</th></tr></thead>

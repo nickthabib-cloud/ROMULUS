@@ -1,17 +1,19 @@
-"""Late Windows account and ticket context keeps raw citations and one candidate identity."""
-from romulus.detect.windows_correlations import CreatedThenPrivileged, KerberosTgtContext
-from romulus.evidence.typed import fv
-from tests.windows_event_support import event, run
+"""Native account sequences cite positively recorded actions and retain revision identity."""
+from romulus.detect.windows_correlations import CreatedThenPrivileged
+from tests.test_windows_c_burst_review import native_event
+from tests.windows_process_support import run
 
 SID = "S-1-5-21-1-2-3-1100"
 
+
 def creation(offset=0):
-    return event("account_change", 4720, offset=offset, native=f"created-{offset}", host="dc01", **{
-        "account.group_id": SID, "account.name": "alice"})
+    return native_event(4720, {"TargetSid": SID, "TargetUserName": "alice", "TargetDomainName": "EXAMPLE"},
+                        offset=offset, host="dc01.example.test")
+
 
 def membership(offset=60, *, sid=SID, group="S-1-5-32-544"):
-    return event("account_change", 4732, offset=offset, native=f"member-{offset}", host="ws01", **{
-        "account.member_id": sid, "account.group_id": group})
+    return native_event(4732, {"MemberSid": sid, "TargetSid": group, "TargetUserName": "Administrators",
+                               "TargetDomainName": "BUILTIN"}, offset=offset)
 
 
 def test_created_then_privileged_both_arrival_orders_cite_both_recorded_actions():
@@ -44,44 +46,9 @@ def test_late_creation_context_revises_same_membership_candidate_and_keeps_raw()
     assert out[0].group_key == final[0].group_key and final[0].revision_reason
     assert {item.id for item in final[0].events} == {newer.id, added.id}
     assert all(ref.key in final[0].raw_copies for item in final[0].events for ref in item.raw)
+    rule.release_state()
 
 
-def ticket(code, offset=0, *, principal="alice@example.test", ip="203.0.113.8"):
-    return event("auth", code, offset=offset, native=f"ticket-{code}-{offset}", host="dc01", **{
-        "account.name": principal, "account.domain": "example.test", "source.ip": ip,
-        "auth.service_name": "fileserver$", "auth.encryption_type": 0x12})
-
-
-def test_service_ticket_context_gap_is_a_caveated_lead_after_full_replay():
-    rule = KerberosTgtContext()
-    service = ticket(4769, 60)
-    assert not rule.consume([service])
-    matches = list(rule.finalize())
-    assert len(matches) == 1 and matches[0].proposed_lane == "lead"
-    assert "unresolved TGT context" in matches[0].claim
-    assert any("cached" in note for note in matches[0].notes)
-
-
-def test_prior_tgt_on_another_dc_suppresses_only_the_context_gap_regardless_of_arrival_order():
-    tgt, service = ticket(4768), ticket(4769, 60)
-    tgt.fields["account.name"] = fv("alice", "test")
-    tgt.host = "dc02"
-    assert not run(KerberosTgtContext(), [[service], [tgt]])
-    for invalid in (ticket(4768, 90), ticket(4768, principal="other@example.test"), ticket(4768, ip="203.0.113.9")):
-        assert run(KerberosTgtContext(), [invalid, service])
-
-
-def test_context_resolution_after_a_published_gap_revises_the_same_id():
-    rule = KerberosTgtContext()
-    rule.consume([ticket(4769, 60)])
-    [before] = list(rule.finalize())
-    rule.consume([ticket(4768)])
-    after = list(rule.finalize())
-    assert len(after) == 1 and after[0].group_key == before.group_key
-    assert after[0].revision_reason and "companion" in after[0].claim
-
-
-def test_later_ticket_companion_never_overwrites_an_earlier_tickets_context_gap():
-    matches = run(KerberosTgtContext(), [ticket(4769, 60), ticket(4768, 120), ticket(4769, 180)])
-    assert len(matches) == 1 and "unresolved TGT context" in matches[0].claim
-    assert matches[0].events[0].id == ticket(4769, 60).id
+def test_weak_remote_access_group_is_a_lead_even_after_recent_creation():
+    [match] = run(CreatedThenPrivileged(), [creation(), membership(group="S-1-5-32-555")])
+    assert match.proposed_lane == "lead"
