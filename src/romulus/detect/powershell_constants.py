@@ -19,6 +19,7 @@ OBFUSCATING = frozenset({'concatenation', 'format-string', 'character-cast', 'ch
                          'string-join', 'backtick', 'embedded-quotes', 'command-lookup'})
 _NUMBER = re.compile(r'(?:0x[0-9a-f]+|[0-9]+)\Z', re.ASCII)
 _VARIABLE = re.compile(r'\$[a-z_][\w]*\Z', re.ASCII)
+_VARIABLE_MUTATORS = frozenset({'sv', 'set-variable', 'set', 'clv', 'clear-variable', 'rv', 'remove-variable'})
 
 
 @dataclass(frozen=True)
@@ -40,26 +41,56 @@ class _Limited(Exception):
 
 
 class _Reader:
-    def __init__(self, tokens):
+    def __init__(self, tokens, budget=None, limits=None):
         self.tokens, self.variables = tokens, {}
-        self.work, self.steps, self.partial = MAX_CONSTANT_WORK, MAX_STEPS, False
+        self.budget = [MAX_CONSTANT_WORK, MAX_STEPS] if budget is None else budget
+        self.partial = False
+        self.limits = set() if limits is None else limits
+        self.furthest = 0
+
+    @property
+    def work(self):
+        return self.budget[0]
+
+    @work.setter
+    def work(self, value):
+        self.budget[0] = value
+
+    def limit(self, name):
+        self.partial = True
+        self.limits.add(name)
+        raise _Limited
 
     def value(self, index):
         return self.tokens[index].value if index < len(self.tokens) else ''
 
+    def scan_items(self, values):
+        if len(values) > MAX_ITEMS:
+            self.limit('MAX_ITEMS=4096')
+        if len(values) > self.work:
+            self.limit('MAX_CONSTANT_WORK=2097152')
+        self.work -= len(values)
+
     def make(self, value, transforms=frozenset()):
+        if isinstance(value, tuple):
+            self.scan_items(value)
+        if isinstance(value, tuple) and not all(isinstance(item, (str, int)) for item in value):
+            raise _Unknown
         size = sum(len(str(item)) for item in value) if isinstance(value, tuple) else len(str(value))
-        if size > MAX_VALUE_CHARS or size > self.work or isinstance(value, tuple) and len(value) > MAX_ITEMS:
-            self.partial = True
-            raise _Limited
+        if size > MAX_VALUE_CHARS:
+            self.limit('MAX_VALUE_CHARS=65536')
+        if size > self.work:
+            self.limit('MAX_CONSTANT_WORK=2097152')
         self.work -= size
         return Constant(value, frozenset(transforms))
 
     def expression(self, index, precedence=0, depth=0, *, call_target=False):
-        self.steps -= 1
-        if self.steps < 0 or depth > MAX_DEPTH:
-            self.partial = True
-            raise _Limited
+        self.budget[1] -= 1
+        self.furthest = max(self.furthest, index)
+        if self.budget[1] < 0:
+            self.limit('MAX_STEPS=180000')
+        if depth > MAX_DEPTH:
+            self.limit('MAX_DEPTH=32')
         if index >= len(self.tokens):
             raise _Unknown
         token, value = self.tokens[index], self.value(index)
@@ -77,6 +108,7 @@ class _Reader:
         elif token.kind == 'word' and value == '-join':
             operand, end = self.expression(index + 1, 80, depth + 1)
             items = operand.value if isinstance(operand.value, tuple) else (operand.value,)
+            self.scan_items(items)
             if not all(isinstance(item, str) for item in items):
                 raise _Unknown
             left = self.make(''.join(items), operand.transforms | {'char-join'})
@@ -112,8 +144,8 @@ class _Reader:
                 if isinstance(left.value, str) and isinstance(right.value, (str, int)):
                     right_text = str(right.value)
                     if len(left.value) + len(right_text) > min(MAX_VALUE_CHARS, self.work):
-                        self.partial = True
-                        raise _Limited
+                        self.limit('MAX_VALUE_CHARS=65536' if len(left.value) + len(right_text) > MAX_VALUE_CHARS
+                                   else 'MAX_CONSTANT_WORK=2097152')
                     left = self.make(left.value + right_text, transforms | {'concatenation'})
                 elif isinstance(left.value, int) and isinstance(right.value, int):
                     left = self.make(left.value + right.value, transforms)
@@ -121,12 +153,12 @@ class _Reader:
                     raise _Unknown
             elif operator.value == '-join':
                 values = left.value if isinstance(left.value, tuple) else (left.value,)
+                self.scan_items(values)
                 if not isinstance(right.value, str) or not all(isinstance(item, str) for item in values):
                     raise _Unknown
                 size = sum(map(len, values)) + max(0, len(values) - 1) * len(right.value)
                 if size > min(MAX_VALUE_CHARS, self.work):
-                    self.partial = True
-                    raise _Limited
+                    self.limit('MAX_VALUE_CHARS=65536' if size > MAX_VALUE_CHARS else 'MAX_CONSTANT_WORK=2097152')
                 left = self.make(right.value.join(values), transforms | {'char-join'})
             else:
                 arguments = list(right.value) if isinstance(right.value, tuple) else [right.value]
@@ -135,8 +167,7 @@ class _Reader:
                     arguments.append(item.value)
                     transforms |= item.transforms
                     if len(arguments) > MAX_ITEMS:
-                        self.partial = True
-                        raise _Limited
+                        self.limit('MAX_ITEMS=4096')
                 left = self.make(self.format(left.value, arguments), transforms | {'format-string'})
             end = after
         return left, end
@@ -149,8 +180,7 @@ class _Reader:
             item, end = self.expression(end, depth=depth, call_target=call_target)
             items.append(item)
             if len(items) > MAX_ITEMS:
-                self.partial = True
-                raise _Limited
+                self.limit('MAX_ITEMS=4096')
             if self.value(end) == closing:
                 return items, end + 1
             if self.value(end) != ',':
@@ -172,12 +202,13 @@ class _Reader:
             if len(arguments) < 2 or not isinstance(arguments[0].value, str):
                 raise _Unknown
             values = arguments[1].value if len(arguments) == 2 and isinstance(arguments[1].value, tuple) else tuple(item.value for item in arguments[1:])
+            self.scan_items(values)
             if not all(isinstance(item, str) for item in values):
                 raise _Unknown
             separator = arguments[0].value
-            if sum(map(len, values)) + len(separator) * max(0, len(values) - 1) > min(MAX_VALUE_CHARS, self.work):
-                self.partial = True
-                raise _Limited
+            size = sum(map(len, values)) + len(separator) * max(0, len(values) - 1)
+            if size > min(MAX_VALUE_CHARS, self.work):
+                self.limit('MAX_VALUE_CHARS=65536' if size > MAX_VALUE_CHARS else 'MAX_CONSTANT_WORK=2097152')
             return self.make(separator.join(values), set().union(*(item.transforms for item in arguments)) | {'string-join'}), end
         if typename not in {'char', 'system.char', 'char[]', 'system.char[]', 'string', 'system.string'}:
             raise _Unknown
@@ -187,6 +218,7 @@ class _Reader:
                 raise _Unknown
             return self.make(str(operand.value), operand.transforms), end
         values = operand.value if isinstance(operand.value, tuple) else tuple(operand.value) if isinstance(operand.value, str) and typename.endswith('[]') else (operand.value,)
+        self.scan_items(values)
         chars = []
         for value in values:
             if isinstance(value, int) and 0 <= value <= 0xffff:
@@ -204,6 +236,10 @@ class _Reader:
             raise _Unknown
         parts, index, size = [], 0, 0
         while index < len(template):
+            # Charge scans even when a malformed placeholder later makes this fold fail.
+            if self.work <= 0:
+                self.limit('MAX_CONSTANT_WORK=2097152')
+            self.work -= 1
             if template.startswith('{{', index) or template.startswith('}}', index):
                 piece, index = template[index], index + 2
             elif template[index] == '{':
@@ -220,18 +256,30 @@ class _Reader:
                 piece, index = template[index], index + 1
             size += len(piece)
             if size > min(MAX_VALUE_CHARS, self.work):
-                self.partial = True
-                raise _Limited
+                self.limit('MAX_VALUE_CHARS=65536' if size > MAX_VALUE_CHARS else 'MAX_CONSTANT_WORK=2097152')
             parts.append(piece)
         return ''.join(parts)
 
 
-def fold_constants(tokens, budget=None):
+def fold_constants(tokens, budget=None, limits=None):
     """Return folded tokens, original token/value/transformation evidence and an honest work-limit flag."""
-    reader, out, evidence, index = _Reader(tokens), [], [], 0
-    call_in_statement = False
-    if budget is not None:
-        reader.work = budget[0]
+    reader, out, evidence, index = _Reader(tokens, budget, limits), [], [], 0
+    call_in_statement, argument_mode, failed_until, limited_until = False, False, -1, -1
+
+    def note_evidence(begin, end, value):
+        if len(evidence) < MAX_FOLD_EVIDENCE:
+            evidence.append((tuple((item.kind, item.value) for item in tokens[begin:end]),
+                             str(value.value), tuple(sorted(value.transforms))))
+        else:
+            reader.limits.add('MAX_FOLD_EVIDENCE=256')
+
+    def skip_limited_statement(begin):
+        end = begin
+        while end < len(tokens) and not (tokens[end].kind == 'op' and tokens[end].value in {';', '\n'}):
+            end += 1
+        reader.variables.clear()
+        return end
+
     while index < len(tokens):
         token = tokens[index]
         previous = tokens[index - 1].value if index else ''
@@ -239,6 +287,7 @@ def fold_constants(tokens, budget=None):
             if call_in_statement:
                 reader.variables.clear()
             call_in_statement = False
+            argument_mode = False
         if (token.kind == 'op' and (token.value == '&' or token.value == '.' and
                                   (not index or previous in {';', '\n', '{', '=', '('}))
                 or token.kind == 'word' and (not index or previous in {';', '\n', '{', '=', '('})
@@ -247,6 +296,13 @@ def fold_constants(tokens, budget=None):
                 and index + 1 < len(tokens) and tokens[index + 1].value == '('):
             # Unknown commands may change session variables after their arguments are evaluated.
             call_in_statement = True
+            argument_mode = True
+        if (token.kind in {'word', 'string'} and token.value.casefold().rsplit('\\', 1)[-1] in _VARIABLE_MUTATORS
+                and (token.kind == 'word' and (not index or previous in {';', '\n', '{', '=', '(', '|'})
+                     or previous == '&' and (index < 2 or not tokens[index-2].value.endswith('>'))
+                     or previous == '.' and (index == 1 or tokens[index-2].value in {
+                         ';', '\n', '{', '=', '(', '|'}))):
+            reader.variables.clear()
         if token.kind == 'op' and token.value in {'{', '}'}:
             # No control-flow or function execution is assumed across a scriptblock boundary.
             reader.variables.clear()
@@ -262,6 +318,8 @@ def fold_constants(tokens, budget=None):
             name = variable_name(token.value)
             out.extend(tokens[index:index + 2])
             try:
+                if index < limited_until:
+                    raise _Unknown
                 value, end = reader.expression(index + 2)
                 scalar_target = not index or previous in {';', '\n', '{'}
                 if scalar_target and _VARIABLE.fullmatch(name) and (end == len(tokens) or tokens[end].value in {';', '\n', '}'}):
@@ -269,15 +327,14 @@ def fold_constants(tokens, budget=None):
                     if not isinstance(value.value, tuple):
                         out.append(replace(tokens[index + 2], kind='string' if isinstance(value.value, str) else 'word',
                                            value=str(value.value), transforms=value.transforms))
-                        if len(evidence) < MAX_FOLD_EVIDENCE:
-                            evidence.append((tuple((item.kind, item.value) for item in tokens[index + 2:end]), str(value.value), tuple(sorted(value.transforms))))
-                        else:
-                            reader.partial = True
+                        note_evidence(index + 2, end, value)
                         index = end
                         continue
                 else:
                     reader.variables.clear()
-            except (_Unknown, _Limited):
+            except _Limited:
+                limited_until = skip_limited_statement(index)
+            except _Unknown:
                 reader.variables.clear()
             index += 2
             continue
@@ -291,26 +348,29 @@ def fold_constants(tokens, budget=None):
             index += 1
             continue
         try:
+            if index < limited_until or index < failed_until:
+                raise _Unknown
             target = index > 0 and tokens[index - 1].kind == 'op' and tokens[index - 1].value in {'&', '.'}
-            value, end = reader.expression(index, call_target=target)
+            reader.furthest = index
+            value, end = reader.expression(index, 100 if argument_mode and token.value not in {'(', '[', '-join'} else 0,
+                                           call_target=target)
+            if target and isinstance(value.value, str) and value.value.casefold().rsplit('\\', 1)[-1] in _VARIABLE_MUTATORS:
+                reader.variables.clear()
             if isinstance(value.value, tuple):
                 raise _Unknown
             kind = 'string' if isinstance(value.value, str) else 'word'
             folded = replace(token, kind=kind, value=str(value.value), transforms=value.transforms)
             out.append(folded)
             if end > index + 1 or token.kind == 'variable':
-                if len(evidence) < MAX_FOLD_EVIDENCE:
-                    evidence.append((tuple((item.kind, item.value) for item in tokens[index:end]), str(value.value), tuple(sorted(value.transforms))))
-                else:
-                    reader.partial = True
+                note_evidence(index, end, value)
             index = end
         except _Unknown:
+            failed_until = max(failed_until, reader.furthest)
             out.append(token)
             index += 1
         except _Limited:
-            reader.partial = True
-            out.extend(tokens[index:])
-            break
-    if budget is not None:
-        budget[0] = reader.work
+            limited_until = skip_limited_statement(index)
+            end = max(index + 1, limited_until)
+            out.extend(tokens[index:end])
+            index = end
     return out, evidence, reader.partial

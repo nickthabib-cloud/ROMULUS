@@ -45,7 +45,7 @@ CONTENT_COMMANDS = TOOLS | EXECUTORS | {"get-process", "gps", "ps", "out-minidum
 
 
 class ScriptRule(WindowsEventRule):
-    version = "2"
+    version = "3"
     families = ("script_block",)
     windows_event_classes = SCRIPT_CLASSES
     claim_type = "script_content"
@@ -87,7 +87,7 @@ class ScriptRule(WindowsEventRule):
         if self.id == "win.script_offensive_function" and parsed.commands & HIGH_TOOLS:
             return "high"
         if self.id == "win.script_sam_access" and any(
-            len(args) > 1 and args[1].rstrip("\\") in {"hklm\\sam", "hklm\\security",
+            len(args) > 1 and args[0] in {'save', 'export'} and args[1].rstrip("\\") in {"hklm\\sam", "hklm\\security",
                 "hkey_local_machine\\sam", "hkey_local_machine\\security"}
             for name in ("reg", "reg.exe") for args in parsed.arguments.get(name, [])):
             return "high"
@@ -126,8 +126,12 @@ class ScriptRule(WindowsEventRule):
                 prior_block["open"] = False
                 self.block_views.put(block_key, prior_block)
             if parsed.partial or event.get("script.truncated") is True:
-                self.note_limit("script_partial", "Script text is partial or has unresolved lexical structure; "
-                                "unevaluated portions and dynamic code remain unresolved")
+                reasons = sorted(parsed.limits)
+                if event.get('script.truncated') is True:
+                    reasons.append('script.truncated')
+                self.note_limit("script_partial", "Script reading is partial: " + ', '.join(reasons))
+                for reason in reasons:
+                    self.note_limit('script_partial:' + reason, 'Script reading is partial: ' + reason)
             labels = self.shapes(event, parsed)
             correction = False
             if not labels and complete and prior_block and prior_block["identity"]:
@@ -140,13 +144,14 @@ class ScriptRule(WindowsEventRule):
             for shape, description, fields in labels:
                 proof = self._proof(event, parsed)
                 content = hashlib.sha256(json.dumps(proof, sort_keys=True).encode()).hexdigest()
-                content_key = (event.host or event.id, content)
+                content_key = ((event.host or event.id, content, block_key or event.id) if not complete
+                               else (event.host or event.id, content))
                 identity = self.content_views.get(content_key)
                 if correction:
                     identity = prior_block["identity"]
                 elif identity is None:
                     identity = (prior_block["identity"] if prior_block and prior_block["identity"] else
-                                hashlib.sha256(json.dumps((self.id, content_key, shape)).encode()).hexdigest()[:32])
+                                hashlib.sha256(json.dumps((self.id, block_key or content_key, shape)).encode()).hexdigest()[:32])
                     self.content_views.put(content_key, identity)
                 preference = 2 * rank.get(event.get("script.view"), 0) + int(complete)
                 if complete and not correction:
@@ -176,6 +181,11 @@ class ScriptRule(WindowsEventRule):
                 hit.notes += (("Script content is not proof that the described action ran or succeeded. "
                                "The lexer does not execute dynamic expressions or resolve runtime aliases/variables."),)
                 hit.notes += tuple(event.caveats)
+                if parsed.limits:
+                    hit.notes += ('Script reading limits: ' + ', '.join(sorted(parsed.limits)),)
+                if parsed.fold_evidence_truncated:
+                    hit.notes += ('Fold evidence list truncated at 256; script reading and detected calls remain complete.',)
+                    self.note_coverage('script_fold_evidence', 'Fold evidence list truncated at 256')
                 match = self.record_match(event, hit)
                 match.group_key = identity
                 match.raw_copies = self.raw_of(event)
@@ -298,7 +308,7 @@ class ScriptObfuscatedExecution(ScriptRule):
 
 class ScriptDecodeEvaluation(ScriptRule):
     id = "win.script_decode_evaluation"
-    version = "1"
+    version = "2"
     title = "PowerShell script contains decoding followed by code evaluation"
     attack = ("T1140", "T1059.001")
     description = "Recorded code combines Base64/decompression reading and a code-evaluation call; runtime data flow is unverified"

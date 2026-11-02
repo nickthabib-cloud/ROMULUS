@@ -21,7 +21,7 @@ from romulus.hunt.run import open_repo
 from romulus.report.manifest import internal_networks_view, investigations_for_hunt, publish_revision
 from romulus.report.markdown import render as render_md
 from romulus.site import SiteChangedError, SiteValidationError, load_site_facts, save_site_facts
-from romulus.store.db import compact
+from romulus.store.db import compact, maintenance_lease
 from romulus.web import site_form
 from romulus.web.auth import RateLimiter, Sessions, csrf_ok, verify
 
@@ -102,7 +102,8 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         deleted = request.query_params.get("deleted", "")
         # only confirm a deletion that the audit log actually records (the query string is spoofable)
         confirmed = deleted if deleted and repo.latest_audit(deleted, "hunt.delete") else ""
-        return page(request, "hunts.html", u, hunts=rows, deleted=confirmed)
+        return page(request, "hunts.html", u, hunts=rows, deleted=confirmed,
+                    compaction_failed=bool(confirmed and repo.latest_audit(confirmed, "hunt.compaction_failed")))
 
     @app.get("/hunts/new", response_class=HTMLResponse)
     def new_hunt_form(request: Request):
@@ -312,14 +313,17 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         if s.reports_dir.resolve() in rdir.parents and rdir.is_dir():
             import shutil
             shutil.rmtree(rdir, ignore_errors=True)
-        # Return freed pages to the filesystem, but never while a hunt may be writing: VACUUM blocks
-        # writers and could push a running sweep past its busy timeout. Compaction then simply waits
-        # for the next deletion made while nothing is running.
-        if not repo.hunts_with_live_lease():
-            try:
-                compact(repo.engine)
-            except Exception:  # noqa: BLE001, S110 - best-effort; the deletion already committed
-                pass
+        # The same cross-process lease guards hunt claims through the final
+        # checkpoint, closing the check-then-VACUUM race with a new hunt.
+        try:
+            with maintenance_lease(repo.engine):
+                if not repo.hunts_with_live_lease():
+                    compact(repo.engine)
+        except Exception as error:  # deletion has already committed
+            import logging
+            logging.getLogger(__name__).exception("Hunt deletion compaction failed for %s", hunt_id)
+            repo.audit(f"web:{u['u']}", "hunt.compaction_failed", hunt_id=hunt_id,
+                       detail={"error": str(error)[:500]})
         return RedirectResponse(f"/?deleted={hunt_id}&removed={counts.get('candidates', 0)}", status_code=303)
 
     # ------------------------------------------------------------------ site setup

@@ -85,7 +85,7 @@ def test_b_b3_ordinary_remote_thread_and_install_tamper_are_leads():
         'StartFunction': 'CtrlRoutine', 'StartAddress': '0x123', 'NewThreadId': '77'})
     assert RemoteThreadCreation().judge(thread)[0].lane == 'lead'
     tamper = native(25, {'Image': r'C:\Program Files\Google\Chrome\chrome.exe', 'Type': 'Image is replaced'})
-    assert ProcessImageTampering().judge(tamper)[0].lane == 'lead'
+    assert ProcessImageTampering().judge(tamper)[0].lane == 'high'
 
 
 @pytest.mark.parametrize('root', [r'HKU\S-1-5-21-1-2-3-1001_Classes', r'HKCU\Software\Classes',
@@ -96,10 +96,10 @@ def test_b_b4_real_com_views_and_install_payload_lead(root):
     assert RegistryUserCom().judge(ev)[0].lane == 'lead'
 
 
-def test_b_b4_user_writable_com_payload_is_high():
+def test_b_b4_unknown_com_class_writable_payload_is_lead():
     ev = native(13, {'TargetObject': r'HKU\S-1-5-21-1-2-3-1001_Classes\CLSID' + '\\' + _GUID + r'\InprocServer32\(Default)',
         'Details': r'C:\ProgramData\x.dll'})
-    assert RegistryUserCom().judge(ev)[0].lane == 'high'
+    assert RegistryUserCom().judge(ev)[0].lane == 'lead'
 
 
 @pytest.mark.parametrize('value', ['unknown.dll', 'unknown.exe /start', r'"C:\Program Files\Vendor\app.exe" /embedding',
@@ -246,7 +246,7 @@ def test_b_b1_tool_pipe_content_does_not_keep_embedded_pids_or_random_names(name
 def test_b_minor_exclusion_trailing_slash_and_equals_are_preserved():
     ev = native(13, {'TargetObject': 'HKLM\\Software\\Microsoft\\Windows Defender\\Exclusions\\Paths\\C:\\Temp\\',
                      'Details': 'DWORD (0x00000000)'})
-    assert RegistryDefender().judge(ev)[0].lane == 'high'
+    assert RegistryDefender().judge(ev)[0].lane == 'lead'
     ev = native(5007, {'New Value': r'HKLM\Software\Microsoft\Windows Defender\Exclusions\Paths\C:\a=b = 0x0'},
                 provider=DEFENDER_PROVIDER, channel=DEFENDER_CHANNEL)
     assert DefenderProtection().judge(ev)[0].lane == 'high'

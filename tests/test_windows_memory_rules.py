@@ -32,7 +32,7 @@ CLR = {"image.kind": "image", "image.path": r"C:\Windows\Microsoft.NET\Framework
 CASES = (
     (LsassProcessAccess, "process_access", 10, LSASS, "high"),
     (RemoteThreadCreation, "remote_thread", 8, REMOTE, "high"),
-    (ProcessImageTampering, "process_tampering", 25, TAMPER, "lead"),
+    (ProcessImageTampering, "process_tampering", 25, TAMPER, "high"),
     (UnsignedDriverLoad, "image_load", 6, DRIVER, "high"),
     (WritableUnsignedDllLoad, "image_load", 7, DLL, "high"),
     (DumpLibraryLoad, "image_load", 7, DUMP, "lead"),
@@ -178,8 +178,8 @@ def test_known_valid_module_signature_is_outside_unsigned_scope(rule, code, fiel
 
 
 @pytest.mark.parametrize("path", [r"C:\Program Files\App\plugin.dll", r"C:\Windows\System32\plugin.dll"])
-def test_unsigned_dll_requires_writable_dll_path(path):
-    assert run(WritableUnsignedDllLoad(), [event("image_load", 7, **{**DLL, "image.path": path})]) == []
+def test_unsigned_dll_in_installation_tree_remains_a_lead(path):
+    assert run(WritableUnsignedDllLoad(), [event("image_load", 7, **{**DLL, "image.path": path})])[0].proposed_lane == "lead"
 
 
 @pytest.mark.parametrize("loader", [r"C:\Tools\app.exe", r"C:\Users\alice\Windows\System32\app.exe",

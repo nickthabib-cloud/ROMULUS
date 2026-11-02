@@ -49,6 +49,7 @@ class ScriptBlockAssembler:
         root.chmod(0o700)
         self.path = root / "windows-script-blocks.db"
         self.db = sqlite3.connect(self.path)
+        self.db.execute("PRAGMA journal_mode=MEMORY")
         self.path.chmod(0o600)
         self.text_cap = max(1, int(text_cap))
         self.budget = budget if budget is not None else StateBudget(root)
@@ -85,14 +86,11 @@ class ScriptBlockAssembler:
                 f"script-block reassembly database floor {self._size} exceeds cap {self.max_bytes} bytes"
             )
             self._refusal_reasons[self.refusal_reason] = None
-        else:
-            headroom = self.budget.headroom()
-            ceiling = self.max_bytes if headroom is None else min(self.max_bytes, self._size + headroom)
-            pages = max(1, ceiling // self._page)
-            self.db.execute(f"PRAGMA max_page_count = {pages}")
         if self.budget is not None and self.account is not None:
             self.budget.charge(self.account, self._size)
+            self.budget.physical_account(self.account, self._size)
             self.budget.grew(self._size)
+        self._checkpoint()
 
     def _db_size(self) -> int:
         return int(self.db.execute("PRAGMA page_count").fetchone()[0]) * self._page
@@ -104,10 +102,11 @@ class ScriptBlockAssembler:
         growth = size - self._size
         if growth > 0 and self.budget is not None and self.account is not None:
             self.budget.charge(self.account, growth)
+            self.budget.physical_account(self.account, growth)
             self.budget.grew(growth)
         self._size = size
         # Other hunt stores share this budget and can grow after this database was opened.
-        headroom = self.budget.headroom()
+        headroom = self.budget.physical_allowance(self.account)
         ceiling = self.max_bytes if headroom is None else min(self.max_bytes, size + headroom)
         self.db.execute(f"PRAGMA max_page_count = {max(1, ceiling // self._page)}")
         if size > self.max_bytes:
@@ -319,7 +318,10 @@ class ScriptBlockAssembler:
                         self.db.execute("RELEASE script_part")
                 self.refusal_reason = f"writing script-block reassembly state failed ({exc})"
                 if self.budget is not None:
-                    self.budget.fail(self.refusal_reason)
+                    if "full" in str(exc).lower():
+                        self.budget.refuse_capacity(self.account, self.refusal_reason)
+                    else:
+                        self.budget.fail(self.refusal_reason)
                 self._note_refusal(self.refusal_reason)
                 output.append(self._partial(event, self.refusal_reason))
                 continue
@@ -493,6 +495,7 @@ class ScriptBlockAssembler:
         if self._tempdir is not None:
             shutil.rmtree(self._tempdir, ignore_errors=True)
             self._tempdir = None
+            self.budget.release_physical_account(self.account)
 
     def __del__(self):
         with contextlib.suppress(Exception):

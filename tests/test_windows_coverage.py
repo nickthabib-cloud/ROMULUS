@@ -2035,7 +2035,7 @@ def test_5000_host_windows_sweep_refuses_bounded_state_without_crashing(tmp_path
     assert any("counts over them may include duplicates" in reason for reason in cell["detail"]["reasons"])
     assert "state_capped" not in cell["detail"]
     assert any("host/channel groups" in reason for reason in cell["detail"]["reasons"])
-    assert "windows_seen" in budget.full
+    assert "windows_continuity" in budget.full
     assert refused > 0
     assert len(cell["detail"]["reasons"]) < 10
     sweep.close_stage()

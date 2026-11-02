@@ -130,7 +130,7 @@ def test_dns_identity_is_signal_even_for_benign_domain_and_failed_resolution():
 def test_new_host_and_new_payload_publish_before_finalize_and_repeats_revise_in_place():
     records = [event("file_change", 11, host=host, offset=index, **{"file.path": path})
                for index, (host, path) in enumerate([
-                   ("one", STARTUP), ("two", STARTUP), ("one", STARTUP.replace("payload", "other")),
+                   ("one", STARTUP), ("two", STARTUP), ("one", STARTUP.replace(".ps1", ".exe")),
                    ("one", STARTUP), ("one", STARTUP),
                ])]
     rule = StartupFileWrite()
@@ -141,8 +141,9 @@ def test_new_host_and_new_payload_publish_before_finalize_and_repeats_revise_in_
         matches.extend(rule.consume([item]))
         rule.drain_staged()
         rule.drain_bounds()
-    own = [match for match in matches if not match.group_key]
-    assert len(own) == 3 and {match.events[0].host for match in own} == {"one", "two"}
+    assert matches and all(match.group_key for match in matches)
+    assert any({item.host for item in match.events} == {"one", "two"} for match in matches)
+    assert len({match.group_key for match in matches}) == 2
     finals = rule.finalize()
     assert len(finals) == 1 and finals[0].revision_reason
     assert "Windows event record(s)" in finals[0].claim and "process-creation" not in finals[0].claim

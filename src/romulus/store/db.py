@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -13,6 +14,48 @@ from sqlalchemy import Engine, create_engine, event, text
 from romulus.store.schema import metadata
 
 _write_lock = threading.Lock()
+_memory_maintenance_lock = threading.Lock()
+
+
+@contextmanager
+def maintenance_lease(engine: Engine):
+    """Serialize maintenance with hunt claims across processes for this database.
+
+    OS file locks release on process exit. The lock file stays in place to avoid
+    replacing a locked inode while another process is opening it.
+    """
+    database = engine.url.database
+    if not database or database == ":memory:":
+        if not _memory_maintenance_lock.acquire(blocking=False):
+            raise RuntimeError("Database maintenance is active; try again after compaction")
+        try:
+            yield
+        finally:
+            _memory_maintenance_lock.release()
+        return
+    with Path(str(Path(database).resolve()) + ".maintenance.lock").open("a+b") as handle:
+        handle.seek(0, 2)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            raise RuntimeError("Database maintenance is active; try again after compaction") from error
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def utcnow() -> datetime:

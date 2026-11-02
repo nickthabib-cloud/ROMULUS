@@ -137,7 +137,8 @@ class WindowsEventRule(WindowsProcessRule):
         return out
 
     def _shape(self, event, hit):
-        material = {"rule": self.id, "behavior": hit.behavior, "content": hit.content,
+        identity = hit.content or json.dumps([event.id, sorted(ref.key for ref in event.raw)])
+        material = {"rule": self.id, "behavior": hit.behavior, "content": identity,
                     "lane": hit.lane}
         return hashlib.sha256(json.dumps(material, sort_keys=True, default=str).encode()).hexdigest()[:32]
 

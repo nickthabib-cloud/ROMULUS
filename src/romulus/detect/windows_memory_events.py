@@ -6,10 +6,15 @@ loads and thread creation likewise retain their recorded meaning without asserti
 from __future__ import annotations
 
 import json
-import ntpath
 import re
 
 from romulus.detect.windows_events import WindowsEventRule, basename, components, integer, signal, writable
+from romulus.detect.windows_path_data import (
+    installation_parts,
+    path_class,
+    protected_platform_path,
+    writable_windows_path,
+)
 from romulus.evidence.windows_catalog import SYSMON, SYSMON_CHANNEL
 
 _SYSMON = "https://learn.microsoft.com/en-us/sysinternals/downloads/sysmon"
@@ -63,32 +68,20 @@ def _system_directory(path):
 
 def _installation_parts(path):
     """Components below a recorded local volume or Windows-root placeholder."""
-    parts = components(ntpath.normpath(str(path or "")))
-    if parts and parts[0] in {"?", "??"}:
-        parts = parts[1:]
-    if parts and re.fullmatch(r"[a-z]:", parts[0]):
-        parts = parts[1:]
-    elif len(parts) >= 2 and parts[0] == "device" and re.fullmatch(r"harddiskvolume\d+", parts[1]):
-        parts = parts[2:]
-    elif parts and parts[0] in {"%systemroot%", "%windir%", "systemroot"}:
-        parts = ("windows", *parts[1:])
-    else:
-        return ()
-    return parts
+    return installation_parts(path)
 
 
 def _installed_path(path):
     """Installation-directory scope, not trust or a claim about effective ACLs."""
     parts = _installation_parts(path)
-    return bool(parts and parts[0] in {"windows", "program files", "program files (x86)"}
-                and not (parts[0] == "windows" and len(parts) > 1
-                         and parts[1] in {"temp", "tasks", "tracing"}))
+    return (protected_platform_path(path) or bool(
+        parts and parts[0] in {"windows", "program files", "program files (x86)"}
+        and not writable_windows_path(path)))
 
 
 def _writable_indicator(path):
     parts = _installation_parts(path)
-    return writable(path) or bool(parts and (parts[0] in {"programdata", "perflogs"}
-                                 or parts[:2] in {("windows", "tasks"), ("windows", "tracing")}))
+    return writable(path) or writable_windows_path(path) or bool(parts and parts[0] in {"programdata", "perflogs"})
 
 
 def _content(event, *fields):
@@ -148,7 +141,7 @@ def _expected_dotnet_host(path):
 
 class LsassProcessAccess(WindowsEventRule):
     id = "win.lsass_process_access"
-    version = "2"
+    version = "3"
     title = "A process opened LSASS with memory-related access or a notable call trace"
     families = ("process_access",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 10),)
@@ -194,13 +187,17 @@ class LsassProcessAccess(WindowsEventRule):
                        (*_ROLE_FIELDS, "process.access.action", "process.access.mask",
                         "process.access.call_trace", "process.access.call_trace_modules"),
                        lane="high" if high else "lead", severity="high" if high else "medium",
-                       content=json.dumps([source, target, mask, trace_modules], separators=(",", ":")),
+                       content=json.dumps([path_class(source) if protected_platform_path(source) else source,
+                                           target, mask,
+                                           [path_class(item) if protected_platform_path(item) else item
+                                            for item in trace_modules]], separators=(",", ":")),
+                       common=f"A recorded source in the same installation/path class opened lsass.exe {rights}",
                        notes=("The record shows granted access, not a completed read or credential dump.",))]
 
 
 class RemoteThreadCreation(WindowsEventRule):
     id = "win.remote_thread_creation"
-    version = "2"
+    version = "3"
     title = "Sysmon recorded a thread created in another process"
     families = ("remote_thread",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 8),)
@@ -215,9 +212,11 @@ class RemoteThreadCreation(WindowsEventRule):
         source, target = _process(event, "source"), _process(event, "target")
         module = event.get("thread.start_module")
         high = bool(source and target and (
-            not module or str(module).casefold() in {"unknown", "-"} or not _installed_path(source)
+            str(module).casefold() in {"unknown", "-"} or not _installed_path(source)
             or basename(target) in {"lsass.exe", "winlogon.exe"}))
-        return [signal(event, "remote_thread", "Sysmon recorded creation of a thread in another process",
+        detail = ("; start module was not recorded" if not module else
+                  "; start module was recorded as '-' (Sysmon did not identify a module)" if module == "-" else "")
+        return [signal(event, "remote_thread", "Sysmon recorded creation of a thread in another process" + detail,
                        self.attack, (*_ROLE_FIELDS, "thread.id", "thread.start_address", "thread.start_module",
                                      "thread.start_function"), lane="high" if high else "lead",
                        severity="high" if high else "medium",
@@ -227,7 +226,7 @@ class RemoteThreadCreation(WindowsEventRule):
 
 class ProcessImageTampering(WindowsEventRule):
     id = "win.process_image_tampering"
-    version = "2"
+    version = "3"
     title = "Sysmon reported process image tampering"
     families = ("process_tampering",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 25),)
@@ -239,7 +238,7 @@ class ProcessImageTampering(WindowsEventRule):
     def judge(self, event):
         if event.get("event.code") != 25:
             return []
-        detailed = bool(_process(event) and event.get("process.tampering.type") and not _installed_path(_process(event)))
+        detailed = str(event.get("process.tampering.type") or "").strip().casefold() == "image is replaced"
         return [signal(event, "process_tampering", "Sysmon reported process image tampering", self.attack,
                        (*_PROCESS_FIELDS, "process.tampering.type"), lane="high" if detailed else "lead",
                        severity="high" if detailed else "medium",
@@ -271,8 +270,8 @@ class UnsignedDriverLoad(WindowsEventRule):
 
 class WritableUnsignedDllLoad(WindowsEventRule):
     id = "win.writable_unsigned_dll_load"
-    version = "2"
-    title = "A process loaded a module outside standard installation directories without a recorded valid signature"
+    version = "3"
+    title = "A process loaded an unsigned or invalid module, or a module outside standard installation directories"
     families = ("image_load",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 7),)
     attack = ("T1574.001",)
@@ -284,11 +283,13 @@ class WritableUnsignedDllLoad(WindowsEventRule):
     def judge(self, event):
         path = _image(event)
         if (event.get("event.code") != 7 or event.get("image.kind") != "image"
-                or not path or _installed_path(path) or _signature_known_good(event)):
+                or not path or _signature_known_good(event)
+                or (_installed_path(path) and not _bad_signature(event))):
             return []
         high = _bad_signature(event) and _system_directory(_process(event)) and _writable_indicator(path)
-        return [signal(event, "writable_dll", "A process loaded a module outside standard installation directories without a recorded "
-                       "valid signature", self.attack, _IMAGE_FIELDS, lane="high" if high else "lead",
+        text = ("A process loaded a module with a recorded absent or invalid signature" if _bad_signature(event)
+                else "A process loaded a module outside standard installation directories without a recorded valid signature")
+        return [signal(event, "writable_dll", text, self.attack, _IMAGE_FIELDS, lane="high" if high else "lead",
                        severity="high" if high else "medium", content=_image_content(event),
                        notes=(("A system-directory path does not establish a trusted process identity. "
                                "The loading process signature is unavailable in this event schema."),))]
@@ -296,7 +297,7 @@ class WritableUnsignedDllLoad(WindowsEventRule):
 
 class DumpLibraryLoad(WindowsEventRule):
     id = "win.dump_library_load"
-    version = "2"
+    version = "3"
     title = "A process loaded a library that provides diagnostic or dump functionality"
     families = ("image_load",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 7),)
@@ -320,7 +321,7 @@ class DumpLibraryLoad(WindowsEventRule):
 
 class UnexpectedClrLoad(WindowsEventRule):
     id = "win.unexpected_clr_load"
-    version = "2"
+    version = "3"
     title = "A CLR load did not meet the expected loader, module path and signature checks"
     families = ("image_load",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 7),)

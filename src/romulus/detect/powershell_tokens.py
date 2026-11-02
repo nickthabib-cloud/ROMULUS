@@ -12,7 +12,8 @@ from dataclasses import dataclass, field
 
 MAX_TOKENS = 60_000
 MAX_READ_CHARS = 2_097_152
-_VARIABLE = re.compile(r"\$(?:\{[^}]*\}|[\w?]+(?::(?!:)[\w?]+)?)")
+MAX_WORD_CHARS = 65_536
+_VARIABLE = re.compile(r"\$[\w?]+(?::(?!:)[\w?]+)?")
 _HERE = {quote: re.compile(r"(?m)^" + re.escape(quote) + "@") for quote in "'\""}
 _QUOTES = {c: "'" for c in "'\u2018\u2019\u201a\u201b"} | {c: '"' for c in '\"\u201c\u201d\u201e'}
 
@@ -44,6 +45,8 @@ class Script:
     module_binding_data: bool = False
     module_bindings: list[tuple[str, str, str]] = field(default_factory=list)
     partial: bool = False
+    limits: set[str] = field(default_factory=set)
+    fold_evidence_truncated: bool = False
 
 
 def _expression_end(text: str, start: int) -> int:
@@ -87,12 +90,46 @@ def _expression_end(text: str, start: int) -> int:
     return len(text)
 
 
-def lex(text: str, *, csharp: bool = False) -> tuple[list[Token], bool]:
+def lex(text: str, *, csharp: bool = False, limits=None) -> tuple[list[Token], bool]:
     """Tokenize strings, here-strings, comments, variables, operators and escaped bare words."""
-    tokens, i, partial = [], 0, False
+    limits = set() if limits is None else limits
+    partial = len(text) > MAX_READ_CHARS
+    if partial:
+        limits.add('MAX_READ_CHARS=2097152')
+        text = text[:MAX_READ_CHARS]
+    tokens, i, chunks = [], 0, 0
     word_end = -1
-    while i < len(text) and len(tokens) < MAX_TOKENS:
+    word_parts, word_size, word_index = [], 0, None
+
+    def finish_word():
+        nonlocal word_parts, word_size, word_index
+        if word_parts:
+            old = tokens[word_index]
+            tokens[word_index] = Token('word', ''.join(word_parts), old.escaped, old.transforms)
+            word_parts, word_size, word_index = [], 0, None
+
+    def append_word(value, escaped=False, transforms=frozenset()):
+        nonlocal word_size, word_index, partial
+        if not word_parts:
+            word_index = len(tokens) - 1
+            word_parts.append(tokens[-1].value)
+            word_size = len(tokens[-1].value)
+        room = max(0, MAX_WORD_CHARS - word_size)
+        word_parts.append(value[:room])
+        word_size += len(value)
+        if word_size > MAX_WORD_CHARS:
+            partial = True
+            limits.add('MAX_WORD_CHARS=65536')
+        old = tokens[word_index]
+        tokens[word_index] = Token('word', '', old.escaped or escaped, old.transforms | transforms)
+
+    while i < len(text) and chunks < MAX_TOKENS:
         c = text[i]
+        chunks += c not in ' \t\r'
+        continuation = (word_end == i and tokens and tokens[-1].kind == 'word'
+                        and (c in _QUOTES or c not in " \t\r\n;|&(){}[],=+@$"))
+        if not continuation:
+            finish_word()
         if csharp and text.startswith("//", i):
             end = text.find("\n", i)
             i = len(text) if end < 0 else end
@@ -169,15 +206,22 @@ def lex(text: str, *, csharp: bool = False) -> tuple[list[Token], bool]:
             partial |= not closed
             value = "".join(value)
             if word_end == start and tokens and tokens[-1].kind == "word" and not dynamic and closed:
-                old = tokens.pop()
-                tokens.append(Token("word", old.value + value.casefold(), old.escaped,
-                                    old.transforms | {"embedded-quotes"}))
+                append_word(value.casefold(), transforms={'embedded-quotes'})
                 word_end = i
             else:
+                finish_word()
                 tokens.append(Token("data" if dynamic or not closed else "string", value))
         elif c == "$":
-            match = _VARIABLE.match(text, i)
-            if match:
+            if text.startswith('${', i):
+                end = text.find('}', i + 2)
+                if end < 0:
+                    partial = True
+                    limits.add('unclosed_braced_variable')
+                    i = len(text)
+                else:
+                    tokens.append(Token('variable', text[i:end + 1].casefold()))
+                    i = end + 1
+            elif (match := _VARIABLE.match(text, i)):
                 tokens.append(Token("variable", match[0].casefold()))
                 i += len(match[0])
             else:
@@ -192,7 +236,10 @@ def lex(text: str, *, csharp: bool = False) -> tuple[list[Token], bool]:
         else:
             start = i
             value, escaped = [], False
-            member = bool(tokens and tokens[-1].value in {".", "::"} and not text.startswith((".\\", "./"), i))
+            dot_call = (tokens and tokens[-1].value == '.' and (len(tokens) == 1
+                        or tokens[-2].value in {';', '\n', '{', '=', '(', '|'}))
+            member = bool(tokens and tokens[-1].value in {".", "::"} and not dot_call
+                          and not text.startswith((".\\", "./"), i))
             while i < len(text) and text[i] not in " \t\r\n;|&(){}[],=+@$" and text[i] not in _QUOTES:
                 if text[i] == "." and member:
                     break
@@ -207,14 +254,21 @@ def lex(text: str, *, csharp: bool = False) -> tuple[list[Token], bool]:
             if value.startswith(("\u2013", "\u2014", "\u2015")):
                 value = "-" + value[1:]
             if word_end == start and tokens and tokens[-1].kind == "word":
-                old = tokens.pop()
-                value, escaped = old.value + value, old.escaped or escaped
-                transforms = old.transforms
+                append_word(value, escaped, {'backtick'} if escaped else set())
             else:
-                transforms = frozenset()
-            tokens.append(Token("word", value, escaped, transforms | ({"backtick"} if escaped else set())))
+                if len(value) > MAX_WORD_CHARS:
+                    partial = True
+                    limits.add('MAX_WORD_CHARS=65536')
+                tokens.append(Token("word", value[:MAX_WORD_CHARS], escaped,
+                                    frozenset({'backtick'} if escaped else set())))
             word_end = i
-    return tokens, partial or i < len(text)
+    finish_word()
+    if i < len(text):
+        limits.add('MAX_TOKENS=60000')
+    partial |= i < len(text)
+    if partial and not limits:
+        limits.add('unclosed_literal_or_comment')
+    return tokens, partial
 
 
 def _read_tokens(tokens: list[Token], partial: bool, constant_budget=None) -> Script:
@@ -228,8 +282,22 @@ def _read_tokens(tokens: list[Token], partial: bool, constant_budget=None) -> Sc
             result.literals.add(token.value.casefold())
         if token.kind in {'string', 'data', 'inert'}:
             result.inert_words.update(re.findall(r'[a-z][\w-]*', token.value.casefold()))
-    tokens, result.constant_folds, limited = fold_constants(tokens, constant_budget)
+    tokens, result.constant_folds, limited = fold_constants(tokens, constant_budget, result.limits)
+    result.fold_evidence_truncated = 'MAX_FOLD_EVIDENCE=256' in result.limits
+    result.limits.discard('MAX_FOLD_EVIDENCE=256')
     result.partial |= limited
+    # Match group ends once; overlapping call expressions never rescan the same token suffix.
+    group_stack, group_ends, constructed_prefix = [], {}, [0]
+    for position, item in enumerate(tokens):
+        if item.kind == 'op' and item.value in {'(', '['}:
+            group_stack.append((item.value, position))
+        elif item.kind == 'op' and item.value in {')', ']'} and group_stack:
+            opening, begin = group_stack.pop()
+            if (opening, item.value) in {('(', ')'), ('[', ']')}:
+                group_ends[begin] = position
+        constructed = (item.value in {'+', '-f', '-join', '['}
+                       or item.kind == 'word' and ('*' in item.value or '?' in item.value))
+        constructed_prefix.append(constructed_prefix[-1] + int(constructed))
     stack, contexts = [], []
     start, called, command, args, evaluating = True, False, '', [], False
     type_depth = 0
@@ -276,6 +344,7 @@ def _read_tokens(tokens: list[Token], partial: bool, constant_budget=None) -> Sc
             want = {")": "(", "]": "[", "}": "{"}[value]
             if not stack or stack.pop() != want:
                 result.partial = True
+                result.limits.add('unbalanced_syntax')
             while switch_depths and switch_depths[-1] > len(stack):
                 switch_bodies.discard(switch_depths.pop())
         if token.kind in {'word', 'string'} and len(stack) in switch_bodies:
@@ -313,10 +382,18 @@ def _read_tokens(tokens: list[Token], partial: bool, constant_budget=None) -> Sc
             start = False
             continue
         if value in {"&", "."} and token.kind == "op" and (start or value == "&"):
-            if value == "&" and re.search(r"(?:\d*>>?|\*>)$", previous):
+            if value == "&" and previous.endswith('>'):
                 continue
             start, called = True, True
             result.dynamic_invocation = True
+            if following == '(':
+                end = group_ends.get(i + 1, i + 1)
+                if constructed_prefix[end] > constructed_prefix[i + 2]:
+                    result.obfuscation.add('unresolved-constructed-target')
+                    result.obfuscated_execution = result.evaluates_code = True
+            elif i + 2 < len(tokens) and tokens[i+1].kind == 'variable' and tokens[i+2].value == '[':
+                result.obfuscation.add('unresolved-constructed-target')
+                result.obfuscated_execution = result.evaluates_code = True
             continue
         if token.kind == 'op' and value == '(':
             member_arguments = i > 1 and tokens[i-1].kind in {'word', 'string'} and tokens[i-2].value in {'.', '::'}
@@ -362,21 +439,28 @@ def _read_tokens(tokens: list[Token], partial: bool, constant_budget=None) -> Sc
     finish()
     result.reflection_filter = reflection_pattern and 'gettypes' in result.members
     result.partial |= bool(stack)
+    if stack:
+        result.limits.add('unbalanced_syntax')
     return result
 
 
 def read_script(text: str) -> Script:
     """Read expandable-string code iteratively, without a recursion or executable-evaluation path."""
     result, pending, remaining = Script(), [text], MAX_READ_CHARS
-    constant_budget = [MAX_READ_CHARS]
+    from romulus.detect.powershell_constants import MAX_STEPS
+    constant_budget = [MAX_READ_CHARS, MAX_STEPS]
     while pending and remaining > 0:
         source = pending.pop()
         clipped = len(source) > remaining
-        tokens, partial = lex(source[:remaining] if clipped else source)
+        lexical_limits = set()
+        tokens, partial = lex(source[:remaining] if clipped else source, limits=lexical_limits)
         remaining -= len(source)
         partial |= clipped
         pending.extend(token.value for token in tokens if token.kind == "expression")
         parsed = _read_tokens([token for token in tokens if token.kind != "expression"], partial, constant_budget)
+        result.limits.update(lexical_limits | parsed.limits)
+        if clipped:
+            result.limits.add('MAX_READ_CHARS=2097152')
         for name in ("commands", "definitions", "members", "static_calls", "literals", "variables", "obfuscation", "inert_words"):
             getattr(result, name).update(getattr(parsed, name))
         for command, arguments in parsed.arguments.items():
@@ -387,9 +471,11 @@ def read_script(text: str) -> Script:
         result.reflection_filter |= parsed.reflection_filter
         room = max(0, 256 - len(result.constant_folds))
         result.constant_folds.extend(parsed.constant_folds[:room])
-        result.partial |= len(parsed.constant_folds) > room
+        result.fold_evidence_truncated |= len(parsed.constant_folds) > room or parsed.fold_evidence_truncated
         result.partial |= parsed.partial
     result.partial |= bool(pending)
+    if pending:
+        result.limits.add('MAX_READ_CHARS=2097152')
     return result
 
 
@@ -415,7 +501,7 @@ def _read_module_payload(text):
     Microsoft documents these records as CommandInvocation and ParameterBinding lines.
     Missing source/binding completeness remains partial, including otherwise valid records.
     """
-    result = Script(partial=True)
+    result = Script(partial=True, limits={'module_invocation_source_incomplete'})
     header = True
     for line in text[:MAX_READ_CHARS].splitlines()[:MAX_TOKENS]:
         if not line.strip():

@@ -245,7 +245,7 @@ def test_similar_keys_or_unrelated_value_names_are_not_targets(rule, key, name):
 @pytest.mark.parametrize("root", ["HKCU", r"HKU\S-1-5-21-1-2-3-1001", r"\Registry\User\S-1-5-21-1-2-3-1001"])
 def test_per_user_native_hive_forms(root):
     matches = run(RegistryUserCom(), [change(CLSID.replace("HKCU", root) + r"\InprocServer32", "(Default)")])
-    assert len(matches) == 1 and matches[0].proposed_lane == "high"
+    assert len(matches) == 1 and matches[0].proposed_lane == "lead"
 
 
 @pytest.mark.parametrize("control", ["CurrentControlSet", "ControlSet001", "ControlSet009"])

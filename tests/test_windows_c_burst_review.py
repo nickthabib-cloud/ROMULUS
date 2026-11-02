@@ -77,8 +77,8 @@ def test_daily_distinct_account_breadth_finds_slow_and_rotating_source_sprays(ro
                for n in range(2000)]
     rule = WindowsPasswordSpray()
     matches = run(rule, [records[n:n+100] for n in range(0, len(records), 100)])
-    daily = [match for match in matches if "UTC day" in match.claim]
-    assert len(daily) == (2 if rotating else 4)  # One per qualifying UTC day and concentration key.
+    daily = [match for match in matches if "hunt span" in match.claim]
+    assert len(daily) == (1 if rotating else 2)  # One folded finding per concentration key across days.
     assert daily and all(len(match.events) == 100 for match in daily)
     assert any("reporting host" in match.claim for match in daily)
     if not rotating:

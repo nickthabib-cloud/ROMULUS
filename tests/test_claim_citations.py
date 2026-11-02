@@ -1000,3 +1000,35 @@ def test_a_failed_citation_eviction_stops_eviction_and_leaves_the_detection_stor
     assert written and detect.on_disk == written - len(detect.hot)
     assert cite.broken and "evicting citation records failed" in cite.broken
     rule.close_spill()
+
+
+def test_partial_citation_eviction_failure_rolls_back_the_whole_delete_batch(tmp_path):
+    import sqlite3
+
+    from romulus.detect.bounded import KeyedStore, StateBudget
+    budget = StateBudget(tmp_path, disk_total=256*1024, reserve=0)
+    rule = _Owner(tmp_path, budget, "partial-delete").rule
+    budget.plan(1)
+    cite = KeyedStore(rule, "exec_records", 1)
+    cite.yields = True
+    for n in range(20):
+        assert cite.put(f"c{n}", "x"*200)
+        cite.trim()
+    db = cite._db()
+    before = db.execute("SELECT k FROM exec_records ORDER BY rowid").fetchall()
+    count, billed = cite.on_disk, cite.held_bytes
+
+    class PartialDelete:
+        def __getattr__(self, name):
+            return getattr(db, name)
+
+        def executemany(self, sql, rows):
+            db.executemany(sql, list(rows)[:1])
+            raise sqlite3.OperationalError("database or disk is full")
+
+    cite._db = lambda: PartialDelete()
+    assert cite.evict_oldest(500) == 0
+    assert cite.broken and cite.on_disk == count and cite.held_bytes == billed
+    assert db.execute("SELECT k FROM exec_records ORDER BY rowid").fetchall() == before
+    assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    rule.close_spill()

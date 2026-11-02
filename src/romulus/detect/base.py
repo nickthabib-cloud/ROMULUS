@@ -306,7 +306,7 @@ class Playbook:
         """This playbook's private on-disk tables (created on first use)."""
         if self._spill is None:
             from romulus.detect.bounded import Spill
-            self._spill = Spill(self.spill_dir, self.state_budget())
+            self._spill = Spill(self.spill_dir, self.state_budget(), owner=self)
         return self._spill
 
     def refuse_unevaluated(self, events: list[TypedEvent], evaluated: int, text: str) -> None:

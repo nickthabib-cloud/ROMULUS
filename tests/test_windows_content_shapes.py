@@ -3,7 +3,7 @@ from romulus.detect.windows_events import WindowsEventRule, signal
 from tests.windows_event_support import event
 
 
-def test_file_time_payload_and_share_outcome_are_behavior_content():
+def test_file_time_instances_fold_and_share_outcomes_remain_distinct_behavior_content():
     from romulus.detect.windows_endpoint_events import AdminShareTransfer
     from romulus.detect.windows_file_events import ExecutableCreationTimeChange
     from romulus.evidence.windows import normalize_windows
@@ -16,7 +16,9 @@ def test_file_time_payload_and_share_outcome_are_behavior_content():
                        ("2020-01-01 00:00:00.000", "2021-01-01 00:00:00.000"),
                        ("2021-01-01 00:00:00.000", "2022-01-01 00:00:00.000"))]
     a, b = [rule.judge(item)[0] for item in items]
-    assert rule._shape(items[0], a) != rule._shape(items[1], b)
+    assert rule._shape(items[0], a) == rule._shape(items[1], b)
+    assert all({'file.previous_creation_time', 'file.creation_time'} <= {p.field for p in hit.predicate}
+               for hit in (a, b))
     share = AdminShareTransfer()
     shares = []
     for outcome in ("success", "failure"):

@@ -130,7 +130,7 @@ def _risks(executable: str, args: list[str], *, depth=0) -> list[str]:
 
 class ServiceRegistration(WindowsEventRule):
     id = "win.service_registration"
-    version = "2"
+    version = "3"
     title = "Service registration contains a risky executable configuration"
     families = ("service_change",)
     windows_event_classes = (("Security", SECURITY, 4697), ("System", "Service Control Manager", 7045))
@@ -149,8 +149,11 @@ class ServiceRegistration(WindowsEventRule):
         executable, args, reason = _command(image)
         risks = _risks(executable, args) if executable else []
         remote = str(event.get("service.name") or "").casefold() in _REMOTE_NAMES
+        installed_only = not risks and not remote and not reason and bool(executable)
         if not risks and not remote and not reason:
-            return []
+            if not executable or not re.match(r"(?i)^[a-z]:\\windows\\system32\\", _expand(executable)):
+                return []
+            risks.append("executable service image; authorization and signature unresolved")
         text = (f"Service installation record registered name {self.describe(event.get('service.name'))} "
                 f"with ImagePath {self.describe(image)}")
         if risks:
@@ -165,7 +168,7 @@ class ServiceRegistration(WindowsEventRule):
             "user mode service", "win32 own process", "win32 share process", "own process", "share process",
         }
         second_signal = bool(executable and basename(executable) in _HOSTS | _LOLBINS)
-        high = bool(risks and (user_mode or second_signal))
+        high = bool(risks and (user_mode or second_signal) and not installed_only)
         return [signal(event, "service_configuration", text, self.attack, fields,
                        lane="high" if high else "lead", severity="high" if high else "medium",
                        notes=(("Registration does not establish that the configured payload executed. Service names "
@@ -212,7 +215,7 @@ def _task_structure(event) -> bool:
 
 class ScheduledTaskRegistration(WindowsEventRule):
     id = "win.scheduled_task_registration"
-    version = "2"
+    version = "3"
     title = "Scheduled task record contains a risky action configuration"
     families = ("scheduled_task",)
     windows_event_classes = tuple(("Security", SECURITY, code) for code in (4698, 4702)) + tuple(
@@ -234,7 +237,10 @@ class ScheduledTaskRegistration(WindowsEventRule):
         if code == 200:
             action = event.get("task.action_name")
             # ActionName is a path, so an embedded space is never an argv boundary.
-            risks = _risks(action, []) if isinstance(action, str) and action.strip() else []
+            is_path = isinstance(action, str) and bool(re.search(r"[\\/]|^[a-zA-Z]:|^%", action))
+            risks = _risks(action, []) if is_path else []
+            if action and not is_path:
+                risks.append("COM handler action, no executable path in this record")
             if not risks and action:
                 return []
             text = (f"Task action-started record named {self.describe(action)} for task "
@@ -300,7 +306,7 @@ class ScheduledTaskRegistration(WindowsEventRule):
 
 class WindowsAuditTamper(WindowsEventRule):
     id = "win.audit_state_change"
-    version = "2"
+    version = "3"
     title = "Windows logging state, configuration, or log contents changed"
     families = ("audit_config",)
     windows_event_classes = tuple(("Security", EVENTLOG, code) for code in (1100, 1102, 1104, 1108)) + (
@@ -341,9 +347,8 @@ class WindowsAuditTamper(WindowsEventRule):
         elif code == 4719:
             changes = str(event.get("audit.config.changes") or "").strip().casefold()
             tokens = re.findall(r"(?<![\w%])%%\d+(?!\w)", changes)
-            high = bool(set(tokens) & {"%%8448", "%%8450"}) or changes in {
-                "success removed", "failure removed", "success removed, failure removed", "failure removed, success removed",
-            }
+            rendered = {item.strip() for item in re.split(r"[,;\r\n]+", changes)}
+            high = bool(set(tokens) & {"%%8448", "%%8450"}) or bool(rendered & {"success removed", "failure removed"})
             text = ("Windows recorded removal of an audit policy setting" if high else
                     "Windows recorded an audit policy change; the event alone does not establish disabled auditing")
             attack = ("T1685.001",)
@@ -359,7 +364,7 @@ class WindowsAuditTamper(WindowsEventRule):
             if state == "started":
                 return []
             high = False
-            text = ("Sysmon recorded its service stopped; shutdown context is unresolved from this record" if state == "stopped" else
+            text = ("Sysmon recorded its service stopped; shutdown context is unresolved within 5 minutes of this record" if state == "stopped" else
                     "Sysmon recorded a service state change whose stopping effect is not established")
         elif code in {1104, 1108, 255}:
             high = False
@@ -371,7 +376,7 @@ class WindowsAuditTamper(WindowsEventRule):
         context_raw = {}
         if code == 4 and str(event.get("audit.config.state") or "").casefold() == "stopped":
             retained = self.shutdowns.get(event.get("host.full_name") or event.host)
-            if retained is not None:
+            if retained is not None and abs((event.ts - retained[0].ts).total_seconds()) <= 300:
                 context, context_raw = retained
                 text = ("Sysmon recorded its service stopped; the host's records also contain an event logging "
                         f"service shutdown at {context.ts.isoformat()}; this does not establish the cause of the stop")

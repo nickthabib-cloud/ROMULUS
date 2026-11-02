@@ -32,7 +32,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.sqlite import insert
 
 from romulus.store import schema as t
-from romulus.store.db import read_snapshot, utcnow, write_txn
+from romulus.store.db import maintenance_lease, read_snapshot, utcnow, write_txn
 
 # The origin suffix of a boot id a hunt's boot-interval map placed (the normalizer's BOOT_INTERVAL_ORIGIN; the
 # store does not import the evidence layer, and a test keeps the two equal).
@@ -414,7 +414,7 @@ class Repo:
 
     # ---- hunts ------------------------------------------------------------------------------
     def create_hunt(self, hunt_id: str, manifest: dict, digest_: str, created_by: str, parent: str | None = None):
-        with write_txn(self.engine) as c:
+        with maintenance_lease(self.engine), write_txn(self.engine) as c:
             c.execute(t.hunt.insert().values(id=hunt_id, created_at=utcnow(), created_by=created_by, manifest=manifest,
                                              manifest_digest=digest_, parent_hunt_id=parent, execution_state="planned"))
             c.execute(t.audit_event.insert().values(at=utcnow(), actor=created_by, action="hunt.create",
@@ -448,7 +448,7 @@ class Repo:
         now = now or utcnow()
         owner_token = owner_token or uuid.uuid4().hex
         lease_until = now + timedelta(seconds=lease_seconds)
-        with write_txn(self.engine) as c:
+        with maintenance_lease(self.engine), write_txn(self.engine) as c:
             current = c.execute(select(t.hunt).where(t.hunt.c.id == hunt_id)).mappings().one()
             state = current["execution_state"]
             action = "hunt.claim"

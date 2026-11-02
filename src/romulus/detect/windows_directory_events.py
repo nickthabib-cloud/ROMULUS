@@ -95,16 +95,17 @@ def _listed_actor(event, facts):
         host, separator, suffix = full.partition(".")
         if machine not in {full, host}:
             continue
-        # DNS and NetBIOS domains have no general string conversion. Require an
-        # exact recorded domain or the DNS suffix's first label for a DC hint.
-        if domain and separator and domain in {suffix, suffix.split(".", 1)[0]}:
-            return True
+        # DNS realms can be compared directly. A short/NetBIOS name has no
+        # authoritative conversion to a DNS suffix, so a mismatch is unresolved.
+        if domain and separator and "." in domain and domain.rstrip(".") != suffix:
+            continue
+        return True
     return False
 
 
 class DirectoryReplicationAccess(WindowsEventRule):
     id = "win.directory_replication_access"
-    version = "2"
+    version = "3"
     title = "A directory access record named replication extended rights"
     families = ("directory_access",)
     windows_event_classes = _security(4662)

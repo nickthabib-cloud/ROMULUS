@@ -71,7 +71,7 @@ def clear_stale_stages(directory: str | Path, older_than: float = STALE_SECONDS)
 
 class EventStage:
     def __init__(self, directory: str | Path | None = None, *, budget: StateBudget | None = None,
-                 windows_account: Account | None = None):
+                 windows_account: Account | None = None, account: Account | None = None):
         if directory is not None:
             Path(directory).mkdir(mode=0o700, parents=True, exist_ok=True)
         self._dir = tempfile.mkdtemp(prefix=PREFIX, dir=directory)
@@ -79,7 +79,8 @@ class EventStage:
         self.directory.chmod(0o700)
         self.path = Path(self._dir) / "stage.db"
         self.db: sqlite3.Connection | None = sqlite3.connect(self.path)
-        self.db.execute("PRAGMA journal_mode=OFF")
+        # Roll back a refused write atomically without a disk journal outside the hunt byte budget.
+        self.db.execute("PRAGMA journal_mode=MEMORY")
         self.db.execute("PRAGMA synchronous=OFF")
         # kept = 1: staged to be kept to the end; 0: present only while a playbook holds it (table hold)
         self.db.execute("CREATE TABLE event (id TEXT PRIMARY KEY, body TEXT NOT NULL, kept INTEGER NOT NULL)")
@@ -91,45 +92,13 @@ class EventStage:
         # event that becomes kept loses its rows here
         self.db.execute("CREATE TABLE event_raw (id TEXT NOT NULL, key TEXT NOT NULL, PRIMARY KEY (id, key))")
         self.db.execute("CREATE INDEX event_raw_key ON event_raw (key)")
-        # Window exec-pair state is compact: no typed-event body or raw source copy is written here.
-        self.db.execute(
-            "CREATE TABLE baseline_cell (target TEXT NOT NULL, partition TEXT NOT NULL, start TEXT NOT NULL, "
-            "end TEXT NOT NULL, target_applicable INTEGER NOT NULL, source_complete INTEGER NOT NULL, "
-            "reasons TEXT NOT NULL, task_id TEXT, "
-            "PRIMARY KEY (target, partition))"
-        )
-        self.db.execute(
-            "CREATE TABLE baseline_exec (target TEXT NOT NULL, partition TEXT NOT NULL, ordinal INTEGER NOT NULL, "
-            "family TEXT NOT NULL, host TEXT, boot TEXT, pid INTEGER, ppid INTEGER, ts TEXT NOT NULL, "
-            "serial INTEGER, session INTEGER, executable TEXT, outcome TEXT NOT NULL, event_id TEXT NOT NULL, "
-            "PRIMARY KEY (target, partition, ordinal))"
-        )
-        self.db.execute(
-            "CREATE TABLE baseline_observation (target TEXT NOT NULL, partition TEXT NOT NULL, "
-            "ordinal INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY (target, partition, ordinal))"
-        )
-        self.db.execute(
-            "CREATE TABLE baseline_pending (target TEXT NOT NULL, partition TEXT NOT NULL, "
-            "ordinal INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY (target, partition, ordinal))"
-        )
-        self.db.execute(
-            "CREATE TABLE baseline_count (target TEXT NOT NULL, partition TEXT NOT NULL, "
-            "ordinal INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY (target, partition, ordinal))"
-        )
-        self.db.execute(
-            "CREATE TABLE baseline_scope_hour (target TEXT NOT NULL, partition TEXT NOT NULL, "
-            "ordinal INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY (target, partition, ordinal))"
-        )
-        self.db.execute(
-            "CREATE TABLE baseline_event_hour (target TEXT NOT NULL, partition TEXT NOT NULL, "
-            "ordinal INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY (target, partition, ordinal))"
-        )
+        self._baseline_ready = False
         # One bounded-width key per normalized Windows event. The row count follows the hunt's retrieved Windows
         # records; unlike aggregate staging this seam never serializes event bodies or raw telemetry. Keeping the
         # table in the stage gives all transient sweep state the same private lifecycle and cleanup behavior.
         self.windows_path = Path(self._dir) / "windows-seen.db"
         self.windows_db: sqlite3.Connection | None = sqlite3.connect(self.windows_path)
-        self.windows_db.execute("PRAGMA journal_mode=OFF")
+        self.windows_db.execute("PRAGMA journal_mode=MEMORY")
         self.windows_db.execute("PRAGMA synchronous=OFF")
         self.windows_db.execute(
             f"CREATE TABLE windows_seen (id TEXT PRIMARY KEY CHECK(length(id) <= "
@@ -139,26 +108,125 @@ class EventStage:
         self._windows_page = self.windows_db.execute("PRAGMA page_size").fetchone()[0]
         self._windows_size = 0
         self.budget = budget
-        self.windows_account = windows_account
+        self.account = account or (budget.account("event_stage") if budget is not None else None)
+        self._size = 0
+        self.refusal_reason = ""
+        self.refused = 0
+        self.owners = {}
+        self.owner_accounts = {}
+        self.windows_account = windows_account or self.account
         self.windows_refused = 0
         self.windows_refusal_reason = ""
         self._charge_windows_growth()
+        self.charge_growth()
         self.events = 0
+
+    def _create_baseline(self):
+        # Window exec-pair state is compact: no typed-event body or raw source copy is written here.
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS baseline_cell (target TEXT NOT NULL, partition TEXT NOT NULL, start TEXT NOT NULL, "
+            "end TEXT NOT NULL, target_applicable INTEGER NOT NULL, source_complete INTEGER NOT NULL, "
+            "reasons TEXT NOT NULL, task_id TEXT, "
+            "PRIMARY KEY (target, partition))"
+        )
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS baseline_exec (target TEXT NOT NULL, partition TEXT NOT NULL, ordinal INTEGER NOT NULL, "
+            "family TEXT NOT NULL, host TEXT, boot TEXT, pid INTEGER, ppid INTEGER, ts TEXT NOT NULL, "
+            "serial INTEGER, session INTEGER, executable TEXT, outcome TEXT NOT NULL, event_id TEXT NOT NULL, "
+            "PRIMARY KEY (target, partition, ordinal))"
+        )
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS baseline_observation (target TEXT NOT NULL, partition TEXT NOT NULL, "
+            "ordinal INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY (target, partition, ordinal))"
+        )
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS baseline_pending (target TEXT NOT NULL, partition TEXT NOT NULL, "
+            "ordinal INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY (target, partition, ordinal))"
+        )
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS baseline_count (target TEXT NOT NULL, partition TEXT NOT NULL, "
+            "ordinal INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY (target, partition, ordinal))"
+        )
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS baseline_scope_hour (target TEXT NOT NULL, partition TEXT NOT NULL, "
+            "ordinal INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY (target, partition, ordinal))"
+        )
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS baseline_event_hour (target TEXT NOT NULL, partition TEXT NOT NULL, "
+            "ordinal INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY (target, partition, ordinal))"
+        )
+        self.db.commit()
+        self._baseline_ready = True
+
+    def _ensure_baseline(self):
+        if not self._baseline_ready:
+            self._write(self._create_baseline, 1)
+            if not self._baseline_ready:
+                raise sqlite3.OperationalError("compact baseline schema refused: " + self.refusal_reason)
+
+    def charge_growth(self, account=None):
+        size = self.db.execute("PRAGMA page_count").fetchone()[0] * self.db.execute("PRAGMA page_size").fetchone()[0]
+        if self.budget is not None and self.account is not None and size > self._size:
+            self.budget.charge(account or self.account, size-self._size)
+            self.budget.physical_account(account or self.account, size-self._size)
+            self.budget.grew(size-self._size)
+        self._size = size
+
+    def _allowance(self, account):
+        if self.budget is None:
+            return None
+        budget = self.budget
+        # Some detector accounts conservatively estimate logical payloads. The total byte ceiling
+        # follows reported physical file growth, so those estimates cannot consume a quiet owner's floor.
+        available = min(max(0, budget.disk_total-budget.physical_used),
+                        max(0, budget.floor_of(account)-account.used) + max(0, budget.pool-budget.physical_pool_used))
+        headroom = budget.headroom()
+        return available if headroom is None else min(available, headroom)
+
+    def _write(self, operation, count, accounts=()):
+        account = self.account
+        if self.budget is not None:
+            self.budget.check_free()
+            # Shared records may have several owners. A busy owner cannot consume another rule's
+            # guaranteed citation floor; an admissible owner can retain the one physical copy.
+            reason = ""
+            for account in accounts or (self.account,):
+                reason = self.budget.new_key_reason(account)
+                if not reason:
+                    break
+            if reason:
+                self.refusal_reason = reason
+                self.refused += count
+                return
+            page = self.db.execute("PRAGMA page_size").fetchone()[0]
+            pages = self.db.execute("PRAGMA page_count").fetchone()[0]
+            self.db.execute(f"PRAGMA max_page_count={pages + self._allowance(account)//page}")
+        try:
+            operation()
+        except sqlite3.OperationalError as exc:
+            self.db.rollback()
+            if "full" not in str(exc).lower():
+                raise
+            self.refusal_reason = "event stage reached its hunt byte allowance or volume reserve"
+            self.refused += count
+        finally:
+            self.charge_growth(account)
 
     def _cap_windows(self) -> None:
         if self.budget is None:
             return
-        headroom = self.budget.headroom()
+        headroom = self._allowance(self.windows_account) if self.windows_account is not None else self.budget.headroom()
         if headroom is None:
             return
         pages = self.windows_db.execute("PRAGMA page_count").fetchone()[0]
-        self.windows_db.execute(f"PRAGMA max_page_count = {pages + headroom // self._windows_page + 1}")
+        self.windows_db.execute(f"PRAGMA max_page_count = {pages + headroom // self._windows_page}")
 
     def _charge_windows_growth(self) -> None:
         size = self.windows_db.execute("PRAGMA page_count").fetchone()[0] * self._windows_page
         growth = size - self._windows_size
         if growth > 0 and self.budget is not None and self.windows_account is not None:
             self.budget.charge(self.windows_account, growth)
+            self.budget.physical_account(self.windows_account, growth)
             self.budget.grew(growth)
         self._windows_size = size
 
@@ -205,9 +273,13 @@ class EventStage:
                 self._charge_windows_growth()
             except sqlite3.OperationalError as exc:
                 self.windows_db.rollback()
+                self._charge_windows_growth()
                 reason = f"writing the Windows dedup store failed ({exc})"
                 if self.budget is not None:
-                    self.budget.fail(reason)
+                    if "full" in str(exc).lower():
+                        self.budget.refuse_capacity(self.windows_account, reason)
+                    else:
+                        self.budget.fail(reason)
                 self.windows_refused += len(inserts) - start
                 self.windows_refusal_reason = reason
                 break
@@ -217,6 +289,11 @@ class EventStage:
         return fresh, duplicates
 
     def put(self, events: list[TypedEvent], raw_sources: dict[str, dict]) -> None:
+        self.refusal_reason = ""
+        for event in events:
+            self._write(lambda event=event: self._put([event], raw_sources), 1, self.owners.get(event.id, ()))
+
+    def _put(self, events: list[TypedEvent], raw_sources: dict[str, dict]) -> None:
         """Stage events to be kept to the end of the sweep: the first event body wins, raw copies are keyed, and an
         event or raw copy staged earlier only as a hold is kept from now on."""
         if not events:
@@ -237,6 +314,11 @@ class EventStage:
         self.events += len(events)
 
     def hold(self, held: list[tuple[str, TypedEvent]], raw_sources: dict[str, dict]) -> None:
+        for pair in held:
+            account = self.owner_accounts.get(pair[0], self.account)
+            self._write(lambda pair=pair: self._hold([pair], raw_sources), 1, (account,))
+
+    def _hold(self, held: list[tuple[str, TypedEvent]], raw_sources: dict[str, dict]) -> None:
         """Stage events that an owner (a playbook) holds until it releases them: one hold per (owner, event) pair
         listed, counted, so an event held twice is released twice. An event also staged by `put` is kept."""
         if not held:
@@ -304,11 +386,28 @@ class EventStage:
                 out[key] = json.loads(body)
         return out
 
+    def load_required(self, ids: list[str]) -> list[TypedEvent]:
+        """Finalizers receive a uniform, recoverable failure for refused citation bodies."""
+        events = self.load(ids)
+        missing = set(ids)-{event.id for event in events}
+        if missing:
+            raise LookupError(f"{len(missing)} cited event(s) absent from the budgeted event stage")
+        return events
+
     def record_baseline_cell(self, *, target: str, partition: str, start, end,
+                             **kwargs) -> None:
+        self.refusal_reason = ""
+        self._write(lambda: self._record_baseline_cell(target=target, partition=partition, start=start, end=end,
+                                                      **kwargs), 1)
+        if self.refusal_reason:
+            raise sqlite3.OperationalError("compact baseline stage refused: " + self.refusal_reason)
+
+    def _record_baseline_cell(self, *, target: str, partition: str, start, end,
                              target_applicable: bool, source_complete: bool, reasons: list[str],
                              task_id: str | None, events: list[TypedEvent], observations=(),
                              pendings: tuple[Pending, ...] = (), counts=(), scope_hours=(), event_hours=()) -> None:
         """Stage one exec-pair cell using compact rows only, atomically."""
+        self._ensure_baseline()
         def body(value) -> str:
             return json.dumps(value, sort_keys=True, default=lambda item: item.isoformat())
 
@@ -358,6 +457,8 @@ class EventStage:
 
     def baseline_cells(self, target: str) -> list[dict]:
         """A target's staged cells newest-first, which is the carry-in writer's processing order."""
+        if not self._baseline_ready:
+            return []
         rows = self.db.execute(
             "SELECT partition, start, end, target_applicable, source_complete, reasons, task_id "
             "FROM baseline_cell "
@@ -374,6 +475,8 @@ class EventStage:
         } for partition, start, end, target_applicable, source_complete, reasons, task_id in rows]
 
     def baseline_execs(self, target: str, partition: str) -> list[dict]:
+        if not self._baseline_ready:
+            return []
         rows = self.db.execute(
             "SELECT family, host, boot, pid, ppid, ts, serial, session, executable, outcome, event_id "
             "FROM baseline_exec "
@@ -386,6 +489,8 @@ class EventStage:
         } for family, host, boot, pid, ppid, ts, serial, session, executable, outcome, event_id in rows]
 
     def baseline_observations(self, target: str, partition: str) -> list[dict]:
+        if not self._baseline_ready:
+            return []
         rows = self.db.execute(
             "SELECT body FROM baseline_observation WHERE target = ? AND partition = ? ORDER BY ordinal",
             (target, partition),
@@ -400,6 +505,8 @@ class EventStage:
         return out
 
     def baseline_pendings(self, target: str, partition: str) -> list[Pending]:
+        if not self._baseline_ready:
+            return []
         rows = self.db.execute(
             "SELECT body FROM baseline_pending WHERE target = ? AND partition = ? ORDER BY ordinal",
             (target, partition),
@@ -413,6 +520,8 @@ class EventStage:
         return out
 
     def _baseline_counter_rows(self, table: str, target: str, partition: str) -> list[dict]:
+        if not self._baseline_ready:
+            return []
         rows = self.db.execute(
             f"SELECT body FROM {table} WHERE target = ? AND partition = ? ORDER BY ordinal",
             (target, partition),
@@ -437,6 +546,8 @@ class EventStage:
 
     def baseline_compact_bytes(self) -> int:
         """Logical bytes in compact baseline rows, excluding fixed empty-table page overhead."""
+        if not self._baseline_ready:
+            return 0
         total = 0
         for table in ("baseline_cell", "baseline_exec", "baseline_observation", "baseline_pending",
                       "baseline_count", "baseline_scope_hour", "baseline_event_hour"):
@@ -446,6 +557,8 @@ class EventStage:
         return total
 
     def drop_baseline_cell(self, target: str, partition: str) -> None:
+        if not self._baseline_ready:
+            return
         with self.db:
             for table in ("baseline_exec", "baseline_observation", "baseline_pending",
                           "baseline_count", "baseline_scope_hour", "baseline_event_hour", "baseline_cell"):
@@ -459,6 +572,11 @@ class EventStage:
         if self.db is not None:
             self.db.close()
             self.db = None
+            if self.budget is not None:
+                accounts = {id(account): account for account in
+                            (self.account, self.windows_account, *self.owner_accounts.values()) if account is not None}
+                for account in accounts.values():
+                    self.budget.release_physical_account(account)
         shutil.rmtree(self._dir, ignore_errors=True)
 
     def __del__(self):

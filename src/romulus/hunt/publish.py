@@ -14,6 +14,56 @@ from romulus.store.repo import Repo
 LINEAGE_CITATION_BATCH = 500
 
 
+class WindowsCitationFetcher:
+    """Fetch bounded authentication witnesses by native index and document id, verifying recorded fields."""
+
+    def __init__(self, client):
+        self.client = client
+
+    def hydrate(self, match: Match) -> None:
+        compact = [event for event in match.events if any(
+            note.startswith("Authentication witness body not retrieved") for note in event.caveats)]
+        if not compact:
+            return
+        wanted = {}
+        for event in compact:
+            for ref in event.raw:
+                wanted.setdefault(ref.target, set()).add(ref.native_id)
+        hits = {}
+        for index, identities in wanted.items():
+            ordered = sorted(identities)
+            for start in range(0, len(ordered), LINEAGE_CITATION_BATCH):
+                batch = ordered[start:start+LINEAGE_CITATION_BATCH]
+                try:
+                    response = self.client.search(index, {"size": len(batch), "track_total_hits": False,
+                        "query": {"bool": {"filter": [{"ids": {"values": batch}},
+                                                     {"terms": {"_index": [index]}}]}}})
+                except Exception:  # noqa: BLE001, S112 - downstream fixed caveat reports unavailable bodies
+                    continue
+                for hit in response.get("hits", {}).get("hits", []):
+                    if hit.get("_index") == index and hit.get("_id") in identities:
+                        hits[(index, hit["_id"])] = hit
+        replacements = {}
+        for event in compact:
+            ref = event.raw[0]
+            hit = hits.get((ref.target, ref.native_id))
+            if hit is None:
+                continue
+            events, _skips, errors = normalize_hits([hit])
+            actual = next((item for item in events if item.id == event.id), None)
+            if errors or actual is None or any(actual.fields.get(name) != value for name, value in event.fields.items()):
+                continue
+            replacements[event.id] = actual
+            match.raw_copies[ref.key] = hit["_source"]
+        match.events = [replacements.get(event.id, event) for event in match.events]
+        missing = len(compact)-len(replacements)
+        if missing:
+            note = (f"Authentication witness body not retrieved for {missing} cited records; "
+                    "compact recorded fields, native index/document ids and timestamps are retained.")
+            match.notes.append(note)
+            match.claim += " " + note
+
+
 def _exec_record(hits: list[dict], boot: list | tuple | None = None) -> TypedEvent | None:
     """Rebuild the one process_exec view from its raw audit records and sweep-assigned boot id."""
     events, _skips, errors = normalize_hits(hits)
@@ -146,6 +196,9 @@ def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
                   *, owner_token: str | None = None) -> dict | None:
     """Persist cited evidence and publish a machine-decided finding once, with stable script-view revisions.
     Context findings are published by the post-expansion pass (romulus.hunt.context.finalize_context)."""
+    fetcher = getattr(playbook, "citation_fetcher", None)
+    if fetcher is not None:
+        fetcher.hydrate(match)
     decision = decide(match, hunt_id)
     if match.raw_copies:
         raw_sources = {**match.raw_copies, **raw_sources}
@@ -207,9 +260,15 @@ def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
             origin = {name: first_discovery.get(name)
                       for name in ("source_case_id", "source_anchor_id", "source_link_id")}
         row["gate_results"]["_evidence_view_origin"] = origin
+        if (existing_view is not None and existing_view.get("source_case_id") is not None
+                and source_case_id is None and source_anchor_id is None and source_link_id is None):
+            # Sweep rediscovery follows ordinary agent-to-deterministic ownership
+            # while keeping the best evidence view and its first discovery origin.
+            canonical = {**existing_view, "source_case_id": None, "source_anchor_id": None, "source_link_id": None}
+            repo.save_candidate(canonical, canonicalize_agent=True, owner_token=owner_token)
+            existing_view = repo.candidate(candidate_id)
         if existing_view is not None:
-            # The first discovery owns this observation even when a sweep or a
-            # different investigator later supplies the preferred evidence view.
+            # Other investigator views retain the current canonical ownership.
             for name in ("source_case_id", "source_anchor_id", "source_link_id"):
                 row[name] = existing_view.get(name)
     if view_field and existing_view is not None:

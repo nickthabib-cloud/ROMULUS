@@ -31,7 +31,7 @@ from romulus.evidence.windows_catalog import (
     TASK_CHANNEL,
     TASK_PROVIDER,
 )
-from romulus.site import SiteFacts
+from romulus.site import COLLECTION_SCHEMA, SiteFacts, validate_site_content
 from tests.windows_event_support import run
 from tests.windows_fixtures import SHAPES, LogicalWindowsEvent, windows_hit
 
@@ -231,7 +231,8 @@ REPLICATION = {"SubjectUserName": "operator", "SubjectDomainName": "EXAMPLE", "O
 
 
 @pytest.mark.parametrize("domain,name,lane", [("EXAMPLE", "operator", "high"), ("EXAMPLE", "DC01$", "lead"),
-                                              ("EVIL", "DC01$", "high"), (None, "DC01$", "lead")])
+                                              ("EVIL", "DC01$", "lead"), ("evil.test", "DC01$", "high"),
+                                              (None, "DC01$", "lead")])
 def test_declared_empty_sync_list_is_configured_and_dc_domain_matters(domain, name, lane):
     data = {**REPLICATION, "SubjectUserName": name}
     if domain:
@@ -239,7 +240,8 @@ def test_declared_empty_sync_list_is_configured_and_dc_domain_matters(domain, na
     else:
         data.pop("SubjectDomainName")
     rule = DirectoryReplicationAccess()
-    rule.site_facts = FACTS
+    rule.site_facts = validate_site_content({"schema": COLLECTION_SCHEMA, "domain_controllers": ["dc01.example.test"],
+                                             "directory_sync_accounts": []})
     hit = rule.judge(native(4662, data))[0]
     assert hit.lane == lane and "not configured" not in " ".join(hit.notes)
 

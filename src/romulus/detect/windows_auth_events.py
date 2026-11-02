@@ -51,8 +51,9 @@ def source_key(event):
 
 
 class _Burst(WindowsEventRule):
-    version = "2"
-    needs_live_loader = True
+    version = "3"
+    citation_fields = _FIELDS
+    needs_live_loader = False
     direct_eligible = False
     kind, claim_type, anchor_class = "aggregate", "aggregate_observation", "credential_access"
     families = ("auth",)
@@ -75,17 +76,12 @@ class _Burst(WindowsEventRule):
         raise NotImplementedError
 
     def _load_witnesses(self, ids):
-        found = {event.id: event for event in self.load([key for key in ids if key not in self._batch])}
-        found.update({key: self._batch[key] for key in ids if key in self._batch})
-        if any(key not in found for key in ids):
-            self.note_limit("burst_citations", "Authentication witnesses were not loadable from the shared event stage; "
-                            "the affected concentration could not be published.")
-            return []
+        found = {event.id: event for event in self.rows.compact(ids)}
         return [found[key] for key in ids]
 
     def _maybe(self, key, event_id, stamp, value, host, *, phase):
         bucket = int(stamp // self.seconds)
-        identity = row_key(self.id, key, host, bucket)
+        identity = row_key(self.id, key, host)
         mark = ("finalized:" if phase == "finalize" else "published:") + identity
         if self.rows.marked(mark):
             return []
@@ -115,7 +111,8 @@ class _Burst(WindowsEventRule):
                  f"for {self.describe(key_text)}. The {self.threshold} cited witnesses span "
                  f"{min(item.ts for item in witnesses).isoformat()} to {max(item.ts for item in witnesses).isoformat()}. "
                  f"The current supporting record is on {event.host}. This is a concentration signal, not proof of intent.")
-        signature = hashlib.sha256(row_key(claim, sorted(selected)).encode()).hexdigest()
+        total = self.rows.count(key)
+        signature = hashlib.sha256(row_key(claim, sorted(selected), total).encode()).hexdigest()
         previous = self.rows.marker("signature:" + identity)
         self.rows.remember("signature:" + identity, signature)
         self.rows.first("published:" + identity)
@@ -125,6 +122,8 @@ class _Burst(WindowsEventRule):
                       [pf(item, name) for item in selected.values() for name in _FIELDS if item.has(name)], event.ts,
                       "medium", "lead", "medium", event.entities(),
                       [self.rationale, "Counts are records; several channels may describe one authentication attempt.",
+                       (f"The correlation key has {total} recorded witnesses; "
+                        f"the citation list is bounded to {self.threshold + 1} selected records."),
                        "Reported workstation labels do not establish verified host identities or IP ownership."],
                       group_key="windows-burst:" + hashlib.sha256(identity.encode()).hexdigest(),
                       context_ids=set(selected) - {event.id},
@@ -134,7 +133,6 @@ class _Burst(WindowsEventRule):
     def consume(self, events):
         out = []
         scoped = self.scope_partition(events)
-        self._batch = {event.id: event for event in scoped}
         for event in sorted(scoped, key=lambda item: (item.ts, item.id)):
             if not self._events_pre_scoped:
                 self.os_applicable += 1
@@ -148,7 +146,6 @@ class _Burst(WindowsEventRule):
                 continue
             key, value = pair
             if self.rows.put(key, event, value):
-                self._pending.append(event)
                 out.extend(self._maybe(key, event.id, event.ts.timestamp(), value, event.host, phase="consume"))
                 if isinstance(self, WindowsPasswordSpray):
                     reporter = str(event.get("host.full_name") or event.host).casefold()
@@ -172,34 +169,36 @@ class _Burst(WindowsEventRule):
     def _daily(self):
         # Calendar days are explicit UTC partitions, not an assumed rolling lifetime or an absence test.
         threshold = 100
-        for key, day, count in self.rows.daily_groups(threshold):
-            identity = "windows-daily-auth:" + hashlib.sha256(row_key(key, day).encode()).hexdigest()
+        for key, day, count, offset in self.rows.daily_groups(threshold):
+            identity = "windows-daily-auth:" + hashlib.sha256(row_key(key).encode()).hexdigest()
             signature = str(count)
             previous = self.rows.marker(identity)
-            if previous == signature:
+            if previous is not None and int(previous) >= count:
                 continue
-            evidence = self.rows.daily_witnesses(key, day, threshold)
+            evidence = self.rows.daily_witnesses(key, day, threshold, offset)
             witnesses = self._load_witnesses([item[0] for item in evidence])
             if len(witnesses) != threshold:
                 continue
             self.rows.remember(identity, signature)
             label, subject = json.loads(key)
             scope = "reporting host" if label == "daily-reporter" else "recorded source"
-            claim = (f"Failed authentication records named {count} distinct target-account identities during UTC day "
-                     f"{witnesses[0].ts.date().isoformat()} for {scope} {self.describe(subject)}; "
-                     f"{threshold} distinct-account witnesses are cited. This daily account breadth can expose "
+            interval = ("the hunt span" if day is None else
+                        f"a UTC day partition (offset {offset//3600} hours) containing {witnesses[0].ts.isoformat()}")
+            claim = (f"Failed authentication records named {count} distinct target-account identities during {interval} "
+                     f"for {scope} {self.describe(subject)}; "
+                     f"{threshold} distinct-account witnesses are cited. This account breadth can expose "
                      "slow or rotating-source guessing; it is not proof of intent or a verified common source.")
             yield Match(self.id, claim, self.claim_type, witnesses,
                         [pf(item, name) for item in witnesses for name in _FIELDS if item.has(name)], witnesses[-1].ts,
                         "medium", "lead", "medium", witnesses[0].entities(),
-                        [("One hundred distinct accounts per UTC day tests sustained account breadth beyond the short "
+                        [("One hundred distinct accounts in a UTC day, offset day or hunt span tests breadth beyond the short "
                          "burst window. This absolute review threshold is independent of fleet size; central DCs, "
                          "outages and legitimate automation can exceed it and require site review."),
-                         ("UTC day boundaries may split a campaign; no negative assurance is made. "
+                         ("Daily, twelve-hour-offset daily and hunt-span partitions are checked; no negative assurance is made. "
                          "Account/source keys and late-record replay are disk-backed; only a stated disk refusal "
                          "can leave records unassessed.")], group_key=identity,
                         context_ids={item.id for item in witnesses[1:]},
-                        revision_reason="Later records changed the daily distinct-account count." if previous else "")
+                        revision_reason="Later records or a broader partition changed the distinct-account count." if previous else "")
 
     def release_state(self):
         self._batch = {}

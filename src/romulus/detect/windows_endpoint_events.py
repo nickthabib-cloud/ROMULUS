@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 import re
 
+from romulus.detect.windows_behavior import BehaviorFleetRule
 from romulus.detect.windows_events import WindowsEventRule, basename, components, integer, signal
+from romulus.detect.windows_path_data import path_class
 from romulus.evidence.typed import Outcome, TypedEvent
 from romulus.evidence.windows_catalog import (
     DEFENDER_CHANNEL,
@@ -31,7 +33,26 @@ def _content(event, fields):
                       sort_keys=True, separators=(",", ":"))
 
 
-_SHARE_FIELDS = ("share.name", "share.relative_target", "share.access_mask", "share.accesses", "source.ip")
+_SHARE_FIELDS = ("share.name", "share.relative_target", "share.access_mask", "share.accesses", "source.ip",
+                 "user.name", "user.key", "user.sid", "user.domain")
+
+
+def _account_class(event):
+    name = event.get("user.name")
+    return "machine account" if name and str(name).endswith("$") else "user account" if name else "unresolved account class"
+
+
+_WRITE_ACCESS_NAMES = frozenset({"writedata", "addfile", "appenddata", "addsubdirectory",
+    "writedataoraddfile", "appenddataoraddsubdirectoryorcreatepipeinstance", "%%4417", "%%4418"})
+_READ_ACCESS_NAMES = frozenset({"readdata", "listdirectory", "readdataorlistdirectory", "readcontrol",
+    "synchronize", "readextendedattributes", "readattributes", "execute", "traverse", "executeortraverse",
+    "%%4416", "%%4419", "%%4421", "%%4423", "%%1538", "%%1541", "(or", "or", "listdirectory)"})
+
+
+def _share_access_names(event):
+    accesses = event.get("share.accesses")
+    tokens = accesses if isinstance(accesses, list) else [str(accesses or "")]
+    return {re.sub(r"[\s_()]+", "", str(token)).casefold() for token in tokens if token}
 
 
 class WmiSubscription(WindowsEventRule):
@@ -136,7 +157,7 @@ def _share(event: TypedEvent) -> str:
 
 class AdminShareTransfer(WindowsEventRule):
     id = "win.admin_share_transfer"
-    version = "2"
+    version = "3"
     title = "Write or unresolved access to a file through an administrative share"
     families = ("share_access",)
     windows_event_classes = _SECURITY_5145
@@ -154,11 +175,11 @@ class AdminShareTransfer(WindowsEventRule):
         if not path:
             return []
         mask = integer(event.get("share.access_mask"))
-        accesses = event.get("share.accesses")
-        tokens = accesses if isinstance(accesses, list) else [str(accesses or "")]
-        writes = any(re.search(r"(?:%%441[78]|\b(?:writedata|appenddata|addfile|addsubdirectory)\b)",
-                               str(token), re.IGNORECASE) for token in tokens)
+        tokens = _share_access_names(event)
+        writes = bool(tokens & _WRITE_ACCESS_NAMES)
         if mask is not None and not mask & 0x6 and not writes:
+            return []
+        if mask is None and tokens and tokens <= _READ_ACCESS_NAMES:
             return []
         qualifier = "write/append access" if writes or (mask is not None and mask & 0x6) else "access with unresolved rights"
         text = (f"Administrative share access check recorded {qualifier} for file "
@@ -171,9 +192,10 @@ class AdminShareTransfer(WindowsEventRule):
                        (*_SHARE_FIELDS, "share.session_id"), content=_content(event, _SHARE_FIELDS))]
 
 
-class RemoteManagementPipe(WindowsEventRule):
+class RemoteManagementPipe(BehaviorFleetRule):
     id = "win.remote_management_pipe"
-    version = "2"
+    version = "3"
+    count_source_ips = True
     title = "IPC share access to a management RPC pipe"
     families = ("share_access",)
     windows_event_classes = _SECURITY_5145
@@ -194,14 +216,17 @@ class RemoteManagementPipe(WindowsEventRule):
         text = f"IPC$ access check named the {name} management RPC pipe"
         if event.outcome == Outcome.failure:
             text += "; the access check failed"
+        account = _account_class(event)
         return [signal(event, "management_pipe", text, self.attack,
-                       (*_SHARE_FIELDS, "share.session_id"), content=_content(event, _SHARE_FIELDS),
+                       (*_SHARE_FIELDS, "share.session_id"), content=json.dumps([name, event.outcome, account]),
+                       common=f"IPC$ access checks named the {name} management RPC pipe by {account}s with recorded outcome {event.outcome}",
                        notes=("Pipe access alone does not establish service execution or credential extraction.",))]
 
 
-class GppPolicyFileAccess(WindowsEventRule):
+class GppPolicyFileAccess(BehaviorFleetRule):
     id = "win.gpp_policy_file_access"
-    version = "2"
+    version = "3"
+    count_source_ips = True
     title = "SYSVOL access names a Group Policy Preferences policy file"
     families = ("share_access",)
     windows_event_classes = _SECURITY_5145
@@ -224,8 +249,10 @@ class GppPolicyFileAccess(WindowsEventRule):
         text = f"SYSVOL access check named Group Policy Preferences file {self.describe(path)}"
         if event.outcome == Outcome.failure:
             text += "; the access check failed"
+        account = _account_class(event)
         return [signal(event, "gpp_file", text, self.attack,
-                       (*_SHARE_FIELDS, "share.session_id"), content=_content(event, _SHARE_FIELDS),
+                       (*_SHARE_FIELDS, "share.session_id"), content=json.dumps([path_class(path), event.outcome, account]),
+                       common=f"SYSVOL access checks named the same Group Policy Preferences file path class by {account}s with recorded outcome {event.outcome}",
                        notes=("The access record does not show file contents or whether credentials were present.",))]
 
 

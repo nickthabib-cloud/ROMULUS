@@ -1,0 +1,94 @@
+"""Sourced Windows path scopes and COM identities; scopes do not establish trust."""
+from __future__ import annotations
+
+import ntpath
+import re
+
+from romulus.detect.windows_events import components, local_path_components
+
+# Microsoft documents versioned installation roots, including the MDE unified sensor:
+# https://learn.microsoft.com/defender-endpoint/collect-diagnostic-data
+# https://learn.microsoft.com/defender-endpoint/switch-to-mde-troubleshooting
+PROTECTED_PLATFORM_PRODUCTS = frozenset({
+    'windows defender', 'windows defender advanced threat protection',
+})
+_VERSION = re.compile(r'\d+(?:\.\d+){1,5}(?:-\d+)?', re.ASCII)
+_GUID = re.compile(r'\{?[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\}?', re.ASCII)
+_RANDOM = re.compile(r'(?:[0-9a-f]{8,}|f_[0-9a-f]{4,})', re.ASCII)
+
+# Path indicators documented by the analytic's original researchers; effective ACLs
+# vary by OS and policy. These raise attention, never establish an effective permission.
+# https://research.splunk.com/endpoint/c051b68c-60f7-4022-b3ad-773bec7a225b/
+WRITABLE_WINDOWS_DIRS = (
+    ('windows', 'temp'), ('windows', 'tasks'), ('windows', 'tracing'),
+    ('windows', 'system32', 'tasks'), ('windows', 'syswow64', 'tasks'),
+    ('windows', 'system32', 'spool', 'drivers', 'color'),
+    ('windows', 'syswow64', 'spool', 'drivers', 'color'),
+)
+
+# Windows built-ins named by ATT&CK's original COM-hijacking case studies.
+# Each identity retains its source; this is deliberately a small positive-only list.
+BUILTIN_COM_CLASSES = {
+    '{42aedc87-2188-41fd-b9a3-0c966feabec1}': (
+        'MruPidlList', 'https://unit42.paloaltonetworks.com/bbsrat-attacks-targeting-russian-organizations-linked-to-roaming-tiger/'),
+    '{f3130cdb-aa52-4c3a-ab32-85ffc23af9c1}': (
+        'Microsoft WBEM New Event Subsystem', 'https://unit42.paloaltonetworks.com/bbsrat-attacks-targeting-russian-organizations-linked-to-roaming-tiger/'),
+    '{bcde0395-e52f-467c-8e3d-c4579291692e}': (
+        'MMDeviceEnumerator', 'https://raw.githubusercontent.com/microsoft/win32metadata/main/generation/WinSDK/RecompiledIdlHeaders/um/mmdeviceapi.h'),
+}
+
+
+def installation_parts(path):
+    parts = local_path_components(path)
+    if parts:
+        return parts
+    parts = components(ntpath.normpath(str(path or '')))
+    if parts and parts[0] in {'%systemroot%', '%windir%', 'systemroot'}:
+        return ('windows', *parts[1:])
+    if parts and parts[0] == '%programdata%':
+        return ('programdata', *parts[1:])
+    return ()
+
+
+def protected_platform_path(path):
+    parts = installation_parts(path)
+    return (len(parts) >= 6 and parts[:2] == ('programdata', 'microsoft')
+            and parts[2] in PROTECTED_PLATFORM_PRODUCTS and parts[3] == 'platform'
+            and _VERSION.fullmatch(parts[4]) is not None)
+
+
+def writable_windows_path(path):
+    parts = installation_parts(path)
+    return any(len(parts) > len(prefix) and parts[:len(prefix)] == prefix for prefix in WRITABLE_WINDOWS_DIRS)
+
+
+def path_class(path, *, directory=False):
+    """Normalize content identity only; exact paths remain in predicates and citations.
+
+    This never changes a lane or suppresses a record. Directory identity retains
+    application/location labels but discards profile, GUID, version and cache instances.
+    """
+    text = ntpath.normpath(str(path or '').replace('/', '\\')).casefold()
+    parts = list(components(text))
+    if not parts:
+        return '<unrecorded>'
+    for index, part in enumerate(parts):
+        if index and parts[index - 1] in {'users', 'documents and settings'}:
+            parts[index] = '<profile>'
+        elif _GUID.fullmatch(part):
+            parts[index] = '<guid>'
+        elif _VERSION.fullmatch(part):
+            parts[index] = '<version>'
+        elif _RANDOM.fullmatch(part):
+            parts[index] = '<instance>'
+    if directory:
+        parts = parts[:-1]
+        for index, part in enumerate(parts):
+            if part in {'cache', 'cache_data', 'code cache', 'gpucache'}:
+                parts = parts[:index + 1] + (['<cache-directories>'] if index + 1 < len(parts) else [])
+                break
+    return '\\'.join(parts)
+
+
+def extension_class(path):
+    return ntpath.splitext(str(path or ''))[1].casefold() or '<no-extension>'

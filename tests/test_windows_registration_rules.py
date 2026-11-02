@@ -58,8 +58,12 @@ def test_service_ambiguous_or_missing_image_is_uncertain_lead(image):
                                        ("RemComSvcExtra", '"C:\\Program Files\\Acme\\cmd.exe.backup"'),
                                        ("Acme", '"C:\\Program Files\\Acme\\svc.exe"')])
 def test_service_hard_negatives(name, image):
-    assert ServiceRegistration().judge(event("service_change", 7045,
-                                            **{"service.name": name, "service.image_path": image})) == []
+    hits = ServiceRegistration().judge(event("service_change", 7045,
+                                           **{"service.name": name, "service.image_path": image}))
+    if image.startswith("C:\\Windows\\System32\\"):
+        assert len(hits) == 1 and hits[0].lane == "lead"
+    else:
+        assert hits == []
 
 
 def _task(command="cmd.exe", args="/c example", **extra):

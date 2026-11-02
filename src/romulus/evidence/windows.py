@@ -24,7 +24,7 @@ from romulus.evidence.windows_catalog import WINDOWS_DATASETS, WindowsEventClass
 if TYPE_CHECKING:
     from romulus.detect.bounded import Account, StateBudget
 
-WINDOWS_NORMALIZER = "windows-ecs@6"
+WINDOWS_NORMALIZER = "windows-ecs@7"
 # This is already far beyond what the 64 MiB assembler can retain at normal 4104 chunk sizes, while bounding every
 # completeness vector even when hostile metadata claims billions of parts.
 SCRIPT_BLOCK_MAX_PARTS = 4_096
@@ -211,6 +211,7 @@ class RecordIdContinuity:
         root.chmod(0o700)
         self.path = root / "windows-continuity.db"
         self._db = sqlite3.connect(self.path)
+        self._db.execute("PRAGMA journal_mode=MEMORY")
         self.path.chmod(0o600)
         self._db.execute(
             "CREATE TABLE continuity ("
@@ -228,17 +229,18 @@ class RecordIdContinuity:
     def _cap(self) -> None:
         if self.budget is None:
             return
-        headroom = self.budget.headroom()
+        headroom = self.budget.physical_allowance(self.account) if self.account is not None else self.budget.headroom()
         if headroom is None:
             return
         pages = self._db.execute("PRAGMA page_count").fetchone()[0]
-        self._db.execute(f"PRAGMA max_page_count = {pages + headroom // self._page + 1}")
+        self._db.execute(f"PRAGMA max_page_count = {pages + headroom // self._page}")
 
     def _charge_growth(self) -> None:
         size = self._db.execute("PRAGMA page_count").fetchone()[0] * self._page
         growth = size - self._size
         if growth > 0 and self.budget is not None and self.account is not None:
             self.budget.charge(self.account, growth)
+            self.budget.physical_account(self.account, growth)
             self.budget.grew(growth)
         self._size = size
 
@@ -259,6 +261,8 @@ class RecordIdContinuity:
         if getattr(self, "_tempdir", None) is not None:
             shutil.rmtree(self._tempdir, ignore_errors=True)
             self._tempdir = None
+            if self.budget is not None and self.account is not None:
+                self.budget.release_physical_account(self.account)
 
     def __del__(self):
         with contextlib.suppress(Exception):
@@ -337,7 +341,10 @@ class RecordIdContinuity:
                     self._db.rollback()
                     reason = f"writing Windows continuity state failed ({exc})"
                     if self.budget is not None:
-                        self.budget.fail(reason)
+                        if "full" in str(exc).lower():
+                            self.budget.refuse_capacity(self.account, reason)
+                        else:
+                            self.budget.fail(reason)
                     record_refusal(group, reason)
                     continue
                 touched.add(key)
@@ -902,7 +909,7 @@ def _native_value_is_absent(name: str, value: object) -> bool:
     if value in (None, ""):
         return True
     text = str(value).strip().casefold()
-    if text == "-":
+    if text == "-" and name.casefold() != "startmodule":
         return True
     if name.casefold().endswith("sid") and text in {"null sid", "s-1-0-0"}:
         return True

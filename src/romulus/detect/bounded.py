@@ -241,6 +241,9 @@ class StateBudget:
         self.forced: list = []          # (predicate on an Account, reason): stores forced into no-growth mode (tests)
         self.calm = True                # no limit reached: the per-record check is one attribute read
         self.disk_used = 0              # the spills' real database growth (for the summary)
+        self._physical: dict[tuple, tuple[int, int]] = {}  # live file/owner bytes and guaranteed-floor weights
+        self._physical_released = 0
+        self._capacity_refusals: set[int] = set()
         self.over_total = ""            # every store in no-growth mode at once (sticky; probes and tests)
         self.low_space = ""             # why the stage volume is at its reserve (sticky)
         self.broken = ""                # a write failed (sticky)
@@ -381,6 +384,37 @@ class StateBudget:
         free = self.free()
         return None if free is None else max(0, free - self.reserve)
 
+    @property
+    def physical_used(self):
+        # Legacy compact stores report physical growth without a per-file ledger entry.
+        # The cumulative counter conservatively covers them and never understates live bytes.
+        return max(self.disk_used-self._physical_released, sum(size for size, _weight in self._physical.values()))
+
+    @property
+    def physical_pool_used(self):
+        return sum(max(0, size-self.floor*weight) for size, weight in self._physical.values())
+
+    def physical_account(self, account, growth):
+        key = ("account", id(account))
+        size = self._physical.get(key, (0, account.weight))[0]
+        self._physical[key] = (size+growth, account.weight)
+
+    def release_physical_account(self, account):
+        size = self._physical.pop(("account", id(account)), (0, 0))[0]
+        self._physical_released += size
+        self.charge(account, -size)
+
+    def physical_allowance(self, account):
+        available = min(max(0, self.disk_total-self.physical_used),
+                        max(0, self.floor_of(account)-account.used) + max(0, self.pool-self.physical_pool_used))
+        headroom = self.headroom()
+        return available if headroom is None else min(available, headroom)
+
+    def refuse_capacity(self, account, reason):
+        if account is not None and id(account) not in self._capacity_refusals:
+            self._capacity_refusals.add(id(account))
+            self.force_full(reason, lambda item: item is account)
+
     def check_free(self) -> None:
         free = self.free()
         if free is not None and free < self.reserve and not self.low_space:
@@ -519,7 +553,7 @@ class Spill:
     Its database's growth is reported to the hunt's state budget (the stores' own Accounts hold their bytes), and the
     database is capped at the volume's headroom above the reserve, so no statement can run the volume into it."""
 
-    def __init__(self, directory=None, budget: StateBudget | None = None):
+    def __init__(self, directory=None, budget: StateBudget | None = None, *, owner=None):
         import sqlite3
         import tempfile
         from pathlib import Path
@@ -529,10 +563,13 @@ class Spill:
         self.path = Path(self._dir) / "spill.db"
         self.db = sqlite3.connect(self.path)
         # The page cache is memory outside the hunt's memory budget: SPILL_CACHE_KIB per spill.
-        for pragma in ("journal_mode=OFF", "synchronous=OFF", "temp_store=FILE", f"cache_size=-{SPILL_CACHE_KIB}"):
+        for pragma in ("journal_mode=MEMORY", "synchronous=OFF", "temp_store=FILE", f"cache_size=-{SPILL_CACHE_KIB}"):
             self.db.execute(f"PRAGMA {pragma}")
         self._page = self.db.execute("PRAGMA page_size").fetchone()[0]
         self.budget = budget if budget is not None else StateBudget(directory)
+        self.owner = owner
+        self._budget_limited = False
+        self._fair_refused = False
         self._size = 0
         self._buffers: dict[str, tuple[str, list[tuple]]] = {}
 
@@ -540,12 +577,19 @@ class Spill:
         """Cap the database at its pages now plus the volume's headroom above the reserve: SQLite then stops any
         statement that would pass it with "database or disk is full"."""
         import sqlite3
+        self.grew()
         headroom = self.budget.headroom()
-        if headroom is None:
-            return
+        available = max(0, self.budget.disk_total-self.budget.physical_used)
+        if self.owner is not None:
+            floors = self.budget.floor * max(1, live_stores([self.owner]))
+            available = min(available, max(0, floors-self._size) +
+                            max(0, self.budget.pool-self.budget.physical_pool_used))
+        self._budget_limited = headroom is None or available <= headroom
+        if headroom is not None:
+            available = min(available, headroom)
         try:
             pages = self.db.execute("PRAGMA page_count").fetchone()[0]
-            self.db.execute(f"PRAGMA max_page_count = {pages + headroom // self._page + 1}")
+            self.db.execute(f"PRAGMA max_page_count = {pages + available // self._page}")
         except sqlite3.Error:
             pass
 
@@ -554,7 +598,7 @@ class Spill:
         width = len(columns.split(","))
         self._buffers[name] = (f"INSERT INTO {name} VALUES ({','.join('?' * width)})", [])
 
-    def write(self, sql: str, rows: list[tuple]) -> None:
+    def write(self, sql: str, rows: list[tuple], *, account: Account | None = None) -> None:
         """Write rows, charging the database's growth to the budget. Raises StateExhausted when the stage volume is
         at its free-space reserve or a write failed (nothing of a failed batch can be trusted). A store past its floor
         does not stop a write already under way: its rule refuses records needing a new key."""
@@ -562,17 +606,46 @@ class Spill:
         reason = self.budget.hard
         if reason:
             raise StateExhausted(reason)
+        if account is not None and not account.yields and self.budget.yield_used:
+            # Physical index/page overhead can spend headroom before logical payload billing does.
+            # Citation-only rows give way before a detection batch is refused for that pressure.
+            # A new table/index leaf can split its parent as well as allocate its own page.
+            needed = 4*self._page + sum(128 + sum(len(value) if isinstance(value, (bytes, str)) else 16
+                                              for value in row) for row in rows)
+            excess = needed-max(0, self.budget.pool-self.budget.physical_pool_used)
+            for yielding in self.budget.accounts:
+                if excess <= 0:
+                    break
+                if yielding.yields and yielding.evict is not None and yielding.used:
+                    excess -= yielding.evict(excess)
         self.cap()
+        # Refusing a batch must restore all its rows; older accepted state remains readable.
+        self.db.commit()
         try:
             self.db.executemany(sql, rows)
+            self.db.commit()
         except sqlite3.OperationalError as exc:
-            raise self.failed(exc) from exc
-        self.grew()
+            self.db.rollback()
+            raise self.failed(exc, account=account) from exc
+        finally:
+            self.grew()
 
-    def failed(self, exc: Exception) -> Exception:
+    def failed(self, exc: Exception, *, account: Account | None = None) -> Exception:
         """The exception to raise for a failed statement: StateExhausted (the budget marked broken) when the stage
         volume could not take the write, else the error itself."""
         text = str(exc).lower()
+        if "full" in text and self._budget_limited:
+            reason = "detector spill reached its hunt byte allowance"
+            if account is not None:
+                self.budget.refuse_capacity(account, reason)
+                if self.owner is not None:
+                    self.owner.note_limit("state_disk", reason + "; later records needing new state are not evaluated")
+            elif self.owner is not None and not self._fair_refused:
+                self._fair_refused = True
+                prefix = str(self.owner.id)+":"
+                self.budget.force_full(reason, lambda account: account.name.startswith(prefix))
+                self.owner.note_limit("state_disk", reason + "; later records needing new state are not evaluated")
+            return StateExhausted(reason)
         if "full" in text or "disk i/o" in text or "no space" in text:
             self.budget.fail(f"writing detector state to the stage volume failed ({exc})")
             return StateExhausted(self.budget.broken)
@@ -610,6 +683,8 @@ class Spill:
             size = self.db.execute("PRAGMA page_count").fetchone()[0] * self._page
         except sqlite3.Error:
             return
+        weight = max(1, live_stores([self.owner])) if self.owner is not None else 1
+        self.budget._physical[("spill", id(self))] = (size, weight)
         if size > self._size:
             self.budget.grew(size - self._size)
             self._size = size
@@ -630,6 +705,8 @@ class Spill:
             with contextlib.suppress(Exception):
                 self.db.close()
             self.db = None
+        released = self.budget._physical.pop(("spill", id(self)), (0, 0))[0]
+        self.budget._physical_released += released
         shutil.rmtree(self._dir, ignore_errors=True)
 
 
@@ -1062,7 +1139,7 @@ class KeyedStore:
                          1 if self.candidate is None or self.candidate(state) else 0,
                          None if self.group is None else self.group(key), seq))
         try:
-            spill.write(f"INSERT OR REPLACE INTO {self.name} VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
+            spill.write(f"INSERT OR REPLACE INTO {self.name} VALUES (?, ?, ?, ?, ?, ?, ?)", rows, account=self.account())
         except StateExhausted:
             for key, state, seq in reversed(evicted):      # nothing is dropped: back to memory, oldest first
                 self.hot[key] = state
@@ -1106,11 +1183,22 @@ class KeyedStore:
                         break
                     take.append((rowid,))
                     size_taken += size
+                db.execute("SAVEPOINT citation_eviction")
                 db.executemany(f"DELETE FROM {self.name} WHERE rowid = ?", take)
+                db.execute("RELEASE citation_eviction")
                 freed += size_taken
                 self.on_disk -= len(take)
                 dropped += len(take)
+            if not self.on_disk and dropped:
+                # An empty citation-only table must give its index/root pages back too; otherwise
+                # its fixed schema footprint would still reduce detection capacity after all rows yielded.
+                db.execute(f"DROP TABLE {self.name}")
+                self._ready = False
         except sqlite3.Error as exc:
+            if db.in_transaction:
+                with contextlib.suppress(sqlite3.Error):
+                    db.execute("ROLLBACK TO citation_eviction")
+                    db.execute("RELEASE citation_eviction")
             # a failed delete (the volume full, for one) stops eviction for good; what was freed is still billed back
             self.broken = f"evicting citation records failed ({exc})"
         self.disk_bytes -= freed
@@ -1255,7 +1343,7 @@ class SpillList:
             nbytes += len(blob)
             rows.append((self.on_disk + i, o1, o2, blob))
         try:
-            spill.write(f"INSERT INTO {self.name} VALUES (?, ?, ?, ?)", rows)
+            spill.write(f"INSERT INTO {self.name} VALUES (?, ?, ?, ?)", rows, account=self.account())
         except StateExhausted:
             if budget.broken:
                 self.broken = budget.broken

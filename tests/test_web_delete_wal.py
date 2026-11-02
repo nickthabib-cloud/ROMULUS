@@ -62,3 +62,53 @@ def test_compaction_restores_pooled_connection_transaction_semantics(tmp_path):
             assert connection.exec_driver_sql("SELECT count(*) FROM atomic_probe").scalar_one() == 0
     finally:
         repo.engine.dispose()
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_delete_compaction_blocks_claim_for_its_entire_duration_and_reports_failure(tmp_path, monkeypatch, caplog, fail):
+    settings = Settings(home=tmp_path, secret_key=secrets.token_urlsafe(32))
+    repo = open_repo(settings)
+    repo.create_hunt("delete-me", {}, "digest", "test")
+    repo.create_hunt("next-hunt", {}, "digest", "test")
+    create_user(repo.engine, "lead", secrets.token_urlsafe(24), "lead")
+    monkeypatch.setattr(web, "open_repo", lambda _: repo)
+    attempted = []
+
+    def checked_compact(engine):
+        other = open_repo(settings)
+        try:
+            try:
+                other.claim_hunt("next-hunt", 60)
+            except RuntimeError as error:
+                attempted.append("blocked" if "maintenance" in str(error) else "other error")
+            else:
+                attempted.append("claimed")
+            try:
+                other.create_hunt("concurrent-create", {}, "digest", "test")
+            except RuntimeError as error:
+                attempted.append("create blocked" if "maintenance" in str(error) else "create other error")
+            else:
+                attempted.append("created")
+        finally:
+            other.engine.dispose()
+        if fail:
+            raise OSError("synthetic disk refusal")
+        compact(engine)
+
+    monkeypatch.setattr(web, "compact", checked_compact)
+    sessions = Sessions(settings.secret_key.get_secret_value())
+    cookie = sessions.issue({"username": "lead", "role": "lead"})
+    try:
+        with TestClient(web.create_app(settings)) as client:
+            client.cookies.set(web.COOKIE, cookie)
+            response = client.post("/hunts/delete-me/delete", data={"csrf": sessions.read(cookie)["csrf"],
+                "confirm": "delete-me"}, follow_redirects=True)
+            assert response.status_code == 200
+            assert attempted == ["blocked", "create blocked"]
+            if fail:
+                assert "compaction failed" in response.text.lower()
+                assert repo.latest_audit("delete-me", "hunt.compaction_failed")
+                assert "synthetic disk refusal" in caplog.text
+            assert repo.claim_hunt("next-hunt", 60)["execution_state"] == "running"
+    finally:
+        repo.engine.dispose()

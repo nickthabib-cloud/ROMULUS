@@ -9,8 +9,9 @@ import json
 import re
 from dataclasses import dataclass
 
+from romulus.detect.windows_behavior import BehaviorFleetRule
 from romulus.detect.windows_events import WindowsEventRule, basename, components, integer, signal
-from romulus.detect.windows_memory_events import _writable_indicator
+from romulus.detect.windows_path_data import BUILTIN_COM_CLASSES, path_class
 from romulus.evidence.typed import TypedEvent
 
 _LM = "hkey_local_machine"
@@ -170,17 +171,19 @@ class _RegistryRule(WindowsEventRule):
         return out
 
     def report(self, event, target, behavior, description, *, high=False, numeric=None, mask=None,
-               known_numeric=(0, 1), multi=False):
+               known_numeric=(0, 1), multi=False, content=None, common=""):
         """A deletion/rename is always an observation, never a payload installation."""
         action = target.action
         value = event.get("registry.value")
-        content = json.dumps([target.root, target.key, target.name, action, value,
-                              event.get("registry.value_type"), event.get("registry.details_truncated")],
-                             sort_keys=True, separators=(",", ":"))
+        if content is None:
+            content = json.dumps([target.root, target.key, target.name, action, value,
+                                  event.get("registry.value_type"), event.get("registry.details_truncated")],
+                                 sort_keys=True, separators=(",", ":"))
         notes = ("A registry change does not establish that the referenced code executed or the policy took effect.",)
         if action != "written":
             text = f"{description} registry target was {action}; resulting value and effective state are unknown"
-            return [signal(event, behavior + ":" + action, text, self.attack, _FIELDS, notes=notes, content=content)]
+            return [signal(event, behavior + ":" + action, text, self.attack, _FIELDS, notes=notes, content=content,
+                           common=common)]
         if (_uncertain(event) or (isinstance(value, (list, tuple))
                                  and (not multi or any(not isinstance(item, str) for item in value)))):
             text = f"{description} registry value was written; data is missing, malformed or truncated, so its effect is unknown"
@@ -188,7 +191,8 @@ class _RegistryRule(WindowsEventRule):
                              and isinstance(value, str) and bool(value.strip())
                              and not _default_winlogon(value.removesuffix("...").strip(), target.name or ""))
             return [signal(event, behavior + ":unknown", text, self.attack, _FIELDS, notes=notes, content=content,
-                           lane="high" if observed_high else "lead", severity="high" if observed_high else "medium")]
+                           lane="high" if observed_high else "lead", severity="high" if observed_high else "medium",
+                           common=common)]
         if numeric is not None:
             if not _recorded_dword(event):
                 text = f"{description} registry value was written without a supported DWORD type; its effect is unknown"
@@ -204,13 +208,16 @@ class _RegistryRule(WindowsEventRule):
                 return []
         elif (isinstance(value, str) and not value.strip()) or value in ([], ()):
             text = f"{description} registry value was cleared; no executable payload is established by this write"
-            return [signal(event, behavior + ":cleared", text, self.attack, _FIELDS, notes=notes, content=content)]
+            return [signal(event, behavior + ":cleared", text, self.attack, _FIELDS, notes=notes, content=content,
+                           common=common)]
         elif not isinstance(value, (str, list, tuple)):
             text = f"{description} registry value was written with malformed text data; its effect is unknown"
-            return [signal(event, behavior + ":unknown", text, self.attack, _FIELDS, notes=notes, content=content)]
+            return [signal(event, behavior + ":unknown", text, self.attack, _FIELDS, notes=notes, content=content,
+                           common=common)]
         text = f"{description} registry value was written as {self.describe(value)!r}"
         return [signal(event, behavior, text, self.attack, _FIELDS,
-                       lane="high" if high else "lead", severity="high" if high else "medium", notes=notes, content=content)]
+                       lane="high" if high else "lead", severity="high" if high else "medium", notes=notes, content=content,
+                       common=common)]
 
 
 class RegistryRunKeys(_RegistryRule):
@@ -330,9 +337,9 @@ class RegistryAppCert(_RegistryRule):
         return []
 
 
-class RegistryUserCom(_RegistryRule):
+class RegistryUserCom(_RegistryRule, BehaviorFleetRule):
     id = "win.registry_user_com"
-    version = "2"
+    version = "3"
     title = "Per-user COM server registration changed"
     attack = ("T1546.015",)
     benign = ("per-user COM application installation and repair",)
@@ -340,19 +347,33 @@ class RegistryUserCom(_RegistryRule):
     research = ("https://attack.mitre.org/techniques/T1546/015/",
                 "https://learn.microsoft.com/windows/win32/winprog64/shared-registry-keys",
                 "https://devblogs.microsoft.com/oldnewthing/20121205-00/?p=5913",
-                "https://learn.microsoft.com/windows/win32/com/treatas")
+                "https://learn.microsoft.com/windows/win32/com/treatas",
+                "https://learn.microsoft.com/windows/win32/com/-progid--key",
+                *(item[1] for item in BUILTIN_COM_CLASSES.values()))
 
     def _judge_target(self, event, target):
         key = _software(target) if target and target.root == _CU else None
         if key and key[:2] == ("classes", "wow6432node"):
             key = ("classes", *key[2:])
         if (key and len(key) == 4 and key[:2] == ("classes", "clsid")
-                and _GUID.fullmatch(key[2]) and key[3] in {"inprocserver32", "localserver32", "treatas"}
+                and _GUID.fullmatch(key[2]) and key[3] in {"inprocserver32", "localserver32", "treatas", "progid"}
                 and target.name in {None, "", "(default)"}):
             value = event.get("registry.value")
-            high = isinstance(value, str) and bool(value.strip()) and (
-                _writable_indicator(value.strip().lstrip('"')) and key[3] != "treatas")
-            return self.report(event, target, "user_com_server", "Per-user COM server registration", high=high)
+            builtin = BUILTIN_COM_CLASSES.get(key[2])
+            high = builtin is not None and isinstance(value, str) and bool(value.strip())
+            payload = value.strip().casefold() if isinstance(value, str) and _GUID.fullmatch(value.strip().casefold()) else path_class(value)
+            content = json.dumps([key, target.name, target.action, payload,
+                                  event.get("registry.value_type"), event.get("registry.details_truncated")])
+            common = (f"Per-user COM {key[3]} registration in the same class and payload path class was {target.action}"
+                      + (f" for documented Windows built-in {builtin[0]}" if builtin else ""))
+            return self.report(event, target, "user_com_server", "Per-user COM server registration", high=high,
+                               content=content, common=common)
+        # A ProgID's CLSID mapping is a redirection observation. Its target CLSID does
+        # not establish that the source ProgID is a built-in registration being shadowed.
+        if (key and len(key) == 3 and key[0] == "classes" and key[1] != "clsid" and key[2] == "clsid"
+                and target.name in {None, "", "(default)"}):
+            return self.report(event, target, "user_com_progid", "Per-user COM ProgID redirection",
+                               common=f"Per-user COM ProgID redirection was {target.action}")
         return []
 
 
@@ -396,7 +417,7 @@ class RegistryCredentialProtection(_RegistryRule):
 
 class RegistryDefender(_RegistryRule):
     id = "win.registry_defender"
-    version = "2"
+    version = "3"
     title = "Defender policy or exclusion registry setting changed"
     attack = ("T1685", "T1112")
     benign = ("managed antivirus policy and approved performance exclusions",)
@@ -415,6 +436,14 @@ class RegistryDefender(_RegistryRule):
         if key[:2] != prefix:
             return []
         tail = key[2:]
+        # Non-policy signature inventory is update bookkeeping. Policy values under
+        # the same label configure update behavior and remain reportable settings:
+        # https://learn.microsoft.com/windows/client-management/mdm/policy-csp-admx-microsoftdefenderantivirus
+        if not policy and tail[:1] == ("signature updates",):
+            return []
+        if not policy:
+            return self.report(event, target, "defender_setting",
+                               "Defender configuration (effective protection impact unknown)")
         if len(tail) == 2 and tail[0] == "exclusions" and tail[1] in {"paths", "processes", "extensions", "ipaddresses"}:
             if target.action == "written" and event.get("registry.value") == "":
                 return []
@@ -427,9 +456,8 @@ class RegistryDefender(_RegistryRule):
                      ("spynet",): {"disableblockatfirstseen"}}
         if target.name in disabling.get(tail, set()):
             return self.report(event, target, "defender_disable", "Defender protection disablement request", numeric=(1,), high=True)
-        # Unrecognised policy values are still sensitive configuration observations, with no disabling claim.
-        return (self.report(event, target, "defender_policy", "Defender policy (effective protection impact unknown)")
-                if policy else [])
+        # Every other setting is a positive observation, without inferring its effect.
+        return self.report(event, target, "defender_policy", "Defender configuration (effective protection impact unknown)")
 
 
 class RegistryRdp(_RegistryRule):

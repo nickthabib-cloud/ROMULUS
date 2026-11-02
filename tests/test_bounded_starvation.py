@@ -149,12 +149,12 @@ def run_sweep(monkeypatch, tmp_path, pack, batches, budget):
         m.raw_sources_seen = dict(raw_sources)
         published.append(m)
     monkeypatch.setattr(sw, "publish_match", publish)
+    monkeypatch.setattr(sw, "fresh_pack", lambda: pack)
     sweep = sw.Sweep(repo, object(), "h1", Window(start=T0, end=T0 + timedelta(hours=6)), {"romulus-host-x": None},
                      stage_dir=tmp_path)
     sweep.pack = pack
     for pb in pack:
         pb.spill_dir, pb.budget = tmp_path, budget
-    budget.plan(live_stores(pack) + 1)
     for k in range(len(batches)):
         start = T0 + timedelta(minutes=10 * k)
         sweep.run_partition("romulus-host-x", None, [], Window(start=start, end=start + timedelta(minutes=10)), est=1)

@@ -242,7 +242,7 @@ def test_fleet_repeat_does_not_hide_new_host_or_content(rule, family, code, fiel
     instance.consume([repeat])
     instance.drain_staged()
     published = instance.consume([new_host])
-    assert any(match.events[0].id == "newhost" for match in published)
+    assert any(any(item.id == "newhost" for item in match.events) for match in published)
     field = next(iter(fields))
     changed = {**fields, field: str(fields[field]) + " changed"}
     # Use a valid changed content shape for name-based rules.

@@ -380,6 +380,10 @@ def _validated(loaded: object) -> _SiteDocument:
 
 def _facts(document: _SiteDocument) -> SiteFacts:
     content = document.model_dump(mode="json", by_alias=True)
+    # A missing list expresses unknown configuration, whereas an explicit empty
+    # list declares that no synchronization accounts are configured.
+    if "directory_sync_accounts" not in document.model_fields_set:
+        content.pop("directory_sync_accounts", None)
     return SiteFacts(
         True,
         _digest(content),
