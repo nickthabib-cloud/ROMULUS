@@ -27,7 +27,7 @@ PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf211
                    # Suricata TCP/ICMP, Arkime ICMP and Zeek ICMP conn fields gained strict typed contracts.
                    13: "faf22327da69e63f594c999c9c5c68b909408308e37b0d1ab22ad86da1111b44",
                    # Arkime ICMP lists and Zeek ICMP type/address-family semantics are normalized truthfully.
-                   14: "46a16f9d7bccc6d85793b01e5b82fb0cc02cb2acd56df8064e386d43fd884806"}
+                   14: "35f10daf30977638d670ac0f9714ad72127685268c95f0c1f622231eaa0d9023"}
 WINDOWS_EVIDENCE_FILES = ("community.py", "windows.py", "windows_catalog.py", "windows_reassembly.py")
 PINNED_WINDOWS = {
     "windows-ecs@1": "8c2f1668700a3f7d0a143eef00473770e2e5c746fadf6ce3b2c95ae6bbe6a419",

@@ -19,6 +19,7 @@ from romulus.hunt.site_networks import check_host_addresses
 from romulus.site import SiteValidationError, load_site_facts
 from romulus.sources.es import (
     ELASTICSEARCH_MIN,
+    ES_CLUSTER_WRITE_PRIVILEGES,
     OPENSEARCH_SHARD_DOC,
     TIE_GROUP_WINDOW,
     Backend,
@@ -66,30 +67,40 @@ def check_es(s: Settings, transport: httpx.BaseTransport | None = None) -> list[
                          f"user={who.get('username')} roles={roles}"))
     except SourceError as e:
         out.append(Check("es.account", "warn", f"cannot read identity: {e}"))
+    concrete = []
     try:
-        concrete = []
         for pat in s.es_index_patterns:
             names = c.resolve(pat)
             concrete += names
             out.append(Check(f"es.index[{pat}]", "ok" if names else "fail", f"resolves to {names}"))
-        if concrete:
-            p = c.has_privileges(concrete)
-            cl = p.get("cluster", {})
-            idx = p.get("index", {})
-            writes = sorted({f"{i}:{k}" for i, privs in idx.items() for k, v in privs.items() if v and k != "read"})
-            reads = [i for i, privs in idx.items() if privs.get("read")]
-            bad_cluster = sorted(k for k in ("all", "manage", "manage_security") if cl.get(k))
-            status = "ok" if not writes and not bad_cluster else "fail"
-            out.append(Check("es.least_privilege", status,
-                             f"read on {len(reads)}/{len(concrete)} indices; write-capable={writes or 'none'}; "
-                             f"cluster-admin={bad_cluster or 'none'}"))
-            out.append(Check("os.read_only", status,
-                             "_has_privileges shows no write or cluster-admin privilege on the configured indices"
-                             if status == "ok" else
-                             f"_has_privileges shows write-capable={writes or 'none'}, "
-                             f"cluster-admin={bad_cluster or 'none'}"))
     except SourceError as e:
         out.append(Check("es.privileges", "warn", str(e)))
+        out.append(Check("os.read_only", "warn", f"the index patterns could not be resolved ({e}), so "
+                                                 f"_has_privileges was not asked: {READ_ONLY_UNPROVEN}"))
+        return out
+    if not concrete:
+        out.append(Check("os.read_only", "warn", "no configured index pattern resolves to an index, so "
+                                                 f"_has_privileges was not asked: {READ_ONLY_UNPROVEN}"))
+        return out
+    try:
+        p = c.has_privileges(concrete)
+    except SourceError as e:
+        out.append(Check("es.privileges", "warn", str(e)))
+        out.append(Check("os.read_only", "warn", f"_has_privileges could not be read ({e}): {READ_ONLY_UNPROVEN}"))
+        return out
+    cl = p.get("cluster", {})
+    idx = p.get("index", {})
+    writes = sorted({f"{i}:{k}" for i, privs in idx.items() for k, v in privs.items() if v and k != "read"})
+    reads = [i for i, privs in idx.items() if privs.get("read")]
+    bad_cluster = sorted(k for k in ES_CLUSTER_WRITE_PRIVILEGES if cl.get(k))
+    status = "ok" if not writes and not bad_cluster else "fail"
+    out.append(Check("es.least_privilege", status,
+                     f"read on {len(reads)}/{len(concrete)} indices; write-capable={writes or 'none'}; "
+                     f"cluster-write={bad_cluster or 'none'}"))
+    out.append(Check("os.read_only", status,
+                     "_has_privileges shows no write privilege on the configured indices or the cluster"
+                     if status == "ok" else
+                     f"_has_privileges shows write-capable={writes or 'none'}, cluster-write={bad_cluster or 'none'}"))
     return out
 
 

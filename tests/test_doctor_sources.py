@@ -4,6 +4,8 @@ responses in tests/data/opensearch_responses.json (sources cited in tests/test_s
 Read-only is reported only when it is shown: on Elasticsearch by `_has_privileges`; on OpenSearch by the security
 plugin's role list matching the site's configured read-only roles. Anything else is a warning that names the request
 allowlist as the write guard, or a failure when the account is shown to be able to write."""
+import json
+
 import httpx
 import pytest
 
@@ -29,7 +31,7 @@ def opensearch_doctor(root="root_opensearch_2.11.1", authinfo="authinfo_read_onl
 
 @pytest.mark.parametrize("root,status,text", [
     ("root_opensearch_2.3.0", "fail", "no point-in-time search (OpenSearch 2.4 or later)"),
-    ("root_opensearch_compat_7.10.2", "fail", "Elasticsearch-compatible version number"),
+    ("root_opensearch_compatibility_mode", "fail", "turn off compatibility.override_main_response_version"),
     ("root_elasticsearch_8.15.0", "fail", "ES_FLAVOR=opensearch, but the cluster reports elasticsearch 8.15.0"),
     ("root_opensearch_2.11.1", "ok", "no _shard_doc tiebreaker"),
     ("root_opensearch_3.3.0", "ok", "point-in-time search available"),
@@ -47,16 +49,21 @@ def test_opensearch_3_3_carries_no_tie_group_note():
     assert "_shard_doc" not in checks["os.flavor_version"].detail
 
 
-def _es_handler(root, privileges=None):
+def _es_handler(root, privileges=None, indices=("logs-a",), resolve_status=200, privileges_status=200, seen=None):
     def handler(request):
         path = request.url.path
+        if seen is not None:
+            seen.append(request)
         if path == "/":
             return recorded(root)
         if path == "/_security/_authenticate":
             return httpx.Response(200, json={"username": "hunt_reader", "roles": ["reader"]})
         if path.startswith("/_resolve/index/"):
-            return httpx.Response(200, json={"indices": [{"name": "logs-a"}], "aliases": [], "data_streams": []})
+            return httpx.Response(resolve_status, json={"indices": [{"name": i} for i in indices], "aliases": [],
+                                                        "data_streams": []})
         if path == "/_security/user/_has_privileges":
+            if privileges_status != 200:
+                return httpx.Response(privileges_status, json={"error": "security_exception"})
             return httpx.Response(200, json=privileges or {
                 "cluster": {"all": False, "manage": False, "monitor": True, "manage_security": False},
                 "index": {"logs-a": {"read": True, "write": False, "index": False, "delete": False,
@@ -91,6 +98,48 @@ def test_elasticsearch_write_privilege_fails_read_only():
     checks = by_name(check_es(s, transport=_es_handler("root_elasticsearch_8.15.0", privileges)))
     assert checks["os.read_only"].status == checks["es.least_privilege"].status == "fail"
     assert "logs-a:write" in checks["os.read_only"].detail
+
+
+@pytest.mark.parametrize("index_privilege", ["create_doc", "create_index", "auto_configure", "maintenance"])
+def test_elasticsearch_index_write_privileges_beyond_write_fail_read_only(index_privilege):
+    s = Settings(es_url="https://es.invalid", es_index_patterns=["logs-*"])
+    privileges = {"cluster": {}, "index": {"logs-a": {"read": True, index_privilege: True}}}
+    checks = by_name(check_es(s, transport=_es_handler("root_elasticsearch_8.15.0", privileges)))
+    assert checks["os.read_only"].status == "fail" and f"logs-a:{index_privilege}" in checks["os.read_only"].detail
+
+
+@pytest.mark.parametrize("cluster_privilege", ["manage_pipeline", "manage_ingest_pipelines", "manage_watcher",
+                                               "manage_index_templates", "manage_transform", "create_snapshot"])
+def test_elasticsearch_cluster_write_privileges_fail_read_only(cluster_privilege):
+    s = Settings(es_url="https://es.invalid", es_index_patterns=["logs-*"])
+    privileges = {"cluster": {cluster_privilege: True, "monitor": True},
+                  "index": {"logs-a": {"read": True, "write": False}}}
+    checks = by_name(check_es(s, transport=_es_handler("root_elasticsearch_8.15.0", privileges)))
+    assert checks["os.read_only"].status == "fail" and cluster_privilege in checks["os.read_only"].detail
+
+
+def test_elasticsearch_asks_for_every_write_privilege_the_docs_list():
+    seen = []
+    s = Settings(es_url="https://es.invalid", es_index_patterns=["logs-*"])
+    check_es(s, transport=_es_handler("root_elasticsearch_8.15.0", seen=seen))
+    body = json.loads(next(r for r in seen if r.url.path == "/_security/user/_has_privileges").content)
+    asked = set(body["index"][0]["privileges"])
+    assert {"create_doc", "create_index", "write", "index", "delete", "delete_index", "manage", "all"} <= asked
+    assert {"manage_pipeline", "manage_ingest_pipelines", "manage_watcher", "manage_security", "all",
+            "manage"} <= set(body["cluster"])
+
+
+@pytest.mark.parametrize("handler_args,text", [
+    ({"privileges_status": 403}, "_has_privileges could not be read"),
+    ({"indices": ()}, "no configured index pattern resolves"),
+    ({"resolve_status": 500}, "index patterns could not be resolved"),
+])
+def test_elasticsearch_read_only_is_a_warning_when_it_could_not_be_asked(handler_args, text):
+    s = Settings(es_url="https://es.invalid", es_index_patterns=["logs-*"])
+    checks = by_name(check_es(s, transport=_es_handler("root_elasticsearch_8.15.0", **handler_args)))
+    assert checks["os.read_only"].status == "warn" and text in checks["os.read_only"].detail
+    assert checks["os.read_only"].detail.endswith(READ_ONLY_UNPROVEN)
+    assert "es.least_privilege" not in checks
 
 
 # ---- os.read_only: OpenSearch --------------------------------------------------------------------------------

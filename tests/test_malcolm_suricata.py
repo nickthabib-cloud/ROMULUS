@@ -20,6 +20,7 @@ from datetime import datetime
 
 import pytest
 
+from romulus.detect.flows import ALTERNATIVES_NOTE, LongUnidentifiedSession, ProtocolPortMismatch
 from romulus.evidence.normalize import (
     MALCOLM_FTP_CAVEAT,
     MALCOLM_MISSING_TIMESTAMP_CAVEAT,
@@ -223,7 +224,7 @@ def test_moved_fields_cite_the_malcolm_paths():
     assert origins["network.community_id"] == "mc-1:network.community_id"
     assert origins["network.app_proto"] == "mc-1:network.protocol#derived:app_proto"
     assert origins["alert.signature"] == "mc-1:rule.name" and origins["alert.signature_id"] == "mc-1:rule.id"
-    assert origins["alert.category"] == "mc-1:rule.category#derived:first-value"
+    assert origins["alert.category"] == "mc-1:rule.category#derived:classtype"
     assert origins["alert.mitre_technique_id"].startswith("mc-1:threat.technique.subtechnique.id+threat.technique.id")
     assert origins["alert.severity"] == "mc-1:suricata.alert.severity"
     assert origins["suricata.flow_id"] == "mc-1:suricata.flow_id"
@@ -276,9 +277,13 @@ def test_app_proto_is_read_back_including_malcolm_renames_of_one_protocol(app_pr
 
 
 @pytest.mark.parametrize("app_proto", ["ftp", "ftp-data"])
-def test_ftp_and_ftp_data_cannot_be_told_apart_and_are_not_typed(app_proto):
-    _filebeat, malcolm = _flow(eve={"app_proto": app_proto}, protocol=["ftp"])
+def test_ftp_and_ftp_data_cannot_be_told_apart_and_are_typed_as_candidates(app_proto):
+    filebeat, malcolm = _flow(eve={"app_proto": app_proto}, protocol=["ftp"])
+    assert filebeat.get("network.app_proto") == app_proto
     assert not malcolm.has("network.app_proto") and malcolm.caveats == [MALCOLM_FTP_CAVEAT]
+    assert malcolm.get("network.app_proto_candidates") == ["ftp", "ftp-data"]
+    assert malcolm.fields["network.app_proto_candidates"].origin == (
+        "mc-1:network.protocol#derived:app_proto_candidates")
 
 
 def test_failed_detection_is_removed_by_malcolm_and_the_record_says_so():
@@ -406,3 +411,144 @@ def test_an_event_type_the_eve_normalizer_skips_is_skipped_for_malcolm_too():
     src = _malcolm_base("stats", "2024-11-18T14:00:00.000Z", {"stats": {"uptime": 10}}, tags=["_suricatastats"])
     events, skips, errors = normalize_hits([malcolm_hit(src)])
     assert events == [] and errors == [] and skips == {"suricata event_type 'stats' is not normalized": 1}
+
+
+# ---- Malcolm's ftp in the flow rules: candidates are an identification, never "none identified" -------------------
+
+def run_rule(rule, events):
+    stage = {}
+    rule.consume(events)
+    stage.update({e.id: e for e in rule.drain_staged()})
+    rule.bind_loader(lambda ids: [stage[i] for i in ids if i in stage])
+    return rule.finalize()
+
+
+FLOW_TIMES = {"short": ("2024-11-18T14:00:00", "2024-11-18T14:00:05"),
+              "long": ("2024-11-18T14:00:00", "2024-11-18T15:10:00")}
+
+
+def malcolm_flow(i, dport, protocol, span="short", src="10.0.0.5"):
+    start, end = FLOW_TIMES[span]
+    network = {"transport": "tcp"} | ({"protocol": protocol} if protocol else {})
+    return malcolm_hit({
+        "@timestamp": end + ".000Z", "event": {"provider": "suricata", "dataset": "flow"}, "host": {"name": SENSOR},
+        "node": SENSOR, "source": {"ip": src, "port": 50000 + i},
+        "destination": {"ip": "10.0.1.21", "port": dport}, "network": network,
+        "suricata": {"timestamp": end + ".000Z", "flow_id": 1000 + i,
+                     "flow": {"start": start + ".000Z", "end": end + ".000Z", "bytes_toserver": 20000,
+                              "bytes_toclient": 30000, "pkts_toserver": 100, "pkts_toclient": 100,
+                              "state": "closed"},
+                     "tcp": {"syn": True, "tcp_flags_ts": "1b", "tcp_flags_tc": "1b"}}}, f"mc{i}")
+
+
+def filebeat_flow(i, dport, app_proto, span="short", src="10.0.0.5"):
+    start, end = FLOW_TIMES[span]
+    eve = {"timestamp": end + ".000000+0000", "flow_id": 1000 + i, "event_type": "flow", "src_ip": src,
+           "src_port": 50000 + i, "dest_ip": "10.0.1.21", "dest_port": dport, "proto": "TCP",
+           "flow": {"start": start + ".000000+0000", "end": end + ".000000+0000", "bytes_toserver": 20000,
+                    "bytes_toclient": 30000, "pkts_toserver": 100, "pkts_toclient": 100, "state": "closed"},
+           "tcp": {"syn": True, "tcp_flags_ts": "1b", "tcp_flags_tc": "1b"}}
+    if app_proto:
+        eve["app_proto"] = app_proto
+    return filebeat_hit(eve, f"fb{i}")
+
+
+def events_of(hits):
+    events, skips, errors = normalize_hits(hits)
+    assert (skips, errors) == ({}, [])
+    return events
+
+
+@pytest.mark.parametrize("span,dport,app_proto", [
+    ("short", 21, "ftp"),               # control channel
+    ("short", 20, "ftp-data"),          # active data channel
+    ("short", 50021, "ftp-data"),       # passive data channel on a client port
+    ("long", 50021, "ftp-data"),        # a long transfer
+    ("long", 21, "ftp"),
+])
+def test_malcolm_ftp_flows_raise_no_protocol_lead_and_their_filebeat_twins_are_unchanged(span, dport, app_proto):
+    malcolm = events_of([malcolm_flow(i, dport, ["ftp"], span) for i in range(3)])
+    filebeat = events_of([filebeat_flow(i, dport, app_proto, span) for i in range(3)])
+    for rule in (ProtocolPortMismatch, LongUnidentifiedSession):
+        assert run_rule(rule(), malcolm) == [], rule.id
+        assert run_rule(rule(), filebeat) == [], rule.id
+
+
+def test_without_the_candidates_the_same_malcolm_ftp_flows_would_be_unidentified_leads():
+    """The candidate field is what keeps these records identified: the same rows with no protocol are leads."""
+    control = events_of([malcolm_flow(i, 21, None) for i in range(3)])
+    data = events_of([malcolm_flow(i, 50021, None, "long") for i in range(3)])
+    assert [m.playbook_id for m in run_rule(ProtocolPortMismatch(), control)] == [ProtocolPortMismatch.id]
+    assert [m.playbook_id for m in run_rule(LongUnidentifiedSession(), data)] == [LongUnidentifiedSession.id]
+
+
+def test_claims_name_both_candidates_and_say_the_record_does_not_distinguish_them():
+    """Unidentified Filebeat records to an FTP port are a lead; the server's Malcolm records are counted in the
+    claim under one label naming both candidates."""
+    hits = [filebeat_flow(i, 21, None, src="10.0.0.9") for i in range(2)]
+    hits += [malcolm_flow(10 + i, 21, ["ftp"], src="10.0.0.7") for i in range(3)]
+    [match] = run_rule(ProtocolPortMismatch(), events_of(hits))
+    label = f"ftp or ftp-data ({ALTERNATIVES_NOTE}) 3"
+    assert label in match.claim
+    assert "ftp 3" not in match.claim.replace(label, "") and "ftp-data 3" not in match.claim.replace(label, "")
+
+
+# ---- a provider name alone does not make a Malcolm Suricata row ----------------------------------------------------
+
+def test_an_arkime_session_naming_the_suricata_provider_normalizes_as_before():
+    arkime = {"firstPacket": 1731938400000, "lastPacket": 1731938405000, "ipProtocol": 6, "node": "s1",
+              "source": {"ip": "10.0.0.5", "port": 50000, "bytes": 100, "packets": 2},
+              "destination": {"ip": "10.0.1.1", "port": 443, "bytes": 200, "packets": 2},
+              "network": {"community_id": "1:abc=", "transport": "tcp", "protocol": ["tls"]},
+              "protocol": ["tcp", "tls"]}
+    plain = events_of([malcolm_hit(dict(arkime), "a")])
+    named = events_of([malcolm_hit({**arkime, "event": {"provider": "suricata"}}, "a")])
+    assert [e.family for e in named] == ["net_session"]
+    # the same typed event; only the raw copy's digest differs, as the two rows differ by the provider field
+    assert [e.model_dump(exclude={"raw"}) for e in named] == [e.model_dump(exclude={"raw"}) for e in plain]
+    assert [[r.key for r in e.raw] for e in named] == [[r.key for r in e.raw] for e in plain]
+
+
+# ---- the alert category is the classtype, never the MITRE metadata Malcolm appends ----------------------------------
+
+@pytest.mark.parametrize("category,threat,expected", [
+    (["Potentially Bad Traffic", "Command and Control"], {"tactic": {"name": ["Command and Control"]}},
+     "Potentially Bad Traffic"),
+    (["", "Command and Control"], {"tactic": {"name": ["Command and Control"]}}, ""),       # no classtype
+    (["Command and Control"], {"tactic": {"name": ["Command and Control"]}}, None),          # only the tactic
+    (["Command and Control", "Command and Control"], {"tactic": {"name": ["Command and Control"]}},
+     "Command and Control"),                                                                # classtype = tactic
+    (["Misc activity", "Application Layer Protocol"], {"technique": {"name": ["Application Layer Protocol"]}},
+     "Misc activity"),
+    (["Misc activity", "MITRE ATT&CK"], {"framework": "MITRE ATT&CK"}, "Misc activity"),
+    (["Misc activity"], None, "Misc activity"),
+])
+def test_alert_category_is_the_classtype_only(category, threat, expected):
+    src = copy.deepcopy(MALCOLM["alert"])
+    src["rule"]["category"] = category
+    src.pop("threat")
+    if threat:
+        src["threat"] = threat
+    event = normalize_malcolm_suricata(malcolm_hit(src))
+    assert event.get("alert.category") == expected
+    if expected is not None:
+        assert event.fields["alert.category"].origin == "mc-1:rule.category#derived:classtype"
+
+
+def test_the_alert_with_no_classtype_and_attack_metadata_matches_its_filebeat_twin():
+    eve = copy.deepcopy(EVE["alert"])
+    eve["alert"]["category"] = ""
+    src = copy.deepcopy(MALCOLM["alert"])
+    src["rule"]["category"] = ["", "Command and Control"]
+    filebeat, malcolm = normalize_suricata(filebeat_hit(eve)), normalize_malcolm_suricata(malcolm_hit(src))
+    assert malcolm.get("alert.category") == filebeat.get("alert.category") == ""
+
+
+def test_a_parent_listed_beside_its_sub_technique_reads_back_as_the_sub_technique_alone():
+    """A known limit: Malcolm derives every sub-technique's parent, so a listed parent cannot be told apart."""
+    eve = copy.deepcopy(EVE["alert"])
+    eve["alert"]["metadata"]["mitre_technique_id"] = ["T1071", "T1071.001"]
+    src = copy.deepcopy(MALCOLM["alert"])           # Malcolm writes the same split for both listings
+    filebeat, malcolm = normalize_suricata(filebeat_hit(eve)), normalize_malcolm_suricata(malcolm_hit(src))
+    assert filebeat.get("alert.mitre_technique_id") == ["T1071", "T1071.001"]
+    assert malcolm.get("alert.mitre_technique_id") == ["T1071.001"]

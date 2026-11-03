@@ -145,12 +145,14 @@ def compile_es(intent: SearchIntent, contract: FieldContract, flavor: str = "ela
         raise CompileError("intent target does not match contract target")
     query = build_query(intent, contract)
     if intent.kind == "raw":
+        time_sort = {"order": intent.order}
+        if flavor != "opensearch":
+            # OpenSearch's field sort refuses `format`; its date sort values are the field's own epoch numbers
+            time_sort["format"] = "strict_date_optional_time_nanos"
         body = {
             "query": query,
             "sort": [
-                {contract.time_field: {
-                    "order": intent.order, "format": "strict_date_optional_time_nanos",
-                }},
+                {contract.time_field: time_sort},
                 {"_shard_doc": intent.order},
             ],
         }
@@ -177,4 +179,6 @@ def compile_es(intent: SearchIntent, contract: FieldContract, flavor: str = "ela
     else:
         raise CompileError(f"unknown intent kind {intent.kind}")
     fp = digest({"target": intent.target, "kind": intent.kind, "body": body})
-    return CompiledQuery(backend=flavor, target=intent.target, body=body, fingerprint=fp)
+    time_spec = contract.fields.get(contract.time_field)
+    unit = "ns" if time_spec is not None and time_spec.type == "date_nanos" else "ms"
+    return CompiledQuery(backend=flavor, target=intent.target, body=body, fingerprint=fp, time_unit=unit)

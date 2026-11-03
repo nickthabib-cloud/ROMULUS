@@ -62,15 +62,14 @@
       "tagline": "The OpenSearch Project: https://opensearch.org/"
     }
   },
-  "root_opensearch_compat_7.10.2": {
-    "request": "GET /",
+  "root_opensearch_compatibility_mode": {
+    "request": "GET / (compatibility.override_main_response_version: true; MainResponse.toXContent omits the distribution)",
     "status": 200,
     "body": {
       "name": "node-1",
       "cluster_name": "example-cluster",
       "cluster_uuid": "c3ludGhldGljLXV1aWQtMDQ",
       "version": {
-        "distribution": "opensearch",
         "number": "7.10.2",
         "build_type": "tar",
         "build_hash": "0000000000000000000000000000000000000004",
@@ -250,9 +249,9 @@
         "total": {"value": 2, "relation": "eq"},
         "hits": [
           {"_index": "arkime_sessions3-241118", "_id": "r1", "_source": {"event": {"provider": "suricata", "dataset": "flow"}},
-           "sort": ["2024-11-18T14:00:00.000Z", 1]},
+           "sort": [1731938400000]},
           {"_index": "arkime_sessions3-241118", "_id": "r2", "_source": {"event": {"provider": "suricata", "dataset": "alert"}},
-           "sort": ["2024-11-18T14:00:01.000Z", 2]}
+           "sort": [1731938401000]}
         ]
       }
     }
