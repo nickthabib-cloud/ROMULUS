@@ -1870,15 +1870,13 @@ _MALCOLM_MOVED_TLS = (("version", "tls.version"), ("ja3", "tls.client.ja3"), ("j
 
 
 def is_malcolm_suricata(src: dict) -> bool:
-    """A Suricata record as Malcolm indexes it: provider "suricata", and a bare event type as the dataset or a
-    `suricata` object. A record with neither (an Arkime session naming the provider, say) is left to the other
-    normalizers."""
+    """A Suricata record as Malcolm indexes it: provider "suricata" and the bare EVE event type as the dataset
+    (Malcolm always writes it). A record without that dataset (an Arkime session naming the provider, say) is left
+    to the other normalizers, exactly as before Malcolm records were read."""
     if _get(src, "event.provider") != "suricata":
         return False
     dataset = _get(src, "event.dataset")
-    if isinstance(dataset, str) and dataset.startswith("suricata."):
-        return False
-    return (isinstance(dataset, str) and bool(dataset)) or isinstance(src.get("suricata"), dict)
+    return isinstance(dataset, str) and bool(dataset) and not dataset.startswith("suricata.")
 
 
 def normalize_malcolm_suricata(hit: dict) -> TypedEvent:

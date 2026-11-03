@@ -380,8 +380,6 @@ def _malformed(mutate) -> tuple:
 
 @pytest.mark.parametrize("mutate,error", [
     (lambda s: s.pop("suricata"), "no suricata object"),
-    (lambda s: s["event"].update(dataset=["alert", "flow"]), "not one event type"),
-    (lambda s: s["event"].pop("dataset"), "not one event type"),
     (lambda s: s["suricata"].update(tls="not an object"), "tls block is str"),
     (lambda s: s["suricata"].update(alert=["not", "an", "object"]), "'list' object has no attribute 'get'"),
     (lambda s: (s.pop("@timestamp"), s["suricata"].pop("timestamp")), "@timestamp"),
@@ -390,6 +388,16 @@ def test_unreadable_malcolm_rows_are_errors_never_crashes(mutate, error):
     events, skips, errors = _malformed(mutate)
     assert events == [] and skips == {} and len(errors) == 1
     assert errors[0][0] == "bad" and error in errors[0][1]
+
+
+def test_rows_without_one_event_type_are_read_exactly_as_before_malcolm_records_were():
+    """Malcolm always writes the EVE event type as the dataset. A row without one is not read as Malcolm's EVE: it
+    takes the path it took before (a dataset list is an error; no dataset and the Arkime fields Malcolm adds make an
+    Arkime session), so no record that normalized before changes its typed output."""
+    events, skips, errors = _malformed(lambda s: s["event"].update(dataset=["alert", "flow"]))
+    assert events == [] and skips == {} and [e[0] for e in errors] == ["bad"]
+    events, skips, errors = _malformed(lambda s: s["event"].pop("dataset"))
+    assert [e.family for e in events] == ["net_session"] and (skips, errors) == ({}, [])
 
 
 @pytest.mark.parametrize("mutate,path,absent", [
@@ -495,14 +503,19 @@ def test_claims_name_both_candidates_and_say_the_record_does_not_distinguish_the
 
 # ---- a provider name alone does not make a Malcolm Suricata row ----------------------------------------------------
 
-def test_an_arkime_session_naming_the_suricata_provider_normalizes_as_before():
+@pytest.mark.parametrize("extra", [
+    {"event": {"provider": "suricata"}},
+    {"event": {"provider": "suricata", "dataset": ""}},
+    {"event": {"provider": "suricata"}, "suricata": {"flow_id": FLOW_ID}},     # no dataset: never Malcolm's EVE
+])
+def test_an_arkime_session_naming_the_suricata_provider_normalizes_as_before(extra):
     arkime = {"firstPacket": 1731938400000, "lastPacket": 1731938405000, "ipProtocol": 6, "node": "s1",
               "source": {"ip": "10.0.0.5", "port": 50000, "bytes": 100, "packets": 2},
               "destination": {"ip": "10.0.1.1", "port": 443, "bytes": 200, "packets": 2},
               "network": {"community_id": "1:abc=", "transport": "tcp", "protocol": ["tls"]},
               "protocol": ["tcp", "tls"]}
     plain = events_of([malcolm_hit(dict(arkime), "a")])
-    named = events_of([malcolm_hit({**arkime, "event": {"provider": "suricata"}}, "a")])
+    named = events_of([malcolm_hit({**arkime, **extra}, "a")])
     assert [e.family for e in named] == ["net_session"]
     # the same typed event; only the raw copy's digest differs, as the two rows differ by the provider field
     assert [e.model_dump(exclude={"raw"}) for e in named] == [e.model_dump(exclude={"raw"}) for e in plain]

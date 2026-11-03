@@ -709,3 +709,21 @@ def test_tie_paging_fuzz_exactly_once_and_honest_about_what_it_did_not_read(monk
                 or (unbounded and (lost or out.completeness != Completeness.complete))):
             defects.append((trial, n, page, out.completeness, out.reasons))
     assert defects == []
+
+
+_ARKIME_TYPES = {"firstPacket": "date", "lastPacket": "date", "network.community_id": "keyword"}
+
+
+@pytest.mark.parametrize("types,sort,expected", [
+    (_ARKIME_TYPES, [1731938400000], 1731938400000000000),                                 # OpenSearch, ms
+    ({"@timestamp": "date_nanos"}, [1731938400000000123], 1731938400000000123),           # OpenSearch, ns
+    (_ARKIME_TYPES, ["2024-11-18T14:00:00.000Z", 3], 1731938400000000000),                 # Elasticsearch, text
+])
+def test_a_pivot_sample_boundary_reads_the_sort_value_in_the_field_resolution(types, sort, expected):
+    from romulus.hunt.pivot import _record_boundary
+    from romulus.sources.profile import contract_from_types
+
+    contract = contract_from_types("t", types)
+    assert contract.time_field in types
+    # the epoch-number source value of an Arkime-shaped record cannot stand in for the sort value
+    assert _record_boundary({"_sort": sort, "_source": {"firstPacket": 1731938400000}}, contract) == expected

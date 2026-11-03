@@ -179,6 +179,11 @@ def compile_es(intent: SearchIntent, contract: FieldContract, flavor: str = "ela
     else:
         raise CompileError(f"unknown intent kind {intent.kind}")
     fp = digest({"target": intent.target, "kind": intent.kind, "body": body})
+    return CompiledQuery(backend=flavor, target=intent.target, body=body, fingerprint=fp,
+                         time_unit=time_unit(contract))
+
+
+def time_unit(contract: FieldContract) -> str:
+    """The resolution of the time field's epoch sort values: nanoseconds for `date_nanos`, else milliseconds."""
     time_spec = contract.fields.get(contract.time_field)
-    unit = "ns" if time_spec is not None and time_spec.type == "date_nanos" else "ms"
-    return CompiledQuery(backend=flavor, target=intent.target, body=body, fingerprint=fp, time_unit=unit)
+    return "ns" if time_spec is not None and time_spec.type == "date_nanos" else "ms"
