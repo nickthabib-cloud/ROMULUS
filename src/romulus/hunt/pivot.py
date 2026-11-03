@@ -37,6 +37,7 @@ from romulus.evidence.windows_catalog import (
 from romulus.evidence.windows_reassembly import ScriptBlockAssembler
 from romulus.hunt.publish import publish_match
 from romulus.site import SiteFacts, absent_site_facts
+from romulus.sources.compile import time_unit
 from romulus.sources.es import ElasticClient, SourceError
 from romulus.sources.execute import execute
 from romulus.sources.models import Completeness, Predicate, SearchIntent, SearchOutcome, Window
@@ -354,6 +355,9 @@ def _ns_text(value: int) -> str:
 def _record_boundary(record: dict, contract: FieldContract) -> int | None:
     sort = record.get("_sort")
     value = sort[0] if isinstance(sort, list) and sort else None
+    if isinstance(value, int) and not isinstance(value, bool):
+        # OpenSearch returns the time sort value as the field's own epoch number
+        return value if time_unit(contract) == "ns" else value * 1_000_000
     if not isinstance(value, str):
         value = _source_value(record.get("_source") or {}, contract.time_field)
     if value is None:

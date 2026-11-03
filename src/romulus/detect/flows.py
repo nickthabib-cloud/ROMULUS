@@ -304,6 +304,7 @@ class FlowView:
     opened: bool = False                # a typed field shows the source opened the TCP connection
     c2s_data: int | None = None         # application bytes the source side sent (Arkime's own count, else estimated)
     s2c_data: int | None = None         # ... and the destination side; None when the counters are absent
+    alternatives: bool = False          # `protocols` are candidates the record names without saying which one
 
     @property
     def key(self) -> tuple:
@@ -408,9 +409,31 @@ def flow_view(event: TypedEvent, kind: str) -> FlowView | None:
         name = canonical_protocol(app) if isinstance(app, str) else ""
         failed = name == "failed"
         protocols = frozenset() if name in UNIDENTIFIED_NAMES else frozenset({name})
+        alternatives = False
+        if not protocols and not failed:
+            # A record that names candidate protocols without saying which one (Malcolm writes Suricata's ftp and
+            # ftp-data alike) identified one of them: it is never an unidentified record.
+            listed = event.get("network.app_proto_candidates")
+            if isinstance(listed, list) and listed and all(isinstance(p, str) for p in listed):
+                named = frozenset(canonical_protocol(p) for p in listed) - UNIDENTIFIED_NAMES
+                protocols, alternatives = named, len(named) > 1
         opened = suricata_source_opened(event)
+        return FlowView(sensor, src, sport, dst, dport, transport, start, end, timed, c2s, s2c, s2c_packets,
+                        payload, protocols, failed, opened, data_c, data_s, alternatives)
     return FlowView(sensor, src, sport, dst, dport, transport, start, end, timed, c2s, s2c, s2c_packets, payload,
                     protocols, failed, opened, data_c, data_s)
+
+
+# How a claim names candidate protocols a record does not tell apart.
+ALTERNATIVES_NOTE = "Malcolm's record does not distinguish them"
+
+
+def protocol_label(protocols, alternatives: bool) -> list[str]:
+    """The names a record's protocols are counted and printed under: each one, or for candidates one label naming
+    them all ("ftp or ftp-data (...)"), so a candidate set is never counted as several identifications."""
+    if alternatives:
+        return [f"{' or '.join(sorted(protocols))} ({ALTERNATIVES_NOTE})"]
+    return sorted(protocols)
 
 
 def ip_sort_key(ip: str):
@@ -1300,6 +1323,7 @@ class _Mismatch:
     last: float = float("-inf")
     cited: list[str] = field(default_factory=list)
     ends: Ends = field(default_factory=Ends)
+    alternatives: bool = False                                # the protocols are candidates of one record
 
 
 @dataclass
@@ -1439,7 +1463,7 @@ class ProtocolPortMismatch(_FlowRule):
                 return self._refused("server tallies'")
             tally = counts.setdefault(view.sensor, Counter())
             tally["records"] += 1
-            for protocol in view.protocols:
+            for protocol in protocol_label(view.protocols, view.alternatives):
                 tally[protocol] += 1
         if view.protocols:
             # a protocol that negotiates its ports at run time is consistent with any port
@@ -1451,12 +1475,13 @@ class ProtocolPortMismatch(_FlowRule):
                 seen = self.identified.setdefault(view.key, dict)
                 if seen is None:
                     return self._refused("identified connections'")
-                seen.setdefault(view.sensor, set()).update(view.protocols)
+                seen.setdefault(view.sensor, set()).update(protocol_label(view.protocols, view.alternatives))
             if not consistent and judged:
                 group_key = (view.dst, view.dport, view.transport, tuple(sorted(view.protocols)))
                 group = self.mismatches.setdefault(group_key, _Mismatch)
                 if group is None:
                     return self._refused("mismatch groups'")
+                group.alternatives = group.alternatives or view.alternatives
                 if view.key in group.connections or len(group.connections) < self.CONNECTIONS_PER_MISMATCH:
                     group.connections.add(view.key)
                     group.sources.setdefault(view.src, set()).add(view.key)
@@ -1531,7 +1556,7 @@ class ProtocolPortMismatch(_FlowRule):
         dst, port, transport, protocols = key
         expected = expected_protocols(transport, port)
         sensors = " and ".join(SENSOR_NAMES[s] for s in sorted(group.records))
-        names = ", ".join(protocols)
+        names = ", ".join(protocol_label(protocols, group.alternatives))
         port_phrase = (f"{transport}/{port} is registered here for {', '.join(sorted(expected))}" if expected else
                        f"{transport}/{port} is not registered here for any protocol")
         protocol_phrases = []
@@ -1542,7 +1567,7 @@ class ProtocolPortMismatch(_FlowRule):
         others: dict[str, set[str]] = defaultdict(set)
         for connection in group.connections:
             for sensor, seen in self.identified.peek(connection, {}).items():
-                extra = seen - set(protocols)
+                extra = seen - set(protocols) - set(protocol_label(protocols, group.alternatives))
                 if extra:
                     others[sensor].update(extra)
         evs, missing = self._cite(group.ends, group.cited)
@@ -1559,7 +1584,7 @@ class ProtocolPortMismatch(_FlowRule):
         claim += " Protocol identity is the sensor parser's judgement."
         match = Match(self.id, claim, "network_observation", evs,
                       _predicates(evs[0], ("source.ip", "destination.ip", "destination.port", "network.app_proto",
-                                           "network.protocols")),
+                                           "network.app_proto_candidates", "network.protocols")),
                       evs[0].ts, self.severity, self.lane, "medium", _entities(evs),
                       group_key=f"{dst}|{transport}/{port}|{names}")
         match.notes.append("ATT&CK context: T1571 Non-Standard Port; T1572 Protocol Tunneling when a registered port "
@@ -1614,7 +1639,8 @@ class ProtocolPortMismatch(_FlowRule):
                  + (_per_sensor_cited(evs, tallies) if denominators and counted > len(evs) else ""))
         match = Match(self.id, claim, "network_observation", evs,
                       _predicates(evs[0], ("source.ip", "source.port", "destination.ip", "destination.port",
-                                           "network.app_proto", "network.protocols")),
+                                           "network.app_proto", "network.app_proto_candidates",
+                                           "network.protocols")),
                       evs[0].ts, self.severity, self.lane, "medium", _entities(evs),
                       group_key=f"{server}|{transport}/{port}|unidentified|{side}")
         match.notes.append("ATT&CK context: T1571 Non-Standard Port / T1095 Non-Application Layer Protocol")

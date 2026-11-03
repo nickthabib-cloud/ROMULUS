@@ -31,12 +31,14 @@ ROMULUS works **with or without an AI model**. Initial finding comes from determ
 | Linux auditd | ✓ | |
 | Linux journal | ✓ | |
 | Apache access and error logs | ✓ | other web servers |
-| Suricata alerts and flows | ✓ | |
+| Suricata alerts and flows (Filebeat EVE, or as Malcolm indexes them) | ✓ | |
 | Arkime sessions (via its Elasticsearch indices) | ✓ | |
 | PCAP via Arkime and TShark | ✓ | more protocols |
 | Windows / Active Directory, Zeek, cloud and identity logs, ICS protocols | | ✓ |
 
-Sources are read through Elasticsearch or OpenSearch with **read-only** credentials. ROMULUS never writes to your telemetry.
+Sources are read through Elasticsearch (8 or later) or OpenSearch (2.4 or later) with **read-only** credentials. ROMULUS never writes to your telemetry: each flavor has its own list of the read requests ROMULUS may send, and every other request is refused before it leaves the process. ROMULUS confirms the flavor and version from the cluster itself and refuses to run against one that does not match `ES_FLAVOR`. `romulus doctor` also checks that the account is read-only: on Elasticsearch from its privileges; on OpenSearch only when the security plugin lists the account's roles and each one is a role named in `ES_READ_ONLY_ROLES`. When that cannot be shown, it warns, and the request list is the write guard.
+
+The Arkime viewer can sit behind a proxy under a path prefix (`ARKIME_BASE_PATH`, e.g. `/arkime` behind Malcolm's web server) with digest or basic authentication (`ARKIME_AUTH`).
 
 ## Findings and lanes
 
@@ -102,8 +104,8 @@ Add `--json` for machine-readable output.
 All settings live in `$ROMULUS_HOME/.env` (template: [`.env.example`](.env.example)). Keep it `chmod 600` and never commit it. The main groups:
 
 - **ROMULUS:** `ROMULUS_HOME`, `ROMULUS_WEB_BIND`, `ROMULUS_SECRET_KEY`, `MISSION_TIMEZONE`
-- **Elasticsearch/OpenSearch:** `ES_URL`, `ES_FLAVOR`, credentials or `ES_API_KEY`, TLS options, `ES_INDEX_PATTERNS`
-- **Arkime and packets:** `ARKIME_URL`, credentials, `PCAP_ALLOWED_DIRS`, `TSHARK_BIN`
+- **Elasticsearch/OpenSearch:** `ES_URL`, `ES_FLAVOR`, credentials or `ES_API_KEY`, TLS options, `ES_INDEX_PATTERNS`, `ES_READ_ONLY_ROLES` (OpenSearch)
+- **Arkime and packets:** `ARKIME_URL`, `ARKIME_BASE_PATH`, `ARKIME_AUTH`, credentials, `PCAP_ALLOWED_DIRS`, `TSHARK_BIN`
 - **Model (optional):** see below
 
 **Site facts** live in `$ROMULUS_HOME/site/collection.yaml`. A lead edits them on the web UI's **Site setup** page:
