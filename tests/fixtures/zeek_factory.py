@@ -19,8 +19,12 @@ reproduced; no upstream file is copied:
 - Security Onion 2.4 (Security-Onion-Solutions/securityonion branch 2.4/main):
   salt/elasticfleet/files/integrations-dynamic/grid-nodes_general/zeek-logs.json (`event.module` "zeek",
   `data_stream.dataset` "zeek"), salt/elasticsearch/files/ingest/zeek.conn at commit
-  c29f11863e96b86540fae76386c5e5ec3b8fe7d4 (`event.dataset` "conn" and its renames, `event.duration` in seconds)
-  and salt/elasticsearch/files/ingest/zeek.common (`log.id.uid`, `source.*`, `observer.name` from `agent.name`).
+  c29f11863e96b86540fae76386c5e5ec3b8fe7d4 (`event.dataset` "conn" and its renames, `event.duration` in seconds),
+  salt/elasticsearch/files/ingest/zeek.common (`log.id.uid`, `source.*`, `observer.name` from `agent.name`) and
+  salt/elasticsearch/files/ingest-dynamic/common at commit 742649a33797ceb85a111402fb48cd3839d2fcbb (the dataset
+  prefixed with the module: "zeek.conn").
+
+The analyzer logs' records and writers are in tests/fixtures/zeek_logs.py.
 """
 from __future__ import annotations
 
@@ -30,6 +34,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
 from romulus.evidence.community import community_id
+from tests.fixtures import zeek_logs
 
 SENSOR = "sensor-zeek-01"
 # Malcolm, Elastic and Security Onion keep Zeek's first-packet time to the millisecond, so the logical records here
@@ -194,13 +199,15 @@ def elastic(conn: Conn, nid: str = "el-1", *, sensor: str | None = SENSOR, origi
     return hit("elastic", _prune(source), nid)
 
 
-def security_onion(conn: Conn, nid: str = "so-1", *, sensor: str | None = SENSOR) -> dict:
-    """Security Onion 2.4's document for one conn row. Its `message` keeps the Zeek line: a normalizer never
-    parses it."""
+def security_onion(conn: Conn, nid: str = "so-1", *, sensor: str | None = SENSOR, bare: bool = False) -> dict:
+    """Security Onion 2.4's document for one conn row: its common pipeline prefixes the dataset with the module
+    ("zeek.conn"); `bare`: a record that did not pass that pipeline ("conn"). Its `message` keeps the Zeek line: a
+    normalizer never parses it."""
     source = {
         "@timestamp": iso_ms(conn.ts), "message": json.dumps(zeek_json(conn)),
-        "event": {"module": "zeek", "dataset": "conn", "category": "network", "duration": conn.duration},
-        "data_stream": {"dataset": "zeek"}, "observer": {"name": sensor},
+        "event": {"module": "zeek", "dataset": "conn" if bare else "zeek.conn", "category": "network",
+                  "duration": conn.duration},
+        "data_stream": {"dataset": "zeek", "namespace": "so"}, "observer": {"name": sensor}, "tags": ["conn"],
         "source": {"ip": conn.orig_h, "port": conn.orig_p}, "destination": {"ip": conn.resp_h, "port": conn.resp_p},
         "client": {"ip": conn.orig_h, "port": conn.orig_p, "bytes": conn.orig_bytes, "packets": conn.orig_pkts,
                    "ip_bytes": conn.orig_ip_bytes},
@@ -231,8 +238,11 @@ def plain(conn: Conn, nid: str = "pl-1", *, path: str | None = "conn", expanded:
 WRITERS = {"malcolm": malcolm, "elastic": elastic, "security_onion": security_onion, "plain": plain}
 
 
-def in_every_shape(conn: Conn, prefix: str = "") -> dict[str, dict]:
-    return {shape: WRITERS[shape](conn, f"{prefix}{shape}") for shape in SHAPES}
+def in_every_shape(record: Conn | zeek_logs.Row, prefix: str = "") -> dict[str, dict]:
+    """The logical record in every shape that writes its log (a conn record, or an analyzer log's row)."""
+    if isinstance(record, zeek_logs.Row):
+        return zeek_logs.in_every_shape(record, prefix)
+    return {shape: WRITERS[shape](record, f"{prefix}{shape}") for shape in SHAPES}
 
 
 # ---- the logical records the tests need ---------------------------------------------------------------------------
@@ -284,7 +294,7 @@ TUNNELLED = Conn(uid="CinnerTunnel001", tunnel_parents=(PARENT_UID,), resp_p=80,
 FULL = Conn(tunnel_parents=(PARENT_UID,), vlan=110, inner_vlan=220, ja4t="64240_2-4-8-1-3_1460_8",
             ja4ts="65160_2-4-8-1-3_1460_7", ja4l="1050_64", ja4ls="2120_128")
 # a logical record per catalogued log (the gate test fails when a catalogued log has none)
-LOG_FIXTURES = {"conn": FULL}
+LOG_FIXTURES: dict[str, Conn | zeek_logs.Row] = {"conn": FULL, **zeek_logs.ROWS}
 MULTI_SERVICE = Conn(resp_p=445, service="gssapi,smb,krb,dce_rpc,ntlm")
 REMOVED_SERVICE = Conn(resp_p=8443, service="http,-ssl")
 SPICY_SERVICE = Conn(resp_p=88, service="spicy_krb_tcp")
@@ -338,7 +348,7 @@ def malformed_rows() -> list[tuple[str, dict, str]]:
     # no readable log name: not taken as Zeek, the record keeps the path it took before (here an Arkime session)
     mutated("no-log-name", "malcolm", lambda s: s["event"].pop("dataset"), "not-zeek")
     mutated("log-name-number", "security_onion", lambda s: s["event"].update(dataset=5), "error")
-    mutated("uncatalogued-log", "malcolm", lambda s: s["event"].update(dataset="weird"), "skip")
+    mutated("uncatalogued-log", "malcolm", lambda s: s["event"].update(dataset="kerberos"), "skip")
     mutated("dataset-array-uncatalogued", "malcolm", lambda s: s["event"].update(dataset=["smb_files", "smb_cmd"]),
             "skip")
     # a list naming a catalogued log is that log only when the row carries the log's object
@@ -518,6 +528,31 @@ def previous_shapes() -> dict[str, list[dict]]:
         **_previous_network(),
     }
     return {**{name: [h] for name, h in single.items()}, **_host_records()}
+
+
+def dispatch_records() -> dict[str, list[dict]]:
+    """Every record group the dispatch golden holds: the previous shapes, and Zeek rows of every catalogued log in every
+    shape that writes it (named zeek-<log>-<shape>), Zeek 5.0's files layout, and the conn record of a Security Onion
+    sensor whose records did not pass its common pipeline. Each group's rows name a sensor of their own, so no copy
+    merges across groups in the one-batch reading."""
+    out = dict(previous_shapes())
+    for name, record in LOG_FIXTURES.items():
+        for shape in zeek_logs.shapes_of(name) if name != "conn" else SHAPES:
+            nid, sensor = f"golden-{shape}-{name}", f"sensor-{shape}-{name}"
+            if name == "conn":
+                h = WRITERS[shape](record, nid) if shape == "plain" else WRITERS[shape](record, nid, sensor=sensor)
+            else:
+                h = zeek_logs.WRITERS[shape](record, nid) if shape == "plain" else \
+                    zeek_logs.WRITERS[shape](record, nid, sensor=sensor)
+            out[f"zeek-{name}-{shape}"] = [h]
+    for shape in SHAPES:
+        nid, sensor = f"golden-{shape}-files-5.0", f"sensor-{shape}-files-5.0"
+        writer = zeek_logs.WRITERS[shape]
+        out[f"zeek-files-5.0-{shape}"] = [writer(zeek_logs.FILES_50, nid) if shape == "plain"
+                                          else writer(zeek_logs.FILES_50, nid, sensor=sensor)]
+    out["zeek-conn-security_onion-bare"] = [security_onion(FULL, "golden-security_onion-bare",
+                                                           sensor="sensor-security_onion-bare", bare=True)]
+    return out
 
 
 def _previous_network() -> dict[str, dict]:

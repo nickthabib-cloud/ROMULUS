@@ -354,6 +354,13 @@ def test_recognition_reads_only_shipper_written_fields_and_one_record_matches_on
     assert zeek_record(zf.elastic(zf.Conn())["_source"]).shape == "elastic"
     assert zeek_record(zf.elastic(zf.Conn(), filebeat=True)["_source"]).shape == "elastic"
     assert zeek_record(zf.security_onion(zf.Conn())["_source"]).shape == "security_onion"
+    assert zeek_record(zf.security_onion(zf.Conn(), bare=True)["_source"]).shape == "security_onion"
+    # Security Onion's indexed dataset is zeek.<log>, like Elastic's: its agent's one data stream "zeek" and the module
+    # tell it apart; an Elastic Agent document's data stream is zeek.<stream> itself
+    so_real = zf.security_onion(zf.Conn())["_source"]
+    assert so_real["event"]["dataset"] == "zeek.conn" and so_real["data_stream"]["dataset"] == "zeek"
+    assert zeek_record({**so_real, "data_stream": {"dataset": "zeek.connection"}}).shape == "elastic"
+    assert zeek_record({**so_real, "event": {**so_real["event"], "module": None}}).shape == "elastic"
     assert zeek_record(zf.plain(zf.Conn())["_source"]) is None            # nothing the shipper wrote says Zeek
     suricata = zf.previous_shapes()["malcolm-suricata-flow"][0]["_source"]
     assert zeek_record({**suricata, "event": {**suricata["event"], "module": "zeek"}}) is None   # provider decides
@@ -372,12 +379,19 @@ def test_recognition_reads_only_shipper_written_fields_and_one_record_matches_on
 
 
 def test_every_catalogued_log_has_a_fixture_in_every_shape():
-    """Gate: a log added to the catalog needs a logical fixture written in all four shapes that normalizes to it."""
+    """Gate: a log added to the catalog needs a logical fixture written in every shape that normalizes to it. A shape
+    may be left out only when the catalog says why (its shipper publishes no pipeline for the log), and then the
+    fixture factory writes no record of the log in that shape either."""
     assert set(zf.SHAPES) == set(SHAPES)
     for log in ZEEK_LOGS:
         assert log.name in zf.LOG_FIXTURES, f"no fixture for catalogued Zeek log {log.name}"
-        assert set(log.names) == set(SHAPES), f"{log.name} is not catalogued for every shape"
-        for shape, h in zf.in_every_shape(zf.LOG_FIXTURES[log.name]).items():
+        declared = set(log.names) | set(log.absent_shapes)
+        assert declared == set(SHAPES), f"{log.name}: a shape is neither catalogued nor declared absent"
+        assert not set(log.names) & set(log.absent_shapes), log.name
+        assert all(reason for reason in log.absent_shapes.values()), log.name
+        written = zf.in_every_shape(zf.LOG_FIXTURES[log.name])
+        assert set(written) == set(log.names), f"{log.name}: fixture shapes {sorted(written)}"
+        for shape, h in written.items():
             event = normalize(h)
             assert (event.family, event.get("zeek.log")) == (log.family, log.name), shape
 
@@ -385,19 +399,21 @@ def test_every_catalogued_log_has_a_fixture_in_every_shape():
 def test_uncatalogued_logs_are_skips_the_sweep_counts_as_unevaluated_never_errors():
     """Every uncatalogued log in every shape is also in the dispatch golden, compared with what it was before."""
     malcolm = zf.malcolm(zf.Conn())
-    malcolm["_source"]["event"]["dataset"] = "dns"
+    malcolm["_source"]["event"]["dataset"] = "kerberos"
     elastic = zf.elastic(zf.Conn())
-    elastic["_source"]["event"]["dataset"] = "zeek.dns"
+    elastic["_source"]["event"]["dataset"] = "zeek.kerberos"
     so = zf.security_onion(zf.Conn())
-    so["_source"]["event"]["dataset"] = "dns"
+    so["_source"]["event"]["dataset"] = "zeek.kerberos"
+    bare = zf.security_onion(zf.Conn(), "so-bare", bare=True)
+    bare["_source"]["event"]["dataset"] = "kerberos"
     listed = zf.malcolm(zf.Conn(), "listed")
     listed["_source"]["event"]["dataset"] = ["smb_files", "smb_cmd"]
-    events, skips, errors = normalize_hits([malcolm, elastic, so, listed])
+    events, skips, errors = normalize_hits([malcolm, elastic, so, bare, listed])
     assert events == [] and errors == []
-    assert skips == {"dataset:dns is not normalized": 2, "dataset:zeek.dns is not normalized": 1,
+    assert skips == {"dataset:kerberos is not normalized": 2, "dataset:zeek.kerberos is not normalized": 2,
                      "dataset:['smb_files', 'smb_cmd'] is not normalized": 1}
-    with pytest.raises(ZeekNotNormalized, match=r"^dataset:dns is not normalized$"):
-        normalize_plain_zeek(zf.plain(zf.Conn(), path="dns"))
+    with pytest.raises(ZeekNotNormalized, match=r"^dataset:kerberos is not normalized$"):
+        normalize_plain_zeek(zf.plain(zf.Conn(), path="kerberos"))
 
 
 def test_errors_are_tagged_with_the_dispatch_token():

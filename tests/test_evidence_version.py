@@ -20,7 +20,7 @@ from romulus.hunt import packets as packet_stage
 from romulus.sources import packets as packet_sources
 
 # The files that turn ES/OpenSearch records into typed events (not shellparse.py, which only detectors use).
-EVIDENCE_FILES = ("__init__.py", "auditd.py", "community.py", "normalize.py", "typed.py")
+EVIDENCE_FILES = ("__init__.py", "auditd.py", "certificates.py", "community.py", "normalize.py", "typed.py")
 PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf2116524009",
                    10: "e4dffd0944b86200b3c94aa301bead206967c58f565b30d426ee0071bd4f1aa9",
                    11: "150e5e4d74cb0f4891ef4cca7114a709f2038a42fc456e69f7952dcf0f6c9b32",
@@ -30,7 +30,10 @@ PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf211
                    # Arkime ICMP lists and Zeek ICMP type/address-family semantics are normalized truthfully.
                    # Then Zeek records moved to their own producer (zeek-ecs); no other record's output changed
                    # (tests/test_zeek_dispatch.py compares every previous shape with its output before the move).
-                   14: "3d5a2d51777d13d7f6e4d9f93f88b3a8d49a9b881e3e80f9c612f7c08b5c23e4"}
+                   # The certificate contract moved to certificates.py, shared with the Zeek producer, and the
+                   # observer families gained app_tx and x509_certificate: no output of this producer changed (the
+                   # same golden compares every one of its records).
+                   14: "059d8d188d6311d24094007ba4525d28ddba654d248e551f0a3dc0ab302a5890"}
 WINDOWS_EVIDENCE_FILES = ("community.py", "windows.py", "windows_catalog.py", "windows_reassembly.py")
 PINNED_WINDOWS = {
     "windows-ecs@1": "8c2f1668700a3f7d0a143eef00473770e2e5c746fadf6ce3b2c95ae6bbe6a419",
@@ -38,9 +41,9 @@ PINNED_WINDOWS = {
     "windows-ecs@3": "f0a941924e4c0b95b0e2f9dbc2635ae325708c7739b3fcf780e803e7dbfdf203",
     "windows-ecs@4": "6d31ffa710c230e79dc39509fd40740e69c35240028cfbc0a4759cb587dafd7d",
 }
-ZEEK_EVIDENCE_FILES = ("community.py", "zeek.py", "zeek_catalog.py")
+ZEEK_EVIDENCE_FILES = ("certificates.py", "community.py", "zeek.py", "zeek_catalog.py")
 PINNED_ZEEK = {
-    "zeek-ecs@1": "cd9e46fc19d3a4c0b9e2fd56d724b5d6e3afab3bec2e39ea62e44b436cae3e45",
+    "zeek-ecs@1": "86d24dc8c57adbeb769d7eb31f158102742814f228d29d877b2dcc7b2087957b",
 }
 # The packet stage's normalizer: HTTP bodies rebuilt by TShark -> http_body events, and TCP connections rebuilt
 # from per-segment payload -> tcp_stream events (with the shell analysis and the tables it reads).

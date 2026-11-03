@@ -14,7 +14,9 @@ import pytest
 
 from romulus.evidence import zeek
 from romulus.evidence.normalize import normalize_hits
+from romulus.evidence.zeek_catalog import ZEEK_LOGS
 from tests.fixtures import zeek_factory as zf
+from tests.fixtures import zeek_logs as zl
 
 PAGE = 250
 PAGES = 16
@@ -30,7 +32,42 @@ def test_the_stamped_volume_rows_are_the_written_layout():
 def test_every_normalizer_cache_has_a_fixed_size():
     assert zeek._address.cache_info().maxsize == 65536
     assert zeek._parts.cache_info().maxsize == 4096
-    assert zeek._compiled.cache_info().maxsize == 1024
+    assert zeek._compiled.cache_info().maxsize == 4096
+
+
+def test_the_catalog_fits_its_caches():
+    """A hunt over every shape and log never evicts a compiled path or a split path it will need again."""
+    pairs = sum(len(spec.paths) for log in ZEEK_LOGS for spec in log.fields)
+    paths = {path for log in ZEEK_LOGS for spec in log.fields for each in spec.paths.values() for path in each}
+    assert pairs <= zeek._compiled.cache_info().maxsize // 2
+    assert len(paths) <= zeek._parts.cache_info().maxsize // 2
+
+
+def test_analyzer_log_memory_returns_to_its_level_after_every_page():
+    """The analyzer logs stream as conn does: a page of mixed dns, http, ssl, files and notice rows leaves nothing
+    behind once the caches are warm."""
+    stream = zl.stream_rows(PAGE * (PAGES + 1))
+    pages = (list(itertools.islice(stream, PAGE)) for _ in range(PAGES + 1))
+    tracemalloc.start()
+    try:
+        warm, skips, errors = normalize_hits(next(pages))
+        assert (skips, errors) == ({}, []) and len(warm) == PAGE
+        del warm
+        gc.collect()
+        baseline = tracemalloc.get_traced_memory()[0]
+        levels = []
+        for page in pages:
+            typed, _skips, _errors = normalize_hits(page)
+            assert len(typed) == PAGE
+            del typed, page
+            gc.collect()
+            levels.append(tracemalloc.get_traced_memory()[0] - baseline)
+    finally:
+        tracemalloc.stop()
+    shown = [round(level / 2**10, 1) for level in levels]
+    assert max(levels) <= RESIDUE, shown
+    later = levels[PAGES // 2:]
+    assert max(later) - min(later) <= RESIDUE // 4, shown
 
 
 def test_memory_returns_to_its_level_after_every_page():

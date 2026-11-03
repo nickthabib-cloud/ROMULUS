@@ -2,8 +2,9 @@
 
 The sweep counts every record whose skip names an unread dataset as a record no rule evaluated, which keeps every
 rule's search over that partition partial. Zeek rows of logs outside the catalog must keep that skip: a partition
-holding Zeek dns rows beside Suricata dns records is searched in part for a DNS rule, never in full, and one holding
-only Zeek dns rows is never "no data in scope". The sweep is called as it is, through its partition runner.
+holding Zeek kerberos rows beside Suricata dns records is searched in part for a DNS rule, never in full, and one
+holding only Zeek kerberos rows is never "no data in scope". The sweep is called as it is, through its partition
+runner.
 """
 from datetime import timedelta
 
@@ -31,9 +32,10 @@ def _suricata_dns() -> dict:
     return zf.previous_shapes()["malcolm-suricata-dns"][0]
 
 
-def _zeek_dns(shape: str) -> dict:
-    h = zf.WRITERS[shape](zf.UDP_DNS, f"zeek-dns-{shape}")
-    h["_source"]["event"]["dataset"] = "zeek.dns" if shape == "elastic" else "dns"
+def _zeek_unread(shape: str) -> dict:
+    """A Zeek row of a log outside the catalog (kerberos) as each shipper names it."""
+    h = zf.WRITERS[shape](zf.UDP_DNS, f"zeek-kerberos-{shape}")
+    h["_source"]["event"]["dataset"] = "kerberos" if shape == "malcolm" else "zeek.kerberos"
     return h
 
 
@@ -53,12 +55,12 @@ def _cell(monkeypatch, records):
 
 @pytest.mark.parametrize("shape", ["malcolm", "elastic", "security_onion"])
 def test_zeek_rows_of_an_unread_log_keep_a_rule_beside_them_searched_in_part(monkeypatch, shape):
-    cell = _cell(monkeypatch, [_suricata_dns(), _zeek_dns(shape)])
+    cell = _cell(monkeypatch, [_suricata_dns(), _zeek_unread(shape)])
     assert cell["state"] == "evaluated_partial" and cell["evaluated"] > 0
     assert any("is not normalized" in reason for reason in cell["detail"]["reasons"])
 
 
 @pytest.mark.parametrize("shape", ["malcolm", "elastic", "security_onion"])
 def test_zeek_rows_of_an_unread_log_alone_are_never_no_data_in_scope(monkeypatch, shape):
-    cell = _cell(monkeypatch, [_zeek_dns(shape)])
+    cell = _cell(monkeypatch, [_zeek_unread(shape)])
     assert cell["state"] == "evaluated_partial" and cell["evaluated"] == 0
