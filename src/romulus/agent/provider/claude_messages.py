@@ -3,12 +3,15 @@ install, imported only when this adapter is built).
 
 AGENT_BASE_URL defaults to https://api.anthropic.com, a remote endpoint: telemetry may reach it only under
 ROMULUS_MODEL_EGRESS=lab-public-data, over https. The SDK is given the key from AGENT_API_KEY, an HTTP client built
-here (no environment proxy, no redirects, every request pinned to the classified host and stripped of headers the
-environment would add) and no retries of its own, so the port's one retry policy applies. Credentials, endpoints,
-headers, logging and tracing the SDK would otherwise read from the environment are not used.
+here (no environment proxy, no redirects, every request pinned to the classified host and sent with an allowlist of
+headers rebuilt from the request) and no retries of its own, so the port's one retry policy applies. Credentials,
+endpoints, headers, logging and tracing the SDK would otherwise read from the environment are not used. Each call
+reports every attempt the API billed, with the model that served it (a refusal-fallback answer, or an attempt that
+broke off mid-reply at its full output allowance), so budgets price each attempt by its own model.
 
 Translation: leading system messages become the top-level system prompt and later ones mid-conversation system
-messages; assistant tool calls become tool_use blocks; consecutive tool results go back in one user message. Tools
+messages, placed where the API accepts them (after a user turn, last or before an assistant turn; anything else is a
+HistoryError); assistant tool calls become tool_use blocks; consecutive tool results go back in one user message. Tools
 are sent strict, and a schema outside the strict subset the API documents is refused before anything is sent; a
 response schema becomes output_config.format; sampling parameters are never sent. tool_choice "required" becomes
 "auto" with an instruction to call a tool, and a reply without one is invalid_tool_call. Thinking is adaptive,
@@ -19,16 +22,20 @@ growing conversation is cached automatically.
 
 Sessions must be append-only, or start fresh. Claude signs its thinking blocks, and they must go back unchanged, in
 their original place in the turn that produced them, in a conversation whose earlier turns are unchanged. Each
-reply's blocks travel in the provider state of its assistant message (ChatResult.assistant_message()). An assistant
-turn with tool calls but no provider state (history from another provider, or a trimmed or rebuilt turn), or whose
-text or tool calls no longer match it, raises HistoryError before anything is sent.
+reply's blocks travel in the provider state of its assistant message (ChatResult.assistant_message()), with the raw
+tool inputs the model streamed and the tools a required-tool instruction named, which is rebuilt from those names.
+Replay accepts only text, thinking, redacted-thinking and tool-use blocks with their known fields, as an assistant
+turn. An assistant turn with tool calls but no provider state (history from another provider, or a trimmed or
+rebuilt turn), a state that is malformed or holds anything else, a turn whose text or tool calls no longer match its
+state, or one that holds a configured secret, raises HistoryError before anything is sent.
 """
 from __future__ import annotations
 
 import copy
+import datetime
+import ipaddress
 import json
 import logging
-import os
 import re
 import time
 from collections.abc import Callable
@@ -40,6 +47,7 @@ from romulus.agent.provider.base import (
     ChatRequest,
     ChatResult,
     HistoryError,
+    ProviderUnavailable,
     ToolCall,
     TransientFailure,
     Usage,
@@ -55,7 +63,17 @@ FALLBACK_BETA = "server-side-fallback-2026-07-01"
 CACHE = {"type": "ephemeral"}            # five-minute cache entries
 OVERLOADED = 529
 RETRY_ERROR_TYPES = frozenset({"overloaded_error", "rate_limit_error", "api_error"})   # also sent mid-stream
-STOP_REASONS = {"end_turn": "stop", "tool_use": "tool_calls", "max_tokens": "length"}  # the rest are not a reply
+# the documented stop reasons that say what a reply is, in the port's words; any other is an error (stop_sequence
+# included: no stop sequence is ever sent)
+CLAUDE_STOP_REASONS = {"end_turn": "stop", "tool_use": "tool_calls", "max_tokens": "length", "refusal": "refusal"}
+
+# what a reply may hold and an assistant turn may replay: these block types, with only these fields
+BLOCK_KEYS = {"text": frozenset({"type", "text", "citations"}),
+              "thinking": frozenset({"type", "thinking", "signature"}),
+              "redacted_thinking": frozenset({"type", "data"}),
+              "tool_use": frozenset({"type", "id", "name", "input", "caller"})}
+STATE_KEYS = frozenset({"provider", "model", "content", "tool_inputs", "required_tools"})
+TOOL_NAME = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 # the JSON-schema subset strict tools and structured outputs accept, and its per-request complexity limits
 STRICT_TYPES = frozenset({"object", "array", "string", "integer", "number", "boolean", "null"})
@@ -84,6 +102,81 @@ class _Failed(Exception):
         self.error = error
 
 
+# ---- conversation shape ---------------------------------------------------------------------------------------
+
+def _instruction(names: list[str]) -> str:
+    return (f"Answer this turn by calling one of the provided tools ({', '.join(names)}). "
+            "A reply without a tool call is not accepted.")
+
+
+def _require_tool(out: list[dict], n, names: list[str]) -> None:
+    """Ask for a tool call in a system message after the last user turn: merged into a system message already
+    there, else appended. Rebuilt the same way when the reply is replayed, so the history stays append-only."""
+    text = _instruction(names)
+    if out and out[-1]["role"] == "system":
+        out[-1]["content"] = f"{out[-1]['content']}\n\n{text}"
+    elif out and out[-1]["role"] == "user":
+        out.append({"role": "system", "content": text, "_n": n})
+    else:
+        raise HistoryError(f"message {n}: a tool call can be required only after a user turn")
+
+
+def _check_placement(out: list[dict]) -> None:
+    """Mid-conversation system messages where the API accepts them: right after a user turn, and either last or
+    right before an assistant turn. Drops the bookkeeping field."""
+    for i, message in enumerate(out):
+        if message["role"] != "system":
+            continue
+        n = message.pop("_n", "?")
+        before = out[i - 1]["role"] if i else None
+        after = out[i + 1]["role"] if i + 1 < len(out) else None
+        if before != "user" or after not in (None, "assistant"):
+            raise HistoryError(f"message {n}: a system message after the first turn must follow a user turn and "
+                               "be the last message or come right before an assistant turn")
+
+
+def _state_problem(state) -> str:
+    """Why a provider state cannot be a reply this adapter stored (empty when it can)."""
+    if not isinstance(state, dict) or state.get("provider") != "anthropic":
+        return "it was not written by this adapter"
+    if set(state) - STATE_KEYS:
+        return f"unknown fields {sorted(set(state) - STATE_KEYS)}"
+    blocks, inputs = state.get("content"), state.get("tool_inputs", {})
+    if not isinstance(blocks, list) or not isinstance(inputs, dict) or not isinstance(state.get("model", ""), str):
+        return "malformed"
+    ids = []
+    for block in blocks:
+        kind = block.get("type") if isinstance(block, dict) else None
+        if kind not in BLOCK_KEYS:
+            return f"a {kind!r} block, which a reply to this adapter never holds"
+        if set(block) - BLOCK_KEYS[kind]:
+            return f"a {kind} block with unknown fields {sorted(set(block) - BLOCK_KEYS[kind])}"
+        strings = {"text": ("text",), "thinking": ("thinking", "signature"), "redacted_thinking": ("data",),
+                   "tool_use": ("id", "name")}[kind]
+        if any(not isinstance(block.get(key), str) for key in strings) or block.get("citations") is not None:
+            return f"a malformed {kind} block"
+        if kind == "tool_use":
+            if not isinstance(block.get("input"), dict) or block.get("caller") not in (None, {"type": "direct"}):
+                return "a malformed tool_use block"
+            ids.append(block["id"])
+    if sorted(ids) != sorted(inputs) or not all(isinstance(v, str) for v in inputs.values()):
+        return "tool inputs that do not match its tool calls"
+    required = state.get("required_tools", [])
+    if not isinstance(required, list) or not all(isinstance(r, str) and TOOL_NAME.fullmatch(r) for r in required):
+        return "malformed required tools"
+    return ""
+
+
+def _same_arguments(given, stored_raw: str) -> bool:
+    """The tool-call arguments of a message against the raw input the model streamed for it."""
+    if isinstance(given, str):
+        return given == stored_raw
+    try:
+        return given is not None and json.loads(stored_raw) == given
+    except json.JSONDecodeError:
+        return False
+
+
 def _import_sdk():
     import anthropic
 
@@ -94,11 +187,11 @@ def _import_sdk():
 
 
 def _pinned_transport(httpx2, inner, *, target, authorization: str, betas: frozenset[str], api_version: str,
-                      drop: frozenset[str]):
-    """An httpx2 transport that refuses any request not addressed to `target` and fixes the headers that carry
-    credentials and API options, whatever the SDK merged in from the environment."""
+                      user_agent: str):
+    """An httpx2 transport that refuses any request not addressed to `target` and sends only the headers this
+    adapter vouches for, rebuilt from the request itself: never the credentials, API options or framing headers the
+    SDK merges in from the environment (ANTHROPIC_CUSTOM_HEADERS)."""
     expected = (target.scheme, target.host, target.port)
-    drop = drop - {"authorization", "anthropic-version", "anthropic-beta"}      # set or filtered below
 
     class PinnedTransport(httpx2.BaseTransport):
         def __init__(self):
@@ -109,17 +202,19 @@ def _pinned_transport(httpx2, inner, *, target, authorization: str, betas: froze
             if (url.scheme, url.host, url.port) != expected:
                 raise EgressViolation(f"refused a request to {url.scheme}://{url.host}: only "
                                       f"{target.scheme}://{target.host} was classified for egress")
-            headers = request.headers
-            for name in drop | {"x-api-key"}:
-                if name in headers:
-                    del headers[name]
-            headers["authorization"] = authorization
-            headers["anthropic-version"] = api_version
-            asked = [b.strip() for b in headers.get("anthropic-beta", "").split(",") if b.strip() in betas]
+            body = request.read()
+            headers = [("host", url.netloc.decode("ascii")), ("accept", "application/json"),
+                       ("accept-encoding", "gzip, deflate"), ("connection", "keep-alive"),
+                       ("user-agent", user_agent), ("authorization", authorization),
+                       ("anthropic-version", api_version)]
+            asked = [b.strip() for b in request.headers.get("anthropic-beta", "").split(",") if b.strip() in betas]
             if asked:
-                headers["anthropic-beta"] = ",".join(asked)
-            elif "anthropic-beta" in headers:
-                del headers["anthropic-beta"]
+                headers.append(("anthropic-beta", ",".join(dict.fromkeys(asked))))
+            # the SDK's own client metadata (language, version, retry count, timeouts)
+            headers += [(k, v) for k, v in request.headers.items() if k.lower().startswith("x-stainless-")]
+            if body or request.method == "POST":
+                headers += [("content-type", "application/json"), ("content-length", str(len(body)))]
+            request.headers = httpx2.Headers(headers)
             return self.inner.handle_request(request)
 
         def close(self):
@@ -215,9 +310,14 @@ def strict_schema_problems(schema, counts: dict | None = None) -> list[str]:
             problems.append(f"{path}: enum must list strings, numbers, booleans or nulls")
         if "format" in node and node["format"] not in STRICT_FORMATS:
             problems.append(f"{path}: format {node['format']!r} is not supported")
-        if "pattern" in node and (not isinstance(node["pattern"], str)
-                                  or UNSUPPORTED_PATTERN.search(node["pattern"])):
-            problems.append(f"{path}: the pattern uses an unsupported regular-expression feature")
+        if "pattern" in node:
+            if not isinstance(node["pattern"], str) or UNSUPPORTED_PATTERN.search(node["pattern"]):
+                problems.append(f"{path}: the pattern uses an unsupported regular-expression feature")
+            else:
+                try:
+                    re.compile(node["pattern"])
+                except re.error as exc:
+                    problems.append(f"{path}: the pattern is not a valid regular expression ({exc})")
         for key in ("anyOf", "allOf"):
             if key in node:
                 if not isinstance(node[key], list) or not node[key]:
@@ -251,9 +351,8 @@ def strict_schema_problems(schema, counts: dict | None = None) -> list[str]:
 
 
 def _is_type(value, kind: str) -> bool:
-    if kind == "integer":
-        return (isinstance(value, int) and not isinstance(value, bool)) or (
-            isinstance(value, float) and value.is_integer())
+    if kind == "integer":      # 5.0 and True are not integers
+        return isinstance(value, int) and not isinstance(value, bool)
     if kind == "number":
         return isinstance(value, (int, float)) and not isinstance(value, bool)
     if kind == "null":
@@ -266,9 +365,53 @@ def _same(a, b) -> bool:
     return a == b and isinstance(a, bool) == isinstance(b, bool)
 
 
+_OFFSET = r"(?:[Zz]|[+-]\d{2}:\d{2})"
+_FORMATS = {
+    "date-time": re.compile(rf"\d{{4}}-\d{{2}}-\d{{2}}[Tt ]\d{{2}}:\d{{2}}:\d{{2}}(?:\.\d+)?{_OFFSET}"),
+    "time": re.compile(rf"\d{{2}}:\d{{2}}:\d{{2}}(?:\.\d+)?{_OFFSET}"),
+    "date": re.compile(r"\d{4}-\d{2}-\d{2}"),
+    "duration": re.compile(r"P(?=\d|T\d)(?:\d+Y)?(?:\d+M)?(?:\d+W)?(?:\d+D)?(?:T(?=\d)(?:\d+H)?(?:\d+M)?"
+                           r"(?:\d+(?:\.\d+)?S)?)?"),
+    "uuid": re.compile(r"[0-9A-Fa-f]{8}-(?:[0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}"),
+    "uri": re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:[^\s<>\"{}|\\^`]*"),
+}
+_LABEL = re.compile(r"(?!-)[A-Za-z0-9-]{1,63}(?<!-)")
+
+
+def _hostname_ok(value: str) -> bool:
+    return 0 < len(value.rstrip(".")) <= 253 and all(_LABEL.fullmatch(label) for label in value.rstrip(".").split("."))
+
+
+def _format_ok(value: str, kind: str) -> bool:
+    """The string formats the strict subset allows, checked as RFC 3339 / ISO 8601 / RFC 1123 / RFC 3986 define
+    them (an unknown format is refused up front by strict_schema_problems)."""
+    try:
+        if kind in _FORMATS and not _FORMATS[kind].fullmatch(value):
+            return False
+        if kind == "date-time":
+            datetime.datetime.fromisoformat(value.replace("z", "Z").replace("t", "T").replace(" ", "T"))
+        elif kind == "time":
+            datetime.time.fromisoformat(value.replace("z", "Z"))
+        elif kind == "date":
+            datetime.date.fromisoformat(value)
+        elif kind == "ipv4":
+            ipaddress.IPv4Address(value)
+        elif kind == "ipv6":
+            ipaddress.IPv6Address(value)
+        elif kind == "hostname":
+            return _hostname_ok(value)
+        elif kind == "email":
+            local, _, domain = value.rpartition("@")
+            return bool(local) and len(local) <= 64 and not any(c.isspace() for c in local) and _hostname_ok(domain)
+        elif kind not in _FORMATS:
+            return False
+        return True
+    except ValueError:
+        return False
+
+
 def instance_problems(value, schema: dict, root: dict | None = None, path: str = "$") -> list[str]:
-    """Why `value` does not match `schema` (a schema inside the strict subset). String formats are left to the
-    API's grammar and not checked here."""
+    """Why `value` does not match `schema` (a schema inside the strict subset, string formats included)."""
     root = root if root is not None else schema
     if not isinstance(schema, dict):
         return []
@@ -303,12 +446,14 @@ def instance_problems(value, schema: dict, root: dict | None = None, path: str =
         if isinstance(schema.get("items"), dict):
             for n, item in enumerate(value):
                 problems += instance_problems(item, schema["items"], root, f"{path}[{n}]")
-    if isinstance(value, str) and isinstance(schema.get("pattern"), str):
+    if isinstance(value, str) and "pattern" in schema:
         try:
             if not re.search(schema["pattern"], value):
                 problems.append(f"{path}: does not match the pattern")
-        except re.error:
-            pass
+        except (re.error, TypeError):       # refused up front by strict_schema_problems; never skipped here
+            problems.append(f"{path}: the schema's pattern cannot be checked")
+    if isinstance(value, str) and "format" in schema and not _format_ok(value, schema["format"]):
+        problems.append(f"{path}: not a valid {schema['format']}")
     return problems
 
 
@@ -332,15 +477,13 @@ class ClaudeMessagesProvider(ChatProvider):
         self.betas = (FALLBACK_BETA,) if settings.agent_refusal_fallback == "default" else ()
         self._window: int | None = None
         key = settings.agent_api_key.get_secret_value()
-        # header names the SDK would merge in from ANTHROPIC_CUSTOM_HEADERS (credentials, API options, anything)
-        drop = frozenset(line.split(":", 1)[0].strip().lower()
-                         for line in os.environ.get("ANTHROPIC_CUSTOM_HEADERS", "").split("\n") if ":" in line)
+        timeout = float(settings.agent_timeout_seconds)
         # an explicit transport: the SDK's default one would mount the environment's (or the registry's) proxies
         inner = transport if transport is not None else httpx2.HTTPTransport(trust_env=False)
         self.transport = _pinned_transport(httpx2, inner, target=httpx2.URL(self.base_url),
                                            authorization=f"Bearer {key}", betas=frozenset(self.betas),
-                                           api_version=ANTHROPIC_API_VERSION, drop=drop)
-        timeout = float(settings.agent_timeout_seconds)
+                                           api_version=ANTHROPIC_API_VERSION,
+                                           user_agent=f"Anthropic/Python {anthropic.__version__}")
         http = anthropic.DefaultHttpxClient(transport=self.transport, trust_env=False, follow_redirects=False,
                                             timeout=timeout)
         self.client = anthropic.Anthropic(api_key=key, base_url=self.base_url, http_client=http, max_retries=0,
@@ -378,35 +521,67 @@ class ClaudeMessagesProvider(ChatProvider):
         if problems:
             return failed("error", "not sent: outside the strict JSON-schema subset the API accepts: "
                                    + "; ".join(problems[:10]))
-        body, before = self._body(request, messages, max_out)
+        body, required = self._body(request, messages, max_out)
         raw_inputs: dict[int, str] = {}
         attempts = [0]
+        broken: list[dict] = []          # attempts that broke off after their reply began: billed all the same
 
         def once():
             attempts[0] += 1
             raw_inputs.clear()
-            return self._stream(body, raw_inputs)
+            began: dict = {}
+            try:
+                return self._stream(body, raw_inputs, began)
+            except (TransientFailure, _Failed):
+                if began:
+                    broken.append(self._broken_attempt(began, max_out))
+                raise
 
         t0 = time.monotonic()
         try:
             message, ms, n = self._retrying(once)
         except _Failed as exc:
-            return failed(exc.status, exc.error, int((time.monotonic() - t0) * 1000), attempts[0])
-        return self._result(request, message, raw_inputs, before, est, ms, n)
+            result = failed(exc.status, exc.error, int((time.monotonic() - t0) * 1000), attempts[0])
+            if broken:
+                result.details = {"billed": broken}
+            return result
+        except ProviderUnavailable as exc:
+            exc.billed = broken      # for AgentBudget.charge_failure: the provider billed these attempts
+            raise
+        return self._result(request, message, raw_inputs, required, est, ms, n, broken)
 
-    def _stream(self, body: dict, raw_inputs: dict[int, str]):
-        """One streamed request and its final message, with each tool input's raw JSON as it arrived."""
+    def _broken_attempt(self, began: dict, max_out: int) -> dict:
+        """The charge of an attempt whose reply began and then broke off: its reported prompt, and its output at the
+        reported count when the stream got that far, else at the full allowance (never as an empty completion)."""
+        usage = began.get("usage")
+        read = getattr(usage, "cache_read_input_tokens", None) or 0
+        write = getattr(usage, "cache_creation_input_tokens", None) or 0
+        prompt = (getattr(usage, "input_tokens", None) or 0) + read + write
+        output = began.get("output_tokens")
+        return {"model": began.get("model") or "", "prompt": prompt, "completion": output if output is not None
+                else max_out, "cache_read": read, "cache_write": write, "worst_case": output is None}
+
+    def _stream(self, body: dict, raw_inputs: dict[int, str], began: dict):
+        """One streamed request and its final message, with each tool input's raw JSON as it arrived. `began` gets
+        the model and usage the reply started with, and the output count once the reply reports it."""
         sdk, httpx2 = self.sdk, self.httpx2
         try:
             with self.client.beta.messages.stream(**body) as stream:
                 for event in stream:
                     if event.type == "content_block_delta" and getattr(event.delta, "type", "") == "input_json_delta":
                         raw_inputs[event.index] = raw_inputs.get(event.index, "") + event.delta.partial_json
+                    elif event.type == "message_start":
+                        began.update(model=event.message.model, usage=event.message.usage)
+                    elif event.type == "message_delta":
+                        began["output_tokens"] = event.usage.output_tokens
                 try:
-                    return stream.get_final_message()
+                    message = stream.get_final_message()
                 except AssertionError:
-                    # the SDK has no message when the stream closed before it began (a dropped connection)
-                    raise TransientFailure("the reply stream ended before the reply began") from None
+                    message = None
+                if message is None:
+                    # no message: the stream closed before the reply began (a dropped connection)
+                    raise TransientFailure("the reply stream ended before the reply began")
+                return message
         except sdk.APIStatusError as exc:
             code, kind = exc.status_code, exc.type or ""
             detail = redact_text(str(exc.message), self.s)[:300]
@@ -448,8 +623,8 @@ class ClaudeMessagesProvider(ChatProvider):
             problems.append(f"{counts['union']} union-typed parameters (at most {MAX_UNION_PARAMETERS})")
         return problems
 
-    def _body(self, request: ChatRequest, messages: list[dict], max_out: int) -> tuple[dict, list[dict]]:
-        """The stream() arguments, and the messages this call adds ahead of its reply (replayed with it)."""
+    def _body(self, request: ChatRequest, messages: list[dict], max_out: int) -> tuple[dict, list[str]]:
+        """The stream() arguments, and the tools a required-tool instruction named (replayed with the reply)."""
         system, out = self._translate(request, messages)
         tools = [{"name": t.name, "description": t.description, "input_schema": t.parameters, "strict": True,
                   # inputs stream as generated; _tool_call parses and checks each one, as the API no longer does
@@ -460,13 +635,12 @@ class ClaudeMessagesProvider(ChatProvider):
             system[-1]["cache_control"] = dict(CACHE)
         elif tools:
             tools[-1]["cache_control"] = dict(CACHE)
-        before: list[dict] = []
+        required: list[str] = []
         if tools and request.tool_choice == "required":
-            # this model rejects a forced tool choice; the instruction is replayed with the reply it produced
-            names = ", ".join(t["name"] for t in tools)
-            before = [{"role": "system", "content": f"Answer this turn by calling one of the provided tools "
-                                                    f"({names}). A reply without a tool call is not accepted."}]
-            out += copy.deepcopy(before)
+            # this model rejects a forced tool choice; the instruction is rebuilt from these names on replay
+            required = [t["name"] for t in tools]
+            _require_tool(out, len(request.messages), required)
+        _check_placement(out)
         output_config: dict = {"effort": self.s.agent_effort}
         if request.response_schema is not None:
             output_config["format"] = {"type": "json_schema", "schema": request.response_schema}
@@ -483,7 +657,7 @@ class ClaudeMessagesProvider(ChatProvider):
         if self.betas:
             body["betas"] = list(self.betas)
             body["fallbacks"] = "default"
-        return body, before
+        return body, required
 
     def _translate(self, request: ChatRequest, messages: list[dict]) -> tuple[list[dict], list[dict]]:
         """Port messages to the top-level system blocks and Messages API messages. `messages` are the redacted
@@ -492,12 +666,14 @@ class ClaudeMessagesProvider(ChatProvider):
         out: list[dict] = []
         results: list[dict] | None = None      # the open user message of tool results
         for n, (original, m) in enumerate(zip(request.messages, messages)):
+            if not isinstance(m, dict):
+                raise HistoryError(f"message {n} is not a message object")
             role = m.get("role")
             if role != "tool":
                 results = None
             if role == "system":
                 if out:
-                    out.append({"role": "system", "content": _text(m)})     # a mid-conversation system message
+                    out.append({"role": "system", "content": _text(m), "_n": n})    # a mid-conversation one
                 else:
                     system.append({"type": "text", "text": _text(m)})
             elif role == "user":
@@ -505,7 +681,7 @@ class ClaudeMessagesProvider(ChatProvider):
                 out.append({"role": "user", "content": content if isinstance(content, str) else
                             [{"type": "text", "text": _text({"content": [part]})} for part in content or []]})
             elif role == "assistant":
-                out += self._assistant(n, original, m)
+                out += self._assistant(n, original, m, out)
             elif role == "tool":
                 block = {"type": "tool_result", "tool_use_id": str(m.get("tool_call_id") or ""), "content": _text(m)}
                 if m.get("is_error"):
@@ -518,7 +694,7 @@ class ClaudeMessagesProvider(ChatProvider):
                 raise HistoryError(f"message {n} has an unknown role {role!r}")
         return system, out
 
-    def _assistant(self, n: int, original: dict, m: dict) -> list[dict]:
+    def _assistant(self, n: int, original: dict, m: dict, out: list[dict]) -> list[dict]:
         state = original.get(PROVIDER_STATE)
         calls = original.get("tool_calls") or []
         if state is None:
@@ -528,30 +704,29 @@ class ClaudeMessagesProvider(ChatProvider):
                     "turn: it was built by another provider, or trimmed or rebuilt. Append each reply as "
                     "ChatResult.assistant_message() returns it; sessions must be append-only or start fresh")
             return [{"role": "assistant", "content": _text(m)}]
-        if not isinstance(state, dict) or state.get("provider") != self.name or not isinstance(
-                state.get("content"), list):
-            raise HistoryError(f"assistant message {n} carries provider state this adapter did not write")
-        blocks = state["content"]
-        stored_calls = [(b.get("id"), b.get("name"), b.get("input")) for b in blocks if b.get("type") == "tool_use"]
-        given_calls = []
-        for call in calls:
-            function = call.get("function") or {}
-            arguments = function.get("arguments")
-            try:
-                parsed = json.loads(arguments) if isinstance(arguments, str) else arguments
-            except json.JSONDecodeError:
-                parsed = arguments
-            given_calls.append((call.get("id"), function.get("name"), parsed))
-        stored_text = "".join(str(b.get("text", "")) for b in blocks if b.get("type") == "text")
-        if given_calls != stored_calls or _text(original) != stored_text:
+        problem = _state_problem(state)
+        if problem:
+            raise HistoryError(f"assistant message {n} carries provider state this adapter will not replay: {problem}")
+        blocks, raw_inputs = state["content"], state.get("tool_inputs") or {}
+        stored = [(b["id"], b["name"], raw_inputs.get(b["id"], "")) for b in blocks if b["type"] == "tool_use"]
+        given = [(c.get("id"), (c.get("function") or {}).get("name"), (c.get("function") or {}).get("arguments"))
+                 for c in calls if isinstance(c, dict)]
+        same_calls = len(given) == len(stored) == len(calls) and all(
+            g[:2] == s[:2] and _same_arguments(g[2], s[2]) for g, s in zip(given, stored, strict=True))
+        stored_text = "".join(b["text"] for b in blocks if b["type"] == "text")
+        if not same_calls or _text(original) != stored_text:
             raise HistoryError(f"assistant message {n} was changed after the model produced it; its signed "
                                "thinking no longer matches the turn. Sessions must be append-only or start fresh")
-        before = state.get("before") or []
-        return [*copy.deepcopy(before), {"role": "assistant", "content": copy.deepcopy(blocks)}]
+        replayed = [b.get("text") or b.get("thinking") or "" for b in blocks] + [s[2] for s in stored]
+        if any(redact_text(text, self.s) != text for text in replayed):
+            raise HistoryError(f"assistant message {n} holds a configured secret; it is never sent")
+        if state.get("required_tools"):
+            _require_tool(out, n, list(state["required_tools"]))
+        return [{"role": "assistant", "content": copy.deepcopy(blocks)}]
 
     # ---- reply ------------------------------------------------------------------------------------------------
-    def _result(self, request: ChatRequest, message, raw_inputs: dict[int, str], before: list[dict], est: int,
-                ms: int, attempts: int) -> ChatResult:
+    def _result(self, request: ChatRequest, message, raw_inputs: dict[int, str], required: list[str], est: int,
+                ms: int, attempts: int, broken: list[dict]) -> ChatResult:
         blocks = list(message.content or [])
         # after a fallback, only text from before the last switch carries over; the declined model's thinking and
         # tool calls are dropped, and the switch marker itself is an audit record the API ignores
@@ -559,16 +734,22 @@ class ClaudeMessagesProvider(ChatProvider):
         kept: list[dict] = []
         texts: list[str] = []
         calls: list[ToolCall] = []
+        tool_inputs: dict[str, str] = {}
+        foreign: list[str] = []
         for i, block in enumerate(blocks):
             if block.type == "fallback" or (i < boundary and block.type != "text"):
                 continue
-            kept.append(block.to_dict())
+            if block.type not in BLOCK_KEYS:
+                foreign.append(block.type)      # no server tools are offered: nothing else belongs in a reply
+                continue
+            kept.append({k: v for k, v in block.to_dict().items() if k in BLOCK_KEYS[block.type]})
             if block.type == "text":
                 texts.append(block.text)
             elif block.type == "tool_use":
                 raw = raw_inputs.get(i)
                 if raw is None:
                     raw = json.dumps(block.input) if block.input else ""
+                tool_inputs[block.id] = raw
                 calls.append(self._tool_call(block.id, block.name, raw, request))
         content = "".join(texts)
         native = message.stop_reason
@@ -586,26 +767,30 @@ class ClaudeMessagesProvider(ChatProvider):
         usage = message.usage
         iterations = [it for it in (getattr(usage, "iterations", None) or [])
                       if it.type in ("message", "fallback_message")]
-        if switches or any(it.type == "fallback_message" for it in iterations):
+        served_by_fallback = any(it.type == "fallback_message" for it in iterations)
+        if switches or served_by_fallback:
             details["fallback"] = {"served_by": message.model, "switches": switches}
-        if len(iterations) > 1:
-            # every attempt the API billed for this call, the declined ones included
-            details["billed"] = {
-                "prompt": sum(it.input_tokens + it.cache_creation_input_tokens + it.cache_read_input_tokens
-                              for it in iterations),
-                "completion": sum(it.output_tokens for it in iterations),
-                "cache_read": sum(it.cache_read_input_tokens for it in iterations),
-                "cache_write": sum(it.cache_creation_input_tokens for it in iterations)}
-        if usage is not None:
-            read, write = usage.cache_read_input_tokens or 0, usage.cache_creation_input_tokens or 0
-            tokens = Usage(usage.input_tokens + read + write, usage.output_tokens, read, write)
-        else:
-            tokens = Usage()
-        finish = "refusal" if native == "refusal" else STOP_REASONS.get(native, native) if native else None
+        read, write = (usage.cache_read_input_tokens or 0), (usage.cache_creation_input_tokens or 0)
+        tokens = Usage(usage.input_tokens + read + write, usage.output_tokens, read, write)
+        # every attempt the API billed for this call, each with the model that served it (the declined ones, and a
+        # call the fallback model serves outright, included), after any attempt that broke off before this one
+        attempts_billed = [{"model": it.model or ("" if served_by_fallback else message.model),
+                            "prompt": it.input_tokens + it.cache_creation_input_tokens + it.cache_read_input_tokens,
+                            "completion": it.output_tokens, "cache_read": it.cache_read_input_tokens,
+                            "cache_write": it.cache_creation_input_tokens} for it in iterations] or [
+            {"model": message.model, "prompt": tokens.prompt_tokens, "completion": tokens.completion_tokens,
+             "cache_read": read, "cache_write": write}]
+        details["billed"] = [*broken, *attempts_billed]
+        finish = CLAUDE_STOP_REASONS.get(native, native) if native else None
         result = self._finish(finish_reason=finish, content=content, tool_calls=calls, usage=tokens, est=est,
                               model_reported=str(message.model or ""), ms=ms,
                               raw=json.dumps(message.to_dict(mode="json"), sort_keys=True), attempts=attempts,
                               request=request, refusal=refusal)
+        if native and native not in CLAUDE_STOP_REASONS and result.status != "truncated_input":
+            # only the documented reasons say what the reply is; stop_sequence too, as none is ever sent
+            result.status, result.error = "error", f"unexpected stop reason {native!r}: not a complete reply"
+        if foreign and result.status in ("ok", "invalid_json", "invalid_tool_call"):
+            result.status, result.error = "error", f"the reply holds unexpected content blocks: {sorted(set(foreign))}"
         if result.status == "truncated_output" and not content and not calls:
             result.error += ("; nothing was produced before the limit (thinking used it all): raise "
                              "AGENT_THINKING_TOKENS or lower AGENT_EFFORT")
@@ -619,9 +804,11 @@ class ClaudeMessagesProvider(ChatProvider):
                 result.status, result.parsed = "invalid_json", None
                 result.error = "the reply does not match the requested schema: " + "; ".join(problems[:5])
         result.details = details
-        if result.status != "refused":
-            result.provider_state = {"provider": self.name, "model": message.model, "before": before,
-                                     "content": kept}
+        if result.status != "refused" and not foreign:
+            state: dict = {"provider": self.name, "model": message.model, "content": kept, "tool_inputs": tool_inputs}
+            if required:
+                state["required_tools"] = required
+            result.provider_state = state
         return result
 
     def _tool_call(self, call_id: str, name: str, raw: str, request: ChatRequest) -> ToolCall:

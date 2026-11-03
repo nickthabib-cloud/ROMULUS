@@ -11,7 +11,7 @@ from pathlib import Path
 
 import httpx
 
-from romulus.agent.provider import EGRESS_SWITCH_VALUE, agent_readiness, build_provider
+from romulus.agent.provider import EGRESS_SWITCH_VALUE, AgentNotReady, agent_readiness, build_provider
 from romulus.agent.provider.egress import Resolver, system_resolver
 from romulus.config import FULL_ACCESS_ROLE, Settings, redact_text
 from romulus.detect.netdef import INTERNAL_SETTING, SiteNetworks
@@ -290,7 +290,13 @@ def check_agent(s: Settings, transport: httpx.BaseTransport | None = None,
     if readiness.provider == "openai_compatible" and not s.agent_context_tokens and d.egress == "local":
         out.append(Check("agent.context", "warn", "AGENT_CONTEXT_TOKENS is 0: a local server that silently cuts "
                                                   "long prompts cannot be detected; set it to the model's context window"))
-    provider = build_provider(s, transport=transport, resolver=resolver, readiness=readiness)
+    try:
+        provider = build_provider(s, transport=transport, resolver=resolver, readiness=readiness)
+    except AgentNotReady as exc:       # an optional SDK that cannot be loaded: not configured, never a traceback
+        message = redact_text(str(exc), s)
+        if message.startswith("agent not configured"):
+            return [Check("agent.provider", "ok", f"{message}; hunts run without the AI agent")]
+        return [*out, Check("agent.provider", "fail", message)]
     try:
         probes = provider.probe()
     except Exception as exc:  # noqa: BLE001 - a broken or hostile endpoint must not take the other checks down

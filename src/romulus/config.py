@@ -141,6 +141,10 @@ class Settings(BaseModel):
     # USD per million prompt tokens read from / written to the provider's prompt cache; 0 = unset (see budget.py)
     agent_price_cache_read_per_mtok: float = Field(default=0.0, ge=0.0)
     agent_price_cache_write_per_mtok: float = Field(default=0.0, ge=0.0)
+    # anthropic with the refusal fallback on: the prices of the fallback model that may answer a declined call
+    agent_price_fallback_input_per_mtok: float = Field(default=0.0, ge=0.0)
+    agent_price_fallback_output_per_mtok: float = Field(default=0.0, ge=0.0)
+    agent_price_fallback_cache_read_per_mtok: float = Field(default=0.0, ge=0.0)
     agent_max_tool_calls_per_session: int = Field(default=25, ge=1, le=500)
     agent_max_source_queries: int = Field(default=200, ge=1, le=100_000)
     agent_concurrency: int = Field(default=2, ge=1, le=16)
@@ -307,6 +311,9 @@ ENV_MAP = {
     "AGENT_PRICE_OUTPUT_PER_MTOK": "agent_price_output_per_mtok",
     "AGENT_PRICE_CACHE_READ_PER_MTOK": "agent_price_cache_read_per_mtok",
     "AGENT_PRICE_CACHE_WRITE_PER_MTOK": "agent_price_cache_write_per_mtok",
+    "AGENT_PRICE_FALLBACK_INPUT_PER_MTOK": "agent_price_fallback_input_per_mtok",
+    "AGENT_PRICE_FALLBACK_OUTPUT_PER_MTOK": "agent_price_fallback_output_per_mtok",
+    "AGENT_PRICE_FALLBACK_CACHE_READ_PER_MTOK": "agent_price_fallback_cache_read_per_mtok",
     "AGENT_MAX_TOOL_CALLS_PER_SESSION": "agent_max_tool_calls_per_session",
     "AGENT_MAX_SOURCE_QUERIES": "agent_max_source_queries",
     "AGENT_CONCURRENCY": "agent_concurrency",

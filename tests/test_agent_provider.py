@@ -833,7 +833,7 @@ def test_the_anthropic_provider_without_its_sdk_is_not_configured_never_a_traceb
 
     from romulus.hunt import run as hunt_run
     monkeypatch.setitem(sys.modules, "anthropic", None)      # as if romulus[anthropic] were not installed
-    s = Settings(home=tmp_path, agent_provider="anthropic", agent_model="claude-opus-5-5", agent_api_key=KEY,
+    s = Settings(home=tmp_path, agent_provider="anthropic", agent_model="claude-test-model", agent_api_key=KEY,
                  model_egress="lab-public-data")
     r = agent_readiness(s, resolver_for({"api.anthropic.com": ["198.51.100.20"]}))
     assert r.state == "not_configured" and "install romulus[anthropic]" in r.reason

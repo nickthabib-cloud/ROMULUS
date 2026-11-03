@@ -40,12 +40,14 @@ Configuration lives in `$ROMULUS_HOME/.env`:
 | `AGENT_PROVIDER` | `openai_compatible` (default), `ollama` or `anthropic` |
 | `AGENT_EFFORT`, `AGENT_THINKING_TOKENS`, `AGENT_REFUSAL_FALLBACK` | `anthropic` only: thinking depth (`low` to `max`, default `high`), the output room reserved for thinking on every call, and whether a refused call may be answered by the API's recommended fallback model (`default` or `off`) |
 | `AGENT_PRICE_CACHE_READ_PER_MTOK`, `AGENT_PRICE_CACHE_WRITE_PER_MTOK` | Prices of prompt tokens read from and written to the provider's prompt cache, for the cost estimate. A priced `anthropic` agent needs the cache-read price; the write price defaults to 1.25 times the input price |
-| `AGENT_BASE_URL`, `AGENT_API_KEY`, `AGENT_MODEL` | Endpoint (the API root that contains `/chat/completions`), key and model. A remote endpoint needs a key; your own local server may not. Pin a dated model snapshot, not a `latest` alias |
+| `AGENT_PRICE_FALLBACK_INPUT_PER_MTOK`, `AGENT_PRICE_FALLBACK_OUTPUT_PER_MTOK`, `AGENT_PRICE_FALLBACK_CACHE_READ_PER_MTOK` | `anthropic` with the refusal fallback on: the fallback model's prices. A declined call is billed, then answered and billed again by the fallback model, so a priced agent needs these; each billed attempt is charged at the prices of the model that served it |
+| `AGENT_BASE_URL` | The endpoint. `openai_compatible`: the API root that contains `/chat/completions`. `ollama`: the server root. `anthropic`: empty means `https://api.anthropic.com` |
+| `AGENT_API_KEY`, `AGENT_MODEL` | Key and model. A remote endpoint and `anthropic` need a key; your own local server may not. Pin an exact model id as the provider lists it, not a `latest` alias |
 | `ROMULUS_MODEL_EGRESS` | Must be `lab-public-data` before any non-local endpoint is allowed (see below) |
 | `MODEL_LOCAL_HOSTS` | Extra hostnames, addresses or CIDR networks treated as local, such as a team's model server on a routable enclave address |
 | `AGENT_CONTEXT_TOKENS` | The model's context window, so a cut-off prompt is detected; `0` leaves it to the server (Ollama uses `OLLAMA_NUM_CTX`) |
 | `AGENT_MAX_OUTPUT_TOKENS`, `AGENT_TIMEOUT_SECONDS` | Per-call output allowance and timeout |
-| `AGENT_MAX_CALLS`, `AGENT_MAX_TOKENS`, `AGENT_MAX_WALL_SECONDS`, `AGENT_MAX_COST_USD` | Per-hunt budgets. The cost budget is optional, estimated from reported usage with `AGENT_PRICE_INPUT_PER_MTOK` and `AGENT_PRICE_OUTPUT_PER_MTOK` |
+| `AGENT_MAX_CALLS`, `AGENT_MAX_TOKENS`, `AGENT_MAX_WALL_SECONDS`, `AGENT_MAX_COST_USD` | Per-hunt budgets. The cost budget is optional, estimated from reported usage with `AGENT_PRICE_INPUT_PER_MTOK` and `AGENT_PRICE_OUTPUT_PER_MTOK`; every price a call can be charged at must be set above 0 |
 | `AGENT_MAX_TOOL_CALLS_PER_SESSION` | Bounds one investigation session (default 25) |
 | `AGENT_CONCURRENCY` | Parallel investigation sessions (default 2) |
 | `AGENT_DEFAULT` | `on` or `off`: whether new hunts use the agent when it is configured (`hunt start --no-agent` turns it off for one hunt) |
