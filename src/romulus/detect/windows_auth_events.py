@@ -69,8 +69,9 @@ class _Burst(WindowsEventRule):
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
         cls.card = {**cls.card, "lanes": (
-            "The first qualifying window for each correlation key and each new episode publishes immediately "
-            "as a LEAD. Within an episode, revisions occur at non-overlapping-window doublings and finalization, "
+            "The first qualifying window for each correlation key and its first eight episodes publishes immediately "
+            "as a LEAD. Those episodes revise at non-overlapping-window doublings; later episodes revise at "
+            "episode-count doublings and finalization, "
             "retaining first/latest witnesses and the complete reporting-host list.")}
 
     def __init__(self):
@@ -120,10 +121,13 @@ class _Burst(WindowsEventRule):
                  "episode_windows": 1 if new_episode else state["episode_windows"]+int(counted),
                  "key": key, "host": host}
         self.rows.remember(state_key, json.dumps(state, sort_keys=True))
-        # The first window of each episode is immediately useful. Within an episode only doubling
-        # checkpoints revise the candidate; finalize publishes its latest complete state once.
+        # Keep early episodes immediate, then bound publication across arbitrarily many episodes.
+        # Final replay always publishes the latest complete totals and first/latest witnesses.
         windows = state["episode_windows"]
-        if phase == "finalize" or not counted or windows & (windows-1):
+        episodes = state["episodes"]
+        checkpoint = (counted and not windows & (windows-1) if episodes <= 8 else
+                      new_episode and not episodes & (episodes-1))
+        if phase == "finalize" or not checkpoint:
             return []
         return self._publish_window(identity, state)
 
@@ -169,8 +173,9 @@ class _Burst(WindowsEventRule):
                        ("Touching or overlapping windows, or windows separated by less than one window length, "
                         "belong to the same episode. Window counts use disjoint selections; the latest qualifying "
                         "window is retained even when it overlaps an earlier selection. "
-                        "First/latest bounds, episode and window totals are retained; intermediate members remain "
-                        "in disk-backed history. Revisions occur at episode-window doublings and at finalization."),
+                        "First/latest witnesses and bounds, episode and window totals are retained with this finding; "
+                        "intermediate records are not all cited. The first eight episodes revise at window doublings; "
+                        "later episodes revise at episode-count doublings, plus finalization."),
                        "Reported workstation labels do not establish verified host identities or IP ownership."],
                       group_key="windows-burst:" + hashlib.sha256(identity.encode()).hexdigest(),
                       context_ids=set(selected) - {event.id},
@@ -276,6 +281,7 @@ class _Burst(WindowsEventRule):
 
 
 class WindowsPasswordSpray(_Burst):
+    version = "6"
     id, title = "win.password_spray", "Failed authentication against many accounts by source or reporting host"
     attack = ("T1110.003",)
     description, units = "Many target accounts were named by failed authentication records", "distinct target-account identities"
@@ -292,6 +298,7 @@ class WindowsPasswordSpray(_Burst):
 
 
 class WindowsBruteForce(_Burst):
+    version = "6"
     id, title = "win.brute_force", "Repeated failures against one account by source or reporting host"
     attack = ("T1110.001",)
     description, units, distinct = ("Failed authentication records repeatedly named one account",
@@ -306,6 +313,7 @@ class WindowsBruteForce(_Burst):
 
 
 class WindowsDistributedGuessing(_Burst):
+    version = "6"
     id, title = "win.distributed_auth_failures", "Many sources failed authentication against one account"
     attack = ("T1110.001",)
     threshold = 10
@@ -322,6 +330,7 @@ class WindowsDistributedGuessing(_Burst):
 
 
 class WindowsExplicitCredentialFanout(_Burst):
+    version = "6"
     id, title = "win.explicit_credential_fanout", "Explicit credentials named several target servers"
     attack = ("T1078",)
     windows_event_classes = (("Security", SECURITY, 4648),)
@@ -344,6 +353,7 @@ class WindowsExplicitCredentialFanout(_Burst):
 
 
 class WindowsKerberoastDiversity(_Burst):
+    version = "6"
     id, title = "win.kerberos_service_fanout", "One principal requested tickets for many service names"
     attack = ("T1558.003",)
     windows_event_classes = (("Security", SECURITY, 4769),)
@@ -364,7 +374,7 @@ class WindowsKerberoastDiversity(_Burst):
 
 
 class WindowsHashLogonShape(WindowsEventRule):
-    version = "3"
+    version = "4"
     id, title = "win.hash_logon_shape", "Logon fields have a pass-the-hash-associated shape"
     families = ("auth",)
     windows_event_classes = (("Security", SECURITY, 4624),)
@@ -393,7 +403,7 @@ class WindowsHashLogonShape(WindowsEventRule):
 
 
 class WindowsExternalRdp(WindowsEventRule):
-    version = "3"
+    version = "4"
     id, title = "win.rdp_external_source", "RDP source outside the site's internal-network definition"
     direction_dependent = True
     families = ("auth", "remote_access")

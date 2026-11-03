@@ -1552,6 +1552,16 @@ class ProtocolPortMismatch(_FlowRule):
         groups.clear()
         return out
 
+    def uncited_finding(self, key, state, match):
+        server, port, transport, kind = key
+        if isinstance(kind, str):
+            match.group_key = f"{server}|{transport}/{port}|unidentified|{kind}"
+        else:
+            group = state[0]
+            names = ", ".join(protocol_label(kind, group.alternatives))
+            match.group_key = f"{server}|{transport}/{port}|{names}"
+        return match
+
     def _mismatch(self, key, group: _Mismatch) -> Match:
         dst, port, transport, protocols = key
         expected = expected_protocols(transport, port)
@@ -1854,6 +1864,11 @@ class LongUnidentifiedSession(_FlowRule):
                for key in sorted(groups.keys(candidates=True), key=lambda k: (ip_sort_key(k[0]),) + k[1:]) for _citation in citation_call(self, self._match, key, groups.peek(key))]
         groups.clear()
         return out
+
+    def uncited_finding(self, key, state, match):
+        dst, port, transport = key
+        match.group_key = f"{dst}|{transport}/{port}"
+        return match
 
     def _match(self, key, group: _LongGroup) -> Match:
         dst, port, transport = key

@@ -108,14 +108,16 @@ def test_access_messages_use_object_type_table(kind, codes, rights):
 ])
 def test_relative_proxy_operand_is_placed_with_native_current_directory(image, command, rule):
     event = process(image, command, CurrentDirectory='C:\\Users\\analyst\\Desktop\\')
+    [match] = run(rule(), [event])
     if rule is Regsvr32Execution:
-        assert not run(rule(), [event])  # Bare libraries use DLL search order, not the CWD.
-        return
-    [hit] = rule().judge(event)
-    assert 'placed using the recorded working directory' in hit.text
-    assert 'Desktop' in hit.text
-    assert any(p.field == 'process.current_directory' for p in hit.predicate)
-    assert set(hit.attack) <= set(rule.attack)
+        assert match.proposed_lane == 'lead'
+        assert 'not a recognized Windows system library' in match.claim
+        assert 'may load from there' in match.claim
+    else:
+        assert 'placed using the recorded working directory' in match.claim
+    assert 'Desktop' in match.claim
+    assert any(p.field == 'process.current_directory' for p in match.predicate)
+    assert all(set(hit.attack) <= set(rule.attack) for hit in rule().judge(event))
 
 
 def test_script_host_remote_url_claim_names_url():

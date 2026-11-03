@@ -67,6 +67,7 @@ class BehaviorFleetRule(WindowsEventRule):
     def _fleet_match(self, shape, group, *, final):
         result = super()._fleet_match(shape, group, final=final)
         if result is not None and getattr(group, 'behavior_fleet', True):
+            result.bounded_revision = True
             result.claim = result.claim.replace(
                 "Each host's first record keeps its own finding.",
                 'The first observation was published immediately; members revise this fleet finding.',

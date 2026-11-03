@@ -50,7 +50,7 @@ class _RowsRule(WindowsEventRule):
 
 
 class CreatedThenPrivileged(_RowsRule):
-    version = "2"
+    version = "3"
     id, title = "win.created_then_privileged", "Account creation followed by sensitive group membership"
     lane = severity = "high"
     families = ("account_change",)

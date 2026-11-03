@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from romulus.detect import bounded, network
+from romulus.detect import network
 from romulus.evidence.typed import RawRef, TypedEvent, fv
 
 T0 = datetime(2024, 11, 4, 0, 0, tzinfo=UTC)
@@ -218,7 +218,8 @@ def test_subdomain_enumeration_keeps_every_pair_with_a_bounded_hot_set(monkeypat
 def test_only_the_disk_budget_refuses_new_groups_and_coverage_says_so(monkeypatch, tmp_path, cls, make):
     """Groups beyond the hot set go to disk; once the disk budget is spent a record of a new group is refused (not
     evaluated, coverage partial), while records of groups already held are still counted."""
-    monkeypatch.setattr(bounded, "DISK_BUDGET", 1)
+    from tests.storage_capacity_fixture import refuse_new_stores_after_spill
+    refuse_new_stores_after_spill(monkeypatch, 1)
     rule = small(monkeypatch, cls, tmp_path)
     run_batches(rule, [[make(1)], [make(2)], [make(i) for i in range(3, 8)] + [make(1), make(2)]])
     assert len(rule.groups) == 2 and rule.capped == 5

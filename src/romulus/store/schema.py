@@ -376,6 +376,15 @@ report_manifest = Table(
     UniqueConstraint("hunt_id", "revision", name="uq_report_rev"),
 )
 
+report_host = Table(
+    "report_host", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id", ondelete="CASCADE"), primary_key=True),
+    Column("snapshot", String, primary_key=True),
+    Column("host", String, primary_key=True),
+    Column("first_event_id", String, nullable=False),
+    sqlite_with_rowid=False,
+)
+
 user = Table(
     "user", metadata,
     Column("username", String, primary_key=True),

@@ -143,6 +143,8 @@ def test_only_the_disk_budget_refuses_a_new_key(tmp_path):
     owner = _Owner()
     owner.spill_dir = tmp_path
     store = KeyedStore(owner, "s", hot=1, disk_budget=200)
+    from tests.storage_capacity_fixture import refuse_after_spill
+    refuse_after_spill(owner, store, 200)
     accepted = 0
     for i in range(100):
         if store.put(f"k{i}", {"payload": "x" * 50}):

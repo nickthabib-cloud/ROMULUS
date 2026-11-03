@@ -226,7 +226,7 @@ class _RegistryRule(WindowsEventRule):
 
 class RegistryRunKeys(_RegistryRule):
     id = "win.registry_run_keys"
-    version = "4"
+    version = "5"
     title = "Run, RunOnce or RunOnceEx registry entry changed"
     attack = ("T1547.001",)
     benign = ("application installers and per-user startup preferences",)
@@ -254,7 +254,7 @@ class RegistryRunKeys(_RegistryRule):
 
 class RegistryWinlogon(_RegistryRule):
     id = "win.registry_winlogon"
-    version = "4"
+    version = "5"
     title = "Winlogon shell, user initialization or notification registration changed"
     attack = ("T1547.004",)
     benign = ("approved custom shells and legacy logon software",)
@@ -279,7 +279,7 @@ class RegistryWinlogon(_RegistryRule):
 
 class RegistryImageExecution(_RegistryRule):
     id = "win.registry_image_execution"
-    version = "4"
+    version = "5"
     title = "IFEO debugger or silent-exit monitoring registration changed"
     attack = ("T1546.012",)
     benign = ("debugging and application crash diagnostics",)
@@ -309,7 +309,7 @@ class RegistryImageExecution(_RegistryRule):
 
 class RegistryAppInit(_RegistryRule):
     id = "win.registry_appinit"
-    version = "4"
+    version = "5"
     title = "AppInit DLL registration or loading flag changed"
     attack = ("T1546.010",)
     benign = ("legacy application compatibility or security software",)
@@ -328,7 +328,7 @@ class RegistryAppInit(_RegistryRule):
 
 class RegistryAppCert(_RegistryRule):
     id = "win.registry_appcert"
-    version = "4"
+    version = "5"
     title = "AppCert DLL registration changed"
     attack = ("T1546.009",)
     benign = ("legacy certified application hooks",)
@@ -343,7 +343,7 @@ class RegistryAppCert(_RegistryRule):
 
 class RegistryUserCom(_RegistryRule, BehaviorFleetRule):
     id = "win.registry_user_com"
-    version = "5"
+    version = "6"
     title = "Per-user COM server registration changed"
     attack = ("T1546.015",)
     benign = ("per-user COM application installation and repair",)
@@ -383,7 +383,7 @@ class RegistryUserCom(_RegistryRule, BehaviorFleetRule):
 
 class RegistryLsaPackages(_RegistryRule):
     id = "win.registry_lsa_packages"
-    version = "4"
+    version = "5"
     title = "LSA authentication, security or notification packages changed"
     attack = ("T1547.002", "T1547.005", "T1112")
     benign = ("approved authentication providers, password filters and security products",)
@@ -400,7 +400,7 @@ class RegistryLsaPackages(_RegistryRule):
 
 class RegistryCredentialProtection(_RegistryRule):
     id = "win.registry_credential_protection"
-    version = "4"
+    version = "5"
     title = "WDigest credential retention or LSA protection registry setting changed"
     attack = ("T1112", "T1685")
     benign = ("legacy authentication troubleshooting and authorized compatibility work",)
@@ -421,7 +421,7 @@ class RegistryCredentialProtection(_RegistryRule):
 
 class RegistryDefender(_RegistryRule):
     id = "win.registry_defender"
-    version = "5"
+    version = "6"
     title = "Defender policy or exclusion registry setting changed"
     attack = ("T1685", "T1112")
     benign = ("managed antivirus policy and approved performance exclusions",)
@@ -467,7 +467,7 @@ class RegistryDefender(_RegistryRule):
 
 class RegistryRdp(_RegistryRule):
     id = "win.registry_rdp"
-    version = "4"
+    version = "5"
     title = "Remote Desktop registry enablement setting changed"
     attack = ("T1021.001", "T1112")
     benign = ("authorized remote administration enablement",)
@@ -482,7 +482,7 @@ class RegistryRdp(_RegistryRule):
 
 class RegistryServiceCommand(_RegistryRule):
     id = "win.registry_service_command"
-    version = "4"
+    version = "5"
     title = "Service image or failure command registry setting changed"
     attack = ("T1543.003",)
     benign = ("service installation, upgrades and recovery configuration",)

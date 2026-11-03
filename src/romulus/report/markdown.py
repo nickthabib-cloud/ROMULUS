@@ -64,7 +64,7 @@ def _internal_networks_cell(m: dict) -> str:
     return str(view.get("line") or view.get("summary") or "Internal networks: not recorded").removeprefix("Internal networks: ")
 
 
-def render(m: dict, banner: str = BANNER) -> str:
+def _render_body(m: dict, banner: str = BANNER) -> str:
     h = m["hunt"]
     graph = m.get("incident_graph") or {"incidents": [], "links": [], "nodes": [], "edges": []}
     link_strength = {link["id"]: link["style"] for link in graph["links"]}
@@ -382,3 +382,34 @@ def render(m: dict, banner: str = BANNER) -> str:
                  "and the database."), "",
             "## Versions", "", fence(json.dumps(m["versions"], indent=2, sort_keys=True), "json"), "", banner, ""]
     return "\n".join(out)
+
+
+def iter_render(m: dict, banner: str = BANNER, *, host_rows=None):
+    """Render host appendices incrementally; the resolver reads the manifest's immutable references."""
+    yield _render_body(m, banner)
+    fleets = [finding for finding in m["findings"] if "fleet_hosts" in finding]
+    if not fleets:
+        return
+    if host_rows is None:
+        raise ValueError("This manifest references fleet host appendices; a host-stream resolver is required")
+    yield "\n## Fleet host appendix\n\n"
+    for finding in fleets:
+        ref = finding["fleet_hosts"]
+        yield (f"### Finding {cell(finding['id'])}\n\n"
+               f"{ref['count']} of {ref['expected_count']} reporting hosts retained. "
+               f"Host list {'complete' if ref['complete'] else 'partial'}. "
+               f"Manifest appendix: `{ref['filename']}`.\n\n"
+               "| Host | First recorded event ID |\n|---|---|\n")
+        count = 0
+        for row in host_rows(ref):
+            yield f"| {cell(row['host'])} | {cell(row['first_event_id'])} |\n"
+            count += 1
+        if count != ref["count"]:
+            raise ValueError("Fleet host appendix is incomplete or differs from its manifest")
+        yield "\n"
+    yield banner+"\n"
+
+
+def render(m: dict, banner: str = BANNER, *, host_rows=None) -> str:
+    """Convenience renderer; file/download callers use iter_render to stream large appendices."""
+    return "".join(iter_render(m, banner, host_rows=host_rows))

@@ -250,6 +250,7 @@ class Sweep:
         for pb in self.pack:
             pb.spill_dir = stage_dir          # a playbook's on-disk join tables live beside the event stage
             pb.budget = self.budget
+            pb.window_start = window.start
             if hasattr(pb, "citation_fields"):
                 pb.citation_fetcher = WindowsCitationFetcher(client)
             else:
@@ -1713,6 +1714,7 @@ class Sweep:
                 windows_account=getattr(self, "_windows_seen_account", None),
             )
             stage.owner_accounts = self._stage_owner_accounts
+            stage.playbooks = self.pack
         return stage
 
     def _windows_continuity(self) -> RecordIdContinuity:
@@ -1863,6 +1865,8 @@ class Sweep:
             reasons += limits + pb.coverage_notes()
             self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, "*", "window", state,
                                     finalized_matches + consumed_matches, evaluated, {"reasons": reasons})
+            if getattr(self, "_stage", None) is not None and pb.id in self._stage_owner_accounts:
+                self._stage.finished_owners.add(self._stage_owner_accounts[pb.id].name)
             pb.release_state()
         agg_raw.clear()
         if self.budget.spent:

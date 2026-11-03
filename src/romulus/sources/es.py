@@ -275,7 +275,10 @@ class ElasticClient:
             retry = r.status_code in (429, 502, 503, 504)
             raise SourceError(redact_text(f"HTTP {r.status_code} {method} {path}: {r.text[:300]}", self.settings),
                               retryable=retry, status=r.status_code)
-        return r.json() if r.content else {}
+        try:
+            return r.json() if r.content else {}
+        except ValueError as error:
+            raise SourceError(f"non-JSON response HTTP {r.status_code} {method} {path}") from error
 
     # -- metadata --------------------------------------------------------------------------
     def probe(self) -> tuple[dict, Backend, str | None]:

@@ -116,6 +116,7 @@
 {% for r in reports %}
 <li>Revision {{ r.revision }} ({{ r.created_at.strftime('%Y-%m-%d %H:%M') }}):
   <a href="/reports/{{ h.id }}/{{ r.id }}.md">technical (Markdown)</a> ·
+  <a href="/reports/{{ h.id }}/{{ r.id }}.docx">executive (Word)</a> ·
   <a href="/reports/{{ h.id }}/{{ r.id }}.json">manifest (JSON)</a></li>
 {% else %}<li>No report revisions yet.</li>{% endfor %}
 </ul>

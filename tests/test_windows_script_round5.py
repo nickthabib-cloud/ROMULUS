@@ -19,7 +19,7 @@ STARTS = [
     r"& 'setup.exe'", r'& "setup.exe"',
     '[Diagnostics.Process]::Start($f)', '[System.Diagnostics.Process]::Start($f)',
     '(New-Object -ComObject WScript.Shell).Run($f)',
-    "(New-Object -ComObject 'WScript.Shell').ShellExecute($f)",
+    "(New-Object -ComObject 'Shell.Application').ShellExecute($f)",
 ]
 
 

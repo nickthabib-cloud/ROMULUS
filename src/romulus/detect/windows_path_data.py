@@ -15,6 +15,14 @@ PROTECTED_PLATFORM_PRODUCTS = frozenset({
 _VERSION = re.compile(r'\d+(?:\.\d+){1,5}(?:-\d+)?', re.ASCII)
 _GUID = re.compile(r'\{?[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\}?', re.ASCII)
 _RANDOM = re.compile(r'(?:[0-9a-f]{8,}|f_[0-9a-f]{4,})', re.ASCII)
+# Alias expansion requires the actual filesystem; do not infer a trusted long name.
+# https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file
+_SHORT_NAME = re.compile(r'[^.\\/: ]{1,6}~[0-9]+(?:\.[^.\\/: ]{1,3})?', re.ASCII)
+
+
+def has_short_name(path):
+    """A DOS short-name component does not record the corresponding long location."""
+    return any(_SHORT_NAME.fullmatch(part) for part in components(path))
 
 # Path indicators documented by the analytic's original researchers; effective ACLs
 # vary by OS and policy. These raise attention, never establish an effective permission.
@@ -52,6 +60,8 @@ def installation_parts(path):
     A device/volume path does not identify the system volume without a recorded map.
     A non-system drive spelling never establishes installed scope.
     """
+    if has_short_name(path):
+        return ()
     text = ntpath.normpath(str(path or '').replace('/', '\\')).casefold()
     canonical = text[4:] if text.startswith(('\\\\?\\', '\\??\\')) else text
     parts = local_path_components(path)

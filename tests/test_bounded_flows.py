@@ -106,7 +106,8 @@ def test_flow_stores_spill_to_disk_and_change_nothing(monkeypatch, cls, make):
 
 @pytest.mark.parametrize("cls, make", SCENARIOS)
 def test_flow_disk_budget_refuses_and_makes_coverage_partial(monkeypatch, cls, make):
-    monkeypatch.setattr(bounded, "DISK_BUDGET", 1)
+    from tests.storage_capacity_fixture import refuse_new_stores_after_spill
+    refuse_new_stores_after_spill(monkeypatch, 1)
     for name in HOTS[cls]:
         monkeypatch.setattr(cls, name, 1)
     rule = cls()

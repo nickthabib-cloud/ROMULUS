@@ -381,13 +381,13 @@ def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
         with repo.candidate_publication():
             status = repo.revise_candidate(row, match.revision_reason, owner_token=owner_token,
                                            bounded_revision=match.bounded_revision)
-            if match.fleet_host_count or match.fleet_hosts_complete:
+            if status and (match.fleet_host_count or match.fleet_hosts_complete):
                 row.update(repo.save_candidate_hosts(candidate_id, hunt_id, match.fleet_hosts, owner_token=owner_token,
                            replace=match.fleet_hosts_complete, expected_count=match.fleet_host_count, claim=match.claim))
         return row if status == "inserted" else None
     with repo.candidate_publication():
         saved = repo.save_candidate(row, canonicalize_agent=source_case_id is None, owner_token=owner_token)
-        if match.fleet_host_count or match.fleet_hosts_complete:
+        if saved and (match.fleet_host_count or match.fleet_hosts_complete):
             row.update(repo.save_candidate_hosts(candidate_id, hunt_id, match.fleet_hosts, owner_token=owner_token,
                        replace=match.fleet_hosts_complete, expected_count=match.fleet_host_count, claim=match.claim))
     return row if saved else None

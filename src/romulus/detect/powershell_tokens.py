@@ -16,6 +16,19 @@ MAX_WORD_CHARS = 65_536
 _VARIABLE = re.compile(r"\$[\w?]+(?::(?!:)[\w?]+)?")
 _HERE = {quote: re.compile(r"(?m)^" + re.escape(quote) + "@") for quote in "'\""}
 _QUOTES = {c: "'" for c in "'\u2018\u2019\u201a\u201b"} | {c: '"' for c in '\"\u201c\u201d\u201e'}
+_MODULE_COMMAND_NAME = re.compile(r'[\w.-]+\\[a-z][\w]*-[a-z][\w-]*\Z', re.IGNORECASE | re.ASCII)
+_PROGRAM_SUFFIXES = ('.exe', '.com', '.cmd', '.bat', '.ps1', '.msi', '.msp', '.vbs', '.vbe',
+                     '.js', '.jse', '.wsf', '.wsh', '.scr', '.cpl')
+_SHELL_METHODS = {'wscript.shell': frozenset({'run', 'exec'}),
+                  'shell.application': frozenset({'shellexecute'})}
+
+
+def _path_literal(value):
+    return ('\\' in value or '/' in value) and not _MODULE_COMMAND_NAME.fullmatch(value)
+
+
+def _program_target(value):
+    return _path_literal(value) or value.casefold().endswith(_PROGRAM_SUFFIXES)
 
 
 @dataclass(frozen=True)
@@ -229,8 +242,8 @@ def lex(text: str, *, csharp: bool = False, limits=None) -> tuple[list[Token], b
             else:
                 tokens.append(Token("op", c))
                 i += 1
-        elif text.startswith("::", i):
-            tokens.append(Token("op", "::"))
+        elif text.startswith(("::", "&&"), i):
+            tokens.append(Token("op", text[i:i+2]))
             i += 2
         elif c in "\n;|&(){}[],=+.@" and not text.startswith((".\\", "./"), i):
             tokens.append(Token("op", c))
@@ -275,7 +288,7 @@ def lex(text: str, *, csharp: bool = False, limits=None) -> tuple[list[Token], b
 
 def _mark_path_calls(tokens: list[Token]) -> list[Token]:
     """Classify literal path operands before folding can merge a nonpath literal into a path."""
-    stack, ends, bad, literals = [], {}, [0], [0]
+    stack, ends, bad, literals, statements = [], {}, [0], [0], [0]
     for position, item in enumerate(tokens):
         if item.kind == 'op' and item.value == '(':
             stack.append(position)
@@ -283,9 +296,11 @@ def _mark_path_calls(tokens: list[Token]) -> list[Token]:
             ends[stack.pop()] = position
         root = item.kind == 'variable' and (item.value.startswith('$env:')
                                            or item.value in {'$psscriptroot', '$pscommandpath'})
-        literal = item.kind == 'string' and ('\\' in item.value or '/' in item.value)
+        literal = item.kind == 'string' and _path_literal(item.value)
         bad.append(bad[-1] + int(not (root or literal or item.kind == 'op' and item.value in {'+', '(', ')'})))
         literals.append(literals[-1] + int(literal))
+        statements.append(statements[-1] + int(item.kind == 'op'
+                                               and item.value in {';', '\n', '|', '&', '&&', '{', '}'}))
     for begin, end in ends.items():
         if not begin or tokens[begin-1].kind != 'op' or tokens[begin-1].value not in {'&', '.'}:
             continue
@@ -295,14 +310,25 @@ def _mark_path_calls(tokens: list[Token]) -> list[Token]:
             if first >= end or tokens[first].kind != 'op' or tokens[first].value != '(':
                 break
             first += 1
-        if (first < end and tokens[first].kind == 'variable'
+        command_first, command_end = begin + 1, end
+        for _ in range(32):
+            if command_first >= command_end or ends.get(command_first) != command_end - 1:
+                break
+            command_first += 1
+            command_end -= 1
+        # Only a whole path command has a path result. A pipeline, later statement,
+        # or operation outside its parentheses may instead return constructed text.
+        path_command = (command_first < command_end and tokens[command_first].kind == 'word'
+                        and tokens[command_first].value.rsplit('\\', 1)[-1] in {'join-path', 'resolve-path'}
+                        and statements[command_end] == statements[command_first])
+        if (path_command or first < end and tokens[first].kind == 'variable'
                 and bad[end] == bad[begin+1] and literals[end] > literals[begin+1]):
             tokens[begin] = replace(tokens[begin], transforms=tokens[begin].transforms | {'path-call'})
     return tokens
 
 
 def _read_tokens(tokens: list[Token], partial: bool, constant_budget=None) -> Script:
-    from romulus.detect.powershell_constants import OBFUSCATING, fold_constants
+    from romulus.detect.powershell_constants import OBFUSCATING, fold_constants, variable_name
 
     result = Script(partial=partial)
     for token in tokens:
@@ -350,6 +376,7 @@ def _read_tokens(tokens: list[Token], partial: bool, constant_budget=None) -> Sc
     reflection_pattern = False
     invoking_member_target = False
     evaluators = {'iex', 'invoke-expression'}
+    shell_receivers = {}
     keywords = {'function', 'filter', 'if', 'elseif', 'else', 'while', 'for', 'foreach', 'switch',
                 'param', 'begin', 'process', 'end', 'try', 'catch', 'finally', 'return', 'throw', 'class', 'enum'}
 
@@ -382,12 +409,45 @@ def _read_tokens(tokens: list[Token], partial: bool, constant_budget=None) -> Sc
                 current = group_ends[current]
             current += 1
 
+    def shell_constructor(begin, end):
+        # Exact constructors only. Parenthesis unwrapping shares the bounded expression depth;
+        # receivers are block-local lexical facts, never general object/data-flow inference.
+        for _ in range(32):
+            if begin < end and tokens[begin].value == '(' and group_ends.get(begin) == end - 1:
+                begin, end = begin + 1, end - 1
+            else:
+                break
+        if end - begin != 3:
+            return ''
+        creator, parameter, progid = tokens[begin:end]
+        if (creator.kind == 'word' and command_name(creator.value) == 'new-object'
+                and parameter.kind == 'word' and len(parameter.value) >= 4
+                and '-comobject'.startswith(parameter.value)
+                and progid.kind in {'word', 'string'} and progid.value.casefold() in _SHELL_METHODS):
+            return progid.value.casefold()
+        return ''
+
     for i, token in enumerate(tokens):
         value, previous = token.value, tokens[i-1].value if i else ""
         following = tokens[i+1].value if i + 1 < len(tokens) else ""
         transforms = token.transforms & OBFUSCATING
         result.obfuscation.update(transforms)
+        if token.kind == 'variable' and following in {'+', '-', '++', '--'}:
+            shell_receivers.pop(variable_name(value), None)
+        if token.kind == 'variable' and following == '=':
+            name = variable_name(value)
+            shell_receivers.pop(name, None)
+            begin = i + 2
+            end = group_ends.get(begin, begin + 2) + 1
+            if ((not i or previous in {';', '\n', '{'}) and end <= len(tokens)
+                    and (end == len(tokens) or tokens[end].value in {';', '\n', '}'})):
+                progid = shell_constructor(begin, end)
+                if progid:
+                    shell_receivers[name] = progid
         if token.kind in {'inert', 'data'}:
+            if token.kind == 'data' and called:
+                result.starts_program = True
+                start, called, invoking_member_target = False, False, False
             if command and token.kind == 'data':
                 args.append(value.casefold())
             continue
@@ -422,14 +482,12 @@ def _read_tokens(tokens: list[Token], partial: bool, constant_budget=None) -> Sc
         if (token.kind in {"word", "string"} and i and tokens[i-1].kind == 'op'
                 and previous in {".", "::"} and following == "("):
             result.members.add(value.casefold())
-            if previous == '.' and value.casefold() in {'run', 'shellexecute'} and i >= 2:
+            if previous == '.' and value.casefold() in {'run', 'exec', 'shellexecute'} and i >= 2:
                 begin = group_starts.get(i - 2)
-                if begin is not None and i - 2 - begin == 4:
-                    receiver = tokens[begin+1:i-2]
-                    result.starts_program |= (receiver[0].kind == 'word' and receiver[0].value == 'new-object'
-                                              and receiver[1].kind == 'word' and receiver[1].value == '-comobject'
-                                              and receiver[2].kind in {'word', 'string'}
-                                              and receiver[2].value.casefold() == 'wscript.shell')
+                progid = shell_constructor(begin, i - 1) if begin is not None else ''
+                if tokens[i-2].kind == 'variable':
+                    progid = shell_receivers.get(variable_name(tokens[i-2].value), '')
+                result.starts_program |= value.casefold() in _SHELL_METHODS.get(progid, ())
             if value.casefold() in {'getmethod', 'getprocaddress'}:
                 member_literal(i, value.casefold())
             if value.casefold() == 'invoke' and i >= 3 and tokens[i-3].value in {'.', '::'} and tokens[i-2].kind in {'word', 'string'}:
@@ -454,7 +512,9 @@ def _read_tokens(tokens: list[Token], partial: bool, constant_budget=None) -> Sc
                         result.static_calls.add((typename.casefold(), value.casefold()))
                         result.starts_program |= (typename.casefold() in {'diagnostics.process', 'system.diagnostics.process'}
                                                   and value.casefold() == 'start')
-        if value in {";", "\n", "|", "{", "}"} and token.kind == "op":
+        if value in {";", "\n", "|", "&&", "{", "}"} and token.kind == "op":
+            if value in {'{', '}'}:
+                shell_receivers.clear()
             finish()
             start, called, command, args = True, False, "", []
             invoking_member_target = False
@@ -473,9 +533,8 @@ def _read_tokens(tokens: list[Token], partial: bool, constant_budget=None) -> Sc
             invoking_member_target = i + 1 < len(tokens) and (tokens[i+1].kind == 'variable' or following == '(')
             if i + 1 < len(tokens):
                 target = tokens[i+1]
-                result.starts_program |= (target.kind == 'variable' or target.kind in {'string', 'data'}
-                                          and ('\\' in target.value or '/' in target.value
-                                               or target.value.casefold().endswith(('.exe', '.com', '.cmd', '.bat', '.ps1'))))
+                result.starts_program |= (target.kind in {'variable', 'data'}
+                                          or target.kind in {'word', 'string'} and _program_target(target.value))
             if following == '(':
                 end = group_ends.get(i + 1, i + 1)
                 path_call = 'path-call' in tokens[i+1].transforms
@@ -513,13 +572,19 @@ def _read_tokens(tokens: list[Token], partial: bool, constant_budget=None) -> Sc
             continue
         if token.kind in {"word", "string"} and start:
             name = command_name(value)
-            if ((token.kind == "word" or called) and (called or previous not in {"[", ".", "::"})
-                    and following not in {"::", ".", "=", "["} and name not in keywords
+            command_position = ((token.kind == "word" or called) and (called or previous not in {"[", ".", "::"})
+                                and following not in {"::", ".", "=", "["})
+            if command_position and _program_target(value):
+                result.starts_program = True
+                shell_receivers.clear()
+            if (command_position and name not in keywords
                     and re.fullmatch(r'[a-z_][\w.-]*', name, re.ASCII)):
                 command = name
                 result.commands.add(command)
                 result.evaluates_code |= command in evaluators
                 result.obfuscated_execution |= bool(transforms)
+                if command != 'new-object':
+                    shell_receivers.clear()
             start, called = False, False
         elif command and token.kind in {"word", "string", "variable"}:
             args.append(value.casefold())

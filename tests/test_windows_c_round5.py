@@ -6,7 +6,6 @@ import pytest
 
 from romulus.detect.bounded import KeyedStore, StateBudget
 from romulus.hunt import sweep as sw
-from romulus.hunt.citations import COMPACT_CITATION_NOTE
 from romulus.hunt.publish import SourceCitationFetcher
 from romulus.sources.es import SourceError
 from romulus.sources.models import Window
@@ -42,12 +41,17 @@ def test_detection_reclaims_native_citation_bodies_before_physical_refusal(tmp_p
     owner = _owner(tmp_path, sweep.budget, "late_detection", strong=True)
     store = KeyedStore(owner, "keys", hot=0)
     try:
-        for n in range(80):
-            assert store.put(str(n), bytes([n])*4000)
+        for n in range(256):
+            assert store.put(str(n), bytes([n % 256])*4000)
             store.trim()
-        assert len(store) == 80 and not owner.limits
-        assert stage.db.execute("SELECT COUNT(*) FROM raw").fetchone()[0] == 0
-        assert all(COMPACT_CITATION_NOTE in event.caveats for event in stage.load([event.id for event, _ in pairs]))
+            if stage.db.execute("SELECT COUNT(*) FROM raw").fetchone()[0] < len(pairs):
+                break
+        else:
+            pytest.fail("fixture did not reach citation pressure")
+        assert len(store) == n+1 and not owner.limits
+        assert 0 < stage.db.execute("SELECT COUNT(*) FROM raw").fetchone()[0] < len(pairs)
+        retained = stage.load([event.id for event, _ in pairs])
+        assert {event.id for event in retained} == {event.id for event, _ in pairs}
         assert sum(path.stat().st_size for path in tmp_path.rglob("*") if path.is_file()) <= sweep.budget.disk_total
         sweep.finalize()
         assert len(sweep.repo.candidates("h1")) == len(pairs)
@@ -80,7 +84,8 @@ def test_large_native_baseline_batch_retries_after_citation_reclamation(tmp_path
     stage = sweep._event_stage()
     if compact_first:
         stage._ensure_baseline()
-        sweep.budget.reclaim_citations(sweep.budget.disk_total)
+        while stage._evict_citations(4096):
+            pass
         assert {event.id for event in stage.load([event.id for event, _hit in pairs])} == {
             event.id for event, _hit in pairs}
         assert stage._text_rows == 0
@@ -134,16 +139,26 @@ def test_large_native_baseline_batch_retries_after_citation_reclamation(tmp_path
             records.extend(hit(f"baseline-exec-{n}-{i}", line) for i, line in enumerate(lines))
         events, _skips, errors = normalize_hits(records)
         assert not errors and len(events) == event_count
-        stage.record_baseline_cell(target="romulus-host-x", partition="large-cell", start=events[0].ts,
-                                   end=events[-1].ts+timedelta(hours=1), target_applicable=True,
-                                   source_complete=True, reasons=[], task_id=None, events=events)
-        assert stage.db.execute("SELECT COUNT(*) FROM baseline_exec WHERE partition='large-cell'").fetchone()[0] == event_count
-        assert stage.db.execute("SELECT COUNT(*) FROM raw").fetchone()[0] == 0
-        assert not stage.refusal_reason
+        kwargs = {"target": "romulus-host-x", "partition": "large-cell", "start": events[0].ts,
+                  "end": events[-1].ts+timedelta(hours=1), "target_applicable": True,
+                  "source_complete": True, "reasons": [], "task_id": None, "events": events}
+        if compact_first:
+            # Each IOC group has only one witness. The large cell must refuse locally rather than erase them.
+            with pytest.raises(sqlite3.OperationalError, match="physical whole-hunt"):
+                stage.record_baseline_cell(**kwargs)
+            assert stage.db.execute("SELECT COUNT(*) FROM baseline_exec WHERE partition='large-cell'").fetchone()[0] == 0
+        else:
+            stage.record_baseline_cell(**kwargs)
+            assert stage.db.execute("SELECT COUNT(*) FROM baseline_exec WHERE partition='large-cell'").fetchone()[0] == event_count
+            assert not stage.refusal_reason
+            assert 0 < stage.db.execute("SELECT COUNT(*) FROM raw").fetchone()[0] < len(pairs)
+        assert {event.id for event in stage.load([e.id for e, _ in pairs])} == {e.id for e, _ in pairs}
         assert sweep.budget.physical_used <= sweep.budget.disk_total
         assert full
         if compact_first:
-            assert reclaimed and stage.count() < len(pairs)
+            assert reclaimed and stage.count() == len(pairs)
+        sweep.finalize()
+        assert len(sweep.repo.candidates("h1")) == len(pairs)
     finally:
         owner.close_spill()
         sweep.close_stage()

@@ -150,7 +150,7 @@ def _expected_dotnet_host(path):
 
 class LsassProcessAccess(WindowsEventRule):
     id = "win.lsass_process_access"
-    version = "5"
+    version = "6"
     title = "A process opened LSASS with memory-related access or a notable call trace"
     families = ("process_access", "object_access")
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 10), ("Security", SECURITY, 4656), ("Security", SECURITY, 4663))
@@ -215,7 +215,7 @@ class LsassProcessAccess(WindowsEventRule):
                 reasons.append("the source path does not establish system-volume installation scope")
             if notable_trace:
                 reasons.append("the call trace names " + ", ".join(sorted(names & (_DUMP_DLLS | {"seclogon.dll", "unknown"}))))
-            priority = "; high priority because memory-related rights accompany " + " and ".join(reasons)
+            priority = "; high priority because memory-related rights were recorded and " + " and ".join(reasons)
             text += priority
         fields = ((*_PROCESS_FIELDS, "object.name", "object.name_key", "object.type", "object.access_mask", "object.accesses")
                   if security else (*_ROLE_FIELDS, "process.access.action", "process.access.mask",
@@ -236,7 +236,7 @@ class LsassProcessAccess(WindowsEventRule):
 
 class RemoteThreadCreation(WindowsEventRule):
     id = "win.remote_thread_creation"
-    version = "5"
+    version = "6"
     title = "Sysmon recorded a thread created in another process"
     families = ("remote_thread",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 8),)
@@ -281,7 +281,7 @@ class RemoteThreadCreation(WindowsEventRule):
 
 class ProcessImageTampering(BehaviorFleetRule):
     id = "win.process_image_tampering"
-    version = "5"
+    version = "6"
     title = "Sysmon reported process image tampering"
     families = ("process_tampering",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 25),)
@@ -304,7 +304,7 @@ class ProcessImageTampering(BehaviorFleetRule):
 
 class UnsignedDriverLoad(WindowsEventRule):
     id = "win.unsigned_driver_load"
-    version = "3"
+    version = "4"
     title = "A driver loaded without a recorded valid signature"
     families = ("image_load",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 6),)
@@ -327,7 +327,7 @@ class UnsignedDriverLoad(WindowsEventRule):
 
 class WritableUnsignedDllLoad(WindowsEventRule):
     id = "win.writable_unsigned_dll_load"
-    version = "5"
+    version = "6"
     title = "A process loaded an unsigned or invalid module, or a module outside standard installation directories"
     families = ("image_load",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 7),)
@@ -382,7 +382,7 @@ class WritableUnsignedDllLoad(WindowsEventRule):
 
 class DumpLibraryLoad(WindowsEventRule):
     id = "win.dump_library_load"
-    version = "5"
+    version = "6"
     title = "A process loaded a library that provides diagnostic or dump functionality"
     families = ("image_load",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 7),)
@@ -406,7 +406,7 @@ class DumpLibraryLoad(WindowsEventRule):
 
 class UnexpectedClrLoad(WindowsEventRule):
     id = "win.unexpected_clr_load"
-    version = "5"
+    version = "6"
     title = "A CLR load did not meet the expected loader, module path and signature checks"
     families = ("image_load",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 7),)

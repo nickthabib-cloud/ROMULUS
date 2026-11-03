@@ -156,21 +156,19 @@ def cmd_findings(args) -> int:
 
 def cmd_report(args) -> int:
     from romulus.hunt.run import open_repo
+    from romulus.report.bundle import write_reports
     from romulus.report.manifest import publish_revision
-    from romulus.report.markdown import render
     s = load_settings(_env_file(args))
     repo = open_repo(s)
     user = os.environ.get("USER") or os.environ.get("USERNAME") or "cli"
     m = publish_revision(repo, args.hunt_id, actor=f"cli:{user}")
     out_dir = s.reports_dir / args.hunt_id
     out_dir.mkdir(parents=True, exist_ok=True)
-    stem = f"{m['revision']['id']}"
-    jpath, mpath = out_dir / f"{stem}.json", out_dir / f"{stem}.md"
-    jpath.write_text(json.dumps(m, indent=2, sort_keys=True), encoding="utf-8")
-    mpath.write_text(render(m), encoding="utf-8")
+    paths = write_reports(repo, m, out_dir)
     print(f"revision {m['revision']['number']}: {len(m['findings'])} findings/leads, "
           f"broken citations={m['integrity']['broken_citations']}")
-    print(f"  {jpath}\n  {mpath}")
+    for path in paths.values():
+        print(f"  {path}")
     return EXIT_OK if m["integrity"]["finalizable"] else EXIT_FAIL
 
 
@@ -319,7 +317,7 @@ def main(argv: list[str] | None = None) -> int:
     fp = sub.add_parser("findings", help="list candidates of a hunt, ranked by lane and priority")
     fp.add_argument("hunt_id")
     fp.add_argument("--lane", action="append", choices=["urgent", "high", "lead", "context"])
-    rp = sub.add_parser("report", help="publish a new immutable report revision (JSON + technical Markdown)")
+    rp = sub.add_parser("report", help="publish a report revision (JSON, technical Markdown and executive DOCX)")
     rp.add_argument("hunt_id")
     up = sub.add_parser("user", help="manage web UI accounts")
     up.add_argument("action", choices=["add"])

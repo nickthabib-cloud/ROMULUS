@@ -10,7 +10,13 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -18,8 +24,8 @@ from romulus.agent.provider import egress_banners
 from romulus.config import Settings
 from romulus.decide.policy import LANE_ORDER
 from romulus.hunt.run import open_repo
+from romulus.report.bundle import write_reports
 from romulus.report.manifest import internal_networks_view, investigations_for_hunt, publish_revision
-from romulus.report.markdown import render as render_md
 from romulus.site import SiteChangedError, SiteValidationError, load_site_facts, save_site_facts
 from romulus.store.db import compact, maintenance_lease
 from romulus.web import site_form
@@ -395,21 +401,23 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         m = publish_revision(repo, hunt_id, f"web:{u['u']}")
         out = s.reports_dir / hunt_id
         out.mkdir(parents=True, exist_ok=True)
-        (out / f"{m['revision']['id']}.json").write_text(json.dumps(m, indent=2, sort_keys=True), encoding="utf-8")
-        (out / f"{m['revision']['id']}.md").write_text(render_md(m), encoding="utf-8")
+        write_reports(repo, m, out)
         return RedirectResponse(f"/hunts/{hunt_id}#reports", status_code=303)
 
     @app.get("/reports/{hunt_id}/{rev_id}.{ext}")
     def get_report(request: Request, hunt_id: str, rev_id: str, ext: str):
         need(request)
-        if ext not in ("md", "json") or not rev_id.startswith(hunt_id + "-r") or "/" in rev_id or ".." in rev_id:
+        appendix = (ext == "jsonl" and rev_id.startswith("fleet-hosts-") and len(rev_id) == 76
+                    and all(char in "0123456789abcdef" for char in rev_id[12:]))
+        if (not appendix and (ext not in ("md", "json", "docx") or not rev_id.startswith(hunt_id + "-r"))
+                or "/" in rev_id or ".." in rev_id):
             raise HTTPException(404)
         p = (s.reports_dir / hunt_id / f"{rev_id}.{ext}").resolve()
         if s.reports_dir.resolve() not in p.parents or not p.exists():
             raise HTTPException(404)
-        media = "text/markdown; charset=utf-8" if ext == "md" else "application/json"
-        return PlainTextResponse(p.read_text(encoding="utf-8"), media_type=media,
-                                 headers={"Content-Disposition": f'attachment; filename="{rev_id}.{ext}"'})
+        media = {"md": "text/markdown; charset=utf-8", "json": "application/json", "jsonl": "application/x-ndjson",
+                 "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}[ext]
+        return FileResponse(p, media_type=media, filename=f"{rev_id}.{ext}")
 
     @app.exception_handler(HTTPException)
     async def http_exc(request: Request, exc: HTTPException):

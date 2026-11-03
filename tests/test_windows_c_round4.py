@@ -330,7 +330,7 @@ def test_native_cache_repacking_rolls_back_deleted_events_and_all_id_relations(t
         def __exit__(self, *args):
             return connection.__exit__(*args)
         def executemany(self, sql, rows):
-            if sql == "INSERT INTO event VALUES(?,?,?)":
+            if sql == "INSERT INTO event(id,body,kept) VALUES(?,?,?)":
                 raise sqlite3.OperationalError("database or disk is full")
             return connection.executemany(sql, rows)
 
@@ -501,14 +501,14 @@ def test_native_shared_raw_pin_relaxation_invalidates_the_other_owner(tmp_path, 
     stage._compact_cache([], (aa,))
     stage._compact_cache([], (aa,), drop_raw=True)
     assert shared in stage.raw_sources([source])   # the other typed view still pins this native body
-    before = stage._raw_revisions[aa.name]
+    before = stage._raw_revisions[stage._owner_number(aa.name)]
     if relax == "compact":
         stage._compact_cache([], (ba,))
         assert stage.load([target.id])[0].fields == target.fields
     else:
         stage.release(b.id, [target.id])
         assert not stage.load([target.id])
-    assert stage._raw_revisions[aa.name] > before
+    assert stage._raw_revisions[stage._owner_number(aa.name)] > before
     stage._compact_cache([], (aa,), drop_raw=True)
     assert shared not in stage.raw_sources([source])
     [retained] = stage.load([source.id])

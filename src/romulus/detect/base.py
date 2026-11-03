@@ -56,6 +56,8 @@ class Match:
     fleet_hosts: Iterable[tuple[str, str]] = ()
     fleet_host_count: int = 0
     fleet_hosts_complete: bool = False
+    # Native subject identity retained in detection state when the event citation is unavailable.
+    identity_key: str = ""
 
     def __post_init__(self) -> None:
         # A positive stays valid on a command line some of whose arguments were lost; the claim says so.
@@ -235,6 +237,9 @@ class Playbook:
         evaluate; direct callers use :meth:`consume_partition`.
         """
         self.os_applicable += len(scoped)
+        if scoped:
+            first = min(event.ts for event in scoped)
+            self._first_record_time = min(first, getattr(self, "_first_record_time", first))
         self._events_pre_scoped = True
         try:
             return self.consume(scoped)

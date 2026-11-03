@@ -758,7 +758,8 @@ def path_key(text: str) -> str:
 
 def is_remote_path(text: str) -> bool:
     key = text.strip().strip('"').strip("'").replace("/", "\\")
-    return key.startswith("\\\\") and not key.startswith(("\\\\?\\", "\\\\.\\"))
+    return (key.casefold().startswith(("\\\\?\\unc\\", "\\??\\unc\\"))
+            or key.startswith("\\\\") and not key.startswith(("\\\\?\\", "\\\\.\\")))
 
 
 def is_user_writable(text: str) -> bool:

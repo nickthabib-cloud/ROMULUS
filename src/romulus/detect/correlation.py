@@ -29,6 +29,7 @@ from romulus.detect.bounded import (
     RecentIds,
     Spill,
     StateExhausted,
+    reclaiming_write,
     register_store,
     scalar,
     store_refuses,
@@ -1087,11 +1088,7 @@ class ProcessNetworkLink(Playbook):
                  "established; " + LINEAGE_LANES,
     }
     HEARTBEAT_EVERY = 1000
-    # Bytes of spilled rows (socket calls, network records and their endpoint index) after which a further record is
-    # refused through the coverage ledger, counted at ROW_BYTES per row (about what a row takes on disk), so this is
-    # about 100 million records; the join's own tables at finalize take a similar amount again. The spill file's real
-    # growth is charged to the hunt's state budget.
-    DISK_BUDGET = 16 * 2**30
+    # Logical row accounting allocates shared state fairly; only the actual physical ceiling refuses capacity.
     ROW_BYTES = 160
     JOIN_CHUNK = 50_000             # socket calls joined per statement at finalize
     holds_state = True
@@ -1163,18 +1160,11 @@ class ProcessNetworkLink(Playbook):
         self.close_spill()
 
     def _room(self, rows: int) -> bool:
-        """Count the rows against the disk budget. Once it, or this store's share of the hunt's state budget (its
-        floor, once the shared headroom is spent), is spent the record is refused (not evaluated) instead: every
-        record here needs new rows."""
+        """Charge rows to shared state; each record needs new rows and can be refused at physical capacity."""
         if store_refuses(self, self.account):
             self.evaluated -= 1
             self.refuse("state_disk", "the join's rows took their share of the hunt's state budget; later socket calls "
                                       "and network records are not evaluated")
-            return False
-        if self.spilled_bytes >= self.DISK_BUDGET:
-            self.evaluated -= 1
-            self.refuse("disk", f"the join's spilled rows reached their disk budget of {self.DISK_BUDGET:,} bytes; "
-                                f"later socket calls and network records are not evaluated")
             return False
         self.spilled_bytes += rows * self.ROW_BYTES
         if self.budget is not None:
@@ -1316,7 +1306,48 @@ class ProcessNetworkLink(Playbook):
         return []           # staged on disk instead
 
     # ---- join ------------------------------------------------------------------------------
+    def extra_citation_reference_groups(self):
+        """After consume, unmatched network endpoints cannot contribute a published join.
+
+        Their detection rows stay intact; only their temporary citations may yield to finalization work.
+        """
+        if (self._spill is None or not self._tables or not self.state_budget().finalizing
+                or "endpoints" in self.limits):
+            return
+        def rows():
+            yield from self._spill.db.execute("SELECT id,src,sport,dst,dport FROM net WHERE staged=1")
+            # A FULL while flushing has rolled back the batch, so its accepted rows still live only in the
+            # existing buffer. Apply the same endpoint proof before that first commit, without copying it.
+            for row in self._spill._buffers["net"][1]:
+                if row[15]:
+                    yield row[0], row[5], row[6], row[7], row[8]
+        def unmatched():
+            for identity, src, sport, dst, dport in rows():
+                if (self.endpoints.peek((dst, dport), None) is None
+                        and self.endpoints.peek((src, sport), None) is None):
+                    yield identity
+        yield "unmatched_network", unmatched()
+
+    @reclaiming_write
     def _link(self, spill: Spill) -> None:
+        """Retry the whole join setup after a rolled-back FULL, including its DDL."""
+        spill.db.commit()
+        while True:
+            spill.cap()
+            spill.db.execute("BEGIN")
+            try:
+                self._build_link(spill)
+                return
+            except sqlite3.OperationalError as exc:
+                spill.db.rollback()
+                spill.grew()
+                if "full" in str(exc).lower() and spill.budget.reclaim_citations_step():
+                    continue
+                raise
+            finally:
+                spill.grew()
+
+    def _build_link(self, spill: Spill) -> None:
         """Every (socket call, network record) pair the join links: records for the call's remote endpoint (either
         direction) starting within the join window, then records sharing a directly linked record's community ID
         and endpoint pair inside its flow's lifetime (plus slack)."""

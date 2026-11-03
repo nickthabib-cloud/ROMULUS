@@ -116,7 +116,8 @@ def test_a_record_bridging_two_stretches_merges_them_and_keeps_the_first_read_ci
 
 
 def test_session_disk_budget_refuses_new_connections_and_says_so(monkeypatch):
-    monkeypatch.setattr(bounded, "DISK_BUDGET", 1)
+    from tests.storage_capacity_fixture import refuse_new_stores_after_spill
+    refuse_new_stores_after_spill(monkeypatch, 1)
     monkeypatch.setattr(sessions.LongExternalConnection, "HOT", 1)
     rule = sessions.LongExternalConnection()
     drive(rule, [[session("10.5.0.1", 30000 + i, "203.0.113.50", 443, T0 + timedelta(minutes=i))] for i in range(6)])

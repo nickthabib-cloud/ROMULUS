@@ -281,6 +281,9 @@ from tests import throughput_fixture as tf
 # and the positive-only texts no longer present absence as a later goal), so only the manifest digest changes; findings, cells and every other digest are unchanged.
 # Fleet host paging changes Windows rule versions in the Linux coverage inventory.
 # Candidate fields, citations, lanes, raw records, links and the manifest stay identical.
+# Windows proxy, script, citation and bounded-revision semantics increment Windows rule versions.
+# Only rule_version changes in 6,887 coverage cells across 97 Windows rules in this Linux fixture.
+# Restoring those versions reproduces every table and semantic-field digest; all findings remain identical.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
     "audit": "23d9b87c75d030df8ff5bcbf07deacc75416c325dd74bcc89243cc1b5488ae93",
@@ -302,7 +305,7 @@ GOLDEN_STACK = {
     "links": "0fbedb27ca9a4cb72354178444ee9aabc49f377b2c933074fe03ef29c8fbb08a",
     "manifest": "35b8a0132fc6747d24e7efe50b32fa0c44c8eefaffcebf5d8795f01438b0a8f1",
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
-    "rule_cells": "1c4c4d7bc9058bb1b2693ff7ec917a18d200ad238e1908dd6f05544cee6394eb",
+    "rule_cells": "8facf7a58590996807a6086c14472c5cfbff060454c8add0ccab54aebb479d6d",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
     "tasks": "c65df4ab88c05661371cf32b49a1d22ef84d6753488bdb946c8e29376d486260",
 }
@@ -334,10 +337,10 @@ GOLDEN_NON_BASELINE_SEMANTICS = {
         "ts": "d8015c1ff0b135e082a5fef2ab1cb88206470e30beee157a0cfc7790d48b8310",
     },
     "rule_cells": {
-                      "all_fields": "9dc70821708d0a61bc5e0cd31626c840b57ba2e431b0d46ca872dcf932032f89",
+        "all_fields": "24f3d40100b38b0b9d2ed2862fb4bbe782bbb048964cc556cc9a5e578ea754cd",
                       "count": 10646,
                       "rule_id": "9ef91e8f298a297308417d67b28ef44dc488841f79a07bc8358ab1cb797efe62",
-                      "rule_version": "4958eee1bc2558c3ff97fd55a9ebbdcd899cd77535bcf5bc93075ae7c98c4c6f",
+        "rule_version": "815e029b22c75f5fbcabc51ae0e8cdb946890491a5062e9c88ec837a45e20b62",
                       "target": "4a231d37bd821a12102aedcb08319addc2bb8d465e326e35f798658d4940c9c5",
                       "partition": "c5e3dd9bd630991ca3e6f5e6921923c038d29fad9215dece94f544bead04090a",
                       "state": "ebd5c7de5e0a1d1a4101483fe37ce56d6ec74d9e3642392a02a18e504baa6fc4",

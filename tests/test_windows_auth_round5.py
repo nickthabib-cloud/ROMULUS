@@ -142,7 +142,7 @@ def test_authentication_state_reclaims_optional_citations_before_refusing_record
     for start in range(0, 2000, 50):
         rule.consume([failure(n, account=f"unique{n}", offset=n*601+1000) for n in range(start, start+50)])
         assert not rule.capped
-        if stage.db.execute("SELECT COUNT(*) FROM raw").fetchone()[0] == 0:
+        if stage.db.execute("SELECT COUNT(*) FROM raw").fetchone()[0] < 18:
             break
     else:
         pytest.fail("probe did not reach citation reclamation")

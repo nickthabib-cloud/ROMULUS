@@ -21,15 +21,28 @@ def sweep_for(pack):
     return sweep, contract, window
 
 
-def test_process_object_filter_compiles_from_native_flattened_contract():
+def test_process_object_filter_stays_broad_for_native_flattened_contract():
     sweep, contract, window = sweep_for([LsassProcessAccess()])
     groups = sweep._any_of_for(contract.target, contract)
     objects = [group for group in groups if any(p.field == "event.code" and p.value in (4656, 4663) for p in group)]
     assert len(objects) == 2
+    assert all(not any(p.field == "object.type" for p in group) for group in objects)
+    compiled = compile_es(SearchIntent(kind="raw", target=contract.target, window=window, any_of=groups), contract)
+    assert "winlog.event_data.ObjectType" not in str(compiled.body)
+    assert not sweep.stats["windows_process_object_filter"][contract.target]
+
+
+def test_process_object_filter_compiles_when_leaf_is_keyword():
+    from romulus.sources.profile import contract_from_types
+
+    sweep, contract, window = sweep_for([LsassProcessAccess()])
+    leaf = contract_from_types(contract.target, {"winlog.event_data.ObjectType": "keyword"})
+    contract.fields["object.type"] = leaf.fields["object.type"]
+    groups = sweep._any_of_for(contract.target, contract)
+    objects = [group for group in groups if any(p.field == "event.code" and p.value in (4656, 4663) for p in group)]
     assert all(any(p.field == "object.type" and p.value == "Process" for p in group) for group in objects)
     compiled = compile_es(SearchIntent(kind="raw", target=contract.target, window=window, any_of=groups), contract)
     assert "winlog.event_data.ObjectType" in str(compiled.body)
-    assert "case_insensitive" in str(compiled.body)
 
 
 def test_filter_is_not_applied_if_mapping_cannot_push_or_another_rule_needs_objects():

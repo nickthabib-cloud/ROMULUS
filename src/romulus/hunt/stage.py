@@ -23,13 +23,14 @@ import shutil
 import sqlite3
 import tempfile
 import time
+import zlib
 from collections import OrderedDict, defaultdict
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
 from romulus.baseline.spec import Pending, exec_serial
-from romulus.detect.bounded import Account, StateBudget
+from romulus.detect.bounded import Account, StateBudget, reclaiming_write
 from romulus.detect.correlation import boot_of
 from romulus.evidence.typed import TypedEvent
 from romulus.hunt.citations import COMPACT_CITATION_NOTE, compact_event, expand_event
@@ -38,6 +39,13 @@ PREFIX = "romulus-stage-"
 PCAP_PREFIX = "romulus-pcap-"            # the packet stage's capture directory
 STALE_SECONDS = 6 * 3600
 WINDOWS_STABLE_ID_MAX_CHARS = 64
+REFERENCE_FLAGS_BASE = 1 << 56       # all plan tags occupy the same eight payload bytes, even at FULL
+
+
+def _citation_epoch(body):
+    row = json.loads(zlib.decompress(body) if isinstance(body, bytes) else body)
+    stamp = row[2] if isinstance(row, list) else row.get("ts")
+    return datetime.fromisoformat(stamp).timestamp() if stamp else None
 
 # Held events. Every statement that releases a hold or keeps a held event looks rows up by a primary key or an index
 # (one id or key at a time), so a release costs the same however many holds the stage has; tests check the plans.
@@ -86,7 +94,11 @@ class EventStage:
         self.db.execute("PRAGMA journal_mode=MEMORY")
         self.db.execute("PRAGMA synchronous=OFF")
         # kept = 1: staged to be kept to the end; 0: present only while a playbook holds it (table hold)
-        self.db.execute("CREATE TABLE event (id TEXT PRIMARY KEY, body TEXT NOT NULL, kept INTEGER NOT NULL)")
+        self.db.create_function("citation_epoch", 1, _citation_epoch, deterministic=True)
+        self.db.execute("CREATE TABLE event (id TEXT PRIMARY KEY, body TEXT NOT NULL, kept INTEGER NOT NULL, "
+                        f"reclaim INTEGER NOT NULL DEFAULT {REFERENCE_FLAGS_BASE}, "
+                        "ts REAL GENERATED ALWAYS AS (citation_epoch(body)) STORED) WITHOUT ROWID")
+        self.db.execute("CREATE INDEX event_time ON event(ts,id)")
         self.db.execute("CREATE TABLE raw (key TEXT PRIMARY KEY, body TEXT NOT NULL, kept INTEGER NOT NULL)")
         self._raw_table = True
         # holds by event first, so "is this event still held by anyone" is a primary-key lookup
@@ -96,7 +108,8 @@ class EventStage:
         self.db.execute("CREATE TABLE event_raw (id TEXT NOT NULL, key TEXT NOT NULL, PRIMARY KEY (id, key))")
         self.db.execute("CREATE INDEX event_raw_key ON event_raw (key)")
         # This shared root belongs to the stage schema, never the first quiet citation owner.
-        self.db.execute("CREATE TABLE citation_owner(id TEXT,owner TEXT,PRIMARY KEY(id,owner)) WITHOUT ROWID")
+        self.db.execute("CREATE TABLE citation_owner(id TEXT,owner INTEGER,classified INTEGER NOT NULL DEFAULT 0,"
+                        "PRIMARY KEY(id,owner)) WITHOUT ROWID")
         self._baseline_ready = False
         # One bounded-width key per normalized Windows event. The row count follows the hunt's retrieved Windows
         # records; unlike aggregate staging this seam never serializes event bodies or raw telemetry. Keeping the
@@ -125,8 +138,14 @@ class EventStage:
         self.refused = 0
         self.owners = {}
         self.owner_accounts = {}
+        self._owner_numbers = {}       # one entry per registered account, not per event/group; survives DB reopen
+        self.playbooks = ()
+        self.finished_owners = set()
+        self._reference_plan = None
+        self._reference_plan_builds = 0
         self._cache_connection = self.db
         self._text_rows = 0
+        self._body_cursor = ""
         self._body_revisions = defaultdict(int)
         self._raw_revisions = defaultdict(int)
         self._cache_passes = OrderedDict()
@@ -207,35 +226,152 @@ class EventStage:
         def shrink():
             self.db.execute("PRAGMA incremental_vacuum").fetchall()
             self.charge_growth()
+        changed = False
         if self._raw_table:
-            self.db.execute("DELETE FROM raw")
+            removed = self.db.execute("DELETE FROM raw WHERE key IN (SELECT key FROM raw ORDER BY rowid LIMIT 4)").rowcount
             self.db.commit()
-            shrink()
-        cursor = self.db.execute("SELECT id,body,kept FROM event WHERE typeof(body)='text' ORDER BY id")
-        while rows := cursor.fetchmany(500):
+            if removed:
+                shrink()
+                self._cache_passes.clear()
+                return max(1, before-self._size)
+        if self._text_rows == 0:
+            return 0
+        rows = self.db.execute("SELECT id,body,kept FROM event WHERE id>? AND typeof(body)='text' ORDER BY id LIMIT 4",
+                               (self._body_cursor,)).fetchall()
+        if rows:
+            self._body_cursor = rows[-1][0]
             with self.db:
                 self.db.executemany("DELETE FROM event WHERE id=?", [(row[0],) for row in rows])
-                self.db.executemany("INSERT INTO event VALUES(?,?,?)", [
+                self.db.executemany("INSERT INTO event(id,body,kept) VALUES(?,?,?)", [
                     (identity, compact_event(TypedEvent.model_validate_json(body)), kept)
                     for identity, body, kept in rows])
+            self._reference_plan = None
             shrink()
-        self._text_rows = 0
+            if self._text_rows is not None:
+                self._text_rows -= len(rows)
+            changed = True
+        else:
+            self._text_rows = 0
         self._cache_passes.clear()
-        return before-self._size
+        return max(int(changed), before-self._size)
+
+    def _reference_groups(self):
+        """Read existing group state only at physical pressure; no new metadata file or per-group memory."""
+        from romulus.detect.bounded import KeyedStore, key_bytes
+        from romulus.detect.citing import state_citation_ids
+
+        for playbook in self.playbooks:
+            account = self.owner_accounts.get(playbook.id)
+            if account is not None and account.name in self.finished_owners:
+                continue
+            extra = getattr(playbook, "extra_citation_reference_groups", None)
+            owner = self._owner_number(account.name) if account is not None else None
+            if extra is not None:
+                for key, references in extra():
+                    yield (owner, id(playbook), key, True), playbook.state_slice == "strong", references
+            for ref in playbook.__dict__.get("_state_stores", ()):
+                store = ref()
+                if not isinstance(store, KeyedStore) or store.yields:
+                    continue
+                for key, state in store.pressure_items():
+                    custom = getattr(playbook, "citation_reference_groups", None)
+                    if custom is not None:
+                        for index, group in enumerate(custom(store, key, state)):
+                            yield (owner, id(store), key_bytes(key), index, True), playbook.state_slice == "strong", group
+                    else:
+                        identity = store.group(key) if store.group is not None else key
+                        refreshes = getattr(playbook, "refreshes_citation_on_next_record", None)
+                        protect = (store.candidate is None or store.candidate(state)
+                                   or refreshes is None or not refreshes(store, state))
+                        yield (owner, id(store), key_bytes(identity), protect), playbook.state_slice == "strong", state_citation_ids(state)
+                # A failed spill write has rolled back; its states have not yet returned to the hot set.
+                for key, state, _seq in getattr(store, "_writing_states", ()):
+                    custom = getattr(playbook, "citation_reference_groups", None)
+                    if custom is not None:
+                        for index, group in enumerate(custom(store, key, state)):
+                            yield (owner, id(store), key_bytes(key), index, True), playbook.state_slice == "strong", group
+                    else:
+                        identity = store.group(key) if store.group is not None else key
+                        refreshes = getattr(playbook, "refreshes_citation_on_next_record", None)
+                        protect = (store.candidate is None or store.candidate(state)
+                                   or refreshes is None or not refreshes(store, state))
+                        yield (owner, id(store), key_bytes(identity), protect), playbook.state_slice == "strong", state_citation_ids(state)
+
+    def _plan_references(self, token):
+        """Tag exact eligible/strong references and protected witnesses once per attempted write.
+
+        Tags were allocated at insertion at a fixed width. Each commit changes at most 128 rows, and ordering
+        uses the stage's accounted index; there is no unbounded hot-state copy or external temporary sort/file.
+        """
+        self._reference_plan_builds += 1
+        pending = 0
+        def write(sql, params):
+            nonlocal pending
+            self.db.execute(sql, params)
+            pending += 1
+            if pending == 128:
+                self.db.commit()
+                pending = 0
+        def mark(identity, bits, reset=False):
+            sql = "UPDATE event SET reclaim=? WHERE id=?" if reset else "UPDATE event SET reclaim=reclaim|? WHERE id=?"
+            write(sql, (bits, identity))
+        for (identity,) in self.db.execute("SELECT id FROM event"):
+            mark(identity, REFERENCE_FLAGS_BASE, reset=True)
+        for identity, owner in self.db.execute("SELECT id,owner FROM citation_owner WHERE classified=1"):
+            write("UPDATE citation_owner SET classified=0 WHERE id=? AND owner=?", (identity, owner))
+        for group, is_strong, references in self._reference_groups():
+            newest = None
+            for identity in references:
+                row = self.db.execute("SELECT ts,id FROM event WHERE id=?", (identity,)).fetchone()
+                if row is not None:
+                    mark(identity, 1 | (4 if is_strong else 0))
+                    write("UPDATE citation_owner SET classified=1 WHERE id=? AND owner=?", (identity, group[0]))
+                    if newest is None or row > newest:
+                        newest = row
+            if newest is not None and group[-1]:
+                mark(newest[1], 2)
+        strong_owners = {self._owner_number(a.name) for a in self.owner_accounts.values() if a.strong}
+        finished = {self._owner_number(name) for name in self.finished_owners}
+        for (identity,) in self.db.execute("SELECT id FROM event"):
+            owners = dict(self.db.execute("SELECT owner,classified FROM citation_owner WHERE id=?", (identity,)))
+            bits = int(bool(owners and owners.keys() <= finished))
+            if owners.keys() & strong_owners:
+                bits |= 4
+            if any(owner not in finished and not classified for owner, classified in owners.items()):
+                bits |= 2
+            if bits:
+                mark(identity, bits)
+        self.db.commit()
+        self._reference_plan = [token, 0, None]
 
     def _evict_references(self, needed):
-        """An actual detection-write FULL permits compact references to yield after optional bodies."""
+        """After FULL, advance one bounded chronological batch from this write's exact pressure plan."""
         before = self._size
-        while before-self._size < needed:
-            ids = [row[0] for row in self.db.execute("SELECT id FROM event ORDER BY kept,id LIMIT 100")]
-            if not ids:
+        token = getattr(self.budget, "_reclamation_token", None) or object()
+        if self._reference_plan is None or self._reference_plan[0] is not token:
+            self._plan_references(token)
+        plan = self._reference_plan
+        while plan[1] < 2:
+            strength, after = plan[1], plan[2]
+            clause = " AND (ts,id)>(?,?)" if after is not None else ""
+            rows = self.db.execute("SELECT ts,id FROM event INDEXED BY event_time "
+                                   "WHERE (reclaim&3)=1 AND (reclaim&4)=?" + clause + " ORDER BY ts,id LIMIT 4",
+                                   (strength*4, *(after or ()))).fetchall()
+            if rows:
+                plan[2] = rows[-1]
                 break
-            with self.db:
-                for table in ("event_raw", "hold", "citation_owner", "event"):
-                    self.db.executemany(f"DELETE FROM {table} WHERE id=?", [(identity,) for identity in ids])
-            self.db.execute("PRAGMA incremental_vacuum").fetchall()
-            self.charge_growth()
-        return before-self._size
+            plan[1], plan[2] = strength+1, None
+        else:
+            return 0
+        # The protected bit was computed across every group before any deletion; a combined batch cannot
+        # remove both witnesses of a shared group, even when their times fall in different cursor pages.
+        ids = [identity for _stamp, identity in rows]
+        with self.db:
+            for table in ("event_raw", "hold", "citation_owner", "event"):
+                self.db.executemany(f"DELETE FROM {table} WHERE id=?", [(identity,) for identity in ids])
+        self.db.execute("PRAGMA incremental_vacuum").fetchall()
+        self.charge_growth()
+        return max(len(ids), before-self._size)
 
     def _allowance(self, account):
         if self.budget is None:
@@ -250,6 +386,7 @@ class EventStage:
         headroom = budget.headroom()
         return available if headroom is None else min(available, headroom)
 
+    @reclaiming_write
     def _write(self, operation, count, accounts=(), estimated_bytes=0, *, retry=True):
         account = self.account
         if self.budget is not None:
@@ -275,23 +412,25 @@ class EventStage:
                 self.refusal_reason = "estimated citation batch exceeds its body allowance"
                 self.refused += count
                 return
-        try:
-            operation()
-        except sqlite3.OperationalError as exc:
-            self.db.rollback()
-            self._raw_table = bool(self.db.execute("SELECT 1 FROM sqlite_master WHERE name='raw'").fetchone())
-            if "full" not in str(exc).lower():
-                raise
-            if retry and not accounts and self.budget is not None:
+        while True:
+            try:
+                operation()
+                return
+            except sqlite3.OperationalError as exc:
+                self.db.rollback()
+                self._raw_table = bool(self.db.execute("SELECT 1 FROM sqlite_master WHERE name='raw'").fetchone())
+                if "full" not in str(exc).lower():
+                    raise
                 self.charge_growth(account)
-                self.budget.reclaim_citations(self.budget.disk_total, references=True)
-                # Detection batches can be larger than the initial estimate. Retry the same rolled-back
-                # cell once after optional citations yield; a local refusal must mean physical capacity.
-                return self._write(operation, count, accounts, estimated_bytes, retry=False)
-            self.refusal_reason = "event stage reached the physical whole-hunt byte ceiling or volume reserve"
-            self.refused += count
-        finally:
-            self.charge_growth(account)
+                if retry and not accounts and self.budget is not None and self.budget.reclaim_citations_step():
+                    pages = self.db.execute("PRAGMA page_count").fetchone()[0]
+                    self.db.execute(f"PRAGMA max_page_count={pages + self._allowance(account)//page}")
+                    continue
+                self.refusal_reason = "event stage reached the physical whole-hunt byte ceiling or volume reserve"
+                self.refused += count
+                return
+            finally:
+                self.charge_growth(account)
 
     def _cap_windows(self) -> None:
         if self.budget is None:
@@ -312,6 +451,7 @@ class EventStage:
             self.budget.grew(growth)
         self._windows_size = size
 
+    @reclaiming_write
     def unique_windows(self, events: list[TypedEvent]) -> tuple[list[TypedEvent], list[TypedEvent]]:
         """Deduplicate only Windows stable ids, storing no event body and no raw telemetry."""
         self.windows_refused = 0
@@ -348,34 +488,29 @@ class EventStage:
                 self.windows_refused += len(inserts) - start
                 self.windows_refusal_reason = reason
                 break
-            try:
-                self._cap_windows()
-                self.windows_db.executemany("INSERT OR IGNORE INTO windows_seen VALUES (?)", chunk)
-                self.windows_db.commit()
-                self._charge_windows_growth()
-            except sqlite3.OperationalError as exc:
-                self.windows_db.rollback()
-                self._charge_windows_growth()
-                if self.budget is not None and "full" in str(exc).lower():
-                    self.budget.reclaim_citations(self.budget.disk_total, references=True)
+            while True:
+                try:
                     self._cap_windows()
-                    try:
-                        self.windows_db.executemany("INSERT OR IGNORE INTO windows_seen VALUES (?)", chunk)
-                        self.windows_db.commit()
-                        self._charge_windows_growth()
+                    self.windows_db.executemany("INSERT OR IGNORE INTO windows_seen VALUES (?)", chunk)
+                    self.windows_db.commit()
+                    self._charge_windows_growth()
+                    break
+                except sqlite3.OperationalError as exc:
+                    self.windows_db.rollback()
+                    self._charge_windows_growth()
+                    if (self.budget is not None and "full" in str(exc).lower()
+                            and self.budget.reclaim_citations_step()):
                         continue
-                    except sqlite3.OperationalError as retry_exc:
-                        self.windows_db.rollback()
-                        self._charge_windows_growth()
-                        exc = retry_exc
-                reason = f"writing the Windows dedup store failed ({exc})"
-                if self.budget is not None:
-                    if "full" in str(exc).lower():
-                        self.budget.refuse_capacity(self.windows_account, reason)
-                    else:
-                        self.budget.fail(reason)
-                self.windows_refused += len(inserts) - start
-                self.windows_refusal_reason = reason
+                    reason = f"writing the Windows dedup store failed ({exc})"
+                    if self.budget is not None:
+                        if "full" in str(exc).lower():
+                            self.budget.refuse_capacity(self.windows_account, reason)
+                        else:
+                            self.budget.fail(reason)
+                    self.windows_refused += len(inserts) - start
+                    self.windows_refusal_reason = reason
+                    break
+            if self.windows_refusal_reason:
                 break
         # An event whose dedup state was refused is still delivered: every rule reads every batch, and a strong
         # indicator must publish on its own. A later partition may then deliver another copy of it as fresh, so
@@ -408,17 +543,26 @@ class EventStage:
                 for event in first.values() for ref in event.raw if ref.key in raw_sources}
         return bodies, raws
 
+    def _owner_number(self, name):
+        number = self._owner_numbers.get(name)
+        if number is None:
+            number = self._owner_numbers[name] = len(self._owner_numbers)+1
+        return number
+
     def _record_owners(self, events, accounts):
         accounts = tuple(account for account in accounts if account is not None)
         if not accounts:
             return 0
-        return self.db.executemany("INSERT OR IGNORE INTO citation_owner VALUES(?,?)",
-                                   [(event.id, account.name) for event in events for account in accounts]).rowcount
+        return self.db.executemany("INSERT OR IGNORE INTO citation_owner(id,owner) VALUES(?,?)",
+                                   [(event.id, self._owner_number(account.name))
+                                    for event in events for account in accounts]).rowcount
 
     def _cache_changed(self, events=(), *, ids=(), body=False, raw=False):
         """Invalidate fixed-owner revisions only after committed cache/ownership changes."""
         if not body and not raw:
             return
+        if body:
+            self._body_cursor = ""
         ids = sorted({*ids, *(event.id for event in events)})
         body_owners, raw_owners = set(), set()
         for start in range(0, len(ids), 500):
@@ -442,6 +586,8 @@ class EventStage:
     def _compact_cache(self, events, accounts, *, drop_raw=False):
         """Release optional source bodies before refusing a recorded positive's compact witness."""
         if self.db is not self._cache_connection:
+            self.db.create_function("citation_epoch", 1, _citation_epoch, deterministic=True)
+            self._body_cursor = ""
             # Connection replacement/reopen starts unknown: infer live text state once, never per batch.
             self._cache_connection = self.db
             self._text_rows = None
@@ -450,7 +596,7 @@ class EventStage:
             self._text_rows = self.db.execute("SELECT COUNT(*) FROM event WHERE typeof(body)='text'").fetchone()[0]
         if not drop_raw and self._text_rows == 0:
             return
-        names = tuple(sorted(account.name for account in accounts))
+        names = tuple(sorted(self._owner_number(account.name) for account in accounts))
         cache_key = (drop_raw, names)
         def revisions():
             return tuple((self._body_revisions[name], self._raw_revisions[name] if drop_raw else 0) for name in names)
@@ -470,13 +616,15 @@ class EventStage:
                 # Delete/reinsert lets SQLite merge sparse leaves and reuse their pages for hold/index
                 # metadata. In-place body shrinking leaves fragments stranded in otherwise live leaves.
                 self.db.executemany("DELETE FROM event WHERE id=?", [(identity,) for identity, _, _ in rows])
-                self.db.executemany("INSERT INTO event VALUES(?,?,?)", packed)
+                self.db.executemany("INSERT INTO event(id,body,kept) VALUES(?,?,?)", packed)
                 if self._raw_table and drop_raw:
                     raw_deleted = self.db.execute(
                         f"DELETE FROM raw WHERE key IN (SELECT key FROM event_raw WHERE id IN ({marks})) "
                         "AND NOT EXISTS (SELECT 1 FROM event_raw r JOIN event e ON e.id=r.id "
                         "WHERE r.key=raw.key AND typeof(e.body)='text')", ids).rowcount
             self._text_rows -= len(rows)
+            if rows:
+                self._reference_plan = None
             if rows or raw_deleted:
                 self._cache_changed(ids=ids, raw=True)
         identities = [] if accounts else sorted({event.id for event in events})
@@ -530,6 +678,7 @@ class EventStage:
             return
         self._cache_changed(events, body=bool(owners_added), raw=bool(raw_added or owners_added))
 
+    @reclaiming_write
     def _put_compact(self, events, held=(), accounts=(), *, raws=None):
         self._insert_compact(events, held, accounts)
         # All mandatory siblings finish before optional copies can reuse any remaining pages.
@@ -547,25 +696,12 @@ class EventStage:
             except sqlite3.OperationalError as exc:
                 if "full" not in str(exc).lower():
                     raise
-        # Mandatory references survive optional body limits. Detection may reclaim them only under physical pressure.
+        # Mandatory references survive optional body limits and retry real FULL under the same physical policy.
         account = self.account
         if self.budget is not None:
             account = max(accounts or (self._citation_account,), key=lambda item: (self._allowance(item), item.name))
-            page = self.db.execute("PRAGMA page_size").fetchone()[0]
-            pages = self.db.execute("PRAGMA page_count").fetchone()[0]
-            # A compact witness is the mandatory minimum; only physical capacity can refuse it.
-            room = self.budget.physical_allowance(account)
-            self.db.execute(f"PRAGMA max_page_count={pages+room//page}")
         try:
-            with self.db:
-                self.db.executemany("INSERT OR IGNORE INTO event VALUES(?,?,?)", [
-                    (event.id, compact_event(event), int(not held)) for event in events])
-                if held:
-                    self.db.executemany(HOLD_ADD, [(event.id, owner) for owner, event in held])
-                    self.db.executemany("INSERT OR IGNORE INTO event_raw VALUES (?, ?)",
-                                        [(event.id, ref.key) for event in events for ref in event.raw])
-                else:
-                    self.db.executemany(EVENT_KEEP, [(event.id,) for event in events])
+            self._write_compact(events, held, accounts, account)
             self.events += len(events)
         except sqlite3.OperationalError as exc:
             self.db.rollback()
@@ -591,6 +727,37 @@ class EventStage:
         finally:
             self.charge_growth(account)
 
+    def _write_compact(self, events, held, accounts, account):
+        packed = [(event.id, compact_event(event), int(not held)) for event in events]
+        while True:
+            if self.budget is not None:
+                page = self.db.execute("PRAGMA page_size").fetchone()[0]
+                pages = self.db.execute("PRAGMA page_count").fetchone()[0]
+                room = self.budget.physical_allowance(account)
+                self.db.execute(f"PRAGMA max_page_count={pages+room//page}")
+            try:
+                before = self.db.total_changes
+                with self.db:
+                    self.db.executemany("INSERT OR IGNORE INTO event(id,body,kept) VALUES(?,?,?)", packed)
+                    self._record_owners(events, accounts)
+                    if held:
+                        self.db.executemany(HOLD_ADD, [(event.id, owner) for owner, event in held])
+                        self.db.executemany("INSERT OR IGNORE INTO event_raw VALUES (?, ?)",
+                                            [(event.id, ref.key) for event in events for ref in event.raw])
+                    else:
+                        self.db.executemany(EVENT_KEEP, [(event.id,) for event in events])
+                if self.db.total_changes != before:
+                    self._reference_plan = None
+                return
+            except sqlite3.OperationalError as exc:
+                self.db.rollback()
+                self.charge_growth(account)
+                if "full" in str(exc).lower() and self.budget is not None and self.budget.reclaim_citations_step():
+                    continue
+                raise
+            finally:
+                self.charge_growth(account)
+
     def _put(self, events: list[TypedEvent], raw_sources: dict[str, dict], prepared=None) -> None:
         """Stage events to be kept to the end of the sweep: the first event body wins, raw copies are keyed, and an
         event or raw copy staged earlier only as a hold is kept from now on."""
@@ -600,7 +767,7 @@ class EventStage:
         for e in events:
             first.setdefault(e.id, e)
         bodies, raws = prepared or self._prepare(events, raw_sources)
-        self.db.executemany("INSERT OR IGNORE INTO event VALUES (?, ?, 1)",
+        self.db.executemany("INSERT OR IGNORE INTO event(id,body,kept) VALUES (?, ?, 1)",
                             list(bodies.items()))
         # an event or raw copy staged earlier only as a hold is kept from now on: a release never removes it
         self.db.executemany(EVENT_KEEP, [(eid,) for eid in first])
@@ -649,7 +816,7 @@ class EventStage:
             marks = ",".join("?" * len(chunk))
             present.update(row[0] for row in self.db.execute(f"SELECT id FROM event WHERE id IN ({marks})", chunk))
         # an event already on the stage (kept, or held before) is not serialized again
-        self.db.executemany("INSERT INTO event VALUES (?, ?, 0)",
+        self.db.executemany("INSERT INTO event(id,body,kept) VALUES (?, ?, 0)",
                             [(eid, body) for eid, body in bodies.items() if eid not in present])
         self.db.executemany(HOLD_ADD, [(e.id, owner) for owner, e in held])
         owners_added = self._record_owners(list(first.values()), accounts)

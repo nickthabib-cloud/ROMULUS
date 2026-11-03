@@ -174,13 +174,14 @@ def test_non_scalar_telemetry_values_are_bound_as_text(tmp_path):
 def test_only_the_disk_budget_refuses_a_record(tmp_path):
     rule = ProcessNetworkLink()
     rule.spill_dir = tmp_path
-    rule.DISK_BUDGET = 2_000
+    rule.state_budget().force_full("injected physical whole-hunt byte ceiling", lambda account:
+                                   account is rule.account() and rule.spilled_bytes >= 2_000)
     events = [flow(T0 + timedelta(seconds=i), "10.1.0.5", 30000 + i, "198.51.100.1", 443) for i in range(40)]
     rule.consume(events)
     rule.release_state()
-    refused = rule.limits["disk"].records
+    refused = rule.limits["state_disk"].records
     assert 0 < refused < 40 and rule.capped == refused and rule.evaluated == 40 - refused
-    assert "disk budget" in rule.limit_reasons()[0]
+    assert "physical whole-hunt byte ceiling" in rule.limit_reasons()[0]
 
 
 def test_the_sweep_closes_the_spill_on_a_failure_path(tmp_path):

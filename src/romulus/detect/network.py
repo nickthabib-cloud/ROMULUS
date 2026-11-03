@@ -101,6 +101,10 @@ class _Grouped(Playbook):
         """Whether a group's state can still be reported (finalize reads only these from disk)."""
         return True
 
+    def refreshes_citation_on_next_record(self, store, state) -> bool:
+        """An unfilled sample necessarily stages its next record, regardless of timestamp ordering."""
+        return store is self.groups and len(state.held) < EXAMPLE_LIMIT
+
     def drain_staged(self) -> list[TypedEvent]:
         # each kept record once (an example may also be a named value's record), then the bounds' holds
         out, self._pending = list({e.id: e for e in self._pending}.values()) + self.bounds.drain(), []
@@ -624,6 +628,21 @@ class PortScan(_Grouped):
                 return True
         return False
 
+    def _scan_ports(self, key, state):
+        src, dst = key
+        answered = {port for port, seen in state.replies.items() if self._answered(src, dst, port, seen)}
+        unanswered = set(state.replies)-answered
+        client_range = {port for port in unanswered if port >= self.EPHEMERAL_FLOOR}
+        probed = state.bag("ports") | (unanswered-client_range)
+        return answered, unanswered, client_range, probed
+
+    def uncited_finding(self, key, state, match):
+        answered, _unanswered, _client_range, probed = self._scan_ports(key, state)
+        if len(probed) < self.MIN_PORTS:
+            match.proposed_lane, match.severity = "context", "low"
+        match.claim += f" {len(probed)} port(s) look probed; {len(answered)} answer earlier requests."
+        return match
+
     def finalize(self):
         rows = []
         uncited = []
@@ -636,10 +655,7 @@ class PortScan(_Grouped):
                 if len(ports) < self.MIN_PORTS:
                     continue
                 evs, missing, context = self.cite(state)
-                answered = {port for port, seen in replies.items() if self._answered(src, dst, port, seen)}
-                unanswered = set(replies) - answered
-                client_range = {port for port in unanswered if port >= self.EPHEMERAL_FLOOR}
-                probed = forward | (unanswered - client_range)
+                answered, unanswered, client_range, probed = self._scan_ports(key, state)
                 sample = sorted(state.names("ports", self.PORTS_NAMED).values())
                 claim = (f"{state.count} flow record(s) from {src} to {dst} covering {len(ports)} distinct destination "
                          f"ports ({self.span(state)}); e.g. {sample}{more(len(sample), len(ports))}.")
@@ -669,6 +685,13 @@ class PortScan(_Grouped):
                 opened = sorted(port for port in state.names("opened", self.PORTS_NAMED).values() if port in probed)
                 rows.append((src, dst, claim, lane, severity, evs, len(probed), opened, len(answered), context))
         scanned = {(src, dst) for src, dst, _claim, lane, *_rest in rows if lane == self.lane}
+        scanned.update(tuple(match.group_key.split("|")) for match in uncited if match.proposed_lane == self.lane)
+        for match in uncited:
+            src, dst = match.group_key.split("|")
+            if match.proposed_lane == "context" and (dst, src) in scanned:
+                match.proposed_lane, match.severity = self.lane, self.severity
+                match.claim += (f" The opposite direction, {dst} to {src}, is reported as a port scan lead, "
+                                "so this pair is raised to the same lane.")
         out = list(uncited)
         for src, dst, claim, lane, severity, evs, n_probed, opened, n_answered, context in rows:
             if lane == "context" and (dst, src) in scanned:

@@ -711,6 +711,7 @@ class Repo:
             rm("rule_cells", t.rule_run.delete().where(t.rule_run.c.hunt_id == hunt_id))
             rm("tasks", t.task.delete().where(t.task.c.hunt_id == hunt_id))
             rm("report_revisions", t.report_manifest.delete().where(t.report_manifest.c.hunt_id == hunt_id))
+            rm("report_hosts", t.report_host.delete().where(t.report_host.c.hunt_id == hunt_id))
             rm("source_profiles", t.source_profile.delete().where(t.source_profile.c.hunt_id == hunt_id))
             rm("audit_records", t.audit_event.delete().where(t.audit_event.c.hunt_id == hunt_id,
                                                              t.audit_event.c.actor == SYSTEM_ACTOR))
@@ -1816,6 +1817,11 @@ class Repo:
                        "rule_version": existing["rule_version"]}
             summaries = [*list(history.get("summaries") or []), summary][-self.REVISION_SUMMARIES:]
             gates = incoming_gates
+            # Membership is a separate durable stream. Keep its retained count while
+            # the accompanying revision adds a delta, avoiding a full host recount.
+            for key in ("_fleet_hosts_retained", "_fleet_hosts_complete"):
+                if key in previous_gates:
+                    gates.setdefault(key, previous_gates[key])
             gates["_notes"] = sorted({*(str(note) for note in gates.get("_notes", [])),
                                       f"revised in place: {reason}"})
             gates["_revision"] = {"digest": digest, "count": int(history.get("count") or 0) + 1,
@@ -1864,12 +1870,18 @@ class Repo:
 
         with self.candidate_publication() as connection:
             self._fence_lease(connection, hunt_id, owner_token)
-            existing = connection.execute(select(t.candidate.c.hunt_id).where(
-                t.candidate.c.id == candidate_id)).scalar_one()
-            if existing != hunt_id:
+            stored = connection.execute(select(t.candidate).where(
+                t.candidate.c.id == candidate_id)).mappings().one()
+            if stored["hunt_id"] != hunt_id:
                 raise ValueError("fleet membership must belong to the candidate hunt")
+            gates = dict(stored["gate_results"] or {})
+            retained = gates.get("_fleet_hosts_retained")
             if replace:
                 connection.execute(t.candidate_host.delete().where(t.candidate_host.c.candidate_id == candidate_id))
+                retained = 0
+            elif retained is None:
+                retained = connection.execute(select(func.count()).select_from(t.candidate_host).where(
+                    t.candidate_host.c.candidate_id == candidate_id)).scalar_one()
             statement = insert(t.candidate_host).on_conflict_do_nothing()
             batch = []
             reason = ""
@@ -1877,20 +1889,16 @@ class Repo:
                 for host, event_id in hosts:
                     batch.append({"candidate_id": candidate_id, "host": host, "first_event_id": event_id})
                     if len(batch) == 100:
-                        connection.execute(statement, batch)
+                        retained += connection.execute(statement, batch).rowcount
                         batch.clear()
             except (LookupError, RuntimeError) as error:
                 # Optional membership reads may fail after the positive was computed.
                 # Commit the retained prefix with an explicit incomplete-list claim.
                 reason = f"{type(error).__name__}: {str(error)[:300]}"
             if batch:
-                connection.execute(statement, batch)
+                retained += connection.execute(statement, batch).rowcount
             if expected_count is None:
-                return {}
-            retained = connection.execute(select(func.count()).select_from(t.candidate_host).where(
-                t.candidate_host.c.candidate_id == candidate_id)).scalar_one()
-            stored = connection.execute(select(t.candidate).where(t.candidate.c.id == candidate_id)).mappings().one()
-            gates = dict(stored["gate_results"] or {})
+                expected_count = retained if replace else max(gates.get("_fleet_host_count", 0), retained)
             gates["_fleet_host_count"] = expected_count
             gates["_fleet_hosts_retained"] = retained
             gates["_fleet_hosts_complete"] = retained == expected_count and not reason
@@ -1915,6 +1923,61 @@ class Repo:
             ).order_by(t.candidate_host.c.host).limit(limit+1)).mappings().all()
         page = [dict(row) for row in rows[:limit]]
         return page, page[-1]["host"] if len(rows) > limit else ""
+
+    @staticmethod
+    def report_host_line(row):
+        """Canonical appendix bytes, shared by the snapshot digest and exported JSONL."""
+        return json.dumps({"host": row["host"], "first_event_id": row["first_event_id"]},
+                          ensure_ascii=True, sort_keys=True, separators=(",", ":"))+"\n"
+
+    def snapshot_candidate_hosts(self, candidate_id, hunt_id, *, expected_count, complete, expected_candidate=None):
+        """Copy a consistent membership stream; future revisions cannot change this appendix."""
+        from sqlalchemy import literal
+        from sqlalchemy.dialects.sqlite import insert
+
+        with self.candidate_publication() as connection:
+            # pysqlite legacy mode does not begin a transaction for SELECT. Fence
+            # other processes before checking the decision and hashing its hosts.
+            if not connection.connection.driver_connection.in_transaction:
+                connection.exec_driver_sql("BEGIN IMMEDIATE")
+            current = connection.execute(select(t.candidate).where(
+                t.candidate.c.id == candidate_id)).mappings().one()
+            if current["hunt_id"] != hunt_id:
+                raise ValueError("report membership must belong to the candidate hunt")
+            if expected_candidate is not None and any(current[name] != expected_candidate[name]
+                                                     for name in (*self._REVISION_FIELDS, "ts", "group_key")):
+                raise RuntimeError("Candidate changed while building report; publish a fresh report revision")
+            hasher, count = hashlib.sha256(), 0
+            query = select(t.candidate_host.c.host, t.candidate_host.c.first_event_id).where(
+                t.candidate_host.c.candidate_id == candidate_id).order_by(t.candidate_host.c.host)
+            for batch in connection.execute(query).mappings().partitions(100):
+                for row in batch:
+                    hasher.update(self.report_host_line(row).encode("utf-8"))
+                    count += 1
+            snapshot = hasher.hexdigest()
+            connection.execute(insert(t.report_host).from_select(
+                ["hunt_id", "snapshot", "host", "first_event_id"],
+                select(literal(hunt_id), literal(snapshot), t.candidate_host.c.host,
+                       t.candidate_host.c.first_event_id).where(t.candidate_host.c.candidate_id == candidate_id)
+            ).on_conflict_do_nothing())
+        return {"sha256": snapshot, "filename": f"fleet-hosts-{snapshot}.jsonl", "count": count,
+                "expected_count": expected_count, "complete": bool(complete and count == expected_count)}
+
+    def report_hosts(self, hunt_id, snapshot):
+        """Keyset pages of an immutable report appendix, without an open reader between pages."""
+        after = None
+        while True:
+            query = select(t.report_host.c.host, t.report_host.c.first_event_id).where(
+                t.report_host.c.hunt_id == hunt_id, t.report_host.c.snapshot == snapshot)
+            if after is not None:
+                query = query.where(t.report_host.c.host > after)
+            with self.engine.connect() as connection:
+                rows = connection.execute(query.order_by(t.report_host.c.host).limit(100)).mappings().all()
+            if not rows:
+                return
+            for row in rows:
+                yield dict(row)
+            after = rows[-1]["host"]
 
     def candidates(self, hunt_id: str, lanes: list[str] | None = None) -> list[dict]:
         q = select(t.candidate).where(t.candidate.c.hunt_id == hunt_id)

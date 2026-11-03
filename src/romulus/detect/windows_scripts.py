@@ -42,7 +42,7 @@ CONTENT_COMMANDS = TOOLS | EXECUTORS | {"get-process", "gps", "ps", "out-minidum
     "add-type", "get-credential", "out-file", "set-content", "add-content", "export-csv",
     "invoke-webrequest", "iwr", "wget", "curl", "invoke-restmethod", "irm", "start-bitstransfer",
     "set-itemproperty", "new-itemproperty", "sp", "get-command", "gcm",
-    "start-process", "saps", "invoke-item", "ii"}
+    "start-process", "start", "saps", "invoke-item", "ii"}
 
 
 def runs_code(parsed):
@@ -313,11 +313,11 @@ class ScriptRule(WindowsEventRule):
 
 class ScriptDownload(ScriptRule):
     id = "win.script_download"
-    version = "5"
+    version = "6"
     title = "PowerShell script contains download and evaluation or start requests"
     attack = ("T1059.001", "T1105")
     description = "Recorded script combines a download with a code-running call; runtime data flow and execution are unverified"
-    start_requests = frozenset({'start-process', 'saps', 'invoke-item', 'ii'})
+    start_requests = frozenset({'start-process', 'start', 'saps', 'invoke-item', 'ii'})
 
     def test(self, event, p):
         return downloads(p) and (runs_code(p) or p.starts_program or bool(p.commands & self.start_requests))
@@ -331,6 +331,7 @@ class ScriptDownload(ScriptRule):
 
 
 class ScriptReflectiveLoad(ScriptRule):
+    version = "5"
     id = "win.script_reflective_load"
     title = "PowerShell script contains a reflective assembly load"
     attack = ("T1620", "T1059.001")
@@ -342,6 +343,7 @@ class ScriptReflectiveLoad(ScriptRule):
 
 
 class ScriptPInvoke(ScriptRule):
+    version = "5"
     id = "win.script_pinvoke"
     title = "PowerShell script contains native memory or delegate calls"
     attack = ("T1055", "T1059.001")
@@ -357,6 +359,7 @@ class ScriptPInvoke(ScriptRule):
 
 
 class ScriptAmsiBypass(ScriptRule):
+    version = "5"
     id = "win.script_amsi_bypass"
     title = "PowerShell script contains AMSI bypass code"
     attack = ("T1685", "T1059.001")
@@ -367,6 +370,7 @@ class ScriptAmsiBypass(ScriptRule):
 
 
 class ScriptEtwBypass(ScriptRule):
+    version = "5"
     id = "win.script_etw_bypass"
     title = "PowerShell script contains ETW bypass code"
     attack = ("T1685.001", "T1059.001")
@@ -383,7 +387,7 @@ class ScriptEtwBypass(ScriptRule):
 
 class ScriptObfuscatedExecution(ScriptRule):
     id = "win.script_obfuscated_execution"
-    version = "5"
+    version = "6"
     title = "PowerShell script contains obfuscated evaluation"
     attack = ("T1027.010", "T1059.001")
     description = "Recorded script combines character, format, backtick or concatenation obfuscation with call/evaluation syntax"
@@ -394,7 +398,7 @@ class ScriptObfuscatedExecution(ScriptRule):
 
 class ScriptDecodeEvaluation(ScriptRule):
     id = "win.script_decode_evaluation"
-    version = "4"
+    version = "5"
     title = "PowerShell script contains decoding followed by code evaluation"
     attack = ("T1140", "T1059.001")
     description = "Recorded code combines Base64/decompression reading and a code-evaluation call; runtime data flow is unverified"
@@ -410,6 +414,7 @@ class ScriptDecodeEvaluation(ScriptRule):
 
 
 class ScriptOffensiveFunction(ScriptRule):
+    version = "5"
     id = "win.script_offensive_function"
     title = "PowerShell script contains an offensive or dual-use function"
     attack = ("T1059.001",)
@@ -420,6 +425,7 @@ class ScriptOffensiveFunction(ScriptRule):
 
 
 class ScriptLsassAccess(ScriptRule):
+    version = "5"
     id = "win.script_lsass_access"
     title = "PowerShell script contains LSASS dump code"
     attack = ("T1003.001", "T1059.001")
@@ -435,6 +441,7 @@ class ScriptLsassAccess(ScriptRule):
 
 
 class ScriptSamAccess(ScriptRule):
+    version = "5"
     id = "win.script_sam_access"
     title = "PowerShell script contains credential hive export code"
     attack = ("T1003.002", "T1003.004", "T1059.001")
@@ -452,6 +459,7 @@ class ScriptSamAccess(ScriptRule):
 
 
 class ScriptDpapiAccess(ScriptRule):
+    version = "5"
     id = "win.script_dpapi_access"
     title = "PowerShell script contains DPAPI decryption code"
     attack = ("T1555", "T1059.001")
@@ -464,6 +472,7 @@ class ScriptDpapiAccess(ScriptRule):
 
 
 class ScriptCredentialHarvest(ScriptRule):
+    version = "5"
     id = "win.script_credential_harvest"
     title = "PowerShell script contains credential prompt extraction code"
     attack = ("T1056.003", "T1059.001")
@@ -506,6 +515,7 @@ def disables(p, suffix, name):
 
 
 class ScriptLoggingDisable(ScriptRule):
+    version = "5"
     id = "win.script_logging_disable"
     title = "PowerShell script contains logging-disable code"
     attack = ("T1685.001", "T1059.001")
@@ -519,6 +529,7 @@ class ScriptLoggingDisable(ScriptRule):
 
 
 class ScriptAmsiDisable(ScriptRule):
+    version = "5"
     id = "win.script_amsi_disable"
     title = "PowerShell script contains Windows Script AMSI-disable code"
     attack = ("T1685", "T1059.001")
@@ -529,6 +540,7 @@ class ScriptAmsiDisable(ScriptRule):
 
 
 class ScriptEncodedCommand(ScriptRule):
+    version = "5"
     id = "win.script_encoded_command"
     title = "PowerShell script record has a decoded encoded-command host launch"
     attack = ("T1027.010", "T1059.001")
@@ -549,6 +561,7 @@ class ScriptEncodedCommand(ScriptRule):
 
 
 class ScriptEngineV2(ScriptRule):
+    version = "5"
     id = "win.script_engine_v2"
     title = "PowerShell engine-start record reports version 2.0"
     attack = ("T1059.001", "T1685.001")

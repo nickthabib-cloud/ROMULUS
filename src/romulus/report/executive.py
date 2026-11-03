@@ -1,0 +1,56 @@
+"""Executive Word document rendered from the same immutable report manifest."""
+from xml.etree.ElementTree import Element, SubElement, tostring
+from zipfile import ZIP_DEFLATED, ZipFile
+
+from romulus.report.markdown import _CTRL, BANNER, outcome_sentence
+
+_WORD = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+
+def write(m, path, technical_name):
+    document = Element(f"{{{_WORD}}}document")
+    body = SubElement(document, f"{{{_WORD}}}body")
+
+    def paragraph(value, *, bold=False):
+        p = SubElement(body, f"{{{_WORD}}}p")
+        r = SubElement(p, f"{{{_WORD}}}r")
+        if bold:
+            SubElement(SubElement(r, f"{{{_WORD}}}rPr"), f"{{{_WORD}}}b")
+        text = SubElement(r, f"{{{_WORD}}}t", {"{http://www.w3.org/XML/1998/namespace}space": "preserve"})
+        text.text = _CTRL.sub("", str(value))
+
+    paragraph(BANNER)
+    paragraph("ROMULUS executive report", bold=True)
+    paragraph(f"Hunt {m['hunt']['id']} — revision {m['revision']['number']}")
+    paragraph(outcome_sentence(m))
+    if not m["integrity"]["finalizable"]:
+        paragraph("Degraded report: incomplete evidence or host lists are identified in the technical report.")
+    paragraph(f"Technical report: {technical_name}. This contains the full findings, citations and coverage gaps.")
+    for finding in m["findings"]:
+        paragraph(f"{finding['rule_id']} — {finding['lane']}", bold=True)
+        paragraph(finding["claim"])
+        if ref := finding.get("fleet_hosts"):
+            amount = str(ref["count"]) if ref["complete"] else f"{ref['count']} of {ref['expected_count']}"
+            paragraph(f"{amount} reporting hosts retained; host list {'complete' if ref['complete'] else 'partial'}. "
+                      f"See {technical_name}, Fleet host appendix, finding {finding['id']}, for every retained host.")
+        for check in finding["next_checks"]:
+            paragraph("Recommended check: "+check)
+    paragraph(BANNER)
+    section = SubElement(body, f"{{{_WORD}}}sectPr")
+    SubElement(section, f"{{{_WORD}}}pgSz", {f"{{{_WORD}}}w": "12240", f"{{{_WORD}}}h": "15840"})
+    SubElement(section, f"{{{_WORD}}}pgMar", {f"{{{_WORD}}}{side}": "1440" for side in ("top", "right", "bottom", "left")})
+    content_types = ('<?xml version="1.0" encoding="UTF-8"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/word/document.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+        '</Types>')
+    relationships = ('<?xml version="1.0" encoding="UTF-8"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" '
+        'Target="word/document.xml"/></Relationships>')
+    with ZipFile(path, "w", compression=ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", content_types)
+        archive.writestr("_rels/.rels", relationships)
+        archive.writestr("word/document.xml", tostring(document, encoding="utf-8", xml_declaration=True))

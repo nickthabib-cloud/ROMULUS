@@ -42,6 +42,7 @@ _CACHE_TEXT_SUFFIXES = frozenset({
 LURE_WRITERS = frozenset({"winword.exe", "excel.exe", "powerpnt.exe", "outlook.exe", "msaccess.exe",
                           "onenote.exe", "mspub.exe", "chrome.exe", "msedge.exe", "firefox.exe", "iexplore.exe",
                           "brave.exe", "opera.exe"})
+_BROWSER_WRITERS = frozenset({"chrome.exe", "msedge.exe", "firefox.exe", "iexplore.exe", "brave.exe", "opera.exe"})
 _SCRIPT_START = re.compile(r"\A\s*(?:#!|<script(?:\s|>)|function\s+[\w-]+\s*\{|"
                            r"(?:iex|invoke-expression|start-process|write-host|write-output)\b)", re.IGNORECASE)
 _FILE_FIELDS = ("file.path", "file.path_key", "file.action", "process.executable", "process.executable_key",
@@ -71,7 +72,9 @@ def _code_record(event, path=None):
     body = str(event.get("file.stream.content") or "")
     if _pe_record(event):
         return True
-    if _browser_cache(path) and extension_class(path) in _CACHE_TEXT_SUFFIXES:
+    writer = event.get("process.executable_key") or event.get("process.executable")
+    if (basename(writer) in _BROWSER_WRITERS and _browser_cache(path)
+            and extension_class(path) in _CACHE_TEXT_SUFFIXES):
         return False
     return bool(executable_path(path)
                 or "startup" in parts or "wwwroot" in parts
@@ -99,7 +102,7 @@ def _browser_cache(path):
     else:
         return False
     if len(tail) > 3 and tail[:3] == ('microsoft', 'windows', 'inetcache'):
-        return True
+        return tail[3] not in {'content.outlook', 'content.mso'}
     cache = {"cache", "cache_data", "code cache", "gpucache", "cache2", "startupcache"}
     profile = tail[:3] in {('google', 'chrome', 'user data'), ('microsoft', 'edge', 'user data'),
                           ('mozilla', 'firefox', 'profiles')}
@@ -136,7 +139,7 @@ class _FileBehaviorRule(BehaviorFleetRule):
 
 class StartupFileWrite(_FileBehaviorRule):
     id = "win.startup_file_write"
-    version = "5"
+    version = "6"
     title = "File created in a Windows startup folder"
     families = ("file_change",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 11),)
@@ -158,7 +161,7 @@ class StartupFileWrite(_FileBehaviorRule):
 
 class LureApplicationFileWrite(_FileBehaviorRule):
     id = "win.lure_application_file_write"
-    version = "5"
+    version = "6"
     title = "Office or browser process wrote a file in a user-writable directory"
     families = ("file_change",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 11),)
@@ -186,7 +189,7 @@ class LureApplicationFileWrite(_FileBehaviorRule):
 
 class ExecutableAlternateStream(_FileBehaviorRule):
     id = "win.executable_alternate_stream"
-    version = "5"
+    version = "6"
     title = "An alternate file stream was recorded"
     families = ("file_change",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 15),)
@@ -226,7 +229,7 @@ class ExecutableAlternateStream(_FileBehaviorRule):
 
 class ExecutableCreationTimeChange(_FileBehaviorRule):
     id = "win.executable_creation_time_change"
-    version = "5"
+    version = "6"
     title = "Creation time changed on a Windows file"
     families = ("file_change",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 2),)
@@ -254,7 +257,7 @@ class ExecutableCreationTimeChange(_FileBehaviorRule):
 
 class WritableExecutableDeletion(_FileBehaviorRule):
     id = "win.writable_executable_deletion"
-    version = "5"
+    version = "6"
     title = "File deleted from a user-writable or startup location"
     families = ("file_change",)
     windows_event_classes = tuple((SYSMON_CHANNEL, SYSMON, code) for code in (23, 26))
@@ -276,7 +279,7 @@ class WritableExecutableDeletion(_FileBehaviorRule):
 
 class WebRootFileWrite(_FileBehaviorRule):
     id = "win.web_root_file_write"
-    version = "3"
+    version = "4"
     title = "File created in the default IIS web content directory"
     families = ("file_change",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 11),)
@@ -305,7 +308,7 @@ class WebRootFileWrite(_FileBehaviorRule):
 
 class CodeRunnerDnsLookup(WindowsEventRule):
     id = "win.code_runner_dns_lookup"
-    version = "3"
+    version = "4"
     title = "Script host or proxy-execution binary requested DNS resolution"
     families = ("dns_lookup",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 22),)

@@ -418,7 +418,7 @@ class WebServiceSpawnsInterpreter(Playbook):
             key = (e.host, user, command_shape(argv), packaged)
             state = self.shapes.get(key)
             if state is None:
-                state = [0, HeldExamples(self.CITE), {}]
+                state = [0, HeldExamples(self.CITE), {}, {}]
                 if not self.shapes.put(key, state):
                     # its rarity cannot be judged without the shape's count: a lead per shape, published as read
                     self.note_limit("shapes_unheld", "the web-service interpreter shapes' disk budget is spent; a run "
@@ -434,6 +434,10 @@ class WebServiceSpawnsInterpreter(Playbook):
             hour = e.ts.replace(minute=0, second=0, microsecond=0)
             hours[hour] = hours.get(hour, 0) + 1
             if state[1].offer(e):
+                if state[0] <= self.RARE_MAX:
+                    state[3][e.id] = "|".join(sorted(ref.key for ref in e.raw))
+                else:
+                    state[3].clear()
                 self._pending.append(e)
                 self._fresh.append(state[1])
         return matches
@@ -514,6 +518,15 @@ class WebServiceSpawnsInterpreter(Playbook):
                     out.append(self._event_match(e, user, argv, [], count=n, runs=evs))
         return out
 
+    def citation_reference_groups(self, store, key, state):
+        from romulus.detect.citing import state_citation_ids
+
+        if store is self.shapes and not key[3] and state[0] <= self.RARE_MAX:
+            # Rare shapes publish each run independently; each run is its own publishing group.
+            yield from ([identity] for identity in state[1].ids())
+        else:
+            yield state_citation_ids(state)
+
     def uncited_finding(self, key, state, match):
         host, user, shape, packaged = key
         n = state[0]
@@ -528,6 +541,11 @@ class WebServiceSpawnsInterpreter(Playbook):
         match.entities = [("host", host, "host"), ("account", user, "actor")]
         match.claim = (f"Account '{user}' on {host} ran command shape '{shape}' {n} time(s). "
                        + match.notes[0])
+        if not packaged and n <= self.RARE_MAX:
+            from dataclasses import replace
+
+            return [replace(match, ts=ref[0], group_key="", identity_key=state[3][ref[1]])
+                    for ref, _event in state[1].items]
         return match
 
 

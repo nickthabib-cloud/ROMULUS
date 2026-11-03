@@ -625,6 +625,10 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
             "disposition_history": [{"actor": d["actor"], "at": str(d["at"]), "status": d["status"],
                                      "note": d["note"]} for d in disp],
         })
+        if "_fleet_host_count" in gates:
+            findings[-1]["fleet_hosts"] = repo.snapshot_candidate_hosts(
+                c["id"], hunt_id, expected_count=gates["_fleet_host_count"],
+                complete=gates.get("_fleet_hosts_complete", False), expected_candidate=c)
     lane_counts = Counter(c["lane"] for c in cands)
     with repo.engine.connect() as conn:
         tasks = conn.execute(select(t.task.c.state, func.count()).where(t.task.c.hunt_id == hunt_id)
@@ -671,6 +675,10 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
                       "broken_incident_citations": len(broken_incidents),
                       "broken_incident_event_ids": broken_incidents[:50],
                       "finalizable": broken == 0 and not broken_inv and not broken_incidents}
+    fleet_gaps = sum(not finding["fleet_hosts"]["complete"] for finding in findings if "fleet_hosts" in finding)
+    if fleet_gaps:
+        m["integrity"]["incomplete_fleet_host_lists"] = fleet_gaps
+        m["integrity"]["finalizable"] = False
     return _jsonable(m)
 
 

@@ -4,7 +4,7 @@ disk spill), so activity that starts after many ordinary names is found exactly 
 import random
 from datetime import timedelta
 
-from romulus.detect import bounded, dns
+from romulus.detect import dns
 from tests.test_bounded_dns import HEX, T0, hot_within, ptr_question, question, run_batches, shape, small
 
 UNBOUNDED = 10**9
@@ -79,7 +79,8 @@ def test_the_running_entropy_sum_equals_the_builtin_sum_bit_for_bit():
 
 
 def test_a_name_refused_by_the_disk_budget_is_not_counted_and_coverage_says_so(monkeypatch, tmp_path):
-    monkeypatch.setattr(bounded, "DISK_BUDGET", 1)
+    from tests.storage_capacity_fixture import refuse_new_stores_after_spill
+    refuse_new_stores_after_spill(monkeypatch, 1)
     monkeypatch.setattr(dns.DnsTunnelShape, "NAMES_INLINE", 2)
     rule = small(monkeypatch, dns.DnsTunnelShape, tmp_path)
     ask = [question("10.40.0.8", f"n{i}.example.test", T0 + timedelta(seconds=i)) for i in range(5)]

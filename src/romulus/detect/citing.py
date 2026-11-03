@@ -25,6 +25,41 @@ from romulus.detect.bounded import CitationUnavailable
 from romulus.evidence.typed import TypedEvent
 
 
+def state_citation_ids(state):
+    """Stream explicit citation references from bounded aggregate state, never telemetry text."""
+    from dataclasses import fields, is_dataclass
+
+    from romulus.detect.bounded import HeldExamples
+
+    reference_names = {"id", "event_id", "ids", "events", "held", "cited", "cites", "examples",
+                       "opener_id", "first", "last", "longest", "parts", "staged"}
+
+    def visit(value, references=False):
+        if isinstance(value, TypedEvent):
+            yield value.id
+        elif isinstance(value, (HeldExamples, Ends)):
+            yield from value.ids()
+        elif isinstance(value, Named):
+            yield from value.ids.values()
+        elif isinstance(value, str):
+            if references:
+                yield value
+        elif isinstance(value, dict):
+            for name, item in value.items():
+                yield from visit(item, references or name in reference_names)
+        elif isinstance(value, (tuple, list)):
+            for item in value:
+                yield from visit(item, references)
+        elif is_dataclass(value):
+            for item in fields(value):
+                yield from visit(getattr(value, item.name), item.name in reference_names)
+        elif slots := getattr(type(value), "__slots__", ()):
+            for name in slots:
+                yield from visit(getattr(value, name, None), name in reference_names)
+
+    yield from visit(state)
+
+
 @contextmanager
 def citation_group(owner, out=None, key=None, state=None):
     """A refused compact witness affects its group, never the rule's other findings."""
@@ -33,7 +68,8 @@ def citation_group(owner, out=None, key=None, state=None):
     except CitationUnavailable:
         if out is None or key is None:
             raise
-        out.append(uncited_positive(owner, key, state))
+        finding = uncited_positive(owner, key, state)
+        out.extend(finding if isinstance(finding, list) else [finding])
 
 
 def uncited_positive(owner, key, state=None):
@@ -58,6 +94,14 @@ def uncited_positive(owner, key, state=None):
             for name, item in value.items():
                 if name in ("ts", "first", "start") and isinstance(item, (float, int)):
                     times.append(datetime.fromtimestamp(item, UTC))
+                elif name == "first" and isinstance(item, (list, tuple)) and item:
+                    first = item[0]
+                    if isinstance(first, (list, tuple)) and first:
+                        first = first[0]
+                    if isinstance(first, (int, float)):
+                        times.append(datetime.fromtimestamp(first, UTC))
+                    else:
+                        visit(item, depth+1)
                 else:
                     visit(item, depth+1)
         elif isinstance(value, (tuple, list)):
@@ -73,12 +117,47 @@ def uncited_positive(owner, key, state=None):
     visit(state)
     identity = key if isinstance(key, str) else "|".join(map(str, key)) if isinstance(key, tuple) else str(key)
     note = f"Group {identity}: no citation could be retained; this positive is published from its recorded detection state."
-    owner.note_limit("citation_reference", note)
+    timestamp = min(times) if times else getattr(owner, "_first_record_time", None) or getattr(owner, "window_start", None)
+    if timestamp is None:
+        raise ValueError("an uncited positive requires a recorded or evaluation-window timestamp")
     match = Match(owner.id, f"{owner.title}: {note}", owner.claim_type, [], [],
-                  min(times) if times else datetime.min.replace(tzinfo=UTC), owner.severity, owner.lane,
+                  timestamp, owner.severity, owner.lane,
                   "medium", notes=[note], group_key=identity, citation_unavailable=True)
     factory = getattr(owner, "uncited_finding", None)
-    return factory(key, state, match) if factory else match
+    result = factory(key, state, match) if factory else match
+    findings = result if isinstance(result, list) else [result]
+    retained = False
+    for finding in findings:
+        # A factory may split one state into per-record findings. Those may cite only their own exact raw-key
+        # identity; borrowing another run's survivor would change both the evidence and canonical identity.
+        record_identity = "" if finding.group_key else finding.identity_key
+        if not finding.group_key and not record_identity:
+            continue
+        survivor = None
+        for event_id in state_citation_ids(state):
+            try:
+                events = owner.load([event_id])
+            except CitationUnavailable:
+                continue
+            for event in events:
+                if (event.id != event_id or record_identity
+                        and "|".join(sorted(ref.key for ref in event.raw)) != record_identity):
+                    continue
+                if survivor is None or (event.ts, event.id) < (survivor.ts, survivor.id):
+                    survivor = event
+        if survivor is None:
+            continue
+        retained = True
+        finding.events = [survivor]
+        partial = note.replace("no citation could be retained",
+                               "a surviving reference is retained, but citation coverage is partial")
+        finding.notes = [partial if item == note else item for item in finding.notes]
+        # The surviving record does not necessarily support every specific statement in the original claim.
+        # Keep computed lane/identity and a truthful generic claim, with missing predicate lineage explicit.
+        finding.claim = f"{owner.title}: {partial}"
+    owner.note_limit("citation_reference", f"Group {identity}: citation coverage is partial; "
+                     "the positive is published from recorded detection state." if retained else note)
+    return result
 
 
 def citation_call(owner, build, *args, **kwargs):

@@ -331,6 +331,8 @@ def test_replacing_a_key_held_on_disk_is_not_a_new_key_under_a_spent_budget(tmp_
     owner = _Owner()
     owner.spill_dir = tmp_path
     store = KeyedStore(owner, "r", hot=1, disk_budget=1)
+    from tests.storage_capacity_fixture import refuse_after_spill
+    refuse_after_spill(owner, store, 1)
     store.put("a", [1])
     store.put("b", [2])
     store.trim()                                        # "a" on disk; the budget is now spent
@@ -426,6 +428,8 @@ def test_an_existing_process_keeps_its_lineage_when_the_disk_budget_is_spent(tmp
     owner.spill_dir = tmp_path
     lineage = ProcessLineage(owner)
     lineage.records.hot_size, lineage.records.disk_budget = 1, 1
+    from tests.storage_capacity_fixture import refuse_after_spill
+    refuse_after_spill(owner, lineage.records, 1)
     lineage.observe(_exec("x1", 100, 0))
     lineage.observe(_exec("y1", 200, 1))
     lineage.observe(_exec("w1", 400, 2))

@@ -95,14 +95,20 @@ class BurstRows(WindowsRows):
         if not self.ready:
             self.account = self.owner.state_budget().account(f"{self.owner.id}:windows_rows", strong=True)
             spill.budget.reclaim_citations(16*spill._page)
-            spill.cap()
-            try:
-                self._schema(spill)
-            except sqlite3.OperationalError as error:
-                spill.db.rollback()
-                raise spill.failed(error, account=self.account) from error
-            finally:
-                spill.grew()
+            with spill.budget.reclamation_write():
+                while True:
+                    spill.cap()
+                    try:
+                        self._schema(spill)
+                        break
+                    except sqlite3.OperationalError as error:
+                        spill.db.rollback()
+                        spill.grew()
+                        if "full" in str(error).lower() and spill.budget.reclaim_citations_step():
+                            continue
+                        raise spill.failed(error, account=self.account) from error
+                    finally:
+                        spill.grew()
             self.ready = True
             self._charge()
         return spill
@@ -137,20 +143,31 @@ class BurstRows(WindowsRows):
         self.owner.state_budget().charge(self.account, size-self.account.used)
 
     def _reclaim_capacity(self):
-        """An actual FULL write gets one retry after optional citation caches yield."""
-        spill, budget = self.store(), self.owner.state_budget()
+        """Retry one actual FULL write after a bounded citation reclamation step."""
+        spill, budget = self.owner.spill(), self.owner.state_budget()
         spill.grew()
         self._charge()
-        before = budget.physical_used
-        budget.reclaim_citations(budget.disk_total, references=True)
-        if budget.physical_used >= before:
+        if not budget.reclaim_citations_step():
             return False
         pages = spill.db.execute("PRAGMA page_count").fetchone()[0]
         spill.db.execute(f"PRAGMA max_page_count={max(1, pages+budget.physical_allowance(self.account)//spill._page)}")
         self._batch_refusal = budget.new_key_reason(self.account)
         return not self._batch_refusal
 
-    def _write(self, statement, rows, *, retried=False):
+    @staticmethod
+    def _physical_full(error):
+        return isinstance(error.__cause__, sqlite3.OperationalError) and "full" in str(error.__cause__).lower()
+
+    def _write(self, statement, rows):
+        with self.owner.state_budget().reclamation_write():
+            while True:
+                try:
+                    return self._write_once(statement, rows)
+                except StateExhausted as error:
+                    if self._in_savepoint or not self._physical_full(error) or not self._reclaim_capacity():
+                        raise
+
+    def _write_once(self, statement, rows):
         spill = self.store()
         budget = self.owner.state_budget()
         if self._batching:
@@ -163,8 +180,6 @@ class BurstRows(WindowsRows):
                 self._symbol_cache.clear()
                 self._symbol_bytes = 0
                 if "full" in str(exc).lower():
-                    if not self._in_savepoint and not retried and self._reclaim_capacity():
-                        return self._write(statement, rows, retried=True)
                     raise StateExhausted("authentication state reached its hunt byte allowance or volume reserve") from exc
                 raise
             return
@@ -187,8 +202,6 @@ class BurstRows(WindowsRows):
             self._symbol_cache.clear()
             self._symbol_bytes = 0
             if "full" in str(exc).lower():
-                if not self._in_savepoint and not retried and self._reclaim_capacity():
-                    return self._write(statement, rows, retried=True)
                 raise StateExhausted("authentication state reached its hunt byte allowance or volume reserve") from exc
             raise
         finally:
@@ -227,7 +240,19 @@ class BurstRows(WindowsRows):
     def reset_markers(self, prefix):
         self._execute("DELETE FROM windows_marks WHERE k>=? AND k<?", (prefix, prefix+chr(0x10ffff)))
 
-    def put(self, key, event, value="", *, retried=False):
+    def put(self, key, event, value=""):
+        with self.owner.state_budget().reclamation_write():
+            while True:
+                try:
+                    return self._put(key, event, value)
+                except StateExhausted as error:
+                    if self._physical_full(error) and self._reclaim_capacity():
+                        continue
+                    self._refuse(event, f"An authentication correlation key could not be written: {error}")
+                    self._charge()
+                    return False
+
+    def _put(self, key, event, value):
         spill = self.store()
         key_id = self._lookup(key)
         if key_id is not None and self._execute(
@@ -295,11 +320,7 @@ class BurstRows(WindowsRows):
                 self.owner.note_limit("windows_expiry", f"Authentication archive maintenance deferred: {exc}")
                 self._charge()
                 return True
-            if not retried and self._reclaim_capacity():
-                return self.put(key, event, value, retried=True)
-            self._refuse(event, f"An authentication correlation key could not be written: {exc}")
-            self._charge()
-            return False
+            raise
         if not self._batching:
             self._charge()
         return True
@@ -367,20 +388,36 @@ class BurstRows(WindowsRows):
             (*values, *values)).fetchone() is not None
 
     def witnesses(self, key, end, seconds, count, *, distinct=False, latest=False):
+        interval = (self._lookup(key), end-seconds, end)
+        if latest:
+            # Both sides use (key,time,id) indexes. SQLite merges the two ordered cursors;
+            # stop once the required newest distinct values (or records) have been seen.
+            # Unlike a window/GROUP BY query this does not rank the entire active window.
+            query = ("SELECT id,ts,value FROM windows_rows WHERE k=? AND ts>=? AND ts<=? UNION ALL "
+                     "SELECT id,ts,value FROM windows_archive WHERE k=? AND ts>=? AND ts<=? "
+                     "ORDER BY ts DESC,id DESC")
+            seen, out = set(), []
+            cursor = self._execute(query, (*interval, *interval))
+            try:
+                for identity, stamp, value in cursor:
+                    member = value if distinct else identity
+                    if member in seen:
+                        continue
+                    seen.add(member)
+                    out.append((_event_id(identity), stamp))
+                    if len(out) == count:
+                        break
+            finally:
+                cursor.close()
+            return out
         inner = ("FROM (SELECT id,ts,value FROM windows_rows WHERE k=? AND ts>=? AND ts<=? UNION ALL "
                  "SELECT id,ts,value FROM windows_archive WHERE k=? AND ts>=? AND ts<=?) ")
-        if latest and distinct:
-            query = ("SELECT id,ts FROM (SELECT id,ts,ROW_NUMBER() OVER(PARTITION BY value ORDER BY ts DESC,id DESC) r "
-                     + inner + ") WHERE r=1 ORDER BY ts DESC,id DESC LIMIT ?")
-        elif latest:
-            query = "SELECT id,MAX(ts) " + inner + "GROUP BY id ORDER BY MAX(ts) DESC,id DESC LIMIT ?"
-        elif distinct:
+        if distinct:
             # A self-join over the UNION view could materialize the hunt archive for every check.
             query = "SELECT MIN(id),MIN(ts) " + inner + "GROUP BY value ORDER BY MIN(ts),MIN(id) LIMIT ?"
         else:
             # GROUP BY id also prevents double counting if a failed expiry move left both copies readable.
             query = "SELECT id,MIN(ts) " + inner + "GROUP BY id ORDER BY MIN(ts),id LIMIT ?"
-        interval = (self._lookup(key), end-seconds, end)
         return [(_event_id(identity), stamp) for identity, stamp in
                 self._execute(query, (*interval, *interval, count))]
 

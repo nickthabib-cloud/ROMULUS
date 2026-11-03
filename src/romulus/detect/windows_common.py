@@ -40,12 +40,13 @@ import hashlib
 import ntpath
 import re
 from bisect import insort
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, PredicateField
-from romulus.detect.bounded import HOT_COUNT, HeldExamples, KeyedStore, RecentIds
+from romulus.detect.bounded import HOT_COUNT, CitationUnavailable, HeldExamples, KeyedStore, RecentIds
 from romulus.detect.citing import (
     BoundStage,
     Ends,
@@ -912,6 +913,31 @@ class WindowsProcessRule(Playbook):
         return match
 
     # ---- finalize ----
+    @contextmanager
+    def _child_citations(self, child_id):
+        try:
+            yield
+        except CitationUnavailable as error:
+            # A deferred decision is not yet a positive. Keep this child unresolved,
+            # without abandoning unrelated children or already-computed fleet groups.
+            self.note_limit("parent_children", f"Parent re-judgement for child {child_id} is incomplete: {error}")
+
+    def _finalize_fold(self, event, hit, out):
+        try:
+            return self._fold(event, hit, out)
+        except CitationUnavailable:
+            shape = self._shape(event, hit)
+            group = self.groups.peek(shape)
+            if group is not None:
+                out.append(uncited_positive(self, f"{self.id}|fleet|{shape}", group))
+                return shape, "repeat"
+            # The hit is already computed from this available record; a failed fold
+            # cannot discard it or invent a group that was never admitted.
+            match = self.record_match(event, hit)
+            match.notes.append("Fleet correlation was incomplete because a retained citation was unavailable.")
+            out.append(match)
+            return None, "own"
+
     def _load_one(self, child_id: str) -> TypedEvent | None:
         found = [event for event in self.load([child_id]) if event.id == child_id]
         if not found:
@@ -972,7 +998,7 @@ class WindowsProcessRule(Playbook):
             deferred = {str(key) for key in self.deferred.keys()}  # noqa: SIM118 (a KeyedStore)
             # 1. children undecided at observation time, judged now against the complete history
             for child_id in sorted(deferred):
-                with citation_group(self):
+                with self._child_citations(child_id):
                     event = self._load_one(child_id)
                     if event is None:
                         continue
@@ -983,13 +1009,12 @@ class WindowsProcessRule(Playbook):
                         continue
                     self.evaluated += 1
                     for hit in hits:
-                        with citation_group(self):
-                            self._fold(event, hit, out)
+                        self._finalize_fold(event, hit, out)
             # 2. children judged early whose parent pid gained a record inside their window: re-judge, and publish a
             #    correction when the answer changed, or the finding when a match appears that was not there before
             #    (every pid-path child was staged when first judged, so any dirty one can be re-read here)
             for child_id in self.lineage.dirty_ids():
-                with citation_group(self):
+                with self._child_citations(child_id):
                     if child_id in deferred:
                         continue
                     event = self._load_one(child_id)
@@ -999,8 +1024,7 @@ class WindowsProcessRule(Playbook):
                     hits, undecided = self._rejudge(event)
                     if early is None:
                         for hit in hits:                        # a match that a late record revealed
-                            with citation_group(self):
-                                self._fold(event, hit, out)
+                            self._finalize_fold(event, hit, out)
                         continue
                     signature, folds = early
                     if _signature(hits) == signature:
@@ -1020,8 +1044,7 @@ class WindowsProcessRule(Playbook):
                             self._count_undecided(event, undecided)
                         revised_folds = []
                         for hit in hits:
-                            with citation_group(self):
-                                revised_folds.append(self._fold(event, hit, out))
+                            revised_folds.append(self._finalize_fold(event, hit, out))
                         self.early.put(event.id, (_signature(hits), tuple(revised_folds)))
         # 3. every merged finding is revised in place to its exact final tally (idempotent: a re-run writes nothing);
         #    one already published is revised even when exclusions left it no repeat
