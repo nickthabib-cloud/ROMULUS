@@ -47,7 +47,7 @@ Coverage cells are written at every stage that can lose information (compile, ex
 |---|---|
 | `config` | `.env` loading, secret redaction, runtime paths |
 | `store` | SQLite schema, Alembic migrations, repositories, the single-writer coordinator |
-| `sources` | Source profiles, field contracts, typed query compilation, read-only Elasticsearch/OpenSearch, Arkime and TShark adapters |
+| `sources` | Source profiles, field contracts, typed query compilation, read-only Elasticsearch/OpenSearch (one request allowlist per flavor, flavor and version confirmed from the cluster), Arkime and TShark adapters |
 | `evidence` | Raw references, typed normalization with field lineage, entities |
 | `baseline` | Pure versioned baseline specifications and canonical typed key extraction |
 | `detect` | Playbooks and typed evaluators: sweep rules, context rules, packet rules, indicator lists |

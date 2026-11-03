@@ -13,11 +13,20 @@ import httpx
 
 from romulus.agent.provider import EGRESS_SWITCH_VALUE, agent_readiness, build_provider
 from romulus.agent.provider.egress import Resolver, system_resolver
-from romulus.config import Settings, redact_text
+from romulus.config import FULL_ACCESS_ROLE, Settings, redact_text
 from romulus.detect.netdef import INTERNAL_SETTING, SiteNetworks
 from romulus.hunt.site_networks import check_host_addresses
 from romulus.site import SiteValidationError, load_site_facts
-from romulus.sources.es import ElasticClient, SourceError
+from romulus.sources.es import (
+    ELASTICSEARCH_MIN,
+    ES_CLUSTER_WRITE_PRIVILEGES,
+    OPENSEARCH_SHARD_DOC,
+    TIE_GROUP_WINDOW,
+    Backend,
+    ElasticClient,
+    SourceError,
+)
+from romulus.sources.packets import PacketError, arkime_client, check_arkime_endpoint
 from romulus.sources.profile import contract_from_types, flatten_mapping
 from romulus.store.db import integrity_check, make_engine, migrate, space_report
 
@@ -30,16 +39,26 @@ class Check:
     data: dict = field(default_factory=dict)
 
 
-def check_es(s: Settings) -> list[Check]:
+READ_ONLY_UNPROVEN = "read-only cannot be verified on this backend; ROMULUS's request allowlist is the write guard"
+
+
+def check_es(s: Settings, transport: httpx.BaseTransport | None = None) -> list[Check]:
     out: list[Check] = []
-    c = ElasticClient(s)
+    c = ElasticClient(s, transport=transport)
     try:
-        info = c.info()
-        out.append(Check("es.reachable", "ok", f"{s.es_flavor} {c.version} cluster={info.get('cluster_name')}"))
+        info, backend, _refusal = c.probe()
+        out.append(Check("es.reachable", "ok", f"{backend.label()} cluster={info.get('cluster_name')}"))
     except SourceError as e:
         return [Check("es.reachable", "fail", str(e))]
+    out.append(check_flavor_version(s, backend, c.refusal))
+    if c.refusal is not None:
+        # the client refuses every further request against this cluster
+        return out
     if s.es_url.startswith("http://"):
-        out.append(Check("es.tls", "warn", "plain HTTP to Elasticsearch (lab exception)"))
+        name = "OpenSearch" if s.es_flavor == "opensearch" else "Elasticsearch"
+        out.append(Check("es.tls", "warn", f"plain HTTP to {name} (lab exception)"))
+    if s.es_flavor == "opensearch":
+        return out + _check_opensearch_access(s, c)
     try:
         who = c.authenticate()
         roles = who.get("roles", [])
@@ -48,25 +67,111 @@ def check_es(s: Settings) -> list[Check]:
                          f"user={who.get('username')} roles={roles}"))
     except SourceError as e:
         out.append(Check("es.account", "warn", f"cannot read identity: {e}"))
+    concrete = []
     try:
-        concrete = []
         for pat in s.es_index_patterns:
             names = c.resolve(pat)
             concrete += names
             out.append(Check(f"es.index[{pat}]", "ok" if names else "fail", f"resolves to {names}"))
-        if concrete:
-            p = c.has_privileges(concrete)
-            cl = p.get("cluster", {})
-            idx = p.get("index", {})
-            writes = sorted({f"{i}:{k}" for i, privs in idx.items() for k, v in privs.items() if v and k != "read"})
-            reads = [i for i, privs in idx.items() if privs.get("read")]
-            bad_cluster = sorted(k for k in ("all", "manage", "manage_security") if cl.get(k))
-            status = "ok" if not writes and not bad_cluster else "fail"
-            out.append(Check("es.least_privilege", status,
-                             f"read on {len(reads)}/{len(concrete)} indices; write-capable={writes or 'none'}; "
-                             f"cluster-admin={bad_cluster or 'none'}"))
     except SourceError as e:
         out.append(Check("es.privileges", "warn", str(e)))
+        out.append(Check("os.read_only", "warn", f"the index patterns could not be resolved ({e}), so "
+                                                 f"_has_privileges was not asked: {READ_ONLY_UNPROVEN}"))
+        return out
+    if not concrete:
+        out.append(Check("os.read_only", "warn", "no configured index pattern resolves to an index, so "
+                                                 f"_has_privileges was not asked: {READ_ONLY_UNPROVEN}"))
+        return out
+    try:
+        p = c.has_privileges(concrete)
+    except SourceError as e:
+        out.append(Check("es.privileges", "warn", str(e)))
+        out.append(Check("os.read_only", "warn", f"_has_privileges could not be read ({e}): {READ_ONLY_UNPROVEN}"))
+        return out
+    cl = p.get("cluster", {})
+    idx = p.get("index", {})
+    writes = sorted({f"{i}:{k}" for i, privs in idx.items() for k, v in privs.items() if v and k != "read"})
+    reads = [i for i, privs in idx.items() if privs.get("read")]
+    bad_cluster = sorted(k for k in ES_CLUSTER_WRITE_PRIVILEGES if cl.get(k))
+    status = "ok" if not writes and not bad_cluster else "fail"
+    out.append(Check("es.least_privilege", status,
+                     f"read on {len(reads)}/{len(concrete)} indices; write-capable={writes or 'none'}; "
+                     f"cluster-write={bad_cluster or 'none'}"))
+    out.append(Check("os.read_only", status,
+                     "_has_privileges shows no write privilege on the configured indices or the cluster"
+                     if status == "ok" else
+                     f"_has_privileges shows write-capable={writes or 'none'}, cluster-write={bad_cluster or 'none'}"))
+    return out
+
+
+def check_flavor_version(s: Settings, backend: Backend, refusal: str | None) -> Check:
+    """`os.flavor_version`: the cluster is the configured flavor, at a version ROMULUS pages through correctly:
+    OpenSearch 2.4 or later (point in time), Elasticsearch 8 or later."""
+    if refusal is not None:
+        return Check("os.flavor_version", "fail", refusal)
+    if s.es_flavor == "elasticsearch":
+        if backend.version is None or backend.version[:2] < ELASTICSEARCH_MIN:
+            return Check("os.flavor_version", "fail",
+                         f"the cluster reports {backend.label()}: Elasticsearch 8 or later is required")
+        return Check("os.flavor_version", "ok", f"{backend.label()} matches ES_FLAVOR=elasticsearch")
+    detail = f"{backend.label()} matches ES_FLAVOR=opensearch; point-in-time search available"
+    if backend.version is not None and backend.version[:2] < OPENSEARCH_SHARD_DOC:
+        detail += ("; this version has no _shard_doc tiebreaker (3.3 or later), so records sharing one time value "
+                   f"are read as a whole group; a group of more than {TIE_GROUP_WINDOW:,} records is read in part "
+                   "and the search says so")
+    return Check("os.flavor_version", "ok", detail)
+
+
+def _check_opensearch_access(s: Settings, c: ElasticClient) -> list[Check]:
+    """Account, index resolution and `os.read_only` on OpenSearch. OpenSearch has no has-privileges API: with
+    the security plugin, read-only is shown only when every role it maps the account to is a role the site
+    configured as read-only (ES_READ_ONLY_ROLES); without the plugin, or when it does not answer, it is a warning.
+    It is never reported as read-only when that cannot be shown."""
+    out: list[Check] = []
+    try:
+        who = c.authinfo()
+    except SourceError as e:
+        why = (f"the security plugin does not answer (HTTP {e.status})" if e.status in (400, 404, 405)
+               else f"the security plugin refused to describe the account (HTTP {e.status})" if e.status in (401, 403)
+               else f"the account could not be read: {e}")
+        out.append(Check("es.account", "warn", f"{why}; the account and its roles are unknown"))
+        out += _check_indices(s, c)
+        out.append(Check("os.read_only", "warn", f"{why}: {READ_ONLY_UNPROVEN}"))
+        return out
+    user = who.get("user_name")
+    roles = who.get("roles")
+    roles = sorted({str(r) for r in roles}) if isinstance(roles, list) else []
+    privileged = FULL_ACCESS_ROLE in roles
+    out.append(Check("es.account", "fail" if privileged and not s.allow_privileged_source_account else "ok",
+                     f"user={user} roles={roles} backend_roles={who.get('backend_roles')}"))
+    out += _check_indices(s, c)
+    configured = set(s.es_read_only_roles)
+    if privileged:
+        out.append(Check("os.read_only", "warn" if s.allow_privileged_source_account else "fail",
+                         f"user={user} holds {FULL_ACCESS_ROLE}, which can write to every index"))
+    elif not roles:
+        out.append(Check("os.read_only", "warn", f"the security plugin lists no roles for user={user}: "
+                                                 f"{READ_ONLY_UNPROVEN}"))
+    elif not configured:
+        out.append(Check("os.read_only", "warn", f"user={user} has roles {roles}, and no read-only role names are "
+                                                 f"configured (ES_READ_ONLY_ROLES): {READ_ONLY_UNPROVEN}"))
+    elif set(roles) <= configured:
+        out.append(Check("os.read_only", "ok", f"every role of user={user} ({roles}) is a configured read-only role"))
+    else:
+        others = sorted(set(roles) - configured)
+        out.append(Check("os.read_only", "warn", f"user={user} also has roles {others}, which are not configured "
+                                                 f"read-only roles (ES_READ_ONLY_ROLES): {READ_ONLY_UNPROVEN}"))
+    return out
+
+
+def _check_indices(s: Settings, c: ElasticClient) -> list[Check]:
+    out = []
+    try:
+        for pat in s.es_index_patterns:
+            names = c.resolve(pat)
+            out.append(Check(f"es.index[{pat}]", "ok" if names else "fail", f"resolves to {names}"))
+    except SourceError as e:
+        out.append(Check("es.index", "warn", str(e)))
     return out
 
 
@@ -103,14 +208,27 @@ def check_site_networks(s: Settings, client: ElasticClient | None = None) -> Che
     return Check("site.internal_networks", status, "; ".join(notes), data=result)
 
 
-def check_arkime(s: Settings) -> Check:
+def check_arkime(s: Settings, transport: httpx.BaseTransport | None = None) -> Check:
+    """One read of the viewer's session list, through the same client, base path, authentication and endpoint
+    allowlist the packet fetch uses."""
+    path = "/api/sessions"
     try:
-        r = httpx.get(f"{s.arkime_url.rstrip('/')}/api/sessions", params={"date": "1", "length": "1"},
-                      auth=httpx.DigestAuth(s.arkime_username, s.arkime_password.get_secret_value()),
-                      verify=s.arkime_verify_tls, timeout=15)
-        return Check("arkime.reachable", "ok" if r.status_code == 200 else "fail", f"HTTP {r.status_code}")
-    except httpx.HTTPError as e:
+        check_arkime_endpoint("GET", path)
+        with arkime_client(s, transport=transport, timeout=15) as http:
+            r = http.get(path, params={"date": "1", "length": "1"})
+        return Check("arkime.reachable", "ok" if r.status_code == 200 else "fail",
+                     f"HTTP {r.status_code} ({s.arkime_auth} authentication, base path "
+                     f"{s.arkime_base_path or '/'})")
+    except (httpx.HTTPError, PacketError) as e:
         return Check("arkime.reachable", "fail", redact_text(str(e), s))
+
+
+def check_arkime_auth(s: Settings) -> Check | None:
+    """Basic authentication sends the password with every request: only over TLS."""
+    if s.arkime_auth == "basic" and httpx.URL(s.arkime_url).scheme == "http":
+        return Check("arkime.auth", "warn", "basic authentication over plain HTTP sends the Arkime password in "
+                                            "clear on every request: use an https ARKIME_URL")
+    return None
 
 
 def _private_host(host: str) -> bool:
@@ -323,6 +441,9 @@ def run_all(s: Settings, env_file: Path | None = None) -> list[Check]:
     checks = check_es(s)
     checks.append(check_site_networks(s))
     checks.append(check_arkime(s))
+    auth = check_arkime_auth(s)
+    if auth is not None:
+        checks.append(auth)
     checks += check_ollama(s)
     checks += check_agent(s)
     checks.append(check_tshark(s))
