@@ -352,10 +352,12 @@ def malformed_rows() -> list[tuple[str, dict, str]]:
     # no readable log name: not taken as Zeek, the record keeps the path it took before (here an Arkime session)
     mutated("no-log-name", "malcolm", lambda s: s["event"].pop("dataset"), "not-zeek")
     mutated("log-name-number", "security_onion", lambda s: s["event"].update(dataset=5), "error")
-    mutated("uncatalogued-log", "malcolm", lambda s: s["event"].update(dataset="kerberos"), "skip")
-    mutated("dataset-array-uncatalogued", "malcolm", lambda s: s["event"].update(dataset=["smb_files", "smb_cmd"]),
+    mutated("uncatalogued-log", "malcolm", lambda s: s["event"].update(dataset="modbus"), "skip")
+    mutated("dataset-array-uncatalogued", "malcolm", lambda s: s["event"].update(dataset=["modbus", "dnp3"]),
             "skip")
-    # a list naming a catalogued log is that log only when the row carries the log's object
+    # a list naming catalogued logs is a log only when the row carries the log's object
+    mutated("dataset-array-smb-without-objects", "malcolm",
+            lambda s: s["event"].update(dataset=["smb_files", "smb_cmd"]), "skip")
     mutated("dataset-array-without-object", "malcolm",
             lambda s: (s["event"].update(dataset=["conn", "dns"]), s["zeek"].pop("conn")), "skip")
     return rows
@@ -443,8 +445,9 @@ _SSH = {"client": {"proto_version": "2.0", "software_version": "paramiko_3.4.0",
         "server": {"proto_version": "2.0", "software_version": "OpenSSH_9.6"}}
 _DNS = {"version": 2, "type": "answer", "id": 7, "rrname": "a.example", "rrtype": "A", "rcode": "NOERROR",
         "answers": [{"rrname": "a.example", "rrtype": "A", "ttl": 30, "rdata": "192.0.2.9"}]}
-# Zeek logs outside the catalog, as each shipper names them: their rows keep the skip every unread dataset gets.
-UNCATALOGUED_LOGS = ("dns", "http", "ssl", "x509", "files", "ssh", "notice", "weird", "smb_files")
+# Zeek logs outside the catalog, as each shipper names them, at the time each group was added (most are catalogued
+# now): their rows keep the skip every unread dataset gets until their log is read.
+UNCATALOGUED_LOGS = ("dns", "http", "ssl", "x509", "files", "ssh", "notice", "weird", "smb_files", "modbus")
 
 
 def _uncatalogued(shape: str, log: str) -> dict:
@@ -556,6 +559,16 @@ def dispatch_records() -> dict[str, list[dict]]:
                                           else writer(zeek_logs.FILES_50, nid, sensor=sensor)]
     out["zeek-conn-security_onion-bare"] = [security_onion(FULL, "golden-security_onion-bare",
                                                            sensor="sensor-security_onion-bare", bare=True)]
+    # Zeek 6.1's ldap layout, an smb_cmd row with no referenced file, and Malcolm's text-log smb_cmd row
+    for label, record in (("ldap-6.1", zeek_logs.LDAP_61), ("ldap_search-6.1", zeek_logs.LDAP_SEARCH_61),
+                          ("smb_cmd-no-file", zeek_logs.SMB_CMD_NO_FILE)):
+        for shape in zeek_logs.shapes_of(record.log):
+            nid, sensor = f"golden-{shape}-{label}", f"sensor-{shape}-{label}"
+            writer = zeek_logs.WRITERS[shape]
+            out[f"zeek-{label}-{shape}"] = [writer(record, nid) if shape == "plain" else writer(record, nid,
+                                                                                                 sensor=sensor)]
+    out["zeek-smb_cmd-malcolm-text"] = [zeek_logs.malcolm(zeek_logs.SMB_CMD, "golden-malcolm-smb_cmd-text",
+                                                          sensor="sensor-malcolm-smb_cmd-text", text=True)]
     return out
 
 

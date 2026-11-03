@@ -32,8 +32,10 @@ PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf211
                    # (tests/test_zeek_dispatch.py compares every previous shape with its output before the move).
                    # The certificate contract moved to certificates.py, shared with the Zeek producer, and the
                    # observer families gained app_tx and x509_certificate: no output of this producer changed (the
-                   # same golden compares every one of its records).
-                   14: "059d8d188d6311d24094007ba4525d28ddba654d248e551f0a3dc0ab302a5890"}
+                   # same golden compares every one of its records). So too when they gained the Windows-protocol
+                   # families (smb_tx, rpc_tx, kerberos_tx, ntlm_tx, remote_session, ldap_tx, address_assignment,
+                   # asset_observed), which this producer never writes.
+                   14: "c9a00e37d6908e9e9aa28a14c2fdb7c91ba453cc9ea33776baf7e6d1e2c787a3"}
 WINDOWS_EVIDENCE_FILES = ("community.py", "windows.py", "windows_catalog.py", "windows_reassembly.py")
 PINNED_WINDOWS = {
     "windows-ecs@1": "8c2f1668700a3f7d0a143eef00473770e2e5c746fadf6ce3b2c95ae6bbe6a419",
@@ -41,9 +43,10 @@ PINNED_WINDOWS = {
     "windows-ecs@3": "f0a941924e4c0b95b0e2f9dbc2635ae325708c7739b3fcf780e803e7dbfdf203",
     "windows-ecs@4": "6d31ffa710c230e79dc39509fd40740e69c35240028cfbc0a4759cb587dafd7d",
 }
-ZEEK_EVIDENCE_FILES = ("certificates.py", "community.py", "zeek.py", "zeek_catalog.py", "zeek_credentials.py")
+ZEEK_EVIDENCE_FILES = ("certificates.py", "community.py", "rpc_catalog.py", "zeek.py", "zeek_catalog.py",
+                       "zeek_credentials.py")
 PINNED_ZEEK = {
-    "zeek-ecs@1": "283461d62b9dda777a153582586b3444f5095060f407e70c1527eb5a713b91f0",
+    "zeek-ecs@1": "bf545be4d69a44cbb17cd851c426e4d7135d06575dd44ca1bf59e02dbcd4138b",
 }
 # The packet stage's normalizer: HTTP bodies rebuilt by TShark -> http_body events, and TCP connections rebuilt
 # from per-segment payload -> tcp_stream events (with the shell analysis and the tables it reads).

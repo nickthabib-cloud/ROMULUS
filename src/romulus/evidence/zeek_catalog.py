@@ -94,9 +94,12 @@ SHAPE_NAMES = {MALCOLM: "Malcolm", ELASTIC: "Elastic", SECURITY_ONION: "Security
 # vector of string, time. "names" is a set (sorted, distinct), "list" a vector (Zeek's order kept); "text1" is a string
 # a shipper may have split into a one-element list; "count_text" a count a shipper may have converted to text;
 # "time" an absolute time (epoch seconds, or an ISO-8601 time a shipper converted it to); "hex" and "hexes" lowercase
-# digests; "addresses" a set or vector of addresses in the order written; "seconds_list" a vector of intervals.
+# digests; "addresses" a set or vector of addresses in the order written; "seconds_list" a vector of intervals;
+# "strings" one string or a list of them (a field Zeek 6.1 wrote as a set or vector and later Zeek as one string), a
+# string never split, since its text can hold commas (a distinguished name); "ip1" an address a shipper may have
+# written as a one-element list.
 KINDS = frozenset({"ip", "port", "count", "seconds", "text", "flag", "services", "names", "mac", "list", "text1",
-                   "count_text", "time", "hex", "hexes", "addresses", "seconds_list"})
+                   "count_text", "time", "hex", "hexes", "addresses", "seconds_list", "strings", "ip1"})
 
 
 @dataclass(frozen=True, eq=False)
@@ -140,6 +143,9 @@ class ZeekLog:
     # the log, the time and the record's typed values
     key: tuple[str, ...] = ()
     sequence: tuple[str, ...] = ()
+    # shape -> the other logs whose object a row of this log may also carry (Malcolm moves an smb_cmd row's referenced
+    # file to zeek.smb_files and names both logs in event.dataset): such a row is this log's
+    carries: dict[str, frozenset[str]] = field(default_factory=dict)
 
     @property
     def token(self) -> str:
@@ -270,14 +276,18 @@ CONN = ZeekLog(
 # ---- the analyzer logs -----------------------------------------------------------------------------------------------
 
 def _log(name: str, family: str, fields: tuple[ZeekField, ...], *, elastic: str | None = None,
-         so: str | None = None, absent: dict[str, str] | None = None, **extra) -> ZeekLog:
+         so: str | None = None, absent: dict[str, str] | None = None, renamed_only: tuple[str, ...] = (),
+         **extra) -> ZeekLog:
     """An analyzer log written by every shape except those in `absent`: Malcolm under ``zeek.<name>``, Elastic under
-    ``zeek.<elastic stream>``, Security Onion as ``zeek.<so name>`` (renamed fields only), plain JSON as Zeek wrote it."""
+    ``zeek.<elastic stream>``, Security Onion as ``zeek.<so name>`` (renamed fields only), plain JSON as Zeek wrote it.
+    `renamed_only`: shapes that, like Security Onion, index only the columns their pipeline renames."""
     absent = absent or {}
     stream, so_name = elastic or name, so or name
     names = {MALCOLM: frozenset({name}), ELASTIC: frozenset({stream}), SECURITY_ONION: frozenset({so_name}),
              PLAIN: frozenset({name})}
     objects = {MALCOLM: f"zeek.{name}", ELASTIC: f"zeek.{stream}", PLAIN: ""}
+    for shape in renamed_only:
+        objects.pop(shape, None)
     for shape in absent:
         names.pop(shape)
         objects.pop(shape, None)
@@ -290,15 +300,18 @@ def _log(name: str, family: str, fields: tuple[ZeekField, ...], *, elastic: str 
                    sensor_paths=SENSOR_PATHS, time_paths=TIME_PATHS, absent_shapes=absent, **extra)
 
 
-def _endpoints(log: str, stream: str | None = None, *, absent=()) -> tuple[ZeekField, ...]:
+def _endpoints(log: str, stream: str | None = None, *, absent=(), uid_kind: str = "text",
+               community_absent=()) -> tuple[ZeekField, ...]:
     """The connection's addresses, ports, uid and Community ID on an analyzer log's record: Malcolm lifts them for
     every log, Elastic renames them to ECS (or leaves them, literal-dotted, under the stream's object), Security Onion's
-    ``zeek.common`` renames them, plain JSON keeps Zeek's names."""
+    ``zeek.common`` renames them, plain JSON keeps Zeek's names. `uid_kind` "text1" where a shipper may write the uid as
+    a one-element list; `community_absent`: shapes whose Community ID is not read (computed from a transport the
+    shipper's pipeline sets as a constant, where the analyzer reads more than one)."""
     el = f"zeek.{stream or log}"
 
-    def paths(malcolm, elastic, so, plain):
+    def paths(malcolm, elastic, so, plain, skip=()):
         out = {"malcolm": malcolm, "elastic": elastic, "security_onion": so, "plain": plain}
-        return {shape: value for shape, value in out.items() if shape not in absent}
+        return {shape: value for shape, value in out.items() if shape not in absent and shape not in skip}
 
     return (
         _f("source.ip", "id.orig_h", "ip", **paths(("source.ip",), ("source.ip", "source.address", f"{el}.id.orig_h"),
@@ -311,11 +324,11 @@ def _endpoints(log: str, stream: str | None = None, *, absent=()) -> tuple[ZeekF
         _f("destination.port", "id.resp_p", "port",
            **paths(("destination.port",), ("destination.port", f"{el}.id.resp_p"), ("destination.port",),
                    ("id.resp_p",))),
-        _f("zeek.uid", "uid", "text", **paths(("zeek.uid",), ("zeek.session_id", "event.id", f"{el}.uid"),
-                                               ("log.id.uid",), ("uid",))),
+        _f("zeek.uid", "uid", uid_kind, **paths(("zeek.uid",), ("zeek.session_id", "event.id", f"{el}.uid"),
+                                                 ("log.id.uid",), ("uid",))),
         _f("network.community_id", "community_id", "text",
            **paths(("network.community_id",), ("network.community_id",), ("network.community_id",),
-                   ("community_id",))),
+                   ("community_id",), community_absent)),
     )
 
 
@@ -977,8 +990,436 @@ RADIUS = _log("radius", "app_tx", (
        plain=("ttl",)),
 ), doc="base/protocols/radius/main.zeek", transport="udp", key=("zeek.uid",))
 
+# ---- the Windows-protocol logs ---------------------------------------------------------------------------------------
+#
+# Their native fields are Zeek's at the same tag (scripts/base/protocols/{smb,dce-rpc,krb,ntlm,rdp,rfb,ldap,dhcp}/
+# main.zeek, base/protocols/krb/files.zeek, policy/protocols/smb/log-cmds.zeek, base/frameworks/software/main.zeek,
+# policy/protocols/conn/known-{hosts,services}.zeek, policy/protocols/ssl/known-certs.zeek; ldap at tag v6.1.0 too, whose
+# ldap and ldap_search logs wrote sets and vectors (opcodes, results, objects, arguments, scopes, base_objects, ...)
+# where later Zeek writes one value). Where each shipper puts them:
+# - Malcolm at commit 541160e513de90ed4ea5af1d1ed7a8a64758bf8d: logstash/pipelines/zeek/1016_zeek_dce_rpc.conf,
+#   1017_zeek_dhcp.conf, 1033_zeek_kerberos.conf, 1034_zeek_known.conf, 1035_zeek_ldap.conf, 1041_zeek_ntlm.conf,
+#   1049_zeek_rdp.conf, 1050_zeek_rfb.conf, 1054_zeek_smb.conf, 1058_zeek_software.conf (JSON renames, text-log
+#   columns); 1200_zeek_mutate.conf (an smb_cmd row's referenced file moved to zeek.smb_files with its uid and fuid
+#   merged into zeek.uid and zeek.fuid and the dataset written ["smb_files", "smb_cmd"]; SMB paths and names with each
+#   doubled backslash made single; a simple bind's argument copied to related.password; the DHCP client's MAC copied to
+#   zeek.dhcp.mac); 1400_zeek_convert.conf (kerberos from/till and the text-log smb_files times as ISO times).
+# - Elastic at commit 8518218716a47fdd55b5e766f15e9fed1e5c3fe2: data_stream/{smb_cmd,smb_files,smb_mapping,dce_rpc,
+#   kerberos,ntlm,rdp,rfb,dhcp,software,known_hosts,known_services,known_certs}/elasticsearch/ingest_pipeline/default.yml
+#   and their pipeline tests; the known_* pipelines index only the columns they rename. Elastic has no ldap stream.
+# - Security Onion at commit 742649a33797ceb85a111402fb48cd3839d2fcbb: salt/elasticsearch/files/ingest/zeek.{smb_files,
+#   smb_mapping,dce_rpc,kerberos,ntlm,rdp,rfb,ldap,ldap_search,dhcp,software}; it has no smb_cmd or known_* pipeline.
+
+_NO_SO_SMB_CMD = {SECURITY_ONION: "Security Onion 2.4 has no ingest pipeline for smb_cmd"}
+_NO_SO_KNOWN = {SECURITY_ONION: "Security Onion 2.4 has no ingest pipeline for the known_* logs"}
+_NO_ELASTIC_LDAP = {ELASTIC: "elastic/integrations packages/zeek has no ldap or ldap_search data stream"}
+
+# smb_files and smb_cmd's referenced file: Zeek's SMB::FileInfo (base/protocols/smb/main.zeek). Zeek writes the action
+# as "SMB::FILE_OPEN" (Malcolm removes the prefix) and, by default, logs only FILE_OPEN, FILE_RENAME, FILE_DELETE,
+# PRINT_OPEN and PRINT_CLOSE (SMB::logged_file_actions).
+_SMB_TIMES = (("modified", "mtime"), ("accessed", "accessed"), ("created", "created"), ("changed", "ctime"))
+
+SMB_FILES = _log("smb_files", "smb_tx", (
+    *_endpoints("smb_files", uid_kind="text1"),
+    _f("file.fuid", "fuid", "text1", malcolm=("zeek.fuid",), elastic=("zeek.smb_files.fuid",),
+       security_onion=("log.id.fuid",), plain=("fuid",)),
+    _f("smb.action", "action", "text", malcolm=("zeek.smb_files.action",), elastic=("zeek.smb_files.action",),
+       security_onion=("file.action",), plain=("action",)),
+    _f("smb.path", "path", "text", malcolm=("zeek.smb_files.path",), elastic=("zeek.smb_files.path",),
+       security_onion=("file.path",), plain=("path",)),
+    _f("smb.name", "name", "text", malcolm=("zeek.smb_files.name",), elastic=("zeek.smb_files.name", "file.name"),
+       security_onion=("file.name",), plain=("name",)),
+    _f("file.size", "size", "count", malcolm=("zeek.smb_files.size",), elastic=("zeek.smb_files.size", "file.size"),
+       security_onion=("file.size",), plain=("size",)),
+    _f("smb.prev_name", "prev_name", "text", malcolm=("zeek.smb_files.prev_name",),
+       elastic=("zeek.smb_files.prev_name",), security_onion=("file.previous_name",), plain=("prev_name",)),
+    # MAC times: Malcolm keeps a JSON row's as Zeek's literal dotted keys and names a text row's times_<name>
+    *(_f(f"file.{ecs}", f"times.{name}", "time",
+         malcolm=(f"zeek.smb_files.times.{name}", f"zeek.smb_files.times_{name}"),
+         elastic=(f"zeek.smb_files.times.{name}",), security_onion=(f"file.times_{name}",), plain=(f"times.{name}",))
+      for name, ecs in _SMB_TIMES),
+), doc="base/protocols/smb/main.zeek", transport="tcp", key=("zeek.uid",), sequence=("file.fuid", "smb.action"))
+
+# Malcolm's text-log column for the share's resource type is resource_type; its JSON rows keep Zeek's name, service,
+# which its shared lift merges into network.protocol with the "smb" it adds: Malcolm's resource type is not read
+SMB_MAPPING = _log("smb_mapping", "smb_tx", (
+    *_endpoints("smb_mapping"),
+    _f("smb.path", "path", "text", malcolm=("zeek.smb_mapping.path",), elastic=("zeek.smb_mapping.path",),
+       security_onion=("smb.path",), plain=("path",)),
+    _f("smb.service", "service", "text", elastic=("zeek.smb_mapping.service",), security_onion=("smb.service",),
+       plain=("service",)),
+    _f("smb.native_file_system", "native_file_system", "text", malcolm=("zeek.smb_mapping.native_file_system",),
+       elastic=("zeek.smb_mapping.native_file_system",), security_onion=("smb.file_system",),
+       plain=("native_file_system",)),
+    _f("smb.share_type", "share_type", "text", malcolm=("zeek.smb_mapping.share_type",),
+       elastic=("zeek.smb_mapping.share_type",), security_onion=("smb.share_type",), plain=("share_type",)),
+), doc="base/protocols/smb/main.zeek", transport="tcp", key=("zeek.uid",), sequence=("smb.path",))
+
+# smb_cmd (policy/protocols/smb/log-cmds.zeek): one row per command response, the highest-volume SMB log. Its referenced
+# file is Zeek's FileInfo record, flattened into referenced_file.* keys. Malcolm moves a text row's whole referenced
+# file to zeek.smb_files; a JSON row's keys stay literal under zeek.smb_cmd (only its id.* move). Elastic keeps the
+# file's action, name and path under zeek.smb_cmd.file and removes the rest (its fuid, size and prev_name survive only
+# in the Zeek line). Zeek's script never sets username.
+SMB_CMD = _log("smb_cmd", "smb_tx", (
+    *_endpoints("smb_cmd", absent=(SECURITY_ONION,), uid_kind="text1"),
+    *(_f(f"smb.{name}", name, kind, malcolm=(f"zeek.smb_cmd.{name}",), elastic=(f"zeek.smb_cmd.{name}",),
+         plain=(name,))
+      for name, kind in (("command", "text"), ("sub_command", "text"), ("argument", "text"), ("status", "text"),
+                         ("version", "text"), ("tree", "text"), ("tree_service", "text"))),
+    _f("smb.rtt_s", "rtt", "seconds", malcolm=("zeek.smb_cmd.rtt",), elastic=("zeek.smb_cmd.rtt",), plain=("rtt",)),
+    _f("user.name", "username", "text1", malcolm=("related.user", "zeek.smb_cmd.username"),
+       elastic=("zeek.smb_cmd.username", "user.name"), plain=("username",)),
+    *(_f(typed, f"referenced_file.{name}", kind,
+         malcolm=(f"zeek.smb_files.{name}", f"zeek.smb_cmd.referenced_file.{name}"),
+         elastic=((f"zeek.smb_cmd.file.{name}",) if name in ("action", "name", "path")
+                  else (f"original:referenced_file.{name}",)),
+         plain=(f"referenced_file.{name}",))
+      for typed, name, kind in (("smb.action", "action", "text"), ("smb.path", "path", "text"),
+                                ("smb.name", "name", "text"), ("smb.prev_name", "prev_name", "text"),
+                                ("file.size", "size", "count"))),
+    _f("file.fuid", "referenced_file.fuid", "text1", malcolm=("zeek.fuid", "zeek.smb_cmd.referenced_file.fuid"),
+       elastic=("original:referenced_file.fuid",), plain=("referenced_file.fuid",)),
+), absent=_NO_SO_SMB_CMD, doc="policy/protocols/smb/log-cmds.zeek", transport="tcp", key=("zeek.uid",),
+    carries={MALCOLM: frozenset({"smb_files"})})
+
+DCE_RPC = _log("dce_rpc", "rpc_tx", (
+    *_endpoints("dce_rpc"),
+    _f("rpc.rtt_s", "rtt", "seconds", malcolm=("zeek.dce_rpc.rtt",), elastic=("zeek.dce_rpc.rtt",),
+       security_onion=("event.duration",), plain=("rtt",)),
+    # Zeek's name for the secondary address of the bind: a named pipe, or a port
+    _f("rpc.named_pipe", "named_pipe", "text", malcolm=("zeek.dce_rpc.named_pipe",),
+       elastic=("zeek.dce_rpc.named_pipe",), security_onion=("dce_rpc.named_pipe",), plain=("named_pipe",)),
+    _f("rpc.endpoint", "endpoint", "text", malcolm=("zeek.dce_rpc.endpoint",), elastic=("zeek.dce_rpc.endpoint",),
+       security_onion=("dce_rpc.endpoint",), plain=("endpoint",)),
+    _f("rpc.operation", "operation", "text", malcolm=("zeek.dce_rpc.operation",),
+       elastic=("zeek.dce_rpc.operation",), security_onion=("dce_rpc.operation",), plain=("operation",)),
+), doc="base/protocols/dce-rpc/main.zeek", transport="tcp", key=("zeek.uid",))
+
+# kerberos.log has no proto and Kerberos runs over UDP and TCP; Elastic's pipeline sets network.transport "tcp" on every
+# document and computes its Community ID from that, so Elastic's Community ID is not read (Malcolm computes none for
+# kerberos: logstash/maps/zeek_log_transport.yaml leaves it out as either transport)
+_KRB_CERT = tuple(
+    spec for side in ("client", "server") for spec in (
+        _f(f"kerberos.{side}_cert_subject", f"{side}_cert_subject", "text",
+           malcolm=(f"zeek.kerberos.{side}_cert_subject",),
+           elastic=(f"zeek.kerberos.{side}_cert_subject", f"zeek.kerberos.cert.{side}.subject"),
+           security_onion=(f"kerberos.{side}_certificate_subject",), plain=(f"{side}_cert_subject",)),
+        _f(f"kerberos.{side}_cert_fuids", f"{side}_cert_fuid", "list", malcolm=(f"zeek.kerberos.{side}_cert_fuid",),
+           elastic=(f"zeek.kerberos.{side}_cert_fuid", f"zeek.kerberos.cert.{side}.fuid"),
+           security_onion=(f"log.id.{side}_certificate_fuid",), plain=(f"{side}_cert_fuid",))))
+KERBEROS = _log("kerberos", "kerberos_tx", (
+    *_endpoints("kerberos", community_absent=(ELASTIC,)),
+    _f("kerberos.request_type", "request_type", "text", malcolm=("zeek.kerberos.request_type",),
+       elastic=("zeek.kerberos.request_type",), security_onion=("kerberos.request_type",), plain=("request_type",)),
+    # Malcolm renames client and service to cname and sname (its shared lift would take a column named service)
+    _f("kerberos.client", "client", "text", malcolm=("zeek.kerberos.cname",), elastic=("zeek.kerberos.client",),
+       security_onion=("kerberos.client",), plain=("client",)),
+    _f("kerberos.service", "service", "text", malcolm=("zeek.kerberos.sname",), elastic=("zeek.kerberos.service",),
+       security_onion=("kerberos.service",), plain=("service",)),
+    _f("kerberos.success", "success", "flag", malcolm=("zeek.kerberos.success",), elastic=("zeek.kerberos.success",),
+       security_onion=("kerberos.success",), plain=("success",)),
+    _f("kerberos.error_msg", "error_msg", "text", malcolm=("zeek.kerberos.error_msg",),
+       elastic=("zeek.kerberos.error.msg",), security_onion=("kerberos.error_message",), plain=("error_msg",)),
+    _f("kerberos.from", "from", "time", malcolm=("zeek.kerberos.from",), elastic=("zeek.kerberos.valid.from",),
+       security_onion=("kerberos.ticket.valid.from",), plain=("from",)),
+    _f("kerberos.till", "till", "time", malcolm=("zeek.kerberos.till",), elastic=("zeek.kerberos.valid.until",),
+       security_onion=("kerberos.ticket.valid.until",), plain=("till",)),
+    _f("kerberos.cipher", "cipher", "text", malcolm=("zeek.kerberos.cipher",), elastic=("zeek.kerberos.cipher",),
+       security_onion=("kerberos.ticket.cipher",), plain=("cipher",)),
+    _f("kerberos.forwardable", "forwardable", "flag", malcolm=("zeek.kerberos.forwardable",),
+       elastic=("zeek.kerberos.forwardable",), security_onion=("kerberos.ticket.forwardable",),
+       plain=("forwardable",)),
+    _f("kerberos.renewable", "renewable", "flag", malcolm=("zeek.kerberos.renewable",),
+       elastic=("zeek.kerberos.renewable",), security_onion=("kerberos.ticket.renewable",), plain=("renewable",)),
+    *_KRB_CERT,
+), doc="base/protocols/krb/main.zeek", key=("zeek.uid",))
+
+# Kerberos encryption type numbers by the names Zeek writes for them (KRB::cipher_name, base/protocols/krb/consts.zeek),
+# the numbers being the IANA "Kerberos Encryption Type Numbers" registry's: RFC 3961 section 8 (1-3, 5, 7, 16), RFC 3962
+# (17, 18), RFC 8009 (19, 20), RFC 4757 (23, 24), RFC 6803 (25, 26), RFC 4556 (9-15, the CMS and PKINIT identifiers) and
+# RFC 4120 section 7.5.9 (65, subkey-keymaterial). Zeek has no name for 19 and 20 and writes them, as any number it does
+# not name, "unknown-<n>"; the IANA names are listed for them so a release that names them reads the same.
+KERBEROS_ETYPES: dict[str, int] = {
+    "des-cbc-crc": 1, "des-cbc-md4": 2, "des-cbc-md5": 3, "des3-cbc-md5": 5, "des3-cbc-sha1": 7,
+    "dsaWithSHA1-CmsOID": 9, "md5WithRSAEncryption-CmsOID": 10, "sha1WithRSAEncryption-CmsOID": 11,
+    "rc2CBC-EnvOID": 12, "rsaEncryption-EnvOID": 13, "rsaES-OAEP-ENV-OID": 14, "des-ede3-cbc-Env-OID": 15,
+    "des3-cbc-sha1-kd": 16, "aes128-cts-hmac-sha1-96": 17, "aes256-cts-hmac-sha1-96": 18,
+    "aes128-cts-hmac-sha256-128": 19, "aes256-cts-hmac-sha384-192": 20, "rc4-hmac": 23, "rc4-hmac-exp": 24,
+    "camellia128-cts-cmac": 25, "camellia256-cts-cmac": 26, "subkey-keymaterial": 65,
+}
+# Kerberos error codes by the names Zeek writes for a KRB-ERROR without error text (KRB::error_msg, the same file):
+# RFC 4120 section 7.5.9, with RFC 4556's PKINIT codes (62-66, 70-76). A KRB-ERROR that carries error text is logged with
+# that text instead, which names no code.
+KERBEROS_ERRORS: dict[str, int] = {name: code for code, name in enumerate((
+    "KDC_ERR_NONE", "KDC_ERR_NAME_EXP", "KDC_ERR_SERVICE_EXP", "KDC_ERR_BAD_PVNO", "KDC_ERR_C_OLD_MAST_KVNO",
+    "KDC_ERR_S_OLD_MAST_KVNO", "KDC_ERR_C_PRINCIPAL_UNKNOWN", "KDC_ERR_S_PRINCIPAL_UNKNOWN",
+    "KDC_ERR_PRINCIPAL_NOT_UNIQUE", "KDC_ERR_NULL_KEY", "KDC_ERR_CANNOT_POSTDATE", "KDC_ERR_NEVER_VALID",
+    "KDC_ERR_POLICY", "KDC_ERR_BADOPTION", "KDC_ERR_ETYPE_NOSUPP", "KDC_ERR_SUMTYPE_NOSUPP",
+    "KDC_ERR_PADATA_TYPE_NOSUPP", "KDC_ERR_TRTYPE_NOSUPP", "KDC_ERR_CLIENT_REVOKED", "KDC_ERR_SERVICE_REVOKED",
+    "KDC_ERR_TGT_REVOKED", "KDC_ERR_CLIENT_NOTYET", "KDC_ERR_SERVICE_NOTYET", "KDC_ERR_KEY_EXPIRED",
+    "KDC_ERR_PREAUTH_FAILED", "KDC_ERR_PREAUTH_REQUIRED", "KDC_ERR_SERVER_NOMATCH", "KDC_ERR_MUST_USE_USER2USER",
+    "KDC_ERR_PATH_NOT_ACCEPTED", "KDC_ERR_SVC_UNAVAILABLE"))}
+KERBEROS_ERRORS.update({
+    "KRB_AP_ERR_BAD_INTEGRITY": 31, "KRB_AP_ERR_TKT_EXPIRED": 32, "KRB_AP_ERR_TKT_NYV": 33, "KRB_AP_ERR_REPEAT": 34,
+    "KRB_AP_ERR_NOT_US": 35, "KRB_AP_ERR_BADMATCH": 36, "KRB_AP_ERR_SKEW": 37, "KRB_AP_ERR_BADADDR": 38,
+    "KRB_AP_ERR_BADVERSION": 39, "KRB_AP_ERR_MSG_TYPE": 40, "KRB_AP_ERR_MODIFIED": 41, "KRB_AP_ERR_BADORDER": 42,
+    "KRB_AP_ERR_BADKEYVER": 44, "KRB_AP_ERR_NOKEY": 45, "KRB_AP_ERR_MUT_FAIL": 46, "KRB_AP_ERR_BADDIRECTION": 47,
+    "KRB_AP_ERR_METHOD": 48, "KRB_AP_ERR_BADSEQ": 49, "KRB_AP_ERR_INAPP_CKSUM": 50, "KRB_AP_PATH_NOT_ACCEPTED": 51,
+    "KRB_ERR_RESPONSE_TOO_BIG": 52, "KRB_ERR_GENERIC": 60, "KRB_ERR_FIELD_TOOLONG": 61,
+    "KDC_ERROR_CLIENT_NOT_TRUSTED": 62, "KDC_ERROR_KDC_NOT_TRUSTED": 63, "KDC_ERROR_INVALID_SIG": 64,
+    "KDC_ERR_KEY_TOO_WEAK": 65, "KDC_ERR_CERTIFICATE_MISMATCH": 66, "KRB_AP_ERR_NO_TGT": 67,
+    "KDC_ERR_WRONG_REALM": 68, "KRB_AP_ERR_USER_TO_USER_REQUIRED": 69, "KDC_ERR_CANT_VERIFY_CERTIFICATE": 70,
+    "KDC_ERR_INVALID_CERTIFICATE": 71, "KDC_ERR_REVOKED_CERTIFICATE": 72, "KDC_ERR_REVOCATION_STATUS_UNKNOWN": 73,
+    "KDC_ERR_REVOCATION_STATUS_UNAVAILABLE": 74, "KDC_ERR_CLIENT_NAME_MISMATCH": 75, "KDC_ERR_KDC_NAME_MISMATCH": 76,
+})
+# Zeek's name for a number its tables do not name ("unknown-23"): the digits a 32-bit Kerberos Int32 can have
+_UNKNOWN_NUMBER = "unknown-"
+_INT32_DIGITS = 10
+
+
+def kerberos_etype(name: object) -> int | None:
+    """The encryption type number a Zeek cipher name denotes, or None when it names none."""
+    if not isinstance(name, str):
+        return None
+    text = name.strip()
+    if text in KERBEROS_ETYPES:
+        return KERBEROS_ETYPES[text]
+    if text.startswith(_UNKNOWN_NUMBER):
+        digits = text[len(_UNKNOWN_NUMBER):]
+        if digits.isascii() and digits.isdigit() and len(digits) <= _INT32_DIGITS and int(digits) < 2**31:
+            return int(digits)
+    return None
+
+# ntlm.log carries no hash or response, only names: Malcolm renames hostname, domainname, the server names and
+# username (lifted to related.user); Security Onion writes the workstation to host.name and its domain to host.domain
+NTLM = _log("ntlm", "ntlm_tx", (
+    *_endpoints("ntlm"),
+    _f("ntlm.username", "username", "text1", malcolm=("related.user",), elastic=("zeek.ntlm.username", "user.name"),
+       security_onion=("user.name",), plain=("username",)),
+    _f("ntlm.hostname", "hostname", "text", malcolm=("zeek.ntlm.host",), elastic=("zeek.ntlm.hostname",),
+       security_onion=("host.name",), plain=("hostname",)),
+    _f("ntlm.domain", "domainname", "text", malcolm=("zeek.ntlm.domain",), elastic=("zeek.ntlm.domain",),
+       security_onion=("host.domain",), plain=("domainname",)),
+    _f("ntlm.server_nb_computer_name", "server_nb_computer_name", "text", malcolm=("zeek.ntlm.server_nb_computer",),
+       elastic=("zeek.ntlm.server.name.netbios",), security_onion=("ntlm.server.nb.name",),
+       plain=("server_nb_computer_name",)),
+    _f("ntlm.server_dns_computer_name", "server_dns_computer_name", "text",
+       malcolm=("zeek.ntlm.server_dns_computer",), elastic=("zeek.ntlm.server.name.dns",),
+       security_onion=("ntlm.server.dns.name",), plain=("server_dns_computer_name",)),
+    _f("ntlm.server_tree_name", "server_tree_name", "text", malcolm=("zeek.ntlm.server_tree",),
+       elastic=("zeek.ntlm.server.name.tree",), security_onion=("ntlm.server.tree.name",),
+       plain=("server_tree_name",)),
+    # the GSS-API negotiation's result (present only when NTLM ran inside SPNEGO)
+    _f("ntlm.success", "success", "flag", malcolm=("zeek.ntlm.success",), elastic=("zeek.ntlm.success",),
+       security_onion=("ntlm.success",), plain=("success",)),
+    # a status column older Zeek wrote (Zeek 5 and later write none): read where a shipper keeps it
+    _f("ntlm.status", "status", "text", malcolm=("zeek.ntlm.status",), elastic=("zeek.ntlm.status",),
+       security_onion=("ntlm.status",), plain=("status",)),
+), doc="base/protocols/ntlm/main.zeek", transport="tcp", key=("zeek.uid",))
+
+# rdp.log has no authentication result in any Zeek release (base/protocols/rdp/main.zeek at v7.2.0, v8.0.0 and v9.0.1):
+# result is the negotiation's failure code or the GCC conference's result, or "encrypted"
+RDP = _log("rdp", "remote_session", (
+    *_endpoints("rdp"),
+    *(_f(f"rdp.{name}", name, kind, malcolm=(f"zeek.rdp.{name}",), elastic=(f"zeek.rdp.{elastic}",),
+         security_onion=(so,), plain=(name,))
+      for name, kind, elastic, so in (
+          ("cookie", "text", "cookie", "rdp.cookie"), ("result", "text", "result", "rdp.result"),
+          ("security_protocol", "text", "security_protocol", "rdp.security_protocol"),
+          ("keyboard_layout", "text", "keyboard_layout", "rdp.keyboard_layout"),
+          ("client_build", "text", "client.build", "rdp.client_build"),
+          ("client_name", "text", "client.name", "client.name"),
+          ("client_dig_product_id", "text", "client.product_id", "client.id.product"),
+          ("desktop_width", "count", "desktop.width", "rdp.desktop.width"),
+          ("desktop_height", "count", "desktop.height", "rdp.desktop.height"),
+          ("requested_color_depth", "text", "desktop.color_depth", "rdp.requested_color_depth"),
+          ("cert_type", "text", "cert.type", "rdp.certificate_type"),
+          ("cert_count", "count", "cert.count", "rdp.certificate_count"),
+          ("cert_permanent", "flag", "cert.permanent", "rdp.certificate_permanent"),
+          ("encryption_level", "text", "encryption.level", "rdp.encryption_level"),
+          ("encryption_method", "text", "encryption.method", "rdp.encryption_method"))),
+    _f("rdp.client_channels", "client_channels", "list", malcolm=("zeek.rdp.client_channels",),
+       elastic=("zeek.rdp.client_channels",), plain=("client_channels",)),
+    # policy/protocols/rdp/indicate_ssl.zeek: whether the connection switched to TLS
+    _f("rdp.ssl", "ssl", "flag", malcolm=("zeek.rdp.ssl",), elastic=("zeek.rdp.ssl", "tls.established"),
+       plain=("ssl",)),
+), doc="base/protocols/rdp/main.zeek", transport="tcp", key=("zeek.uid",))
+
+RFB = _log("rfb", "remote_session", (
+    *_endpoints("rfb"),
+    *(_f(f"rfb.{side}_{part}_version", f"{side}_{part}_version", "text",
+         malcolm=(f"zeek.rfb.{side}_{part}_version",), elastic=(f"zeek.rfb.version.{side}.{part}",),
+         security_onion=(f"rfb.{side}_{part}_version",), plain=(f"{side}_{part}_version",))
+      for side in ("client", "server") for part in ("major", "minor")),
+    _f("rfb.authentication_method", "authentication_method", "text", malcolm=("zeek.rfb.authentication_method",),
+       elastic=("zeek.rfb.auth.method",), security_onion=("rfb.authentication.method",),
+       plain=("authentication_method",)),
+    _f("rfb.auth_success", "auth", "flag", malcolm=("zeek.rfb.auth",), elastic=("zeek.rfb.auth.success",),
+       security_onion=("rfb.authentication.success",), plain=("auth",)),
+    _f("rfb.share_flag", "share_flag", "flag", malcolm=("zeek.rfb.share_flag",), elastic=("zeek.rfb.share_flag",),
+       security_onion=("rfb.share_flag",), plain=("share_flag",)),
+    _f("rfb.desktop_name", "desktop_name", "text", malcolm=("zeek.rfb.desktop_name",),
+       elastic=("zeek.rfb.desktop_name",), security_onion=("rfb.desktop.name",), plain=("desktop_name",)),
+    _f("rfb.width", "width", "count", malcolm=("zeek.rfb.width",), elastic=("zeek.rfb.width",),
+       security_onion=("rfb.desktop.width",), plain=("width",)),
+    _f("rfb.height", "height", "count", malcolm=("zeek.rfb.height",), elastic=("zeek.rfb.height",),
+       security_onion=("rfb.desktop.height",), plain=("height",)),
+), doc="base/protocols/rfb/main.zeek", transport="tcp", key=("zeek.uid",))
+
+# ldap.log (Zeek 6.1 and later; earlier releases have no LDAP analyzer). A simple bind's argument is its password:
+# Zeek writes "REDACTED" unless LDAP::default_capture_password is set; either way zeek.py never types it. Malcolm
+# renames opcode(s) to operation, result(s) to result_code, diagnostic_message(s) to result_message and arguments to
+# argument (keeping 6.1's objects); Security Onion indexes the singular columns only.
+def _ldap_message_id(log: str) -> ZeekField:
+    return _f("ldap.message_id", "message_id", "count", malcolm=(f"zeek.{log}.message_id",),
+              security_onion=("ldap.message_id",), plain=("message_id",))
+
+
+LDAP = _log("ldap", "ldap_tx", (
+    *_endpoints("ldap", absent=(ELASTIC,)),
+    _ldap_message_id("ldap"),
+    _f("ldap.version", "version", "count", malcolm=("zeek.ldap.version",), security_onion=("ldap.version",),
+       plain=("version",)),
+    _f("ldap.operations", "opcode", "strings", malcolm=("zeek.ldap.operation",), security_onion=("ldap.opcode",),
+       plain=("opcode", "opcodes")),
+    _f("ldap.results", "result", "strings", malcolm=("zeek.ldap.result_code",), security_onion=("ldap.result",),
+       plain=("result", "results")),
+    _f("ldap.diagnostic_messages", "diagnostic_message", "strings", malcolm=("zeek.ldap.result_message",),
+       security_onion=("ldap.diagnostic_message",), plain=("diagnostic_message", "diagnostic_messages")),
+    _f("ldap.objects", "object", "strings", malcolm=("zeek.ldap.object", "zeek.ldap.objects"),
+       security_onion=("ldap.object",), plain=("object", "objects")),
+    _f("ldap.arguments", "argument", "strings", malcolm=("zeek.ldap.argument",), security_onion=("ldap.argument",),
+       plain=("argument", "arguments")),
+), absent=_NO_ELASTIC_LDAP, doc="base/protocols/ldap/main.zeek", key=("zeek.uid",), sequence=("ldap.message_id",))
+
+# ldap_search.log: Security Onion writes the base object to ldap.object; Zeek logs the requested attributes only when
+# LDAP::default_log_search_attributes is set
+LDAP_SEARCH = _log("ldap_search", "ldap_tx", (
+    *_endpoints("ldap_search", absent=(ELASTIC,)),
+    _ldap_message_id("ldap_search"),
+    _f("ldap.scopes", "scope", "strings", malcolm=("zeek.ldap_search.scope",),
+       security_onion=("ldap_search.scope",), plain=("scope", "scopes")),
+    _f("ldap.deref_aliases", "deref_aliases", "strings", malcolm=("zeek.ldap_search.deref",),
+       security_onion=("ldap_search.deref_aliases",), plain=("deref_aliases", "derefs")),
+    _f("ldap.base_objects", "base_object", "strings", malcolm=("zeek.ldap_search.base_object",),
+       security_onion=("ldap.object",), plain=("base_object", "base_objects")),
+    _f("ldap.result_count", "result_count", "count", malcolm=("zeek.ldap_search.result_count",),
+       security_onion=("ldap_search.result_count",), plain=("result_count",)),
+    _f("ldap.results", "result", "strings", malcolm=("zeek.ldap_search.result_code",),
+       security_onion=("ldap.result",), plain=("result", "results")),
+    _f("ldap.diagnostic_messages", "diagnostic_message", "strings", malcolm=("zeek.ldap_search.result_message",),
+       security_onion=("ldap.diagnostic_message",), plain=("diagnostic_message", "diagnostic_messages")),
+    _f("ldap.filter", "filter", "text", malcolm=("zeek.ldap_search.filter",), security_onion=("ldap_search.filter",),
+       plain=("filter",)),
+    _f("ldap.attributes", "attributes", "list", malcolm=("zeek.ldap_search.attributes",),
+       security_onion=("ldap_search.attributes",), plain=("attributes",)),
+), absent=_NO_ELASTIC_LDAP, doc="base/protocols/ldap/main.zeek", key=("zeek.uid",), sequence=("ldap.message_id",))
+
+# dhcp.log: one row per DHCP transaction, over the set of connections (uids) that carried it, and no 4-tuple: the
+# shippers' ports (68 and 67) are constants they add, so neither ports nor a Community ID are read
+DHCP = _log("dhcp", "address_assignment", (
+    _f("zeek.uids", "uids", "names", malcolm=("zeek.uid",), elastic=("zeek.session_id", "event.id"),
+       security_onion=("log.id.uids",), plain=("uids",)),
+    _f("dhcp.client_address", "client_addr", "ip", malcolm=("source.ip",), elastic=("zeek.dhcp.address.client",),
+       security_onion=("client.address",), plain=("client_addr",)),
+    _f("dhcp.server_address", "server_addr", "ip", malcolm=("destination.ip",),
+       elastic=("zeek.dhcp.address.server",), security_onion=("server.address",), plain=("server_addr",)),
+    _f("dhcp.client_mac", "mac", "mac", malcolm=("zeek.dhcp.mac", "source.mac"), elastic=("zeek.dhcp.address.mac",),
+       security_onion=("host.mac",), plain=("mac",)),
+    _f("dhcp.hostname", "host_name", "text", malcolm=("zeek.dhcp.host_name",), elastic=("zeek.dhcp.hostname",),
+       security_onion=("host.hostname",), plain=("host_name",)),
+    _f("dhcp.client_fqdn", "client_fqdn", "text", malcolm=("zeek.dhcp.client_fqdn",),
+       elastic=("zeek.dhcp.client_fqdn",), plain=("client_fqdn",)),
+    _f("dhcp.domain", "domain", "text", malcolm=("zeek.dhcp.domain",), elastic=("zeek.dhcp.domain",),
+       security_onion=("host.domain",), plain=("domain",)),
+    _f("dhcp.requested_ip", "requested_addr", "ip", malcolm=("zeek.dhcp.requested_ip",),
+       elastic=("zeek.dhcp.address.requested",), security_onion=("dhcp.requested_address",),
+       plain=("requested_addr",)),
+    _f("dhcp.assigned_ip", "assigned_addr", "ip", malcolm=("zeek.dhcp.assigned_ip",),
+       elastic=("zeek.dhcp.address.assigned",), security_onion=("dhcp.assigned_ip",), plain=("assigned_addr",)),
+    _f("dhcp.lease_s", "lease_time", "seconds", malcolm=("zeek.dhcp.lease_time",), elastic=("zeek.dhcp.lease_time",),
+       security_onion=("dhcp.lease_time",), plain=("lease_time",)),
+    _f("dhcp.client_message", "client_message", "text", malcolm=("zeek.dhcp.client_message",),
+       elastic=("zeek.dhcp.msg.client",), plain=("client_message",)),
+    _f("dhcp.server_message", "server_message", "text", malcolm=("zeek.dhcp.server_message",),
+       elastic=("zeek.dhcp.msg.server",), plain=("server_message",)),
+    # every message type in Zeek's order, repeats kept (Malcolm keeps each type once: its own loss)
+    _f("dhcp.message_types", "msg_types", "list", malcolm=("zeek.dhcp.msg_types",), elastic=("zeek.dhcp.msg.types",),
+       security_onion=("dhcp.message_types",), plain=("msg_types",)),
+    _f("dhcp.duration_s", "duration", "seconds", malcolm=("zeek.dhcp.duration",), elastic=("zeek.dhcp.duration",),
+       security_onion=("event.duration",), plain=("duration",)),
+    # policy/protocols/dhcp/software.zeek, msg-orig.zeek and sub-opts.zeek
+    _f("dhcp.client_software", "client_software", "text", malcolm=("zeek.dhcp.client_software",),
+       elastic=("zeek.dhcp.software.client",), plain=("client_software",)),
+    _f("dhcp.server_software", "server_software", "text", malcolm=("zeek.dhcp.server_software",),
+       elastic=("zeek.dhcp.software.server",), plain=("server_software",)),
+    _f("dhcp.msg_orig", "msg_orig", "addresses", malcolm=("zeek.dhcp.msg_orig",), elastic=("zeek.dhcp.msg.origin",),
+       plain=("msg_orig",)),
+    *(_f(f"dhcp.{name}", name, "text", malcolm=(f"zeek.dhcp.{name}",), elastic=(f"zeek.dhcp.id.{elastic}",),
+         plain=(name,))
+      for name, elastic in (("circuit_id", "circuit"), ("agent_remote_id", "remote_agent"),
+                            ("subscriber_id", "subscriber"))),
+), doc="base/protocols/dhcp/main.zeek", transport="udp", key=("zeek.uids",))
+
+# The asset logs name no connection: a host, a service or a certificate Zeek saw, or software it identified. Malcolm
+# writes the asset's address to source.ip (known_hosts, known_certs, software) or destination.ip (known_services);
+# Elastic to host.ip (a one-element list) and server.ip.
+SOFTWARE = _log("software", "asset_observed", (
+    _f("asset.ip", "host", "ip1", malcolm=("source.ip",), elastic=("host.ip",), security_onion=("source.ip",),
+       plain=("host",)),
+    _f("asset.port", "host_p", "port", malcolm=("source.port",), elastic=("zeek.software.host_p",),
+       security_onion=("source.port",), plain=("host_p",)),
+    _f("software.type", "software_type", "text", malcolm=("zeek.software.software_type",),
+       elastic=("zeek.software.type",), security_onion=("software.type",), plain=("software_type",)),
+    _f("software.name", "name", "text", malcolm=("zeek.software.name",), elastic=("zeek.software.name",),
+       security_onion=("software.name",), plain=("name",)),
+    *(_f(f"software.version.{part}", f"version.{part}", "count", malcolm=(f"zeek.software.version_{part}",),
+         elastic=(f"zeek.software.version.{part}",), security_onion=(f"software.version.{part}",),
+         plain=(f"version.{part}",))
+      for part in ("major", "minor", "minor2", "minor3")),
+    _f("software.version.addl", "version.addl", "text", malcolm=("zeek.software.version_addl",),
+       elastic=("zeek.software.version.additional",), security_onion=("software.version.additional_info",),
+       plain=("version.addl",)),
+    _f("software.version.unparsed", "unparsed_version", "text", malcolm=("zeek.software.unparsed_version",),
+       elastic=("zeek.software.version.full",), security_onion=("software.version.unparsed",),
+       plain=("unparsed_version",)),
+    # policy/protocols/http/software-browser-plugins.zeek
+    _f("software.url", "url", "text", malcolm=("zeek.software.url",), elastic=("zeek.software.url",), plain=("url",)),
+), doc="base/frameworks/software/main.zeek", key=("asset.ip",))
+
+KNOWN_HOSTS = _log("known_hosts", "asset_observed", (
+    _f("asset.ip", "host", "ip1", malcolm=("source.ip",), elastic=("host.ip",), plain=("host",)),
+), absent=_NO_SO_KNOWN, renamed_only=(ELASTIC,), doc="policy/protocols/conn/known-hosts.zeek", key=("asset.ip",))
+
+KNOWN_SERVICES = _log("known_services", "asset_observed", (
+    _f("asset.ip", "host", "ip1", malcolm=("destination.ip",), elastic=("server.ip", "host.ip"), plain=("host",)),
+    _f("asset.port", "port_num", "port", malcolm=("destination.port",), elastic=("server.port",),
+       plain=("port_num",)),
+    _f("asset.transport", "port_proto", "text", malcolm=("network.transport",), elastic=("network.transport",),
+       plain=("port_proto",)),
+    _f("asset.services", "service", "services", malcolm=("network.protocol",), elastic=("network.application",),
+       plain=("service",)),
+), absent=_NO_SO_KNOWN, renamed_only=(ELASTIC,), doc="policy/protocols/conn/known-services.zeek",
+    key=("asset.ip",), sequence=("asset.port",))
+
+KNOWN_CERTS = _log("known_certs", "asset_observed", (
+    _f("asset.ip", "host", "ip1", malcolm=("source.ip",), elastic=("server.ip", "host.ip"), plain=("host",)),
+    _f("asset.port", "port_num", "port", malcolm=("source.port",), elastic=("server.port",), plain=("port_num",)),
+    _f("x509.subject", "subject", "text", malcolm=("zeek.known_certs.subject",),
+       elastic=("tls.server.x509.subject.distinguished_name", "tls.server.subject"), plain=("subject",)),
+    _f("x509.issuer", "issuer_subject", "text", malcolm=("zeek.known_certs.issuer_subject",),
+       elastic=("tls.server.x509.issuer.distinguished_name", "tls.server.issuer"), plain=("issuer_subject",)),
+    _f("x509.serial", "serial", "hex", malcolm=("zeek.known_certs.serial",),
+       elastic=("tls.server.x509.serial_number",), plain=("serial",)),
+), absent=_NO_SO_KNOWN, renamed_only=(ELASTIC,), doc="policy/protocols/ssl/known-certs.zeek",
+    key=("asset.ip",), sequence=("asset.port", "x509.serial"))
+
+WINDOWS_PROTOCOL_LOGS: tuple[ZeekLog, ...] = (SMB_FILES, SMB_MAPPING, SMB_CMD, DCE_RPC, KERBEROS, NTLM, RDP, RFB, LDAP,
+                                              LDAP_SEARCH, DHCP, SOFTWARE, KNOWN_HOSTS, KNOWN_SERVICES, KNOWN_CERTS)
+
 ANALYZER_LOGS: tuple[ZeekLog, ...] = (DNS, HTTP, SSL, X509, FILES, PE, SSH, NOTICE, WEIRD, SIGNATURES, INTEL, FTP, SMTP,
-                                      IRC, MYSQL, TDS, POSTGRESQL, REDIS, SOCKS, TUNNEL, SIP, SNMP, RADIUS)
+                                      IRC, MYSQL, TDS, POSTGRESQL, REDIS, SOCKS, TUNNEL, SIP, SNMP, RADIUS,
+                                      *WINDOWS_PROTOCOL_LOGS)
 ZEEK_LOGS: tuple[ZeekLog, ...] = (CONN, *ANALYZER_LOGS)
 _BY_NAME: dict[tuple[str, str], ZeekLog] = {(shape, name): log for log in ZEEK_LOGS
                                             for shape, names in log.names.items() for name in names}

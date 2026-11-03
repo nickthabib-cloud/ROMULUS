@@ -404,21 +404,21 @@ def test_every_catalogued_log_has_a_fixture_in_every_shape():
 def test_uncatalogued_logs_are_skips_the_sweep_counts_as_unevaluated_never_errors():
     """Every uncatalogued log in every shape is also in the dispatch golden, compared with what it was before."""
     malcolm = zf.malcolm(zf.Conn())
-    malcolm["_source"]["event"]["dataset"] = "kerberos"
+    malcolm["_source"]["event"]["dataset"] = "modbus"
     elastic = zf.elastic(zf.Conn())
-    elastic["_source"]["event"]["dataset"] = elastic["_source"]["data_stream"]["dataset"] = "zeek.kerberos"
+    elastic["_source"]["event"]["dataset"] = elastic["_source"]["data_stream"]["dataset"] = "zeek.modbus"
     so = zf.security_onion(zf.Conn())
-    so["_source"]["event"]["dataset"] = "zeek.kerberos"
+    so["_source"]["event"]["dataset"] = "zeek.modbus"
     bare = zf.security_onion(zf.Conn(), "so-bare", bare=True)
-    bare["_source"]["event"]["dataset"] = "kerberos"
+    bare["_source"]["event"]["dataset"] = "modbus"
     listed = zf.malcolm(zf.Conn(), "listed")
     listed["_source"]["event"]["dataset"] = ["smb_files", "smb_cmd"]
     events, skips, errors = normalize_hits([malcolm, elastic, so, bare, listed])
     assert events == [] and errors == []
-    assert skips == {"dataset:kerberos is not normalized": 2, "dataset:zeek.kerberos is not normalized": 2,
+    assert skips == {"dataset:modbus is not normalized": 2, "dataset:zeek.modbus is not normalized": 2,
                      "dataset:['smb_files', 'smb_cmd'] is not normalized": 1}
-    with pytest.raises(ZeekNotNormalized, match=r"^dataset:kerberos is not normalized$"):
-        normalize_plain_zeek(zf.plain(zf.Conn(), path="kerberos"))
+    with pytest.raises(ZeekNotNormalized, match=r"^dataset:modbus is not normalized$"):
+        normalize_plain_zeek(zf.plain(zf.Conn(), path="modbus"))
 
 
 def test_errors_are_tagged_with_the_dispatch_token():

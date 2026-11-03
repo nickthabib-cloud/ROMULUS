@@ -30,8 +30,9 @@ LOGS = {log.name: log for log in ANALYZER_LOGS}
 # Natives a log's own step reads in a shape outside its catalog table (Security Onion writes both files layouts'
 # identifiers to log.id.uid and Zeek 5.0's first hosts to source.ip and destination.ip)
 STEP_READ = {("files", "security_onion"): {"uid", "conn_uids", "tx_hosts", "rx_hosts"}}
-# A Community ID some shippers compute for a log whose record names no transport: compared on its own
-NOT_COMPARED = {"network.community_id"}
+# A Community ID some shippers compute for a log whose record names no transport, and the list of logs Malcolm names on
+# an smb_cmd row that carries its referenced file: compared on their own
+NOT_COMPARED = {"network.community_id", "zeek.datasets"}
 
 
 def normalize(h, *, sensor=zl.SENSOR, expect_clean=True):
@@ -487,7 +488,11 @@ def test_duplicates_are_merged_within_one_batch_only():
 
 # ---- secrets -------------------------------------------------------------------------------------------------------
 
-CREDENTIAL_LOGS = {"http", "ftp", "socks", "snmp", "irc", "redis", "mysql", "postgresql"}
+CREDENTIAL_LOGS = {"http", "ftp", "socks", "snmp", "irc", "redis", "mysql", "postgresql", "ldap", "ldap_search",
+                   "software"}
+# credential-bearing rows whose column the shipper does not index (its Zeek line is kept whole, never parsed)
+NOT_INDEXED = {"ldap.61-security_onion": "Security Onion indexes Zeek 7's singular ldap columns only",
+               "software-security_onion": "Security Onion indexes no software url"}
 
 
 @pytest.mark.parametrize("name,h", zl.secret_rows(), ids=[r[0] for r in zl.secret_rows()])
@@ -502,9 +507,11 @@ def test_no_password_value_reaches_a_typed_event_caveat_error_or_skip(name, h):
     assert zl.SECRET not in event.model_dump_json()
     assert zl.SECRET not in json.dumps([skips, errors, event.caveats])
     # the column is found where the shape keeps it as a column; a Zeek line kept whole (Security Onion's message) is
-    # never parsed, so nothing is found there (and Elastic's line is read only for the columns it alone carries)
-    found = name.endswith(("-malcolm-column", "-elastic-column", "-plain-column")) or (
-        log in CREDENTIAL_LOGS and not name.endswith("-column"))
+    # never parsed, so nothing is found there (and Elastic's line is read only for the columns it alone carries; its
+    # known_* pipelines keep no column they do not rename)
+    found = name.endswith(("-malcolm-column", "-plain-column")) or (
+        name.endswith("-elastic-column") and "elastic" in LOGS[log].log_objects) or (
+        log in CREDENTIAL_LOGS and not name.endswith("-column") and name not in NOT_INDEXED)
     if found:
         assert event.get("auth.cleartext_credentials_present") is True, name
         assert event.fields["auth.cleartext_credentials_present"].origin.endswith("#present")

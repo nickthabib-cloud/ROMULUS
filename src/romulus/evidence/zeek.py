@@ -21,9 +21,20 @@ contract, files and pe as `file_transfer`, ssh as `ssh_session`, notice/weird/si
 `alert.provider` "zeek"), x509 rows as `x509_certificate` records keyed by fingerprint (they name no connection), and
 logs no family carries as `app_tx` (command, argument, reply).
 
+Windows protocols. smb_files, smb_mapping and smb_cmd rows are `smb_tx`; dce_rpc rows `rpc_tx`, classed by the one RPC
+table (rpc_catalog); kerberos `kerberos_tx`; ntlm `ntlm_tx`; rdp and rfb `remote_session`; ldap and ldap_search
+`ldap_tx`; dhcp `address_assignment`; software and the known_* logs `asset_observed` (context: an asset Zeek saw).
+These are the sensor's view of a protocol exchange, never a host's record of a logon: where a value means what a
+Windows auth event's typed field means, it is typed under that name and type (`auth.target_account`, the account key;
+`auth.encryption_type`, the ticket's encryption type number; `auth.status`, a KRB-ERROR's code; `source.hostname`, the
+workstation an NTLM client names), and every other value under the protocol's own names (`kerberos.service` is the
+service principal, where a Windows event's `auth.service_name` is an account name). An authentication's result (Kerberos
+success, NTLM's GSS-API result, VNC's) is the event's outcome.
+
 Secrets. Credential values (Malcolm's `related.password`, `url.password`, `url.full` and `post_password_*`, Zeek's
 own `password` columns, the argument of a credential command (FTP PASS/ACCT/ADAT, IRC PASS/OPER/AUTHENTICATE and JOIN
-keys, Redis AUTH), an SNMPv1/v2c community) are never kept in a typed value, an origin, a caveat or an error. Inside
+keys, Redis AUTH, an LDAP simple bind), an SNMPv1/v2c community, an LDAP search filter that compares a password
+attribute with a value) are never kept in a typed value, an origin, a caveat or an error. Inside
 free text (a URI's userinfo, a SIP URI's password, a SQL statement's password literals, a Redis reply's passwords) only
 the credential is replaced by "<redacted>" and the rest kept (see zeek_credentials). Only
 `auth.cleartext_credentials_present` (or, where text that can carry one was withheld because it could not be read,
@@ -42,10 +53,12 @@ from functools import lru_cache
 
 from romulus.evidence.certificates import certificate_fields, dn_parts, name_key
 from romulus.evidence.community import community_id
-from romulus.evidence.typed import FieldValue, RawRef, TypedEvent, event_id, fv
+from romulus.evidence.rpc_catalog import lookup_zeek, zeek_opnum, zeek_uuid
+from romulus.evidence.typed import FieldValue, Outcome, RawRef, TypedEvent, event_id, fv
 from romulus.evidence.zeek_catalog import (
     CONN,
     ELASTIC,
+    KERBEROS_ERRORS,
     MALCOLM,
     PLAIN,
     SECURITY_ONION,
@@ -53,12 +66,14 @@ from romulus.evidence.zeek_catalog import (
     ZEEK_LOGS,
     ZeekField,
     ZeekLog,
+    kerberos_etype,
     lookup_log,
 )
 from romulus.evidence.zeek_credentials import (
     REDACTED,
     SIP_UNREAD,
     Scrubbed,
+    scrub_ldap_filter,
     scrub_redis_reply,
     scrub_sql,
     strip_sip_password,
@@ -216,6 +231,12 @@ def _record(src: dict, shape: str, names: tuple[str, ...] | None, origin: str, r
         # a row naming several logs (Malcolm's SMB rows) is a log only when it carries that log's object
         logs = [log for log in logs
                 if log.log_objects.get(shape) and _present(_nested(src, _parts(log.log_objects[shape])))]
+        # and of several, the one whose rows carry the others' objects (Malcolm's smb_cmd row with its referenced
+        # file moved to zeek.smb_files)
+        carriers = [log for log in logs
+                    if {other.name for other in logs if other is not log} <= log.carries.get(shape, frozenset())]
+        if len(logs) > 1 and len(carriers) == 1:
+            logs = carriers
     return ZeekRecord(shape, names, origin, logs[0] if len(logs) == 1 else None, recognized_by, unsupported)
 
 
@@ -499,11 +520,29 @@ def _read_time(value, shape):
     return _BAD
 
 
+def _read_strings(value, shape):
+    """One string or a list of them, as a list in the order written; a string is never split (its text may hold
+    commas: a distinguished name, a diagnostic message)."""
+    items = [value] if isinstance(value, str) else value
+    if not isinstance(items, list) or not all(isinstance(item, str) for item in items):
+        return _BAD
+    kept = [item for item in items if item.strip() not in PLACEHOLDERS]
+    return kept or None
+
+
+def _read_ip1(value, shape):
+    """An address, which a shipper may have written as a one-element list (Elastic's host.ip)."""
+    if isinstance(value, list) and len(value) == 1:
+        value = value[0]
+    return _read_ip(value, shape)
+
+
 READERS = {"ip": _read_ip, "port": lambda v, s: _read_count(v, s, 65535), "count": _read_count,
            "seconds": _read_seconds, "text": _read_text, "flag": _read_flag, "services": _read_services,
            "names": _read_names, "mac": _read_mac, "list": _read_vector, "text1": _read_text1,
            "count_text": _read_count_text, "time": _read_time, "hex": _read_hex, "hexes": _read_hexes,
-           "addresses": _read_addresses, "seconds_list": _read_seconds_list}
+           "addresses": _read_addresses, "seconds_list": _read_seconds_list, "strings": _read_strings,
+           "ip1": _read_ip1}
 # divisors to seconds (a division of two exact integers is correctly rounded; a product with 1e-9 is not)
 _UNITS = {"ns": 1e9, "ms": 1e3}
 
@@ -517,7 +556,7 @@ class _Path:
     origin: str                     # the origin after "<id>:"; also the name a malformed value is listed under
 
 
-@lru_cache(maxsize=4096)            # every (field, shape) pair of the catalog fits (about 1,600)
+@lru_cache(maxsize=8192)            # every (field, shape) pair of the catalog fits (about 2,300)
 def _compiled(spec: ZeekField, shape: str) -> tuple[tuple[_Path, ...], object]:
     paths = []
     for path in spec.paths.get(shape, ()):
@@ -940,6 +979,13 @@ def _analyzer(hit: dict, record: ZeekRecord, declared_sensor: str | None) -> Typ
     _strip_userinfo(f, log, caveats, guard)
     if log.family == "app_tx":
         f["app.protocol"] = fv(log.name, f"{nid}:{record.origin}")
+    if log.family == "remote_session":
+        f["remote.protocol"] = fv(_REMOTE_PROTOCOLS[log.name], f"{nid}:{record.origin}")
+    if log.family == "asset_observed":
+        f["asset.kind"] = fv(_ASSET_KINDS[log.name], f"{nid}:{record.origin}")
+    if log.name == "ldap_search":
+        f["ldap.operations"] = fv(["search"], f"{nid}:{record.origin}")
+        f["ldap.operation"] = fv("search", f"{nid}:{record.origin}")
     if log.family == "net_alert":
         f["alert.provider"] = fv("zeek", f"{nid}:{record.recognized_by}#producer")
         f["alert.kind"] = fv(_ALERT_KINDS[log.name], f"{nid}:{record.origin}")
@@ -974,11 +1020,18 @@ def _analyzer(hit: dict, record: ZeekRecord, declared_sensor: str | None) -> Typ
         sequence = "|".join(str(f[name].value) if name in f else "" for name in log.sequence)
         identity = [RawRef(target=f"zeek:{host or ''}:{log.name}",
                            native_id=f"{key}|{when.isoformat()}|{sequence}|{_signature(f)}")]
+    success = f.get(_SUCCESS_FIELDS.get(log.name, ""))
+    outcome = Outcome.unknown if success is None else Outcome.success if success.value else Outcome.failure
     return TypedEvent(id=event_id(log.family, identity, ZEEK_NORMALIZER), family=log.family, ts=when, host=host,
-                      fields=f, raw=[ref], normalizer=ZEEK_NORMALIZER, caveats=caveats)
+                      outcome=outcome, fields=f, raw=[ref], normalizer=ZEEK_NORMALIZER, caveats=caveats)
 
 
 _ALERT_KINDS = {"notice": "notice", "weird": "weird", "signatures": "signature", "intel": "intel"}
+_REMOTE_PROTOCOLS = {"rdp": "rdp", "rfb": "vnc"}
+_ASSET_KINDS = {"software": "software", "known_hosts": "host", "known_services": "service",
+                "known_certs": "certificate"}
+# the typed result of an authentication a log records, which is the event's outcome
+_SUCCESS_FIELDS = {"kerberos": "kerberos.success", "ntlm": "ntlm.success", "rfb": "rfb.auth_success"}
 # where Malcolm puts any log's password column (it lifts every `password` to related.password and builds http's
 # url.password from it)
 _MALCOLM_PASSWORDS = ("related.password", "url.password")
@@ -1062,7 +1115,8 @@ _IRC_CHANNEL_KEY = "with channel key:"
 _ECHO_LIMIT = 32
 # the typed values of each log that hold a URI, a SIP URI, or a host name
 _URI_FIELDS = {"http": ("url.original", "http.request.referrer", "http.request.origin"), "ftp": ("app.arg",),
-               "intel": ("intel.indicator",), "mysql": ("app.arg",), "postgresql": ("app.arg",)}
+               "intel": ("intel.indicator",), "mysql": ("app.arg",), "postgresql": ("app.arg",),
+               "software": ("software.url",)}
 _SIP_FIELDS = {"sip": ("app.arg", "sip.request_from", "sip.request_to")}
 _HOST_FIELDS = {"http": ("http.hostname",)}
 
@@ -1460,8 +1514,216 @@ def _redis(f, reader, log, caveats, guard):
     _scrubbed(f, "app.reply", reply, scrub_redis_reply(reply.value, name), caveats, guard, "reply")
 
 
+# ---- the Windows-protocol logs --------------------------------------------------------------------------------------
+#
+# Values a shipper rewrites are given one form in every shape: Zeek's SMB enum names without their "SMB::" prefix (as
+# Malcolm writes them), SMB versions as Zeek writes them ("SMB2"; Malcolm removes "SMB"), share paths and trees with a
+# leading run of backslashes as two and any other run as one (Malcolm makes each doubled backslash single, which leaves
+# a JSON row's "\\host\share" as "\host\share"), and RDP client builds without Zeek's "RDP " prefix (as Malcolm writes
+# them). Each changed value's origin says how.
+
+_SMB_ENUM_PREFIX = "SMB::"
+_BACKSLASH_RUN = re.compile(r"\\{2,}+")
+
+
+def _single_backslashes(text: str) -> str:
+    return _BACKSLASH_RUN.sub(r"\\", text) if "\\\\" in text else text
+
+
+def _unc(text: str) -> str:
+    """A share path as Zeek writes it ("\\\\host\\share"): a leading run of backslashes as two, any other as one."""
+    body = text.lstrip("\\")
+    return ("\\\\" if len(body) != len(text) else "") + _single_backslashes(body)
+
+
+def _smb(f, reader, log, caveats, guard):
+    """The SMB enum names, version, paths and names in one form; the share's host and name from its UNC path (the file's
+    path, else the command's tree)."""
+    for typed in ("smb.action", "smb.command"):
+        value = f.get(typed)
+        if value is not None:
+            _derive(f, typed, value.value.removeprefix(_SMB_ENUM_PREFIX), value, "zeek-enum-name")
+    version = f.get("smb.version")
+    if version is not None and version.value.isascii() and version.value.isdigit():
+        _derive(f, "smb.version", f"SMB{version.value}", version, "smb-version")
+    for typed in ("smb.path", "smb.tree"):
+        value = f.get(typed)
+        if value is not None:
+            _derive(f, typed, _unc(value.value), value, "unc-path")
+    for typed in ("smb.name", "smb.prev_name"):
+        value = f.get(typed)
+        if value is not None:
+            _derive(f, typed, _single_backslashes(value.value), value, "backslashes")
+    source = f.get("smb.path") or f.get("smb.tree")
+    if source is not None and source.value.startswith("\\\\"):
+        host, _sep, rest = source.value[2:].partition("\\")
+        share = rest.partition("\\")[0]
+        if host:
+            f["smb.host"] = fv(host, f"{reader.nid}:{_native(source)}#derived:unc-host")
+        if share:
+            f["smb.share"] = fv(share, f"{reader.nid}:{_native(source)}#derived:unc-share")
+
+
+def _rpc(f, reader, log, caveats, guard):
+    """The call's class from the one RPC table (rpc_catalog), and the interface UUID and opnum Zeek's names denote."""
+    endpoint, operation = f.get("rpc.endpoint"), f.get("rpc.operation")
+    if endpoint is not None:
+        uuid = zeek_uuid(endpoint.value)
+        if uuid is not None:
+            f["rpc.interface_uuid"] = fv(uuid, f"{endpoint.origin}#derived:rpc-catalog")
+    if endpoint is None or operation is None:
+        return
+    origin = f"{endpoint.origin}+{_path(operation)}#derived:rpc-catalog"
+    f["rpc.op_class"] = fv(lookup_zeek(endpoint.value, operation.value).op_class, origin)
+    opnum = zeek_opnum(endpoint.value, operation.value)
+    if opnum is not None:
+        f["rpc.opnum"] = fv(opnum, origin)
+
+
+def _account_key(name: str, domain: str) -> str:
+    """An account as the Windows auth events key one by name: "name:" and domain\\name (the name alone without a
+    domain), casefolded."""
+    joined = f"{domain}\\{name}" if domain and domain not in ("-", ".") else name
+    return f"name:{joined.casefold()}"
+
+
+def _kerberos(f, reader, log, caveats, guard):
+    """The ticket's encryption type number, the KRB-ERROR's code, and the client principal's name, realm and account.
+    Zeek writes the client "name/realm", or the realm alone for a KRB-ERROR that names no client."""
+    cipher = f.get("kerberos.cipher")
+    if cipher is not None and (number := kerberos_etype(cipher.value)) is not None:
+        f["auth.encryption_type"] = fv(number, f"{cipher.origin}#derived:kerberos-etype")
+    error = f.get("kerberos.error_msg")
+    if error is not None and error.value.strip() in KERBEROS_ERRORS:
+        f["auth.status"] = fv(KERBEROS_ERRORS[error.value.strip()], f"{error.origin}#derived:kerberos-error-code")
+    client = f.get("kerberos.client")
+    if client is None:
+        return
+    name, sep, realm = client.value.rpartition("/")
+    name, realm = (name.strip(), realm.strip()) if sep else ("", client.value.strip())
+    origin = f"{client.origin}#derived:principal"
+    if name:
+        f["kerberos.client_name"] = fv(name, origin)
+        f["auth.target_account"] = fv(_account_key(name, realm), origin)
+    if realm:
+        f["kerberos.client_realm"] = fv(realm, origin)
+
+
+def _ntlm(f, reader, log, caveats, guard):
+    """The workstation name as the Windows auth events type theirs (source.hostname), and the account."""
+    host = f.get("ntlm.hostname")
+    if host is not None:
+        name = host.value.strip().rstrip(".").casefold()
+        if name:
+            f["source.hostname"] = fv(name, f"{host.origin}#derived:hostname")
+    user, domain = f.get("ntlm.username"), f.get("ntlm.domain")
+    if user is not None and user.value.strip():
+        parts = [user] + ([domain] if domain is not None else [])
+        origin = "+".join([parts[0].origin, *(_path(value) for value in parts[1:])])
+        f["auth.target_account"] = fv(_account_key(user.value.strip(), domain.value.strip() if domain else ""),
+                                      f"{origin}#derived:account")
+
+
+def _rdp(f, reader, log, caveats, guard):
+    build = f.get("rdp.client_build")
+    if build is not None:
+        _derive(f, "rdp.client_build", build.value.removeprefix("RDP "), build, "build")
+
+
+# the scalar of each LDAP value Zeek 6.1 wrote as a set or vector, typed when the record holds one
+_LDAP_SCALARS = (("ldap.operations", "ldap.operation"), ("ldap.results", "ldap.result"),
+                 ("ldap.diagnostic_messages", "ldap.diagnostic_message"), ("ldap.objects", "ldap.object"),
+                 ("ldap.arguments", "ldap.argument"), ("ldap.scopes", "ldap.scope"),
+                 ("ldap.base_objects", "ldap.base_object"))
+_SIMPLE_BIND = "bind simple"
+_SASL_BIND = "bind sasl"
+_BIND = "bind"
+_SICILY_BINDS = frozenset({"sicily_negotiate", "sicily_response"})
+# SASL mechanisms that send the password itself (RFC 4616 PLAIN; the LOGIN mechanism)
+_SASL_CLEARTEXT = frozenset({"PLAIN", "LOGIN"})
+
+
+def _ldap(f, reader, log, caveats, guard):
+    """A bind's argument is withheld when the bind is simple (its argument is the password, or Zeek's "REDACTED" for
+    it), when its kind was not recorded, and when the operation cannot be read; a SASL bind's argument (its mechanism)
+    is kept. A search filter that compares a password attribute with a value is withheld. Then each one-element list
+    gives its scalar, and a bind its kind."""
+    if log.name == "ldap":
+        _ldap_arguments(f, reader, log, caveats, guard)
+    search = f.get("ldap.filter")
+    if search is not None:
+        _scrubbed(f, "ldap.filter", search, scrub_ldap_filter(search.value), caveats, guard, "ldap-filter")
+    for plural, scalar in _LDAP_SCALARS:
+        value = f.get(plural)
+        if value is not None and len(value.value) == 1:
+            f[scalar] = fv(value.value[0], value.origin)
+    operations = f.get("ldap.operations")
+    kinds = {_bind_kind(name) for name in operations.value} - {None} if operations is not None else set()
+    if len(kinds) == 1:
+        f["ldap.bind_type"] = fv(kinds.pop(), f"{operations.origin}#derived:bind-type")
+
+
+def _bind_kind(operation: str) -> str | None:
+    """A bind's kind from Zeek's operation name ("bind simple", "bind SASL"; Zeek 8's "sicily_negotiate" and
+    "sicily_response"), casefolded; None for any other operation, and for a bind whose kind Zeek did not record."""
+    name = operation.strip().casefold()
+    if name.startswith(_BIND + " "):
+        return name[len(_BIND) + 1:].strip() or None
+    return name if name in _SICILY_BINDS else None
+
+
+def _ldap_arguments(f, reader, log, caveats, guard):
+    written = _raw_path(reader, log, "ldap.arguments")
+    operations = f.get("ldap.operations")
+    names = [name.strip().casefold() for name in operations.value] if operations is not None else []
+    if not names:
+        if written is not None:                         # fail closed: no operation, no argument kept
+            f.pop("ldap.arguments", None)
+            guard.unknown.append(f"{written}#unread-operation")
+            guard.withheld = True
+            if ZEEK_ARGUMENT_WITHHELD not in caveats:
+                caveats.append(ZEEK_ARGUMENT_WITHHELD)
+        return
+    if any(_SIMPLE_BIND in name for name in names):
+        if written is not None:
+            f.pop("ldap.arguments", None)
+            guard.present.append(f"{written}#simple-bind")
+            guard.withheld = True
+        return
+    if _BIND in names and written is not None:
+        # a bind whose kind Zeek did not record (it saw the response alone): it may have been simple
+        f.pop("ldap.arguments", None)
+        guard.unknown.append(f"{written}#bind-of-unknown-kind")
+        guard.withheld = True
+        if ZEEK_ARGUMENT_WITHHELD not in caveats:
+            caveats.append(ZEEK_ARGUMENT_WITHHELD)
+        return
+    arguments = f.get("ldap.arguments")
+    if arguments is not None and any(name.startswith(_SASL_BIND) for name in names) and any(
+            argument.strip().upper() in _SASL_CLEARTEXT for argument in arguments.value):
+        guard.present.append(f"{_native(arguments)}#sasl-cleartext-mechanism")
+
+
+def _known_services(f, reader, log, caveats, guard):
+    """The services as conn's are typed (Zeek's analyzer names, lowercased, without a transport or "spicy_" part), as
+    Malcolm writes them too."""
+    services = f.get("asset.services")
+    if services is None:
+        return
+    names = []
+    for item in services.value:
+        name = item.removeprefix(_SERVICE_PREFIX)
+        for suffix in ("_tcp", "_udp", "_data", "-tcp", "-udp", "-data"):
+            name = name.removesuffix(suffix)
+        if name and name not in names:
+            names.append(name)
+    _derive(f, "asset.services", names, services, "service-names")
+
+
 # SNMP's community needs no step: Zeek writes it only from an SNMPv1 or v2c message's header (an SNMPv3 header has
 # none), whatever the session's version column says (that is its first message's), so it is always a cleartext
 # community and only its presence is typed (the catalog's secret paths).
 _STEPS = {"dns": _dns, "http": _http, "ssl": _ssl, "x509": _x509, "files": _files, "ssh": _ssh, "ftp": _ftp,
-          "socks": _socks, "tunnel": _tunnel, "radius": _radius, "redis": _redis}
+          "socks": _socks, "tunnel": _tunnel, "radius": _radius, "redis": _redis, "smb_files": _smb,
+          "smb_mapping": _smb, "smb_cmd": _smb, "dce_rpc": _rpc, "kerberos": _kerberos, "ntlm": _ntlm, "rdp": _rdp,
+          "ldap": _ldap, "ldap_search": _ldap, "known_services": _known_services}

@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -193,21 +194,113 @@ SNMP = Row("snmp", {**_conn("CsnmpConn00000001", 51150, 161), "duration": 0.5, "
 RADIUS = Row("radius", {**_conn("CradiusConn000001", 51160, 1812), "username": "alice", "mac": "00:00:5e:00:53:10",
                         "framed_addr": "10.0.10.20", "reply_msg": "Welcome", "result": "success", "ttl": 0.1})
 
+# ---- the Windows-protocol logs (Zeek's smb, dce-rpc, krb, ntlm, rdp, rfb, ldap, dhcp, software and known-* scripts at
+# tag v8.0.0; ldap's Zeek 6.1 layout at tag v6.1.0) ----------------------------------------------------------------
+
+DC, WS = "10.0.0.10", CLIENT
+UID_SMB = "CsmbConn000000001"
+FUID_SMB = "FsmbFile000000001"
+SHARE = "\\\\DC01\\ADMIN$"                  # Zeek's tree path: \\DC01\ADMIN$
+SMB_FILES = Row("smb_files", {**_conn(UID_SMB, 51200, 445, DC), "fuid": FUID_SMB, "action": "SMB::FILE_OPEN",
+                              "path": SHARE, "name": "Temp\\svc-update.exe", "size": 73802,
+                              "times.modified": 1731938300.5, "times.accessed": 1731938300.5,
+                              "times.created": 1731938300.25, "times.changed": 1731938300.5})
+SMB_MAPPING = Row("smb_mapping", {**_conn(UID_SMB, 51200, 445, DC), "path": SHARE, "service": "A:",
+                                  "native_file_system": "NTFS", "share_type": "DISK"})
+_REFERENCED = {"referenced_file.ts": T0, "referenced_file.uid": UID_SMB, "referenced_file.id.orig_h": WS,
+               "referenced_file.id.orig_p": 51200, "referenced_file.id.resp_h": DC, "referenced_file.id.resp_p": 445,
+               "referenced_file.fuid": FUID_SMB, "referenced_file.action": "SMB::FILE_OPEN",
+               "referenced_file.path": SHARE, "referenced_file.name": "Temp\\svc-update.exe",
+               "referenced_file.size": 73802}
+SMB_CMD = Row("smb_cmd", {**_conn(UID_SMB, 51200, 445, DC), "command": "CREATE", "argument": "Temp\\svc-update.exe",
+                          "status": "SUCCESS", "rtt": 0.000412, "version": "SMB2", "tree": SHARE,
+                          "tree_service": "A:", **_REFERENCED})
+# a command that references no file (Zeek writes no referenced_file.* keys)
+SMB_CMD_NO_FILE = Row("smb_cmd", {**_conn(UID_SMB, 51200, 445, DC), "command": "TREE_CONNECT", "argument": SHARE,
+                                  "status": "SUCCESS", "rtt": 0.000301, "version": "SMB2", "tree": SHARE,
+                                  "tree_service": "A:"}, ts=T0 - 1)
+DCE_RPC = Row("dce_rpc", {**_conn("CrpcConn000000001", 51210, 445, DC), "rtt": 0.000512, "named_pipe": "\\PIPE\\ntsvcs",
+                          "endpoint": "svcctl", "operation": "CreateServiceW"})
+KERBEROS = Row("kerberos", {**_conn("CkrbConn000000001", 51220, 88, DC), "request_type": "TGS",
+                            "client": "alice/EXAMPLE.TEST", "service": "MSSQLSvc/sql01.example.test:1433",
+                            "success": True, "from": 1731938390.0, "till": 2136422885.0, "cipher": "rc4-hmac",
+                            "forwardable": True, "renewable": True,
+                            "client_cert_subject": "CN=alice,OU=Users,DC=example,DC=test",
+                            "client_cert_fuid": "FkrbCert000000001",
+                            "server_cert_subject": "CN=dc01.example.test", "server_cert_fuid": "FkrbCert000000002"})
+NTLM = Row("ntlm", {**_conn("CntlmConn00000001", 51230, 445, DC), "username": "alice", "hostname": "WS01",
+                    "domainname": "EXAMPLE", "server_nb_computer_name": "DC01",
+                    "server_dns_computer_name": "dc01.example.test", "server_tree_name": "example.test",
+                    "success": True})
+RDP = Row("rdp", {**_conn("CrdpConn000000001", 51240, 3389, "10.0.0.20"), "cookie": "alice", "result": "Success",
+                  "security_protocol": "RDP", "client_channels": ["rdpdr", "rdpsnd", "cliprdr"],
+                  "keyboard_layout": "English - United States", "client_build": "RDP 8.1", "client_name": "WS01",
+                  "client_dig_product_id": "00000-00000-00000-AA000", "desktop_width": 1920,
+                  "desktop_height": 1080, "requested_color_depth": "32bit", "cert_type": "RSA", "cert_count": 1,
+                  "cert_permanent": False, "encryption_level": "Client compatible", "encryption_method": "128bit",
+                  "ssl": False})
+RFB = Row("rfb", {**_conn("CrfbConn000000001", 51250, 5900, "10.0.0.21"), "client_major_version": "003",
+                  "client_minor_version": "008", "server_major_version": "003", "server_minor_version": "008",
+                  "authentication_method": "VNC", "auth": True, "share_flag": True, "desktop_name": "ws21:0",
+                  "width": 1280, "height": 800})
+UID_LDAP = "CldapConn00000001"
+LDAP = Row("ldap", {**_conn(UID_LDAP, 51260, 389, DC), "message_id": 1, "version": 3, "opcode": "bind SASL",
+                    "result": "success", "diagnostic_message": "synthetic diagnostic",
+                    "object": "CN=svc-app,OU=Service,DC=example,DC=test", "argument": "GSS-SPNEGO"})
+LDAP_SEARCH = Row("ldap_search", {**_conn(UID_LDAP, 51260, 389, DC), "message_id": 2, "scope": "tree",
+                                  "deref_aliases": "never", "base_object": "DC=example,DC=test", "result_count": 3,
+                                  "result": "success", "diagnostic_message": "synthetic diagnostic",
+                                  "filter": "(&(objectclass=user)(servicePrincipalName=*))",
+                                  "attributes": ["sAMAccountName", "servicePrincipalName", "memberOf"]})
+# Zeek 6.1's layout of the same records: sets and vectors where later Zeek writes one value
+LDAP_61 = Row("ldap", {**{k: v for k, v in LDAP.zeek.items() if k not in (
+    "opcode", "result", "diagnostic_message", "object", "argument")}, "opcodes": ["bind SASL"],
+    "results": ["success"], "diagnostic_messages": ["synthetic diagnostic"],
+    "objects": ["CN=svc-app,OU=Service,DC=example,DC=test"], "arguments": ["GSS-SPNEGO"]})
+LDAP_SEARCH_61 = Row("ldap_search", {**{k: v for k, v in LDAP_SEARCH.zeek.items() if k not in (
+    "scope", "deref_aliases", "base_object", "result", "diagnostic_message")}, "scopes": ["tree"],
+    "derefs": ["never"], "base_objects": ["DC=example,DC=test"], "results": ["success"],
+    "diagnostic_messages": ["synthetic diagnostic"]})
+DHCP = Row("dhcp", {"uids": ["CdhcpConn00000001", "CdhcpConn00000002"], "client_addr": WS, "server_addr": "10.0.0.1",
+                    "mac": "00:00:5e:00:53:05", "host_name": "WS01", "client_fqdn": "ws01.example.test",
+                    "domain": "example.test", "requested_addr": WS, "assigned_addr": WS, "lease_time": 86400.0,
+                    "client_message": "synthetic client message", "server_message": "synthetic server message",
+                    "msg_types": ["REQUEST", "ACK"], "duration": 0.0042, "client_software": "MSFT 5.0",
+                    "server_software": "synthetic-dhcpd 4.4", "msg_orig": [WS, "10.0.0.1"],
+                    "circuit_id": "synthetic-circuit", "agent_remote_id": "synthetic-agent",
+                    "subscriber_id": "synthetic-subscriber"})
+SOFTWARE = Row("software", {"host": DC, "host_p": 22, "software_type": "SSH::SERVER", "name": "OpenSSH",
+                            "version.major": 8, "version.minor": 9, "version.minor2": 0, "version.minor3": 1,
+                            "version.addl": "p1", "unparsed_version": "OpenSSH_8.9p1 Ubuntu-3ubuntu0.6",
+                            "url": "http://www.example.test/plugin"})
+KNOWN_HOSTS = Row("known_hosts", {"host": WS})
+KNOWN_SERVICES = Row("known_services", {"host": DC, "port_num": 88, "port_proto": "tcp", "service": ["KRB_TCP"]})
+KNOWN_CERTS = Row("known_certs", {"host": DC, "port_num": 636, "subject": "CN=dc01.example.test",
+                                  "issuer_subject": "CN=Example Issuing CA,O=Example Org,C=US",
+                                  "serial": "0A1B2C3D4E5F6071"})
+WINDOWS_ROWS = (SMB_FILES, SMB_MAPPING, SMB_CMD, DCE_RPC, KERBEROS, NTLM, RDP, RFB, LDAP, LDAP_SEARCH, DHCP, SOFTWARE,
+                KNOWN_HOSTS, KNOWN_SERVICES, KNOWN_CERTS)
+
 ROWS = {row.log: row for row in (DNS, HTTP, SSL, X509, FILES, PE, SSH, NOTICE, WEIRD, SIGNATURES, INTEL, FTP, SMTP,
-                                 IRC, MYSQL, TDS, POSTGRESQL, REDIS, SOCKS, TUNNEL, SIP, SNMP, RADIUS)}
+                                 IRC, MYSQL, TDS, POSTGRESQL, REDIS, SOCKS, TUNNEL, SIP, SNMP, RADIUS, *WINDOWS_ROWS)}
 # shipper streams and dataset names that differ from Zeek's own log name
 ELASTIC_STREAMS = {"signatures": "signature"}
 SO_NAMES = {"files": "file"}
 # logs a shipper publishes no pipeline for (the catalog's absent_shapes)
 NOT_WRITTEN = {"tds": {"elastic"}, "postgresql": {"elastic", "security_onion"},
-               "redis": {"elastic", "security_onion"}}
+               "redis": {"elastic", "security_onion"}, "smb_cmd": {"security_onion"},
+               "ldap": {"elastic"}, "ldap_search": {"elastic"}, "known_hosts": {"security_onion"},
+               "known_services": {"security_onion"}, "known_certs": {"security_onion"}}
 # the transport each shipper knows for a log whose record has no proto (Malcolm's 10xx add_field, Elastic's set):
 # used for the Community ID it writes
+_TCP_WINDOWS = {log: "tcp" for log in ("smb_files", "smb_mapping", "smb_cmd", "dce_rpc", "ntlm", "rdp", "rfb")}
 SHIPPER_TRANSPORT = {
     "malcolm": {"http": "tcp", "ssl": "tcp", "ftp": "tcp", "smtp": "tcp", "irc": "tcp", "tds": "tcp",
-                "postgresql": "tcp", "redis": "tcp", "ssh": "tcp", "snmp": "udp"},
+                "postgresql": "tcp", "redis": "tcp", "ssh": "tcp", "snmp": "udp", **_TCP_WINDOWS},
+    # Elastic's kerberos pipeline sets tcp whatever the transport
     "elastic": {"http": "tcp", "ssl": "tcp", "ssh": "tcp", "ftp": "tcp", "smtp": "tcp", "irc": "tcp",
-                "mysql": "tcp", "socks": "tcp", "sip": "udp", "snmp": "udp", "radius": "udp"},
+                "mysql": "tcp", "socks": "tcp", "sip": "udp", "snmp": "udp", "radius": "udp", **_TCP_WINDOWS,
+                "kerberos": "tcp"},
     "security_onion": {"http": "tcp", "smtp": "tcp"},
 }
 
@@ -306,8 +399,28 @@ MALCOLM_RENAMES = {
     "socks": {"bound.host": "bound_host", "bound.name": "bound_name", "request.host": "request_host",
               "request.name": "request_name", "status": "server_status"},
     "radius": {"username": "user"},
+    "kerberos": {"client": "cname", "service": "sname"},
+    "ntlm": {"hostname": "host", "domainname": "domain", "server_nb_computer_name": "server_nb_computer",
+             "server_dns_computer_name": "server_dns_computer", "server_tree_name": "server_tree", "username": "user"},
+    "ldap": {"arguments": "argument", "opcode": "operation", "opcodes": "operation", "result": "result_code",
+             "results": "result_code", "diagnostic_message": "result_message", "diagnostic_messages": "result_message"},
+    "ldap_search": {"base_objects": "base_object", "deref_aliases": "deref", "derefs": "deref",
+                    "diagnostic_message": "result_message", "diagnostic_messages": "result_message",
+                    "result": "result_code", "results": "result_code", "scopes": "scope"},
+    "dhcp": {"uids": "uid", "client_addr": "orig_h", "server_addr": "resp_h", "mac": "orig_l2_addr",
+             "requested_addr": "requested_ip", "assigned_addr": "assigned_ip"},
+    "known_certs": {"host": "orig_h", "port_num": "orig_p"},
+    "known_hosts": {"host": "orig_h"},
+    "known_services": {"host": "resp_h", "port_num": "resp_p", "port_proto": "proto"},
+    "software": {"host": "orig_h", "host_p": "orig_p",
+                 **{f"version.{part}": f"version_{part}" for part in ("major", "minor", "minor2", "minor3", "addl")}},
 }
-# 10xx_zeek_<log>.conf add_field: proto and service
+# the text-log (TSV) column names that differ from Zeek's JSON names after the renames above (10xx dissect mappings)
+MALCOLM_TEXT_RENAMES = {
+    "smb_files": {f"times.{name}": f"times_{name}" for name in ("modified", "accessed", "created", "changed")},
+    "smb_mapping": {"service": "resource_type"},
+}
+# 10xx_zeek_<log>.conf add_field: proto and service (a column already there becomes a list of both: Logstash add_field)
 MALCOLM_ADDED = {"dns": {"service": "dns"}, "http": {"proto": "tcp", "service": "http"},
                  "ssl": {"proto": "tcp", "service": "tls"}, "x509": {"service": "X.509"},
                  "ftp": {"proto": "tcp", "service": "ftp"}, "smtp": {"proto": "tcp", "service": "smtp"},
@@ -315,7 +428,12 @@ MALCOLM_ADDED = {"dns": {"service": "dns"}, "http": {"proto": "tcp", "service": 
                  "tds": {"proto": "tcp", "service": "tds"}, "postgresql": {"proto": "tcp", "service": "postgresql"},
                  "redis": {"proto": "tcp", "service": "redis"}, "socks": {"service": "socks"},
                  "sip": {"service": "sip"}, "snmp": {"proto": "udp", "service": "snmp"},
-                 "radius": {"service": "radius"}, "ssh": {"proto": "tcp", "service": "ssh"}}
+                 "radius": {"service": "radius"}, "ssh": {"proto": "tcp", "service": "ssh"},
+                 **{log: {"proto": "tcp", "service": "smb"} for log in ("smb_files", "smb_mapping", "smb_cmd")},
+                 "dce_rpc": {"proto": "tcp", "service": "dce_rpc"}, "kerberos": {"service": "krb"},
+                 "ntlm": {"service": "ntlm"}, "rdp": {"service": "rdp"}, "rfb": {"service": "rfb"},
+                 "ldap": {"service": "ldap"}, "ldap_search": {"service": "ldap"},
+                 "dhcp": {"proto": "udp", "service": "dhcp"}, "known_certs": {"proto": "tcp", "service": "tls"}}
 # 1200_zeek_mutate.conf: the shared lifts out of zeek.<log>
 MALCOLM_LIFTS = {"ts": "zeek.ts", "uid": "zeek.uid", "fuid": "zeek.fuid", "is_orig": "network.is_orig",
                  "orig_h": "source.ip", "orig_p": "source.port", "resp_h": "destination.ip",
@@ -324,7 +442,8 @@ MALCOLM_LIFTS = {"ts": "zeek.ts", "uid": "zeek.uid", "fuid": "zeek.fuid", "is_or
                  "password": "related.password", "community_id": "network.community_id"}
 # 1400_zeek_convert.conf: epoch columns written as times
 MALCOLM_TIMES = {"pe": ("compile_ts",), "x509": ("certificate_not_valid_before", "certificate_not_valid_after"),
-                 "snmp": ("up_since",)}
+                 "snmp": ("up_since",), "kerberos": ("from", "till"),
+                 "smb_files": ("times_modified", "times_accessed", "times_created", "times_changed")}
 
 
 def _split_dn(dn: str) -> dict:
@@ -344,11 +463,26 @@ def malcolm(row: Row, nid: str = "mc-1", *, sensor: str | None = SENSOR, text: b
     cols = {"orig_h" if k == "id.orig_h" else "orig_p" if k == "id.orig_p" else "resp_h" if k == "id.resp_h"
             else "resp_p" if k == "id.resp_p" else k: v for k, v in row.json().items()}
     cols = {MALCOLM_RENAMES.get(log, {}).get(k, k): v for k, v in cols.items()}
-    cols.update(MALCOLM_ADDED.get(log, {}))
+    if text:
+        cols = {MALCOLM_TEXT_RENAMES.get(log, {}).get(k, k): v for k, v in cols.items()}
+    referenced = {k: cols.pop(k) for k in [k for k in cols if k.startswith("referenced_file.")]}
+    for name, value in MALCOLM_ADDED.get(log, {}).items():
+        cols[name] = value if name not in cols else [*(cols[name] if isinstance(cols[name], list)
+                                                        else [cols[name]]), value]
+    if log == "dhcp" and "orig_p" not in cols and "resp_p" not in cols:
+        cols.update(orig_p=68, resp_p=67)              # 1017_zeek_dhcp.conf: the DHCP ports, when absent
+    if log == "known_services" and "service" in cols:
+        cols["service"] = [_malcolm_service(s) for s in cols["service"]]
+    if log == "rdp" and isinstance(cols.get("client_build"), str):
+        cols["client_build"] = cols["client_build"].removeprefix("RDP ")
     if log == "ssl" and str(cols.get("ssl_version", "")).startswith("DTLS"):
         cols["proto"] = "udp"
     if text:
         cols = {k: v if k in ("ts",) else _text(v) for k, v in cols.items()}
+    if referenced:
+        cols["referenced_file"] = _malcolm_referenced_file(referenced, text)
+        if not text:                                    # JSON: the keys other than id.* stay literal
+            cols.update({k: v for k, v in referenced.items() if not k.startswith("referenced_file.id.")})
     top: dict = {}
     for name, target in MALCOLM_LIFTS.items():
         if name in cols:
@@ -377,6 +511,7 @@ def malcolm(row: Row, nid: str = "mc-1", *, sensor: str | None = SENSOR, text: b
     if written is not None:
         _set(source, "network.community_id", written)
     _malcolm_mutate(log, source, zeek_log, row)
+    _malcolm_windows(log, source, zeek_log, text)
     for name in MALCOLM_TIMES.get(log, ()):
         if name in zeek_log and zeek_log[name] is not None:
             zeek_log[name] = _epoch_iso(float(zeek_log[name]))
@@ -446,6 +581,94 @@ def _malcolm_mutate(log: str, source: dict, z: dict, row: Row) -> None:
                 z[name] = str(z[name]).removeprefix("Tunnel::")
 
 
+def _dedouble(value):
+    """logstash/ruby/dedoubleslash.rb: each doubled backslash made single (it undoes the escaping of Zeek's text logs,
+    and on a JSON row turns a share path's leading two into one)."""
+    if isinstance(value, list):
+        return [_dedouble(v) for v in value]
+    return value.replace("\\\\", "\\") if isinstance(value, str) else value
+
+
+def _malcolm_service(name: str) -> str:
+    """1034_zeek_known.conf: a known service's name lowercased, its transport, "data", "spicy_" and cipher parts
+    removed."""
+    name = re.sub(r"[_-](tcp|udp|data)", "", name.lower()).replace("spicy_", "")
+    return re.sub(r"(_hmac)?(_(sha|md)\d+)?$", "", name)
+
+
+_TSV_REFERENCED = {"id.orig_h": "orig_h", "id.orig_p": "orig_p", "id.resp_h": "resp_h", "id.resp_p": "resp_p",
+                   **{f"times.{name}": f"times_{name}" for name in ("modified", "accessed", "created", "changed")}}
+
+
+def _malcolm_referenced_file(referenced: dict, text: bool) -> dict:
+    """An smb_cmd row's referenced file as Malcolm reads it: a text row's whole file as the nested columns its dissect
+    names; a JSON row's id.* only (1054_zeek_smb.conf renames those; the other keys stay literal)."""
+    out = {}
+    for key, value in referenced.items():
+        name = key.removeprefix("referenced_file.")
+        if text:
+            out[_TSV_REFERENCED.get(name, name)] = _text(value)
+        elif name.startswith("id."):
+            out[_TSV_REFERENCED[name]] = value
+    return out
+
+
+def _merged(current, added) -> list:
+    """Logstash mutate merge: the union of both, as a list."""
+    items = current if isinstance(current, list) else [] if current is None else [current]
+    return list(dict.fromkeys([*items, *(added if isinstance(added, list) else [added])]))
+
+
+def _malcolm_windows(log: str, source: dict, z: dict, text: bool) -> None:
+    """1017, 1035 and 1054 and the matching 1200_zeek_mutate.conf steps for the Windows-protocol logs."""
+    if log in ("smb_files", "smb_cmd") and isinstance(z.get("action"), str):
+        z["action"] = z["action"].removeprefix("SMB::")
+    if log == "smb_cmd":
+        if isinstance(z.get("version"), str):
+            z["version"] = re.sub("^SMB", "", z["version"])
+        if isinstance(z.get("command"), str):
+            z["command"] = z["command"].removeprefix("SMB::")
+        if "tree" in z and not text:
+            z["tree"] = _dedouble(z["tree"])
+        referenced = z.pop("referenced_file", None)
+        if referenced is not None:
+            referenced = {k: v for k, v in referenced.items() if v not in (None, "-", "(empty)", "")}
+            for name in ("uid", "fuid"):
+                if name in referenced:
+                    _set(source, f"zeek.{name}", _merged(_get(source, f"zeek.{name}"), referenced.pop(name)))
+            if isinstance(referenced.get("action"), str):
+                referenced["action"] = referenced["action"].removeprefix("SMB::")
+            source["zeek"]["smb_files"] = referenced
+            source["event"]["dataset"] = ["smb_files", "smb_cmd"]
+    if log == "smb_files" and not text:
+        for name in ("path", "name", "prev_name"):
+            if name in z:
+                z[name] = _dedouble(z[name])
+    if log == "smb_mapping" and not text and "path" in z:
+        z["path"] = _dedouble(z["path"])
+    if log == "dhcp":
+        if text:
+            for path in ("zeek.uid", "zeek.dhcp.msg_types"):
+                value = _get(source, path)
+                if isinstance(value, str):
+                    _set(source, path, value.split(","))
+        if _get(source, "source.mac") is not None:
+            z["mac"] = _get(source, "source.mac")
+        if isinstance(z.get("msg_types"), list):
+            z["msg_types"] = list(dict.fromkeys(z["msg_types"]))        # make_unique_array.rb
+        client, server = _get(source, "source.ip"), _get(source, "destination.ip")
+        if client and server:                           # 1250_zeek_community_id.conf, from the ports it added
+            _set(source, "network.community_id", community_id(client, 68, server, 67, "udp"))
+    if log == "ldap":
+        operation = z.get("operation")
+        names = operation if isinstance(operation, list) else [operation]
+        if any(isinstance(name, str) and "bind simple" in name for name in names):
+            if z.get("object"):
+                _set(source, "related.user", _merged(_get(source, "related.user"), z["object"]))
+            if z.get("argument"):
+                _set(source, "related.password", _merged(_get(source, "related.password"), z["argument"]))
+
+
 # ---- Elastic -------------------------------------------------------------------------------------------------------
 
 # default.yml renames per stream: Zeek column -> document path (None: removed). Columns not listed stay under
@@ -506,10 +729,53 @@ ELASTIC_RENAMES = {
             "status_code": "zeek.sip.status.code", "status_msg": "zeek.sip.status.msg", "seq": None},
     "snmp": {**_IDS, "get_requests": "zeek.snmp.get.requests", "get_bulk_requests": "zeek.snmp.get.bulk_requests",
              "get_responses": "zeek.snmp.get.responses", "set_requests": "zeek.snmp.set.requests"},
+    "smb_files": dict(_IDS), "smb_mapping": dict(_IDS), "dce_rpc": dict(_IDS),
+    # the referenced file's action, name, path, uid and hosts are kept under zeek.smb_cmd.file; the rest is removed
+    "smb_cmd": {**_IDS, "referenced_file.uid": "zeek.smb_cmd.file.uid",
+                "referenced_file.id.orig_h": "zeek.smb_cmd.file.host.tx",
+                "referenced_file.id.resp_h": "zeek.smb_cmd.file.host.rx",
+                "referenced_file.name": "zeek.smb_cmd.file.name", "referenced_file.path": "zeek.smb_cmd.file.path",
+                "referenced_file.action": "zeek.smb_cmd.file.action",
+                **{f"referenced_file.{name}": None for name in (
+                    "ts", "id.orig_p", "id.resp_p", "size", "times.modified", "times.accessed", "times.created",
+                    "times.changed", "fuid", "prev_name")}},
+    "kerberos": {**_IDS, "till": "zeek.kerberos.valid.until", "from": "zeek.kerberos.valid.from",
+                 "error_code": "zeek.kerberos.error.code", "error_msg": "zeek.kerberos.error.msg"},
+    "ntlm": {**_IDS, "domainname": "zeek.ntlm.domain", "server_dns_computer_name": "zeek.ntlm.server.name.dns",
+             "server_nb_computer_name": "zeek.ntlm.server.name.netbios",
+             "server_tree_name": "zeek.ntlm.server.name.tree"},
+    "rdp": {**_IDS, **{name: f"zeek.rdp.{target}" for name, target in (
+        ("client_build", "client.build"), ("client_name", "client.name"), ("client_dig_product_id", "client.product_id"),
+        ("desktop_width", "desktop.width"), ("desktop_height", "desktop.height"),
+        ("requested_color_depth", "desktop.color_depth"), ("cert_type", "cert.type"), ("cert_count", "cert.count"),
+        ("cert_permanent", "cert.permanent"), ("encryption_level", "encryption.level"),
+        ("encryption_method", "encryption.method"))}},
+    "rfb": {**_IDS, "client_major_version": "zeek.rfb.version.client.major",
+            "client_minor_version": "zeek.rfb.version.client.minor",
+            "server_major_version": "zeek.rfb.version.server.major",
+            "server_minor_version": "zeek.rfb.version.server.minor", "auth": "zeek.rfb.auth.success",
+            "authentication_method": "zeek.rfb.auth.method"},
+    "dhcp": {"uids": "zeek.session_id", **{name: f"zeek.dhcp.{target}" for name, target in (
+        ("assigned_addr", "address.assigned"), ("client_addr", "address.client"), ("mac", "address.mac"),
+        ("requested_addr", "address.requested"), ("server_addr", "address.server"), ("host_name", "hostname"),
+        ("client_message", "msg.client"), ("server_message", "msg.server"), ("msg_types", "msg.types"),
+        ("msg_orig", "msg.origin"), ("client_software", "software.client"), ("server_software", "software.server"),
+        ("circuit_id", "id.circuit"), ("agent_remote_id", "id.remote_agent"), ("subscriber_id", "id.subscriber"))}},
+    "software": {"host": "host.ip", "software_type": "zeek.software.type",
+                 "unparsed_version": "zeek.software.version.full", "version.addl": "zeek.software.version.additional"},
+    "known_hosts": {"host": "host.ip"},
+    "known_services": {"host": "host.ip", "port_num": "server.port", "port_proto": "network.transport",
+                       "service": "network.application"},
+    "known_certs": {"host": "host.ip", "port_num": "server.port",
+                    "subject": "tls.server.x509.subject.distinguished_name",
+                    "issuer_subject": "tls.server.x509.issuer.distinguished_name",
+                    "serial": "tls.server.x509.serial_number"},
 }
 # columns the pipelines convert to dates (ISO)
 ELASTIC_TIMES = {"zeek.x509.certificate.valid.from", "zeek.x509.certificate.valid.until", "zeek.pe.compile_time",
-                 "zeek.snmp.up_since"}
+                 "zeek.snmp.up_since", "zeek.kerberos.valid.until", "zeek.kerberos.valid.from"}
+# the known_* pipelines index only the columns they rename (they remove the parsed line)
+ELASTIC_RENAMED_ONLY = {"known_hosts", "known_services", "known_certs"}
 
 
 def elastic(row: Row, nid: str = "el-1", *, sensor: str | None = SENSOR, original: bool = True,
@@ -528,6 +794,8 @@ def elastic(row: Row, nid: str = "el-1", *, sensor: str | None = SENSOR, origina
                 _set(doc, renames[key], copy.deepcopy(value))
         elif stream == "files" and key.startswith("id."):
             zeek_log[key] = value                       # no dot_expander for files: the key stays literal
+        elif stream in ELASTIC_RENAMED_ONLY:
+            continue
         else:
             _set(zeek_log, key, copy.deepcopy(value))
     doc = _merge(doc, {"zeek": {stream: zeek_log}})
@@ -550,12 +818,15 @@ def elastic(row: Row, nid: str = "el-1", *, sensor: str | None = SENSOR, origina
         _set(doc, "network.community_id", written)
     event = {**doc.get("event", {}), "dataset": f"zeek.{stream}", "kind": "event",
              "original": json.dumps(row.json()) if original else None, "module": "zeek" if filebeat else None}
+    shipper = {"name": f"{sensor}-shipper" if sensor else None}
     source = {"@timestamp": iso_ms(row.ts), "agent": {"name": sensor, "type": "filebeat"},
-              "host": {"name": f"{sensor}-shipper" if sensor else None},
+              "host": shipper,
               "data_stream": None if filebeat else {"dataset": f"zeek.{stream}", "type": "logs"}, **doc,
               "fileset": {"name": stream} if filebeat else None, "service": {"type": "zeek"} if filebeat else None,
               "event": event,
               "tags": ["preserve_original_event", f"zeek-{stream}"] if original else [f"zeek-{stream}"]}
+    if "host" in doc:                                   # an asset's address (host.ip) beside the shipper's name
+        source["host"] = {**shipper, **doc["host"]}
     return _hit("elastic", source, nid, stream)
 
 
@@ -655,6 +926,61 @@ def _elastic_steps(stream: str, row: Row, doc: dict) -> None:
         _set(doc, "url.full", z["uri"])
     if stream == "intel" and _get(z, "seen.indicator_type") == "Intel::DOMAIN":
         _set(doc, "threat.indicator.type", "domain-name")
+    _elastic_windows(stream, row, doc, z)
+
+
+def _elastic_windows(stream: str, row: Row, doc: dict, z: dict) -> None:
+    """default.yml steps of the Windows-protocol streams beyond the plain renames."""
+    zeek = row.zeek
+    if stream == "smb_files":
+        for name, target in (("action", "event.action"), ("name", "file.name"), ("size", "file.size")):
+            if name in z:
+                _set(doc, target, z[name])
+        if _get(z, "times.accessed") is not None:      # the pipeline converts all four only when accessed is set
+            for name in ("modified", "accessed", "created", "changed"):
+                if _get(z, f"times.{name}") is not None:
+                    _set(z, f"times.{name}", _epoch_iso(_get(z, f"times.{name}")))
+    if stream == "smb_cmd":
+        if "referenced_file.action" not in zeek:
+            file = z.get("file", {})
+            file.pop("uid", None)
+            file.pop("host", None)
+        if "command" in z:
+            _set(doc, "event.action", z["command"])
+        if "username" in z:
+            _set(doc, "user.name", z["username"])
+    if stream == "dce_rpc" and "operation" in z:
+        _set(doc, "event.action", z["operation"])
+    if stream == "kerberos" and "/" in str(zeek.get("client", "")):
+        name, _sep, domain = zeek["client"].partition("/")        # dissect %{user.name}/%{user.domain}
+        _set(doc, "user.name", name)
+        _set(doc, "user.domain", domain)
+    if stream == "ntlm":
+        if "username" in z:
+            _set(doc, "user.name", z["username"])
+        if "domain" in z:
+            _set(doc, "user.domain", z["domain"])
+    if stream == "rdp" and "ssl" in z:
+        _set(doc, "tls.established", z["ssl"])
+    if stream == "dhcp":
+        client, server = zeek.get("client_addr"), zeek.get("server_addr")
+        _set(doc, "network.transport", "udp")
+        _set(doc, "source.port", 68)
+        _set(doc, "destination.port", 67)
+        if client:
+            _set(doc, "source.address", client)
+        if server:
+            _set(doc, "destination.address", server)
+        if client and server:
+            _set(doc, "network.community_id", community_id(client, 68, server, 67, "udp"))
+    if stream in ("software", "known_hosts", "known_services", "known_certs") and "host" in zeek:
+        _set(doc, "host.ip", [zeek["host"]])
+        if stream in ("known_services", "known_certs"):
+            _set(doc, "server.ip", [zeek["host"]])
+    if stream == "known_certs":
+        for name, target in (("subject", "tls.server.subject"), ("issuer_subject", "tls.server.issuer")):
+            if name in zeek:
+                _set(doc, target, zeek[name])
 
 
 # ---- Security Onion ------------------------------------------------------------------------------------------------
@@ -764,6 +1090,53 @@ SO_RENAMES = {
              "get_requests": "snmp.get.requests", "get_bulk_requests": "snmp.get.bulk_requests",
              "get_responses": "snmp.get.responses", "set_requests": "snmp.set.requests",
              "display_string": "snmp.display_string", "up_since": "snmp.up_since"},
+    "smb_files": {"fuid": "log.id.fuid", "action": "file.action", "path": "file.path", "name": "file.name",
+                  "size": "file.size", "prev_name": "file.previous_name",
+                  **{f"times.{name}": f"file.times_{name}" for name in ("modified", "accessed", "created", "changed")}},
+    "smb_mapping": {"path": "smb.path", "service": "smb.service", "native_file_system": "smb.file_system",
+                    "share_type": "smb.share_type"},
+    "dce_rpc": {"rtt": "event.duration", "named_pipe": "dce_rpc.named_pipe", "endpoint": "dce_rpc.endpoint",
+                "operation": "dce_rpc.operation"},
+    "kerberos": {"request_type": "kerberos.request_type", "client": "kerberos.client", "service": "kerberos.service",
+                 "success": "kerberos.success", "error_msg": "kerberos.error_message",
+                 "from": "kerberos.ticket.valid.from", "till": "kerberos.ticket.valid.until",
+                 "cipher": "kerberos.ticket.cipher", "forwardable": "kerberos.ticket.forwardable",
+                 "renewable": "kerberos.ticket.renewable",
+                 "client_cert_subject": "kerberos.client_certificate_subject",
+                 "client_cert_fuid": "log.id.client_certificate_fuid",
+                 "server_cert_subject": "kerberos.server_certificate_subject",
+                 "server_cert_fuid": "log.id.server_certificate_fuid"},
+    "ntlm": {"hostname": "host.name", "domainname": "host.domain", "success": "ntlm.success", "status": "ntlm.status",
+             "username": "user.name", "server_dns_computer_name": "ntlm.server.dns.name",
+             "server_nb_computer_name": "ntlm.server.nb.name", "server_tree_name": "ntlm.server.tree.name"},
+    "rdp": {"cookie": "rdp.cookie", "result": "rdp.result", "security_protocol": "rdp.security_protocol",
+            "keyboard_layout": "rdp.keyboard_layout", "client_build": "rdp.client_build", "client_name": "client.name",
+            "client_dig_product_id": "client.id.product", "desktop_width": "rdp.desktop.width",
+            "desktop_height": "rdp.desktop.height", "requested_color_depth": "rdp.requested_color_depth",
+            "cert_type": "rdp.certificate_type", "cert_count": "rdp.certificate_count",
+            "cert_permanent": "rdp.certificate_permanent", "encryption_level": "rdp.encryption_level",
+            "encryption_method": "rdp.encryption_method"},
+    "rfb": {"client_major_version": "rfb.client_major_version", "client_minor_version": "rfb.client_minor_version",
+            "server_major_version": "rfb.server_major_version", "server_minor_version": "rfb.server_minor_version",
+            "authentication_method": "rfb.authentication.method", "auth": "rfb.authentication.success",
+            "share_flag": "rfb.share_flag", "desktop_name": "rfb.desktop.name", "width": "rfb.desktop.width",
+            "height": "rfb.desktop.height"},
+    "ldap": {"message_id": "ldap.message_id", "opcode": "ldap.opcode", "result": "ldap.result",
+             "diagnostic_message": "ldap.diagnostic_message", "version": "ldap.version", "object": "ldap.object",
+             "argument": "ldap.argument"},
+    "ldap_search": {"message_id": "ldap.message_id", "result": "ldap.result",
+                    "diagnostic_message": "ldap.diagnostic_message", "scope": "ldap_search.scope",
+                    "deref_aliases": "ldap_search.deref_aliases", "base_object": "ldap.object",
+                    "result_count": "ldap_search.result_count", "filter": "ldap_search.filter",
+                    "attributes": "ldap_search.attributes"},
+    "dhcp": {"uids": "log.id.uids", "mac": "host.mac", "assigned_addr": "dhcp.assigned_ip",
+             "lease_time": "dhcp.lease_time", "client_addr": "client.address", "server_addr": "server.address",
+             "requested_addr": "dhcp.requested_address", "domain": "host.domain", "host_name": "host.hostname",
+             "duration": "event.duration", "msg_types": "dhcp.message_types"},
+    "software": {**{f"version.{part}": f"software.version.{part}" for part in ("major", "minor", "minor2", "minor3")},
+                 "version.addl": "software.version.additional_info", "host": "source.ip", "host_p": "source.port",
+                 "software_type": "software.type", "name": "software.name",
+                 "unparsed_version": "software.version.unparsed"},
 }
 # the pipeline's own network.transport sets (zeek.http, zeek.smtp); zeek.dns renames proto
 SO_TRANSPORT = {"http": "tcp", "smtp": "tcp"}
@@ -815,11 +1188,19 @@ def in_every_shape(row: Row, prefix: str = "") -> dict[str, dict]:
 
 # ---- mission-scale volume ------------------------------------------------------------------------------------------
 
-def stream_rows(n: int, shape: str = "malcolm", *, hosts: int = 250) -> Iterator[dict]:
+# the Windows-protocol rows a mission network writes most of: SMB commands and DCE-RPC calls, with SMB files, Kerberos,
+# NTLM and LDAP searches beside them
+WINDOWS_STREAM = (SMB_CMD, DCE_RPC, SMB_CMD, DCE_RPC, SMB_FILES, KERBEROS, NTLM, LDAP_SEARCH)
+_RPC_CALLS = ("CreateServiceW", "StartServiceW", "OpenSCManagerW", "SamrLookupIdsInDomain", "NetrShareEnum")
+_RPC_ENDPOINTS = ("svcctl", "svcctl", "svcctl", "samr", "srvsvc")
+
+
+def stream_rows(n: int, shape: str = "malcolm", *, hosts: int = 250, kinds: tuple[Row, ...] | None = None
+                ) -> Iterator[dict]:
     """`n` distinct analyzer rows written lazily, one at a time (memory does not grow with `n`): dns, http, ssl, files
-    and notice in turn, each with its own uid, file id, time, client port and names, from `hosts` client addresses
-    (the address cache is bounded, so a fixed population keeps it from filling page by page)."""
-    kinds = (DNS, HTTP, SSL, FILES, NOTICE)
+    and notice in turn (or `kinds`), each with its own uid, file id, time, client port and names, from `hosts` client
+    addresses (the address cache is bounded, so a fixed population keeps it from filling page by page)."""
+    kinds = kinds or (DNS, HTTP, SSL, FILES, NOTICE)
     for i in range(n):
         base = kinds[i % len(kinds)]
         host = i % hosts
@@ -829,8 +1210,14 @@ def stream_rows(n: int, shape: str = "malcolm", *, hosts: int = 250) -> Iterator
             changes.update(query=f"h{i}.example.test", trans_id=i % 65536)
         elif base.log == "http":
             changes.update(uri=f"/item/{i}")
-        elif base.log == "files":
+        elif base.log in ("files", "smb_files"):
             changes.update(fuid=f"F{i:016d}")
+        elif base.log == "smb_cmd":
+            changes.update({"rtt": 0.0001 + (i % 997) * 1e-6, "referenced_file.fuid": f"F{i:016d}"})
+        elif base.log == "dce_rpc":
+            changes.update(endpoint=_RPC_ENDPOINTS[i % 5], operation=_RPC_CALLS[i % 5])
+        elif base.log == "ldap_search":
+            changes.update(message_id=i % 2**31, base_object=f"OU=unit{i},DC=example,DC=test")
         row = replace(base.with_(**changes), ts=T0 + i * 0.001)
         yield WRITERS[shape](row, f"{shape}-{base.log}-{i}")
 
@@ -898,7 +1285,37 @@ def malformed_rows() -> list[tuple[str, dict, str]]:
     # unreadable: no time; a log outside the catalog is a counted skip
     mutated("no-time", "plain", DNS, lambda s: s.pop("ts"), "error")
     mutated("time-garbage", "elastic", HTTP, lambda s: s.update({"@timestamp": "yesterday"}), "error")
-    mutated("uncatalogued-log", "malcolm", DNS, lambda s: s["event"].update(dataset="kerberos"), "skip")
+    mutated("uncatalogued-log", "malcolm", DNS, lambda s: s["event"].update(dataset="modbus"), "skip")
+    # the Windows-protocol logs: wrong types, integers beyond Zeek's count, values no reader takes
+    mutated("smb-size-huge", "plain", SMB_FILES, lambda s: s.update(size=10**30), "size")
+    mutated("smb-size-text", "security_onion", SMB_FILES, lambda s: s["file"].update(size="big"), "file.size")
+    mutated("smb-times-word", "plain", SMB_FILES, lambda s: s.update({"times.modified": "yesterday"}),
+            "times.modified")
+    mutated("smb-cmd-rtt-negative", "malcolm", SMB_CMD, lambda s: s["zeek"]["smb_cmd"].update(rtt=-1),
+            "zeek.smb_cmd.rtt")
+    mutated("dce-rpc-operation-number", "plain", DCE_RPC, lambda s: s.update(operation=12), "operation")
+    mutated("kerberos-till-word", "plain", KERBEROS, lambda s: s.update(till="forever"), "till")
+    mutated("kerberos-success-text", "elastic", KERBEROS, lambda s: s["zeek"]["kerberos"].update(success="yes"),
+            "zeek.kerberos.success")
+    mutated("ntlm-success-text", "security_onion", NTLM, lambda s: s["ntlm"].update(success="maybe"), "ntlm.success")
+    mutated("rdp-width-beyond-count", "plain", RDP, lambda s: s.update(desktop_width=2**70), "desktop_width")
+    mutated("rdp-channels-numbers", "elastic", RDP, lambda s: s["zeek"]["rdp"].update(client_channels=[1, 2]),
+            "zeek.rdp.client_channels")
+    mutated("rfb-width-negative", "plain", RFB, lambda s: s.update(width=-1), "width")
+    mutated("ldap-message-id-text", "plain", LDAP, lambda s: s.update(message_id="first"), "message_id")
+    mutated("ldap-opcodes-numbers", "plain", LDAP_61, lambda s: s.update(opcodes=[1]), "opcodes")
+    mutated("ldap-attributes-object", "security_onion", LDAP_SEARCH,
+            lambda s: s["ldap_search"].update(attributes={"a": 1}), "ldap_search.attributes")
+    mutated("dhcp-assigned-garbage", "plain", DHCP, lambda s: s.update(assigned_addr="10.0.0.999"), "assigned_addr")
+    mutated("dhcp-mac-garbage", "elastic", DHCP, lambda s: s["zeek"]["dhcp"]["address"].update(mac="zz"),
+            "zeek.dhcp.address.mac")
+    mutated("dhcp-lease-text", "malcolm", DHCP, lambda s: s["zeek"]["dhcp"].update(lease_time=[1]),
+            "zeek.dhcp.lease_time")
+    mutated("software-major-text", "plain", SOFTWARE, lambda s: s.update({"version.major": "eight"}), "version.major")
+    mutated("known-services-port-range", "plain", KNOWN_SERVICES, lambda s: s.update(port_num=70000), "port_num")
+    mutated("known-certs-serial-not-hex", "plain", KNOWN_CERTS, lambda s: s.update(serial="not hex"), "serial")
+    mutated("known-hosts-two-addresses", "elastic", KNOWN_HOSTS,
+            lambda s: s["host"].update(ip=["10.0.0.5", "10.0.0.6"]), "host.ip")
     return rows
 
 
@@ -938,6 +1355,13 @@ def secret_rows() -> list[tuple[str, dict]]:
         "irc.nick": IRC.with_(command="NICK", value="synthbot2", addl=f" with channel key: '{SECRET}'"),
         "irc.dcc": IRC.with_(command="DCC", value="#ops", addl=f" with channel key: '{SECRET}'",
                              dcc_file_name="update.bin", dcc_file_size=1024),
+        # an LDAP simple bind whose password Zeek captured (LDAP::default_capture_password), in 7.0's layout and 6.1's
+        "ldap": LDAP.with_(opcode="bind simple", argument=SECRET, object="CN=alice,OU=Users,DC=example,DC=test"),
+        "ldap.61": LDAP_61.with_(opcodes=["bind simple"], arguments=[SECRET],
+                                 objects=["CN=alice,OU=Users,DC=example,DC=test"]),
+        # a search that compares a password attribute with a value
+        "ldap_search": LDAP_SEARCH.with_(filter=f"(&(objectclass=user)(userPassword={SECRET}))"),
+        "software": SOFTWARE.with_(url=f"http://alice:{SECRET}@www.example.test/plugin"),
     }
     for log, row in logical.items():
         for shape, h in in_every_shape(row, "secret-").items():

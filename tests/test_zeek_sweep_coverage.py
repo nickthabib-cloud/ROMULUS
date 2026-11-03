@@ -2,8 +2,8 @@
 
 The sweep counts every record whose skip names an unread dataset as a record no rule evaluated, which keeps every
 rule's search over that partition partial. Zeek rows of logs outside the catalog must keep that skip: a partition
-holding Zeek kerberos rows beside Suricata dns records is searched in part for a DNS rule, never in full, and one
-holding only Zeek kerberos rows is never "no data in scope". The sweep is called as it is, through its partition
+holding Zeek modbus rows beside Suricata dns records is searched in part for a DNS rule, never in full, and one
+holding only Zeek modbus rows is never "no data in scope". The sweep is called as it is, through its partition
 runner.
 """
 from datetime import timedelta
@@ -33,11 +33,11 @@ def _suricata_dns() -> dict:
 
 
 def _zeek_unread(shape: str) -> dict:
-    """A Zeek row of a log outside the catalog (kerberos) as each shipper names it."""
-    h = zf.WRITERS[shape](zf.UDP_DNS, f"zeek-kerberos-{shape}")
-    h["_source"]["event"]["dataset"] = "kerberos" if shape == "malcolm" else "zeek.kerberos"
+    """A Zeek row of a log outside the catalog (modbus) as each shipper names it."""
+    h = zf.WRITERS[shape](zf.UDP_DNS, f"zeek-modbus-{shape}")
+    h["_source"]["event"]["dataset"] = "modbus" if shape == "malcolm" else "zeek.modbus"
     if shape == "elastic":
-        h["_source"]["data_stream"]["dataset"] = "zeek.kerberos"
+        h["_source"]["data_stream"]["dataset"] = "zeek.modbus"
     return h
 
 

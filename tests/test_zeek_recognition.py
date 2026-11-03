@@ -17,7 +17,11 @@ from tests.fixtures import zeek_factory as zf
 from tests.fixtures import zeek_logs as zl
 
 # a zeek.<name> dataset only Elastic writes (Security Onion names no log so)
-ELASTIC_ONLY = {"connection", "files", "signature"}
+ELASTIC_ONLY = {"connection", "files", "signature", "smb_cmd", "known_hosts", "known_services", "known_certs"}
+# Elastic streams whose documents keep no zeek.<stream> object (their pipelines index only the columns they rename):
+# with Security Onion 2.3's markers forged onto one, nothing tells it from a Security Onion record, which is then read
+# as one (and these logs are no log of Security Onion's catalog: a counted skip)
+ELASTIC_WITHOUT_OBJECT = {"known_hosts", "known_services", "known_certs"}
 
 
 def written(log: str) -> dict:
@@ -80,10 +84,13 @@ def expected(shape: str, variant: str, name: str) -> str | None:
     if shape == "malcolm" and variant.startswith("no-event.provider"):
         # Malcolm's own fields (node, firstPacket, zeek.<log>) with the module but no provider: never read as
         # Security Onion's; without the module the record keeps the path it took before
-        module = variant.endswith("module-zeek") or name in MALCOLM_MODULE
+        module = variant.endswith("module-zeek") or (isinstance(name, str) and name in MALCOLM_MODULE)
         return AMBIGUOUS if module else None
     if shape == "malcolm":                       # its provider decides; without a dataset it is not Zeek
-        return None if variant == "no-event.dataset" else "malcolm"
+        # (a dataset that is already a list, Malcolm's smb_cmd with its referenced file, nested in another list is no
+        # log name)
+        nested = variant == "dataset-list" and isinstance(name, list)
+        return None if variant == "no-event.dataset" or nested else "malcolm"
     if variant == "no-event.provider":
         variant = "as-written"                   # no other shipper writes the provider
     elif variant == "no-event.provider+module-zeek":
@@ -92,7 +99,8 @@ def expected(shape: str, variant: str, name: str) -> str | None:
         # Elastic's data stream alone still names the stream; a list is no shipper's zeek.<log> dataset
         return "elastic" if shape == "elastic" and variant == "no-event.dataset" else None
     if variant == "security-onion-2.3" and shape == "elastic":
-        return AMBIGUOUS                         # 2.3's markers on a record with Elastic's zeek.<stream> object
+        # 2.3's markers on a record with Elastic's zeek.<stream> object; without one, a Security Onion record
+        return "security_onion" if name in ELASTIC_WITHOUT_OBJECT else AMBIGUOUS
     if variant in ("module+datastream-zeek", "security-onion-2.3"):
         return "security_onion"                  # Security Onion's markers are its own, whatever else is written
     if shape == "security_onion":
@@ -127,8 +135,8 @@ def test_a_record_is_read_in_the_shape_whose_markers_it_carries_or_not_read(log,
         assert reason.startswith(f"dataset:{carried} is not normalized: ")     # counted as no rule's evaluation
 
 
-UNIT_FIELDS = {"conn": "session.duration_s", "dns": "dns.rtt_s", "files": "file.duration_s",
-               "snmp": "snmp.duration_s"}
+UNIT_FIELDS = {"conn": "session.duration_s", "dns": "dns.rtt_s", "files": "file.duration_s", "dce_rpc": "rpc.rtt_s",
+               "snmp": "snmp.duration_s", "dhcp": "dhcp.duration_s"}
 
 
 @pytest.mark.parametrize("log", sorted(UNIT_FIELDS))
