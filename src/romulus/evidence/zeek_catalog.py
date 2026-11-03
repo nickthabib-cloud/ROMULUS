@@ -116,11 +116,12 @@ def _f(typed: str, native: str, kind: str, **paths) -> ZeekField:
 
 
 # Where each shape names its sensor, in order (`observer.name`; for plain Zeek JSON the site declares it), and the
-# time of the record's first packet (Zeek's `ts`).
+# time of the record's first packet (Zeek's `ts`). A number in `@timestamp` is epoch milliseconds (the default date
+# format of Elasticsearch and OpenSearch); Zeek's own `ts` is epoch seconds.
 SENSOR_PATHS = _each(malcolm=("node",), elastic=("agent.name", "host.name"),
                      security_onion=("observer.name",))
-TIME_PATHS = _each(malcolm=("@timestamp", "firstPacket:ms"), elastic=("@timestamp",),
-                   security_onion=("@timestamp",), plain=("ts",))
+TIME_PATHS = _each(malcolm=("@timestamp:ms", "firstPacket:ms"), elastic=("@timestamp:ms",),
+                   security_onion=("@timestamp:ms",), plain=("ts",))
 
 CONN_FIELDS = (
     _f("source.ip", "id.orig_h", "ip", malcolm=("source.ip",),

@@ -30,7 +30,7 @@ PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf211
                    # Arkime ICMP lists and Zeek ICMP type/address-family semantics are normalized truthfully.
                    # Then Zeek records moved to their own producer (zeek-ecs); no other record's output changed
                    # (tests/test_zeek_dispatch.py compares every previous shape with its output before the move).
-                   14: "ab21e133c8812b7b48d9ead259c8c19fa41ec69a7607d4e4a52412012f824b44"}
+                   14: "3d5a2d51777d13d7f6e4d9f93f88b3a8d49a9b881e3e80f9c612f7c08b5c23e4"}
 WINDOWS_EVIDENCE_FILES = ("community.py", "windows.py", "windows_catalog.py", "windows_reassembly.py")
 PINNED_WINDOWS = {
     "windows-ecs@1": "8c2f1668700a3f7d0a143eef00473770e2e5c746fadf6ce3b2c95ae6bbe6a419",
@@ -40,7 +40,7 @@ PINNED_WINDOWS = {
 }
 ZEEK_EVIDENCE_FILES = ("community.py", "zeek.py", "zeek_catalog.py")
 PINNED_ZEEK = {
-    "zeek-ecs@1": "a0a03ba2ebe3a329c9d6bef5d9da9a205fa4f3b8faf0e298dd74018ac697c0c0",
+    "zeek-ecs@1": "cd9e46fc19d3a4c0b9e2fd56d724b5d6e3afab3bec2e39ea62e44b436cae3e45",
 }
 # The packet stage's normalizer: HTTP bodies rebuilt by TShark -> http_body events, and TCP connections rebuilt
 # from per-segment payload -> tcp_stream events (with the shell analysis and the tables it reads).

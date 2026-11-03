@@ -60,7 +60,6 @@ ICMP_TRANSPORTS = frozenset({"icmp", "ipv6-icmp", "icmpv6"})
 IP_PROTOCOLS = {1: "icmp", 6: "tcp", 17: "udp", 58: "ipv6-icmp", 132: "sctp"}
 # Zeek's text logs write "-" for an unset field and "(empty)" for an empty set; JSON omits both.
 PLACEHOLDERS = frozenset({"", "-", "(empty)"})
-_LOG_NAME = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
 _DIGITS = re.compile(r"^[0-9]+$")
 _DECIMAL = re.compile(r"^[0-9]+(?:\.[0-9]+)?$")
 _MAC = re.compile(r"^[0-9a-fA-F]{2}(?:[:-][0-9a-fA-F]{2}){5}$")
@@ -81,6 +80,7 @@ class ZeekNotNormalized(Exception):
 
 
 _MISSING = object()
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 
 @lru_cache(maxsize=4096)
@@ -88,21 +88,33 @@ def _parts(path: str) -> tuple[str, ...]:
     return tuple(path.split("."))
 
 
-def _walk(cur, parts: tuple[str, ...], i: int) -> object:
-    """The value at parts[i:] below `cur`, where any level may hold literal dotted keys: each way the rest of the
-    path can start at a level is tried, the longest literal key first."""
-    n = len(parts)
-    if i == n:
-        return cur
+_CONFLICT = object()
+
+
+def _routes(cur, parts: tuple[str, ...], i: int):
+    """Every value at parts[i:] below `cur`, one per way the rest of the path splits into nested and literal dotted
+    keys (`a.b.c` may be written as a/b/c, a.b/c, a/b.c or a.b.c)."""
+    if i == len(parts):
+        yield cur
+        return
     if not isinstance(cur, dict):
-        return _MISSING
-    for j in range(n, i, -1):
+        return
+    for j in range(i + 1, len(parts) + 1):
         key = parts[i] if j == i + 1 else ".".join(parts[i:j])
         if key in cur:
-            found = _walk(cur[key], parts, j)
-            if found is not _MISSING:
-                return found
-    return _MISSING
+            yield from _routes(cur[key], parts, j)
+
+
+def _resolve(src, parts: tuple[str, ...]):
+    """The value at a path written with any mix of nested and literal dotted keys; _CONFLICT when the record writes
+    the path more than once with different values (never silently resolved), _MISSING when absent."""
+    values: list = []
+    for value in _routes(src, parts, 0):
+        if not any(value == seen for seen in values):
+            values.append(value)
+    if not values:
+        return _MISSING
+    return values[0] if len(values) == 1 else _CONFLICT
 
 
 def _nested(src, parts: tuple[str, ...]):
@@ -130,13 +142,12 @@ def _has_dotted_keys(value) -> bool:
 
 def dotted(src, path: str):
     """The value at a dotted path, whether the shipper nested the keys or kept them literal ("id.orig_h"), or any
-    mix. The nested value is found first; literal dotted keys are searched only when there is none. _MISSING when
-    absent."""
+    mix. _MISSING when absent, and when the record writes the path twice with different values."""
     parts = _parts(path)
-    found = _nested(src, parts)
-    if found is not _MISSING or len(parts) == 1:
-        return found
-    return _walk(src, parts, 0) if _has_dotted_keys(src) else _MISSING
+    if not _has_dotted_keys(src):
+        return _nested(src, parts)
+    value = _resolve(src, parts)
+    return _MISSING if value is _CONFLICT else value
 
 
 def _present(value) -> bool:
@@ -153,16 +164,13 @@ class ZeekRecord:
     origin: str                     # where the log names were read
     log: ZeekLog | None
     recognized_by: str              # the shipper-written field (or the site declaration) that says it is Zeek
+    # The skip reason while the record's log is not normalized: the one every record of a dataset no normalizer
+    # reads gets, which the sweep counts as records no rule evaluated (so no rule's search over them is complete).
+    unsupported: str
 
     @property
     def token(self) -> str:
         return self.log.token if self.log is not None else "zeek"
-
-    def skip_reason(self) -> str:
-        safe = [name for name in self.names if _LOG_NAME.match(name)]
-        if not safe or len(safe) != len(self.names):
-            return f"Zeek log with an unrecognised name is not normalized ({SHAPE_NAMES[self.shape]})"
-        return f"Zeek {'/'.join(safe)} log is not normalized ({SHAPE_NAMES[self.shape]})"
 
 
 def _names(value) -> tuple[str, ...] | None:
@@ -173,15 +181,20 @@ def _names(value) -> tuple[str, ...] | None:
     return tuple(dict.fromkeys(item.strip().lower() for item in items))
 
 
-def _record(src: dict, shape: str, names: tuple[str, ...] | None, origin: str, recognized_by: str) -> ZeekRecord:
+def _unsupported(dataset) -> str:
+    return f"dataset:{dataset if dataset is not _MISSING and dataset else ''} is not normalized"
+
+
+def _record(src: dict, shape: str, names: tuple[str, ...] | None, origin: str, recognized_by: str,
+            unsupported: str) -> ZeekRecord:
     if names is None:
-        return ZeekRecord(shape, (), origin, None, recognized_by)
+        return ZeekRecord(shape, (), origin, None, recognized_by, unsupported)
     logs = list(dict.fromkeys(log for name in names if (log := lookup_log(shape, name)) is not None))
-    if len(logs) > 1:
-        # a row naming several logs (Malcolm's SMB rows) is the log whose object it carries
+    if len(names) > 1:
+        # a row naming several logs (Malcolm's SMB rows) is a log only when it carries that log's object
         logs = [log for log in logs
                 if log.log_objects.get(shape) and _present(_nested(src, _parts(log.log_objects[shape])))]
-    return ZeekRecord(shape, names, origin, logs[0] if len(logs) == 1 else None, recognized_by)
+    return ZeekRecord(shape, names, origin, logs[0] if len(logs) == 1 else None, recognized_by, unsupported)
 
 
 _PROVIDER, _DATASET, _STREAM, _MODULE = (_parts(path) for path in (
@@ -191,24 +204,33 @@ _PROVIDER, _DATASET, _STREAM, _MODULE = (_parts(path) for path in (
 def zeek_record(src: dict) -> ZeekRecord | None:
     """The Zeek shape of an indexed record, from shipper-written fields only, or None for a record that is not Zeek.
 
-    - Malcolm: `event.provider` "zeek" (its Suricata and Arkime rows name their own provider, which decides);
-    - Elastic Agent and Filebeat: `event.dataset` (else `data_stream.dataset`) `zeek.<stream>`;
-    - Security Onion: `event.module` "zeek" with its bare `event.dataset`.
-    These shippers write the fields as objects, which is how every other normalizer reads `event.dataset` too.
-    Plain Zeek JSON carries no such field: a site declares it, and `plain_record` reads it."""
+    - Elastic Agent and Filebeat: `event.dataset` (else, when it is absent, `data_stream.dataset`) `zeek.<stream>`;
+    - Malcolm: `event.provider` "zeek" with a bare log name (or a list of them) as `event.dataset`;
+    - Security Onion: `event.module` "zeek" with a bare log name as `event.dataset`.
+    The Elastic pipelines and Security Onion's Zeek pipelines and agent policy write no `event.provider`, and Malcolm
+    and Security Onion write bare log names, never `zeek.<stream>`, so one record matches one shape at most. A
+    provider of "suricata" or "arkime" (Malcolm's other rows) decides that the record is not Zeek; a dotted dataset
+    that is not `zeek.*` is not a Zeek log name, and the record keeps the path it took before Zeek was read. These
+    shippers write the fields as objects, which is how every other normalizer reads `event.dataset` too. Plain Zeek
+    JSON carries no such field: a site declares it, and `plain_record` reads it."""
     provider = _nested(src, _PROVIDER)
-    if provider == "zeek":
-        return _record(src, MALCOLM, _names(_nested(src, _DATASET)), "event.dataset", "event.provider")
     if provider in ("suricata", "arkime"):
         return None
-    for path, parts in (("event.dataset", _DATASET), ("data_stream.dataset", _STREAM)):
-        dataset = _nested(src, parts)
-        if isinstance(dataset, str) and dataset.startswith("zeek."):
-            return _record(src, ELASTIC, _names(dataset[len("zeek."):]), path, path)
-        if _present(dataset):
-            break
+    dataset = _nested(src, _DATASET)
+    stream = _MISSING if _present(dataset) else _nested(src, _STREAM)
+    for path, value in (("event.dataset", dataset), ("data_stream.dataset", stream)):
+        if isinstance(value, str) and value.startswith("zeek."):
+            names = _names(value[len("zeek."):])
+            return None if names is None else _record(src, ELASTIC, names, path, path, _unsupported(dataset))
+    names = _names(dataset)
+    if names is None or any("." in name for name in names):
+        # no readable log name: the record keeps the path it took before Zeek was read (a Malcolm row without its
+        # dataset is read for the Arkime session fields Malcolm adds, as it always was)
+        return None
+    if provider == "zeek":
+        return _record(src, MALCOLM, names, "event.dataset", "event.provider", _unsupported(dataset))
     if _nested(src, _MODULE) == "zeek":
-        return _record(src, SECURITY_ONION, _names(_nested(src, _DATASET)), "event.dataset", "event.module")
+        return _record(src, SECURITY_ONION, names, "event.dataset", "event.module", _unsupported(dataset))
     return None
 
 
@@ -220,9 +242,9 @@ def plain_record(src: dict, declared_log: str | None = None) -> ZeekRecord:
         names = _names(path)
         if names is not None and declared_log and names != (declared_log.strip().lower(),):
             raise ValueError("plain Zeek record's _path names a different log than the target declares")
-        return _record(src, PLAIN, names, "_path", "#declared")
+        return _record(src, PLAIN, names, "_path", "#declared", _unsupported("/".join(names or ())))
     names = _names(declared_log) if declared_log else None
-    return _record(src, PLAIN, names, "#declared", "#declared")
+    return _record(src, PLAIN, names, "#declared", "#declared", _unsupported("/".join(names or ())))
 
 
 # ---- value readers -------------------------------------------------------------------------------------------------
@@ -253,20 +275,29 @@ def _read_ip(value, shape):
     return _BAD if address is None else address
 
 
-def _read_count(value, shape, limit=None):
-    if _number_text(value, shape, _DIGITS):
+# Zeek's count type is an unsigned 64-bit integer: a larger value is not one Zeek wrote.
+COUNT_MAX = 2**64 - 1
+
+
+def _read_count(value, shape, limit=COUNT_MAX):
+    if _number_text(value, shape, _DIGITS) and len(value) <= 20:
         value = int(value)
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0 or (limit is not None and value > limit):
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= limit:
         return _BAD
     return value
 
 
 def _read_seconds(value, shape):
+    """Zeek's interval: a finite, non-negative number of seconds (or a unit the catalog names)."""
     if _number_text(value, shape, _DECIMAL):
         value = float(value)
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value < float("inf"):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return _BAD
-    return float(value)
+    try:
+        seconds = float(value)
+    except OverflowError:                               # an integer beyond any float
+        return _BAD
+    return seconds if 0 <= seconds < float("inf") else _BAD
 
 
 def _read_text(value, shape):
@@ -350,30 +381,33 @@ class _Reader:
         self.src, self.nid, self.shape = hit["_source"], hit["_id"], shape
         self.bad: list[str] = []
         self._original = _MISSING
-        self._literal: dict[int, bool] = {}     # per object of the record: whether it holds a literal dotted key
-
-    def _holds_literal(self, level: dict) -> bool:
-        found = self._literal.get(id(level))
-        if found is None:
-            found = self._literal[id(level)] = any(isinstance(key, str) and "." in key for key in level)
-        return found
+        self._literal: bool | None = None       # whether the record holds a literal dotted key anywhere
 
     def get(self, path: str):
+        """The value at a path, or _MISSING. A value standing where the path needs an object (a string where
+        `zeek` or `source` should be) and a path the record writes twice with different values (nested and
+        literal) are listed as malformed, never read past or silently resolved."""
         parts = _parts(path)
-        found = _nested(self.src, parts)
-        if found is not _MISSING or len(parts) == 1:
-            return found
-        # a literal dotted key that could complete the path sits on a level the nested walk reached
+        if self._literal is None:
+            self._literal = _has_dotted_keys(self.src)
+        if self._literal:
+            value = _resolve(self.src, parts)
+            if value is _CONFLICT:
+                self.bad.append(path)
+                return _MISSING
+            if value is not _MISSING:
+                return value
         cur = self.src
-        for part in parts:
+        for depth, part in enumerate(parts):
+            if cur is None:
+                return _MISSING
             if not isinstance(cur, dict):
-                break
-            if self._holds_literal(cur):
-                return _walk(self.src, parts, 0)
+                self.bad.append(".".join(parts[:depth]))
+                return _MISSING
             if part not in cur:
-                break
+                return _MISSING
             cur = cur[part]
-        return _MISSING
+        return cur
 
     def original(self):
         """The Zeek line Elastic keeps in event.original, parsed once; None when absent or not a JSON object."""
@@ -424,7 +458,8 @@ def _time(reader: _Reader, log: ZeekLog) -> tuple[datetime, str]:
             continue
         try:
             if isinstance(value, (int, float)) and not isinstance(value, bool):
-                when = datetime.fromtimestamp(value / 1000 if unit == "ms" else value, UTC)
+                # epoch arithmetic, not fromtimestamp: the platform's C library limits that one (to year 3000)
+                when = _EPOCH + timedelta(seconds=value / 1000 if unit == "ms" else value)
             elif isinstance(value, str):
                 when = datetime.fromisoformat(value.replace("Z", "+00:00") if value.endswith("Z") else value)
                 when = (when if when.tzinfo else when.replace(tzinfo=UTC)).astimezone(UTC)
@@ -437,10 +472,15 @@ def _time(reader: _Reader, log: ZeekLog) -> tuple[datetime, str]:
 
 
 def _sensor(reader: _Reader, log: ZeekLog) -> FieldValue | None:
+    """The sensor at the first of the shape's paths the record writes; a value that is not one name is malformed."""
     for path in log.sensor_paths.get(reader.shape, ()):
         value = reader.get(path)
+        if not _present(value):
+            continue
         if isinstance(value, str) and value.strip():
             return fv(value.strip(), f"{reader.nid}:{path}")
+        reader.bad.append(path)
+        return None
     return None
 
 
@@ -489,10 +529,10 @@ def normalize_zeek(hit: dict, record: ZeekRecord, *, sensor: str | None = None) 
     if record.log is None:
         if not record.names:
             raise ValueError(f"{SHAPE_NAMES[record.shape]} Zeek record names no log at {record.origin}")
-        raise ZeekNotNormalized(record.skip_reason())
+        raise ZeekNotNormalized(record.unsupported)
     if record.log is CONN:
         return _conn(hit, record, sensor)
-    raise ZeekNotNormalized(record.skip_reason())       # catalogued, with no normalizer yet
+    raise ZeekNotNormalized(record.unsupported)         # catalogued, with no normalizer yet
 
 
 def normalize_plain_zeek(hit: dict, log: str | None = None, sensor: str | None = None) -> TypedEvent:
@@ -505,10 +545,6 @@ def _conn(hit: dict, record: ZeekRecord, declared_sensor: str | None) -> TypedEv
     shape, log = record.shape, record.log
     reader = _Reader(hit, shape)
     nid = reader.nid
-    log_object = log.log_objects.get(shape)
-    if log_object and reader.get(log_object) is not _MISSING \
-            and not isinstance(reader.get(log_object), dict):
-        raise TypeError(f"{SHAPE_NAMES[shape]} Zeek conn record's {log_object} is not an object")
     when, time_origin = _time(reader, log)
     f: dict[str, FieldValue] = {}
     for spec in log.fields:
@@ -536,10 +572,7 @@ def _conn(hit: dict, record: ZeekRecord, declared_sensor: str | None) -> TypedEv
         if removed:
             f["network.protocols_removed"] = fv(removed, f"{services.origin}#derived:removed-services")
     f["flow.start"] = fv(when.isoformat(), time_origin)
-    duration = f.get("session.duration_s")
-    if duration is not None:
-        f["flow.end"] = fv((when + timedelta(seconds=duration.value)).isoformat(),
-                           f"{time_origin}+{duration.origin.split(':', 1)[1]}")
+    _end(f, reader, when, time_origin)
     payload_paths = [log.spec(name).paths[shape][0] for name in ("flow.bytes_toserver", "flow.bytes_toclient")]
     f["flow.bytes_are_payload"] = fv(True, f"{nid}:{'+'.join(payload_paths)}#semantics")
     history = f.get("conn.history")
@@ -583,6 +616,28 @@ def _conn(hit: dict, record: ZeekRecord, declared_sensor: str | None) -> TypedEv
                                                  native_id=f"{uid.value}|{_signature(f)}")]
     return TypedEvent(id=event_id(log.family, identity, ZEEK_NORMALIZER), family=log.family, ts=when, host=host,
                       fields=f, raw=[ref], normalizer=ZEEK_NORMALIZER, caveats=caveats)
+
+
+def _end(f: dict[str, FieldValue], reader: _Reader, when: datetime, time_origin: str) -> None:
+    """flow.end from the first-packet time and the duration. A duration no time span can hold is malformed (and
+    dropped); when the end lies beyond any representable time, flow.end is left out and the pair listed, never
+    guessed."""
+    duration = f.get("session.duration_s")
+    if duration is None:
+        return
+    duration_path = duration.origin.split(":", 1)[1]
+    try:
+        span = timedelta(seconds=duration.value)
+    except OverflowError:
+        reader.bad.append(duration_path)
+        del f["session.duration_s"]
+        return
+    try:
+        end = when + span
+    except OverflowError:
+        reader.bad.append(f"{time_origin.split(':', 1)[1]}+{duration_path}")
+        return
+    f["flow.end"] = fv(end.isoformat(), f"{time_origin}+{duration_path}")
 
 
 def _transport(f: dict[str, FieldValue]) -> None:

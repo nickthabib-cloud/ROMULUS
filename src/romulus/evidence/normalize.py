@@ -2332,7 +2332,7 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
             skips[uncatalogued.reason] += 1
         except Skip as s:
             skips[s.reason] += 1
-        except (ValueError, KeyError, TypeError, AttributeError) as e:   # malformed telemetry: an error, never a crash
+        except (ValueError, KeyError, TypeError, AttributeError, OverflowError) as e:   # malformed: an error, not a crash
             errors.append((h["_id"], f"{ds}: {e}"))
     superseded = superseded_interim(list(zeek_events.values())) if zeek_events else []
     if superseded:

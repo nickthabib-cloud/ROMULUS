@@ -20,6 +20,7 @@ from romulus.evidence.zeek import (
     ZEEK_DUPLICATE,
     ZEEK_INTERIM_SUPERSEDED,
     ZEEK_NORMALIZER,
+    ZeekNotNormalized,
     dotted,
     normalize_plain_zeek,
     plain_record,
@@ -348,16 +349,26 @@ def test_a_malcolm_mixed_batch_routes_each_row_to_its_own_normalizer():
 
 # ---- recognition and dispatch ------------------------------------------------------------------------------------
 
-def test_recognition_reads_only_shipper_written_fields():
+def test_recognition_reads_only_shipper_written_fields_and_one_record_matches_one_shape():
     assert zeek_record(zf.malcolm(zf.Conn())["_source"]).shape == "malcolm"
     assert zeek_record(zf.elastic(zf.Conn())["_source"]).shape == "elastic"
     assert zeek_record(zf.elastic(zf.Conn(), filebeat=True)["_source"]).shape == "elastic"
     assert zeek_record(zf.security_onion(zf.Conn())["_source"]).shape == "security_onion"
     assert zeek_record(zf.plain(zf.Conn())["_source"]) is None            # nothing the shipper wrote says Zeek
-    suricata = zf.previous_shapes()["malcolm-suricata-flow"]["_source"]
+    suricata = zf.previous_shapes()["malcolm-suricata-flow"][0]["_source"]
     assert zeek_record({**suricata, "event": {**suricata["event"], "module": "zeek"}}) is None   # provider decides
     assert zeek_record({"event": {"dataset": "conn"}}) is None                    # a bare name alone is not Zeek
     assert zeek_record({"message": json.dumps(zf.zeek_json(zf.Conn()))}) is None  # nor is content
+    # a zeek.* dataset is Elastic's whatever provider a record names; Malcolm writes bare log names only
+    elastic = zf.elastic(zf.Conn())["_source"]
+    assert zeek_record({**elastic, "event": {**elastic["event"], "provider": "zeek"}}).shape == "elastic"
+    # Malcolm's notice rows carry event.module "zeek" too: the provider makes them Malcolm's
+    malcolm = zf.malcolm(zf.Conn())["_source"]
+    assert zeek_record({**malcolm, "event": {**malcolm["event"], "module": "zeek"}}).shape == "malcolm"
+    # a dotted dataset that is not zeek.* is no Zeek log name: the record keeps the path it took before
+    so = zf.security_onion(zf.Conn())["_source"]
+    assert zeek_record({**so, "event": {**so["event"], "dataset": "suricata.eve.alert"}}) is None
+    assert zeek_record({**malcolm, "event": {**malcolm["event"], "dataset": "suricata.eve.flow"}}) is None
 
 
 def test_every_catalogued_log_has_a_fixture_in_every_shape():
@@ -371,21 +382,22 @@ def test_every_catalogued_log_has_a_fixture_in_every_shape():
             assert (event.family, event.get("zeek.log")) == (log.family, log.name), shape
 
 
-def test_uncatalogued_logs_are_counted_skips_naming_the_log_never_errors():
+def test_uncatalogued_logs_are_skips_the_sweep_counts_as_unevaluated_never_errors():
+    """Every uncatalogued log in every shape is also in the dispatch golden, compared with what it was before."""
     malcolm = zf.malcolm(zf.Conn())
     malcolm["_source"]["event"]["dataset"] = "dns"
     elastic = zf.elastic(zf.Conn())
     elastic["_source"]["event"]["dataset"] = "zeek.dns"
     so = zf.security_onion(zf.Conn())
     so["_source"]["event"]["dataset"] = "dns"
-    hostile = zf.malcolm(zf.Conn(), "hostile")
-    hostile["_source"]["event"]["dataset"] = "x" * 500
-    events, skips, errors = normalize_hits([malcolm, elastic, so, hostile])
+    listed = zf.malcolm(zf.Conn(), "listed")
+    listed["_source"]["event"]["dataset"] = ["smb_files", "smb_cmd"]
+    events, skips, errors = normalize_hits([malcolm, elastic, so, listed])
     assert events == [] and errors == []
-    assert skips == {"Zeek dns log is not normalized (Malcolm)": 1, "Zeek dns log is not normalized (Elastic)": 1,
-                     "Zeek dns log is not normalized (Security Onion)": 1,
-                     "Zeek log with an unrecognised name is not normalized (Malcolm)": 1}
-    assert not any(reason.startswith("dataset:") for reason in skips)
+    assert skips == {"dataset:dns is not normalized": 2, "dataset:zeek.dns is not normalized": 1,
+                     "dataset:['smb_files', 'smb_cmd'] is not normalized": 1}
+    with pytest.raises(ZeekNotNormalized, match=r"^dataset:dns is not normalized$"):
+        normalize_plain_zeek(zf.plain(zf.Conn(), path="dns"))
 
 
 def test_errors_are_tagged_with_the_dispatch_token():
@@ -411,10 +423,40 @@ def test_malformed_rows_are_errors_skips_or_listed_fields_never_crashes(name, h,
     elif outcome == "absent":
         assert errors == [] and len(events) == 1 and not events[0].has("parse.malformed")
         assert not events[0].has("conn.history") and not events[0].has("conn.tunnel_parents")
+    elif outcome == "not-zeek":
+        assert zeek_record(h["_source"]) is None and errors == []
+        assert events and not any(e.normalizer == ZEEK_NORMALIZER for e in events)
     else:
         assert errors == [] and len(events) == 1
         assert outcome in events[0].get("parse.malformed"), events[0].get("parse.malformed")
         assert events[0].has("network.transport")                  # the rest of the record is kept
+
+
+@pytest.mark.parametrize("name,h", zf.overflow_rows(), ids=[r[0] for r in zf.overflow_rows()])
+def test_an_end_or_duration_beyond_any_time_is_listed_and_flow_end_left_out(name, h):
+    if h["_index"] == zf.INDEX["plain"]:
+        events, skips, errors = [normalize_plain_zeek(h, sensor=zf.SENSOR)], {}, []
+    else:
+        events, skips, errors = normalize_hits([h])
+    assert (skips, errors) == ({}, []) and len(events) == 1
+    event = events[0]
+    assert not event.has("flow.end")
+    malformed = event.get("parse.malformed")
+    assert malformed and any("duration" in path for path in malformed), malformed
+    assert event.has("flow.start") and event.has("source.ip")       # the rest of the record is kept
+
+
+def test_an_integer_beyond_zeeks_count_type_is_malformed():
+    h = zf.plain(zf.Conn())
+    h["_source"]["orig_bytes"] = 2**64
+    event = normalize(h)
+    assert not event.has("flow.bytes_toserver") and event.get("parse.malformed") == ["orig_bytes"]
+
+
+def test_a_numeric_timestamp_in_an_index_document_is_epoch_milliseconds():
+    h = zf.elastic(zf.Conn())
+    h["_source"]["@timestamp"] = round(zf.T0 * 1000)
+    assert normalize(h).get("flow.start") == "2024-11-18T14:00:00.123000+00:00"
 
 
 def test_plain_json_takes_its_log_from_path_or_the_declaration_never_from_content():

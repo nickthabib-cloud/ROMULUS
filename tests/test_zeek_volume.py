@@ -1,26 +1,25 @@
-"""Zeek conn normalization streams at mission scale: a million rows in bounded memory and linear time.
+"""Zeek conn normalization streams at mission scale: bounded memory, linear time.
 
 conn.log is the largest network log (one row per connection; hundreds of millions per hunt on a mission network).
-Rows are generated lazily and normalized a page at a time, as a sweep reads them; nothing may accumulate across
-pages. The memory ceiling holds every live object Python allocates while the million rows go through (the page being
-normalized, its typed events, and the normalizer's bounded caches), and the peak may not grow once the first
-hundred thousand rows have filled those caches.
+Rows are normalized a page at a time, as a sweep reads them, and nothing may accumulate across pages. The proof:
+every cache the normalizer keeps has a fixed size; once a first page has filled them, the memory Python holds
+returns to the same level after each later page; and normalizing four times the rows takes about four times as long.
 """
+import gc
 import itertools
 import time
 import tracemalloc
 
 import pytest
 
+from romulus.evidence import zeek
 from romulus.evidence.normalize import normalize_hits
-from romulus.evidence.zeek import ZEEK_NORMALIZER
 from tests.fixtures import zeek_factory as zf
 
-ROWS = 1_000_000
-PAGE = 1_000
-CHUNK = 100_000
-CEILING = 64 * 2**20
-GROWTH = 8 * 2**20
+PAGE = 250
+PAGES = 16
+# Bytes a page may leave behind once the caches are warm: allocator noise, never a page's events (hundreds of KiB).
+RESIDUE = 64 * 2**10
 
 
 def test_the_stamped_volume_rows_are_the_written_layout():
@@ -28,33 +27,50 @@ def test_the_stamped_volume_rows_are_the_written_layout():
         assert h == zf.malcolm(zf._volume_conn(i, zf.T0), f"malcolm-{i}"), i
 
 
-@pytest.mark.slow
-def test_a_million_conn_rows_normalize_in_bounded_memory_and_linear_time():
-    stream = zf.stream_conn_hits(ROWS)
-    events = 0
-    chunk_times: list[float] = []
-    first_chunk_peak = None
+def test_every_normalizer_cache_has_a_fixed_size():
+    assert zeek._address.cache_info().maxsize == 65536
+    assert zeek._parts.cache_info().maxsize == 4096
+    assert zeek._compiled.cache_info().maxsize == 1024
+
+
+def test_memory_returns_to_its_level_after_every_page():
+    stream = zf.stream_conn_hits(PAGE * (PAGES + 1), hosts=PAGE)
+    pages = (list(itertools.islice(stream, PAGE)) for _ in range(PAGES + 1))
     tracemalloc.start()
     try:
-        chunk_start = time.perf_counter()
-        while page := list(itertools.islice(stream, PAGE)):
-            typed, skips, errors = normalize_hits(page)
-            assert (skips, errors) == ({}, []) and len(typed) == len(page)
-            assert typed[-1].normalizer == ZEEK_NORMALIZER
-            events += len(typed)
+        warm, skips, errors = normalize_hits(next(pages))
+        assert (skips, errors) == ({}, []) and len(warm) == PAGE
+        del warm
+        gc.collect()
+        baseline = tracemalloc.get_traced_memory()[0]
+        levels = []
+        for page in pages:
+            typed, _skips, _errors = normalize_hits(page)
+            assert len(typed) == PAGE
             del typed, page
-            if events % CHUNK == 0:
-                now = time.perf_counter()
-                chunk_times.append(now - chunk_start)
-                chunk_start = now
-                if first_chunk_peak is None:
-                    first_chunk_peak = tracemalloc.get_traced_memory()[1]
-        peak = tracemalloc.get_traced_memory()[1]
+            gc.collect()
+            levels.append(tracemalloc.get_traced_memory()[0] - baseline)
     finally:
         tracemalloc.stop()
-    assert events == ROWS and len(chunk_times) == ROWS // CHUNK
-    assert peak < CEILING, f"peak {peak / 2**20:.1f} MiB"
-    assert peak <= first_chunk_peak + GROWTH, (
-        f"peak grew from {first_chunk_peak / 2**20:.1f} MiB after {CHUNK:,} rows to {peak / 2**20:.1f} MiB")
-    # linear: every hundred thousand rows take about as long as the first did
-    assert max(chunk_times) <= 2.0 * chunk_times[0], [round(t, 1) for t in chunk_times]
+    shown = [round(level / 2**10, 1) for level in levels]
+    assert max(levels) <= RESIDUE, shown
+    # and it does not climb: the later pages leave what the middle ones did (a page's events would add hundreds of KiB)
+    later = levels[PAGES // 2:]
+    assert max(later) - min(later) <= RESIDUE // 4, shown
+
+
+def _seconds(rows: int) -> float:
+    stream = zf.stream_conn_hits(rows)
+    start = time.perf_counter()
+    while page := list(itertools.islice(stream, 1000)):
+        typed, skips, errors = normalize_hits(page)
+        assert (skips, errors) == ({}, []) and len(typed) == len(page)
+    return time.perf_counter() - start
+
+
+@pytest.mark.slow
+def test_four_times_the_rows_take_about_four_times_as_long():
+    small, large = _seconds(20_000), _seconds(80_000)
+    # linear is 4x; the bound is generous so that a loaded machine does not fail it, and still far below the 16x a
+    # quadratic cost would show
+    assert large <= 8 * small, (round(small, 1), round(large, 1))

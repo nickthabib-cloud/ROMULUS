@@ -27,7 +27,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from romulus.evidence.community import community_id
 
@@ -89,7 +89,8 @@ class Conn:
 
 def iso_ms(ts: float) -> str:
     ms = round(ts * 1000)
-    return datetime.fromtimestamp(ms // 1000, UTC).strftime("%Y-%m-%dT%H:%M:%S") + f".{ms % 1000:03d}Z"
+    when = datetime(1970, 1, 1, tzinfo=UTC) + timedelta(seconds=ms // 1000)
+    return when.strftime("%Y-%m-%dT%H:%M:%S") + f".{ms % 1000:03d}Z"
 
 
 def zeek_json(conn: Conn) -> dict:
@@ -317,7 +318,16 @@ def malformed_rows() -> list[tuple[str, dict, str]]:
     mutated("parents-numbers", "plain", lambda s: s.update(tunnel_parents=[1, 2]), "tunnel_parents",
             TUNNELLED)
     mutated("original-not-json", "elastic", lambda s: s["event"].update(original="ts\tuid\t..."), "event.original")
-    mutated("conn-object-string", "malcolm", lambda s: s["zeek"].update(conn="not an object"), "error")
+    # a value standing where an object belongs, a sensor that is not one name, a path written twice
+    mutated("conn-object-string", "malcolm", lambda s: s["zeek"].update(conn="not an object"), "zeek.conn")
+    mutated("zeek-not-object", "malcolm", lambda s: s.update(zeek="x"), "zeek")
+    mutated("source-not-object", "malcolm", lambda s: s.update(source="x"), "source")
+    mutated("node-list", "malcolm", lambda s: s.update(node=["a", "b"]), "node")
+    mutated("agent-name-number", "elastic", lambda s: s["agent"].update(name=7), "agent.name")
+    mutated("nested-and-literal-disagree", "malcolm", lambda s: s["zeek"].update({"conn.history": "Dd"}),
+            "zeek.conn.history")
+    mutated("plain-nested-and-literal-disagree", "plain", lambda s: s.update(id={"orig_h": "10.9.9.9"}),
+            "id.orig_h")
     # placeholders Zeek writes for unset and empty values are absent, never malformed
     mutated("placeholders", "malcolm",
             lambda s: s["zeek"]["conn"].update(history="-", tunnel_parents="(empty)", orig_bytes="-"),
@@ -325,11 +335,47 @@ def malformed_rows() -> list[tuple[str, dict, str]]:
     # unreadable: no time, no log name, a log name of the wrong type
     mutated("no-time", "plain", lambda s: s.pop("ts"), "error")
     mutated("time-garbage", "elastic", lambda s: s.update({"@timestamp": "yesterday"}), "error")
-    mutated("no-log-name", "malcolm", lambda s: s["event"].pop("dataset"), "error")
+    # no readable log name: not taken as Zeek, the record keeps the path it took before (here an Arkime session)
+    mutated("no-log-name", "malcolm", lambda s: s["event"].pop("dataset"), "not-zeek")
     mutated("log-name-number", "security_onion", lambda s: s["event"].update(dataset=5), "error")
     mutated("uncatalogued-log", "malcolm", lambda s: s["event"].update(dataset="weird"), "skip")
     mutated("dataset-array-uncatalogued", "malcolm", lambda s: s["event"].update(dataset=["smb_files", "smb_cmd"]),
             "skip")
+    # a list naming a catalogued log is that log only when the row carries the log's object
+    mutated("dataset-array-without-object", "malcolm",
+            lambda s: (s["event"].update(dataset=["conn", "dns"]), s["zeek"].pop("conn")), "skip")
+    return rows
+
+
+# Out-of-range times and durations, as each shape writes them: (seconds, how the shape writes them).
+HUGE_DURATIONS = (1e12, 1e13, 1e15, 10**400)
+LAST_SECOND = 253402300799.0                    # 9999-12-31T23:59:59Z: any duration takes the end out of range
+
+
+def overflow_rows() -> list[tuple[str, dict]]:
+    """Rows whose end time or duration no time value can hold, in every shape. Each must type the record with
+    flow.end left out and the offending path listed in parse.malformed; none may raise."""
+    rows: list[tuple[str, dict]] = []
+    for seconds in HUGE_DURATIONS:
+        label = f"{seconds:.0e}" if isinstance(seconds, float) else "1e400"
+        h = malcolm(Conn(), f"mc-{label}")
+        h["_source"]["zeek"]["conn"]["duration"] = seconds
+        rows.append((f"malcolm-duration-{label}", h))
+        h = elastic(Conn(), f"el-{label}")
+        h["_source"]["event"]["duration"] = int(seconds) * 10**9
+        rows.append((f"elastic-duration-{label}", h))
+        h = security_onion(Conn(), f"so-{label}")
+        h["_source"]["event"]["duration"] = seconds
+        rows.append((f"security-onion-duration-{label}", h))
+        h = plain(Conn(), f"pl-{label}")
+        h["_source"]["duration"] = seconds
+        rows.append((f"plain-duration-{label}", h))
+    text = malcolm(Conn(), "mc-text-huge", text=True)
+    text["_source"]["zeek"]["conn"]["duration"] = "9" * 400
+    rows.append(("malcolm-text-duration-400-digits", text))
+    last = replace(Conn(), ts=LAST_SECOND)
+    for shape in SHAPES:
+        rows.append((f"{shape}-start-9999-12-31", WRITERS[shape](last, f"{shape}-9999")))
     return rows
 
 
@@ -377,8 +423,104 @@ def legacy_zeek_icmp(nid: str = "z1", *, source_port=8, destination_port=0, conn
     return {"_id": nid, "_index": "romulus-network-logs", "_source": source}
 
 
-def previous_shapes() -> dict[str, dict]:
-    """Records of every network shape that normalized (or was counted as skipped) before Zeek dispatch existed."""
+_HTTP = {"hostname": "www.example.test", "url": "/index.html", "http_user_agent": "ExampleAgent/1.0",
+         "http_content_type": "text/html", "http_method": "GET", "protocol": "HTTP/1.1", "status": 200, "length": 1024}
+_SSH = {"client": {"proto_version": "2.0", "software_version": "paramiko_3.4.0", "hassh": {"hash": "abc"}},
+        "server": {"proto_version": "2.0", "software_version": "OpenSSH_9.6"}}
+_DNS = {"version": 2, "type": "answer", "id": 7, "rrname": "a.example", "rrtype": "A", "rcode": "NOERROR",
+        "answers": [{"rrname": "a.example", "rrtype": "A", "ttl": 30, "rdata": "192.0.2.9"}]}
+# Zeek logs outside the catalog, as each shipper names them: their rows keep the skip every unread dataset gets.
+UNCATALOGUED_LOGS = ("dns", "http", "ssl", "x509", "files", "ssh", "notice", "weird", "smb_files")
+
+
+def _uncatalogued(shape: str, log: str) -> dict:
+    h = WRITERS[shape](Conn(), f"zeek-uncatalogued-{shape}-{log}")
+    if shape == "elastic":
+        h["_source"]["event"]["dataset"] = h["_source"]["data_stream"]["dataset"] = f"zeek.{log}"
+    elif shape == "plain":
+        h["_source"]["_path"] = log
+    else:
+        h["_source"]["event"]["dataset"] = log
+    return h
+
+
+def _host_records() -> dict[str, list[dict]]:
+    """An audit event's records, a journal record and Apache records from the throughput fixture, and Windows events
+    in two shipper shapes."""
+    from tests import throughput_fixture, windows_fixtures
+    host = throughput_fixture.build(1)[throughput_fixture.HOST_TARGET]
+    first = next(h for h in host if h["_source"]["event"]["dataset"] == "linux.audit")
+    serial = first["_source"]["event"]["original"].split("msg=", 1)[1].split(")", 1)[0]
+    out = {"linux-audit-group": [h for h in host if h["_source"]["event"]["dataset"] == "linux.audit"
+                                 and f"msg={serial})" in h["_source"]["event"]["original"]]}
+    for dataset in ("systemd.journal", "apache.access", "apache.error"):
+        out[dataset.replace(".", "-")] = [next(h for h in host if h["_source"]["event"]["dataset"] == dataset)]
+    out["systemd-journal-sshd"] = [next(h for h in host if h["_source"]["event"]["dataset"] == "systemd.journal"
+                                        and '"SYSLOG_IDENTIFIER": "sshd"' in h["_source"]["event"].get("original", ""))]
+    events = windows_fixtures.all_logical_events()
+    sysmon = next(e for e in events if e.provider == "Microsoft-Windows-Sysmon")
+    for event, label in ((events[0], "security"), (sysmon, "sysmon")):
+        for shape in ("winlogbeat_8", "elastic_agent"):
+            out[f"windows-{label}-{shape}"] = [windows_fixtures.windows_hit(event, shape)]
+    return out
+
+
+def previous_shapes() -> dict[str, list[dict]]:
+    """Records of every shape that normalized, or was counted as skipped, before Zeek dispatch existed, in the groups
+    normalize_hits reads together (an audit event's records). The Zeek rows of logs outside the catalog are among
+    them: until their log is normalized they keep the skip they had."""
+    single = {
+        "eve-http": _eve("eve-http", {"event_type": "http", "dest_port": 80, "http": _HTTP}),
+        "eve-fileinfo": _eve("eve-fileinfo", {"event_type": "fileinfo", "dest_port": 80, "http": _HTTP, "fileinfo": {
+            "filename": "/files/report.pdf", "size": 2048, "state": "CLOSED", "gaps": False}}),
+        "eve-ssh": _eve("eve-ssh", {"event_type": "ssh", "dest_port": 22, "ssh": _SSH}),
+        "malcolm-suricata-dns": _malcolm_suricata(
+            "malcolm-suricata-dns", "dns", {"dns": _DNS}, source={"ip": "10.0.0.5", "port": 53000},
+            destination={"ip": "198.51.100.53", "port": 53}, network={"transport": "udp", "protocol": ["dns"]}),
+        "malcolm-suricata-http": _malcolm_suricata(
+            "malcolm-suricata-http", "http", {"tx_id": 0, "http": _HTTP},
+            destination={"ip": "203.0.113.10", "port": 80}, network={"transport": "tcp", "protocol": ["http"]}),
+        "malcolm-suricata-fileinfo": _malcolm_suricata(
+            "malcolm-suricata-fileinfo", "fileinfo",
+            {"http": _HTTP, "fileinfo": {"filename": "/files/report.pdf", "size": 2048, "state": "CLOSED"}},
+            destination={"ip": "203.0.113.10", "port": 80}, network={"transport": "tcp", "protocol": ["http"]}),
+        "malcolm-suricata-tls": _malcolm_suricata(
+            "malcolm-suricata-tls", "tls",
+            {"tls": {"subject": "CN=www.example.test", "issuerdn": "CN=Example CA", "sni": "www.example.test",
+                     "notbefore": "2024-01-01T00:00:00.000Z", "notafter": "2025-01-01T00:00:00.000Z"}},
+            network={"transport": "tcp", "protocol": ["tls"]},
+            tls={"version": "TLS 1.2", "client": {"ja3": "e7d705a3286e19ea42f587b344ee6865"}}),
+        "malcolm-suricata-ssh": _malcolm_suricata(
+            "malcolm-suricata-ssh", "ssh", {"ssh": _SSH}, destination={"ip": "203.0.113.10", "port": 22},
+            network={"transport": "tcp", "protocol": ["ssh"]}),
+        "malcolm-suricata-netflow": _malcolm_suricata(
+            "malcolm-suricata-netflow", "netflow", {"netflow": {"pkts": 1, "bytes": 74,
+                                                                 "start": "2024-11-18T14:00:00.000Z",
+                                                                 "end": "2024-11-18T14:00:00.000Z"}},
+            source={"ip": "10.0.0.5", "port": 53000}, destination={"ip": "198.51.100.53", "port": 53},
+            network={"transport": "udp", "protocol": ["dns"]}),
+        "malcolm-suricata-ftp": _malcolm_suricata(
+            "malcolm-suricata-ftp", "flow", {"flow": {"bytes_toserver": 400, "bytes_toclient": 900,
+                                                      "pkts_toserver": 4, "pkts_toclient": 5, "state": "closed",
+                                                      "start": "2024-11-18T14:00:00.000Z",
+                                                      "end": "2024-11-18T14:00:04.000Z"}},
+            destination={"ip": "203.0.113.10", "port": 21}, network={"transport": "tcp", "protocol": ["ftp"]}),
+        # a dotted dataset that is not zeek.* is no Zeek log name, whatever the module says
+        "zeek-module-with-suricata-dataset": {"_id": "zeek-module-with-suricata-dataset", "_index": "logs-x",
+                                              "_source": {
+            "@timestamp": "2024-11-18T14:26:40.100Z", "event": {
+                "module": "zeek", "dataset": "suricata.eve.alert", "original": json.dumps({
+                    "timestamp": "2024-11-18T14:26:40.100000+0000", "event_type": "alert", "src_ip": "10.0.0.5",
+                    "src_port": 51000, "dest_ip": "203.0.113.10", "dest_port": 80, "proto": "TCP",
+                    "alert": {"signature": "ET INFO Example", "signature_id": 1, "severity": 3}})}}},
+        **{f"zeek-uncatalogued-{shape}-{log}": _uncatalogued(shape, log)
+           for shape in ("malcolm", "elastic", "security_onion") for log in UNCATALOGUED_LOGS},
+        **_previous_network(),
+    }
+    return {**{name: [h] for name, h in single.items()}, **_host_records()}
+
+
+def _previous_network() -> dict[str, dict]:
     return {
         "eve-flow": _eve("eve-flow", {"event_type": "flow", "app_proto": "tls", "flow": {
             "bytes_toserver": 1200, "bytes_toclient": 9000, "pkts_toserver": 10, "pkts_toclient": 9,
@@ -445,16 +587,17 @@ def malcolm_mixed_batch() -> list[dict]:
         malcolm(final, "mx-zeek-final"),
         _arkime("mx-arkime", rootId="mx-arkime"),
         _arkime("mx-arkime-provider", event={"provider": "arkime"}),
-        previous_shapes()["malcolm-suricata-flow"],
+        _previous_network()["malcolm-suricata-flow"],
     ]
 
 
 # ---- mission-scale volume ------------------------------------------------------------------------------------------
 
-def _volume_conn(i: int, start: float) -> Conn:
+def _volume_conn(i: int, start: float, hosts: int | None = None) -> Conn:
     kind = i % 100
+    host = i if hosts is None else i % hosts
     conn = replace(Conn(), uid=f"C{i:017d}", ts=start + i * 0.001,
-                   orig_h=f"10.{(i >> 16) & 255}.{(i >> 8) & 255}.{i & 255}", orig_p=32768 + i % 28000,
+                   orig_h=f"10.{(host >> 16) & 255}.{(host >> 8) & 255}.{host & 255}", orig_p=32768 + i % 28000,
                    resp_p=443 if kind % 10 else 53)
     if kind == 99:
         return replace(conn, proto="icmp", orig_p=8, resp_p=0, service=None, history=None, ip_proto=1,
@@ -464,20 +607,22 @@ def _volume_conn(i: int, start: float) -> Conn:
     return conn
 
 
-def stream_conn_hits(n: int, shape: str = "malcolm", *, start: float = T0) -> Iterator[dict]:
+def stream_conn_hits(n: int, shape: str = "malcolm", *, start: float = T0, hosts: int | None = None,
+                     ) -> Iterator[dict]:
     """`n` distinct conn rows written lazily, one at a time: memory does not grow with `n`. Addresses, ports, uids
-    and times vary deterministically; a tenth of the rows are UDP and a hundredth ICMP. Malcolm rows are stamped
-    from one written row per kind (the varying fields replaced), so generating them costs little beside
-    normalizing them; other shapes are written in full."""
+    and times vary deterministically (`hosts`: the number of distinct source addresses, by default one per row); a
+    tenth of the rows are UDP and a hundredth ICMP. Malcolm rows are stamped from one written row per kind (the
+    varying fields replaced), so generating them costs little beside normalizing them; other shapes are written in
+    full."""
     if shape != "malcolm":
         for i in range(n):
-            yield WRITERS[shape](_volume_conn(i, start), f"{shape}-{i}")
+            yield WRITERS[shape](_volume_conn(i, start, hosts), f"{shape}-{i}")
         return
     templates = {kind: malcolm(_volume_conn(kind, start), "template")["_source"] for kind in (1, 10, 99)}
     for i in range(n):
         kind = i % 100
         template = templates[99 if kind == 99 else 10 if kind % 10 == 0 else 1]
-        conn = _volume_conn(i, start)
+        conn = _volume_conn(i, start, hosts)
         ms = round(conn.ts * 1000)
         stamp = iso_ms(conn.ts)
         source = dict(template)
