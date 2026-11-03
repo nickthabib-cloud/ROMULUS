@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, SecretStr, field_validator, model_validat
 from romulus.detect.netdef import EXTERNAL_SETTING, INTERNAL_SETTING, SiteNetworks, parse_networks
 
 SECRET_KEYS = ("PASSWORD", "API_KEY", "SECRET", "TOKEN")
+MIN_SECRET_LENGTH = 8      # shorter secrets are hard to tell apart from ordinary text (doctor warns)
 # OpenSearch's built-in superuser role (full cluster access, writes to every index).
 FULL_ACCESS_ROLE = "all_access"
 _BASE_PATH = re.compile(r"(/[A-Za-z0-9._~-]+)+")
@@ -330,6 +331,16 @@ def load_settings(env_file: Path | None = None, environ: dict[str, str] | None =
     merged = {**parse_env_file(env_file), **{k: v for k, v in environ.items() if k in ENV_MAP}}
     kwargs = {ENV_MAP[k]: v for k, v in merged.items() if k in ENV_MAP and v != ""}
     return Settings(**kwargs)
+
+
+def short_secrets(settings: Settings) -> list[str]:
+    """The environment names of configured secrets shorter than MIN_SECRET_LENGTH (never their values or lengths).
+    Text that short also turns up in ordinary words, so redacting it distorts prompts and reports, and below 4
+    characters it is not redacted at all."""
+    names = {field: key for key, field in ENV_MAP.items()}
+    return sorted(names.get(name, name.upper()) for name in type(settings).model_fields
+                  if isinstance(getattr(settings, name), SecretStr)
+                  and 0 < len(getattr(settings, name).get_secret_value()) < MIN_SECRET_LENGTH)
 
 
 def redact_text(text: str, settings: Settings) -> str:

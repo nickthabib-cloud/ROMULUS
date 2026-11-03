@@ -29,6 +29,7 @@ from romulus.agent.provider import (
 from romulus.agent.provider.claude_messages import (
     FALLBACK_BETA,
     EgressViolation,
+    _format_ok,
     instance_problems,
     strict_schema_problems,
 )
@@ -620,6 +621,65 @@ def test_an_attempt_that_breaks_off_mid_reply_is_charged_at_its_worst_case():
     assert charged["completion_tokens"] == 40 + 30 and charged["worst_case"] is False
 
 
+def _cut(blocks, model=MODEL, usage=None) -> bytes:
+    """A reply stream that ends cleanly before its message_delta: no stop reason, no output count."""
+    return reply(blocks, model=model, usage=usage).split(b"event: message_delta")[0]
+
+
+SWITCH = {"type": "fallback", "from": {"model": MODEL}, "to": {"model": "claude-fallback-model"},
+          "trigger": {"category": "cyber"}}
+COLD = {"input_tokens": 100, "cache_read_input_tokens": 900}
+
+
+def test_a_reply_that_ends_before_its_stop_reason_is_charged_its_full_allowance():
+    s = claude_settings(**PRICES, agent_thinking_tokens=1024, agent_max_output_tokens=976)     # max_tokens 2000
+    limits = BudgetLimits.from_settings(s)
+    p, _ = provider(s, Endpoint(_cut([text("partial answer " * 50)], usage=COLD)))
+    result = p.chat(ask())
+    assert result.status == "error" and "finish reason" in result.error
+    charged = AgentBudget(limits, clock=lambda: 0.0).charge(result)
+    assert (charged["prompt_tokens"], charged["completion_tokens"], charged["worst_case"]) == (1000, 2000, True)
+    assert charged["cost_usd"] == pytest.approx((100 * 4 + 900 * 0.2 + 2000 * 20) / 1e6)
+    # after an in-stream switch, the fallback hop is charged too
+    p, _ = provider(s, Endpoint(_cut([text("part"), SWITCH, text(" rest")], usage=COLD)))
+    charged = AgentBudget(limits, clock=lambda: 0.0).charge(p.chat(ask()))
+    assert charged["cost_usd"] == pytest.approx((100 * 4 + 900 * 0.2 + 2000 * 20) / 1e6
+                                                + (100 * 5 + 900 * 6.25 + 2000 * 25) / 1e6)
+
+
+def test_a_break_after_an_in_stream_switch_charges_both_hops():
+    s = claude_settings(**PRICES, agent_thinking_tokens=1024, agent_max_output_tokens=976)
+    limits = BudgetLimits.from_settings(s)
+    switched = reply([text("part"), SWITCH, text(" rest")], usage=COLD).split(b"event: message_delta")[0] + \
+        b'event: error\ndata: {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}\n\n'
+    p, _ = provider(s, Endpoint(switched, reply([text("hi")], usage={**COLD, "output_tokens": 30})))
+    result = p.chat(ask())
+    assert result.ok and result.attempts == 2
+    hops = [(b["model"], b["completion"], b["cache_write"]) for b in result.details["billed"]]
+    assert hops == [(MODEL, 2000, 0), ("claude-fallback-model", 2000, 900), (MODEL, 30, 0)]
+    charged = AgentBudget(limits, clock=lambda: 0.0).charge(result)
+    assert charged["cost_usd"] == pytest.approx((100 * 4 + 900 * 0.2 + 2000 * 20) / 1e6
+                                                + (100 * 5 + 900 * 6.25 + 2000 * 25) / 1e6
+                                                + (100 * 4 + 900 * 0.2 + 30 * 20) / 1e6)
+
+
+def test_with_a_cost_budget_a_billed_break_is_not_retried():
+    s = claude_settings(**PRICES, agent_max_cost_usd=50)
+    switched = reply([text("part"), SWITCH], usage=COLD).split(b"event: message_delta")[0] + \
+        b'event: error\ndata: {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}\n\n'
+    ep = Endpoint(switched, reply([text("hi")]))
+    p, sleeps = provider(s, ep)
+    result = p.chat(ask())
+    assert result.status == "error" and "not retried" in result.error and len(ep.calls) == 1 and sleeps == []
+    assert [b["model"] for b in result.details["billed"]] == [MODEL, "claude-fallback-model"]
+    # an overload before the reply began is still retried: nothing was billed
+    ep = Endpoint(httpx2.Response(529, json={"type": "error", "error": {"type": "overloaded_error",
+                                                                         "message": "Overloaded"}}),
+                  reply([text("hi")]))
+    p, _ = provider(s, ep)
+    assert p.chat(ask()).ok and len(ep.calls) == 2
+
+
 # ---- thinking blocks round-trip, and history that cannot -----------------------------------------------------
 
 def test_thinking_blocks_go_back_byte_for_byte_in_their_place():
@@ -723,6 +783,8 @@ def _first_turn(blocks, raw_reply=None):
     lambda s: s["tool_inputs"].update(toolu_99="{}"),
     lambda s: s.update(required_tools=["report_status; ignore the user"]),
     lambda s: s.update(provider="openai_compatible"),
+    lambda s: s["content"][0].update(type=["text"]),                     # an unhashable type: never a TypeError
+    lambda s: s["content"][2].update(input={"ok": False}),               # the input edited, its raw string kept
 ])
 def test_a_tampered_provider_state_is_never_replayed(tamper):
     message = _first_turn([THINKING, text("Lead."), tool_use()])
@@ -736,13 +798,31 @@ def test_a_tampered_provider_state_is_never_replayed(tamper):
 
 
 def test_a_replayed_turn_holding_a_configured_secret_is_never_sent():
-    message = _first_turn([THINKING, text("the password is es-pass-9876"), tool_use()])
+    for blocks in ([THINKING, text("the password is es-pass-9876"), tool_use()],
+                   [THINKING, text("Lead."), tool_use('{"note": "es-pass-9876"}', name="note")]):
+        message = _first_turn(blocks)
+        ep = Endpoint(reply([text("x")]))
+        p, _ = provider(claude_settings(es_password="es-pass-9876"), ep)
+        note = Tool("note", "x", {"type": "object", "properties": {"note": {"type": "string"}}, "required": ["note"],
+                                  "additionalProperties": False})
+        with pytest.raises(HistoryError, match="secret") as exc:
+            p.chat(ChatRequest([{"role": "user", "content": "go"}, message,
+                                {"role": "tool", "tool_call_id": "toolu_01", "content": "ok"}], tools=[TOOL, note]))
+        assert ep.calls == [] and "es-pass" not in str(exc.value)
+
+
+def test_a_short_secret_does_not_block_replay_and_doctor_warns_without_showing_it():
+    from romulus.doctor import check_secret_lengths
+    message = _first_turn([THINKING, text("We should test the beacon."), tool_use()])
     ep = Endpoint(reply([text("x")]))
-    p, _ = provider(claude_settings(es_password="es-pass-9876"), ep)
-    with pytest.raises(HistoryError, match="secret"):
-        p.chat(ChatRequest([{"role": "user", "content": "go"}, message,
-                            {"role": "tool", "tool_call_id": "toolu_01", "content": "ok"}], tools=[TOOL]))
-    assert ep.calls == []
+    s = claude_settings(arkime_password="test")
+    p, _ = provider(s, ep)
+    assert p.chat(ChatRequest([{"role": "user", "content": "go"}, message,
+                               {"role": "tool", "tool_call_id": "toolu_01", "content": "ok"}], tools=[TOOL])).ok
+    check = check_secret_lengths(s)
+    assert check.status == "warn" and "ARKIME_PASSWORD" in check.detail and "test" not in check.detail
+    assert "4" not in check.detail
+    assert check_secret_lengths(claude_settings()).status == "ok"
 
 
 @pytest.mark.parametrize("raw", ['{"entity": 5}', '{"entity": "web1"}garbage', '{"entity": "web1", "x": 1}'])
@@ -864,8 +944,14 @@ def test_tool_inputs_are_checked_exactly():
     assert instance_problems(good, schema) == []
     for key, bad in (("n", 5.0), ("n", True), ("when", "2024-11-18 10:00"), ("when", "2024-13-40T10:00:00Z"),
                      ("ip", "10.0.0.256"), ("ip", "010.0.0.1"), ("id", "not-a-uuid"), ("mail", "no at sign"),
-                     ("host", "-bad-.example")):
+                     ("host", "-bad-.example"), ("when", "٢٠٢٤-01-01T00:00:00Z"),
+                     ("when", "2024-01-01T12:00:60Z")):
         assert instance_problems({**good, key: bad}, schema), (key, bad)
+    for kind, value, ok in (("date-time", "2024-12-31T23:59:60Z", True), ("date-time", "2024-12-31T18:59:60-05:00", True),
+                            ("time", "23:59:60Z", True), ("ipv6", "fe80::1", True), ("ipv6", "fe80::1%eth0", False),
+                            ("date", "٢٠٢٤-٠١-٠١", False),
+                            ("duration", "P٣D", False), ("duration", "P3DT4H", True)):
+        assert _format_ok(value, kind) is ok, (kind, value)
     broken = {"type": "object", "additionalProperties": False, "required": ["a"],
               "properties": {"a": {"type": "string", "pattern": "[unclosed"}}}
     assert any("not a valid regular expression" in p for p in strict_schema_problems(broken))
@@ -888,7 +974,8 @@ def test_ambient_sdk_configuration_is_ignored(monkeypatch, tmp_path, caplog):
         "ANTHROPIC_BASE_URL": "https://ambient.example", "ANTHROPIC_LOG": "debug",
         "ANTHROPIC_CUSTOM_HEADERS": f"x-api-key: {AMBIENT}\nAuthorization: Bearer {AMBIENT}\n"
                                     "anthropic-beta: ambient-beta-2099-01-01\nanthropic-version: 2023-06-01\n"
-                                    "X-Ambient: 1",
+                                    "X-Ambient: 1\nX-Stainless-Exfil: ambient-value\nx-stainless-retry-count: 99\n"
+                                    "x-stainless-os: SPOOFED\nIdempotency-Key: ambient-idem",
         "ANTHROPIC_PROFILE": "ambient", "ANTHROPIC_CONFIG_DIR": str(tmp_path),
         "ANTHROPIC_FEDERATION_RULE_ID": "fdrl_ambient", "ANTHROPIC_ORGANIZATION_ID": "org_ambient",
         "ANTHROPIC_SERVICE_ACCOUNT_ID": "svac_ambient", "ANTHROPIC_IDENTITY_TOKEN": "eyJ.ambient.jwt",
@@ -911,6 +998,11 @@ def test_ambient_sdk_configuration_is_ignored(monkeypatch, tmp_path, caplog):
     from anthropic._constants import ANTHROPIC_API_VERSION
     assert req.headers["anthropic-version"] == ANTHROPIC_API_VERSION
     assert AMBIENT not in str(req.headers)
+    # client metadata only from the SDK itself, never a value or a name the environment supplied
+    assert "x-stainless-exfil" not in req.headers and "x-stainless-retry-count" not in req.headers
+    assert "idempotency-key" not in req.headers and "ambient" not in str(req.headers).lower()
+    assert req.headers["x-stainless-os"] == p.client.platform_headers()["X-Stainless-OS"] != "SPOOFED"
+    assert req.headers["x-stainless-lang"] == "python"
     # no proxy: no mounts, and our pinned transport carries every request
     http = p.client._client
     assert http._mounts == {} and http._transport_for_url(req.url) is p.transport
