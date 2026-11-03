@@ -14,6 +14,7 @@ import pytest
 from romulus.evidence.normalize import normalize_hits
 from romulus.evidence.typed import NETWORK_OBSERVER_FAMILIES
 from romulus.evidence.zeek import (
+    AMBIGUOUS,
     CONTENT_GAP_CAVEAT,
     INTERIM_CAVEAT,
     PARTIAL_CAVEAT,
@@ -359,8 +360,12 @@ def test_recognition_reads_only_shipper_written_fields_and_one_record_matches_on
     # tell it apart; an Elastic Agent document's data stream is zeek.<stream> itself
     so_real = zf.security_onion(zf.Conn())["_source"]
     assert so_real["event"]["dataset"] == "zeek.conn" and so_real["data_stream"]["dataset"] == "zeek"
-    assert zeek_record({**so_real, "data_stream": {"dataset": "zeek.connection"}}).shape == "elastic"
-    assert zeek_record({**so_real, "event": {**so_real["event"], "module": None}}).shape == "elastic"
+    # without Security Onion's markers zeek.conn is no shipper's known layout: never read (Elastic's is zeek.connection)
+    for sparse in ({**so_real, "data_stream": {"dataset": "zeek.connection"}},
+                   {**so_real, "event": {**so_real["event"], "module": None}}):
+        assert zeek_record(sparse).shape == AMBIGUOUS and zeek_record(sparse).log is None
+    filebeat = zf.elastic(zf.Conn(), filebeat=True)["_source"]
+    assert "data_stream" not in filebeat and zeek_record(filebeat).shape == "elastic"
     assert zeek_record(zf.plain(zf.Conn())["_source"]) is None            # nothing the shipper wrote says Zeek
     suricata = zf.previous_shapes()["malcolm-suricata-flow"][0]["_source"]
     assert zeek_record({**suricata, "event": {**suricata["event"], "module": "zeek"}}) is None   # provider decides
@@ -401,7 +406,7 @@ def test_uncatalogued_logs_are_skips_the_sweep_counts_as_unevaluated_never_error
     malcolm = zf.malcolm(zf.Conn())
     malcolm["_source"]["event"]["dataset"] = "kerberos"
     elastic = zf.elastic(zf.Conn())
-    elastic["_source"]["event"]["dataset"] = "zeek.kerberos"
+    elastic["_source"]["event"]["dataset"] = elastic["_source"]["data_stream"]["dataset"] = "zeek.kerberos"
     so = zf.security_onion(zf.Conn())
     so["_source"]["event"]["dataset"] = "zeek.kerberos"
     bare = zf.security_onion(zf.Conn(), "so-bare", bare=True)

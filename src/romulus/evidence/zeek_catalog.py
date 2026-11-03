@@ -257,8 +257,9 @@ CONN_FIELDS = (
 
 CONN = ZeekLog(
     name="conn", family="net_flow",
-    # plain `conn_long` is the interim log of Zeek's long-connections package (Malcolm renames it to conn itself)
-    names={MALCOLM: frozenset({"conn"}), ELASTIC: frozenset({"connection", "conn"}),
+    # plain `conn_long` is the interim log of Zeek's long-connections package (Malcolm renames it to conn itself).
+    # Elastic's integration and Filebeat's module name the stream "connection" only: zeek.conn is Security Onion's.
+    names={MALCOLM: frozenset({"conn"}), ELASTIC: frozenset({"connection"}),
            SECURITY_ONION: frozenset({"conn"}), PLAIN: frozenset({"conn", "conn_long"})},
     log_objects={MALCOLM: "zeek.conn", ELASTIC: "zeek.connection", PLAIN: ""},
     fields=CONN_FIELDS,
@@ -492,6 +493,10 @@ X509 = _log("x509", "x509_certificate", (
     _f("x509.issuer", "certificate.issuer", "text", malcolm=("zeek.x509.certificate_issuer_full",),
        elastic=("original:certificate.issuer",), security_onion=("x509.certificate.issuer",),
        plain=("certificate.issuer",)),
+    # the parts Elastic splits the names into (its kv step), read when its Zeek line is not kept
+    *(_f(f"zeek.x509.{side}_{part}", f"certificate.{side}", "list",
+         elastic=(f"zeek.x509.certificate.{side}.{name}", f"file.x509.{side}.{name}"))
+      for side in ("subject", "issuer") for part, name in (("cn", "common_name"), ("on", "organization"))),
     _f("x509.not_before", "certificate.not_valid_before", "time",
        malcolm=("zeek.x509.certificate_not_valid_before",), elastic=("zeek.x509.certificate.valid.from",),
        security_onion=("x509.certificate.not_valid_before",), plain=("certificate.not_valid_before",)),
@@ -945,7 +950,8 @@ SNMP = _log("snmp", "app_tx", (
     _f("snmp.up_since", "up_since", "time", malcolm=("zeek.snmp.up_since",), elastic=("zeek.snmp.up_since",),
        security_onion=("snmp.up_since",), plain=("up_since",)),
 ), doc="base/protocols/snmp/main.zeek", transport="udp", key=("zeek.uid",),
-    # SNMPv1 and v2c communities are shared secrets sent in cleartext (SNMPv3 writes its user name there instead)
+    # an SNMPv1 or v2c community, a shared secret sent in cleartext: Zeek writes the column only from a v1 or v2c
+    # header, whatever the version column (the session's first message) says (base/protocols/snmp/main.zeek)
     secrets={MALCOLM: ("zeek.snmp.community",), ELASTIC: ("zeek.snmp.community",),
              SECURITY_ONION: ("snmp.community",), PLAIN: ("community",)})
 

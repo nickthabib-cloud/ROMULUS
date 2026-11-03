@@ -36,6 +36,8 @@ def _zeek_unread(shape: str) -> dict:
     """A Zeek row of a log outside the catalog (kerberos) as each shipper names it."""
     h = zf.WRITERS[shape](zf.UDP_DNS, f"zeek-kerberos-{shape}")
     h["_source"]["event"]["dataset"] = "kerberos" if shape == "malcolm" else "zeek.kerberos"
+    if shape == "elastic":
+        h["_source"]["data_stream"]["dataset"] = "zeek.kerberos"
     return h
 
 

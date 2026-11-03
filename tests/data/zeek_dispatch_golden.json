@@ -14030,7 +14030,31 @@
        "server": {
         "issuer": "CN=Example Issuing CA,O=Example Org,C=US",
         "ja3s": "fedcba9876543210fedcba9876543210",
-        "subject": "CN=www.example.test,O=Example Org,C=US"
+        "subject": "CN=www.example.test,O=Example Org,C=US",
+        "x509": {
+         "issuer": {
+          "common_name": [
+           "Example Issuing CA"
+          ],
+          "country": [
+           "US"
+          ],
+          "organization": [
+           "Example Org"
+          ]
+         },
+         "subject": {
+          "common_name": [
+           "www.example.test"
+          ],
+          "country": [
+           "US"
+          ],
+          "organization": [
+           "Example Org"
+          ]
+         }
+        }
        }
       },
       "zeek": {
@@ -14048,15 +14072,15 @@
         "resumed": false,
         "server": {
          "issuer": {
-          "C": "US",
-          "CN": "Example Issuing CA",
-          "O": "Example Org"
+          "common_name": "Example Issuing CA",
+          "country": "US",
+          "organization": "Example Org"
          },
          "name": "www.example.test",
          "subject": {
-          "C": "US",
-          "CN": "www.example.test",
-          "O": "Example Org"
+          "common_name": "www.example.test",
+          "country": "US",
+          "organization": "Example Org"
          }
         },
         "sni_matches_cert": true,
@@ -16892,11 +16916,23 @@
         "issuer": {
          "common_name": [
           "Example Issuing CA"
+         ],
+         "country": [
+          "US"
+         ],
+         "organization": [
+          "Example Org"
          ]
         },
         "subject": {
          "common_name": [
           "www.example.test"
+         ],
+         "country": [
+          "US"
+         ],
+         "organization": [
+          "Example Org"
          ]
         }
        }
@@ -16917,9 +16953,9 @@
         "certificate": {
          "exponent": "65537",
          "issuer": {
-          "C": "US",
-          "CN": "Example Issuing CA",
-          "O": "Example Org"
+          "common_name": "Example Issuing CA",
+          "country": "US",
+          "organization": "Example Org"
          },
          "key": {
           "algorithm": "rsaEncryption",
@@ -16929,9 +16965,9 @@
          "serial": "0A1B2C3D4E5F",
          "signature_algorithm": "sha256WithRSAEncryption",
          "subject": {
-          "C": "US",
-          "CN": "www.example.test",
-          "O": "Example Org"
+          "common_name": "www.example.test",
+          "country": "US",
+          "organization": "Example Org"
          },
          "valid": {
           "from": "2024-11-01T00:00:00.000Z",

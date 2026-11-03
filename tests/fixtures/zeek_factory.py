@@ -173,8 +173,10 @@ def malcolm(conn: Conn, nid: str = "mc-1", *, sensor: str | None = SENSOR, text:
 
 def elastic(conn: Conn, nid: str = "el-1", *, sensor: str | None = SENSOR, original: bool = True,
             filebeat: bool = False) -> dict:
-    """The Elastic Agent integration's document for one conn row (`filebeat`: the Filebeat zeek module's, which also
-    writes `event.module`). `original`: the Zeek line kept in event.original."""
+    """The Elastic Agent integration's document for one conn row (`filebeat`: the Filebeat zeek module's, which writes
+    `event.module`, `fileset.name` and no data stream: elastic/beats x-pack/filebeat/module/zeek/connection/test/
+    connection-json.log-expected.json at commit bd26a932c991bdd42314ab5f7fdf7ad7539e2584). `original`: the Zeek line
+    kept in event.original."""
     zeek_connection = {"state": conn.conn_state, "history": conn.history, "local_orig": conn.local_orig,
                        "local_resp": conn.local_resp, "missed_bytes": conn.missed_bytes, "vlan": conn.vlan,
                        "inner_vlan": conn.inner_vlan, "ja4t": conn.ja4t, "ja4ts": conn.ja4ts, "ja4l": conn.ja4l,
@@ -191,7 +193,9 @@ def elastic(conn: Conn, nid: str = "el-1", *, sensor: str | None = SENSOR, origi
              "module": "zeek" if filebeat else None}
     source = {"@timestamp": iso_ms(conn.ts), "agent": {"name": sensor, "type": "filebeat"},
               "host": {"name": f"{sensor}-shipper" if sensor else None},
-              "data_stream": {"dataset": "zeek.connection", "type": "logs"}, "event": event,
+              "data_stream": None if filebeat else {"dataset": "zeek.connection", "type": "logs"}, "event": event,
+              "fileset": {"name": "connection"} if filebeat else None,
+              "service": {"type": "zeek"} if filebeat else None,
               "source": source_side, "destination": destination_side,
               "network": {"transport": conn.proto, "protocol": conn.service, "community_id": conn.community_id},
               "zeek": {"session_id": conn.uid, "connection": zeek_connection},

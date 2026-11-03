@@ -14,10 +14,12 @@ import pytest
 from romulus.evidence.normalize import normalize_hits
 from romulus.evidence.typed import NETWORK_OBSERVER_FAMILIES
 from romulus.evidence.zeek import (
+    ZEEK_ARGUMENT_WITHHELD,
     ZEEK_DUPLICATE,
     ZEEK_FIRST_HOST_ONLY,
     ZEEK_NORMALIZER,
     ZEEK_TIMEDOUT_FILE,
+    ZEEK_X509_NAME_PARTS,
     normalize_plain_zeek,
     zeek_record,
 )
@@ -404,11 +406,15 @@ def test_zeeks_unknown_ftp_user_is_no_user():
     assert normalize(zl.plain(zl.FTP)).get("user.name") == "ftpuser1"
 
 
-def test_snmpv3_writes_its_user_where_v1_and_v2c_write_a_community():
-    v3 = normalize(zl.plain(LOGICAL["snmp-v3"]))
-    assert v3.get("user.name") == "snmpuser" and not v3.has("auth.cleartext_credentials_present")
-    v2 = normalize(zl.plain(zl.SNMP))
-    assert v2.get("auth.cleartext_credentials_present") is True and not v2.has("user.name")
+def test_an_snmp_community_is_a_credential_whatever_the_sessions_version_column_says():
+    """Zeek writes the community only from an SNMPv1 or v2c message's header, and the version column from the
+    session's first message: a session that began with SNMPv3 can still carry a v2c community."""
+    for name in ("snmp", "snmp-v3"):
+        row = LOGICAL.get(name, zl.SNMP)
+        for shape, h in zl.in_every_shape(row).items():
+            event = normalize(h)
+            assert event.get("auth.cleartext_credentials_present") is True, (name, shape)
+            assert not event.has("user.name") and "snmpuser" not in event.model_dump_json(), (name, shape)
 
 
 def test_malcolm_drops_a_rows_count_of_zero():
@@ -524,6 +530,149 @@ def test_every_log_and_shape_has_a_secret_row():
             assert f"{log.name}-{shape}-column" in names, (log.name, shape)
     for log in CREDENTIAL_LOGS:
         assert {f"{log}-{shape}" for shape in zl.shapes_of(log)} <= names, log
+
+
+# The commands whose argument is a credential (or may hold one), from the protocols' own definitions:
+# (log, Zeek's command column, the command, the columns the credential travels in, what is typed: present/unknown)
+S = zl.SECRET
+COMMAND_CASES = [
+    # RFC 959 PASS and ACCT, RFC 2228 ADAT
+    ("ftp", "command", "PASS", {"arg": S}, "present"),
+    ("ftp", "command", "ACCT", {"arg": S}, "present"),
+    ("ftp", "command", "ADAT", {"arg": S}, "present"),
+    # RFC 2812 PASS, OPER <name> <password>, JOIN <channel> <key> (Zeek writes the key to addl), IRCv3 SASL
+    ("irc", "command", "PASS", {"value": S}, "present"),
+    ("irc", "command", "OPER", {"value": f"admin {S}", "addl": S}, "present"),
+    ("irc", "command", "JOIN", {"value": "#ops", "addl": f" with channel key: '{S}'"}, "present"),
+    ("irc", "command", "AUTHENTICATE", {"value": S}, "present"),
+    ("irc", "command", "NICKSERV", {"value": "IDENTIFY", "addl": S}, "present"),
+    ("irc", "command", "PRIVMSG", {"value": "NickServ", "addl": f"IDENTIFY {S}"}, "unknown"),
+    # AUTH [username] password; HELLO 3 AUTH user pass; MIGRATE ... AUTH; CONFIG SET requirepass; ACL SETUSER >pass
+    ("redis", "cmd.name", "AUTH", {"cmd.key": S}, "present"),
+    ("redis", "cmd.name", "HELLO", {"cmd.key": S}, "unknown"),
+    ("redis", "cmd.name", "MIGRATE", {"cmd.key": S}, "unknown"),
+    ("redis", "cmd.name", "CONFIG", {"cmd.key": S}, "unknown"),
+    ("redis", "cmd.name", "ACL", {"cmd.key": S}, "unknown"),
+    # COM_CHANGE_USER's raw authentication data; SQL that assigns a password
+    ("mysql", "cmd", "change_user", {"arg": S}, "unknown"),
+    ("mysql", "cmd", "query", {"arg": f"ALTER USER 'app'@'%' IDENTIFIED BY '{S}'"}, "present"),
+    ("mysql", "cmd", "query", {"arg": f"SET PASSWORD FOR 'app'@'%' = '{S}'"}, "present"),
+    ("mysql", "cmd", "query", {"arg": f"CHANGE MASTER TO MASTER_PASSWORD='{S}'"}, "present"),
+    ("postgresql", "frontend", "simple_query", {"frontend_arg": f"ALTER ROLE app WITH PASSWORD '{S}'"}, "present"),
+    ("postgresql", "frontend", "simple_query", {"frontend_arg": f"CREATE USER app PASSWORD '{S}'"}, "present"),
+]
+# how a command column can arrive: as Zeek wrote it, lowercased, padded, or not readable as one command at all
+SPELLINGS = {"as-written": lambda c: c, "lower": str.lower, "leading-space": lambda c: f" {c}",
+             "trailing-space": lambda c: f"{c} ", "list": lambda c: [c], "missing": lambda c: None,
+             "number": lambda c: 7}
+
+
+def _command_hits(log: str, column: str, command, values: dict) -> dict[str, dict]:
+    row = zl.ROWS[log].with_(**values)
+    row = row.without(column) if command is None else row.with_(**{column: command})
+    return zl.in_every_shape(row, f"cmd-{log}-")
+
+
+@pytest.mark.parametrize("case", COMMAND_CASES, ids=[f"{c[0]}-{c[2]}-{c[4]}" for c in COMMAND_CASES])
+@pytest.mark.parametrize("spelling", sorted(SPELLINGS))
+def test_a_credential_command_never_keeps_its_argument_in_any_shape_or_spelling(case, spelling):
+    log, column, command, values, kind = case
+    for shape, h in _command_hits(log, column, SPELLINGS[spelling](command), values).items():
+        events, skips, errors = normalize_hits([h]) if shape != "plain" else (
+            [normalize_plain_zeek(h, sensor=zl.SENSOR)], {}, [])
+        assert errors == [] and len(events) == 1, (shape, errors)
+        [event] = events
+        assert S not in event.model_dump_json() and S not in json.dumps([skips, event.caveats]), (shape, spelling)
+        readable = spelling in ("as-written", "lower", "leading-space", "trailing-space")
+        flag = "auth.cleartext_credentials_present" if readable and kind == "present" else \
+            "auth.cleartext_credentials_unknown"
+        assert event.get(flag) is True, (shape, spelling, flag)
+        if not readable:                    # fail closed: no argument of an unreadable command is kept
+            assert not event.has("app.arg") and not event.has("irc.addl"), (shape, spelling)
+            assert ZEEK_ARGUMENT_WITHHELD in event.caveats
+
+
+def test_other_commands_keep_their_arguments():
+    for log, column, command, values in (("ftp", "command", "RETR", {"arg": "ftp://203.0.113.10/pub/tool.bin"}),
+                                         ("irc", "command", "PRIVMSG", {"value": "#ops", "addl": "hello"}),
+                                         ("redis", "cmd.name", "GET", {"cmd.key": "session:42"}),
+                                         ("mysql", "cmd", "query", {"arg": "SELECT password FROM users"}),
+                                         ("postgresql", "frontend", "simple_query", {"frontend_arg": "SELECT 1"})):
+        for shape, h in _command_hits(log, column, command, values).items():
+            event = normalize(h)
+            assert event.has("app.arg"), (log, shape)
+            assert not event.has("auth.cleartext_credentials_present"), (log, shape)
+            assert not event.has("auth.cleartext_credentials_unknown"), (log, shape)
+
+
+def test_a_credential_command_without_its_argument_still_says_one_was_sent():
+    for shape, h in zl.in_every_shape(zl.REDIS.with_(**{"cmd.name": "AUTH"}).without("cmd.key")).items():
+        event = normalize(h)
+        assert event.get("auth.cleartext_credentials_present") is True, shape
+        assert event.fields["auth.cleartext_credentials_present"].origin.endswith("#auth-command#present"), shape
+
+
+USERINFO_CASES = [
+    ("http", {"uri": f"http://alice:{S}@proxy.example.test/x"}, "url.original", "http://proxy.example.test/x"),
+    ("http", {"referrer": f"https://alice:{S}@www.example.test/"}, "http.request.referrer",
+     "https://www.example.test/"),
+    ("http", {"host": f"alice:{S}@www.example.test"}, "http.hostname", "www.example.test"),
+    ("ftp", {"command": "RETR", "arg": f"ftp://alice:{S}@203.0.113.10/pub/tool.bin"}, "app.arg",
+     "ftp://203.0.113.10/pub/tool.bin"),
+    ("sip", {"uri": f"sip:bob:{S}@example.net"}, "app.arg", "sip:bob@example.net"),
+    ("sip", {"request_from": f"<sip:alice:{S}@example.test>"}, "sip.request_from", "<sip:alice@example.test>"),
+    ("intel", {"seen.indicator": f"http://alice:{S}@listed.example.test/"}, "intel.indicator",
+     "http://listed.example.test/"),
+]
+
+
+@pytest.mark.parametrize("log,values,typed,expected", USERINFO_CASES, ids=[f"{c[0]}-{c[2]}" for c in USERINFO_CASES])
+def test_a_uris_userinfo_is_removed_and_its_credential_flagged(log, values, typed, expected):
+    for shape, h in zl.in_every_shape(zl.ROWS[log].with_(**values), "ui-").items():
+        event = normalize(h)
+        assert S not in event.model_dump_json(), (shape, typed)
+        assert event.get(typed) == expected, (shape, event.get(typed))
+        assert event.get("auth.cleartext_credentials_present") is True, shape
+        assert "#derived:" in event.fields[typed].origin, shape
+
+
+def test_a_user_alone_in_a_uri_is_removed_and_flagged_as_possibly_a_credential():
+    event = normalize(zl.plain(zl.HTTP.with_(referrer="https://ghp_token0123@git.example.test/repo")))
+    assert event.get("http.request.referrer") == "https://git.example.test/repo"
+    assert event.get("auth.cleartext_credentials_unknown") is True and "ghp_token" not in event.model_dump_json()
+
+
+def test_rows_differing_only_in_a_withheld_credential_stay_apart_and_copies_of_one_document_merge():
+    attempts = [zl.malcolm(zl.REDIS.with_(**{"cmd.name": "AUTH", "cmd.key": f"guess-{i}", "success": False,
+                                              "reply.value": "WRONGPASS"}), f"auth-{i}") for i in range(5)]
+    events, skips, errors = normalize_hits(attempts)
+    assert errors == [] and skips == {} and len(events) == 5
+    assert len({e.id for e in events}) == 5 and all(len(e.raw) == 1 for e in events)
+    tries = [zl.plain(zl.FTP.with_(command="PASS", arg=f"guess-{i}", reply_code=530), f"pass-{i}") for i in range(5)]
+    assert len({normalize_plain_zeek(h, sensor=zl.SENSOR).id for h in tries}) == 5
+    # the same document read twice (overlapping pages) is one record
+    events, skips, _ = normalize_hits([attempts[0], attempts[0]])
+    assert len(events) == 1 and skips == {ZEEK_DUPLICATE: 1}
+    # rows that withheld nothing keep their logical identity: copies in two indices merge
+    events, skips, _ = normalize_hits([zl.malcolm(zl.REDIS, "get-a"), {**zl.malcolm(zl.REDIS, "get-b"),
+                                                                        "_index": "arkime_sessions3-x"}])
+    assert len(events) == 1 and skips == {ZEEK_DUPLICATE: 1}
+
+
+def test_elastic_x509_rows_without_their_zeek_line_type_names_from_the_attribute_split():
+    for original in (True, False):
+        event = normalize(zl.elastic(zl.X509, f"x509-{original}", original=original))
+        cert = event.get("x509.certificate")
+        assert cert["subject_cn"] == ["www.example.test"] and cert["issuer_on"] == ["Example Org"], original
+        assert cert["self_issued"] is False, original
+        if original:
+            assert cert["subject_dn"] == "CN=www.example.test,O=Example Org,C=US"
+            assert ZEEK_X509_NAME_PARTS not in event.caveats
+        else:
+            assert cert["subject_dn"] is None and cert["names_compared"] == "CN and O"
+            assert ZEEK_X509_NAME_PARTS in event.caveats and not event.has("x509.subject")
+    selfsigned = zl.X509.with_(**{"certificate.issuer": zl.X509.zeek["certificate.subject"]})
+    assert normalize(zl.elastic(selfsigned, "x509-self", original=False)).get("x509.self_issued") is True
 
 
 def test_credential_paths_are_never_catalogued_as_typed_values():

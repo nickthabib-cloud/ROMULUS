@@ -512,8 +512,10 @@ ELASTIC_TIMES = {"zeek.x509.certificate.valid.from", "zeek.x509.certificate.vali
 
 def elastic(row: Row, nid: str = "el-1", *, sensor: str | None = SENSOR, original: bool = True,
             filebeat: bool = False) -> dict:
-    """The Elastic Agent integration's document for one row (`filebeat`: the Filebeat module's, which also writes
-    `event.module`). `original`: the Zeek line kept in event.original (the preserve_original_event tag)."""
+    """The Elastic Agent integration's document for one row (`filebeat`: the Filebeat module's, which writes
+    `event.module` and `fileset.name` and no data stream: elastic/beats x-pack/filebeat/module/zeek/<fileset>/test/
+    *-expected.json at commit bd26a932c991bdd42314ab5f7fdf7ad7539e2584). `original`: the Zeek line kept in
+    event.original (the preserve_original_event tag)."""
     stream = ELASTIC_STREAMS.get(row.log, row.log)
     renames = ELASTIC_RENAMES.get(stream, {})
     doc: dict = {}
@@ -548,9 +550,30 @@ def elastic(row: Row, nid: str = "el-1", *, sensor: str | None = SENSOR, origina
              "original": json.dumps(row.json()) if original else None, "module": "zeek" if filebeat else None}
     source = {"@timestamp": iso_ms(row.ts), "agent": {"name": sensor, "type": "filebeat"},
               "host": {"name": f"{sensor}-shipper" if sensor else None},
-              "data_stream": {"dataset": f"zeek.{stream}", "type": "logs"}, **doc, "event": event,
+              "data_stream": None if filebeat else {"dataset": f"zeek.{stream}", "type": "logs"}, **doc,
+              "fileset": {"name": stream} if filebeat else None, "service": {"type": "zeek"} if filebeat else None,
+              "event": event,
               "tags": ["preserve_original_event", f"zeek-{stream}"] if original else [f"zeek-{stream}"]}
     return _hit("elastic", source, nid, stream)
+
+
+# Elastic's renames of a name's attributes after its kv split (zeek.<stream>.*), and the ECS x509 fields it sets from
+# them (one-element lists)
+_ELASTIC_NAME_KEYS = {"C": ("country", "country"), "CN": ("common_name", "common_name"),
+                      "L": ("locality", "locality"), "O": ("organization", "organization"),
+                      "OU": ("organizational_unit", "organizational_unit"), "ST": ("state", "state_or_province")}
+
+
+def _elastic_name_parts(dn: str) -> tuple[dict, dict]:
+    """A one-line name as Elastic's x509 and ssl pipelines leave it: escaped commas removed (gsub), split on commas
+    (kv), each attribute renamed under zeek.<stream>, and set as a one-element list under the ECS x509 field."""
+    zeek_parts, ecs_parts = {}, {}
+    for key, value in _split_dn(dn.replace("\\,", "")).items():
+        if key in _ELASTIC_NAME_KEYS:
+            zeek_name, ecs_name = _ELASTIC_NAME_KEYS[key]
+            zeek_parts[zeek_name] = value
+            ecs_parts[ecs_name] = [value]
+    return zeek_parts, ecs_parts
 
 
 def _elastic_steps(stream: str, row: Row, doc: dict) -> None:
@@ -574,9 +597,11 @@ def _elastic_steps(stream: str, row: Row, doc: dict) -> None:
         for name in ("subject", "issuer"):
             if name in zeek:
                 _set(doc, f"tls.server.{name}", zeek[name].replace("\\,", ""))
-                z.setdefault("server", {})[name] = _split_dn(zeek[name].replace("\\,", ""))
+                zeek_parts, ecs_parts = _elastic_name_parts(zeek[name])
+                z.setdefault("server", {})[name] = zeek_parts
+                _set(doc, f"tls.server.x509.{name}", ecs_parts)
         if "client_subject" in zeek:
-            z.setdefault("client", {})["subject"] = _split_dn(zeek["client_subject"])
+            z.setdefault("client", {})["subject"] = _elastic_name_parts(zeek["client_subject"])[0]
         for name in ("cipher", "curve"):
             if name in z:
                 _set(doc, f"tls.{name}", z[name])
@@ -587,10 +612,9 @@ def _elastic_steps(stream: str, row: Row, doc: dict) -> None:
         for name in ("subject", "issuer"):
             native = zeek.get(f"certificate.{name}")
             if native is not None:
-                parts = _split_dn(native.replace("\\,", ""))
-                z.setdefault("certificate", {})[name] = parts
-                if "CN" in parts:
-                    _set(doc, f"file.x509.{name}.common_name", [parts["CN"]])
+                zeek_parts, ecs_parts = _elastic_name_parts(native)
+                z.setdefault("certificate", {})[name] = zeek_parts
+                _set(doc, f"file.x509.{name}", ecs_parts)
         if "san.dns" in zeek:
             _set(doc, "file.x509.alternative_names", list(zeek["san.dns"]))
     if stream == "files":
