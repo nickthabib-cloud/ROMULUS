@@ -1,12 +1,18 @@
 # Deploy the working tree to a Linux host over SSH and install it into the venv under the remote ROMULUS_HOME.
 # Usage: powershell -File scripts/deploy.ps1 -Target <ssh-host> -RemoteHome <absolute path> [-SkipInstall]
+#          [-Extras <extra>[,<extra>]]
 #   (or set ROMULUS_DEPLOY_TARGET and ROMULUS_DEPLOY_HOME instead of passing them)
+#   -Extras installs optional dependency groups too, e.g. -Extras anthropic for AGENT_PROVIDER=anthropic.
+#   Without it the install is the plain package, as before.
 # Fails loudly on any step: PowerShell 5.1 does not stop on failing native commands by itself, which
 # once let a stale archive be uploaded. Every deploy is stamped with the git commit it shipped.
-param([switch]$SkipInstall, [string]$Target = $env:ROMULUS_DEPLOY_TARGET, [string]$RemoteHome = $env:ROMULUS_DEPLOY_HOME)
+param([switch]$SkipInstall, [string]$Target = $env:ROMULUS_DEPLOY_TARGET, [string]$RemoteHome = $env:ROMULUS_DEPLOY_HOME,
+      [string]$Extras = "")
 $ErrorActionPreference = "Stop"
 if ($Target -notmatch '^[A-Za-z0-9@._-]+$') { throw "set -Target (an ssh host or alias) or ROMULUS_DEPLOY_TARGET" }
 if ($RemoteHome -notmatch '^/[A-Za-z0-9._/-]+$') { throw "set -RemoteHome (an absolute path) or ROMULUS_DEPLOY_HOME" }
+if ($Extras -notmatch '^([a-z0-9_-]+(,[a-z0-9_-]+)*)?$') { throw "-Extras takes comma-separated extra names, e.g. anthropic" }
+if ($Extras -and $SkipInstall) { throw "-Extras needs an install; drop -SkipInstall" }
 function Check($what) { if ($LASTEXITCODE -ne 0) { throw "deploy failed at: $what (exit $LASTEXITCODE)" } }
 
 $root = Split-Path -Parent $PSScriptRoot
@@ -30,17 +36,18 @@ if (-not (Test-Path $tmp)) { throw "deploy failed: archive was not created" }
 scp -q $tmp "${Target}:/tmp/romulus-deploy.tgz"; Check "scp archive"
 $remote = @'
 set -e
-STAMP="$1"; MODE="$2"; H="$3"
+STAMP="$1"; MODE="$2"; H="$3"; EXTRAS="${4:-}"
+SPEC="$H/app"; if [ -n "$EXTRAS" ]; then SPEC="$H/app[$EXTRAS]"; fi
 mkdir -p $H/app $H/db $H/logs $H/reports $H/cache && chmod 700 $H
 rm -rf $H/app.new && mkdir $H/app.new && tar -xzf /tmp/romulus-deploy.tgz -C $H/app.new && rm -f /tmp/romulus-deploy.tgz
 echo "$STAMP" > $H/app.new/DEPLOYED_COMMIT
 rm -rf $H/app.old; if [ -d $H/app ]; then mv $H/app $H/app.old; fi; mv $H/app.new $H/app
 [ -x $H/venv/bin/python ] || python3 -m venv $H/venv
-if [ "$MODE" != "skip" ]; then $H/venv/bin/pip install -q --upgrade pip >/dev/null; $H/venv/bin/pip install -q -e "$H/app" pytest respx; fi
+if [ "$MODE" != "skip" ]; then $H/venv/bin/pip install -q --upgrade pip >/dev/null; $H/venv/bin/pip install -q -e "$SPEC" pytest respx; fi
 echo "deployed commit $(cat $H/app/DEPLOYED_COMMIT): $(cd $H/app && ls | tr '\n' ' ')"
 '@
 $remoteFile = Join-Path $env:TEMP "romulus-deploy.sh"
 [IO.File]::WriteAllText($remoteFile, $remote.Replace("`r", ""))
 scp -q $remoteFile "${Target}:/tmp/romulus-deploy.sh"; Check "scp script"
 $mode = if ($SkipInstall) { "skip" } else { "install" }
-ssh $Target "bash /tmp/romulus-deploy.sh $stamp $mode $RemoteHome; rc=`$?; rm -f /tmp/romulus-deploy.sh; exit `$rc"; Check "remote install"
+ssh $Target "bash /tmp/romulus-deploy.sh $stamp $mode $RemoteHome $Extras; rc=`$?; rm -f /tmp/romulus-deploy.sh; exit `$rc"; Check "remote install"

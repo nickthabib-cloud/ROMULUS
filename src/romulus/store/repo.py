@@ -4543,12 +4543,16 @@ class Repo:
                 t.model_call.c.prompt_tokens_est, t.model_call.c.prompt_eval_count, t.model_call.c.eval_count,
                 t.model_call.c.raw_response, t.model_call.c.cost_usd_est, t.model_call.c.duration_ms,
                 t.model_call.c.egress, t.model_call.c.endpoint_host, t.model_call.c.model,
+                t.model_call.c.model_reported,
             ).where(t.model_call.c.hunt_id == hunt_id, t.model_call.c.provider.is_not(None))).all()
         tokens, cost, ms, estimated = 0, 0.0, 0, False
         remote: dict[tuple[str, str], int] = {}
-        for prompt_est, prompt, completion, raw, row_cost, duration, egress, host, model in rows:
+        answered: dict[tuple[str, str], int] = {}     # (configured model, the model that answered) -> calls
+        for prompt_est, prompt, completion, raw, row_cost, duration, egress, host, model, reported in rows:
             if egress != "local":
                 remote[(host or "unknown", model)] = remote.get((host or "unknown", model), 0) + 1
+            if reported:
+                answered[(model, reported)] = answered.get((model, reported), 0) + 1
             if prompt is None or completion is None:
                 # unreported usage is charged at the prompt estimate plus the whole response text
                 estimated = True
@@ -4557,7 +4561,9 @@ class Repo:
             cost += float(row_cost or 0.0)
             ms += int(duration or 0)
         return {"calls": len(rows), "tokens": tokens, "cost_usd": cost, "model_ms": ms, "estimated": estimated,
-                "remote_calls": [{"endpoint_host": h, "model": m, "calls": n} for (h, m), n in sorted(remote.items())]}
+                "remote_calls": [{"endpoint_host": h, "model": m, "calls": n} for (h, m), n in sorted(remote.items())],
+                "models_reported": [{"model": m, "model_reported": r, "calls": n}
+                                    for (m, r), n in sorted(answered.items())]}
 
     def agent_elapsed_ms(self, hunt_id: str) -> int:
         with self.engine.connect() as c:

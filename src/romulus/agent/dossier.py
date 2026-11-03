@@ -245,14 +245,7 @@ def _budget(repo: Repo, hunt_id: str, manifest: dict) -> dict:
     required = {"max_calls", "max_tokens", "max_wall_seconds"}
     if not required <= configured.keys():
         return {"configured": False, "spent": {}, "remaining": {}}
-    limits = BudgetLimits(
-        max_calls=int(configured["max_calls"]),
-        max_tokens=int(configured["max_tokens"]),
-        max_wall_seconds=int(configured["max_wall_seconds"]),
-        max_cost_usd=float(configured.get("max_cost_usd") or 0.0),
-        price_input_per_mtok=float(configured.get("price_input_per_mtok") or 0.0),
-        price_output_per_mtok=float(configured.get("price_output_per_mtok") or 0.0),
-    )
+    limits = BudgetLimits.from_dict(configured, str((manifest.get("ai_agent") or {}).get("model") or ""))
     usage = repo.agent_usage(hunt_id)
     budget = AgentBudget.from_usage(
         limits, usage, wall_seconds_before=repo.agent_elapsed_ms(hunt_id) / 1000.0, clock=lambda: 0.0,
