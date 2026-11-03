@@ -1,0 +1,1564 @@
+{
+ "apache-access": {
+  "errors": [],
+  "events": [
+   {
+    "caveats": [],
+    "family": "http_access",
+    "fields": {
+     "http.request.method": {
+      "origin": "apache-access:http.request.method",
+      "value": "GET"
+     },
+     "http.response.status_code": {
+      "origin": "apache-access:http.response.status_code",
+      "value": 200
+     },
+     "source.ip": {
+      "origin": "apache-access:source.ip",
+      "value": "198.51.100.7"
+     },
+     "url.original": {
+      "origin": "apache-access:url.original",
+      "value": "/index.html"
+     },
+     "user_agent.original": {
+      "origin": "apache-access:user_agent.original",
+      "value": "curl/8.0"
+     }
+    },
+    "host": "web01",
+    "id": "a883d5b5a9aa8c81b1668ade",
+    "normalizer": "lab-ecs@14",
+    "outcome": "success",
+    "raw": [
+     {
+      "digest": "618a4e08463a3616c7d223d7a724c2a984ab03fe04e64e7d78c8a261e5104f15",
+      "native_id": "apache-access",
+      "target": "logs-apache"
+     }
+    ],
+    "ts": "2024-11-18T14:00:00Z"
+   }
+  ],
+  "skips": {}
+ },
+ "arkime": {
+  "errors": [],
+  "events": [
+   {
+    "caveats": [],
+    "family": "net_session",
+    "fields": {
+     "arkime.node": {
+      "origin": "arkime:node",
+      "value": "capture-01"
+     },
+     "client.bytes": {
+      "origin": "arkime:client.bytes",
+      "value": 300
+     },
+     "destination.bytes": {
+      "origin": "arkime:destination.bytes",
+      "value": 4000
+     },
+     "destination.ip": {
+      "origin": "arkime:destination.ip",
+      "value": "192.0.2.174"
+     },
+     "destination.packets": {
+      "origin": "arkime:destination.packets",
+      "value": 8
+     },
+     "destination.port": {
+      "origin": "arkime:destination.port",
+      "value": 443
+     },
+     "flow.end": {
+      "origin": "arkime:lastPacket",
+      "value": "2024-11-18T14:26:42+00:00"
+     },
+     "flow.start": {
+      "origin": "arkime:firstPacket",
+      "value": "2024-11-18T14:26:40+00:00"
+     },
+     "network.community_id": {
+      "origin": "arkime:network.community_id",
+      "value": "1:abc="
+     },
+     "network.protocols": {
+      "origin": "arkime:protocol",
+      "value": [
+       "tcp",
+       "tls"
+      ]
+     },
+     "network.transport": {
+      "origin": "arkime:ipProtocol",
+      "value": "tcp"
+     },
+     "server.bytes": {
+      "origin": "arkime:server.bytes",
+      "value": 2900
+     },
+     "session.duration_s": {
+      "origin": "arkime:lastPacket-firstPacket",
+      "value": 2.0
+     },
+     "source.bytes": {
+      "origin": "arkime:source.bytes",
+      "value": 900
+     },
+     "source.ip": {
+      "origin": "arkime:source.ip",
+      "value": "172.17.100.121"
+     },
+     "source.packets": {
+      "origin": "arkime:source.packets",
+      "value": 9
+     },
+     "source.port": {
+      "origin": "arkime:source.port",
+      "value": 51000
+     },
+     "tcp.flags.ack": {
+      "origin": "arkime:tcpflags.ack",
+      "value": 10
+     },
+     "tcp.flags.syn": {
+      "origin": "arkime:tcpflags.syn",
+      "value": 1
+     },
+     "tcp.flags.syn_ack": {
+      "origin": "arkime:tcpflags.syn-ack",
+      "value": 1
+     }
+    },
+    "host": "capture-01",
+    "id": "140baf479aba0f80d6c647d4",
+    "normalizer": "lab-ecs@14",
+    "outcome": "unknown",
+    "raw": [
+     {
+      "digest": "07f0ff64efd11e49f40b0af66322abbe91d33f6a1f7a30c3d1f267e830565654",
+      "native_id": "arkime",
+      "target": "arkime_sessions3-241118"
+     }
+    ],
+    "ts": "2024-11-18T14:26:40Z"
+   }
+  ],
+  "skips": {}
+ },
+ "arkime-continuation": {
+  "errors": [],
+  "events": [
+   {
+    "caveats": [],
+    "family": "net_session",
+    "fields": {
+     "arkime.continuation": {
+      "origin": "arkime-continuation:rootId#derived:differs-from-own-id",
+      "value": true
+     },
+     "arkime.node": {
+      "origin": "arkime-continuation:node",
+      "value": "capture-01"
+     },
+     "arkime.root_id": {
+      "origin": "arkime-continuation:rootId",
+      "value": "arkime"
+     },
+     "client.bytes": {
+      "origin": "arkime-continuation:client.bytes",
+      "value": 300
+     },
+     "destination.bytes": {
+      "origin": "arkime-continuation:destination.bytes",
+      "value": 4000
+     },
+     "destination.ip": {
+      "origin": "arkime-continuation:destination.ip",
+      "value": "192.0.2.174"
+     },
+     "destination.packets": {
+      "origin": "arkime-continuation:destination.packets",
+      "value": 8
+     },
+     "destination.port": {
+      "origin": "arkime-continuation:destination.port",
+      "value": 443
+     },
+     "flow.end": {
+      "origin": "arkime-continuation:lastPacket",
+      "value": "2024-11-18T14:26:42+00:00"
+     },
+     "flow.start": {
+      "origin": "arkime-continuation:firstPacket",
+      "value": "2024-11-18T14:26:40+00:00"
+     },
+     "network.community_id": {
+      "origin": "arkime-continuation:network.community_id",
+      "value": "1:abc="
+     },
+     "network.protocols": {
+      "origin": "arkime-continuation:protocol",
+      "value": [
+       "tcp",
+       "tls"
+      ]
+     },
+     "network.transport": {
+      "origin": "arkime-continuation:ipProtocol",
+      "value": "tcp"
+     },
+     "server.bytes": {
+      "origin": "arkime-continuation:server.bytes",
+      "value": 2900
+     },
+     "session.duration_s": {
+      "origin": "arkime-continuation:lastPacket-firstPacket",
+      "value": 2.0
+     },
+     "source.bytes": {
+      "origin": "arkime-continuation:source.bytes",
+      "value": 900
+     },
+     "source.ip": {
+      "origin": "arkime-continuation:source.ip",
+      "value": "172.17.100.121"
+     },
+     "source.packets": {
+      "origin": "arkime-continuation:source.packets",
+      "value": 9
+     },
+     "source.port": {
+      "origin": "arkime-continuation:source.port",
+      "value": 51000
+     },
+     "tcp.flags.ack": {
+      "origin": "arkime-continuation:tcpflags.ack",
+      "value": 10
+     },
+     "tcp.flags.syn": {
+      "origin": "arkime-continuation:tcpflags.syn",
+      "value": 1
+     },
+     "tcp.flags.syn_ack": {
+      "origin": "arkime-continuation:tcpflags.syn-ack",
+      "value": 1
+     }
+    },
+    "host": "capture-01",
+    "id": "ae7d907fb1116af1ca80763f",
+    "normalizer": "lab-ecs@14",
+    "outcome": "unknown",
+    "raw": [
+     {
+      "digest": "98468d0642cbd8c2124efc514b6984229dfdcb94218c18a7499dcc834dcaed76",
+      "native_id": "arkime-continuation",
+      "target": "arkime_sessions3-241118"
+     }
+    ],
+    "ts": "2024-11-18T14:26:40Z"
+   }
+  ],
+  "skips": {}
+ },
+ "arkime-provider": {
+  "errors": [],
+  "events": [
+   {
+    "caveats": [],
+    "family": "net_session",
+    "fields": {
+     "arkime.node": {
+      "origin": "arkime-provider:node",
+      "value": "capture-01"
+     },
+     "client.bytes": {
+      "origin": "arkime-provider:client.bytes",
+      "value": 300
+     },
+     "destination.bytes": {
+      "origin": "arkime-provider:destination.bytes",
+      "value": 4000
+     },
+     "destination.ip": {
+      "origin": "arkime-provider:destination.ip",
+      "value": "192.0.2.174"
+     },
+     "destination.packets": {
+      "origin": "arkime-provider:destination.packets",
+      "value": 8
+     },
+     "destination.port": {
+      "origin": "arkime-provider:destination.port",
+      "value": 443
+     },
+     "flow.end": {
+      "origin": "arkime-provider:lastPacket",
+      "value": "2024-11-18T14:26:42+00:00"
+     },
+     "flow.start": {
+      "origin": "arkime-provider:firstPacket",
+      "value": "2024-11-18T14:26:40+00:00"
+     },
+     "network.community_id": {
+      "origin": "arkime-provider:network.community_id",
+      "value": "1:abc="
+     },
+     "network.protocols": {
+      "origin": "arkime-provider:protocol",
+      "value": [
+       "tcp",
+       "tls"
+      ]
+     },
+     "network.transport": {
+      "origin": "arkime-provider:ipProtocol",
+      "value": "tcp"
+     },
+     "server.bytes": {
+      "origin": "arkime-provider:server.bytes",
+      "value": 2900
+     },
+     "session.duration_s": {
+      "origin": "arkime-provider:lastPacket-firstPacket",
+      "value": 2.0
+     },
+     "source.bytes": {
+      "origin": "arkime-provider:source.bytes",
+      "value": 900
+     },
+     "source.ip": {
+      "origin": "arkime-provider:source.ip",
+      "value": "172.17.100.121"
+     },
+     "source.packets": {
+      "origin": "arkime-provider:source.packets",
+      "value": 9
+     },
+     "source.port": {
+      "origin": "arkime-provider:source.port",
+      "value": 51000
+     },
+     "tcp.flags.ack": {
+      "origin": "arkime-provider:tcpflags.ack",
+      "value": 10
+     },
+     "tcp.flags.syn": {
+      "origin": "arkime-provider:tcpflags.syn",
+      "value": 1
+     },
+     "tcp.flags.syn_ack": {
+      "origin": "arkime-provider:tcpflags.syn-ack",
+      "value": 1
+     }
+    },
+    "host": "capture-01",
+    "id": "481b840fb474d4c39aa575eb",
+    "normalizer": "lab-ecs@14",
+    "outcome": "unknown",
+    "raw": [
+     {
+      "digest": "f5ebf8da5678c5c2e5e73fcaed6e4d5c31846de964f7992d296800515091e57a",
+      "native_id": "arkime-provider",
+      "target": "arkime_sessions3-241118"
+     }
+    ],
+    "ts": "2024-11-18T14:26:40Z"
+   }
+  ],
+  "skips": {}
+ },
+ "eve-alert": {
+  "errors": [],
+  "events": [
+   {
+    "caveats": [],
+    "family": "net_alert",
+    "fields": {
+     "alert.category": {
+      "origin": "eve-alert:event.original#eve.alert.category",
+      "value": "Misc activity"
+     },
+     "alert.mitre_technique_id": {
+      "origin": "eve-alert:event.original#eve.alert.metadata.mitre_technique_id",
+      "value": [
+       "T1071.001"
+      ]
+     },
+     "alert.severity": {
+      "origin": "eve-alert:event.original#eve.alert.severity",
+      "value": 2
+     },
+     "alert.signature": {
+      "origin": "eve-alert:event.original#eve.alert.signature",
+      "value": "ET INFO Example"
+     },
+     "alert.signature_id": {
+      "origin": "eve-alert:event.original#eve.alert.signature_id",
+      "value": 2000001
+     },
+     "destination.ip": {
+      "origin": "eve-alert:event.original#eve.dest_ip",
+      "value": "192.0.2.174"
+     },
+     "destination.port": {
+      "origin": "eve-alert:event.original#eve.dest_port",
+      "value": 443
+     },
+     "network.app_proto": {
+      "origin": "eve-alert:event.original#eve.app_proto",
+      "value": "http"
+     },
+     "network.community_id": {
+      "origin": "eve-alert:event.original#eve.community_id",
+      "value": "1:abc="
+     },
+     "network.transport": {
+      "origin": "eve-alert:event.original#eve.proto",
+      "value": "tcp"
+     },
+     "source.ip": {
+      "origin": "eve-alert:event.original#eve.src_ip",
+      "value": "172.17.100.121"
+     },
+     "source.port": {
+      "origin": "eve-alert:event.original#eve.src_port",
+      "value": 51000
+     },
+     "suricata.flow_id": {
+      "origin": "eve-alert:event.original#eve.flow_id",
+      "value": 1234
+     }
+    },
+    "host": "inetfw",
+    "id": "04da3040bc3088298c89dc1f",
+    "normalizer": "lab-ecs@14",
+    "outcome": "unknown",
+    "raw": [
+     {
+      "digest": "fb35792381b9a1bc30d12877aedc9b7e76af27957602ab39c78dcded61c6d1ed",
+      "native_id": "eve-alert",
+      "target": "romulus-network-logs"
+     }
+    ],
+    "ts": "2024-11-18T14:26:40.100000Z"
+   }
+  ],
+  "skips": {}
+ },
+ "eve-dns": {
+  "errors": [],
+  "events": [
+   {
+    "caveats": [],
+    "family": "dns_query",
+    "fields": {
+     "destination.ip": {
+      "origin": "eve-dns:event.original#eve.dest_ip",
+      "value": "192.0.2.174"
+     },
+     "destination.port": {
+      "origin": "eve-dns:event.original#eve.dest_port",
+      "value": 53
+     },
+     "dns.answers": {
+      "origin": "eve-dns:event.original#eve.dns.answers",
+      "value": [
+       {
+        "data": "192.0.2.9",
+        "name": "a.example",
+        "ttl": 30,
+        "type": "A"
+       }
+      ]
+     },
+     "dns.id": {
+      "origin": "eve-dns:event.original#eve.dns.id",
+      "value": 7
+     },
+     "dns.question.name": {
+      "origin": "eve-dns:event.original#eve.dns.rrname+rrtype+queries+rcode",
+      "value": "a.example"
+     },
+     "dns.question.names": {
+      "origin": "eve-dns:event.original#eve.dns.rrname+rrtype+queries+rcode",
+      "value": [
+       "a.example"
+      ]
+     },
+     "dns.question.type": {
+      "origin": "eve-dns:event.original#eve.dns.rrname+rrtype+queries+rcode",
+      "value": "A"
+     },
+     "dns.question.types": {
+      "origin": "eve-dns:event.original#eve.dns.rrname+rrtype+queries+rcode",
+      "value": [
+       "A"
+      ]
+     },
+     "dns.response_code": {
+      "origin": "eve-dns:event.original#eve.dns.rrname+rrtype+queries+rcode",
+      "value": "NOERROR"
+     },
+     "dns.response_codes": {
+      "origin": "eve-dns:event.original#eve.dns.rrname+rrtype+queries+rcode",
+      "value": [
+       "NOERROR"
+      ]
+     },
+     "dns.type": {
+      "origin": "eve-dns:event.original#eve.dns.type",
+      "value": "answer"
+     },
+     "dns.version": {
+      "origin": "eve-dns:event.original#eve.dns.version",
+      "value": 2
+     },
+     "network.community_id": {
+      "origin": "eve-dns:event.original#eve.community_id",
+      "value": "1:abc="
+     },
+     "network.transport": {
+      "origin": "eve-dns:event.original#eve.proto",
+      "value": "udp"
+     },
+     "source.ip": {
+      "origin": "eve-dns:event.original#eve.src_ip",
+      "value": "172.17.100.121"
+     },
+     "source.port": {
+      "origin": "eve-dns:event.original#eve.src_port",
+      "value": 51000
+     },
+     "suricata.flow_id": {
+      "origin": "eve-dns:event.original#eve.flow_id",
+      "value": 1234
+     }
+    },
+    "host": "inetfw",
+    "id": "72f77510466e2c929073bf89",
+    "normalizer": "lab-ecs@14",
+    "outcome": "unknown",
+    "raw": [
+     {
+      "digest": "aa4ce7ee4d5ff2dd36321e3d1d60bbc0ac62657ae5646bcb43e3e9bade71ff36",
+      "native_id": "eve-dns",
+      "target": "romulus-network-logs"
+     }
+    ],
+    "ts": "2024-11-18T14:26:40.100000Z"
+   }
+  ],
+  "skips": {}
+ },
+ "eve-flow": {
+  "errors": [],
+  "events": [
+   {
+    "caveats": [],
+    "family": "net_flow",
+    "fields": {
+     "destination.ip": {
+      "origin": "eve-flow:event.original#eve.dest_ip",
+      "value": "192.0.2.174"
+     },
+     "destination.port": {
+      "origin": "eve-flow:event.original#eve.dest_port",
+      "value": 443
+     },
+     "flow.bytes_toclient": {
+      "origin": "eve-flow:event.original#eve.flow.bytes_toclient",
+      "value": 9000
+     },
+     "flow.bytes_toserver": {
+      "origin": "eve-flow:event.original#eve.flow.bytes_toserver",
+      "value": 1200
+     },
+     "flow.end": {
+      "origin": "eve-flow:event.original#eve.flow.end",
+      "value": "2024-11-18T14:26:40.000000+0000"
+     },
+     "flow.pkts_toclient": {
+      "origin": "eve-flow:event.original#eve.flow.pkts_toclient",
+      "value": 9
+     },
+     "flow.pkts_toserver": {
+      "origin": "eve-flow:event.original#eve.flow.pkts_toserver",
+      "value": 10
+     },
+     "flow.start": {
+      "origin": "eve-flow:event.original#eve.flow.start",
+      "value": "2024-11-18T14:26:30.000000+0000"
+     },
+     "flow.state": {
+      "origin": "eve-flow:event.original#eve.flow.state",
+      "value": "closed"
+     },
+     "network.app_proto": {
+      "origin": "eve-flow:event.original#eve.app_proto",
+      "value": "tls"
+     },
+     "network.community_id": {
+      "origin": "eve-flow:event.original#eve.community_id",
+      "value": "1:abc="
+     },
+     "network.transport": {
+      "origin": "eve-flow:event.original#eve.proto",
+      "value": "tcp"
+     },
+     "source.ip": {
+      "origin": "eve-flow:event.original#eve.src_ip",
+      "value": "172.17.100.121"
+     },
+     "source.port": {
+      "origin": "eve-flow:event.original#eve.src_port",
+      "value": 51000
+     },
+     "suricata.flow_id": {
+      "origin": "eve-flow:event.original#eve.flow_id",
+      "value": 1234
+     },
+     "tcp.state": {
+      "origin": "eve-flow:event.original#eve.tcp.state",
+      "value": "closed"
+     },
+     "tcp.syn": {
+      "origin": "eve-flow:event.original#eve.tcp.syn",
+      "value": true
+     },
+     "tcp.tcp_flags_tc": {
+      "origin": "eve-flow:event.original#eve.tcp.tcp_flags_tc",
+      "value": "1b"
+     },
+     "tcp.tcp_flags_ts": {
+      "origin": "eve-flow:event.original#eve.tcp.tcp_flags_ts",
+      "value": "1b"
+     }
+    },
+    "host": "inetfw",
+    "id": "24c3a620c2f1ca6c168827a8",
+    "normalizer": "lab-ecs@14",
+    "outcome": "unknown",
+    "raw": [
+     {
+      "digest": "f6a673c7ff92e0be0d3b2ea31462ddebe742bc73df69f817adb3e5941cae9073",
+      "native_id": "eve-flow",
+      "target": "romulus-network-logs"
+     }
+    ],
+    "ts": "2024-11-18T14:26:40.100000Z"
+   }
+  ],
+  "skips": {}
+ },
+ "eve-icmp": {
+  "errors": [],
+  "events": [
+   {
+    "caveats": [],
+    "family": "net_flow",
+    "fields": {
+     "destination.ip": {
+      "origin": "eve-icmp:event.original#eve.dest_ip",
+      "value": "192.0.2.174"
+     },
+     "destination.port": {
+      "origin": "eve-icmp:event.original#eve.dest_port",
+      "value": 443
+     },
+     "flow.bytes_toclient": {
+      "origin": "eve-icmp:event.original#eve.flow.bytes_toclient",
+      "value": 900
+     },
+     "flow.bytes_toserver": {
+      "origin": "eve-icmp:event.original#eve.flow.bytes_toserver",
+      "value": 900
+     },
+     "flow.pkts_toclient": {
+      "origin": "eve-icmp:event.original#eve.flow.pkts_toclient",
+      "value": 9
+     },
+     "flow.pkts_toserver": {
+      "origin": "eve-icmp:event.original#eve.flow.pkts_toserver",
+      "value": 9
+     },
+     "icmp.code": {
+      "origin": "eve-icmp:event.original#eve.icmp_code",
+      "value": 0
+     },
+     "icmp.type": {
+      "origin": "eve-icmp:event.original#eve.icmp_type",
+      "value": 8
+     },
+     "network.community_id": {
+      "origin": "eve-icmp:event.original#eve.community_id",
+      "value": "1:abc="
+     },
+     "network.transport": {
+      "origin": "eve-icmp:event.original#eve.proto",
+      "value": "icmp"
+     },
+     "source.ip": {
+      "origin": "eve-icmp:event.original#eve.src_ip",
+      "value": "172.17.100.121"
+     },
+     "source.port": {
+      "origin": "eve-icmp:event.original#eve.src_port",
+      "value": 51000
+     },
+     "suricata.flow_id": {
+      "origin": "eve-icmp:event.original#eve.flow_id",
+      "value": 1234
+     }
+    },
+    "host": "inetfw",
+    "id": "5a4fa1caccd491fed46ac7ae",
+    "normalizer": "lab-ecs@14",
+    "outcome": "unknown",
+    "raw": [
+     {
+      "digest": "e525f83aafa8d623407bd4dc12ff1c6051840720c9ad7ec0105052502ac6db27",
+      "native_id": "eve-icmp",
+      "target": "romulus-network-logs"
+     }
+    ],
+    "ts": "2024-11-18T14:26:40.100000Z"
+   }
+  ],
+  "skips": {}
+ },
+ "eve-netflow": {
+  "errors": [],
+  "events": [
+   {
+    "caveats": [],
+    "family": "net_flow",
+    "fields": {
+     "destination.ip": {
+      "origin": "eve-netflow:event.original#eve.dest_ip",
+      "value": "192.0.2.174"
+     },
+     "destination.port": {
+      "origin": "eve-netflow:event.original#eve.dest_port",
+      "value": 443
+     },
+     "flow.bytes": {
+      "origin": "eve-netflow:event.original#eve.flow.bytes",
+      "value": 74
+     },
+     "flow.pkts": {
+      "origin": "eve-netflow:event.original#eve.flow.pkts",
+      "value": 1
+     },
+     "network.community_id": {
+      "origin": "eve-netflow:event.original#eve.community_id",
+      "value": "1:abc="
+     },
+     "network.transport": {
+      "origin": "eve-netflow:event.original#eve.proto",
+      "value": "tcp"
+     },
+     "source.ip": {
+      "origin": "eve-netflow:event.original#eve.src_ip",
+      "value": "172.17.100.121"
+     },
+     "source.port": {
+      "origin": "eve-netflow:event.original#eve.src_port",
+      "value": 51000
+     },
+     "suricata.flow_id": {
+      "origin": "eve-netflow:event.original#eve.flow_id",
+      "value": 1234
+     }
+    },
+    "host": "inetfw",
+    "id": "799744d684de00b20c97e12b",
+    "normalizer": "lab-ecs@14",
+    "outcome": "unknown",
+    "raw": [
+     {
+      "digest": "01732023955d839b5b57f7892b47d2a8953fce84cb66e8e069afdac25437c108",
+      "native_id": "eve-netflow",
+      "target": "romulus-network-logs"
+     }
+    ],
+    "ts": "2024-11-18T14:26:40.100000Z"
+   }
+  ],
+  "skips": {}
+ },
+ "eve-stats": {
+  "errors": [],
+  "events": [],
+  "skips": {
+   "suricata event_type 'stats' is not normalized": 1
+  }
+ },
+ "eve-tls": {
+  "errors": [],
+  "events": [
+   {
+    "caveats": [],
+    "family": "tls_session",
+    "fields": {
+     "destination.ip": {
+      "origin": "eve-tls:event.original#eve.dest_ip",
+      "value": "192.0.2.174"
+     },
+     "destination.port": {
+      "origin": "eve-tls:event.original#eve.dest_port",
+      "value": 443
+     },
+     "network.community_id": {
+      "origin": "eve-tls:event.original#eve.community_id",
+      "value": "1:abc="
+     },
+     "network.transport": {
+      "origin": "eve-tls:event.original#eve.proto",
+      "value": "tcp"
+     },
+     "source.ip": {
+      "origin": "eve-tls:event.original#eve.src_ip",
+      "value": "172.17.100.121"
+     },
+     "source.port": {
+      "origin": "eve-tls:event.original#eve.src_port",
+      "value": 51000
+     },
+     "suricata.flow_id": {
+      "origin": "eve-tls:event.original#eve.flow_id",
+      "value": 1234
+     },
+     "tls.client.server_name": {
+      "origin": "eve-tls:event.original#eve.tls.sni",
+      "value": "c2.example"
+     },
+     "tls.ja3": {
+      "origin": "eve-tls:event.original#eve.tls.ja3.hash",
+      "value": [
+       "abc"
+      ]
+     },
+     "tls.server.certificates": {
+      "origin": "eve-tls:event.original#eve.tls.subject+issuerdn+notbefore+notafter+fingerprint+serial",
+      "value": [
+       {
+        "alt_names": [],
+        "issuer_cn": [
+         "c2.example"
+        ],
+        "issuer_dn": "CN=c2.example",
+        "issuer_on": [],
+        "issues_other": false,
+        "names_compared": "distinguished name",
+        "not_after": null,
+        "not_before": null,
+        "self_issued": true,
+        "serial": null,
+        "sha1": null,
+        "subject_cn": [
+         "c2.example"
+        ],
+        "subject_dn": "CN=c2.example",
+        "subject_on": [],
+        "valid_days": null
+       }
+      ]
+     },
+     "tls.server.issuer_cn": {
+      "origin": "eve-tls:event.original#eve.tls.subject+issuerdn+notbefore+notafter+fingerprint+serial#derived:server-certificate",
+      "value": [
+       "c2.example"
+      ]
+     },
+     "tls.server.subject_cn": {
+      "origin": "eve-tls:event.original#eve.tls.subject+issuerdn+notbefore+notafter+fingerprint+serial#derived:server-certificate",
+      "value": [
+       "c2.example"
+      ]
+     },
+     "tls.version": {
+      "origin": "eve-tls:event.original#eve.tls.version",
+      "value": [
+       "TLSv1.2"
+      ]
+     }
+    },
+    "host": "inetfw",
+    "id": "eb02ee62efd6f86fcbfe3a22",
+    "normalizer": "lab-ecs@14",
+    "outcome": "unknown",
+    "raw": [
+     {
+      "digest": "b0f8b08c7141d448c816997e5c6b4b07423283fbdce27f38b3f40cc2e9dea293",
+      "native_id": "eve-tls",
+      "target": "romulus-network-logs"
+     }
+    ],
+    "ts": "2024-11-18T14:26:40.100000Z"
+   }
+  ],
+  "skips": {}
+ },
+ "malcolm-suricata-alert": {
+  "errors": [],
+  "events": [
+   {
+    "caveats": [],
+    "family": "net_alert",
+    "fields": {
+     "alert.action": {
+      "origin": "malcolm-suricata-alert:suricata.alert.action",
+      "value": "allowed"
+     },
+     "alert.category": {
+      "origin": "malcolm-suricata-alert:rule.category#derived:classtype",
+      "value": "Misc activity"
+     },
+     "alert.severity": {
+      "origin": "malcolm-suricata-alert:suricata.alert.severity",
+      "value": 2
+     },
+     "alert.signature": {
+      "origin": "malcolm-suricata-alert:rule.name",
+      "value": "ET INFO Example"
+     },
+     "alert.signature_id": {
+      "origin": "malcolm-suricata-alert:rule.id",
+      "value": 2000001
+     },
+     "alert.signature_severity": {
+      "origin": "malcolm-suricata-alert:suricata.alert.metadata.signature_severity",
+      "value": [
+       "Major"
+      ]
+     },
+     "destination.ip": {
+      "origin": "malcolm-suricata-alert:destination.ip",
+      "value": "203.0.113.10"
+     },
+     "destination.port": {
+      "origin": "malcolm-suricata-alert:destination.port",
+      "value": 443
+     },
+     "network.app_proto": {
+      "origin": "malcolm-suricata-alert:network.protocol#derived:app_proto",
+      "value": "http"
+     },
+     "network.community_id": {
+      "origin": "malcolm-suricata-alert:source.ip+source.port+destination.ip+destination.port+network.transport#computed:community_id_v1",
+      "value": "1:EGTZlBoNqvOVlp1kHRfUQQdxf7o="
+     },
+     "network.transport": {
+      "origin": "malcolm-suricata-alert:network.transport",
+      "value": "tcp"
+     },
+     "source.ip": {
+      "origin": "malcolm-suricata-alert:source.ip",
+      "value": "10.0.0.5"
+     },
+     "source.port": {
+      "origin": "malcolm-suricata-alert:source.port",
+      "value": 51000
+     },
+     "suricata.flow_id": {
+      "origin": "malcolm-suricata-alert:suricata.flow_id",
+      "value": 99
+     }
+    },
+    "host": "sensor-01",
+    "id": "83887cf7db4da59a862230cc",
+    "normalizer": "lab-ecs@14",
+    "outcome": "unknown",
+    "raw": [
+     {
+      "digest": "680d9dac9c080ab2bc798359923b900893f444acbe9acb104194ccc4393627e2",
+      "native_id": "malcolm-suricata-alert",
+      "target": "arkime_sessions3-241118"
+     }
+    ],
+    "ts": "2024-11-18T14:00:05Z"
+   }
+  ],
+  "skips": {}
+ },
+ "malcolm-suricata-flow": {
+  "errors": [],
+  "events": [
+   {
+    "caveats": [],
+    "family": "net_flow",
+    "fields": {
+     "destination.ip": {
+      "origin": "malcolm-suricata-flow:destination.ip",
+      "value": "203.0.113.10"
+     },
+     "destination.port": {
+      "origin": "malcolm-suricata-flow:destination.port",
+      "value": 443
+     },
+     "flow.bytes_toclient": {
+      "origin": "malcolm-suricata-flow:suricata.flow.bytes_toclient",
+      "value": 18000
+     },
+     "flow.bytes_toserver": {
+      "origin": "malcolm-suricata-flow:suricata.flow.bytes_toserver",
+      "value": 2400
+     },
+     "flow.end": {
+      "origin": "malcolm-suricata-flow:suricata.flow.end",
+      "value": "2024-11-18T14:00:04.250Z"
+     },
+     "flow.pkts_toclient": {
+      "origin": "malcolm-suricata-flow:suricata.flow.pkts_toclient",
+      "value": 10
+     },
+     "flow.pkts_toserver": {
+      "origin": "malcolm-suricata-flow:suricata.flow.pkts_toserver",
+      "value": 12
+     },
+     "flow.start": {
+      "origin": "malcolm-suricata-flow:suricata.flow.start",
+      "value": "2024-11-18T14:00:00.000Z"
+     },
+     "flow.state": {
+      "origin": "malcolm-suricata-flow:suricata.flow.state",
+      "value": "closed"
+     },
+     "network.app_proto": {
+      "origin": "malcolm-suricata-flow:network.protocol#derived:app_proto",
+      "value": "tls"
+     },
+     "network.community_id": {
+      "origin": "malcolm-suricata-flow:network.community_id",
+      "value": "1:abc="
+     },
+     "network.transport": {
+      "origin": "malcolm-suricata-flow:network.transport",
+      "value": "tcp"
+     },
+     "source.ip": {
+      "origin": "malcolm-suricata-flow:source.ip",
+      "value": "10.0.0.5"
+     },
+     "source.port": {
+      "origin": "malcolm-suricata-flow:source.port",
+      "value": 51000
+     },
+     "suricata.flow_id": {
+      "origin": "malcolm-suricata-flow:suricata.flow_id",
+      "value": 99
+     },
+     "tcp.syn": {
+      "origin": "malcolm-suricata-flow:suricata.tcp.syn",
+      "value": true
+     },
+     "tcp.tcp_flags_tc": {
+      "origin": "malcolm-suricata-flow:suricata.tcp.tcp_flags_tc",
+      "value": "1b"
+     },
+     "tcp.tcp_flags_ts": {
+      "origin": "malcolm-suricata-flow:suricata.tcp.tcp_flags_ts",
+      "value": "1b"
+     }
+    },
+    "host": "sensor-01",
+    "id": "40421a6651a2a1050d0f4710",
+    "normalizer": "lab-ecs@14",
+    "outcome": "unknown",
+    "raw": [
+     {
+      "digest": "43beaf1ebf002e70577747a19ce891bad72ef3230f38d9505a3a3c265ee1b0a2",
+      "native_id": "malcolm-suricata-flow",
+      "target": "arkime_sessions3-241118"
+     }
+    ],
+    "ts": "2024-11-18T14:00:05Z"
+   }
+  ],
+  "skips": {}
+ },
+ "unknown-dataset": {
+  "errors": [],
+  "events": [],
+  "skips": {
+   "dataset:vendor.thing is not normalized": 1
+  }
+ },
+ "zeek-icmp": {
+  "errors": [],
+  "events": [
+   {
+    "caveats": [],
+    "family": "net_flow",
+    "fields": {
+     "destination.ip": {
+      "origin": "zeek-icmp:destination.ip|zeek.connection.resp_h",
+      "value": "192.0.2.174"
+     },
+     "destination.port": {
+      "origin": "zeek-icmp:destination.port",
+      "value": 0
+     },
+     "flow.bytes_are_payload": {
+      "origin": "zeek-icmp:zeek.connection.orig_bytes+resp_bytes#semantics",
+      "value": true
+     },
+     "flow.bytes_toclient": {
+      "origin": "zeek-icmp:zeek.connection.resp_bytes",
+      "value": 4000
+     },
+     "flow.bytes_toserver": {
+      "origin": "zeek-icmp:zeek.connection.orig_bytes",
+      "value": 900
+     },
+     "flow.end": {
+      "origin": "zeek-icmp:@timestamp+zeek.connection.duration",
+      "value": "2024-11-18T14:26:42.100000+00:00"
+     },
+     "flow.pkts_toclient": {
+      "origin": "zeek-icmp:zeek.connection.resp_pkts",
+      "value": 8
+     },
+     "flow.pkts_toserver": {
+      "origin": "zeek-icmp:zeek.connection.orig_pkts",
+      "value": 9
+     },
+     "flow.start": {
+      "origin": "zeek-icmp:@timestamp",
+      "value": "2024-11-18T14:26:40.100000+00:00"
+     },
+     "icmp.type": {
+      "origin": "zeek-icmp:source.port#zeek-icmp-type",
+      "value": 8
+     },
+     "network.transport": {
+      "origin": "zeek-icmp:network.transport|zeek.connection.proto",
+      "value": "icmp"
+     },
+     "observer.product": {
+      "origin": "zeek-icmp:event.dataset#producer",
+      "value": "zeek"
+     },
+     "session.duration_s": {
+      "origin": "zeek-icmp:zeek.connection.duration",
+      "value": 2.0
+     },
+     "source.ip": {
+      "origin": "zeek-icmp:source.ip|zeek.connection.orig_h",
+      "value": "172.17.100.121"
+     },
+     "source.port": {
+      "origin": "zeek-icmp:source.port",
+      "value": 8
+     }
+    },
+    "host": "zeek1",
+    "id": "29ddc5ddb293cd62e116f2fc",
+    "normalizer": "lab-ecs@14",
+    "outcome": "unknown",
+    "raw": [
+     {
+      "digest": "e696ddd29af37ac69a8bbe8606189e1bddf60dcbef7c04c08252731f603f3798",
+      "native_id": "zeek-icmp",
+      "target": "romulus-network-logs"
+     }
+    ],
+    "ts": "2024-11-18T14:26:40.100000Z"
+   }
+  ],
+  "skips": {}
+ },
+ "zeek-icmp-absent-type": {
+  "errors": [],
+  "events": [
+   {
+    "caveats": [],
+    "family": "net_flow",
+    "fields": {
+     "destination.ip": {
+      "origin": "zeek-icmp-absent-type:destination.ip|zeek.connection.resp_h",
+      "value": "192.0.2.174"
+     },
+     "flow.bytes_are_payload": {
+      "origin": "zeek-icmp-absent-type:zeek.connection.orig_bytes+resp_bytes#semantics",
+      "value": true
+     },
+     "flow.bytes_toclient": {
+      "origin": "zeek-icmp-absent-type:zeek.connection.resp_bytes",
+      "value": 4000
+     },
+     "flow.bytes_toserver": {
+      "origin": "zeek-icmp-absent-type:zeek.connection.orig_bytes",
+      "value": 900
+     },
+     "flow.end": {
+      "origin": "zeek-icmp-absent-type:@timestamp+zeek.connection.duration",
+      "value": "2024-11-18T14:26:42.100000+00:00"
+     },
+     "flow.pkts_toclient": {
+      "origin": "zeek-icmp-absent-type:zeek.connection.resp_pkts",
+      "value": 8
+     },
+     "flow.pkts_toserver": {
+      "origin": "zeek-icmp-absent-type:zeek.connection.orig_pkts",
+      "value": 9
+     },
+     "flow.start": {
+      "origin": "zeek-icmp-absent-type:@timestamp",
+      "value": "2024-11-18T14:26:40.100000+00:00"
+     },
+     "network.transport": {
+      "origin": "zeek-icmp-absent-type:network.transport|zeek.connection.proto",
+      "value": "icmp"
+     },
+     "observer.product": {
+      "origin": "zeek-icmp-absent-type:event.dataset#producer",
+      "value": "zeek"
+     },
+     "session.duration_s": {
+      "origin": "zeek-icmp-absent-type:zeek.connection.duration",
+      "value": 2.0
+     },
+     "source.ip": {
+      "origin": "zeek-icmp-absent-type:source.ip|zeek.connection.orig_h",
+      "value": "172.17.100.121"
+     }
+    },
+    "host": "zeek1",
+    "id": "bdb283b9ad7490143564d079",
+    "normalizer": "lab-ecs@14",
+    "outcome": "unknown",
+    "raw": [
+     {
+      "digest": "26a427facb1dca1952beb60e3830c6ccf0beaeeb6b0074379ee01da0273df167",
+      "native_id": "zeek-icmp-absent-type",
+      "target": "romulus-network-logs"
+     }
+    ],
+    "ts": "2024-11-18T14:26:40.100000Z"
+   }
+  ],
+  "skips": {}
+ },
+ "zeek-icmp-bad-counter": {
+  "errors": [],
+  "events": [
+   {
+    "caveats": [],
+    "family": "net_flow",
+    "fields": {
+     "destination.ip": {
+      "origin": "zeek-icmp-bad-counter:destination.ip|zeek.connection.resp_h",
+      "value": "192.0.2.174"
+     },
+     "destination.port": {
+      "origin": "zeek-icmp-bad-counter:destination.port",
+      "value": 0
+     },
+     "flow.bytes_are_payload": {
+      "origin": "zeek-icmp-bad-counter:zeek.connection.orig_bytes+resp_bytes#semantics",
+      "value": true
+     },
+     "flow.start": {
+      "origin": "zeek-icmp-bad-counter:@timestamp",
+      "value": "2024-11-18T14:26:40.100000+00:00"
+     },
+     "icmp.type": {
+      "origin": "zeek-icmp-bad-counter:source.port#zeek-icmp-type",
+      "value": 8
+     },
+     "network.transport": {
+      "origin": "zeek-icmp-bad-counter:network.transport|zeek.connection.proto",
+      "value": "icmp"
+     },
+     "observer.product": {
+      "origin": "zeek-icmp-bad-counter:event.dataset#producer",
+      "value": "zeek"
+     },
+     "parse.malformed": {
+      "origin": "zeek-icmp-bad-counter:#malformed",
+      "value": [
+       "zeek.connection.duration",
+       "zeek.connection.orig_bytes",
+       "zeek.connection.resp_bytes"
+      ]
+     },
+     "source.ip": {
+      "origin": "zeek-icmp-bad-counter:source.ip|zeek.connection.orig_h",
+      "value": "172.17.100.121"
+     },
+     "source.port": {
+      "origin": "zeek-icmp-bad-counter:source.port",
+      "value": 8
+     }
+    },
+    "host": "zeek1",
+    "id": "9472feeb12780dad3d41f5a9",
+    "normalizer": "lab-ecs@14",
+    "outcome": "unknown",
+    "raw": [
+     {
+      "digest": "e1d0d1047f8f5ce13ad1ddbb0990ad1d4b351917e7afcee8bcc20eb50812df83",
+      "native_id": "zeek-icmp-bad-counter",
+      "target": "romulus-network-logs"
+     }
+    ],
+    "ts": "2024-11-18T14:26:40.100000Z"
+   }
+  ],
+  "skips": {}
+ },
+ "zeek-icmp-explicit": {
+  "errors": [],
+  "events": [
+   {
+    "caveats": [],
+    "family": "net_flow",
+    "fields": {
+     "destination.ip": {
+      "origin": "zeek-icmp-explicit:destination.ip|zeek.connection.resp_h",
+      "value": "192.0.2.174"
+     },
+     "destination.port": {
+      "origin": "zeek-icmp-explicit:destination.port",
+      "value": 0
+     },
+     "flow.bytes_are_payload": {
+      "origin": "zeek-icmp-explicit:zeek.connection.orig_bytes+resp_bytes#semantics",
+      "value": true
+     },
+     "flow.bytes_toclient": {
+      "origin": "zeek-icmp-explicit:zeek.connection.resp_bytes",
+      "value": 10
+     },
+     "flow.bytes_toserver": {
+      "origin": "zeek-icmp-explicit:zeek.connection.orig_bytes",
+      "value": 10
+     },
+     "flow.pkts_toclient": {
+      "origin": "zeek-icmp-explicit:zeek.connection.resp_pkts",
+      "value": 1
+     },
+     "flow.pkts_toserver": {
+      "origin": "zeek-icmp-explicit:zeek.connection.orig_pkts",
+      "value": 1
+     },
+     "flow.start": {
+      "origin": "zeek-icmp-explicit:@timestamp",
+      "value": "2024-11-18T14:26:40.100000+00:00"
+     },
+     "icmp.code": {
+      "origin": "zeek-icmp-explicit:zeek.connection.icmp_code",
+      "value": 1
+     },
+     "icmp.type": {
+      "origin": "zeek-icmp-explicit:zeek.connection.icmp_type",
+      "value": 3
+     },
+     "network.transport": {
+      "origin": "zeek-icmp-explicit:network.transport|zeek.connection.proto",
+      "value": "icmp"
+     },
+     "observer.product": {
+      "origin": "zeek-icmp-explicit:event.dataset#producer",
+      "value": "zeek"
+     },
+     "source.ip": {
+      "origin": "zeek-icmp-explicit:source.ip|zeek.connection.orig_h",
+      "value": "172.17.100.121"
+     },
+     "source.port": {
+      "origin": "zeek-icmp-explicit:source.port",
+      "value": 8
+     }
+    },
+    "host": "zeek1",
+    "id": "c4b2455dfd59dd900dd090e0",
+    "normalizer": "lab-ecs@14",
+    "outcome": "unknown",
+    "raw": [
+     {
+      "digest": "f9f891e8d94c1c5a5c6d3ccf8502d721783eece658e1b6f62210257a32913f75",
+      "native_id": "zeek-icmp-explicit",
+      "target": "romulus-network-logs"
+     }
+    ],
+    "ts": "2024-11-18T14:26:40.100000Z"
+   }
+  ],
+  "skips": {}
+ },
+ "zeek-icmp-reply-first": {
+  "errors": [],
+  "events": [
+   {
+    "caveats": [],
+    "family": "net_flow",
+    "fields": {
+     "destination.ip": {
+      "origin": "zeek-icmp-reply-first:destination.ip|zeek.connection.resp_h",
+      "value": "192.0.2.174"
+     },
+     "destination.port": {
+      "origin": "zeek-icmp-reply-first:destination.port",
+      "value": 8
+     },
+     "flow.bytes_are_payload": {
+      "origin": "zeek-icmp-reply-first:zeek.connection.orig_bytes+resp_bytes#semantics",
+      "value": true
+     },
+     "flow.bytes_toclient": {
+      "origin": "zeek-icmp-reply-first:zeek.connection.resp_bytes",
+      "value": 4000
+     },
+     "flow.bytes_toserver": {
+      "origin": "zeek-icmp-reply-first:zeek.connection.orig_bytes",
+      "value": 900
+     },
+     "flow.end": {
+      "origin": "zeek-icmp-reply-first:@timestamp+zeek.connection.duration",
+      "value": "2024-11-18T14:26:42.100000+00:00"
+     },
+     "flow.pkts_toclient": {
+      "origin": "zeek-icmp-reply-first:zeek.connection.resp_pkts",
+      "value": 8
+     },
+     "flow.pkts_toserver": {
+      "origin": "zeek-icmp-reply-first:zeek.connection.orig_pkts",
+      "value": 9
+     },
+     "flow.start": {
+      "origin": "zeek-icmp-reply-first:@timestamp",
+      "value": "2024-11-18T14:26:40.100000+00:00"
+     },
+     "icmp.type": {
+      "origin": "zeek-icmp-reply-first:source.port#zeek-icmp-type",
+      "value": 0
+     },
+     "network.transport": {
+      "origin": "zeek-icmp-reply-first:network.transport|zeek.connection.proto",
+      "value": "icmp"
+     },
+     "observer.product": {
+      "origin": "zeek-icmp-reply-first:event.dataset#producer",
+      "value": "zeek"
+     },
+     "session.duration_s": {
+      "origin": "zeek-icmp-reply-first:zeek.connection.duration",
+      "value": 2.0
+     },
+     "source.ip": {
+      "origin": "zeek-icmp-reply-first:source.ip|zeek.connection.orig_h",
+      "value": "172.17.100.121"
+     },
+     "source.port": {
+      "origin": "zeek-icmp-reply-first:source.port",
+      "value": 0
+     }
+    },
+    "host": "zeek1",
+    "id": "9b94f8e72954b04c81214ba8",
+    "normalizer": "lab-ecs@14",
+    "outcome": "unknown",
+    "raw": [
+     {
+      "digest": "929b3b59e09a625c2f2e36370d3abe6c7ccf3a2e3d3a36cd37440e5cb5d4c929",
+      "native_id": "zeek-icmp-reply-first",
+      "target": "romulus-network-logs"
+     }
+    ],
+    "ts": "2024-11-18T14:26:40.100000Z"
+   }
+  ],
+  "skips": {}
+ },
+ "zeek-icmp6": {
+  "errors": [],
+  "events": [
+   {
+    "caveats": [],
+    "family": "net_flow",
+    "fields": {
+     "destination.ip": {
+      "origin": "zeek-icmp6:destination.ip|zeek.connection.resp_h",
+      "value": "2001:db8::50"
+     },
+     "destination.port": {
+      "origin": "zeek-icmp6:destination.port",
+      "value": 129
+     },
+     "flow.bytes_are_payload": {
+      "origin": "zeek-icmp6:zeek.connection.orig_bytes+resp_bytes#semantics",
+      "value": true
+     },
+     "flow.bytes_toclient": {
+      "origin": "zeek-icmp6:zeek.connection.resp_bytes",
+      "value": 4000
+     },
+     "flow.bytes_toserver": {
+      "origin": "zeek-icmp6:zeek.connection.orig_bytes",
+      "value": 900
+     },
+     "flow.end": {
+      "origin": "zeek-icmp6:@timestamp+zeek.connection.duration",
+      "value": "2024-11-18T14:26:42.100000+00:00"
+     },
+     "flow.pkts_toclient": {
+      "origin": "zeek-icmp6:zeek.connection.resp_pkts",
+      "value": 8
+     },
+     "flow.pkts_toserver": {
+      "origin": "zeek-icmp6:zeek.connection.orig_pkts",
+      "value": 9
+     },
+     "flow.start": {
+      "origin": "zeek-icmp6:@timestamp",
+      "value": "2024-11-18T14:26:40.100000+00:00"
+     },
+     "icmp.type": {
+      "origin": "zeek-icmp6:source.port#zeek-icmp-type",
+      "value": 128
+     },
+     "network.transport": {
+      "origin": "zeek-icmp6:network.transport|zeek.connection.proto",
+      "value": "ipv6-icmp"
+     },
+     "observer.product": {
+      "origin": "zeek-icmp6:event.dataset#producer",
+      "value": "zeek"
+     },
+     "session.duration_s": {
+      "origin": "zeek-icmp6:zeek.connection.duration",
+      "value": 2.0
+     },
+     "source.ip": {
+      "origin": "zeek-icmp6:source.ip|zeek.connection.orig_h",
+      "value": "fd00::5"
+     },
+     "source.port": {
+      "origin": "zeek-icmp6:source.port",
+      "value": 128
+     }
+    },
+    "host": "zeek1",
+    "id": "654b4d04728424546c859c2f",
+    "normalizer": "lab-ecs@14",
+    "outcome": "unknown",
+    "raw": [
+     {
+      "digest": "4ed8427131da6b9df877e019eeb170f4d30cf35516c12818c80fcf1fe2a734c8",
+      "native_id": "zeek-icmp6",
+      "target": "romulus-network-logs"
+     }
+    ],
+    "ts": "2024-11-18T14:26:40.100000Z"
+   }
+  ],
+  "skips": {}
+ }
+}

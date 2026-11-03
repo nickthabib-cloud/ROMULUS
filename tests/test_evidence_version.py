@@ -15,6 +15,7 @@ from romulus.evidence import typed
 from romulus.evidence.normalize import NORMALIZER_VERSION
 from romulus.evidence.typed import EVIDENCE_VERSION, RawRef, event_id
 from romulus.evidence.windows import WINDOWS_NORMALIZER
+from romulus.evidence.zeek import ZEEK_NORMALIZER
 from romulus.hunt import packets as packet_stage
 from romulus.sources import packets as packet_sources
 
@@ -27,13 +28,19 @@ PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf211
                    # Suricata TCP/ICMP, Arkime ICMP and Zeek ICMP conn fields gained strict typed contracts.
                    13: "faf22327da69e63f594c999c9c5c68b909408308e37b0d1ab22ad86da1111b44",
                    # Arkime ICMP lists and Zeek ICMP type/address-family semantics are normalized truthfully.
-                   14: "d25c8cff3b459118ce377eb4c49c0d63736f68b4411fc520f8a32cbfa5107a9a"}
+                   # Then Zeek records moved to their own producer (zeek-ecs); no other record's output changed
+                   # (tests/test_zeek_dispatch.py compares every previous shape with its output before the move).
+                   14: "ab21e133c8812b7b48d9ead259c8c19fa41ec69a7607d4e4a52412012f824b44"}
 WINDOWS_EVIDENCE_FILES = ("community.py", "windows.py", "windows_catalog.py", "windows_reassembly.py")
 PINNED_WINDOWS = {
     "windows-ecs@1": "8c2f1668700a3f7d0a143eef00473770e2e5c746fadf6ce3b2c95ae6bbe6a419",
     "windows-ecs@2": "c8931d60bb8eeb86c02b50d07950baea0e4225e01d3b9999cd12454609093255",
     "windows-ecs@3": "f0a941924e4c0b95b0e2f9dbc2635ae325708c7739b3fcf780e803e7dbfdf203",
     "windows-ecs@4": "6d31ffa710c230e79dc39509fd40740e69c35240028cfbc0a4759cb587dafd7d",
+}
+ZEEK_EVIDENCE_FILES = ("community.py", "zeek.py", "zeek_catalog.py")
+PINNED_ZEEK = {
+    "zeek-ecs@1": "a0a03ba2ebe3a329c9d6bef5d9da9a205fa4f3b8faf0e298dd74018ac697c0c0",
 }
 # The packet stage's normalizer: HTTP bodies rebuilt by TShark -> http_body events, and TCP connections rebuilt
 # from per-segment payload -> tcp_stream events (with the shell analysis and the tables it reads).
@@ -74,6 +81,14 @@ def _windows_files_digest() -> str:
     return h.hexdigest()
 
 
+def _zeek_files_digest() -> str:
+    h = hashlib.sha256()
+    for name in ZEEK_EVIDENCE_FILES:
+        path = Path(typed.__file__).parent / name
+        h.update(name.encode() + b"\0" + path.read_bytes().replace(b"\r\n", b"\n") + b"\0")
+    return h.hexdigest()
+
+
 def _functions_digest() -> str:
     h = hashlib.sha256()
     for fn in PACKET_FUNCTIONS:
@@ -95,6 +110,13 @@ def test_windows_normalization_matches_the_pinned_producer_version():
     )
 
 
+def test_zeek_normalization_matches_the_pinned_producer_version():
+    assert PINNED_ZEEK.get(ZEEK_NORMALIZER) == _zeek_files_digest(), (
+        "Zeek evidence normalization changed: bump ZEEK_NORMALIZER, then record "
+        f"{_zeek_files_digest()} for {ZEEK_NORMALIZER} in tests/test_evidence_version.py"
+    )
+
+
 def test_packet_normalization_matches_the_pinned_version():
     version = packet_stage.PACKET_NORMALIZER
     assert PINNED_PACKETS.get(version) == _functions_digest(), (
@@ -108,5 +130,6 @@ def test_event_ids_carry_the_producer_and_version():
     legacy = hashlib.sha256(b"process_exec|" + ref.key.encode()).hexdigest()[:24]
     assert event_id("process_exec", [ref]) != legacy                    # never collides with pre-versioned rows
     assert event_id("process_exec", [ref], WINDOWS_NORMALIZER) != event_id("process_exec", [ref])
+    assert event_id("net_flow", [ref], ZEEK_NORMALIZER) != event_id("net_flow", [ref])
     assert event_id("http_body", [ref], "tshark-http@3") != event_id("http_body", [ref], "tshark-http@4")
     assert event_id("http_body", [ref], "tshark-http@4") != event_id("http_body", [ref], "tshark-packets@5")

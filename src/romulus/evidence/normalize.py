@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import hashlib
-import ipaddress
 import json
 import posixpath
 import re
@@ -40,6 +39,14 @@ from romulus.evidence.windows import (
     normalize_windows,
     windows_record_key,
     windows_record_signature,
+)
+from romulus.evidence.zeek import (
+    ZEEK_DUPLICATE,
+    ZEEK_INTERIM_SUPERSEDED,
+    ZeekNotNormalized,
+    normalize_zeek,
+    superseded_interim,
+    zeek_record,
 )
 
 NORMALIZER_VERSION = f"lab-ecs@{EVIDENCE_VERSION}"
@@ -2204,69 +2211,6 @@ def normalize_arkime_session(hit: dict) -> TypedEvent:
                       normalizer=NORMALIZER_VERSION, caveats=caveats)
 
 
-def normalize_zeek_connection(hit: dict) -> TypedEvent:
-    """One Zeek ICMP conn record. ``orig_p`` is the originator type; ``resp_p`` is its counterpart type."""
-    src, nid, ref = hit["_source"], hit["_id"], _ref(hit)
-    conn = _get(src, "zeek.connection")
-    if not isinstance(conn, dict):
-        raise TypeError("zeek.connection is not an object")
-    transport = _get(src, "network.transport") or conn.get("proto")
-    transport = transport.lower() if isinstance(transport, str) else None
-    if transport not in ("icmp", "ipv6-icmp", "icmpv6"):
-        raise Skip("zeek non-ICMP connection is not normalized")
-    source_ip = _get(src, "source.ip") or conn.get("orig_h")
-    destination_ip = _get(src, "destination.ip") or conn.get("resp_h")
-    try:
-        if any(ipaddress.ip_address(str(address)).version == 6 for address in (source_ip, destination_ip)):
-            transport = "ipv6-icmp"
-        else:
-            transport = "icmp"
-    except ValueError:
-        pass
-    when = _ts(src["@timestamp"])
-    bad: list[str] = []
-    f = {
-        "source.ip": fv(source_ip, f"{nid}:source.ip|zeek.connection.orig_h"),
-        "destination.ip": fv(destination_ip,
-                             f"{nid}:destination.ip|zeek.connection.resp_h"),
-        "source.port": fv(_get(src, "source.port"), f"{nid}:source.port"),
-        "destination.port": fv(_get(src, "destination.port"), f"{nid}:destination.port"),
-        "network.transport": fv(transport, f"{nid}:network.transport|zeek.connection.proto"),
-        "observer.product": fv("zeek", f"{nid}:event.dataset#producer"),
-        "flow.start": fv(when.isoformat(), f"{nid}:@timestamp"),
-        # Zeek orig_bytes/resp_bytes are IP payload bytes rather than whole captured frames.
-        "flow.bytes_are_payload": fv(True, f"{nid}:zeek.connection.orig_bytes+resp_bytes#semantics"),
-    }
-    for typed, native in (("flow.bytes_toserver", "orig_bytes"), ("flow.bytes_toclient", "resp_bytes"),
-                          ("flow.pkts_toserver", "orig_pkts"), ("flow.pkts_toclient", "resp_pkts")):
-        number = _count(conn.get(native), f"zeek.connection.{native}", bad)
-        if number is not None:
-            f[typed] = fv(number, f"{nid}:zeek.connection.{native}")
-    duration = conn.get("duration")
-    if duration is not None:
-        if isinstance(duration, bool) or not isinstance(duration, (int, float)) or duration < 0:
-            bad.append("zeek.connection.duration")
-        else:
-            seconds = float(duration)
-            f["session.duration_s"] = fv(seconds, f"{nid}:zeek.connection.duration")
-            f["flow.end"] = fv((when + timedelta(seconds=seconds)).isoformat(),
-                               f"{nid}:@timestamp+zeek.connection.duration")
-    raw_type = conn.get("icmp_type") if "icmp_type" in conn else _get(src, "source.port")
-    number = _icmp_number(raw_type, "icmp.type", bad)
-    if number is not None:
-        origin = "zeek.connection.icmp_type" if "icmp_type" in conn else "source.port#zeek-icmp-type"
-        f["icmp.type"] = fv(number, f"{nid}:{origin}")
-    if "icmp_code" in conn:
-        number = _icmp_number(conn.get("icmp_code"), "icmp.code", bad)
-        if number is not None:
-            f["icmp.code"] = fv(number, f"{nid}:zeek.connection.icmp_code")
-    if bad:
-        f["parse.malformed"] = fv(sorted(set(bad)), f"{nid}:#malformed")
-    return TypedEvent(id=event_id("net_flow", [ref]), family="net_flow", ts=when,
-                      host=_get(src, "host.name"), fields={k: v for k, v in f.items() if v.value is not None},
-                      raw=[ref], normalizer=NORMALIZER_VERSION, caveats=[])
-
-
 # Companion record types an exec or socket event holds at most once (EXECVE may repeat: continuation records)
 _SINGLE_COMPANIONS = (EXEC_COMPANIONS | SOCKET_COMPANIONS) - {"EXECVE"}
 
@@ -2324,6 +2268,7 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
     events, skips, errors = [], defaultdict(int), []
     windows_events: dict[tuple[tuple[str, str, str], str], TypedEvent] = {}
     windows_signatures: dict[tuple[str, str, str], set[str]] = defaultdict(set)
+    zeek_events: dict[str, TypedEvent] = {}           # by event id: a Zeek record's logical identity
     audit_hits = []
     audit_copies: list[tuple[tuple[str, int, int], str, str, str]] = []
     journal_boots: list[tuple[str, str, int | None, str, bool]] = []
@@ -2347,6 +2292,19 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                     known = {raw.key for raw in prior.raw}
                     prior.raw.extend(raw for raw in windows_event.raw if raw.key not in known)
                     skips["duplicate Windows event copy (computer/channel/record_id)"] += 1
+            elif (zeek := zeek_record(h["_source"])) is not None:
+                # Malcolm's provider, Elastic's zeek.* dataset or Security Onion's module: before the Arkime shape,
+                # because Malcolm adds Arkime's session fields (rootId among them) to the Zeek rows it indexes
+                ds = zeek.token
+                zeek_event = normalize_zeek(h, zeek)
+                prior = zeek_events.get(zeek_event.id)
+                if prior is None:
+                    zeek_events[zeek_event.id] = zeek_event
+                    events.append(zeek_event)
+                else:
+                    known = {raw.key for raw in prior.raw}
+                    prior.raw.extend(raw for raw in zeek_event.raw if raw.key not in known)
+                    skips[ZEEK_DUPLICATE] += 1
             elif is_malcolm_suricata(h["_source"]):
                 # before the Arkime shape: Malcolm adds Arkime's session fields to the Suricata rows it indexes
                 events.append(normalize_malcolm_suricata(h))
@@ -2357,8 +2315,6 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                 audit_hits.append(h)
             elif ds.startswith("suricata.eve"):
                 events.append(normalize_suricata(h))
-            elif ds in ("zeek.connection", "zeek.conn"):
-                events.append(normalize_zeek_connection(h))
             elif ds == "systemd.journal":
                 events.append(normalize_journal(h, journal_boots))
             elif ds in SINGLE:
@@ -2372,10 +2328,17 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                 audit_copies.append((*found, h["_id"]))
         except WindowsNotNormalized as unsupported:
             skips[unsupported.reason] += 1
+        except ZeekNotNormalized as uncatalogued:
+            skips[uncatalogued.reason] += 1
         except Skip as s:
             skips[s.reason] += 1
         except (ValueError, KeyError, TypeError, AttributeError) as e:   # malformed telemetry: an error, never a crash
             errors.append((h["_id"], f"{ds}: {e}"))
+    superseded = superseded_interim(list(zeek_events.values())) if zeek_events else []
+    if superseded:
+        dropped = {id(event) for event in superseded}
+        events = [event for event in events if id(event) not in dropped]
+        skips[ZEEK_INTERIM_SUPERSEDED] += len(superseded)
     groups, audit_errors = group_audit(audit_hits, audit_parse)
     errors.extend(audit_errors)
     partners = _boot_partners(audit_copies)
