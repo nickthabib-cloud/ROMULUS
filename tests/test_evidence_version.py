@@ -43,7 +43,7 @@ PINNED_WINDOWS = {
 }
 ZEEK_EVIDENCE_FILES = ("certificates.py", "community.py", "zeek.py", "zeek_catalog.py", "zeek_credentials.py")
 PINNED_ZEEK = {
-    "zeek-ecs@1": "1272a9786b0f9f9ca1393b3e7fea3de4cfea4a5a99b05ccb14160fa7e25b0afb",
+    "zeek-ecs@1": "283461d62b9dda777a153582586b3444f5095060f407e70c1527eb5a713b91f0",
 }
 # The packet stage's normalizer: HTTP bodies rebuilt by TShark -> http_body events, and TCP connections rebuilt
 # from per-segment payload -> tcp_stream events (with the shell analysis and the tables it reads).

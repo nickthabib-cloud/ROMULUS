@@ -228,6 +228,12 @@ AMBIGUOUS_SHAPE = ("dataset:{dataset} is not normalized: the record carries neit
                    "(event.module and data_stream.dataset \"zeek\") nor Elastic's (data_stream.dataset {dataset}, or "
                    "Filebeat's event.module \"zeek\" with fileset.name), and the dataset alone does not tell their "
                    "layouts apart, so its sensor, uid and time units are not known")
+# Fields Security Onion never writes on a Zeek row: the Arkime session fields Malcolm's 1200_zeek_mutate.conf sets, and
+# a zeek.<log> object (Malcolm's and Elastic's layout). A bare log name with event.module "zeek" and these is not read.
+_NOT_SECURITY_ONION = (_parts("node"), _parts("firstPacket"))
+AMBIGUOUS_MODULE = (": the record carries Security Onion's event.module \"zeek\" with a bare log name, but also fields "
+                    "Security Onion never writes (Malcolm's node or firstPacket, or a zeek.<log> object) and no "
+                    "Malcolm event.provider, so its sensor, uid and time units are not known")
 # zeek.<name> datasets no catalogued log of Security Onion is named: only Elastic writes them
 _ELASTIC_ONLY = frozenset(name for log in ZEEK_LOGS for name in log.names.get(ELASTIC, ())) - frozenset(
     name for log in ZEEK_LOGS for name in log.names.get(SECURITY_ONION, ()))
@@ -246,7 +252,8 @@ def zeek_record(src: dict) -> ZeekRecord | None:
       (Filebeat always writes a module's dataset as `<module>.<fileset>`, so a bare name is never its own);
     - Malcolm: `event.provider` "zeek" with a bare log name (or a list of them) as `event.dataset`; Malcolm writes the
       provider on every Zeek row, and `event.module` "zeek" on notice and signatures rows too, so the provider is
-      read first.
+      read first. A row with the module and a bare name but fields Security Onion never writes (Malcolm's `node` or
+      `firstPacket`, a `zeek.<log>` object) and no provider is a skip whose reason says why (`AMBIGUOUS_MODULE`).
     Security Onion and Elastic both name most logs `zeek.<log>` (dns, http, ssl, ...), and read with the other's
     layout a record loses its sensor and uid and changes units. So a `zeek.<log>` record with neither shipper's
     markers is never read: it is a skip whose reason says why (`AMBIGUOUS_SHAPE`), counted like a dataset no
@@ -286,6 +293,12 @@ def zeek_record(src: dict) -> ZeekRecord | None:
     if provider == "zeek":
         return _record(src, MALCOLM, names, "event.dataset", "event.provider", _unsupported(dataset))
     if module == "zeek":
+        if any(_present(_nested(src, parts)) for parts in _NOT_SECURITY_ONION) or any(
+                isinstance(_nested(src, ("zeek", name)), dict) for name in names):
+            # another shipper's fields (a Malcolm row without its provider): read as Security Onion's, it would lose
+            # its sensor and uid and change units
+            return ZeekRecord(AMBIGUOUS, names, "event.dataset", None, "event.module",
+                              f"{_unsupported(dataset)}{AMBIGUOUS_MODULE}")
         return _record(src, SECURITY_ONION, names, "event.dataset", "event.module", _unsupported(dataset))
     return None
 

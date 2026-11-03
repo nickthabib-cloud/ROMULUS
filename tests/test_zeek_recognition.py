@@ -67,17 +67,32 @@ VARIANTS = {
     "no-event.dataset": lambda s: _drop(s, "event.dataset"),
     "dataset-list": lambda s: _set(s, "event.dataset", [s["event"]["dataset"]]),
     "security-onion-2.3": _security_onion_2_3,
+    "no-event.provider": lambda s: _drop(s, "event.provider"),
+    "no-event.provider+module-zeek": lambda s: (_drop(s, "event.provider"), _set(s, "event.module", "zeek")),
 }
+# the logs whose Malcolm rows carry event.module "zeek" as written (1200_zeek_mutate.conf)
+MALCOLM_MODULE = {"notice", "signatures"}
 
 
 def expected(shape: str, variant: str, name: str) -> str | None:
     """What a record written in `shape` (its dataset naming `name`) must be recognized as after `variant`: a shape,
     AMBIGUOUS (never read), or None (not taken as Zeek: it keeps the path it took before Zeek was read)."""
+    if shape == "malcolm" and variant.startswith("no-event.provider"):
+        # Malcolm's own fields (node, firstPacket, zeek.<log>) with the module but no provider: never read as
+        # Security Onion's; without the module the record keeps the path it took before
+        module = variant.endswith("module-zeek") or name in MALCOLM_MODULE
+        return AMBIGUOUS if module else None
     if shape == "malcolm":                       # its provider decides; without a dataset it is not Zeek
         return None if variant == "no-event.dataset" else "malcolm"
+    if variant == "no-event.provider":
+        variant = "as-written"                   # no other shipper writes the provider
+    elif variant == "no-event.provider+module-zeek":
+        variant = "module-zeek"
     if variant in ("no-event.dataset", "dataset-list"):
         # Elastic's data stream alone still names the stream; a list is no shipper's zeek.<log> dataset
         return "elastic" if shape == "elastic" and variant == "no-event.dataset" else None
+    if variant == "security-onion-2.3" and shape == "elastic":
+        return AMBIGUOUS                         # 2.3's markers on a record with Elastic's zeek.<stream> object
     if variant in ("module+datastream-zeek", "security-onion-2.3"):
         return "security_onion"                  # Security Onion's markers are its own, whatever else is written
     if shape == "security_onion":
@@ -108,7 +123,8 @@ def test_a_record_is_read_in_the_shape_whose_markers_it_carries_or_not_read(log,
         events, skips, errors = normalize_hits([h])
         assert events == [] and errors == [] and len(skips) == 1
         [reason] = skips
-        assert reason.startswith(f"dataset:{dataset} is not normalized: ")     # counted as no rule's evaluation
+        carried = h["_source"]["event"]["dataset"]                                  # as the variant left it
+        assert reason.startswith(f"dataset:{carried} is not normalized: ")     # counted as no rule's evaluation
 
 
 UNIT_FIELDS = {"conn": "session.duration_s", "dns": "dns.rtt_s", "files": "file.duration_s",

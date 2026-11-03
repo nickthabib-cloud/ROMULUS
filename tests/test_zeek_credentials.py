@@ -104,6 +104,22 @@ SQL_CASES = [
     # a row that does not match its columns: every literal of the VALUES
     ("INSERT INTO users (name, password) VALUES ('bob', 'p4ss', 'extra')",
      f"INSERT INTO users (name, password) VALUES ({R}, {R}, {R})", "both"),
+    # no column list in a statement that names a password: every VALUES literal
+    ("INSERT INTO passwords VALUES ('svc', 'p4ss')", f"INSERT INTO passwords VALUES ({R}, {R})", "both"),
+    # a value written as a concatenation, whole
+    ("SELECT * FROM users WHERE password = 'p4' || 'ss'", f"SELECT * FROM users WHERE password = {R} || {R}",
+     "present"),
+    ("SELECT * FROM users WHERE password = 'p4' 'ss' AND id = 1",
+     f"SELECT * FROM users WHERE password = {R} {R} AND id = 1", "present"),
+    ("UPDATE users SET password = 'p4ss', email = 'ops@example.test' WHERE id = 1",
+     f"UPDATE users SET password = {R}, email = 'ops@example.test' WHERE id = 1", "present"),
+    # credential positions inside a comment, and a comment joining a column's name
+    ("SELECT 1 /* password = 'p4ss' */", f"SELECT 1 /* password = {R} */", "present"),
+    ("SELECT * FROM users WHERE name = 'a' -- AND password = 'p4ss'",
+     f"SELECT * FROM users WHERE name = 'a' -- AND password = {R}", "present"),
+    ("SELECT * FROM users WHERE password = /* c */ 'p4ss'", f"SELECT * FROM users WHERE password = /* c */ {R}",
+     "present"),
+    ("SELECT * FROM users WHERE pass/**/word = 'p4ss'", f"SELECT * FROM users WHERE pass/**/word = {R}", "present"),
     # a connection string's password inside a literal
     ("SELECT dblink_connect('host=192.0.2.5 user=app password=p4ss dbname=inventory')",
      f"SELECT dblink_connect('host=192.0.2.5 user=app password={R}')", "present"),
@@ -131,7 +147,10 @@ DUMPING = [
     "SELECT * FROM users ORDER BY password DESC",
     "SELECT password AS pw, COUNT(*) FROM users GROUP BY password",
     "SELECT * FROM users WHERE password IS NULL",
+    # an INSERT that names no columns, in a statement that names no password: nothing says which value is one (a
+    # limit of reading only statements that name a password)
     "INSERT INTO users VALUES ('bob', 'not-a-named-column')",
+    "SELECT 1 /* a comment naming no credential: it's kept */",
     "INSERT INTO audit (event, detail) VALUES ('login', 'password reset requested')",
     "GRANT ALL PRIVILEGES ON *.* TO 'backdoor'@'%' WITH GRANT OPTION",
     "SELECT * FROM t INTO OUTFILE '/var/www/html/s.php'",
@@ -202,22 +221,36 @@ def test_a_statement_longer_than_the_token_budget_is_withheld_after_its_first_cr
 
 H = "ab" * 32           # a SHA-256 hash as ACL LIST writes it
 MONITOR = "1731938400.123456 [0 192.0.2.10:51131]"
-# (the row's command, its reply as Zeek stringifies it, the reply typed (None: withheld), what is flagged)
+# (the row's command, its reply as Zeek stringifies it, the reply typed (None: withheld), what is found: a credential
+# redacted ("present"), text that may hold one redacted or withheld ("unread"), "both", or None)
 REDIS_CASES = [
     ("CONFIG", "OK", "OK", None),
     ("CONFIG", "[requirepass, S3cr3t]", f"[requirepass, {R}]", "present"),
-    ("CONFIG", "[dbfilename, dump.rdb, dir, /var/spool/cron, requirepass, S3cr3t, masterauth, M4ster]",
-     f"[dbfilename, dump.rdb, dir, /var/spool/cron, requirepass, {R}, masterauth, {R}]", "present"),
-    ("CONFIG", "{requirepass: S3cr3t, dir: /data}", f"{{requirepass: {R}, dir: /data}}", "present"),
-    ("CONFIG", "[requirepass, ]", "[requirepass, ]", None),
     ("CONFIG", "[dir, /root/.ssh]", "[dir, /root/.ssh]", None),
-    # a value holding ", " cannot be told from two items: not read
-    ("CONFIG", "[requirepass, S3c, r3t, masterauth, x]", None, "unread"),
+    ("CONFIG", "[requirepass, ]", "[requirepass, ]", None),
+    # not the full parameter list: a value holding ", <name>, " would read as more pairs, so a credential's value runs
+    # to the end of the reply
+    ("CONFIG", "[dbfilename, dump.rdb, dir, /var/spool/cron, requirepass, S3cr3t, masterauth, M4ster]",
+     f"[dbfilename, dump.rdb, dir, /var/spool/cron, requirepass, {R}]", "both"),
+    ("CONFIG", "[requirepass, S3c, dir, r3t]", f"[requirepass, {R}]", "both"),
+    ("CONFIG", "{requirepass: S3cr3t, dir: /data}", f"{{requirepass: {R}}}", "both"),
+    ("CONFIG", "{dir: /data, requirepass: S3c, dir: r3t}", f"{{dir: /data, requirepass: {R}}}", "unread"),
+    # not read as pairs (a module's parameter, an odd list, a name twice): kept up to the first item that is exactly
+    # a credential parameter's name; a value that merely holds "auth" or "pass" names none
+    ("CONFIG", "[search-timeout, 500, dir, /root/.ssh, dbfilename, authorized_keys]",
+     "[search-timeout, 500, dir, /root/.ssh, dbfilename, authorized_keys]", None),
+    ("CONFIG", "[search-timeout, 500, dir, /root/.ssh, dbfilename, authorized_keys, requirepass, S3cr3t, port, 6379]",
+     f"[search-timeout, 500, dir, /root/.ssh, dbfilename, authorized_keys, requirepass, {R}]", "unread"),
+    ("CONFIG", "{search-timeout: 500, dir: /tmp/passwords, requirepass: S3cr3t}",
+     f"{{search-timeout: 500, dir: /tmp/passwords, requirepass: {R}}}", "unread"),
+    ("CONFIG", "[requirepass, S3c, r3t, masterauth, x]", f"[requirepass, {R}]", "unread"),
     ("CONFIG", "[requirepass, S3cr3t", None, "unread"),
     ("CONFIG", "ERR Invalid argument 'S3cr3t' for CONFIG SET 'requirepass'", None, "unread"),
+    ("CONFIG", "ERR CONFIG SET failed for 'dir' (authorized_keys)", "ERR CONFIG SET failed for 'dir' (authorized_keys)",
+     None),
     # a credential parameter in a list logged on another row (replies follow commands by count)
     ("GET", "[requirepass, S3cr3t]", f"[requirepass, {R}]", "present"),
-    ("GET", "[requirepass, S3c, r3t]", None, "unread"),
+    ("GET", "[requirepass, S3c, r3t]", f"[requirepass, {R}]", "unread"),
     ("GET", "[bypass, list]", "[bypass, list]", None),
     # ACL: hashes, plaintext rules, generated passwords
     ("ACL", f"[user default on #{H} ~* &* +@all]", f"[user default on #{R} ~* &* +@all]", "present"),
@@ -254,22 +287,42 @@ REDIS_CASES = [
 def test_a_redis_reply_keeps_everything_but_the_credentials_it_carries(command, reply, expected, flag):
     result = scrub_redis_reply(reply, command)
     assert result.text == expected
-    assert result.redacted is (flag == "present")
-    assert result.unread is (flag == "unread")
-    assert (REDIS_UNREAD in result.caveats) is (flag == "unread")
+    assert result.redacted is (flag in ("present", "both"))
+    assert result.unread is (flag in ("unread", "both"))
+    assert (REDIS_UNREAD in result.caveats) is result.unread
     keyless = zl.REDIS.without("cmd.key", "cmd.name").with_(**{"reply.value": reply})
     row = keyless.with_(**{"cmd.name": command}) if command else keyless
     for shape, h in zl.in_every_shape(row, "reply-").items():
         event = normalize(h)
         assert event.get("app.reply") == expected, shape
-        assert "S3cr" not in event.model_dump_json() and H not in event.model_dump_json(), shape
-        if flag == "present":
+        dumped = event.model_dump_json()
+        assert not any(secret in dumped for secret in ("S3c", "r3t", "M4ster", H)), shape
+        if flag in ("present", "both"):
             assert event.get("auth.cleartext_credentials_present") is True, shape
         if flag == "unread":
-            assert event.get("auth.cleartext_credentials_unknown") is True and REDIS_UNREAD in event.caveats, shape
+            assert event.get("auth.cleartext_credentials_unknown") is True, shape
+        assert (REDIS_UNREAD in event.caveats) is (flag in ("unread", "both")), shape
         if flag is None and command not in ("", "AUTH"):
             assert not event.has("auth.cleartext_credentials_present"), shape
             assert not event.has("auth.cleartext_credentials_unknown"), shape
+
+
+def test_the_full_parameter_list_is_read_pair_by_pair():
+    """CONFIG GET * names every parameter once: a password posing as more pairs would repeat a name, so the full list
+    keeps every other value and redacts each credential's alone."""
+    names = sorted(zeek_credentials.REDIS_CORE_PARAMETERS - {"requirepass", "dir"})
+    head = ", ".join(f"{name}, v-{name}" for name in names)
+    full = f"[{head}, requirepass, S3cr3t, masterauth, M4ster, dir, /var/spool/cron]"
+    result = scrub_redis_reply(full, "CONFIG")
+    assert result.text == f"[{head}, requirepass, {R}, masterauth, {R}, dir, /var/spool/cron]"
+    assert result.redacted and not result.unread
+    # a password posing as more pairs repeats a name: from it to the end
+    posing = f"[{head}, dir, /data, requirepass, S3c, dir, r3t]"
+    result = scrub_redis_reply(posing, "CONFIG")
+    assert result.text == f"[{head}, dir, /data, requirepass, {R}]" and result.unread
+    # a list missing a parameter every version names is not the full list
+    partial = full.replace("hz, v-hz, ", "")
+    assert scrub_redis_reply(partial, "CONFIG").text.endswith(f"requirepass, {R}]")
 
 
 # ---- IRC rows that hold an earlier command's columns ---------------------------------------------------------------
@@ -417,6 +470,9 @@ def _fields():
                       "password = " + "'a' " * (N // 4), "IDENTIFIED BY " * (N // 14), "PASSWORD(" * (N // 9),
                       "INSERT INTO users (name, password) VALUES " + "('a', 'b'), " * (N // 12),
                       "password " + "/*" * (N // 2), "password $a$" + "x" * N, "password " + "a " * (N // 2),
+                      "/* password = 'a' */ " * (N // 22), "/* password /* /* " * (N // 18),
+                      "-- password = x\n" * (N // 16), "password = " + "'a' || " * (N // 7),
+                      "pass/**/word = " * (N // 15),
                       # a statement just inside the token budget: the most work a statement is given
                       "password=" + "a=" * (SQL_TOKEN_BUDGET // 2 - 2)):
         yield "mysql", {"cmd": "query", "arg": statement}

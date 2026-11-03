@@ -128,9 +128,9 @@ _WORD_REST = re.compile(r"\w*+")
 # Tokens are read one by one up to this many (spaces and comments included); a longer statement that names a password
 # is redacted from that name on.
 SQL_TOKEN_BUDGET = 20_000
-_SQL_TOKEN = re.compile(r"""
+_SQL_TOKENS = r"""
     (?P<space>\s++)
-  | (?P<comment>/\*[\s\S]*?(?:(?P<comment_end>\*/)|\Z)|--(?=\s|\Z)[^\n]*+)
+  {comment}
   | (?P<str>(?:[xXbBnNeE]|_[A-Za-z0-9]++)?'(?:[^'\\]++|\\[\s\S]?|'')*+(?:(?P<str_end>')|\Z))
   | (?P<dq>"(?:[^"\\]++|\\[\s\S]?|"")*+(?:(?P<dq_end>")|\Z))
   | (?P<tick>`(?:[^`]++|``)*+(?:(?P<tick_end>`)|\Z))
@@ -139,9 +139,13 @@ _SQL_TOKEN = re.compile(r"""
   | (?P<number>0[xX][0-9A-Fa-f]++|0[bB][01]++|[0-9]++(?:\.[0-9]*+)?(?:[eE][+-]?[0-9]++)?|\.[0-9]++)
   | (?P<var>@@?[A-Za-z_][\w$.]*+)
   | (?P<word>[^\W\d][\w$]*+)
-  | (?P<op><=>|<>|!=|==|<=|>=)
+  | (?P<op><=>|<>|!=|==|<=|>=|\|\|)
   | (?P<punct>[\s\S])
-""", re.VERBOSE)
+"""
+_SQL_TOKEN = re.compile(_SQL_TOKENS.format(
+    comment=r"| (?P<comment>/\*[\s\S]*?(?:(?P<comment_end>\*/)|\Z)|--(?=\s|\Z)[^\n]*+)"), re.VERBOSE)
+# a comment's text, read as SQL in its turn (a comment inside it is not one: the text is read once)
+_SQL_TOKEN_IN_COMMENT = re.compile(_SQL_TOKENS.format(comment=""), re.VERBOSE)
 _STRINGS = frozenset({"str", "dq", "dollar"})
 _LITERALS = _STRINGS | {"number"}
 _EQUALS = frozenset({"=", "==", "<>", "!=", "<=>"})
@@ -160,76 +164,115 @@ def scrub_sql(text: str) -> Scrubbed:
     Positions: after IDENTIFIED [WITH <plugin>] BY|AS (and a REPLACE that follows), [ENCRYPTED] PASSWORD, PASSWORD
     FOR <user> =, the arguments of a function whose name holds "pass" (PASSWORD(), OLD_PASSWORD()), and a comparison
     or assignment (=, <>, !=, LIKE, IN (...)) of a column whose name holds "pass" or is authentication_string (either
-    side); the VALUES of an INSERT or REPLACE at such a column's position; a connection string's password= inside a
-    literal. Literals: '...' (with '' and \\' escapes, and X'', B'', N'', E'' and _charset'' prefixes), "...",
-    $$...$$ and $tag$...$tag$, numbers and 0x/0b numbers, and a bare word where a value goes. Placeholders ($1, ?,
-    :name) and variables (@name) are not values: nothing is redacted for them. An empty literal carries nothing."""
+    side, with a value written as a concatenation ('a' || 'b', or juxtaposed strings) whole); the VALUES of an INSERT
+    or REPLACE at such a column's position, or all of them when the INSERT names no columns; a connection string's
+    password= inside a literal; and the same positions inside a comment's text. Literals: '...' (with '' and \\'
+    escapes, and X'', B'', N'', E'' and _charset'' prefixes), "...", $$...$$ and $tag$...$tag$, numbers and 0x/0b
+    numbers, and a bare word where a value goes. Placeholders ($1, ?, :name) and variables (@name) are not values:
+    nothing is redacted for them. An empty literal carries nothing.
+
+    Only a statement that names a password (a cue: "pass", "identified" or "authentication_string", in any case) is
+    read. So an INSERT without a column list into a table whose name holds no cue (INSERT INTO users VALUES ('bob',
+    'secret')) is kept as written: nothing in it says which value, if any, is a password."""
     cue = _SQL_CUE.search(text)
     if cue is None:
         return Scrubbed(text)
-    tail = (_WORD_REST.match(text, cue.end()).end(), len(text))     # after the word holding the first cue
-    tokens = _sql_tokens(text)
-    if tokens is None:
-        return Scrubbed(_splice(text, [tail]) if tail[0] < tail[1] else text, unread=True, caveats=[SQL_UNREAD])
-    kinds, starts, ends, unterminated, unclosed = tokens
-    scan = _SqlScan(text, kinds, starts, ends, unclosed)
-    scan.run()
-    scan.strings()
-    spans, unread = scan.spans, scan.unread
-    if unterminated and not any(end == len(text) for _start, end in spans):
-        # a quote or comment that never ends, and no credential redacted to the end: what it hides cannot be told
-        # from what it does not, so everything after the first name of a password is withheld
-        if tail[0] < tail[1]:
-            spans.append(tail)
-        unread = True
+    budget = [SQL_TOKEN_BUDGET]
+    main = _sql_region(text, 0, len(text), _SQL_TOKEN, budget)
+    scans = [main] if main is not None else []
+    for start, end in main.comments if main is not None else ():
+        if _SQL_CUE.search(text, start, end) is None:
+            continue
+        inner = _sql_region(text, start, end, _SQL_TOKEN_IN_COMMENT, budget)
+        if inner is None:
+            main = None
+            break
+        scans.append(inner)
+    if main is None:                        # more tokens than are read: from the first cue on
+        tail = _WORD_REST.match(text, cue.end()).end()
+        return Scrubbed(_splice(text, [(tail, len(text))]) if tail < len(text) else text, unread=True,
+                        caveats=[SQL_UNREAD])
+    spans = [span for scan in scans for span in scan.spans]
+    secrets = [secret for scan in scans for secret in scan.secrets]
+    unread = any(scan.unread for scan in scans)
     if not spans:
         return Scrubbed(text, unread=unread, caveats=[SQL_UNREAD] if unread else [])
-    return Scrubbed(_splice(text, spans), redacted=bool(scan.secrets), unread=unread,
-                    caveats=[SQL_UNREAD] if unread else [], secrets=scan.secrets)
+    return Scrubbed(_splice(text, spans), redacted=bool(secrets), unread=unread,
+                    caveats=[SQL_UNREAD] if unread else [], secrets=secrets)
 
 
-def _sql_tokens(text: str):
-    """The statement's tokens as parallel lists (kind, start, end), spaces and comments left out; whether a quote or
-    comment never ends; and the index of the token that never ends (None if none). None when the statement has more
-    tokens than are read."""
+def _sql_region(text: str, start: int, end: int, pattern: re.Pattern, budget: list[int]) -> _SqlScan | None:
+    """The credential positions of the SQL text between start and end (a statement, or a comment's text); None when
+    the budget of tokens runs out. A quote or comment that never ends, unless a credential was redacted to the end,
+    withholds everything after the region's first cue: what it hides cannot be told from what it does not."""
+    tokens = _sql_tokens(text, start, end, pattern, budget)
+    if tokens is None:
+        return None
+    kinds, starts, ends, unterminated, unclosed, comments = tokens
+    scan = _SqlScan(text, kinds, starts, ends, unclosed, end)
+    scan.comments = comments
+    scan.run()
+    scan.strings()
+    if unterminated and not any(stop == end for _start, stop in scan.spans):
+        cue = _SQL_CUE.search(text, start, end)
+        tail = _WORD_REST.match(text, cue.end(), end).end()
+        if tail < end:
+            scan.spans.append((tail, end))
+        scan.unread = True
+    return scan
+
+
+def _sql_tokens(text: str, start: int, end: int, pattern: re.Pattern, budget: list[int]):
+    """The tokens between start and end as parallel lists (kind, start, end), spaces and comments left out; whether a
+    quote or comment never ends; the index of the token that never ends (None if none); and the comments' text spans.
+    None when the budget (shared by every region of one statement) runs out."""
     kinds: list[str] = []
     starts: list[int] = []
     ends: list[int] = []
+    comments: list[tuple[int, int]] = []
     unterminated, unclosed = False, None
-    pos, n, count, match = 0, len(text), 0, _SQL_TOKEN.match
-    while pos < n:
-        count += 1
-        if count > SQL_TOKEN_BUDGET:
+    pos, match = start, pattern.match
+    while pos < end:
+        budget[0] -= 1
+        if budget[0] < 0:
             return None
-        m = match(text, pos)
-        kind, end = m.lastgroup, m.end()
+        m = match(text, pos, end)
+        kind, stop = m.lastgroup, m.end()
         if kind == "space":
-            pos = end
+            pos = stop
             continue
         if kind == "comment":
-            unterminated = unterminated or (text.startswith("/*", pos) and m.group("comment_end") is None)
-            pos = end
+            if text.startswith("/*", pos):
+                closed = m.group("comment_end") is not None
+                unterminated = unterminated or not closed
+                comments.append((pos + 2, stop - 2 if closed else stop))
+            else:
+                comments.append((pos + 2, stop))
+            pos = stop
             continue
         if kind == "dollar":                # PostgreSQL's dollar quoting: up to the same tag
-            close = text.find(m.group(), end)
+            close = text.find(m.group(), stop, end)
             if close == -1:
                 unterminated, unclosed = True, len(kinds)
-            end = n if close == -1 else close + (end - pos)
+            stop = end if close == -1 else close + (stop - pos)
         elif kind in ("str", "dq", "tick") and m.group(f"{kind}_end") is None:
             unterminated, unclosed = True, len(kinds)
         kinds.append(kind)
         starts.append(pos)
-        ends.append(end)
-        pos = end
-    return kinds, starts, ends, unterminated, unclosed
+        ends.append(stop)
+        pos = stop
+    return kinds, starts, ends, unterminated, unclosed, comments
 
 
 class _SqlScan:
-    """The credential positions of one tokenized statement. Each range of tokens is read once: nested calls and
-    lists inside a range already read are skipped (`covered`), so the scan is linear in the tokens."""
+    """The credential positions of one tokenized statement (or comment). Each range of tokens is read once: nested
+    calls and lists inside a range already read are skipped (`covered`), so the scan is linear in the tokens."""
 
-    def __init__(self, text: str, kinds: list[str], starts: list[int], ends: list[int], unclosed: int | None):
+    def __init__(self, text: str, kinds: list[str], starts: list[int], ends: list[int], unclosed: int | None,
+                 limit: int):
         self.text, self.kinds, self.starts, self.ends, self.unclosed = text, kinds, starts, ends, unclosed
+        self.limit = limit                  # where the text read ends
+        self.comments: list[tuple[int, int]] = []
         self.n = len(kinds)
         self.spans: list[tuple[int, int]] = []
         self.secrets: list[str] = []
@@ -270,7 +313,16 @@ class _SqlScan:
 
     def credential_column(self, i: int) -> bool:
         name = self.name(i)
+        if self.glued(i - 1):               # pass/**/word: the comment joins one name, as an evasion writes it
+            name = self.name(i - 1) + name
         return bool(name) and ("pass" in name or name == "authentication_string") and self.punct(i + 1) != "("
+
+    def glued(self, i: int) -> bool:
+        """Whether words i and i + 1 are separated by one block comment alone."""
+        if not (0 <= i < self.n - 1 and self.kinds[i] == "word" and self.kinds[i + 1] == "word"):
+            return False
+        gap = self.text[self.ends[i]:self.starts[i + 1]]
+        return gap.startswith("/*") and gap.find("*/") == len(gap) - 2
 
     def _content(self, i: int) -> tuple[int, int]:
         """Where a literal's value lies inside its token."""
@@ -299,7 +351,7 @@ class _SqlScan:
         if i + 1 < self.n and self.starts[i + 1] == self.ends[i] and self.kinds[i] in _STRINGS and \
                 self.kinds[i + 1] in ("word", "number", "str", "dq", "dollar"):
             self.done.update(range(i + 1, self.n))
-            self.spans.append((self.ends[i], len(self.text)))
+            self.spans.append((self.ends[i], self.limit))
             self.unread = True
 
     def redact_unquoted(self, j: int) -> int:
@@ -317,7 +369,21 @@ class _SqlScan:
         return last + 1
 
     def value(self, j: int) -> int:
-        """Redact the value at j (a literal, the string arguments of a call, a parenthesized expression, or a bare
+        """Redact the value at j, written as one operand or a concatenation of them ('a' || 'b', or strings written
+        one after another, which MySQL joins); the index after it."""
+        k = self.operand(j)
+        while k < self.n:
+            if self.kinds[k] in _STRINGS:
+                self.redact(k)
+                k += 1
+            elif self.punct(k) == "||":
+                k = self.operand(k + 1)
+            else:
+                break
+        return k
+
+    def operand(self, j: int) -> int:
+        """Redact one operand at j (a literal, the string arguments of a call, a parenthesized expression, or a bare
         word); the index after it."""
         if j >= self.n:
             return j
@@ -431,8 +497,12 @@ class _SqlScan:
             j += 2
         if self.word(j) == "AS" and self.name(j + 1):
             j += 2
+        if self.word(j) in ("VALUES", "VALUE"):
+            # no column list in a statement that names a password: which value is one is not known
+            self.all_values(j)
+            return
         if self.punct(j) != "(" or j not in self.closing:
-            return                          # no column list: no column is named a password
+            return
         columns = self.items(j, self.closing[j])
         positions = [p for p, (a, b) in enumerate(columns)
                      if any("pass" in self.name(k) or self.name(k) == "authentication_string" for k in range(a, b))]
@@ -461,14 +531,8 @@ class _SqlScan:
             if self.punct(j) != ",":
                 break
             j += 1
-        if not readable:                    # every literal of the statement's VALUES
-            end = values
-            while end < self.n and self.punct(end) != ";":
-                if self.kinds[end] in _LITERALS:
-                    self.redact(end)
-                end += 1
-            self.covered = max(self.covered, end)
-            self.unread = True
+        if not readable:
+            self.all_values(values)
             return
         for row in rows:
             for p in positions:
@@ -480,6 +544,17 @@ class _SqlScan:
                         if self.kinds[k] in _STRINGS:
                             self.redact(k)
         self.covered = max(self.covered, j)
+
+    def all_values(self, values: int) -> None:
+        """Redact every literal of a VALUES list (from the VALUES keyword to the statement's end), as text that may
+        hold a password."""
+        end = values
+        while end < self.n and self.punct(end) != ";":
+            if self.kinds[end] in _LITERALS:
+                self.redact(end)
+            end += 1
+        self.covered = max(self.covered, end)
+        self.unread = True
 
     def strings(self) -> None:
         """A connection string's password inside any string literal not already redacted."""
@@ -498,10 +573,12 @@ class _SqlScan:
 #
 # Zeek's Redis analyzer logs a reply as one string (src/analyzer/protocol/redis/redis.spicy, stringify): an array or
 # push as "[a, b]", a map as "{k: v, k2: v2}", a set as "(a, b)", null as "null", a boolean as "T"/"F", and a bulk or
-# simple string as its raw bytes, with no quoting or escaping. So a value holding ", " cannot be told from two values;
-# a reply is read as name/value pairs only when every name is a known CONFIG parameter, else withheld when it can hold
-# a credential. A MONITOR stream's lines ("<sec>.<usec> [<db> <client>] "cmd" "arg" ...", each argument quoted and
-# escaped by Redis's sdscatrepr) arrive as replies, on any row of the connection.
+# simple string as its raw bytes, with no quoting or escaping. So a value holding ", " cannot be told from two values,
+# and a password "x, dir, y" reads as two pairs. Only the full parameter list (CONFIG GET *, which names every
+# parameter once, so a password posing as more pairs would repeat a name) is read pair by pair; in any other reply a
+# credential parameter's value is taken to run to the end of the reply. A MONITOR stream's lines ("<sec>.<usec> [<db>
+# <client>] "cmd" "arg" ...", each argument quoted and escaped by Redis's sdscatrepr) arrive as replies, on any row
+# of the connection.
 
 REDIS_UNREAD = ("this record's Redis reply could not be read for credentials (a CONFIG, ACL or MONITOR reply whose "
                 "structure is ambiguous or unterminated): it was withheld, or its unreadable part redacted")
@@ -555,15 +632,35 @@ tls-session-caching tracking-table-max-keys unixsocket unixsocketgroup unixsocke
 watchdog-period zset-max-listpack-entries zset-max-listpack-value zset-max-ziplist-entries zset-max-ziplist-value
 """
 REDIS_CONFIG_PARAMETERS = frozenset(_CONFIG_NAMES.split())
+# the parameters every one of those versions names in CONFIG GET * (none an alias): a reply naming all of them is the
+# full parameter list
+_CORE_NAMES = """
+active-defrag-cycle-max active-defrag-cycle-min active-defrag-ignore-bytes active-defrag-max-scan-fields
+active-defrag-threshold-lower active-defrag-threshold-upper activedefrag activerehashing aof-load-truncated
+aof-rewrite-incremental-fsync aof-use-rdb-preamble appendfsync appendonly auto-aof-rewrite-min-size
+auto-aof-rewrite-percentage bind client-output-buffer-limit client-query-buffer-limit cluster-announce-bus-port
+cluster-announce-ip cluster-announce-port cluster-migration-barrier cluster-node-timeout cluster-replica-no-failover
+cluster-replica-validity-factor cluster-require-full-coverage daemonize databases dbfilename dir hll-sparse-max-bytes
+hz latency-monitor-threshold lazyfree-lazy-eviction lazyfree-lazy-expire lazyfree-lazy-server-del lfu-decay-time
+lfu-log-factor list-compress-depth logfile loglevel maxclients maxmemory maxmemory-policy maxmemory-samples
+min-replicas-max-lag min-replicas-to-write no-appendfsync-on-rewrite notify-keyspace-events pidfile port
+protected-mode proto-max-bulk-len rdb-save-incremental-fsync rdbchecksum rdbcompression repl-backlog-size
+repl-backlog-ttl repl-disable-tcp-nodelay repl-diskless-sync repl-diskless-sync-delay repl-ping-replica-period
+repl-timeout replica-announce-ip replica-announce-port replica-ignore-maxmemory replica-lazy-flush replica-priority
+replica-read-only replica-serve-stale-data replicaof requirepass save set-max-intset-entries
+stop-writes-on-bgsave-error stream-node-max-bytes stream-node-max-entries supervised syslog-facility tcp-backlog
+tcp-keepalive timeout unixsocket unixsocketperm watchdog-period
+"""
+REDIS_CORE_PARAMETERS = frozenset(_CORE_NAMES.split())
 # the parameters whose value is a credential: a password (any name holding "pass") and replication's user and password
 REDIS_CREDENTIAL_PARAMETERS = frozenset(
     {name for name in REDIS_CONFIG_PARAMETERS if "pass" in name} | {"masterauth", "masteruser", "primaryauth",
                                                                     "primaryuser"})
+_CREDENTIAL_NAMES = "|".join(map(re.escape, sorted(REDIS_CREDENTIAL_PARAMETERS)))
 # a credential parameter as one item of a container reply (whatever the command it is logged with)
-_CREDENTIAL_ITEM = re.compile(r"(?:[\[{(]|, )(?:" + "|".join(map(re.escape, sorted(REDIS_CREDENTIAL_PARAMETERS))) +
-                              r")(?=, |: |[\]})])", re.IGNORECASE)
-# text that can name a credential: a reply that cannot be read and holds one is withheld
-_CREDENTIAL_CUE = re.compile(r"pass|auth|secret|token|cred", re.IGNORECASE)
+_CREDENTIAL_ITEM = re.compile(r"(?:[\[{(]|, )(?:" + _CREDENTIAL_NAMES + r")(?=, |: |[\]})])", re.IGNORECASE)
+# a credential parameter named as a whole word in a reply that is no list (an error naming it)
+_CREDENTIAL_WORD = re.compile(r"(?<![\w-])(?:" + _CREDENTIAL_NAMES + r")(?![\w-])", re.IGNORECASE)
 _CLOSERS = {"[": "]", "{": "}", "(": ")"}
 # a command a MONITOR stream (or anything else) echoes as quoted arguments, starting a run of them
 _ECHO = re.compile(r'(?<![\\\w"])"(?:auth|hello|migrate|config|acl)"', re.IGNORECASE)
@@ -587,9 +684,8 @@ def scrub_redis_reply(text: str, command: str) -> Scrubbed:
 
     - any reply: the arguments of AUTH, of HELLO ... AUTH and MIGRATE ... AUTH/AUTH2, the value of CONFIG SET of a
       credential parameter, and ACL SETUSER's password rules, when a MONITOR line (or other text) quotes the command;
-      every "#" + 64-hex password hash; and the value after a credential parameter in a name/value list;
-    - CONFIG: a reply whose names are not all known parameters (so its pairs cannot be told apart) is withheld when it
-      can hold a credential;
+      every "#" + 64-hex password hash; and a credential parameter's value in a list (_config_credentials);
+    - CONFIG: a reply that is no list and names a credential parameter (an error quoting what was set) is withheld;
     - ACL: bare 64-hex hashes, ">"/"<" password rules, and a reply that is one long hex string (ACL GENPASS);
     - a MONITOR line, or a CONFIG or ACL list, that does not end where its structure says is withheld."""
     spans: list[tuple[int, int]] = []
@@ -645,13 +741,17 @@ def scrub_redis_reply(text: str, command: str) -> Scrubbed:
     # 3. name/value pairs: CONFIG GET's reply, or a credential parameter's name in any list
     container = len(text) >= 2 and _CLOSERS.get(text[0]) == text[-1]
     if command == "CONFIG" or (container and _CREDENTIAL_ITEM.search(text)):
-        pairs = _config_pairs(text) if container else None
-        if pairs is not None:
-            for name, start, end in pairs:
-                if name in REDIS_CREDENTIAL_PARAMETERS:
+        if not container:
+            if _CREDENTIAL_WORD.search(text):    # a reply that is no list, naming a credential parameter
+                return Scrubbed(None, unread=True, caveats=[REDIS_UNREAD])
+        else:
+            values, certain, rest = _config_credentials(text)
+            for start, end in values:
+                if certain:
                     redact(start, end)
-        elif _CREDENTIAL_CUE.search(text):
-            return Scrubbed(None, unread=True, caveats=[REDIS_UNREAD])
+                else:                           # may hold a credential: redacted, not counted as one
+                    spans.append((start, end))
+            unread = unread or rest
 
     # 4. password hashes, and ACL's own forms
     for run in _HEX_RUN.finditer(text):
@@ -699,22 +799,54 @@ def _echoed_secrets(text: str, name: str, arguments: list[tuple[int, int]]) -> l
     return out
 
 
-def _config_pairs(text: str) -> list[tuple[str, int, int]] | None:
-    """A container reply read as CONFIG GET's name/value pairs: (name, value start, value end) each; None when it is
-    not one (an odd list, an item of a map without ": ", a name no Redis or Valkey version has, a name twice)."""
+def _config_credentials(text: str) -> tuple[list[tuple[int, int]], bool, bool]:
+    """Where a container reply that names CONFIG parameters holds credential values: the spans to redact, whether they
+    are certainly credential values, and whether text that cannot be told apart from one was redacted with them.
+
+    - the full parameter list, read as pairs (every name known, each once, and every core name present): each
+      credential value alone;
+    - other replies read as pairs: from the first credential value to the end of the reply, since a value holding
+      ", " cannot be told from more pairs;
+    - replies not read as pairs (an unknown name, an odd list, a name twice): from the value after the first item that
+      is exactly a credential parameter's name to the end, as text that may hold one; none such, nothing."""
     inner = text[1:-1]
     items = inner.split(", ") if inner else []
     offsets = list(accumulate((len(item) + 2 for item in items), initial=1))
+    end = len(text) - 1                     # before the closing bracket
+    is_map = text[0] == "{"
+    keys = [item.partition(": ")[0] for item in items] if is_map else items
+    pairs = _config_pairs(text, items, offsets, keys)
+    if pairs is not None:
+        credentials = [(start, stop) for name, start, stop in pairs if name in REDIS_CREDENTIAL_PARAMETERS]
+        if REDIS_CORE_PARAMETERS <= {name for name, _start, _stop in pairs}:
+            return credentials, True, False
+        if not credentials:
+            return [], True, False
+        start, stop = credentials[0]
+        return [(start, end)], True, stop < end
+    for k, key in enumerate(keys):
+        if key.lower() in REDIS_CREDENTIAL_PARAMETERS:
+            if is_map:
+                start = offsets[k] + len(key) + 2 if items[k] != key else end
+            else:
+                start = offsets[k + 1] if k + 1 < len(items) else end
+            return ([(start, end)] if start < end else []), False, True
+    return [], False, False
+
+
+def _config_pairs(text: str, items: list[str], offsets: list[int],
+                  keys: list[str]) -> list[tuple[str, int, int]] | None:
+    """A container reply read as CONFIG GET's name/value pairs: (name, value start, value end) each; None when it is
+    not one (an odd list, an item of a map without ": ", a name no Redis or Valkey version has, a name twice)."""
     if text[0] == "[":
         names = items[0::2]
         if len(items) % 2:
             return None
         values = [(offsets[k], offsets[k] + len(items[k])) for k in range(1, len(items), 2)]
     elif text[0] == "{":
-        split = [item.partition(": ") for item in items]
-        if not all(sep for _name, sep, _value in split):
-            return None
-        names = [name for name, _sep, _value in split]
+        if any(item == key for item, key in zip(items, keys, strict=True)):
+            return None                     # an item without ": "
+        names = keys
         values = [(offsets[k] + len(names[k]) + 2, offsets[k] + len(items[k])) for k in range(len(items))]
     else:
         return None
