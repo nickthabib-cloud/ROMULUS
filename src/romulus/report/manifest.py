@@ -693,13 +693,16 @@ def internal_networks_view(repo: Repo, hunt_id: str, hunt_manifest: dict) -> dic
 
 
 def _ai_agent(repo: Repo, hunt_id: str, hunt_manifest: dict) -> dict:
-    """The AI agent's provenance (provider, endpoint host, model, egress class) and what its phase did."""
+    """The AI agent's provenance (provider, endpoint host, model, egress class), what its phase did, and which
+    model actually answered its calls next to the one configured (a provider can serve a call with another)."""
     configured = dict(hunt_manifest.get("ai_agent") or {})
     configured.pop("budgets", None)
     phase = repo.latest_audit(hunt_id, "hunt.ai_agent_summary")
     usage = repo.agent_usage(hunt_id)
-    return {"configured": configured, "phase": phase["detail"] if phase else {"status": "unknown"},
-            "usage": {k: usage[k] for k in ("calls", "tokens", "cost_usd", "estimated")}}
+    shown = {k: usage[k] for k in ("calls", "tokens", "cost_usd", "estimated")}
+    if usage["models_reported"]:
+        shown["models_reported"] = usage["models_reported"]
+    return {"configured": configured, "phase": phase["detail"] if phase else {"status": "unknown"}, "usage": shown}
 
 
 def _content_candidate_key(repo: Repo, candidate: dict) -> str:

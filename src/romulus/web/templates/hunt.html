@@ -10,6 +10,7 @@
   <div class="wide"><span class="label">Internal networks</span> {{ (internal_networks.line or internal_networks.summary) | replace('Internal networks: ', '', 1) }}</div>
   {% if h.stop_reason %}<div class="wide"><span class="label">Stop reason</span> {{ h.stop_reason }}</div>{% endif %}
   {% if ai_agent %}<div class="wide"><span class="label">AI agent</span> {{ ai_agent.status }}{% if ai_agent.reason %}: {{ ai_agent.reason }}{% endif %}</div>{% endif %}
+  {% if answered_by %}<div class="wide"><span class="label">Answered by</span> {% for r in answered_by %}{{ r.model_reported }} ({{ r.calls }} calls; configured {{ r.model }}){% if not loop.last %}, {% endif %}{% endfor %}</div>{% endif %}
 </div>
 {% if internal_networks.warning %}<p class="warn"><b>Internal networks:</b> {{ internal_networks.warning }}</p>{% endif %}
 {% for egress in egress_banners %}<p class="warn"><b>Model egress:</b> {{ egress }}</p>{% endfor %}

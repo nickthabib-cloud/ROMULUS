@@ -55,6 +55,10 @@ def _ai_agent_cell(m: dict) -> str:
     text = f"{phase.get('status', 'unknown')}: {phase.get('reason', '')}".rstrip(": ")
     if configured.get("model"):
         text += f" (provider {configured.get('provider')}, model {configured.get('model')}, "                 f"{configured.get('egress') or 'unknown'} endpoint)"
+    others = [r for r in (ai.get("usage") or {}).get("models_reported") or [] if r["model_reported"] != r["model"]]
+    if others:
+        text += "; answered by " + ", ".join(f"{r['model_reported']} ({r['calls']} calls, configured {r['model']})"
+                                             for r in others)
     return text
 
 

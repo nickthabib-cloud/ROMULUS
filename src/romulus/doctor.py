@@ -11,9 +11,9 @@ from pathlib import Path
 
 import httpx
 
-from romulus.agent.provider import EGRESS_SWITCH_VALUE, agent_readiness, build_provider
+from romulus.agent.provider import EGRESS_SWITCH_VALUE, AgentNotReady, agent_readiness, build_provider
 from romulus.agent.provider.egress import Resolver, system_resolver
-from romulus.config import FULL_ACCESS_ROLE, Settings, redact_text
+from romulus.config import FULL_ACCESS_ROLE, MIN_SECRET_LENGTH, Settings, redact_text, short_secrets
 from romulus.detect.netdef import INTERNAL_SETTING, SiteNetworks
 from romulus.hunt.site_networks import check_host_addresses
 from romulus.site import SiteValidationError, load_site_facts
@@ -290,7 +290,13 @@ def check_agent(s: Settings, transport: httpx.BaseTransport | None = None,
     if readiness.provider == "openai_compatible" and not s.agent_context_tokens and d.egress == "local":
         out.append(Check("agent.context", "warn", "AGENT_CONTEXT_TOKENS is 0: a local server that silently cuts "
                                                   "long prompts cannot be detected; set it to the model's context window"))
-    provider = build_provider(s, transport=transport, resolver=resolver, readiness=readiness)
+    try:
+        provider = build_provider(s, transport=transport, resolver=resolver, readiness=readiness)
+    except AgentNotReady as exc:       # an optional SDK that cannot be loaded: not configured, never a traceback
+        message = redact_text(str(exc), s)
+        if message.startswith("agent not configured"):
+            return [Check("agent.provider", "ok", f"{message}; hunts run without the AI agent")]
+        return [*out, Check("agent.provider", "fail", message)]
     try:
         probes = provider.probe()
     except Exception as exc:  # noqa: BLE001 - a broken or hostile endpoint must not take the other checks down
@@ -298,6 +304,18 @@ def check_agent(s: Settings, transport: httpx.BaseTransport | None = None,
     for name, status, detail in probes:
         out.append(Check(name, status, redact_text(detail, s)))
     return out
+
+
+def check_secret_lengths(s: Settings) -> Check:
+    """Short secrets are redacted wherever their text turns up, ordinary words included. Names only: never a
+    secret or its length."""
+    short = short_secrets(s)
+    if not short:
+        return Check("secrets.length", "ok", f"configured secrets are at least {MIN_SECRET_LENGTH} characters")
+    return Check("secrets.length", "warn",
+                 f"{', '.join(short)}: shorter than {MIN_SECRET_LENGTH} characters. Text that short also turns up in "
+                 "ordinary words, so redaction distorts prompts and reports (and very short secrets cannot be "
+                 "redacted); use longer secrets")
 
 
 def check_tshark(s: Settings) -> Check:
@@ -450,6 +468,7 @@ def run_all(s: Settings, env_file: Path | None = None) -> list[Check]:
         checks.append(auth)
     checks += check_ollama(s)
     checks += check_agent(s)
+    checks.append(check_secret_lengths(s))
     checks.append(check_tshark(s))
     checks += check_paths(s, env_file)
     checks.append(check_site(s))

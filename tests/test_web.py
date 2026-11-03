@@ -94,6 +94,20 @@ def test_report_path_traversal_refused(client):
     assert c.get("/reports/h1/h1-r1.txt").status_code == 404
 
 
+def test_hunt_page_names_a_model_that_answered_in_place_of_the_configured_one(client, tmp_path):
+    from romulus.hunt import run as hr
+    c, pw, _ = client
+    repo = hr.open_repo(Settings(home=tmp_path))
+    for n, answered in enumerate(("model-a", "model-b-fallback")):
+        repo.save_model_call({"id": f"mc-fb-{n}", "hunt_id": "h1", "purpose": "agent.test", "model": "model-a",
+                              "options": {}, "prompt_digest": "d", "status": "ok", "provider": "anthropic",
+                              "endpoint_host": "api.provider.example", "egress": "remote",
+                              "model_reported": answered})
+    _login(c, pw)
+    page = c.get("/hunts/h1").text
+    assert "Answered by" in page and "model-b-fallback (1 calls; configured model-a)" in page
+
+
 def test_hunt_page_shows_latest_agent_status_and_unworked_count(client):
     c, pw, _ = client
     _login(c, pw)

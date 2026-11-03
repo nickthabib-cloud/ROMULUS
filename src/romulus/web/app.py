@@ -168,11 +168,14 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         agent_summary = agent_audit["detail"] if agent_audit else None
         investigations = investigations_for_hunt(repo, hunt_id)
         ai_audit = repo.latest_audit(hunt_id, "hunt.ai_agent_summary")
-        banners = egress_banners(h["manifest"].get("ai_agent"), repo.agent_usage(hunt_id))
+        agent_usage = repo.agent_usage(hunt_id)
+        banners = egress_banners(h["manifest"].get("ai_agent"), agent_usage)
+        # calls a model other than the configured one answered (a provider's refusal fallback)
+        answered_by = [r for r in agent_usage["models_reported"] if r["model_reported"] != r["model"]]
         return page(request, "hunt.html", u, h=h, cands=cands, lanes=repo.lane_counts(hunt_id), lane=lane,
                     coverage=cov["rules"], tasks=repo.tasks(hunt_id), reports=reports, agent=agent_summary,
                     investigations=investigations, ai_agent=ai_audit["detail"] if ai_audit else None,
-                    egress_banners=banners,
+                    egress_banners=banners, answered_by=answered_by,
                     internal_networks=internal_networks_view(repo, hunt_id, h["manifest"]))
 
     def _timeline_findings(hunt_id: str) -> list[dict]:
