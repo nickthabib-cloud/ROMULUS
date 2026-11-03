@@ -27,16 +27,19 @@ The agent is a phase of the hunt worker with its own state (`pending`, `running`
 
 ## Connecting a model
 
-ROMULUS talks to models through one provider interface with two adapters:
+ROMULUS talks to models through one provider interface with three adapters:
 
 - **`openai_compatible`** (the main one): the OpenAI Chat Completions API with tool calling and JSON-schema output. It works with a team's own model server (vLLM, SGLang, llama.cpp `server`, LM Studio, TGI, Ollama's `/v1`) and with hosted APIs.
 - **`ollama`**: the existing client, for small local runs.
+- **`anthropic`**: Claude models through the Claude Messages API and Anthropic's official SDK, an optional install (`romulus[anthropic]`) imported only when this provider is chosen. The endpoint defaults to `https://api.anthropic.com`, a remote endpoint, so the egress rules below apply unchanged. The SDK gets the key only from `AGENT_API_KEY` and an HTTP client ROMULUS builds: no environment proxy, no redirects, requests only to the classified host, and no credentials, headers, logging or tracing taken from the SDK's own environment variables. The port's retry policy is the only one. Tools are sent with strict schemas (a schema outside the subset the API accepts is refused before sending), thinking is always on with its depth set by `AGENT_EFFORT`, each call reserves `AGENT_THINKING_TOKENS` of output for it, and the tool list and system prompt are a cached prefix. A refusal by the API's safety classifier is reported as `refused`, never as "nothing found"; by default the API retries it on the fallback model it recommends, and every call records the model that actually answered. Claude signs its thinking, so an investigation session must be append-only or start fresh: each reply carries its signed blocks in an opaque provider field that goes back unchanged with the turn, and an edited or foreign turn is rejected before anything is sent.
 
 Configuration lives in `$ROMULUS_HOME/.env`:
 
 | Key | Meaning |
 |---|---|
-| `AGENT_PROVIDER` | `openai_compatible` (default) or `ollama` |
+| `AGENT_PROVIDER` | `openai_compatible` (default), `ollama` or `anthropic` |
+| `AGENT_EFFORT`, `AGENT_THINKING_TOKENS`, `AGENT_REFUSAL_FALLBACK` | `anthropic` only: thinking depth (`low` to `max`, default `high`), the output room reserved for thinking on every call, and whether a refused call may be answered by the API's recommended fallback model (`default` or `off`) |
+| `AGENT_PRICE_CACHE_READ_PER_MTOK`, `AGENT_PRICE_CACHE_WRITE_PER_MTOK` | Prices of prompt tokens read from and written to the provider's prompt cache, for the cost estimate. A priced `anthropic` agent needs the cache-read price; the write price defaults to 1.25 times the input price |
 | `AGENT_BASE_URL`, `AGENT_API_KEY`, `AGENT_MODEL` | Endpoint (the API root that contains `/chat/completions`), key and model. A remote endpoint needs a key; your own local server may not. Pin a dated model snapshot, not a `latest` alias |
 | `ROMULUS_MODEL_EGRESS` | Must be `lab-public-data` before any non-local endpoint is allowed (see below) |
 | `MODEL_LOCAL_HOSTS` | Extra hostnames, addresses or CIDR networks treated as local, such as a team's model server on a routable enclave address |
@@ -53,7 +56,7 @@ With no endpoint, no model, or a remote endpoint with no key, the agent is **not
 
 Every reply must say why generation stopped and how many tokens it used. A reply cut off at the output limit, a prompt that reached the context window, a refusal, a reply with no stop reason, malformed tool-call arguments, a call to a tool that was not offered, and output that does not match the requested JSON schema are all reported as such, never passed on as a complete answer. A prompt estimated to exceed the context window is not sent. Transport errors and `429`/`5xx` responses are retried up to three times with backoff; then the endpoint counts as unavailable. Redirects are not followed.
 
-`romulus doctor` checks the agent's endpoint: its egress class, reachability, that the model is listed, that tool calling and JSON-schema output work (with a tiny request that carries no telemetry), that usage is reported, and that the model the server reports matches the pinned one.
+`romulus doctor` checks the agent's endpoint: its egress class, reachability, that the model is listed, that tool calling and JSON-schema output work (with a tiny request that carries no telemetry), that usage is reported, and that the model the server reports matches the pinned one. For `anthropic` the models endpoint must confirm the exact model id, supplies the context window when `AGENT_CONTEXT_TOKENS` is 0 (doctor fails and asks for that key when it reports none), and bounds the per-call output plus thinking allowance; the tool-call check asks for the tool in the prompt, since the model does not accept a forced tool choice, and a reply without the call fails it.
 
 ### Keeping telemetry on site
 

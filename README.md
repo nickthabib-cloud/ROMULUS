@@ -124,6 +124,18 @@ After the deterministic hunt, an AI agent will read everything ROMULUS found, fo
 - A hosted model is allowed only for testing on public data, behind an explicit install-time switch, with a banner on every hunt and report that used it.
 - Usage is bounded by per-hunt budgets (calls, tokens, time, optional cost). If a budget runs out, the deterministic results are unaffected.
 
+### Model providers
+
+`AGENT_PROVIDER` in `.env` picks how ROMULUS talks to the model:
+
+| Provider | For | Notes |
+|---|---|---|
+| `openai_compatible` (default) | A team's own model server (vLLM, SGLang, llama.cpp `server`, LM Studio, TGI, Ollama's `/v1`), or a hosted API | Set `AGENT_BASE_URL`, `AGENT_MODEL` and, for a remote endpoint, `AGENT_API_KEY` |
+| `ollama` | Small local runs on Ollama's native API | The context window is always explicit |
+| `anthropic` | Claude models through the Claude Messages API | Install the optional SDK first (`pip install -e ".[anthropic]"`; `scripts/deploy.ps1 -Extras anthropic` on a host). The endpoint defaults to `https://api.anthropic.com`, which is remote: like any hosted API it needs `ROMULUS_MODEL_EGRESS=lab-public-data`, so use it on public data only. Set `AGENT_MODEL` to an exact model id and `AGENT_API_KEY`; `AGENT_EFFORT`, `AGENT_THINKING_TOKENS` and `AGENT_REFUSAL_FALLBACK` tune it (see `.env.example`) |
+
+`romulus doctor` checks the configured provider with a tiny request that carries no telemetry.
+
 Full design: [`docs/architecture/ai-investigating-agent.md`](docs/architecture/ai-investigating-agent.md).
 
 - **Strong indicators are reported on their own, immediately.** Correlation and attack paths come second.

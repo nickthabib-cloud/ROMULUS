@@ -113,29 +113,32 @@ class OpenAICompatibleProvider(ChatProvider):
         else:
             out.append(("agent.reachable", "warn", (f"{self.decision.host} does not list models "
                                                    f"(HTTP {response.status_code}); checking by a call")))
-        out += self._probe_calls()
+        out += probe_calls(self)
         return out
 
-    def _probe_calls(self) -> list[tuple[str, str, str]]:
-        out = []
-        user = [{"role": "user", "content": "This is a connectivity check. Call report_status with ok set to true."}]
-        try:
-            tool = self.chat(ChatRequest(user, tools=[PROBE_TOOL], tool_choice="required",
+
+def probe_calls(provider: ChatProvider) -> list[tuple[str, str, str]]:
+    """Doctor checks shared by adapters: one required tool call and one JSON-schema reply, carrying no telemetry,
+    then usage reporting and model pinning."""
+    out = []
+    user = [{"role": "user", "content": "This is a connectivity check. Call report_status with ok set to true."}]
+    try:
+        tool = provider.chat(ChatRequest(user, tools=[PROBE_TOOL], tool_choice="required",
                                          max_output_tokens=PROBE_MAX_OUTPUT))
-            schema = self.chat(ChatRequest(
-                [{"role": "user", "content": "This is a connectivity check. Reply with ok set to true."}],
-                response_schema=PROBE_SCHEMA, schema_name="report_status", max_output_tokens=PROBE_MAX_OUTPUT))
-        except ProviderUnavailable as exc:
-            return [("agent.tool_calls", "fail", str(exc))]
-        good_tool = tool.ok and any(c.name == PROBE_TOOL.name and (c.arguments or {}).get("ok") is True
-                                    for c in tool.tool_calls)
-        out.append(("agent.tool_calls", "ok" if good_tool else "fail",
-                    "tool calling works" if good_tool else f"no valid tool call: {tool.status} {tool.error}"[:300]))
-        good_schema = schema.ok and (schema.parsed or {}).get("ok") is True
-        out.append(("agent.json_schema", "ok" if good_schema else "fail",
-                    "JSON-schema output works" if good_schema else f"{schema.status} {schema.error}"[:300]))
-        out += usage_checks(self.model, (tool, schema))
-        return out
+        schema = provider.chat(ChatRequest(
+            [{"role": "user", "content": "This is a connectivity check. Reply with ok set to true."}],
+            response_schema=PROBE_SCHEMA, schema_name="report_status", max_output_tokens=PROBE_MAX_OUTPUT))
+    except ProviderUnavailable as exc:
+        return [("agent.tool_calls", "fail", str(exc))]
+    good_tool = tool.ok and any(c.name == PROBE_TOOL.name and (c.arguments or {}).get("ok") is True
+                                for c in tool.tool_calls)
+    out.append(("agent.tool_calls", "ok" if good_tool else "fail",
+                "tool calling works" if good_tool else f"no valid tool call: {tool.status} {tool.error}"[:300]))
+    good_schema = schema.ok and (schema.parsed or {}).get("ok") is True
+    out.append(("agent.json_schema", "ok" if good_schema else "fail",
+                "JSON-schema output works" if good_schema else f"{schema.status} {schema.error}"[:300]))
+    out += usage_checks(provider.model, (tool, schema))
+    return out
 
 
 def usage_checks(model: str, results) -> list[tuple[str, str, str]]:

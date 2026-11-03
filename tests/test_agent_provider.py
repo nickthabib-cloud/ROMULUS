@@ -807,6 +807,56 @@ def test_doctor_survives_a_probe_that_crashes(monkeypatch):
     assert checks[-1].status == "fail" and "probe failed" in checks[-1].detail
 
 
+def test_the_port_and_the_other_adapters_never_import_the_anthropic_sdk():
+    import subprocess
+    import sys
+    script = (
+        "import sys, httpx\n"
+        "import romulus.agent.provider as port, romulus.doctor\n"
+        "from romulus.agent.provider.openai_compatible import OpenAICompatibleProvider\n"
+        "from romulus.agent.provider.ollama import OllamaProvider\n"
+        "from romulus.config import Settings\n"
+        "ok = lambda r: httpx.Response(200, json={'model': 'm', 'choices': [{'message': {'content': 'hi'}, "
+        "'finish_reason': 'stop'}]})\n"
+        "p = port.build_provider(Settings(agent_base_url='http://10.0.0.5/v1', agent_model='m'), "
+        "transport=httpx.MockTransport(ok), resolver=lambda h: [])\n"
+        "assert p.chat(port.ChatRequest([{'role': 'user', 'content': 'x'}])).ok\n"
+        "port.agent_readiness(Settings(agent_provider='anthropic', agent_model='m'), lambda h: ['198.51.100.7'])\n"
+        "assert 'anthropic' not in sys.modules and 'httpx2' not in sys.modules, sorted(sys.modules)\n"
+    )
+    done = subprocess.run([sys.executable, "-c", script], check=False, capture_output=True, text=True, timeout=120)
+    assert done.returncode == 0, done.stderr
+
+
+def test_the_anthropic_provider_without_its_sdk_is_not_configured_never_a_traceback(monkeypatch, tmp_path):
+    import sys
+
+    from romulus.hunt import run as hunt_run
+    monkeypatch.setitem(sys.modules, "anthropic", None)      # as if romulus[anthropic] were not installed
+    s = Settings(home=tmp_path, agent_provider="anthropic", agent_model="claude-opus-5-5", agent_api_key=KEY,
+                 model_egress="lab-public-data")
+    r = agent_readiness(s, resolver_for({"api.anthropic.com": ["198.51.100.20"]}))
+    assert r.state == "not_configured" and "install romulus[anthropic]" in r.reason
+    checks = check_agent(s, resolver=resolver_for({"api.anthropic.com": ["198.51.100.20"]}))
+    assert [(c.name, c.status) for c in checks] == [("agent.provider", "ok")]
+    assert "agent not configured" in checks[0].detail and "romulus[anthropic]" in checks[0].detail
+    with pytest.raises(AgentNotReady, match="romulus"):
+        build_provider(s, resolver=resolver_for({"api.anthropic.com": ["198.51.100.20"]}))
+    monkeypatch.setattr(hunt_run, "agent_readiness", lambda settings: agent_readiness(
+        settings, resolver_for({"api.anthropic.com": ["198.51.100.20"]})))
+    entry = hunt_run.ai_agent_entry(s)
+    assert entry["state"] == "not_configured" and "romulus[anthropic]" in entry["reason"]
+
+
+def test_assistant_messages_carry_provider_state_only_when_an_adapter_wrote_some():
+    from romulus.agent.provider import PROVIDER_STATE
+    rec = Recorder(completion(tool_calls=[tool_call()], finish="tool_calls"))
+    p, _ = provider(remote_settings(), rec)
+    message = p.chat(ask(tools=[TOOL])).assistant_message()
+    assert PROVIDER_STATE not in message
+    assert message["tool_calls"][0]["function"] == {"name": "report_status", "arguments": '{"ok": true}'}
+
+
 def test_cli_wording_never_calls_a_partial_hunt_complete():
     from romulus import cli
     line = cli._ai_agent_line({"ai_agent": {"status": "not_configured", "reason": "x"}})

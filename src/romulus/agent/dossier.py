@@ -252,6 +252,8 @@ def _budget(repo: Repo, hunt_id: str, manifest: dict) -> dict:
         max_cost_usd=float(configured.get("max_cost_usd") or 0.0),
         price_input_per_mtok=float(configured.get("price_input_per_mtok") or 0.0),
         price_output_per_mtok=float(configured.get("price_output_per_mtok") or 0.0),
+        price_cache_read_per_mtok=float(configured.get("price_cache_read_per_mtok") or 0.0),
+        price_cache_write_per_mtok=float(configured.get("price_cache_write_per_mtok") or 0.0),
     )
     usage = repo.agent_usage(hunt_id)
     budget = AgentBudget.from_usage(
