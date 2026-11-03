@@ -23,9 +23,11 @@ logs no family carries as `app_tx` (command, argument, reply).
 
 Secrets. Credential values (Malcolm's `related.password`, `url.password`, `url.full` and `post_password_*`, Zeek's
 own `password` columns, the argument of a credential command (FTP PASS/ACCT/ADAT, IRC PASS/OPER/AUTHENTICATE and JOIN
-keys, Redis AUTH, SQL that assigns a password), an SNMPv1/v2c community, a URI's userinfo) are never kept in a typed
-value, an origin, a caveat or an error. Only `auth.cleartext_credentials_present` (or, where an argument was withheld
-because its command could not be read, `auth.cleartext_credentials_unknown`) is typed, its origin naming where.
+keys, Redis AUTH), an SNMPv1/v2c community) are never kept in a typed value, an origin, a caveat or an error. Inside
+free text (a URI's userinfo, a SIP URI's password, a SQL statement's password literals, a Redis reply's passwords) only
+the credential is replaced by "<redacted>" and the rest kept (see zeek_credentials). Only
+`auth.cleartext_credentials_present` (or, where text that can carry one was withheld because it could not be read,
+`auth.cleartext_credentials_unknown`) is typed, its origin naming where.
 """
 from __future__ import annotations
 
@@ -52,6 +54,15 @@ from romulus.evidence.zeek_catalog import (
     ZeekField,
     ZeekLog,
     lookup_log,
+)
+from romulus.evidence.zeek_credentials import (
+    REDACTED,
+    SIP_UNREAD,
+    Scrubbed,
+    scrub_redis_reply,
+    scrub_sql,
+    strip_sip_password,
+    strip_uri_userinfo,
 )
 
 ZEEK_NORMALIZER = "zeek-ecs@1"
@@ -225,12 +236,17 @@ _ELASTIC_ONLY = frozenset(name for log in ZEEK_LOGS for name in log.names.get(EL
 def zeek_record(src: dict) -> ZeekRecord | None:
     """The Zeek shape of an indexed record, from shipper-written fields only, or None for a record that is not Zeek.
 
-    - Security Onion: `event.module` "zeek" with `data_stream.dataset` exactly "zeek" (its agent policy's one stream
-      for every Zeek log) and `event.dataset` `zeek.<log>` (its common pipeline prefixes the module), or a bare log
-      name (a record that did not pass that pipeline);
+    - Security Onion 2.4: `event.module` "zeek" with `data_stream.dataset` exactly "zeek" (its agent policy's one
+      stream for every Zeek log) and `event.dataset` `zeek.<log>` (its common pipeline prefixes the module), or a
+      bare log name (a record that did not pass that pipeline);
+    - Security Onion 2.3: `event.module` "zeek" with a bare log name as `event.dataset` and no data stream (its
+      Filebeat inputs' module and dataset fields, which its common pipeline renames and does not prefix);
     - Elastic Agent: `data_stream.dataset` `zeek.<stream>`, the same as `event.dataset` when that is written;
-    - Filebeat's zeek module: `event.module` "zeek", `event.dataset` `zeek.<fileset>` and `fileset.name` the fileset;
-    - Malcolm: `event.provider` "zeek" with a bare log name (or a list of them) as `event.dataset`.
+    - Filebeat's zeek module: `event.module` "zeek", `event.dataset` `zeek.<fileset>` and `fileset.name` the fileset
+      (Filebeat always writes a module's dataset as `<module>.<fileset>`, so a bare name is never its own);
+    - Malcolm: `event.provider` "zeek" with a bare log name (or a list of them) as `event.dataset`; Malcolm writes the
+      provider on every Zeek row, and `event.module` "zeek" on notice and signatures rows too, so the provider is
+      read first.
     Security Onion and Elastic both name most logs `zeek.<log>` (dns, http, ssl, ...), and read with the other's
     layout a record loses its sensor and uid and changes units. So a `zeek.<log>` record with neither shipper's
     markers is never read: it is a skip whose reason says why (`AMBIGUOUS_SHAPE`), counted like a dataset no
@@ -269,10 +285,8 @@ def zeek_record(src: dict) -> ZeekRecord | None:
         return None
     if provider == "zeek":
         return _record(src, MALCOLM, names, "event.dataset", "event.provider", _unsupported(dataset))
-    if module == "zeek" and data_stream == "zeek":
+    if module == "zeek":
         return _record(src, SECURITY_ONION, names, "event.dataset", "event.module", _unsupported(dataset))
-    # a bare log name with the module alone: Security Onion's before its data stream was set, or Malcolm's notice and
-    # signatures rows (which carry the module too) without their provider; the record keeps the path it took before
     return None
 
 
@@ -852,8 +866,9 @@ def superseded_interim(events: list[TypedEvent]) -> list[TypedEvent]:
 #   `#derived:analyzer-transport`); the Community ID as the shipper wrote it, else computed from the 5-tuple;
 # - `auth.cleartext_credentials_present: True` when the record carries a credential sent in cleartext (a password
 #   column, a Basic-auth username, a credential command's argument, an SNMPv1/v2c community, a SOCKS5 user, a URI's
-#   userinfo), and `auth.cleartext_credentials_unknown: True` when an argument that can carry one was withheld
-#   because its command could not be read: the origin names where, the value itself is never kept;
+#   userinfo, a password literal in SQL, a password in a Redis reply), and `auth.cleartext_credentials_unknown: True`
+#   when text that can carry one was withheld because it could not be read (an argument of an unreadable command, an
+#   ambiguous reply): the origin names where, the value itself is never kept;
 # - identity: (sensor, log, the record's key, its time, its sequence, its typed values), so copies of one row merge;
 #   a record a value was withheld from is identified by its own document (index and id) instead.
 
@@ -865,8 +880,11 @@ ZEEK_TIMEDOUT_FILE = ("Zeek stopped analyzing this file when it went idle (timed
                       "checks describe only the bytes seen before then")
 ZEEK_FIRST_HOST_ONLY = ("the shipper keeps only the first of Zeek's sending and receiving hosts of this file "
                         "(tx_hosts, rx_hosts): other hosts that carried it are not typed")
-ZEEK_ARGUMENT_WITHHELD = ("an argument of this record was not typed: its command is missing or could not be read, and "
-                          "the argument of a credential command (a password, a key) cannot be told from any other")
+ZEEK_ARGUMENT_WITHHELD = ("an argument of this record was not typed: its command is missing or could not be read, or "
+                          "is one whose argument can be a credential (a password, a key) that cannot be told from any "
+                          "other")
+ZEEK_IRC_STALE = ("Zeek logs one IRC record per connection again for each command, so on this row {fields} still held "
+                  "an earlier command's values: they were not typed")
 ZEEK_X509_NAME_PARTS = ("Elastic keeps this certificate's subject and issuer only split into attributes (the whole "
                         "names are in its Zeek line, kept only with its preserve_original_event tag): they are typed "
                         "from their CN and O, and compared by them")
@@ -905,8 +923,8 @@ def _analyzer(hit: dict, record: ZeekRecord, declared_sensor: str | None) -> Typ
     step = _STEPS.get(log.name)
     if step is not None:
         step(f, reader, log, caveats, guard)
-    _withhold_arguments(f, reader, log, guard)
-    _strip_userinfo(f, log, guard)
+    _withhold_arguments(f, reader, log, caveats, guard)
+    _strip_userinfo(f, log, caveats, guard)
     if log.family == "app_tx":
         f["app.protocol"] = fv(log.name, f"{nid}:{record.origin}")
     if log.family == "net_alert":
@@ -927,7 +945,6 @@ def _analyzer(hit: dict, record: ZeekRecord, declared_sensor: str | None) -> Typ
         f["auth.cleartext_credentials_present"] = fv(True, f"{nid}:{'+'.join(dict.fromkeys(guard.present))}#present")
     elif guard.unknown:
         f["auth.cleartext_credentials_unknown"] = fv(True, f"{nid}:{'+'.join(dict.fromkeys(guard.unknown))}#unknown")
-        caveats.append(ZEEK_ARGUMENT_WITHHELD)
     tags = reader.get("tags")
     if shape == MALCOLM and "_missing_timestamp" in (tags if isinstance(tags, list) else [tags]):
         caveats.append(MALCOLM_MISSING_TS_CAVEAT)
@@ -978,13 +995,15 @@ class _Guard:
 class _CommandArguments:
     """A log whose command's argument can be a credential: the typed command, the typed fields its arguments are
     written to, and per command (as sent, compared stripped and uppercased) which of those fields are a credential
-    (`present`) or may hold one (`unknown`). `sql`: the arguments are SQL text, withheld when they assign a
-    credential. A record whose command is missing or unreadable keeps none of its arguments."""
+    (`present`) or may hold one (`unknown`). `sql`: the argument is SQL text, whose password literals are redacted,
+    and `echoes` the fields where the server may quote it back (an error naming the text near a syntax error). A
+    record whose command is missing or unreadable keeps none of its arguments."""
     command: str
     arguments: tuple[str, ...]
     present: dict[str, tuple[str, ...]]
     unknown: dict[str, tuple[str, ...]]
     sql: bool = False
+    echoes: tuple[str, ...] = ()
 
 
 _IRC_ARGUMENTS = ("app.arg", "irc.addl")
@@ -1003,10 +1022,14 @@ _COMMAND_ARGUMENTS = {
     "redis": _CommandArguments("app.command", ("app.arg",), {"AUTH": ("app.arg",)},
                                {name: ("app.arg",) for name in ("HELLO", "MIGRATE", "CONFIG", "ACL")}),
     # COM_CHANGE_USER's argument is the new user's authentication data until Zeek's parser reduces it to the user
-    # name; a query's text can assign a password (IDENTIFIED BY, SET PASSWORD, MASTER_PASSWORD=)
-    "mysql": _CommandArguments("app.command", ("app.arg",), {}, {"CHANGE_USER": ("app.arg",)}, sql=True),
-    # a simple query's text can assign a password (CREATE ROLE ... PASSWORD '...', ALTER USER ... PASSWORD)
-    "postgresql": _CommandArguments("app.command", ("app.arg",), {}, {}, sql=True),
+    # name; a query's text can set or compare a password (IDENTIFIED BY, SET PASSWORD, MASTER_PASSWORD=), and an
+    # error response quotes the text near a syntax error
+    "mysql": _CommandArguments("app.command", ("app.arg",), {}, {"CHANGE_USER": ("app.arg",)}, sql=True,
+                               echoes=("app.reply",)),
+    # a simple query's text can set or compare a password (CREATE ROLE ... PASSWORD '...'); an error's fields can
+    # quote it
+    "postgresql": _CommandArguments("app.command", ("app.arg",), {}, {}, sql=True,
+                                    echoes=("postgresql.backend_arg",)),
 }
 # IRC services that take a password in a message (NickServ IDENTIFY, AuthServ AUTH, QuakeNet's Q, Undernet's X), and the
 # services commands that carry one as their first words
@@ -1014,18 +1037,19 @@ _IRC_SERVICES = frozenset({"nickserv", "ns", "chanserv", "cs", "authserv", "q", 
 _IRC_SERVICE_COMMANDS = frozenset({"IDENTIFY", "AUTH", "LOGIN", "REGISTER", "GHOST", "RECOVER", "RELEASE", "REGAIN",
                                    "SETPASS", "PASSWORD", "OPER"})
 _IRC_MESSAGES = frozenset({"PRIVMSG", "NOTICE", "SQUERY"})
-# SQL that assigns a credential: CREATE/ALTER USER ... IDENTIFIED BY, SET PASSWORD [FOR ...] =, PASSWORD('...'),
-# CREATE/ALTER ROLE ... [ENCRYPTED] PASSWORD '...', CHANGE MASTER TO MASTER_PASSWORD=..., password= in connection
-# strings. A column named password in a SELECT is not one.
-_SQL_CREDENTIAL = re.compile(r"\bIDENTIFIED\b|\bPASSWORD\b\s*(?:=|\(|'|\"|\$|\bFOR\b|\bTO\b|\bWITH\b)|\w_PASSWORD\b\s*=",
-                             re.IGNORECASE)
-# userinfo in a hierarchical URI (scheme://user:password@host): up to the last @ before the path
-_URI_USERINFO = re.compile(r"\b([A-Za-z][A-Za-z0-9+.-]*://)([^/?#\s]*)@")
-# the password of a SIP URI's userinfo (sip:user:password@host); the user is the address and stays
-_SIP_PASSWORD = re.compile(r"\b(sips?:)([^:@;>\s/]*):([^;>\s]*)@", re.IGNORECASE)
+# Zeek's IRC script keeps one record per connection and logs it again for each command, setting only that command's
+# columns (base/protocols/irc/main.zeek, dcc-send.zeek): NICK sets the value, USER the value and addl, JOIN the value
+# and addl (the channel key), and a DCC row is the record as the last command left it, with the dcc_* columns set. So
+# these columns of a row hold an earlier command's values (a JOIN's key among them): they are not typed.
+_IRC_STALE = {"DCC": ("app.arg", "irc.addl")}
+_IRC_FRESH = frozenset({"USER", "JOIN"})
+# how Zeek writes a JOIN's channel key into addl
+_IRC_CHANNEL_KEY = "with channel key:"
+# the most redacted values whose echo is removed from a reply; with more, the reply is withheld
+_ECHO_LIMIT = 32
 # the typed values of each log that hold a URI, a SIP URI, or a host name
 _URI_FIELDS = {"http": ("url.original", "http.request.referrer", "http.request.origin"), "ftp": ("app.arg",),
-               "intel": ("intel.indicator",)}
+               "intel": ("intel.indicator",), "mysql": ("app.arg",), "postgresql": ("app.arg",)}
 _SIP_FIELDS = {"sip": ("app.arg", "sip.request_from", "sip.request_to")}
 _HOST_FIELDS = {"http": ("http.hostname",)}
 
@@ -1044,8 +1068,10 @@ def _raw_path(reader: _Reader, log: ZeekLog, typed: str) -> str | None:
     return None
 
 
-def _withhold_arguments(f: dict[str, FieldValue], reader: _Reader, log: ZeekLog, guard: _Guard) -> None:
-    """Drop the arguments of a credential command (and of a command that cannot be read) before they are kept."""
+def _withhold_arguments(f: dict[str, FieldValue], reader: _Reader, log: ZeekLog, caveats: list[str],
+                        guard: _Guard) -> None:
+    """Drop the arguments of a credential command (and of a command that cannot be read) before they are kept, drop
+    the IRC columns a row holds from an earlier command, and redact the password literals of SQL text."""
     rule = _COMMAND_ARGUMENTS.get(log.name)
     if rule is None:
         return
@@ -1059,6 +1085,8 @@ def _withhold_arguments(f: dict[str, FieldValue], reader: _Reader, log: ZeekLog,
                 f.pop(typed, None)
                 into.append(f"{written[typed]}#{what}")
                 guard.withheld = True
+                if into is guard.unknown and ZEEK_ARGUMENT_WITHHELD not in caveats:
+                    caveats.append(ZEEK_ARGUMENT_WITHHELD)
 
     if not name:                                    # missing, empty or unreadable: fail closed
         withhold(rule.arguments, guard.unknown, "unread-command")
@@ -1066,55 +1094,139 @@ def _withhold_arguments(f: dict[str, FieldValue], reader: _Reader, log: ZeekLog,
     if name in rule.present:
         if not any(typed in written for typed in rule.present[name]) and set(rule.present[name]) == set(
                 rule.arguments):
-            # the command itself sends a credential (PASS, AUTH, ...), whether or not its argument was logged
+            # the command itself sends a credential (PASS, AUTH, ...), whether or not its argument was logged: the
+            # row is its own document, like one whose argument was withheld
             guard.present.append(f"{_path(command)}#{name.lower()}-command")
+            guard.withheld = True
         withhold(rule.present[name], guard.present, f"{name.lower()}-argument")
     if name in rule.unknown:
         withhold(rule.unknown[name], guard.unknown, f"{name.lower()}-argument")
-    if log.name == "irc" and name in _IRC_MESSAGES:
-        target, text = f.get("app.arg"), f.get("irc.addl")
-        nick = target.value.strip().split("@", 1)[0].lower() if target is not None else ""
-        first = text.value.strip().split(" ", 1)[0].lstrip(":").upper() if text is not None else ""
-        if nick in _IRC_SERVICES or first in _IRC_SERVICE_COMMANDS:
-            withhold(("irc.addl",), guard.unknown, "services-message")
+    if log.name == "irc" and name not in rule.present and name not in _IRC_FRESH:
+        _irc_stale(f, name, caveats, guard)
     if rule.sql:
-        for typed in rule.arguments:
-            value = f.get(typed)
-            if value is not None and isinstance(value.value, str) and _SQL_CREDENTIAL.search(value.value):
-                withhold((typed,), guard.present, "sql-credential")
+        _redact_sql(f, rule, caveats, guard)
 
 
-def _strip_userinfo(f: dict[str, FieldValue], log: ZeekLog, guard: _Guard) -> None:
+def _irc_stale(f: dict[str, FieldValue], name: str, caveats: list[str], guard: _Guard) -> None:
+    """Drop what a row holds from an earlier command: a DCC row's value and addl, any other row's addl (only USER and
+    JOIN write their own). A dropped JOIN key is a credential the row carried; a message to a services nick may be
+    one."""
+    dropped = []
+    for typed in _IRC_STALE.get(name, ("irc.addl",)):
+        value = f.pop(typed, None)
+        if value is None:
+            continue
+        dropped.append(_native(value))
+        if typed != "irc.addl" or not isinstance(value.value, str):
+            continue
+        if value.value.strip().startswith(_IRC_CHANNEL_KEY):
+            guard.present.append(f"{_native(value)}#earlier-channel-key")
+            guard.withheld = True
+        elif name in _IRC_MESSAGES:
+            target = f.get("app.arg")
+            nick = target.value.strip().split("@", 1)[0].lower() if target is not None else ""
+            first = value.value.strip().split(" ", 1)[0].lstrip(":").upper()
+            if nick in _IRC_SERVICES or first in _IRC_SERVICE_COMMANDS:
+                guard.unknown.append(f"{_native(value)}#services-message")
+                guard.withheld = True
+    if dropped:
+        caveats.append(ZEEK_IRC_STALE.format(fields=" and ".join(dropped)))
+
+
+def _redact_sql(f: dict[str, FieldValue], rule: _CommandArguments, caveats: list[str], guard: _Guard) -> None:
+    """Redact the password literals of a statement, and their echo in the server's reply on the same row (withheld
+    when the statement could not be read, or held more credentials than are looked for)."""
+    value = f.get("app.arg")
+    if value is None or not isinstance(value.value, str):
+        return
+    result = scrub_sql(value.value)
+    _scrubbed(f, "app.arg", value, result, caveats, guard, "sql")
+    if not (result.redacted or result.unread):
+        return
+    secrets = sorted({secret for secret in result.secrets if len(secret) >= 2}, key=len, reverse=True)
+    for typed in rule.echoes:
+        echo = f.get(typed)
+        if echo is None or not isinstance(echo.value, str):
+            continue
+        if result.unread or len(secrets) > _ECHO_LIMIT:
+            del f[typed]
+            guard.unknown.append(f"{_native(echo)}#statement-echo")
+            guard.withheld = True
+            continue
+        text = echo.value
+        for secret in secrets:
+            text = text.replace(secret, REDACTED)
+        if text != echo.value:
+            f[typed] = fv(text, f"{echo.origin}#derived:credentials-redacted")
+            guard.present.append(f"{_native(echo)}#statement-echo")
+            guard.withheld = True
+
+
+def _scrubbed(f: dict[str, FieldValue], typed: str, value: FieldValue, result: Scrubbed, caveats: list[str],
+              guard: _Guard, what: str) -> None:
+    """Keep a value with its credentials redacted (or withhold it whole), and say what was found."""
+    if result.text is None:
+        del f[typed]
+        guard.withheld = True
+    elif result.text != value.value:
+        f[typed] = fv(result.text, f"{value.origin}#derived:credentials-redacted")
+        guard.withheld = True
+    if result.redacted:
+        guard.present.append(f"{_native(value)}#{what}-credential")
+    if result.unread or result.text is None:
+        guard.unknown.append(f"{_native(value)}#unread-{what}")
+    caveats.extend(caveat for caveat in result.caveats if caveat not in caveats)
+
+
+def _strip_userinfo(f: dict[str, FieldValue], log: ZeekLog, caveats: list[str], guard: _Guard) -> None:
     """Remove the userinfo of every URI a typed value holds (a password, or a token sent as the user), the password of
     a SIP URI's userinfo, and a user part written before a host name."""
     for typed in _URI_FIELDS.get(log.name, ()):
         value = f.get(typed)
         if value is None or not isinstance(value.value, str):
             continue
-        found = _URI_USERINFO.findall(value.value)
-        if found:
-            f[typed] = fv(_URI_USERINFO.sub(r"\1", value.value), f"{value.origin}#derived:userinfo-removed")
-            into = guard.present if any(":" in userinfo for _scheme, userinfo in found) else guard.unknown
-            into.append(f"{_path(value)}#uri-userinfo")
+        text, removed, password = strip_uri_userinfo(value.value)
+        if removed:
+            f[typed] = fv(text, _derived(value, "userinfo-removed"))
+            (guard.present if password else guard.unknown).append(f"{_native(value)}#uri-userinfo")
             guard.withheld = True
     for typed in _SIP_FIELDS.get(log.name, ()):
         value = f.get(typed)
-        if value is not None and isinstance(value.value, str) and _SIP_PASSWORD.search(value.value):
-            f[typed] = fv(_SIP_PASSWORD.sub(r"\1\2@", value.value), f"{value.origin}#derived:password-removed")
-            guard.present.append(f"{_path(value)}#sip-userinfo")
+        if value is None or not isinstance(value.value, str):
+            continue
+        text, removed = strip_sip_password(value.value)
+        if text is None:                    # more SIP URIs than are read: withheld whole
+            del f[typed]
+            guard.unknown.append(f"{_native(value)}#unread-sip-uris")
+            guard.withheld = True
+            if SIP_UNREAD not in caveats:
+                caveats.append(SIP_UNREAD)
+        elif removed:
+            f[typed] = fv(text, _derived(value, "password-removed"))
+            guard.present.append(f"{_native(value)}#sip-userinfo")
             guard.withheld = True
     for typed in _HOST_FIELDS.get(log.name, ()):
         value = f.get(typed)
         if value is not None and isinstance(value.value, str) and "@" in value.value:
             userinfo, _at, host = value.value.rpartition("@")
-            f[typed] = fv(host, f"{value.origin}#derived:userinfo-removed")
-            (guard.present if ":" in userinfo else guard.unknown).append(f"{_path(value)}#host-userinfo")
+            f[typed] = fv(host, _derived(value, "userinfo-removed"))
+            (guard.present if ":" in userinfo else guard.unknown).append(f"{_native(value)}#host-userinfo")
             guard.withheld = True
+
+
+def _derived(value: FieldValue, how: str) -> str:
+    """A changed value's origin: its own, marked derived once."""
+    return value.origin if "#derived:" in value.origin else f"{value.origin}#derived:{how}"
 
 
 def _path(value: FieldValue) -> str:
     """The native path a typed value was read from (its origin without the record id)."""
     return value.origin.split(":", 1)[1]
+
+
+def _native(value: FieldValue) -> str:
+    """The native path alone (without what was derived from it)."""
+    return _path(value).split("#", 1)[0]
 
 
 def _derive(f: dict[str, FieldValue], typed: str, value, source: FieldValue, how: str) -> None:
@@ -1326,8 +1438,17 @@ def _radius(f, reader, log, caveats, guard):
         f["app.success"] = fv(result.value == "success", f"{result.origin}#derived:result")
 
 
+def _redis(f, reader, log, caveats, guard):
+    """A reply keeps everything but the credentials it carries (zeek_credentials.scrub_redis_reply)."""
+    reply, command = f.get("app.reply"), f.get("app.command")
+    if reply is None or not isinstance(reply.value, str):
+        return
+    name = command.value.strip().upper() if command is not None and isinstance(command.value, str) else ""
+    _scrubbed(f, "app.reply", reply, scrub_redis_reply(reply.value, name), caveats, guard, "reply")
+
+
 # SNMP's community needs no step: Zeek writes it only from an SNMPv1 or v2c message's header (an SNMPv3 header has
 # none), whatever the session's version column says (that is its first message's), so it is always a cleartext
 # community and only its presence is typed (the catalog's secret paths).
 _STEPS = {"dns": _dns, "http": _http, "ssl": _ssl, "x509": _x509, "files": _files, "ssh": _ssh, "ftp": _ftp,
-          "socks": _socks, "tunnel": _tunnel, "radius": _radius}
+          "socks": _socks, "tunnel": _tunnel, "radius": _radius, "redis": _redis}

@@ -386,7 +386,7 @@ def test_application_logs_type_command_argument_and_reply_as_app_tx():
     expected = {"ftp": ("RETR", "ftp://203.0.113.10/pub/tool.bin", "Transfer complete."),
                 "mysql": ("query", "SELECT 1", "OK"), "tds": ("SQLBatch", None, None),
                 "postgresql": ("simple_query", "SELECT 1", "command_complete"),
-                "redis": ("GET", "session:42", "cached"), "irc": ("PRIVMSG", "#ops", None),
+                "redis": ("GET", "session:42", "cached"), "irc": ("USER", "synth", None),
                 "sip": ("INVITE", "sip:bob@example.net", "OK"), "tunnel": ("DISCOVER", None, None),
                 "smtp": (None, None, "250 2.0.0 Ok: queued"), "socks": (None, None, "succeeded"),
                 "radius": (None, None, "Welcome"), "snmp": (None, None, None)}
@@ -487,12 +487,12 @@ def test_duplicates_are_merged_within_one_batch_only():
 
 # ---- secrets -------------------------------------------------------------------------------------------------------
 
-CREDENTIAL_LOGS = {"http", "ftp", "socks", "snmp", "irc", "redis"}
+CREDENTIAL_LOGS = {"http", "ftp", "socks", "snmp", "irc", "redis", "mysql", "postgresql"}
 
 
 @pytest.mark.parametrize("name,h", zl.secret_rows(), ids=[r[0] for r in zl.secret_rows()])
 def test_no_password_value_reaches_a_typed_event_caveat_error_or_skip(name, h):
-    log = name.split("-")[0]
+    log = name.split("-")[0].split(".")[0]
     if h["_index"] == zl.INDEX["plain"]:
         events, skips, errors = [normalize_plain_zeek(h, sensor=zl.SENSOR)], {}, []
     else:
@@ -643,6 +643,15 @@ def test_a_user_alone_in_a_uri_is_removed_and_flagged_as_possibly_a_credential()
 
 
 def test_rows_differing_only_in_a_withheld_credential_stay_apart_and_copies_of_one_document_merge():
+    # Zeek logs an AUTH row with no key (its parser types a key only for commands that have one): five attempts in
+    # one connection and one millisecond are five identical rows, and each is its own document
+    keyless = zl.REDIS.without("cmd.key").with_(**{"cmd.name": "AUTH", "success": False,
+                                                   "reply.value": "WRONGPASS invalid username-password pair"})
+    for shape in zl.shapes_of("redis"):
+        attempts = [zl.WRITERS[shape](keyless, f"auth-{shape}-{i}") for i in range(5)]
+        events = [normalize(h) for h in attempts]
+        assert len({e.id for e in events}) == 5, shape
+        assert all(e.get("auth.cleartext_credentials_present") is True for e in events), shape
     attempts = [zl.malcolm(zl.REDIS.with_(**{"cmd.name": "AUTH", "cmd.key": f"guess-{i}", "success": False,
                                               "reply.value": "WRONGPASS"}), f"auth-{i}") for i in range(5)]
     events, skips, errors = normalize_hits(attempts)

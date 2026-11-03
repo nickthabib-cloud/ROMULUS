@@ -814,7 +814,8 @@ IRC = _log("irc", "app_tx", (
        security_onion=("irc.command.type",), plain=("command",)),
     _f("app.arg", "value", "text", malcolm=("zeek.irc.value",), elastic=("zeek.irc.value",),
        security_onion=("irc.command.value",), plain=("value",)),
-    # Zeek writes a JOIN's channel key here: zeek.py never types it
+    # USER's host, server and real name, or a JOIN's channel key; on any other row an earlier command's: zeek.py types
+    # it only on a USER row
     _f("irc.addl", "addl", "text", malcolm=("zeek.irc.addl",), elastic=("zeek.irc.addl",),
        security_onion=("irc.command.info",), plain=("addl",)),
     _f("file.name", "dcc_file_name", "text", malcolm=("zeek.irc.dcc_file_name",), elastic=("file.name",),
@@ -875,6 +876,7 @@ REDIS = _log("redis", "app_tx", (
     # (cmd.value) is application data and is not read.
     _f("app.arg", "cmd.key", "text", malcolm=("zeek.redis.cmd_key",), plain=("cmd.key",)),
     _f("app.success", "success", "flag", malcolm=("zeek.redis.success",), plain=("success",)),
+    # a reply can carry a password (CONFIG GET requirepass, ACL hashes, a MONITOR line echoing AUTH): zeek.py redacts it
     _f("app.reply", "reply.value", "text", malcolm=("zeek.redis.reply",), plain=("reply.value",)),
 ), absent={**_NO_ELASTIC, **_NO_SO}, doc="base/protocols/redis/main.zeek", transport="tcp", key=("zeek.uid",))
 

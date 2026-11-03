@@ -41,9 +41,9 @@ PINNED_WINDOWS = {
     "windows-ecs@3": "f0a941924e4c0b95b0e2f9dbc2635ae325708c7739b3fcf780e803e7dbfdf203",
     "windows-ecs@4": "6d31ffa710c230e79dc39509fd40740e69c35240028cfbc0a4759cb587dafd7d",
 }
-ZEEK_EVIDENCE_FILES = ("certificates.py", "community.py", "zeek.py", "zeek_catalog.py")
+ZEEK_EVIDENCE_FILES = ("certificates.py", "community.py", "zeek.py", "zeek_catalog.py", "zeek_credentials.py")
 PINNED_ZEEK = {
-    "zeek-ecs@1": "ea40ff0d3413a4619a72de846ca3b88c19f6d1a7cc3844e9626606a34dd6cd6c",
+    "zeek-ecs@1": "1272a9786b0f9f9ca1393b3e7fea3de4cfea4a5a99b05ccb14160fa7e25b0afb",
 }
 # The packet stage's normalizer: HTTP bodies rebuilt by TShark -> http_body events, and TCP connections rebuilt
 # from per-segment payload -> tcp_stream events (with the shell analysis and the tables it reads).

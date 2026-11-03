@@ -166,8 +166,9 @@ SMTP = Row("smtp", {**_conn("CsmtpConn00000001", 51080, 25), "trans_depth": 1, "
                     "subject": "Quarterly report", "x_originating_ip": "192.0.2.25",
                     "last_reply": "250 2.0.0 Ok: queued", "path": [SERVER, CLIENT], "user_agent": "ExampleMail 1.0",
                     "tls": False, "fuids": ["Fsmtp000000000001"]})
+# a USER row, the one command whose addl is its own (host, server and real name)
 IRC = Row("irc", {**_conn("CircConn000000001", 51090, 6667), "nick": "synthbot", "user": "synth",
-                  "command": "PRIVMSG", "value": "#ops", "addl": "hello"})
+                  "command": "USER", "value": "synth", "addl": "localhost irc.example.test Synthetic Bot"})
 MYSQL = Row("mysql", {**_conn("CmysqlConn0000001", 51100, 3306), "cmd": "query", "arg": "SELECT 1", "success": True,
                       "rows": 1, "response": "OK"})
 TDS = Row("tds", {**_conn("CtdsConn000000001", 51110, 1433), "command": "SQLBatch"})
@@ -421,6 +422,7 @@ def _malcolm_mutate(log: str, source: dict, z: dict, row: Row) -> None:
             _set(source, "event.original", z.pop("event_message"))
         if "note" in z:
             _set(source, "rule.category", [z.pop("note")])
+        _set(source, "event.module", "zeek")        # 1200_zeek_mutate.conf adds it to signatures and notice rows
     if log == "notice":
         _set(source, "event.original", ":".join(p for p in (z.get("msg"), z.get("sub")) if p))
         _set(source, "event.module", "zeek")
@@ -907,9 +909,11 @@ SECRET = "Hunter2-synthetic-secret"
 
 def secret_rows() -> list[tuple[str, dict]]:
     """For every log that can carry a credential, a row in every shape with SECRET wherever that shape writes it,
-    plus Malcolm's derived copies (url.full, url.password, post_password_*). Each must type only
+    plus Malcolm's derived copies (url.full, url.password, post_password_*); and rows whose free text carries one (a
+    Redis reply, SQL, an IRC row holding an earlier JOIN's key), named <log>.<case>. Each must type only
     auth.cleartext_credentials_present."""
     rows: list[tuple[str, dict]] = []
+    keyless = REDIS.without("cmd.key")
     logical = {
         "http": HTTP.with_(username="alice", password=SECRET),
         "ftp": FTP.with_(command="PASS", arg=SECRET, password=SECRET),
@@ -917,6 +921,23 @@ def secret_rows() -> list[tuple[str, dict]]:
         "snmp": SNMP.with_(community=SECRET),
         "irc": IRC.with_(command="JOIN", value="#ops", addl=f" with channel key: '{SECRET}'"),
         "redis": REDIS.with_(**{"cmd.name": "AUTH", "cmd.key": SECRET}),
+        # an unquoted password is a syntax error, and the server's error quotes it back
+        "mysql": MYSQL.with_(arg=f"CREATE USER 'app'@'%' IDENTIFIED BY {SECRET}", success=False, response=(
+            "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version "
+            f"for the right syntax to use near '{SECRET}' at line 1")),
+        "postgresql": POSTGRESQL.with_(frontend_arg=f"ALTER ROLE app WITH ENCRYPTED PASSWORD '{SECRET}'",
+                                       backend_arg="ALTER ROLE"),
+        "redis.config": keyless.with_(**{"cmd.name": "CONFIG", "reply.value": f"[dir, /data, requirepass, {SECRET}]"}),
+        "redis.acl": keyless.with_(**{"cmd.name": "ACL", "reply.value": f"[user default on >{SECRET} ~* +@all]"}),
+        # a MONITOR stream's line, logged when the connection ends on a row with no command
+        "redis.monitor": keyless.without("cmd.name").with_(
+            **{"reply.value": f'1731938400.123456 [0 {CLIENT}:51131] "auth" "{SECRET}"'}),
+        "mysql.insert": MYSQL.with_(arg=f"INSERT INTO accounts (name, password) VALUES ('svc', '{SECRET}')"),
+        "postgresql.conninfo": POSTGRESQL.with_(
+            frontend_arg=f"SELECT dblink_connect('host=192.0.2.5 user=app password={SECRET} dbname=inventory')"),
+        "irc.nick": IRC.with_(command="NICK", value="synthbot2", addl=f" with channel key: '{SECRET}'"),
+        "irc.dcc": IRC.with_(command="DCC", value="#ops", addl=f" with channel key: '{SECRET}'",
+                             dcc_file_name="update.bin", dcc_file_size=1024),
     }
     for log, row in logical.items():
         for shape, h in in_every_shape(row, "secret-").items():

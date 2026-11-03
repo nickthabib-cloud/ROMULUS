@@ -11234,7 +11234,7 @@
        "dataset": "zeek.irc",
        "id": "CircConn000000001",
        "kind": "event",
-       "original": "{\"ts\": 1731938400.123, \"uid\": \"CircConn000000001\", \"id.orig_h\": \"10.0.0.5\", \"id.orig_p\": 51090, \"id.resp_h\": \"203.0.113.10\", \"id.resp_p\": 6667, \"nick\": \"synthbot\", \"user\": \"synth\", \"command\": \"PRIVMSG\", \"value\": \"#ops\", \"addl\": \"hello\"}"
+       "original": "{\"ts\": 1731938400.123, \"uid\": \"CircConn000000001\", \"id.orig_h\": \"10.0.0.5\", \"id.orig_p\": 51090, \"id.resp_h\": \"203.0.113.10\", \"id.resp_p\": 6667, \"nick\": \"synthbot\", \"user\": \"synth\", \"command\": \"USER\", \"value\": \"synth\", \"addl\": \"localhost irc.example.test Synthetic Bot\"}"
       },
       "host": {
        "name": "sensor-elastic-irc-shipper"
@@ -11257,10 +11257,10 @@
       },
       "zeek": {
        "irc": {
-        "addl": "hello",
-        "command": "PRIVMSG",
+        "addl": "localhost irc.example.test Synthetic Bot",
+        "command": "USER",
         "nick": "synthbot",
-        "value": "#ops"
+        "value": "synth"
        },
        "session_id": "CircConn000000001"
       }
@@ -11317,10 +11317,10 @@
       "timestamp": 1731938400123,
       "zeek": {
        "irc": {
-        "addl": "hello",
-        "command": "PRIVMSG",
+        "addl": "localhost irc.example.test Synthetic Bot",
+        "command": "USER",
         "nick": "synthbot",
-        "value": "#ops"
+        "value": "synth"
        },
        "ts": "2024-11-18T14:00:00.123Z",
        "uid": "CircConn000000001"
@@ -11341,8 +11341,8 @@
      "_index": "zeek-json-241118",
      "_source": {
       "_path": "irc",
-      "addl": "hello",
-      "command": "PRIVMSG",
+      "addl": "localhost irc.example.test Synthetic Bot",
+      "command": "USER",
       "id.orig_h": "10.0.0.5",
       "id.orig_p": 51090,
       "id.resp_h": "203.0.113.10",
@@ -11351,7 +11351,7 @@
       "ts": 1731938400.123,
       "uid": "CircConn000000001",
       "user": "synth",
-      "value": "#ops"
+      "value": "synth"
      }
     }
    ],
@@ -11387,9 +11387,9 @@
       },
       "irc": {
        "command": {
-        "info": "hello",
-        "type": "PRIVMSG",
-        "value": "#ops"
+        "info": "localhost irc.example.test Synthetic Bot",
+        "type": "USER",
+        "value": "synth"
        },
        "nickname": "synthbot",
        "username": "synth"
@@ -11399,7 +11399,7 @@
         "uid": "CircConn000000001"
        }
       },
-      "message": "{\"ts\": 1731938400.123, \"uid\": \"CircConn000000001\", \"id.orig_h\": \"10.0.0.5\", \"id.orig_p\": 51090, \"id.resp_h\": \"203.0.113.10\", \"id.resp_p\": 6667, \"nick\": \"synthbot\", \"user\": \"synth\", \"command\": \"PRIVMSG\", \"value\": \"#ops\", \"addl\": \"hello\"}",
+      "message": "{\"ts\": 1731938400.123, \"uid\": \"CircConn000000001\", \"id.orig_h\": \"10.0.0.5\", \"id.orig_p\": 51090, \"id.resp_h\": \"203.0.113.10\", \"id.resp_p\": 6667, \"nick\": \"synthbot\", \"user\": \"synth\", \"command\": \"USER\", \"value\": \"synth\", \"addl\": \"localhost irc.example.test Synthetic Bot\"}",
       "observer": {
        "name": "sensor-security_onion-irc"
       },
@@ -12630,6 +12630,7 @@
         "CsigConn000000001"
        ],
        "kind": "event",
+       "module": "zeek",
        "original": "10.0.0.5: synthetic payload marker",
        "provider": "zeek"
       },
