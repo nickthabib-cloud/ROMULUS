@@ -27,7 +27,8 @@ anthropic = ["anthropic>=2.4.0,<3"]
 romulus = "romulus.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8.2", "respx>=0.21", "ruff>=0.6"]
+# the anthropic extra is listed so its adapter tests run instead of being skipped
+dev = ["pytest>=8.2", "respx>=0.21", "ruff>=0.6", "anthropic>=2.4.0,<3"]
 
 [build-system]
 requires = ["hatchling>=1.25"]
