@@ -5,6 +5,7 @@ import hashlib
 import ipaddress
 import json
 from datetime import UTC, datetime
+from itertools import islice
 
 from romulus.detect.base import Match, pf
 from romulus.detect.netdef import DIRECTION_ASSUMED_REASON, assume_direction, current
@@ -52,7 +53,7 @@ def source_key(event):
 
 
 class _Burst(WindowsEventRule):
-    version = "4"
+    version = "5"
     citation_fields = _FIELDS
     needs_live_loader = False
     direct_eligible = False
@@ -64,6 +65,13 @@ class _Burst(WindowsEventRule):
     next_checks = ("review cited status codes, source identities and site-wide authentication activity",)
     research = (_DOC + "4625", _DOC + "4771", _DOC + "4776")
     rationale = "Twenty failed records in ten minutes tests concentrated retries rather than isolated mistakes."
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        cls.card = {**cls.card, "lanes": (
+            "The first qualifying window for each correlation key and each new episode publishes immediately "
+            "as a LEAD. Within an episode, revisions occur at non-overlapping-window doublings and finalization, "
+            "retaining first/latest witnesses and the complete reporting-host list.")}
 
     def __init__(self):
         super().__init__()
@@ -81,11 +89,11 @@ class _Burst(WindowsEventRule):
         return [found[key] for key in ids]
 
     def _maybe(self, key, event_id, stamp, value, host, *, phase):
-        identity = row_key(self.id, key, host)
+        identity = row_key(self.id, key)
         state_key = ("replay:" if phase == "finalize" else "window:") + identity
         previous = self.rows.marker(state_key)
         state = json.loads(previous) if previous else None
-        if state is not None and stamp <= state["latest_end"]:
+        if state is not None and stamp < state["latest_end"]:
             return []
         if state is None and self.distinct and not self.rows.marked("qualified-key:"+key) and self.rows.prior_value(
                 key, stamp, value, host, event_id, int(stamp//self.seconds)*self.seconds):
@@ -95,29 +103,49 @@ class _Burst(WindowsEventRule):
         if len(evidence) != self.threshold:
             return []
         self.rows.first("qualified-key:"+key)
-        if state is not None and min(item[1] for item in evidence) <= state["latest_end"]:
-            return []
-        loaded = self._load_witnesses(list(dict.fromkeys([event_id, *(item[0] for item in evidence)])))
-        event = loaded[0]
-        by_id = {item.id: item for item in loaded}
-        witnesses = [by_id[item[0]] for item in evidence]
-        start, end = min(item.ts.timestamp() for item in witnesses), max(item.ts.timestamp() for item in witnesses)
-        if state is not None and start <= state["latest_end"]:
+        start, end = min(item[1] for item in evidence), max(item[1] for item in evidence)
+        # Overlapping windows still advance the episode frontier and its latest witnesses.
+        # Count disjoint windows separately, so the checkpoint cadence cannot grow per record.
+        new_episode = state is None or start-state["latest_end"] >= self.seconds
+        counted = state is None or start > state["counted_end"]
+        ids = [item[0] for item in evidence]
+        if state is not None and ids == state["latest_ids"]:
             return []
         state = {"first_start": start if state is None else state["first_start"],
                  "first_end": end if state is None else state["first_end"],
-                 "latest_start": start, "latest_end": end, "windows": 1 if state is None else state["windows"]+1}
+                 "first_ids": ids if state is None else state["first_ids"], "latest_ids": ids,
+                 "latest_start": start, "latest_end": end, "counted_end": end if counted else state["counted_end"],
+                 "windows": 1 if state is None else state["windows"]+int(counted),
+                 "episodes": 1 if state is None else state["episodes"]+int(new_episode),
+                 "episode_windows": 1 if new_episode else state["episode_windows"]+int(counted),
+                 "key": key, "host": host}
         self.rows.remember(state_key, json.dumps(state, sort_keys=True))
+        # The first window of each episode is immediately useful. Within an episode only doubling
+        # checkpoints revise the candidate; finalize publishes its latest complete state once.
+        windows = state["episode_windows"]
+        if phase == "finalize" or not counted or windows & (windows-1):
+            return []
+        return self._publish_window(identity, state)
+
+    def _publish_window(self, identity, state, *, final=False):
+        key, host = state["key"], state["host"]
+        ids = list(dict.fromkeys([*state["first_ids"], *state["latest_ids"]]))
+        loaded = self._load_witnesses(ids)
+        if not loaded:
+            return []
+        selected = {item.id: item for item in loaded}
+        event = max(loaded, key=lambda item: (item.ts, item.id))
         emitted = self.rows.marker("emitted:"+identity)
         emitted = json.loads(emitted) if emitted else None
-        if emitted is not None and end < emitted["latest_end"]:
+        if not final and emitted is not None and state["latest_end"] < emitted["latest_end"]:
             return []
-        total = self.rows.count(key)
-        selected = {item.id: item for item in loaded}
-        signature = hashlib.sha256(row_key(state, sorted(selected), total).encode()).hexdigest()
+        total, values, accounts = self.rows.totals(key)
+        host_count, host_checkpoint, _ = self.rows.host_checkpoint(key)
+        host_sample = ", ".join(host for host, _ in islice(self.rows.hosts(key, host_checkpoint), 8))
+        signature = hashlib.sha256(row_key(state, sorted(selected), total, values, accounts).encode()).hexdigest()
         if emitted is not None and signature == emitted["signature"]:
             return []
-        self.rows.remember("emitted:"+identity, json.dumps({"latest_end": end, "signature": signature}))
+        self.rows.remember("emitted:"+identity, json.dumps({"latest_end": state["latest_end"], "signature": signature}))
         reporter = key.startswith('["reporter",')
         key_text = ("reporting host " + str(event.get("host.full_name") or host) +
                     "; recorded sources may be unresolved or unrelated" if reporter else self.key_description(event))
@@ -125,20 +153,30 @@ class _Burst(WindowsEventRule):
             return datetime.fromtimestamp(value, UTC).isoformat()
         claim = (f"{self.description}: at least {self.threshold} {self.units} within {self.seconds} seconds "
                  f"for {self.describe(key_text)}. First qualifying window {iso(state['first_start'])} to "
-                 f"{iso(state['first_end'])}; latest qualifying window {iso(start)} to {iso(end)}. "
-                 f"The {self.threshold} cited witnesses describe the latest window. "
+                 f"{iso(state['first_end'])}; latest qualifying window {iso(state['latest_start'])} to "
+                 f"{iso(state['latest_end'])}. {state['windows']} non-overlapping qualifying windows across "
+                 f"{state['episodes']} episode{'s' if state['episodes'] != 1 else ''}; "
+                 f"{total} records, {accounts} distinct recorded target accounts and {values} distinct correlation "
+                 f"values retained for this key. "
+                 f"{host_count} reporting hosts retained (sample: {host_sample}); the complete list is in finding detail. "
+                 f"The {len(selected)} cited witnesses cover the first and latest windows "
+                 f"({self.threshold} witnesses each; overlapping citations count once). "
                  f"The current supporting record is on {event.host}. This is a concentration signal, not proof of intent.")
         return [Match(self.id, claim, self.claim_type, list(selected.values()),
                       [pf(item, name) for item in selected.values() for name in _FIELDS if item.has(name)], event.ts,
                       "medium", "lead", "medium", event.entities(),
                       [self.rationale, "Counts are records; several channels may describe one authentication attempt.",
-                       (f"The correlation key has {total} recorded witnesses across {state['windows']} non-overlapping "
-                        f"qualifying windows; at most {self.threshold+1} latest-window witnesses are cited. "
-                        "First/latest bounds and window count are retained; other window members remain in disk-backed history."),
+                       ("Touching or overlapping windows, or windows separated by less than one window length, "
+                        "belong to the same episode. Window counts use disjoint selections; the latest qualifying "
+                        "window is retained even when it overlaps an earlier selection. "
+                        "First/latest bounds, episode and window totals are retained; intermediate members remain "
+                        "in disk-backed history. Revisions occur at episode-window doublings and at finalization."),
                        "Reported workstation labels do not establish verified host identities or IP ownership."],
                       group_key="windows-burst:" + hashlib.sha256(identity.encode()).hexdigest(),
                       context_ids=set(selected) - {event.id},
-                      revision_reason="A later qualifying window or chronological replay revised the cited witnesses." if emitted else "")]
+                      revision_reason="A later episode checkpoint or final replay revised the first/latest witnesses." if emitted else "",
+                      bounded_revision=True, fleet_hosts=self.rows.hosts(key, host_checkpoint),
+                      fleet_host_count=host_count, fleet_hosts_complete=True)]
 
     def consume(self, events):
         out = []
@@ -177,10 +215,13 @@ class _Burst(WindowsEventRule):
             return
         with self.rows.batch():
             # Stream replay catches windows made visible by late or out-of-order target arrivals.
+            self.rows.reset_markers("replay:")
             for key, event_id, stamp, value, host in self.rows.iterate():
                 if key.startswith('["daily-'):
                     continue
                 yield from self._maybe(key, event_id, stamp, value, host, phase="finalize")
+            for identity, value in self.rows.markers("replay:"):
+                yield from self._publish_window(identity.removeprefix("replay:"), json.loads(value), final=True)
             if isinstance(self, WindowsPasswordSpray):
                 yield from self._daily()
 
@@ -191,10 +232,12 @@ class _Burst(WindowsEventRule):
             identity = "windows-daily-auth:" + hashlib.sha256(row_key(key).encode()).hexdigest()
             previous = self.rows.marker(identity)
             evidence = self.rows.daily_witnesses(key, day, threshold, offset)
-            signature = json.dumps([count, max(item[1] for item in evidence)], separators=(",", ":"))
+            host_count, host_checkpoint, host_revision = self.rows.host_checkpoint(key)
+            signature = json.dumps([count, max(item[1] for item in evidence), host_count, host_revision], separators=(",", ":"))
             if previous is not None:
-                prior_count, prior_end = json.loads(previous)
-                if prior_end >= max(item[1] for item in evidence) and prior_count >= count:
+                prior_count, prior_end, prior_hosts, prior_revision = json.loads(previous)
+                if (prior_end >= max(item[1] for item in evidence) and prior_count >= count
+                        and prior_hosts >= host_count and prior_revision >= host_revision):
                     continue
             witnesses = sorted(self._load_witnesses([item[0] for item in evidence]), key=lambda item: (item.ts, item.id))
             if len(witnesses) != threshold:
@@ -204,8 +247,11 @@ class _Burst(WindowsEventRule):
             scope = "reporting host" if label == "daily-reporter" else "recorded source"
             interval = ("the hunt span" if day is None else
                         f"a UTC day partition (offset {offset//3600} hours) containing {witnesses[0].ts.isoformat()}")
+            host_sample = ", ".join(host for host, _ in islice(self.rows.hosts(key, host_checkpoint), 8))
             claim = (f"Failed authentication records named {count} distinct target-account identities during {interval} "
                      f"for {scope} {self.describe(subject)}; "
+                     f"{host_count} reporting hosts retained across this key's history (sample: {host_sample}); "
+                     "the complete list is in finding detail. "
                      f"{threshold} distinct-account witnesses are cited. This account breadth can expose "
                      "slow or rotating-source guessing; it is not proof of intent or a verified common source.")
             yield Match(self.id, claim, self.claim_type, witnesses,
@@ -218,7 +264,9 @@ class _Burst(WindowsEventRule):
                          "Account/source keys and late-record replay are disk-backed; only a stated disk refusal "
                          "can leave records unassessed.")], group_key=identity,
                         context_ids={item.id for item in witnesses[1:]},
-                        revision_reason="Later records or a broader partition changed the distinct-account count." if previous else "")
+                        revision_reason="Later records or a broader partition revised account counts, witnesses or host references." if previous else "",
+                        bounded_revision=True, fleet_hosts=self.rows.hosts(key, host_checkpoint),
+                        fleet_host_count=host_count, fleet_hosts_complete=True)
 
     def release_state(self):
         self._batch = {}
@@ -251,7 +299,7 @@ class WindowsBruteForce(_Burst):
 
     def key_value(self, event):
         source, account = source_key(event), account_key(event)
-        return (row_key(source, account), event.id) if source and account else None
+        return (row_key(source, account), account) if source and account else None
 
     def key_description(self, event):
         return f"{account_key(event)} from {source_key(event)}"
@@ -316,7 +364,7 @@ class WindowsKerberoastDiversity(_Burst):
 
 
 class WindowsHashLogonShape(WindowsEventRule):
-    version = "2"
+    version = "3"
     id, title = "win.hash_logon_shape", "Logon fields have a pass-the-hash-associated shape"
     families = ("auth",)
     windows_event_classes = (("Security", SECURITY, 4624),)
@@ -345,7 +393,7 @@ class WindowsHashLogonShape(WindowsEventRule):
 
 
 class WindowsExternalRdp(WindowsEventRule):
-    version = "2"
+    version = "3"
     id, title = "win.rdp_external_source", "RDP source outside the site's internal-network definition"
     direction_dependent = True
     families = ("auth", "remote_access")

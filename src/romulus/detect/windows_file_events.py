@@ -26,6 +26,18 @@ EXECUTABLE_SUFFIXES = frozenset({
     ".psd1", ".ps1xml", ".mof", ".sdb", ".reg", ".inf", ".vxd", ".drv", ".appx", ".appxbundle",
     ".msix", ".msixbundle", ".sh", ".bash", ".pyw", ".lua", ".go", ".c", ".cpp", ".h", ".cs",
     ".vb", ".tsx", ".ts", ".jsx", ".mjs", ".cjs", ".wasm", ".wsc", ".pif", ".url", ".scf",
+    ".xll", ".wll", ".chm", ".msc", ".application", ".appref-ms", ".settingcontent-ms", ".ws",
+    ".iqy", ".slk", ".library-ms", ".searchconnector-ms", ".diagcab", ".gadget", ".vsto", ".xbap", ".ppkg",
+    ".docm", ".dotm", ".xlsm", ".xltm", ".xlam", ".xla", ".pptm", ".potm", ".ppam", ".ppsm", ".sldm",
+    ".one", ".onepkg", ".iso", ".img", ".vhd", ".vhdx",
+})
+# Cached script/text resources do not establish a runnable downloaded artifact.
+# Native binaries, active document formats, shortcuts and disk images remain code-capable.
+_CACHE_TEXT_SUFFIXES = frozenset({
+    ".js", ".jse", ".ts", ".tsx", ".jsx", ".mjs", ".cjs", ".vbs", ".vbe", ".ps1", ".psm1", ".psd1",
+    ".ws", ".wsf", ".wsh", ".py", ".pyw", ".rb", ".pl", ".lua", ".go", ".c", ".cpp", ".h", ".cs", ".vb",
+    ".sh", ".bash", ".bat", ".cmd", ".asp", ".aspx", ".ashx", ".asmx", ".php", ".jsp", ".jspx", ".cgi",
+    ".htm", ".html", ".css", ".json", ".xml", ".txt", ".map", ".xsl", ".xslt",
 })
 LURE_WRITERS = frozenset({"winword.exe", "excel.exe", "powerpnt.exe", "outlook.exe", "msaccess.exe",
                           "onenote.exe", "mspub.exe", "chrome.exe", "msedge.exe", "firefox.exe", "iexplore.exe",
@@ -57,10 +69,41 @@ def _code_record(event, path=None):
     path = path or event.get("file.stream.base_path") or event.get("file.path_key") or event.get("file.path")
     parts = components(path)
     body = str(event.get("file.stream.content") or "")
-    return bool(executable_path(path) or event.get("file.is_executable") is True or event.get("file.hashes")
+    if _pe_record(event):
+        return True
+    if _browser_cache(path) and extension_class(path) in _CACHE_TEXT_SUFFIXES:
+        return False
+    return bool(executable_path(path)
                 or "startup" in parts or "wwwroot" in parts
                 or executable_path(str(event.get("file.stream.name") or "").casefold().removesuffix(":$data"))
                 or body.startswith("MZ") or _SCRIPT_START.match(body))
+
+
+def _pe_record(event):
+    """Ordinary content hashes identify bytes, not executable format."""
+    hashes = event.get("file.hashes")
+    imphash = hashes.get("imphash") if isinstance(hashes, dict) else None
+    return (event.get("file.is_executable") is True
+            or isinstance(imphash, str) and re.fullmatch(r"[0-9a-fA-F]{32}", imphash) is not None
+            and bool(int(imphash, 16))
+            or str(event.get("file.stream.content") or "").startswith("MZ"))
+
+
+def _browser_cache(path):
+    local = local_path_components(path)
+    parts = components(path)
+    if len(local) > 4 and local[0] == 'users' and local[2:4] == ('appdata', 'local'):
+        tail = local[4:]
+    elif parts[:1] == ('%localappdata%',):
+        tail = parts[1:]
+    else:
+        return False
+    if len(tail) > 3 and tail[:3] == ('microsoft', 'windows', 'inetcache'):
+        return True
+    cache = {"cache", "cache_data", "code cache", "gpucache", "cache2", "startupcache"}
+    profile = tail[:3] in {('google', 'chrome', 'user data'), ('microsoft', 'edge', 'user data'),
+                          ('mozilla', 'firefox', 'profiles')}
+    return profile and len(tail) > 5 and tail[4] in cache
 
 
 def _common(event, action, path=None):
@@ -93,7 +136,7 @@ class _FileBehaviorRule(BehaviorFleetRule):
 
 class StartupFileWrite(_FileBehaviorRule):
     id = "win.startup_file_write"
-    version = "4"
+    version = "5"
     title = "File created in a Windows startup folder"
     families = ("file_change",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 11),)
@@ -115,7 +158,7 @@ class StartupFileWrite(_FileBehaviorRule):
 
 class LureApplicationFileWrite(_FileBehaviorRule):
     id = "win.lure_application_file_write"
-    version = "4"
+    version = "5"
     title = "Office or browser process wrote a file in a user-writable directory"
     families = ("file_change",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 11),)
@@ -143,7 +186,7 @@ class LureApplicationFileWrite(_FileBehaviorRule):
 
 class ExecutableAlternateStream(_FileBehaviorRule):
     id = "win.executable_alternate_stream"
-    version = "4"
+    version = "5"
     title = "An alternate file stream was recorded"
     families = ("file_change",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 15),)
@@ -183,7 +226,7 @@ class ExecutableAlternateStream(_FileBehaviorRule):
 
 class ExecutableCreationTimeChange(_FileBehaviorRule):
     id = "win.executable_creation_time_change"
-    version = "4"
+    version = "5"
     title = "Creation time changed on a Windows file"
     families = ("file_change",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 2),)
@@ -211,7 +254,7 @@ class ExecutableCreationTimeChange(_FileBehaviorRule):
 
 class WritableExecutableDeletion(_FileBehaviorRule):
     id = "win.writable_executable_deletion"
-    version = "4"
+    version = "5"
     title = "File deleted from a user-writable or startup location"
     families = ("file_change",)
     windows_event_classes = tuple((SYSMON_CHANNEL, SYSMON, code) for code in (23, 26))
@@ -233,7 +276,7 @@ class WritableExecutableDeletion(_FileBehaviorRule):
 
 class WebRootFileWrite(_FileBehaviorRule):
     id = "win.web_root_file_write"
-    version = "2"
+    version = "3"
     title = "File created in the default IIS web content directory"
     families = ("file_change",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 11),)
@@ -262,7 +305,7 @@ class WebRootFileWrite(_FileBehaviorRule):
 
 class CodeRunnerDnsLookup(WindowsEventRule):
     id = "win.code_runner_dns_lookup"
-    version = "2"
+    version = "3"
     title = "Script host or proxy-execution binary requested DNS resolution"
     families = ("dns_lookup",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 22),)

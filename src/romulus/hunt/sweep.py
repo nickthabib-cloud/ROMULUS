@@ -256,14 +256,13 @@ class Sweep:
                 pb.citation_fetcher = SourceCitationFetcher(client)
         self._has_windows = any(contract is not None and contract.os_family == "windows"
                                 for contract in contracts.values())
-        # one guaranteed floor per live store of the pack (a store shared by several rules counts once), and one for
-        # the event stage, which holds the citations of every rule. Windows hunts add independent floors for their
-        # id-only delivery guard and continuity state, so event volume cannot take a detector store's floor.
+        # Plan only detection stores. Citation owners have no floor and yield their optional cache bytes first.
+        # Windows hunts additionally own id-only delivery, continuity and script assembly state.
         stage_owners = [pb for pb in self.pack if pb.staged and not hasattr(pb, "citation_fields")]
-        self.budget.plan(live_stores(self.pack) + 1 + len(stage_owners) + (3 if self._has_windows else 0))
+        self.budget.plan(live_stores(self.pack) + 1 + (3 if self._has_windows else 0))
         self._stage_account = self.budget.account("event_stage")
         self._stage_owner_accounts = {pb.id: self.budget.account("event_stage:"+pb.id,
-                                                               strong=pb.state_slice == "strong")
+                                                               strong=pb.state_slice == "strong", yields=True)
                                       for pb in stage_owners}
         self._stage_owners = {}
         self._windows_seen_account = self.budget.account("windows_seen") if self._has_windows else None
@@ -445,11 +444,20 @@ class Sweep:
             if selected:
                 self._windows_selective.add(target)
                 self.stats.setdefault("windows_class_filter", {})[target] = [event.token for event in selected]
-                return [[
-                    Predicate(field="event.channel", op="eq", value=event.channel),
-                    Predicate(field="event.provider", op="eq", value=event.provider),
-                    Predicate(field="event.code", op="eq", value=event.event_id),
-                ] for event in selected]
+                object_readers = {playbook.id for playbook in self.pack
+                                  if "windows" in playbook.os_families
+                                  and "object_access" in (*playbook.families, *playbook.context_families)}
+                process_only = object_readers == {"win.lsass_process_access"} and contract.supports("object.type", "eq")
+                groups = []
+                for event in selected:
+                    group = [Predicate(field="event.channel", op="eq", value=event.channel),
+                             Predicate(field="event.provider", op="eq", value=event.provider),
+                             Predicate(field="event.code", op="eq", value=event.event_id)]
+                    if process_only and event.family == "object_access":
+                        group.append(Predicate(field="object.type", op="eq", value="Process"))
+                    groups.append(group)
+                self.stats.setdefault("windows_process_object_filter", {})[target] = process_only
+                return groups
         groups: list[list[Predicate]] = []
         if contract.supports("event.dataset", "in"):
             groups.append([Predicate(field="event.dataset", op="in", value=list(WINDOWS_HOST_DATASETS))])
@@ -1424,7 +1432,6 @@ class Sweep:
                         self._charge_stage(stage)
                     except sqlite3.OperationalError as exc:
                         reason = f"compact baseline stage failed ({exc})"
-                        self.budget.fail(reason)
                         self.partial_reasons.append(f"{target} {pkey}: {reason}")
                         self.repo.save_baseline_window_cell(self.hunt_id, {
                             "rule_id": pb.id, "version": pb.spec.version, "target": target,
@@ -1797,7 +1804,12 @@ class Sweep:
         stage = self._event_stage()
         loaded = {event.id: event for event in stage.load([event.id for event in match.events])}
         match.events = [loaded.get(event.id, event) for event in match.events]
-        return stage.raw_sources(match.events)
+        sources = stage.raw_sources(match.events)
+        from romulus.hunt.citations import COMPACT_CITATION_NOTE
+        for event in match.events:
+            if any(ref.key not in sources for ref in event.raw) and COMPACT_CITATION_NOTE not in event.caveats:
+                event.caveats.append(COMPACT_CITATION_NOTE)
+        return sources
 
     def finalize(self):
         self.heartbeat()

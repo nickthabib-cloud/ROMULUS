@@ -473,7 +473,7 @@ class WebServiceSpawnsInterpreter(Playbook):
     def finalize(self):
         out = []
         for key in self.order:
-            with citation_group(self):
+            with citation_group(self, out, key, self.shapes.peek(key)):
                 state = self.shapes.peek(key)
                 evs = state[1].events(self.load)
                 host_, user, shape, packaged = key
@@ -513,6 +513,22 @@ class WebServiceSpawnsInterpreter(Playbook):
                     argv = e.get("process.argv")
                     out.append(self._event_match(e, user, argv, [], count=n, runs=evs))
         return out
+
+    def uncited_finding(self, key, state, match):
+        host, user, shape, packaged = key
+        n = state[0]
+        hours, busiest = self._hour_stats(state)
+        routine = n > self.RARE_MAX and hours >= self.ROUTINE_MIN_HOURS and busiest * 2 <= n
+        context = (packaged and n <= self.RARE_MAX) or routine
+        match.proposed_lane, match.severity = ("context", "low") if context else ("lead", "medium")
+        if packaged and n <= self.RARE_MAX:
+            match.group_key = f"packaged|{host}|{user}|{shape}"
+        elif n > self.RARE_MAX:
+            match.group_key = f"{'routine' if routine else 'burst'}|{host}|{user}|{shape}" + (f"|{packaged}" if packaged else "")
+        match.entities = [("host", host, "host"), ("account", user, "actor")]
+        match.claim = (f"Account '{user}' on {host} ran command shape '{shape}' {n} time(s). "
+                       + match.notes[0])
+        return match
 
 
 class DownloaderFeedsInterpreter(Playbook):
@@ -1233,7 +1249,7 @@ class SshLoginFromExternal(Playbook):
     def finalize(self):
         out = []
         for host, user, ip in self.order:
-            with citation_group(self):
+            with citation_group(self, out, (host, user, ip), self.groups.peek((host, user, ip))):
                 journal, audit, last, store, ends = self.groups.peek((host, user, ip))
                 out.append(self._login_match((host, user, ip), journal, audit, last, store.events(self.load), ends))
         return out
@@ -1402,7 +1418,7 @@ class UnbackedExecutable(Playbook):
     def finalize(self):
         out = []
         for key in sorted(self.groups.keys()):
-            with citation_group(self):
+            with citation_group(self, out, key, self.groups.peek(key)):
                 counts, (first, last), uids, store, ends = self.groups.peek(key)
                 out.append(self._group_match(key, counts, first, last, uids, store.events(self.load), ends))
         return out

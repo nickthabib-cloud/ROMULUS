@@ -427,9 +427,12 @@ def test_a_missing_staged_root_change_does_not_empty_other_persistence_findings(
 
     matches = rule.finalize()
 
-    assert [match.group_key for match in matches] == [
+    assert [match.group_key for match in matches if not match.citation_unavailable] == [
         "app01|33|/etc/cron.d|pid 4000|/usr/bin/dash|2030-01-06T09:00:01+00:00",
     ]
+    [uncited] = [match for match in matches if match.citation_unavailable]
+    assert uncited.proposed_lane == "lead" and "/etc/cron.d/package" in uncited.claim
+    assert "no citation could be retained" in uncited.claim and not uncited.events
     assert "stage_missing" in rule.limits
 
 

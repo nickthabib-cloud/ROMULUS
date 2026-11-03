@@ -531,20 +531,18 @@ class ReverseShellByLineage(Playbook):
     def finalize(self):
         groups = KeyedStore(self, "rs_groups", self.HOT)
         for i, shell in enumerate(self.shells):
-            with citation_group(self):
-                self._hits(shell, groups)
-                if i % self.TRIM_EVERY == self.TRIM_EVERY - 1:
-                    self._trim()
-                    groups.trim()
+            self._hits(shell, groups)
+            if i % self.TRIM_EVERY == self.TRIM_EVERY - 1:
+                self._trim()
+                groups.trim()
         for hit in self._judged:                    # shells joined when read (no room to hold them)
-            with citation_group(self):
-                self._add_hit(hit, groups)
+            self._add_hit(hit, groups)
         keys = groups.keys()
         merged = {**{k: [k] for k in keys if len(k) == 3},
                   **merge_unknown_boot({k: [k] for k in keys if len(k) == 4}, 1)}
         out = []
         for key in sorted(merged, key=lambda k: tuple("" if part is None else str(part) for part in k)):
-            with citation_group(self):
+            with citation_group(self, out, key, [groups.peek(old) for old in merged[key]]):
                 hits = [hit for old in merged[key] for hit in groups.peek(old)]
                 out.append(self._helpers(key, hits) if len(key) == 3 else self._finding(key, hits))
         groups.clear()
@@ -557,22 +555,20 @@ class ReverseShellByLineage(Playbook):
 
         def publish(local: _Groups) -> None:
             for key, hits in local.items():
-                with citation_group(self):
+                with citation_group(self, out, key, hits):
                     m = self._helpers(key, hits) if len(key) == 3 else self._finding(key, hits)
                     m.group_key += f"|alone:{hits[0].shell.event_id}"
                     m.notes.append(f"published one shell at a time: grouping the joins needed disk ({reason})")
                     out.append(m)
         for hit in self._judged:                    # each shell joined when read, on its own
-            with citation_group(self):
-                local = _Groups()
-                self._add_hit(hit, local)
-                publish(local)
+            local = _Groups()
+            self._add_hit(hit, local)
+            publish(local)
         try:
             for shell in self.shells:
-                with citation_group(self):
-                    local = _Groups()
-                    self._hits(shell, local)
-                    publish(local)
+                local = _Groups()
+                self._hits(shell, local)
+                publish(local)
         except StateExhausted:
             pass
         return out
@@ -668,6 +664,13 @@ class ReverseShellByLineage(Playbook):
                       context_ids={event.id for event in lineage_events})
         match.raw_copies.update(lineage_raw)
         match.notes = notes + _budget_notes(hits)
+        return match
+
+    def uncited_finding(self, key, state, match):
+        hits = [hit for group in state for hit in group] if state and isinstance(state[0], list) else state
+        match.proposed_lane = "high" if len(key) != 3 and any(hit.high for hit in hits) else "lead"
+        match.entities = [("host", key[0], "host")]
+        match.notes.extend(_budget_notes(hits))
         return match
 
     def _finding(self, key: tuple, hits: list[_Hit]) -> Match:

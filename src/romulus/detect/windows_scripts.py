@@ -313,13 +313,14 @@ class ScriptRule(WindowsEventRule):
 
 class ScriptDownload(ScriptRule):
     id = "win.script_download"
+    version = "5"
     title = "PowerShell script contains download and evaluation or start requests"
     attack = ("T1059.001", "T1105")
     description = "Recorded script combines a download with a code-running call; runtime data flow and execution are unverified"
     start_requests = frozenset({'start-process', 'saps', 'invoke-item', 'ii'})
 
     def test(self, event, p):
-        return downloads(p) and (runs_code(p) or bool(p.commands & self.start_requests))
+        return downloads(p) and (runs_code(p) or p.starts_program or bool(p.commands & self.start_requests))
 
     def shapes(self, event, parsed):
         labels = super().shapes(event, parsed)
@@ -382,6 +383,7 @@ class ScriptEtwBypass(ScriptRule):
 
 class ScriptObfuscatedExecution(ScriptRule):
     id = "win.script_obfuscated_execution"
+    version = "5"
     title = "PowerShell script contains obfuscated evaluation"
     attack = ("T1027.010", "T1059.001")
     description = "Recorded script combines character, format, backtick or concatenation obfuscation with call/evaluation syntax"
@@ -392,7 +394,7 @@ class ScriptObfuscatedExecution(ScriptRule):
 
 class ScriptDecodeEvaluation(ScriptRule):
     id = "win.script_decode_evaluation"
-    version = "3"
+    version = "4"
     title = "PowerShell script contains decoding followed by code evaluation"
     attack = ("T1140", "T1059.001")
     description = "Recorded code combines Base64/decompression reading and a code-evaluation call; runtime data flow is unverified"

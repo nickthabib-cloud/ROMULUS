@@ -186,7 +186,11 @@ def test_only_exact_default_winlogon_grammar_is_safe(name, value):
 def test_default_winlogon_on_each_system_volume_grammar(root, name, tail):
     value = root + tail
     for safe in [value, '"' + value + '"', value + "," if name == "Userinit" else value]:
-        assert not run(RegistryWinlogon(), [change(SOFT + "Winlogon", name, safe)])
+        matches = run(RegistryWinlogon(), [change(SOFT + "Winlogon", name, safe)])
+        if root in {r"\SystemRoot", "%WinDir%", "%SystemRoot%", r"%SystemDrive%\Windows"}:
+            assert not matches
+        else:
+            assert len(matches) == 1 and matches[0].proposed_lane == 'high'
         for bad in [safe + " /extra", safe + ",payload.exe", safe + "&payload.exe"]:
             matches = run(RegistryWinlogon(), [change(SOFT + "Winlogon", name, bad)])
             assert len(matches) == 1 and matches[0].proposed_lane == "high"

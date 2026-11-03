@@ -226,6 +226,14 @@ candidate = Table(
 )
 Index("ix_candidate_hunt_lane", candidate.c.hunt_id, candidate.c.lane, candidate.c.priority)
 
+candidate_host = Table(
+    "candidate_host", metadata,
+    Column("candidate_id", String, ForeignKey("candidate.id", ondelete="CASCADE"), primary_key=True),
+    Column("host", String, primary_key=True),
+    Column("first_event_id", String, nullable=False),
+    sqlite_with_rowid=False,
+)
+
 expansion_anchor = Table(
     "expansion_anchor", metadata,
     Column("id", String, primary_key=True),              # the anchored candidate id

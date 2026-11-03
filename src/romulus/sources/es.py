@@ -12,17 +12,12 @@ from typing import Any
 import httpx
 
 from romulus.config import Settings, redact_text
+from romulus.errors import SourceError
 from romulus.sources.models import CompiledQuery, Completeness, SearchOutcome
 
 
 class WriteAttemptBlocked(RuntimeError):
     """Raised before any request that is not on the read-only allowlist leaves the process."""
-
-
-class SourceError(RuntimeError):
-    def __init__(self, message: str, retryable: bool = False):
-        super().__init__(message)
-        self.retryable = retryable
 
 
 class SourceBudgetExhausted(SourceError):

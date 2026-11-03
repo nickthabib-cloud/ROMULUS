@@ -136,7 +136,7 @@ def _risks(executable: str, args: list[str], *, depth=0) -> list[str]:
 
 class ServiceRegistration(WindowsEventRule):
     id = "win.service_registration"
-    version = "4"
+    version = "5"
     title = "Service registration contains a risky executable configuration"
     families = ("service_change",)
     windows_event_classes = (("Security", SECURITY, 4697), ("System", "Service Control Manager", 7045))
@@ -227,7 +227,7 @@ def _task_structure(event) -> bool:
 
 class ScheduledTaskRegistration(BehaviorFleetRule):
     id = "win.scheduled_task_registration"
-    version = "4"
+    version = "5"
     title = "Scheduled task record contains a risky action configuration"
     families = ("scheduled_task",)
     windows_event_classes = tuple(("Security", SECURITY, code) for code in (4698, 4702)) + tuple(
@@ -338,7 +338,7 @@ class ScheduledTaskRegistration(BehaviorFleetRule):
 
 class WindowsAuditTamper(WindowsEventRule):
     id = "win.audit_state_change"
-    version = "3"
+    version = "4"
     title = "Windows logging state, configuration, or log contents changed"
     families = ("audit_config",)
     windows_event_classes = tuple(("Security", EVENTLOG, code) for code in (1100, 1102, 1104, 1108)) + (

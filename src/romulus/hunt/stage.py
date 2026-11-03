@@ -81,6 +81,7 @@ class EventStage:
         self.directory.chmod(0o700)
         self.path = Path(self._dir) / "stage.db"
         self.db: sqlite3.Connection | None = sqlite3.connect(self.path)
+        self.db.execute("PRAGMA auto_vacuum=INCREMENTAL")
         # Roll back a refused write atomically without a disk journal outside the hunt byte budget.
         self.db.execute("PRAGMA journal_mode=MEMORY")
         self.db.execute("PRAGMA synchronous=OFF")
@@ -114,6 +115,12 @@ class EventStage:
         self.budget = budget
         self.account = account or (budget.account("event_stage") if budget is not None else None)
         self._size = 0
+        self._allocations = {}
+        self._citation_account = (budget.account("event_stage:optional_citations", yields=True)
+                                  if budget is not None else None)
+        if self._citation_account is not None:
+            self._citation_account.evict = self._evict_citations
+            self._citation_account.evict_references = self._evict_references
         self.refusal_reason = ""
         self.refused = 0
         self.owners = {}
@@ -176,10 +183,59 @@ class EventStage:
     def charge_growth(self, account=None):
         size = self.db.execute("PRAGMA page_count").fetchone()[0] * self.db.execute("PRAGMA page_size").fetchone()[0]
         if self.budget is not None and self.account is not None and size > self._size:
-            self.budget.charge(account or self.account, size-self._size)
-            self.budget.physical_account(account or self.account, size-self._size)
+            owner = account or self.account
+            self._allocations[owner] = self._allocations.get(owner, 0)+size-self._size
+            self.budget.charge(owner, size-self._size)
+            self.budget.physical_account(owner, size-self._size)
             self.budget.grew(size-self._size)
+        elif self.budget is not None and size < self._size:
+            released = self._size-size
+            for owner in sorted(self._allocations, key=lambda item: (not item.yields, item.name)):
+                amount = min(released, self._allocations[owner])
+                self._allocations[owner] -= amount
+                self.budget.charge(owner, -amount)
+                self.budget.physical_account(owner, -amount)
+                self.budget._physical_released += amount
+                released -= amount
+                if not released:
+                    break
         self._size = size
+
+    def _evict_citations(self, needed):
+        """Reclaim physical cache pages before any detection store refuses a write."""
+        before = self._size
+        def shrink():
+            self.db.execute("PRAGMA incremental_vacuum").fetchall()
+            self.charge_growth()
+        if self._raw_table:
+            self.db.execute("DELETE FROM raw")
+            self.db.commit()
+            shrink()
+        cursor = self.db.execute("SELECT id,body,kept FROM event WHERE typeof(body)='text' ORDER BY id")
+        while rows := cursor.fetchmany(500):
+            with self.db:
+                self.db.executemany("DELETE FROM event WHERE id=?", [(row[0],) for row in rows])
+                self.db.executemany("INSERT INTO event VALUES(?,?,?)", [
+                    (identity, compact_event(TypedEvent.model_validate_json(body)), kept)
+                    for identity, body, kept in rows])
+            shrink()
+        self._text_rows = 0
+        self._cache_passes.clear()
+        return before-self._size
+
+    def _evict_references(self, needed):
+        """An actual detection-write FULL permits compact references to yield after optional bodies."""
+        before = self._size
+        while before-self._size < needed:
+            ids = [row[0] for row in self.db.execute("SELECT id FROM event ORDER BY kept,id LIMIT 100")]
+            if not ids:
+                break
+            with self.db:
+                for table in ("event_raw", "hold", "citation_owner", "event"):
+                    self.db.executemany(f"DELETE FROM {table} WHERE id=?", [(identity,) for identity in ids])
+            self.db.execute("PRAGMA incremental_vacuum").fetchall()
+            self.charge_growth()
+        return before-self._size
 
     def _allowance(self, account):
         if self.budget is None:
@@ -187,17 +243,20 @@ class EventStage:
         budget = self.budget
         # Some detector accounts conservatively estimate logical payloads. The total byte ceiling
         # follows reported physical file growth, so those estimates cannot consume a quiet owner's floor.
-        available = min(max(0, budget.disk_total-budget.physical_used),
-                        max(0, budget.floor_of(account)-account.used) + max(0, budget.pool-budget.physical_pool_used))
+        available = max(0, budget.disk_total-budget.physical_used)
+        if account is not None and account.yields:
+            cached = sum(size for owner, size in self._allocations.items() if owner.yields)
+            available = min(available, max(0, budget.yield_cap-cached))
         headroom = budget.headroom()
         return available if headroom is None else min(available, headroom)
 
-    def _write(self, operation, count, accounts=(), estimated_bytes=0):
+    def _write(self, operation, count, accounts=(), estimated_bytes=0, *, retry=True):
         account = self.account
         if self.budget is not None:
+            if not accounts:
+                self.budget.reclaim_citations(estimated_bytes+16384)
             self.budget.check_free()
-            # Shared records may have several owners. A busy owner cannot consume another rule's
-            # guaranteed citation floor; an admissible owner can retain the one physical copy.
+            # Shared records may have several owners; one admissible owner retains the physical copy.
             reason = ""
             for account in accounts or (self.account,):
                 reason = self.budget.new_key_reason(account)
@@ -223,7 +282,13 @@ class EventStage:
             self._raw_table = bool(self.db.execute("SELECT 1 FROM sqlite_master WHERE name='raw'").fetchone())
             if "full" not in str(exc).lower():
                 raise
-            self.refusal_reason = "event stage reached its hunt byte allowance or volume reserve"
+            if retry and not accounts and self.budget is not None:
+                self.charge_growth(account)
+                self.budget.reclaim_citations(self.budget.disk_total, references=True)
+                # Detection batches can be larger than the initial estimate. Retry the same rolled-back
+                # cell once after optional citations yield; a local refusal must mean physical capacity.
+                return self._write(operation, count, accounts, estimated_bytes, retry=False)
+            self.refusal_reason = "event stage reached the physical whole-hunt byte ceiling or volume reserve"
             self.refused += count
         finally:
             self.charge_growth(account)
@@ -231,6 +296,7 @@ class EventStage:
     def _cap_windows(self) -> None:
         if self.budget is None:
             return
+        self.budget.reclaim_citations(16384)
         headroom = self._allowance(self.windows_account) if self.windows_account is not None else self.budget.headroom()
         if headroom is None:
             return
@@ -290,6 +356,18 @@ class EventStage:
             except sqlite3.OperationalError as exc:
                 self.windows_db.rollback()
                 self._charge_windows_growth()
+                if self.budget is not None and "full" in str(exc).lower():
+                    self.budget.reclaim_citations(self.budget.disk_total, references=True)
+                    self._cap_windows()
+                    try:
+                        self.windows_db.executemany("INSERT OR IGNORE INTO windows_seen VALUES (?)", chunk)
+                        self.windows_db.commit()
+                        self._charge_windows_growth()
+                        continue
+                    except sqlite3.OperationalError as retry_exc:
+                        self.windows_db.rollback()
+                        self._charge_windows_growth()
+                        exc = retry_exc
                 reason = f"writing the Windows dedup store failed ({exc})"
                 if self.budget is not None:
                     if "full" in str(exc).lower():
@@ -341,7 +419,7 @@ class EventStage:
         """Invalidate fixed-owner revisions only after committed cache/ownership changes."""
         if not body and not raw:
             return
-        ids = list({*ids, *(event.id for event in events)})
+        ids = sorted({*ids, *(event.id for event in events)})
         body_owners, raw_owners = set(), set()
         for start in range(0, len(ids), 500):
             chunk = ids[start:start+500]
@@ -356,9 +434,9 @@ class EventStage:
                 raw_owners.update(row[0] for row in self.db.execute(
                     "SELECT DISTINCT c.owner FROM event_raw own JOIN event_raw peer ON peer.key=own.key "
                     f"JOIN citation_owner c ON c.id=peer.id WHERE own.id IN ({marks})", chunk))
-        for owner in body_owners:
+        for owner in sorted(body_owners):
             self._body_revisions[owner] += 1
-        for owner in raw_owners:
+        for owner in sorted(raw_owners):
             self._raw_revisions[owner] += 1
 
     def _compact_cache(self, events, accounts, *, drop_raw=False):
@@ -383,7 +461,7 @@ class EventStage:
         def compact_ids(ids):
             nonlocal compacted
             marks = ",".join("?" for _ in ids)
-            rows = self.db.execute(f"SELECT id,body,kept FROM event WHERE id IN ({marks}) AND typeof(body)='text'", ids).fetchall()
+            rows = self.db.execute(f"SELECT id,body,kept FROM event WHERE id IN ({marks}) AND typeof(body)='text' ORDER BY id", ids).fetchall()
             compacted |= bool(rows)
             packed = [(identity, compact_event(TypedEvent.model_validate_json(body)), kept)
                       for identity, body, kept in rows]
@@ -409,7 +487,7 @@ class EventStage:
             cursor = self.db.execute(
                 f"SELECT c.id FROM citation_owner c WHERE c.owner IN ({marks}) AND NOT EXISTS "
                 f"(SELECT 1 FROM citation_owner other WHERE other.id=c.id AND other.owner NOT IN ({marks})) "
-                "GROUP BY c.id", names+names)
+                "GROUP BY c.id ORDER BY c.id", names+names)
             while rows := cursor.fetchmany(500):
                 compact_ids([row[0] for row in rows])
         at_reserve = self.budget is not None and self.budget.headroom() == 0
@@ -432,7 +510,7 @@ class EventStage:
         """Optional source copies may reuse allocated pages, never grow a compact-reference write."""
         if not raws or not self._raw_table:
             return
-        keys = {ref.key for event in events for ref in event.raw if ref.key in raws}
+        keys = sorted({ref.key for event in events for ref in event.raw if ref.key in raws})
         if not keys:
             return
         pages = self.db.execute("PRAGMA page_count").fetchone()[0]
@@ -469,19 +547,14 @@ class EventStage:
             except sqlite3.OperationalError as exc:
                 if "full" not in str(exc).lower():
                     raise
-        # Strong positive references survive their body quota, bounded by the actual hunt ceiling.
-        # Routine tentative citations retain their floor/pool bound so quiet strong owners keep room.
+        # Mandatory references survive optional body limits. Detection may reclaim them only under physical pressure.
         account = self.account
         if self.budget is not None:
-            account = max(accounts or (self.account,), key=lambda item: (item.strong, self._allowance(item)))
+            account = max(accounts or (self._citation_account,), key=lambda item: (self._allowance(item), item.name))
             page = self.db.execute("PRAGMA page_size").fetchone()[0]
             pages = self.db.execute("PRAGMA page_count").fetchone()[0]
-            room = self._allowance(account)
-            if account.strong:
-                room = max(0, self.budget.disk_total-self.budget.physical_used)
-                headroom = self.budget.headroom()
-                if headroom is not None:
-                    room = min(room, headroom)
+            # A compact witness is the mandatory minimum; only physical capacity can refuse it.
+            room = self.budget.physical_allowance(account)
             self.db.execute(f"PRAGMA max_page_count={pages+room//page}")
         try:
             with self.db:
@@ -514,9 +587,7 @@ class EventStage:
                     self._insert_compact(subset, [(owner, event) for owner, event in held if event.id in ids],
                                          accounts, cache_ready=True, raw_reclaimed=True)
             else:
-                self.refusal_reason = ("compact citation storage reached the whole-hunt byte ceiling or volume reserve"
-                                       if account is not None and account.strong else
-                                       "routine compact citation storage reached its owner floor and shared pool")
+                self.refusal_reason = "compact citation storage reached the physical whole-hunt byte ceiling or volume reserve"
         finally:
             self.charge_growth(account)
 
@@ -535,7 +606,8 @@ class EventStage:
         self.db.executemany(EVENT_KEEP, [(eid,) for eid in first])
         self.db.executemany("INSERT OR IGNORE INTO event_raw VALUES (?, ?)",
                             [(event.id, ref.key) for event in first.values() for ref in event.raw])
-        account_set = {account for event in first.values() for account in self.owners.get(event.id, ())}
+        account_set = sorted({account for event in first.values() for account in self.owners.get(event.id, ())},
+                             key=lambda account: account.name)
         owners_added = self._record_owners(list(first.values()), account_set)
         raw_added = 0
         if raws:
@@ -610,7 +682,7 @@ class EventStage:
             if unheld is None:
                 continue                # kept, still held by someone, or already gone
             text_deleted += unheld[0] == "text"
-            keys = [row[0] for row in self.db.execute(HELD_RAW, (event_id,))]
+            keys = sorted(row[0] for row in self.db.execute(HELD_RAW, (event_id,)))
             if unheld[0] == "text":
                 for start in range(0, len(keys), 500):
                     chunk = keys[start:start+500]
@@ -625,7 +697,7 @@ class EventStage:
         self.db.commit()
         if self._text_rows is not None:
             self._text_rows -= text_deleted
-        for changed_owner in raw_changed_owners:
+        for changed_owner in sorted(raw_changed_owners):
             self._raw_revisions[changed_owner] += 1
 
     def count(self) -> int:
@@ -841,9 +913,12 @@ class EventStage:
             self.db = None
             if self.budget is not None:
                 accounts = {id(account): account for account in
-                            (self.account, self.windows_account, *self.owner_accounts.values()) if account is not None}
-                for account in accounts.values():
+                            (self.account, self.windows_account, self._citation_account, *self.owner_accounts.values())
+                            if account is not None}
+                for account in sorted(accounts.values(), key=lambda item: item.name):
                     self.budget.release_physical_account(account)
+                self._citation_account.evict = None
+                self._citation_account.evict_references = None
         shutil.rmtree(self._dir, ignore_errors=True)
 
     def __del__(self):

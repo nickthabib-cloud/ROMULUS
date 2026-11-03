@@ -519,7 +519,7 @@ def _owner(tmp_path, budget, name="test.store", strong=False):
     return owner
 
 
-def test_every_store_keeps_its_floor_whatever_another_store_holds(tmp_path):
+def test_detection_can_use_idle_floors_and_refuses_only_at_physical_capacity(tmp_path):
     budget = StateBudget(tmp_path, disk_total=300_000, reserve=0)
     budget.plan(3)                                                   # floor 50,000; 150,000 shared
     busy, quiet = _owner(tmp_path, budget, "busy"), _owner(tmp_path, budget, "quiet")
@@ -529,14 +529,15 @@ def test_every_store_keeps_its_floor_whatever_another_store_holds(tmp_path):
         if not big.put(f"k{i}", "x" * 1000 + str(i)):
             refused += 1
         big.trim()
-    assert refused and budget.physical_pool_used >= budget.pool - 2*busy.spill()._page and big.disk_bytes < 210_000
+    assert refused and busy.spill().path.stat().st_size >= budget.disk_total - busy.spill()._page
+    assert big.disk_bytes > budget.floor + budget.pool
     taken = 0
     for i in range(60):                                               # about 1 KB each: the floor holds ~45
         if small.put(f"k{i}", "y" * 1000 + str(i)):
             taken += 1
         small.trim()
-    # The physical floor includes SQLite pages, indexes and serialized keys as well as payload bytes.
-    assert 25 <= taken < 60 and quiet.spill().path.stat().st_size >= budget.floor - 2*quiet.spill()._page
+    # The first quiet key remains in memory; its next new key reports the actual physical exhaustion.
+    assert 1 <= taken < 60
     assert len(small) == taken
     assert sum(path.stat().st_size for path in tmp_path.rglob("*") if path.is_file()) <= budget.disk_total
     assert set(budget.full) == {"busy:s", "quiet:s"}

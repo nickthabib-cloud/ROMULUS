@@ -791,7 +791,7 @@ class InterpreterExternalConnection(Playbook):
     def finalize(self):
         out = []
         for key in sorted(self.groups.keys()):
-            with citation_group(self):
+            with citation_group(self, out, key, self.groups.peek(key)):
                 info, group = self.groups.peek(key)
                 out.append(self._group_match(key, info, group.events(self.load)))
         return out
@@ -842,6 +842,19 @@ class InterpreterExternalConnection(Playbook):
             m.notes.append(f"{len(lineage_events)} process record(s) (exec and observed) the named lineage rests on "
                            f"are cited")
         return m
+
+    def uncited_finding(self, key, state, match):
+        info = state[0]
+        host = key.split("|", 1)[0]
+        judged, unjudged, _events, _raw = judge_processes(self.pids, host, info["procs"], info["unheld"])
+        match.proposed_lane, notes = lineage_lane(info["reason"], info["lane"], judged, unjudged)
+        if match.proposed_lane == "high" and all(o == Outcome.failure for o in info["outcomes"]):
+            match.proposed_lane = "lead"
+            notes.append("lane lowered to lead: every connect() call failed")
+        match.entities = [("host", host, "host"), *(("ip", ip, "dst") for ip in sorted(info["dests"]))]
+        match.notes.extend(notes)
+        match.claim = f"Group {key} recorded {info['count']} external connection call(s). " + match.notes[0]
+        return match
 
     def _load(self, ids: list[str]) -> list[TypedEvent]:
         found = self.load(ids) if ids else []
@@ -1440,8 +1453,7 @@ class ProcessNetworkLink(Playbook):
     def _finish(self, group: _Group, address) -> list[Match]:
         m = None
         try:
-            with citation_group(self):
-                m = self._group_match(group, address) if group.socks else None
+            m = self._group_match(group, address) if group.socks else None
         finally:
             group.clear()
         return [m] if m is not None else []
@@ -1515,7 +1527,11 @@ class ProcessNetworkLink(Playbook):
         loaded = {e.id: e for e in self.load(ids)}
         missing = [i for i in ids if i not in loaded]
         if missing:
-            raise CitationUnavailable(f"{self.id}: {len(missing)} cited event(s) absent from the stage, e.g. {missing[0]}")
+            from romulus.detect.citing import uncited_positive
+            match = uncited_positive(self, g.key, g.ends)
+            match.proposed_lane, match.severity = lane, LANE_SEVERITY[lane]
+            match.entities = [("host", s0.host, "subject")]
+            return match
         cited = [loaded[i] for i in ids]
         first = loaded[g.socks[0].id] if g.socks else loaded[sock_ids[0]] if sock_ids else None
         if first is None:

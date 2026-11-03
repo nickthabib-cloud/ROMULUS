@@ -105,7 +105,7 @@ def _listed_actor(event, facts):
 
 class DirectoryReplicationAccess(WindowsEventRule):
     id = "win.directory_replication_access"
-    version = "4"
+    version = "5"
     title = "A directory access record named replication extended rights"
     families = ("directory_access",)
     windows_event_classes = _security(4662)
@@ -150,7 +150,7 @@ class DirectoryReplicationAccess(WindowsEventRule):
 
 class WeakKerberosTicketEncryption(WindowsEventRule):
     id = "win.weak_kerberos_ticket_encryption"
-    version = "2"
+    version = "3"
     title = "A Kerberos ticket record reported DES or RC4 encryption"
     families = ("auth",)
     windows_event_classes = _security(4768, 4769, 4770)
@@ -178,7 +178,7 @@ class WeakKerberosTicketEncryption(WindowsEventRule):
 
 class KerberosNoPreauthentication(WindowsEventRule):
     id = "win.kerberos_no_preauthentication"
-    version = "2"
+    version = "3"
     title = "A TGT request recorded pre-authentication type zero"
     families = ("auth",)
     windows_event_classes = _security(4768)
@@ -330,7 +330,7 @@ class _DirectoryChangeRule(WindowsEventRule):
 
 class AdminSdHolderChange(_DirectoryChangeRule):
     id = "win.adminsdholder_change"
-    version = "3"
+    version = "4"
     title = "A directory change named the exact AdminSDHolder object"
     behavior, subject = "adminsdholder_change", "the domain AdminSDHolder object"
     attack = ("T1098",)
@@ -346,7 +346,7 @@ class AdminSdHolderChange(_DirectoryChangeRule):
 
 class GroupPolicyDirectoryChange(_DirectoryChangeRule):
     id = "win.group_policy_directory_change"
-    version = "3"
+    version = "4"
     title = "A directory change named a GPO object, policy container or policy link attribute"
     behavior, subject = "group_policy_directory_change", "a group-policy object, policy container or link attribute"
     attack = ("T1484.001",)
@@ -361,7 +361,7 @@ class GroupPolicyDirectoryChange(_DirectoryChangeRule):
 
 class TrustDirectoryChange(_DirectoryChangeRule):
     id = "win.trust_directory_change"
-    version = "3"
+    version = "4"
     windows_event_classes = _security(*_CHANGES, 4706, 4716)
     title = "A directory change named a trust object or exact trust attribute"
     behavior, subject = "trust_directory_change", "a trust object or trust attribute"
@@ -391,7 +391,7 @@ class TrustDirectoryChange(_DirectoryChangeRule):
 
 class SensitiveDirectoryAttributeChange(_DirectoryChangeRule):
     id = "win.sensitive_directory_attribute_change"
-    version = "2"
+    version = "3"
     title = "A directory change names a credential, delegation or domain-root permissions attribute"
     windows_event_classes = _security(5136)
     behavior, subject = "sensitive_directory_attribute_change", "a credential, delegation or domain-root permissions attribute"

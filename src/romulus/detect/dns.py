@@ -660,7 +660,7 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
     def finalize(self):
         out = []
         for key in sorted(self.groups.keys()):
-            with citation_group(self):
+            with citation_group(self, out, key, self.groups.peek(key)):
                 group = self.groups.peek(key)
                 client, server, kind, zone = key
                 asked, replies = group.requests, group.replies
@@ -731,6 +731,14 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
                               context_ids=context)
                 out.append(match)
         return out
+
+
+    def uncited_finding(self, key, group, match):
+        client, server, kind, zone = key
+        match.group_key = f"{client}|{server}|{zone}" if kind == "transfer" else f"{client}|{server}|ANY"
+        if kind == "transfer" and _internal(client) is False and _internal(server) and group.deciding is not None:
+            match.proposed_lane, match.severity = "high", "high"
+        return match
 
 
 def _tally(counts: Counter) -> str:
@@ -1026,7 +1034,7 @@ class DnsReverseLookupSweep(_DnsAggregate):
         spilled = {client for client in candidates if self.clients.peek(client).blocks is None}
         on_disk = self._ranked_on_disk(spilled) if spilled else {}
         for client in candidates:
-            with citation_group(self):
+            with citation_group(self, out, client, self.clients.peek(client)):
                 state = self.clients.peek(client)
                 if state.blocks is not None:
                     ranked = sorted((e for e in state.blocks.values() if e[1]), key=_block_rank)[:5]
@@ -1064,10 +1072,9 @@ class DnsReverseLookupSweep(_DnsAggregate):
                               f"{'more ' if shown else ''}keep no cited record and are not named")
                 claim += "."
                 for version in (4, 6):
-                    with citation_group(self):
-                        span = state.vspan.get(version)
-                        if state.n_blocks > 1 and span:
-                            claim += f" IPv{version} addresses span {span[0]} – {span[1]}."
+                    span = state.vspan.get(version)
+                    if state.n_blocks > 1 and span:
+                        claim += f" IPv{version} addresses span {span[0]} – {span[1]}."
                 if state.n_blocks:
                     claim += f" {state.internal} of the {addresses} addresses are in internal ranges."
                 if densest >= self.DENSE_BLOCK:
@@ -1414,14 +1421,13 @@ class DnsNxdomainBurst(_DnsAggregate):
         out = []
         bursts: dict[str, tuple[int, int]] = {}         # every bursting client's (peak, start); read one at a time
         for address in self.addresses.keys(candidates=True):
-            with citation_group(self):
-                state = self.addresses.peek(address)
-                if state.times:
-                    peak, start = self._peak(list(state.times))
-                    if peak >= self.MIN_BURST:
-                        bursts[address] = (peak, start)
+            state = self.addresses.peek(address)
+            if state.times:
+                peak, start = self._peak(list(state.times))
+                if peak >= self.MIN_BURST:
+                    bursts[address] = (peak, start)
         for client in sorted(bursts):
-            with citation_group(self):
+            with citation_group(self, out, client, self.addresses.peek(client)):
                 state = self.addresses.peek(client)
                 peak, start = bursts[client]
                 codes = state.codes
@@ -1707,19 +1713,28 @@ class DnsTunnelShape(_DnsAggregate):
         # the findings, so only the small shape summaries are held together
         shaped: dict[str, dict[str, dict]] = defaultdict(dict)
         for key in sorted(self.pairs.keys(candidates=True)):
-            with citation_group(self):
-                found = self._assess(self.pairs.peek(key))
-                if found is not None:
-                    shaped[key[1]][key[0]] = found
+            found = self._assess(self.pairs.peek(key))
+            if found is not None:
+                shaped[key[1]][key[0]] = found
         out = []
         for domain in sorted(shaped):
-            with citation_group(self):
+            with citation_group(self, out, domain, shaped[domain]):
                 members = shaped[domain]
                 if len(members) >= self.SHARED_CLIENTS:
                     out.append(self._shared(domain, members, self.askers.peek(domain, 0)))
                 else:
                     out += [_citation for client, found in sorted(members.items()) for _citation in citation_call(self, self._single, client, domain, found)]
         return out
+
+    def uncited_finding(self, key, state, match):
+        members = state.values() if isinstance(state, dict) else (state[-1],)
+        match.proposed_lane = "high" if any(found["lane"] == "high" for found in members) else self.lane
+        if isinstance(state, dict):
+            match.group_key = f"*|{key}"
+            match.ts = min(self.pairs.peek((client, key)).span.first for client in state)
+        else:
+            match.ts = self.pairs.peek(key).span.first
+        return match
 
     def _own(self, record: _TunnelKey, found: dict) -> list[TypedEvent]:
         """What the finding is about: the strong-type examples (for the high lane), then the earliest records."""

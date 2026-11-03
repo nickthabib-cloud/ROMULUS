@@ -80,3 +80,21 @@ def test_cli_bounded_maintenance_timeout_creates_no_planned_hunt(monkeypatch, tm
     assert result == [cli.EXIT_FAIL] and created == [] and ran == []
     assert repo.get_hunt('h2') is None
     assert 'hunt not created: Database maintenance is active' in capsys.readouterr().err
+
+
+def test_cli_claim_failure_names_existing_hunt_and_recovery(monkeypatch, tmp_path, capsys):
+    repo, args, created, ran = setup(monkeypatch, tmp_path)
+    def fail(*args, **kwargs):
+        raise RuntimeError("injected claim failure")
+    monkeypatch.setattr(repo, "claim_hunt", fail)
+    assert cli.cmd_hunt(args) == cli.EXIT_FAIL
+    assert created == [True] and not ran
+    assert repo.get_hunt("h2")["execution_state"] == "planned"
+    error = capsys.readouterr().err
+    assert "hunt h2 was created but could not be claimed" in error
+    assert "/hunts/h2/delete" in error and "planned hunts cannot be resumed" in error
+    assert "start a new hunt" in error
+    assert "hunt not created" not in error
+    # Follow the documented recovery through the same repository operation used by the web delete route.
+    repo.delete_hunt("h2", actor="web:test")
+    assert repo.get_hunt("h2") is None

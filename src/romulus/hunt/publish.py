@@ -4,15 +4,25 @@ from __future__ import annotations
 import hashlib
 import json
 
+import httpx
+
 from romulus.decide.policy import decide
 from romulus.detect.base import Match, Playbook
 from romulus.detect.observed import pointer_body
+from romulus.errors import SourceError
 from romulus.evidence.normalize import normalize_hits, observed_record, raw_digest
 from romulus.evidence.typed import TypedEvent, fv
 from romulus.hunt.citations import COMPACT_CITATION_NOTE
 from romulus.store.repo import Repo, raw_id
 
 LINEAGE_CITATION_BATCH = 500
+
+
+def _retrieval_note(error):
+    message = str(error)
+    kind = ("authorization" if "HTTP 401" in message or "HTTP 403" in message else
+            "mapping/query" if "HTTP 400" in message else "retrieval")
+    return f"Citation {kind} error: {message[:300]}. Citation coverage is partial for this finding."
 
 
 class SourceCitationFetcher:
@@ -31,14 +41,18 @@ class SourceCitationFetcher:
             for ref in event.raw:
                 if ref.key not in sources:
                     wanted.setdefault(ref.target, set()).add(ref.native_id)
-        for index, ids in wanted.items():
+        for index, ids in sorted(wanted.items()) if self.client is not None else ():
             ordered = sorted(ids)
             for start in range(0, len(ordered), LINEAGE_CITATION_BATCH):
                 batch = ordered[start:start+LINEAGE_CITATION_BATCH]
                 try:
                     response = self.client.search(index, {"size": len(batch), "track_total_hits": False,
                         "query": {"bool": {"filter": [{"ids": {"values": batch}}, {"terms": {"_index": [index]}}]}}})
-                except Exception:  # noqa: BLE001, S112 - each affected finding retains a fixed missing-body caveat
+                except (SourceError, httpx.TransportError, FileNotFoundError) as error:
+                    note = _retrieval_note(error)
+                    if note not in match.notes:
+                        match.notes.append(note)
+                        match.claim += " "+note
                     continue
                 for hit in response.get("hits", {}).get("hits", []):
                     if hit.get("_index") == index and hit.get("_id") in ids and isinstance(hit.get("_source"), dict):
@@ -80,7 +94,7 @@ class WindowsCitationFetcher:
                 wanted.setdefault(ref.target, set()).add(ref.native_id)
         hits = {(ref.target, ref.native_id): {"_index": ref.target, "_id": ref.native_id, "_source": raw_sources[ref.key]}
                 for event in compact for ref in event.raw if raw_sources and ref.key in raw_sources}
-        for index, identities in wanted.items():
+        for index, identities in sorted(wanted.items()) if self.client is not None else ():
             ordered = sorted(identities)
             for start in range(0, len(ordered), LINEAGE_CITATION_BATCH):
                 batch = [identity for identity in ordered[start:start+LINEAGE_CITATION_BATCH]
@@ -91,7 +105,11 @@ class WindowsCitationFetcher:
                     response = self.client.search(index, {"size": len(batch), "track_total_hits": False,
                         "query": {"bool": {"filter": [{"ids": {"values": batch}},
                                                      {"terms": {"_index": [index]}}]}}})
-                except Exception:  # noqa: BLE001, S112 - downstream fixed caveat reports unavailable bodies
+                except (SourceError, httpx.TransportError, FileNotFoundError) as error:
+                    note = _retrieval_note(error)
+                    if note not in match.notes:
+                        match.notes.append(note)
+                        match.claim += " "+note
                     continue
                 for hit in response.get("hits", {}).get("hits", []):
                     if hit.get("_index") == index and hit.get("_id") in identities:
@@ -310,6 +328,8 @@ def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
         "gate_results": {
             **decision.gates,
             "_notes": decision.notes,
+            **({"_citation_unavailable": True} if match.citation_unavailable else {}),
+            **({"_fleet_host_count": match.fleet_host_count} if match.fleet_host_count else {}),
             **({"_context_reaches": [context_reach]} if context_reach else {}),
         },
         "benign_alternatives": list(playbook.benign),
@@ -358,8 +378,16 @@ def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
         # the corrected decision for a direct finding already published under this id: revised in place. A revision
         # is not a new candidate, so it returns None (the sweep's new-candidate count and live callback are
         # unchanged); only a first publication under the id returns the row.
-        status = repo.revise_candidate(row, match.revision_reason, owner_token=owner_token)
+        with repo.candidate_publication():
+            status = repo.revise_candidate(row, match.revision_reason, owner_token=owner_token,
+                                           bounded_revision=match.bounded_revision)
+            if match.fleet_host_count or match.fleet_hosts_complete:
+                row.update(repo.save_candidate_hosts(candidate_id, hunt_id, match.fleet_hosts, owner_token=owner_token,
+                           replace=match.fleet_hosts_complete, expected_count=match.fleet_host_count, claim=match.claim))
         return row if status == "inserted" else None
-    return row if repo.save_candidate(
-        row, canonicalize_agent=source_case_id is None, owner_token=owner_token,
-    ) else None
+    with repo.candidate_publication():
+        saved = repo.save_candidate(row, canonicalize_agent=source_case_id is None, owner_token=owner_token)
+        if match.fleet_host_count or match.fleet_hosts_complete:
+            row.update(repo.save_candidate_hosts(candidate_id, hunt_id, match.fleet_hosts, owner_token=owner_token,
+                       replace=match.fleet_hosts_complete, expected_count=match.fleet_host_count, claim=match.claim))
+    return row if saved else None

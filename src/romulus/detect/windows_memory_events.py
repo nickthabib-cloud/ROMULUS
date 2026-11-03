@@ -150,7 +150,7 @@ def _expected_dotnet_host(path):
 
 class LsassProcessAccess(WindowsEventRule):
     id = "win.lsass_process_access"
-    version = "4"
+    version = "5"
     title = "A process opened LSASS with memory-related access or a notable call trace"
     families = ("process_access", "object_access")
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 10), ("Security", SECURITY, 4656), ("Security", SECURITY, 4663))
@@ -196,11 +196,14 @@ class LsassProcessAccess(WindowsEventRule):
             return []
         source = _process(event) if security else _process(event, "source")
         high = memory_rights and bool(source) and (not _installed_path(source) or notable_trace)
-        rights = "including PROCESS_VM_READ" if mask is not None and mask & 0x10 else "with memory-related qualifiers"
+        rights = ("including PROCESS_VM_READ" if mask is not None and mask & 0x10 else
+                  "with memory-related rights" if memory_rights else "")
         actor = f"Recorded source '{self.describe(source)}'" if source else "An unresolved source image"
         text = f"{actor} opened lsass.exe {rights}" if memory_rights else f"{actor} opened lsass.exe"
         if security:
-            text = f"Security recorded a process-object {'handle request' if code == 4656 else 'access'} by '{self.describe(source)}' to '{self.describe(target)}' {rights}"
+            actor = f"by '{self.describe(source)}'" if source else "by a process not recorded"
+            text = (f"Security recorded a process-object {'handle request' if code == 4656 else 'access'} "
+                    f"{actor} to '{self.describe(target)}'" + (f" {rights}" if rights else ""))
             if str(event.outcome) in {"failure", "Outcome.failure"}:
                 text += "; the recorded operation failed"
         if related_rights and not memory_rights:
@@ -224,13 +227,16 @@ class LsassProcessAccess(WindowsEventRule):
                                            target, mask, code,
                                            [path_class(item) if protected_platform_path(item) else item
                                             for item in trace_modules]], separators=(",", ":")),
-                       common=f"A recorded source in the same installation/path class opened lsass.exe {rights}" + priority,
-                       notes=("The record shows granted access, not a completed read or credential dump.",))]
+                       common=(text if security else f"A recorded source in the same installation/path class opened lsass.exe {rights}" + priority),
+                       notes=(("A handle request does not establish granted access or a completed read or credential dump."
+                               if security and code == 4656 else
+                               "A process-object access record does not establish a completed read or credential dump."
+                               if security else "The record shows granted access, not a completed read or credential dump."),))]
 
 
 class RemoteThreadCreation(WindowsEventRule):
     id = "win.remote_thread_creation"
-    version = "4"
+    version = "5"
     title = "Sysmon recorded a thread created in another process"
     families = ("remote_thread",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 8),)
@@ -246,17 +252,25 @@ class RemoteThreadCreation(WindowsEventRule):
         module = event.get("thread.start_module")
         address = event.get("thread.start_address")
         unresolved_module = not module or str(module).casefold() in {"unknown", "-"}
-        high = bool(source and target and (
-            (unresolved_module and address) or str(module).casefold() in {"unknown", "-"} or not _installed_path(source)
-            or basename(target) in {"lsass.exe", "winlogon.exe"}))
+        reasons = []
+        if source and target:
+            if unresolved_module and address:
+                reasons.append("no start module was recorded for the recorded start address")
+            if not _installed_path(source):
+                reasons.append("the source path does not establish system-volume installation scope")
+            if basename(target) in {"lsass.exe", "winlogon.exe"}:
+                reasons.append(f"the target is {basename(target)}")
+        high = bool(reasons)
         detail = (f"; no start module was recorded for start address {self.describe(address)}; "
                   "Sysmon leaves it empty when the address is outside any loaded image" if unresolved_module and address
-                  else "; start module was not recorded" if not module else f"; start module '{self.describe(module)}'")
+                  else "; start module was not recorded" if unresolved_module else f"; start module '{self.describe(module)}'")
         detail += (f"; start function '{self.describe(event.get('thread.start_function'))}'" if event.get('thread.start_function')
                    else "; start function not recorded")
         source_label = self.describe(source) if source else "source image not recorded"
         target_label = self.describe(target) if target else "target image not recorded"
         text = f"Sysmon recorded a remote thread from '{source_label}' into '{target_label}'" + detail
+        if high:
+            text += "; high priority because " + " and ".join(reasons)
         return [signal(event, "remote_thread", text,
                        self.attack, (*_ROLE_FIELDS, "thread.id", "thread.start_address", "thread.start_module",
                                      "thread.start_function"), lane="high" if high else "lead",
@@ -267,7 +281,7 @@ class RemoteThreadCreation(WindowsEventRule):
 
 class ProcessImageTampering(BehaviorFleetRule):
     id = "win.process_image_tampering"
-    version = "4"
+    version = "5"
     title = "Sysmon reported process image tampering"
     families = ("process_tampering",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 25),)
@@ -290,7 +304,7 @@ class ProcessImageTampering(BehaviorFleetRule):
 
 class UnsignedDriverLoad(WindowsEventRule):
     id = "win.unsigned_driver_load"
-    version = "2"
+    version = "3"
     title = "A driver loaded without a recorded valid signature"
     families = ("image_load",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 6),)
@@ -313,7 +327,7 @@ class UnsignedDriverLoad(WindowsEventRule):
 
 class WritableUnsignedDllLoad(WindowsEventRule):
     id = "win.writable_unsigned_dll_load"
-    version = "4"
+    version = "5"
     title = "A process loaded an unsigned or invalid module, or a module outside standard installation directories"
     families = ("image_load",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 7),)
@@ -368,7 +382,7 @@ class WritableUnsignedDllLoad(WindowsEventRule):
 
 class DumpLibraryLoad(WindowsEventRule):
     id = "win.dump_library_load"
-    version = "4"
+    version = "5"
     title = "A process loaded a library that provides diagnostic or dump functionality"
     families = ("image_load",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 7),)
@@ -392,7 +406,7 @@ class DumpLibraryLoad(WindowsEventRule):
 
 class UnexpectedClrLoad(WindowsEventRule):
     id = "win.unexpected_clr_load"
-    version = "4"
+    version = "5"
     title = "A CLR load did not meet the expected loader, module path and signature checks"
     families = ("image_load",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 7),)

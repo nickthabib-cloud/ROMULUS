@@ -376,8 +376,8 @@ class IndicatorMatch(Playbook):
         stores = ((self.groups, self.groups.keys()), (self.overflow, self.overflow.keys()))
         groups = [(key, store) for store, keys in stores for key in keys]
         for key, store in sorted(groups, key=lambda item: str(item[0])):
-            with citation_group(self):
-                state = store.peek(key)
+            state = store.peek(key)
+            with citation_group(self, out, key, state):
                 out.append(self._finding(key, state[0], state[1], state[2].events(self.load),
                                          state[3] if len(state) > 5 else None,
                                          operating_systems=state[-2], ends=state[-1]))
@@ -387,14 +387,24 @@ class IndicatorMatch(Playbook):
         """A group store whose disk table cannot be read: the groups held in memory, each complete for its key."""
         out = []
         for store in (self.groups, self.overflow):
-            with citation_group(self):
-                for key, state in sorted(store.hot.items(), key=lambda item: str(item[0])):
-                    with citation_group(self):
-                        m = self._finding(key, state[0], state[1], state[2].events(self.load),
-                                          state[3] if len(state) > 5 else None, operating_systems=state[-2], ends=state[-1])
-                        m.notes.append(f"published from memory only: the groups on disk could not be read ({reason})")
-                        out.append(m)
+            for key, state in sorted(store.hot.items(), key=lambda item: str(item[0])):
+                with citation_group(self, out, key, state):
+                    m = self._finding(key, state[0], state[1], state[2].events(self.load),
+                                      state[3] if len(state) > 5 else None, operating_systems=state[-2], ends=state[-1])
+                    m.notes.append(f"published from memory only: the groups on disk could not be read ({reason})")
+                    out.append(m)
         return out
+
+    def uncited_finding(self, key, state, match):
+        indicator = self.by_id[key[0]]
+        match.severity = indicator.severity
+        match.proposed_lane = "lead" if key[1] == "argument" else indicator.lane
+        match.claim_type = "mention" if key[1] == "argument" else "aggregate_observation"
+        match.entities = [("host", str(key[2]), "observer")] if key[2] else []
+        match.claim = (f"{state[0]} recorded matches of indicator {indicator.id} ({indicator.label}, list "
+                       f"{indicator.source}) for {key[1]} '{key[3]}' on {key[2]}; no citation could be retained. "
+                       "The positive is published from the recorded group state.")
+        return match
 
     def _finding(self, key: tuple, n: int, field_name: str, evs: list[TypedEvent],
                  values: list[str] | None = None, *, operating_systems: set[str], ends: Ends | None = None) -> Match:

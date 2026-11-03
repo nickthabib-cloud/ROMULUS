@@ -393,7 +393,7 @@ class SshPasswordGuessing(_SshAttemptStream):
     def _findings(self):
         out = []
         for key in sorted(self.tallies.keys(candidates=True), key=str):
-            with citation_group(self):
+            with citation_group(self, out, key, self.tallies.peek(key)):
                 host, ip, account = key
                 t = self.tallies.peek(key)
                 if t.crossed is None:
@@ -499,7 +499,7 @@ class SshPasswordSpraying(_SshAttemptStream):
     def _findings(self):
         out = []
         for key in sorted(self.tallies.keys(candidates=True), key=str):
-            with citation_group(self):
+            with citation_group(self, out, key, self.tallies.peek(key)):
                 host, ip = key
                 t = self.tallies.peek(key)
                 if t.crossed is None:
@@ -1312,28 +1312,25 @@ class AccountOrGroupChange(Playbook):
         # Join each tool record to the command of the same process (same host and pid, close in time).
         unjoined = SpillList(self, "acct_unjoined", self.HOT, disk_budget=UNBUDGETED)
         for i, record in enumerate(self.records.ordered()):
-            with citation_group(self):
-                ts = record.ts.timestamp()
-                candidates = [c for c in self.by_pid.get((record.host, record.get("process.pid")), ())
-                              if abs(c.ts - ts) <= self.JOIN_SECONDS]
-                if candidates:
-                    for change in candidates:
-                        with citation_group(self):
-                            change.records.append(record)
-                else:
-                    need(unjoined.append(record), self, "the unjoined tool records")
-                if i % self.FINALIZE_TRIM == self.FINALIZE_TRIM - 1:
-                    self.by_pid.trim()
-                    unjoined.trim()
+            ts = record.ts.timestamp()
+            candidates = [c for c in self.by_pid.get((record.host, record.get("process.pid")), ())
+                          if abs(c.ts - ts) <= self.JOIN_SECONDS]
+            if candidates:
+                for change in candidates:
+                    change.records.append(record)
+            else:
+                need(unjoined.append(record), self, "the unjoined tool records")
+            if i % self.FINALIZE_TRIM == self.FINALIZE_TRIM - 1:
+                self.by_pid.trim()
+                unjoined.trim()
         groups = KeyedStore(self, "acct_groups", self.HOT, disk_budget=UNBUDGETED)
         self._boot_events: dict[str, TypedEvent] = {}
         changes = (c for _key, held in self.by_pid.items() for c in held)
         loose = (c for held in self.loose for c in held)
         for i, change in enumerate(itertools.chain(changes, loose, self._record_changes(unjoined))):
-            with citation_group(self):
-                need(groups.setdefault(self._group(change), list), self, "the account change grouping").append(change)
-                if i % self.FINALIZE_TRIM == self.FINALIZE_TRIM - 1:
-                    groups.trim()
+            need(groups.setdefault(self._group(change), list), self, "the account change grouping").append(change)
+            if i % self.FINALIZE_TRIM == self.FINALIZE_TRIM - 1:
+                groups.trim()
         out = [_citation for key in sorted(groups.keys(), key=str) for _citation in citation_call(self, self._finding, key, groups.peek(key))]
         groups.clear()
         unjoined.clear()
@@ -1347,7 +1344,7 @@ class AccountOrGroupChange(Playbook):
 
         def each(changes) -> None:
             for change in changes:
-                with citation_group(self):
+                with citation_group(self, out, self._group(change), change):
                     m = self._finding(self._group(change), [change])
                     m.group_key += f"|alone:{(change.command or change.records[0]).id}"
                     m.notes.append(f"published on its own: grouping and joining needed disk ({reason})")
@@ -1355,11 +1352,10 @@ class AccountOrGroupChange(Playbook):
         for source in (lambda: (c for _key, held in self.by_pid.items() for c in held),
                        lambda: (c for held in self.loose for c in held),
                        lambda: self._record_changes(self.records)):
-            with citation_group(self):
-                try:
-                    each(source())
-                except StateExhausted:
-                    continue                            # a table on disk cannot be read: what was read stands
+            try:
+                each(source())
+            except StateExhausted:
+                continue                            # a table on disk cannot be read: what was read stands
         return out
 
     def _record_changes(self, unjoined):

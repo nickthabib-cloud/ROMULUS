@@ -66,7 +66,7 @@ def test_duplicates_repetition_missing_fields_success_and_wide_records_are_not_s
         assert not run(WindowsPasswordSpray(), records)
 
 
-def test_new_host_is_published_immediately_even_after_source_threshold():
+def test_new_host_is_retained_at_the_final_source_checkpoint():
     records = [failure(n) for n in range(20)] + [failure(50, host="ws02.example.test")]
     rule = bind(WindowsPasswordSpray(), records)
     matches = []
@@ -74,8 +74,12 @@ def test_new_host_is_published_immediately_even_after_source_threshold():
         matches.extend(rule.consume([item]))
         rule.drain_staged()
     source = [match for match in matches if "for IP " in match.claim]
-    assert len(source) == 2 and source[0].group_key != source[1].group_key
-    assert "ws02" in source[1].claim
+    assert len(source) == 1
+    [final] = [match for match in rule.finalize() if "for IP " in match.claim]
+    assert final.group_key == source[0].group_key and final.proposed_lane == "lead"
+    assert {item.id for item in final.events} == {item.id for item in records}
+    assert "ws02" in final.claim and "21 records" in final.claim
+    assert not list(rule.finalize())
     rule.release_state()
 
 
@@ -86,8 +90,12 @@ def test_repeated_value_on_an_early_host_is_not_suppressed_after_global_threshol
     rule = bind(WindowsPasswordSpray(), records)
     assert not rule.consume(records[:1])
     assert rule.consume(records[1:-1])
-    matches = rule.consume(records[-1:])
-    assert len(matches) == 1 and "early" in matches[0].claim
+    assert not rule.consume(records[-1:])
+    [final] = list(rule.finalize())
+    assert final.proposed_lane == "lead" and "early" in final.claim
+    assert {item.id for item in final.events} == {item.id for item in records}
+    assert "21 records" in final.claim and "20 distinct recorded target accounts" in final.claim
+    assert not list(rule.finalize())
     rule.release_state()
 
 
@@ -180,5 +188,7 @@ def test_metadata_and_attack_ids_are_current():
     bundle = load_attack_bundle()
     assert len(WINDOWS_AUTH_EVENT_PLAYBOOKS) == 7
     for rule in WINDOWS_AUTH_EVENT_PLAYBOOKS:
-        assert rule.version == ("4" if hasattr(rule, "citation_fields") else "2") and not rule.assures_negative and rule.benign and rule.research and rule.windows_event_classes
+        assert rule.version == ("5" if hasattr(rule, "citation_fields") else "3") and not rule.assures_negative and rule.benign and rule.research and rule.windows_event_classes
+        if hasattr(rule, "citation_fields"):
+            assert "doublings and finalization" in rule.card["lanes"]
         assert rule.attack and all(not bundle.technique(item).revoked for item in rule.attack)

@@ -19,25 +19,74 @@ from __future__ import annotations
 from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 from romulus.detect.bounded import CitationUnavailable
 from romulus.evidence.typed import TypedEvent
 
 
 @contextmanager
-def citation_group(owner):
+def citation_group(owner, out=None, key=None, state=None):
     """A refused compact witness affects its group, never the rule's other findings."""
     try:
         yield
     except CitationUnavailable:
-        owner.note_limit("citation_reference", "A finding's compact citation could not be retained within its "
-                         "available citation storage; that group was not published. Other groups continued.", records=1)
+        if out is None or key is None:
+            raise
+        out.append(uncited_positive(owner, key, state))
+
+
+def uncited_positive(owner, key, state=None):
+    """Publish a computed group from detection state without inventing a cited event."""
+    from dataclasses import fields, is_dataclass
+
+    from romulus.detect.base import Match
+    from romulus.detect.bounded import HeldExamples
+
+    times = []
+    def visit(value, depth=0):
+        if depth > 6:
+            return
+        if isinstance(value, datetime):
+            times.append(value)
+        elif isinstance(value, Ends):
+            if value.first:
+                times.append(datetime.fromtimestamp(value.first[0], UTC))
+        elif isinstance(value, HeldExamples):
+            times.extend(item[0][0] for item in value.items)
+        elif isinstance(value, dict):
+            for name, item in value.items():
+                if name in ("ts", "first", "start") and isinstance(item, (float, int)):
+                    times.append(datetime.fromtimestamp(item, UTC))
+                else:
+                    visit(item, depth+1)
+        elif isinstance(value, (tuple, list)):
+            for item in value[:100]:
+                visit(item, depth+1)
+        elif is_dataclass(value):
+            visit({item.name: getattr(value, item.name) for item in fields(value)}, depth+1)
+        else:
+            bounds = {name: getattr(value, name) for name in ("ts", "first", "start", "ends", "span")
+                      if hasattr(value, name)}
+            if bounds:
+                visit(bounds, depth+1)
+    visit(state)
+    identity = key if isinstance(key, str) else "|".join(map(str, key)) if isinstance(key, tuple) else str(key)
+    note = f"Group {identity}: no citation could be retained; this positive is published from its recorded detection state."
+    owner.note_limit("citation_reference", note)
+    match = Match(owner.id, f"{owner.title}: {note}", owner.claim_type, [], [],
+                  min(times) if times else datetime.min.replace(tzinfo=UTC), owner.severity, owner.lane,
+                  "medium", notes=[note], group_key=identity, citation_unavailable=True)
+    factory = getattr(owner, "uncited_finding", None)
+    return factory(key, state, match) if factory else match
 
 
 def citation_call(owner, build, *args, **kwargs):
-    with citation_group(owner):
-        return [build(*args, **kwargs)]
-    return []
+    out = []
+    identity = tuple(arg for arg in args if isinstance(arg, str)) or args[0]
+    with citation_group(owner, out, identity, args[1:]):
+        out.append(build(*args, **kwargs))
+    return out
 
 
 @dataclass

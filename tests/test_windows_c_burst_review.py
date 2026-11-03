@@ -125,19 +125,19 @@ def test_archive_preserves_late_witnesses_and_cross_bucket_windows():
     rule.release_state()
 
 
-def test_shared_budget_flood_cannot_take_another_rules_guaranteed_floor(tmp_path):
+def test_shared_budget_uses_idle_space_and_later_rule_can_use_remaining_physical_room(tmp_path):
     budget = StateBudget(tmp_path, disk_total=8*2**20, reserve=0)
     budget.plan(70)
     noisy, roast = WindowsBruteForce(), WindowsKerberoastDiversity()
     for rule in (noisy, roast):
         rule.budget = budget
-    # Over 25,000 native records force the noisy rule's own budget into honest refusal.
+    # Detection may use idle floors: 25,000 compact native records fit the physical budget.
     for start in range(0, 25000, 100):
         noisy.consume([failure(n, account="alice", offset=n*601) for n in range(start, start+100)])
         noisy.drain_staged()
     attack = [ticket(90000+n) for n in range(10)]
     matches = run(roast, attack)
-    assert noisy.capped > 0 and noisy.limit_reasons()
+    assert noisy.capped == 0 and budget.physical_used <= budget.disk_total
     assert matches and roast.capped == 0
     assert all(event.id in {item.id for item in matches[0].events} for event in attack)
     noisy.release_state()

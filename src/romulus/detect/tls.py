@@ -310,7 +310,7 @@ class SelfSignedCertificateOutbound(_CertificateRule):
     def finalize(self):
         out = []
         for key, state in self.groups.items():
-            with citation_group(self):
+            with citation_group(self, out, key, state):
                 evs, missing, context = self.cite(state)
                 g = state["info"]
                 cert = g["cert"]
@@ -397,7 +397,7 @@ class ShortLivedOrNewCertificateOutbound(_CertificateRule):
     def finalize(self):
         out = []
         for key, state in self.groups.items():
-            with citation_group(self):
+            with citation_group(self, out, key, state):
                 evs, missing, context = self.cite(state)
                 g = state["info"]
                 cert, parts = g["cert"], []

@@ -290,6 +290,8 @@ def _coverage(cells: list[dict], targets: list[str] | None = None, rule_ids: lis
         if matched:
             claim = "none (rule matched)" + "".join(f"; {s}" for s in dict.fromkeys(scope[rule])) \
                 + ("; coverage incomplete: " + "; ".join(reasons) if reasons else "")
+        elif set(states) == {"not_applicable_no_events"} and not reasons:
+            claim = "no data in scope for this rule"
         elif states.get("positive_only") or states.get("positive_only_partial") or rule in POSITIVE_ONLY_RULE_IDS:
             # decided by what the rule can prove *now*, not by cells stored under an older pack: a hunt swept
             # before a rule became positive-only must not render its old no_match_complete as "complete"

@@ -368,7 +368,7 @@ class RootExecNonRootModifiableFile(Playbook):
         own = KeyedStore(self, "rx_own", self.HOT)      # (host, owner) -> [(file, tally of own runs)]
         current = f = others = mine = None
         for key, runs in self.runs.grouped():           # one file's session runs at a time, files in key order
-            with citation_group(self):
+            with citation_group(self, out, key, runs):
                 if key[:3] != current:
                     self._file_done(current, f, others, mine, out, own)
                     current, others, mine = key[:3], _RunTally(), _RunTally()
@@ -478,6 +478,17 @@ class RootExecNonRootModifiableFile(Playbook):
         match.notes = ["T1548.003", "T1574",
                        ("own sessions are matched by audit session id and boot id; where the boot id is not recorded, "
                        "a session id reused after a reboot can match a different login")]
+        return match
+
+    def uncited_finding(self, key, state, match):
+        match.proposed_lane = "lead"
+        if len(key) == 3:
+            f, runs = state
+            match.group_key = f"{key[0]}|{f.owner}|{key[1]}"
+            if (f.web or f.world) and runs.failed < runs.count:
+                match.proposed_lane = "high"
+        else:
+            match.group_key = f"{key[0]}|own:{key[1]}"
         return match
 
 
@@ -776,11 +787,10 @@ class PersistencePathChange(Playbook):
         loaded = {event.id: event for event in self.load([change.event_id])}
         event = loaded.get(change.event_id)
         if event is None:
-            self._stage_missing.add(change.event_id)
             self.note_limit(
                 "stage_missing",
-                "a staged persistence-location change was unavailable during finalization; that change is omitted "
-                "because its subject record cannot be cited, while other changes are still evaluated",
+                f"Persistence change on {change.host} at {change.path}: no citation could be retained; "
+                "package ancestry is unavailable, and the recorded change remains reportable",
             )
             return None
         change.lineage = self.lineage.classify(event)
@@ -837,29 +847,25 @@ class PersistencePathChange(Playbook):
             # Package activity is batched per (host, manager). Anything else is one finding per writing process
             # (host, uid, pid) and directory, so one editor run (file, swap and backup files) is one finding; without
             # a pid it is one finding per file. Every file is named and its first record cited.
-            with citation_group(self):
-                key = self._key(change)
-                if change.event_id in self._stage_missing:
-                    continue
-                need(groups.setdefault(key, list), self, "the persistence change grouping").append(change)
-                if i % self.TRIM_EVERY == self.TRIM_EVERY - 1:
-                    groups.trim()
-                    self.lineage.trim()
+            key = self._key(change)
+            need(groups.setdefault(key, list), self, "the persistence change grouping").append(change)
+            if i % self.TRIM_EVERY == self.TRIM_EVERY - 1:
+                groups.trim()
+                self.lineage.trim()
         # one process's records whose boot is not recorded stay with it unless the records show a second boot
         keys = groups.keys()
         merged = {**{k: [k] for k in keys if k[0] != "account"},
                   **merge_unknown_boot({k: [k] for k in keys if k[0] == "account"}, 6)}
-        out = []
+        out, uncited = [], []
         for key, parts in merged.items():               # one merged group read at a time
-            with citation_group(self):
-                items = [change for part in parts for change in groups.peek(part)]
-                for final, run in self._split_runs({key: items}).items():
-                    with citation_group(self):
-                        run = sorted(run, key=lambda c: (c.ts, c.event_id))
-                        out.append((tuple(str(part) for part in final),
-                                    self._package_finding(final, run) if final[0] == "package" else self._finding(final, run)))
+            items = [change for part in parts for change in groups.peek(part)]
+            for final, run in self._split_runs({key: items}).items():
+                with citation_group(self, uncited, final, run):
+                    run = sorted(run, key=lambda c: (c.ts, c.event_id))
+                    out.append((tuple(str(part) for part in final),
+                                self._package_finding(final, run) if final[0] == "package" else self._finding(final, run)))
         groups.clear()
-        return [match for _key, match in sorted(out, key=lambda item: item[0])]
+        return [match for _key, match in sorted(out, key=lambda item: item[0])] + uncited
 
     def _key(self, change: _Change) -> tuple:
         """The finding a change belongs to: package activity per (host, manager); anything else per writing
@@ -882,7 +888,7 @@ class PersistencePathChange(Playbook):
         out = []
         try:
             for change in self.changes:
-                with citation_group(self):
+                with citation_group(self, out, self._key(change), [change]):
                     m = self._single(change)
                     m.group_key += f"|alone:{change.event_id}"
                     m.notes.append(f"published on its own: grouping per process needed disk ({reason})")
@@ -890,6 +896,25 @@ class PersistencePathChange(Playbook):
         except StateExhausted:
             pass                                    # the list on disk cannot be read: what was read stands
         return out
+
+    def uncited_finding(self, key, items, match):
+        first = items[0]
+        if key[0] == "package":
+            match.group_key = f"{key[1]}|package:{key[2]}"
+        else:
+            _kind, host, place, uid, pid = key[:5]
+            match.group_key = (f"{host}|{uid}|{place}" + (f"|pid {pid}" if pid is not None else "")
+                               + (f"|{first.exe}|{_iso(first.ts)}" if pid is not None else ""))
+        root = first.uid == "0"
+        ok = any(change.outcome != Outcome.failure for change in items)
+        own_only = not root and all(change.own and not change.web for change in items)
+        setuid_only = not root and all(change.setuid and change.per_account and not change.web for change in items)
+        match.proposed_lane = "high" if not root and ok and not own_only and not setuid_only else "lead"
+        match.entities = [("host", first.host, "subject")]
+        match.claim = (f"On {first.host}, {len(items)} recorded persistence-location changes: "
+                       f"{self._changes_text(items)}; no citation could be retained. "
+                       "The positive is published from recorded change state.")
+        return match
 
     @staticmethod
     def _split_runs(groups: dict[tuple, list[_Change]]) -> dict[tuple, list[_Change]]:

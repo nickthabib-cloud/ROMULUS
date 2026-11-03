@@ -29,6 +29,8 @@ WRITABLE_WINDOWS_DIRS = (
 # Windows built-ins named by ATT&CK's original COM-hijacking case studies.
 # Each identity retains its source; this is deliberately a small positive-only list.
 BUILTIN_COM_CLASSES = {
+    '{b5f8350b-0548-48b1-a6ee-88bd00b4a5e7}': (
+        'CAccPropServicesClass', 'https://learn.microsoft.com/dotnet/api/accessibility.caccpropservicesclass'),
     '{42aedc87-2188-41fd-b9a3-0c966feabec1}': (
         'MruPidlList', 'https://unit42.paloaltonetworks.com/bbsrat-attacks-targeting-russian-organizations-linked-to-roaming-tiger/'),
     '{f3130cdb-aa52-4c3a-ab32-85ffc23af9c1}': (
@@ -97,7 +99,7 @@ def path_class(path, *, directory=False):
     if directory:
         parts = parts[:-1]
         for index, part in enumerate(parts):
-            if part in {'cache', 'cache_data', 'code cache', 'gpucache'}:
+            if part in {'cache', 'cache_data', 'code cache', 'gpucache', 'inetcache', 'cache2', 'startupcache'}:
                 parts = parts[:index + 1] + (['<cache-directories>'] if index + 1 < len(parts) else [])
                 break
     return '\\'.join(parts)

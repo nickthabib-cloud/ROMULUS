@@ -28,6 +28,14 @@
 </ul>
 {% endif %}
 
+{% if fleet_hosts %}
+<h2>Hosts in this finding ({{ gates.get('_fleet_host_count', fleet_hosts | length) }})</h2>
+<table class="grid"><thead><tr><th>Host</th><th>First recorded witness</th></tr></thead>
+<tbody>{% for host in fleet_hosts %}<tr><td>{{ host.host }}</td><td class="mono">{{ host.first_event_id }}</td></tr>{% endfor %}</tbody></table>
+{% if fleet_after %}<a href="/findings/{{ c.id }}">First host page</a>{% endif %}
+{% if fleet_next %}<a href="/findings/{{ c.id }}?host_after={{ fleet_next | urlencode }}">Next host page</a>{% endif %}
+{% endif %}
+
 <h2>What the claim rests on</h2>
 <table class="grid">
 <thead><tr><th>Field</th><th>Value</th><th>Origin (record:field)</th></tr></thead>

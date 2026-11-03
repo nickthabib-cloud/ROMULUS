@@ -244,7 +244,7 @@ class SuricataAlertStack(_Grouped):
     def finalize(self):
         out = []
         for key, state in self.reported():
-            with citation_group(self):
+            with citation_group(self, out, key, state):
                 evs, missing, context = self.cite(state)
                 src, dst, cat, sev = key
                 n = state.count
@@ -292,6 +292,13 @@ class SuricataAlertStack(_Grouped):
         return out
 
 
+    def uncited_finding(self, key, state, match):
+        _src, _dst, category, severity = key
+        match.proposed_lane, match.severity = (("context", "low") if category == "Not Suspicious Traffic" or severity == 3
+                                               else ("high", "high") if severity == 1 else ("lead", "medium"))
+        return match
+
+
 class WebScanBurst(_Grouped):
     id = "web.scan_burst"
     title = "High-volume error-heavy web requests from one source"
@@ -337,7 +344,7 @@ class WebScanBurst(_Grouped):
     def finalize(self):
         out = []
         for key, state in self.reported():
-            with citation_group(self):
+            with citation_group(self, out, key, state):
                 n, errs = state.count, state.errors
                 if n < self.MIN_REQUESTS or errs / n < self.MIN_ERROR_RATIO:
                     continue
@@ -434,7 +441,7 @@ class DnsSubdomainEnumeration(_Grouped):
     def finalize(self):
         out = []
         for key, state in self.reported():
-            with citation_group(self):
+            with citation_group(self, out, key, state):
                 distinct = len(state.bag("names"))
                 if distinct < self.MIN_DISTINCT:
                     continue
@@ -498,7 +505,7 @@ class ToolUserAgentHttp(_Grouped):
     def finalize(self):
         out = []
         for key, state in self.reported():
-            with citation_group(self):
+            with citation_group(self, out, key, state):
                 evs, missing, context = self.cite(state)
                 src, dst, hostname, ua = key
                 urls = sorted(u for u in state.names("urls", self.URLS_NAMED).values())
@@ -619,8 +626,9 @@ class PortScan(_Grouped):
 
     def finalize(self):
         rows = []
+        uncited = []
         for key, state in self.reported():
-            with citation_group(self):
+            with citation_group(self, uncited, key, state):
                 src, dst = key
                 forward = state.bag("ports")
                 replies = state.replies
@@ -661,28 +669,27 @@ class PortScan(_Grouped):
                 opened = sorted(port for port in state.names("opened", self.PORTS_NAMED).values() if port in probed)
                 rows.append((src, dst, claim, lane, severity, evs, len(probed), opened, len(answered), context))
         scanned = {(src, dst) for src, dst, _claim, lane, *_rest in rows if lane == self.lane}
-        out = []
+        out = list(uncited)
         for src, dst, claim, lane, severity, evs, n_probed, opened, n_answered, context in rows:
-            with citation_group(self):
-                if lane == "context" and (dst, src) in scanned:
-                    # The target's side of a scan that is itself a lead belongs to that attack: keep it visible at the
-                    # scan's lane, saying what this pair's own records show (answers, and ports it probed itself).
-                    lane, severity = self.lane, self.severity
-                    claim += (f" The opposite direction, {dst} to {src}, is reported as a port scan lead, so this pair is "
-                              f"raised to the same lane: {n_answered} of its ports answer earlier requests from {dst}, "
-                              f"and {n_probed} look probed in this direction.")
-                    if opened:
-                        claim += (f" A cited Suricata directional TCP flag summary shows {src} opened the "
-                                  f"connection on tcp/" + ", tcp/".join(str(port) for port in opened)
-                                  + " (it records a SYN toward the server).")
-                    elif n_probed:
-                        claim += " No cited record shows which side opened the connections on the probed ports."
-                elif lane == "context":
-                    claim += " Retained for context."
-                out.append(Match(self.id, claim, self.claim_type, evs, [pf(evs[0], "source.ip"),
-                                                                         pf(evs[0], "destination.ip")],
-                                 evs[0].ts, severity, lane, "high", evs[0].entities(), group_key=f"{src}|{dst}",
-                                 context_ids=context))
+            if lane == "context" and (dst, src) in scanned:
+                # The target's side of a scan that is itself a lead belongs to that attack: keep it visible at the
+                # scan's lane, saying what this pair's own records show (answers, and ports it probed itself).
+                lane, severity = self.lane, self.severity
+                claim += (f" The opposite direction, {dst} to {src}, is reported as a port scan lead, so this pair is "
+                          f"raised to the same lane: {n_answered} of its ports answer earlier requests from {dst}, "
+                          f"and {n_probed} look probed in this direction.")
+                if opened:
+                    claim += (f" A cited Suricata directional TCP flag summary shows {src} opened the "
+                              f"connection on tcp/" + ", tcp/".join(str(port) for port in opened)
+                              + " (it records a SYN toward the server).")
+                elif n_probed:
+                    claim += " No cited record shows which side opened the connections on the probed ports."
+            elif lane == "context":
+                claim += " Retained for context."
+            out.append(Match(self.id, claim, self.claim_type, evs, [pf(evs[0], "source.ip"),
+                                                                     pf(evs[0], "destination.ip")],
+                             evs[0].ts, severity, lane, "high", evs[0].entities(), group_key=f"{src}|{dst}",
+                             context_ids=context))
         return out
 
 

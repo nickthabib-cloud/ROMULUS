@@ -11,6 +11,7 @@ from romulus.detect.windows_auth_events import (
     WindowsPasswordSpray,
 )
 from romulus.hunt import sweep as sw
+from romulus.sources.es import SourceError
 from romulus.sources.models import Window
 from tests.test_bounded_starvation import _Listed
 from tests.test_sweep import _complete, _repo
@@ -52,7 +53,7 @@ def test_all_151_native_high_iocs_publish_after_body_owner_quota_with_local_cita
     class Client:
         def search(self, index, body):
             if not retrieve:
-                raise RuntimeError("source document rolled off")
+                raise SourceError("source document rolled off")
             ids = body["query"]["bool"]["filter"][0]["ids"]["values"]
             return {"hits": {"hits": [hit for _, hit in pairs if hit["_index"] == index and hit["_id"] in ids]}}
     repo = _repo()
@@ -114,10 +115,12 @@ def test_later_native_qualifying_window_revises_same_key_and_cites_its_own_membe
     assert len(bursts) == (2 if kind in {"spray", "source_less"} else 1)
     latest_ids = {event.id for event in latest}
     for match in bursts:
-        assert {event.id for event in match.events} <= latest_ids
-        assert len(match.events) <= rule.threshold+1 and match.revision_reason
+        assert {event.id for event in match.events} <= latest_ids | {event.id for event in old}
+        assert {event.id for event in old} <= {event.id for event in match.events}
+        assert {event.id for event in latest[-rule.threshold:]} <= {event.id for event in match.events}
+        assert len(match.events) <= 2*rule.threshold and match.revision_reason
         assert old[0].ts.isoformat() in match.claim and latest[-1].ts.isoformat() in match.claim
-        assert any("qualifying windows" in note for note in match.notes)
+        assert "qualifying windows" in match.claim and "2 episodes" in match.claim
     rule.release_state()
 
 
@@ -184,7 +187,10 @@ def test_one_actual_compact_write_refusal_preserves_other_same_rule_ioc_groups(t
     assert sum(path.stat().st_size for path in tmp_path.rglob("*") if path.is_file()) <= 400000
     sweep.finalize()
     candidates = repo.candidates("h1")
-    assert len(candidates) == 150 and all(row["lane"] == "high" for row in candidates)
+    assert len(candidates) == 151 and all(row["lane"] == "high" for row in candidates)
+    [uncited] = [row for row in candidates if not row["event_ids"]]
+    assert "no citation could be retained" in uncited["claim"] and "group70.c2.test" in uncited["claim"]
+    assert any("group70.c2.test" in reason for reason in rule.limit_reasons())
     assert {event.id for event, _ in pairs}-{refused_id} == {
         identity for row in candidates for identity in row["event_ids"]}
     assert "citation_reference" in rule.limits
@@ -217,7 +223,11 @@ def test_missing_native_join_subject_preserves_the_other_process_network_group(t
     load = stage.load
     monkeypatch.setattr(stage, "load", lambda ids: [event for event in load(ids) if event.id not in refused])
     sweep.finalize()
-    [candidate] = repo.candidates("h1")
+    candidates = repo.candidates("h1")
+    assert len(candidates) == 2
+    [uncited] = [row for row in candidates if not row["event_ids"]]
+    assert "bad" in uncited["claim"] and "no citation could be retained" in uncited["claim"]
+    [candidate] = [row for row in candidates if row["event_ids"]]
     assert candidate["rule_id"] == rule.id and "good" in candidate["claim"]
     assert "citation_reference" in rule.limits
     assert not any("finalize stopped" in reason for reason in rule.limit_reasons())
@@ -256,7 +266,9 @@ def test_missing_native_host_subject_preserves_other_file_groups(tmp_path, monke
     monkeypatch.setattr(stage, "load", lambda ids: [event for event in load(ids) if event.id != refused_id])
     sweep.finalize()
     candidates = repo.candidates("h1")
-    assert len(candidates) == 2
+    assert len(candidates) == 3
+    [uncited] = [row for row in candidates if not row["event_ids"]]
+    assert "no citation could be retained" in uncited["claim"] and f"run{missing}" in uncited["claim"]
     assert {event.id for event in events}-{refused_id} == {
         identity for row in candidates for identity in row["event_ids"]}
     assert "citation_reference" in rule.limits

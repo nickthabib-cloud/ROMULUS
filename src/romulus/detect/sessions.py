@@ -308,7 +308,7 @@ class LongExternalConnection(_Stitched):
         out = []
         order = sorted((c["seq"], key) for key, c in self.conns.items(candidates=True))
         for _seq, key in order:
-            with citation_group(self):
+            with citation_group(self, out, key, self.conns.peek(key)):
                 c = self.conns.peek(key)
                 staged = set(c["events"])
                 # the records bounding the span, the record showing the opening, the first record of each later stretch
@@ -420,19 +420,17 @@ class Beaconing(_Stitched):
     def finalize(self):
         series = KeyedStore(self, "beacon_series", self.HOT)
         for i, (_key, c) in enumerate(self.conns.items()):
-            with citation_group(self):
-                s = series.setdefault((c["src"], c["dst"], c["dport"], c["transport"]), _Series)
-                if s is None:
-                    self.refuse("disk", "the series' disk budget is spent; a connection is not evaluated")
-                    continue
-                for part in c["parts"]:
-                    with citation_group(self):
-                        s.add(part)
-                if i % self.TRIM_EVERY == self.TRIM_EVERY - 1:
-                    series.trim()
+            s = series.setdefault((c["src"], c["dst"], c["dport"], c["transport"]), _Series)
+            if s is None:
+                self.refuse("disk", "the series' disk budget is spent; a connection is not evaluated")
+                continue
+            for part in c["parts"]:
+                s.add(part)
+            if i % self.TRIM_EVERY == self.TRIM_EVERY - 1:
+                series.trim()
         out = []
         for (src, dst, dport, transport), s in series.items():
-            with citation_group(self):
+            with citation_group(self, out, (src, dst, dport, transport), s):
                 if len(s.starts) < self.MIN_CONNECTIONS:
                     continue
                 starts = sorted(s.starts)
@@ -589,7 +587,7 @@ class RareClientFingerprint(_Stitched):
         out = []
         labels = {kind: label for kind, _field, label in self.KINDS}
         for (kind, value), p in self.prints.items(candidates=True):
-            with citation_group(self):
+            with citation_group(self, out, (kind, value), p):
                 if not self._rare(p):
                     continue
                 evs = self._events(p["events"])
@@ -823,7 +821,7 @@ class ArkimeSshReverseShellTag(Playbook):
     def finalize(self):
         out = []
         for key, pair in self.pairs.items(candidates=True):
-            with citation_group(self):
+            with citation_group(self, out, key, pair):
                 g = pair["info"]
                 # the tagged records bounding the stated span and its duration first, then the held examples
                 bounds = list(dict.fromkeys(g["by_time"].ids() + g["by_end"].ids()))

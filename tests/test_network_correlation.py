@@ -441,7 +441,9 @@ def test_a_cited_event_missing_from_the_stage_is_a_named_partial_group():
     rule.consume([_sock()] + _network(flow()))
     rule.drain_staged()
     rule.bind_loader(lambda ids: [])
-    assert rule.finalize() == []
+    [match] = rule.finalize()
+    assert match.citation_unavailable and not match.events and not match.predicate
+    assert match.proposed_lane == "lead" and "no citation could be retained" in match.claim
     assert "citation_reference" in rule.limits
 
 

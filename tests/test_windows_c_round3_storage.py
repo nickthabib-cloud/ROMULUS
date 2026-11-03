@@ -199,8 +199,9 @@ def test_bursts_fold_across_buckets_with_bounded_witness_list_and_total_count():
     rule = WindowsKerberoastDiversity()
     records = [ticket(n, offset=n if n < 10 else n+600) for n in range(20)]
     matches = run(rule, records)
-    assert len(matches) == 1 and len(matches[0].events) <= 11
-    assert any("20 recorded witnesses" in note for note in matches[0].notes)
+    assert len(matches) == 1 and len(matches[0].events) == 20
+    assert {event.id for event in matches[0].events} == {event.id for event in records}
+    assert "20 records" in matches[0].claim and "2 episodes" in matches[0].claim
     rule.release_state()
 
 

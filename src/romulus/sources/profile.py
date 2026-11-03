@@ -112,6 +112,7 @@ WINDOWS_FIELD_MAPPINGS: dict[str, tuple[str, ...]] = {
     "event.channel": ("winlog.channel",),
     "event.provider": ("winlog.provider_name",),
     "event.code": ("winlog.event_id",),
+    "object.type": ("winlog.event_data.ObjectType",),
     "host.name": ("winlog.computer_name",),
     "process.command_line": ("winlog.event_data.CommandLine",),
     "process.executable": (

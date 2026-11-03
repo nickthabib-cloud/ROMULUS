@@ -110,6 +110,7 @@ class _AccountRule(WindowsEventRule):
 
 
 class PrivilegedGroupAddition(_AccountRule):
+    version = "3"
     id = "win.privileged_group_addition"
     title = "An account was added to a sensitive local or domain group"
     windows_event_classes = tuple(("Security", SECURITY, code) for code in (4728, 4732, 4756))
@@ -154,6 +155,7 @@ class PrivilegedGroupAddition(_AccountRule):
 
 
 class SidHistoryChange(_AccountRule):
+    version = "3"
     id = "win.sid_history_change"
     title = "SID history addition or failed addition was recorded"
     windows_event_classes = tuple(("Security", SECURITY, code) for code in (4765, 4766))
@@ -181,6 +183,7 @@ class SidHistoryChange(_AccountRule):
 
 
 class DsrmPasswordAttempt(_AccountRule):
+    version = "3"
     id = "win.dsrm_password_attempt"
     title = "DSRM administrator password-setting attempt was recorded"
     windows_event_classes = (("Security", SECURITY, 4794),)
@@ -199,6 +202,7 @@ class DsrmPasswordAttempt(_AccountRule):
 
 
 class AccountCreation(_AccountRule):
+    version = "3"
     id = "win.account_creation"
     title = "A user or domain computer account was created"
     windows_event_classes = tuple(("Security", SECURITY, code) for code in (4720, 4741))
@@ -242,6 +246,7 @@ _SPN = re.compile(r"[^\s/<>]+/[^\s/<>]+(?:/[^\s/<>]+)?", re.ASCII)
 
 
 class ComputerAccountConfiguration(_AccountRule):
+    version = "3"
     id = "win.computer_account_configuration"
     title = "User or computer account delegation or sensitive SAMR flags changed"
     windows_event_classes = tuple(("Security", SECURITY, code) for code in (4738, 4742))
@@ -323,7 +328,7 @@ class ComputerAccountConfiguration(_AccountRule):
 
 class AccountRename(_AccountRule):
     id = "win.account_rename"
-    version = "1"
+    version = "2"
     title = "An account rename was recorded"
     windows_event_classes = (("Security", SECURITY, 4781),)
     attack = ("T1098",)

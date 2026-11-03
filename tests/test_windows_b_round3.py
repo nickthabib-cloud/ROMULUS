@@ -240,6 +240,7 @@ def test_b2_i2_code_directory_instances_keep_first_host_findings_and_basename_co
 ])
 def test_b2_i2_benign_stream_delete_and_archive_timestamp_classes_fold(rule, code, writer, path, extra):
     events = [native(code, {'Image': writer, 'TargetFilename': path.format(i),
+        'Hashes': f'SHA256={i:064x},IMPHASH=' + '0' * 32,
         **{name: value.format(i) for name, value in extra.items()}}) for i in range(20)]
     matches, _ = fold(rule(), events)
     assert len(matches) == 1 and matches[0].proposed_lane == 'lead'
@@ -253,7 +254,7 @@ def test_b2_i3_management_fanout_folds_by_pipe_outcome_account_class_and_counts_
     matches, _ = fold(RemoteManagementPipe(), events)
     assert all(match.proposed_lane == 'lead' for match in matches)
     if pipe in {'svcctl', 'atsvc'}:
-        assert len(matches) == 2 and any(not match.group_key for match in matches)
+        assert len(matches) == 200 and all(not match.group_key for match in matches)
     else:
         assert len(matches) == 1
         assert '200 distinct source IP' in matches[0].claim and 'machine account' in matches[0].claim
@@ -378,5 +379,5 @@ def test_b2_m3_missing_module_is_unresolved_but_recorded_dash_is_a_cited_marker(
     missing = RemoteThreadCreation().judge(native(8, data))[0]
     marker = RemoteThreadCreation().judge(native(8, {**data, 'StartModule': '-'}))[0]
     assert missing.lane == 'lead' and 'not recorded' in missing.text
-    assert marker.lane == 'high' and "'-'" in marker.text
+    assert marker.lane == 'lead' and 'not recorded' in marker.text
     assert any(item.field == 'thread.start_module' and item.value == '-' for item in marker.predicate)

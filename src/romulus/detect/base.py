@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, ClassVar, Literal
@@ -47,6 +48,14 @@ class Match:
     # same identity (a later record changed the answer, or a merged finding's final tally): the publication revises
     # that candidate in place, and this is the stated reason. Empty for every ordinary match.
     revision_reason: str = ""
+    # A computed positive whose optional source citations could not be retained/retrieved.
+    citation_unavailable: bool = False
+    # Burst aggregates replace bounded first/latest witnesses rather than accumulating history.
+    bounded_revision: bool = False
+    # Streamed host membership, persisted separately from the bounded candidate JSON.
+    fleet_hosts: Iterable[tuple[str, str]] = ()
+    fleet_host_count: int = 0
+    fleet_hosts_complete: bool = False
 
     def __post_init__(self) -> None:
         # A positive stays valid on a command line some of whose arguments were lost; the claim says so.

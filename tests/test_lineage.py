@@ -472,13 +472,17 @@ def test_missing_staged_group_is_named_partial_and_other_lineage_findings_contin
     pb.consume([*missing, *retained])
     staged = {event.id: event for event in pb.drain_staged() if event.host == "app02"}
     pb.bind_loader(lambda ids: [staged[identity] for identity in ids if identity in staged])
-    [match] = pb.finalize()
+    matches = pb.finalize()
+    [match] = [m for m in matches if not m.citation_unavailable]
+    [uncited] = [m for m in matches if m.citation_unavailable]
+    assert uncited.proposed_lane == "high" and not uncited.events
+    assert uncited.group_key == f"app01|None|500|{EXT}"
     assert match.proposed_lane == "high" and match.group_key == f"app02|None|500|{EXT}"
     cited = {event.id for event in match.events}
     assert {retained[1].id, retained[2].id} <= cited
     assert cited.isdisjoint(event.id for event in missing)
-    assert pb.limits["citation_reference"].records == 1
-    assert any("that group was not published. Other groups continued." in reason for reason in pb.limit_reasons())
+    assert pb.limits["citation_reference"].records == 0 and pb.limits["citation_reference"].hits == 1
+    assert any("no citation could be retained" in reason for reason in pb.limit_reasons())
     assert not any("finalize stopped" in reason for reason in pb.limit_reasons())
 
 

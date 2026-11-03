@@ -108,6 +108,9 @@ def test_access_messages_use_object_type_table(kind, codes, rights):
 ])
 def test_relative_proxy_operand_is_placed_with_native_current_directory(image, command, rule):
     event = process(image, command, CurrentDirectory='C:\\Users\\analyst\\Desktop\\')
+    if rule is Regsvr32Execution:
+        assert not run(rule(), [event])  # Bare libraries use DLL search order, not the CWD.
+        return
     [hit] = rule().judge(event)
     assert 'placed using the recorded working directory' in hit.text
     assert 'Desktop' in hit.text
@@ -126,24 +129,27 @@ def test_script_host_remote_url_claim_names_url():
                                        (r'C:\Windows\System32\inetsrv\w3wp.exe', 'high')])
 def test_encoded_only_process_lane_uses_parent_evidence(parent, lane):
     encoded = base64.b64encode('Get-Date'.encode('utf-16le')).decode()
-    [hit] = PowerShellEncodedOrCradle().judge(process('powershell.exe', 'powershell.exe -enc ' + encoded,
-                                                   ParentImage=parent))
-    assert hit.lane == lane
+    events = [process('powershell.exe', 'powershell.exe -enc ' + encoded, ParentImage=parent) for _ in range(3)]
+    matches = run(PowerShellEncodedOrCradle(), events)
+    assert all(match.proposed_lane == lane for match in matches)
+    assert any(match.group_key for match in matches)
     if lane == 'high':
-        assert 'recorded parent image' in hit.text
+        assert all('recorded parent image' in match.claim for match in matches)
 
 
 @pytest.mark.parametrize('source', [text for name, text in CASES if name in {
     'download', 'offensive_function', 'amsi_bypass'}])
 def test_encoded_process_high_requires_observed_strong_script_shape(source):
     encoded = base64.b64encode(source.encode('utf-16le')).decode()
-    hits = PowerShellEncodedOrCradle().judge(process('powershell.exe', 'powershell.exe -enc ' + encoded))
-    assert hits[0].lane == 'high'
+    matches = run(PowerShellEncodedOrCradle(), [process('powershell.exe', 'powershell.exe -enc ' + encoded) for _ in range(3)])
+    assert all(match.proposed_lane == 'high' for match in matches)
+    assert any(match.group_key for match in matches)
 
 
 def test_undecodable_encoded_process_is_still_a_reported_lead():
-    [hit] = PowerShellEncodedOrCradle().judge(process('powershell.exe', 'powershell.exe -enc !invalid'))
-    assert hit.lane == 'lead' and 'could not be decoded' in hit.text
+    matches = run(PowerShellEncodedOrCradle(), [process('powershell.exe', 'powershell.exe -enc !invalid') for _ in range(3)])
+    assert all(match.proposed_lane == 'lead' and 'could not be decoded' in match.claim for match in matches)
+    assert any(match.group_key for match in matches)
 
 
 def test_bare_service_image_is_lead_with_no_directory_claim():
@@ -171,8 +177,9 @@ def test_com_handler_registration_folds_fleet_by_clsid():
     assert len({match.group_key for match in matches}) == 1
     assert matches[-1].group_key
     assert 'ws29' in {event.host for event in matches[-1].events}
-    assert len(matches[-1].events) <= 9
-    assert '30 records are cited' in matches[-1].claim
+    assert len(matches[-1].events) == 21  # First record of the first 20 hosts, plus the latest boundary.
+    assert '21 of the 30 records are cited' in matches[-1].claim
+    assert len(dict(matches[-1].fleet_hosts)) == 30
 
 
 def test_winlogbeat8_fixture_has_native_envelope_and_old_sysmon_variant():

@@ -68,6 +68,7 @@ def cmd_hunt(args) -> int:
         s = s.model_copy(update={"agent_mode": agent_mode})
         start, end = _parse_time(args.start, s.mission_timezone), _parse_time(args.end, s.mission_timezone)
         user = os.environ.get("USER") or os.environ.get("USERNAME") or "cli"
+        hid = None
         try:
             repo = open_repo(s)
             with maintenance_lease(repo.engine, wait_seconds=30, allow_nested=True, on_wait=lambda: print(
@@ -79,7 +80,13 @@ def cmd_hunt(args) -> int:
                                   expand=not args.no_expand, ai_agent=False if args.no_agent else None)
                 owner = repo.claim_hunt(hid, _lease_seconds(s))["lease_owner"]
         except (ValueError, RuntimeError) as e:
-            print(f"hunt not created: {e}", file=sys.stderr)
+            if hid is None:
+                print(f"hunt not created: {e}", file=sys.stderr)
+            else:
+                print(f"hunt {hid} was created but could not be claimed: {e}. "
+                      f"Check its state at /hunts/{hid}. If still planned, delete it at /hunts/{hid}/delete "
+                      "and start a new hunt; planned hunts cannot be resumed.",
+                      file=sys.stderr)
             return EXIT_FAIL
         print(f"hunt {hid} created [{start.isoformat()}, {end.isoformat()})")
         ai = ai_agent_entry(s, False if args.no_agent else None)

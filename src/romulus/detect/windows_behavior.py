@@ -15,6 +15,10 @@ class BehaviorFleetRule(WindowsEventRule):
     def fleet_eligible(self, event, hit):
         return True
 
+    def _offer_group_example(self, group, event, hit, *, new_host):
+        return (new_host or not self.fleet_eligible(event, hit)) and group.examples.offer(event)
+
+
     def _fold(self, event, hit, out):
         if not self.fleet_eligible(event, hit):
             shape, role = super()._fold(event, hit, out)
@@ -45,11 +49,16 @@ class BehaviorFleetRule(WindowsEventRule):
         if group.records == 1:
             for match in out[start:]:
                 match.group_key = f'{self.id}|fleet|{shape}'
+                match.fleet_hosts = ((event.host, event.id),)
+                match.fleet_host_count = group.hosts
+                match.fleet_hosts_complete = False
         elif role == 'own':
             # A newly observed host revises the fleet finding immediately.
             merged = self._fleet_match(shape, group, final=False)
             if merged is not None:
                 merged.revision_reason = 'a newly observed host revised the running fleet membership and count'
+                merged.fleet_hosts = ((event.host, event.id),)
+                merged.fleet_hosts_complete = False
                 out[start:] = [merged]
                 group.emitted_records = group.records
                 self.groups.put(shape, group)

@@ -23,9 +23,7 @@ _CONTROL = re.compile(r"(?:currentcontrolset|controlset\d{3})", re.ASCII)
 _SYSMON_DWORD = re.compile(r"dword \(0x[0-9a-f]{1,8}\)", re.ASCII)
 _DWORD_TYPES = {"reg_dword", "reg_dword_little_endian", "dword", "%%1876"}
 _DEFAULT_ROOT = re.compile(
-    r"(?:[a-z]:\\windows|\\\\\?\\[a-z]:\\windows|\\\?\?\\[a-z]:\\windows"
-    r"|\\device\\harddiskvolume\d+\\windows"
-    r"|(?:\\\\\?\\|\\\?\?\\)volume\{[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\}\\windows"
+    r"(?:c:\\windows|\\\\\?\\c:\\windows|\\\?\?\\c:\\windows"
     r"|\\systemroot|%systemroot%|%windir%|%systemdrive%\\windows)", re.ASCII,
 )
 _NT = ("microsoft", "windows nt", "currentversion")
@@ -144,7 +142,7 @@ def _recorded_dword(event: TypedEvent) -> bool:
 def _default_winlogon(value: object, name: str) -> bool:
     """One exact default image, with optional quoting and Userinit's trailing comma.
 
-    Recognise the system-directory grammar on any volume without expanding variables,
+    Recognise only explicit system-volume grammar without expanding variables,
     resolving UNC shares or treating arbitrary paths with familiar basenames as safe.
     """
     if not isinstance(value, str):
@@ -228,7 +226,7 @@ class _RegistryRule(WindowsEventRule):
 
 class RegistryRunKeys(_RegistryRule):
     id = "win.registry_run_keys"
-    version = "3"
+    version = "4"
     title = "Run, RunOnce or RunOnceEx registry entry changed"
     attack = ("T1547.001",)
     benign = ("application installers and per-user startup preferences",)
@@ -256,7 +254,7 @@ class RegistryRunKeys(_RegistryRule):
 
 class RegistryWinlogon(_RegistryRule):
     id = "win.registry_winlogon"
-    version = "3"
+    version = "4"
     title = "Winlogon shell, user initialization or notification registration changed"
     attack = ("T1547.004",)
     benign = ("approved custom shells and legacy logon software",)
@@ -281,7 +279,7 @@ class RegistryWinlogon(_RegistryRule):
 
 class RegistryImageExecution(_RegistryRule):
     id = "win.registry_image_execution"
-    version = "3"
+    version = "4"
     title = "IFEO debugger or silent-exit monitoring registration changed"
     attack = ("T1546.012",)
     benign = ("debugging and application crash diagnostics",)
@@ -311,7 +309,7 @@ class RegistryImageExecution(_RegistryRule):
 
 class RegistryAppInit(_RegistryRule):
     id = "win.registry_appinit"
-    version = "3"
+    version = "4"
     title = "AppInit DLL registration or loading flag changed"
     attack = ("T1546.010",)
     benign = ("legacy application compatibility or security software",)
@@ -330,7 +328,7 @@ class RegistryAppInit(_RegistryRule):
 
 class RegistryAppCert(_RegistryRule):
     id = "win.registry_appcert"
-    version = "3"
+    version = "4"
     title = "AppCert DLL registration changed"
     attack = ("T1546.009",)
     benign = ("legacy certified application hooks",)
@@ -345,7 +343,7 @@ class RegistryAppCert(_RegistryRule):
 
 class RegistryUserCom(_RegistryRule, BehaviorFleetRule):
     id = "win.registry_user_com"
-    version = "4"
+    version = "5"
     title = "Per-user COM server registration changed"
     attack = ("T1546.015",)
     benign = ("per-user COM application installation and repair",)
@@ -385,7 +383,7 @@ class RegistryUserCom(_RegistryRule, BehaviorFleetRule):
 
 class RegistryLsaPackages(_RegistryRule):
     id = "win.registry_lsa_packages"
-    version = "3"
+    version = "4"
     title = "LSA authentication, security or notification packages changed"
     attack = ("T1547.002", "T1547.005", "T1112")
     benign = ("approved authentication providers, password filters and security products",)
@@ -402,7 +400,7 @@ class RegistryLsaPackages(_RegistryRule):
 
 class RegistryCredentialProtection(_RegistryRule):
     id = "win.registry_credential_protection"
-    version = "3"
+    version = "4"
     title = "WDigest credential retention or LSA protection registry setting changed"
     attack = ("T1112", "T1685")
     benign = ("legacy authentication troubleshooting and authorized compatibility work",)
@@ -423,7 +421,7 @@ class RegistryCredentialProtection(_RegistryRule):
 
 class RegistryDefender(_RegistryRule):
     id = "win.registry_defender"
-    version = "4"
+    version = "5"
     title = "Defender policy or exclusion registry setting changed"
     attack = ("T1685", "T1112")
     benign = ("managed antivirus policy and approved performance exclusions",)
@@ -469,7 +467,7 @@ class RegistryDefender(_RegistryRule):
 
 class RegistryRdp(_RegistryRule):
     id = "win.registry_rdp"
-    version = "3"
+    version = "4"
     title = "Remote Desktop registry enablement setting changed"
     attack = ("T1021.001", "T1112")
     benign = ("authorized remote administration enablement",)
@@ -484,7 +482,7 @@ class RegistryRdp(_RegistryRule):
 
 class RegistryServiceCommand(_RegistryRule):
     id = "win.registry_service_command"
-    version = "3"
+    version = "4"
     title = "Service image or failure command registry setting changed"
     attack = ("T1543.003",)
     benign = ("service installation, upgrades and recovery configuration",)

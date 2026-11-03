@@ -245,7 +245,7 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
 
     # ------------------------------------------------------------------ findings
     @app.get("/findings/{cid}", response_class=HTMLResponse)
-    def finding(request: Request, cid: str):
+    def finding(request: Request, cid: str, host_after: str = ""):
         u = need(request)
         c = repo.candidate(cid)
         if c is None:
@@ -256,7 +256,9 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         gates = dict(c["gate_results"])
         notes = gates.pop("_notes", [])
         pred_fields = {p["field"] for p in c["predicate_fields"]}
+        fleet_hosts, fleet_next = repo.candidate_hosts(cid, after=host_after)
         return page(request, "finding.html", u, c=c, gates=gates, notes=notes, events=events, raws=raws,
+                    fleet_hosts=fleet_hosts, fleet_next=fleet_next, fleet_after=host_after,
                     pred_fields=pred_fields, dispositions=repo.dispositions(cid), statuses=STATUSES,
                     pretty=lambda v: json.dumps(v, indent=2, ensure_ascii=False, sort_keys=True, default=str))
 

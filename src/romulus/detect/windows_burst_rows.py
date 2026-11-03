@@ -44,6 +44,8 @@ class BurstRows(WindowsRows):
         self._symbol_cache = OrderedDict()
         self._symbol_bytes = 0
         self._batching = False
+        self._batch_refusal = None
+        self._in_savepoint = False
 
     @contextmanager
     def batch(self):
@@ -52,7 +54,8 @@ class BurstRows(WindowsRows):
         budget = self.owner.state_budget()
         budget.check_free()
         pages = spill.db.execute("PRAGMA page_count").fetchone()[0]
-        spill.db.execute(f"PRAGMA max_page_count={pages+budget.physical_allowance(self.account)//spill._page}")
+        spill.db.execute(f"PRAGMA max_page_count={max(1, pages+budget.physical_allowance(self.account)//spill._page)}")
+        self._batch_refusal = budget.new_key_reason(self.account)
         self._batching = True
         try:
             yield
@@ -62,9 +65,18 @@ class BurstRows(WindowsRows):
             spill.grew()
             self._charge()
 
+    def room(self):
+        # The SQLite page limit enforces each write inside this batch. Rechecking every
+        # symbol/marker would repeat global admission work for every input record.
+        if not self._batching:
+            return super().room()
+        if self._batch_refusal:
+            self.owner.note_limit("windows_rows", "Correlation row growth is incomplete: " + self._batch_refusal)
+        return not self._batch_refusal
+
     def _execute(self, statement, values=()):
         spill = self.store()
-        return spill.db.execute(statement, values) if self._batching else spill.execute(statement, values)
+        return spill.db.execute(statement, values) if self._batching or self._in_savepoint else spill.execute(statement, values)
 
     def _cache(self, value, identity):
         cost = len(value.encode())+96
@@ -81,26 +93,42 @@ class BurstRows(WindowsRows):
     def store(self):
         spill = self.owner.spill()
         if not self.ready:
-            spill.db.execute("PRAGMA journal_mode=MEMORY")
-            spill.db.execute("CREATE TABLE windows_symbols(id INTEGER PRIMARY KEY,value TEXT UNIQUE)")
-            spill.db.execute("CREATE TABLE windows_refs(id BLOB PRIMARY KEY,target INTEGER,native TEXT,"
-                             "fields BLOB,template INTEGER) WITHOUT ROWID")
-            for table in ("windows_rows", "windows_archive"):
-                spill.db.execute(f"CREATE TABLE {table}(k INTEGER,id BLOB,ts REAL,value INTEGER,host INTEGER,"
-                                 "PRIMARY KEY(k,id)) WITHOUT ROWID")
-                spill.db.execute(f"CREATE INDEX {table}_time ON {table}(k,ts,id)")
-                spill.db.execute(f"CREATE INDEX {table}_value ON {table}(k,value,host,ts)")
-                spill.db.execute(f"CREATE INDEX {table}_identity ON {table}(id)")
-            spill.db.execute("CREATE INDEX windows_rows_expiry ON windows_rows(ts)")
-            spill.db.execute("CREATE VIEW windows_all AS SELECT k.value k,w.id,w.ts,v.value value,h.value host FROM "
-                             "(SELECT * FROM windows_rows UNION ALL SELECT * FROM windows_archive) w "
-                             "JOIN windows_symbols k ON k.id=w.k JOIN windows_symbols v ON v.id=w.value "
-                             "JOIN windows_symbols h ON h.id=w.host")
-            spill.db.execute("CREATE TABLE windows_marks(k TEXT PRIMARY KEY,value TEXT) WITHOUT ROWID")
             self.account = self.owner.state_budget().account(f"{self.owner.id}:windows_rows", strong=True)
+            spill.budget.reclaim_citations(16*spill._page)
+            spill.cap()
+            try:
+                self._schema(spill)
+            except sqlite3.OperationalError as error:
+                spill.db.rollback()
+                raise spill.failed(error, account=self.account) from error
+            finally:
+                spill.grew()
             self.ready = True
             self._charge()
         return spill
+
+    @staticmethod
+    def _schema(spill):
+        spill.db.execute("SAVEPOINT auth_schema")
+        spill.db.execute("CREATE TABLE windows_symbols(id INTEGER PRIMARY KEY,value TEXT UNIQUE)")
+        spill.db.execute("CREATE TABLE windows_refs(id BLOB PRIMARY KEY,target INTEGER,native TEXT,"
+                         "fields BLOB,template INTEGER) WITHOUT ROWID")
+        for table in ("windows_rows", "windows_archive"):
+            spill.db.execute(f"CREATE TABLE {table}(k INTEGER,id BLOB,ts REAL,value INTEGER,host INTEGER,"
+                             "PRIMARY KEY(k,id)) WITHOUT ROWID")
+            spill.db.execute(f"CREATE INDEX {table}_time ON {table}(k,ts,id)")
+            spill.db.execute(f"CREATE INDEX {table}_value ON {table}(k,value,host,ts)")
+            spill.db.execute(f"CREATE INDEX {table}_identity ON {table}(id)")
+        spill.db.execute("CREATE INDEX windows_rows_expiry ON windows_rows(ts)")
+        spill.db.execute("CREATE VIEW windows_all AS SELECT k.value k,w.id,w.ts,v.value value,h.value host FROM "
+                         "(SELECT * FROM windows_rows UNION ALL SELECT * FROM windows_archive) w "
+                         "JOIN windows_symbols k ON k.id=w.k JOIN windows_symbols v ON v.id=w.value "
+                         "JOIN windows_symbols h ON h.id=w.host")
+        spill.db.execute("CREATE TABLE windows_marks(k TEXT PRIMARY KEY,value TEXT) WITHOUT ROWID")
+        spill.db.execute("CREATE TABLE windows_accounts(k INTEGER,account INTEGER,PRIMARY KEY(k,account)) WITHOUT ROWID")
+        spill.db.execute("CREATE TABLE windows_hosts(n INTEGER PRIMARY KEY,k INTEGER,host INTEGER,"
+                         "first_id BLOB,first_ts REAL,revision INTEGER NOT NULL DEFAULT 0,UNIQUE(k,host))")
+        spill.db.execute("RELEASE auth_schema")
 
     def _charge(self):
         # Charge allocated pages, including indexes and symbols, rather than a favorable payload estimate.
@@ -108,17 +136,35 @@ class BurstRows(WindowsRows):
         size = db.execute("PRAGMA page_count").fetchone()[0] * db.execute("PRAGMA page_size").fetchone()[0]
         self.owner.state_budget().charge(self.account, size-self.account.used)
 
-    def _write(self, statement, rows):
+    def _reclaim_capacity(self):
+        """An actual FULL write gets one retry after optional citation caches yield."""
+        spill, budget = self.store(), self.owner.state_budget()
+        spill.grew()
+        self._charge()
+        before = budget.physical_used
+        budget.reclaim_citations(budget.disk_total, references=True)
+        if budget.physical_used >= before:
+            return False
+        pages = spill.db.execute("PRAGMA page_count").fetchone()[0]
+        spill.db.execute(f"PRAGMA max_page_count={max(1, pages+budget.physical_allowance(self.account)//spill._page)}")
+        self._batch_refusal = budget.new_key_reason(self.account)
+        return not self._batch_refusal
+
+    def _write(self, statement, rows, *, retried=False):
         spill = self.store()
         budget = self.owner.state_budget()
         if self._batching:
             try:
                 spill.db.executemany(statement, rows)
+                if not self._in_savepoint:
+                    spill.db.commit()
             except sqlite3.OperationalError as exc:
                 spill.db.rollback()
                 self._symbol_cache.clear()
                 self._symbol_bytes = 0
                 if "full" in str(exc).lower():
+                    if not self._in_savepoint and not retried and self._reclaim_capacity():
+                        return self._write(statement, rows, retried=True)
                     raise StateExhausted("authentication state reached its hunt byte allowance or volume reserve") from exc
                 raise
             return
@@ -126,9 +172,7 @@ class BurstRows(WindowsRows):
         reason = budget.new_key_reason(self.account)
         if reason:
             raise StateExhausted(reason)
-        available = min(max(0, budget.disk_total-budget.physical_used),
-                        max(0, budget.floor_of(self.account)-self.account.used) +
-                        max(0, budget.pool-budget.physical_pool_used))
+        available = budget.physical_allowance(self.account)
         headroom = budget.headroom()
         if headroom is not None:
             available = min(available, headroom)
@@ -136,9 +180,15 @@ class BurstRows(WindowsRows):
         spill.db.execute(f"PRAGMA max_page_count={pages+available//spill._page}")
         try:
             spill.db.executemany(statement, rows)
+            if not self._in_savepoint:
+                spill.db.commit()
         except sqlite3.OperationalError as exc:
             spill.db.rollback()
+            self._symbol_cache.clear()
+            self._symbol_bytes = 0
             if "full" in str(exc).lower():
+                if not self._in_savepoint and not retried and self._reclaim_capacity():
+                    return self._write(statement, rows, retried=True)
                 raise StateExhausted("authentication state reached its hunt byte allowance or volume reserve") from exc
             raise
         finally:
@@ -170,7 +220,14 @@ class BurstRows(WindowsRows):
         row = self._execute("SELECT value FROM windows_marks WHERE k=?", (key,)).fetchone()
         return row[0] if row else None
 
-    def put(self, key, event, value=""):
+    def markers(self, prefix):
+        yield from self._execute("SELECT k,value FROM windows_marks WHERE k>=? AND k<? ORDER BY k",
+                                 (prefix, prefix+chr(0x10ffff)))
+
+    def reset_markers(self, prefix):
+        self._execute("DELETE FROM windows_marks WHERE k>=? AND k<?", (prefix, prefix+chr(0x10ffff)))
+
+    def put(self, key, event, value="", *, retried=False):
         spill = self.store()
         key_id = self._lookup(key)
         if key_id is not None and self._execute(
@@ -184,10 +241,11 @@ class BurstRows(WindowsRows):
         stamp = event.ts.timestamp()
         cutoff = max(self.watermark, stamp) - self.owner.seconds
         table = "windows_archive" if stamp < cutoff else "windows_rows"
+        stored = False
         try:
-            if self._batching:
-                spill.db.commit()
-                spill.db.execute("SAVEPOINT auth_record")
+            spill.db.commit()
+            spill.db.execute("SAVEPOINT auth_record")
+            self._in_savepoint = True
             if not self._execute("SELECT 1 FROM windows_refs WHERE id=?", (_stored_id(event.id),)).fetchone():
                 # Origins and repeated values are dictionary encoded; record ids are never symbols.
                 names = sorted(name for name in event.fields if name in self.owner.citation_fields)
@@ -200,24 +258,45 @@ class BurstRows(WindowsRows):
                 values = array("I", [self._symbol(json.dumps(event.get(name))) for name in names]).tobytes()
                 self._write("INSERT INTO windows_refs VALUES(?,?,?,?,?)", [
                     (_stored_id(event.id), self._symbol(ref.target), ref.native_id, values, self._symbol(template))])
-            # Non-distinct rules count records by their row identity, without interning each id a second time.
-            if not self.owner.distinct:
-                value = ""
+            # Keep the recorded identity even when qualification counts records rather than distinct values.
+            # This dictionary entry is shared by repeated credentials and supports truthful aggregate totals.
             row = (self._symbol(key), _stored_id(event.id), stamp, self._symbol(value), self._symbol(event.host))
             self._write(f"INSERT INTO {table} VALUES(?,?,?,?,?)", [row])
-            if self._batching:
-                spill.db.execute("RELEASE auth_record")
+            self._write("INSERT INTO windows_hosts(k,host,first_id,first_ts) VALUES(?,?,?,?) "
+                        "ON CONFLICT(k,host) DO UPDATE SET first_id=excluded.first_id,first_ts=excluded.first_ts,"
+                        "revision=windows_hosts.revision+1 "
+                        "WHERE (excluded.first_ts,excluded.first_id)<(windows_hosts.first_ts,windows_hosts.first_id)",
+                        [(row[0], row[4], row[1], stamp)])
+            account = event.get("auth.target_account")
+            if account:
+                self._write("INSERT OR IGNORE INTO windows_accounts VALUES(?,?)",
+                            [(row[0], self._symbol(json.dumps(account)))])
+            spill.db.execute("RELEASE auth_record")
+            self._in_savepoint = False
+            stored = True
             if stamp > self.watermark:
                 # Rows move, rather than being forgotten; the archive also catches late cross-target windows.
                 # Commit bounded moves so the in-memory rollback journal cannot grow with a whole
                 # high-volume time window. A crash can leave both copies; readers deduplicate ids.
-                while expired := self._execute("SELECT * FROM windows_rows WHERE ts<? LIMIT 256", (cutoff,)).fetchall():
+                while expired := self._execute("SELECT * FROM windows_rows WHERE ts<? ORDER BY ts,k,id LIMIT 256",
+                                               (cutoff,)).fetchall():
                     spill.db.execute("SAVEPOINT auth_expiry")
+                    self._in_savepoint = True
                     self._write("INSERT OR IGNORE INTO windows_archive VALUES(?,?,?,?,?)", expired)
                     self._write("DELETE FROM windows_rows WHERE k=? AND id=?", [(row[0], row[1]) for row in expired])
                     spill.db.execute("RELEASE auth_expiry")
+                    self._in_savepoint = False
                 self.watermark = stamp
         except StateExhausted as exc:
+            self._in_savepoint = False
+            if stored:
+                # The record's savepoint has committed. Expiry is optional maintenance;
+                # active rows remain replayable even when an archive move cannot grow.
+                self.owner.note_limit("windows_expiry", f"Authentication archive maintenance deferred: {exc}")
+                self._charge()
+                return True
+            if not retried and self._reclaim_capacity():
+                return self.put(key, event, value, retried=True)
             self._refuse(event, f"An authentication correlation key could not be written: {exc}")
             self._charge()
             return False
@@ -307,6 +386,24 @@ class BurstRows(WindowsRows):
 
     def count(self, key):
         return self._execute("SELECT COUNT(DISTINCT id) FROM windows_all WHERE k=?", (key,)).fetchone()[0]
+
+    def totals(self, key):
+        total, values = self._execute("SELECT COUNT(DISTINCT id),COUNT(DISTINCT value) FROM windows_all WHERE k=?",
+                                      (key,)).fetchone()
+        accounts = self._execute("SELECT COUNT(*) FROM windows_accounts WHERE k=?", (self._lookup(key),)).fetchone()[0]
+        return total, values, accounts
+
+    def host_checkpoint(self, key):
+        return self._execute("SELECT COUNT(*),COALESCE(MAX(n),0),COALESCE(SUM(revision),0) FROM windows_hosts WHERE k=?",
+                             (self._lookup(key),)).fetchone()
+
+    def hosts(self, key, through):
+        # A publication can wait until the current input batch ends. Its sequence fence keeps
+        # later hosts out of that earlier snapshot without materializing the whole host list.
+        for host, identity in self._execute(
+                "SELECT s.value,h.first_id FROM windows_hosts h JOIN windows_symbols s ON s.id=h.host "
+                "WHERE h.k=? AND h.n<=? ORDER BY s.value", (self._lookup(key), through)):
+            yield host, _event_id(identity)
 
     def iterate(self):
         if self.ready:

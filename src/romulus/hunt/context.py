@@ -284,12 +284,36 @@ def _withdraw_dropped(repo: Repo, hunt_id: str, rule_ids: set[str], produced_ids
         )
 
 
+def _uncited_anchor_cells(repo, hunt_id, *, owner_token=None):
+    """An uncited positive survives, but its unavailable link evidence cannot assure context coverage."""
+    repo.clear_uncited_anchor_cells(hunt_id, owner_token=owner_token)
+    rules = fresh_context_pack()
+    offset = 0
+    while page := repo.candidate_page(hunt_id, offset=offset, limit=EVENT_CHUNK):
+        offset += len(page)
+        for candidate in page:
+            if not (candidate.get("gate_results") or {}).get("_citation_unavailable"):
+                continue
+            anchor_class = anchor_class_for_rule(candidate["rule_id"])
+            reason = (f"Context expansion for anchor {candidate['id']} from {candidate['rule_id']} "
+                      f"(group {candidate['group_key']}) could not read linked evidence: no citation could be retained. "
+                      "The computed positive is retained; this context rule was not assessed through that anchor.")
+            for rule in rules:
+                if "*" not in rule.anchor_classes and anchor_class not in rule.anchor_classes:
+                    continue
+                repo.set_rule_cell(hunt_id, rule.id, rule.version, "context:uncited_anchor",
+                                   f"anchor:{candidate['id']}", "evaluated_partial", 0, 0,
+                                   {"anchor_id": candidate["id"], "source_rule": candidate["rule_id"],
+                                    "missing_required": 1, "reasons": [reason]}, owner_token=owner_token)
+
+
 def finalize_context(repo: Repo, hunt_id: str, *, owner_token: str | None = None) -> None:
     """One deterministic pass after expansion ends (and again after a resumed expansion). Every evaluated link
     is a reach; each context rule sees only reaches whose anchor class and link type it accepts, aggregates them
     per group key across reaches, and the result is upserted as one candidate per (rule, group key). A candidate
     a previous pass produced that this pass no longer does is withdrawn to the context lane. Order-independent:
     the output depends only on the set of reaches."""
+    _uncited_anchor_cells(repo, hunt_id, owner_token=owner_token)
     link_rows = sorted((row for row in repo.expansion_links(hunt_id)
                         if row["evaluated"] and not is_agent_reach(row["link_type"], row["strength"])),
                        key=lambda row: (row["anchor_id"], row["id"]))

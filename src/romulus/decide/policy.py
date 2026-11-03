@@ -83,8 +83,10 @@ def decide(m: Match, hunt_id: str) -> Decision:
             notes.extend(sorted(set(e.caveats)))
             break
     admitted = all(not v.startswith("fail") for v in gates.values())
-    if not admitted:
+    if not admitted and not m.citation_unavailable:
         lane = "context"
+    elif m.citation_unavailable:
+        notes.append("Citation coverage is partial: no citation could be retained; lane reflects the computed positive.")
 
     reasons = [f"severity {severity} (+{SEV_WEIGHT[severity]})", f"confidence {confidence} (+{CONF_WEIGHT[confidence]})"]
     score = SEV_WEIGHT[severity] + CONF_WEIGHT[confidence]

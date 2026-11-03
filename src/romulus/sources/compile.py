@@ -72,8 +72,8 @@ def _pred(p: Predicate, contract: FieldContract, *, os_family: str | None = None
     natives = spec.natives or (spec.native,)
     if (
         p.op == "eq"
-        and p.field in {"event.channel", "event.provider"}
-        and spec.native in {"winlog.channel", "winlog.provider_name"}
+        and p.field in {"event.channel", "event.provider", "object.type"}
+        and spec.native in {"winlog.channel", "winlog.provider_name", "winlog.event_data.ObjectType"}
     ):
         clauses = [
             {"wildcard": {native: {
