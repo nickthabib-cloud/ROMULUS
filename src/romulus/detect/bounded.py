@@ -81,6 +81,10 @@ class Limit:
         return f"state limit: {self.text}"
 
 
+class CitationUnavailable(LookupError):
+    """A whole-hunt byte refusal left one finding without its compact citation state."""
+
+
 class HeldExamples:
     """The cited records of one group. Each is held as its event only until the sweep has handed that event to the
     disk stage (`staged`), then as its (time, id) reference, so a group costs references, not events. With
@@ -127,7 +131,7 @@ class HeldExamples:
         found = {event.id: event for event in load(wanted)} if wanted else {}
         missing = [event_id for event_id in wanted if event_id not in found]
         if missing:
-            raise LookupError(f"{len(missing)} cited event(s) absent from the stage, e.g. {missing[0]}")
+            raise CitationUnavailable(f"{len(missing)} cited event(s) absent from the stage, e.g. {missing[0]}")
         return [item[1] if item[1] is not None else found[item[0][1]] for item in self.items]
 
 
@@ -1334,15 +1338,21 @@ class SpillList:
                 return
             raise StateExhausted(budget.blocked())
         spill = self.owner.spill()
-        if not self._ready:
-            spill.db.execute(f"CREATE TABLE IF NOT EXISTS {self.name} (seq INTEGER PRIMARY KEY, o1, o2, v BLOB)")
-            self._ready = True
         rows, nbytes = [], 0
         for i, ((o1, o2), record) in enumerate(self.buffer):
             blob = pickle.dumps(record, protocol=4)
             nbytes += len(blob)
             rows.append((self.on_disk + i, o1, o2, blob))
         try:
+            if not self._ready:
+                import sqlite3
+                spill.cap()
+                try:
+                    spill.db.execute(f"CREATE TABLE IF NOT EXISTS {self.name} (seq INTEGER PRIMARY KEY, o1, o2, v BLOB)")
+                except sqlite3.OperationalError as exc:
+                    raise spill.failed(exc, account=self.account()) from exc
+                finally:
+                    spill.grew()
             spill.write(f"INSERT INTO {self.name} VALUES (?, ?, ?, ?)", rows, account=self.account())
         except StateExhausted:
             if budget.broken:
@@ -1350,6 +1360,7 @@ class SpillList:
             if not budget.finalizing and keep is None:
                 return
             raise
+        self._ready = True
         self._charge(nbytes)
         self.on_disk += len(rows)
         self.buffer = []

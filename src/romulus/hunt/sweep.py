@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict
@@ -41,7 +41,12 @@ from romulus.evidence.windows_catalog import (
     lookup_event_class,
 )
 from romulus.evidence.windows_reassembly import SCRIPT_FINALIZE_BATCH_SIZE, ScriptBlockAssembler
-from romulus.hunt.publish import LineageCitationFetcher, WindowsCitationFetcher, publish_match
+from romulus.hunt.publish import (
+    LineageCitationFetcher,
+    SourceCitationFetcher,
+    WindowsCitationFetcher,
+    publish_match,
+)
 from romulus.hunt.stage import EventStage
 from romulus.site import SiteFacts, absent_site_facts
 from romulus.sources.es import ElasticClient, fetch_limit
@@ -247,6 +252,8 @@ class Sweep:
             pb.budget = self.budget
             if hasattr(pb, "citation_fields"):
                 pb.citation_fetcher = WindowsCitationFetcher(client)
+            else:
+                pb.citation_fetcher = SourceCitationFetcher(client)
         self._has_windows = any(contract is not None and contract.os_family == "windows"
                                 for contract in contracts.values())
         # one guaranteed floor per live store of the pack (a store shared by several rules counts once), and one for
@@ -255,7 +262,9 @@ class Sweep:
         stage_owners = [pb for pb in self.pack if pb.staged and not hasattr(pb, "citation_fields")]
         self.budget.plan(live_stores(self.pack) + 1 + len(stage_owners) + (3 if self._has_windows else 0))
         self._stage_account = self.budget.account("event_stage")
-        self._stage_owner_accounts = {pb.id: self.budget.account("event_stage:"+pb.id) for pb in stage_owners}
+        self._stage_owner_accounts = {pb.id: self.budget.account("event_stage:"+pb.id,
+                                                               strong=pb.state_slice == "strong")
+                                      for pb in stage_owners}
         self._stage_owners = {}
         self._windows_seen_account = self.budget.account("windows_seen") if self._has_windows else None
         self._windows_continuity_account = (
@@ -297,18 +306,24 @@ class Sweep:
         stage = self._event_stage()
         stage.owners = self._stage_owners
         self._stage_owners = {}
+        # A bound can be replaced many times within one partition. Its new hold and release cancel
+        # before disk admission; only the surviving references need storage or source-body pages.
+        released_counts = Counter((owner, identity) for owner, ids in released for identity in ids)
+        surviving = []
+        for owner, event in held:
+            key = (owner, event.id)
+            if released_counts[key]:
+                released_counts[key] -= 1
+            else:
+                surviving.append((owner, event))
+        released_by_owner = defaultdict(list)
+        for (owner, identity), count in released_counts.items():
+            released_by_owner[owner].extend([identity]*count)
         try:
             if events:
                 stage.put(events, raw_sources)
-            stage.hold(list(held), raw_sources)
-            if stage.refusal_reason:
-                for pb in self.pack:
-                    if pb.staged:
-                        pb.note_limit("stage", "Event stage citation growth was refused: " + stage.refusal_reason)
-                reason = "Event stage citation growth was refused: " + stage.refusal_reason
-                if reason not in self.partial_reasons:
-                    self.partial_reasons.append(reason)
-            for owner, ids in released:
+            stage.hold(surviving, raw_sources)
+            for owner, ids in released_by_owner.items():
                 stage.release(owner, ids)
         except sqlite3.OperationalError as exc:
             self.budget.fail(f"writing the event stage failed ({exc})")
@@ -345,13 +360,6 @@ class Sweep:
             if released_ids:
                 released.append((pb.id, released_ids))
             account = self._stage_owner_accounts.get(pb.id, self._stage_account)
-            if drained and self.budget.new_key_reason(account):
-                pb.note_limit(
-                    "stage",
-                    f"the event stage took no new citation of this rule ({self.budget.new_key_reason(account)}); "
-                    "its findings that cite them are not computed",
-                )
-                return
             # An event returned more often than it is held is also staged to be kept.
             holds = Counter(held_ids)
             copies = Counter(event.id for event in drained)
@@ -1805,7 +1813,7 @@ class Sweep:
             self.heartbeat()
             if pb.staged:
                 stage = self._event_stage()
-                pb.bind_loader(stage.load_required)
+                pb.bind_loader(stage.load)
                 pb.heartbeat = self.heartbeat
             ms = self._finalize_rule(pb)
             finalized_matches = 0

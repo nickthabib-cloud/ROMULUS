@@ -246,6 +246,7 @@ EVENT_CLASSES = (
     _sysmon(15, "file_change", "file stream created"),
     _sysmon(23, "file_change", "file deleted and archived"),
     _sysmon(26, "file_change", "file delete detected"),
+    _sysmon(29, "file_change", "executable detected"),
     _sysmon(10, "process_access", "process accessed"),
     _sysmon(6, "image_load", "driver loaded"),
     _sysmon(7, "image_load", "image loaded"),

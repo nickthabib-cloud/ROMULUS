@@ -74,7 +74,7 @@ def _is_native_messaging(event: TypedEvent, child_name: str) -> bool:
 
 class LureAppSpawnsCodeRunner(WindowsProcessRule):
     id = "win.lure_app_spawns_code_runner"
-    version = "6"
+    version = "7"
     title = "A document, mail, reader or browser application created a shell, script host or LOLBin"
     uses_parent = True
     reads_command_line = False            # the match is images only; the command line is read only to exclude NM
@@ -145,8 +145,7 @@ class LureAppSpawnsCodeRunner(WindowsProcessRule):
             if child_name in _INSTALLER_CHILDREN:
                 lane, what = "lead", f"a browser ('{parent.name}') started the installer '{child_name}'"
             else:
-                lane, what = "lead", (f"a browser ('{parent.name}') created the code runner '{child_name}' "
-                                      f"(not a native-messaging host)")
+                lane, what = "lead", f"a browser ('{parent.name}') created the code runner '{child_name}'"
             return [Hit(
                 behavior="browser_spawns_code_runner",
                 text=f"{what} (parent resolved from {how})",

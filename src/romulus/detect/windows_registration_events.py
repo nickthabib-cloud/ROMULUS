@@ -7,6 +7,7 @@ import re
 from xml.etree import ElementTree
 
 from romulus.detect.bounded import KeyedStore
+from romulus.detect.windows_behavior import BehaviorFleetRule
 from romulus.detect.windows_cmdline import (
     cmd_payload,
     parse_cmd_payload,
@@ -48,6 +49,7 @@ def _expand(path):
     text = re.sub(r"(?i)^%(?:systemroot|windir)%", r"C:\\Windows", text)
     text = re.sub(r"(?i)^\\systemroot(?=\\)", r"C:\\Windows", text)
     text = re.sub(r"(?i)^%comspec%", r"C:\\Windows\\System32\\cmd.exe", text)
+    text = re.sub(r"(?i)^%systemdrive%(?=\\)", "C:", text)
     return text
 
 
@@ -61,6 +63,8 @@ def _unusual(path):
         return True
     if not re.match(r"[a-z]:\\", text):
         return text.startswith("%")
+    if not text.startswith("c:\\"):
+        return True
     parts = text[3:].split("\\")
     return not (parts[0] in {"program files", "program files (x86)"}
                 or len(parts) > 2 and parts[0] == "windows" and parts[1] not in {"temp", "tasks", "tracing"})
@@ -96,7 +100,9 @@ def _risks(executable: str, args: list[str], *, depth=0) -> list[str]:
         risks.append("shell or script host")
     elif name in _LOLBINS:
         risks.append("dual-use Windows execution or transfer utility")
-    if writable(executable) or _unusual(executable) or ("\\" not in executable and name not in _HOSTS | _LOLBINS):
+    if not re.search(r"[\\/]|^[a-zA-Z]:|^%", executable):
+        risks.append("no directory recorded for executable")
+    elif writable(executable) or _unusual(executable):
         risks.append("executable outside standard Windows or Program Files installation locations")
     for arg in args:
         operand = switch_value(arg) if arg.startswith(("-", "/")) else None
@@ -130,7 +136,7 @@ def _risks(executable: str, args: list[str], *, depth=0) -> list[str]:
 
 class ServiceRegistration(WindowsEventRule):
     id = "win.service_registration"
-    version = "3"
+    version = "4"
     title = "Service registration contains a risky executable configuration"
     families = ("service_change",)
     windows_event_classes = (("Security", SECURITY, 4697), ("System", "Service Control Manager", 7045))
@@ -147,6 +153,9 @@ class ServiceRegistration(WindowsEventRule):
         fields = ("service.name", "service.image_path", "service.start_type", "service.account", "service.type")
         image = event.get("service.image_path")
         executable, args, reason = _command(image)
+        relative_system = bool(executable and re.match(r"(?i)^(?:system32|syswow64)\\", executable))
+        if relative_system:
+            executable = _expand("\\SystemRoot\\" + executable)
         risks = _risks(executable, args) if executable else []
         remote = str(event.get("service.name") or "").casefold() in _REMOTE_NAMES
         installed_only = not risks and not remote and not reason and bool(executable)
@@ -162,13 +171,16 @@ class ServiceRegistration(WindowsEventRule):
             text += "; the service name matches a documented remote-administration default"
         if reason:
             text += f"; {reason}"
+        if relative_system:
+            text += "; relative image path placed using Windows SystemRoot scope"
         service_type = integer(event.get("service.type"))
         type_name = str(event.get("service.type") or "").strip().casefold()
         user_mode = bool(service_type is not None and service_type & 0x30) or type_name in {
             "user mode service", "win32 own process", "win32 share process", "own process", "share process",
         }
         second_signal = bool(executable and basename(executable) in _HOSTS | _LOLBINS)
-        high = bool(risks and (user_mode or second_signal) and not installed_only)
+        positive_risks = [risk for risk in risks if risk != "no directory recorded for executable"]
+        high = bool(positive_risks and (user_mode or second_signal) and not installed_only)
         return [signal(event, "service_configuration", text, self.attack, fields,
                        lane="high" if high else "lead", severity="high" if high else "medium",
                        notes=(("Registration does not establish that the configured payload executed. Service names "
@@ -213,9 +225,9 @@ def _task_structure(event) -> bool:
     return direct == [action for action in actions if isinstance(action, dict) and action.get("kind") == "exec"]
 
 
-class ScheduledTaskRegistration(WindowsEventRule):
+class ScheduledTaskRegistration(BehaviorFleetRule):
     id = "win.scheduled_task_registration"
-    version = "3"
+    version = "4"
     title = "Scheduled task record contains a risky action configuration"
     families = ("scheduled_task",)
     windows_event_classes = tuple(("Security", SECURITY, code) for code in (4698, 4702)) + tuple(
@@ -224,6 +236,9 @@ class ScheduledTaskRegistration(WindowsEventRule):
     benign = ("administration, updaters and inventory tasks often run hidden, as SYSTEM, or through a script host",)
     next_checks = ("validate the complete task definition and all actions", "inspect the configured files and task results")
     research = (_TASK_DOC, "https://learn.microsoft.com/windows/win32/taskschd/task-scheduler-schema")
+
+    def fleet_eligible(self, event, hit):
+        return hit.behavior == "task_com_handler"
 
     def judge(self, event):
         code = integer(event.get("event.code"))
@@ -298,8 +313,25 @@ class ScheduledTaskRegistration(WindowsEventRule):
         if uncertain:
             text += "; configuration interpretation remains uncertain"
         high = risky and not uncertain
-        return [signal(event, "task_configuration", text, self.attack, fields,
+        clsid = r"\{[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\}"
+        com_actions = []
+        if code == 200 and re.fullmatch(clsid, str(event.get("task.action_name") or "").casefold()):
+            com_actions = [(str(event.get("task.action_name")).casefold(), None)]
+        elif code != 200:
+            actions = event.get("task.actions")
+            if isinstance(actions, list) and actions and all(isinstance(action, dict)
+                    and action.get("kind") == "com_handler" and re.fullmatch(clsid, str(action.get("class_id") or "").casefold())
+                    for action in actions):
+                com_actions = [(str(action["class_id"]).casefold(), action.get("data")) for action in actions]
+        extra = {}
+        if com_actions:
+            operation = "action-started" if code == 200 else "updated" if code in {4702, 140} else "registered"
+            extra = {"content": json.dumps([operation, com_actions], sort_keys=True),
+                     "common": f"Task {operation} records named COM handler class(es) " + ", ".join(item[0] for item in com_actions)
+                     + "; no executable path or successful execution is established"}
+        return [signal(event, "task_com_handler" if com_actions else "task_configuration", text, self.attack, fields,
                        lane="high" if high else "lead", severity="high" if high else "medium",
+                       **extra,
                        notes=(("Parsed configuration and an action-started name do not establish that the configured "
                                "payload executed successfully. Hidden and SYSTEM alone are administration leads."),))]
 

@@ -224,7 +224,7 @@ def test_sensitive_group_roles_and_name_only_leads(group, name, lane):
     assert PrivilegedGroupAddition().consume([ev])[0].proposed_lane == lane
 
 
-FACTS = SiteFacts(True, "test", {"directory_sync_accounts": []}, (), ("dc01.example.test",), ())
+FACTS = SiteFacts(True, "test", {"directory_sync_accounts": [], "directory_sync_accounts_declared": True}, (), ("dc01.example.test",), ())
 REPLICATION = {"SubjectUserName": "operator", "SubjectDomainName": "EXAMPLE", "ObjectServer": "DS",
                "ObjectName": "DC=example,DC=test", "AccessMask": "0x100",
                "Properties": "{1131f6ad-9c07-11d1-f79f-00c04fc2dcd2}"}
@@ -241,7 +241,7 @@ def test_declared_empty_sync_list_is_configured_and_dc_domain_matters(domain, na
         data.pop("SubjectDomainName")
     rule = DirectoryReplicationAccess()
     rule.site_facts = validate_site_content({"schema": COLLECTION_SCHEMA, "domain_controllers": ["dc01.example.test"],
-                                             "directory_sync_accounts": []})
+                                             "directory_sync_accounts": [], "directory_sync_accounts_declared": True})
     hit = rule.judge(native(4662, data))[0]
     assert hit.lane == lane and "not configured" not in " ".join(hit.notes)
 

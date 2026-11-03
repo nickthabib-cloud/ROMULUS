@@ -23,6 +23,7 @@ def test_sync_declaration_survives_validation_saved_yaml_and_unchanged_form(tmp_
     content = {"schema": COLLECTION_SCHEMA, "domain_controllers": ["dc01.example.test"]}
     if declared:
         content["directory_sync_accounts"] = accounts
+        content["directory_sync_accounts_declared"] = True
     validated = validate_site_content(content)
     assert ("directory_sync_accounts" in validated.content) is declared
     save_site_facts(tmp_path, content, "")
@@ -53,7 +54,7 @@ def test_sync_declaration_survives_validation_saved_yaml_and_unchanged_form(tmp_
 def test_dc_name_hint_requires_positive_domain_contradiction_for_a_high(shape, dc, domain, user, lane):
     rule = DirectoryReplicationAccess()
     rule.site_facts = validate_site_content({"schema": COLLECTION_SCHEMA, "domain_controllers": [dc],
-                                             "directory_sync_accounts": []})
+                                             "directory_sync_accounts": [], "directory_sync_accounts_declared": True})
     [hit] = rule.consume([native(4662, {**REPLICATION, "SubjectUserName": user, "SubjectDomainName": domain}, shape=shape)])
     assert hit.proposed_lane == lane
 

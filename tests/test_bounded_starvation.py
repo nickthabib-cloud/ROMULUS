@@ -16,6 +16,8 @@ from romulus.detect.indicators import Indicator, IndicatorMatch, IndicatorSet
 from romulus.detect.lineage import ReverseShellByLineage
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
 from romulus.hunt import sweep as sw
+from romulus.hunt.citations import COMPACT_CITATION_NOTE
+from romulus.hunt.publish import SourceCitationFetcher
 from romulus.hunt.stage import EventStage
 from romulus.sources.models import Completeness, SearchOutcome, Window
 from romulus.store.db import make_engine, migrate
@@ -144,9 +146,12 @@ def run_sweep(monkeypatch, tmp_path, pack, batches, budget):
     monkeypatch.setattr(sw, "normalize_hits", lambda records, boots: (current[0], {}, []))
     monkeypatch.setattr(sw, "state_budget", lambda settings, stage_dir: budget)
     published = []
+    recorded = {event.id: event for batch in batches for event in batch}
 
     def publish(repo_, hunt, pb, m, task_id, raw_sources, *a, **k):
-        m.raw_sources_seen = dict(raw_sources)
+        SourceCitationFetcher(None).hydrate(m, raw_sources)
+        m.raw_sources_seen = {**raw_sources, **m.raw_copies}
+        m.recorded_events = {event.id: recorded[event.id] for event in m.events}
         published.append(m)
     monkeypatch.setattr(sw, "publish_match", publish)
     monkeypatch.setattr(sw, "fresh_pack", lambda: pack)
@@ -192,13 +197,26 @@ def _capped(cells, rule_id) -> int:
 
 def _cites_what_it_states(published) -> None:
     """Every predicate of every published match comes from a cited record, and every cited record's raw copy was
-    handed to publication (from the partition read, or from the event stage)."""
+    handed to publication or its compact fields and native references survive with explicit partial disclosure."""
     for m in published:
         cited = {e.id for e in m.events}
         origins = {p.origin.split(":", 1)[0] for p in m.predicate}
         assert origins <= cited, (m.playbook_id, m.claim, origins - cited)
+        missing = [e for e in m.events if COMPACT_CITATION_NOTE in e.caveats]
         for e in m.events:
-            assert all(r.key in m.raw_sources_seen for r in e.raw), (m.playbook_id, e.id)
+            assert e.raw, (m.playbook_id, e.id)
+            if COMPACT_CITATION_NOTE not in e.caveats:
+                assert all(r.key in m.raw_sources_seen for r in e.raw), (m.playbook_id, e.id)
+            else:
+                recorded = m.recorded_events[e.id]
+                assert e.fields == recorded.fields, (m.playbook_id, e.id)
+                assert e.raw and e.raw == recorded.raw
+                assert all(ref.target and ref.native_id for ref in e.raw)
+                assert (e.id, e.ts, e.family, e.host, e.outcome, e.normalizer) == (
+                    recorded.id, recorded.ts, recorded.family, recorded.host, recorded.outcome, recorded.normalizer)
+                note = (f"Citation body not retrieved for {len(missing)} cited records; compact recorded fields, "
+                        "native index/document ids and timestamps are retained. Citation coverage is partial for this finding.")
+                assert note in m.notes and note in m.claim
 
 
 class _Switch(Playbook):

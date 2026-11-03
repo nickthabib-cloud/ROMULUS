@@ -436,14 +436,13 @@ def test_re_reading_a_partition_counts_each_record_once():
     assert "made 1 connect() call(s)" in rule.finalize()[0].claim
 
 
-def test_a_cited_event_missing_from_the_stage_fails_loudly():
-    from romulus.detect.correlation import StageMissing
+def test_a_cited_event_missing_from_the_stage_is_a_named_partial_group():
     rule = ProcessNetworkLink()
     rule.consume([_sock()] + _network(flow()))
     rule.drain_staged()
     rule.bind_loader(lambda ids: [])
-    with pytest.raises(StageMissing):
-        rule.finalize()
+    assert rule.finalize() == []
+    assert "citation_reference" in rule.limits
 
 
 def test_stage_is_removed_on_failure_and_stale_stages_are_cleared(tmp_path):

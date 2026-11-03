@@ -38,18 +38,20 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
-from romulus.detect.bounded import HOT_COUNT, KeyedStore, Limit, RecentIds
+from romulus.detect.bounded import HOT_COUNT, CitationUnavailable, KeyedStore, Limit, RecentIds
 from romulus.detect.citing import (
     BoundStage,
     Ends,
     Holds,
     bound_note,
+    citation_call,
+    citation_group,
     cite_with_bounds,
     cited_phrase,
     drained_holds,
     more,
 )
-from romulus.detect.correlation import StageMissing, canon_ip, external, routable_remote
+from romulus.detect.correlation import canon_ip, external, routable_remote
 from romulus.detect.netdef import assume_direction
 from romulus.evidence.typed import TypedEvent
 
@@ -498,7 +500,7 @@ class _FlowRule(Playbook):
         wanted = list(dict.fromkeys(ids))
         loaded = self.load(wanted)
         if len(loaded) != len(wanted):
-            raise StageMissing(f"{self.id}: {len(wanted) - len(loaded)} cited event(s) absent from the stage")
+            raise CitationUnavailable(f"{self.id}: {len(wanted) - len(loaded)} cited event(s) absent from the stage")
         return sorted(loaded, key=lambda e: (e.ts, e.id))
 
     def _cite(self, ends: Ends, ids, limit: int = EXAMPLE_LIMIT) -> tuple[list[TypedEvent], set[str]]:
@@ -804,7 +806,7 @@ class IcmpEchoTunnel(_FlowRule):
         return True
 
     def finalize(self):
-        matches = [self._match(key, self.pairs.peek(key)) for key in sorted(self.pairs.keys(candidates=True))]
+        matches = [_citation for key in sorted(self.pairs.keys(candidates=True)) for _citation in citation_call(self, self._match, key, self.pairs.peek(key))]
         return matches
 
     def _match(self, key, pair: _IcmpEchoPair) -> Match:
@@ -1170,22 +1172,23 @@ class HorizontalSweep(_FlowRule):
     def finalize(self):
         out = []
         for key, group, dests in self._groups():
-            src, transport, _port, scope = key
-            limits = self.THRESHOLDS[scope]
-            share = self.EXTERNAL_MIN_SILENT_SHARE if scope == "external" else 0.0
-            qualifying = [busiest_window(dests, width, min_size=limits[width], min_silent_share=share)
-                          for width in self.WINDOWS]
-            qualifying = [window for window in qualifying if window is not None]
-            if not qualifying:
-                continue
-            high = None
-            if scope == "internal" and transport == "tcp" and internal_address(src):
-                high = busiest_window(dests, 3600, min_size=self.HIGH_MIN_DESTINATIONS,
-                                      min_silent_share=self.HIGH_MIN_SILENT_SHARE)
-            # the window that decided the lane: the high window, else the widest qualifying window
-            deciding = high or max(qualifying, key=lambda window: (window.width, window.size))
-            out.append(((key[0], key[1], -1 if key[2] is None else key[2], key[3]),
-                        self._match(key, group, dests, deciding, high is not None)))
+            with citation_group(self):
+                src, transport, _port, scope = key
+                limits = self.THRESHOLDS[scope]
+                share = self.EXTERNAL_MIN_SILENT_SHARE if scope == "external" else 0.0
+                qualifying = [busiest_window(dests, width, min_size=limits[width], min_silent_share=share)
+                              for width in self.WINDOWS]
+                qualifying = [window for window in qualifying if window is not None]
+                if not qualifying:
+                    continue
+                high = None
+                if scope == "internal" and transport == "tcp" and internal_address(src):
+                    high = busiest_window(dests, 3600, min_size=self.HIGH_MIN_DESTINATIONS,
+                                          min_silent_share=self.HIGH_MIN_SILENT_SHARE)
+                # the window that decided the lane: the high window, else the widest qualifying window
+                deciding = high or max(qualifying, key=lambda window: (window.width, window.size))
+                out.append(((key[0], key[1], -1 if key[2] is None else key[2], key[3]),
+                            self._match(key, group, dests, deciding, high is not None)))
         return [match for _order, match in sorted(out, key=lambda item: item[0])]
 
     def _match(self, key, group: _SweepGroup, dests: dict[str, _Destination], deciding: _Window,
@@ -1494,24 +1497,26 @@ class ProtocolPortMismatch(_FlowRule):
         return True
 
     def finalize(self):
-        out = [self._mismatch(key, self.mismatches.peek(key))
-               for key in sorted(self.mismatches.keys(), key=lambda k: (ip_sort_key(k[0]),) + k[1:])]
+        out = [_citation
+               for key in sorted(self.mismatches.keys(), key=lambda k: (ip_sort_key(k[0]),) + k[1:]) for _citation in citation_call(self, self._mismatch, key, self.mismatches.peek(key))]
         groups = KeyedStore(self, "ppm_unidentified_groups", self.HOT_GROUPS)
         for i, (key, entry) in enumerate(self.unidentified.items()):
-            if key in self.identified:
-                continue                # another record of the same connection had its protocol identified
-            side = "source" if entry.on_source else "destination"
-            group = groups.setdefault((entry.src, entry.sport, entry.transport, side) if entry.on_source else
-                                      (entry.dst, entry.dport, entry.transport, side), _UnidentifiedGroup)
-            if group is None:
-                self.refuse("disk", "the unidentified groups' disk budget is spent; a candidate connection is not "
-                                    "evaluated")
-                continue
-            group.add(entry, side)
-            if i % FINALIZE_TRIM == FINALIZE_TRIM - 1:
-                groups.trim()
+            with citation_group(self):
+                if key in self.identified:
+                    continue                # another record of the same connection had its protocol identified
+                side = "source" if entry.on_source else "destination"
+                group = groups.setdefault((entry.src, entry.sport, entry.transport, side) if entry.on_source else
+                                          (entry.dst, entry.dport, entry.transport, side), _UnidentifiedGroup)
+                if group is None:
+                    self.refuse("disk", "the unidentified groups' disk budget is spent; a candidate connection is not "
+                                        "evaluated")
+                    continue
+                group.add(entry, side)
+                if i % FINALIZE_TRIM == FINALIZE_TRIM - 1:
+                    groups.trim()
         for key in sorted(groups.keys(), key=lambda k: (ip_sort_key(k[0]),) + k[1:]):
-            out.append(self._unidentified(key, groups.peek(key)))
+            with citation_group(self):
+                out.append(self._unidentified(key, groups.peek(key)))
         groups.clear()
         return out
 
@@ -1802,18 +1807,19 @@ class LongUnidentifiedSession(_FlowRule):
     def finalize(self):
         groups = KeyedStore(self, "lus_groups", self.HOT, candidate=lambda group: group.long > 0)
         for i, pieces in enumerate(self._connections()):
-            if any(p.identified or p.capable for p in pieces) or not any(p.payload for p in pieces):
-                continue                # identified, owned by the protocol/port rule, or never carried data
-            first = pieces[0]
-            group = groups.setdefault((first.dst, first.dport, first.transport), _LongGroup)
-            if group is None:
-                self.refuse("disk", "the connection groups' disk budget is spent; a connection is not evaluated")
-                continue
-            group.add(pieces, self.MIN_SECONDS)
-            if i % FINALIZE_TRIM == FINALIZE_TRIM - 1:
-                groups.trim()
-        out = [self._match(key, groups.peek(key))
-               for key in sorted(groups.keys(candidates=True), key=lambda k: (ip_sort_key(k[0]),) + k[1:])]
+            with citation_group(self):
+                if any(p.identified or p.capable for p in pieces) or not any(p.payload for p in pieces):
+                    continue                # identified, owned by the protocol/port rule, or never carried data
+                first = pieces[0]
+                group = groups.setdefault((first.dst, first.dport, first.transport), _LongGroup)
+                if group is None:
+                    self.refuse("disk", "the connection groups' disk budget is spent; a connection is not evaluated")
+                    continue
+                group.add(pieces, self.MIN_SECONDS)
+                if i % FINALIZE_TRIM == FINALIZE_TRIM - 1:
+                    groups.trim()
+        out = [_citation
+               for key in sorted(groups.keys(candidates=True), key=lambda k: (ip_sort_key(k[0]),) + k[1:]) for _citation in citation_call(self, self._match, key, groups.peek(key))]
         groups.clear()
         return out
 
@@ -2165,39 +2171,41 @@ class OutboundVolumeAsymmetry(_FlowRule):
         hits = []
         self._notes = []
         for i, ((src, dst), totals) in enumerate(self._resolved()):
-            not_read.update(totals.not_read)
-            for kind in (SERVED_ARKIME, SERVED_SURICATA, SERVER_SHAPED):
-                sent_here = totals.not_read[kind, "bytes"]
-                if sent_here and sent_here > largest.get(kind, (0,))[0]:
-                    largest[kind] = (sent_here, src, dst)
-            out, back = totals.not_read[SERVER_SHAPED, "bytes"], totals.not_read[SERVER_SHAPED, "received"]
-            if out >= self.MIN_OUTBOUND_BYTES and out >= self.MIN_RATIO * back:
-                # met the upload thresholds on connections not read as uploads only because of their port shape
-                not_read[SERVER_SHAPED, "qualifying"] += 1
-                ports = totals.inside_ports.get(SERVER_SHAPED, Counter())
-                entry = (out, src, dst, back, ", ".join(p for p, _n in ports.most_common(3)))
-                if len(shaped) < NOT_READ_LISTED:
-                    heapq.heappush(shaped, entry)
-                elif entry > shaped[0]:
-                    heapq.heapreplace(shaped, entry)
-            if not totals.connections:
-                continue
-            total = totals_by_source.setdefault(src, lambda: [0])
-            sent = senders.setdefault(dst, lambda: [0]) if totals.out > 0 else [0]
-            if total is None or sent is None:
-                self.refuse("disk", "the per-address totals' disk budget is spent; a pair is not evaluated")
-                continue
-            total[0] += totals.out
-            sent[0] += totals.out > 0
-            if totals.out >= self.MIN_OUTBOUND_BYTES and totals.out >= self.MIN_RATIO * totals.inn:
-                hits.append((src, dst, totals))
-            if i % FINALIZE_TRIM == FINALIZE_TRIM - 1:
-                totals_by_source.trim()
-                senders.trim()
+            with citation_group(self):
+                not_read.update(totals.not_read)
+                for kind in (SERVED_ARKIME, SERVED_SURICATA, SERVER_SHAPED):
+                    with citation_group(self):
+                        sent_here = totals.not_read[kind, "bytes"]
+                        if sent_here and sent_here > largest.get(kind, (0,))[0]:
+                            largest[kind] = (sent_here, src, dst)
+                out, back = totals.not_read[SERVER_SHAPED, "bytes"], totals.not_read[SERVER_SHAPED, "received"]
+                if out >= self.MIN_OUTBOUND_BYTES and out >= self.MIN_RATIO * back:
+                    # met the upload thresholds on connections not read as uploads only because of their port shape
+                    not_read[SERVER_SHAPED, "qualifying"] += 1
+                    ports = totals.inside_ports.get(SERVER_SHAPED, Counter())
+                    entry = (out, src, dst, back, ", ".join(p for p, _n in ports.most_common(3)))
+                    if len(shaped) < NOT_READ_LISTED:
+                        heapq.heappush(shaped, entry)
+                    elif entry > shaped[0]:
+                        heapq.heapreplace(shaped, entry)
+                if not totals.connections:
+                    continue
+                total = totals_by_source.setdefault(src, lambda: [0])
+                sent = senders.setdefault(dst, lambda: [0]) if totals.out > 0 else [0]
+                if total is None or sent is None:
+                    self.refuse("disk", "the per-address totals' disk budget is spent; a pair is not evaluated")
+                    continue
+                total[0] += totals.out
+                sent[0] += totals.out > 0
+                if totals.out >= self.MIN_OUTBOUND_BYTES and totals.out >= self.MIN_RATIO * totals.inn:
+                    hits.append((src, dst, totals))
+                if i % FINALIZE_TRIM == FINALIZE_TRIM - 1:
+                    totals_by_source.trim()
+                    senders.trim()
         self._note_not_read(not_read, largest, sorted(shaped, reverse=True))
         # a reported source sent data to the destination, so it is one of the destination's senders
-        matches = [self._match(src, dst, totals, totals_by_source.peek(src)[0], senders.peek(dst)[0] - 1)
-                   for src, dst, totals in sorted(hits, key=lambda hit: hit[:2])]
+        matches = [_citation
+                   for src, dst, totals in sorted(hits, key=lambda hit: hit[:2]) for _citation in citation_call(self, self._match, src, dst, totals, totals_by_source.peek(src)[0], senders.peek(dst)[0] - 1)]
         uncited = sum(match is None for match in matches)
         if uncited:
             self.limits["uncited"] = _Uncited(

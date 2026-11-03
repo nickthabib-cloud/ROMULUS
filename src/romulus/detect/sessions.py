@@ -15,9 +15,16 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
-from romulus.detect.bounded import HOT_COUNT, HeldExamples, KeyedStore, RecentIds
-from romulus.detect.citing import BoundStage, Ends, bound_note, cite_with_bounds, cited_phrase
-from romulus.detect.correlation import StageMissing, canon_ip, external, routable_remote
+from romulus.detect.bounded import HOT_COUNT, CitationUnavailable, HeldExamples, KeyedStore, RecentIds
+from romulus.detect.citing import (
+    BoundStage,
+    Ends,
+    bound_note,
+    citation_group,
+    cite_with_bounds,
+    cited_phrase,
+)
+from romulus.detect.correlation import canon_ip, external, routable_remote
 from romulus.detect.netdef import assume_direction
 from romulus.evidence.typed import TypedEvent
 
@@ -128,7 +135,7 @@ class _Stitched(Playbook):
     def _events(self, ids: list[str]) -> list[TypedEvent]:
         loaded = self.load(ids)
         if len(loaded) != len(set(ids)):
-            raise StageMissing(f"{self.id}: {len(set(ids)) - len(loaded)} cited event(s) absent from the stage")
+            raise CitationUnavailable(f"{self.id}: {len(set(ids)) - len(loaded)} cited event(s) absent from the stage")
         return sorted(loaded, key=lambda e: (e.ts, e.id))
 
     def _conn_key(self, e: TypedEvent) -> str:
@@ -301,32 +308,33 @@ class LongExternalConnection(_Stitched):
         out = []
         order = sorted((c["seq"], key) for key, c in self.conns.items(candidates=True))
         for _seq, key in order:
-            c = self.conns.peek(key)
-            staged = set(c["events"])
-            # the records bounding the span, the record showing the opening, the first record of each later stretch
-            # of activity, then the connection's first records
-            leads = [part[3] for part in c["parts"][1:] if part[3] in staged]
-            ids = ([c["opener_id"]] if c["opener_id"] in staged else []) + leads + c["events"]
-            evs, missing = cite_with_bounds(self.load, self._events, c["ends"], ids, EXAMPLE_LIMIT)
-            claim = (f"Arkime recorded {c['records']} session record(s) for {self._sides(c)} Only the part of the "
-                     f"connection that started inside the hunt window is counted.")
-            gaps = len(c["parts"]) - 1
-            if gaps:
-                # Arkime writes a live connection's record at least every save interval: a long silence is a
-                # channel that slept, or the 5-tuple used again by a separate connection. Either way it is reported.
-                claim += (f" The records show {gaps} gap(s) of more than {self.IDLE / 3600:.0f} hour(s) without a "
-                          f"record, so this may be one channel that slept between bursts or the same 5-tuple reused "
-                          f"by separate connections; the span covers all of them.")
-            claim += cited_phrase(len(evs), c["records"], not missing) + bound_note(missing, c["ends"], "the span")
-            by_id = {e.id: e for e in evs}
-            opening = by_id.get(c["ends"].first[1]) or evs[0]
-            closing = by_id.get(c["ends"].last[1]) or max(evs, key=lambda e: (_epoch(e.get("flow.end")) or 0, e.id))
-            preds = [pf(opening, "source.ip"), pf(opening, "destination.ip"), pf(opening, "flow.start"),
-                     pf(closing, "flow.end")]
-            if c["opener_id"] in by_id and len(c["openers"]) == 1:
-                preds.append(pf(by_id[c["opener_id"]], "tcp.flags.syn"))
-            out.append(Match(self.id, claim, self.claim_type, evs, preds, evs[0].ts, self.severity, self.lane,
-                             "high", evs[0].entities(), group_key=key))
+            with citation_group(self):
+                c = self.conns.peek(key)
+                staged = set(c["events"])
+                # the records bounding the span, the record showing the opening, the first record of each later stretch
+                # of activity, then the connection's first records
+                leads = [part[3] for part in c["parts"][1:] if part[3] in staged]
+                ids = ([c["opener_id"]] if c["opener_id"] in staged else []) + leads + c["events"]
+                evs, missing = cite_with_bounds(self.load, self._events, c["ends"], ids, EXAMPLE_LIMIT)
+                claim = (f"Arkime recorded {c['records']} session record(s) for {self._sides(c)} Only the part of the "
+                         f"connection that started inside the hunt window is counted.")
+                gaps = len(c["parts"]) - 1
+                if gaps:
+                    # Arkime writes a live connection's record at least every save interval: a long silence is a
+                    # channel that slept, or the 5-tuple used again by a separate connection. Either way it is reported.
+                    claim += (f" The records show {gaps} gap(s) of more than {self.IDLE / 3600:.0f} hour(s) without a "
+                              f"record, so this may be one channel that slept between bursts or the same 5-tuple reused "
+                              f"by separate connections; the span covers all of them.")
+                claim += cited_phrase(len(evs), c["records"], not missing) + bound_note(missing, c["ends"], "the span")
+                by_id = {e.id: e for e in evs}
+                opening = by_id.get(c["ends"].first[1]) or evs[0]
+                closing = by_id.get(c["ends"].last[1]) or max(evs, key=lambda e: (_epoch(e.get("flow.end")) or 0, e.id))
+                preds = [pf(opening, "source.ip"), pf(opening, "destination.ip"), pf(opening, "flow.start"),
+                         pf(closing, "flow.end")]
+                if c["opener_id"] in by_id and len(c["openers"]) == 1:
+                    preds.append(pf(by_id[c["opener_id"]], "tcp.flags.syn"))
+                out.append(Match(self.id, claim, self.claim_type, evs, preds, evs[0].ts, self.severity, self.lane,
+                                 "high", evs[0].entities(), group_key=key))
         return out
 
 
@@ -412,44 +420,47 @@ class Beaconing(_Stitched):
     def finalize(self):
         series = KeyedStore(self, "beacon_series", self.HOT)
         for i, (_key, c) in enumerate(self.conns.items()):
-            s = series.setdefault((c["src"], c["dst"], c["dport"], c["transport"]), _Series)
-            if s is None:
-                self.refuse("disk", "the series' disk budget is spent; a connection is not evaluated")
-                continue
-            for part in c["parts"]:
-                s.add(part)
-            if i % self.TRIM_EVERY == self.TRIM_EVERY - 1:
-                series.trim()
+            with citation_group(self):
+                s = series.setdefault((c["src"], c["dst"], c["dport"], c["transport"]), _Series)
+                if s is None:
+                    self.refuse("disk", "the series' disk budget is spent; a connection is not evaluated")
+                    continue
+                for part in c["parts"]:
+                    with citation_group(self):
+                        s.add(part)
+                if i % self.TRIM_EVERY == self.TRIM_EVERY - 1:
+                    series.trim()
         out = []
         for (src, dst, dport, transport), s in series.items():
-            if len(s.starts) < self.MIN_CONNECTIONS:
-                continue
-            starts = sorted(s.starts)
-            gaps = [b - a for a, b in itertools.pairwise(starts)]
-            median = statistics.median(gaps)
-            if median < self.MIN_INTERVAL:
-                continue
-            mad = statistics.median(abs(g - median) for g in gaps)
-            if mad / median > self.MAX_JITTER:
-                continue
-            # the first and the last connection bound the stated span; the earliest others fill the rest
-            ids = [event_id for _start, _seq, event_id in s.first]
-            evs = self._events(list(dict.fromkeys([ids[0], s.last[2], *ids]))[:EXAMPLE_LIMIT])
-            # Protocols that are periodic by design, identified by Arkime's parser from packet content (not the
-            # port): still reported, in the context lane, never dropped
-            periodic = sorted(s.protocols & PERIODIC_BY_DESIGN)
-            claim = (f"Arkime recorded {len(starts)} separate {transport} connections from {src} to {dst} port {dport} "
-                     f"({_iso(starts[0])} – {_iso(starts[-1])}) starting every {median:.0f} s (median), with a median "
-                     f"deviation of {mad:.1f} s between starts. "
-                     + (f"The first records of all {len(starts)} connections are cited." if len(evs) >= len(starts)
-                        else f"The first records of {len(evs)} of the {len(starts)} connections are cited, including "
-                             f"the first and the last.")
-                     + (f" Arkime's parser identified every connection as {', '.join(periodic)}, a protocol that is "
-                        f"periodic by design." if periodic else ""))
-            preds = [pf(evs[0], "source.ip"), pf(evs[0], "destination.ip"), pf(evs[0], "destination.port")]
-            out.append(Match(self.id, claim, self.claim_type, evs, preds, evs[0].ts, self.severity,
-                             "context" if periodic else self.lane, "medium", evs[0].entities(),
-                             group_key=f"{src}|{dst}|{dport}|{transport}"))
+            with citation_group(self):
+                if len(s.starts) < self.MIN_CONNECTIONS:
+                    continue
+                starts = sorted(s.starts)
+                gaps = [b - a for a, b in itertools.pairwise(starts)]
+                median = statistics.median(gaps)
+                if median < self.MIN_INTERVAL:
+                    continue
+                mad = statistics.median(abs(g - median) for g in gaps)
+                if mad / median > self.MAX_JITTER:
+                    continue
+                # the first and the last connection bound the stated span; the earliest others fill the rest
+                ids = [event_id for _start, _seq, event_id in s.first]
+                evs = self._events(list(dict.fromkeys([ids[0], s.last[2], *ids]))[:EXAMPLE_LIMIT])
+                # Protocols that are periodic by design, identified by Arkime's parser from packet content (not the
+                # port): still reported, in the context lane, never dropped
+                periodic = sorted(s.protocols & PERIODIC_BY_DESIGN)
+                claim = (f"Arkime recorded {len(starts)} separate {transport} connections from {src} to {dst} port {dport} "
+                         f"({_iso(starts[0])} – {_iso(starts[-1])}) starting every {median:.0f} s (median), with a median "
+                         f"deviation of {mad:.1f} s between starts. "
+                         + (f"The first records of all {len(starts)} connections are cited." if len(evs) >= len(starts)
+                            else f"The first records of {len(evs)} of the {len(starts)} connections are cited, including "
+                                 f"the first and the last.")
+                         + (f" Arkime's parser identified every connection as {', '.join(periodic)}, a protocol that is "
+                            f"periodic by design." if periodic else ""))
+                preds = [pf(evs[0], "source.ip"), pf(evs[0], "destination.ip"), pf(evs[0], "destination.port")]
+                out.append(Match(self.id, claim, self.claim_type, evs, preds, evs[0].ts, self.severity,
+                                 "context" if periodic else self.lane, "medium", evs[0].entities(),
+                                 group_key=f"{src}|{dst}|{dport}|{transport}"))
         series.clear()
         return out
 
@@ -578,18 +589,19 @@ class RareClientFingerprint(_Stitched):
         out = []
         labels = {kind: label for kind, _field, label in self.KINDS}
         for (kind, value), p in self.prints.items(candidates=True):
-            if not self._rare(p):
-                continue
-            evs = self._events(p["events"])
-            src = next(iter(p["sources"]))
-            dsts = sorted({str(e.get("destination.ip")) for e in evs})
-            shown = value if kind != "SSH client software" else f"'{value}'"
-            claim = (f"{labels[kind]} {shown} appears on {len(p['conns'])} connection(s) in this window, all "
-                     f"from {src}, to {', '.join(dsts[:5])}. No other internal address used it in the window.")
-            cited = next(e for e in evs if e.has(p["field"]))
-            out.append(Match(self.id, claim, self.claim_type, evs, [pf(cited, p["field"]), pf(cited, "source.ip")],
-                             evs[0].ts, self.severity, self.lane, "medium", evs[0].entities(),
-                             group_key=f"{kind}|{value}"))
+            with citation_group(self):
+                if not self._rare(p):
+                    continue
+                evs = self._events(p["events"])
+                src = next(iter(p["sources"]))
+                dsts = sorted({str(e.get("destination.ip")) for e in evs})
+                shown = value if kind != "SSH client software" else f"'{value}'"
+                claim = (f"{labels[kind]} {shown} appears on {len(p['conns'])} connection(s) in this window, all "
+                         f"from {src}, to {', '.join(dsts[:5])}. No other internal address used it in the window.")
+                cited = next(e for e in evs if e.has(p["field"]))
+                out.append(Match(self.id, claim, self.claim_type, evs, [pf(cited, p["field"]), pf(cited, "source.ip")],
+                                 evs[0].ts, self.severity, self.lane, "medium", evs[0].entities(),
+                                 group_key=f"{kind}|{value}"))
         return out
 
 
@@ -811,35 +823,36 @@ class ArkimeSshReverseShellTag(Playbook):
     def finalize(self):
         out = []
         for key, pair in self.pairs.items(candidates=True):
-            g = pair["info"]
-            # the tagged records bounding the stated span and its duration first, then the held examples
-            bounds = list(dict.fromkeys(g["by_time"].ids() + g["by_end"].ids()))
-            held = {e.id: e for e in self.load(bounds)}
-            examples = pair["examples"].events(self.load)
-            ordered = list(dict.fromkeys([*(i for i in bounds if i in held), *(e.id for e in examples)]))
-            by_id = {**{e.id: e for e in examples}, **held}
-            evs = sorted((by_id[i] for i in ordered[:EXAMPLE_LIMIT]), key=lambda e: (e.ts, e.id))
-            missing = set(bounds) - set(held)
-            src, dst, port = key
-            # the span runs from the first tagged record's start to the latest end of a tagged record (or the last
-            # tagged record's time when no end is recorded): the interval the stated duration measures
-            end = _iso(g["end"]) if g["end"] is not None else g["last"].isoformat()
-            claim = (f"Arkime's heuristic tagged {g['records']} session record(s) of {len(g['conns'])} connection(s) "
-                     f"from {src} to {dst} port {port} '{self.TAG}' ({g['first'].isoformat()} – {end}). This is "
-                     f"Arkime's own detection from the traffic shape, like an IDS alert; it does not show that a shell "
-                     f"ran.") + self._context(key, g, pair["ssh"])
-            claim += cited_phrase(len(evs), g["records"], not missing, "tagged records", "tagged record")
-            if g["by_time"].first and g["by_time"].first[1] in missing:
-                claim += (" The record that starts the tagged records' span was not kept for citation; the interval is "
-                          "computed from every record.")
-            if g["end"] is not None and g["by_end"].last and g["by_end"].last[1] in missing:
-                claim += " The record that ends the last tagged session was not kept for citation."
-            elif g["end"] is None and g["by_time"].last and g["by_time"].last[1] in missing:
-                claim += " The last tagged record was not kept for citation."
-            out.append(Match(self.id, claim, self.claim_type, evs,
-                             [pf(evs[0], "arkime.tags"), pf(evs[0], "source.ip"), pf(evs[0], "destination.ip")],
-                             evs[0].ts, self.severity, self.lane, "medium", evs[0].entities(),
-                             group_key="|".join(key)))
+            with citation_group(self):
+                g = pair["info"]
+                # the tagged records bounding the stated span and its duration first, then the held examples
+                bounds = list(dict.fromkeys(g["by_time"].ids() + g["by_end"].ids()))
+                held = {e.id: e for e in self.load(bounds)}
+                examples = pair["examples"].events(self.load)
+                ordered = list(dict.fromkeys([*(i for i in bounds if i in held), *(e.id for e in examples)]))
+                by_id = {**{e.id: e for e in examples}, **held}
+                evs = sorted((by_id[i] for i in ordered[:EXAMPLE_LIMIT]), key=lambda e: (e.ts, e.id))
+                missing = set(bounds) - set(held)
+                src, dst, port = key
+                # the span runs from the first tagged record's start to the latest end of a tagged record (or the last
+                # tagged record's time when no end is recorded): the interval the stated duration measures
+                end = _iso(g["end"]) if g["end"] is not None else g["last"].isoformat()
+                claim = (f"Arkime's heuristic tagged {g['records']} session record(s) of {len(g['conns'])} connection(s) "
+                         f"from {src} to {dst} port {port} '{self.TAG}' ({g['first'].isoformat()} – {end}). This is "
+                         f"Arkime's own detection from the traffic shape, like an IDS alert; it does not show that a shell "
+                         f"ran.") + self._context(key, g, pair["ssh"])
+                claim += cited_phrase(len(evs), g["records"], not missing, "tagged records", "tagged record")
+                if g["by_time"].first and g["by_time"].first[1] in missing:
+                    claim += (" The record that starts the tagged records' span was not kept for citation; the interval is "
+                              "computed from every record.")
+                if g["end"] is not None and g["by_end"].last and g["by_end"].last[1] in missing:
+                    claim += " The record that ends the last tagged session was not kept for citation."
+                elif g["end"] is None and g["by_time"].last and g["by_time"].last[1] in missing:
+                    claim += " The last tagged record was not kept for citation."
+                out.append(Match(self.id, claim, self.claim_type, evs,
+                                 [pf(evs[0], "arkime.tags"), pf(evs[0], "source.ip"), pf(evs[0], "destination.ip")],
+                                 evs[0].ts, self.severity, self.lane, "medium", evs[0].entities(),
+                                 group_key="|".join(key)))
         return out
 
 

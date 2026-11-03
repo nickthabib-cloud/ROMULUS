@@ -87,7 +87,7 @@ def test_b2_n1_platform_volume_spellings_are_path_scope(prefix):
     hit = LsassProcessAccess().judge(native(10, {'SourceImage': prefix +
         r'\PROGRAMDATA\Microsoft\Windows Defender\Platform\4.18.24090.11-0\anything.exe',
         'TargetImage': r'C:\Windows\System32\lsass.exe', 'GrantedAccess': '0x1010'}))[0]
-    assert hit.lane == 'lead'
+    assert hit.lane == ('high' if prefix.startswith('\\Device') else 'lead')
 
 
 @pytest.mark.parametrize('tail,value', [(r'Features\TamperProtection', 4), (r'Spynet\SpynetReporting', 0),
@@ -108,7 +108,7 @@ def test_b2_n2_signature_bookkeeping_excluded_but_policy_and_exclusions_keep_lan
                      r'Real-Time Protection\DisableRealtimeMonitoring']:
             ev = native(13, {'TargetObject': root + r'\Windows Defender' + '\\' + tail,
                 'Details': 'DWORD (0x00000000)' if 'Exclusions' in tail else 'DWORD (0x00000001)'})
-            assert RegistryDefender().judge(ev)[0].lane == ('high' if 'Policies' in root else 'lead')
+            assert RegistryDefender().judge(ev)[0].lane == 'high'
     policy = native(13, {'TargetObject': r'HKLM\Software\Policies\Microsoft\Windows Defender\Spynet\SpynetReporting',
                         'Details': 'DWORD (0x00000000)'})
     assert RegistryDefender().judge(policy)[0].lane == 'lead'
@@ -117,8 +117,8 @@ def test_b2_n2_signature_bookkeeping_excluded_but_policy_and_exclusions_keep_lan
 @pytest.mark.parametrize('shipper', ['winlogbeat_7', 'winlogbeat_8', 'elastic_agent'])
 @pytest.mark.parametrize('tail', [r'Exclusions\Paths\C:\Users\Public\payloads',
                                r'Exclusions\Processes\payload.exe'])
-def test_b2_n2_nonpolicy_exclusions_are_leads_and_matching_policies_preserve_high(shipper, tail):
-    for root, expected in [(r'HKLM\Software\Microsoft', 'lead'),
+def test_b2_n2_nonpolicy_and_matching_policy_exclusions_are_high(shipper, tail):
+    for root, expected in [(r'HKLM\Software\Microsoft', 'high'),
                            (r'HKLM\Software\Policies\Microsoft', 'high')]:
         ev = native(13, {'EventType': 'SetValue', 'TargetObject': root + r'\Windows Defender' + '\\' + tail,
                          'Details': 'DWORD (0x00000000)'}, shipper=shipper)
@@ -133,7 +133,9 @@ def test_b2_n2_nonpolicy_protection_setting_writes_stay_observations(value):
     event = native(13, {'TargetObject': r'HKLM\Software\Microsoft\Windows Defender\Real-Time Protection\DisableRealtimeMonitoring',
                        'Details': f'DWORD (0x{value:08x})'})
     hit = RegistryDefender().judge(event)[0]
-    assert hit.lane == 'lead' and 'effective protection impact unknown' in hit.text
+    assert hit.lane == ('high' if value == 1 else 'lead')
+    if value == 0:
+        assert 'effective protection impact unknown' in hit.text
 
 
 def test_b2_n1_short_alias_is_not_guessed_to_be_a_protected_platform_root():
@@ -200,15 +202,14 @@ def test_b2_i2_thousand_chrome_cache_files_fold_and_code_extensions_remain_disti
     assert StartupFileWrite().consume([startup])
 
 
-def test_b2_i2_default_iis_aspx_is_immediate_and_static_deployment_folds_separately():
+def test_b2_i2_default_iis_aspx_and_static_webroot_files_have_own_findings():
     writer = r'C:\Windows\System32\inetsrv\w3wp.exe'
     script = native(11, {'Image': writer, 'TargetFilename': r'C:\inetpub\wwwroot\shell.aspx'})
     rule = WebRootFileWrite()
     assert rule.consume([script])[0].proposed_lane == 'lead'
     static = [native(11, {'Image': writer, 'TargetFilename': fr'C:\inetpub\wwwroot\image{i}.png'}) for i in range(30)]
     matches, _ = fold(WebRootFileWrite(), [script, *static])
-    assert len(matches) == 2
-    assert any('30 Windows event record(s)' in item.claim for item in matches)
+    assert len(matches) == 31 and all(not match.group_key for match in matches)
     assert rule.judge(script)[0].content != rule.judge(static[0])[0].content
     assert 'execution is not established' in rule.judge(script)[0].text
     for path in [r'C:\backup\inetpub\wwwroot\shell.aspx', r'C:\inetpub\wwwroot_backup\shell.aspx',
@@ -216,15 +217,15 @@ def test_b2_i2_default_iis_aspx_is_immediate_and_static_deployment_folds_separat
         assert not rule.judge(native(11, {'Image': writer, 'TargetFilename': path}))
 
 
-def test_b2_i2_directory_instances_profiles_versions_and_fleet_members_fold_with_extensions_distinct():
+def test_b2_i2_code_directory_instances_keep_first_host_findings_and_basename_content():
     events = [native(11, {'Image': fr'C:\Users\{user}\AppData\Local\Browser\{version}\chrome.exe',
         'TargetFilename': fr'C:\Users\{user}\AppData\Local\Temp\{{{guid}}}\{version}\{i:032x}\file{i}.exe'}, host=f'ws{i}')
         for i, (user, version, guid) in enumerate([
             ('alice', '23.1.2.3', '11111111-2222-3333-4444-555555555555'),
             ('bob', '24.2.3.4', 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')])]
     matches, _ = fold(LureApplicationFileWrite(), events)
-    assert len(matches) == 1 and '2 host(s)' in matches[0].claim
-    assert {event.host for event in matches[0].events} == {'ws0', 'ws1'}
+    assert len(matches) == 2 and all(not match.group_key for match in matches)
+    assert {event.host for match in matches for event in match.events} == {'ws0', 'ws1'}
     assert all(field in {item.field for item in matches[0].predicate}
                for field in ['file.path', 'process.executable'])
 
@@ -250,8 +251,12 @@ def test_b2_i3_management_fanout_folds_by_pipe_outcome_account_class_and_counts_
     events = [native(5145, {'ShareName': r'\\*\IPC$', 'RelativeTargetName': pipe, 'AccessMask': '0x12019F',
         'SubjectUserName': f'WS{i}$', 'SubjectDomainName': 'EXAMPLE', 'IpAddress': f'10.0.{i//254}.{i%254+1}'}) for i in range(200)]
     matches, _ = fold(RemoteManagementPipe(), events)
-    assert len(matches) == 1 and matches[0].proposed_lane == 'lead'
-    assert '200 distinct source IP' in matches[0].claim and 'machine account' in matches[0].claim
+    assert all(match.proposed_lane == 'lead' for match in matches)
+    if pipe in {'svcctl', 'atsvc'}:
+        assert len(matches) == 2 and any(not match.group_key for match in matches)
+    else:
+        assert len(matches) == 1
+        assert '200 distinct source IP' in matches[0].claim and 'machine account' in matches[0].claim
     user = native(5145, {'ShareName': r'\\*\IPC$', 'RelativeTargetName': pipe, 'AccessMask': '0x12019F',
         'SubjectUserName': 'administrator', 'IpAddress': '10.0.0.1'})
     assert RemoteManagementPipe().judge(user)[0].content != RemoteManagementPipe().judge(events[0])[0].content
@@ -347,7 +352,7 @@ def test_b2_shared_install_scope_keeps_dump_library_and_clr_claims_narrow():
     clr = {'Image': root + r'\Windows\System32\WindowsPowerShell\v1.0\powershell.exe',
            'ImageLoaded': root + r'\Windows\Microsoft.NET\Framework64\v4.0.30319\clr.dll',
            'Signed': 'true', 'SignatureStatus': 'Valid'}
-    assert not UnexpectedClrLoad().judge(native(7, clr))
+    assert UnexpectedClrLoad().judge(native(7, clr))[0].lane == 'lead'
     assert UnexpectedClrLoad().judge(native(7, {**clr, 'Signed': 'false'}))[0].lane == 'lead'
 
 

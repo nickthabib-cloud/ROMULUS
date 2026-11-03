@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass
 
 from romulus.detect.windows_behavior import BehaviorFleetRule
-from romulus.detect.windows_events import WindowsEventRule, basename, components, integer, signal
+from romulus.detect.windows_events import WindowsEventRule, components, integer, signal
 from romulus.detect.windows_path_data import BUILTIN_COM_CLASSES, path_class
 from romulus.evidence.typed import TypedEvent
 
@@ -32,6 +32,12 @@ _NT = ("microsoft", "windows nt", "currentversion")
 _FIELDS = ("registry.path_key", "registry.value_name", "registry.value", "registry.value_type",
            "registry.action", "registry.event_type", "registry.operation_type", "registry.new_path",
            "registry.details_truncated")
+
+
+def default_value_name(value):
+    """Canonicalize only the documented default-value markers, including old Sysmon."""
+    name = str(value or "").casefold()
+    return "" if name in {"(default)", "{default}"} else name
 
 
 @dataclass(frozen=True)
@@ -93,7 +99,7 @@ def _target(event: TypedEvent, path=None) -> _Target | None:
             root, key = _CU, key[1:]
         else:
             return None
-    return _Target(root, key, name, action)
+    return _Target(root, key, default_value_name(name) if name is not None else None, action)
 
 
 def _software(target: _Target) -> tuple[str, ...] | None:
@@ -214,7 +220,7 @@ class _RegistryRule(WindowsEventRule):
             text = f"{description} registry value was written with malformed text data; its effect is unknown"
             return [signal(event, behavior + ":unknown", text, self.attack, _FIELDS, notes=notes, content=content,
                            common=common)]
-        text = f"{description} registry value was written as {self.describe(value)!r}"
+        text = f"{description} registry value was written as '{self.describe(value)}'"
         return [signal(event, behavior, text, self.attack, _FIELDS,
                        lane="high" if high else "lead", severity="high" if high else "medium", notes=notes, content=content,
                        common=common)]
@@ -222,7 +228,7 @@ class _RegistryRule(WindowsEventRule):
 
 class RegistryRunKeys(_RegistryRule):
     id = "win.registry_run_keys"
-    version = "2"
+    version = "3"
     title = "Run, RunOnce or RunOnceEx registry entry changed"
     attack = ("T1547.001",)
     benign = ("application installers and per-user startup preferences",)
@@ -250,7 +256,7 @@ class RegistryRunKeys(_RegistryRule):
 
 class RegistryWinlogon(_RegistryRule):
     id = "win.registry_winlogon"
-    version = "2"
+    version = "3"
     title = "Winlogon shell, user initialization or notification registration changed"
     attack = ("T1547.004",)
     benign = ("approved custom shells and legacy logon software",)
@@ -275,7 +281,7 @@ class RegistryWinlogon(_RegistryRule):
 
 class RegistryImageExecution(_RegistryRule):
     id = "win.registry_image_execution"
-    version = "2"
+    version = "3"
     title = "IFEO debugger or silent-exit monitoring registration changed"
     attack = ("T1546.012",)
     benign = ("debugging and application crash diagnostics",)
@@ -305,7 +311,7 @@ class RegistryImageExecution(_RegistryRule):
 
 class RegistryAppInit(_RegistryRule):
     id = "win.registry_appinit"
-    version = "2"
+    version = "3"
     title = "AppInit DLL registration or loading flag changed"
     attack = ("T1546.010",)
     benign = ("legacy application compatibility or security software",)
@@ -324,7 +330,7 @@ class RegistryAppInit(_RegistryRule):
 
 class RegistryAppCert(_RegistryRule):
     id = "win.registry_appcert"
-    version = "2"
+    version = "3"
     title = "AppCert DLL registration changed"
     attack = ("T1546.009",)
     benign = ("legacy certified application hooks",)
@@ -339,7 +345,7 @@ class RegistryAppCert(_RegistryRule):
 
 class RegistryUserCom(_RegistryRule, BehaviorFleetRule):
     id = "win.registry_user_com"
-    version = "3"
+    version = "4"
     title = "Per-user COM server registration changed"
     attack = ("T1546.015",)
     benign = ("per-user COM application installation and repair",)
@@ -379,7 +385,7 @@ class RegistryUserCom(_RegistryRule, BehaviorFleetRule):
 
 class RegistryLsaPackages(_RegistryRule):
     id = "win.registry_lsa_packages"
-    version = "2"
+    version = "3"
     title = "LSA authentication, security or notification packages changed"
     attack = ("T1547.002", "T1547.005", "T1112")
     benign = ("approved authentication providers, password filters and security products",)
@@ -396,7 +402,7 @@ class RegistryLsaPackages(_RegistryRule):
 
 class RegistryCredentialProtection(_RegistryRule):
     id = "win.registry_credential_protection"
-    version = "2"
+    version = "3"
     title = "WDigest credential retention or LSA protection registry setting changed"
     attack = ("T1112", "T1685")
     benign = ("legacy authentication troubleshooting and authorized compatibility work",)
@@ -417,7 +423,7 @@ class RegistryCredentialProtection(_RegistryRule):
 
 class RegistryDefender(_RegistryRule):
     id = "win.registry_defender"
-    version = "3"
+    version = "4"
     title = "Defender policy or exclusion registry setting changed"
     attack = ("T1685", "T1112")
     benign = ("managed antivirus policy and approved performance exclusions",)
@@ -441,11 +447,8 @@ class RegistryDefender(_RegistryRule):
         # https://learn.microsoft.com/windows/client-management/mdm/policy-csp-admx-microsoftdefenderantivirus
         if not policy and tail[:1] == ("signature updates",):
             return []
-        if not policy:
-            return self.report(event, target, "defender_setting",
-                               "Defender configuration (effective protection impact unknown)")
         if len(tail) == 2 and tail[0] == "exclusions" and tail[1] in {"paths", "processes", "extensions", "ipaddresses"}:
-            if target.action == "written" and event.get("registry.value") == "":
+            if policy and target.action == "written" and event.get("registry.value") == "":
                 return []
             return self.report(event, target, "defender_exclusion", "Defender exclusion registration", numeric=(0,),
                                known_numeric=(), high=True)
@@ -455,14 +458,18 @@ class RegistryDefender(_RegistryRule):
                                                  "disableioavprotection", "disablescriptscanning"},
                      ("spynet",): {"disableblockatfirstseen"}}
         if target.name in disabling.get(tail, set()):
+            if not policy and _recorded_dword(event) and integer(event.get("registry.value")) != 1:
+                return self.report(event, target, "defender_setting",
+                                   "Defender configuration (effective protection impact unknown)")
             return self.report(event, target, "defender_disable", "Defender protection disablement request", numeric=(1,), high=True)
         # Every other setting is a positive observation, without inferring its effect.
-        return self.report(event, target, "defender_policy", "Defender configuration (effective protection impact unknown)")
+        return self.report(event, target, "defender_policy" if policy else "defender_setting",
+                           "Defender configuration (effective protection impact unknown)")
 
 
 class RegistryRdp(_RegistryRule):
     id = "win.registry_rdp"
-    version = "2"
+    version = "3"
     title = "Remote Desktop registry enablement setting changed"
     attack = ("T1021.001", "T1112")
     benign = ("authorized remote administration enablement",)
@@ -477,7 +484,7 @@ class RegistryRdp(_RegistryRule):
 
 class RegistryServiceCommand(_RegistryRule):
     id = "win.registry_service_command"
-    version = "2"
+    version = "3"
     title = "Service image or failure command registry setting changed"
     attack = ("T1543.003",)
     benign = ("service installation, upgrades and recovery configuration",)
@@ -489,10 +496,8 @@ class RegistryServiceCommand(_RegistryRule):
         if key and len(key) == 3 and key[0] == "services" and key[2] == "parameters" and target.name == "servicedll":
             return self.report(event, target, "service_dll", "Service implementation DLL registration")
         if key and len(key) == 2 and key[0] == "services" and target.name in {"imagepath", "failurecommand"}:
-            # Basename is descriptive only; a familiar binary name never suppresses a recorded command.
-            name = basename(event.get("registry.value"))
             return self.report(event, target, "service_" + target.name,
-                               "Service " + target.name + (f" ({self.describe(name)})" if name else ""))
+                               "Service " + self.describe(key[1]) + " " + target.name)
         return []
 
 

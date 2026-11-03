@@ -8,14 +8,23 @@ from __future__ import annotations
 import json
 import re
 
-from romulus.detect.windows_events import WindowsEventRule, basename, components, integer, signal, writable
+from romulus.detect.windows_behavior import BehaviorFleetRule
+from romulus.detect.windows_events import (
+    WindowsEventRule,
+    basename,
+    components,
+    integer,
+    local_path_components,
+    signal,
+    writable,
+)
 from romulus.detect.windows_path_data import (
     installation_parts,
     path_class,
     protected_platform_path,
     writable_windows_path,
 )
-from romulus.evidence.windows_catalog import SYSMON, SYSMON_CHANNEL
+from romulus.evidence.windows_catalog import SECURITY, SYSMON, SYSMON_CHANNEL
 
 _SYSMON = "https://learn.microsoft.com/en-us/sysinternals/downloads/sysmon"
 _LSASS = "https://attack.mitre.org/techniques/T1003/001/"
@@ -80,7 +89,7 @@ def _installed_path(path):
 
 
 def _writable_indicator(path):
-    parts = _installation_parts(path)
+    parts = local_path_components(path) or _installation_parts(path)
     return writable(path) or writable_windows_path(path) or bool(parts and parts[0] in {"programdata", "perflogs"})
 
 
@@ -141,26 +150,35 @@ def _expected_dotnet_host(path):
 
 class LsassProcessAccess(WindowsEventRule):
     id = "win.lsass_process_access"
-    version = "3"
+    version = "4"
     title = "A process opened LSASS with memory-related access or a notable call trace"
-    families = ("process_access",)
-    windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 10),)
+    families = ("process_access", "object_access")
+    windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 10), ("Security", SECURITY, 4656), ("Security", SECURITY, 4663))
     attack = ("T1003.001",)
     benign = ("security inspection, crash diagnostics and Task Manager can open LSASS",)
     next_checks = ("verify the source executable and signer independently", "inspect access trace and dump-file writes")
     research = (_SYSMON, _LSASS, _RIGHTS, "https://github.com/antonioCoco/MalSeclogon/blob/master/MalSeclogon.c")
 
     def judge(self, event):
-        if event.get("event.code") != 10:
+        code = event.get("event.code")
+        security = code in {4656, 4663}
+        if code != 10 and not security:
             return []
-        target = _process(event, "target")
+        if security and str(event.get("object.type") or "").casefold() != "process":
+            return []
+        target = (event.get("object.name_key") or event.get("object.name")) if security else _process(event, "target")
         if target and basename(target) != "lsass.exe":
             return []
         if not target:
             return [signal(event, "access_target_unresolved", "A process-access record has no target image; LSASS relevance is unresolved",
                            self.attack, (*_ROLE_FIELDS, "process.access.mask", "process.access.call_trace"),
                            content=_content(event, "source.executable_key", "source.executable", "process.access.mask"))]
-        mask = integer(event.get("process.access.mask"))
+        mask = integer(event.get("object.access_mask") if security else event.get("process.access.mask"))
+        accesses = event.get("object.accesses") if security else None
+        if mask is None and isinstance(accesses, list):
+            rights_by_name = {"create_thread": 0x2, "vm_operation": 0x8, "vm_read": 0x10,
+                              "vm_write": 0x20, "dup_handle": 0x40, "create_process": 0x80}
+            mask = sum(rights_by_name.get(str(name).casefold(), 0) for name in set(accesses))
         modules = event.get("process.access.call_trace_modules") or []
         names = {basename(module) for module in modules} if isinstance(modules, list) else set()
         trace = str(event.get("process.access.call_trace") or "").casefold()
@@ -176,28 +194,43 @@ class LsassProcessAccess(WindowsEventRule):
         related_rights = mask is not None and bool(mask & (0x40 | 0x80))
         if mask is not None and not memory_rights and not related_rights and not notable_trace:
             return []
-        source = _process(event, "source")
+        source = _process(event) if security else _process(event, "source")
         high = memory_rights and bool(source) and (not _installed_path(source) or notable_trace)
         rights = "including PROCESS_VM_READ" if mask is not None and mask & 0x10 else "with memory-related qualifiers"
         actor = f"Recorded source '{self.describe(source)}'" if source else "An unresolved source image"
         text = f"{actor} opened lsass.exe {rights}" if memory_rights else f"{actor} opened lsass.exe"
+        if security:
+            text = f"Security recorded a process-object {'handle request' if code == 4656 else 'access'} by '{self.describe(source)}' to '{self.describe(target)}' {rights}"
+            if str(event.outcome) in {"failure", "Outcome.failure"}:
+                text += "; the recorded operation failed"
         if related_rights and not memory_rights:
             text += " with handle-duplication or parent-process access rights"
+        priority = ""
+        if high:
+            reasons = []
+            if not _installed_path(source):
+                reasons.append("the source path does not establish system-volume installation scope")
+            if notable_trace:
+                reasons.append("the call trace names " + ", ".join(sorted(names & (_DUMP_DLLS | {"seclogon.dll", "unknown"}))))
+            priority = "; high priority because memory-related rights accompany " + " and ".join(reasons)
+            text += priority
+        fields = ((*_PROCESS_FIELDS, "object.name", "object.name_key", "object.type", "object.access_mask", "object.accesses")
+                  if security else (*_ROLE_FIELDS, "process.access.action", "process.access.mask",
+                                    "process.access.call_trace", "process.access.call_trace_modules"))
         return [signal(event, "lsass_access", text, self.attack,
-                       (*_ROLE_FIELDS, "process.access.action", "process.access.mask",
-                        "process.access.call_trace", "process.access.call_trace_modules"),
+                       fields,
                        lane="high" if high else "lead", severity="high" if high else "medium",
                        content=json.dumps([path_class(source) if protected_platform_path(source) else source,
-                                           target, mask,
+                                           target, mask, code,
                                            [path_class(item) if protected_platform_path(item) else item
                                             for item in trace_modules]], separators=(",", ":")),
-                       common=f"A recorded source in the same installation/path class opened lsass.exe {rights}",
+                       common=f"A recorded source in the same installation/path class opened lsass.exe {rights}" + priority,
                        notes=("The record shows granted access, not a completed read or credential dump.",))]
 
 
 class RemoteThreadCreation(WindowsEventRule):
     id = "win.remote_thread_creation"
-    version = "3"
+    version = "4"
     title = "Sysmon recorded a thread created in another process"
     families = ("remote_thread",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 8),)
@@ -211,12 +244,20 @@ class RemoteThreadCreation(WindowsEventRule):
             return []
         source, target = _process(event, "source"), _process(event, "target")
         module = event.get("thread.start_module")
+        address = event.get("thread.start_address")
+        unresolved_module = not module or str(module).casefold() in {"unknown", "-"}
         high = bool(source and target and (
-            str(module).casefold() in {"unknown", "-"} or not _installed_path(source)
+            (unresolved_module and address) or str(module).casefold() in {"unknown", "-"} or not _installed_path(source)
             or basename(target) in {"lsass.exe", "winlogon.exe"}))
-        detail = ("; start module was not recorded" if not module else
-                  "; start module was recorded as '-' (Sysmon did not identify a module)" if module == "-" else "")
-        return [signal(event, "remote_thread", "Sysmon recorded creation of a thread in another process" + detail,
+        detail = (f"; no start module was recorded for start address {self.describe(address)}; "
+                  "Sysmon leaves it empty when the address is outside any loaded image" if unresolved_module and address
+                  else "; start module was not recorded" if not module else f"; start module '{self.describe(module)}'")
+        detail += (f"; start function '{self.describe(event.get('thread.start_function'))}'" if event.get('thread.start_function')
+                   else "; start function not recorded")
+        source_label = self.describe(source) if source else "source image not recorded"
+        target_label = self.describe(target) if target else "target image not recorded"
+        text = f"Sysmon recorded a remote thread from '{source_label}' into '{target_label}'" + detail
+        return [signal(event, "remote_thread", text,
                        self.attack, (*_ROLE_FIELDS, "thread.id", "thread.start_address", "thread.start_module",
                                      "thread.start_function"), lane="high" if high else "lead",
                        severity="high" if high else "medium",
@@ -224,9 +265,9 @@ class RemoteThreadCreation(WindowsEventRule):
                        notes=("Start module and function are Sysmon inferences; this event alone does not prove injection.",))]
 
 
-class ProcessImageTampering(WindowsEventRule):
+class ProcessImageTampering(BehaviorFleetRule):
     id = "win.process_image_tampering"
-    version = "3"
+    version = "4"
     title = "Sysmon reported process image tampering"
     families = ("process_tampering",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 25),)
@@ -239,10 +280,12 @@ class ProcessImageTampering(WindowsEventRule):
         if event.get("event.code") != 25:
             return []
         detailed = str(event.get("process.tampering.type") or "").strip().casefold() == "image is replaced"
-        return [signal(event, "process_tampering", "Sysmon reported process image tampering", self.attack,
+        image, kind = _process(event), event.get("process.tampering.type")
+        return [signal(event, "process_tampering", f"Sysmon reported process image tampering for '{self.describe(image)}': {self.describe(kind)}", self.attack,
                        (*_PROCESS_FIELDS, "process.tampering.type"), lane="high" if detailed else "lead",
                        severity="high" if detailed else "medium",
-                       content=_content(event, "process.executable_key", "process.executable", "process.tampering.type"))]
+                       content=json.dumps([path_class(image), str(kind or '').casefold()]),
+                       common=f"Sysmon reported {self.describe(kind)} for image path class '{path_class(image)}'")]
 
 
 class UnsignedDriverLoad(WindowsEventRule):
@@ -270,7 +313,7 @@ class UnsignedDriverLoad(WindowsEventRule):
 
 class WritableUnsignedDllLoad(WindowsEventRule):
     id = "win.writable_unsigned_dll_load"
-    version = "3"
+    version = "4"
     title = "A process loaded an unsigned or invalid module, or a module outside standard installation directories"
     families = ("image_load",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 7),)
@@ -280,24 +323,52 @@ class WritableUnsignedDllLoad(WindowsEventRule):
                    "inspect the DLL hash, writer and search-path resolution")
     research = (_SYSMON, "https://attack.mitre.org/techniques/T1574/001/")
 
+    def __init__(self):
+        super().__init__()
+        self.signature_not_assessed = 0
+
+    def consume(self, events):
+        before = self.signature_not_assessed
+        out = super().consume(events)
+        unassessed = self.signature_not_assessed - before
+        self.evaluated -= unassessed
+        self.missing_required += unassessed
+        return out
+
     def judge(self, event):
         path = _image(event)
         if (event.get("event.code") != 7 or event.get("image.kind") != "image"
-                or not path or _signature_known_good(event)
-                or (_installed_path(path) and not _bad_signature(event))):
+                or not path or _signature_known_good(event)):
+            return []
+        if _installed_path(path) and not _bad_signature(event):
+            self.signature_not_assessed += 1
+            absent = not any(event.has(name) for name in ("image.signed", "image.signature_status", "image.signature"))
+            reason = ("not assessed: no signature fields in this record" if absent
+                      else "not assessed: recorded signature fields do not establish module signature validity")
+            self.note_coverage("module_signature_absent" if absent else "module_signature_unresolved", reason)
             return []
         high = _bad_signature(event) and _system_directory(_process(event)) and _writable_indicator(path)
         text = ("A process loaded a module with a recorded absent or invalid signature" if _bad_signature(event)
                 else "A process loaded a module outside standard installation directories without a recorded valid signature")
+        text += f"; process '{self.describe(_process(event))}', module '{self.describe(path)}'"
+        if high:
+            text += "; high priority because an unsigned/invalid module has a writable-path indicator and the loader has a system-directory path"
+        parts = _installation_parts(path)
+        family = ("ngen native images" if len(parts) > 2 and parts[:2] == ("windows", "assembly")
+                  and parts[2].startswith("nativeimages_") else "Windows component store" if parts[:2] == ("windows", "winsxs") else "")
+        content = (json.dumps([path_class(_process(event)), family, event.get("image.signed"), event.get("image.signature_status")])
+                   if family else _image_content(event))
+        common = (f"A process in loader path class '{path_class(_process(event))}' loaded unsigned or invalid modules from {family}"
+                  if family else text)
         return [signal(event, "writable_dll", text, self.attack, _IMAGE_FIELDS, lane="high" if high else "lead",
-                       severity="high" if high else "medium", content=_image_content(event),
+                       severity="high" if high else "medium", content=content, common=common,
                        notes=(("A system-directory path does not establish a trusted process identity. "
                                "The loading process signature is unavailable in this event schema."),))]
 
 
 class DumpLibraryLoad(WindowsEventRule):
     id = "win.dump_library_load"
-    version = "3"
+    version = "4"
     title = "A process loaded a library that provides diagnostic or dump functionality"
     families = ("image_load",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 7),)
@@ -310,10 +381,10 @@ class DumpLibraryLoad(WindowsEventRule):
         if (event.get("event.code") != 7 or event.get("image.kind") != "image"
                 or basename(_image(event)) not in _DUMP_DLLS):
             return []
-        if (_signature_known_good(event) and _system_directory(_image(event))
+        if (_signature_known_good(event) and _system_directory(_image(event)) and _installed_path(_image(event))
                 and _installed_path(_process(event))):
             return []
-        return [signal(event, "dump_library", "A process loaded a library with diagnostic or dump functionality",
+        return [signal(event, "dump_library", f"Process '{self.describe(_process(event))}' loaded library '{self.describe(_image(event))}' with diagnostic or dump functionality",
                        self.attack, _IMAGE_FIELDS, content=_image_content(event),
                        notes=(("A library load does not prove a dump occurred. Stronger access, tampering or "
                                "unsigned writable-load observations are evaluated separately."),))]
@@ -321,7 +392,7 @@ class DumpLibraryLoad(WindowsEventRule):
 
 class UnexpectedClrLoad(WindowsEventRule):
     id = "win.unexpected_clr_load"
-    version = "3"
+    version = "4"
     title = "A CLR load did not meet the expected loader, module path and signature checks"
     families = ("image_load",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 7),)
@@ -337,8 +408,8 @@ class UnexpectedClrLoad(WindowsEventRule):
         if (_expected_dotnet_host(_process(event)) and _expected_clr_path(_image(event))
                 and _signature_known_good(event)):
             return []
-        return [signal(event, "unexpected_clr", "A CLR load did not meet the expected loader, module path and "
-                       "signature checks",
+        return [signal(event, "unexpected_clr", f"Process '{self.describe(_process(event))}' loaded CLR module '{self.describe(_image(event))}'; "
+                       "the loader, module path and signature did not meet the expected checks",
                        self.attack, _IMAGE_FIELDS, content=_image_content(event),
                        notes=(("A CLR load does not prove reflective code loading. The host exclusion requires an "
                                "expected loader, a canonical CLR installation path and a recorded valid module "

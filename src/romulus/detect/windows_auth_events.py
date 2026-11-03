@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+from datetime import UTC, datetime
 
 from romulus.detect.base import Match, pf
 from romulus.detect.netdef import DIRECTION_ASSUMED_REASON, assume_direction, current
@@ -51,7 +52,7 @@ def source_key(event):
 
 
 class _Burst(WindowsEventRule):
-    version = "3"
+    version = "4"
     citation_fields = _FIELDS
     needs_live_loader = False
     direct_eligible = False
@@ -80,103 +81,122 @@ class _Burst(WindowsEventRule):
         return [found[key] for key in ids]
 
     def _maybe(self, key, event_id, stamp, value, host, *, phase):
-        bucket = int(stamp // self.seconds)
         identity = row_key(self.id, key, host)
-        mark = ("finalized:" if phase == "finalize" else "published:") + identity
-        if self.rows.marked(mark):
+        state_key = ("replay:" if phase == "finalize" else "window:") + identity
+        previous = self.rows.marker(state_key)
+        state = json.loads(previous) if previous else None
+        if state is not None and stamp <= state["latest_end"]:
             return []
-        qualified = row_key("qualified", phase, key, bucket)
-        # In a bucket no wider than the window, another occurrence of a value already seen
-        # cannot add breadth. After a threshold, re-check to publish newly observed hosts too.
-        if (self.distinct and self.rows.prior_value(key, stamp, value, host, event_id, bucket*self.seconds)
-                and not self.rows.marked(qualified)):
+        if state is None and self.distinct and not self.rows.marked("qualified-key:"+key) and self.rows.prior_value(
+                key, stamp, value, host, event_id, int(stamp//self.seconds)*self.seconds):
             return []
-        evidence = self.rows.witnesses(key, stamp, self.seconds, self.threshold, distinct=self.distinct)
+        evidence = self.rows.witnesses(key, stamp, self.seconds, self.threshold,
+                                       distinct=self.distinct, latest=True)
         if len(evidence) != self.threshold:
             return []
-        loaded = self._load_witnesses(list(dict.fromkeys([event_id, *(item[0] for item in evidence)])))
-        if not loaded:
+        self.rows.first("qualified-key:"+key)
+        if state is not None and min(item[1] for item in evidence) <= state["latest_end"]:
             return []
+        loaded = self._load_witnesses(list(dict.fromkeys([event_id, *(item[0] for item in evidence)])))
         event = loaded[0]
         by_id = {item.id: item for item in loaded}
         witnesses = [by_id[item[0]] for item in evidence]
-        selected = {item.id: item for item in loaded}
-        if not self.rows.first(mark):
+        start, end = min(item.ts.timestamp() for item in witnesses), max(item.ts.timestamp() for item in witnesses)
+        if state is not None and start <= state["latest_end"]:
             return []
-        self.rows.first(qualified)
+        state = {"first_start": start if state is None else state["first_start"],
+                 "first_end": end if state is None else state["first_end"],
+                 "latest_start": start, "latest_end": end, "windows": 1 if state is None else state["windows"]+1}
+        self.rows.remember(state_key, json.dumps(state, sort_keys=True))
+        emitted = self.rows.marker("emitted:"+identity)
+        emitted = json.loads(emitted) if emitted else None
+        if emitted is not None and end < emitted["latest_end"]:
+            return []
+        total = self.rows.count(key)
+        selected = {item.id: item for item in loaded}
+        signature = hashlib.sha256(row_key(state, sorted(selected), total).encode()).hexdigest()
+        if emitted is not None and signature == emitted["signature"]:
+            return []
+        self.rows.remember("emitted:"+identity, json.dumps({"latest_end": end, "signature": signature}))
         reporter = key.startswith('["reporter",')
         key_text = ("reporting host " + str(event.get("host.full_name") or host) +
                     "; recorded sources may be unresolved or unrelated" if reporter else self.key_description(event))
+        def iso(value):
+            return datetime.fromtimestamp(value, UTC).isoformat()
         claim = (f"{self.description}: at least {self.threshold} {self.units} within {self.seconds} seconds "
-                 f"for {self.describe(key_text)}. The {self.threshold} cited witnesses span "
-                 f"{min(item.ts for item in witnesses).isoformat()} to {max(item.ts for item in witnesses).isoformat()}. "
+                 f"for {self.describe(key_text)}. First qualifying window {iso(state['first_start'])} to "
+                 f"{iso(state['first_end'])}; latest qualifying window {iso(start)} to {iso(end)}. "
+                 f"The {self.threshold} cited witnesses describe the latest window. "
                  f"The current supporting record is on {event.host}. This is a concentration signal, not proof of intent.")
-        total = self.rows.count(key)
-        signature = hashlib.sha256(row_key(claim, sorted(selected), total).encode()).hexdigest()
-        previous = self.rows.marker("signature:" + identity)
-        self.rows.remember("signature:" + identity, signature)
-        self.rows.first("published:" + identity)
-        if phase == "finalize" and previous == signature:
-            return []
         return [Match(self.id, claim, self.claim_type, list(selected.values()),
                       [pf(item, name) for item in selected.values() for name in _FIELDS if item.has(name)], event.ts,
                       "medium", "lead", "medium", event.entities(),
                       [self.rationale, "Counts are records; several channels may describe one authentication attempt.",
-                       (f"The correlation key has {total} recorded witnesses; "
-                        f"the citation list is bounded to {self.threshold + 1} selected records."),
+                       (f"The correlation key has {total} recorded witnesses across {state['windows']} non-overlapping "
+                        f"qualifying windows; at most {self.threshold+1} latest-window witnesses are cited. "
+                        "First/latest bounds and window count are retained; other window members remain in disk-backed history."),
                        "Reported workstation labels do not establish verified host identities or IP ownership."],
                       group_key="windows-burst:" + hashlib.sha256(identity.encode()).hexdigest(),
                       context_ids=set(selected) - {event.id},
-                      revision_reason=("Chronological replay selected the earliest qualifying cited witnesses "
-                                       "after late records arrived." if phase == "finalize" and previous else ""))]
+                      revision_reason="A later qualifying window or chronological replay revised the cited witnesses." if emitted else "")]
 
     def consume(self, events):
         out = []
         scoped = self.scope_partition(events)
-        for event in sorted(scoped, key=lambda item: (item.ts, item.id)):
+        if not any(self.eligible(event) for event in scoped):
             if not self._events_pre_scoped:
-                self.os_applicable += 1
-            if not self.eligible(event):
-                continue
-            self.evaluated += 1
-            pair = self.key_value(event)
-            if pair is None:
-                self.missing_required += 1
-                self.note_coverage("burst_keys", "Source, principal or target fields required for correlation were missing.")
-                continue
-            key, value = pair
-            if self.rows.put(key, event, value):
-                out.extend(self._maybe(key, event.id, event.ts.timestamp(), value, event.host, phase="consume"))
-                if isinstance(self, WindowsPasswordSpray):
-                    reporter = str(event.get("host.full_name") or event.host).casefold()
-                    report_key = row_key("reporter", reporter)
-                    self.rows.put(report_key, event, value)
-                    out.extend(self._maybe(report_key, event.id, event.ts.timestamp(), value, event.host, phase="consume"))
-                    self.rows.put(row_key("daily-source", source_key(event)), event, value)
-                    self.rows.put(row_key("daily-reporter", reporter), event, value)
+                self.os_applicable += len(scoped)
+            return out
+        with self.rows.batch():
+            for event in sorted(scoped, key=lambda item: (item.ts, item.id)):
+                if not self._events_pre_scoped:
+                    self.os_applicable += 1
+                if not self.eligible(event):
+                    continue
+                self.evaluated += 1
+                pair = self.key_value(event)
+                if pair is None:
+                    self.missing_required += 1
+                    self.note_coverage("burst_keys", "Source, principal or target fields required for correlation were missing.")
+                    continue
+                key, value = pair
+                if self.rows.put(key, event, value):
+                    out.extend(self._maybe(key, event.id, event.ts.timestamp(), value, event.host, phase="consume"))
+                    if isinstance(self, WindowsPasswordSpray):
+                        reporter = str(event.get("host.full_name") or event.host).casefold()
+                        report_key = row_key("reporter", reporter)
+                        self.rows.put(report_key, event, value)
+                        out.extend(self._maybe(report_key, event.id, event.ts.timestamp(), value, event.host, phase="consume"))
+                        self.rows.put(row_key("daily-source", source_key(event)), event, value)
+                        self.rows.put(row_key("daily-reporter", reporter), event, value)
         self._batch = {}
         return out
 
     def finalize(self):
-        # Stream replay catches windows made visible by late or out-of-order target arrivals.
-        for key, event_id, stamp, value, host in self.rows.iterate():
-            if key.startswith('["daily-'):
-                continue
-            yield from self._maybe(key, event_id, stamp, value, host, phase="finalize")
-        if isinstance(self, WindowsPasswordSpray):
-            yield from self._daily()
+        if not self.rows.ready:
+            return
+        with self.rows.batch():
+            # Stream replay catches windows made visible by late or out-of-order target arrivals.
+            for key, event_id, stamp, value, host in self.rows.iterate():
+                if key.startswith('["daily-'):
+                    continue
+                yield from self._maybe(key, event_id, stamp, value, host, phase="finalize")
+            if isinstance(self, WindowsPasswordSpray):
+                yield from self._daily()
 
     def _daily(self):
         # Calendar days are explicit UTC partitions, not an assumed rolling lifetime or an absence test.
         threshold = 100
         for key, day, count, offset in self.rows.daily_groups(threshold):
             identity = "windows-daily-auth:" + hashlib.sha256(row_key(key).encode()).hexdigest()
-            signature = str(count)
             previous = self.rows.marker(identity)
-            if previous is not None and int(previous) >= count:
-                continue
             evidence = self.rows.daily_witnesses(key, day, threshold, offset)
-            witnesses = self._load_witnesses([item[0] for item in evidence])
+            signature = json.dumps([count, max(item[1] for item in evidence)], separators=(",", ":"))
+            if previous is not None:
+                prior_count, prior_end = json.loads(previous)
+                if prior_end >= max(item[1] for item in evidence) and prior_count >= count:
+                    continue
+            witnesses = sorted(self._load_witnesses([item[0] for item in evidence]), key=lambda item: (item.ts, item.id))
             if len(witnesses) != threshold:
                 continue
             self.rows.remember(identity, signature)

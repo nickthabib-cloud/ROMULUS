@@ -8,7 +8,6 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from romulus.detect.correlation import StageMissing
 from romulus.detect.lineage import MAX_GAP, TIGHT_GAP, ReverseShellByLineage
 from romulus.detect.registry import ALL_PLAYBOOKS, fresh_pack
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
@@ -466,13 +465,21 @@ def test_boot_identity_keys_the_join():
     assert out == []
 
 
-def test_missing_staged_event_raises_stage_missing():
+def test_missing_staged_group_is_named_partial_and_other_lineage_findings_continue():
     pb = ReverseShellByLineage()
-    pb.consume(_interp_owner(["sh", "-i"]))
-    pb.drain_staged()
-    pb.bind_loader(lambda ids: [])
-    with pytest.raises(StageMissing):
-        pb.finalize()
+    missing = _interp_owner(["sh", "-i"])
+    retained = [event.model_copy(update={"host": "app02"}) for event in _interp_owner(["sh", "-i"])]
+    pb.consume([*missing, *retained])
+    staged = {event.id: event for event in pb.drain_staged() if event.host == "app02"}
+    pb.bind_loader(lambda ids: [staged[identity] for identity in ids if identity in staged])
+    [match] = pb.finalize()
+    assert match.proposed_lane == "high" and match.group_key == f"app02|None|500|{EXT}"
+    cited = {event.id for event in match.events}
+    assert {retained[1].id, retained[2].id} <= cited
+    assert cited.isdisjoint(event.id for event in missing)
+    assert pb.limits["citation_reference"].records == 1
+    assert any("that group was not published. Other groups continued." in reason for reason in pb.limit_reasons())
+    assert not any("finalize stopped" in reason for reason in pb.limit_reasons())
 
 
 # ---------------------------------------------------------------- review fixes: sshd by exact path

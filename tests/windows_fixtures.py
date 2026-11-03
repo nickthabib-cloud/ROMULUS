@@ -29,7 +29,7 @@ _DOCUMENTED_EVENT_KEYS = (
         5136, 5137, 5138, 5139, 5141, 5140, 5145,
     )],
     *[("Microsoft-Windows-Sysmon/Operational", SYSMON, event_id) for event_id in (
-        1, 3, 5, 2, 11, 15, 23, 26, 10, 6, 7, 8, 25, 12, 13, 14,
+        1, 3, 5, 2, 11, 15, 23, 26, 29, 10, 6, 7, 8, 25, 12, 13, 14,
         17, 18, 19, 20, 21, 22, 4, 16, 255,
     )],
     ("Security", "Microsoft-Windows-Eventlog", 1102),
@@ -119,7 +119,7 @@ def _sysmon_data(event_id: int, ordinal: int) -> dict[str, object]:
         }
     if event_id == 5:
         return {**process, "Image": r"C:\Windows\System32\whoami.exe"}
-    if event_id in {2, 11, 15, 23, 26}:
+    if event_id in {2, 11, 15, 23, 26, 29}:
         suffix = ":Zone.Identifier" if event_id == 15 else ""
         data = {
             **process,
@@ -416,7 +416,7 @@ def _data(provider: str, event_id: int, ordinal: int) -> dict[str, object]:
             "User": r"EXAMPLE\analyst",
         }
     if provider == "Microsoft-Windows-PowerShell":
-        return {
+        data = {
             "ScriptBlockId": _guid(ordinal),
             "Path": r"C:\ProgramData\Example\inventory.ps1",
             "ScriptBlockText": "Get-CimInstance Win32_OperatingSystem",
@@ -425,7 +425,15 @@ def _data(provider: str, event_id: int, ordinal: int) -> dict[str, object]:
             "MessageTotal": "1",
             "RunspaceId": _guid(ordinal + 40_000),
         }
+        if event_id == 4104:
+            data.pop("ContextInfo")
+            data.pop("RunspaceId")
+        return data
     if provider == "PowerShell":
+        if event_id == 800:
+            return {"param1": "Get-CimInstance Win32_OperatingSystem",
+                    "param2": "HostApplication=powershell.exe -NoProfile -File inventory.ps1\nEngineVersion=2.0",
+                    "param3": 'CommandInvocation(Get-CimInstance): "Get-CimInstance"'}
         return {
             "param1": "Available" if event_id in {400, 403} else "Get-CimInstance Win32_OperatingSystem",
             "param2": "None" if event_id in {400, 403} else "Pipeline execution details",
@@ -453,20 +461,16 @@ def _data(provider: str, event_id: int, ordinal: int) -> dict[str, object]:
             "SessionID": str(ordinal + 100),
         }
     if provider == "Microsoft-Windows-WinRM":
-        return {
-            "ClientAddress": "203.0.113.25",
-            "ClientPort": "5985",
-            "ClientName": "ws02.example.test",
-            "ResourceUri": "http://schemas.microsoft.com/wbem/wsman/1/wmi/root/cimv2/*",
-            "UserName": r"EXAMPLE\analyst",
-        }
+        return {} if event_id == 91 else {"connection": "https://ws02.example.test/wsman"}
     if provider == "Microsoft-Windows-Bits-Client":
+        if event_id == 3:
+            return {"jobId": _guid(ordinal + 60_000), "jobTitle": "Example inventory payload",
+                    "jobOwner": r"EXAMPLE\analyst", "processPath": r"C:\Windows\System32\svchost.exe",
+                    "processId": str(ordinal + 2000)}
         return {
-            "JobId": _guid(ordinal + 60_000),
-            "JobName": "Example inventory payload",
-            "RemoteName": "https://downloads.example.test/inventory.dat",
-            "LocalName": r"C:\ProgramData\Example\inventory.dat",
-            "User": r"EXAMPLE\analyst",
+            "Id": _guid(ordinal + 60_000), "name": "Example inventory payload",
+            "url": "https://downloads.example.test/inventory.dat",
+            "fileTime": "0", "fileLength": "1000",
         }
     raise AssertionError(f"missing fixture for provider {provider!r}, event {event_id}")
 
@@ -503,11 +507,23 @@ def _dataset(event: LogicalWindowsEvent) -> str:
     return "winlog.winlog"
 
 
-def windows_hit(event: LogicalWindowsEvent, shape: Shape) -> dict:
+def windows_hit(event: LogicalWindowsEvent, shape: Shape, *, old_sysmon: bool = False) -> dict:
     if shape not in SHAPES:
         raise ValueError(f"unknown Windows fixture shape {shape!r}")
     dataset = _dataset(event)
     native_data = dict(event.data)
+    if old_sysmon and event.provider == SYSMON:
+        native_data.pop("OriginalFileName", None)
+        if "Hashes" in native_data:
+            native_data["Hash"] = native_data.pop("Hashes")
+        native_data = {name: value.replace("(Default)", "{Default}") if isinstance(value, str) else value
+                       for name, value in native_data.items()}
+    if shape == "winlogbeat_8":
+        native_data = {name: value for name, value in native_data.items() if value not in (None, "")}
+        if event.provider == SYSMON and event.event_id == 10:
+            for old, new in (("SourceProcessGuid", "SourceProcessGUID"), ("TargetProcessGuid", "TargetProcessGUID")):
+                if old in native_data:
+                    native_data[new] = native_data.pop(old)
     if shape == "elastic_agent" and event.provider == "Microsoft-Windows-Windows Defender":
         # The Windows integration rewrites the native spaced Defender names with underscores.
         for spaced, underscored in (
@@ -540,7 +556,21 @@ def windows_hit(event: LogicalWindowsEvent, shape: Shape) -> dict:
         source["winlog"]["record_id"] = str(event.record_id)
         source.update({"agent": {"type": "winlogbeat", "version": "7.17.0"}, "ecs": {"version": "1.12.0"}})
     elif shape == "winlogbeat_8":
-        source.update({"agent": {"type": "winlogbeat", "version": "8.19.0"}, "ecs": {"version": "8.17.0"}})
+        source.update({"agent": {"type": "winlogbeat", "version": "8.19.12"}, "ecs": {"version": "8.17.0"},
+                       "event": {"code": str(event.event_id)}})
+        source["winlog"]["event_id"] = str(event.event_id)
+        source["winlog"].pop("time_created")
+        if event.provider == SYSMON:
+            source["winlog"]["user"] = {"identifier": "S-1-5-18", "name": "SYSTEM", "domain": "NT AUTHORITY", "type": "User"}
+        if event.event_id in {1102, 104, 1149} or (event.provider == "Microsoft-Windows-Application-Experience"
+                                                   and event.event_id in {17, 500}):
+            source["winlog"]["user_data"] = source["winlog"].pop("event_data")
+            source["winlog"]["user_data"]["xml_name"] = {1102: "LogFileCleared", 104: "LogFileCleared",
+                                                         1149: "EventXML", 17: "ProgramCompatibilityAssistant",
+                                                         500: "ProgramTelemetry"}[event.event_id]
+        if event.provider == "Microsoft-Windows-PowerShell" and event.event_id == 4104:
+            native_data.pop("ContextInfo", None)
+            native_data.pop("RunspaceId", None)
     else:
         source.update({
             "agent": {"type": "filebeat", "version": "8.19.0"},
@@ -561,7 +591,9 @@ def windows_xml_hit(event: LogicalWindowsEvent, shape: Shape = "winlogbeat_8") -
     """Render the event-data payload solely through the shipper's retained native event XML."""
     hit = windows_hit(event, shape)
     winlog = hit["_source"]["winlog"]
-    data = winlog.pop("event_data")
+    data = winlog.pop("event_data", None)
+    if data is None:
+        data = {name: value for name, value in winlog.pop("user_data").items() if name != "xml_name"}
     winlog.pop("time_created", None)
     rendered = "".join(
         (f"<Data>{escape(str(value))}</Data>" if event.provider == "PowerShell" and name.startswith("param")
@@ -603,8 +635,13 @@ def semantic_event(event: TypedEvent) -> dict:
             value["fields"][spaced_key] = value["fields"].pop(compact_key)
     for field in value["fields"].values():
         field["origin"] = field["origin"].replace("winlog.user_data.", "winlog.event_data.")
+        field["origin"] = field["origin"].replace(":@timestamp", ":winlog.time_created")
+        field["origin"] = field["origin"].replace("ProcessGUID", "ProcessGuid")
         for agent_name, spaced in agent_defender_names.items():
             field["origin"] = field["origin"].replace(f".{agent_name}", f".{spaced}")
+    for name in tuple(value["fields"]):
+        if "ProcessGUID" in name:
+            value["fields"][name.replace("ProcessGUID", "ProcessGuid")] = value["fields"].pop(name)
     return value
 
 

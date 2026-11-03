@@ -29,7 +29,15 @@ from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
 from romulus.detect.bounded import HOT_COUNT, HeldExamples, KeyedStore, RecentIds
-from romulus.detect.citing import BoundStage, Ends, bound_note, cite_extra, cited_phrase, more
+from romulus.detect.citing import (
+    BoundStage,
+    Ends,
+    bound_note,
+    citation_group,
+    cite_extra,
+    cited_phrase,
+    more,
+)
 from romulus.detect.correlation import canon_ip, external, routable_remote
 from romulus.detect.netdef import assume_direction
 from romulus.evidence.typed import TypedEvent
@@ -302,16 +310,17 @@ class SelfSignedCertificateOutbound(_CertificateRule):
     def finalize(self):
         out = []
         for key, state in self.groups.items():
-            evs, missing, context = self.cite(state)
-            g = state["info"]
-            cert = g["cert"]
-            compared = cert.get("names_compared") or "CN and O"
-            claim = (f"{self.summary(key, g, evs, missing)} the server presented: its subject name equals its "
-                     f"issuer name ({describe(cert)}), and no other certificate in the handshake names it as issuer. "
-                     f"Compared by {compared}; the signature was not verified.")
-            out.append(Match(self.id, claim, self.claim_type, evs, self.predicate(evs), evs[0].ts, self.severity,
-                             self.lane, "high" if compared == "distinguished name" else "medium", evs[0].entities(),
-                             group_key=f"{key[0]}|{key[1]}", context_ids=context))
+            with citation_group(self):
+                evs, missing, context = self.cite(state)
+                g = state["info"]
+                cert = g["cert"]
+                compared = cert.get("names_compared") or "CN and O"
+                claim = (f"{self.summary(key, g, evs, missing)} the server presented: its subject name equals its "
+                         f"issuer name ({describe(cert)}), and no other certificate in the handshake names it as issuer. "
+                         f"Compared by {compared}; the signature was not verified.")
+                out.append(Match(self.id, claim, self.claim_type, evs, self.predicate(evs), evs[0].ts, self.severity,
+                                 self.lane, "high" if compared == "distinguished name" else "medium", evs[0].entities(),
+                                 group_key=f"{key[0]}|{key[1]}", context_ids=context))
         return out
 
 
@@ -388,24 +397,25 @@ class ShortLivedOrNewCertificateOutbound(_CertificateRule):
     def finalize(self):
         out = []
         for key, state in self.groups.items():
-            evs, missing, context = self.cite(state)
-            g = state["info"]
-            cert, parts = g["cert"], []
-            validity = self.validity_days(cert)
-            if "short-lived" in g["reasons"] and validity is not None:
-                parts.append(f"its validity period is {validity:.1f} days (at most {self.SHORT_VALIDITY_DAYS})")
-            age = self.age_days(cert, g["first"])         # the age at the earliest matching session is the least
-            if age is not None and age < 0:
-                parts.append(f"it was not yet valid when first presented ({-age * 24:.1f} hours before its "
-                             f"notBefore)")
-            elif age is not None and age < self.FRESH_DAYS:
-                parts.append(f"its notBefore is {age * 24:.1f} hours before the first such session "
-                             f"(under {self.FRESH_DAYS} days)")
-            claim = (f"{self.summary(key, g, evs, missing)} the server presented ({describe(cert)}): "
-                     f"{'; '.join(parts)}.")
-            out.append(Match(self.id, claim, self.claim_type, evs, self.predicate(evs), evs[0].ts, self.severity,
-                             self.lane, "medium", evs[0].entities(), group_key=f"{key[0]}|{key[1]}",
-                             context_ids=context))
+            with citation_group(self):
+                evs, missing, context = self.cite(state)
+                g = state["info"]
+                cert, parts = g["cert"], []
+                validity = self.validity_days(cert)
+                if "short-lived" in g["reasons"] and validity is not None:
+                    parts.append(f"its validity period is {validity:.1f} days (at most {self.SHORT_VALIDITY_DAYS})")
+                age = self.age_days(cert, g["first"])         # the age at the earliest matching session is the least
+                if age is not None and age < 0:
+                    parts.append(f"it was not yet valid when first presented ({-age * 24:.1f} hours before its "
+                                 f"notBefore)")
+                elif age is not None and age < self.FRESH_DAYS:
+                    parts.append(f"its notBefore is {age * 24:.1f} hours before the first such session "
+                                 f"(under {self.FRESH_DAYS} days)")
+                claim = (f"{self.summary(key, g, evs, missing)} the server presented ({describe(cert)}): "
+                         f"{'; '.join(parts)}.")
+                out.append(Match(self.id, claim, self.claim_type, evs, self.predicate(evs), evs[0].ts, self.severity,
+                                 self.lane, "medium", evs[0].entities(), group_key=f"{key[0]}|{key[1]}",
+                                 context_ids=context))
         return out
 
 

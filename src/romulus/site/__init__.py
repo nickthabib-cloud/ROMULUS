@@ -228,6 +228,7 @@ class _SiteDocument(BaseModel):
     collection: tuple[CollectionGroup, ...] = ()
     domain_controllers: tuple[str, ...] = ()
     directory_sync_accounts: tuple[str, ...] = ()
+    directory_sync_accounts_declared: StrictBool = False
     # The site's internal-network definition, the same lists as ROMULUS_INTERNAL_NETWORKS and
     # ROMULUS_EXTERNAL_NETWORKS; only one of the two places may set it.
     internal_networks: tuple[str, ...] = ()
@@ -380,10 +381,12 @@ def _validated(loaded: object) -> _SiteDocument:
 
 def _facts(document: _SiteDocument) -> SiteFacts:
     content = document.model_dump(mode="json", by_alias=True)
-    # A missing list expresses unknown configuration, whereas an explicit empty
-    # list declares that no synchronization accounts are configured.
-    if "directory_sync_accounts" not in document.model_fields_set:
+    # Older saves materialized default empty lists, so an empty list alone cannot
+    # attest that the lead checked the site's synchronization accounts.
+    if not document.directory_sync_accounts and not document.directory_sync_accounts_declared:
         content.pop("directory_sync_accounts", None)
+    if not document.directory_sync_accounts_declared:
+        content.pop("directory_sync_accounts_declared", None)
     return SiteFacts(
         True,
         _digest(content),

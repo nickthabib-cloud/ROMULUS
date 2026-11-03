@@ -62,16 +62,23 @@ def cmd_hunt(args) -> int:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     s = load_settings(_env_file(args))
     if args.action == "start":
+        from romulus.hunt.run import _lease_seconds
+        from romulus.store.db import maintenance_lease
         agent_mode = "off" if args.no_agent else (args.agent_mode or s.agent_mode)
         s = s.model_copy(update={"agent_mode": agent_mode})
         start, end = _parse_time(args.start, s.mission_timezone), _parse_time(args.end, s.mission_timezone)
         user = os.environ.get("USER") or os.environ.get("USERNAME") or "cli"
         try:
-            hid = create_hunt(s, start, end, created_by=f"cli:{user}", style=args.style,
-                              hypothesis=args.hypothesis or "",
-                              original_input={"start": args.start, "end": args.end, "tz": s.mission_timezone},
-                              expand=not args.no_expand, ai_agent=False if args.no_agent else None)
-        except ValueError as e:
+            repo = open_repo(s)
+            with maintenance_lease(repo.engine, wait_seconds=30, allow_nested=True, on_wait=lambda: print(
+                    "Waiting up to 30 seconds for database maintenance before creating the hunt...", file=sys.stderr,
+                    flush=True)):
+                hid = create_hunt(s, start, end, created_by=f"cli:{user}", style=args.style,
+                                  hypothesis=args.hypothesis or "",
+                                  original_input={"start": args.start, "end": args.end, "tz": s.mission_timezone},
+                                  expand=not args.no_expand, ai_agent=False if args.no_agent else None)
+                owner = repo.claim_hunt(hid, _lease_seconds(s))["lease_owner"]
+        except (ValueError, RuntimeError) as e:
             print(f"hunt not created: {e}", file=sys.stderr)
             return EXIT_FAIL
         print(f"hunt {hid} created [{start.isoformat()}, {end.isoformat()})")
@@ -82,7 +89,8 @@ def cmd_hunt(args) -> int:
         def show(c):
             if c["lane"] in ("urgent", "high"):
                 print(f"  [{c['lane'].upper():6}] {c['rule_id']}: {c['claim'][:180]}", flush=True)
-        res = run_hunt(s, hid, agent_mode=agent_mode, on_candidate=show, expand=not args.no_expand)
+        res = run_hunt(s, hid, agent_mode=agent_mode, on_candidate=show, expand=not args.no_expand,
+                       claimed_owner=owner)
         print(json.dumps(res, indent=2, default=str) if args.json else
               f"done: {res['execution_state']} {res['detection_result']} lanes={res['lanes']} "
               f"stats={ {k: v for k, v in res['stats'].items() if k != 'skips'} }\n" + _ai_agent_line(res))

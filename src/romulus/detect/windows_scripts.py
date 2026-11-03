@@ -41,11 +41,64 @@ HIGH_TOOLS = frozenset({"invoke-mimikatz", "invoke-kerberoast", "invoke-reflecti
 CONTENT_COMMANDS = TOOLS | EXECUTORS | {"get-process", "gps", "ps", "out-minidump", "reg", "reg.exe",
     "add-type", "get-credential", "out-file", "set-content", "add-content", "export-csv",
     "invoke-webrequest", "iwr", "wget", "curl", "invoke-restmethod", "irm", "start-bitstransfer",
-    "set-itemproperty", "new-itemproperty", "sp", "get-command", "gcm"}
+    "set-itemproperty", "new-itemproperty", "sp", "get-command", "gcm",
+    "start-process", "saps", "invoke-item", "ii"}
+
+
+def runs_code(parsed):
+    return bool(parsed.evaluates_code or parsed.commands & EXECUTORS
+                or parsed.members & {'invokescript', 'newscriptblock'}
+                or parsed.static_calls & {('scriptblock', 'create'),
+                                          ('system.management.automation.scriptblock', 'create')})
+
+
+def downloads(parsed):
+    return bool(parsed.members & {'downloadstring', 'downloaddata', 'downloadfile', 'getresponsestream'}
+                or {'send', 'open'} <= parsed.members and parsed.literals & {'msxml2.xmlhttp', 'microsoft.xmlhttp'}
+                or parsed.commands & {'invoke-webrequest', 'iwr', 'wget', 'curl', 'invoke-restmethod', 'irm',
+                                      'start-bitstransfer'})
+
+
+def amsi_bypass(parsed):
+    reflection = (('system.management.automation.amsiutils' in parsed.literals or parsed.reflection_filter)
+                  and bool(parsed.literals & {'amsiinitfailed', 'amsicontext', 'amsisession'})
+                  and bool(parsed.members & {'gettype', 'gettypes'}) and {'getfield', 'setvalue'} <= parsed.members)
+    patch = ('amsiscanbuffer' in parsed.literals and 'getprocaddress' in parsed.members
+             and bool(parsed.members & {'virtualprotect', 'copy', 'writebyte', 'writeint32'}))
+    return reflection or patch
+
+
+def add_type_words(parsed):
+    cached = getattr(parsed, '_add_type_words', None)
+    if cached is not None:
+        return cached
+    remaining, seen, words = 2_097_152, set(), set()
+    for args in parsed.arguments.get('add-type', []):
+        if '-typedefinition' not in args:
+            continue
+        position = args.index('-typedefinition') + 1
+        if position >= len(args) or args[position] in seen:
+            continue
+        source = args[position]
+        seen.add(source)
+        if len(source) > remaining:
+            parsed.partial = True
+            parsed.limits.add('MAX_ADD_TYPE_CHARS=2097152')
+            continue
+        remaining -= len(source)
+        inner_limits = set()
+        tokens, _partial = lex(source, csharp=True, limits=inner_limits)
+        for limit in inner_limits:
+            if limit.startswith(('MAX_TOKENS=', 'MAX_READ_CHARS=')):
+                parsed.partial = True
+                parsed.limits.add('ADD_TYPE_' + limit)
+        words.update(token.value for token in tokens if token.kind == 'word')
+    parsed._add_type_words = words
+    return words
 
 
 class ScriptRule(WindowsEventRule):
-    version = "3"
+    version = "4"
     families = ("script_block",)
     windows_event_classes = SCRIPT_CLASSES
     claim_type = "script_content"
@@ -73,11 +126,51 @@ class ScriptRule(WindowsEventRule):
             return {"host_command": str(event.get("script.host_application") or "").strip()}
         if self.id == "win.script_engine_v2":
             return {"engine": event.get("script.engine_version")}
-        return {"commands": sorted(parsed.commands & CONTENT_COMMANDS),
-                "arguments": {name: values for name, values in parsed.arguments.items() if name in CONTENT_COMMANDS},
-                "definitions": sorted(parsed.definitions & TOOLS), "members": sorted(parsed.members),
-                "static_calls": sorted(parsed.static_calls), "constants": sorted(parsed.literals),
+        cached = getattr(parsed, '_proof', None)
+        if cached is not None:
+            return cached
+        arguments, remaining, retained, total, digest = {}, 32768, 0, 0, hashlib.sha256()
+        for name, rows in parsed.arguments.items():
+            if name not in CONTENT_COMMANDS:
+                continue
+            for row in rows:
+                kept = []
+                digest.update(name.encode())
+                for value in row:
+                    total += 1
+                    digest.update(len(value).to_bytes(8, 'big'))
+                    digest.update(value.encode())
+                    if retained < 256 and len(value) <= remaining:
+                        kept.append(value)
+                        remaining -= len(value)
+                        retained += 1
+                if kept:
+                    arguments.setdefault(name, []).append(tuple(kept))
+        def bounded(values):
+            retained_values, room, checksum = [], 32768, hashlib.sha256()
+            for value in sorted(values):
+                text = value if isinstance(value, str) else json.dumps(value)
+                checksum.update(len(text).to_bytes(8, 'big'))
+                checksum.update(text.encode())
+                if len(retained_values) < 256 and len(text) <= room:
+                    retained_values.append(value)
+                    room -= len(text)
+            return retained_values, {'total_values': len(values), 'omitted_values': len(values)-len(retained_values),
+                                     'digest': checksum.hexdigest()}
+        constants, constant_summary = bounded(parsed.literals)
+        members, member_summary = bounded(parsed.members)
+        member_literals, member_literal_summary = bounded(parsed.member_literals)
+        static_calls, static_summary = bounded(parsed.static_calls)
+        proof = {"commands": sorted(parsed.commands & CONTENT_COMMANDS),
+                "arguments": arguments, 'argument_summary': {'total_values': total,
+                    'omitted_values': total-retained, 'digest': digest.hexdigest()},
+                "definitions": sorted(parsed.definitions & TOOLS), "members": members,
+                "static_calls": static_calls, "constants": constants,
+                'member_literals': member_literals, 'member_literal_summary': member_literal_summary,
+                'constant_summary': constant_summary, 'member_summary': member_summary, 'static_summary': static_summary,
                 "obfuscation": sorted(parsed.obfuscation)}
+        parsed._proof = proof
+        return proof
 
     def _lane(self, event, parsed, complete):
         if not complete:
@@ -106,6 +199,7 @@ class ScriptRule(WindowsEventRule):
                 self.os_applicable += 1
             self.evaluated += 1
             parsed = read_event_script(event)
+            add_type_words(parsed)
             if not event.get("script.text") and self.id not in {"win.script_encoded_command", "win.script_engine_v2"}:
                 self.missing_required += 1
                 self.note_limit("script_text", "This record has no script source text; content rules cannot judge it", 1)
@@ -144,7 +238,7 @@ class ScriptRule(WindowsEventRule):
             for shape, description, fields in labels:
                 proof = self._proof(event, parsed)
                 content = hashlib.sha256(json.dumps(proof, sort_keys=True).encode()).hexdigest()
-                content_key = ((event.host or event.id, content, block_key or event.id) if not complete
+                content_key = ((event.host or event.id, content, block_key) if not complete and block_key
                                else (event.host or event.id, content))
                 identity = self.content_views.get(content_key)
                 if correction:
@@ -181,10 +275,13 @@ class ScriptRule(WindowsEventRule):
                 hit.notes += (("Script content is not proof that the described action ran or succeeded. "
                                "The lexer does not execute dynamic expressions or resolve runtime aliases/variables."),)
                 hit.notes += tuple(event.caveats)
+                omitted = proof.get('argument_summary', {}).get('omitted_values', 0)
+                if omitted:
+                    hit.notes += (f'Bounded proof omits {omitted} argument values; full source remains cited.',)
                 if parsed.limits:
                     hit.notes += ('Script reading limits: ' + ', '.join(sorted(parsed.limits)),)
                 if parsed.fold_evidence_truncated:
-                    hit.notes += ('Fold evidence list truncated at 256; script reading and detected calls remain complete.',)
+                    hit.notes += ('Fold evidence list truncated at 256; this evidence-list cap does not determine script completeness.',)
                     self.note_coverage('script_fold_evidence', 'Fold evidence list truncated at 256')
                 match = self.record_match(event, hit)
                 match.group_key = identity
@@ -216,19 +313,20 @@ class ScriptRule(WindowsEventRule):
 
 class ScriptDownload(ScriptRule):
     id = "win.script_download"
-    title = "PowerShell script contains a download cradle"
+    title = "PowerShell script contains download and evaluation or start requests"
     attack = ("T1059.001", "T1105")
-    description = "Recorded script contains a tokenized download and code-evaluation cradle"
+    description = "Recorded script combines a download with a code-running call; runtime data flow and execution are unverified"
+    start_requests = frozenset({'start-process', 'saps', 'invoke-item', 'ii'})
 
     def test(self, event, p):
-        downloads = bool(p.members & {"downloadstring", "downloaddata", "downloadfile"}
-                         or "getresponsestream" in p.members
-                         or ({"send", "open"} <= p.members and bool(p.literals & {"msxml2.xmlhttp", "microsoft.xmlhttp"}))
-                         or p.commands & {"invoke-webrequest", "iwr", "wget", "curl", "invoke-restmethod", "irm",
-                                          "start-bitstransfer"})
-        return downloads and bool(getattr(p, "evaluates_code", False) or p.commands & EXECUTORS
-                                  or "invokescript" in p.members or ("scriptblock", "create") in p.static_calls
-                                  or ("system.management.automation.scriptblock", "create") in p.static_calls)
+        return downloads(p) and (runs_code(p) or bool(p.commands & self.start_requests))
+
+    def shapes(self, event, parsed):
+        labels = super().shapes(event, parsed)
+        if labels and not runs_code(parsed):
+            return [(self.id, ("Recorded script combines a download with a program-start/item-open request; "
+                     "data flow and execution are unverified"), ("script.text",))]
+        return labels
 
 
 class ScriptReflectiveLoad(ScriptRule):
@@ -253,17 +351,8 @@ class ScriptPInvoke(ScriptRule):
                   "getdelegateforfunctionpointer"}
         if p.members & native:
             return True
-        for args in p.arguments.get("add-type", []):
-            if "-typedefinition" not in args:
-                continue
-            index = args.index("-typedefinition") + 1
-            if index >= len(args):
-                continue
-            tokens, _partial = lex(args[index], csharp=True)
-            words = {token.value for token in tokens if token.kind == "word"}
-            if {"dllimport", "extern"} <= words and words & native:
-                return True
-        return False
+        words = add_type_words(p)
+        return bool({'dllimport', 'extern'} <= words and words & native)
 
 
 class ScriptAmsiBypass(ScriptRule):
@@ -273,12 +362,7 @@ class ScriptAmsiBypass(ScriptRule):
     description = "Recorded script contains AMSI reflection or patching call shapes; bypass success is unresolved"
 
     def test(self, event, p):
-        reflection = (("system.management.automation.amsiutils" in p.literals or getattr(p, "reflection_filter", False))
-                      and bool(p.literals & {"amsiinitfailed", "amsicontext", "amsisession"})
-                      and bool(p.members & {"gettype", "gettypes"}) and {"getfield", "setvalue"} <= p.members)
-        patch = ("amsiscanbuffer" in p.literals and "getprocaddress" in p.members
-                 and bool(p.members & {"virtualprotect", "copy", "writebyte", "writeint32"}))
-        return reflection or patch
+        return amsi_bypass(p)
 
 
 class ScriptEtwBypass(ScriptRule):
@@ -308,7 +392,7 @@ class ScriptObfuscatedExecution(ScriptRule):
 
 class ScriptDecodeEvaluation(ScriptRule):
     id = "win.script_decode_evaluation"
-    version = "2"
+    version = "3"
     title = "PowerShell script contains decoding followed by code evaluation"
     attack = ("T1140", "T1059.001")
     description = "Recorded code combines Base64/decompression reading and a code-evaluation call; runtime data flow is unverified"
@@ -320,8 +404,7 @@ class ScriptDecodeEvaluation(ScriptRule):
                       or any(any(value in {"system.io.compression.gzipstream", "io.compression.gzipstream",
                                             "system.io.compression.deflatestream", "io.compression.deflatestream"}
                                  for value in args) for args in p.arguments.get("new-object", [])))
-        return ("frombase64string" in p.members or decompress) and bool(
-            getattr(p, "evaluates_code", False) or p.commands & EXECUTORS or "invokescript" in p.members)
+        return ("frombase64string" in p.members or decompress) and runs_code(p)
 
 
 class ScriptOffensiveFunction(ScriptRule):
@@ -338,13 +421,15 @@ class ScriptLsassAccess(ScriptRule):
     id = "win.script_lsass_access"
     title = "PowerShell script contains LSASS dump code"
     attack = ("T1003.001", "T1059.001")
-    description = "Recorded script combines an LSASS process selection with a dump call; no credential read is established"
+    description = "Recorded script combines an LSASS process selection with dump API and invocation syntax; execution and data flow are unverified"
 
     def test(self, event, p):
         selects = any(set(args) & {"lsass", "lsass.exe"}
                       for name in ("get-process", "gps", "ps") for args in p.arguments.get(name, []))
+        reflection = ('invoke' in p.members and bool(p.member_literals & {('getmethod', 'minidumpwritedump'),
+                                                                         ('getprocaddress', 'minidumpwritedump')}))
         return selects and bool(p.commands & {"out-minidump", "get-processdump", "invoke-procdump"}
-                                or "minidumpwritedump" in p.members)
+                                or "minidumpwritedump" in p.members or reflection)
 
 
 class ScriptSamAccess(ScriptRule):
@@ -380,12 +465,11 @@ class ScriptCredentialHarvest(ScriptRule):
     id = "win.script_credential_harvest"
     title = "PowerShell script contains credential prompt extraction code"
     attack = ("T1056.003", "T1059.001")
-    description = "Recorded script combines Get-Credential, plaintext credential access and an output/transfer call"
+    description = "Recorded script combines a credential prompt with plaintext credential access; use and output are unresolved"
 
     def test(self, event, p):
-        return ("get-credential" in p.commands and "getnetworkcredential" in p.members
-                and bool(p.commands & {"out-file", "set-content", "add-content", "invoke-webrequest",
-                                       "invoke-restmethod", "export-csv"}))
+        return bool(('get-credential' in p.commands or 'promptforcredential' in p.members)
+                    and 'getnetworkcredential' in p.members)
 
 
 def disables(p, suffix, name):

@@ -46,7 +46,14 @@ from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, PredicateField
 from romulus.detect.bounded import HOT_COUNT, HeldExamples, KeyedStore, RecentIds
-from romulus.detect.citing import BoundStage, Ends, bound_note, cite_group, cited_phrase
+from romulus.detect.citing import (
+    BoundStage,
+    Ends,
+    bound_note,
+    citation_group,
+    cite_group,
+    cited_phrase,
+)
 from romulus.detect.host import add_unheld, alone, exec_order
 from romulus.detect.windows_cmdline import PARSED
 from romulus.evidence.typed import TypedEvent
@@ -907,53 +914,59 @@ class WindowsProcessRule(Playbook):
             deferred = {str(key) for key in self.deferred.keys()}  # noqa: SIM118 (a KeyedStore)
             # 1. children undecided at observation time, judged now against the complete history
             for child_id in sorted(deferred):
-                event = self._load_one(child_id)
-                if event is None:
-                    continue
-                try:
-                    hits = self._checked_judge(event)
-                except Undecided as undecided:
-                    self._count_undecided(event, undecided)
-                    continue
-                self.evaluated += 1
-                for hit in hits:
-                    self._fold(event, hit, out)
+                with citation_group(self):
+                    event = self._load_one(child_id)
+                    if event is None:
+                        continue
+                    try:
+                        hits = self._checked_judge(event)
+                    except Undecided as undecided:
+                        self._count_undecided(event, undecided)
+                        continue
+                    self.evaluated += 1
+                    for hit in hits:
+                        with citation_group(self):
+                            self._fold(event, hit, out)
             # 2. children judged early whose parent pid gained a record inside their window: re-judge, and publish a
             #    correction when the answer changed, or the finding when a match appears that was not there before
             #    (every pid-path child was staged when first judged, so any dirty one can be re-read here)
             for child_id in self.lineage.dirty_ids():
-                if child_id in deferred:
-                    continue
-                event = self._load_one(child_id)
-                if event is None:
-                    continue
-                early = self.early.peek(child_id)
-                hits, undecided = self._rejudge(event)
-                if early is None:
-                    for hit in hits:                        # a match that a late record revealed
-                        self._fold(event, hit, out)
-                    continue
-                signature, folds = early
-                if _signature(hits) == signature:
-                    continue
-                # the earlier decision no longer holds: the record leaves every group it was counted in; its own
-                # finding (when it had one) is revised in place, and a record that was only a merged repeat has
-                # its new decision published as any record's would be
-                self._exclude(event, folds)
-                if any(role == "own" for _shape, role in folds):
-                    out.append(self._correction(event, signature, hits, undecided))
-                else:
-                    if undecided is not None:
-                        self._count_undecided(event, undecided)
-                    for hit in hits:
-                        self._fold(event, hit, out)
+                with citation_group(self):
+                    if child_id in deferred:
+                        continue
+                    event = self._load_one(child_id)
+                    if event is None:
+                        continue
+                    early = self.early.peek(child_id)
+                    hits, undecided = self._rejudge(event)
+                    if early is None:
+                        for hit in hits:                        # a match that a late record revealed
+                            with citation_group(self):
+                                self._fold(event, hit, out)
+                        continue
+                    signature, folds = early
+                    if _signature(hits) == signature:
+                        continue
+                    # the earlier decision no longer holds: the record leaves every group it was counted in; its own
+                    # finding (when it had one) is revised in place, and a record that was only a merged repeat has
+                    # its new decision published as any record's would be
+                    self._exclude(event, folds)
+                    if any(role == "own" for _shape, role in folds):
+                        out.append(self._correction(event, signature, hits, undecided))
+                    else:
+                        if undecided is not None:
+                            self._count_undecided(event, undecided)
+                        for hit in hits:
+                            with citation_group(self):
+                                self._fold(event, hit, out)
         # 3. every merged finding is revised in place to its exact final tally (idempotent: a re-run writes nothing);
         #    one already published is revised even when exclusions left it no repeat
         for shape in self.order.keys():  # noqa: SIM118 (a KeyedStore: first-insertion order, keys on disk too)
-            group = self.groups.peek(shape)
-            if group is None or (group.repeats <= 0 and not group.emitted_records):
-                continue
-            merged = self._fleet_match(shape, group, final=True)
-            if merged is not None:
-                out.append(merged)
+            with citation_group(self):
+                group = self.groups.peek(shape)
+                if group is None or (group.repeats <= 0 and not group.emitted_records):
+                    continue
+                merged = self._fleet_match(shape, group, final=True)
+                if merged is not None:
+                    out.append(merged)
         return out

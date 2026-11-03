@@ -7,11 +7,59 @@ import json
 from romulus.decide.policy import decide
 from romulus.detect.base import Match, Playbook
 from romulus.detect.observed import pointer_body
-from romulus.evidence.normalize import normalize_hits, observed_record
+from romulus.evidence.normalize import normalize_hits, observed_record, raw_digest
 from romulus.evidence.typed import TypedEvent, fv
-from romulus.store.repo import Repo
+from romulus.hunt.citations import COMPACT_CITATION_NOTE
+from romulus.store.repo import Repo, raw_id
 
 LINEAGE_CITATION_BATCH = 500
+
+
+class SourceCitationFetcher:
+    """Hydrate compact staged witnesses without changing their recorded normalized fields."""
+
+    def __init__(self, client):
+        self.client = client
+
+    def hydrate(self, match: Match, raw_sources=None):
+        compact = [event for event in match.events if COMPACT_CITATION_NOTE in event.caveats]
+        if not compact:
+            return
+        sources = {**match.raw_copies, **(raw_sources or {})}
+        wanted = {}
+        for event in compact:
+            for ref in event.raw:
+                if ref.key not in sources:
+                    wanted.setdefault(ref.target, set()).add(ref.native_id)
+        for index, ids in wanted.items():
+            ordered = sorted(ids)
+            for start in range(0, len(ordered), LINEAGE_CITATION_BATCH):
+                batch = ordered[start:start+LINEAGE_CITATION_BATCH]
+                try:
+                    response = self.client.search(index, {"size": len(batch), "track_total_hits": False,
+                        "query": {"bool": {"filter": [{"ids": {"values": batch}}, {"terms": {"_index": [index]}}]}}})
+                except Exception:  # noqa: BLE001, S112 - each affected finding retains a fixed missing-body caveat
+                    continue
+                for hit in response.get("hits", {}).get("hits", []):
+                    if hit.get("_index") == index and hit.get("_id") in ids and isinstance(hit.get("_source"), dict):
+                        sources[f"{index}/{hit['_id']}"] = hit["_source"]
+        missing = []
+        replacements = {}
+        for event in compact:
+            valid = {ref.key: sources[ref.key] for ref in event.raw if ref.key in sources and
+                     (not ref.digest or raw_digest(sources[ref.key]) == ref.digest)}
+            match.raw_copies.update(valid)
+            if len(valid) == len(event.raw):
+                replacements[event.id] = event.model_copy(update={"caveats": [
+                    note for note in event.caveats if note != COMPACT_CITATION_NOTE]})
+            else:
+                missing.append(event.id)
+        match.events = [replacements.get(event.id, event) for event in match.events]
+        if missing:
+            note = (f"Citation body not retrieved for {len(missing)} cited records; compact recorded fields, "
+                    "native index/document ids and timestamps are retained. Citation coverage is partial for this finding.")
+            match.notes.append(note)
+            match.claim += " " + note
 
 
 class WindowsCitationFetcher:
@@ -20,7 +68,8 @@ class WindowsCitationFetcher:
     def __init__(self, client):
         self.client = client
 
-    def hydrate(self, match: Match) -> None:
+    def hydrate(self, match: Match, raw_sources=None) -> None:
+        SourceCitationFetcher(self.client).hydrate(match, raw_sources)
         compact = [event for event in match.events if any(
             note.startswith("Authentication witness body not retrieved") for note in event.caveats)]
         if not compact:
@@ -29,11 +78,15 @@ class WindowsCitationFetcher:
         for event in compact:
             for ref in event.raw:
                 wanted.setdefault(ref.target, set()).add(ref.native_id)
-        hits = {}
+        hits = {(ref.target, ref.native_id): {"_index": ref.target, "_id": ref.native_id, "_source": raw_sources[ref.key]}
+                for event in compact for ref in event.raw if raw_sources and ref.key in raw_sources}
         for index, identities in wanted.items():
             ordered = sorted(identities)
             for start in range(0, len(ordered), LINEAGE_CITATION_BATCH):
-                batch = ordered[start:start+LINEAGE_CITATION_BATCH]
+                batch = [identity for identity in ordered[start:start+LINEAGE_CITATION_BATCH]
+                         if (index, identity) not in hits]
+                if not batch:
+                    continue
                 try:
                     response = self.client.search(index, {"size": len(batch), "track_total_hits": False,
                         "query": {"bool": {"filter": [{"ids": {"values": batch}},
@@ -196,9 +249,24 @@ def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
                   *, owner_token: str | None = None) -> dict | None:
     """Persist cited evidence and publish a machine-decided finding once, with stable script-view revisions.
     Context findings are published by the post-expansion pass (romulus.hunt.context.finalize_context)."""
+    compact = [event for event in match.events if COMPACT_CITATION_NOTE in event.caveats or any(
+        note.startswith("Authentication witness body not retrieved") for note in event.caveats)]
+    if compact:
+        refs = {raw_id(ref.target, ref.native_id): ref for event in compact for ref in event.raw
+                if ref.key not in raw_sources}
+        ids = sorted(refs)
+        retained = {}
+        for start in range(0, len(ids), LINEAGE_CITATION_BATCH):
+            for row in repo.raw_records(ids[start:start+LINEAGE_CITATION_BATCH]):
+                ref = refs[row["id"]]
+                if not ref.digest or row["digest"] == ref.digest:
+                    retained[ref.key] = row["source"]
+        raw_sources = {**retained, **raw_sources}
     fetcher = getattr(playbook, "citation_fetcher", None)
     if fetcher is not None:
-        fetcher.hydrate(match)
+        fetcher.hydrate(match, raw_sources)
+    else:
+        SourceCitationFetcher(None).hydrate(match, raw_sources)
     decision = decide(match, hunt_id)
     if match.raw_copies:
         raw_sources = {**match.raw_copies, **raw_sources}

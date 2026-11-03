@@ -31,7 +31,14 @@ import yaml
 
 from romulus.detect.base import LANES, SEVERITIES, Match, Playbook, basename, pf
 from romulus.detect.bounded import HOT_COUNT, HeldExamples, KeyedStore
-from romulus.detect.citing import BoundStage, Ends, bound_note, cite_extra, cited_phrase
+from romulus.detect.citing import (
+    BoundStage,
+    Ends,
+    bound_note,
+    citation_group,
+    cite_extra,
+    cited_phrase,
+)
 from romulus.detect.host import (
     AWK_INTERPRETERS,
     SCRIPT_FILE_INTERPRETERS,
@@ -369,21 +376,24 @@ class IndicatorMatch(Playbook):
         stores = ((self.groups, self.groups.keys()), (self.overflow, self.overflow.keys()))
         groups = [(key, store) for store, keys in stores for key in keys]
         for key, store in sorted(groups, key=lambda item: str(item[0])):
-            state = store.peek(key)
-            out.append(self._finding(key, state[0], state[1], state[2].events(self.load),
-                                     state[3] if len(state) > 5 else None,
-                                     operating_systems=state[-2], ends=state[-1]))
+            with citation_group(self):
+                state = store.peek(key)
+                out.append(self._finding(key, state[0], state[1], state[2].events(self.load),
+                                         state[3] if len(state) > 5 else None,
+                                         operating_systems=state[-2], ends=state[-1]))
         return out
 
     def finalize_fallback(self, reason: str) -> list[Match]:
         """A group store whose disk table cannot be read: the groups held in memory, each complete for its key."""
         out = []
         for store in (self.groups, self.overflow):
-            for key, state in sorted(store.hot.items(), key=lambda item: str(item[0])):
-                m = self._finding(key, state[0], state[1], state[2].events(self.load),
-                                  state[3] if len(state) > 5 else None, operating_systems=state[-2], ends=state[-1])
-                m.notes.append(f"published from memory only: the groups on disk could not be read ({reason})")
-                out.append(m)
+            with citation_group(self):
+                for key, state in sorted(store.hot.items(), key=lambda item: str(item[0])):
+                    with citation_group(self):
+                        m = self._finding(key, state[0], state[1], state[2].events(self.load),
+                                          state[3] if len(state) > 5 else None, operating_systems=state[-2], ends=state[-1])
+                        m.notes.append(f"published from memory only: the groups on disk could not be read ({reason})")
+                        out.append(m)
         return out
 
     def _finding(self, key: tuple, n: int, field_name: str, evs: list[TypedEvent],

@@ -392,7 +392,8 @@ def _run_investigator(s: Settings, repo: Repo, client: ElasticClient, hunt_id: s
 
 
 def run_hunt(s: Settings, hunt_id: str, agent: bool | None = None, on_candidate=None,
-             agent_mode: str | None = None, expand: bool | None = None, ai_agent: bool | None = None) -> dict:
+             agent_mode: str | None = None, expand: bool | None = None, ai_agent: bool | None = None,
+             claimed_owner: str | None = None) -> dict:
     repo = open_repo(s)
     hunt = repo.get_hunt(hunt_id)
     if hunt is None:
@@ -403,7 +404,13 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool | None = None, on_candidate=
         raise ValueError("expansion mode is immutable after hunt creation")
     # the hunt's internal-network definition, installed once before the sweep
     install_for_hunt(s, hunt_id, initial_manifest)
-    claimed = repo.claim_hunt(hunt_id, _lease_seconds(s))
+    if claimed_owner is None:
+        claimed = repo.claim_hunt(hunt_id, _lease_seconds(s))
+    else:
+        if hunt["execution_state"] != "running" or hunt["lease_owner"] != claimed_owner:
+            raise RuntimeError("hunt start ownership changed before execution")
+        repo.heartbeat_hunt(hunt_id, _lease_seconds(s), owner_token=claimed_owner)
+        claimed = hunt
     owner_token = claimed["lease_owner"]
     h = repo.get_hunt(hunt_id)
     m = h["manifest"]

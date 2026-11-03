@@ -21,13 +21,19 @@ from romulus.evidence.windows_catalog import SYSMON, SYSMON_CHANNEL
 EXECUTABLE_SUFFIXES = frozenset({
     ".exe", ".dll", ".com", ".scr", ".sys", ".msi", ".ps1", ".psm1", ".vbs", ".vbe", ".js", ".jse",
     ".wsf", ".wsh", ".hta", ".bat", ".cmd", ".lnk",
+    ".aspx", ".asp", ".ashx", ".asmx", ".php", ".jsp", ".jspx", ".cgi", ".pl", ".py", ".rb",
+    ".jar", ".class", ".war", ".sct", ".xsl", ".xslt", ".cpl", ".ocx", ".msp", ".mst",
+    ".psd1", ".ps1xml", ".mof", ".sdb", ".reg", ".inf", ".vxd", ".drv", ".appx", ".appxbundle",
+    ".msix", ".msixbundle", ".sh", ".bash", ".pyw", ".lua", ".go", ".c", ".cpp", ".h", ".cs",
+    ".vb", ".tsx", ".ts", ".jsx", ".mjs", ".cjs", ".wasm", ".wsc", ".pif", ".url", ".scf",
 })
 LURE_WRITERS = frozenset({"winword.exe", "excel.exe", "powerpnt.exe", "outlook.exe", "msaccess.exe",
                           "onenote.exe", "mspub.exe", "chrome.exe", "msedge.exe", "firefox.exe", "iexplore.exe",
                           "brave.exe", "opera.exe"})
 _SCRIPT_START = re.compile(r"\A\s*(?:#!|<script(?:\s|>)|function\s+[\w-]+\s*\{|"
                            r"(?:iex|invoke-expression|start-process|write-host|write-output)\b)", re.IGNORECASE)
-_FILE_FIELDS = ("file.path", "file.path_key", "file.action", "process.executable", "process.executable_key")
+_FILE_FIELDS = ("file.path", "file.path_key", "file.action", "process.executable", "process.executable_key",
+                "file.is_executable", "file.hashes")
 
 
 def executable_path(value):
@@ -41,11 +47,24 @@ def _content(event, fields=_FILE_FIELDS):
 def _file_class(event, path=None):
     path = path or event.get("file.path_key") or event.get("file.path")
     writer = event.get("process.executable_key") or event.get("process.executable")
-    return [path_class(writer), path_class(path, directory=True), extension_class(path), event.get("file.action")]
+    content = [path_class(writer), path_class(path, directory=True), extension_class(path), event.get("file.action")]
+    if _code_record(event, path):
+        content += [basename(path), event.get("file.is_executable"), event.get("file.hashes")]
+    return content
+
+
+def _code_record(event, path=None):
+    path = path or event.get("file.stream.base_path") or event.get("file.path_key") or event.get("file.path")
+    parts = components(path)
+    body = str(event.get("file.stream.content") or "")
+    return bool(executable_path(path) or event.get("file.is_executable") is True or event.get("file.hashes")
+                or "startup" in parts or "wwwroot" in parts
+                or executable_path(str(event.get("file.stream.name") or "").casefold().removesuffix(":$data"))
+                or body.startswith("MZ") or _SCRIPT_START.match(body))
 
 
 def _common(event, action, path=None):
-    writer, directory, suffix, _ = _file_class(event, path)
+    writer, directory, suffix, *_ = _file_class(event, path)
     return f"Windows recorded {action} by writer path class '{writer}' in directory class '{directory}' with extension '{suffix}'"
 
 
@@ -67,9 +86,14 @@ def startup_path(value):
     return len(tail) == len(marker) + 1 and tail[:len(marker)] == marker
 
 
-class StartupFileWrite(BehaviorFleetRule):
+class _FileBehaviorRule(BehaviorFleetRule):
+    def fleet_eligible(self, event, hit):
+        return not _code_record(event)
+
+
+class StartupFileWrite(_FileBehaviorRule):
     id = "win.startup_file_write"
-    version = "3"
+    version = "4"
     title = "File created in a Windows startup folder"
     families = ("file_change",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 11),)
@@ -89,9 +113,9 @@ class StartupFileWrite(BehaviorFleetRule):
                        content=json.dumps(_file_class(event)), common=_common(event, "startup-artifact creation"))]
 
 
-class LureApplicationFileWrite(BehaviorFleetRule):
+class LureApplicationFileWrite(_FileBehaviorRule):
     id = "win.lure_application_file_write"
-    version = "3"
+    version = "4"
     title = "Office or browser process wrote a file in a user-writable directory"
     families = ("file_change",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 11),)
@@ -117,9 +141,9 @@ class LureApplicationFileWrite(BehaviorFleetRule):
                        common=_common(event, "file creation") + "; execution is not established")]
 
 
-class ExecutableAlternateStream(BehaviorFleetRule):
+class ExecutableAlternateStream(_FileBehaviorRule):
     id = "win.executable_alternate_stream"
-    version = "3"
+    version = "4"
     title = "An alternate file stream was recorded"
     families = ("file_change",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 15),)
@@ -143,20 +167,23 @@ class ExecutableAlternateStream(BehaviorFleetRule):
         # Zone metadata varies by download URL and base filename. Those are citations,
         # not new behavior classes; executable-content qualifiers still stay distinct.
         writer = event.get("process.executable_key") or event.get("process.executable")
-        shape = ([path_class(writer)] if name.casefold() == "zone.identifier" and not (pe or script)
+        shape = ([path_class(writer)] if name.casefold() == "zone.identifier" and not _code_record(event)
                  else _file_class(event, event.get("file.stream.base_path")))
         shape += [name.casefold(), what]
-        return [signal(event, "executable_ads", f"Alternate stream '{self.describe(name)}' of "
-                       f"'{self.describe(event.get('file.stream.base_path'))}' was recorded with {what}; "
+        path = event.get('file.stream.base_path') or event.get('file.path') or event.get('file.path_key')
+        description = (f"Alternate stream '{self.describe(name)}' of '{self.describe(path)}'" if name
+                       else f"Stream creation recorded on '{self.describe(path)}'; stream name not recorded")
+        description += f" was recorded with {what}" if name else f"; recorded content has {what}"
+        return [signal(event, "executable_ads", f"{description}; "
                        "this does not establish execution or a complete executable",
                        self.attack, (*_FILE_FIELDS, "file.stream.name", "file.stream.content", "file.stream.base_path"),
                        content=json.dumps(shape),
                        common=f"Alternate streams of the same stream and file behavior class were recorded with {what}; this does not establish execution")]
 
 
-class ExecutableCreationTimeChange(BehaviorFleetRule):
+class ExecutableCreationTimeChange(_FileBehaviorRule):
     id = "win.executable_creation_time_change"
-    version = "3"
+    version = "4"
     title = "Creation time changed on a Windows file"
     families = ("file_change",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 2),)
@@ -182,9 +209,9 @@ class ExecutableCreationTimeChange(BehaviorFleetRule):
                        common=_common(event, "creation-time changes") + f"; {direction}")]
 
 
-class WritableExecutableDeletion(BehaviorFleetRule):
+class WritableExecutableDeletion(_FileBehaviorRule):
     id = "win.writable_executable_deletion"
-    version = "3"
+    version = "4"
     title = "File deleted from a user-writable or startup location"
     families = ("file_change",)
     windows_event_classes = tuple((SYSMON_CHANNEL, SYSMON, code) for code in (23, 26))
@@ -204,9 +231,9 @@ class WritableExecutableDeletion(BehaviorFleetRule):
                        common=_common(event, "file deletion") + "; the purpose of the deletion is unresolved")]
 
 
-class WebRootFileWrite(BehaviorFleetRule):
+class WebRootFileWrite(_FileBehaviorRule):
     id = "win.web_root_file_write"
-    version = "1"
+    version = "2"
     title = "File created in the default IIS web content directory"
     families = ("file_change",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 11),)

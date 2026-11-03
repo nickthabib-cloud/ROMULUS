@@ -6,12 +6,14 @@ import pytest
 
 from romulus.detect.bounded import StateBudget
 from romulus.detect.windows_auth_events import WindowsKerberoastDiversity, WindowsPasswordSpray
+from romulus.evidence.typed import TypedEvent
 from romulus.evidence.windows import normalize_windows
 from romulus.evidence.windows_catalog import SECURITY
 from romulus.hunt import sweep as sw
 from romulus.hunt.publish import WindowsCitationFetcher
 from romulus.hunt.stage import EventStage
 from romulus.sources.models import Window
+from romulus.store.repo import raw_id
 from tests.test_sweep import _repo
 from tests.test_windows_c_burst_review import START, failure, ticket
 from tests.windows_fixtures import LogicalWindowsEvent, windows_hit
@@ -49,13 +51,27 @@ def test_real_sweep_benign_ticket_flood_keeps_late_positive_and_actual_bytes(tmp
     for start in range(0, records, 100):
         assert not feed(sweep, rule, [native_ticket(n, f"u{n%50}", f"host/s{n%7}", n)
                                      for n in range(start, start+100)])
-    matches = feed(sweep, rule, [native_ticket(90000+n, "late", f"mssql/db{n}", 9000+n) for n in range(10)])
+    attack = [native_ticket(90000+n, "late", f"mssql/db{n}", 9000+n) for n in range(10)]
+    matches = feed(sweep, rule, attack)
     assert matches and rule.capped == 0 and not rule.limits
     assert sweep._event_stage().count() == 0
     assert sum(path.stat().st_size for path in tmp_path.rglob("*") if path.is_file()) <= total
-    candidates = sweep.repo.candidates("h1")
-    assert candidates and any("body not retrieved" in note for note in candidates[0]["gate_results"]["_notes"])
-    assert len(candidates[0]["event_ids"]) <= 11
+    [candidate] = sweep.repo.candidates("h1")
+    assert len(candidate["event_ids"]) == 10
+    assert set(candidate["event_ids"]) == {event.id for event, _ in attack}
+    citations = sweep.repo.citation_events("h1", candidate["event_ids"])
+    actual = {row["id"]: TypedEvent.model_validate(row["event"]) for row in citations}
+    assert set(actual) == {event.id for event, _ in attack}
+    assert {event.get("auth.service_name") for event in actual.values()} == {f"mssql/db{n}" for n in range(10)}
+    assert {event.get("auth.target_account") for event in actual.values()} == {r"name:example.test\late@example.test"}
+    expected_raw = {raw_id(hit["_index"], hit["_id"]): hit["_source"] for _, hit in attack}
+    raw = sweep.repo.raw_records([identity for row in citations for identity in row["raw_ids"]])
+    assert len(raw) == 10 and {row["id"]: row["source"] for row in raw} == expected_raw
+    for event, _ in attack:
+        assert actual[event.id].fields == event.fields
+        assert actual[event.id].raw == event.raw
+        assert actual[event.id].ts == event.ts
+    assert not any("body not retrieved" in note for note in candidate["gate_results"]["_notes"])
     rule.release_state()
     sweep._event_stage().close()
 
@@ -135,7 +151,9 @@ def test_event_stage_enforces_own_budget_on_direct_writers_and_rolls_back(tmp_pa
     event, hit = native_ticket(1, "alice", "host/one", 1)
     hit["_source"]["message"] = "x"*(1024*1024)
     stage.put([event], {event.raw[0].key: hit["_source"]})
-    assert stage.refused == 1 and stage.refusal_reason and stage.count() == 0
+    assert stage.refused == 1 and stage.refusal_reason and stage.count() == 1
+    assert stage.load([event.id])[0].fields == event.fields
+    assert "Citation body not retained" in str(stage.load([event.id])[0].caveats)
     assert sum(path.stat().st_size for path in Path(tmp_path).rglob("*") if path.is_file()) <= budget.disk_total
     assert stage.db.execute("PRAGMA max_page_count").fetchone()[0] * 4096 <= budget.disk_total
     stage.close()
@@ -168,9 +186,9 @@ def test_missing_witness_body_survives_real_sweep_report_and_agent_toolbox(tmp_p
     toolbox.execute("list_findings", {"page": 1})
     view = toolbox.execute("get_finding", {"finding": "F1"})
     assert "body not retrieved" in str(view)
-    alias = view["data"]["finding"]["evidence"][0]
-    evidence = toolbox.execute("get_evidence", {"evidence": [alias]})
-    assert evidence["counts"]["returned"] == 1
+    aliases = view["data"]["finding"]["evidence"]
+    evidence = toolbox.execute("get_evidence", {"evidence": aliases})
+    assert evidence["counts"]["returned"] == 10
     assert "body not retrieved" in str(evidence)
     assert "native_id" in str(evidence)
     rule.release_state()
@@ -211,8 +229,9 @@ def test_real_sweep_strong_stage_refusal_is_named_and_never_bypasses_budget(tmp_
     sweep.budget.force_full("injected stage byte allowance", lambda account: account.name == "event_stage")
     event, hit = native_ticket(1, "alice", "host/one", 1)
     sweep._stage_put([event], {event.raw[0].key: hit["_source"]})
-    assert sweep._event_stage().count() == 0 and sweep._event_stage().refused == 1
-    assert "stage" in rule.limits and any("stage byte allowance" in reason for reason in sweep.partial_reasons)
+    assert sweep._event_stage().count() == 1 and sweep._event_stage().refused == 1
+    assert not rule.limits and "stage byte allowance" in sweep._event_stage().refusal_reason
+    assert sweep._event_stage().load([event.id])[0].fields == event.fields
     assert sum(path.stat().st_size for path in tmp_path.rglob("*") if path.is_file()) <= sweep.budget.disk_total
     sweep._event_stage().close()
 

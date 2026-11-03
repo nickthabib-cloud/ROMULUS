@@ -621,7 +621,7 @@ class _StrongCiter(_Citer):
     state_slice = "strong"
 
 
-def test_the_event_stage_is_charged_and_below_the_reserve_refuses_all_new_citations(monkeypatch, tmp_path):
+def test_the_event_stage_preserves_compact_strong_witnesses_at_the_reserve(monkeypatch, tmp_path):
     free = {"bytes": 10 * 2**30}
     monkeypatch.setattr(StateBudget, "free", lambda self: free["bytes"])
     budget = StateBudget(tmp_path, disk_total=2**40, reserve=2**30)
@@ -638,12 +638,11 @@ def test_the_event_stage_is_charged_and_below_the_reserve_refuses_all_new_citati
     stage = next(a for a in budget.accounts if a.name == "event_stage")
     assert stage.used == 0 and budget.disk_used > 0                  # billed growth is released with deleted files
     assert budget.low_space
-    assert strong.loaded is None                                    # strong rules share the same reserve bound
-    assert routine.loaded is None                                    # a routine rule's later ones are not
+    assert strong.loaded == 21                                      # compact references preserve every strong witness
+    assert routine.loaded == 42                                     # these compact references also fit allocated pages
     window = next(c for c in cells if c["rule_id"] == routine.id and c["target"] == "*")
-    assert window["state"] == "evaluated_partial"
-    assert any("stage" in r.lower() and "refused" in r.lower() for r in window["detail"]["reasons"])
-    assert any("finalize stopped" in r for r in window["detail"]["reasons"])
+    assert not any("finalize stopped" in reason for reason in window["detail"].get("reasons", []))
+    assert not any("stage" in rule.limits for rule in (routine, strong))
     assert any("below the reserve" in r for r in sweep.partial_reasons)
 
 

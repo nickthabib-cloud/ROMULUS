@@ -17,9 +17,27 @@ computed from every record and that record was not kept (`bound_note`); nothing 
 from __future__ import annotations
 
 from collections.abc import Iterable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
+from romulus.detect.bounded import CitationUnavailable
 from romulus.evidence.typed import TypedEvent
+
+
+@contextmanager
+def citation_group(owner):
+    """A refused compact witness affects its group, never the rule's other findings."""
+    try:
+        yield
+    except CitationUnavailable:
+        owner.note_limit("citation_reference", "A finding's compact citation could not be retained within its "
+                         "available citation storage; that group was not published. Other groups continued.", records=1)
+
+
+def citation_call(owner, build, *args, **kwargs):
+    with citation_group(owner):
+        return [build(*args, **kwargs)]
+    return []
 
 
 @dataclass
@@ -236,7 +254,7 @@ def cite_group(load, examples: list[TypedEvent], bounds: BoundStage, ends: Ends 
     def strict(ids):
         found = get(ids)
         if len(found) != len(set(ids)):
-            raise LookupError(f"{len(set(ids)) - len(found)} cited event(s) absent from the stage")
+            raise CitationUnavailable(f"{len(set(ids)) - len(found)} cited event(s) absent from the stage")
         return found
 
     return cite_extra(get, strict, ends, [e.id for e in examples], named)

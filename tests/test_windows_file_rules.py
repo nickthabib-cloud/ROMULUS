@@ -141,9 +141,9 @@ def test_new_host_and_new_payload_publish_before_finalize_and_repeats_revise_in_
         matches.extend(rule.consume([item]))
         rule.drain_staged()
         rule.drain_bounds()
-    assert matches and all(match.group_key for match in matches)
-    assert any({item.host for item in match.events} == {"one", "two"} for match in matches)
-    assert len({match.group_key for match in matches}) == 2
+    own = [match for match in matches if not match.group_key]
+    assert len(own) == 3 and {match.events[0].host for match in own} == {"one", "two"}
+    assert len({match.group_key for match in matches if match.group_key}) == 1
     finals = rule.finalize()
     assert len(finals) == 1 and finals[0].revision_reason
     assert "Windows event record(s)" in finals[0].claim and "process-creation" not in finals[0].claim

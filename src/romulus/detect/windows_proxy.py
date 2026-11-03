@@ -15,9 +15,11 @@ calls parsed from script text).
 """
 from __future__ import annotations
 
+import ntpath
 from typing import ClassVar
 
 from romulus.detect.base import PredicateField
+from romulus.detect.powershell_tokens import read_script
 from romulus.detect.windows_cmdline import (
     PARSED,
     PARSED_DECODED,
@@ -39,8 +41,12 @@ from romulus.detect.windows_common import (
     WindowsProcessRule,
     clip,
     image_name,
+    parent_predicate,
     parsed_field,
+    resolve_parent,
 )
+from romulus.detect.windows_lineage import LureAppSpawnsCodeRunner
+from romulus.detect.windows_scripts import HIGH_TOOLS, amsi_bypass, downloads, runs_code
 from romulus.evidence.typed import TypedEvent
 
 # Download cmdlets and their characteristic members/parameters, matched as code words in parsed script text.
@@ -63,9 +69,33 @@ def _command_argv(event: TypedEvent) -> list[str]:
     return argv
 
 
+def place_operand(event: TypedEvent, token: str) -> tuple[str, str]:
+    """Place a relative operand only with an absolute working directory in its record."""
+    operand = token.strip().strip('"')
+    if url_in(operand) or operand.casefold().startswith(("javascript:", "vbscript:")):
+        return operand, ""
+    directory = event.get("process.current_directory")
+    if (not ntpath.isabs(operand) and not ntpath.splitdrive(operand)[0]
+            and isinstance(directory, str) and ntpath.isabs(directory)):
+        return ntpath.normpath(ntpath.join(directory, operand)), "; placed using the recorded working directory"
+    return operand, ""
+
+
+def _writable_operand(event, token, label, behavior, attack):
+    placed, note = place_operand(event, token)
+    if not is_user_writable(placed):
+        return None
+    predicate = [parsed_field(event, token)]
+    if note:
+        value = event.fields["process.current_directory"]
+        predicate.append(PredicateField("process.current_directory", value.value, value.origin))
+    return Hit(behavior, f"{label} was given a target in a user-writable location ({clip(placed)}){note}",
+               "lead", "medium", attack, predicate, content=f"{behavior}:writable")
+
+
 class MshtaExecution(WindowsProcessRule):
     id = "win.mshta_remote_or_inline"
-    version = "2"
+    version = "3"
     title = "mshta ran a remote HTA or inline script"
     assures_negative = False
     positive_only_reason = ("mshta is recognised from argv, and a payload can also be delivered by other binaries "
@@ -104,6 +134,8 @@ class MshtaExecution(WindowsProcessRule):
                 return [self._hit(event, token, "an inline script", "mshta_inline")]
             if lowered.startswith("\\\\"):
                 return [self._hit(event, token, f"a UNC path ({token.strip()})", "mshta_unc")]
+            if lowered.endswith(".hta") and (hit := _writable_operand(event, token, "mshta", "mshta_local", self.attack)):
+                return [hit]
         return []
 
     def _hit(self, event: TypedEvent, token: str, what: str, shape: str) -> Hit:
@@ -113,7 +145,7 @@ class MshtaExecution(WindowsProcessRule):
 
 class Rundll32Execution(WindowsProcessRule):
     id = "win.rundll32_proxy"
-    version = "3"
+    version = "4"
     title = "rundll32 proxied execution (script protocol, remote DLL, or LSASS MiniDump)"
     assures_negative = False
     positive_only_reason = ("rundll32 and its target are read from argv; the same proxying can be done by other means, "
@@ -161,12 +193,17 @@ class Rundll32Execution(WindowsProcessRule):
                             f"rundll32 was run with comsvcs.dll MiniDump (entry '{entry}'), the shape used to dump a "
                             f"process's memory", self.lane, self.severity, ("T1003.001", "T1218.011"),
                             [parsed_field(event, clip(" ".join(argv[1:])))], content="rundll32:comsvcs")]
+        for token in operands(argv[1:]):
+            dll = token.split(",", 1)[0]
+            if dll.casefold().endswith(".dll") and (hit := _writable_operand(
+                    event, dll, "rundll32", "rundll32_writable", ("T1218.011",))):
+                return [hit]
         return []
 
 
 class Regsvr32Execution(WindowsProcessRule):
     id = "win.regsvr32_scriptlet"
-    version = "2"
+    version = "3"
     title = "regsvr32 registered a remote or scriptlet payload (Squiblydoo)"
     assures_negative = False
     positive_only_reason = ("regsvr32's install flag and target are read from argv; a window without a match proves "
@@ -204,6 +241,10 @@ class Regsvr32Execution(WindowsProcessRule):
                     return [Hit("regsvr32_scriptlet", f"regsvr32 was run with /i: naming {what} ({clip(target)})",
                                 self.lane, self.severity, self.attack, [parsed_field(event, token)],
                                 content=f"regsvr32:{'remote' if remote else 'sct'}")]
+        for token in operands(argv[1:]):
+            if token.casefold().endswith(".dll") and (hit := _writable_operand(
+                    event, token, "regsvr32", "regsvr32_writable", self.attack)):
+                return [hit]
         return []
 
 
@@ -331,7 +372,7 @@ class CurlDownload(WindowsProcessRule):
 
 class ScriptHostRemoteOrWritable(WindowsProcessRule):
     id = "win.script_host_untrusted_script"
-    version = "2"
+    version = "3"
     title = "wscript or cscript ran a script from a user-writable or remote location"
     assures_negative = False
     positive_only_reason = ("the script path is read from argv and a path can be renamed or relocated; a window "
@@ -362,11 +403,13 @@ class ScriptHostRemoteOrWritable(WindowsProcessRule):
             return []
         argv = _command_argv(event)
         for token in operands(argv[1:]):
-            if is_user_writable(token) or url_in(token) or token.strip().strip('"').startswith("\\\\"):
-                where = "a UNC path" if token.strip().strip('"').startswith("\\\\") else "a user-writable location"
+            if url_in(token) or token.strip().strip('"').startswith("\\\\"):
+                where = "a UNC path" if token.strip().strip('"').startswith("\\\\") else "a remote URL"
                 return [Hit("script_host_untrusted", f"a script host was given a script in {where} ({clip(token)})",
                             self.lane, self.severity, self.attack, [parsed_field(event, token)],
                             content="scripthost:untrusted")]
+            if hit := _writable_operand(event, token, "a script host", "script_host_untrusted", self.attack):
+                return [hit]
         return []
 
 
@@ -411,27 +454,28 @@ class MsiexecRemotePackage(WindowsProcessRule):
 
 class CompilerProxyExecution(WindowsProcessRule):
     id = "win.dotnet_lolbin_proxy"
-    version = "2"
-    title = "a .NET LOLBin (InstallUtil, Regasm, Regsvcs, MSBuild, odbcconf, cmstp) proxied execution"
+    version = "3"
+    title = "A build, install or XML utility received proxy-execution arguments"
     assures_negative = False
     positive_only_reason = ("the LOLBin and its payload flag are read from argv; a window without a match proves "
                             "nothing, and these tools have legitimate build and install uses")
     severity, lane = "high", "lead"
-    attack = ("T1218.004", "T1218.009", "T1127.001", "T1218.008", "T1218.003")
+    attack = ("T1218.004", "T1218.009", "T1127.001", "T1218.008", "T1218.003", "T1220")
     benign = (("genuine software builds (MSBuild on a developer or build host) and assembly installs (InstallUtil, "
                "Regasm, Regsvcs) during deployment"),)
     next_checks = ("the project, inf or assembly named", "the tool's network and child activity")
     card: ClassVar[dict] = {
         "behavior": "InstallUtil with /logfile= /LogToConsole=false /U, Regasm/Regsvcs with /U, MSBuild building an "
                     "inline-task project from a user-writable/remote path, odbcconf /a with a REGSVR action, or cmstp "
-                    "with an .inf",
+                    "with an .inf, or msxsl given XML/XSL operands in a user-writable path",
         "telemetry": "Sysmon 1 or Security 4688 (process.command_line)",
         "fidelity": "the arguments show the proxy-execution shape; positive-only",
         "benign_and_cost": "build and deployment hosts use these legitimately, so lane is lead and repeats merge",
         "query_cost": "none beyond the sweep",
         "next_pivot": "the named project/assembly/inf and the tool's children",
-        "adds": "the .NET/MSBuild/odbcconf/cmstp proxy-execution shapes",
-        "research_basis": "ATT&CK Enterprise 20.0 T1218.004/.009/.008/.003, T1127.001; LOLBAS (reimplemented)",
+        "adds": "the .NET/MSBuild/odbcconf/cmstp and msxsl proxy-execution shapes",
+        "research_basis": "ATT&CK Enterprise 20.0 T1218.004/.009/.008/.003, T1127.001, T1220; "
+                          "https://attack.mitre.org/techniques/T1220/; LOLBAS (reimplemented)",
         "lanes": "lead: common on build and deployment hosts",
         "retrieval": "the sweep retrieves every process-creation record; this reads those whose image is one of the "
                      "named .NET LOLBins",
@@ -450,6 +494,11 @@ class CompilerProxyExecution(WindowsProcessRule):
                 if is_user_writable(token) or url_in(token) or token.strip().strip('"').startswith("\\\\"):
                     return [self._hit(event, [token], "MSBuild (project from an untrusted path)",
                                       "T1127.001", "msbuild")]
+        if name == "msxsl.exe":
+            for token in operands(rest):
+                if token.casefold().endswith((".xsl", ".xslt", ".xml")) and (hit := _writable_operand(
+                        event, token, "msxsl", "msxsl_writable", ("T1220",))):
+                    return [hit]
         if name == "odbcconf.exe" and any("regsvr" in token.casefold() for token in rest):
             return [self._hit(event, rest, "odbcconf (REGSVR action)", "T1218.008", "odbcconf")]
         if name == "cmstp.exe" and any(token.strip().strip('"').casefold().endswith(".inf") for token in rest):
@@ -464,7 +513,7 @@ class CompilerProxyExecution(WindowsProcessRule):
 
 class PowerShellEncodedOrCradle(WindowsProcessRule):
     id = "win.powershell_encoded_or_cradle"
-    version = "2"
+    version = "3"
     title = "PowerShell ran an encoded command or a download cradle"
     assures_negative = False
     positive_only_reason = ("the command is read from PowerShell's argv and script text, which can be obfuscated or "
@@ -484,14 +533,14 @@ class PowerShellEncodedOrCradle(WindowsProcessRule):
                      "UTF-16LE, decoded here and labelled parsed",
         "fidelity": "the host arguments and parsed script show what PowerShell was asked to run; positive-only. A "
                     "download cmdlet in the text is 'a download was requested', not 'a payload was fetched'.",
-        "benign_and_cost": "encoded commands and Invoke-WebRequest have legitimate uses; lane high for encoded, and "
+        "benign_and_cost": "encoded commands and Invoke-WebRequest have legitimate uses; encoded-only is lead, and "
                            "repeats merge per shape so a fleet-wide management command is triaged once",
         "query_cost": "none beyond the sweep",
         "next_pivot": "the decoded command, PowerShell's network connection, and the 4104 script block",
         "adds": "PowerShell encoded-command decoding and download-cradle detection by parsed tokens",
         "research_basis": "ATT&CK Enterprise 20.0 T1059.001, T1027.010, T1105, T1140; the Microsoft PowerShell host "
                           "parameter reference; SigmaHQ encoded-command patterns (reimplemented, not copied)",
-        "lanes": "high for an encoded command or a cradle piped to Invoke-Expression; a bare download cmdlet is lead",
+        "lanes": "encoded-only and bare downloads are lead; high requires a decoded cradle, offensive or AMSI call shape, or a lure/server parent",
         "retrieval": "the sweep retrieves every process-creation record; this reads those whose image is "
                      "powershell.exe/pwsh.exe",
     }
@@ -502,6 +551,21 @@ class PowerShellEncodedOrCradle(WindowsProcessRule):
         argv = _command_argv(event)
         call = parse_powershell(argv[1:])
         hits: list[Hit] = []
+        parsed = read_script(call.script) if call.script is not None else None
+        strong = bool(parsed and (parsed.commands & HIGH_TOOLS or amsi_bypass(parsed)
+                                 or downloads(parsed) and runs_code(parsed)))
+        parent_fields, parent_context, parent_raw = [], [], []
+        parent_note = ""
+        try:
+            parent = resolve_parent(event, self.lineage)
+        except Undecided:
+            parent = None
+        if parent and parent.name in (LureAppSpawnsCodeRunner.parent_images | {
+                "w3wp.exe", "httpd.exe", "nginx.exe", "tomcat.exe", "sqlservr.exe"}):
+            strong = True
+            parent_fields, parent_context, _how, parent_raw = parent_predicate(event, parent)
+            parent_note = f"; recorded parent image '{parent.name}' supports the high lane"
+        encoded_lane = "high" if strong else "lead"
         if call.source == "encodedcommand":
             origin = event.fields["process.command_line"].origin
             if call.script is not None:
@@ -510,8 +574,9 @@ class PowerShellEncodedOrCradle(WindowsProcessRule):
                 note = ("the command line is truncated before decoding; only a prefix was read"
                         if call.truncated else "")
                 hits.append(Hit("powershell_encoded",
-                                f"PowerShell was run with an encoded command; decoded: '{clip(call.script)}'",
-                                self.lane, self.severity, ("T1059.001", "T1027.010"), [value],
+                                f"PowerShell was run with an encoded command; decoded: '{clip(call.script)}'{parent_note}",
+                                encoded_lane, "high" if strong else "medium", ("T1059.001", "T1027.010"), [value, *parent_fields],
+                                context=parent_context, raw_copies=parent_raw,
                                 content="ps:encoded", notes=tuple(n for n in (note,) if n)))
             else:
                 reason = call.decode_error or "no value followed -EncodedCommand"
@@ -520,7 +585,8 @@ class PowerShellEncodedOrCradle(WindowsProcessRule):
                                        origin=f"{origin}{PARSED}")
                 hits.append(Hit("powershell_encoded",
                                 f"PowerShell was run with -EncodedCommand but its value could not be decoded "
-                                f"({reason})", self.lane, self.severity, ("T1059.001", "T1027.010"), [value],
+                                f"({reason}){parent_note}", encoded_lane, "high" if strong else "medium", ("T1059.001", "T1027.010"), [value, *parent_fields],
+                                context=parent_context, raw_copies=parent_raw,
                                 content="ps:encoded-bad"))
         cradle = self._cradle(event, call)
         if cradle is not None:
@@ -541,16 +607,16 @@ class PowerShellEncodedOrCradle(WindowsProcessRule):
                 break
         if download is None:
             return None
-        executes = any(token.kind == "word" and token.text in _EXEC_WORDS for token in tokens)
+        executes = runs_code(read_script(call.script))
         origin = event.fields["process.command_line"].origin
         value = PredicateField(field="process.command_line", value=clip(call.script),
                                origin=f"{origin}{PARSED}")
         lane = self.lane if executes else "lead"
-        tail = " and piped into Invoke-Expression" if executes else ""
+        tail = " and a code-evaluation call" if executes else ""
         return Hit("powershell_cradle",
-                   f"PowerShell script called {download}{tail} (a download cradle)", lane, self.severity,
+                   f"PowerShell script called {download}{tail}", lane, self.severity,
                    ("T1059.001", "T1105") + (("T1140",) if executes else ()), [value],
-                   content=f"ps:cradle:{download}{'+iex' if executes else ''}")
+                   content=f"ps:cradle:{download}{'+eval' if executes else ''}")
 
 
 WINDOWS_PROXY_PLAYBOOKS = [

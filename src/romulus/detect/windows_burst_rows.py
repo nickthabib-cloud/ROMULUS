@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 import sqlite3
 from array import array
+from collections import OrderedDict
+from contextlib import contextmanager
 from datetime import UTC, datetime
 
 from romulus.detect.bounded import StateExhausted
@@ -39,6 +41,42 @@ class BurstRows(WindowsRows):
         super().__init__(owner)
         self.watermark = float("-inf")
         self._last_refused = None
+        self._symbol_cache = OrderedDict()
+        self._symbol_bytes = 0
+        self._batching = False
+
+    @contextmanager
+    def batch(self):
+        spill = self.store()
+        spill.flush()
+        budget = self.owner.state_budget()
+        budget.check_free()
+        pages = spill.db.execute("PRAGMA page_count").fetchone()[0]
+        spill.db.execute(f"PRAGMA max_page_count={pages+budget.physical_allowance(self.account)//spill._page}")
+        self._batching = True
+        try:
+            yield
+        finally:
+            spill.db.commit()
+            self._batching = False
+            spill.grew()
+            self._charge()
+
+    def _execute(self, statement, values=()):
+        spill = self.store()
+        return spill.db.execute(statement, values) if self._batching else spill.execute(statement, values)
+
+    def _cache(self, value, identity):
+        cost = len(value.encode())+96
+        if cost > 2**20:
+            return
+        previous = self._symbol_cache.pop(value, None)
+        if previous is None:
+            self._symbol_bytes += cost
+        self._symbol_cache[value] = identity
+        while len(self._symbol_cache) > 8192 or self._symbol_bytes > 2**20:
+            oldest, _ = self._symbol_cache.popitem(last=False)
+            self._symbol_bytes -= len(oldest.encode())+96
 
     def store(self):
         spill = self.owner.spill()
@@ -52,6 +90,7 @@ class BurstRows(WindowsRows):
                                  "PRIMARY KEY(k,id)) WITHOUT ROWID")
                 spill.db.execute(f"CREATE INDEX {table}_time ON {table}(k,ts,id)")
                 spill.db.execute(f"CREATE INDEX {table}_value ON {table}(k,value,host,ts)")
+                spill.db.execute(f"CREATE INDEX {table}_identity ON {table}(id)")
             spill.db.execute("CREATE INDEX windows_rows_expiry ON windows_rows(ts)")
             spill.db.execute("CREATE VIEW windows_all AS SELECT k.value k,w.id,w.ts,v.value value,h.value host FROM "
                              "(SELECT * FROM windows_rows UNION ALL SELECT * FROM windows_archive) w "
@@ -72,6 +111,17 @@ class BurstRows(WindowsRows):
     def _write(self, statement, rows):
         spill = self.store()
         budget = self.owner.state_budget()
+        if self._batching:
+            try:
+                spill.db.executemany(statement, rows)
+            except sqlite3.OperationalError as exc:
+                spill.db.rollback()
+                self._symbol_cache.clear()
+                self._symbol_bytes = 0
+                if "full" in str(exc).lower():
+                    raise StateExhausted("authentication state reached its hunt byte allowance or volume reserve") from exc
+                raise
+            return
         budget.check_free()
         reason = budget.new_key_reason(self.account)
         if reason:
@@ -100,16 +150,30 @@ class BurstRows(WindowsRows):
         if existing is not None:
             return existing
         self._write("INSERT INTO windows_symbols(value) VALUES(?)", [(value,)])
-        return self.store().db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        identity = self.store().db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        self._cache(value, identity)
+        return identity
 
     def _lookup(self, value):
-        row = self.store().execute("SELECT id FROM windows_symbols WHERE value=?", (value,)).fetchone()
+        if value in self._symbol_cache:
+            self._symbol_cache.move_to_end(value)
+            return self._symbol_cache[value]
+        row = self._execute("SELECT id FROM windows_symbols WHERE value=?", (value,)).fetchone()
+        if row:
+            self._cache(value, row[0])
+        return row[0] if row else None
+
+    def marked(self, key):
+        return self.marker(key) is not None
+
+    def marker(self, key):
+        row = self._execute("SELECT value FROM windows_marks WHERE k=?", (key,)).fetchone()
         return row[0] if row else None
 
     def put(self, key, event, value=""):
         spill = self.store()
         key_id = self._lookup(key)
-        if key_id is not None and spill.execute(
+        if key_id is not None and self._execute(
                 "SELECT 1 FROM windows_rows WHERE k=? AND id=? UNION ALL "
                 "SELECT 1 FROM windows_archive WHERE k=? AND id=? LIMIT 1",
                 (key_id, _stored_id(event.id), key_id, _stored_id(event.id))).fetchone():
@@ -121,7 +185,10 @@ class BurstRows(WindowsRows):
         cutoff = max(self.watermark, stamp) - self.owner.seconds
         table = "windows_archive" if stamp < cutoff else "windows_rows"
         try:
-            if not spill.execute("SELECT 1 FROM windows_refs WHERE id=?", (_stored_id(event.id),)).fetchone():
+            if self._batching:
+                spill.db.commit()
+                spill.db.execute("SAVEPOINT auth_record")
+            if not self._execute("SELECT 1 FROM windows_refs WHERE id=?", (_stored_id(event.id),)).fetchone():
                 # Origins and repeated values are dictionary encoded; record ids are never symbols.
                 names = sorted(name for name in event.fields if name in self.owner.citation_fields)
                 ref = event.raw[0]
@@ -138,26 +205,31 @@ class BurstRows(WindowsRows):
                 value = ""
             row = (self._symbol(key), _stored_id(event.id), stamp, self._symbol(value), self._symbol(event.host))
             self._write(f"INSERT INTO {table} VALUES(?,?,?,?,?)", [row])
+            if self._batching:
+                spill.db.execute("RELEASE auth_record")
             if stamp > self.watermark:
                 # Rows move, rather than being forgotten; the archive also catches late cross-target windows.
                 # Commit bounded moves so the in-memory rollback journal cannot grow with a whole
                 # high-volume time window. A crash can leave both copies; readers deduplicate ids.
-                while expired := spill.execute("SELECT * FROM windows_rows WHERE ts<? LIMIT 256", (cutoff,)).fetchall():
+                while expired := self._execute("SELECT * FROM windows_rows WHERE ts<? LIMIT 256", (cutoff,)).fetchall():
+                    spill.db.execute("SAVEPOINT auth_expiry")
                     self._write("INSERT OR IGNORE INTO windows_archive VALUES(?,?,?,?,?)", expired)
                     self._write("DELETE FROM windows_rows WHERE k=? AND id=?", [(row[0], row[1]) for row in expired])
+                    spill.db.execute("RELEASE auth_expiry")
                 self.watermark = stamp
         except StateExhausted as exc:
             self._refuse(event, f"An authentication correlation key could not be written: {exc}")
             self._charge()
             return False
-        self._charge()
+        if not self._batching:
+            self._charge()
         return True
 
     def compact(self, identities):
         """Rebuild only cited, recorded fields. The source body is fetched at publication, if available."""
         out = []
         for identity in identities:
-            row = self.store().execute(
+            row = self._execute(
                 "SELECT r.target,r.native,r.fields,r.template,w.ts,w.host FROM windows_refs r JOIN "
                 "(SELECT id,ts,host FROM windows_rows UNION ALL SELECT id,ts,host FROM windows_archive) w "
                 "ON w.id=r.id WHERE r.id=? LIMIT 1", (_stored_id(identity),)).fetchone()
@@ -165,7 +237,7 @@ class BurstRows(WindowsRows):
                 continue
             target, native, blob, template, stamp, host = row
             def symbol(number):
-                return self.store().execute("SELECT value FROM windows_symbols WHERE id=?", (number,)).fetchone()[0]
+                return self._execute("SELECT value FROM windows_symbols WHERE id=?", (number,)).fetchone()[0]
             metadata = json.loads(symbol(template))
             fields = {name: fv(json.loads(symbol(number)), origin.replace("{native}", native, 1))
                       for (name, origin), number in zip(metadata[:-2], array("I", blob), strict=True)}
@@ -188,7 +260,8 @@ class BurstRows(WindowsRows):
             return
         try:
             self._write("INSERT OR REPLACE INTO windows_marks VALUES(?,?)", [(key, value)])
-            self._charge()
+            if not self._batching:
+                self._charge()
         except StateExhausted as exc:
             self.owner.note_limit("windows_marks", f"Correlation revision state could not be retained: {exc}")
 
@@ -198,7 +271,8 @@ class BurstRows(WindowsRows):
         if self.room():
             try:
                 self._write("INSERT INTO windows_marks VALUES(?,?)", [(key, "")])
-                self._charge()
+                if not self._batching:
+                    self._charge()
             except StateExhausted as exc:
                 self.owner.note_limit("windows_marks", f"Correlation dedup markers could not be retained: {exc}")
         return True
@@ -207,16 +281,21 @@ class BurstRows(WindowsRows):
         # This is an indexed lookup, not one extra marker per record/value in a crowded burst.
         values = (self._lookup(key), self._lookup(value), self._lookup(host), bucket_start, stamp, stamp,
                   _stored_id(identity))
-        return self.store().execute(
+        return self._execute(
             "SELECT 1 FROM windows_rows WHERE k=? AND value=? AND host=? AND ts>=? AND "
             "(ts<? OR (ts=? AND id<?)) UNION ALL SELECT 1 FROM windows_archive "
             "WHERE k=? AND value=? AND host=? AND ts>=? AND (ts<? OR (ts=? AND id<?)) LIMIT 1",
             (*values, *values)).fetchone() is not None
 
-    def witnesses(self, key, end, seconds, count, *, distinct=False):
+    def witnesses(self, key, end, seconds, count, *, distinct=False, latest=False):
         inner = ("FROM (SELECT id,ts,value FROM windows_rows WHERE k=? AND ts>=? AND ts<=? UNION ALL "
                  "SELECT id,ts,value FROM windows_archive WHERE k=? AND ts>=? AND ts<=?) ")
-        if distinct:
+        if latest and distinct:
+            query = ("SELECT id,ts FROM (SELECT id,ts,ROW_NUMBER() OVER(PARTITION BY value ORDER BY ts DESC,id DESC) r "
+                     + inner + ") WHERE r=1 ORDER BY ts DESC,id DESC LIMIT ?")
+        elif latest:
+            query = "SELECT id,MAX(ts) " + inner + "GROUP BY id ORDER BY MAX(ts) DESC,id DESC LIMIT ?"
+        elif distinct:
             # A self-join over the UNION view could materialize the hunt archive for every check.
             query = "SELECT MIN(id),MIN(ts) " + inner + "GROUP BY value ORDER BY MIN(ts),MIN(id) LIMIT ?"
         else:
@@ -224,14 +303,14 @@ class BurstRows(WindowsRows):
             query = "SELECT id,MIN(ts) " + inner + "GROUP BY id ORDER BY MIN(ts),id LIMIT ?"
         interval = (self._lookup(key), end-seconds, end)
         return [(_event_id(identity), stamp) for identity, stamp in
-                self.store().execute(query, (*interval, *interval, count))]
+                self._execute(query, (*interval, *interval, count))]
 
     def count(self, key):
-        return self.store().execute("SELECT COUNT(DISTINCT id) FROM windows_all WHERE k=?", (key,)).fetchone()[0]
+        return self._execute("SELECT COUNT(DISTINCT id) FROM windows_all WHERE k=?", (key,)).fetchone()[0]
 
     def iterate(self):
         if self.ready:
-            for key, identity, stamp, value, host in self.store().execute(
+            for key, identity, stamp, value, host in self._execute(
                     "SELECT k,id,ts,value,host FROM windows_all ORDER BY k,ts,id"):
                 yield key, _event_id(identity), stamp, value, host
 
@@ -239,16 +318,16 @@ class BurstRows(WindowsRows):
         if self.ready:
             # Hunt-span catches low-and-slow breadth; both daily partitions still run independently.
             for offset in (0, 43200):
-                yield from self.store().execute(
+                yield from self._execute(
                     "SELECT k,CAST((ts-?)/86400 AS INTEGER),COUNT(DISTINCT value),? FROM windows_all "
                     "WHERE k LIKE '[\"daily-%' GROUP BY k,CAST((ts-?)/86400 AS INTEGER) "
                     "HAVING COUNT(DISTINCT value)>=? ORDER BY k", (offset, offset, offset, threshold))
-            yield from self.store().execute(
+            yield from self._execute(
                 "SELECT k,NULL,COUNT(DISTINCT value),0 FROM windows_all WHERE k LIKE '[\"daily-%' "
                 "GROUP BY k HAVING COUNT(DISTINCT value)>=? ORDER BY k", (threshold,))
 
     def daily_witnesses(self, key, day, threshold, offset=0):
         if day is None:
-            end = self.store().execute("SELECT MAX(ts) FROM windows_all WHERE k=?", (key,)).fetchone()[0]
-            return self.witnesses(key, end, float("inf"), threshold, distinct=True)
-        return self.witnesses(key, (day+1)*86400+offset-0.000001, 86400-0.000001, threshold, distinct=True)
+            end = self._execute("SELECT MAX(ts) FROM windows_all WHERE k=?", (key,)).fetchone()[0]
+            return self.witnesses(key, end, float("inf"), threshold, distinct=True, latest=True)
+        return self.witnesses(key, (day+1)*86400+offset-0.000001, 86400-0.000001, threshold, distinct=True, latest=True)

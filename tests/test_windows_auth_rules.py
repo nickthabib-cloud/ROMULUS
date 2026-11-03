@@ -180,5 +180,5 @@ def test_metadata_and_attack_ids_are_current():
     bundle = load_attack_bundle()
     assert len(WINDOWS_AUTH_EVENT_PLAYBOOKS) == 7
     for rule in WINDOWS_AUTH_EVENT_PLAYBOOKS:
-        assert rule.version == ("3" if hasattr(rule, "citation_fields") else "2") and not rule.assures_negative and rule.benign and rule.research and rule.windows_event_classes
+        assert rule.version == ("4" if hasattr(rule, "citation_fields") else "2") and not rule.assures_negative and rule.benign and rule.research and rule.windows_event_classes
         assert rule.attack and all(not bundle.technique(item).revoked for item in rule.attack)

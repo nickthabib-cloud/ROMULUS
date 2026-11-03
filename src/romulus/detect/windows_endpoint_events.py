@@ -194,7 +194,7 @@ class AdminShareTransfer(WindowsEventRule):
 
 class RemoteManagementPipe(BehaviorFleetRule):
     id = "win.remote_management_pipe"
-    version = "3"
+    version = "4"
     count_source_ips = True
     title = "IPC share access to a management RPC pipe"
     families = ("share_access",)
@@ -203,6 +203,9 @@ class RemoteManagementPipe(BehaviorFleetRule):
     benign = ("normal Windows administration, account lookup and domain replication use these pipes",)
     next_checks = ("review the source account and host", "correlate service, task and directory access records")
     research = (_SHARE_DOC, "https://github.com/fortra/impacket/blob/master/examples/psexec.py")
+
+    def fleet_eligible(self, event, hit):
+        return _pipe_name(event.get("share.relative_target")) not in {"svcctl", "atsvc"}
 
     def judge(self, event):
         if integer(event.get("event.code")) != 5145 or _share(event) != "ipc$":
@@ -225,7 +228,7 @@ class RemoteManagementPipe(BehaviorFleetRule):
 
 class GppPolicyFileAccess(BehaviorFleetRule):
     id = "win.gpp_policy_file_access"
-    version = "3"
+    version = "4"
     count_source_ips = True
     title = "SYSVOL access names a Group Policy Preferences policy file"
     families = ("share_access",)

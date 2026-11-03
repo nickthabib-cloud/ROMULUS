@@ -35,18 +35,29 @@ BUILTIN_COM_CLASSES = {
         'Microsoft WBEM New Event Subsystem', 'https://unit42.paloaltonetworks.com/bbsrat-attacks-targeting-russian-organizations-linked-to-roaming-tiger/'),
     '{bcde0395-e52f-467c-8e3d-c4579291692e}': (
         'MMDeviceEnumerator', 'https://raw.githubusercontent.com/microsoft/win32metadata/main/generation/WinSDK/RecompiledIdlHeaders/um/mmdeviceapi.h'),
+    '{0358b920-0ac7-461f-98f4-58e32cd89148}': (
+        'Wininet CacheTask handler', 'https://www.mdsec.co.uk/2019/05/persistence-the-continued-or-prolonged-existence-of-something-part-2-com-hijacking/'),
+    '{c947d50f-378e-4ff6-8835-fcb50305244d}': (
+        'Windows synchronization manager', 'https://bohops.com/2018/06/28/abusing-com-registry-structure-clsid-localserver32-inprocserver32/'),
+    '{ecd4fc4d-521c-11d0-b792-00a0c90312e1}': (
+        'Shell Rebar BandSite', 'https://media.kasperskycontenthub.com/wp-content/uploads/sites/43/2023/11/09055246/Modern-Asian-APT-groups-TTPs_report_eng.pdf'),
 }
 
 
 def installation_parts(path):
+    """Only explicitly system-rooted scope can lower attention from path evidence.
+
+    A device/volume path does not identify the system volume without a recorded map.
+    A non-system drive spelling never establishes installed scope.
+    """
+    text = ntpath.normpath(str(path or '').replace('/', '\\')).casefold()
+    canonical = text[4:] if text.startswith(('\\\\?\\', '\\??\\')) else text
     parts = local_path_components(path)
-    if parts:
+    if parts and canonical.startswith(('c:\\', '%systemdrive%\\')):
         return parts
-    parts = components(ntpath.normpath(str(path or '')))
+    parts = components(text)
     if parts and parts[0] in {'%systemroot%', '%windir%', 'systemroot'}:
         return ('windows', *parts[1:])
-    if parts and parts[0] == '%programdata%':
-        return ('programdata', *parts[1:])
     return ()
 
 
@@ -58,7 +69,9 @@ def protected_platform_path(path):
 
 
 def writable_windows_path(path):
-    parts = installation_parts(path)
+    # Positive directory indicators apply to every local volume. Only the
+    # installation scope used to lower attention requires the system volume.
+    parts = local_path_components(path) or installation_parts(path)
     return any(len(parts) > len(prefix) and parts[:len(prefix)] == prefix for prefix in WRITABLE_WINDOWS_DIRS)
 
 

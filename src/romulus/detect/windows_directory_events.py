@@ -105,7 +105,7 @@ def _listed_actor(event, facts):
 
 class DirectoryReplicationAccess(WindowsEventRule):
     id = "win.directory_replication_access"
-    version = "3"
+    version = "4"
     title = "A directory access record named replication extended rights"
     families = ("directory_access",)
     windows_event_classes = _security(4662)
@@ -121,7 +121,7 @@ class DirectoryReplicationAccess(WindowsEventRule):
         if event.get("event.code") != 4662 or not _replication_rights(event):
             return []
         facts = self.site_facts or absent_site_facts()
-        declared_sync = bool(facts.directory_sync_accounts) or "directory_sync_accounts" in facts.content
+        declared_sync = bool(facts.directory_sync_accounts or facts.content.get("directory_sync_accounts_declared"))
         configured = bool(facts.present and facts.domain_controllers and declared_sync)
         listed = _listed_actor(event, facts)
         mask = integer(event.get("directory.access.access_mask"))
@@ -138,7 +138,10 @@ class DirectoryReplicationAccess(WindowsEventRule):
         if not positive:
             notes.append("The full successful DS/control-access/actor conjunction is not recorded; this is a lead.")
         prefix = "A failed directory access record" if event.outcome == Outcome.failure else "A directory access record"
-        return [signal(event, "directory_replication_rights", prefix + " named replication extended rights",
+        actor = self.describe(event.get("user.entity_id") or event.get("user.name"))
+        target = self.describe(event.get("directory.object.dn"))
+        return [signal(event, "directory_replication_rights",
+                       f"{prefix} named replication extended rights on {target} by actor {actor}",
                        self.attack, (*_ACTOR, "directory.object.server", "directory.object.dn", "directory.object.type",
                                      "directory.access.action", "directory.access.access_mask", "directory.access.accesses",
                                      "directory.rights.guids", "directory.rights.names", "windows.event_data.Properties"),
@@ -307,6 +310,9 @@ class _DirectoryChangeRule(WindowsEventRule):
             return []
         prefix = "A failed directory-change audit" if event.outcome == Outcome.failure else "A directory-change record"
         text = prefix + f" reported {action} of {self.subject}"
+        text += (f"; actor {self.describe(event.get('user.entity_id') or event.get('user.name'))}"
+                 f"; object {self.describe(event.get('directory.object.dn'))}"
+                 f"; attribute {self.describe(event.get('directory.attribute.ldap_name'))}")
         notes = ["The claim names the event's recorded action; it does not establish a malicious policy effect."]
         if endpoint_event:
             if all(parsed.get(name) is not None for name in _MOVE_DNS):
@@ -324,7 +330,7 @@ class _DirectoryChangeRule(WindowsEventRule):
 
 class AdminSdHolderChange(_DirectoryChangeRule):
     id = "win.adminsdholder_change"
-    version = "2"
+    version = "3"
     title = "A directory change named the exact AdminSDHolder object"
     behavior, subject = "adminsdholder_change", "the domain AdminSDHolder object"
     attack = ("T1098",)
@@ -340,7 +346,7 @@ class AdminSdHolderChange(_DirectoryChangeRule):
 
 class GroupPolicyDirectoryChange(_DirectoryChangeRule):
     id = "win.group_policy_directory_change"
-    version = "2"
+    version = "3"
     title = "A directory change named a GPO object, policy container or policy link attribute"
     behavior, subject = "group_policy_directory_change", "a group-policy object, policy container or link attribute"
     attack = ("T1484.001",)
@@ -355,7 +361,7 @@ class GroupPolicyDirectoryChange(_DirectoryChangeRule):
 
 class TrustDirectoryChange(_DirectoryChangeRule):
     id = "win.trust_directory_change"
-    version = "2"
+    version = "3"
     windows_event_classes = _security(*_CHANGES, 4706, 4716)
     title = "A directory change named a trust object or exact trust attribute"
     behavior, subject = "trust_directory_change", "a trust object or trust attribute"
@@ -385,7 +391,7 @@ class TrustDirectoryChange(_DirectoryChangeRule):
 
 class SensitiveDirectoryAttributeChange(_DirectoryChangeRule):
     id = "win.sensitive_directory_attribute_change"
-    version = "1"
+    version = "2"
     title = "A directory change names a credential, delegation or domain-root permissions attribute"
     windows_event_classes = _security(5136)
     behavior, subject = "sensitive_directory_attribute_change", "a credential, delegation or domain-root permissions attribute"

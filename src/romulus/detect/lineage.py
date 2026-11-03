@@ -52,12 +52,18 @@ from dataclasses import dataclass, field
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, pf
-from romulus.detect.bounded import HOT_COUNT, KeyedStore, RecentIds, SpillList, StateExhausted
-from romulus.detect.citing import more
+from romulus.detect.bounded import (
+    HOT_COUNT,
+    CitationUnavailable,
+    KeyedStore,
+    RecentIds,
+    SpillList,
+    StateExhausted,
+)
+from romulus.detect.citing import citation_group, more
 from romulus.detect.correlation import (
     LINEAGE_DEPTH,
     PidTable,
-    StageMissing,
     boot_of,
     boots_conflict,
     canon_ip,
@@ -480,7 +486,7 @@ class ReverseShellByLineage(Playbook):
         unique = sorted(set(ids))
         loaded = self.load(unique)
         if len(loaded) != len(unique):
-            raise StageMissing(f"{self.id}: {len(unique) - len(loaded)} cited event(s) absent from the stage")
+            raise CitationUnavailable(f"{self.id}: {len(unique) - len(loaded)} cited event(s) absent from the stage")
         return {event.id: event for event in loaded}
 
     def _hits(self, shell: _Shell, groups: KeyedStore) -> None:
@@ -525,19 +531,22 @@ class ReverseShellByLineage(Playbook):
     def finalize(self):
         groups = KeyedStore(self, "rs_groups", self.HOT)
         for i, shell in enumerate(self.shells):
-            self._hits(shell, groups)
-            if i % self.TRIM_EVERY == self.TRIM_EVERY - 1:
-                self._trim()
-                groups.trim()
+            with citation_group(self):
+                self._hits(shell, groups)
+                if i % self.TRIM_EVERY == self.TRIM_EVERY - 1:
+                    self._trim()
+                    groups.trim()
         for hit in self._judged:                    # shells joined when read (no room to hold them)
-            self._add_hit(hit, groups)
+            with citation_group(self):
+                self._add_hit(hit, groups)
         keys = groups.keys()
         merged = {**{k: [k] for k in keys if len(k) == 3},
                   **merge_unknown_boot({k: [k] for k in keys if len(k) == 4}, 1)}
         out = []
         for key in sorted(merged, key=lambda k: tuple("" if part is None else str(part) for part in k)):
-            hits = [hit for old in merged[key] for hit in groups.peek(old)]
-            out.append(self._helpers(key, hits) if len(key) == 3 else self._finding(key, hits))
+            with citation_group(self):
+                hits = [hit for old in merged[key] for hit in groups.peek(old)]
+                out.append(self._helpers(key, hits) if len(key) == 3 else self._finding(key, hits))
         groups.clear()
         return out
 
@@ -548,19 +557,22 @@ class ReverseShellByLineage(Playbook):
 
         def publish(local: _Groups) -> None:
             for key, hits in local.items():
-                m = self._helpers(key, hits) if len(key) == 3 else self._finding(key, hits)
-                m.group_key += f"|alone:{hits[0].shell.event_id}"
-                m.notes.append(f"published one shell at a time: grouping the joins needed disk ({reason})")
-                out.append(m)
+                with citation_group(self):
+                    m = self._helpers(key, hits) if len(key) == 3 else self._finding(key, hits)
+                    m.group_key += f"|alone:{hits[0].shell.event_id}"
+                    m.notes.append(f"published one shell at a time: grouping the joins needed disk ({reason})")
+                    out.append(m)
         for hit in self._judged:                    # each shell joined when read, on its own
-            local = _Groups()
-            self._add_hit(hit, local)
-            publish(local)
+            with citation_group(self):
+                local = _Groups()
+                self._add_hit(hit, local)
+                publish(local)
         try:
             for shell in self.shells:
-                local = _Groups()
-                self._hits(shell, local)
-                publish(local)
+                with citation_group(self):
+                    local = _Groups()
+                    self._hits(shell, local)
+                    publish(local)
         except StateExhausted:
             pass
         return out

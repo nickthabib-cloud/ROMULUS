@@ -87,7 +87,7 @@ def view(content: dict) -> dict:
         "groups": [group_view(group) for group in content.get("collection") or []],
         "domain_controllers": "\n".join(content.get("domain_controllers") or []),
         "directory_sync_accounts": "\n".join(content.get("directory_sync_accounts") or []),
-        "directory_sync_accounts_declared": "directory_sync_accounts" in content,
+        "directory_sync_accounts_declared": bool(content.get("directory_sync_accounts_declared")),
         "internal_networks": "\n".join(content.get("internal_networks") or []),
         "external_networks": "\n".join(content.get("external_networks") or []),
         "known_sysmon_ids": known_sysmon_ids(),
@@ -160,6 +160,8 @@ def parse_form(form) -> dict:
             group["event_channels"] = [*chosen, *other]
         groups.append(group)
     document: dict = {"schema": COLLECTION_SCHEMA}
+    if form.get("directory_sync_accounts_declared") == "1":
+        document["directory_sync_accounts_declared"] = True
     if groups:
         document["collection"] = groups
     for key in ("domain_controllers", "directory_sync_accounts", "internal_networks", "external_networks"):
@@ -178,4 +180,6 @@ def describe_change(before: dict, after: dict) -> list[str]:
               "directory_sync_accounts": "directory sync accounts", "internal_networks": "internal networks",
               "external_networks": "external networks"}
     return [labels[key] for key in keys if (before.get(key) or []) != (after.get(key) or [])
-            or key == "directory_sync_accounts" and (key in before) != (key in after)]
+            or key == "directory_sync_accounts" and (
+                bool(before.get("directory_sync_accounts_declared")) !=
+                bool(after.get("directory_sync_accounts_declared")))]

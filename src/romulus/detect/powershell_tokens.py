@@ -31,6 +31,7 @@ class Script:
     commands: set[str] = field(default_factory=set)
     definitions: set[str] = field(default_factory=set)
     members: set[str] = field(default_factory=set)
+    member_literals: set[tuple[str, str]] = field(default_factory=set)
     static_calls: set[tuple[str, str]] = field(default_factory=set)
     arguments: dict[str, list[tuple[str, ...]]] = field(default_factory=dict)
     literals: set[str] = field(default_factory=set)
@@ -287,7 +288,20 @@ def _read_tokens(tokens: list[Token], partial: bool, constant_budget=None) -> Sc
     result.limits.discard('MAX_FOLD_EVIDENCE=256')
     result.partial |= limited
     # Match group ends once; overlapping call expressions never rescan the same token suffix.
-    group_stack, group_ends, constructed_prefix = [], {}, [0]
+    group_stack, group_ends, constructed_prefix, path_bad_prefix = [], {}, [0], [0]
+    lookup_pattern_positions = set()
+    for position, item in enumerate(tokens):
+        if item.kind == 'word' and item.value in {'gcm', 'get-command', 'gal', 'get-alias'}:
+            argument = position + 1 + int(position + 1 < len(tokens) and tokens[position+1].value == '-name')
+            for _ in range(32):
+                if argument >= len(tokens) or tokens[argument].kind != 'op' or tokens[argument].value != '(':
+                    break
+                argument += 1
+            if argument < len(tokens):
+                pattern = tokens[argument].value
+                if ('?' in pattern[1:-1] or ('*' in pattern or '?' in pattern)
+                        and max(map(len, pattern.replace('?', '*').split('*'))) < 4):
+                    lookup_pattern_positions.add(argument)
     for position, item in enumerate(tokens):
         if item.kind == 'op' and item.value in {'(', '['}:
             group_stack.append((item.value, position))
@@ -295,9 +309,12 @@ def _read_tokens(tokens: list[Token], partial: bool, constant_budget=None) -> Sc
             opening, begin = group_stack.pop()
             if (opening, item.value) in {('(', ')'), ('[', ']')}:
                 group_ends[begin] = position
-        constructed = (item.value in {'+', '-f', '-join', '['}
-                       or item.kind == 'word' and ('*' in item.value or '?' in item.value))
+        constructed = item.value in {'+', '-f', '-join'} or position in lookup_pattern_positions
         constructed_prefix.append(constructed_prefix[-1] + int(constructed))
+        path_bad_prefix.append(path_bad_prefix[-1] + int(not (
+            item.kind == 'string' or item.kind == 'variable' and (
+                item.value.startswith('$env:') or item.value in {'$psscriptroot', '$pscommandpath'})
+            or item.kind == 'op' and item.value in {'+', '(', ')'})))
     stack, contexts = [], []
     start, called, command, args, evaluating = True, False, '', [], False
     type_depth = 0
@@ -305,6 +322,7 @@ def _read_tokens(tokens: list[Token], partial: bool, constant_budget=None) -> Sc
     switch_bodies = set()
     switch_depths = []
     reflection_pattern = False
+    invoking_member_target = False
     evaluators = {'iex', 'invoke-expression'}
     keywords = {'function', 'filter', 'if', 'elseif', 'else', 'while', 'for', 'foreach', 'switch',
                 'param', 'begin', 'process', 'end', 'try', 'catch', 'finally', 'return', 'throw', 'class', 'enum'}
@@ -320,6 +338,23 @@ def _read_tokens(tokens: list[Token], partial: bool, constant_budget=None) -> Sc
     def finish():
         if command:
             result.arguments.setdefault(command, []).append(tuple(args))
+
+    def member_literal(position, method):
+        end = group_ends.get(position + 1, position + 1)
+        argument, current, steps = 0, position + 2, 0
+        wanted = int(method == 'getprocaddress')
+        while current < end and steps < 64:
+            steps += 1
+            item = tokens[current]
+            if argument == wanted:
+                if item.kind == 'string':
+                    result.member_literals.add((method, item.value.casefold()))
+                return
+            if item.kind == 'op' and item.value == ',':
+                argument += 1
+            elif current in group_ends:
+                current = group_ends[current]
+            current += 1
 
     for i, token in enumerate(tokens):
         value, previous = token.value, tokens[i-1].value if i else ""
@@ -361,39 +396,52 @@ def _read_tokens(tokens: list[Token], partial: bool, constant_budget=None) -> Sc
         if (token.kind in {"word", "string"} and i and tokens[i-1].kind == 'op'
                 and previous in {".", "::"} and following == "("):
             result.members.add(value.casefold())
+            if value.casefold() in {'getmethod', 'getprocaddress'}:
+                member_literal(i, value.casefold())
             if value.casefold() == 'invoke' and i >= 3 and tokens[i-3].value in {'.', '::'} and tokens[i-2].kind in {'word', 'string'}:
                 result.members.add(tokens[i-2].value.casefold())
             if value.casefold() == 'invokescript':
                 result.evaluates_code = True
+            if value.casefold() == 'newscriptblock' or invoking_member_target and value.casefold() in {'getcmdlet', 'getcommand'}:
+                result.evaluates_code = True
+                if invoking_member_target and value.casefold() in {'getcmdlet', 'getcommand'}:
+                    result.obfuscation.add('command-lookup')
+                    result.obfuscated_execution = True
+            invoking_member_target = False
             if previous == "::" and i > 2 and tokens[i-2].kind == "op" and tokens[i-2].value == "]":
                 j = i - 3
                 lower = max(0, i - 64)
                 while j >= lower and not (tokens[j].kind == 'op' and tokens[j].value in {"[", ";", "\n"}):
                     j -= 1
                 if j >= lower and tokens[j].kind == 'op' and tokens[j].value == "[":
-                    typename = "".join(t.value for t in tokens[j+1:i-2])
-                    result.static_calls.add((typename.casefold(), value.casefold()))
+                    parts = tokens[j+1:i-2]
+                    if sum(len(part.value) for part in parts) <= 1024:
+                        typename = "".join(t.value for t in parts)
+                        result.static_calls.add((typename.casefold(), value.casefold()))
         if value in {";", "\n", "|", "{", "}"} and token.kind == "op":
             finish()
             start, called, command, args = True, False, "", []
+            invoking_member_target = False
             continue
         if token.kind == "word" and i and tokens[i-1].kind == 'word' and previous in {"function", "filter"}:
             result.definitions.add(command_name(value))
             start = False
             continue
-        if value in {"&", "."} and token.kind == "op" and (start or value == "&"):
+        member_dot = (value == '.' and i and (tokens[i-1].kind in {'variable', 'word', 'string'}
+                                             or previous in {')', ']'}))
+        if value in {"&", "."} and token.kind == "op" and not member_dot and (start or value == "&"):
             if value == "&" and previous.endswith('>'):
                 continue
             start, called = True, True
             result.dynamic_invocation = True
+            invoking_member_target = i + 1 < len(tokens) and (tokens[i+1].kind == 'variable' or following == '(')
             if following == '(':
                 end = group_ends.get(i + 1, i + 1)
-                if constructed_prefix[end] > constructed_prefix[i + 2]:
+                path_call = (end > i + 2 and path_bad_prefix[end] == path_bad_prefix[i + 2]
+                             and any(tokens[position].kind == 'variable' for position in range(i+2, min(i+5, end))))
+                if not path_call and constructed_prefix[end] > constructed_prefix[i + 2]:
                     result.obfuscation.add('unresolved-constructed-target')
                     result.obfuscated_execution = result.evaluates_code = True
-            elif i + 2 < len(tokens) and tokens[i+1].kind == 'variable' and tokens[i+2].value == '[':
-                result.obfuscation.add('unresolved-constructed-target')
-                result.obfuscated_execution = result.evaluates_code = True
             continue
         if token.kind == 'op' and value == '(':
             member_arguments = i > 1 and tokens[i-1].kind in {'word', 'string'} and tokens[i-2].value in {'.', '::'}
@@ -407,6 +455,7 @@ def _read_tokens(tokens: list[Token], partial: bool, constant_budget=None) -> Sc
                 start, called, command, args, evaluating = contexts.pop()
                 if called:
                     start, called = False, False
+                    invoking_member_target = False
             continue
         if token.kind == 'op' and value == '[':
             type_depth += 1
@@ -461,7 +510,7 @@ def read_script(text: str) -> Script:
         result.limits.update(lexical_limits | parsed.limits)
         if clipped:
             result.limits.add('MAX_READ_CHARS=2097152')
-        for name in ("commands", "definitions", "members", "static_calls", "literals", "variables", "obfuscation", "inert_words"):
+        for name in ("commands", "definitions", "members", "member_literals", "static_calls", "literals", "variables", "obfuscation", "inert_words"):
             getattr(result, name).update(getattr(parsed, name))
         for command, arguments in parsed.arguments.items():
             result.arguments.setdefault(command, []).extend(arguments)
@@ -482,11 +531,20 @@ def read_script(text: str) -> Script:
 def read_event_script(event):
     """Share one bounded reading on the live batch object; the cache is never serialized or hunt-global."""
     text = str(event.get("script.text") or "")
+    module_payload = str(event.get('script.module_payload') or '')
     code = event.get('event.code')
     previous = event.__dict__.get("_powershell_reading")
-    if previous is None or previous[0] != (code, text):
+    if previous is None or previous[0] != (code, text, module_payload):
         parsed = _read_module_payload(text) if code == 4103 else read_script(text)
-        previous = ((code, text), parsed)
+        if code == 800:
+            parsed.partial = True
+            parsed.limits.add('legacy_pipeline_source_incomplete')
+            if module_payload:
+                bindings = _read_module_payload(module_payload)
+                parsed.commands.update(bindings.commands)
+                parsed.module_bindings.extend(bindings.module_bindings)
+                parsed.module_binding_data |= bindings.module_binding_data
+        previous = ((code, text, module_payload), parsed)
         event.__dict__["_powershell_reading"] = previous
     return previous[1]
 

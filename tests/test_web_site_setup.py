@@ -99,7 +99,7 @@ def test_unchanged_web_form_preserves_absent_vs_declared_empty_sync_list(site, d
     settings, _repo, login = site
     text = 'schema: romulus-site-collection@1\ndomain_controllers: [dc01.example.test]\n'
     if declared:
-        text += 'directory_sync_accounts: []\n'
+        text += 'directory_sync_accounts: []\ndirectory_sync_accounts_declared: true\n'
     _write(settings.home, text)
     before = load_site_facts(settings.home)
     lead = login("lead1")

@@ -246,7 +246,7 @@ def test_b_b1_tool_pipe_content_does_not_keep_embedded_pids_or_random_names(name
 def test_b_minor_exclusion_trailing_slash_and_equals_are_preserved():
     ev = native(13, {'TargetObject': 'HKLM\\Software\\Microsoft\\Windows Defender\\Exclusions\\Paths\\C:\\Temp\\',
                      'Details': 'DWORD (0x00000000)'})
-    assert RegistryDefender().judge(ev)[0].lane == 'lead'
+    assert RegistryDefender().judge(ev)[0].lane == 'high'
     ev = native(5007, {'New Value': r'HKLM\Software\Microsoft\Windows Defender\Exclusions\Paths\C:\a=b = 0x0'},
                 provider=DEFENDER_PROVIDER, channel=DEFENDER_CHANNEL)
     assert DefenderProtection().judge(ev)[0].lane == 'high'

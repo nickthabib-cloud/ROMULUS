@@ -37,13 +37,15 @@ from datetime import UTC, datetime, timedelta
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
-from romulus.detect.bounded import HOT_COUNT, KeyedStore
+from romulus.detect.bounded import HOT_COUNT, CitationUnavailable, KeyedStore
 from romulus.detect.citing import (
     BoundStage,
     Ends,
     Holds,
     Named,
     bound_note,
+    citation_call,
+    citation_group,
     cite_extra,
     cited_phrase,
     drained_holds,
@@ -420,7 +422,7 @@ class _DnsAggregate(Playbook):
         wanted = list(dict.fromkeys(ids))
         loaded = self.load(wanted)
         if len(loaded) != len(wanted):
-            raise RuntimeError(f"{self.id}: {len(wanted) - len(loaded)} cited event(s) absent from the stage")
+            raise CitationUnavailable(f"{self.id}: {len(wanted) - len(loaded)} cited event(s) absent from the stage")
         return sorted(loaded, key=lambda event: (event.ts, event.id))
 
     def _stores(self) -> list[KeyedStore]:
@@ -658,75 +660,76 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
     def finalize(self):
         out = []
         for key in sorted(self.groups.keys()):
-            group = self.groups.peek(key)
-            client, server, kind, zone = key
-            asked, replies = group.requests, group.replies
-            types = sorted(set(asked) | {t for t, _c in replies})
-            transfer = kind == "transfer"
-            if transfer:
-                subject = f"for zone '{zone}'" if zone else "for a zone whose name is not recorded"
-            else:
-                names = sorted(group.any_names)
-                named = sorted(group.named.values())
-                shown = ", ".join(f"'{n}'" for n in named) + more(len(named), len(names))
-                at_least = "at least " if len(names) >= NAME_CAP else ""
-                subject = (f"for {at_least}{len(names)} distinct name(s) ({shown})" if names
-                           else "for names not recorded")
-            if asked:
-                claim = (f"{client} sent {sum(asked.values())} DNS question record(s) ({_tally(asked)}) {subject} "
-                         f"to {server} ({group.span.text()}).")
-            else:
-                claim = (f"{client} received {sum(replies.values())} answer record(s) from {server} to "
-                         f"{'/'.join(types)} question(s) {subject} ({group.span.text()}); the question records "
-                         f"themselves were not retrieved.")
-            accepted = sum(n for (t, code), n in replies.items() if code == "NOERROR" and t in self.TRANSFER_TYPES)
-            if replies:
-                by_code = Counter({f"{t} {c}": n for (t, c), n in replies.items()})
-                claim += f" Answer records from the server: {_tally(by_code)}."
-                if accepted:
-                    claim += (" A NOERROR answer to a zone-transfer question means the server answered it; the "
-                              "answer records do not show how many zone records were sent.")
-                elif all(c in ("REFUSED", "NOTAUTH", "NOTIMP") for (_t, c) in replies):
-                    claim += " The server refused or did not implement every answered question."
-            else:
-                claim += (" No answer record for these questions was retrieved, so whether the server answered is "
-                          "not established.")
-            client_internal, server_internal = _internal(client), _internal(server)
-            notes = []
-            if "ANY" in types and client_internal is False and "tcp" not in group.transports:
-                notes.append("an ANY question over UDP from outside the internal ranges may carry a spoofed source "
-                             "address (the request shape of DNS reflection, T1498.002)")
-            deciding_ref = group.deciding
-            deciding = self._events([deciding_ref[1]])[0] if deciding_ref is not None else None
-            if accepted and deciding is None:
-                claim += (" None of the NOERROR answers is recorded over TCP, the transport a zone transfer that "
-                          "carries data uses; an answer over UDP can go to a spoofed source.")
-            first: list[TypedEvent] = []
-            if transfer and client_internal is False and server_internal and deciding is not None:
-                lane, severity = "high", "high"
-                asked_ref = group.asked_by_flow.get(flow_key(deciding))
-                asked_event = self._events([asked_ref[1]])[0] if asked_ref is not None else None
-                first = [deciding] + ([asked_event] if asked_event is not None else [])
-                claim += (f" The client is outside the internal address ranges and the server ({server}) is inside "
-                          f"them; the earliest NOERROR answer over TCP was recorded at {deciding.ts.isoformat()}"
-                          + (" and its question record is cited." if asked_event is not None
-                             else "; its question record was not retrieved."))
-            else:
-                lane, severity = self.lane, self.severity
-            evs, missing, context = self._cite(group.ends, _fill(first, self._events(group.examples.ids())),
-                                               list(group.named.ids.values()))
-            claim += (cited_phrase(len(evs), sum(asked.values()) + sum(replies.values()), not missing)
-                      + bound_note(missing, group.ends))
-            e0 = first[0] if first else evs[0]
-            predicate = [pf(e, name) for e in (first or evs[:2])
-                         for name in ("dns.question.type", "dns.question.name", "dns.response_code",
-                                      "network.transport", "source.ip", "destination.ip")
-                         if e.has(name)]
-            match = Match(self.id, claim, self.claim_type, evs, predicate, evs[0].ts, severity, lane, "high",
-                          e0.entities(), notes=notes,
-                          group_key=f"{client}|{server}|{zone}" if transfer else f"{client}|{server}|ANY",
-                          context_ids=context)
-            out.append(match)
+            with citation_group(self):
+                group = self.groups.peek(key)
+                client, server, kind, zone = key
+                asked, replies = group.requests, group.replies
+                types = sorted(set(asked) | {t for t, _c in replies})
+                transfer = kind == "transfer"
+                if transfer:
+                    subject = f"for zone '{zone}'" if zone else "for a zone whose name is not recorded"
+                else:
+                    names = sorted(group.any_names)
+                    named = sorted(group.named.values())
+                    shown = ", ".join(f"'{n}'" for n in named) + more(len(named), len(names))
+                    at_least = "at least " if len(names) >= NAME_CAP else ""
+                    subject = (f"for {at_least}{len(names)} distinct name(s) ({shown})" if names
+                               else "for names not recorded")
+                if asked:
+                    claim = (f"{client} sent {sum(asked.values())} DNS question record(s) ({_tally(asked)}) {subject} "
+                             f"to {server} ({group.span.text()}).")
+                else:
+                    claim = (f"{client} received {sum(replies.values())} answer record(s) from {server} to "
+                             f"{'/'.join(types)} question(s) {subject} ({group.span.text()}); the question records "
+                             f"themselves were not retrieved.")
+                accepted = sum(n for (t, code), n in replies.items() if code == "NOERROR" and t in self.TRANSFER_TYPES)
+                if replies:
+                    by_code = Counter({f"{t} {c}": n for (t, c), n in replies.items()})
+                    claim += f" Answer records from the server: {_tally(by_code)}."
+                    if accepted:
+                        claim += (" A NOERROR answer to a zone-transfer question means the server answered it; the "
+                                  "answer records do not show how many zone records were sent.")
+                    elif all(c in ("REFUSED", "NOTAUTH", "NOTIMP") for (_t, c) in replies):
+                        claim += " The server refused or did not implement every answered question."
+                else:
+                    claim += (" No answer record for these questions was retrieved, so whether the server answered is "
+                              "not established.")
+                client_internal, server_internal = _internal(client), _internal(server)
+                notes = []
+                if "ANY" in types and client_internal is False and "tcp" not in group.transports:
+                    notes.append("an ANY question over UDP from outside the internal ranges may carry a spoofed source "
+                                 "address (the request shape of DNS reflection, T1498.002)")
+                deciding_ref = group.deciding
+                deciding = self._events([deciding_ref[1]])[0] if deciding_ref is not None else None
+                if accepted and deciding is None:
+                    claim += (" None of the NOERROR answers is recorded over TCP, the transport a zone transfer that "
+                              "carries data uses; an answer over UDP can go to a spoofed source.")
+                first: list[TypedEvent] = []
+                if transfer and client_internal is False and server_internal and deciding is not None:
+                    lane, severity = "high", "high"
+                    asked_ref = group.asked_by_flow.get(flow_key(deciding))
+                    asked_event = self._events([asked_ref[1]])[0] if asked_ref is not None else None
+                    first = [deciding] + ([asked_event] if asked_event is not None else [])
+                    claim += (f" The client is outside the internal address ranges and the server ({server}) is inside "
+                              f"them; the earliest NOERROR answer over TCP was recorded at {deciding.ts.isoformat()}"
+                              + (" and its question record is cited." if asked_event is not None
+                                 else "; its question record was not retrieved."))
+                else:
+                    lane, severity = self.lane, self.severity
+                evs, missing, context = self._cite(group.ends, _fill(first, self._events(group.examples.ids())),
+                                                   list(group.named.ids.values()))
+                claim += (cited_phrase(len(evs), sum(asked.values()) + sum(replies.values()), not missing)
+                          + bound_note(missing, group.ends))
+                e0 = first[0] if first else evs[0]
+                predicate = [pf(e, name) for e in (first or evs[:2])
+                             for name in ("dns.question.type", "dns.question.name", "dns.response_code",
+                                          "network.transport", "source.ip", "destination.ip")
+                             if e.has(name)]
+                match = Match(self.id, claim, self.claim_type, evs, predicate, evs[0].ts, severity, lane, "high",
+                              e0.entities(), notes=notes,
+                              group_key=f"{client}|{server}|{zone}" if transfer else f"{client}|{server}|ANY",
+                              context_ids=context)
+                out.append(match)
         return out
 
 
@@ -1023,66 +1026,68 @@ class DnsReverseLookupSweep(_DnsAggregate):
         spilled = {client for client in candidates if self.clients.peek(client).blocks is None}
         on_disk = self._ranked_on_disk(spilled) if spilled else {}
         for client in candidates:
-            state = self.clients.peek(client)
-            if state.blocks is not None:
-                ranked = sorted((e for e in state.blocks.values() if e[1]), key=_block_rank)[:5]
-            else:
-                ranked = on_disk.get(client, [])
-            densest = state.densest
-            if densest < self.DENSE_BLOCK and state.n_names < self.MIN_DISTINCT:
-                continue
-            addresses = state.addresses
-            # a block is named only with the records showing its lowest and highest address (blocks past BLOCK_STORES
-            # keep none, and are counted instead)
-            unstored = {item[0]: item[2] for item in state.top_blocks}
-            listed = [entry for entry in ranked if entry[0] in state.block_ends or entry[0] in unstored]
-            spans = [state.vends[version] for version in (4, 6)
-                     if state.n_blocks > 1 and state.vspan.get(version)]
-            dense_store = state.block_examples.get(listed[0][0]) if listed else None
-            ends = [state.ends, *spans, *(state.block_ends[entry[0]] for entry in listed if entry[0] in state.block_ends)]
-            dense = self._events(dense_store.ids()) if dense_store else []
-            evs, missing, context = self._cite(ends, _fill(dense, self._events(state.examples.ids())),
-                                               [unstored[entry[0]] for entry in listed if entry[0] in unstored])
-            in_block = _addresses_by_block(evs)
-            claim = (f"{client} sent {state.queries} DNS question record(s) for {state.n_names} distinct "
-                     f"reverse-lookup name(s) ({state.span.text()}; question types: "
-                     f"{_tally(Counter(state.types))}). {addresses} of the names stand for single addresses in "
-                     f"{state.n_blocks} block(s)")
-            if state.zone_names:
-                claim += f"; {state.zone_names} name a reverse zone rather than one address"
-            shown = [f"{block} ({count} address(es), {low} – {high}; {_cited_of(in_block.get(str(block), 0), count)})"
-                     if block in state.block_ends
-                     else f"{block} ({count} address(es); its range is not cited)"
-                     for block, count, low, high in listed]
-            claim += (f". Densest: {'; '.join(shown)}" if shown else "")
-            if len(listed) < len(ranked):
-                claim += (f"{';' if shown else '. Of the densest blocks,'} {len(ranked) - len(listed)} "
-                          f"{'more ' if shown else ''}keep no cited record and are not named")
-            claim += "."
-            for version in (4, 6):
-                span = state.vspan.get(version)
-                if state.n_blocks > 1 and span:
-                    claim += f" IPv{version} addresses span {span[0]} – {span[1]}."
-            if state.n_blocks:
-                claim += f" {state.internal} of the {addresses} addresses are in internal ranges."
-            if densest >= self.DENSE_BLOCK:
-                claim += (" Questions for the names of many addresses packed into one block are the shape of a "
-                          "reverse-DNS sweep (host discovery by name).")
-            else:
-                claim += (f" No block holds {self.DENSE_BLOCK} or more of them: lookups spread across many blocks "
-                          f"are the shape of a server resolving its peers' names as well as of a sparse sweep.")
-            claim += " The question records do not show whether names were returned."
-            claim += cited_phrase(len(evs), state.queries, not missing, "question records", "question record")
-            if missing:
-                claim += (" A record bounding a stated span or address range was not kept for citation; the values are "
-                          "computed from every record.")
-            e0 = evs[0]
-            notes = ["ATT&CK context: " + ("T1018 (the client is in an internal range)" if _internal(client)
-                                           else "T1590.002 (the client is outside the internal ranges)")]
-            predicate = [pf(e, n) for e in evs[:2] for n in ("dns.question.name", "dns.question.type", "source.ip")
-                         if e.has(n)]
-            out.append(Match(self.id, claim, self.claim_type, evs, predicate, e0.ts, self.severity, self.lane,
-                             "high", e0.entities(), notes=notes, group_key=client, context_ids=context))
+            with citation_group(self):
+                state = self.clients.peek(client)
+                if state.blocks is not None:
+                    ranked = sorted((e for e in state.blocks.values() if e[1]), key=_block_rank)[:5]
+                else:
+                    ranked = on_disk.get(client, [])
+                densest = state.densest
+                if densest < self.DENSE_BLOCK and state.n_names < self.MIN_DISTINCT:
+                    continue
+                addresses = state.addresses
+                # a block is named only with the records showing its lowest and highest address (blocks past BLOCK_STORES
+                # keep none, and are counted instead)
+                unstored = {item[0]: item[2] for item in state.top_blocks}
+                listed = [entry for entry in ranked if entry[0] in state.block_ends or entry[0] in unstored]
+                spans = [state.vends[version] for version in (4, 6)
+                         if state.n_blocks > 1 and state.vspan.get(version)]
+                dense_store = state.block_examples.get(listed[0][0]) if listed else None
+                ends = [state.ends, *spans, *(state.block_ends[entry[0]] for entry in listed if entry[0] in state.block_ends)]
+                dense = self._events(dense_store.ids()) if dense_store else []
+                evs, missing, context = self._cite(ends, _fill(dense, self._events(state.examples.ids())),
+                                                   [unstored[entry[0]] for entry in listed if entry[0] in unstored])
+                in_block = _addresses_by_block(evs)
+                claim = (f"{client} sent {state.queries} DNS question record(s) for {state.n_names} distinct "
+                         f"reverse-lookup name(s) ({state.span.text()}; question types: "
+                         f"{_tally(Counter(state.types))}). {addresses} of the names stand for single addresses in "
+                         f"{state.n_blocks} block(s)")
+                if state.zone_names:
+                    claim += f"; {state.zone_names} name a reverse zone rather than one address"
+                shown = [f"{block} ({count} address(es), {low} – {high}; {_cited_of(in_block.get(str(block), 0), count)})"
+                         if block in state.block_ends
+                         else f"{block} ({count} address(es); its range is not cited)"
+                         for block, count, low, high in listed]
+                claim += (f". Densest: {'; '.join(shown)}" if shown else "")
+                if len(listed) < len(ranked):
+                    claim += (f"{';' if shown else '. Of the densest blocks,'} {len(ranked) - len(listed)} "
+                              f"{'more ' if shown else ''}keep no cited record and are not named")
+                claim += "."
+                for version in (4, 6):
+                    with citation_group(self):
+                        span = state.vspan.get(version)
+                        if state.n_blocks > 1 and span:
+                            claim += f" IPv{version} addresses span {span[0]} – {span[1]}."
+                if state.n_blocks:
+                    claim += f" {state.internal} of the {addresses} addresses are in internal ranges."
+                if densest >= self.DENSE_BLOCK:
+                    claim += (" Questions for the names of many addresses packed into one block are the shape of a "
+                              "reverse-DNS sweep (host discovery by name).")
+                else:
+                    claim += (f" No block holds {self.DENSE_BLOCK} or more of them: lookups spread across many blocks "
+                              f"are the shape of a server resolving its peers' names as well as of a sparse sweep.")
+                claim += " The question records do not show whether names were returned."
+                claim += cited_phrase(len(evs), state.queries, not missing, "question records", "question record")
+                if missing:
+                    claim += (" A record bounding a stated span or address range was not kept for citation; the values are "
+                              "computed from every record.")
+                e0 = evs[0]
+                notes = ["ATT&CK context: " + ("T1018 (the client is in an internal range)" if _internal(client)
+                                               else "T1590.002 (the client is outside the internal ranges)")]
+                predicate = [pf(e, n) for e in evs[:2] for n in ("dns.question.name", "dns.question.type", "source.ip")
+                             if e.has(n)]
+                out.append(Match(self.id, claim, self.claim_type, evs, predicate, e0.ts, self.severity, self.lane,
+                                 "high", e0.entities(), notes=notes, group_key=client, context_ids=context))
         return out
 
 
@@ -1409,65 +1414,67 @@ class DnsNxdomainBurst(_DnsAggregate):
         out = []
         bursts: dict[str, tuple[int, int]] = {}         # every bursting client's (peak, start); read one at a time
         for address in self.addresses.keys(candidates=True):
-            state = self.addresses.peek(address)
-            if state.times:
-                peak, start = self._peak(list(state.times))
-                if peak >= self.MIN_BURST:
-                    bursts[address] = (peak, start)
+            with citation_group(self):
+                state = self.addresses.peek(address)
+                if state.times:
+                    peak, start = self._peak(list(state.times))
+                    if peak >= self.MIN_BURST:
+                        bursts[address] = (peak, start)
         for client in sorted(bursts):
-            state = self.addresses.peek(client)
-            peak, start = bursts[client]
-            codes = state.codes
-            nx, answered = codes["NXDOMAIN"], sum(codes.values())
-            names = state.nx_names
-            capped = " (time list capped: the peak is a lower bound)" if state.time_capped else ""
-            if state.late:
-                capped += (" (some of these answers were read after their ten-minute interval had been released, "
-                           "from a target read later, so the peak and its citations come from the answers still "
-                           "held and the peak may be a lower bound)")
-            claim = (f"{client} was sent {nx} NXDOMAIN answer(s) ({nx / answered:.0%} of the {answered} answer "
-                     f"record(s) to it with a recorded rcode; rcodes: {_tally(codes)}) between "
-                     f"{state.span.text()}; at most {peak} of them fell within one ten-minute interval, "
-                     f"starting {_iso_micros(start)}{capped}.")
-            if names:
-                domains = Counter(registered_domain(n) if n != "." else "." for n in names)
-                at_least = "at least " if state.names_capped else ""
-                claim += (f" The NXDOMAIN answers name {at_least}{len(names)} distinct name(s) under {len(domains)} "
-                          f"registered domain(s) (last two labels, or three under a listed country suffix), e.g. "
-                          f"{', '.join(repr(name) for name, _id in state.top)}.")
-                if len(names) < 10:
-                    claim += " Few distinct names repeated many times is the shape of software retrying a name "
-                    claim += "that does not exist (or a dead rendezvous domain), not of generated domains."
-            if state.nx_unnamed:
-                claim += f" {state.nx_unnamed} NXDOMAIN answer record(s) carry no question name."
-            servers = state.servers
-            named = [server for server in state.named_servers.values() if server in servers]
-            if named:
-                claim += (f" Answering server(s): {_tally(Counter({server: servers[server] for server in named}))}"
-                          f"{more(len(named), len(servers))}.")
-            claim += self._as_server(client, state, start, bursts)
-            claim += (" A burst of NXDOMAIN answers is the shape of algorithmically generated domain lookups and "
-                      "also of search-domain suffixing, stale software and blocklist lookups.")
-            # the peak interval's earliest records, beside the records the claim's span, names and servers come from
-            given = [*(event_id for _name, event_id in state.top),
-                     *(state.named_servers.ids[server] for server in named)]
-            evs, missing, context = self._cite(state.ends, self._peak_records(state, start), given)
-            claim += (cited_phrase(len(evs), nx, not missing, "NXDOMAIN answer records", "NXDOMAIN answer record")
-                      + " The cited records are from the peak interval, with the records bounding the span and those "
-                        "of the names and servers given." + bound_note(missing, state.ends))
-            # the rcode tally counts every answer to the client: say how many of them are cited, and which
-            cited_codes = Counter(code for code in (rcode(e.get("dns.response_code")) for e in evs) if code)
-            shown = sum(cited_codes.values())
-            if answered > nx:
-                claim += (f" Of the {answered} answer records in the rcode tally, "
-                          + (f"all {answered} are cited." if shown >= answered else
-                             f"{shown} of the {answered} are cited ({_tally(cited_codes)})." if shown else
-                             f"0 of the {answered} are cited."))
-            e0 = evs[0]
-            predicate = [pf(e, n) for e in evs[:2] for n in ("dns.response_code", "destination.ip", "source.ip",
-                                                             "dns.type") if e.has(n)]
-            out.append(Match(self.id, claim, self.claim_type, evs, predicate, e0.ts, self.severity, self.lane,
-                             "medium", e0.entities(), group_key=client, context_ids=context))
+            with citation_group(self):
+                state = self.addresses.peek(client)
+                peak, start = bursts[client]
+                codes = state.codes
+                nx, answered = codes["NXDOMAIN"], sum(codes.values())
+                names = state.nx_names
+                capped = " (time list capped: the peak is a lower bound)" if state.time_capped else ""
+                if state.late:
+                    capped += (" (some of these answers were read after their ten-minute interval had been released, "
+                               "from a target read later, so the peak and its citations come from the answers still "
+                               "held and the peak may be a lower bound)")
+                claim = (f"{client} was sent {nx} NXDOMAIN answer(s) ({nx / answered:.0%} of the {answered} answer "
+                         f"record(s) to it with a recorded rcode; rcodes: {_tally(codes)}) between "
+                         f"{state.span.text()}; at most {peak} of them fell within one ten-minute interval, "
+                         f"starting {_iso_micros(start)}{capped}.")
+                if names:
+                    domains = Counter(registered_domain(n) if n != "." else "." for n in names)
+                    at_least = "at least " if state.names_capped else ""
+                    claim += (f" The NXDOMAIN answers name {at_least}{len(names)} distinct name(s) under {len(domains)} "
+                              f"registered domain(s) (last two labels, or three under a listed country suffix), e.g. "
+                              f"{', '.join(repr(name) for name, _id in state.top)}.")
+                    if len(names) < 10:
+                        claim += " Few distinct names repeated many times is the shape of software retrying a name "
+                        claim += "that does not exist (or a dead rendezvous domain), not of generated domains."
+                if state.nx_unnamed:
+                    claim += f" {state.nx_unnamed} NXDOMAIN answer record(s) carry no question name."
+                servers = state.servers
+                named = [server for server in state.named_servers.values() if server in servers]
+                if named:
+                    claim += (f" Answering server(s): {_tally(Counter({server: servers[server] for server in named}))}"
+                              f"{more(len(named), len(servers))}.")
+                claim += self._as_server(client, state, start, bursts)
+                claim += (" A burst of NXDOMAIN answers is the shape of algorithmically generated domain lookups and "
+                          "also of search-domain suffixing, stale software and blocklist lookups.")
+                # the peak interval's earliest records, beside the records the claim's span, names and servers come from
+                given = [*(event_id for _name, event_id in state.top),
+                         *(state.named_servers.ids[server] for server in named)]
+                evs, missing, context = self._cite(state.ends, self._peak_records(state, start), given)
+                claim += (cited_phrase(len(evs), nx, not missing, "NXDOMAIN answer records", "NXDOMAIN answer record")
+                          + " The cited records are from the peak interval, with the records bounding the span and those "
+                            "of the names and servers given." + bound_note(missing, state.ends))
+                # the rcode tally counts every answer to the client: say how many of them are cited, and which
+                cited_codes = Counter(code for code in (rcode(e.get("dns.response_code")) for e in evs) if code)
+                shown = sum(cited_codes.values())
+                if answered > nx:
+                    claim += (f" Of the {answered} answer records in the rcode tally, "
+                              + (f"all {answered} are cited." if shown >= answered else
+                                 f"{shown} of the {answered} are cited ({_tally(cited_codes)})." if shown else
+                                 f"0 of the {answered} are cited."))
+                e0 = evs[0]
+                predicate = [pf(e, n) for e in evs[:2] for n in ("dns.response_code", "destination.ip", "source.ip",
+                                                                 "dns.type") if e.has(n)]
+                out.append(Match(self.id, claim, self.claim_type, evs, predicate, e0.ts, self.severity, self.lane,
+                                 "medium", e0.entities(), group_key=client, context_ids=context))
         return out
 
 
@@ -1700,16 +1707,18 @@ class DnsTunnelShape(_DnsAggregate):
         # the findings, so only the small shape summaries are held together
         shaped: dict[str, dict[str, dict]] = defaultdict(dict)
         for key in sorted(self.pairs.keys(candidates=True)):
-            found = self._assess(self.pairs.peek(key))
-            if found is not None:
-                shaped[key[1]][key[0]] = found
+            with citation_group(self):
+                found = self._assess(self.pairs.peek(key))
+                if found is not None:
+                    shaped[key[1]][key[0]] = found
         out = []
         for domain in sorted(shaped):
-            members = shaped[domain]
-            if len(members) >= self.SHARED_CLIENTS:
-                out.append(self._shared(domain, members, self.askers.peek(domain, 0)))
-            else:
-                out += [self._single(client, domain, found) for client, found in sorted(members.items())]
+            with citation_group(self):
+                members = shaped[domain]
+                if len(members) >= self.SHARED_CLIENTS:
+                    out.append(self._shared(domain, members, self.askers.peek(domain, 0)))
+                else:
+                    out += [_citation for client, found in sorted(members.items()) for _citation in citation_call(self, self._single, client, domain, found)]
         return out
 
     def _own(self, record: _TunnelKey, found: dict) -> list[TypedEvent]:

@@ -5,7 +5,8 @@ import hashlib
 import json
 import os
 import threading
-from contextlib import contextmanager
+import time
+from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -15,10 +16,44 @@ from romulus.store.schema import metadata
 
 _write_lock = threading.Lock()
 _memory_maintenance_lock = threading.Lock()
+_maintenance_held = threading.local()
 
 
 @contextmanager
-def maintenance_lease(engine: Engine):
+def maintenance_lease(engine: Engine, *, wait_seconds: float = 0, on_wait=None, allow_nested: bool = False):
+    """Acquire a bounded maintenance lease, allowing nested calls on this thread."""
+    database = engine.url.database
+    key = str(Path(database).resolve()) if database and database != ":memory:" else ":memory:"
+    held = getattr(_maintenance_held, "keys", None)
+    if held is None:
+        held = _maintenance_held.keys = {}
+    if held.get(key):
+        yield
+        return
+    deadline = time.monotonic() + max(0, wait_seconds)
+    notified = False
+    with ExitStack() as stack:
+        while True:
+            try:
+                stack.enter_context(_maintenance_lease_once(engine))
+                break
+            except RuntimeError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                if not notified and on_wait is not None:
+                    on_wait()
+                notified = True
+                time.sleep(min(0.1, remaining))
+        held[key] = allow_nested
+        try:
+            yield
+        finally:
+            del held[key]
+
+
+@contextmanager
+def _maintenance_lease_once(engine: Engine):
     """Serialize maintenance with hunt claims across processes for this database.
 
     OS file locks release on process exit. The lock file stays in place to avoid

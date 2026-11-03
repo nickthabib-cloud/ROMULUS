@@ -30,7 +30,7 @@ from typing import ClassVar, NamedTuple
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, pf
 from romulus.detect.bounded import HOT_COUNT, KeyedStore, RecentIds, SpillList, StateExhausted
-from romulus.detect.citing import Ends, bound_note, cited_phrase
+from romulus.detect.citing import Ends, bound_note, citation_call, citation_group, cited_phrase
 from romulus.detect.host import (
     UNBUDGETED,
     Lineage,
@@ -393,30 +393,31 @@ class SshPasswordGuessing(_SshAttemptStream):
     def _findings(self):
         out = []
         for key in sorted(self.tallies.keys(candidates=True), key=str):
-            host, ip, account = key
-            t = self.tallies.peek(key)
-            if t.crossed is None:
-                continue
-            # the attempts the finding is about, and the first and last attempt cited for the stated span
-            spanning = [e for e in self._load([t.first_id, t.last_id]) if e.id not in {x.id for x in t.cited}]
-            events = sorted(_unique([*t.cited, *spanning]), key=lambda e: (e.ts, e.id))
-            ok = _logins(self.successes.peek(key, 0), self.logins_uncounted)
-            claim = (f"On {host}, sshd recorded {t.attempts} failed authentication attempt(s) for account "
-                     f"'{account}' from {ip} in {t.connections} connection(s) between {_iso(t.first)} and "
-                     f"{_iso(t.last)}; the most within any {self.WINDOW / 60:.0f} minutes was {t.peak} (threshold "
-                     f"{self.THRESHOLD}), first reached at {_iso(t.crossed)}.")
-            if t.invalid:
-                claim += (f" sshd reported '{account}' as an invalid user (no such account, or one not permitted to "
-                          "log in).")
-            claim += (f" The retrieved records hold {ok} accepted sshd login(s) for this account from this source."
-                      if ok else " The retrieved records hold no accepted sshd login for this account from this "
-                                 "source.")
-            claim += " Failures inside connections that then logged in are not counted."
-            claim += _span_cited(events, t, "attempt records", "attempt record")
-            m = Match(self.id, claim, self.claim_type, events, _ssh_predicate(events[:3]), events[0].ts,
-                      self.severity, self.lane, "high", events[0].entities(), group_key=f"{host}|{ip}|{account}",
-                      context_ids={e.id for e in spanning})
-            out.append(m)
+            with citation_group(self):
+                host, ip, account = key
+                t = self.tallies.peek(key)
+                if t.crossed is None:
+                    continue
+                # the attempts the finding is about, and the first and last attempt cited for the stated span
+                spanning = [e for e in self._load([t.first_id, t.last_id]) if e.id not in {x.id for x in t.cited}]
+                events = sorted(_unique([*t.cited, *spanning]), key=lambda e: (e.ts, e.id))
+                ok = _logins(self.successes.peek(key, 0), self.logins_uncounted)
+                claim = (f"On {host}, sshd recorded {t.attempts} failed authentication attempt(s) for account "
+                         f"'{account}' from {ip} in {t.connections} connection(s) between {_iso(t.first)} and "
+                         f"{_iso(t.last)}; the most within any {self.WINDOW / 60:.0f} minutes was {t.peak} (threshold "
+                         f"{self.THRESHOLD}), first reached at {_iso(t.crossed)}.")
+                if t.invalid:
+                    claim += (f" sshd reported '{account}' as an invalid user (no such account, or one not permitted to "
+                              "log in).")
+                claim += (f" The retrieved records hold {ok} accepted sshd login(s) for this account from this source."
+                          if ok else " The retrieved records hold no accepted sshd login for this account from this "
+                                     "source.")
+                claim += " Failures inside connections that then logged in are not counted."
+                claim += _span_cited(events, t, "attempt records", "attempt record")
+                m = Match(self.id, claim, self.claim_type, events, _ssh_predicate(events[:3]), events[0].ts,
+                          self.severity, self.lane, "high", events[0].entities(), group_key=f"{host}|{ip}|{account}",
+                          context_ids={e.id for e in spanning})
+                out.append(m)
         return out
 
 
@@ -498,31 +499,32 @@ class SshPasswordSpraying(_SshAttemptStream):
     def _findings(self):
         out = []
         for key in sorted(self.tallies.keys(candidates=True), key=str):
-            host, ip = key
-            t = self.tallies.peek(key)
-            if t.crossed is None:
-                continue
-            # the attempts the finding is about, and the first and last attempt cited for the stated span
-            spanning = [e for e in self._load([t.first_id, t.last_id]) if e.id not in {x.id for x in t.cited}]
-            events = sorted(_unique([*t.cited, *spanning]), key=lambda e: (e.ts, e.id))
-            total_names = len(t.names) + t.more_names
-            named = {str(e.get("user.name")) for e in events if e.get("user.name")} & t.names
-            ok = _logins(self.successes.peek(key, 0), self.logins_uncounted)
-            claim = (f"On {host}, sshd recorded failed authentication attempts for {total_names} distinct account "
-                     f"name(s) from {ip} between {_iso(t.first)} and {_iso(t.last)} ({t.attempts} attempt(s) in "
-                     f"{t.connections} connection(s)); the most distinct names within any "
-                     f"{self.WINDOW / 60:.0f} minutes was {t.peak} (threshold {self.THRESHOLD}), first reached at "
-                     f"{_iso(t.crossed)}. {_names_cited(named, total_names)}. Of "
-                     f"all the names, sshd reported {len(t.invalid_names)} of them as invalid users (no such account, "
-                     f"or not permitted to log in).")
-            claim += (f" The retrieved records hold {ok} accepted sshd login(s) from this source." if ok else
-                      " The retrieved records hold no accepted sshd login from this source.")
-            claim += " Failures inside connections that then logged in are not counted."
-            claim += _span_cited(events, t, "attempt records", "attempt record")
-            m = Match(self.id, claim, self.claim_type, events, _ssh_predicate(events[:3]), events[0].ts,
-                      self.severity, self.lane, "high", events[0].entities(), group_key=f"{host}|{ip}",
-                      context_ids={e.id for e in spanning})
-            out.append(m)
+            with citation_group(self):
+                host, ip = key
+                t = self.tallies.peek(key)
+                if t.crossed is None:
+                    continue
+                # the attempts the finding is about, and the first and last attempt cited for the stated span
+                spanning = [e for e in self._load([t.first_id, t.last_id]) if e.id not in {x.id for x in t.cited}]
+                events = sorted(_unique([*t.cited, *spanning]), key=lambda e: (e.ts, e.id))
+                total_names = len(t.names) + t.more_names
+                named = {str(e.get("user.name")) for e in events if e.get("user.name")} & t.names
+                ok = _logins(self.successes.peek(key, 0), self.logins_uncounted)
+                claim = (f"On {host}, sshd recorded failed authentication attempts for {total_names} distinct account "
+                         f"name(s) from {ip} between {_iso(t.first)} and {_iso(t.last)} ({t.attempts} attempt(s) in "
+                         f"{t.connections} connection(s)); the most distinct names within any "
+                         f"{self.WINDOW / 60:.0f} minutes was {t.peak} (threshold {self.THRESHOLD}), first reached at "
+                         f"{_iso(t.crossed)}. {_names_cited(named, total_names)}. Of "
+                         f"all the names, sshd reported {len(t.invalid_names)} of them as invalid users (no such account, "
+                         f"or not permitted to log in).")
+                claim += (f" The retrieved records hold {ok} accepted sshd login(s) from this source." if ok else
+                          " The retrieved records hold no accepted sshd login from this source.")
+                claim += " Failures inside connections that then logged in are not counted."
+                claim += _span_cited(events, t, "attempt records", "attempt record")
+                m = Match(self.id, claim, self.claim_type, events, _ssh_predicate(events[:3]), events[0].ts,
+                          self.severity, self.lane, "high", events[0].entities(), group_key=f"{host}|{ip}",
+                          context_ids={e.id for e in spanning})
+                out.append(m)
         return out
 
 
@@ -653,7 +655,7 @@ class SshSuccessAfterFailures(_SshAttemptStream):
         _prune_windows(self.by_account, now, self.WINDOW)
 
     def _findings(self):
-        return [self._match(key, self.found.peek(key)) for key in sorted(self.found.keys(), key=str)]
+        return [_citation for key in sorted(self.found.keys(), key=str) for _citation in citation_call(self, self._match, key, self.found.peek(key))]
 
     def _match(self, key, f: _Followed) -> Match:
         variant, host, ip, account = key
@@ -1310,26 +1312,29 @@ class AccountOrGroupChange(Playbook):
         # Join each tool record to the command of the same process (same host and pid, close in time).
         unjoined = SpillList(self, "acct_unjoined", self.HOT, disk_budget=UNBUDGETED)
         for i, record in enumerate(self.records.ordered()):
-            ts = record.ts.timestamp()
-            candidates = [c for c in self.by_pid.get((record.host, record.get("process.pid")), ())
-                          if abs(c.ts - ts) <= self.JOIN_SECONDS]
-            if candidates:
-                for change in candidates:
-                    change.records.append(record)
-            else:
-                need(unjoined.append(record), self, "the unjoined tool records")
-            if i % self.FINALIZE_TRIM == self.FINALIZE_TRIM - 1:
-                self.by_pid.trim()
-                unjoined.trim()
+            with citation_group(self):
+                ts = record.ts.timestamp()
+                candidates = [c for c in self.by_pid.get((record.host, record.get("process.pid")), ())
+                              if abs(c.ts - ts) <= self.JOIN_SECONDS]
+                if candidates:
+                    for change in candidates:
+                        with citation_group(self):
+                            change.records.append(record)
+                else:
+                    need(unjoined.append(record), self, "the unjoined tool records")
+                if i % self.FINALIZE_TRIM == self.FINALIZE_TRIM - 1:
+                    self.by_pid.trim()
+                    unjoined.trim()
         groups = KeyedStore(self, "acct_groups", self.HOT, disk_budget=UNBUDGETED)
         self._boot_events: dict[str, TypedEvent] = {}
         changes = (c for _key, held in self.by_pid.items() for c in held)
         loose = (c for held in self.loose for c in held)
         for i, change in enumerate(itertools.chain(changes, loose, self._record_changes(unjoined))):
-            need(groups.setdefault(self._group(change), list), self, "the account change grouping").append(change)
-            if i % self.FINALIZE_TRIM == self.FINALIZE_TRIM - 1:
-                groups.trim()
-        out = [self._finding(key, groups.peek(key)) for key in sorted(groups.keys(), key=str)]
+            with citation_group(self):
+                need(groups.setdefault(self._group(change), list), self, "the account change grouping").append(change)
+                if i % self.FINALIZE_TRIM == self.FINALIZE_TRIM - 1:
+                    groups.trim()
+        out = [_citation for key in sorted(groups.keys(), key=str) for _citation in citation_call(self, self._finding, key, groups.peek(key))]
         groups.clear()
         unjoined.clear()
         return out
@@ -1342,17 +1347,19 @@ class AccountOrGroupChange(Playbook):
 
         def each(changes) -> None:
             for change in changes:
-                m = self._finding(self._group(change), [change])
-                m.group_key += f"|alone:{(change.command or change.records[0]).id}"
-                m.notes.append(f"published on its own: grouping and joining needed disk ({reason})")
-                out.append(m)
+                with citation_group(self):
+                    m = self._finding(self._group(change), [change])
+                    m.group_key += f"|alone:{(change.command or change.records[0]).id}"
+                    m.notes.append(f"published on its own: grouping and joining needed disk ({reason})")
+                    out.append(m)
         for source in (lambda: (c for _key, held in self.by_pid.items() for c in held),
                        lambda: (c for held in self.loose for c in held),
                        lambda: self._record_changes(self.records)):
-            try:
-                each(source())
-            except StateExhausted:
-                continue                            # a table on disk cannot be read: what was read stands
+            with citation_group(self):
+                try:
+                    each(source())
+                except StateExhausted:
+                    continue                            # a table on disk cannot be read: what was read stands
         return out
 
     def _record_changes(self, unjoined):

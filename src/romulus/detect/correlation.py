@@ -23,6 +23,7 @@ from romulus.detect import netdef
 from romulus.detect.base import Match, Playbook, basename, pf
 from romulus.detect.bounded import (
     HOT_COUNT,
+    CitationUnavailable,
     HeldExamples,
     KeyedStore,
     RecentIds,
@@ -38,6 +39,7 @@ from romulus.detect.citing import (
     Holds,
     Named,
     bound_note,
+    citation_group,
     cited_phrase,
     drained_holds,
     more,
@@ -789,8 +791,9 @@ class InterpreterExternalConnection(Playbook):
     def finalize(self):
         out = []
         for key in sorted(self.groups.keys()):
-            info, group = self.groups.peek(key)
-            out.append(self._group_match(key, info, group.events(self.load)))
+            with citation_group(self):
+                info, group = self.groups.peek(key)
+                out.append(self._group_match(key, info, group.events(self.load)))
         return out
 
     def _group_match(self, key: str, info: dict, evs: list[TypedEvent]) -> Match:
@@ -843,7 +846,7 @@ class InterpreterExternalConnection(Playbook):
     def _load(self, ids: list[str]) -> list[TypedEvent]:
         found = self.load(ids) if ids else []
         if len(found) != len(ids):
-            raise StageMissing(f"{self.id}: {len(ids) - len(found)} cited event(s) absent from the stage")
+            raise CitationUnavailable(f"{self.id}: {len(ids) - len(found)} cited event(s) absent from the stage")
         return found
 
     def release_state(self) -> None:
@@ -1435,8 +1438,10 @@ class ProcessNetworkLink(Playbook):
         return out
 
     def _finish(self, group: _Group, address) -> list[Match]:
+        m = None
         try:
-            m = self._group_match(group, address) if group.socks else None
+            with citation_group(self):
+                m = self._group_match(group, address) if group.socks else None
         finally:
             group.clear()
         return [m] if m is not None else []
@@ -1510,7 +1515,7 @@ class ProcessNetworkLink(Playbook):
         loaded = {e.id: e for e in self.load(ids)}
         missing = [i for i in ids if i not in loaded]
         if missing:
-            raise StageMissing(f"{self.id}: {len(missing)} cited event(s) absent from the stage, e.g. {missing[0]}")
+            raise CitationUnavailable(f"{self.id}: {len(missing)} cited event(s) absent from the stage, e.g. {missing[0]}")
         cited = [loaded[i] for i in ids]
         first = loaded[g.socks[0].id] if g.socks else loaded[sock_ids[0]] if sock_ids else None
         if first is None:

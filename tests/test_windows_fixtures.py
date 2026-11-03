@@ -41,7 +41,7 @@ _REPRESENTATIVE_FIELDS = {
     "directory_change": ("directory.object.dn", "directory.trust.domain_name"),
     "share_access": ("share.name",),
     "defender_event": ("defender.threat.name",),
-    "remote_access": ("source.ip", "bits.job_id"),
+    "remote_access": ("source.ip", "bits.job_id", "remote.resource", "remote.action"),
 }
 
 
@@ -90,7 +90,7 @@ def test_every_catalog_fixture_has_representative_native_and_typed_family_data()
     for logical in all_logical_events():
         key = (logical.channel, logical.provider, logical.event_id)
         event_class = event_classes[key]
-        assert logical.data, key
+        assert logical.data or key[2] == 91 and key[1] == "Microsoft-Windows-WinRM", key
         [normalized], skips, errors = normalize_hits([windows_hit(logical, "elastic_agent")])
         assert skips == {} and errors == []
         expected = _REPRESENTATIVE_FIELDS[event_class.family]

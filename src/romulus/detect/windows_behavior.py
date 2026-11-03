@@ -12,7 +12,17 @@ class BehaviorFleetRule(WindowsEventRule):
     """
     count_source_ips = False
 
+    def fleet_eligible(self, event, hit):
+        return True
+
     def _fold(self, event, hit, out):
+        if not self.fleet_eligible(event, hit):
+            shape, role = super()._fold(event, hit, out)
+            group = self.groups.get(shape) if shape else None
+            if group is not None:
+                group.behavior_fleet = False
+                self.groups.put(shape, group)
+            return shape, role
         shape = self._shape(event, hit)
         ip = event.get('source.ip')
         if self.count_source_ips and ip:
@@ -47,12 +57,14 @@ class BehaviorFleetRule(WindowsEventRule):
 
     def _fleet_match(self, shape, group, *, final):
         result = super()._fleet_match(shape, group, final=final)
-        if result is not None:
+        if result is not None and getattr(group, 'behavior_fleet', True):
             result.claim = result.claim.replace(
                 "Each host's first record keeps its own finding.",
                 'The first observation was published immediately; members revise this fleet finding.',
             ).replace('each host\'s first record keeps its own finding',
                       'the first observation was published immediately').replace(
+                          ' and remains retrievable',
+                          '; this fleet finding revises that observation in place').replace(
                           'recurred as the same shape on a host already reported for it:',
                           'was observed as the same behavior class:')
             if self.count_source_ips:

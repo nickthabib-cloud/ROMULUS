@@ -43,6 +43,7 @@ class _Limited(Exception):
 class _Reader:
     def __init__(self, tokens, budget=None, limits=None):
         self.tokens, self.variables = tokens, {}
+        self.mutated_arrays = {}
         self.budget = [MAX_CONSTANT_WORK, MAX_STEPS] if budget is None else budget
         self.partial = False
         self.limits = set() if limits is None else limits
@@ -57,6 +58,9 @@ class _Reader:
         self.budget[0] = value
 
     def limit(self, name):
+        if name.startswith('MAX_VALUE_CHARS'):
+            # A complete large data value is outside this constant subset, not missing source.
+            raise _Unknown
         self.partial = True
         self.limits.add(name)
         raise _Limited
@@ -70,6 +74,15 @@ class _Reader:
         if len(values) > self.work:
             self.limit('MAX_CONSTANT_WORK=2097152')
         self.work -= len(values)
+
+    def invalidate_mutator(self, position):
+        position += int(self.value(position) == '-name')
+        if position < len(self.tokens) and self.tokens[position].kind in {'word', 'string'}:
+            name = self.value(position).casefold().lstrip('$')
+            if re.fullmatch(r'[a-z_][\w]*', name, re.ASCII):
+                self.variables.pop('$' + name, None)
+                return
+        self.variables.clear()
 
     def make(self, value, transforms=frozenset()):
         if isinstance(value, tuple):
@@ -100,7 +113,10 @@ class _Reader:
             if self.value(index + 1) in {'[', '.', '::'}:
                 # An unresolved index/member expression is not the value of its variable prefix.
                 raise _Unknown
-            left, end = self.variables[variable_name(value)], index + 1
+            stored = self.variables[variable_name(value)]
+            if isinstance(stored.value, tuple) and id(stored.value) in self.mutated_arrays:
+                raise _Unknown
+            left, end = self.make(stored.value, stored.transforms), index + 1
         elif token.kind == 'word' and _NUMBER.fullmatch(value):
             if len(value) > 10:
                 raise _Unknown
@@ -126,13 +142,21 @@ class _Reader:
                 left = self.make(tuple(item.value for item in items), set().union(*(item.transforms for item in items)))
         elif token.kind == 'op' and value == '[':
             left, end = self.typed(index, depth + 1)
-        elif call_target and token.kind == 'word' and value in {'gcm', 'get-command'}:
-            target = self.tokens[index + 1] if index + 1 < len(self.tokens) else None
-            if not target or target.kind not in {'word', 'string'} or not re.fullmatch(r'[a-z][\w-]*', target.value, re.ASCII):
+        elif call_target and token.kind == 'word' and value in {'gcm', 'get-command', 'gal', 'get-alias'}:
+            position = index + 1 + int(self.value(index + 1) == '-name')
+            target = self.tokens[position] if position < len(self.tokens) else None
+            if target and target.kind == 'op' and target.value == '(':
+                resolved, after = self.expression(position, depth=depth + 1)
+                target_value = resolved.value
+            else:
+                target_value, after = target.value if target and target.kind in {'word', 'string'} else None, position + 1
+            if not isinstance(target_value, str) or not re.fullmatch(r'[a-z][\w-]*', target_value.casefold(), re.ASCII):
                 raise _Unknown
-            left, end = self.make(target.value, {'command-lookup'}), index + 2
+            left, end = self.make(target_value.casefold(), {'command-lookup'}), after
         else:
             raise _Unknown
+        if call_target and token.kind == 'op' and value == '(':
+            return left, end
         while end < len(self.tokens):
             operator = self.tokens[end]
             rank = {'+': 40, '-f': 70, '-join': 30}.get(operator.value, -1)
@@ -265,6 +289,23 @@ def fold_constants(tokens, budget=None, limits=None):
     """Return folded tokens, original token/value/transformation evidence and an honest work-limit flag."""
     reader, out, evidence, index = _Reader(tokens, budget, limits), [], [], 0
     call_in_statement, argument_mode, failed_until, limited_until = False, False, -1, -1
+    pending_call_prior = None
+    bracket_stack, bracket_ends = [], {}
+    for position, item in enumerate(tokens):
+        if item.kind == 'op' and item.value == '[':
+            bracket_stack.append(position)
+        elif item.kind == 'op' and item.value == ']' and bracket_stack:
+            bracket_ends[bracket_stack.pop()] = position
+
+    def writes_variable(position):
+        following = position + 1
+        while following < len(tokens) and tokens[following].kind == 'op' and tokens[following].value == '[':
+            if following not in bracket_ends:
+                return True
+            following = bracket_ends[following] + 1
+        operator = reader.value(following)
+        return (operator in {'=', '++', '--'} or operator in {'+', '-'}
+                and reader.value(following + 1) in {'=', operator})
 
     def note_evidence(begin, end, value):
         if len(evidence) < MAX_FOLD_EVIDENCE:
@@ -276,8 +317,15 @@ def fold_constants(tokens, budget=None, limits=None):
     def skip_limited_statement(begin):
         end = begin
         while end < len(tokens) and not (tokens[end].kind == 'op' and tokens[end].value in {';', '\n'}):
+            item = tokens[end]
+            if item.kind == 'variable' and writes_variable(end):
+                stored = reader.variables.pop(variable_name(item.value), None)
+                if stored and isinstance(stored.value, tuple) and reader.value(end + 1) == '[':
+                    # Retain the value object so a later allocation cannot reuse its identity.
+                    reader.mutated_arrays[id(stored.value)] = stored.value
+            if item.kind == 'word' and item.value.rsplit('\\', 1)[-1] in _VARIABLE_MUTATORS:
+                reader.invalidate_mutator(end + 1)
             end += 1
-        reader.variables.clear()
         return end
 
     while index < len(tokens):
@@ -288,10 +336,14 @@ def fold_constants(tokens, budget=None, limits=None):
                 reader.variables.clear()
             call_in_statement = False
             argument_mode = False
+            pending_call_prior = None
+        if token.kind == 'op' and token.value in {'&', '.'}:
+            pending_call_prior = call_in_statement
         if (token.kind == 'op' and (token.value == '&' or token.value == '.' and
                                   (not index or previous in {';', '\n', '{', '=', '('}))
                 or token.kind == 'word' and (not index or previous in {';', '\n', '{', '=', '('})
                 and not token.value.startswith('-') and not _NUMBER.fullmatch(token.value)
+                and token.value.rsplit('\\', 1)[-1] not in _VARIABLE_MUTATORS
                 or token.kind in {'word', 'string'} and previous in {'.', '::'}
                 and index + 1 < len(tokens) and tokens[index + 1].value == '('):
             # Unknown commands may change session variables after their arguments are evaluated.
@@ -302,7 +354,9 @@ def fold_constants(tokens, budget=None, limits=None):
                      or previous == '&' and (index < 2 or not tokens[index-2].value.endswith('>'))
                      or previous == '.' and (index == 1 or tokens[index-2].value in {
                          ';', '\n', '{', '=', '(', '|'}))):
-            reader.variables.clear()
+            reader.invalidate_mutator(index + 1)
+            if previous in {'&', '.'} and pending_call_prior is not None:
+                call_in_statement, pending_call_prior = pending_call_prior, None
         if token.kind == 'op' and token.value in {'{', '}'}:
             # No control-flow or function execution is assumed across a scriptblock boundary.
             reader.variables.clear()
@@ -321,7 +375,10 @@ def fold_constants(tokens, budget=None, limits=None):
                 if index < limited_until:
                     raise _Unknown
                 value, end = reader.expression(index + 2)
-                scalar_target = not index or previous in {';', '\n', '{'}
+                typed_scalar = (index >= 3 and [item.value for item in tokens[index-3:index]] in
+                                (['[', 'string', ']'], ['[', 'system.string', ']'])
+                                and (index == 3 or tokens[index-4].value in {';', '\n', '{'}))
+                scalar_target = not index or previous in {';', '\n', '{'} or typed_scalar
                 if scalar_target and _VARIABLE.fullmatch(name) and (end == len(tokens) or tokens[end].value in {';', '\n', '}'}):
                     reader.variables[name] = value
                     if not isinstance(value.value, tuple):
@@ -334,8 +391,11 @@ def fold_constants(tokens, budget=None, limits=None):
                     reader.variables.clear()
             except _Limited:
                 limited_until = skip_limited_statement(index)
+                out.extend(tokens[index + 2:limited_until])
+                index = max(index + 2, limited_until)
+                continue
             except _Unknown:
-                reader.variables.clear()
+                reader.variables.pop(name, None)
             index += 2
             continue
         if (token.kind == 'variable' and index + 2 < len(tokens)
@@ -355,7 +415,9 @@ def fold_constants(tokens, budget=None, limits=None):
             value, end = reader.expression(index, 100 if argument_mode and token.value not in {'(', '[', '-join'} else 0,
                                            call_target=target)
             if target and isinstance(value.value, str) and value.value.casefold().rsplit('\\', 1)[-1] in _VARIABLE_MUTATORS:
-                reader.variables.clear()
+                reader.invalidate_mutator(end)
+                if pending_call_prior is not None:
+                    call_in_statement, pending_call_prior = pending_call_prior, None
             if isinstance(value.value, tuple):
                 raise _Unknown
             kind = 'string' if isinstance(value.value, str) else 'word'

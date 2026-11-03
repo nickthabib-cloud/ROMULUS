@@ -151,7 +151,7 @@ def test_unknown_format_or_call_lookup_is_never_guessed():
 def test_constant_growth_and_large_malformed_inputs_are_bounded():
     source = '$x="a";' + '$x=$x+$x;' * 40
     started = time.perf_counter()
-    assert read_script(source).partial
+    assert not read_script(source).partial
     assert time.perf_counter() - started < 2
     started = time.perf_counter()
     assert read_script("']'::b()," * (1_048_576 // 9)).partial
