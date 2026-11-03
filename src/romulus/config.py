@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Literal
 
@@ -10,6 +11,9 @@ from pydantic import BaseModel, Field, SecretStr, field_validator, model_validat
 from romulus.detect.netdef import EXTERNAL_SETTING, INTERNAL_SETTING, SiteNetworks, parse_networks
 
 SECRET_KEYS = ("PASSWORD", "API_KEY", "SECRET", "TOKEN")
+# OpenSearch's built-in superuser role (full cluster access, writes to every index).
+FULL_ACCESS_ROLE = "all_access"
+_BASE_PATH = re.compile(r"(/[A-Za-z0-9._~-]+)+")
 
 
 def parse_env_file(path: Path) -> dict[str, str]:
@@ -65,6 +69,9 @@ class Settings(BaseModel):
     es_ca_cert: str = ""
     es_verify_tls: bool = True
     es_index_patterns: list[str] = []
+    # OpenSearch only: names of the site's read-only roles. `romulus doctor` reports the account as read-only only
+    # when every role the security plugin lists for it is one of these; with none set it cannot say so.
+    es_read_only_roles: list[str] = []
     # gzip responses (the client's default); false asks for uncompressed ones, cheaper to read on a fast link
     es_compression: bool = True
     # fetch the sweep's next partition on one background thread while the current one is evaluated; off by
@@ -96,6 +103,10 @@ class Settings(BaseModel):
     arkime_username: str = ""
     arkime_password: SecretStr = SecretStr("")
     arkime_verify_tls: bool = True
+    # A viewer published under a path prefix behind a proxy (e.g. /arkime), and how it authenticates: digest is the
+    # viewer's own scheme; basic is what an authenticating reverse proxy in front of it usually asks for.
+    arkime_base_path: str = ""
+    arkime_auth: Literal["digest", "basic"] = "digest"
 
     pcap_allowed_dirs: list[Path] = []
     tshark_bin: str = "tshark"
@@ -132,7 +143,7 @@ class Settings(BaseModel):
     external_networks: list[str] = []
 
     @field_validator("es_index_patterns", "pcap_allowed_dirs", "model_local_hosts", "internal_networks",
-                     "external_networks", mode="before")
+                     "external_networks", "es_read_only_roles", mode="before")
     @classmethod
     def _split(cls, v):
         if isinstance(v, str):
@@ -144,6 +155,33 @@ class Settings(BaseModel):
     def _flavor(cls, v: str) -> str:
         if v not in ("elasticsearch", "opensearch"):
             raise ValueError("ES_FLAVOR must be elasticsearch or opensearch")
+        return v
+
+    @field_validator("es_read_only_roles")
+    @classmethod
+    def _read_only_roles(cls, v: list[str]) -> list[str]:
+        roles = [role.strip() for role in v]
+        if any(not role or any(ch.isspace() for ch in role) for role in roles):
+            raise ValueError("ES_READ_ONLY_ROLES must be comma-separated role names without spaces")
+        # OpenSearch's built-in superuser role grants writes to every index: it can never prove read-only access
+        if FULL_ACCESS_ROLE in roles:
+            raise ValueError(f"ES_READ_ONLY_ROLES must not name {FULL_ACCESS_ROLE}, which can write to every index")
+        return roles
+
+    @field_validator("arkime_base_path")
+    @classmethod
+    def _arkime_base_path(cls, v: str) -> str:
+        # one or more plain path segments; no query, fragment, encoding or dot segments can reach the viewer URL
+        path = v.strip().rstrip("/")
+        if path and (not _BASE_PATH.fullmatch(path) or any(seg in (".", "..") for seg in path.split("/"))):
+            raise ValueError("ARKIME_BASE_PATH must be empty or a path such as /arkime (letters, digits, . _ ~ -)")
+        return path
+
+    @field_validator("arkime_auth", mode="before")
+    @classmethod
+    def _arkime_auth(cls, v: str) -> str:
+        if v not in ("digest", "basic"):
+            raise ValueError("ARKIME_AUTH must be digest or basic")
         return v
 
     @field_validator("agent_mode", mode="before")
@@ -221,6 +259,7 @@ ENV_MAP = {
     "ES_URL": "es_url", "ES_FLAVOR": "es_flavor", "ES_USERNAME": "es_username", "ES_PASSWORD": "es_password",
     "ES_API_KEY": "es_api_key", "ES_CA_CERT": "es_ca_cert", "ES_VERIFY_TLS": "es_verify_tls",
     "ES_INDEX_PATTERNS": "es_index_patterns", "ES_COMPRESSION": "es_compression",
+    "ES_READ_ONLY_ROLES": "es_read_only_roles",
     "ROMULUS_SWEEP_PREFETCH": "sweep_prefetch",
     "ROMULUS_STAGE_DIR": "stage_dir", "ROMULUS_STATE_DISK_GB": "state_disk_gb", "ROMULUS_STATE_DISK_RESERVE_GB": "state_disk_reserve_gb",
     "ROMULUS_STATE_MEMORY_MB": "state_memory_mb", "ROMULUS_BASELINE_RETAIN_DISK_GB": "baseline_retain_disk_gb",
@@ -228,7 +267,7 @@ ENV_MAP = {
     "ROMULUS_EXPANSION_MAX_SOURCE_QUERIES": "expansion_max_source_queries",
     "ROMULUS_EXPANSION_WALL_CLOCK_MINUTES": "expansion_wall_clock_minutes",
     "ARKIME_URL": "arkime_url", "ARKIME_USERNAME": "arkime_username", "ARKIME_PASSWORD": "arkime_password",
-    "ARKIME_VERIFY_TLS": "arkime_verify_tls",
+    "ARKIME_VERIFY_TLS": "arkime_verify_tls", "ARKIME_BASE_PATH": "arkime_base_path", "ARKIME_AUTH": "arkime_auth",
     "PCAP_ALLOWED_DIRS": "pcap_allowed_dirs", "TSHARK_BIN": "tshark_bin", "MISSION_TIMEZONE": "mission_timezone",
     "ROMULUS_ALLOW_PRIVILEGED_SOURCE_ACCOUNT": "allow_privileged_source_account",
     "AGENT_MODE": "agent_mode",

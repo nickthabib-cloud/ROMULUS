@@ -3,7 +3,8 @@
 Read-only and bounded by construction:
 
 - Arkime: only `GET /api/sessions/pcap?ids=...` for validated session ids, at most 20 per request, streamed to a
-  private file with a byte cap. Never an expression export, never a free-text query.
+  private file with a byte cap. Never an expression export, never a free-text query. The viewer may sit under a
+  base path behind a proxy and use digest or basic authentication; the endpoint allowlist is the same either way.
 - TShark: an argv list (no shell), a path that must resolve inside an allowed directory, a display filter and
   field list chosen from fixed tables in this module (never from telemetry, users or a model), reassembly
   preferences pinned per query so a site's TShark profile cannot change what is seen, a timeout that kills the
@@ -156,14 +157,46 @@ class TcpStreams:
         return out
 
 
+# The viewer endpoints ROMULUS calls, relative to the viewer's base: the packet download and, from `romulus doctor`,
+# one read of the session list. Both are GETs; nothing else is ever sent.
+ARKIME_ENDPOINTS = frozenset({("GET", "/api/sessions/pcap"), ("GET", "/api/sessions")})
+
+
+def check_arkime_endpoint(method: str, path: str) -> None:
+    if (method.upper(), path) not in ARKIME_ENDPOINTS:
+        raise PacketError(f"refused non-allowlisted Arkime request {method.upper()} {path}")
+
+
+def arkime_base_url(s: Settings) -> str:
+    """ARKIME_URL plus ARKIME_BASE_PATH: a viewer behind a proxy is often published under a prefix. Malcolm's nginx,
+    for one, serves it at /arkime (`location /arkime` in cisagov/Malcolm nginx/nginx.conf, with `webBasePath=/arkime/`
+    in arkime/etc/config.ini)."""
+    return s.arkime_url.rstrip("/") + s.arkime_base_path
+
+
+def arkime_auth(s: Settings) -> httpx.Auth:
+    """Digest is the viewer's own scheme. Basic is what an authenticating proxy in front of it asks for: Malcolm's
+    nginx uses `auth_basic` against its htpasswd file (nginx/nginx_auth_basic.conf) or `auth_ldap`
+    (nginx/nginx_auth_ldap.conf), and passes the user on to Arkime in a header."""
+    password = s.arkime_password.get_secret_value()
+    if s.arkime_auth == "basic":
+        return httpx.BasicAuth(s.arkime_username, password)
+    return httpx.DigestAuth(s.arkime_username, password)
+
+
+def arkime_client(s: Settings, transport: httpx.BaseTransport | None = None, timeout: float = 120) -> httpx.Client:
+    """An HTTP client for the viewer: its base URL and path, authentication and TLS verification. Callers send only
+    requests that pass `check_arkime_endpoint`."""
+    return httpx.Client(base_url=arkime_base_url(s), timeout=timeout, transport=transport,
+                        verify=s.arkime_verify_tls, auth=arkime_auth(s))
+
+
 class ArkimePackets:
     """Fetches packets for explicit Arkime session ids. Read-only: GET on one endpoint only."""
 
     def __init__(self, s: Settings, transport: httpx.BaseTransport | None = None, max_bytes: int = 32 * 1024 * 1024):
         self.max_bytes = max_bytes
-        self.http = httpx.Client(base_url=s.arkime_url.rstrip("/"), timeout=120, transport=transport,
-                                 verify=s.arkime_verify_tls,
-                                 auth=httpx.DigestAuth(s.arkime_username, s.arkime_password.get_secret_value()))
+        self.http = arkime_client(s, transport=transport)
 
     def close(self) -> None:
         self.http.close()
@@ -184,6 +217,7 @@ class ArkimePackets:
         if bad:
             raise PacketError(f"refusing invalid Arkime session id(s): {bad[:3]}")
         total, capped = 0, False
+        check_arkime_endpoint("GET", "/api/sessions/pcap")
         try:
             with self.http.stream("GET", "/api/sessions/pcap", params={"ids": ",".join(ids)}) as r:
                 if r.status_code == 403:

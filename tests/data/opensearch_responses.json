@@ -1,0 +1,265 @@
+{
+  "root_opensearch_2.3.0": {
+    "request": "GET /",
+    "status": 200,
+    "body": {
+      "name": "node-1",
+      "cluster_name": "example-cluster",
+      "cluster_uuid": "c3ludGhldGljLXV1aWQtMDE",
+      "version": {
+        "distribution": "opensearch",
+        "number": "2.3.0",
+        "build_type": "tar",
+        "build_hash": "0000000000000000000000000000000000000001",
+        "build_date": "2022-09-14T00:00:00.000000Z",
+        "build_snapshot": false,
+        "lucene_version": "9.3.0",
+        "minimum_wire_compatibility_version": "7.10.0",
+        "minimum_index_compatibility_version": "7.0.0"
+      },
+      "tagline": "The OpenSearch Project: https://opensearch.org/"
+    }
+  },
+  "root_opensearch_2.11.1": {
+    "request": "GET /",
+    "status": 200,
+    "body": {
+      "name": "node-1",
+      "cluster_name": "example-cluster",
+      "cluster_uuid": "c3ludGhldGljLXV1aWQtMDI",
+      "version": {
+        "distribution": "opensearch",
+        "number": "2.11.1",
+        "build_type": "tar",
+        "build_hash": "0000000000000000000000000000000000000002",
+        "build_date": "2023-11-29T00:00:00.000000Z",
+        "build_snapshot": false,
+        "lucene_version": "9.7.0",
+        "minimum_wire_compatibility_version": "7.10.0",
+        "minimum_index_compatibility_version": "7.0.0"
+      },
+      "tagline": "The OpenSearch Project: https://opensearch.org/"
+    }
+  },
+  "root_opensearch_3.3.0": {
+    "request": "GET /",
+    "status": 200,
+    "body": {
+      "name": "node-1",
+      "cluster_name": "example-cluster",
+      "cluster_uuid": "c3ludGhldGljLXV1aWQtMDM",
+      "version": {
+        "distribution": "opensearch",
+        "number": "3.3.0",
+        "build_type": "tar",
+        "build_hash": "0000000000000000000000000000000000000003",
+        "build_date": "2025-10-14T00:00:00.000000Z",
+        "build_snapshot": false,
+        "lucene_version": "10.3.0",
+        "minimum_wire_compatibility_version": "2.19.0",
+        "minimum_index_compatibility_version": "2.0.0"
+      },
+      "tagline": "The OpenSearch Project: https://opensearch.org/"
+    }
+  },
+  "root_opensearch_compat_7.10.2": {
+    "request": "GET /",
+    "status": 200,
+    "body": {
+      "name": "node-1",
+      "cluster_name": "example-cluster",
+      "cluster_uuid": "c3ludGhldGljLXV1aWQtMDQ",
+      "version": {
+        "distribution": "opensearch",
+        "number": "7.10.2",
+        "build_type": "tar",
+        "build_hash": "0000000000000000000000000000000000000004",
+        "build_date": "2023-11-29T00:00:00.000000Z",
+        "build_snapshot": false,
+        "lucene_version": "9.7.0",
+        "minimum_wire_compatibility_version": "7.10.0",
+        "minimum_index_compatibility_version": "7.0.0"
+      },
+      "tagline": "The OpenSearch Project: https://opensearch.org/"
+    }
+  },
+  "root_elasticsearch_8.15.0": {
+    "request": "GET /",
+    "status": 200,
+    "body": {
+      "name": "node-1",
+      "cluster_name": "example-cluster",
+      "cluster_uuid": "c3ludGhldGljLXV1aWQtMDU",
+      "version": {
+        "number": "8.15.0",
+        "build_flavor": "default",
+        "build_type": "docker",
+        "build_hash": "0000000000000000000000000000000000000005",
+        "build_date": "2024-08-05T00:00:00.000000000Z",
+        "build_snapshot": false,
+        "lucene_version": "9.11.1",
+        "minimum_wire_compatibility_version": "7.17.0",
+        "minimum_index_compatibility_version": "7.0.0"
+      },
+      "tagline": "You Know, for Search"
+    }
+  },
+  "root_elasticsearch_7.17.0": {
+    "request": "GET /",
+    "status": 200,
+    "body": {
+      "name": "node-1",
+      "cluster_name": "example-cluster",
+      "cluster_uuid": "c3ludGhldGljLXV1aWQtMDY",
+      "version": {
+        "number": "7.17.0",
+        "build_flavor": "default",
+        "build_type": "docker",
+        "build_hash": "0000000000000000000000000000000000000006",
+        "build_date": "2022-01-28T00:00:00.000000000Z",
+        "build_snapshot": false,
+        "lucene_version": "8.11.1",
+        "minimum_wire_compatibility_version": "6.8.0",
+        "minimum_index_compatibility_version": "6.0.0-beta1"
+      },
+      "tagline": "You Know, for Search"
+    }
+  },
+  "authinfo_read_only_roles": {
+    "request": "GET /_plugins/_security/authinfo",
+    "status": 200,
+    "body": {
+      "user": "User [name=hunt_reader, backend_roles=[analysts], requestedTenant=null]",
+      "user_name": "hunt_reader",
+      "user_requested_tenant": null,
+      "remote_address": "192.0.2.10:50514",
+      "backend_roles": ["analysts"],
+      "custom_attribute_names": [],
+      "roles": ["readall", "site_reader"],
+      "tenants": {"hunt_reader": true},
+      "principal": null,
+      "peer_certificates": "0",
+      "sso_logout_url": null
+    }
+  },
+  "authinfo_unlisted_role": {
+    "request": "GET /_plugins/_security/authinfo",
+    "status": 200,
+    "body": {
+      "user": "User [name=hunt_reader, backend_roles=[], requestedTenant=null]",
+      "user_name": "hunt_reader",
+      "user_requested_tenant": null,
+      "remote_address": "192.0.2.10:50514",
+      "backend_roles": [],
+      "custom_attribute_names": [],
+      "roles": ["own_index", "readall"],
+      "tenants": {"hunt_reader": true},
+      "principal": null,
+      "peer_certificates": "0",
+      "sso_logout_url": null
+    }
+  },
+  "authinfo_all_access": {
+    "request": "GET /_plugins/_security/authinfo",
+    "status": 200,
+    "body": {
+      "user": "User [name=admin, backend_roles=[admin], requestedTenant=null]",
+      "user_name": "admin",
+      "user_requested_tenant": null,
+      "remote_address": "192.0.2.10:50514",
+      "backend_roles": ["admin"],
+      "custom_attribute_names": [],
+      "roles": ["all_access", "own_index"],
+      "tenants": {"global_tenant": true, "admin_tenant": true, "admin": true},
+      "principal": null,
+      "peer_certificates": "0",
+      "sso_logout_url": null
+    }
+  },
+  "authinfo_no_roles": {
+    "request": "GET /_plugins/_security/authinfo",
+    "status": 200,
+    "body": {
+      "user": "User [name=hunt_reader, backend_roles=[], requestedTenant=null]",
+      "user_name": "hunt_reader",
+      "user_requested_tenant": null,
+      "remote_address": "192.0.2.10:50514",
+      "backend_roles": [],
+      "custom_attribute_names": [],
+      "roles": [],
+      "tenants": {},
+      "principal": null,
+      "peer_certificates": "0",
+      "sso_logout_url": null
+    }
+  },
+  "security_absent_no_handler": {
+    "request": "GET /_plugins/_security/authinfo",
+    "status": 400,
+    "body": {"error": "no handler found for uri [/_plugins/_security/authinfo] and method [GET]"}
+  },
+  "security_absent_proxy_not_found": {
+    "request": "GET /_plugins/_security/authinfo",
+    "status": 404,
+    "headers": {"Content-Type": "text/html"},
+    "text": "<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>nginx</center>\r\n</body>\r\n</html>\r\n"
+  },
+  "security_unauthorized": {
+    "request": "GET /_plugins/_security/authinfo",
+    "status": 401,
+    "headers": {"Content-Type": "text/plain; charset=UTF-8", "WWW-Authenticate": "Basic realm=\"OpenSearch Security\""},
+    "text": "Unauthorized"
+  },
+  "resolve_index": {
+    "request": "GET /_resolve/index/arkime_sessions3-*",
+    "status": 200,
+    "body": {
+      "indices": [{"name": "arkime_sessions3-241118", "attributes": ["open"]}],
+      "aliases": [],
+      "data_streams": []
+    }
+  },
+  "field_caps": {
+    "request": "GET /arkime_sessions3-241118/_field_caps?fields=*&filter_path=fields.*.*",
+    "status": 200,
+    "body": {
+      "fields": {
+        "@timestamp": {"date": {"type": "date", "searchable": true, "aggregatable": true}},
+        "firstPacket": {"date": {"type": "date", "searchable": true, "aggregatable": true}},
+        "event.provider": {"keyword": {"type": "keyword", "searchable": true, "aggregatable": true}},
+        "event.dataset": {"keyword": {"type": "keyword", "searchable": true, "aggregatable": true}},
+        "source.ip": {"ip": {"type": "ip", "searchable": true, "aggregatable": true}},
+        "destination.port": {"long": {"type": "long", "searchable": true, "aggregatable": true}},
+        "rule.name": {"keyword": {"type": "keyword", "searchable": true, "aggregatable": true}}
+      }
+    }
+  },
+  "pit_open": {
+    "request": "POST /arkime_sessions3-241118/_search/point_in_time?keep_alive=2m&allow_partial_pit_creation=false&filter_path=pit_id",
+    "status": 200,
+    "body": {"pit_id": "c3ludGhldGljLXBpdC0x"}
+  },
+  "pit_search_page": {
+    "request": "POST /_search?filter_path=...",
+    "status": 200,
+    "body": {
+      "pit_id": "c3ludGhldGljLXBpdC0x",
+      "timed_out": false,
+      "_shards": {"failed": 0},
+      "hits": {
+        "total": {"value": 2, "relation": "eq"},
+        "hits": [
+          {"_index": "arkime_sessions3-241118", "_id": "r1", "_source": {"event": {"provider": "suricata", "dataset": "flow"}},
+           "sort": ["2024-11-18T14:00:00.000Z", 1]},
+          {"_index": "arkime_sessions3-241118", "_id": "r2", "_source": {"event": {"provider": "suricata", "dataset": "alert"}},
+           "sort": ["2024-11-18T14:00:01.000Z", 2]}
+        ]
+      }
+    }
+  },
+  "pit_close": {
+    "request": "DELETE /_search/point_in_time?filter_path=pits.successful",
+    "status": 200,
+    "body": {"pits": [{"successful": true}]}
+  }
+}

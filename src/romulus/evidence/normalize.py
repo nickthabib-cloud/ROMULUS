@@ -1721,13 +1721,22 @@ def _suricata_community_id(eve: dict, o: str):
 
 
 def normalize_suricata(hit: dict) -> TypedEvent:
-    src, nid, ref = hit["_source"], hit["_id"], _ref(hit)
+    src, nid = hit["_source"], hit["_id"]
     try:
         eve = json.loads(_get(src, "event.original") or src.get("message") or "")
     except json.JSONDecodeError as e:
         raise ValueError(f"suricata event.original is not JSON: {e}") from e
+    return _suricata_event(hit, eve, f"{nid}:event.original#eve")
+
+
+def _suricata_event(hit: dict, eve: dict, o: str, *, origins: dict[str, str] | None = None,
+                    caveats: list[str] | None = None, malformed: list[str] | None = None,
+                    host: str | None = None) -> TypedEvent:
+    """The typed event of one EVE record. `o` prefixes every origin (the EVE record's own location); `origins`
+    replaces the origin of typed fields whose value was read from somewhere else, and `caveats` and `malformed`
+    are what the caller already found."""
+    src, ref = hit["_source"], _ref(hit)
     et = eve.get("event_type")
-    o = f"{nid}:event.original#eve"
     f = {"source.ip": fv(eve.get("src_ip"), f"{o}.src_ip"), "destination.ip": fv(eve.get("dest_ip"), f"{o}.dest_ip"),
          "source.port": fv(eve.get("src_port"), f"{o}.src_port"),
          "destination.port": fv(eve.get("dest_port"), f"{o}.dest_port"),
@@ -1751,7 +1760,7 @@ def normalize_suricata(hit: dict) -> TypedEvent:
               "state"):
         if k in flow:
             f[f"flow.{k}"] = fv(flow[k], f"{o}.flow.{k}")
-    bad: list[str] = []
+    bad: list[str] = list(malformed or [])
     for typed, native in (("icmp.type", "icmp_type"), ("icmp.code", "icmp_code")):
         number = _icmp_number(eve.get(native), typed, bad)
         if number is not None:
@@ -1768,7 +1777,7 @@ def normalize_suricata(hit: dict) -> TypedEvent:
             value = _scalar_str(tcp.get(name), f"tcp.{name}", bad)
             if value is not None:
                 f[f"tcp.{name}"] = fv(value, f"{o}.tcp.{name}")
-    caveats: list[str] = []
+    caveats = list(caveats or [])
     d = _app_block(eve, "dns")
     if d is not None:
         f.update(_suricata_dns(d, o, bad))
@@ -1793,9 +1802,208 @@ def normalize_suricata(hit: dict) -> TypedEvent:
         f["file.name"] = fv(fi.get("filename"), f"{o}.fileinfo.filename")
         f["file.size"] = fv(fi.get("size"), f"{o}.fileinfo.size")
     ts = _ts(eve["timestamp"]) if eve.get("timestamp") else _ts(src["@timestamp"])
-    return TypedEvent(id=event_id(family, [ref]), family=family, ts=ts, host=_get(src, "host.name"),
-                      fields={k: v for k, v in f.items() if v.value is not None}, raw=[ref],
-                      normalizer=NORMALIZER_VERSION, caveats=caveats)
+    fields = {k: v for k, v in f.items() if v.value is not None}
+    for name, origin in (origins or {}).items():
+        if name in fields:
+            fields[name] = fv(fields[name].value, origin)
+    return TypedEvent(id=event_id(family, [ref]), family=family, ts=ts,
+                      host=_get(src, "host.name") if host is None else host,
+                      fields=fields, raw=[ref], normalizer=NORMALIZER_VERSION, caveats=caveats)
+
+
+# ---------------------------------------------------------------------------------------------
+# Suricata EVE as Malcolm indexes it
+# ---------------------------------------------------------------------------------------------
+# Malcolm (cisagov/Malcolm, Apache-2.0) parses each EVE line in Logstash and indexes the parsed record without the
+# line: logstash/pipelines/suricata/11_suricata_logs.conf parses `message` into `suricata.*`, and
+# logstash/pipelines/enrichment/98_finalize.conf removes `message`; `event.original` is never written. The layout
+# read here (as of commit c6160d8e3101c017a45df9d40504ece3da047f43):
+# - event.provider is "suricata"; event.dataset is the bare event_type ("alert", "flow", ...).
+# - Moved: src_ip, dest_ip, src_port, dest_port to source.ip, destination.ip, source.port, destination.port;
+#   proto to network.transport (lowercased); community_id to network.community_id; alert.signature and
+#   alert.signature_id to rule.name and rule.id; tls.version to tls.version; tls.ja3.hash, tls.ja3s.hash and
+#   tls.ja4.hash to tls.client.ja3, tls.server.ja3s and tls.client.ja4.
+# - rule.category starts with alert.category (or, without one, alert.metadata.former_category); a MITRE tactic
+#   name, technique name or framework may follow. alert.metadata.mitre_technique_id becomes threat.technique.id
+#   (the parent ids) and threat.technique.subtechnique.id (the dotted ids).
+# - network.protocol starts with app_proto, then app_proto_orig/_expected/_tc/_ts and anomaly.app_proto; while it
+#   is still empty, names inferred from the app-layer blocks present (and "icmp" from ICMP fields), else
+#   tls.from_proto, are put in it; tunnel.proto is appended. enrichment/96_make_unique.conf then removes duplicates
+#   (first occurrences kept), removes "failed", and renames dcerpc, ftp-data and krb5 to dce_rpc, ftp and krb.
+# - Everything else the EVE normalizer reads stays under suricata.* (flow_id, timestamp, flow, netflow, tcp, dns,
+#   http, fileinfo, ssh, tls, icmp_type, icmp_code, alert.severity, alert.action, alert.metadata); timestamp,
+#   flow.start/end and tls.notbefore/notafter are rewritten as ISO-8601 times by 13_suricata_convert.conf.
+# - A record whose app_proto_ts or app_proto_tc is "failed" loses suricata.http and suricata.tls (and suricata.dns
+#   when app_proto_ts is), tagged proto_parse_failed; a record with no timestamp is given the ingest time, tagged
+#   _missing_timestamp.
+
+MALCOLM_NO_APP_PROTO_CAVEAT = (
+    "Malcolm removes the value 'failed' from network.protocol: no application protocol on this record means "
+    "Suricata identified none or reported its protocol detection 'failed'")
+MALCOLM_FTP_CAVEAT = (
+    "Malcolm writes Suricata's ftp and ftp-data both as 'ftp': which of the two Suricata identified on this "
+    "connection is not stated, so no application protocol is typed")
+MALCOLM_PARSE_FAILED_CAVEAT = (
+    "Malcolm drops the http and tls blocks (and the dns block, when the client side failed) of a record whose "
+    "protocol parsing failed: fields from them are not typed")
+MALCOLM_MISSING_TIMESTAMP_CAVEAT = (
+    "Malcolm found no Suricata timestamp on this record and gave it the time Malcolm ingested it")
+# Malcolm's renames that each name a single Suricata protocol, reversed. "ftp" stands for ftp or ftp-data.
+_MALCOLM_PROTOCOL_ORIGINAL = {"dce_rpc": "dcerpc", "krb": "krb5"}
+_MALCOLM_PROTOCOL_RENAMED = {"dcerpc": "dce_rpc", "ftp-data": "ftp", "krb5": "krb"}
+# EVE event types that carry app_proto once Suricata identified a protocol (Suricata's EVE format documentation:
+# "When an application layer protocol event is detected, the common section will have an app_proto field"; its
+# http, dns, tls and ssh records carry none).
+_EVE_APP_PROTO_TYPES = frozenset({"alert", "flow", "netflow", "fileinfo"})
+# What Malcolm adds to network.protocol after app_proto. Suricata writes the app_proto_* fields only when they
+# differ from app_proto, so a first value found among these means the record had no app_proto.
+_MALCOLM_AFTER_APP_PROTO = ("app_proto_orig", "app_proto_expected", "app_proto_tc", "app_proto_ts", "anomaly.app_proto",
+                            "tls.from_proto", "tunnel.proto")
+_MALCOLM_MOVED = (("src_ip", "source.ip", "source.ip"), ("dest_ip", "destination.ip", "destination.ip"),
+                  ("src_port", "source.port", "source.port"), ("dest_port", "destination.port", "destination.port"),
+                  ("proto", "network.transport", "network.transport"))
+_MALCOLM_MOVED_TLS = (("version", "tls.version"), ("ja3", "tls.client.ja3"), ("ja3s", "tls.server.ja3s"),
+                      ("ja4", "tls.client.ja4"))
+
+
+def is_malcolm_suricata(src: dict) -> bool:
+    """A Suricata record as Malcolm indexes it: provider "suricata" and a bare event type as the dataset."""
+    dataset = _get(src, "event.dataset")
+    return (_get(src, "event.provider") == "suricata"
+            and not (isinstance(dataset, str) and dataset.startswith("suricata.")))
+
+
+def normalize_malcolm_suricata(hit: dict) -> TypedEvent:
+    """A Suricata record as Malcolm indexes it, normalized to the typed event of the same EVE record: from the EVE
+    line when the record still carries it, otherwise from the places Malcolm moved each EVE field to, which every
+    typed field's origin names. The sensor is host.name, else Malcolm's `node`."""
+    src, nid = hit["_source"], hit["_id"]
+    node = src.get("node")
+    host = _get(src, "host.name") or (node if isinstance(node, str) and node else None)
+    raw = _get(src, "event.original") or src.get("message")
+    if raw:
+        try:
+            eve = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"suricata event.original is not JSON: {e}") from e
+        return _suricata_event(hit, eve, f"{nid}:event.original#eve", host=host)
+    eve, origins, caveats, malformed = _malcolm_eve(src, nid)
+    return _suricata_event(hit, eve, f"{nid}:suricata", origins=origins, caveats=caveats, malformed=malformed,
+                           host=host)
+
+
+def _ordered_strings(value, path: str, bad: list[str]) -> list[str] | None:
+    """A string-or-array-of-strings field in its own order, duplicates removed; None when absent."""
+    if _absent(value):
+        return None
+    items = value if isinstance(value, list) else [value]
+    if not all(isinstance(item, str) for item in items):
+        bad.append(path)
+        return None
+    return list(dict.fromkeys(item for item in items if item)) or None
+
+
+def _malcolm_app_proto(src: dict, s: dict, dataset: str, bad: list[str]) -> tuple[str | None, str | None]:
+    """EVE app_proto read back from Malcolm's network.protocol, and the caveat when it cannot be."""
+    protocols = _ordered_strings(_get(src, "network.protocol"), "network.protocol", bad)
+    if "network.protocol" in bad or dataset not in _EVE_APP_PROTO_TYPES:
+        return None, None
+    if not protocols:
+        return None, MALCOLM_NO_APP_PROTO_CAVEAT
+    head = protocols[0]
+    later = set()
+    for path in _MALCOLM_AFTER_APP_PROTO:
+        value = _get(s, path)
+        for item in value if isinstance(value, list) else [value]:
+            if isinstance(item, str) and item:
+                later.add(_MALCOLM_PROTOCOL_RENAMED.get(item.lower(), item.lower()))
+    if head == "icmp":
+        # inferred from the record's ICMP fields: Suricata has no ICMP application protocol, so none was written
+        return None, None
+    if head in later:
+        return None, MALCOLM_NO_APP_PROTO_CAVEAT
+    if head == "ftp":
+        return None, MALCOLM_FTP_CAVEAT
+    return _MALCOLM_PROTOCOL_ORIGINAL.get(head, head), None
+
+
+def _malcolm_techniques(src: dict, bad: list[str]) -> list[str] | None:
+    """alert.metadata.mitre_technique_id read back from threat.technique.id and .subtechnique.id: every dotted id,
+    then every parent id not implied by one of them (a parent listed beside its own sub-technique is not kept)."""
+    parents = _ordered_strings(_get(src, "threat.technique.id"), "threat.technique.id", bad)
+    subs = _ordered_strings(_get(src, "threat.technique.subtechnique.id"), "threat.technique.subtechnique.id", bad)
+    if parents is None and subs is None:
+        return None
+    implied = {sub.split(".", 1)[0] for sub in subs or []}
+    return (subs or []) + [parent for parent in parents or [] if parent not in implied]
+
+
+def _malcolm_eve(src: dict, nid: str) -> tuple[dict, dict[str, str], list[str], list[str]]:
+    """(EVE record, typed-field origins for values read outside suricata.*, caveats, malformed native paths)."""
+    s = src.get("suricata")
+    if not isinstance(s, dict):
+        raise TypeError("Malcolm suricata record has no suricata object")
+    dataset = _get(src, "event.dataset")
+    if not isinstance(dataset, str) or not dataset:
+        raise ValueError(f"Malcolm suricata event.dataset is {type(dataset).__name__}, not one event type")
+    eve = {**s, "event_type": dataset}
+    eve.pop("app_proto", None)
+    origins: dict[str, str] = {}
+    caveats: list[str] = []
+    bad: list[str] = []
+    for key, path, typed in _MALCOLM_MOVED:
+        value = _get(src, path)
+        if value is not None:
+            eve[key] = value
+            origins[typed] = f"{nid}:{path}"
+    written = _get(src, "network.community_id")
+    if written not in (None, ""):
+        eve["community_id"] = written
+        origins["network.community_id"] = f"{nid}:network.community_id"
+    else:
+        origins["network.community_id"] = (f"{nid}:source.ip+source.port+destination.ip+destination.port+"
+                                           f"network.transport#computed:community_id_v1")
+    app_proto, caveat = _malcolm_app_proto(src, s, dataset, bad)
+    if app_proto is not None:
+        eve["app_proto"] = app_proto
+        origins["network.app_proto"] = f"{nid}:network.protocol#derived:app_proto"
+    if caveat:
+        caveats.append(caveat)
+    if dataset == "alert" or "alert" in s:
+        alert = s.get("alert", {})
+        if isinstance(alert, dict):
+            alert = dict(alert)
+            for key, path in (("signature", "rule.name"), ("signature_id", "rule.id")):
+                value = _get(src, path)
+                if value is not None:
+                    alert[key] = value
+                    origins[f"alert.{key}"] = f"{nid}:{path}"
+            categories = _ordered_strings(_get(src, "rule.category"), "rule.category", bad)
+            if categories:
+                alert["category"] = categories[0]
+                origins["alert.category"] = f"{nid}:rule.category#derived:first-value"
+            techniques = _malcolm_techniques(src, bad)
+            metadata = alert.get("metadata") or {}
+            if techniques and isinstance(metadata, dict):
+                alert["metadata"] = {**metadata, "mitre_technique_id": techniques}
+                origins["alert.mitre_technique_id"] = (f"{nid}:threat.technique.subtechnique.id+threat.technique.id"
+                                                       f"#derived:technique-ids")
+        eve["alert"] = alert
+    moved_tls = {key: _get(src, path) for key, path in _MALCOLM_MOVED_TLS if _get(src, path) is not None}
+    if moved_tls:
+        block = s.get("tls", {})
+        if isinstance(block, dict):
+            eve["tls"] = {**block, **moved_tls}
+            origins.update({f"tls.{key}": f"{nid}:{path}" for key, path in _MALCOLM_MOVED_TLS if key in moved_tls})
+    if "flow" not in s and isinstance(s.get("netflow"), dict):
+        origins.update({f"flow.{key}": f"{nid}:suricata.netflow.{key}" for key in s["netflow"]})
+    tags = src.get("tags")
+    tags = {t for t in (tags if isinstance(tags, list) else [tags]) if isinstance(t, str)}
+    if "proto_parse_failed" in tags:
+        caveats.append(MALCOLM_PARSE_FAILED_CAVEAT)
+    if "_missing_timestamp" in tags:
+        caveats.append(MALCOLM_MISSING_TIMESTAMP_CAVEAT)
+    return eve, origins, caveats, bad
 
 
 # ---------------------------------------------------------------------------------------------
@@ -2102,6 +2310,9 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                     known = {raw.key for raw in prior.raw}
                     prior.raw.extend(raw for raw in windows_event.raw if raw.key not in known)
                     skips["duplicate Windows event copy (computer/channel/record_id)"] += 1
+            elif is_malcolm_suricata(h["_source"]):
+                # before the Arkime shape: Malcolm adds Arkime's session fields to the Suricata rows it indexes
+                events.append(normalize_malcolm_suricata(h))
             elif not ds and is_arkime_session(h["_source"]):
                 ds = "arkime.session"
                 events.append(normalize_arkime_session(h))
