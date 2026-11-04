@@ -16,6 +16,7 @@ calls parsed from script text).
 from __future__ import annotations
 
 import ntpath
+import re
 from typing import ClassVar
 
 from romulus.detect.base import PredicateField
@@ -666,7 +667,7 @@ class ScriptHostRemoteOrWritable(WindowsProcessRule):
 
 class MsiexecRemotePackage(WindowsProcessRule):
     id = "win.msiexec_remote_package"
-    version = '6'
+    version = '7'
     title = "msiexec received a remote or writable package installation request"
     assures_negative = False
     positive_only_reason = ("the package source is read from argv; a window without a match proves nothing")
@@ -697,14 +698,23 @@ class MsiexecRemotePackage(WindowsProcessRule):
         packages = tuple(switch_operand(argv, ('i', 'package', 'a'), separators=(), short_attached=True))
         for token in packages:
             if is_remote_path(token):
+                url = bool(re.match(r'(?i)^(?:https?|ftp)://', token))
                 return [Hit('msiexec_remote', f'msiexec was asked to install a remote package ({clip(token)})',
-                            'high', 'high', self.attack, [parsed_field(event, token)],
+                            'high' if url else 'lead', 'high' if url else 'medium', self.attack, [parsed_field(event, token)],
                             content=f'msiexec:remote:{token}',
                             notes=('A package installation was requested; successful installation is not established.',))]
         for token in packages:
             if token.casefold().endswith('.msi') and (hit := _writable_operand(
                     event, token, 'msiexec', 'msiexec_writable_package', ('T1218.007',))):
                 return [hit]
+        install = any(token and token[0] in DASH_LIKE | {'/'} and
+                      re.match(r'(?i)^(?:i|package|a)(?:[:=]|$)', token[1:]) for token in argv[1:])
+        remote = next((token for token in argv[1:] if is_remote_path(token) or url_in(token)), None)
+        if install and remote:
+            return [Hit('msiexec_unbound_request', f'msiexec recorded an attempted or unbound remote installation request ({clip(remote)})',
+                        'lead', 'medium', self.attack, [parsed_field(event, remote)],
+                        content=f'msiexec:unbound:{remote}',
+                        notes=('An install switch and a remote token are recorded; the package operand and successful installation are not established.',))]
         return []
 
 

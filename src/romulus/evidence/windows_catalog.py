@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 
@@ -687,6 +688,9 @@ def lookup_event_class(channel: object, provider: object, event_id: object) -> W
     exact = _BY_KEY.get((channel.casefold(), provider.casefold(), numeric_id))
     if exact is not None:
         return exact
+    if (channel.casefold() == "security" and numeric_id == 33205
+            and re.fullmatch(r"mssql\$[^$]+\$audit", provider.casefold())):
+        return WindowsEventClass(channel, provider, numeric_id, "database_audit", _MSSQL_EVENTS[numeric_id], _SQL_DOC)
     if channel.casefold() == "application" and numeric_id in _MSSQL_EVENTS and (
             provider.casefold() in {"mssql", "mssqlserver"} or provider.casefold().startswith("mssql$")):
         return WindowsEventClass(channel, provider, numeric_id, "database_audit", _MSSQL_EVENTS[numeric_id], _SQL_DOC)

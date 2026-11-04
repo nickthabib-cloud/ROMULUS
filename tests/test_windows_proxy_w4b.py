@@ -26,7 +26,7 @@ def test_dash_like_registration_is_an_attempt_lead(dash, target):
 @pytest.mark.parametrize('switch', ['/i', '/I', '/package', '/PACKAGE'])
 @pytest.mark.parametrize('target,lane', [(r'C:\Users\alice\Downloads\setup.msi', 'lead'),
                                       ('https://example.test/setup.msi', 'high'),
-                                      (r'\\server\share\setup.msi', 'high')])
+                                      (r'\\server\share\setup.msi', 'lead')])
 def test_msi_operand_location_controls_lane(switch, target, lane):
     from romulus.detect.windows_proxy import MsiexecRemotePackage
     matches = run(MsiexecRemotePackage(), [proc('msiexec.exe', f'msiexec.exe {switch} "{target}"')])
@@ -206,10 +206,11 @@ def test_loopback_rdp_logon_native_scope(tmp_path, monkeypatch, source, lane):
     ('0.0.0.0/3389/deep', '192.0.2.2/3389'),
     ('0.0.0.0/3389', '192.0.2.2/70000'),
 ])
-def test_registry_forwarding_requires_an_exact_native_listener_target_row(listener, target):
+def test_registry_forwarding_unparsed_native_values_are_leads(listener, target):
     rule = future('windows_tunnels_w4', 'PortproxyConfiguration')()
     path = 'HKLM\\System\\CurrentControlSet\\Services\\PortProxy\\v4tov4\\tcp\\' + listener
-    assert not run(rule, [native(13, {'TargetObject': path, 'Details': target, 'EventType': 'SetValue'})])
+    [match] = run(rule, [native(13, {'TargetObject': path, 'Details': target, 'EventType': 'SetValue'})])
+    assert match.proposed_lane == 'lead'  # R2: every direct PortProxy value write is a lead.
 
 
 @pytest.mark.parametrize('image,port,expected', [

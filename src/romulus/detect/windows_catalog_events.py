@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import ClassVar
 
 from romulus.detect.windows_behavior import BehaviorFleetRule
@@ -167,7 +168,7 @@ class BootConfigIntegrityDisabled(WindowsEventRule):
 
 class NtdsDatabaseCopy(WindowsEventRule):
     id = 'win.ntds_database_copy'
-    version = '1'
+    version = '2'
     title = 'ESENT recorded an NTDS database lifecycle operation'
     families = ('ese_database',)
     windows_event_classes = tuple(('Application', 'ESENT', code) for code in (216, 325, 326, 327))
@@ -182,7 +183,9 @@ class NtdsDatabaseCopy(WindowsEventRule):
         if basename(event.get('ese.database_path')) != 'ntds.dit' or action not in {'created', 'attached', 'detached'}:
             return []
         fields = ('ese.database_path', 'ese.action', 'ese.pid')
-        high = action != 'detached'
+        path = str(event.get('ese.database_path') or '').replace('/', '\\').casefold()
+        live = bool(re.fullmatch(r'(?:[a-z]:\\windows|%systemroot%|%windir%)\\ntds\\ntds\.dit', path))
+        high = action == 'created' or action == 'attached' and not live
         return [signal(event, str(action), f'ESENT recorded an ntds.dit database {action} at '
             f'{_text(event, "ese.database_path")} by process pid {_text(event, "ese.pid")}',
             self.attack, fields, lane='high' if high else 'lead', severity='high' if high else 'medium',

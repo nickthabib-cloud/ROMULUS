@@ -8,6 +8,7 @@ from tests.windows_process_support import run
 
 @pytest.mark.parametrize('arguments', [
     '3389 192.0.2.10 3389 0.0.0.0',
+    '3389 192.0.2.10',  # R2: connectport defaults to listenport.
     'https 192.0.2.10 https 0.0.0.0 tcp',
     'listenport=https connectaddress=server.example.test connectport=https',
     'listenport=3389 192.0.2.10 3389',
@@ -29,7 +30,6 @@ def test_documented_portproxy_operands_publish_native_request(arguments):
     '3389 192.0.2.10 70000',
     '-invalid 192.0.2.10 https',
     '3389 192.0.2.10 https 0.0.0.0 udp',
-    '3389 192.0.2.10',
     'listenport=3389 connectaddress=192.0.2.10 connectport=3389 unexpected=value',
     'l=3389 connectaddress=192.0.2.10 connectport=3389',
     'listenport=3389 listenport=443 connectaddress=192.0.2.10 connectport=3389',

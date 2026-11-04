@@ -466,43 +466,26 @@ class Sweep:
         rdp_reader = any("remote_access" in (*rule.families, *rule.context_families) for rule in getattr(self, "pack", ()))
         class_searchable = all(contract.supports(field, "eq") for field in (
             "event.channel", "event.provider", "event.code"))
-        if rdp_reader and not class_searchable:
-            from romulus.hunt.windows_filters import RDP_CORE_CHANNEL
-
-            self._windows_inventory_reasons.setdefault(target, []).append(
-                "RdpCoreTS records not fetched: event-class mapping cannot safely exclude unscoped channel traffic")
-            families = {family for rule in getattr(self, "pack", ()) for family in (*rule.families, *rule.context_families)}
-            channels = sorted({event.channel for event in EVENT_CLASSES if event.family in families
-                               and event.channel.casefold() != RDP_CORE_CHANNEL.casefold()
-                               and (not wfp_reader or event.channel.casefold() != 'security')})
-            if channels and contract.supports('event.channel', 'in'):
-                return [[Predicate(field='event.channel', op='in', value=channels)]]
-            for field in ('event.channel', 'event.dataset', contract.time_field):
-                if contract.supports(field, 'exists') and contract.supports(field, 'missing'):
-                    return [[Predicate(field=field, op='exists'), Predicate(field=field, op='missing')]]
+        if (rdp_reader or wfp_reader) and not class_searchable:
+            reason = ("Windows event-class mapping cannot restrict WFP 5156/5158 or RdpCoreTS 131/132/148; "
+                      "base dataset/channel fallback accepts their volume; no Windows classes withheld.")
+            reasons = self._windows_inventory_reasons.setdefault(target, [])
+            if reason not in reasons:
+                reasons.append(reason)
         if rdp_reader and read_tokens is None and class_searchable:
             families = {family for rule in getattr(self, "pack", ()) for family in (*rule.families, *rule.context_families)}
             read_tokens = {event.token for event in EVENT_CLASSES if event.family in families}
-            self._windows_inventory_reasons.setdefault(target, []).append(
-                "Windows class inventory unavailable; RdpCoreTS retrieval uses explicitly declared classes")
+            reason = "Windows class inventory unavailable; RdpCoreTS retrieval uses explicitly declared classes"
+            reasons = self._windows_inventory_reasons.setdefault(target, [])
+            if reason not in reasons:
+                reasons.append(reason)
         if wfp_reader and read_tokens is None and class_searchable:
             families = {family for rule in getattr(self, "pack", ()) for family in (*rule.families, *rule.context_families)}
             read_tokens = {event.token for event in EVENT_CLASSES if event.family in families}
-            self._windows_inventory_reasons.setdefault(target, []).append(
-                "Windows class inventory unavailable; retrieval uses known class scopes, with dynamic providers unresolved")
-        if wfp_reader and not class_searchable:
-            self._windows_inventory_reasons.setdefault(target, []).append(
-                "Windows Security records not fetched: class mapping cannot safely exclude unscoped WFP traffic")
-            # Preserve other known channels when their identity can be queried. Security
-            # cannot be safely split into bounded reads under this incomplete contract.
-            families = {family for rule in getattr(self, "pack", ()) for family in (*rule.families, *rule.context_families)}
-            channels = sorted({event.channel for event in EVENT_CLASSES
-                               if event.family in families and event.channel.casefold() != "security"})
-            if channels and contract.supports("event.channel", "in"):
-                return [[Predicate(field="event.channel", op="in", value=channels)]]
-            for field in ("event.channel", "event.dataset", contract.time_field):
-                if contract.supports(field, "exists") and contract.supports(field, "missing"):
-                    return [[Predicate(field=field, op="exists"), Predicate(field=field, op="missing")]]
+            reason = "Windows class inventory unavailable; retrieval uses known class scopes, with dynamic providers unresolved"
+            reasons = self._windows_inventory_reasons.setdefault(target, [])
+            if reason not in reasons:
+                reasons.append(reason)
         if read_tokens is not None and all(contract.supports(field, "eq") for field in (
                 "event.channel", "event.provider", "event.code")):
             control_tokens = {
@@ -1744,7 +1727,8 @@ class Sweep:
                 rule_errors: list[Exception] = []
 
                 def consume_matches(pb=pb, scoped_events=scoped_events, before_eval=before_eval,
-                                    before_missing=before_missing, before_capped=before_capped):
+                                    before_missing=before_missing, before_capped=before_capped,
+                                    rule_errors=rule_errors):
                     nonlocal matched, consume_failure
                     try:
                         for match in pb.consume_scoped_partition(scoped_events):
@@ -1828,7 +1812,7 @@ class Sweep:
                 cells.append(self._cell(pb, target, pkey, state, matched, evaluated, detail))
             except INFRASTRUCTURE_ERRORS:
                 raise
-            except Exception as exc:  # noqa: BLE001 - one rule's defect must not cost the other rules
+            except Exception as exc:
                 if publish_errors and exc is publish_errors[0]:
                     raise
                 pb.bind_raw({})

@@ -67,13 +67,13 @@ def test_missing_channel_mapping_withholds_channel_chatter_and_names_partial():
 
 
 @pytest.mark.parametrize('missing', ['event.provider', 'event.code', 'inventory'])
-def test_missing_class_mapping_never_fetches_the_whole_rdp_channel(missing):
+def test_missing_class_mapping_preserves_base_fallback_and_names_volume(missing):
     sweep, contract, window = setup()
     if missing == 'inventory':
         sweep._windows_read_tokens.clear()
     else:
         contract.fields.pop(missing)
-    assert not fetched(sweep, contract, window, 148, 'rdpdr')
+    assert fetched(sweep, contract, window, 148, 'rdpdr') == (missing != 'inventory')
     assert sweep._windows_inventory_reasons[contract.target]
 
 

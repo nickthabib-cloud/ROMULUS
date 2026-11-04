@@ -42,7 +42,10 @@ UAC = [r'HKCU\Software\Classes\ms-settings\shell\open\command\(Default)',
 def test_native_uac_registry_targets(path, payload, lane):
     owner = rule('UacRegistryHijack')
     [match] = run(owner, [native(13, {'TargetObject': path, 'Details': payload})[0]])
-    assert match.proposed_lane == lane and 'registry' in match.claim.casefold()
+    # R2: routine App Paths payloads lead; any nonempty sensitive class command raises.
+    expected = ('lead' if path == UAC[2] else
+                'high' if path in UAC[:2] else lane)
+    assert match.proposed_lane == expected and 'registry' in match.claim.casefold()
     owner.release_state()
 
 

@@ -1288,7 +1288,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-auto-elevated-shell"></a>
 ### `win.auto_elevated_shell` — Elevated shell started by an elevation-associated parent
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1548.002`](https://attack.mitre.org/techniques/T1548/002/)
@@ -1612,7 +1612,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-injection-shaped-process-access"></a>
 ### `win.injection_shaped_process_access` — Process access combined memory-write and thread-creation rights
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1055`](https://attack.mitre.org/techniques/T1055/), [`T1055.012`](https://attack.mitre.org/techniques/T1055/012/)
@@ -1780,7 +1780,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-msiexec-remote-package"></a>
 ### `win.msiexec_remote_package` — msiexec received a remote or writable package installation request
 
-- Version: `6`; status: `active`
+- Version: `7`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1105`](https://attack.mitre.org/techniques/T1105/), [`T1218.007`](https://attack.mitre.org/techniques/T1218/007/)
@@ -1792,7 +1792,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-mssql-login-bruteforce"></a>
 ### `win.mssql_login_bruteforce` — SQL Server failed login concentration
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1110.001`](https://attack.mitre.org/techniques/T1110/001/), [`T1110.003`](https://attack.mitre.org/techniques/T1110/003/)
@@ -1852,7 +1852,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-ntds-database-copy"></a>
 ### `win.ntds_database_copy` — ESENT recorded an NTDS database lifecycle operation
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1003.003`](https://attack.mitre.org/techniques/T1003/003/)
@@ -1888,7 +1888,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-portproxy-configuration"></a>
 ### `win.portproxy_configuration` — Windows port-proxy configuration was requested or written
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1090.001`](https://attack.mitre.org/techniques/T1090/001/), [`T1572`](https://attack.mitre.org/techniques/T1572/)
@@ -1948,7 +1948,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-process-account-transition"></a>
 ### `win.process_account_transition` — A SYSTEM child records a different account than its GUID-associated parent
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1134.001`](https://attack.mitre.org/techniques/T1134/001/), [`T1134.002`](https://attack.mitre.org/techniques/T1134/002/)
@@ -2523,7 +2523,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-server-or-boot-process-child"></a>
 ### `win.server_or_boot_process_child` — A server or startup process created a code launcher
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1068`](https://attack.mitre.org/techniques/T1068/), [`T1505.001`](https://attack.mitre.org/techniques/T1505/001/), [`T1505.003`](https://attack.mitre.org/techniques/T1505/003/), [`T1546.008`](https://attack.mitre.org/techniques/T1546/008/), [`T1569.002`](https://attack.mitre.org/techniques/T1569/002/)
@@ -2630,7 +2630,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-uac-registry-hijack"></a>
 ### `win.uac_registry_hijack` — Per-user elevation-associated registry target changed
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1548.002`](https://attack.mitre.org/techniques/T1548/002/)

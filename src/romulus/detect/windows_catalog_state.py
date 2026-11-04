@@ -12,7 +12,7 @@ from typing import ClassVar
 from romulus.detect.base import Match, Playbook, pf
 from romulus.detect.bounded import StateExhausted
 from romulus.detect.windows_behavior import BehaviorFleetRule
-from romulus.detect.windows_burst_rows import BurstRows
+from romulus.detect.windows_burst_rows import BurstRows, _event_id
 from romulus.detect.windows_cmdline import is_user_writable
 from romulus.detect.windows_events import basename, signal
 from romulus.detect.windows_rows import WindowsRows, row_key
@@ -25,6 +25,7 @@ RDP_CHANNEL = RDP + '/Operational'
 
 class MssqlLoginBruteforce(Playbook):
     id = 'win.mssql_login_bruteforce'
+    version = "2"
     title = 'SQL Server failed login concentration'
     families = ('database_audit',)
     os_families = ('windows',)
@@ -65,10 +66,27 @@ class MssqlLoginBruteforce(Playbook):
                 witnesses = distinct
                 breadth = True
         strong = len(witnesses) >= 10 or breadth
+        distinct = self.rows.witnesses(key, stamp, self.seconds, 3, distinct=True, latest=True)
+        interval = (self.rows._lookup(key), self.rows._lookup('sa'), stamp-self.seconds, stamp)
+        sa = self.rows._execute(
+            'SELECT id,ts FROM windows_rows WHERE k=? AND value=? AND ts>=? AND ts<=? UNION ALL '
+            'SELECT id,ts FROM windows_archive WHERE k=? AND value=? AND ts>=? AND ts<=? '
+            'ORDER BY ts DESC,id DESC LIMIT 1',
+            (*interval, *interval)).fetchone()
+        strong = strong and (len(distinct) >= 3 or sa is not None)
         state['count'] = max(state.get('count', 0), len(witnesses))
         # A missing client address cannot establish one remote source's burst.
         remote = json.loads(key)[2]
         strong = strong and isinstance(remote, str)
+        if strong:
+            # Keep the native rows deciding the additional gate, even when they
+            # precede the latest ten failures. Replace redundant count examples:
+            # ten total records (or all eight distinct names) still prove the burst.
+            deciding = distinct if len(distinct) >= 3 else [(_event_id(sa[0]), sa[1])]
+            deciding_ids = {identity for identity, _stamp in deciding}
+            redundant = [item for item in witnesses if item[0] not in deciding_ids]
+            witnesses = sorted([*deciding, *redundant[:len(witnesses)-len(deciding)]],
+                               key=lambda item: (item[1], item[0]), reverse=True)
         if witnesses and (strong > state.get('high', False) or
                           strong == state.get('high', False) and stamp >= state.get('stamp', float('-inf'))):
             state.update(high=strong, stamp=stamp, ids=[item[0] for item in witnesses],
@@ -98,8 +116,8 @@ class MssqlLoginBruteforce(Playbook):
                 'The cumulative retained count spans the key history, not only the following window. '
                 f'The cited {len(events)} record(s) support a 300-second window ending '
                 f'{anchor.ts.isoformat()}; '
-                + ('at least ten failures or eight distinct login names qualified. ' if state.get('high') else
-                   'the concentration threshold has not been established. ')
+                + ('at least ten failures or eight distinct login names qualified, with at least three distinct logins or the privileged sa login. ' if state.get('high') else
+                   'the concentration threshold with login breadth or privileged sa has not been established. ')
                 + 'These are recorded failures, not proof that guessing succeeded.')
         return Match(self.id, text, 'aggregate_observation', events,
                      [pf(event, name) for event in events for name in self.citation_fields if event.has(name)],
@@ -118,7 +136,7 @@ class MssqlLoginBruteforce(Playbook):
             with self.rows.batch():
                 for event in sorted(selected, key=lambda item: (item.ts, item.id)):
                     key = self._key(event)
-                    if not self.rows.put(key, event, str(event.get('db.login.name'))):
+                    if not self.rows.put(key, event, str(event.get('db.login.name')).casefold()):
                         self.note_limit('sql_history', 'A failed-login record could not enter correlation history; its single observation is retained.')
                         out.append(self._single(event))
                         continue

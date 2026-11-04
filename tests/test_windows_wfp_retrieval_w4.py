@@ -67,7 +67,7 @@ def test_missing_wfp_mapping_is_named_without_fetching_whole_stream(monkeypatch)
 
 
 @pytest.mark.parametrize('missing', ['event.code', 'event.provider', 'inventory'])
-def test_wfp_unavailable_class_filter_cannot_fall_back_to_whole_stream(monkeypatch, missing):
+def test_wfp_unavailable_class_filter_preserves_security_fallback(monkeypatch, missing):
     sweep, contract, window = setup(monkeypatch)
     if missing == 'inventory':
         sweep._windows_read_tokens.clear()
@@ -79,5 +79,5 @@ def test_wfp_unavailable_class_filter_cannot_fall_back_to_whole_stream(monkeypat
     source = {'@timestamp': (START + timedelta(minutes=1)).isoformat(),
               'winlog': {'channel': 'Security', 'provider_name': SECURITY, 'event_id': 5156,
                          'event_data': {'DestPort': '445', 'DestAddress': '10.0.0.9'}}}
-    assert not _matches(body['query'], source, '@timestamp')
+    assert _matches(body['query'], source, '@timestamp') == (missing != 'inventory')
     assert sweep._windows_inventory_reasons[contract.target]

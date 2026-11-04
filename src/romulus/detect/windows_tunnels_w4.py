@@ -54,6 +54,7 @@ def _portproxy_parameters(tokens):
         if name is None or name in values or not value:
             return None
         values[name] = value
+    values.setdefault('connectport', values.get('listenport'))
     if not values.get('connectaddress') or not all(_request_port(values.get(name))
                                                  for name in ('listenport', 'connectport')):
         return None
@@ -69,7 +70,11 @@ def _forward_endpoint(value, version):
     try:
         return ipaddress.ip_address(address).version == version
     except ValueError:
-        return False
+        # Retain DNS/NetBIOS names without resolving them on the analyst host.
+        labels = address.rstrip('.').split('.')
+        return (len(address) <= 253 and not re.fullmatch(r'[0-9.]+', address)
+                and all(re.fullmatch(r'(?i)[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?', label)
+                        for label in labels))
 
 
 class LoopbackRemoteService(BehaviorFleetRule):
@@ -145,6 +150,7 @@ class LoopbackServiceConnection(WindowsEventRule):
 
 class PortproxyConfiguration(WindowsEventRule):
     id = 'win.portproxy_configuration'
+    version = "2"
     title = 'Windows port-proxy configuration was requested or written'
     families = ('process_exec', 'registry_change')
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 1), ('Security', SECURITY, 4688), (SYSMON_CHANNEL, SYSMON, 13))
@@ -167,11 +173,9 @@ class PortproxyConfiguration(WindowsEventRule):
             if parts[3:5] != ('services', 'portproxy') or parts[5] not in {'v4tov4', 'v4tov6', 'v6tov4', 'v6tov6'} or parts[6] != 'tcp':
                 return []
             mode = parts[5]
-            if not _forward_endpoint(listener, int(mode[1])) or not _forward_endpoint(event.get('registry.value'), int(mode[5])):
-                self.missing_required += 1
-                return []
+            high = _forward_endpoint(listener, int(mode[1])) and _forward_endpoint(event.get('registry.value'), int(mode[5]))
             return [signal(event, 'portproxy_registry', f'A Windows port-proxy forwarding value was written at {self.describe(path)}',
-                           self.attack, ('registry.path', 'registry.path_key', 'registry.value'), lane='high',
+                           self.attack, ('registry.path', 'registry.path_key', 'registry.value'), lane='high' if high else 'lead',
                            content=json.dumps([path, event.get('registry.value')]),
                            notes=('The registry write is observed; active forwarding or successful access is not established.',))]
         image = event.get('process.executable_key') or event.get('process.executable')
@@ -179,6 +183,8 @@ class PortproxyConfiguration(WindowsEventRule):
             return []
         argv = _command(event)
         tokens = [token.casefold() for token in argv[1:]]
+        if tokens[:1] == ['-c']:
+            tokens = tokens[1:]
         if len(tokens) < 5 or not tokens[0] or not 'interface'.startswith(tokens[0]) or not tokens[1] or not 'portproxy'.startswith(tokens[1]):
             return []
         if not tokens[2] or not any(action.startswith(tokens[2]) for action in ('add', 'set')):

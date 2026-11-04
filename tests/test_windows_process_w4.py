@@ -26,9 +26,12 @@ def rule_type(name):
     return getattr(importlib.import_module("romulus.detect.windows_process_w4"), name)
 
 
-def sweep_run(tmp_path, monkeypatch, rule, batches, *, assert_raw=()):
+def sweep_run(tmp_path, monkeypatch, rule, batches, *, assert_raw=(), citation_source=None):
     monkeypatch.setattr(sw, "fresh_pack", lambda: [rule])
     sweep = sw.Sweep(_repo(), None, "h1", Window(start=START, end=START + timedelta(hours=1)), {}, stage_dir=tmp_path)
+    if citation_source is not None:
+        from romulus.hunt.publish import SourceCitationFetcher
+        rule.citation_fetcher = SourceCitationFetcher(citation_source)
     try:
         for batch in batches:
             monkeypatch.setattr(sw, "execute", lambda _client, intent, _contract, batch=batch:
@@ -56,8 +59,15 @@ def test_guid_account_transition_cites_both_records(tmp_path, monkeypatch, late)
     child = native(process(r"C:\Windows\System32\cmd.exe", r"NT AUTHORITY\SYSTEM", 2,
                            ParentProcessGuid=parent[0].get("process.guid")), 2, offset=1)
     rule = rule_type("ParentAccountTransition")()
+    # R2: pending children retain compact facts; bounded native source retrieval
+    # supplies the original citation body when the parent arrives later.
+    class NativeSource:
+        def search(self, index, body):
+            wanted = body['query']['bool']['filter'][0]['ids']['values']
+            return {'hits': {'hits': [hit for _, hit in (parent, child)
+                                     if hit['_index'] == index and hit['_id'] in wanted]}}
     findings, _rule = sweep_run(tmp_path, monkeypatch, rule, [[child], [parent]] if late else [[parent], [child]],
-                                assert_raw=(parent, child))
+                                assert_raw=(parent, child), citation_source=NativeSource())
     assert len(findings) == 1 and findings[0]["lane"] == "high"
     assert {parent[0].id, child[0].id} <= set(findings[0]["event_ids"])
     assert "NETWORK SERVICE" in findings[0]["claim"] and "SYSTEM" in findings[0]["claim"]
@@ -341,11 +351,11 @@ def test_guid_storage_result_is_hash_seed_independent():
     from pathlib import Path
     root = Path(__file__).resolve().parents[1]
     outputs = []
-    for seed in ("0", "6"):
+    for seed in ("0", "2", "6"):
         environment = dict(os.environ, PYTHONHASHSEED=seed, PYTHONPATH=os.pathsep.join((str(root / "src"), str(root))))
         outputs.append(subprocess.check_output([sys.executable, str(Path(__file__).resolve()), "seed"], cwd=root,
                                               env=environment, text=True))
-    assert outputs[0] == outputs[1]
+    assert outputs[0] == outputs[1] == outputs[2]
 
 
 if __name__ == "__main__":

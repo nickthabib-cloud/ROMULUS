@@ -95,7 +95,8 @@ def test_remote_forms_share_one_predicate(consumer, target):
         'regsvr-i': (Regsvr32Execution, 'regsvr32.exe', '/s /i:' + target + '.sct scrobj.dll', 'high'),
         'script': (ScriptHostRemoteOrWritable, 'cscript.exe', '//nologo ' + target + '.js', 'lead'),
         'hta': (MshtaExecution, 'mshta.exe', target + '.hta', 'high'),
-        'msi': (MsiexecRemotePackage, 'msiexec.exe', '/i ' + target + '.msi', 'high'),
+        'msi': (MsiexecRemotePackage, 'msiexec.exe', '/i ' + target + '.msi',
+                'high' if target.startswith(('http://', 'https://', 'ftp://')) else 'lead'),
         'msbuild': (CompilerProxyExecution, 'msbuild.exe', target + '.xml', 'lead'),
     }[consumer]
     [match] = run(rule(), [proc(image, f'{image} {argument}')])

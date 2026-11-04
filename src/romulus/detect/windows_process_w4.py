@@ -8,7 +8,7 @@ import sqlite3
 
 from romulus.detect.base import Match, Playbook, pf
 from romulus.detect.bounded import StateExhausted
-from romulus.detect.windows_cmdline import is_user_writable
+from romulus.detect.windows_cmdline import is_user_writable, split_argv
 from romulus.detect.windows_common import (
     SPAWNED_CODE_RUNNERS,
     Undecided,
@@ -16,9 +16,10 @@ from romulus.detect.windows_common import (
     parent_predicate,
     resolve_parent,
 )
+from romulus.detect.windows_compact_rows import FENCE_FIELDS, CompactWindowsRows
 from romulus.detect.windows_events import basename, local_path_components, signal
 from romulus.detect.windows_path_data import has_short_name, installation_parts, writable_windows_path
-from romulus.detect.windows_rows import WindowsRows, row_key
+from romulus.detect.windows_rows import row_key
 from romulus.detect.windows_system_data import ACCESSIBILITY_BINARIES, SYSTEM_BINARIES
 from romulus.evidence.windows_catalog import SYSMON, SYSMON_CHANNEL
 
@@ -84,7 +85,7 @@ def _expected_system_location(name, path):
 class ServerOrBootProcessChild(WindowsProcessRule):
     id = "win.server_or_boot_process_child"
     title = "A server or startup process created a code launcher"
-    version = "1"
+    version = '2'
     reads_command_line = False
     uses_parent = True
     parent_images = frozenset({"w3wp.exe", "httpd.exe", "php-cgi.exe", "sqlservr.exe", "smss.exe",
@@ -111,10 +112,26 @@ class ServerOrBootProcessChild(WindowsProcessRule):
                 return []
         elif child not in SPAWNED_CODE_RUNNERS:
             return []
+        argv = split_argv(str(event.get('process.command_line') or ''))
+        if (parent_name == 'services.exe' and child == 'msiexec.exe' and len(argv) == 2
+                and argv[1].casefold() == '/v' and _expected_system_location(child, _path(event))):
+            return []
         predicate, context, how, raw = parent_predicate(event, parent)
         integrity = str(event.get("process.integrity_level") or "").casefold()
-        reason = ("the child executable has a writable-path indicator" if _writable(_path(event)) else
-                  f"the child records {integrity} integrity" if parent_name != "services.exe" and integrity in {"high", "system"} else "")
+        reason = "the child executable has a writable-path indicator" if _writable(_path(event)) else ""
+        if not reason and integrity in {'high', 'system'} and event.get('process.parent.guid') and self.lineage:
+            try:
+                joined = self.lineage.parent(event)
+            except Undecided:
+                joined = None
+            levels = {'low': 0, 'medium': 1, 'high': 2, 'system': 3}
+            if joined and joined.event and joined.event.get('process.guid') == event.get('process.parent.guid'):
+                prior = str(joined.event.get('process.integrity_level') or '').casefold()
+                if prior in levels and levels[prior] < levels[integrity]:
+                    reason = f'the GUID-associated parent records {prior} integrity below the child\'s {integrity} integrity'
+                    context.append(joined.event)
+                    predicate.append(pf(joined.event, 'process.integrity_level'))
+                    raw.update(dict(joined.raw_copies))
         text = f"Recorded parent '{parent_name}' created '{child}' (parent resolved from {how})"
         if reason:
             text += "; high priority because " + reason
@@ -181,8 +198,16 @@ class RenamedSystemBinary(WindowsProcessRule):
                        notes=("Recorded version metadata and names do not establish signature validity or authentic Microsoft provenance.",))]
 
 
-class _ProcessRows(WindowsRows):
+class _ProcessRows(CompactWindowsRows):
     """Schema allocation has the same physical ceiling as subsequent row writes."""
+    def compact_fields(self, key):
+        if key.startswith(('termination:', 'boot:')):
+            return FENCE_FIELDS
+        if key.startswith('pending:'):
+            return frozenset((*_FIELDS, 'event.code', 'event.channel', 'event.provider',
+                              'user.entity_id', 'user.sid', 'auth.target_account'))
+        return None
+
     def store(self):
         spill = self.owner.spill()
         if not self.ready:
@@ -207,7 +232,7 @@ class _ProcessRows(WindowsRows):
 class ParentAccountTransition(Playbook):
     id = "win.process_account_transition"
     title = "A SYSTEM child records a different account than its GUID-associated parent"
-    version = "1"
+    version = '2'
     families = ("process_exec", "process_termination", "system_state")
     context_families = ("process_termination", "system_state")
     os_families = ("windows",)
@@ -225,7 +250,21 @@ class ParentAccountTransition(Playbook):
     def __init__(self):
         super().__init__()
         self.rows = _ProcessRows(self)
-        self.parent_history_refused = False
+        self.refused_parent_keys = {}
+        self.refused_parent_overflow = False
+        self.refused_conflict_overflow = False
+
+    def _refused(self, key):
+        # Fixed-size binary digests bound the emergency RAM path even when disk
+        # cannot accept uncertainty metadata. Never evict an earlier known key.
+        if key is None:
+            return
+        digest = hashlib.sha256(key.encode()).digest()[:16]
+        if len(self.refused_parent_keys) < 4096 or digest in self.refused_parent_keys:
+            self.refused_parent_keys.setdefault(digest, False)
+        else:
+            self.refused_parent_overflow = True
+            self.note_limit('process_account_refusal_keys', 'The 4096-key refusal uncertainty limit was reached; further affected associations cannot be individually named.')
 
     def _identity(self, event, parent=False):
         guid = event.get("process.parent.guid" if parent else "process.guid")
@@ -235,17 +274,29 @@ class ParentAccountTransition(Playbook):
         key = self._identity(child, parent=True)
         if not key or not self.rows.ready:
             return None
+        key_digest = hashlib.sha256(key.encode()).digest()[:16]
         # value is a semantic fingerprint: shipper copies with identical facts do
         # not become false conflicts, and only two distinct versions need loading.
-        cursor = self.rows.store().execute("SELECT event,raw FROM windows_rows WHERE k=? GROUP BY value ORDER BY value LIMIT 2", ("parent:" + key,))
-        parents = [self.rows.hydrate(row) for row in cursor]
-        if live_parent is not None and not any(self._fingerprint(parent) == self._fingerprint(live_parent) for parent, _raw in parents):
+        cursor = self.rows.store().execute("SELECT event,raw,value FROM windows_rows WHERE k=? GROUP BY value ORDER BY value LIMIT 2", ("parent:" + key,))
+        versions = list(cursor)
+        parents = [self.rows.hydrate(row[:2]) for row in versions if row[0]]
+        unretained_parent = live_parent is not None and self._fingerprint(live_parent) not in {row[2] for row in versions}
+        if unretained_parent:
             parents.append((live_parent, self.raw_of(live_parent)))
-        if not parents:
+            versions.append((None, None, self._fingerprint(live_parent)))
+        if not parents and len(versions) < 2:
             if fence_only:
                 self.note_limit("process_account_parent_absent", "A SYSTEM child has no retained same-host GUID parent creation; its account transition is unresolved.")
             return None
-        if len(parents) > 1:
+        if len(versions) > 1 or len(parents) > 1 or self.refused_parent_keys.get(key_digest, False):
+            if unretained_parent and len(versions) == 2:
+                # The second fact may be live only after its write was refused.
+                # Reuse the same bounded digest entry to forbid restoring this lead.
+                if key_digest in self.refused_parent_keys:
+                    self.refused_parent_keys[key_digest] = True
+                else:
+                    self.refused_conflict_overflow = True
+                    self.note_limit('process_account_refusal_conflicts', 'The bounded refusal state could not retain a live GUID conflict; final high-preserving caveat revisions are unavailable.')
             if fence_only:
                 return None
             self.note_limit("parent_guid_ambiguity", "Conflicting creation facts share a host/process GUID; account transition is unresolved.")
@@ -285,28 +336,31 @@ class ParentAccountTransition(Playbook):
             match.raw_copies.update(fence_raw)
             match.raw_copies.update(child_raw or self.raw_of(child))
             return match
-        if fence_only:
+        uncertain = (key_digest in self.refused_parent_keys
+                     or hashlib.sha256(('boot:' + row_key(child.host)).encode()).digest()[:16] in self.refused_parent_keys)
+        if fence_only and (not uncertain or self.refused_conflict_overflow):
             return None
-        uncertain = self.parent_history_refused and live_parent is None
         match = Match(self.id,
                       f"Creation of '{_path(child)}' records account '{child_user}'; its same-host GUID-associated parent "
                       f"creation records account '{parent_user}' and executable '{_path(parent)}' outside standard installation roots. "
                       "This is an account-context difference, not proof of token theft or successful exploitation.",
                       self.claim_type, [child, parent],
                       [pf(event, name) for event in (child, parent) for name in _FIELDS if event.has(name)],
-                      child.ts, "medium" if uncertain else "high", "lead" if uncertain else "high", "low" if uncertain else "medium", child.entities(),
+                      child.ts, "high", "high", "medium", child.entities(),
                       ["Parent GUID and recorded account fields support the association; executable names do not supply an account or integrity level."],
                       group_key="account-transition:" + child.id, bounded_revision=True,
                       revision_reason="Native parent/child account context was associated by the recorded GUID.")
         match.raw_copies.update(raw)
         match.raw_copies.update(child_raw or self.raw_of(child))
         if uncertain:
-            match.claim += " Parent creation history was refused by the physical disk limit, so uniqueness of this account association is unresolved."
+            match.claim += " Additional history for this host/GUID was refused by the physical disk limit; retained parent/child facts still support this high, with incomplete conflict or lifetime coverage."
+        if self.refused_parent_overflow:
+            match.notes.append('Refusal-key tracking overflowed its 4096-key limit; additional history uncertainty cannot be scoped beyond that limit.')
         return match
 
     @staticmethod
     def _fingerprint(event):
-        return hashlib.sha256(row_key(_user(event).casefold(), _path(event), event.ts.isoformat()).encode()).hexdigest()
+        return hashlib.sha256(row_key(_user(event).casefold(), _path(event), event.ts.replace(microsecond=0).isoformat()).encode()).hexdigest()
 
     def consume(self, events):
         selected = self.applicable([item for item in events if item.family == "process_exec" and item.get("event.code") == 1])
@@ -318,6 +372,7 @@ class ParentAccountTransition(Playbook):
             return
         for event in sorted(selected, key=lambda item: (item.ts, item.id)):
             key = self._identity(event)
+            refusal_key = 'boot:' + row_key(event.host) if event.family == 'system_state' else key
             # Compute a live child's positive before optional retention writes.
             # Refusing its citation body must not discard already known facts.
             live_match = self._match(event) if _system_user(_user(event)) else None
@@ -326,7 +381,7 @@ class ParentAccountTransition(Playbook):
                     fence_key = "termination:" + key if event.family == "process_termination" else "boot:" + row_key(event.host)
                     existed = self.rows.store().execute("SELECT 1 FROM windows_rows WHERE k=? AND id=?", (fence_key, event.id)).fetchone()
                     if not existed and not self.rows.put(fence_key, event):
-                        self.parent_history_refused = True
+                        self._refused(key if event.family == 'process_termination' else fence_key)
                         self.note_limit("process_account_fences", "A GUID termination/boot fence could not be retained; live parent/account association may be unresolved.")
                     continue
                 if key:
@@ -337,9 +392,11 @@ class ParentAccountTransition(Playbook):
                     # copies/versions cannot replay the pending children again.
                     accepted = False
                     if not existed and len(versions) < 2:
-                        accepted = self.rows.put("parent:" + key, event, fingerprint)
+                        qualifies = bool(_user(event)) and not _system_user(_user(event)) and _outside_install(_path(event))
+                        writer = self.rows.put if qualifies else self.rows.fingerprint
+                        accepted = writer("parent:" + key, event, fingerprint)
                         if not accepted:
-                            self.parent_history_refused = True
+                            self._refused(key)
                             self.note_limit("process_account_parent_history", "FULL physical disk limit refused parent creation history; later account uniqueness cannot be established.")
                     # Only a new fact version can change pending children; all
                     # lookups are indexed by the relevant host/GUID key.
@@ -358,7 +415,7 @@ class ParentAccountTransition(Playbook):
                     if match is not None:
                         yield match
             except StateExhausted as error:
-                self.parent_history_refused = True
+                self._refused(refusal_key)
                 self.note_limit("process_account_history", f"GUID account association is incomplete after a physical disk refusal: {error}")
                 # An already retained parent can still establish the live child's
                 # positive even if storing that child's body was refused.
@@ -367,14 +424,13 @@ class ParentAccountTransition(Playbook):
                     yield match
 
     def finalize(self):
-        # One streamed final pass checks late fences only. It cannot restore an
-        # earlier high after an ambiguity or physical-refusal correction.
+        # One streamed prefix pass checks late fences and scoped refusals.
+        # Retained or live-only conflicts cannot be restored to high.
         if self.rows.ready:
-            for key, child, child_raw, _value in self.rows.iterate():
-                if key.startswith("pending:"):
-                    match = self._match(child, child_raw=child_raw, fence_only=True)
-                    if match is not None:
-                        yield match
+            for _key, child, child_raw, _value in self.rows.iterate(prefix='pending:'):
+                match = self._match(child, child_raw=child_raw, fence_only=True)
+                if match is not None:
+                    yield match
 
     def release_state(self):
         self.rows.close()

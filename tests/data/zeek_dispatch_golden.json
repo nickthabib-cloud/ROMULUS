@@ -1900,7 +1900,7 @@
     "ts": "2024-11-18T14:06:24Z"
    },
    {
-    "id": "fcab017adde946e3709a7da8",
+    "id": "a07692d4d2e2e49c8b6dc607",
     "family": "process_exec",
     "ts": "2026-01-02T03:04:06Z",
     "host": "ws01",
@@ -2106,11 +2106,11 @@
       "digest": "718c3aa3d586722fa9959a7f37178f1125ed5b338e5a634dc91cd2aee9dd0ce6"
      }
     ],
-    "normalizer": "windows-ecs@11",
+    "normalizer": "windows-ecs@14",
     "caveats": []
    },
    {
-    "id": "a088876bd33709269d2c7a4e",
+    "id": "fe5aecd0419be40bb994df5a",
     "family": "process_exec",
     "ts": "2026-01-02T03:04:05Z",
     "host": "ws01",
@@ -2320,7 +2320,7 @@
       "digest": "b01a67b4c72aa0dca127935cc96d54ad67b8a1e69ebd2e670b1be40fac31bdfc"
      }
     ],
-    "normalizer": "windows-ecs@11",
+    "normalizer": "windows-ecs@14",
     "caveats": []
    },
    {
@@ -14863,7 +14863,7 @@
    "errors": [],
    "events": [
     {
-     "id": "fcab017adde946e3709a7da8",
+     "id": "a07692d4d2e2e49c8b6dc607",
      "family": "process_exec",
      "ts": "2026-01-02T03:04:06Z",
      "host": "ws01",
@@ -15069,7 +15069,7 @@
        "digest": "718c3aa3d586722fa9959a7f37178f1125ed5b338e5a634dc91cd2aee9dd0ce6"
       }
      ],
-     "normalizer": "windows-ecs@11",
+     "normalizer": "windows-ecs@14",
      "caveats": []
     }
    ],
@@ -15128,7 +15128,7 @@
    "errors": [],
    "events": [
     {
-     "id": "fcab017adde946e3709a7da8",
+     "id": "a07692d4d2e2e49c8b6dc607",
      "family": "process_exec",
      "ts": "2026-01-02T03:04:06Z",
      "host": "ws01",
@@ -15334,7 +15334,7 @@
        "digest": "00295662ec4ca40044f1fae5c4484fef8f1878d9150e4d00dfe766605835f900"
       }
      ],
-     "normalizer": "windows-ecs@11",
+     "normalizer": "windows-ecs@14",
      "caveats": []
     }
    ],
@@ -15382,7 +15382,7 @@
    "errors": [],
    "events": [
     {
-     "id": "a088876bd33709269d2c7a4e",
+     "id": "fe5aecd0419be40bb994df5a",
      "family": "process_exec",
      "ts": "2026-01-02T03:04:05Z",
      "host": "ws01",
@@ -15592,7 +15592,7 @@
        "digest": "b01a67b4c72aa0dca127935cc96d54ad67b8a1e69ebd2e670b1be40fac31bdfc"
       }
      ],
-     "normalizer": "windows-ecs@11",
+     "normalizer": "windows-ecs@14",
      "caveats": []
     }
    ],
@@ -15649,7 +15649,7 @@
    "errors": [],
    "events": [
     {
-     "id": "a088876bd33709269d2c7a4e",
+     "id": "fe5aecd0419be40bb994df5a",
      "family": "process_exec",
      "ts": "2026-01-02T03:04:05Z",
      "host": "ws01",
@@ -15859,7 +15859,7 @@
        "digest": "03461e9acbd0018edc54c370b1b480cc7a697bce23670950895abd4e9265e842"
       }
      ],
-     "normalizer": "windows-ecs@11",
+     "normalizer": "windows-ecs@14",
      "caveats": []
     }
    ],
@@ -37555,5 +37555,6 @@
    "skips": {}
   }
  },
- "windows_baseline": "4dea9e3"
+ "windows_baseline": "4dea9e3",
+ "windows_identity_epoch": "windows-ecs@14"
 }

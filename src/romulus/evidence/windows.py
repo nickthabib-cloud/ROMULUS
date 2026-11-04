@@ -24,7 +24,7 @@ from romulus.evidence.windows_catalog import WINDOWS_DATASETS, WindowsEventClass
 if TYPE_CHECKING:
     from romulus.detect.bounded import Account, StateBudget
 
-WINDOWS_NORMALIZER = "windows-ecs@13"
+WINDOWS_NORMALIZER = "windows-ecs@14"
 # This is already far beyond what the 64 MiB assembler can retain at normal 4104 chunk sizes, while bounding every
 # completeness vector even when hostile metadata claims billions of parts.
 SCRIPT_BLOCK_MAX_PARTS = 4_096

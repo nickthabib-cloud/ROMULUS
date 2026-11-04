@@ -60,6 +60,7 @@ def _known_source_context(source, modules):
 
 class InjectionShapedProcessAccess(WindowsEventRule):
     id = 'win.injection_shaped_process_access'
+    version = "2"
     title = 'Process access combined memory-write and thread-creation rights'
     families = ('process_access',)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 10),)
@@ -85,13 +86,15 @@ class InjectionShapedProcessAccess(WindowsEventRule):
         modules = _trace_modules(event)
         if _known_source_context(source, modules):
             return []
-        unknown = [bool(re.fullmatch(r'unknown(?:\([^)]*\))?', module)) for module in modules]
+        frames = str(event.get('process.access.call_trace') or '').casefold().split('|')
+        frames = [frame.strip() for frame in frames if frame.strip()]
+        unknown = [bool(re.fullmatch(r'unknown(?:\([^)]*\))?', frame)) for frame in frames]
         outside = not _installed_path(source)
         if not any(unknown) and not outside:
             return []
         all_unknown = bool(unknown) and all(unknown)
         sensitive = basename(target) in {'winlogon.exe', 'svchost.exe', 'services.exe'}
-        high = all_unknown or sensitive
+        high = all_unknown or outside and sensitive
         reasons = []
         if any(unknown):
             reasons.append('every recorded trace frame is unresolved' if all_unknown else 'some recorded trace frames are unresolved')

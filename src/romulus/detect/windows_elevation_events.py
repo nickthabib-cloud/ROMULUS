@@ -10,6 +10,7 @@ from romulus.detect.base import Match, Playbook, pf
 from romulus.detect.bounded import StateExhausted
 from romulus.detect.windows_cmdline import is_remote_path, is_user_writable, split_argv
 from romulus.detect.windows_common import SPAWNED_CODE_RUNNERS
+from romulus.detect.windows_compact_rows import FENCE_FIELDS, CompactWindowsRows
 from romulus.detect.windows_events import basename, components, signal
 from romulus.detect.windows_registry_events import (
     _CU,
@@ -20,8 +21,8 @@ from romulus.detect.windows_registry_events import (
     _target,
     _uncertain,
 )
-from romulus.detect.windows_rows import WindowsRows, row_key
-from romulus.detect.windows_system_data import AUTO_ELEVATED_BINARIES, ELEVATION_COM_CLSIDS
+from romulus.detect.windows_rows import row_key
+from romulus.detect.windows_system_data import AUTO_ELEVATED_BINARIES, ELEVATION_COM_CLSIDS, SYSTEM_BINARIES
 from romulus.evidence.windows_catalog import SYSMON, SYSMON_CHANNEL
 
 _UAC_SOURCE = 'https://attack.mitre.org/techniques/T1548/002/'
@@ -79,7 +80,12 @@ def _payload_high(event):
     if _uncertain(event):
         return False
     operand = _operand(event.get('registry.value'))
-    return (basename(operand) in SPAWNED_CODE_RUNNERS or is_user_writable(operand))
+    return (_code_runner(operand) or is_user_writable(operand))
+
+
+def _code_runner(operand):
+    name = basename(operand)
+    return name in SPAWNED_CODE_RUNNERS or name + '.exe' in SPAWNED_CODE_RUNNERS
 
 
 def uac_registry_target(event):
@@ -104,7 +110,7 @@ def uac_registry_target(event):
 
 class UacRegistryHijack(_RegistryRule):
     id = 'win.uac_registry_hijack'
-    version = '1'
+    version = '2'
     title = 'Per-user elevation-associated registry target changed'
     windows_event_classes = tuple((SYSMON_CHANNEL, SYSMON, code) for code in (12, 13))
     attack = ('T1548.002',)
@@ -124,8 +130,19 @@ class UacRegistryHijack(_RegistryRule):
                 f'{label} registry value was written with unclosed command quoting; its effect is unknown',
                 self.attack, _REG_FIELDS, notes=_NO_EFFECT,
                 content=json.dumps([target.root, target.key, target.name, target.action, event.get('registry.value')]))]
+        key = _software(target)
+        high = _payload_high(event)
+        if label == 'per-user App Paths registration':
+            high = (key[-1] in AUTO_ELEVATED_BINARIES or key[-1] in SYSTEM_BINARIES
+                    or _code_runner(_operand(event.get('registry.value'))))
+        elif key and key[0] == 'classes':
+            if key[1] in {'ms-settings', 'mscfile', 'launcher.systemsettings'}:
+                value = event.get('registry.value')
+                high = isinstance(value, str) and bool(value.strip()) and value.strip().casefold() != '(empty)'
+            elif key[1] in {'folder', 'exefile'}:
+                high = _code_runner(_operand(event.get('registry.value')))
         return self.report(event, target, 'uac_registry', label,
-                           high=target.action == 'written' and _payload_high(event))
+                           high=target.action == 'written' and high and not _uncertain(event))
 
 
 class SecurityControlRegistry(_RegistryRule):
@@ -217,7 +234,18 @@ class RegistryPersistenceExtension(_RegistryRule):
                            high=bool(high) and not _uncertain(event), multi=True)
 
 
-class _ElevationRows(WindowsRows):
+class _ElevationRows(CompactWindowsRows):
+    def compact_fields(self, key):
+        kind = json.loads(key)[0]
+        if kind in {'boot', 'term'}:
+            return FENCE_FIELDS
+        if kind in {'parent', 'child'}:
+            return frozenset((*_REG_FIELDS, 'event.code', 'event.channel', 'event.provider',
+                              'process.executable', 'process.parent.executable', 'process.guid',
+                              'process.parent.guid', 'process.integrity_level', 'process.command_line',
+                              'process.user', 'user.entity_id', 'user.sid', 'user.name', 'user.domain'))
+        return None
+
     def store(self):
         spill = self.owner.spill()
         if not self.ready:
@@ -255,7 +283,7 @@ def _identity(event):
 
 class AutoElevatedShell(Playbook):
     id = 'win.auto_elevated_shell'
-    version = '1'
+    version = '2'
     title = 'Elevated shell started by an elevation-associated parent'
     families = ('process_exec', 'registry_change', 'process_termination', 'system_state')
     context_families = ('registry_change', 'process_termination', 'system_state')
@@ -296,7 +324,7 @@ class AutoElevatedShell(Playbook):
             return False, None
         parent_key = row_key('parent', child.host, guid)
         alternatives = self.rows.store().execute(
-            'SELECT id FROM windows_rows WHERE k=? AND ts<=? LIMIT 2',
+            'SELECT value FROM windows_rows WHERE k=? AND ts<=? GROUP BY value LIMIT 2',
             (parent_key, child.ts.timestamp())).fetchall()
         boot = self.rows.prior(row_key('boot', child.host), child.ts.timestamp(), float('inf'))
         term = self.rows.prior(row_key('term', child.host, guid), child.ts.timestamp(), float('inf'))
@@ -354,8 +382,10 @@ class AutoElevatedShell(Playbook):
                     elif target and target[0].action == 'written':
                         self.note_limit('elevation_actor', 'An elevation-associated registry write lacks a resolved actor; same-user correlation is incomplete.')
                 elif event.family == 'process_exec':
-                    if basename(event.get('process.executable')) in AUTO_ELEVATED_BINARIES and event.get('process.guid'):
-                        self.rows.put(row_key('parent', event.host, event.get('process.guid')), event)
+                    if basename(event.get('process.executable')) in {'mmc.exe', 'dllhost.exe'} and event.get('process.guid'):
+                        fingerprint = row_key(event.get('process.executable'), event.get('process.command_line'),
+                                              _identity(event), event.ts.replace(microsecond=0).isoformat())
+                        self.rows.put(row_key('parent', event.host, event.get('process.guid')), event, fingerprint)
                     if self._candidate(event):
                         try:
                             self.rows.put(row_key('child', event.host, _identity(event)), event)
@@ -364,7 +394,9 @@ class AutoElevatedShell(Playbook):
                 elif event.family == 'system_state' and event.get('event.code') in {12, 6005}:
                     self.rows.put(row_key('boot', event.host), event)
                 elif event.family == 'process_termination' and event.get('process.guid'):
-                    self.rows.put(row_key('term', event.host, event.get('process.guid')), event)
+                    parent_key = row_key('parent', event.host, event.get('process.guid'))
+                    if self.rows.ready and self.rows.store().execute('SELECT 1 FROM windows_rows WHERE k=? LIMIT 1', (parent_key,)).fetchone():
+                        self.rows.put(row_key('term', event.host, event.get('process.guid')), event)
             except StateExhausted as error:
                 self.note_limit('elevation_history', f'Correlation history was refused by the physical budget: {error}')
                 if self._candidate(event) and not any(event.id == match.events[0].id for match in out):
@@ -374,9 +406,8 @@ class AutoElevatedShell(Playbook):
     def finalize(self):
         if not self.rows.ready:
             return
-        for key, child, raw, _ in self.rows.iterate():
-            if json.loads(key)[0] == 'child':
-                yield self._match(child, raw)
+        for _key, child, raw, _ in self.rows.iterate(prefix='["child",'):
+            yield self._match(child, raw)
 
     def release_state(self):
         self.rows.close()

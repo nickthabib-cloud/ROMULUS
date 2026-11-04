@@ -65,6 +65,50 @@ def test_sql_threshold_and_partition_replay_are_real_sweep_findings(tmp_path, mo
     assert '300' in findings[0]['claim'] and findings[0]['event_ids']
 
 
+@pytest.mark.parametrize('gate', ['sa', 'breadth'])
+@pytest.mark.parametrize('arrival', ['one_batch', 'partitioned', 'late_archive'])
+def test_sql_qualifying_login_older_than_latest_ten_is_cited(tmp_path, monkeypatch, gate, arrival):
+    deciding = ([sql(1, account='sa')] if gate == 'sa' else
+                [sql(1, account='first'), sql(2, account='second')])
+    records = deciding + [sql(n, account='client') for n in range(3, 15)]
+    if arrival == 'one_batch':
+        batches = [records]
+    elif arrival == 'partitioned':
+        batches = [deciding, records[len(deciding):8], records[8:]]
+    else:
+        # The future unrelated client moves the retained window into archive;
+        # its deciding older record(s) then arrive late into that same archive.
+        batches = [records[len(deciding):], [sql(100, account='unrelated', ip='192.0.2.99', offset=1000)], deciding]
+    findings, _ = sweep_run(tmp_path, monkeypatch, 'MssqlLoginBruteforce', batches)
+    [finding] = [row for row in findings if set(row['event_ids']) & {event.id for event, _ in records}]
+    cited = [event for event, _ in records if event.id in finding['event_ids']]
+    accounts = {event.get('db.login.name') for event in cited}
+    assert finding['lane'] == 'high'
+    assert 'sa' in accounts if gate == 'sa' else len(accounts) >= 3
+    assert len(cited) == 10
+    assert max(event.ts for event in cited) - min(event.ts for event in cited) <= timedelta(seconds=300)
+    assert all(event.fields['db.login.name'].origin for event in cited)
+    if arrival != 'one_batch':
+        assert 'Authentication witness body not retrieved' in finding['claim']
+
+
+def test_sql_eight_distinct_gate_keeps_all_native_breadth_witnesses(tmp_path, monkeypatch):
+    records = [sql(n, account=f'login{n}') for n in range(8)]
+    [finding], _ = sweep_run(tmp_path, monkeypatch, 'MssqlLoginBruteforce', [records])
+    cited = [event for event, _ in records if event.id in finding['event_ids']]
+    assert finding['lane'] == 'high' and len(cited) == 8
+    assert len({event.get('db.login.name') for event in cited}) == 8
+
+
+@pytest.mark.parametrize('gate', ['sa', 'breadth'])
+def test_sql_deciding_login_outside_the_count_window_does_not_raise(tmp_path, monkeypatch, gate):
+    deciding = ([sql(1, account='sa', offset=0)] if gate == 'sa' else
+                [sql(1, account='first', offset=0), sql(2, account='second', offset=1)])
+    retries = [sql(n, account='client', offset=400+n) for n in range(3, 15)]
+    [finding], _ = sweep_run(tmp_path, monkeypatch, 'MssqlLoginBruteforce', [deciding, retries])
+    assert finding['lane'] == 'lead'
+
+
 @pytest.mark.parametrize('accounts,count,expected', [(False, 3, 'lead'), (True, 8, 'high')])
 def test_sql_breadth_and_low_count(tmp_path, monkeypatch, accounts, count, expected):
     events = [sql(n, account=f'user{n}' if accounts else 'sa') for n in range(count)]
