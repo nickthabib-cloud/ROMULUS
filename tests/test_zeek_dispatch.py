@@ -10,12 +10,12 @@ in two shipper shapes, the Zeek ICMP shape, Zeek conn rows in every shape, rows 
 that writes it, and rows of logs still outside the catalog. The golden is regenerated only when a baseline moves, never
 to make a dispatch change pass; its non-Zeek groups equal those of the golden made before Zeek records were read at all
 (commit 54bfa96), and its core analyzer groups those the core analyzer logs' own golden compared with that baseline.
-The Windows groups (and the Windows events of the whole batch) retain the typed semantic baseline of commit 4dea9e3
-(`windows_baseline`). Their separate `windows_identity_epoch` advances only the producer and derived event ids:
-the frozen producer 11 predates the integrated base's 13 and the current 14. Exact-base/current normalization of the
-unchanged native hits proved complete event equality after excluding only top-level normalizer/id; all typed fields,
-origins, raw references, skips and errors remain frozen. Only six Windows producer/id entries were byte-patched;
-reversing those replacements and removing the epoch metadata restores the entire original golden byte string.
+The Windows groups (and the Windows events of the whole batch) were reproduced with the final Windows producer at
+commit 14fe48562a3d7b4aff9bf15ee9e13c8ec941e9f4 (`windows_baseline`, windows-ecs@14).
+A one-time golden11/base13/final14 comparison proved complete event equality after excluding only top-level
+normalizer/id. All typed fields, origins, raw references, skips and errors were preserved; the golden update
+changes only the six Windows producer/id pairs and this final-producer baseline. Exact final-producer
+normalization also reproduced all six stored Windows dumps without excluding any keys. No other golden bytes moved.
 The Windows producer reads these records before Zeek recognition, so nothing Zeek-related changes them.
 A Zeek record's digest is over its stored form, its credentials
 masked, so the digest of a credential-bearing record (the SNMP rows' community) is compared as it is computed now.
@@ -85,8 +85,7 @@ def dumped(events, skips, errors) -> dict:
 
 
 def test_the_golden_holds_the_baseline_of_every_shape():
-    assert GOLDEN["baseline"] == "b13fdfe" and GOLDEN["windows_baseline"] == "4dea9e3"
-    assert GOLDEN["windows_identity_epoch"] == WINDOWS_NORMALIZER
+    assert GOLDEN["baseline"] == "b13fdfe" and GOLDEN["windows_baseline"] == "14fe48562a3d7b4aff9bf15ee9e13c8ec941e9f4"
     producers = {e["normalizer"] for record in RECORDS.values() for e in record["events"]}
     assert producers == {NORMALIZER_VERSION, WINDOWS_NORMALIZER, ZEEK_NORMALIZER}
     assert {"linux-audit-group", "systemd-journal-sshd", "apache-access", "windows-security-elastic_agent",
