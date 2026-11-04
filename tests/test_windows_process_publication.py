@@ -373,12 +373,14 @@ def test_full_pack_finalize_corrects_every_parent_rule_whatever_the_pack_order(t
             assert candidate["id"] in early                          # revised in place, never a second finding
             assert "Revised decision" in candidate["claim"]
             by_rule.setdefault(candidate["rule_id"], []).append(candidate)
-        # a late fence corrects a finding of each of the four rules; the lure rule twice (once per target), and the
+        # a late fence corrects a finding of each of the five rules; the lure rule twice (once per target), and the
         # DCOM rule three times (Word is also a DCOM server, so both Word children are its findings too)
         assert sorted((rule, len(items)) for rule, items in by_rule.items()) == [
             ("win.dcom_activated_child", 3), ("win.lure_app_spawns_code_runner", 2),
-            ("win.remote_execution_child", 1), ("win.service_child_output_to_admin_share", 1)]
-        for rule in ("win.dcom_activated_child", "win.lure_app_spawns_code_runner", "win.remote_execution_child"):
+            ("win.remote_execution_child", 1), ("win.server_or_boot_process_child", 1),
+            ("win.service_child_output_to_admin_share", 1)]
+        for rule in ("win.dcom_activated_child", "win.lure_app_spawns_code_runner", "win.remote_execution_child",
+                     "win.server_or_boot_process_child"):
             assert all(c["lane"] == "lead" for c in by_rule[rule])
         [service] = by_rule["win.service_child_output_to_admin_share"]
         assert "could not be resolved" in service["claim"] and service["lane"] == "high"

@@ -94,7 +94,7 @@ def test_relative_library_uses_extended_unc_working_directory(cwd):
 @pytest.mark.parametrize('rule,image,command,lane', [
     (CompilerProxyExecution, 'msbuild.exe', r'msbuild.exe \??\UNC\server\share\Users\build.xml', 'lead'),
     (MshtaExecution, 'mshta.exe', r'mshta.exe \??\UNC\server\share\page.hta', 'high'),
-    (MsiexecRemotePackage, 'msiexec.exe', r'msiexec.exe /i \??\UNC\server\share\install.msi', 'lead'),
+    (MsiexecRemotePackage, 'msiexec.exe', r'msiexec.exe /i \??\UNC\server\share\install.msi', 'high'),
 ])
 def test_extended_unc_paths_preserve_other_proxy_readers(rule, image, command, lane):
     [match] = run(rule(), [proc(image, command)])

@@ -11,7 +11,7 @@ from xml.sax.saxutils import escape, quoteattr
 from romulus.evidence.typed import TypedEvent
 from romulus.evidence.windows_catalog import SECURITY, SYSMON
 
-Shape = Literal["winlogbeat_7", "winlogbeat_8", "elastic_agent"]
+Shape = Literal["winlogbeat_7", "winlogbeat_8", "winlogbeat_8_real", "elastic_agent"]
 SHAPES: tuple[Shape, ...] = ("winlogbeat_7", "winlogbeat_8", "elastic_agent")
 
 # This fixture inventory is intentionally independent of the production catalog. Security event XML:
@@ -59,6 +59,26 @@ _DOCUMENTED_EVENT_KEYS = (
       for event_id in (6, 91)],
     *[("Microsoft-Windows-Bits-Client/Operational", "Microsoft-Windows-Bits-Client", event_id)
       for event_id in (3, 59, 60)],
+)
+
+
+_DOCUMENTED_EVENT_KEYS += (
+    ("Application", "Microsoft-Windows-ProcessExitMonitor", 3001),
+    *[("Application", "MSSQLSERVER", code) for code in (15457, 33205, 15281, 18454, 18456)],
+    *[("Security", provider, 33205) for provider in ("MSSQLSERVER", "MSSQLSERVER$AUDIT")],
+    *[("Application", "ESENT", code) for code in (216, 325, 326, 327)],
+    ("Microsoft-Windows-Winsock-WS2HELP/Operational", "Microsoft-Windows-Winsock-WS2HELP", 1),
+    ("Microsoft-Windows-Application-Experience/Program-Telemetry", "Microsoft-Windows-Application-Experience", 500),
+    ("Microsoft-Windows-Application-Experience/Program-Compatibility-Assistant", "Microsoft-Windows-Program-Compatibility-Assistant", 17),
+    *[("Microsoft-Windows-RemoteDesktopServices-RdpCoreTS/Operational", "Microsoft-Windows-RemoteDesktopServices-RdpCoreTS", code)
+      for code in (65, 66, 68, 72, 101, 103, 104, 129, 131, 132, 140, 148, 168)],
+    *[("Application", "MsiInstaller", code) for code in (1040, 1042)],
+    *[("Microsoft-Windows-WinRM/Operational", "Microsoft-Windows-WinRM", code) for code in (169, 193)],
+    *[("Microsoft-Windows-Bits-Client/Operational", "Microsoft-Windows-Bits-Client", code) for code in (4, 5, 61, 209)],
+    *[("Security", SECURITY, code) for code in (4826, 4798, 4799, 4703, 5156, 5158, 4661, 4985, 4627, 4611, 4673)],
+    ("System", "Microsoft-Windows-DistributedCOM", 10016),
+    ("System", "Service Control Manager", 7036),
+    *[("System", "NETLOGON", code) for code in (5805, 5723)],
 )
 
 
@@ -368,6 +388,9 @@ def _security_data(event_id: int, ordinal: int) -> dict[str, object]:
 
 
 def _data(provider: str, event_id: int, ordinal: int) -> dict[str, object]:
+    extra = _catalog_data(provider, event_id)
+    if extra is not None:
+        return extra
     if provider == SYSMON:
         return _sysmon_data(event_id, ordinal)
     if provider == SECURITY:
@@ -475,6 +498,47 @@ def _data(provider: str, event_id: int, ordinal: int) -> dict[str, object]:
     raise AssertionError(f"missing fixture for provider {provider!r}, event {event_id}")
 
 
+def _catalog_data(provider: str, code: int) -> dict[str, object] | None:
+    if provider == "Microsoft-Windows-ProcessExitMonitor":
+        return {"param1": r"C:\Windows\System32\lsass.exe", "param2": "test.exe", "param3": "0", "param4": "0x123"}
+    if provider.startswith("MSSQL"):
+        return {"param1": "xp_cmdshell" if code == 15457 else "action_id:EX\nsucceeded:true\nobject_name:xp_cmdshell" if code == 33205 else "analyst",
+                "param2": "0" if code == 15457 else "[CLIENT: 192.0.2.2]", "param3": "1" if code == 15457 else "[CLIENT: 192.0.2.2]", "param6": "xp_cmdshell"}
+    if provider == "ESENT":
+        return {"param1": "NTDS", "param2": "42", "param5": r"C:\Copy\ntds.dit"}
+    if provider == "Microsoft-Windows-Winsock-WS2HELP":
+        return {"LSPName": "Example LSP", "Installer": "test.exe", "Catalog": "64"}
+    if provider in {"Microsoft-Windows-Application-Experience", "Microsoft-Windows-Program-Compatibility-Assistant"}:
+        return {"ExePath": r"C:\Example\test.exe", "FixName": "CorrectFilePaths", "ResolverName": "TestResolver"}
+    if provider == "Microsoft-Windows-RemoteDesktopServices-RdpCoreTS":
+        return {"ClientIP": "192.0.2.2:42", "ChannelName": "rdpdr", "TunnelID": "0", "MonitorWidth": "1920", "MonitorHeight": "1080"}
+    if provider == "MsiInstaller":
+        return {"param1": r"C:\Program Files\Example\example.msi", "param2": "42"}
+    if provider == "Microsoft-Windows-DistributedCOM":
+        return {"param2": "Remote", "param3": "Launch", "param7": "analyst"}
+    if provider == "NETLOGON":
+        return {"param1": "HOST$", "param2": "Access denied"}
+    if provider == "Service Control Manager" and code == 7036:
+        return {"param1": "Example", "param2": "running"}
+    if provider == "Microsoft-Windows-WinRM" and code in {169, 193}:
+        return {"username": "EXAMPLE\\analyst", "authenticationMechanism": "NTLM"}
+    if provider != SECURITY:
+        return None
+    if code == 4826:
+        return {**_subject(), "KernelDebug": "%%1843", "TestSigning": "%%1843"}
+    if code in {4798, 4799}:
+        return {**_subject(), "TargetUserName": "Administrators", "TargetSid": "S-1-5-32-544", "CallerProcessName": "net1.exe", "CallerProcessId": "0x2a"}
+    if code == 4703:
+        return {**_subject(), "EnabledPrivilegeList": "SeDebugPrivilege", "ProcessName": "test.exe", "ProcessId": "42"}
+    if code in {5156, 5158}:
+        return {"Application": "test.exe", "SourceAddress": "192.0.2.2", "SourcePort": "42", "DestAddress": "192.0.2.3", "DestPort": "443", "Direction": "%%14593", "Protocol": "6"}
+    if code == 4661:
+        return {**_subject(), "ObjectServer": "Security Account Manager", "ObjectType": "SAM_USER", "ObjectName": "S-1-5-21-1-500", "AccessMask": "0x2d", "AccessList": "%%5440"}
+    if code in {4985, 4627, 4611, 4673}:
+        return {**_subject(), "LogonProcessName": "Example", "Service": "Example", "GroupMembership": "S-1-5-32-544", "TransactionId": "example"}
+    return None
+
+
 def all_logical_events() -> list[LogicalWindowsEvent]:
     start = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
     return [
@@ -508,6 +572,15 @@ def _dataset(event: LogicalWindowsEvent) -> str:
 
 
 def windows_hit(event: LogicalWindowsEvent, shape: Shape, *, old_sysmon: bool = False) -> dict:
+    if shape == "winlogbeat_8_real":
+        hit = windows_hit(event, "winlogbeat_8", old_sysmon=old_sysmon)
+        winlog = hit["_source"]["winlog"]
+        winlog["user"] = {"identifier": "S-1-5-18", "name": "SYSTEM"}
+        winlog["process"] = {"pid": 412, "thread": {"id": 413}}
+        if event.provider == "Microsoft-Windows-Program-Compatibility-Assistant":
+            winlog["user_data"] = winlog.pop("event_data")
+            winlog["user_data"]["xml_name"] = "ResolverFiredEvent"
+        return hit
     if shape not in SHAPES:
         raise ValueError(f"unknown Windows fixture shape {shape!r}")
     dataset = _dataset(event)
