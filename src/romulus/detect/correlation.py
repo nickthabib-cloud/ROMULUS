@@ -987,6 +987,32 @@ def _epoch(value) -> float | None:
     return None
 
 
+# The category a Zeek alert record is held under in the joined rows: the provider and the record's kind.
+ZEEK_ALERT_PREFIX = "zeek:"
+ZEEK_ALERT_NOUNS = {"notice": ("Zeek notice", "Zeek notices"), "weird": ("Zeek weird record", "Zeek weird records"),
+                    "signature": ("Zeek signature match", "Zeek signature matches"),
+                    "intel": ("Zeek intel match", "Zeek intel matches")}
+
+
+def alert_kind(n: Net) -> str:
+    """What kind of alert record a joined row is: 'ids' (a Suricata alert), or the Zeek record's kind."""
+    cat = n.alert_cat or ""
+    if cat.startswith(ZEEK_ALERT_PREFIX):
+        return cat[len(ZEEK_ALERT_PREFIX):] or "alert"
+    return "ids"
+
+
+def _alert_words(counts: dict[str, int]) -> str:
+    """'3 IDS alert(s)', or each provider's records by kind ('1 IDS alert(s) and 2 Zeek weird records')."""
+    parts = [f"{counts['ids']} IDS alert(s)"] if counts.get("ids") else []
+    for kind, count in sorted(counts.items()):
+        if kind == "ids" or not count:
+            continue
+        one, many = ZEEK_ALERT_NOUNS.get(kind, (f"Zeek {kind} record", f"Zeek {kind} records"))
+        parts.append(f"{count} {one if count == 1 else many}")
+    return " and ".join(parts)
+
+
 def alert_lane(n: Net) -> str | None:
     """Exactly the lane SuricataAlertStack gives the same alert on its own; None when the alert lacks the
     severity that stack requires (it would not publish it either)."""
@@ -1041,7 +1067,7 @@ class ProcessNetworkLink(Playbook):
     address is not established for this host is linked but stated, and caps the lane at lead, as do
     multiple local addresses and records shared with another process."""
     id = "corr.process_network_link"
-    version = "9"
+    version = "10"
     title = "Host process connect() calls linked to network-sensor records for the same connection (inferred)"
     kind = "aggregate"
     staged = True
@@ -1236,6 +1262,13 @@ class ProcessNetworkLink(Playbook):
         start = _epoch(e.get("flow.start")) or e.ts.timestamp()
         end = _epoch(e.get("flow.end"))
         sev = e.get("alert.severity")
+        category = scalar(e.get("alert.category"))
+        signature = scalar(e.get("alert.signature"))
+        if e.family == "net_alert" and e.get("alert.provider") == "zeek":
+            # a Zeek notice, weird, signature or intel record: no Suricata category or severity, named by its kind
+            kind = e.get("alert.kind")
+            category = f"{ZEEK_ALERT_PREFIX}{kind if isinstance(kind, str) and kind else 'alert'}"
+            signature = signature if signature is not None else scalar(e.get("intel.indicator"))
         seq = self._net_seq + 1
         endpoints = [(dst, dport, start, seq)] + ([(src, sport, start, seq)] if (src, sport) != (dst, dport) else [])
         if not self._room(1 + len(endpoints)):
@@ -1243,7 +1276,7 @@ class ProcessNetworkLink(Playbook):
         staged = self._cite_net(e, src, sport, dst, dport)
         row = (e.id, e.family, e.host or "", start, end, src, sport, dst, dport,
                scalar(e.get("network.community_id")) or None, sev if isinstance(sev, int) else None,
-               scalar(e.get("alert.category")), scalar(e.get("alert.signature")), seq,
+               category, signature, seq,
                connection_identity(e.get("network.transport"), src, sport, dst, dport), staged)
         self._net_seq = seq
         store = self._store()
@@ -1383,7 +1416,8 @@ class ProcessNetworkLink(Playbook):
                    "ON s.rowid = l.sock GROUP BY l.net")
         # the group being built: its distinct linked records (with the latest call's attribution status), the calls
         # that kept a link, and the records more than one process claims
-        db.execute('CREATE TABLE gp (nid PRIMARY KEY, family, observer, local, conn, sig, status, start, "end")')
+        db.execute('CREATE TABLE gp (nid PRIMARY KEY, family, observer, local, conn, sig, status, start, "end", '
+                   'kind)')
         db.execute("CREATE TABLE gs (sock INTEGER PRIMARY KEY)")
         db.execute("CREATE TABLE gsh (nid, seq INTEGER, PRIMARY KEY (nid, seq)) WITHOUT ROWID")
         db.commit()
@@ -1545,6 +1579,8 @@ class ProcessNetworkLink(Playbook):
         n_connections = count_connections(db.execute('SELECT conn, start, "end" FROM gp ORDER BY conn, start, nid'))
         observers = [observer for (observer,) in db.execute("SELECT DISTINCT observer FROM gp ORDER BY observer")]
         (n_sigs,) = db.execute("SELECT COUNT(DISTINCT sig) FROM gp WHERE family = 'net_alert'").fetchone()
+        alert_counts = dict(db.execute("SELECT kind, COUNT(*) FROM gp WHERE family = 'net_alert' GROUP BY kind"
+                                       ).fetchall())
         outcomes = g.outcomes
 
         # cited: the group's first kept calls, the calls bounding its span (when held), each judged process's
@@ -1598,7 +1634,7 @@ class ProcessNetworkLink(Playbook):
             f"Observed by network sensor(s) {sensors}: {n_flows} flow or session record(s) across "
             f"{n_connections} connection(s) to {s0.ip} port {s0.port} starting within seconds of those calls"
             + (f", with local address(es) {', '.join(locals_)}" if locals_ else "")
-            + (f", and {n_alerts} IDS alert(s) on those connections"
+            + (f", and {_alert_words(alert_counts)} on those connections"
                + (f", among them {'; '.join(f"'{sig}'" for sig in sigs)}" + more(len(sigs), n_sigs) if sigs else "")
                if n_alerts else "") + ".",
             "Of these, " + " and ".join(
@@ -1724,8 +1760,9 @@ class _Group:
         self.db.execute("INSERT OR IGNORE INTO gs VALUES (?)", (sock_rowid,))
         for n, local, status in kept:
             if not self.db.execute(
-                    'INSERT OR IGNORE INTO gp VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                    (n.id, n.family, n.observer, local, n.conn, str(n.alert_sig), status, n.start, n.end)).rowcount:
+                    'INSERT OR IGNORE INTO gp VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    (n.id, n.family, n.observer, local, n.conn, str(n.alert_sig), status, n.start, n.end,
+                     alert_kind(n) if n.family == "net_alert" else None)).rowcount:
                 self.db.execute("UPDATE gp SET status = ? WHERE nid = ?", (status, n.id))   # the latest call's
                 continue
             if n.family == "net_alert":

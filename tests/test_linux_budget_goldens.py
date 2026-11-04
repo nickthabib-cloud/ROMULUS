@@ -5,10 +5,12 @@ from romulus.detect.bounded import StateBudget
 from romulus.hunt import sweep as sw
 from tests import throughput_fixture as tf
 
+# Rule-version bumps only (the Zeek alert reading: see test_throughput_equality); with those versions restored the
+# digest is the earlier 3b23f98dbf25d34c4921bbec2cba932991746ad9d4a11e8963988d7c8c421bee.
 CANDIDATE_GOLDENS = {
-    4: (35, "02c5eb67a3b1a86948920d429194da593380330bd3cd7e66d720c6d898b5b15c"),
-    8: (35, "02c5eb67a3b1a86948920d429194da593380330bd3cd7e66d720c6d898b5b15c"),
-    16: (35, "02c5eb67a3b1a86948920d429194da593380330bd3cd7e66d720c6d898b5b15c"),
+    4: (35, "8c1125e496a977816f1a21d0f391e4408f6cac0edb7ce0c1e58281e8aa3bef6a"),
+    8: (35, "8c1125e496a977816f1a21d0f391e4408f6cac0edb7ce0c1e58281e8aa3bef6a"),
+    16: (35, "8c1125e496a977816f1a21d0f391e4408f6cac0edb7ce0c1e58281e8aa3bef6a"),
 }
 
 
