@@ -95,7 +95,7 @@ def test_remote_forms_share_one_predicate(consumer, target):
         'regsvr-i': (Regsvr32Execution, 'regsvr32.exe', '/s /i:' + target + '.sct scrobj.dll', 'high'),
         'script': (ScriptHostRemoteOrWritable, 'cscript.exe', '//nologo ' + target + '.js', 'lead'),
         'hta': (MshtaExecution, 'mshta.exe', target + '.hta', 'high'),
-        'msi': (MsiexecRemotePackage, 'msiexec.exe', '/i ' + target + '.msi', 'lead'),
+        'msi': (MsiexecRemotePackage, 'msiexec.exe', '/i ' + target + '.msi', 'high'),
         'msbuild': (CompilerProxyExecution, 'msbuild.exe', target + '.xml', 'lead'),
     }[consumer]
     [match] = run(rule(), [proc(image, f'{image} {argument}')])
@@ -190,8 +190,11 @@ def test_local_device_system_file_does_not_create_a_remote_finding(prefix, rule,
 
 
 def test_regsvr_unicode_dash_is_not_a_documented_switch():
-    assert not run(Regsvr32Execution(), [proc('regsvr32.exe',
+    [match] = run(Regsvr32Execution(), [proc('regsvr32.exe',
         'regsvr32.exe –i:https://example.test/a.sct scrobj.dll')])
+    assert match.proposed_lane == 'lead'
+    assert 'attempted scriptlet registration' in match.claim
+    assert any('acceptance by the OS is not established' in note for note in match.notes)
 
 
 @pytest.mark.parametrize('switch', ['/s', '-S', '/u', '/n', '/c', '/i', '/i:local', '-I:local'])

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 from collections import Counter, defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
@@ -339,7 +339,7 @@ class Sweep:
     def _record_playbook_batch(
         self,
         pb: Playbook,
-        matches: list[Match],
+        matches: Iterable[Match],
         raw_sources: dict[str, dict],
         task_id: str | None,
         staged: dict[str, TypedEvent],
@@ -1586,19 +1586,35 @@ class Sweep:
                     return ([current_events[identity] for identity in ids if identity in current_events]
                             + self._event_stage().load(missing))
                 pb.bind_loader(load_live)
+            matched = 0
+            consume_failure = ""
+
+            def consume_matches(pb=pb, scoped_events=scoped_events, before_eval=before_eval,
+                                before_missing=before_missing, before_capped=before_capped):
+                nonlocal matched, consume_failure
+                try:
+                    for match in pb.consume_scoped_partition(scoped_events):
+                        matched += 1
+                        yield match
+                except StateExhausted as exc:
+                    # Preserve already published matches and count the unevaluated tail even when a
+                    # disk-backed replay refuses growth after yielding some observations.
+                    consume_failure = f"a write to the stage volume failed ({exc}); consume stopped before completion"
+                    refused_before = pb.capped
+                    pb.refuse_unevaluated(scoped_events,
+                                          pb.evaluated - before_eval + pb.missing_required - before_missing
+                                          + pb.capped - before_capped,
+                                          f"a write to the stage volume failed ({exc}); this rule's later records of "
+                                          f"the batch are not evaluated")
+                    if pb.capped == refused_before:
+                        # Some rules count applicable records before replaying retained state. A zero
+                        # unevaluated-tail count does not make an interrupted replay complete.
+                        pb.note_limit("state_disk", consume_failure)
+
             try:
-                matches = pb.consume_scoped_partition(scoped_events)
-            except StateExhausted as exc:
-                # a write to the stage volume failed mid-batch (a rule that writes rows directly): the records it
-                # had not evaluated yet are refused, counted exactly
-                matches = []
-                pb.refuse_unevaluated(scoped_events,
-                                      pb.evaluated - before_eval + pb.missing_required - before_missing
-                                      + pb.capped - before_capped,
-                                      f"a write to the stage volume failed ({exc}); this rule's later records of "
-                                      f"the batch are not evaluated")
-            pb.bind_raw({})
-            self._record_playbook_batch(pb, matches, raw_sources, tid, staged, held, released)
+                self._record_playbook_batch(pb, consume_matches(), raw_sources, tid, staged, held, released)
+            finally:
+                pb.bind_raw({})
             evaluated = pb.evaluated - before_eval
             missing = pb.missing_required - before_missing
             target_applicable = target_fallback or pb.os_applicable > before_os
@@ -1607,17 +1623,17 @@ class Sweep:
             capped = pb.capped - before_capped
             # records skipped or judged for a direction the default internal-network definition only assumes
             assumed = pb.direction_assumed - before_assumed
-            incomplete = rule_partial or bool(missing) or bool(capped) or bool(assumed)
+            incomplete = rule_partial or bool(missing) or bool(capped) or bool(assumed) or bool(consume_failure)
             if not target_applicable:
                 state = "not_applicable_no_events"
             elif not (evaluated_families & families) and evaluated == 0:
                 state = "not_applicable_no_events" if not rule_partial else "evaluated_partial"
-            elif pb.kind == "aggregate" and matches:
+            elif pb.kind == "aggregate" and matched:
                 # aggregate rules may publish indicator events during consume(); those are matches
                 state = "match_on_partial" if incomplete else "matched"
             elif pb.kind == "aggregate":
                 state = "evaluated_partial" if incomplete else "evaluated_complete"
-            elif matches:
+            elif matched:
                 state = "match_on_partial" if incomplete else "matched"
             elif not pb.assures_negative:
                 # script-text rules can show intent but never prove absence (spec section 1)
@@ -1626,6 +1642,8 @@ class Sweep:
                 state = "evaluated_partial" if incomplete else "no_match_complete"
             reasons = list(base_reasons)
             reasons.extend(windows_reasons)
+            if consume_failure:
+                reasons.append(consume_failure)
             if error_reason and (error_affected is ALL_FAMILIES or set(pb.families) & error_affected):
                 reasons.append(error_reason)
             if missing:
@@ -1642,7 +1660,7 @@ class Sweep:
                 reasons.append(f"state_capped={capped}: records not evaluated because a state budget of this rule "
                                f"was full; " + "; ".join(refused))
                 detail["state_capped"] = capped
-            cells.append(self._cell(pb, target, pkey, state, len(matches), evaluated, detail))
+            cells.append(self._cell(pb, target, pkey, state, matched, evaluated, detail))
         if windows_gate_reasons:
             self.partial_reasons.append(
                 f"{target} {pkey}: " + "; ".join(sorted(windows_gate_reasons))

@@ -330,7 +330,7 @@ class UnsignedDriverLoad(WindowsEventRule):
 
 class WritableUnsignedDllLoad(WindowsEventRule):
     id = "win.writable_unsigned_dll_load"
-    version = "7"
+    version = '8'
     title = "A process loaded an unsigned or invalid module, or a module outside standard installation directories"
     families = ("image_load",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 7),)
@@ -364,12 +364,22 @@ class WritableUnsignedDllLoad(WindowsEventRule):
                       else "not assessed: recorded signature fields do not establish module signature validity")
             self.note_coverage("module_signature_absent" if absent else "module_signature_unresolved", reason)
             return []
-        high = _bad_signature(event) and _system_directory(_process(event)) and _writable_indicator(path)
+        from romulus.detect.windows_system_data import KNOWN_SYSTEM_DLLS
+        redirection = any(part.endswith('.exe.local') and len(part) > len('.exe.local') for part in components(path))
+        located = bool(local_path_components(path) or _installation_parts(path) or _writable_indicator(path))
+        known_non_system = basename(path) in KNOWN_SYSTEM_DLLS and located and (not _system_directory(path) or _writable_indicator(path))
+        reason = ("an unsigned/invalid module has a writable-path indicator and the loader has a system-directory path"
+                  if _bad_signature(event) and _system_directory(_process(event)) and _writable_indicator(path) else
+                  "the unsigned/invalid module was loaded from an executable .local redirection directory"
+                  if _bad_signature(event) and redirection else
+                  "the unsigned/invalid module has a known system-DLL basename in a non-system or writable directory"
+                  if _bad_signature(event) and known_non_system else "")
+        high = bool(reason)
         text = ("A process loaded a module with a recorded absent or invalid signature" if _bad_signature(event)
                 else "A process loaded a module outside standard installation directories without a recorded valid signature")
         text += f"; process '{self.describe(_process(event))}', module '{self.describe(path)}'"
         if high:
-            text += "; high priority because an unsigned/invalid module has a writable-path indicator and the loader has a system-directory path"
+            text += "; high priority because " + reason
         parts = _installation_parts(path)
         family = ("ngen native images" if len(parts) > 2 and parts[:2] == ("windows", "assembly")
                   and parts[2].startswith("nativeimages_") else "Windows component store" if parts[:2] == ("windows", "winsxs") else "")

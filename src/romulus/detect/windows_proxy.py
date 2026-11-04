@@ -47,6 +47,7 @@ from romulus.detect.windows_common import (
     resolve_parent,
 )
 from romulus.detect.windows_lineage import LureAppSpawnsCodeRunner
+from romulus.detect.windows_lolbin_data import DASH_LIKE, switch_operand
 from romulus.detect.windows_path_data import has_short_name, installation_parts
 from romulus.detect.windows_scripts import HIGH_TOOLS, amsi_bypass, downloads, runs_code
 from romulus.evidence.typed import TypedEvent
@@ -278,7 +279,7 @@ def _proxy_export(event, argv):
 
 class MshtaExecution(WindowsProcessRule):
     id = "win.mshta_remote_or_inline"
-    version = "6"
+    version = '7'
     title = "mshta ran a remote HTA or inline script"
     assures_negative = False
     positive_only_reason = ("mshta is recognised from argv, and a payload can also be delivered by other binaries "
@@ -320,6 +321,12 @@ class MshtaExecution(WindowsProcessRule):
                 return [self._hit(event, token, f"{location} ({token.strip()})", "mshta_unc")]
             if lowered.endswith(".hta") and (hit := _writable_operand(event, token, "mshta", "mshta_local", self.attack)):
                 return [hit]
+        if any(token.casefold() == '-embedding' for token in argv[1:]):
+            return [Hit('mshta_embedding_request', 'mshta was started in embedding mode',
+                        'lead', 'medium', ('T1218.005',), [parsed_field(event, '-Embedding')],
+                        content='mshta:embedding',
+                        notes=('An embedding-mode invocation is observed, not proof that an HTA or payload executed.',
+                               'Behavior source: https://lolbas-project.github.io/lolbas/Binaries/Mshta/'))]
         return []
 
     def _hit(self, event: TypedEvent, token: str, what: str, shape: str) -> Hit:
@@ -329,7 +336,7 @@ class MshtaExecution(WindowsProcessRule):
 
 class Rundll32Execution(WindowsProcessRule):
     id = "win.rundll32_proxy"
-    version = "7"
+    version = '8'
     title = "rundll32 proxied execution (script protocol, remote DLL, or LSASS MiniDump)"
     assures_negative = False
     positive_only_reason = ("rundll32 and its target are read from argv; the same proxying can be done by other means, "
@@ -385,12 +392,19 @@ class Rundll32Execution(WindowsProcessRule):
         if library and (hit := _writable_operand(
                 event, library, "rundll32", "rundll32_writable", ("T1218.011",), dll_search=True)):
             return [hit]
+        if (library and ntpath.splitext(library)[1].casefold() not in {'.dll', ''}
+                and ntpath.basename(library).casefold() not in _SYSTEM_CPLS):
+            return [Hit('rundll32_non_dll_request', f'rundll32 received a non-DLL library operand ({clip(library)})',
+                        'lead', 'medium', ('T1218.011',), [parsed_field(event, library)],
+                        content=f'rundll32:non-dll:{library}',
+                        notes=('The operand is observed; successful loading or execution is not established.',
+                               'Behavior source: https://lolbas-project.github.io/lolbas/Binaries/Rundll32/'))]
         return []
 
 
 class Regsvr32Execution(WindowsProcessRule):
     id = "win.regsvr32_scriptlet"
-    version = "6"
+    version = '7'
     title = "regsvr32 registered a remote or scriptlet payload (Squiblydoo)"
     assures_negative = False
     positive_only_reason = ("regsvr32's install flag and target are read from argv; a window without a match proves "
@@ -428,6 +442,18 @@ class Regsvr32Execution(WindowsProcessRule):
                     return [Hit("regsvr32_scriptlet", f"regsvr32 was run with /i: naming {what} ({clip(target)})",
                                 self.lane, self.severity, self.attack, [parsed_field(event, token)],
                                 content=f"regsvr32:{'remote' if remote else 'sct'}")]
+        # Non-ASCII dash spellings record an attempted registration request;
+        # they are not normalized into a documented, successfully accepted flag.
+        for token in argv[1:]:
+            if token and token[0] in DASH_LIKE - {'-'} and token[1:3].casefold() == 'i:':
+                target = token[3:].strip().strip('"')
+                scriptlet = target.split('?', 1)[0].split('#', 1)[0].casefold().endswith('.sct')
+                if is_remote_path(target) or scriptlet:
+                    return [Hit('regsvr32_attempted_scriptlet',
+                                f'regsvr32 arguments show attempted scriptlet registration ({clip(target)})',
+                                'lead', 'medium', self.attack, [parsed_field(event, token)],
+                                content=f'regsvr32:attempt:{token}',
+                                notes=('A dash-like option spelling is observed; registration or acceptance by the OS is not established.',))]
         # regsvr32 accepts exactly these flags; other slash-prefixed tokens are operands.
         # https://learn.microsoft.com/windows-server/administration/windows-commands/regsvr32
         rest = [token for token in argv[1:] if token.casefold() not in {
@@ -640,8 +666,8 @@ class ScriptHostRemoteOrWritable(WindowsProcessRule):
 
 class MsiexecRemotePackage(WindowsProcessRule):
     id = "win.msiexec_remote_package"
-    version = "5"
-    title = "msiexec installed a package from a remote source"
+    version = '6'
+    title = "msiexec received a remote or writable package installation request"
     assures_negative = False
     positive_only_reason = ("the package source is read from argv; a window without a match proves nothing")
     severity, lane = "medium", "lead"
@@ -649,16 +675,16 @@ class MsiexecRemotePackage(WindowsProcessRule):
     benign = ("enterprise software deployment installing MSIs from an internal distribution server over HTTP/UNC",)
     next_checks = ("the package URL/UNC named", "msiexec's network connection and the installed files")
     card: ClassVar[dict] = {
-        "behavior": "msiexec.exe installing (/i or /package or /a) a package named by an http(s) URL or UNC path",
+        "behavior": "msiexec.exe receiving a remote package installation request or naming a writable local MSI",
         "telemetry": "Sysmon 1 or Security 4688 (process.command_line)",
         "fidelity": "the arguments show a remote install request; positive-only",
-        "benign_and_cost": "software deployment commonly installs MSIs from internal servers; lane lead, merged per "
+        "benign_and_cost": "software deployment commonly installs MSIs from internal servers; remote packages are high and writable local packages lead, merged per "
                            "shape, and internal distribution points are expected",
         "query_cost": "none beyond the sweep",
         "next_pivot": "the package source and the files it installed",
         "adds": "the msiexec remote-package shape",
         "research_basis": "ATT&CK Enterprise 20.0 T1218.007, T1105; LOLBAS msiexec (reimplemented)",
-        "lanes": "lead",
+        "lanes": "high for a remote package, lead for a writable local MSI",
         "retrieval": "the sweep retrieves every process-creation record; this reads those whose image is msiexec.exe",
     }
 
@@ -666,20 +692,25 @@ class MsiexecRemotePackage(WindowsProcessRule):
         if image_name(event.get("process.executable_key"))[0] != "msiexec.exe":
             return []
         argv = _command_argv(event)
-        if not has_switch(argv, "i", "package", "a"):
-            return []
-        for token in argv[1:]:
-            url = url_in(token)
-            if is_remote_path(token) or url:
-                return [Hit("msiexec_remote", f"msiexec was asked to install a remote package ({clip(token)})",
-                            self.lane, self.severity, self.attack, [parsed_field(event, token)],
-                            content="msiexec:remote")]
+        # Bind each target to an install/package action; unrelated URL arguments
+        # cannot establish a remote package source.
+        packages = tuple(switch_operand(argv, ('i', 'package', 'a'), separators=(), short_attached=True))
+        for token in packages:
+            if is_remote_path(token):
+                return [Hit('msiexec_remote', f'msiexec was asked to install a remote package ({clip(token)})',
+                            'high', 'high', self.attack, [parsed_field(event, token)],
+                            content=f'msiexec:remote:{token}',
+                            notes=('A package installation was requested; successful installation is not established.',))]
+        for token in packages:
+            if token.casefold().endswith('.msi') and (hit := _writable_operand(
+                    event, token, 'msiexec', 'msiexec_writable_package', ('T1218.007',))):
+                return [hit]
         return []
 
 
 class CompilerProxyExecution(WindowsProcessRule):
     id = "win.dotnet_lolbin_proxy"
-    version = "6"
+    version = '7'
     title = "A build, install or XML utility received proxy-execution arguments"
     assures_negative = False
     positive_only_reason = ("the LOLBin and its payload flag are read from argv; a window without a match proves "

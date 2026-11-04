@@ -284,6 +284,9 @@ from tests import throughput_fixture as tf
 # Windows proxy, script, citation and bounded-revision semantics increment Windows rule versions.
 # Only rule_version changes in 6,887 coverage cells across 97 Windows rules in this Linux fixture.
 # Restoring those versions reproduces every table and semantic-field digest; all findings remain identical.
+# Additional Windows readers contribute zero-evaluated coverage cells on this Linux fixture.
+# Seven changed Windows rule versions also affect coverage only; every prior cell field is
+# identical after restoring those versions. Findings, citations and other stored tables are unchanged.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
     "audit": "23d9b87c75d030df8ff5bcbf07deacc75416c325dd74bcc89243cc1b5488ae93",
@@ -303,9 +306,9 @@ GOLDEN_STACK = {
     "events": "0165d2807ffee33aaef17dd70ba004ec4c87fa4c5f29e9dc75ba833f57b93ff7",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "0fbedb27ca9a4cb72354178444ee9aabc49f377b2c933074fe03ef29c8fbb08a",
-    "manifest": '8acfdb36999fd13c7ee0f7616b9361f3c5f836ccc2bbc2538031b06bb2066aeb',
+    "manifest": '9e1194f359e07762a726c8c203d8614f125515eafb0634ccae494a204499267f',
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
-    "rule_cells": 'fcd56e02a22dd29ea3337c4775ee7b07db0be1ae0cdda7a722b9805c974785fa',
+    "rule_cells": '162fdd3e606ba549d2fbbdebeed8b730570484cc7365e412509b8f232bc2124b',
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
     "tasks": "c65df4ab88c05661371cf32b49a1d22ef84d6753488bdb946c8e29376d486260",
 }
@@ -337,16 +340,16 @@ GOLDEN_NON_BASELINE_SEMANTICS = {
         "ts": "d8015c1ff0b135e082a5fef2ab1cb88206470e30beee157a0cfc7790d48b8310",
     },
     "rule_cells": {
-        "all_fields": "dd408628c5b191b83749b3214c8be1c92f6955563fb6c2c6b894a699e9a13918",
-        "count": 11640,
-        "rule_id": "87e8ec9dfef9b85c31ceebcd146fd06d592b7aa9f92a1663bc1f167f656486ea",
-        "rule_version": "aded744229ee31b55e89eda9a70105040893f629d0bfd084eb35b73b00bf9413",
-        "target": "d1a27422e71138e6437e8a91cb6bfa32d9ad22111fc2ad893349ccc97779f003",
-        "partition": "b0f7c0f6deef9d0a07acba57657953bff72737fd22a0ff86d98c9390c0e7066e",
-        "state": "69b4496a57662903e6ff20dd28012f90dbb70162a52b05bbbf48cad5da32f2f1",
-        "matched": "a90198a07cf3f2126a2e128d14e854df6dab912c3d513b781f93d3bd57224fcb",
-        "evaluated": "cf446939403653cf41d2f87872a2e5713746fa4fc545d3f64ca2f56318569912",
-        "detail": "ba10b3419a974425166f859ff6e10102c4ef38995d0d1150a3ce4ea7b7f77387"
+        "all_fields": "bdfa59e552345a0c273ef0c8642dab4c4fe67b42e848f3a4dc54acae5df717f2",
+        "count": 12492,
+        "rule_id": "8ab0c1322bafb3fbdabf100e138be05587838329762b3ae8afe434a88b292e83",
+        "rule_version": "1cd318a85638e722fe6073ddbad05fd25de9af7da03c10bd07966ab921484c66",
+        "target": "4fa77a16cedae0e02bcaca06c3852143236a09fb87875995808bef68043c5452",
+        "partition": "ba114683fcd28beaceef8664a71c59fdf0188c41966a05ba5cb498ac8932d855",
+        "state": "342543765c39c0311088dd7da94a819e67c8008861d24fb0a4aaea10edb230d9",
+        "matched": "9cd34370178064b7dc16e271b2b93c14ca52c745a9157e4271833e4fd9d0947e",
+        "evaluated": "d56084f9dfeee7d8d252f3586d2ef043c50551fb38e56c3fde5b02a43badb4d8",
+        "detail": "a7a524a17de2d6bf3688ead535f12c4740d680a2d3b998d2861a9e35dfad0ff8"
 },
 }
 GOLDEN_NORMALIZED = {
