@@ -169,8 +169,8 @@ def test_zeek_filter_falls_back_to_unfiltered_when_missing_or_transport_is_not_s
 
     assert any_of == [] and intents[0].any_of == []
     [cell] = repo.rule_cells("h1")
-    assert cell["state"] == "evaluated_partial"
-    assert "zeek non-ICMP connection is not normalized" in cell["detail"]["reasons"][0]
+    # Zeek conn records of every transport are normalized, so the unfiltered TCP record is evaluated
+    assert cell["state"] == "no_match_complete" and cell["evaluated"] == 1
 
 
 def test_zeek_truncated_dataset_inventory_disables_optimized_filter():

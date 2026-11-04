@@ -1,4 +1,6 @@
-"""Suricata EVE tls/ssh/dns and Arkime 6.x list-shaped blocks into one typed handshake contract."""
+"""Suricata EVE tls/ssh/dns and Arkime 6.x list-shaped blocks into one typed handshake contract.
+
+Zeek conn records (ICMP included) are tested in tests/test_zeek_conn.py."""
 import json
 from datetime import UTC, datetime
 
@@ -29,16 +31,6 @@ def eve(_id, record, ts="2024-11-18T14:26:40.100Z"):
     return {"_id": _id, "_index": "romulus-network-logs", "_source": {
         "@timestamp": ts, "host": {"name": "inetfw"},
         "event": {"dataset": f"suricata.eve.{record['event_type']}", "original": json.dumps(record)}}}
-
-
-def zeek(_id="z1", *, source_port=8, destination_port=0, connection=None):
-    return {"_id": _id, "_index": "romulus-network-logs", "_source": {
-        "@timestamp": "2024-11-18T14:26:40.100Z", "host": {"name": "zeek1"},
-        "event": {"dataset": "zeek.connection"}, "network": {"transport": "icmp"},
-        "source": {"ip": "172.17.100.121", "port": source_port},
-        "destination": {"ip": "192.0.2.174", "port": destination_port},
-        "zeek": {"connection": connection or {"orig_bytes": 900, "resp_bytes": 4000,
-                                                "orig_pkts": 9, "resp_pkts": 8, "duration": 2.0}}}}
 
 
 def one(hit):
@@ -225,35 +217,6 @@ def test_arkime_icmp_session_accepts_multivalued_types_and_never_uses_ports_as_f
                         source={"ip": "172.17.100.121", "port": 0, "bytes": 900, "packets": 9},
                         destination={"ip": "192.0.2.174", "port": 0, "bytes": 4000, "packets": 8}))
     assert absent.get("icmp.type") is None and absent.get("icmp.code") is None
-
-
-def test_zeek_icmp_connection_uses_documented_type_code_ports_and_types_flow_counters():
-    typed = one(zeek())
-    assert typed.family == "net_flow" and typed.get("observer.product") == "zeek"
-    assert typed.get("icmp.type") == 8 and typed.get("icmp.code") is None
-    assert typed.get("flow.bytes_toserver") == 900 and typed.get("flow.bytes_toclient") == 4000
-    assert typed.get("flow.pkts_toserver") == 9 and typed.get("flow.pkts_toclient") == 8
-    assert typed.get("session.duration_s") == 2.0
-
-
-def test_zeek_icmp_absent_type_and_code_stay_absent():
-    typed = one(zeek(source_port=None, destination_port=None))
-    assert typed.get("icmp.type") is None and typed.get("icmp.code") is None
-
-
-def test_zeek_icmp_counterpart_port_is_not_code_and_ipv6_is_typed_from_addresses():
-    timestamp = one(zeek("timestamp", source_port=13, destination_port=14))
-    assert timestamp.get("icmp.type") == 13 and timestamp.get("icmp.code") is None
-
-    reply_first = one(zeek("reply", source_port=0, destination_port=8))
-    assert reply_first.get("icmp.type") == 0 and reply_first.get("icmp.code") is None
-
-    v6 = zeek("v6", source_port=128, destination_port=129)
-    v6["_source"]["source"]["ip"] = "fd00::5"
-    v6["_source"]["destination"]["ip"] = "2001:db8::50"
-    typed_v6 = one(v6)
-    assert typed_v6.get("network.transport") == "ipv6-icmp"
-    assert typed_v6.get("icmp.type") == 128 and typed_v6.get("icmp.code") is None
 
 
 # ---- Arkime DNS ------------------------------------------------------------------------------------------------

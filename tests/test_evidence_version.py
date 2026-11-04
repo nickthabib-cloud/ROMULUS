@@ -15,11 +15,12 @@ from romulus.evidence import typed
 from romulus.evidence.normalize import NORMALIZER_VERSION
 from romulus.evidence.typed import EVIDENCE_VERSION, RawRef, event_id
 from romulus.evidence.windows import WINDOWS_NORMALIZER
+from romulus.evidence.zeek import ZEEK_NORMALIZER
 from romulus.hunt import packets as packet_stage
 from romulus.sources import packets as packet_sources
 
 # The files that turn ES/OpenSearch records into typed events (not shellparse.py, which only detectors use).
-EVIDENCE_FILES = ("__init__.py", "auditd.py", "community.py", "normalize.py", "typed.py")
+EVIDENCE_FILES = ("__init__.py", "auditd.py", "certificates.py", "community.py", "normalize.py", "typed.py")
 PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf2116524009",
                    10: "e4dffd0944b86200b3c94aa301bead206967c58f565b30d426ee0071bd4f1aa9",
                    11: "150e5e4d74cb0f4891ef4cca7114a709f2038a42fc456e69f7952dcf0f6c9b32",
@@ -27,7 +28,14 @@ PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf211
                    # Suricata TCP/ICMP, Arkime ICMP and Zeek ICMP conn fields gained strict typed contracts.
                    13: "faf22327da69e63f594c999c9c5c68b909408308e37b0d1ab22ad86da1111b44",
                    # Arkime ICMP lists and Zeek ICMP type/address-family semantics are normalized truthfully.
-                   14: "d25c8cff3b459118ce377eb4c49c0d63736f68b4411fc520f8a32cbfa5107a9a"}
+                   # Then Zeek records moved to their own producer (zeek-ecs); no other record's output changed
+                   # (tests/test_zeek_dispatch.py compares every previous shape with its output before the move).
+                   # The certificate contract moved to certificates.py, shared with the Zeek producer, and the
+                   # observer families gained app_tx and x509_certificate: no output of this producer changed (the
+                   # same golden compares every one of its records). So too when they gained the Windows-protocol
+                   # families (smb_tx, rpc_tx, kerberos_tx, ntlm_tx, remote_session, ldap_tx, address_assignment,
+                   # asset_observed), which this producer never writes.
+                   14: "c9a00e37d6908e9e9aa28a14c2fdb7c91ba453cc9ea33776baf7e6d1e2c787a3"}
 WINDOWS_EVIDENCE_FILES = ("community.py", "windows.py", "windows_catalog.py", "windows_reassembly.py")
 PINNED_WINDOWS = {
     "windows-ecs@11": "89b0392c0b506597732e45f1ada089cfee28c773f6f346d4993286a239c47f54",
@@ -41,6 +49,11 @@ PINNED_WINDOWS = {
     "windows-ecs@7": "46edd73e96683bc4762130b48ad158c13664101a185fb3cd9f361b2ba66c0f78",
     "windows-ecs@9": "c7c70f9618344ea9ec418499d03747524e2b187491de32420da96002a35dbddc",
     "windows-ecs@8": "1d6de025af778e584dfc052227555d628b830af0735a61f4b26e61787905cdee",
+}
+ZEEK_EVIDENCE_FILES = ("certificates.py", "community.py", "rpc_catalog.py", "zeek.py", "zeek_catalog.py",
+                       "zeek_credentials.py")
+PINNED_ZEEK = {
+    "zeek-ecs@1": "e92d2510f3553641cf32e361077eca0048282095a740fec7af955eaac4208efb",
 }
 # The packet stage's normalizer: HTTP bodies rebuilt by TShark -> http_body events, and TCP connections rebuilt
 # from per-segment payload -> tcp_stream events (with the shell analysis and the tables it reads).
@@ -81,6 +94,14 @@ def _windows_files_digest() -> str:
     return h.hexdigest()
 
 
+def _zeek_files_digest() -> str:
+    h = hashlib.sha256()
+    for name in ZEEK_EVIDENCE_FILES:
+        path = Path(typed.__file__).parent / name
+        h.update(name.encode() + b"\0" + path.read_bytes().replace(b"\r\n", b"\n") + b"\0")
+    return h.hexdigest()
+
+
 def _functions_digest() -> str:
     h = hashlib.sha256()
     for fn in PACKET_FUNCTIONS:
@@ -102,6 +123,13 @@ def test_windows_normalization_matches_the_pinned_producer_version():
     )
 
 
+def test_zeek_normalization_matches_the_pinned_producer_version():
+    assert PINNED_ZEEK.get(ZEEK_NORMALIZER) == _zeek_files_digest(), (
+        "Zeek evidence normalization changed: bump ZEEK_NORMALIZER, then record "
+        f"{_zeek_files_digest()} for {ZEEK_NORMALIZER} in tests/test_evidence_version.py"
+    )
+
+
 def test_packet_normalization_matches_the_pinned_version():
     version = packet_stage.PACKET_NORMALIZER
     assert PINNED_PACKETS.get(version) == _functions_digest(), (
@@ -115,5 +143,6 @@ def test_event_ids_carry_the_producer_and_version():
     legacy = hashlib.sha256(b"process_exec|" + ref.key.encode()).hexdigest()[:24]
     assert event_id("process_exec", [ref]) != legacy                    # never collides with pre-versioned rows
     assert event_id("process_exec", [ref], WINDOWS_NORMALIZER) != event_id("process_exec", [ref])
+    assert event_id("net_flow", [ref], ZEEK_NORMALIZER) != event_id("net_flow", [ref])
     assert event_id("http_body", [ref], "tshark-http@3") != event_id("http_body", [ref], "tshark-http@4")
     assert event_id("http_body", [ref], "tshark-http@4") != event_id("http_body", [ref], "tshark-packets@5")
