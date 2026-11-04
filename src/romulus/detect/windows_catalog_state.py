@@ -57,7 +57,43 @@ class MssqlLoginBruteforce(Playbook):
     def _state(self, key):
         return json.loads(self.rows.marker('state:' + key) or '{}')
 
-    def _evaluate(self, key, event_id, stamp, state):
+    def _track(self, state, event_id, stamp, login):
+        """Keep the three newest distinct logins and the newest sa failure; return whether the row was in order."""
+        recent = [item for item in state.get('recent', []) if item[0] != login]
+        previous = next((item for item in state.get('recent', []) if item[0] == login), None)
+        newest = previous if previous and previous[1:] > [stamp, event_id] else [login, stamp, event_id]
+        recent = sorted([*recent, newest], key=lambda item: (item[1], item[2]), reverse=True)
+        in_order = all(item[1] <= stamp for item in state.get('recent', []))
+        state['recent'] = recent[:3]
+        if login == 'sa' and (state.get('sa') is None or state['sa'] < [stamp, event_id]):
+            state['sa'] = [stamp, event_id]
+        return in_order
+
+    def _gate(self, key, stamp, state, in_order):
+        """Distinct-login and sa witnesses inside the window ending at stamp.
+
+        In-order rows read the tracked state in constant time. A row older than tracked history
+        falls back to bounded indexed reads of the stored window.
+        """
+        start = stamp - self.seconds
+        if in_order:
+            distinct = [(item[2], item[1]) for item in state.get('recent', []) if item[1] >= start]
+            sa = state.get('sa')
+            sa = (sa[1], sa[0]) if sa and start <= sa[0] <= stamp else None
+            return distinct, sa
+        distinct = self.rows.witnesses(key, stamp, self.seconds, 3, distinct=True, latest=True)
+        # Every row of a key shares its host, so binding it lets the (k,value,host,ts) index range on time.
+        host = self.rows._lookup(json.loads(key)[0])
+        clause = 'k=? AND value=? AND ' + ('host=? AND ' if host is not None else '') + 'ts>=? AND ts<=?'
+        interval = (self.rows._lookup(key), self.rows._lookup('sa'), *(() if host is None else (host,)), start, stamp)
+        row = self.rows._execute(
+            f'SELECT id,ts FROM windows_rows WHERE {clause} UNION ALL '
+            f'SELECT id,ts FROM windows_archive WHERE {clause} ORDER BY ts DESC,id DESC LIMIT 1',
+            (*interval, *interval)).fetchone()
+        return distinct, ((_event_id(row[0]), row[1]) if row else None)
+
+    def _evaluate(self, key, event_id, stamp, state, login):
+        in_order = self._track(state, event_id, stamp, login)
         witnesses = self.rows.witnesses(key, stamp, self.seconds, 10, latest=True)
         breadth = False
         if len(witnesses) < 10:
@@ -66,13 +102,7 @@ class MssqlLoginBruteforce(Playbook):
                 witnesses = distinct
                 breadth = True
         strong = len(witnesses) >= 10 or breadth
-        distinct = self.rows.witnesses(key, stamp, self.seconds, 3, distinct=True, latest=True)
-        interval = (self.rows._lookup(key), self.rows._lookup('sa'), stamp-self.seconds, stamp)
-        sa = self.rows._execute(
-            'SELECT id,ts FROM windows_rows WHERE k=? AND value=? AND ts>=? AND ts<=? UNION ALL '
-            'SELECT id,ts FROM windows_archive WHERE k=? AND value=? AND ts>=? AND ts<=? '
-            'ORDER BY ts DESC,id DESC LIMIT 1',
-            (*interval, *interval)).fetchone()
+        distinct, sa = self._gate(key, stamp, state, in_order) if strong else ([], None)
         strong = strong and (len(distinct) >= 3 or sa is not None)
         state['count'] = max(state.get('count', 0), len(witnesses))
         # A missing client address cannot establish one remote source's burst.
@@ -82,7 +112,7 @@ class MssqlLoginBruteforce(Playbook):
             # Keep the native rows deciding the additional gate, even when they
             # precede the latest ten failures. Replace redundant count examples:
             # ten total records (or all eight distinct names) still prove the burst.
-            deciding = distinct if len(distinct) >= 3 else [(_event_id(sa[0]), sa[1])]
+            deciding = distinct if len(distinct) >= 3 else [sa]
             deciding_ids = {identity for identity, _stamp in deciding}
             redundant = [item for item in witnesses if item[0] not in deciding_ids]
             witnesses = sorted([*deciding, *redundant[:len(witnesses)-len(deciding)]],
@@ -143,7 +173,8 @@ class MssqlLoginBruteforce(Playbook):
                     state = self._state(key)
                     old_high = state.get('high', False)
                     state['count'] = state.get('count', 0) + 1
-                    self._evaluate(key, event.id, event.ts.timestamp(), state)
+                    self._evaluate(key, event.id, event.ts.timestamp(), state,
+                                   str(event.get('db.login.name')).casefold())
                     self.rows.remember('state:' + key, json.dumps(state, sort_keys=True))
                     count = state['count']
                     if count == 1 or state.get('high', False) != old_high or not count & (count - 1):
@@ -168,7 +199,7 @@ class MssqlLoginBruteforce(Playbook):
             return
         with self.rows.batch():
             current, state = None, None
-            for key, event_id, stamp, _value, _host in self.rows.iterate():
+            for key, event_id, stamp, value, _host in self.rows.iterate():
                 if key != current:
                     if current is not None:
                         self.rows.remember('state:' + current, json.dumps(state, sort_keys=True))
@@ -176,7 +207,10 @@ class MssqlLoginBruteforce(Playbook):
                         if match:
                             yield match
                     current, state = key, self._state(key)
-                self._evaluate(key, event_id, stamp, state)
+                    # The replay is in time order; tracking restarts so every row reads it in order.
+                    state.pop('recent', None)
+                    state.pop('sa', None)
+                self._evaluate(key, event_id, stamp, state, value)
             if current is not None:
                 self.rows.remember('state:' + current, json.dumps(state, sort_keys=True))
                 match = self._match(current, state)

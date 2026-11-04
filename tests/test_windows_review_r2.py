@@ -85,6 +85,21 @@ def test_r2_writable_server_child_with_system_integrity_stays_high(tmp_path, mon
     assert finding['lane'] == 'high' and 'writable' in finding['claim']
 
 
+@pytest.mark.parametrize('parent,child', [(r'inetsrv\w3wp.exe', 'cmd.exe'), (r'inetsrv\w3wp.exe', r'WindowsPowerShell\v1.0\powershell.exe'),
+                                          ('sqlservr.exe', 'cmd.exe'), ('winlogon.exe', 'cmd.exe'), ('smss.exe', 'cmd.exe')])
+def test_r2_shell_under_server_or_boot_parent_at_inherited_integrity_stays_high(tmp_path, monkeypatch, parent, child):
+    # Webshell, xp_cmdshell and privilege-escalation shapes record inherited high or system integrity.
+    record = native(process('C:\\Windows\\System32\\' + child, r'NT AUTHORITY\SYSTEM', 2, ParentImage='C:\\Windows\\System32\\' + parent, IntegrityLevel='System'))
+    [finding], _ = sweep_run(tmp_path, monkeypatch, ServerOrBootProcessChild(), [[record]])
+    assert finding['lane'] == 'high' and 'integrity under a server or startup process' in finding['claim']
+
+
+def test_r2_service_control_shell_at_system_integrity_stays_a_lead(tmp_path, monkeypatch):
+    record = native(process(r'C:\Windows\System32\cmd.exe', r'NT AUTHORITY\SYSTEM', 2, ParentImage=r'C:\Windows\System32\services.exe', IntegrityLevel='System'))
+    [finding], _ = sweep_run(tmp_path, monkeypatch, ServerOrBootProcessChild(), [[record]])
+    assert finding['lane'] == 'lead'
+
+
 def test_r2_installer_service_start_is_quiet():
     owner = ServerOrBootProcessChild()
     try:
@@ -97,7 +112,7 @@ def test_r2_installer_service_start_is_quiet():
 @pytest.mark.parametrize('parent_integrity,child_integrity,lane', [('Medium', 'High', 'high'), ('System', 'High', 'lead'), ('High', 'High', 'lead')])
 def test_r2_integrity_raise_needs_guid_joined_lower_parent(tmp_path, monkeypatch, parent_integrity, child_integrity, lane):
     parent = native(process(r'C:\Windows\System32\inetsrv\w3wp.exe', r'EXAMPLE\alice', 1, ProcessId='100', IntegrityLevel=parent_integrity))
-    child = native(process(r'C:\Windows\System32\cmd.exe', r'EXAMPLE\alice', 2, ParentProcessGuid=parent[0].get('process.guid'), ParentImage=r'C:\Windows\System32\inetsrv\w3wp.exe', ParentProcessId='100', ProcessId='200', IntegrityLevel=child_integrity), n=2, offset=1)
+    child = native(process(r'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe', r'EXAMPLE\alice', 2, ParentProcessGuid=parent[0].get('process.guid'), ParentImage=r'C:\Windows\System32\inetsrv\w3wp.exe', ParentProcessId='100', ProcessId='200', IntegrityLevel=child_integrity), n=2, offset=1)
     [finding], _ = sweep_run(tmp_path, monkeypatch, ServerOrBootProcessChild(), [[parent], [child]], assert_raw=(child,))
     assert finding['lane'] == lane
 

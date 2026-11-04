@@ -300,6 +300,7 @@ from tests import throughput_fixture as tf
 # Nine Windows rule decisions changed their versions. In this Linux fixture they evaluate no records;
 # restoring those versions reproduces every coverage-cell field and all other table digests.
 # Only the rule_cells fingerprints change; the manifest, findings and citations are identical.
+# The server/startup child rule's later version bump likewise moves only rule_cells.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
     "audit": "23d9b87c75d030df8ff5bcbf07deacc75416c325dd74bcc89243cc1b5488ae93",
@@ -321,7 +322,7 @@ GOLDEN_STACK = {
     "links": "0fbedb27ca9a4cb72354178444ee9aabc49f377b2c933074fe03ef29c8fbb08a",
     "manifest": "ae375fa1371815047377279c299b0e2e9d3e1b16fee0484e5237b1547e78d4b3",
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
-    "rule_cells": '2c74b7d1e5f213c364cae1a601dd227bde0eca355fc29cae87e821a15ef24d09',
+    "rule_cells": '3e363f4b2c2bba9a167a4d86a03923d855e77a5d8406f3f8772f55af8dea53b5',
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
     "tasks": "c65df4ab88c05661371cf32b49a1d22ef84d6753488bdb946c8e29376d486260",
 }
@@ -353,10 +354,10 @@ GOLDEN_NON_BASELINE_SEMANTICS = {
         "ts": "d8015c1ff0b135e082a5fef2ab1cb88206470e30beee157a0cfc7790d48b8310",
     },
     "rule_cells": {
-        "all_fields": "000d55a48d3c7c01cbe48d40ed3f7c7c764be325086ed965d58212d946c2b4a1",
+        "all_fields": "de3bd12977ac9bb63fc3509c6cf224aa310ed25f6b1d13dd392391ffd450d89d",
         "count": 12563,
         "rule_id": "cb113cf586e2d6b38d9b946aa560605b7b1002fd80b15903f85ee15ef31fec68",
-        "rule_version": "8691f635e9c94a748661c1a0f51beb7ab6f6a6187c0fec0e569623235152e358",
+        "rule_version": "6bee9f954e45ae7bc38d409c6f9f20478526d881841fcfe3685aa7c716a8cf7e",
         "target": "28be82d907786442cad6b29a68221ae51bb78c44ceb1db6f8ac185d497a18f25",
         "partition": "b55173864631da90f3c5ba0b34da90b5851d5e1ae1f08a313eedbd59ba8a8968",
         "state": "ca5ff7b9a69767b658ddedade55f3ecddcf3fcf16150d8db84944362cb7eb97e",

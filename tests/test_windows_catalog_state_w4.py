@@ -237,6 +237,27 @@ def test_ten_thousand_native_sql_failures_use_disk_history_and_bounded_citations
     assert len(rule.rows._symbol_cache) <= 8192
 
 
+@pytest.mark.parametrize('accounts', [['app'], ['sa'], ['a', 'b', 'c']])
+def test_sql_breadth_and_sa_gates_do_not_rescan_the_window_for_in_order_records(tmp_path, monkeypatch, accounts):
+    # A sustained single-login or sa burst must stay linear: the gates read tracked state,
+    # never a distinct scan or sa lookup of the whole window per record.
+    rule = rule_type('MssqlLoginBruteforce')()
+    scans = []
+    original = rule.rows.witnesses
+    monkeypatch.setattr(rule.rows, 'witnesses', lambda key, end, seconds, count, **kw:
+                        scans.append(count) if count == 3 else None or original(key, end, seconds, count, **kw))
+    monkeypatch.setattr(rule.rows, '_execute', lambda *a, original=rule.rows._execute: (
+        scans.append('sa') if 'value=?' in a[0] and 'ts>=?' in a[0] else None) or original(*a))
+    try:
+        events = [sql(n, account=accounts[n % len(accounts)], offset=n / 200)[0] for n in range(600)]
+        matches = [match for start in range(0, 600, 100) for match in rule.consume(events[start:start + 100])]
+        matches += list(rule.finalize())
+        assert scans == []
+        assert {match.proposed_lane for match in matches} >= ({'lead'} if accounts == ['app'] else {'high'})
+    finally:
+        rule.release_state()
+
+
 def seed_snapshot():
     """Whole subprocess entry point; no source or fixture is extracted into executable fragments."""
     import json

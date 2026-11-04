@@ -2523,7 +2523,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-win-server-or-boot-process-child"></a>
 ### `win.server_or_boot_process_child` — A server or startup process created a code launcher
 
-- Version: `2`; status: `active`
+- Version: `3`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1068`](https://attack.mitre.org/techniques/T1068/), [`T1505.001`](https://attack.mitre.org/techniques/T1505/001/), [`T1505.003`](https://attack.mitre.org/techniques/T1505/003/), [`T1546.008`](https://attack.mitre.org/techniques/T1546/008/), [`T1569.002`](https://attack.mitre.org/techniques/T1569/002/)
