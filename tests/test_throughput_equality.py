@@ -284,6 +284,9 @@ from tests import throughput_fixture as tf
 # Windows proxy, script, citation and bounded-revision semantics increment Windows rule versions.
 # Only rule_version changes in 6,887 coverage cells across 97 Windows rules in this Linux fixture.
 # Restoring those versions reproduces every table and semantic-field digest; all findings remain identical.
+# Zeek conn reading increments net.protocol_port_mismatch, net.long_unidentified_session,
+# net.outbound_volume_asymmetry and net.port_scan; only their rule_version changes (in candidates, cells and the
+# manifest), and restoring those versions reproduces every digest.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
     "audit": "23d9b87c75d030df8ff5bcbf07deacc75416c325dd74bcc89243cc1b5488ae93",
@@ -296,16 +299,16 @@ GOLDEN_STACK = {
     "baseline_window_counts": "7cc0f5555260b0533927f47cfe29e6a543e2d921b0cc79e4b6b89f418d6052f8",
     "baseline_window_event_hours": "bb58c65144b135443e75a690b7b2f8137ebac6b827f8e8bd8cc7606a01c53e52",
     "baseline_window_scope_hours": "07f4081d18fb5be1dfc23c1eecd4e63eef7af093c1a70eaa7f4ea05fc772006f",
-    "candidates": "3b23f98dbf25d34c4921bbec2cba932991746ad9d4a11e8963988d7c8c421bee",
+    "candidates": "02c5eb67a3b1a86948920d429194da593380330bd3cd7e66d720c6d898b5b15c",
     "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
     "event_citations": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     "event_entities": "40eefa75e2cfa03734adb2e57b3da8719aa150bcdc65e72a758d84ba3e1f31b7",
     "events": "0165d2807ffee33aaef17dd70ba004ec4c87fa4c5f29e9dc75ba833f57b93ff7",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "0fbedb27ca9a4cb72354178444ee9aabc49f377b2c933074fe03ef29c8fbb08a",
-    "manifest": "35b8a0132fc6747d24e7efe50b32fa0c44c8eefaffcebf5d8795f01438b0a8f1",
+    "manifest": "58578d72f4b2170a14517710153af45ff88990746d65fc4c844c13cf1b6ce198",
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
-    "rule_cells": "0ede3beaf59df4de531ac0d313b3a93d6c9f50eb1ad404a809bc24add83f2185",
+    "rule_cells": "90af812692b2907834e4dcaa37c9d7c0eac082043db47c22ee4f0cd0f86eb222",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
     "tasks": "c65df4ab88c05661371cf32b49a1d22ef84d6753488bdb946c8e29376d486260",
 }
