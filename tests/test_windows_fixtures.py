@@ -17,6 +17,7 @@ from tests.windows_fixtures import (
 )
 
 _REPRESENTATIVE_FIELDS = {
+    "rpc_call": ("rpc.interface_uuid", "rpc.opnum", "rpc.protocol"),
     "silent_process_exit": ("monitor.exited_image",),
     "database_audit": ("db.action",),
     "msi_install": ("msi.action",),
@@ -249,3 +250,24 @@ def test_mission_volume_generator_is_streaming_deterministic_and_uses_documentat
     rendered = str(first)
     assert "example.test" in rendered
     assert any(prefix in rendered for prefix in ("192.0.2.", "198.51.100.", "203.0.113."))
+
+
+def test_rpc_catalog_fixtures_are_channelless_local_records_with_xml_and_side_data():
+    logical = [event for event in all_logical_events() if event.provider == "Microsoft-Windows-RPC"]
+    assert [(event.channel, event.event_id) for event in logical] == [("", 5), ("", 6)]
+    for row in logical:
+        for shape in SHAPES:
+            hit = windows_hit(row, shape)
+            assert "channel" not in hit["_source"]["winlog"]
+            assert hit["_source"]["winlog"]["event_data"]["Protocol"] == "3"
+            for native in (hit, windows_xml_hit(row, shape)):
+                [typed], skips, errors = normalize_hits([native])
+                assert skips == {} and errors == []
+                assert typed.family == "rpc_call" and typed.get("event.channel") == ""
+                assert typed.get("rpc.side") == ("client" if row.event_id == 5 else "server")
+                assert typed.get("rpc.interface_uuid") == "367abb81-9844-35f1-ad32-98f038001003"
+                assert typed.get("rpc.opnum") == 17 and typed.get("rpc.protocol") == "local"
+                assert typed.get("rpc.endpoint") == "ntsvcs"
+                assert not typed.has("rpc.network_address")
+                if "event_data" not in native["_source"]["winlog"]:
+                    assert "#xml" in typed.fields["rpc.interface_uuid"].origin

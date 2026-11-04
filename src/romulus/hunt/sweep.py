@@ -29,6 +29,7 @@ from romulus.errors import SourceError
 from romulus.evidence.normalize import (
     BOOT_FILL_FAMILIES,
     BOOT_INTERVAL_ORIGIN,
+    RPC_REMOTE_SCOPE_SKIP,
     BootIntervals,
     normalize_hits,
 )
@@ -464,6 +465,22 @@ class Sweep:
         read_tokens = getattr(self, "_windows_read_tokens", {}).get(target)
         wfp_reader = any("network_filter" in (*rule.families, *rule.context_families) for rule in getattr(self, "pack", ()))
         rdp_reader = any("remote_access" in (*rule.families, *rule.context_families) for rule in getattr(self, "pack", ()))
+        rpc_reader = any("rpc_call" in (*rule.families, *rule.context_families) for rule in getattr(self, "pack", ()))
+        rpc_groups = []
+        strict_rpc = False
+        if rpc_reader:
+            from romulus.hunt.windows_filters import rpc_call_groups
+
+            rpc_groups, strict_rpc = rpc_call_groups(contract)
+            if not strict_rpc:
+                reason = ("RPC exact transport/interface filtering unavailable; available provider/code predicates "
+                          "are used, or unrestricted retrieval when neither is expressible; local or untyped "
+                          "transports and unclassified interfaces are withheld by typed fields before staging.")
+                reasons = self._windows_inventory_reasons.setdefault(target, [])
+                if reason not in reasons:
+                    reasons.append(reason)
+            if any(not group for group in rpc_groups):
+                return []
         class_searchable = all(contract.supports(field, "eq") for field in (
             "event.channel", "event.provider", "event.code"))
         if (rdp_reader or wfp_reader) and not class_searchable:
@@ -505,8 +522,10 @@ class Sweep:
                                   if "windows" in playbook.os_families
                                   and "object_access" in (*playbook.families, *playbook.context_families)}
                 process_only = object_readers == {"win.lsass_process_access"} and contract.supports("object.type", "eq")
-                groups = []
+                groups = list(rpc_groups)
                 for event in selected:
+                    if event.family == "rpc_call":
+                        continue
                     group = [Predicate(field="event.channel", op="eq", value=event.channel),
                              Predicate(field="event.provider", op="eq", value=event.provider),
                              Predicate(field="event.code", op="eq", value=event.event_id)]
@@ -547,11 +566,15 @@ class Sweep:
                     return [[Predicate(field="event.code", op="exists"),
                              Predicate(field="event.code", op="missing")]]
                 return groups
-        groups: list[list[Predicate]] = []
-        if contract.supports("event.dataset", "in"):
+        if rpc_groups and not any(contract.supports(field, "in") for field in ("event.dataset", "event.channel")):
+            # The ordinary Windows fallback was unrestricted; RPC must not narrow it.
+            return []
+        groups: list[list[Predicate]] = list(rpc_groups)
+        if contract.supports("event.dataset", "in") and not (rpc_reader and strict_rpc
+                and contract.supports("event.channel", "in")):
             groups.append([Predicate(field="event.dataset", op="in", value=list(WINDOWS_HOST_DATASETS))])
         if contract.supports("event.channel", "in"):
-            groups.append([Predicate(field="event.channel", op="in", value=list(WINDOWS_CHANNELS))])
+            groups.append([Predicate(field="event.channel", op="in", value=[channel for channel in WINDOWS_CHANNELS if channel])])
         self.stats.setdefault("dataset_filter", {})[target] = list(WINDOWS_HOST_DATASETS)
         self.stats.setdefault("channel_filter", {})[target] = list(WINDOWS_CHANNELS)
         return groups
@@ -663,6 +686,8 @@ class Sweep:
                 or not raw_provider.strip()
                 or isinstance(raw_event_id, bool)
             )
+            if (row := lookup_event_class(raw_channel, raw_provider, raw_event_id)) is not None and row.family == "rpc_call":
+                malformed_identity = False
             if not malformed_identity:
                 try:
                     int(raw_event_id)
@@ -1261,7 +1286,7 @@ class Sweep:
         global_keys = self._bounded_counts(self.stats["skips"], skips)
         windows_skips = {
             reason: count for reason, count in skips.items()
-            if reason.startswith(("Windows event class", "duplicate Windows event copy"))
+            if reason == RPC_REMOTE_SCOPE_SKIP or reason.startswith(("Windows event class", "duplicate Windows event copy"))
         }
         if windows_skips:
             by_target = self.stats.setdefault("skips_by_target", {}).setdefault(target, {})
@@ -1465,7 +1490,7 @@ class Sweep:
         malformed_text: dict[str, list[str]] = {}
         skip_families: dict[str, frozenset[str] | None] = {}
         events, skips, errors = normalize_hits(out.records, self.boots, malformed_text=malformed_text,
-                                               skip_families=skip_families)
+                                               skip_families=skip_families, rpc_remote_only=True)
         if malformed_text:
             # normalized with each lone surrogate replaced (the events name the fields): counted, never partial
             self.stats["malformed_text_records"] = self.stats.get("malformed_text_records", 0) + len(malformed_text)

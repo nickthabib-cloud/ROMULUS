@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from xml.etree import ElementTree
 
+from romulus.evidence import rpc_catalog
 from romulus.evidence.community import community_id
 from romulus.evidence.typed import FieldValue, Outcome, RawRef, TypedEvent, event_id, fv
 from romulus.evidence.windows_catalog import WINDOWS_DATASETS, WindowsEventClass, lookup_event_class
@@ -24,7 +25,7 @@ from romulus.evidence.windows_catalog import WINDOWS_DATASETS, WindowsEventClass
 if TYPE_CHECKING:
     from romulus.detect.bounded import Account, StateBudget
 
-WINDOWS_NORMALIZER = "windows-ecs@14"
+WINDOWS_NORMALIZER = "windows-ecs@15"
 # This is already far beyond what the 64 MiB assembler can retain at normal 4104 chunk sizes, while bounding every
 # completeness vector even when hostile metadata claims billions of parts.
 SCRIPT_BLOCK_MAX_PARTS = 4_096
@@ -552,6 +553,9 @@ def windows_record_key(hit: dict) -> tuple[str, str, str] | None:
     computer = str(winlog.get("computer_name") or "").strip().rstrip(".").casefold()
     channel = str(winlog.get("channel") or "").strip().casefold()
     record_id = winlog.get("record_id")
+    event_class = lookup_event_class(winlog.get("channel"), winlog.get("provider_name"), winlog.get("event_id"))
+    if event_class is not None and event_class.family == "rpc_call":
+        channel = event_class.provider.casefold()
     if not computer or not channel or record_id in (None, "") or isinstance(record_id, bool):
         return None
     return computer, channel, str(record_id)
@@ -614,6 +618,9 @@ def windows_record_signature(hit: dict) -> str:
         "time_created": str(native_time or ""),
         "payload_digest": payload_digest,
     }
+    if event_class is not None and event_class.family == "rpc_call":
+        identity["side"] = "client" if native_event_id == 5 else "server"
+        identity["pid"] = _get(winlog, "process.pid")
     encoded = json.dumps(identity, sort_keys=True, separators=(",", ":"), default=str).encode()
     return hashlib.sha256(encoded).hexdigest()
 
@@ -725,7 +732,7 @@ def read_windows_event(hit: dict) -> WindowsRecord:
     _parsed_hashes(data)
     if event_class.family in {"silent_process_exit", "database_audit", "boot_configuration", "ese_database",
                               "winsock_catalog", "application_compatibility", "msi_install", "security_enumeration",
-                              "privilege_adjustment", "dcom_access", "network_filter", "remote_access"}:
+                              "privilege_adjustment", "dcom_access", "network_filter", "remote_access", "rpc_call"}:
         for name, path in (("EnvelopeProcessId", "process.pid"), ("EnvelopeActorSid", "user.identifier"),
                            ("ConnectionActivity", "activity_id")):
             # These keys are reserved internal aliases, never native payload facts.
@@ -1760,8 +1767,58 @@ def _catalog_fields(fields: dict[str, FieldValue], record: WindowsRecord) -> Out
     return Outcome.success
 
 
+def rpc_protocol(value: object) -> str:
+    """The RPC provider's numeric and protocol-sequence spellings; unknowns are never guessed."""
+    protocols = {"1": "tcp", "ncacn_ip_tcp": "tcp", "2": "named_pipe", "ncacn_np": "named_pipe",
+                 "3": "local", "ncalrpc": "local"}
+    result = protocols.get(str(value).strip().casefold())
+    if result is None:
+        raise ValueError("unrecognized RPC protocol")
+    return result
+
+
+def _rpc_address(value: object) -> str | None:
+    if not isinstance(value, str):
+        raise TypeError("RPC network address must be text")
+    text = value.strip().lstrip("\\").strip("[]")
+    if not text or text.casefold() == "null":
+        return None
+    try:
+        return str(ipaddress.ip_address(text))
+    except ValueError:
+        if re.fullmatch(r"[\w.-]+", text):
+            return text.rstrip(".").casefold()
+        raise ValueError("not an IP address or host name") from None
+
+
+def _rpc_fields(fields, record):
+    fields["rpc.side"] = fv("client" if record.event_class.event_id == 5 else "server",
+                            fields["event.code"].origin + "#computed:side")
+    _put(fields, record, "rpc.interface_uuid", "InterfaceUuid", transform=rpc_catalog.canonical_uuid)
+    _put(fields, record, "rpc.opnum", "ProcNum", transform=_integer)
+    if "rpc.opnum" not in fields:
+        record.caveats.append("ProcNum missing or invalid; RPC operation is untyped")
+    _put(fields, record, "rpc.protocol", "Protocol", transform=rpc_protocol)
+    if "rpc.protocol" not in fields:
+        record.caveats.append("Protocol missing or unrecognized; RPC transport is untyped")
+    _put(fields, record, "rpc.endpoint", "Endpoint")
+    _put(fields, record, "rpc.network_address", "NetworkAddress", transform=_rpc_address)
+    _put(fields, record, "process.pid", "EnvelopeProcessId", transform=_integer)
+    call = rpc_catalog.lookup_call(fields.get("rpc.interface_uuid", fv(None, "")).value,
+                                  fields.get("rpc.opnum", fv(None, "")).value)
+    origin = record.origin("InterfaceUuid") if "InterfaceUuid" in record.data else fields["event.code"].origin
+    fields["rpc.op_class"] = fv(call.op_class, origin + "#rpc_catalog")
+    if call.interface:
+        fields["rpc.interface_name"] = fv(call.interface.zeek_names[0], origin + "#rpc_catalog")
+    if call.operation:
+        fields["rpc.operation"] = fv(call.operation.name, origin + "#rpc_catalog")
+    return Outcome.unknown
+
+
 def _semantic_fields(fields: dict[str, FieldValue], record: WindowsRecord, host: str) -> Outcome:
     event_id, family = record.event_class.event_id, record.event_class.family
+    if family == "rpc_call":
+        return _rpc_fields(fields, record)
     _account_fields(fields, record)
     extra = _catalog_fields(fields, record)
     if extra is not None:

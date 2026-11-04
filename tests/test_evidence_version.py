@@ -41,9 +41,10 @@ PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf211
                    # lone surrogate) change, and a non-Zeek record's stored form and digest are the record as read.
                    # Then normalize_hits gained an optional report of the families a skipped record could have fed,
                    # and the package registers its cleaners with the store on import: no output changed.
-                   14: "54780dc672c15d9d4b5c4e3aa873f6c8070ad59545d2b6961e7e7882448a91a1"}
-WINDOWS_EVIDENCE_FILES = ("community.py", "windows.py", "windows_catalog.py", "windows_reassembly.py")
+                   14: "d79eeeaca41f3d1fd0ea170c5138c89c8634fc4c95a3e564ece0a49631afd1dd"}
+WINDOWS_EVIDENCE_FILES = ("community.py", "windows.py", "windows_catalog.py", "windows_reassembly.py", "rpc_catalog.py")
 PINNED_WINDOWS = {
+    "windows-ecs@15": "25b5a842851ea66af4086d63dc5aac56fe8d0ec486396a456ed6330cc8ed721b",
     "windows-ecs@14": "167de2e4eade937df0f30ea8b82da2b81e5c3923e40707190c55240a53480bf5",
     "windows-ecs@13": "82231992a4a67abefc57f4c0b4bb7c3df0bbef1d63a21cef6303371b7b84ad70",
     "windows-ecs@12": "f77b93e9fb7012437e7b1e158cbfd4675e1381bfe3985a3b783f3c75ffdea223",

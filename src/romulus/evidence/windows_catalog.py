@@ -46,6 +46,7 @@ WINRM_CHANNEL = "Microsoft-Windows-WinRM/Operational"
 WINRM_PROVIDER = "Microsoft-Windows-WinRM"
 BITS_CHANNEL = "Microsoft-Windows-Bits-Client/Operational"
 BITS_PROVIDER = "Microsoft-Windows-Bits-Client"
+RPC_PROVIDER = "Microsoft-Windows-RPC"
 
 def _security(event_id: int, family: str, name: str) -> WindowsEventClass:
     return WindowsEventClass(
@@ -420,6 +421,9 @@ EVENT_CLASSES += (
               "https://learn.microsoft.com/troubleshoot/windows-server/windows-security/troubleshoot-kerberos-domain-join") for code in (5805, 5723)),
 )
 
+EVENT_CLASSES += tuple(WindowsEventClass("", RPC_PROVIDER, code, "rpc_call", side + " RPC call",
+    "https://learn.microsoft.com/windows/win32/rpc/rpc-start-page") for code, side in ((5, "client"), (6, "server")))
+
 EVENT_CLASSES = tuple(WindowsEventClass(row.channel, row.provider, row.event_id, row.family, row.name,
                                        row.documentation_url + f"#event-id-{row.event_id}")
                       if str(row.event_id) not in row.documentation_url else row for row in EVENT_CLASSES)
@@ -616,6 +620,8 @@ def _channel_requirement(event: WindowsEventClass) -> tuple[str, dict, str]:
 def collection_requirements(event: WindowsEventClass) -> tuple[tuple[str, dict, str], ...]:
     """Site facts required before absence of this event class can support a negative."""
     requirements: list[tuple[str, dict, str]] = []
+    if event.provider == RPC_PROVIDER:
+        return (("event_provider", {"provider": RPC_PROVIDER}, f"event provider {RPC_PROVIDER}"),)
     if event.channel.casefold() == "application":
         return (("application_event_log", {}, "Windows Application event log"),)
     if event.provider.casefold() == SYSMON.casefold():
@@ -679,6 +685,8 @@ def collection_requirements(event: WindowsEventClass) -> tuple[tuple[str, dict, 
 
 def lookup_event_class(channel: object, provider: object, event_id: object) -> WindowsEventClass | None:
     """Return a catalog row only when all three shipper-written type fields agree."""
+    if channel is None and isinstance(provider, str) and provider.casefold() == RPC_PROVIDER.casefold():
+        channel = ""
     if not isinstance(channel, str) or not isinstance(provider, str):
         return None
     try:
