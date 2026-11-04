@@ -10,7 +10,6 @@ from romulus.detect.base import Match, Playbook, pf
 from romulus.detect.bounded import StateExhausted
 from romulus.detect.windows_cmdline import is_user_writable, split_argv
 from romulus.detect.windows_common import (
-    SHELLS_AND_SCRIPT_HOSTS,
     SPAWNED_CODE_RUNNERS,
     Undecided,
     WindowsProcessRule,
@@ -83,6 +82,9 @@ def _expected_system_location(name, path):
     return not middle or middle in SYSTEM_BINARIES[name].get("expected_subdirs", ())
 
 
+_SERVER_COMPILERS = frozenset({'csc.exe', 'vbc.exe', 'jsc.exe'})
+
+
 class ServerOrBootProcessChild(WindowsProcessRule):
     id = "win.server_or_boot_process_child"
     title = "A server or startup process created a code launcher"
@@ -120,13 +122,13 @@ class ServerOrBootProcessChild(WindowsProcessRule):
         predicate, context, how, raw = parent_predicate(event, parent)
         integrity = str(event.get("process.integrity_level") or "").casefold()
         reason = "the child executable has a writable-path indicator" if _writable(_path(event)) else ""
-        # A shell or script host under a web, database or logon process at high or system integrity
-        # is the webshell / xp_cmdshell / privilege-escalation shape, and any launcher under smss or
-        # an accessibility binary is abnormal, so the recorded integrity raises them. Compilers and
-        # other proxies under service hosts inherit that integrity routinely (ASP.NET compilation),
-        # so for them only a lower-integrity joined parent raises.
+        # A launcher under a web, database or logon process at high or system integrity is the
+        # webshell / xp_cmdshell / privilege-escalation shape, so the recorded integrity raises it.
+        # The .NET compilers inherit that integrity routinely (ASP.NET dynamic compilation), so under
+        # those parents only a lower-integrity joined parent raises them. Any launcher under smss or
+        # an accessibility binary is abnormal.
         if (not reason and parent_name != 'services.exe' and integrity in {'high', 'system'}
-                and (child in SHELLS_AND_SCRIPT_HOSTS or parent_name == 'smss.exe'
+                and (child not in _SERVER_COMPILERS or parent_name == 'smss.exe'
                      or parent_name in ACCESSIBILITY_BINARIES)):
             reason = f"the child records {integrity} integrity under a server or startup process"
         if not reason and integrity in {'high', 'system'} and event.get('process.parent.guid') and self.lineage:

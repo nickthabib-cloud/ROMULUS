@@ -94,6 +94,14 @@ def test_r2_shell_under_server_or_boot_parent_at_inherited_integrity_stays_high(
     assert finding['lane'] == 'high' and 'integrity under a server or startup process' in finding['claim']
 
 
+@pytest.mark.parametrize('parent,child', [(r'inetsrv\w3wp.exe', 'certutil.exe'), ('sqlservr.exe', 'rundll32.exe')])
+def test_r2_proxy_launcher_under_server_parent_at_inherited_integrity_stays_high(tmp_path, monkeypatch, parent, child):
+    # A webshell or OLE automation can start a proxy directly, without a shell in between.
+    record = native(process('C:\\Windows\\System32\\' + child, r'NT AUTHORITY\SYSTEM', 2, ParentImage='C:\\Windows\\System32\\' + parent, IntegrityLevel='System'))
+    [finding], _ = sweep_run(tmp_path, monkeypatch, ServerOrBootProcessChild(), [[record]])
+    assert finding['lane'] == 'high'
+
+
 def test_r2_service_control_shell_at_system_integrity_stays_a_lead(tmp_path, monkeypatch):
     record = native(process(r'C:\Windows\System32\cmd.exe', r'NT AUTHORITY\SYSTEM', 2, ParentImage=r'C:\Windows\System32\services.exe', IntegrityLevel='System'))
     [finding], _ = sweep_run(tmp_path, monkeypatch, ServerOrBootProcessChild(), [[record]])
