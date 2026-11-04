@@ -230,7 +230,37 @@ def test_a_kerberos_error_with_no_kdc_request_is_an_application_servers_never_th
     # the KDC's own error for an AS request is the account's
     kdc = normalize(zl.plain(zl.Row("kerberos", {**zeek, "request_type": "AS", "error_msg": "KDC_ERR_PREAUTH_FAILED"})))
     assert (kdc.get("auth.status"), kdc.get("kerberos.error_code"), kdc.outcome) == (24, 24, Outcome.failure)
-    assert kdc.get("auth.target_account") == "name:example.test\\alice" and not kdc.has("kerberos.error_source")
+    assert kdc.get("auth.target_account") == "name:example.test\\alice" and kdc.get("kerberos.error_source") == "kdc"
+    assert not any("saw no AS or TGS request" in caveat for caveat in kdc.caveats)
+
+
+@pytest.mark.parametrize("label,changes", [
+    ("kdc-code-on-88", {"id.resp_p": 88, "error_msg": "KDC_ERR_PREAUTH_FAILED"}),
+    ("kdc-code-elsewhere", {"id.resp_p": 1088, "error_msg": "KDC_ERR_C_PRINCIPAL_UNKNOWN"}),
+    ("kdc-port-generic-error", {"id.resp_p": 88, "error_msg": "KRB_ERR_GENERIC"}),
+    ("kdc-port-as-source", {"id.orig_p": 88, "id.resp_p": 51220, "error_msg": "KRB_AP_ERR_SKEW"}),
+    ("pkinit-code", {"id.resp_p": 1088, "error_msg": "KDC_ERROR_CLIENT_NOT_TRUSTED"}),
+])
+def test_a_kdc_error_whose_request_the_capture_missed_is_still_the_kdcs(label, changes):
+    """An asymmetric capture can miss the AS or TGS request: a KDC-only error code or port 88 still says whose answer
+    it is, so a spray of failures stays the account's, with a caveat saying the request was not seen."""
+    zeek = {k: v for k, v in zl.KERBEROS.zeek.items() if k not in (
+        "request_type", "service", "from", "till", "cipher", "forwardable", "renewable", "client_cert_subject",
+        "client_cert_fuid", "server_cert_subject", "server_cert_fuid")}
+    zeek.update({"success": False, **changes})
+    for shape, h in zl.in_every_shape(zl.Row("kerberos", zeek), f"kdc-{label}-").items():
+        event = normalize(h)
+        assert event.get("kerberos.error_source") == "kdc", shape
+        assert event.get("auth.status") == event.get("kerberos.error_code") is not None, shape
+        assert event.outcome == Outcome.failure, shape
+        assert (event.get("auth.target_account"), event.get("user.name")) == ("name:example.test\\alice", "alice")
+        assert any("saw no AS or TGS request" in c and "read as the KDC's" in c for c in event.caveats), shape
+
+
+def test_the_kdc_only_error_codes_are_the_kdc_err_codes():
+    from romulus.evidence.zeek import KDC_ERROR_CODES
+    named = {code for name, code in KERBEROS_ERRORS.items() if name.startswith(("KDC_ERR_", "KDC_ERROR_"))} - {0}
+    assert KDC_ERROR_CODES == named
 
 
 def test_the_account_is_also_typed_bare_for_a_join_across_sources():

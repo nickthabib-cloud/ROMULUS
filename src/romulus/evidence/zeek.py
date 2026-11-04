@@ -33,8 +33,9 @@ principal, where a Windows event's `auth.service_name` is an account name). `aut
 Windows events build a key from a name, but it is not a join key across sources: a Windows event keys an account by its
 SID where it has one, and names its domain by NetBIOS name where Kerberos names the realm; a join reads `user.name` and
 `user.domain`. An authentication's result (a KDC's answer to an AS or TGS request, NTLM's GSS-API result, VNC's) is the
-event's outcome; a Kerberos error Zeek saw with no such request (an application server's, inside GSSAPI) is
-`kerberos.error_code` with `kerberos.error_source` "application_server", and names no account.
+event's outcome; a KDC's answer whose request the capture missed is still read as the KDC's when its error code is one
+only a KDC sends or it travels on port 88 (with a caveat), and any other Kerberos error (an application server's, inside
+GSSAPI) is `kerberos.error_code` with `kerberos.error_source` "application_server", and names no account.
 
 Secrets. Credential values (Malcolm's `related.password`, `url.password`, `url.full` and `post_password_*`, Zeek's
 own `password` columns, the argument of a credential command (FTP PASS/ACCT/ADAT, IRC PASS/OPER/AUTHENTICATE and JOIN
@@ -1598,37 +1599,63 @@ def _account(f: dict[str, FieldValue], name: str, domain: str, origin: str) -> N
 
 # the request types whose replies and errors are the KDC's (AS-REQ, TGS-REQ)
 _KDC_REQUESTS = frozenset({"AS", "TGS"})
-def _kdc_record(f: dict[str, FieldValue]) -> bool:
-    request = f.get("kerberos.request_type")
-    return request is not None and request.value.strip().upper() in _KDC_REQUESTS
-
-
+# the error codes only a KDC sends: RFC 4120 section 7.5.9's KDC_ERR_* codes (1-29, 68) and RFC 4556's PKINIT
+# KDC_ERR_*/KDC_ERROR_* codes (62-66, 70-76); the KRB_AP_ERR_* and KRB_ERR_* codes are an application server's or either
+# side's
+KDC_ERROR_CODES = frozenset({*range(1, 30), *range(62, 67), 68, *range(70, 77)})
+_KDC_PORT = 88                                      # RFC 4120 section 7.2.1
 KERBEROS_NOT_KDC = ("Zeek saw no AS or TGS request for this Kerberos record (as for an AP exchange's error inside "
                     "GSSAPI): its result is read as an application server's, not as a KDC's answer for the account")
+KERBEROS_KDC_NO_REQUEST = ("Zeek saw no AS or TGS request for this Kerberos record (the capture missed it): its {why}, so "
+                           "it is read as the KDC's answer for the account")
+
+
+def _kdc_evidence(f: dict[str, FieldValue]) -> str | None:
+    """Why a Kerberos record is the KDC's answer: its AS or TGS request, else (a reply whose request the capture missed)
+    an error code only a KDC sends, else the KDC's port on either side; None when nothing says so."""
+    request = f.get("kerberos.request_type")
+    if request is not None and request.value.strip().upper() in _KDC_REQUESTS:
+        return "request"
+    code = f.get("kerberos.error_code")
+    if code is not None and code.value in KDC_ERROR_CODES:
+        return "error code is one only a KDC sends"
+    if any(f[port].value == _KDC_PORT for port in ("source.port", "destination.port") if port in f):
+        return "connection uses the KDC's port (88)"
+    return None
+
+
+def _kdc_record(f: dict[str, FieldValue]) -> bool:
+    return _kdc_evidence(f) is not None
 
 
 def _kerberos(f, reader, log, caveats, guard):
     """The ticket's encryption type number, the KRB-ERROR's code, and the client principal's name, realm and account.
-    Zeek writes the client "name/realm", or the realm alone for a KRB-ERROR that names no client. Only a record of an
-    AS or TGS request is the KDC's answer: its error code is `auth.status`, its result the event's outcome, and the
-    client its account. Any other record (Zeek's Kerberos analyzer also reads the AP exchange inside GSSAPI, whose
-    errors an application server sends) types its code as `kerberos.error_code` with `kerberos.error_source`
-    "application_server", and names no account."""
-    kdc = _kdc_record(f)
+    Zeek writes the client "name/realm", or the realm alone for a KRB-ERROR that names no client. A record of an AS or
+    TGS request is the KDC's answer: its error code is `auth.status`, its result the event's outcome, and the client its
+    account. So is a record whose request the capture missed when its error code is one only a KDC sends or its
+    connection uses port 88, with a caveat saying the request was not seen. Any other record (Zeek's Kerberos analyzer
+    also reads the AP exchange inside GSSAPI, whose errors an application server sends) types its code as
+    `kerberos.error_code` with `kerberos.error_source` "application_server", and names no account."""
     cipher = f.get("kerberos.cipher")
     if cipher is not None and (number := kerberos_etype(cipher.value)) is not None:
         f["auth.encryption_type"] = fv(number, f"{cipher.origin}#derived:kerberos-etype")
     error = f.get("kerberos.error_msg")
     if error is not None and error.value.strip() in KERBEROS_ERRORS:
-        code = fv(KERBEROS_ERRORS[error.value.strip()], f"{error.origin}#derived:kerberos-error-code")
-        f["kerberos.error_code"] = code
-        if kdc:
-            f["auth.status"] = code
+        f["kerberos.error_code"] = fv(KERBEROS_ERRORS[error.value.strip()],
+                                      f"{error.origin}#derived:kerberos-error-code")
+    why = _kdc_evidence(f)
+    kdc = why is not None
+    if kdc and "kerberos.error_code" in f:
+        f["auth.status"] = f["kerberos.error_code"]
     success = f.get("kerberos.success")
     failed = error if error is not None else success if success is not None and success.value is False else None
+    if failed is not None:
+        how = "kdc-request" if why == "request" else "kdc-evidence" if kdc else "no-kdc-request"
+        f["kerberos.error_source"] = fv("kdc" if kdc else "application_server", f"{failed.origin}#derived:{how}")
     if not kdc and failed is not None:
-        f["kerberos.error_source"] = fv("application_server", f"{failed.origin}#derived:no-kdc-request")
         caveats.append(KERBEROS_NOT_KDC)
+    elif kdc and why != "request":
+        caveats.append(KERBEROS_KDC_NO_REQUEST.format(why=why))
     client = f.get("kerberos.client")
     if client is None:
         return
