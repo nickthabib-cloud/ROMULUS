@@ -143,7 +143,7 @@ def run_sweep(monkeypatch, tmp_path, pack, batches, budget):
                              completeness=Completeness.complete, total=len(records), total_relation="eq",
                              returned=len(records), records=records)
     monkeypatch.setattr(sw, "execute", execute)
-    monkeypatch.setattr(sw, "normalize_hits", lambda records, boots: (current[0], {}, []))
+    monkeypatch.setattr(sw, "normalize_hits", lambda records, boots, **_kwargs: (current[0], {}, []))
     monkeypatch.setattr(sw, "state_budget", lambda settings, stage_dir: budget)
     published = []
     recorded = {event.id: event for batch in batches for event in batch}

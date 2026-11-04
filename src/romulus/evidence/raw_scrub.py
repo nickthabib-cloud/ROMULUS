@@ -7,6 +7,7 @@ from __future__ import annotations
 from romulus.evidence import surrogates
 from romulus.evidence.typed import TypedEvent
 from romulus.evidence.zeek import scrub_zeek_source
+from romulus.store import cleaning as store_cleaning
 
 
 def might_be_zeek(source: dict) -> bool:
@@ -55,3 +56,7 @@ def clean_event(event: TypedEvent) -> TypedEvent:
                              for ref in event.raw):
         return event
     return surrogates.clean_event(event, found or ["raw"])
+
+
+# The store applies these to everything it writes, without importing this package.
+store_cleaning.register(clean_source, clean_event)

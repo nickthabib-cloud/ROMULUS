@@ -30,32 +30,74 @@ def _repo():
     return r
 
 
-def test_zeek_conn_profiles_do_not_claim_general_net_flow_and_queries_select_only_icmp():
+def test_zeek_conn_profiles_deliver_net_flow_and_every_conn_record_is_retrieved():
     contract = contract_from_types(
         "zeek", {"@timestamp": "date", "event.dataset": "keyword", "network.transport": "keyword"},
         role="network", os_family="unknown",
     )
     profile = {"role": "network", "datasets": {"zeek.connection": 1000}}
 
-    assert sw.delivered_families(profile, contract) == frozenset()
+    assert sw.delivered_families(profile, contract) == frozenset({"net_flow"})
 
     sweep = sw.Sweep(_repo(), FakeClient(), "h1", Window(
         start=START, end=START + timedelta(minutes=5),
     ), {"zeek": contract})
     sweep._profiles = {"zeek": profile}
+    # every transport is normalized and no log outside the catalog is inventoried: nothing to leave out
+    assert sweep._any_of_for("zeek", contract) == []
+
+
+def test_zeek_logs_outside_the_catalog_are_left_out_of_retrieval_and_named_as_not_retrieved():
+    contract = contract_from_types(
+        "zeek", {"@timestamp": "date", "event.dataset": "keyword", "network.transport": "keyword"},
+        role="network", os_family="unknown",
+    )
+    profile = {"role": "network", "datasets": {"zeek.connection": 1000, "zeek.dns": 50, "zeek.modbus": 7}}
+    sweep = sw.Sweep(_repo(), FakeClient(), "h1", Window(
+        start=START, end=START + timedelta(minutes=5),
+    ), {"zeek": contract})
+    sweep._profiles = {"zeek": profile}
+
     groups = sweep._any_of_for("zeek", contract)
 
     assert [[predicate.model_dump() for predicate in group] for group in groups] == [
-        [
-            {"field": "event.dataset", "op": "in", "value": ["zeek.connection"]},
-            {"field": "network.transport", "op": "in", "value": ["icmp", "icmpv6", "ipv6-icmp"]},
-        ],
-        [
-            {"field": "event.dataset", "op": "in", "value": ["zeek.connection"]},
-            {"field": "network.transport", "op": "missing", "value": None},
-        ],
+        [{"field": "event.dataset", "op": "in", "value": ["zeek.connection", "zeek.dns"]}],
         [{"field": "event.dataset", "op": "missing", "value": None}],
     ]
+    assert sweep.stats["dataset_filter"]["zeek"] == ["zeek.connection", "zeek.dns"]
+    assert sw.delivered_families(profile, contract) == frozenset({"net_flow", "dns_query"})
+
+
+def test_a_mixed_malcolm_index_leaves_out_only_its_uncatalogued_zeek_logs():
+    contract = contract_from_types(
+        "malcolm", {"firstPacket": "date", "lastPacket": "date", "network.community_id": "keyword",
+                    "event.provider": "keyword", "event.dataset": "keyword"},
+        role="network", os_family="unknown",
+    )
+    inventory = [{"provider": "zeek", "dataset": "conn", "records": 10},
+                 {"provider": "zeek", "dataset": "modbus", "records": 3},
+                 {"provider": "suricata", "dataset": "alert", "records": 2},
+                 {"provider": None, "dataset": None, "records": 5}]
+    profile = {"role": "network", "kind": "mixed_network", "inventory": inventory,
+               "datasets": {"arkime.session": 5, "suricata.eve.alert": 2, "zeek:conn": 10, "zeek:modbus": 3}}
+    sweep = sw.Sweep(_repo(), FakeClient(), "h1", Window(
+        start=START, end=START + timedelta(minutes=5),
+    ), {"malcolm": contract})
+    sweep._profiles = {"malcolm": profile}
+
+    groups = sweep._any_of_for("malcolm", contract)
+
+    assert [[predicate.model_dump() for predicate in group] for group in groups] == [
+        [{"field": "event.provider", "op": "eq", "value": "zeek"},
+         {"field": "event.dataset", "op": "in", "value": ["conn"]}],
+        [{"field": "event.provider", "op": "eq", "value": "zeek"},
+         {"field": "event.dataset", "op": "missing", "value": None}],
+        [{"field": "event.provider", "op": "in", "value": ["suricata"]}],
+        [{"field": "event.provider", "op": "missing", "value": None}],
+    ]
+    assert sweep.stats["dataset_filter"]["malcolm"] == ["arkime.session", "suricata.eve.alert", "zeek:conn"]
+    assert sw.delivered_families(profile, contract) == (
+        sw.DATASET_FAMILIES["arkime.session"] | sw.NET_FAMILIES | {"net_flow"})
 
 
 class _NetworkFlow(Playbook):
@@ -112,12 +154,7 @@ def test_zeek_missing_transport_is_fetched_and_normalized_from_conn_proto(monkey
         {"role": "network", "datasets": {"zeek.connection": 1}},
     )
 
-    assert any(
-        [(predicate.field, predicate.op) for predicate in group]
-        == [("event.dataset", "in"), ("network.transport", "missing")]
-        for group in any_of
-    )
-    assert intents[0].any_of == any_of
+    assert any_of == [] and intents[0].any_of == []
     [cell] = repo.rule_cells("h1")
     assert cell["evaluated"] == 1 and cell["state"] == "no_match_complete"
 
@@ -132,8 +169,7 @@ def test_zeek_missing_dataset_is_fetched_and_marks_coverage_partial(monkeypatch)
         {"role": "network", "datasets": {"zeek.connection": 1}},
     )
 
-    assert any(len(group) == 1 and group[0].field == "event.dataset"
-               and group[0].op == "missing" for group in any_of)
+    assert any_of == []                 # nothing is left out, so a record without a dataset is read
     [cell] = repo.rule_cells("h1")
     assert cell["state"] == "evaluated_partial"
     assert "dataset: is not normalized" in cell["detail"]["reasons"][0]
@@ -148,7 +184,7 @@ def test_zeek_missing_dataset_keeps_baseline_inapplicable_but_retrieval_incomple
     baseline = ExternalDestinationBaseline()
     repo, sweep, _intents, _any_of = _run_zeek_partition(
         monkeypatch, contract, _zeek_record(dataset=False),
-        {"role": "network", "datasets": {"zeek.connection": 1}}, pack=[baseline],
+        {"role": "network", "datasets": {"zeek.modbus": 1}}, pack=[baseline],
     )
 
     assert sweep._baseline_target_applicable("zeek", baseline) is False
@@ -189,9 +225,21 @@ def test_zeek_truncated_dataset_inventory_disables_optimized_filter():
     assert sweep._any_of_for("zeek", contract) == []
 
 
-def test_unfiltered_zeek_non_icmp_skip_makes_coverage_partial():
-    skips = {"zeek non-ICMP connection is not normalized": 7}
-    assert sw.Sweep._unsupported_skips(skips) == skips
+def test_unsupported_records_poison_only_the_families_they_could_feed():
+    skips = {"dataset:modbus is not normalized": 3, "dataset:zeek.dns is not normalized: ambiguous": 2,
+             "dataset:conn is not normalized: ambiguous module": 1}
+    fed = {"dataset:modbus is not normalized": frozenset(),
+           "dataset:zeek.dns is not normalized: ambiguous": frozenset({"dns_query"}),
+           "dataset:conn is not normalized: ambiguous module": frozenset({"net_flow"})}
+
+    families, not_assessed = sw.Sweep._unsupported_families(sw.Sweep._unsupported_skips(skips), fed)
+
+    assert families == frozenset({"dns_query", "net_flow"})
+    assert not_assessed == {"dataset:modbus is not normalized": 3}
+    # a dataset no normalizer knows could hold anything
+    assert sw.Sweep._unsupported_families({"dataset:x is not normalized": 1},
+                                          {"dataset:x is not normalized": None}) == (sw.ALL_FAMILIES, {})
+    assert sw.Sweep._unsupported_families({"suricata event_type foo": 1}, {}) == (sw.ALL_FAMILIES, {})
 
 
 def test_capped_partitions_split_until_complete(monkeypatch):
@@ -316,7 +364,7 @@ def test_mixed_os_target_evaluates_each_event_os_and_network_is_not_linux(monkey
     monkeypatch.setattr(sw, "execute", lambda client, intent, contract: _complete(intent, [
         {"_id": "raw", "_index": "mixed", "_source": {}},
     ]))
-    monkeypatch.setattr(sw, "normalize_hits", lambda _records, _boots=None: (events, {}, []))
+    monkeypatch.setattr(sw, "normalize_hits", lambda _records, _boots=None, **_kwargs: (events, {}, []))
     contract = contract_from_types("mixed", {"@timestamp": "date"}, role="host", os_family="linux")
     repo = _repo()
     sweep = sw.Sweep(repo, FakeClient(), "h1", Window(
@@ -364,7 +412,7 @@ def test_sweep_filters_event_os_once_inside_each_playbook(monkeypatch):
     monkeypatch.setattr(sw, "execute", lambda client, intent, contract: _complete(intent, [
         {"_id": "raw", "_index": "mixed", "_source": {}},
     ]))
-    monkeypatch.setattr(sw, "normalize_hits", lambda _records, _boots=None: (events, {}, []))
+    monkeypatch.setattr(sw, "normalize_hits", lambda _records, _boots=None, **_kwargs: (events, {}, []))
     contract = contract_from_types("mixed", {"@timestamp": "date"}, role="host", os_family="unknown")
     repo = _repo()
     sweep = sw.Sweep(repo, FakeClient(), "h1", Window(
@@ -501,7 +549,7 @@ def _shell_event(script=None, argv=None):
 def _run_shell_partition(monkeypatch, *, script=None, argv=None):
     record = {"_id": "raw", "_index": "romulus-host-x", "_source": {"fixture": True}}
     monkeypatch.setattr(sw, "execute", lambda client, intent, contract: _complete(intent, [record]))
-    monkeypatch.setattr(sw, "normalize_hits", lambda records, boots=None: ([_shell_event(script, argv)], {}, []))
+    monkeypatch.setattr(sw, "normalize_hits", lambda records, boots=None, **_kwargs: ([_shell_event(script, argv)], {}, []))
     repo = _repo()
     sweep = sw.Sweep(
         repo, FakeClient(), "h1", Window(start=START, end=START + timedelta(minutes=5)),

@@ -1,6 +1,7 @@
 """Sweep integration for bounded window observations and parent continuity."""
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -113,7 +114,7 @@ def _install_partition(monkeypatch, events: list[TypedEvent], *, window: Window)
     monkeypatch.setattr(
         sweep_module,
         "normalize_hits",
-        lambda fetched, _boots=None: ([by_id[row["_id"]] for row in fetched], {}, []),
+        lambda fetched, _boots=None, **_kwargs: ([by_id[row["_id"]] for row in fetched], {}, []),
     )
     monkeypatch.setattr(sweep_module, "plan_partitions", lambda *_args, **_kwargs: [(window, len(records))])
 
@@ -241,7 +242,7 @@ def test_split_partition_resume_does_not_double_count_completed_child(monkeypatc
     monkeypatch.setattr(sweep_module, "execute", execute)
     monkeypatch.setattr(
         sweep_module, "normalize_hits",
-        lambda records, _boots=None: ([next(event for event in by_window.values()
+        lambda records, _boots=None, **_kwargs: ([next(event for event in by_window.values()
                                              if event.id == row["_id"]) for row in records], {}, []),
     )
     monkeypatch.setattr(
@@ -256,7 +257,7 @@ def test_split_partition_resume_does_not_double_count_completed_child(monkeypatc
         nonlocal crashed
         if cell["partition"] == second_window.key() and not crashed:
             crashed = True
-            raise RuntimeError("injected second-child crash")
+            raise sqlite3.OperationalError("injected second-child crash")   # the store failing mid-write
         return real_save(hunt_id, cell, observations, **kwargs)
 
     monkeypatch.setattr(repo, "save_baseline_window_cell", crash_second)
@@ -264,7 +265,7 @@ def test_split_partition_resume_does_not_double_count_completed_child(monkeypatc
         repo, FakeClient(), "h1", window, {"x": _contract()}, stage_dir=tmp_path / "first",
     )
     first.pack = [ExecPathBaseline()]
-    with pytest.raises(RuntimeError, match="second-child"):
+    with pytest.raises(sqlite3.OperationalError, match="second-child"):
         first.run_target("x")
     first.close_stage()
 
@@ -564,7 +565,7 @@ def test_window_child_resolves_to_a_parent_from_an_earlier_cell(monkeypatch, tmp
     monkeypatch.setattr(sweep_module, "execute", execute)
     monkeypatch.setattr(
         sweep_module, "normalize_hits",
-        lambda records, _boots=None: ([by_id[row["_id"]] for row in records], {}, []),
+        lambda records, _boots=None, **_kwargs: ([by_id[row["_id"]] for row in records], {}, []),
     )
     monkeypatch.setattr(sweep_module, "plan_partitions", lambda *_args, **_kwargs: [(first, 1), (second, 1)])
     repo = _repo()
@@ -710,7 +711,7 @@ def test_a_complete_hour_without_execs_joins_the_carry_ledger(monkeypatch, tmp_p
 
     monkeypatch.setattr(sweep_module, "execute", execute)
     monkeypatch.setattr(sweep_module, "normalize_hits",
-                        lambda fetched, _boots=None: ([by_id[row["_id"]] for row in fetched], {}, []))
+                        lambda fetched, _boots=None, **_kwargs: ([by_id[row["_id"]] for row in fetched], {}, []))
     monkeypatch.setattr(sweep_module, "plan_partitions",
                         lambda *_args, **_kwargs: [(quiet_hour, 1), (child_hour, 1)])
     repo = _repo()

@@ -5,8 +5,9 @@ import json
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
+from romulus.evidence.zeek_catalog import MALCOLM, lookup_log
 from romulus.store.db import digest
 
 HOST_INVENTORY_PAGE_SIZE = 500
@@ -83,6 +84,9 @@ class SourceProfile(BaseModel):
     time_max: str | None = None
     doc_count: int | None = None
     notes: list[str] = []
+    # A mixed network index's profile also carries `inventory`: its (provider, dataset) buckets as the source counted
+    # them. Other profiles have no such key (an extra field, so their stored form is what it always was).
+    model_config = ConfigDict(extra="allow")
 
 
 def flatten_mapping(mapping: dict) -> dict[str, str]:
@@ -159,11 +163,12 @@ def schema_of(field_types: dict[str, str]) -> str:
 
 
 def source_role(field_types: dict[str, str], datasets: set[str] | None = None) -> Literal["host", "network"]:
-    """Classify a mapping/inventory by telemetry semantics, never by its target name."""
+    """Classify a mapping/inventory by telemetry semantics, never by its target name. The datasets a shipper wrote
+    decide first: a Zeek index whose kerberos or ntlm rows carry `user.*` fields is still a network sensor's."""
     if schema_of(field_types) == "arkime_sessions":
         return "network"
     datasets = datasets or set()
-    if any(dataset.startswith("suricata.eve") for dataset in datasets):
+    if any(dataset.startswith(("suricata.eve", "zeek.", "zeek:")) for dataset in datasets):
         return "network"
     network_shape = all(field in field_types for field in ("source.ip", "destination.ip"))
     host_shape = any(
@@ -253,6 +258,66 @@ def contract_from_types(
     )
 
 
+MIXED_NETWORK_KIND = "mixed_network"
+PROVIDER_INVENTORY_PAGE_SIZE = 500
+PROVIDER_INVENTORY_PAGE_LIMIT = 20
+# Providers whose rows another normalizer reads in a mixed index (Malcolm writes event.provider on each row).
+MIXED_PROVIDERS = frozenset({"zeek", "suricata"})
+
+
+def inventory_key(provider, dataset) -> str:
+    """The dataset key one (provider, dataset) bucket of a mixed index is listed under, in the sweep's names: a Zeek
+    row by its log's dispatch token (`zeek:conn`; a log outside the catalog as `zeek:<name>`), a Suricata row by its
+    EVE event type (`suricata.eve.alert`), an Arkime session (Arkime's provider, or no provider and no dataset) as
+    `arkime.session`, and anything else by its dataset as written."""
+    name = dataset.strip().lower() if isinstance(dataset, str) and dataset.strip() else None
+    if provider == "zeek" and name is not None:
+        log = lookup_log(MALCOLM, name)
+        return log.token if log is not None else f"zeek:{name}"
+    if provider == "suricata" and name is not None:
+        return f"suricata.eve.{name}"
+    if provider == "arkime" or (provider in (None, "") and name is None):
+        return "arkime.session"
+    return name if name is not None else f"{provider}:"
+
+
+def provider_inventory(client, target: str) -> tuple[list[dict], dict[str, int], list[str]] | None:
+    """A mixed index's inventory by (event.provider, event.dataset), paged to exhaustion within a page budget, or None
+    when the index holds no Zeek or Suricata rows (it stays an Arkime session index). Returns the buckets, the counts
+    by `inventory_key`, and notes (a page budget reached is named as a truncated inventory)."""
+    after = None
+    buckets: list[dict] = []
+    notes: list[str] = []
+    for _page in range(PROVIDER_INVENTORY_PAGE_LIMIT):
+        composite = {"size": PROVIDER_INVENTORY_PAGE_SIZE, "sources": [
+            {"provider": {"terms": {"field": "event.provider", "missing_bucket": True}}},
+            {"dataset": {"terms": {"field": "event.dataset", "missing_bucket": True}}},
+        ]}
+        if after is not None:
+            composite["after"] = after
+        response = client.search(target, {"size": 0, "track_total_hits": False,
+                                          "aggs": {"inventory": {"composite": composite}}})
+        agg = (response.get("aggregations") or {}).get("inventory") or {}
+        page = agg.get("buckets") or []
+        for bucket in page:
+            key = bucket.get("key") if isinstance(bucket.get("key"), dict) else {}
+            buckets.append({"provider": key.get("provider"), "dataset": key.get("dataset"),
+                            "records": int(bucket.get("doc_count") or 0)})
+        after = agg.get("after_key")
+        if not after or not page:
+            break
+    else:
+        notes.append(f"ds inventory truncated (provider/dataset composite page budget {PROVIDER_INVENTORY_PAGE_LIMIT} "
+                     f"exceeded)")
+    if not any(bucket["provider"] in MIXED_PROVIDERS for bucket in buckets):
+        return None
+    datasets: dict[str, int] = {}
+    for bucket in buckets:
+        key = inventory_key(bucket["provider"], bucket["dataset"])
+        datasets[key] = datasets.get(key, 0) + bucket["records"]
+    return buckets, dict(sorted(datasets.items())), notes
+
+
 def build_profile(client, target: str) -> tuple[SourceProfile, FieldContract]:
     """Read-only preflight of one concrete index."""
     field_types = flatten_mapping(client.mapping(target))
@@ -319,10 +384,20 @@ def build_profile(client, target: str) -> tuple[SourceProfile, FieldContract]:
     if aggs.get("ds", {}).get("sum_other_doc_count"):
         notes.append("ds inventory truncated (sum_other_doc_count>0)")
     datasets = {b["key"]: b["doc_count"] for b in aggs.get("ds", {}).get("buckets", [])}
+    kind = "es_index" if schema == "lab_ecs" else schema
+    inventory = None
+    if schema == "arkime_sessions" and "event.provider" in field_types and "event.dataset" in field_types:
+        # Malcolm indexes Zeek and Suricata rows beside Arkime's sessions in one index: each row is read by its own
+        # normalizer, so the inventory is by (provider, dataset), not by Arkime protocol.
+        mixed = provider_inventory(client, target)
+        if mixed is not None:
+            inventory, datasets, mixed_notes = mixed
+            notes = [note for note in notes if not note.startswith("ds inventory truncated")] + mixed_notes
+            kind = MIXED_NETWORK_KIND
     role = source_role(field_types, set(datasets))
     os_family = source_os_family(field_types, role)
     prof = {
-        "target": target, "kind": "es_index" if schema == "lab_ecs" else schema,
+        "target": target, "kind": kind,
         "role": role, "os_family": os_family,
         "backend": client.settings.es_flavor, "backend_version": client.version,
         "captured_at": datetime.now(UTC), "field_types": field_types,
@@ -332,6 +407,8 @@ def build_profile(client, target: str) -> tuple[SourceProfile, FieldContract]:
         "time_max": aggs.get("tmax", {}).get("value_as_string"),
         "doc_count": d.get("hits", {}).get("total", {}).get("value"), "notes": notes,
     }
+    if inventory is not None:
+        prof["inventory"] = inventory
     # Role and OS are source semantics, so they intentionally participate in the profile id. Adding them changes
     # ids made by older builds; the manifest also records both values explicitly for resume validation.
     pid = digest({k: v for k, v in prof.items() if k != "captured_at"})[:16]

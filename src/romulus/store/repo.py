@@ -33,7 +33,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.sqlite import insert
 
-from romulus.evidence.raw_scrub import clean_event, clean_source
+from romulus.store.cleaning import clean_event, clean_source
 from romulus.store import schema as t
 from romulus.store.db import maintenance_lease, read_snapshot, utcnow, write_txn
 

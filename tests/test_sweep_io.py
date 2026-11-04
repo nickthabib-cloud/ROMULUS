@@ -106,7 +106,7 @@ def test_the_next_partition_is_fetched_while_the_current_one_is_evaluated(monkey
 
     seen = []
 
-    def normalize(hits, boots=None):
+    def normalize(hits, boots=None, **_kwargs):
         if not seen:      # the first partition's evaluation waits until the second partition has been fetched
             assert second_fetched.wait(10), "the next partition was not fetched during this one's evaluation"
         seen.append(1)
@@ -121,7 +121,7 @@ def test_the_next_partition_is_fetched_while_the_current_one_is_evaluated(monkey
     assert sorted(fetched) == [w.start for w, _ in parts] and len(seen) == 4
     cells = {(c["partition"], c["state"]) for c in repo.rule_cells("h1")}
     serial = _repo()
-    monkeypatch.setattr(sw, "normalize_hits", lambda hits, boots=None: ([], {}, []))
+    monkeypatch.setattr(sw, "normalize_hits", lambda hits, boots=None, **_kwargs: ([], {}, []))
     sw.Sweep(serial, None, "h1", W, {"romulus-host-x": None}, prefetch=False).run_target("romulus-host-x")
     assert cells == {(c["partition"], c["state"]) for c in serial.rule_cells("h1")}
 
@@ -168,7 +168,7 @@ def _dense(monkeypatch, counting: bool):
         return _outcome(intent, len(inside), records)
 
     monkeypatch.setattr(sw, "execute", execute)
-    monkeypatch.setattr(sw, "normalize_hits", lambda hits, boots=None: ([], {}, []))
+    monkeypatch.setattr(sw, "normalize_hits", lambda hits, boots=None, **_kwargs: ([], {}, []))
     monkeypatch.setattr(sw, "PARTITION_MAX_DOCS", 100)
     repo = _repo()
     sweep = sw.Sweep(repo, None, "h1", Window(start=T0, end=T0 + timedelta(minutes=5)), {"romulus-network-x": None},

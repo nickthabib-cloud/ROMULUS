@@ -39,7 +39,9 @@ PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf211
                    # Then lone UTF-16 surrogates were replaced at the normalization boundary (surrogates.py) and raw
                    # digests became the digest of the stored form (raw_scrub.py): only inputs that used to crash (a
                    # lone surrogate) change, and a non-Zeek record's stored form and digest are the record as read.
-                   14: "6a8e1b8cb0edc046d0492055d8fb25b8e6095e249ccdd8945b1f602d18c28672"}
+                   # Then normalize_hits gained an optional report of the families a skipped record could have fed,
+                   # and the package registers its cleaners with the store on import: no output changed.
+                   14: "54780dc672c15d9d4b5c4e3aa873f6c8070ad59545d2b6961e7e7882448a91a1"}
 WINDOWS_EVIDENCE_FILES = ("community.py", "windows.py", "windows_catalog.py", "windows_reassembly.py")
 PINNED_WINDOWS = {
     "windows-ecs@11": "89b0392c0b506597732e45f1ada089cfee28c773f6f346d4993286a239c47f54",

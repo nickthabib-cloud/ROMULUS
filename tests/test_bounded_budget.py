@@ -76,7 +76,7 @@ def _sweep(monkeypatch, tmp_path, pack, batches, budget: StateBudget):
         target=intent.target, fingerprint="f", started_at=now, ended_at=now, completeness=Completeness.complete,
         total=0, total_relation="eq", returned=0, records=[]))
     feed = iter(batches)
-    monkeypatch.setattr(sw, "normalize_hits", lambda records, boots: (next(feed), {}, []))
+    monkeypatch.setattr(sw, "normalize_hits", lambda records, boots, **_kwargs: (next(feed), {}, []))
     monkeypatch.setattr(sw, "state_budget", lambda settings, stage_dir: budget)
     monkeypatch.setattr(sw, "fresh_pack", lambda: pack)
     sweep = sw.Sweep(repo, object(), "h1", Window(start=START, end=START + timedelta(hours=1)),

@@ -52,6 +52,7 @@ from romulus.evidence.zeek import (
     superseded_interim,
     zeek_record,
 )
+from romulus.evidence.zeek_catalog import SHAPES, lookup_log
 
 NORMALIZER_VERSION = f"lab-ecs@{EVIDENCE_VERSION}"
 # Caveat on a process_exec event whose EXECVE arguments did not all arrive (its process.argv_complete is false).
@@ -2213,12 +2214,24 @@ def observed_record(hit: dict, boot: list | tuple | None = None) -> TypedEvent |
     return event
 
 
+def zeek_skip_families(names) -> frozenset[str]:
+    """The event families the Zeek logs a skipped Zeek record names would feed, in any shipper's naming: empty for
+    logs outside the catalog (their records are not assessed, and could hide no family a rule reads)."""
+    return frozenset(log.family for name in names for shape in SHAPES
+                     if (log := lookup_log(shape, name)) is not None)
+
+
 def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                    audit_parse: Callable[[dict, str], AuditRecord] | None = None,
                    malformed_text: dict[str, list[str]] | None = None,
+                   skip_families: dict[str, frozenset[str] | None] | None = None,
                    ) -> tuple[list[TypedEvent], dict[str, int], list[tuple[str, str]]]:
     """Normalize a batch. Returns (events, skip_counts, errors[(raw_id, error)]). `audit_parse` is passed to
     `group_audit`.
+
+    `skip_families`, when given, receives for each skip reason of a record no normalizer read the event families
+    such records could have fed: the families of the Zeek log(s) a Zeek record names (empty for a log outside the
+    catalog, which feeds none), or None when the reason's records could hold anything (a dataset no normalizer knows).
 
     A record holding a lone UTF-16 surrogate in any key or text is normalized with each one replaced by U+FFFD
     (evidence.surrogates), and every event made from it carries a caveat naming the fields; `malformed_text`, when
@@ -2290,6 +2303,8 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                 events.append(SINGLE[ds](h))
             else:
                 skips[f"dataset:{ds} is not normalized"] += 1
+                if skip_families is not None:
+                    skip_families[f"dataset:{ds} is not normalized"] = None
         except AuditCopy as copy:
             skips[copy.reason] += 1
             found = _audit_copy_key(h, copy.record)
@@ -2299,6 +2314,10 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
             skips[unsupported.reason] += 1
         except ZeekNotNormalized as uncatalogued:
             skips[uncatalogued.reason] += 1
+            if skip_families is not None:
+                fed = zeek_skip_families(zeek.names)
+                known = skip_families.get(uncatalogued.reason, frozenset())
+                skip_families[uncatalogued.reason] = None if known is None else known | fed
         except Skip as s:
             skips[s.reason] += 1
         except (ValueError, KeyError, TypeError, AttributeError, OverflowError) as e:   # malformed: an error, not a crash
