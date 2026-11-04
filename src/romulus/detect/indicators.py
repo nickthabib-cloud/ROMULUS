@@ -61,6 +61,14 @@ NAME_DATA_TYPES = {"CNAME", "DNAME", "NS", "PTR", "MX"}
 FINGERPRINT_FIELDS = {"ja3": "tls.ja3", "ja4": "tls.ja4", "hassh": "ssh.hassh"}
 
 
+def _is_address(text: str) -> bool:
+    try:
+        ipaddress.ip_address(text.strip())
+    except ValueError:
+        return False
+    return True
+
+
 class IndicatorFileError(ValueError):
     """An indicator list is malformed. Hunts refuse to run on a list they cannot read exactly."""
 
@@ -164,7 +172,7 @@ class IndicatorMatch(Playbook):
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "ioc.indicator_match"
     anchor_class = "indicator"
-    version = f"5+{_SET.digest}"
+    version = f"6+{_SET.digest}"
     title = "Indicator list match in the field that gives it meaning"
     kind = "aggregate"
     claim_type = "observed_action"
@@ -328,6 +336,10 @@ class IndicatorMatch(Playbook):
             if isinstance(answer.get("name"), str) and answer["name"].lower().rstrip(".") not in questions:
                 candidates.append(("dns_answer", ANSWER_FIELD, answer["name"]))
             if answer.get("type") in NAME_DATA_TYPES and isinstance(answer.get("data"), str):
+                candidates.append(("dns_answer", ANSWER_FIELD, answer["data"]))
+            elif answer.get("type") is None and isinstance(answer.get("data"), str) and not _is_address(answer["data"]):
+                # a sensor that writes no answer type (Zeek's dns.log): data that is not an address may be a name (a
+                # CNAME target among them), so it is matched as one; an address is matched by the address lists
                 candidates.append(("dns_answer", ANSWER_FIELD, answer["data"]))
         seen = set()            # one record counts once per (indicator, role, name), whichever fields carry it
         for role, fname, value in candidates:

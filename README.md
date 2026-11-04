@@ -34,7 +34,8 @@ ROMULUS works **with or without an AI model**. Initial finding comes from determ
 | Suricata alerts and flows (Filebeat EVE, or as Malcolm indexes them) | ✓ | |
 | Arkime sessions (via its Elasticsearch indices) | ✓ | |
 | PCAP via Arkime and TShark | ✓ | more protocols |
-| Windows / Active Directory, Zeek, cloud and identity logs, ICS protocols | | ✓ |
+| Zeek logs (conn, DNS, HTTP, TLS and certificates, files, SSH, notice, weird, signatures, intel, SMB, DCE-RPC, Kerberos, NTLM, RDP, VNC, LDAP, DHCP, software and the other application logs), as Malcolm, the Elastic Zeek integration or Security Onion index them | ✓ | plain Zeek JSON; ICS logs |
+| Windows / Active Directory, cloud and identity logs, ICS protocols | | ✓ |
 
 Sources are read through Elasticsearch (8 or later) or OpenSearch (2.4 or later) with **read-only** credentials. ROMULUS never writes to your telemetry: each flavor has its own list of the read requests ROMULUS may send, and every other request is refused before it leaves the process. ROMULUS confirms the flavor and version from the cluster itself and refuses to run against one that does not match `ES_FLAVOR`. `romulus doctor` also checks that the account is read-only: on Elasticsearch from its privileges; on OpenSearch only when the security plugin lists the account's roles and each one is a role named in `ES_READ_ONLY_ROLES`. When that cannot be shown, it warns, and the request list is the write guard.
 

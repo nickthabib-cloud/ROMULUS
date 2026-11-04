@@ -81,7 +81,7 @@ def test_each_changed_rule_carries_a_new_version():
                         "net.rare_client_fingerprint": "4", "net.tls_self_signed_certificate_outbound": "4",
                         "net.tls_short_lived_or_new_certificate_outbound": "4",
                         "host.ssh_login_external_source": "6", "host.interpreter_external_connection": "8",
-                        "corr.process_network_link": "9", "net.outbound_volume_asymmetry": "5"}
+                        "corr.process_network_link": "10", "net.outbound_volume_asymmetry": "6"}
 
 
 def test_bl_ext_dest_requires_a_configured_internal_network():
@@ -142,7 +142,7 @@ def _sweep(tmp_path, monkeypatch, events) -> Repo:
                                                              "_source": {}} for e in events])
 
     monkeypatch.setattr(sweep_mod, "execute", execute)
-    monkeypatch.setattr(sweep_mod, "normalize_hits", lambda hits, boots=None: (list(events), {}, []))
+    monkeypatch.setattr(sweep_mod, "normalize_hits", lambda hits, boots=None, **_kwargs: (list(events), {}, []))
     engine = make_engine(":memory:")
     migrate(engine)
     repo = Repo(engine)

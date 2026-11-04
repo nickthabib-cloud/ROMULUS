@@ -34,6 +34,7 @@ from romulus.detect.dns import registered_domain
 from romulus.detect.dns import role as dns_role
 from romulus.detect.dns import server_side as dns_server_side
 from romulus.evidence.typed import Outcome, TypedEvent
+from romulus.evidence.zeek_catalog import ZEEK_LOGS
 
 type Scope = Literal["host", "account", "host_account", "internal_ip", "site"]
 # "prevalence" specs are judged on presence in their own scope and on how many peer scopes of the same kind
@@ -764,6 +765,9 @@ BASELINE_SPECS = (
         datasets=(
             "suricata.eve.flow", "suricata.eve.netflow", "suricata.eve.dns", "suricata.eve.tls",
             "arkime.session",
+            # Zeek's logs of the same families (conn, dns, ssl), by dispatch token, so the window and its history
+            # read the same sensors
+            *(log.token for log in ZEEK_LOGS if log.family in ("net_flow", "dns_query", "tls_session")),
         ),
         scope="internal_ip", measure="prevalence", bucket="day",
         required_fields={

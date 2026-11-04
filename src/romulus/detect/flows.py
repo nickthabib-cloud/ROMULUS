@@ -1,6 +1,7 @@
-"""Flow-shape playbooks over bidirectional connection records (Suricata flow records, Arkime sessions).
+"""Flow-shape playbooks over bidirectional connection records (Suricata flow records, Zeek conn records, Arkime
+sessions).
 
-The families are net_flow (Suricata EVE) and net_session (Arkime SPI).
+The families are net_flow (Suricata EVE flow records and Zeek conn records) and net_session (Arkime SPI).
 
 Record kinds. Suricata writes two record types into net_flow:
 - `flow` records are bidirectional: the source is the side that sent the first packet Suricata saw, and they carry
@@ -18,7 +19,14 @@ order (the same identity a community ID hashes), so the same connection seen by 
 in several save-interval records, is counted once. A 5-tuple reused later is the same identity; rules that measure
 duration split it again where records are more than STITCH_GAP seconds apart.
 
-Which side opened a connection. Both sensors orient a record by the first packet they saw, so a connection picked
+Zeek conn records are bidirectional like Suricata's flow records: the originator is the source, and the byte counts
+are application payload (`flow.bytes_are_payload`). The services Zeek's analyzers confirmed are a list
+(`network.protocols`), and every one counts as identified (a connection on 445 confirmed as gssapi, smb, krb, dce_rpc
+and ntlm is identified). Services Zeek removed after a protocol violation (`network.protocols_removed`) do not count:
+the analyzer itself decided the traffic was not that protocol, so a record left with only removed services is an
+unidentified record, and claims say Zeek removed them.
+
+Which side opened a connection. The sensors orient a record by the first packet they saw, so a connection picked
 up mid-stream (the capture started late, the sensor dropped packets, or Arkime closed a session and opened a new one
 on the same traffic) is recorded with whichever side spoke first as its source. A record states the opener only when
 it shows the opening (FlowView.opened); otherwise its source is just the side the sensor recorded first, and claims
@@ -85,6 +93,8 @@ EPHEMERAL_FLOOR = 32768
 #   such a session the same way.
 # - Suricata's directional TCP flag summaries say which direction carried a SYN. Its aggregate tcp.syn field is
 #   sufficient only when the to-client flags are also present and prove the SYN was not in that direction.
+# - Zeek's conn history starts with S, without the ^ that marks a direction Zeek flipped, when the first packet it saw
+#   was the originator's SYN; the normalizer types exactly that as tcp.opened_by_orig (base/protocols/conn/main.zeek).
 # Anything else (a session picked up mid-stream, UDP and other connectionless traffic, a record without the fields)
 # leaves the opener unknown.
 TCP_SYN = 0x02
@@ -175,10 +185,18 @@ for _name, _by_transport in PROTOCOL_PORTS.items():
 
 # Protocols that negotiate their ports at run time: on an unregistered port they are not a deviation.
 DYNAMIC_PROTOCOLS = frozenset({"dcerpc", "ftp-data", "rtp", "rtcp", "sunrpc", "bittorrent", "bittorrent-dht"})
+# Authentication exchanges carried inside another protocol's messages (SMB, HTTP, DCE-RPC, LDAP), which Zeek names as
+# services of their own: they have no port of their own, so they are consistent with any port.
+EMBEDDED_PROTOCOLS = frozenset({"gssapi", "ntlm"})
+# Zeek's tunnel analyzers (ayiya, teredo, gtpv1, vxlan, geneve) are identified protocols with no port in the table: on
+# an unregistered port they are not judged, and on a port registered for another protocol they are a disagreement (a
+# tunnel on that protocol's port).
 # Sensor protocol names folded to one name per protocol.
 ALIASES = {"https": "tls", "ssl": "tls", "http2": "http", "websocket": "http", "doh2": "http", "gquic": "quic",
            "ikev2": "ike", "smb2": "smb", "krb": "krb5", "kerberos": "krb5", "pgsql": "postgresql",
-           "postgres": "postgresql", "mongodb": "mongo", "vnc": "rfb", "nbns": "netbios", "netbios-ns": "netbios"}
+           "postgres": "postgresql", "mongodb": "mongo", "vnc": "rfb", "nbns": "netbios", "netbios-ns": "netbios",
+           # Zeek's service names: RDP's UDP transport (MS-RDPEUDP) is RDP, and its DCE-RPC analyzer is dce_rpc
+           "rdpeudp": "rdp", "dce_rpc": "dcerpc"}
 # Arkime lists the transport in its protocol field; these are not application protocols.
 NON_APPLICATION = frozenset({"tcp", "udp", "icmp", "sctp", "ipv6-icmp", "icmpv6", "esp", "ah", "gre"})
 UNIDENTIFIED_NAMES = frozenset({"failed", "unknown", ""})
@@ -191,7 +209,16 @@ PARSERS = {
     ARKIME: frozenset({"http", "tls", "ssh", "dns", "smtp", "smb", "krb5", "ldap", "dhcp", "ntp", "snmp", "rdp",
                        "mysql", "postgresql", "redis", "mongo", "kafka", "rtsp", "socks", "irc", "quic", "radius",
                        "tacacs", "bgp", "imap", "pop3", "rfb", "sip", "x11", "syslog"}),
+    # Zeek's base protocol analyzers (scripts/base/protocols/*, loaded by default since Zeek 6.1, the oldest release
+    # with the LDAP and QUIC analyzers): dns, http, ssl (TLS and DTLS), ssh, smtp, pop3, imap, ftp, smb, krb, ldap,
+    # dhcp, ntp, snmp, rdp, rfb, sip, irc, mysql, socks, radius, syslog, modbus, dnp3, quic. Analyzers added to base in
+    # later releases (postgresql, redis) or shipped as policy scripts or packages (mqtt) are left out, so a connection
+    # Zeek named no service for is never judged against a parser the sensor may not run.
+    ZEEK: frozenset({"http", "tls", "dtls", "ssh", "dns", "smtp", "pop3", "imap", "ftp", "smb", "krb5", "ldap",
+                     "dhcp", "ntp", "snmp", "rdp", "rfb", "sip", "irc", "mysql", "socks", "radius", "syslog",
+                     "modbus", "dnp3", "quic"}),
 }
+RECORD_KINDS = {SURICATA: "flow record", ARKIME: "session record", ZEEK: "conn record"}
 
 
 def canonical_protocol(name: str) -> str:
@@ -305,6 +332,7 @@ class FlowView:
     c2s_data: int | None = None         # application bytes the source side sent (Arkime's own count, else estimated)
     s2c_data: int | None = None         # ... and the destination side; None when the counters are absent
     alternatives: bool = False          # `protocols` are candidates the record names without saying which one
+    removed: bool = False               # Zeek removed a service from this record after a protocol violation
 
     @property
     def key(self) -> tuple:
@@ -357,6 +385,41 @@ def suricata_source_opened(event: TypedEvent) -> bool:
     return event.get("tcp.syn") is True and to_client is not None and not (to_client & TCP_SYN)
 
 
+def zeek_source_opened(event: TypedEvent) -> bool:
+    """Whether Zeek's conn history shows that its originator (the record's source) sent the opening SYN."""
+    return event.get("network.transport") == "tcp" and event.get("tcp.opened_by_orig") is True
+
+
+def sensor_of(event: TypedEvent) -> str:
+    """The sensor that wrote a connection record."""
+    if event.family == "net_session":
+        return ARKIME
+    return ZEEK if event.get("observer.product") == "zeek" else SURICATA
+
+
+def source_opened(event: TypedEvent) -> str | None:
+    """The sensor whose own typed field shows that a flow or conn record's source opened the TCP connection (Suricata's
+    directional flags, Zeek's conn history), or None."""
+    if sensor_of(event) == ZEEK:
+        return ZEEK if zeek_source_opened(event) else None
+    return SURICATA if suricata_source_opened(event) else None
+
+
+def _zeek_protocols(event: TypedEvent) -> tuple[frozenset[str], bool]:
+    """(identified protocols, whether a service was removed) of a Zeek conn record: every service its analyzers
+    confirmed (and the sole service, typed as app_proto); removed services are not identifications."""
+    names: set[str] = set()
+    listed = event.get("network.protocols")
+    for item in listed if isinstance(listed, list) else [listed] if isinstance(listed, str) else []:
+        if isinstance(item, str):
+            names.add(canonical_protocol(item))
+    app = event.get("network.app_proto")
+    if isinstance(app, str):
+        names.add(canonical_protocol(app))
+    removed = event.get("network.protocols_removed")
+    return frozenset(names - NON_APPLICATION - UNIDENTIFIED_NAMES), isinstance(removed, list) and bool(removed)
+
+
 def flow_view(event: TypedEvent, kind: str) -> FlowView | None:
     """The typed view of a flow or session record, or None when an identity field is missing or malformed."""
     src, dst = canon_ip(event.get("source.ip")), canon_ip(event.get("destination.ip"))
@@ -403,6 +466,12 @@ def flow_view(event: TypedEvent, kind: str) -> FlowView | None:
         else:
             payload = _framed_payload(transport, c2s, c2s_packets, s2c, s2c_packets)
             data_c, data_s = _framed_data(transport, c2s, c2s_packets), _framed_data(transport, s2c, s2c_packets)
+        if sensor == ZEEK:
+            # Zeek writes a conn record's services once its analyzers confirmed them; none is its own statement that
+            # no protocol was identified.
+            protocols, removed = _zeek_protocols(event)
+            return FlowView(sensor, src, sport, dst, dport, transport, start, end, timed, c2s, s2c, s2c_packets,
+                            payload, protocols, False, zeek_source_opened(event), data_c, data_s, False, removed)
         # Suricata writes app_proto only once detection concluded; its absence is the record's own statement that
         # no protocol was identified, and 'failed' says detection gave up.
         app = event.get("network.app_proto")
@@ -448,11 +517,11 @@ def internal_address(ip: str) -> bool:
 
 def _per_sensor_cited(evs: list[TypedEvent], tallies: dict) -> str:
     """How many of each sensor's counted records to the server port are cited ('0 of the 2 Suricata flow records')."""
-    cited = Counter(ARKIME if e.family == "net_session" else SURICATA for e in evs)
+    cited = Counter(sensor_of(e) for e in evs)
     parts = []
     for sensor, tally in sorted(tallies.items()):
         total = tally["records"]
-        kind = "session record" if sensor == ARKIME else "conn record" if sensor == ZEEK else "flow record"
+        kind = RECORD_KINDS[sensor]
         shown = min(cited[sensor], total)
         name = f"{SENSOR_NAMES[sensor]} {kind}"
         parts.append(f"the one {name}" if total == 1 and shown == 1 else f"all {total} {name}s" if shown == total
@@ -1311,6 +1380,7 @@ class _Unidentified:
     records: Counter = field(default_factory=Counter)
     failed: int = 0
     ends: Ends = field(default_factory=Ends)
+    removed: int = 0                # Zeek records that removed a service after a protocol violation
 
 
 @dataclass
@@ -1337,11 +1407,13 @@ class _UnidentifiedGroup:
     addresses: Counter = field(default_factory=Counter)      # the other end -> its connections
     cites: list[tuple[float, str]] = field(default_factory=list)    # (first, event id) of the earliest connections
     ends: Ends = field(default_factory=Ends)
+    removed: int = 0
 
     def add(self, entry: _Unidentified, side: str) -> None:
         self.connections += 1
         self.records.update(entry.records)
         self.failed += entry.failed
+        self.removed += entry.removed
         self.first, self.last = min(self.first, entry.first), max(self.last, entry.last)
         self.ends.fold(entry.ends)
         self.addresses[entry.dst if side == "source" else entry.src] += 1
@@ -1379,7 +1451,7 @@ class ProtocolPortMismatch(_FlowRule):
     data-carrying connection to a registered port had no protocol identified although the sensor can parse the
     protocol registered there."""
     id = "net.protocol_port_mismatch"
-    version = "7"
+    version = "8"
     title = "Application protocol and port disagree on a connection"
     severity, lane = "medium", "lead"
     attack = ("T1571", "T1572", "T1095")
@@ -1411,7 +1483,9 @@ class ProtocolPortMismatch(_FlowRule):
                      "per direction) and Arkime sessions (network.protocols, ports, transport, client.bytes/"
                      "server.bytes, or source/destination bytes and packets): present in the lab profile, app_proto "
                      "on about 92% of flow records. 'Data both ways' for Suricata is whole-frame bytes minus 66 "
-                     "header bytes per packet of at least 64 in each direction",
+                     "header bytes per packet of at least 64 in each direction. Zeek conn records (the confirmed "
+                     "services in network.protocols, payload bytes per direction); services Zeek removed after a "
+                     "protocol violation are not identifications, and claims say so",
         "fidelity": "the sensors' protocol identification is typed but is a parser's judgement, not proof; a port "
                     "is checked in both directions, so answers from a registered port (NTP replies to ephemeral "
                     "ports) are consistent. Positive-only",
@@ -1467,7 +1541,8 @@ class ProtocolPortMismatch(_FlowRule):
                 tally[protocol] += 1
         if view.protocols:
             # a protocol that negotiates its ports at run time is consistent with any port
-            consistent = any(p in DYNAMIC_PROTOCOLS or standard_on(p, view.transport, port)
+            consistent = any(p in DYNAMIC_PROTOCOLS or p in EMBEDDED_PROTOCOLS
+                             or standard_on(p, view.transport, port)
                              or sibling_label(p, view.transport, view.dport, view.sensor)
                              for p in view.protocols for port in (view.sport, view.dport))
             judged = expected or any(p in PROTOCOL_PORTS for p in view.protocols)
@@ -1523,6 +1598,7 @@ class ProtocolPortMismatch(_FlowRule):
         entry.first, entry.last = min(entry.first, view.start), max(entry.last, view.end)
         entry.records[view.sensor] += 1
         entry.failed += view.failed
+        entry.removed += view.removed
         # A connection's first record is kept above, and it bounds a connection of one record on both sides: bounds
         # are held only once the connection has more records than that.
         self.bounds.offer(("connection", view.key), entry.ends, view.start, view.end, event,
@@ -1616,6 +1692,12 @@ class ProtocolPortMismatch(_FlowRule):
             how.append("Suricata " + " and ".join(parts))
         if records[ARKIME]:
             how.append(f"Arkime listed only the transport on {_plural(records[ARKIME], 'session record')}")
+        if records[ZEEK]:
+            text = f"Zeek named no service on {_plural(records[ZEEK], 'conn record')}"
+            if group.removed:
+                text += (f", having removed a service after a protocol violation on "
+                         f"{group.removed} of them")
+            how.append(text)
         capable = sorted({SENSOR_NAMES[s] for s in records if expected & PARSERS[s]})
         parsable = sorted(expected & set().union(*(PARSERS[s] for s in records)))
         denominators = []
@@ -1623,7 +1705,7 @@ class ProtocolPortMismatch(_FlowRule):
         counted = sum(tally["records"] for tally in tallies.values())
         for sensor, tally in sorted(tallies.items()):
             identified = ", ".join(f"{p} {n}" for p, n in sorted(tally.items()) if p != "records")
-            kind = "flow record" if sensor == SURICATA else "session record"
+            kind = RECORD_KINDS[sensor]
             denominators.append(f"{SENSOR_NAMES[sensor]} wrote {_plural(tally['records'], kind)} to {server} on "
                                 f"this port" + (f", identified as {identified}" if identified else
                                                 ", none with an identified protocol"))
@@ -1643,7 +1725,7 @@ class ProtocolPortMismatch(_FlowRule):
                  f"protocol identified: {'; '.join(how)}. {registered}, which {' and '.join(capable)} can parse "
                  f"({', '.join(parsable)}). " + (f"{'; '.join(denominators)}. " if denominators else "")
                  + "A parser that does not recognise traffic is not proof that a different protocol was used."
-                 + cited_phrase(len(evs), records[SURICATA] + records[ARKIME], not missing,
+                 + cited_phrase(len(evs), sum(records.values()), not missing,
                                 "records with no identified protocol", "record with no identified protocol")
                  + bound_note(missing, group.ends)
                  + (_per_sensor_cited(evs, tallies) if denominators and counted > len(evs) else ""))
@@ -1731,7 +1813,7 @@ class LongUnidentifiedSession(_FlowRule):
     """A long connection that carried data both ways while no sensor identified its application protocol, on a
     port that is unregistered or registered only for protocols the recording sensor cannot parse."""
     id = "net.long_unidentified_session"
-    version = "6"
+    version = "7"
     title = "Long data-carrying connection with no identified protocol on a port its sensor cannot judge"
     severity, lane = "medium", "lead"
     attack = ("T1095", "T1571", "T1573")
@@ -1754,8 +1836,9 @@ class LongUnidentifiedSession(_FlowRule):
                     "protocols no sensor that recorded it can parse (a sensor that can parse the registered protocol "
                     "hands the connection to the protocol/port rule)",
         "telemetry": "Suricata EVE flow records (network.app_proto, flow.start, flow.end, flow.bytes_toserver/"
-                     "toclient) and Arkime sessions (network.protocols, flow.start, flow.end, client.bytes/"
-                     "server.bytes): present in the lab profile",
+                     "toclient), Zeek conn records (network.protocols, flow.start, flow.end, payload bytes) and "
+                     "Arkime sessions (network.protocols, flow.start, flow.end, client.bytes/server.bytes): Suricata "
+                     "and Arkime present in the lab profile",
         "fidelity": "duration and data volume are typed counters; 'data both ways' is Arkime application payload "
                     "bytes, or for Suricata whole-frame bytes minus 66 header bytes per packet of at least 64 in "
                     "each direction; 'no protocol identified' is the parsers' judgement. Positive-only",
@@ -1921,10 +2004,18 @@ COUNTED = frozenset({OPENED_INSIDE, CLIENT_SHAPED, UNSHAPED, PORTLESS})
 # Connections not read as uploads, as the window cell names them: served and shown by a recorded SYN (informational),
 # and server-shaped (partial because the port shape can be wrong).
 SERVED_ARKIME, SERVED_SURICATA = "served (Arkime)", "served (Suricata only)"
+SERVED_ZEEK = "served (Zeek)"
 NOT_READ_LISTED = 10                # qualifying server-shaped pairs listed by name on the window cell
 # The typed fact that showed an opener (bit flags on _Connection.opened_inside / opened_outside).
-ARKIME_SYN, SURICATA_SYN = 1, 2
+ARKIME_SYN, SURICATA_SYN, ZEEK_SYN = 1, 2, 4
 SURICATA_SYN_NOTE = "a Suricata directional TCP flag summary that records a SYN toward the server"
+ZEEK_SYN_NOTE = "a Zeek conn history that begins with the originator's SYN"
+OPENING_FACTS = {ARKIME: ARKIME_SYN, SURICATA: SURICATA_SYN, ZEEK: ZEEK_SYN}
+
+
+def _served_kind(facts: int) -> str:
+    """How a served connection is named, by the strongest fact that shows its outside opener."""
+    return SERVED_ARKIME if facts & ARKIME_SYN else SERVED_ZEEK if facts & ZEEK_SYN else SERVED_SURICATA
 UNKNOWN_REASONS = {"tcp": "TCP with no record of the opening (picked up mid-stream, or opened before the hunt window)",
                    "udp": "UDP, which has no opening to record", "sctp": "SCTP, whose opening no typed field shows",
                    "disagree": "TCP whose records disagree about which side opened it"}
@@ -1989,6 +2080,7 @@ class _PairTotals:
     records: Counter = field(default_factory=Counter)
     readings: Counter = field(default_factory=Counter)      # counted connections per reading
     suricata_only: int = 0                                  # opened inside, shown only by a Suricata SYN fact
+    zeek: int = 0                                           # opened inside, shown by Zeek's history and not Arkime
     unknown: dict = field(default_factory=dict)             # reading -> Counter of why the opener is unknown
     inside_ports: dict = field(default_factory=dict)        # reading -> Counter of the internal address's ports
     outside_ports: dict = field(default_factory=dict)       # reading -> Counter of the external address's ports
@@ -2008,8 +2100,7 @@ class _PairTotals:
             # carry none (their estimated data stays at zero), and MIN_PAYLOAD_BYTES is the same floor the other
             # flow rules use for "carried data". Probes a site's servers merely answered are not named.
             if best[3] >= MIN_PAYLOAD_BYTES:
-                kind = reading if reading != SERVED else (SERVED_ARKIME if conn.opened_outside & ARKIME_SYN
-                                                          else SERVED_SURICATA)
+                kind = reading if reading != SERVED else _served_kind(conn.opened_outside)
                 self.not_read[kind, "connections"] += 1
                 self.not_read[kind, "bytes"] += best[0]
                 self.not_read[kind, "received"] += best[1]
@@ -2023,6 +2114,7 @@ class _PairTotals:
         self.readings[reading] += 1
         if reading == OPENED_INSIDE:
             self.suricata_only += conn.opened_inside == SURICATA_SYN
+            self.zeek += bool(conn.opened_inside & ZEEK_SYN) and not conn.opened_inside & ARKIME_SYN
         else:
             why = "disagree" if conn.opened_inside else transport
             self.unknown.setdefault(reading, Counter())[why] += 1
@@ -2058,7 +2150,7 @@ class OutboundVolumeAsymmetry(_FlowRule):
     """An internal address sent far more to one external address than it received back, in absolute and relative
     terms, with the source's own outbound total as the denominator."""
     id = "net.outbound_volume_asymmetry"
-    version = "5"
+    version = "6"
     title = "Internal address sent much more data to one external address than it received"
     severity, lane = "high", "lead"
     attack = ("T1041", "T1048", "T1567")
@@ -2092,12 +2184,14 @@ class OutboundVolumeAsymmetry(_FlowRule):
         "telemetry": "Suricata EVE flow records (flow.bytes_toserver, flow.bytes_toclient, tcp.tcp_flags_ts, "
                      "tcp.tcp_flags_tc, tcp.syn) and Arkime "
                      "sessions (source.bytes, destination.bytes, tcp.flags.syn): present in the lab profile on every "
-                     "record (Arkime counts SYNs on every TCP session). Suricata netflow records are not read",
+                     "record (Arkime counts SYNs on every TCP session); Zeek conn records (payload bytes per "
+                     "direction, tcp.opened_by_orig from the conn history). Suricata netflow records are not read",
         "fidelity": "typed per-side byte counters (headers included), read for each address whichever side the "
                     "sensor recorded first; each connection is counted once, from the sensor that recorded the most "
                     "bytes for it. The opener is stated only from a recorded TCP opening: an Arkime session that "
-                    "counted a SYN (Arkime orients such a session by it), or a Suricata flow whose directional TCP "
-                    "flags record a SYN toward the server. Without one the claim says "
+                    "counted a SYN (Arkime orients such a session by it), a Suricata flow whose directional TCP "
+                    "flags record a SYN toward the server, or a Zeek conn record whose history begins with the "
+                    "originator's SYN (and Zeek did not flip its direction). Without one the claim says "
                     "the opener is unknown and why. Volume and ratio are a deviation, not proof of theft",
         "benign_and_cost": "backups, cloud sync, log shipping, media uploads (the lab carries CCTV traffic). A "
                            "connection an outside address is shown to have opened to an internal server is not read "
@@ -2170,7 +2264,7 @@ class OutboundVolumeAsymmetry(_FlowRule):
         tally[2] += 1
         tally[3] += sent if data is None else data
         if view.opened:
-            fact = ARKIME_SYN if view.sensor == ARKIME else SURICATA_SYN
+            fact = OPENING_FACTS[view.sensor]
             if inside_first:
                 conn.opened_inside |= fact
             else:
@@ -2219,7 +2313,7 @@ class OutboundVolumeAsymmetry(_FlowRule):
         self._notes = []
         for i, ((src, dst), totals) in enumerate(self._resolved()):
             not_read.update(totals.not_read)
-            for kind in (SERVED_ARKIME, SERVED_SURICATA, SERVER_SHAPED):
+            for kind in (SERVED_ARKIME, SERVED_SURICATA, SERVED_ZEEK, SERVER_SHAPED):
                 sent_here = totals.not_read[kind, "bytes"]
                 if sent_here and sent_here > largest.get(kind, (0,))[0]:
                     largest[kind] = (sent_here, src, dst)
@@ -2271,6 +2365,8 @@ class OutboundVolumeAsymmetry(_FlowRule):
                            "the internal address answered as a server",
             SERVED_SURICATA: f"connections whose only record of the opening, by an external address, is "
                              f"{SURICATA_SYN_NOTE}, so the internal address answered as a server",
+            SERVED_ZEEK: f"connections whose record of the opening, by an external address, is {ZEEK_SYN_NOTE}, so "
+                         f"the internal address answered as a server",
             SERVER_SHAPED: f"connections whose opener is not recorded, with the internal address on a port below "
                            f"{EPHEMERAL_FLOOR} and the external address on one at or above it (the port shape of an "
                            f"internal server answering an outside client)",
@@ -2291,7 +2387,7 @@ class OutboundVolumeAsymmetry(_FlowRule):
                          f"{self.MIN_OUTBOUND_BYTES // 2**20} MiB sent and at least {self.MIN_RATIO:.0f} times what "
                          f"came back) on these connections and {'was' if qualifying == 1 else 'were'} not read as "
                          f"uploads only because of the port shape: {listed}{more}")
-            if kind in (SERVED_ARKIME, SERVED_SURICATA):
+            if kind in (SERVED_ARKIME, SERVED_SURICATA, SERVED_ZEEK):
                 self._notes.append(f"not read as uploads (informational): {text} ({count} connection(s))")
             else:
                 self.limits[f"not_read_{kind}"] = _NotRead(text, records=count, hits=1)
@@ -2317,8 +2413,10 @@ class OutboundVolumeAsymmetry(_FlowRule):
         parts = []
         k = totals.readings[OPENED_INSIDE]
         if k:
-            arkime = k - totals.suricata_only
+            arkime = k - totals.suricata_only - totals.zeek
             facts = ([f"Arkime counted the SYN{'' if n == 1 else f' for {arkime}'}"] if arkime else []) + (
+                [(f"{'the' if n == 1 else f'for {totals.zeek} the'} record of the opening is "
+                  f"{ZEEK_SYN_NOTE}")] if totals.zeek else []) + (
                 [(f"{'the only' if n == 1 else f'for {totals.suricata_only} the only'} record of the opening is "
                  f"{SURICATA_SYN_NOTE}")] if totals.suricata_only else [])
             parts.append(f"A recorded TCP opening shows {src} opened {which(k)}, to server port "
@@ -2373,7 +2471,7 @@ class OutboundVolumeAsymmetry(_FlowRule):
         match = Match(self.id, claim, "aggregate_observation", evs,
                       _predicates(cited, ("source.ip", "destination.ip", "flow.bytes_toserver", "flow.bytes_toclient",
                                           "source.bytes", "destination.bytes", "tcp.tcp_flags_ts",
-                                          "tcp.tcp_flags_tc", "tcp.syn", "tcp.flags.syn")),
+                                          "tcp.tcp_flags_tc", "tcp.syn", "tcp.flags.syn", "tcp.opened_by_orig")),
                       evs[0].ts, self.severity, self.lane, "medium", _entities(evs), group_key=f"{src}|{dst}")
         match.notes.append("ATT&CK context: T1041 / T1048 / T1567 (exfiltration), if the transfer is unauthorized")
         return match

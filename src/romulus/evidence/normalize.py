@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import hashlib
-import ipaddress
 import json
 import posixpath
 import re
@@ -13,6 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 
+from romulus.evidence import surrogates
 from romulus.evidence.auditd import (
     AT_FDCWD,
     O_ACCMODE,
@@ -32,7 +32,10 @@ from romulus.evidence.auditd import (
     socket_syscall,
     syscall_arg,
 )
+from romulus.evidence.certificates import certificate_fields as _certificate_fields
+from romulus.evidence.certificates import dn_parts as _dn_parts
 from romulus.evidence.community import community_id
+from romulus.evidence.raw_scrub import clean_source, might_be_zeek
 from romulus.evidence.typed import EVIDENCE_VERSION, FieldValue, Outcome, RawRef, TypedEvent, event_id, fv
 from romulus.evidence.windows import (
     WindowsNotNormalized,
@@ -41,6 +44,15 @@ from romulus.evidence.windows import (
     windows_record_key,
     windows_record_signature,
 )
+from romulus.evidence.zeek import (
+    ZEEK_DUPLICATE,
+    ZEEK_INTERIM_SUPERSEDED,
+    ZeekNotNormalized,
+    normalize_zeek,
+    superseded_interim,
+    zeek_record,
+)
+from romulus.evidence.zeek_catalog import SHAPES, lookup_log
 
 NORMALIZER_VERSION = f"lab-ecs@{EVIDENCE_VERSION}"
 # Caveat on a process_exec event whose EXECVE arguments did not all arrive (its process.argv_complete is false).
@@ -64,7 +76,13 @@ class AuditCopy(Skip):
 
 
 def raw_digest(source: dict) -> str:
-    return hashlib.sha256(json.dumps(source, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    """The digest of a record as it is stored (raw_scrub.clean_source: any record but a Zeek one, or one holding a
+    lone surrogate, is stored as it is), so a copy fetched again verifies against the stored one."""
+    text = json.dumps(source, sort_keys=True, separators=(",", ":"))
+    if "\\ud" in text or might_be_zeek(source):
+        # a non-BMP or lone surrogate escape, or a Zeek record: the stored form may differ
+        text = json.dumps(clean_source(source), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode()).hexdigest()
 
 
 def _ts(s: str) -> datetime:
@@ -1420,9 +1438,8 @@ def normalize_apache_error(hit: dict) -> TypedEvent:
 #   dropped, never guessed or stringified; a rule that needs it counts the record as missing that field.
 
 _HEX_DIGESTS = {"tls.ja3", "tls.ja3s", "ssh.hassh", "ssh.hassh_server"}
-# Suricata writes RFC 4514-style one-line names ("C=US, O=Example, CN=host"); a comma followed by an attribute
-# type and "=" starts the next attribute, so a comma inside a value ("O=Acme, Inc.") does not split.
-_RDN_SPLIT = re.compile(r",\s*(?=[A-Za-z][A-Za-z0-9.-]*=)")
+# Suricata writes RFC 4514-style one-line names ("C=US, O=Example, CN=host"): romulus.evidence.certificates splits
+# them, so a comma inside a value ("O=Acme, Inc.") does not split.
 _SURICATA_TLS_VERSION = re.compile(r"^TLS (\d\.\d)$")
 
 
@@ -1516,56 +1533,6 @@ def _hex_id(value, path: str, bad: list[str]) -> str | None:
     """A certificate hash or serial as lowercase hex; separators are kept for hashes, removed for serials."""
     text = _scalar_str(value, path, bad)
     return None if text is None else text.lower()
-
-
-def _dn_parts(dn: str) -> list[tuple[str, str]]:
-    parts = []
-    for rdn in _RDN_SPLIT.split(dn.strip()):
-        key, sep, val = rdn.partition("=")
-        if sep and key.strip():
-            parts.append((key.strip().upper(), val.strip()))
-    return parts
-
-
-def _name_key(cert: dict, side: str):
-    """Comparable identity of a certificate's subject or issuer name: the whole distinguished name when the
-    source recorded it, otherwise its CN and O values. None when nothing is recorded."""
-    dn = cert.get(f"{side}_dn")
-    if dn:
-        parts = _dn_parts(dn)
-        if parts:
-            return ("dn", tuple((key, val.casefold()) for key, val in parts))
-    cn = tuple(sorted({v.casefold() for v in cert[f"{side}_cn"]}))
-    on = tuple(sorted({v.casefold() for v in cert[f"{side}_on"]}))
-    return ("cn_on", cn, on) if (cn or on) else None
-
-
-def _certificate_fields(certs: list[dict], origin: str, caveats: list[str]) -> dict:
-    """Typed fields for the certificates one record presented: dedupe, sort, mark self-issued certificates and
-    the ones that issued another presented certificate, and set the server-certificate fields only when that
-    certificate is unambiguous."""
-    distinct = {json.dumps(c, sort_keys=True): c for c in certs}
-    certs = sorted(distinct.values(), key=lambda c: (c["sha1"] or "", json.dumps(c["subject_cn"]),
-                                                     c["subject_dn"] or "", c["not_before"] or ""))
-    for cert in certs:
-        subject, issuer = _name_key(cert, "subject"), _name_key(cert, "issuer")
-        cert["names_compared"] = "distinguished name" if cert["subject_dn"] and cert["issuer_dn"] else "CN and O"
-        cert["self_issued"] = None if subject is None or issuer is None else subject == issuer
-        cert["issues_other"] = subject is not None and any(
-            other is not cert and _name_key(other, "issuer") == subject for other in certs)
-    f = {"tls.server.certificates": fv(certs, origin)}
-    leaves = [c for c in certs if not c["issues_other"]]
-    if len(leaves) == 1:
-        leaf, derived = leaves[0], f"{origin}#derived:server-certificate"
-        for typed, key in (("tls.server.subject_cn", "subject_cn"), ("tls.server.issuer_cn", "issuer_cn"),
-                           ("tls.server.not_before", "not_before"), ("tls.server.not_after", "not_after"),
-                           ("tls.server.hash_sha1", "sha1")):
-            if not _absent(leaf[key]):
-                f[typed] = fv(leaf[key], derived)
-    else:
-        caveats.append(f"{len(leaves)} presented certificates issue no other presented certificate: the server's "
-                       f"own certificate is ambiguous; per-certificate values are in tls.server.certificates")
-    return f
 
 
 def _suricata_tls(t: dict, o: str, bad: list[str], caveats: list[str]) -> dict:
@@ -2204,69 +2171,6 @@ def normalize_arkime_session(hit: dict) -> TypedEvent:
                       normalizer=NORMALIZER_VERSION, caveats=caveats)
 
 
-def normalize_zeek_connection(hit: dict) -> TypedEvent:
-    """One Zeek ICMP conn record. ``orig_p`` is the originator type; ``resp_p`` is its counterpart type."""
-    src, nid, ref = hit["_source"], hit["_id"], _ref(hit)
-    conn = _get(src, "zeek.connection")
-    if not isinstance(conn, dict):
-        raise TypeError("zeek.connection is not an object")
-    transport = _get(src, "network.transport") or conn.get("proto")
-    transport = transport.lower() if isinstance(transport, str) else None
-    if transport not in ("icmp", "ipv6-icmp", "icmpv6"):
-        raise Skip("zeek non-ICMP connection is not normalized")
-    source_ip = _get(src, "source.ip") or conn.get("orig_h")
-    destination_ip = _get(src, "destination.ip") or conn.get("resp_h")
-    try:
-        if any(ipaddress.ip_address(str(address)).version == 6 for address in (source_ip, destination_ip)):
-            transport = "ipv6-icmp"
-        else:
-            transport = "icmp"
-    except ValueError:
-        pass
-    when = _ts(src["@timestamp"])
-    bad: list[str] = []
-    f = {
-        "source.ip": fv(source_ip, f"{nid}:source.ip|zeek.connection.orig_h"),
-        "destination.ip": fv(destination_ip,
-                             f"{nid}:destination.ip|zeek.connection.resp_h"),
-        "source.port": fv(_get(src, "source.port"), f"{nid}:source.port"),
-        "destination.port": fv(_get(src, "destination.port"), f"{nid}:destination.port"),
-        "network.transport": fv(transport, f"{nid}:network.transport|zeek.connection.proto"),
-        "observer.product": fv("zeek", f"{nid}:event.dataset#producer"),
-        "flow.start": fv(when.isoformat(), f"{nid}:@timestamp"),
-        # Zeek orig_bytes/resp_bytes are IP payload bytes rather than whole captured frames.
-        "flow.bytes_are_payload": fv(True, f"{nid}:zeek.connection.orig_bytes+resp_bytes#semantics"),
-    }
-    for typed, native in (("flow.bytes_toserver", "orig_bytes"), ("flow.bytes_toclient", "resp_bytes"),
-                          ("flow.pkts_toserver", "orig_pkts"), ("flow.pkts_toclient", "resp_pkts")):
-        number = _count(conn.get(native), f"zeek.connection.{native}", bad)
-        if number is not None:
-            f[typed] = fv(number, f"{nid}:zeek.connection.{native}")
-    duration = conn.get("duration")
-    if duration is not None:
-        if isinstance(duration, bool) or not isinstance(duration, (int, float)) or duration < 0:
-            bad.append("zeek.connection.duration")
-        else:
-            seconds = float(duration)
-            f["session.duration_s"] = fv(seconds, f"{nid}:zeek.connection.duration")
-            f["flow.end"] = fv((when + timedelta(seconds=seconds)).isoformat(),
-                               f"{nid}:@timestamp+zeek.connection.duration")
-    raw_type = conn.get("icmp_type") if "icmp_type" in conn else _get(src, "source.port")
-    number = _icmp_number(raw_type, "icmp.type", bad)
-    if number is not None:
-        origin = "zeek.connection.icmp_type" if "icmp_type" in conn else "source.port#zeek-icmp-type"
-        f["icmp.type"] = fv(number, f"{nid}:{origin}")
-    if "icmp_code" in conn:
-        number = _icmp_number(conn.get("icmp_code"), "icmp.code", bad)
-        if number is not None:
-            f["icmp.code"] = fv(number, f"{nid}:zeek.connection.icmp_code")
-    if bad:
-        f["parse.malformed"] = fv(sorted(set(bad)), f"{nid}:#malformed")
-    return TypedEvent(id=event_id("net_flow", [ref]), family="net_flow", ts=when,
-                      host=_get(src, "host.name"), fields={k: v for k, v in f.items() if v.value is not None},
-                      raw=[ref], normalizer=NORMALIZER_VERSION, caveats=[])
-
-
 # Companion record types an exec or socket event holds at most once (EXECVE may repeat: continuation records)
 _SINGLE_COMPANIONS = (EXEC_COMPANIONS | SOCKET_COMPANIONS) - {"EXECVE"}
 
@@ -2310,11 +2214,28 @@ def observed_record(hit: dict, boot: list | tuple | None = None) -> TypedEvent |
     return event
 
 
+def zeek_skip_families(names) -> frozenset[str]:
+    """The event families the Zeek logs a skipped Zeek record names would feed, in any shipper's naming: empty for
+    logs outside the catalog (their records are not assessed, and could hide no family a rule reads)."""
+    return frozenset(log.family for name in names for shape in SHAPES
+                     if (log := lookup_log(shape, name)) is not None)
+
+
 def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                    audit_parse: Callable[[dict, str], AuditRecord] | None = None,
+                   malformed_text: dict[str, list[str]] | None = None,
+                   skip_families: dict[str, frozenset[str] | None] | None = None,
                    ) -> tuple[list[TypedEvent], dict[str, int], list[tuple[str, str]]]:
     """Normalize a batch. Returns (events, skip_counts, errors[(raw_id, error)]). `audit_parse` is passed to
     `group_audit`.
+
+    `skip_families`, when given, receives for each skip reason of a record no normalizer read the event families
+    such records could have fed: the families of the Zeek log(s) a Zeek record names (empty for a log outside the
+    catalog, which feeds none), or None when the reason's records could hold anything (a dataset no normalizer knows).
+
+    A record holding a lone UTF-16 surrogate in any key or text is normalized with each one replaced by U+FFFD
+    (evidence.surrogates), and every event made from it carries a caveat naming the fields; `malformed_text`, when
+    given, receives each such record's key ("<index>/<id>") with those fields. The caller's hits are not changed.
 
     An audit event's boot id (`host.boot.id`) comes from the shipper's own field, else from journald's copy of one
     of its records when that copy is in the same batch. With `boots` (a hunt's boot-interval map), the batch's boot
@@ -2324,10 +2245,16 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
     events, skips, errors = [], defaultdict(int), []
     windows_events: dict[tuple[tuple[str, str, str], str], TypedEvent] = {}
     windows_signatures: dict[tuple[str, str, str], set[str]] = defaultdict(set)
+    zeek_events: dict[str, TypedEvent] = {}           # by event id: a Zeek record's logical identity
     audit_hits = []
     audit_copies: list[tuple[tuple[str, int, int], str, str, str]] = []
     journal_boots: list[tuple[str, str, int | None, str, bool]] = []
+    unclean: dict[str, list[str]] = {}
     for h in hits:
+        clean, found = surrogates.sanitize(h["_source"])
+        if found:
+            h = {**h, "_source": clean}
+            unclean[f"{h['_index']}/{h['_id']}"] = found
         ds = _get(h["_source"], "event.dataset") or ""
         try:
             if is_windows_source(h["_source"]):
@@ -2347,6 +2274,19 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                     known = {raw.key for raw in prior.raw}
                     prior.raw.extend(raw for raw in windows_event.raw if raw.key not in known)
                     skips["duplicate Windows event copy (computer/channel/record_id)"] += 1
+            elif (zeek := zeek_record(h["_source"])) is not None:
+                # Malcolm's provider, Elastic's zeek.* dataset or Security Onion's module: before the Arkime shape,
+                # because Malcolm adds Arkime's session fields (rootId among them) to the Zeek rows it indexes
+                ds = zeek.token
+                zeek_event = normalize_zeek(h, zeek)
+                prior = zeek_events.get(zeek_event.id)
+                if prior is None:
+                    zeek_events[zeek_event.id] = zeek_event
+                    events.append(zeek_event)
+                else:
+                    known = {raw.key for raw in prior.raw}
+                    prior.raw.extend(raw for raw in zeek_event.raw if raw.key not in known)
+                    skips[ZEEK_DUPLICATE] += 1
             elif is_malcolm_suricata(h["_source"]):
                 # before the Arkime shape: Malcolm adds Arkime's session fields to the Suricata rows it indexes
                 events.append(normalize_malcolm_suricata(h))
@@ -2357,14 +2297,14 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                 audit_hits.append(h)
             elif ds.startswith("suricata.eve"):
                 events.append(normalize_suricata(h))
-            elif ds in ("zeek.connection", "zeek.conn"):
-                events.append(normalize_zeek_connection(h))
             elif ds == "systemd.journal":
                 events.append(normalize_journal(h, journal_boots))
             elif ds in SINGLE:
                 events.append(SINGLE[ds](h))
             else:
                 skips[f"dataset:{ds} is not normalized"] += 1
+                if skip_families is not None:
+                    skip_families[f"dataset:{ds} is not normalized"] = None
         except AuditCopy as copy:
             skips[copy.reason] += 1
             found = _audit_copy_key(h, copy.record)
@@ -2372,10 +2312,21 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                 audit_copies.append((*found, h["_id"]))
         except WindowsNotNormalized as unsupported:
             skips[unsupported.reason] += 1
+        except ZeekNotNormalized as uncatalogued:
+            skips[uncatalogued.reason] += 1
+            if skip_families is not None:
+                fed = zeek_skip_families(zeek.names)
+                known = skip_families.get(uncatalogued.reason, frozenset())
+                skip_families[uncatalogued.reason] = None if known is None else known | fed
         except Skip as s:
             skips[s.reason] += 1
-        except (ValueError, KeyError, TypeError, AttributeError) as e:   # malformed telemetry: an error, never a crash
+        except (ValueError, KeyError, TypeError, AttributeError, OverflowError) as e:   # malformed: an error, not a crash
             errors.append((h["_id"], f"{ds}: {e}"))
+    superseded = superseded_interim(list(zeek_events.values())) if zeek_events else []
+    if superseded:
+        dropped = {id(event) for event in superseded}
+        events = [event for event in events if id(event) not in dropped]
+        skips[ZEEK_INTERIM_SUPERSEDED] += len(superseded)
     groups, audit_errors = group_audit(audit_hits, audit_parse)
     errors.extend(audit_errors)
     partners = _boot_partners(audit_copies)
@@ -2458,4 +2409,19 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
         for event in events[audit_start:]:
             boots.observe_event(event)
         boots.fill(events[audit_start:], incremental=True)
+    for index, event in enumerate(events):
+        # text parsed out of a record's own text (a Suricata EVE line, a Zeek line) can hold a lone surrogate its
+        # record did not show
+        parsed = surrogates.event_paths(event)
+        paths = [path for ref in event.raw for path in unclean.get(ref.key, ())] if unclean else []
+        if parsed:
+            events[index] = surrogates.clean_event(event, paths + parsed)
+            for ref in event.raw:
+                unclean.setdefault(ref.key, []).extend(parsed)
+        elif paths:
+            note = surrogates.caveat(paths)
+            if note not in event.caveats:
+                event.caveats.append(note)
+    if unclean and malformed_text is not None:
+        malformed_text.update(unclean)
     return events, dict(skips), errors

@@ -33,6 +33,7 @@ from pathlib import Path
 from romulus.baseline.spec import Pending, exec_serial
 from romulus.detect.bounded import Account, StateBudget, reclaiming_write
 from romulus.detect.correlation import boot_of
+from romulus.evidence.raw_scrub import clean_event, clean_source
 from romulus.evidence.typed import TypedEvent
 from romulus.hunt.citations import COMPACT_CITATION_NOTE, compact_event, expand_event
 
@@ -651,11 +652,13 @@ class EventStage:
         self._windows_size = size
 
     @reclaiming_write
-    def unique_windows(self, events: list[TypedEvent]) -> tuple[list[TypedEvent], list[TypedEvent]]:
-        """Deduplicate only Windows stable ids, storing no event body and no raw telemetry."""
+    def unique_windows(self, events: list[TypedEvent], producers: tuple[str, ...] = ("windows-",)
+                       ) -> tuple[list[TypedEvent], list[TypedEvent]]:
+        """Deduplicate the stable ids of the given producers' events (Windows by default; Zeek's logical ids too), storing
+        no event body and no raw telemetry."""
         self.windows_refused = 0
         self.windows_refusal_reason = ""
-        windows = [event for event in events if event.normalizer.startswith("windows-")]
+        windows = [event for event in events if event.normalizer.startswith(producers)]
         if any(len(event.id) > WINDOWS_STABLE_ID_MAX_CHARS for event in windows):
             raise ValueError("Windows stable event id exceeds the dedup table width")
         ids = sorted({event.id for event in windows})
@@ -670,7 +673,7 @@ class EventStage:
             ))
         fresh, duplicates, inserts = [], [], []
         for event in events:
-            if not event.normalizer.startswith("windows-"):
+            if not event.normalizer.startswith(producers):
                 fresh.append(event)
                 continue
             if event.id in seen:
@@ -716,7 +719,64 @@ class EventStage:
         # the refusal reason says that counts may include such copies.
         return fresh, duplicates
 
+    @reclaiming_write
+    def zeek_interim(self, observed: list[tuple[str, bool]], limit: int) -> tuple[dict[str, int], int, str]:
+        """Remember Zeek connections (sensor and uid) whose interim record was evaluated, across partitions and targets.
+
+        `observed`: (connection key, whether the record is interim) for the conn events a partition is about to
+        evaluate. Returns the state each key had before this partition (1: an interim record was evaluated; 2: a later
+        record was evaluated after one), how many keys could not be remembered (the store's row `limit` or its disk
+        budget), and why. Only connections with an interim record are kept, never every connection."""
+        db = self.windows_db
+        if not getattr(self, "_zeek_interim_table", False):
+            db.execute("CREATE TABLE IF NOT EXISTS zeek_interim (key TEXT PRIMARY KEY, state INTEGER NOT NULL) "
+                       "WITHOUT ROWID")
+            self._zeek_interim_table = True
+            self._zeek_interim_rows = 0
+        keys = sorted({key for key, _interim in observed})
+        prior: dict[str, int] = {}
+        for start in range(0, len(keys), 500):
+            chunk = keys[start:start + 500]
+            prior.update(db.execute(f"SELECT key, state FROM zeek_interim WHERE key IN ({','.join('?' * len(chunk))})",
+                                    chunk).fetchall())
+        writes: dict[str, int] = {}
+        for key, interim in observed:
+            state = writes.get(key, prior.get(key))
+            if interim and state is None:
+                writes[key] = 1
+            elif not interim and state == 1:
+                writes[key] = 2
+        new = [(key, state) for key, state in sorted(writes.items()) if key not in prior]
+        updates = [(state, key) for key, state in sorted(writes.items()) if key in prior]
+        refused, reason = 0, ""
+        room = max(limit - self._zeek_interim_rows, 0)
+        if len(new) > room:
+            refused, reason = len(new) - room, f"the store keeps at most {limit:,} connections"
+            new = new[:room]
+        if new and self.budget is not None and self.windows_account is not None:
+            budget_reason = self.budget.new_key_reason(self.windows_account)
+            if budget_reason:
+                refused, reason, new = refused + len(new), budget_reason, []
+        try:
+            self._cap_windows()
+            db.executemany("INSERT OR IGNORE INTO zeek_interim VALUES (?, ?)", new)
+            db.executemany("UPDATE zeek_interim SET state = ? WHERE key = ?", updates)
+            db.commit()
+            self._zeek_interim_rows += len(new)
+        except sqlite3.OperationalError as exc:
+            db.rollback()
+            refused, reason = refused + len(new), f"writing the Zeek interim-record store failed ({exc})"
+            if self.budget is not None:
+                if "full" in str(exc).lower():
+                    self.budget.refuse_capacity(self.windows_account, reason)
+                else:
+                    self.budget.fail(reason)
+        self._charge_windows_growth()
+        return prior, refused, reason
+
     def put(self, events: list[TypedEvent], raw_sources: dict[str, dict]) -> None:
+        # an event holding a lone surrogate is staged with it replaced (it could not be serialized otherwise)
+        events = [clean_event(event) for event in events]
         self._flush_reference_states()
         self.refusal_reason = ""
         if not self._sequence_available(len(events)):
@@ -743,7 +803,7 @@ class EventStage:
             f"SELECT id FROM event WHERE id IN ({','.join('?' for _ in ids[start:start+500])})",
             ids[start:start+500])}
         bodies = {identity: event.model_dump_json() for identity, event in first.items() if identity not in present}
-        raws = {ref.key: json.dumps(raw_sources[ref.key], sort_keys=True)
+        raws = {ref.key: json.dumps(clean_source(raw_sources[ref.key]), sort_keys=True)
                 for event in first.values() for ref in event.raw if ref.key in raw_sources}
         return bodies, raws
 
@@ -1102,6 +1162,7 @@ class EventStage:
         self.events += len(events)
 
     def hold(self, held: list[tuple[str, TypedEvent]], raw_sources: dict[str, dict]) -> None:
+        held = [(owner, clean_event(event)) for owner, event in held]
         self._flush_reference_states()
         if not self._sequence_available(len(held)):
             return

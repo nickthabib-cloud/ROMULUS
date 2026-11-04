@@ -347,6 +347,38 @@ def _tuple(event: TypedEvent) -> tuple | None:
     return values if all(value is not None for value in values) else None
 
 
+# Where a target keeps each flow key: the ECS name, else Zeek's own name as plain Zeek JSON writes it (with literal
+# dotted keys, which the backend indexes under the same dotted path).
+_FLOW_FIELD_NAMES = {
+    "source.ip": ("source.ip", "id.orig_h"),
+    "source.port": ("source.port", "id.orig_p"),
+    "destination.ip": ("destination.ip", "id.resp_h"),
+    "destination.port": ("destination.port", "id.resp_p"),
+    "transport": ("network.transport", "proto"),
+    "community_id": ("network.community_id", "community_id"),
+}
+# The spellings an ICMP transport is stored under: Zeek writes "icmp" for ICMPv6 too, which is typed "ipv6-icmp".
+ZEEK_ICMP_TRANSPORTS = ("icmp", "ipv6-icmp", "icmpv6")
+
+
+def _flow_fields(contract) -> dict[str, str | None]:
+    """The target's searchable field for each flow key, or None when it has none (never a predicate it cannot
+    run)."""
+    return {key: next((name for name in names if _supports(contract, name)), None)
+            for key, names in _FLOW_FIELD_NAMES.items()}
+
+
+def _transport_filter(contract, field: str | None, transport) -> list[Predicate]:
+    """The transport predicate for a flow key: the typed transport as stored, every spelling of ICMP for an ICMP
+    transport (or none, when the target cannot search several; the typed transport is then checked locally)."""
+    if not transport or field is None:
+        return []
+    if str(transport).lower() in ZEEK_ICMP_TRANSPORTS:
+        return ([Predicate(field=field, op="in", value=list(ZEEK_ICMP_TRANSPORTS))]
+                if _supports(contract, field, "in") else [])
+    return [Predicate(field=field, op="eq", value=transport)]
+
+
 def _tuple_matches(left: tuple, right: tuple) -> bool:
     transport, src, sport, dst, dport = left
     rtransport, rsrc, rsport, rdst, rdport = right
@@ -982,29 +1014,43 @@ class LinkFetcher:
         five_tuple = next((_tuple(event) for event in anchor.events if _tuple(event) is not None), None)
         key = ({"network.community_id": community_id} if community_id else
                {"five_tuple": list(five_tuple) if five_tuple else None})
+        # A Zeek ICMP record keys its connection by message type (source.port) and counterpart type or code
+        # (destination.port), which some shippers store outside the port fields (Elastic: zeek.connection.icmp.*);
+        # such a flow is retrieved by its addresses and transport, and its typed tuple is matched locally.
+        icmp_by_address = bool(five_tuple) and str(five_tuple[0]).lower() in ZEEK_ICMP_TRANSPORTS and any(
+            event.get("observer.product") == "zeek" and _tuple(event) is not None for event in anchor.events)
         intents = []
         for target, contract in sorted(self.executor.contracts.items()):
             if not _is_network(target, contract):
                 continue
             filters = []
             any_of = []
-            if community_id and _supports(contract, "network.community_id"):
-                filters.append(Predicate(field="network.community_id", op="eq", value=community_id))
-            elif five_tuple and all(_supports(contract, field) for field in (
+            names = _flow_fields(contract)
+            if community_id and names["community_id"] is not None:
+                filters.append(Predicate(field=names["community_id"], op="eq", value=community_id))
+            elif five_tuple and icmp_by_address and names["source.ip"] and names["destination.ip"]:
+                transport, src, _sport, dst, _dport = five_tuple
+                any_of = [
+                    [Predicate(field=names["source.ip"], op="eq", value=src),
+                     Predicate(field=names["destination.ip"], op="eq", value=dst)],
+                    [Predicate(field=names["source.ip"], op="eq", value=dst),
+                     Predicate(field=names["destination.ip"], op="eq", value=src)],
+                ]
+                filters.extend(_transport_filter(contract, names["transport"], transport))
+            elif five_tuple and all(names[field] for field in (
                     "source.ip", "source.port", "destination.ip", "destination.port")):
                 transport, src, sport, dst, dport = five_tuple
                 any_of = [
-                    [Predicate(field="source.ip", op="eq", value=src),
-                     Predicate(field="source.port", op="eq", value=sport),
-                     Predicate(field="destination.ip", op="eq", value=dst),
-                     Predicate(field="destination.port", op="eq", value=dport)],
-                    [Predicate(field="source.ip", op="eq", value=dst),
-                     Predicate(field="source.port", op="eq", value=dport),
-                     Predicate(field="destination.ip", op="eq", value=src),
-                     Predicate(field="destination.port", op="eq", value=sport)],
+                    [Predicate(field=names["source.ip"], op="eq", value=src),
+                     Predicate(field=names["source.port"], op="eq", value=sport),
+                     Predicate(field=names["destination.ip"], op="eq", value=dst),
+                     Predicate(field=names["destination.port"], op="eq", value=dport)],
+                    [Predicate(field=names["source.ip"], op="eq", value=dst),
+                     Predicate(field=names["source.port"], op="eq", value=dport),
+                     Predicate(field=names["destination.ip"], op="eq", value=src),
+                     Predicate(field=names["destination.port"], op="eq", value=sport)],
                 ]
-                if transport and _supports(contract, "network.transport"):
-                    filters.append(Predicate(field="network.transport", op="eq", value=transport))
+                filters.extend(_transport_filter(contract, names["transport"], transport))
             else:
                 continue
             intents.append(SearchIntent(

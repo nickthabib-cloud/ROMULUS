@@ -74,7 +74,7 @@ def _run(monkeypatch, playbook: Playbook, events: list[TypedEvent]):
     monkeypatch.setattr(sw, "execute", lambda client, intent, contract: SearchOutcome(
         target=intent.target, fingerprint="f", started_at=now, ended_at=now, completeness=Completeness.complete,
         total=0, total_relation="eq", returned=0, records=[]))
-    monkeypatch.setattr(sw, "normalize_hits", lambda records, boots: (events, {}, []))
+    monkeypatch.setattr(sw, "normalize_hits", lambda records, boots, **_kwargs: (events, {}, []))
     window = Window(start=START, end=START + timedelta(minutes=5))
     sweep = sw.Sweep(repo, object(), "h1", window, {"romulus-host-x": None})
     sweep.pack = [playbook]
@@ -199,7 +199,7 @@ def test_each_partition_names_only_its_own_refused_records(monkeypatch):
         total=0, total_relation="eq", returned=0, records=[]))
     batches = iter([[_event(i, f"host{i % 3}") for i in range(6)],          # host2 refused: 2 records
                     [_event(i, f"host{i % 4}") for i in range(6, 14)]])     # host2 and host3 refused: 4 records
-    monkeypatch.setattr(sw, "normalize_hits", lambda records, boots: (next(batches), {}, []))
+    monkeypatch.setattr(sw, "normalize_hits", lambda records, boots, **_kwargs: (next(batches), {}, []))
     sweep = sw.Sweep(repo, object(), "h1", Window(start=START, end=START + timedelta(minutes=10)),
                      {"romulus-host-x": None})
     sweep.pack = [_Capped()]

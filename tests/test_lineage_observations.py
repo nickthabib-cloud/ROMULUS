@@ -243,7 +243,7 @@ def test_unrelated_observation_refusal_does_not_hide_web_lineage(tmp_path):
 
 def test_process_lineage_consumers_bump_versions_for_ambiguous_tie_semantics():
     assert InterpreterExternalConnection.version == "8"
-    assert ProcessNetworkLink.version == "9"
+    assert ProcessNetworkLink.version == "10"      # its claims also name Zeek alert rows by kind
 
 
 def test_persistence_change_uses_a_no_exec_package_parent_and_cites_its_observation():

@@ -17,7 +17,7 @@ from romulus.detect.citing import (
     more,
 )
 from romulus.detect.dns import endpoints
-from romulus.detect.flows import suricata_source_opened
+from romulus.detect.flows import PORTED, SURICATA, ZEEK, source_opened
 from romulus.evidence.typed import TypedEvent
 
 # Lower-cased user-agent prefixes of command-line HTTP tools, and the tool each one is the signature of.
@@ -217,15 +217,20 @@ class SuricataAlertStack(_Grouped):
     next_checks = ("ip_sessions for the source", "http_requests to the destination in the same minutes",
                    "entity_timeline of the destination host after the first alert")
 
-    version = "3"
+    version = "4"
     SIGNATURES_NAMED = 10
     SIGNATURES_HELD = 2000      # distinct signatures held per group; beyond it the count is "at least"
+
+    def scope_partition(self, events: list[TypedEvent]) -> list[TypedEvent]:
+        # Zeek's notice, weird, signature and intel records are net.zeek_alert's input: neither evaluated nor
+        # missing here
+        return [event for event in super().scope_partition(events) if event.get("alert.provider") != "zeek"]
 
     def consume(self, events):
         """Group by (source, destination, category, severity); signatures are listed inside the group so a
         scanner triggering hundreds of signatures is one item, not hundreds. The first SIGNATURES_NAMED distinct
-        signatures each keep a cited record: those are the ones the claim names."""
-        for e in self.applicable(events):
+        signatures each keep a cited record: those are the ones the claim names. Zeek's alerts are another rule's."""
+        for e in self.applicable([event for event in events if event.get("alert.provider") != "zeek"]):
             key = (e.get("source.ip"), e.get("destination.ip"), e.get("alert.category"), e.get("alert.severity"))
             state = self.keep(key, e)
             if state is None:
@@ -549,10 +554,16 @@ class PortScan(_Grouped):
     # is held on the rule's disk spill while it is quiet. The index of requests to services (the earliest start of
     # each 4-tuple, to tell an answer from a probe) is a keyed store too, HOT entries in memory.
     REQUESTS_HOT = HOT_COUNT  # a count cap only: the hunt's memory budget sizes it in bytes
-    version = "10"
+    version = "11"
     # Destination ports the claim names, each with a cited record (the first seen); and probed ports whose opening a
-    # cited record shows (a Suricata directional TCP flag summary with a SYN toward the server).
+    # cited record shows (a Suricata directional TCP flag summary with a SYN toward the server, or a Zeek conn history
+    # that begins with the originator's SYN).
     PORTS_NAMED = 12
+    # The cited record that shows a probed port's opening, and how each sensor's claim names it.
+    OPENED_KINDS: ClassVar[dict[str, tuple[str, str, str]]] = {
+        SURICATA: ("opened", "A cited Suricata directional TCP flag summary shows", "it records a SYN toward the server"),
+        ZEEK: ("opened_zeek", "A cited Zeek conn history shows", "it begins with the originator's SYN"),
+    }
 
     def __init__(self):
         super().__init__()
@@ -571,6 +582,11 @@ class PortScan(_Grouped):
 
     def consume(self, events):
         for e in self.applicable(events):
+            transport = e.get("network.transport")
+            if isinstance(transport, str) and transport.lower() not in PORTED:
+                # a transport without ports: Zeek keeps an ICMP connection's type and counterpart type in its port
+                # fields, and they are not ports (evaluated: such a record is no port of a scan)
+                continue
             src, dst = e.get("source.ip"), e.get("destination.ip")
             key = (src, dst)
             state = self.keep(key, e)
@@ -602,9 +618,10 @@ class PortScan(_Grouped):
             # a port number is 0-65535, so the distinct ports are bounded by construction and counted exactly
             state.bag("ports").add(dport)
             self.name(state, "ports", dport, e, self.PORTS_NAMED)
-            if suricata_source_opened(e) and e.get("flow.bytes_toserver") is not None:
-                # a flow record (not netflow) whose directional flags show its source sent the opening SYN
-                self.name(state, "opened", dport, e, self.PORTS_NAMED)
+            opener = source_opened(e)
+            if opener is not None and e.get("flow.bytes_toserver") is not None:
+                # a flow or conn record (not netflow) whose own typed field shows its source sent the opening SYN
+                self.name(state, self.OPENED_KINDS[opener][0], dport, e, self.PORTS_NAMED)
             if sport is not None and sport >= 1024 > dport:
                 tuple_ = (src, sport, dst, dport)
                 held = self.requests.get(tuple_)
@@ -682,7 +699,9 @@ class PortScan(_Grouped):
                 else:
                     lane, severity = "context", "low"     # mostly a service answering clients: kept visible, not a lead
                     claim += f" Only {len(probed)} port(s) look probed."
-                opened = sorted(port for port in state.names("opened", self.PORTS_NAMED).values() if port in probed)
+                opened = {sensor: sorted(port for port in state.names(kind, self.PORTS_NAMED).values()
+                                         if port in probed)
+                          for sensor, (kind, _shows, _how) in self.OPENED_KINDS.items()}
                 rows.append((src, dst, claim, lane, severity, evs, len(probed), opened, len(answered), context))
         scanned = {(src, dst) for src, dst, _claim, lane, *_rest in rows if lane == self.lane}
         scanned.update(tuple(match.group_key.split("|")) for match in uncited if match.proposed_lane == self.lane)
@@ -701,10 +720,11 @@ class PortScan(_Grouped):
                 claim += (f" The opposite direction, {dst} to {src}, is reported as a port scan lead, so this pair is "
                           f"raised to the same lane: {n_answered} of its ports answer earlier requests from {dst}, "
                           f"and {n_probed} look probed in this direction.")
-                if opened:
-                    claim += (f" A cited Suricata directional TCP flag summary shows {src} opened the "
-                              f"connection on tcp/" + ", tcp/".join(str(port) for port in opened)
-                              + " (it records a SYN toward the server).")
+                if any(opened.values()):
+                    for sensor, (_kind, shows, how) in self.OPENED_KINDS.items():
+                        if opened[sensor]:
+                            claim += (f" {shows} {src} opened the connection on tcp/"
+                                      + ", tcp/".join(str(port) for port in opened[sensor]) + f" ({how}).")
                 elif n_probed:
                     claim += " No cited record shows which side opened the connections on the probed ports."
             elif lane == "context":

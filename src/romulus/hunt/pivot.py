@@ -35,6 +35,8 @@ from romulus.evidence.windows_catalog import (
     datasets_for_families,
 )
 from romulus.evidence.windows_reassembly import ScriptBlockAssembler
+from romulus.evidence.zeek import zeek_record
+from romulus.evidence.zeek_catalog import ELASTIC, MALCOLM, SECURITY_ONION, ZEEK_LOGS
 from romulus.hunt.publish import publish_match
 from romulus.site import SiteFacts, absent_site_facts
 from romulus.sources.compile import time_unit
@@ -51,10 +53,23 @@ MAX_SUMMARY_FIELDS = 16
 MAX_PIVOT_PARTITIONS = 16
 MIN_PIVOT_SPLIT = timedelta(seconds=5)
 HOST_TIMELINE_DATASETS = ["linux.audit", "systemd.journal", "apache.access", "apache.error"]
-NETWORK_TIMELINE_DATASETS = [
+SURICATA_TIMELINE_DATASETS = [
     "suricata.eve.alert", "suricata.eve.flow", "suricata.eve.netflow", "suricata.eve.dns",
     "suricata.eve.http", "suricata.eve.fileinfo", "suricata.eve.tls", "suricata.eve.ssh",
 ]
+# Zeek logs as the shippers that prefix them name them in event.dataset (Elastic's zeek.<stream>, Security Onion's
+# zeek.<log>), from the catalog. Malcolm's and Security Onion's bare log names collide with other datasets, so those
+# rows are selected by their shipper field as well (`zeek_source_groups`).
+ZEEK_LOGS_BY_TOKEN = {log.token: log for log in ZEEK_LOGS}
+_PREFIXED_SHAPES = (ELASTIC, SECURITY_ONION)
+
+
+def _prefixed(logs) -> list[str]:
+    return sorted({f"zeek.{name}" for log in logs for shape in _PREFIXED_SHAPES for name in log.names.get(shape, ())})
+
+
+ZEEK_TIMELINE_DATASETS = _prefixed(ZEEK_LOGS)
+NETWORK_TIMELINE_DATASETS = [*SURICATA_TIMELINE_DATASETS, *ZEEK_TIMELINE_DATASETS]
 SURICATA_ALERT_DATASET = "suricata.eve.alert"
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _ISO_NANOS = re.compile(
@@ -71,6 +86,35 @@ _SURICATA_FAMILY = {
     "tls": "tls_session",
     "ssh": "ssh_session",
 }
+# Each catalogued Zeek log's family, by Zeek's own log name.
+_ZEEK_FAMILY = {log.name: log.family for log in ZEEK_LOGS}
+
+
+def zeek_capable(contract: FieldContract) -> bool:
+    """Whether the target's mapping holds fields only a Zeek shipper writes (a zeek.* object, Security Onion's
+    log.id.uid, plain Zeek JSON's _path): only then does a network pivot name Zeek's datasets, so a target with
+    none keeps the intents it always had."""
+    return any(name.startswith("zeek.") or name in ("log.id.uid", "_path") for name in contract.fields)
+
+
+def zeek_source_groups(contract: FieldContract, logs=None) -> list[list[Predicate]]:
+    """Predicate groups (any one selects a record) for the rows of the given Zeek logs (all when None), one per
+    shipper layout the target can be searched by: the prefixed dataset names, Malcolm's provider with bare names,
+    Security Onion's module with bare names. Empty when the target can run none of them: the caller then retrieves
+    without a dataset predicate and normalization decides, never a negative."""
+    logs = list(ZEEK_LOGS if logs is None else logs)
+    groups: list[list[Predicate]] = []
+    prefixed = _prefixed(logs)
+    if prefixed and _supports(contract, "event.dataset", "in"):
+        groups.append([Predicate(field="event.dataset", op="in", value=prefixed)])
+    if prefixed and _supports(contract, "data_stream.dataset", "in"):
+        groups.append([Predicate(field="data_stream.dataset", op="in", value=prefixed)])
+    for marker, value, shape in (("event.provider", "zeek", MALCOLM), ("event.module", "zeek", SECURITY_ONION)):
+        bare = sorted({name for log in logs for name in log.names.get(shape, ())})
+        if bare and _supports(contract, marker) and _supports(contract, "event.dataset", "in"):
+            groups.append([Predicate(field=marker, op="eq", value=value),
+                           Predicate(field="event.dataset", op="in", value=bare)])
+    return groups
 
 
 @dataclass
@@ -318,6 +362,9 @@ def _prefilter_raw(records: list[dict], families: set[str], parse: _AuditParses 
             if family is None or family in families:
                 selected.extend(group)
             continue
+        zeek = zeek_record(source)
+        if zeek is not None and zeek.log is not None and _ZEEK_FAMILY[zeek.log.name] not in families:
+            continue                    # a catalogued Zeek log of another family; anything unread stays
         selected.extend(group)
     return selected
 
@@ -606,27 +653,46 @@ class PivotExecutor:
                     if not (_supports(contract, "event.dataset", "in")
                             and _supports(contract, "source.ip") and _supports(contract, "destination.ip")):
                         continue
+                    ip_groups = [
+                        [Predicate(field="source.ip", op="eq", value=entity.value)],
+                        [Predicate(field="destination.ip", op="eq", value=entity.value)],
+                    ]
                     inventoried = dataset_inventory.get(target)
                     if inventoried is not None:
                         for dataset in inventoried:
+                            if dataset in ZEEK_LOGS_BY_TOKEN:
+                                # a dispatch token: the log's rows in every layout the target can be searched by
+                                intents.append(SearchIntent(
+                                    kind="raw", target=target, window=window,
+                                    any_of=_and_any_of(
+                                        zeek_source_groups(contract, [ZEEK_LOGS_BY_TOKEN[dataset]]), ip_groups),
+                                    max_records=MAX_PIVOT_RECORDS,
+                                    purpose=f"agent:{request.tool}:{dataset}",
+                                ))
+                                continue
                             if dataset not in NETWORK_TIMELINE_DATASETS:
                                 continue
                             intents.append(SearchIntent(
                                 kind="raw", target=target, window=window,
                                 filters=[Predicate(field="event.dataset", op="eq", value=dataset)],
-                                any_of=[
-                                    [Predicate(field="source.ip", op="eq", value=entity.value)],
-                                    [Predicate(field="destination.ip", op="eq", value=entity.value)],
-                                ],
+                                any_of=ip_groups,
                                 max_records=MAX_PIVOT_RECORDS,
                                 purpose=f"agent:{request.tool}:{dataset}",
                             ))
                         continue
-                    filters = [Predicate(field="event.dataset", op="in", value=NETWORK_TIMELINE_DATASETS)]
-                    any_of = [
-                        [Predicate(field="source.ip", op="eq", value=entity.value)],
-                        [Predicate(field="destination.ip", op="eq", value=entity.value)],
-                    ]
+                    if zeek_capable(contract):
+                        # Suricata's datasets or any Zeek layout the target can be searched by
+                        intents.append(SearchIntent(
+                            kind="raw", target=target, window=window,
+                            any_of=_and_any_of(
+                                [[Predicate(field="event.dataset", op="in", value=NETWORK_TIMELINE_DATASETS)],
+                                 *(group for group in zeek_source_groups(contract)
+                                   if group[0].field != "event.dataset")], ip_groups),
+                            max_records=MAX_PIVOT_RECORDS, purpose=f"agent:{request.tool}",
+                        ))
+                        continue
+                    filters = [Predicate(field="event.dataset", op="in", value=SURICATA_TIMELINE_DATASETS)]
+                    any_of = ip_groups
                 elif entity.kind == "ip" and not network:
                     ip_groups = [
                         [Predicate(field=field, op="eq", value=entity.value)]
@@ -747,6 +813,11 @@ class PivotExecutor:
                     [Predicate(field="source.ip", op="eq", value=args.entity.value)],
                     [Predicate(field="destination.ip", op="eq", value=args.entity.value)],
                 ]
+                if zeek_capable(contract):
+                    # Zeek's notice, weird, signature and intel rows are the sensor's alerts too
+                    alerts = [log for log in ZEEK_LOGS if log.family == "net_alert"]
+                    any_of = _and_any_of([filters, *zeek_source_groups(contract, alerts)], any_of)
+                    filters = []
 
             intents.append(SearchIntent(
                 kind="raw", target=target, window=window, filters=filters, any_of=any_of,
@@ -816,6 +887,9 @@ class PivotExecutor:
             for intent in intents
             for dataset in PivotExecutor._intent_datasets(intent)
         }
+        # a Zeek log planned by its dispatch token (its rows selected per shipper layout)
+        planned.update((intent.target, intent.purpose.split(":", 2)[2]) for intent in intents
+                       if intent.purpose.count(":") >= 2 and intent.purpose.split(":", 2)[2] in ZEEK_LOGS_BY_TOKEN)
         for target, contract in self.contracts.items():
             inventoried = self.dataset_inventory.get(target)
             if inventoried is not None:
@@ -829,7 +903,7 @@ class PivotExecutor:
                         unresolved_ranges=[_range(args.start, args.end, reason)],
                     ))
                     continue
-                normalized = set(NETWORK_TIMELINE_DATASETS if _is_network(target, contract)
+                normalized = set([*NETWORK_TIMELINE_DATASETS, *ZEEK_LOGS_BY_TOKEN] if _is_network(target, contract)
                                  else _host_datasets(contract))
                 for dataset in inventoried:
                     if (target, dataset) in planned:

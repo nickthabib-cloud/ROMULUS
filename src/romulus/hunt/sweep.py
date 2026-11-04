@@ -11,6 +11,9 @@ from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from itertools import batched
 
+import httpx
+from sqlalchemy.exc import SQLAlchemyError
+
 from romulus.baseline.carry import HourParents
 from romulus.baseline.playbook import BaselineCell, BaselinePlaybook
 from romulus.baseline.reasons import summarize
@@ -22,6 +25,7 @@ from romulus.detect.host import bind_lineage_citation_loader
 from romulus.detect.netdef import DIRECTION_ASSUMED_REASON
 from romulus.detect.observed import observation
 from romulus.detect.registry import bind_windows_site, fresh_pack
+from romulus.errors import SourceError
 from romulus.evidence.normalize import (
     BOOT_FILL_FAMILIES,
     BOOT_INTERVAL_ORIGIN,
@@ -41,6 +45,8 @@ from romulus.evidence.windows_catalog import (
     lookup_event_class,
 )
 from romulus.evidence.windows_reassembly import SCRIPT_FINALIZE_BATCH_SIZE, ScriptBlockAssembler
+from romulus.evidence.zeek import ZEEK_INTERIM_SUPERSEDED, ZEEK_NORMALIZER
+from romulus.evidence.zeek_catalog import MALCOLM, SHAPES, ZEEK_LOGS, lookup_log
 from romulus.hunt.publish import (
     LineageCitationFetcher,
     SourceCitationFetcher,
@@ -69,9 +75,7 @@ BASELINE_TOKEN_ROWS_PER_HUNT = 500_000
 PLANNED_CHUNK = 500
 LINUX_HOST_DATASETS = ("linux.audit", "systemd.journal", "apache.access", "apache.error")
 HOST_DATASETS = [*LINUX_HOST_DATASETS, *WINDOWS_HOST_DATASETS]
-ZEEK_CONN_DATASETS = frozenset({"zeek.connection", "zeek.conn"})
-ZEEK_ICMP_TRANSPORTS = ("icmp", "icmpv6", "ipv6-icmp")
-NET_FAMILIES = {"net_alert", "net_flow", "dns_query", "http_tx", "file_transfer", "tls_session", "ssh_session"}
+NET_FAMILIES ={"net_alert", "net_flow", "dns_query", "http_tx", "file_transfer", "tls_session", "ssh_session"}
 # linux.audit now also yields `auth` (USER_LOGIN/USER_START), so an unparseable audit group may hide one.
 # A login group that fails is tagged linux.audit.auth; it takes every record of its event, so it may also hide
 # an exec, socket or file record of that event and carries the whole audit family set.
@@ -91,8 +95,21 @@ LINUX_DATASET_FAMILIES = {
         "alert", "flow", "netflow", "dns", "http", "fileinfo", "tls", "ssh",
     )},
 }
-DATASET_FAMILIES = {**LINUX_DATASET_FAMILIES, **WINDOWS_DATASET_FAMILIES}
+# Every catalogued Zeek log by its dispatch token (`zeek:conn`, never the bare name, which other shippers' datasets
+# share): the family its records feed. A normalization error on a Zeek record is tagged with its token.
+ZEEK_DATASET_FAMILIES = {log.token: frozenset({log.family}) for log in ZEEK_LOGS}
+DATASET_FAMILIES = {**LINUX_DATASET_FAMILIES, **WINDOWS_DATASET_FAMILIES, **ZEEK_DATASET_FAMILIES}
 ALL_FAMILIES = frozenset({"*"})
+# Zeek's provider in a Malcolm index; the other providers there (Suricata, Arkime) are read by their own normalizers.
+ZEEK_PROVIDER = "zeek"
+# How many Zeek connections (sensor and uid) whose interim record a partition evaluated are kept on disk to tell a
+# later record of the same connection from another target. Beyond it a connection's later record is still evaluated,
+# and the reason says counts over such connections may include both records.
+ZEEK_INTERIM_KEYS_LIMIT = 5_000_000
+# Failures of what every rule depends on (the store, the stage volume, the source): they end the sweep and fail the
+# hunt. Any other exception a rule raises is that rule's own defect: its cells are failed, named, and the others go on.
+INFRASTRUCTURE_ERRORS = (sqlite3.Error, SQLAlchemyError, OSError, MemoryError, SourceError, httpx.HTTPError)
+RULE_FAILURE_TEXT = 300
 WINDOW_ROLLUP_PARTIAL = ("whole-window result over partitions of which one or more were partial, failed or "
                          "unexecuted (listed separately)")
 
@@ -112,15 +129,44 @@ SKIP_REASON_OVERFLOW = "additional skip reasons omitted after bounded category l
 MAX_WINDOWS_UNCATALOGUED = 256
 
 
+def _error_tag(message: str) -> str:
+    """The dataset a normalization error names ("linux.audit: ...", "zeek:conn: ..."): a Zeek dispatch token keeps its
+    own colon."""
+    if message.startswith("zeek:") and message[len("zeek:"):][:1] not in ("", " "):
+        return "zeek:" + message[len("zeek:"):].split(":", 1)[0].strip()
+    return message.split(":", 1)[0].strip()
+
+
+def zeek_log_of_dataset(dataset: str):
+    """The catalogued Zeek log a shipper's `zeek.<name>` dataset or a `zeek:<log>` dispatch token names, in any
+    shape's naming; None for anything else (including Zeek logs outside the catalog)."""
+    if dataset.startswith("zeek:"):
+        name = dataset[len("zeek:"):]
+        return next((log for log in ZEEK_LOGS if log.name == name), None)
+    if dataset.startswith("zeek."):
+        name = dataset[len("zeek."):]
+        return next((log for shape in SHAPES if (log := lookup_log(shape, name)) is not None), None)
+    return None
+
+
+def _dataset_families(dataset: str) -> frozenset[str]:
+    families = DATASET_FAMILIES.get(dataset)
+    if families is not None:
+        return families
+    log = zeek_log_of_dataset(dataset)
+    return frozenset({log.family}) if log is not None else frozenset()
+
+
 def _families_of(datasets) -> frozenset[str]:
-    return frozenset().union(*(DATASET_FAMILIES.get(dataset, frozenset()) for dataset in datasets))
+    return frozenset().union(*(_dataset_families(dataset) for dataset in datasets))
 
 
 _WINDOWS_FAMILIES = frozenset().union(*WINDOWS_DATASET_FAMILIES.values())
+_ZEEK_FAMILIES = frozenset().union(*ZEEK_DATASET_FAMILIES.values())
 _ROLE_FAMILIES = {
     "host": _families_of(HOST_DATASETS),
     "network": _families_of([*(name for name in DATASET_FAMILIES if name.startswith("suricata.eve.")),
-                             "arkime.session"]),
+                             "arkime.session"]) | _ZEEK_FAMILIES,
 }
 
 
@@ -283,6 +329,8 @@ class Sweep:
         # Built as partitions are read, in time order per target: each batch's events are placed with what has
         # been observed so far. Expansion and the context pass use the whole map, recorded at finalize.
         self.boots = BootIntervals()
+        # rule id -> why the rule failed: it is not evaluated again in this hunt, and every later cell says so
+        self.failed_rules: dict[str, str] = {}
         self.stats = {"partitions": 0, "records": 0, "events": 0, "candidates": 0, "skips": {}, "errors": 0,
                       "boot": {"recorded": 0, "from_interval": 0, "unknown": 0}}
 
@@ -331,6 +379,15 @@ class Sweep:
                 if pb.staged:
                     pb.note_limit("stage", f"the event stage could not take this partition's citations "
                                            f"({self.budget.broken}); findings that cite them are not computed")
+            return
+        except (ValueError, UnicodeError) as exc:
+            # a citation the stage cannot serialize (the stage replaces lone surrogates, so this is a last resort):
+            # the rules that cite this partition's records say so, and the sweep goes on
+            log.warning("event stage could not serialize a partition's citations: %s", exc.__class__.__name__)
+            for pb in self.pack:
+                if pb.staged:
+                    pb.note_limit("stage", f"the event stage could not serialize this partition's citations "
+                                           f"({exc.__class__.__name__}); findings that cite them are not computed")
             return
         self._charge_stage(stage)
         stage.owners = {}
@@ -399,38 +456,7 @@ class Sweep:
     def _any_of_for(self, target: str, contract: FieldContract | None = None) -> list[list[Predicate]]:
         """Select only normalized source shapes while preserving each target's other known datasets."""
         if contract is not None and contract.role == "network":
-            if self._profiles is None:
-                self._profiles = self.repo.source_profiles(self.hunt_id)
-            profile = self._profiles.get(target) or {}
-            datasets = sorted(profile.get("datasets") or {})
-            zeek = [dataset for dataset in datasets if dataset in ZEEK_CONN_DATASETS]
-            if (zeek and not any(str(note).startswith("ds inventory truncated")
-                                 for note in profile.get("notes") or [])
-                    and contract.supports("event.dataset", "in")
-                    and contract.supports("event.dataset", "missing")
-                    and contract.supports("network.transport", "in")
-                    and contract.supports("network.transport", "missing")):
-                groups = []
-                others = [dataset for dataset in datasets if dataset not in ZEEK_CONN_DATASETS]
-                if others:
-                    groups.append([Predicate(field="event.dataset", op="in", value=others)])
-                groups.append([
-                    Predicate(field="event.dataset", op="in", value=zeek),
-                    Predicate(field="network.transport", op="in", value=list(ZEEK_ICMP_TRANSPORTS)),
-                ])
-                # Some Zeek shippers leave ECS network.transport unset while conn.proto still records ICMP.
-                # Fetch those records for local normalization instead of treating their absence as non-ICMP.
-                groups.append([
-                    Predicate(field="event.dataset", op="in", value=zeek),
-                    Predicate(field="network.transport", op="missing"),
-                ])
-                # A missing dataset cannot be assigned to an inventoried class by the source query. Retrieve it
-                # so the normalizer's unsupported-record accounting makes every affected coverage cell partial.
-                groups.append([Predicate(field="event.dataset", op="missing")])
-                self.stats.setdefault("dataset_filter", {})[target] = others
-                self.stats.setdefault("zeek_transport_filter", {})[target] = list(ZEEK_ICMP_TRANSPORTS)
-                return groups
-            return []
+            return self._zeek_catalog_filter(target, contract)
         # Winlogbeat may omit event.dataset, so Windows also selects by native channel.
         if contract is None or contract.role != "host" or contract.os_family != "windows":
             return []
@@ -466,6 +492,56 @@ class Sweep:
             groups.append([Predicate(field="event.channel", op="in", value=list(WINDOWS_CHANNELS))])
         self.stats.setdefault("dataset_filter", {})[target] = list(WINDOWS_HOST_DATASETS)
         self.stats.setdefault("channel_filter", {})[target] = list(WINDOWS_CHANNELS)
+        return groups
+
+    def _zeek_catalog_filter(self, target: str, contract: FieldContract) -> list[list[Predicate]]:
+        """Leave out only the Zeek logs outside the catalog, which no normalizer reads and which feed no family a rule
+        reads: they are listed as not retrieved (by the report, from the inventory), never as searched. Without a
+        complete inventory naming such a log, or a contract that can select the rest exactly, everything is retrieved
+        and those records are counted as not assessed when they are read."""
+        if self._profiles is None:
+            self._profiles = self.repo.source_profiles(self.hunt_id)
+        profile = self._profiles.get(target) or {}
+        if any(str(note).startswith("ds inventory truncated") for note in profile.get("notes") or []):
+            return []
+        datasets = sorted(profile.get("datasets") or {})
+        inventory = profile.get("inventory")
+        if isinstance(inventory, list) and inventory:
+            # A mixed index (Malcolm: Zeek, Suricata and Arkime rows): Zeek's bare log names are told apart by provider.
+            unread = sorted({str(item.get("dataset")) for item in inventory
+                             if item.get("provider") == ZEEK_PROVIDER and isinstance(item.get("dataset"), str)
+                             and lookup_log(MALCOLM, item["dataset"]) is None})
+            if not unread or not all(contract.supports(field, op) for field, op in (
+                    ("event.provider", "eq"), ("event.provider", "in"), ("event.provider", "missing"),
+                    ("event.dataset", "in"), ("event.dataset", "missing"))):
+                return []
+            read = sorted({str(item["dataset"]) for item in inventory
+                           if item.get("provider") == ZEEK_PROVIDER and isinstance(item.get("dataset"), str)
+                           and lookup_log(MALCOLM, item["dataset"]) is not None})
+            others = sorted({str(item["provider"]) for item in inventory
+                             if isinstance(item.get("provider"), str) and item["provider"] != ZEEK_PROVIDER})
+            groups: list[list[Predicate]] = []
+            if read:
+                groups.append([Predicate(field="event.provider", op="eq", value=ZEEK_PROVIDER),
+                               Predicate(field="event.dataset", op="in", value=read)])
+            # a Zeek row that names no log is read, and normalization decides what it is
+            groups.append([Predicate(field="event.provider", op="eq", value=ZEEK_PROVIDER),
+                           Predicate(field="event.dataset", op="missing")])
+            if others:
+                groups.append([Predicate(field="event.provider", op="in", value=others)])
+            groups.append([Predicate(field="event.provider", op="missing")])
+            unread_keys = {f"zeek:{name.strip().lower()}" for name in unread}
+            self.stats.setdefault("dataset_filter", {})[target] = [key for key in datasets if key not in unread_keys]
+            return groups
+        unread = [dataset for dataset in datasets
+                  if dataset.startswith("zeek.") and zeek_log_of_dataset(dataset) is None]
+        if not unread or not (contract.supports("event.dataset", "in") and contract.supports("event.dataset", "missing")):
+            return []
+        read = [dataset for dataset in datasets if dataset not in unread]
+        groups = [[Predicate(field="event.dataset", op="in", value=read)]] if read else []
+        # A record without a dataset cannot be placed by the source query: it is read, and normalization decides.
+        groups.append([Predicate(field="event.dataset", op="missing")])
+        self.stats.setdefault("dataset_filter", {})[target] = read
         return groups
 
     def _prepare_windows_inventory(self, target: str, contract: FieldContract | None) -> None:
@@ -1059,8 +1135,26 @@ class Sweep:
         """Only unmodeled source formats poison rules; cataloged-source event classes are not-assessed data."""
         return {
             reason: count for reason, count in skips.items()
-            if reason.startswith(("dataset:", "suricata event_type", "zeek non-ICMP connection"))
+            if reason.startswith(("dataset:", "suricata event_type"))
         }
+
+    @staticmethod
+    def _unsupported_families(unsupported: dict[str, int], fed: dict[str, frozenset[str] | None]
+                              ) -> tuple[frozenset[str], dict[str, int]]:
+        """The families unsupported records could hide (ALL_FAMILIES when some could hold anything), and the reasons
+        whose records feed no family a rule reads (Zeek logs outside the catalog): those are not assessed, and they
+        make no rule's search partial."""
+        families: set[str] = set()
+        not_assessed = {}
+        for reason, count in unsupported.items():
+            known = fed.get(reason)
+            if known is None:
+                return ALL_FAMILIES, {}
+            if known:
+                families |= known
+            else:
+                not_assessed[reason] = count
+        return frozenset(families), not_assessed
 
     @staticmethod
     def _bounded_counts(target: dict[str, int], additions: dict[str, int]) -> dict[str, str]:
@@ -1091,6 +1185,30 @@ class Sweep:
               detail: dict | None = None) -> dict:
         return {"rule_id": pb.id, "version": pb.version, "target": target, "partition": pkey, "state": state,
                 "matched": matched, "evaluated": evaluated, "detail": detail or {}}
+
+    def _rule_failed(self, pb: Playbook, exc: Exception, where: str) -> str:
+        """Record that one rule raised: it is evaluated no further in this hunt, its cells say why, and the hunt is
+        partial. The exception's text is bounded and is the rule's own (typed values carry no secret)."""
+        reason = (f"rule {pb.id} failed at {where}: {exc.__class__.__name__}: {str(exc)[:RULE_FAILURE_TEXT]}; "
+                  f"its results from here to the end of the hunt are not computed")
+        log.exception("rule %s failed at %s", pb.id, where)
+        self.failed_rules.setdefault(pb.id, reason)
+        self.partial_reasons.append(reason)
+        self.stats.setdefault("rule_failures", {})[pb.id] = reason
+        return reason
+
+    def _failed_rule_cell(self, pb: Playbook, target: str, pkey: str, cells: list[dict]) -> None:
+        """The cell of a rule that failed in this hunt: never evaluated, never a negative."""
+        reason = self.failed_rules[pb.id]
+        if isinstance(pb, BaselinePlaybook):
+            if not self.repo.baseline_window_cell_done(self.hunt_id, pb.id, pb.version, target, pkey):
+                self.repo.save_baseline_window_cell(self.hunt_id, {
+                    "rule_id": pb.id, "version": pb.spec.version, "target": target, "partition": pkey,
+                    "state": "evaluated_partial", "matched": 0, "evaluated": 0,
+                    "detail": {"reasons": [reason], "retrieval_complete": False},
+                }, ())
+            return
+        cells.append(self._cell(pb, target, pkey, "executed_failed", detail={"error": reason, "reasons": [reason]}))
 
     def _mark_all(self, target: str, pkey: str, state: str, detail: dict | None = None):
         """Write the same coverage state for every rule on one (target, partition), in one transaction."""
@@ -1253,10 +1371,17 @@ class Sweep:
             self._mark_all(target, pkey, "executed_failed", {"error": out.error})
             self.repo.update_task(tid, "failed", error=out.error)
             return
-        events, skips, errors = normalize_hits(out.records, self.boots)
+        malformed_text: dict[str, list[str]] = {}
+        skip_families: dict[str, frozenset[str] | None] = {}
+        events, skips, errors = normalize_hits(out.records, self.boots, malformed_text=malformed_text,
+                                               skip_families=skip_families)
+        if malformed_text:
+            # normalized with each lone surrogate replaced (the events name the fields): counted, never partial
+            self.stats["malformed_text_records"] = self.stats.get("malformed_text_records", 0) + len(malformed_text)
         raw_sources = {f"{r['_index']}/{r['_id']}": r["_source"] for r in out.records}
         duplicate_events = []
         windows_state_reasons: list[str] = []
+        zeek_state_reasons: list[tuple[str, frozenset[str]]] = []
         script_reassembly_reasons: list[str] = []
         script_metadata_reasons: list[str] = []
         if any(event.normalizer.startswith("windows-") for event in events):
@@ -1268,6 +1393,11 @@ class Sweep:
                     f"{stage.windows_refusal_reason}; those events were evaluated, but a shipper copy of one in a "
                     f"later partition is evaluated again, so counts over them may include duplicates"
                 )
+        if any(event.normalizer == ZEEK_NORMALIZER for event in events):
+            events, zeek_duplicates, zeek_superseded = self._unique_zeek(events, zeek_state_reasons)
+            duplicate_events.extend(zeek_duplicates)
+            if zeek_superseded:
+                skips[ZEEK_INTERIM_SUPERSEDED] = skips.get(ZEEK_INTERIM_SUPERSEDED, 0) + zeek_superseded
         if duplicate_events:
             skips["duplicate typed event across source partitions"] = len(duplicate_events)
             self.repo.merge_evidence_raw(self.hunt_id, duplicate_events, raw_sources)
@@ -1297,6 +1427,13 @@ class Sweep:
         # records retrieved but of a dataset/event type no normalizer supports: we cannot say what
         # they contain, so no rule may claim a complete negative over this partition
         unsupported = self._unsupported_skips(skips)
+        # Records of a Zeek log the catalog names are counted against the families that log feeds; those of a Zeek
+        # log outside the catalog feed none and are not assessed (the report lists every skip with its count).
+        unsupported_affected, not_assessed = self._unsupported_families(unsupported, skip_families)
+        if not_assessed:
+            self._bounded_counts(self.stats.setdefault("not_assessed_by_target", {}).setdefault(target, {}),
+                                 not_assessed)
+            unsupported = {reason: count for reason, count in unsupported.items() if reason not in not_assessed}
         gap_reasons = list(windows_state_reasons)
         continuity_times = None
         if contract is not None and contract.os_family == "windows":
@@ -1320,10 +1457,11 @@ class Sweep:
         # Which event families the problems could have hidden. A retrieval problem affects every
         # rule; a normalization error affects only families its dataset feeds; an unsupported
         # dataset could hold anything, so it affects every rule.
-        affected = ALL_FAMILIES if (out.completeness != Completeness.complete or unsupported) else set()
+        everything_unsupported = bool(unsupported) and unsupported_affected is ALL_FAMILIES
+        affected = ALL_FAMILIES if (out.completeness != Completeness.complete or everything_unsupported) else set()
         # An error tag that feeds no known family could hide anything, so it affects every rule.
         error_affected: set[str] | frozenset[str] = set()
-        tags = sorted({msg.split(":", 1)[0].strip() for _rid, msg in errors})
+        tags = sorted({_error_tag(msg) for _rid, msg in errors})
         for tag in tags:
             fams = DATASET_FAMILIES.get(tag)
             if fams is None:
@@ -1331,12 +1469,18 @@ class Sweep:
                 break
             error_affected |= fams
         if affected is not ALL_FAMILIES:
-            affected = error_affected
+            affected = (ALL_FAMILIES if error_affected is ALL_FAMILIES
+                        else set(error_affected) | (set(unsupported_affected) if unsupported else set()))
         # The reasons a cell is partial, stated on the cell so the report can list each gap with its cause.
         base_reasons = list(out.reasons)
-        if unsupported:
+        unsupported_reason = ""
+        if everything_unsupported:
             base_reasons.append(f"unsupported_records={sum(unsupported.values())} (no normalizer; could hold any "
                                 f"behavior): {'; '.join(sorted(unsupported))}")
+        elif unsupported:
+            unsupported_reason = (f"unsupported_records={sum(unsupported.values())} (records of a log no normalizer "
+                                  f"read here; they could hold {', '.join(sorted(unsupported_affected))} records): "
+                                  f"{'; '.join(sorted(unsupported))}")
         unmapped = [tag for tag in tags if tag not in DATASET_FAMILIES]
         error_reason = (f"normalization_errors={len(errors)} in {', '.join(tags)}"
                         + (f"; {', '.join(unmapped)} feeds no known event family, so every rule is partial"
@@ -1350,191 +1494,205 @@ class Sweep:
         released: list[tuple[str, list[str]]] = []       # (playbook, ids) holds the playbooks let go
         target_os = contract.os_family if contract is not None else "linux"
         for pb in self.pack:
-            # families a rule reads only as context (its lineage) do not make a partition an evaluation of it
-            evaluated_families = set(pb.families) - set(pb.context_families)
-            relevant_events = [event for event in events if event.family in evaluated_families]
-            target_fallback = not relevant_events and (
-                target_os == "unknown" or target_os in pb.os_families
-            )
-            windows_reasons = self._windows_rule_reasons(
-                target, contract, pb, out.records, gap_reasons, w, continuity_times,
-            )
-            if (script_metadata_reasons and contract.os_family == "windows"
-                    and "script_block" in pb.families):
-                windows_reasons.extend(script_metadata_reasons)
-            if (script_reassembly_reasons and contract.os_family == "windows"
-                    and "script_block" in pb.families):
-                windows_reasons.extend(script_reassembly_reasons)
-            windows_gate_reasons.update(windows_reasons)
-            rule_partial = (affected is ALL_FAMILIES or bool(set(pb.families) & affected)
-                            or bool(windows_reasons))
-            if isinstance(pb, BaselinePlaybook):
-                if self.repo.baseline_window_cell_done(
-                        self.hunt_id, pb.id, pb.version, target, pkey):
-                    continue
-                ordered = sorted(pb.scope_partition(events), key=lambda item: (
-                    item.ts, -1 if exec_serial(item) is None else exec_serial(item), item.id,
-                ))
-                # Unknown or malformed records can hide behavior, so they make retrieval partial, but they do not
-                # attest that this source delivers the baseline family. Keep applicability profile/event based and
-                # carry the uncertainty through retrieval_complete instead.
-                target_applicable = (
-                    bool(ordered)
-                    or error_affected is ALL_FAMILIES
-                    or self._baseline_target_applicable(target, pb)
+            if pb.id in self.failed_rules:
+                self._failed_rule_cell(pb, target, pkey, cells)
+                continue
+            try:
+                # families a rule reads only as context (its lineage) do not make a partition an evaluation of it
+                evaluated_families = set(pb.families) - set(pb.context_families)
+                relevant_events = [event for event in events if event.family in evaluated_families]
+                target_fallback = not relevant_events and (
+                    target_os == "unknown" or target_os in pb.os_families
                 )
-                reasons = list(base_reasons)
-                reasons.extend(windows_reasons)
-                if error_reason and (error_affected is ALL_FAMILIES or set(pb.families) & error_affected):
-                    reasons.append(error_reason)
-                if pb.id == "bl.exec_pair":
-                    carry_events = sorted(
-                        (event for event in events
-                         if event.family == "process_exec" or observation(event) is not None),
-                        key=lambda item: (
-                            item.ts, -1 if exec_serial(item) is None else exec_serial(item), item.id,
-                        ),
+                windows_reasons = self._windows_rule_reasons(
+                    target, contract, pb, out.records, gap_reasons, w, continuity_times,
+                )
+                if (script_metadata_reasons and contract.os_family == "windows"
+                        and "script_block" in pb.families):
+                    windows_reasons.extend(script_metadata_reasons)
+                if (script_reassembly_reasons and contract.os_family == "windows"
+                        and "script_block" in pb.families):
+                    windows_reasons.extend(script_reassembly_reasons)
+                # Zeek dedup and interim state: only rules reading the families of the records it concerns
+                windows_reasons.extend(reason for reason, fed in zeek_state_reasons if set(pb.families) & fed)
+                if unsupported_reason and set(pb.families) & unsupported_affected:
+                    windows_reasons.append(unsupported_reason)
+                windows_gate_reasons.update(windows_reasons)
+                rule_partial = (affected is ALL_FAMILIES or bool(set(pb.families) & affected)
+                                or bool(windows_reasons))
+                if isinstance(pb, BaselinePlaybook):
+                    if self.repo.baseline_window_cell_done(
+                            self.hunt_id, pb.id, pb.version, target, pkey):
+                        continue
+                    ordered = sorted(pb.scope_partition(events), key=lambda item: (
+                        item.ts, -1 if exec_serial(item) is None else exec_serial(item), item.id,
+                    ))
+                    # Unknown or malformed records can hide behavior, so they make retrieval partial, but they do not
+                    # attest that this source delivers the baseline family. Keep applicability profile/event based and
+                    # carry the uncertainty through retrieval_complete instead.
+                    target_applicable = (
+                        bool(ordered)
+                        or error_affected is ALL_FAMILIES
+                        or self._baseline_target_applicable(target, pb)
                     )
-                    parents = HourParents()
-                    for event in ordered:
-                        parents.add(event)
-                    pb.begin_cell(pkey, (w.start, w.end), KeyContext(pid_table=parents))
+                    reasons = list(base_reasons)
+                    reasons.extend(windows_reasons)
+                    if error_reason and (error_affected is ALL_FAMILIES or set(pb.families) & error_affected):
+                        reasons.append(error_reason)
+                    if pb.id == "bl.exec_pair":
+                        carry_events = sorted(
+                            (event for event in events
+                             if event.family == "process_exec" or observation(event) is not None),
+                            key=lambda item: (
+                                item.ts, -1 if exec_serial(item) is None else exec_serial(item), item.id,
+                            ),
+                        )
+                        parents = HourParents()
+                        for event in ordered:
+                            parents.add(event)
+                        pb.begin_cell(pkey, (w.start, w.end), KeyContext(pid_table=parents))
+                        before_eval = pb.evaluated
+                        pb.consume_scoped_partition(ordered)
+                        result = pb.finish_cell()
+                        reasons.extend(result.reasons)
+                        evaluated = pb.evaluated - before_eval
+                        # A complete hour without execs is staged like any other, so the carry's ledger counts it as
+                        # observed; an inapplicable or incomplete one is final here and never joins that ledger.
+                        if not ordered and (not target_applicable or rule_partial or reasons):
+                            state = ("evaluated_partial" if target_applicable and (rule_partial or reasons)
+                                     else "not_applicable_no_events")
+                            detail = {"reasons": summarize(reasons)}
+                            if state == "not_applicable_no_events":
+                                # an inapplicable target's empty cell is complete history only if retrieval was
+                                detail["retrieval_complete"] = not rule_partial and not result.partial
+                            self.repo.save_baseline_window_cell(self.hunt_id, {
+                                "rule_id": pb.id, "version": pb.spec.version, "target": target,
+                                "partition": pkey, "state": state, "matched": 0,
+                                "evaluated": evaluated, "detail": detail,
+                            }, ())
+                            continue
+                        try:
+                            stage = self._event_stage()
+                            stage.record_baseline_cell(
+                                target=target, partition=pkey, start=w.start, end=w.end,
+                                target_applicable=target_applicable, source_complete=not rule_partial,
+                                reasons=reasons, task_id=tid, events=carry_events,
+                                observations=result.observations, pendings=result.pendings,
+                                counts=result.counts, scope_hours=result.scope_hours,
+                                event_hours=result.event_hours,
+                            )
+                            # Compact rows share the stage volume with citations and are billed with them.
+                            self._charge_stage(stage)
+                        except sqlite3.OperationalError as exc:
+                            reason = f"compact baseline stage failed ({exc})"
+                            self.partial_reasons.append(f"{target} {pkey}: {reason}")
+                            self.repo.save_baseline_window_cell(self.hunt_id, {
+                                "rule_id": pb.id, "version": pb.spec.version, "target": target,
+                                "partition": pkey, "state": "evaluated_partial", "matched": 0,
+                                "evaluated": evaluated, "detail": {"reasons": summarize([*reasons, reason])},
+                            }, ())
+                        continue
+                    pb.begin_cell(
+                        pkey, (w.start, w.end), KeyContext(is_internal=netdef.current().is_internal),
+                    )
                     before_eval = pb.evaluated
                     pb.consume_scoped_partition(ordered)
                     result = pb.finish_cell()
                     reasons.extend(result.reasons)
                     evaluated = pb.evaluated - before_eval
-                    # A complete hour without execs is staged like any other, so the carry's ledger counts it as
-                    # observed; an inapplicable or incomplete one is final here and never joins that ledger.
-                    if not ordered and (not target_applicable or rule_partial or reasons):
-                        state = ("evaluated_partial" if target_applicable and (rule_partial or reasons)
-                                 else "not_applicable_no_events")
-                        detail = {"reasons": summarize(reasons)}
-                        if state == "not_applicable_no_events":
-                            # an inapplicable target's empty cell is complete history only if retrieval was
-                            detail["retrieval_complete"] = not rule_partial and not result.partial
-                        self.repo.save_baseline_window_cell(self.hunt_id, {
-                            "rule_id": pb.id, "version": pb.spec.version, "target": target,
-                            "partition": pkey, "state": state, "matched": 0,
-                            "evaluated": evaluated, "detail": detail,
-                        }, ())
-                        continue
-                    try:
-                        stage = self._event_stage()
-                        stage.record_baseline_cell(
-                            target=target, partition=pkey, start=w.start, end=w.end,
-                            target_applicable=target_applicable, source_complete=not rule_partial,
-                            reasons=reasons, task_id=tid, events=carry_events,
-                            observations=result.observations, pendings=result.pendings,
-                            counts=result.counts, scope_hours=result.scope_hours,
-                            event_hours=result.event_hours,
-                        )
-                        # Compact rows share the stage volume with citations and are billed with them.
-                        self._charge_stage(stage)
-                    except sqlite3.OperationalError as exc:
-                        reason = f"compact baseline stage failed ({exc})"
-                        self.partial_reasons.append(f"{target} {pkey}: {reason}")
-                        self.repo.save_baseline_window_cell(self.hunt_id, {
-                            "rule_id": pb.id, "version": pb.spec.version, "target": target,
-                            "partition": pkey, "state": "evaluated_partial", "matched": 0,
-                            "evaluated": evaluated, "detail": {"reasons": summarize([*reasons, reason])},
-                        }, ())
+                    if not target_applicable:
+                        state = "not_applicable_no_events"
+                    elif rule_partial or result.partial:
+                        state = "evaluated_partial"
+                    elif not (evaluated_families & families) and evaluated == 0:
+                        state = "not_applicable_no_events"
+                    else:
+                        state = "evaluated_complete"
+                    self._save_baseline_cell(
+                        pb, target, pkey, state, evaluated, reasons, result, tid, ordered, raw_sources,
+                        retrieval_complete=not rule_partial and not result.partial,
+                    )
                     continue
-                pb.begin_cell(
-                    pkey, (w.start, w.end), KeyContext(is_internal=netdef.current().is_internal),
+                before_eval, before_missing, before_os, before_capped = (
+                    pb.evaluated, pb.missing_required, pb.os_applicable, pb.capped,
                 )
-                before_eval = pb.evaluated
-                pb.consume_scoped_partition(ordered)
-                result = pb.finish_cell()
-                reasons.extend(result.reasons)
+                before_assumed = pb.direction_assumed
+                before_limits = {name: limit.records for name, limit in pb.limits.items()}
+                scoped_events = pb.scope_partition(events)
+                # Every rule reads every batch, whatever the state budget: a store in no-growth mode refuses only
+                # records that need a new key in it (each rule's own refusal path), and every match that needs no new
+                # state still publishes.
+                pb.bind_raw(raw_sources, target)
+                if getattr(pb, "needs_live_loader", False):
+                    current_events = {event.id: event for event in events}
+                    def load_live(ids, current_events=current_events):
+                        missing = [identity for identity in ids if identity not in current_events]
+                        return ([current_events[identity] for identity in ids if identity in current_events]
+                                + self._event_stage().load(missing))
+                    pb.bind_loader(load_live)
+                try:
+                    matches = pb.consume_scoped_partition(scoped_events)
+                except StateExhausted as exc:
+                    # a write to the stage volume failed mid-batch (a rule that writes rows directly): the records it
+                    # had not evaluated yet are refused, counted exactly
+                    matches = []
+                    pb.refuse_unevaluated(scoped_events,
+                                          pb.evaluated - before_eval + pb.missing_required - before_missing
+                                          + pb.capped - before_capped,
+                                          f"a write to the stage volume failed ({exc}); this rule's later records of "
+                                          f"the batch are not evaluated")
+                pb.bind_raw({})
+                self._record_playbook_batch(pb, matches, raw_sources, tid, staged, held, released)
                 evaluated = pb.evaluated - before_eval
+                missing = pb.missing_required - before_missing
+                target_applicable = target_fallback or pb.os_applicable > before_os
+                rule_partial = target_applicable and rule_partial
+                # records a full state budget kept from evaluation: never a clean evaluation of this partition
+                capped = pb.capped - before_capped
+                # records skipped or judged for a direction the default internal-network definition only assumes
+                assumed = pb.direction_assumed - before_assumed
+                incomplete = rule_partial or bool(missing) or bool(capped) or bool(assumed)
                 if not target_applicable:
                     state = "not_applicable_no_events"
-                elif rule_partial or result.partial:
-                    state = "evaluated_partial"
                 elif not (evaluated_families & families) and evaluated == 0:
-                    state = "not_applicable_no_events"
+                    state = "not_applicable_no_events" if not rule_partial else "evaluated_partial"
+                elif pb.kind == "aggregate" and matches:
+                    # aggregate rules may publish indicator events during consume(); those are matches
+                    state = "match_on_partial" if incomplete else "matched"
+                elif pb.kind == "aggregate":
+                    state = "evaluated_partial" if incomplete else "evaluated_complete"
+                elif matches:
+                    state = "match_on_partial" if incomplete else "matched"
+                elif not pb.assures_negative:
+                    # script-text rules can show intent but never prove absence (spec section 1)
+                    state = "positive_only_partial" if incomplete else "positive_only"
                 else:
-                    state = "evaluated_complete"
-                self._save_baseline_cell(
-                    pb, target, pkey, state, evaluated, reasons, result, tid, ordered, raw_sources,
-                    retrieval_complete=not rule_partial and not result.partial,
-                )
-                continue
-            before_eval, before_missing, before_os, before_capped = (
-                pb.evaluated, pb.missing_required, pb.os_applicable, pb.capped,
-            )
-            before_assumed = pb.direction_assumed
-            before_limits = {name: limit.records for name, limit in pb.limits.items()}
-            scoped_events = pb.scope_partition(events)
-            # Every rule reads every batch, whatever the state budget: a store in no-growth mode refuses only
-            # records that need a new key in it (each rule's own refusal path), and every match that needs no new
-            # state still publishes.
-            pb.bind_raw(raw_sources, target)
-            if getattr(pb, "needs_live_loader", False):
-                current_events = {event.id: event for event in events}
-                def load_live(ids, current_events=current_events):
-                    missing = [identity for identity in ids if identity not in current_events]
-                    return ([current_events[identity] for identity in ids if identity in current_events]
-                            + self._event_stage().load(missing))
-                pb.bind_loader(load_live)
-            try:
-                matches = pb.consume_scoped_partition(scoped_events)
-            except StateExhausted as exc:
-                # a write to the stage volume failed mid-batch (a rule that writes rows directly): the records it
-                # had not evaluated yet are refused, counted exactly
-                matches = []
-                pb.refuse_unevaluated(scoped_events,
-                                      pb.evaluated - before_eval + pb.missing_required - before_missing
-                                      + pb.capped - before_capped,
-                                      f"a write to the stage volume failed ({exc}); this rule's later records of "
-                                      f"the batch are not evaluated")
-            pb.bind_raw({})
-            self._record_playbook_batch(pb, matches, raw_sources, tid, staged, held, released)
-            evaluated = pb.evaluated - before_eval
-            missing = pb.missing_required - before_missing
-            target_applicable = target_fallback or pb.os_applicable > before_os
-            rule_partial = target_applicable and rule_partial
-            # records a full state budget kept from evaluation: never a clean evaluation of this partition
-            capped = pb.capped - before_capped
-            # records skipped or judged for a direction the default internal-network definition only assumes
-            assumed = pb.direction_assumed - before_assumed
-            incomplete = rule_partial or bool(missing) or bool(capped) or bool(assumed)
-            if not target_applicable:
-                state = "not_applicable_no_events"
-            elif not (evaluated_families & families) and evaluated == 0:
-                state = "not_applicable_no_events" if not rule_partial else "evaluated_partial"
-            elif pb.kind == "aggregate" and matches:
-                # aggregate rules may publish indicator events during consume(); those are matches
-                state = "match_on_partial" if incomplete else "matched"
-            elif pb.kind == "aggregate":
-                state = "evaluated_partial" if incomplete else "evaluated_complete"
-            elif matches:
-                state = "match_on_partial" if incomplete else "matched"
-            elif not pb.assures_negative:
-                # script-text rules can show intent but never prove absence (spec section 1)
-                state = "positive_only_partial" if incomplete else "positive_only"
-            else:
-                state = "evaluated_partial" if incomplete else "no_match_complete"
-            reasons = list(base_reasons)
-            reasons.extend(windows_reasons)
-            if error_reason and (error_affected is ALL_FAMILIES or set(pb.families) & error_affected):
-                reasons.append(error_reason)
-            if missing:
-                reasons.append(f"missing_required={missing}: records lacked a field this rule needs")
-            detail = {"missing_required": missing, "reasons": reasons}
-            if assumed:
-                reasons.append(DIRECTION_ASSUMED_REASON)
-                detail["direction_assumed"] = assumed
-            if capped:
-                # this partition's own refusals, per budget (the rule's totals are on its hunt-level coverage)
-                refused = [f"state limit: {limit.text} ({limit.records - before_limits.get(name, 0)} record(s) not "
-                           f"evaluated)" for name, limit in pb.limits.items()
-                           if limit.records > before_limits.get(name, 0)]
-                reasons.append(f"state_capped={capped}: records not evaluated because a state budget of this rule "
-                               f"was full; " + "; ".join(refused))
-                detail["state_capped"] = capped
-            cells.append(self._cell(pb, target, pkey, state, len(matches), evaluated, detail))
+                    state = "evaluated_partial" if incomplete else "no_match_complete"
+                reasons = list(base_reasons)
+                reasons.extend(windows_reasons)
+                if error_reason and (error_affected is ALL_FAMILIES or set(pb.families) & error_affected):
+                    reasons.append(error_reason)
+                if missing:
+                    reasons.append(f"missing_required={missing}: records lacked a field this rule needs")
+                detail = {"missing_required": missing, "reasons": reasons}
+                if assumed:
+                    reasons.append(DIRECTION_ASSUMED_REASON)
+                    detail["direction_assumed"] = assumed
+                if capped:
+                    # this partition's own refusals, per budget (the rule's totals are on its hunt-level coverage)
+                    refused = [f"state limit: {limit.text} ({limit.records - before_limits.get(name, 0)} record(s) not "
+                               f"evaluated)" for name, limit in pb.limits.items()
+                               if limit.records > before_limits.get(name, 0)]
+                    reasons.append(f"state_capped={capped}: records not evaluated because a state budget of this rule "
+                                   f"was full; " + "; ".join(refused))
+                    detail["state_capped"] = capped
+                cells.append(self._cell(pb, target, pkey, state, len(matches), evaluated, detail))
+            except INFRASTRUCTURE_ERRORS:
+                raise
+            except Exception as exc:  # noqa: BLE001 - one rule's defect must not cost the other rules
+                pb.bind_raw({})
+                self._rule_failed(pb, exc, f"{target} {pkey}")
+                self._failed_rule_cell(pb, target, pkey, cells)
         if windows_gate_reasons:
             self.partial_reasons.append(
                 f"{target} {pkey}: " + "; ".join(sorted(windows_gate_reasons))
@@ -1547,6 +1705,45 @@ class Sweep:
         # the partition's cells together: a crash before this leaves them all visibly `planned`
         self.repo.set_rule_cells(self.hunt_id, cells)
         self.repo.update_task(tid, "evaluated")
+
+    def _unique_zeek(self, events: list[TypedEvent], reasons: list[tuple[str, frozenset[str]]]
+                     ) -> tuple[list[TypedEvent], list[TypedEvent], int]:
+        """Zeek records across partitions and targets: a copy of a record an earlier partition evaluated (the same
+        logical id: sensor, log, connection, time and values) merges its raw reference into that event; an interim
+        conn record of a connection whose later record was already evaluated is superseded. Both stores are on the
+        stage volume, bounded by the hunt's state budget; a refusal is named on the rules reading what it concerns.
+        Returns (events to evaluate, duplicates, superseded interim records)."""
+        stage = self._event_stage()
+        zeek_families = frozenset(event.family for event in events if event.normalizer == ZEEK_NORMALIZER)
+        events, duplicates = stage.unique_windows(events, (ZEEK_NORMALIZER,))
+        if stage.windows_refused:
+            reason = (f"Zeek record dedup state refused {stage.windows_refused} event id(s): "
+                      f"{stage.windows_refusal_reason}; those records were evaluated, but a copy of one in a later "
+                      f"partition or target is evaluated again, so counts over them may include duplicates")
+            reasons.append((reason, zeek_families))
+        conn = [event for event in events if event.normalizer == ZEEK_NORMALIZER and event.get("zeek.log") == "conn"
+                and event.has("zeek.uid")]
+        observed = [(f"{event.host or ''}|{event.get('zeek.uid')}", event.get("conn.interim") is True)
+                    for event in conn]
+        if not any(interim for _key, interim in observed) and not getattr(stage, "_zeek_interim_table", False):
+            return events, duplicates, 0        # no interim record has been read in this hunt
+        prior, refused, why = stage.zeek_interim(observed, ZEEK_INTERIM_KEYS_LIMIT)
+        superseded = {id(event) for event, (key, interim) in zip(conn, observed, strict=True)
+                      if interim and prior.get(key) == 2}
+        earlier = sum(1 for key, _interim in observed if prior.get(key) == 1)
+        if earlier:
+            reason = (f"{earlier} Zeek conn record(s) are of connections whose interim record an earlier partition "
+                      f"or target already evaluated; both were evaluated, so counts over those connections may "
+                      f"include both")
+            reasons.append((reason, frozenset({"net_flow"})))
+        if refused:
+            reason = (f"the Zeek interim-record store did not keep {refused} connection(s) ({why}); a later record "
+                      f"of one in another partition or target is evaluated as well, so counts over them may include "
+                      f"both")
+            reasons.append((reason, frozenset({"net_flow"})))
+        if superseded:
+            events = [event for event in events if id(event) not in superseded]
+        return events, duplicates, len(superseded)
 
     def _baseline_target_applicable(self, target: str, playbook: BaselinePlaybook) -> bool:
         """Whether the target can deliver the spec's families, by the rule the baseline stage's history uses."""
@@ -1758,7 +1955,8 @@ class Sweep:
             held: list[tuple[str, TypedEvent]] = []
             released: list[tuple[str, list[str]]] = []
             for pb in self.pack:
-                if isinstance(pb, BaselinePlaybook) or "script_block" not in pb.families:
+                if (isinstance(pb, BaselinePlaybook) or "script_block" not in pb.families
+                        or pb.id in self.failed_rules):
                     continue
                 scoped = pb.scope_partition(events)
                 if not scoped:
@@ -1770,6 +1968,11 @@ class Sweep:
                 except StateExhausted as exc:
                     pb.note_limit("script_reassembly", f"incomplete script blocks were not evaluated ({exc})")
                     matches = []
+                except INFRASTRUCTURE_ERRORS:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - one rule's defect must not cost the other rules
+                    self._rule_failed(pb, exc, "script-block finalize")
+                    continue
                 finally:
                     pb.bind_raw({})
                 matched[pb.id] += len(matches)
@@ -1829,12 +2032,39 @@ class Sweep:
                 stage = self._event_stage()
                 pb.bind_loader(stage.load)
                 pb.heartbeat = self.heartbeat
-            ms = self._finalize_rule(pb)
             finalized_matches = 0
-            for m in ms:
-                finalized_matches += 1
-                raw_sources = ({**agg_raw, **self._merge_staged_match_raw(m)} if pb.staged else agg_raw)
-                self._publish(m, None, raw_sources)
+            if pb.id not in self.failed_rules:
+                # Only the rule's own code is guarded. Publishing (the store, citation reads from the source) is
+                # outside the guard, so its failures end the sweep and are never recorded as the rule's defect.
+                try:
+                    matches = iter(self._finalize_rule(pb))
+                except INFRASTRUCTURE_ERRORS:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - one rule's defect must not cost the other rules
+                    self._rule_failed(pb, exc, "finalize")
+                    matches = iter(())
+                while True:
+                    try:
+                        m = next(matches)
+                    except StopIteration:
+                        break
+                    except INFRASTRUCTURE_ERRORS:
+                        raise
+                    except Exception as exc:  # noqa: BLE001 - one rule's defect must not cost the other rules
+                        self._rule_failed(pb, exc, "finalize")
+                        break
+                    finalized_matches += 1
+                    raw_sources = ({**agg_raw, **self._merge_staged_match_raw(m)} if pb.staged else agg_raw)
+                    self._publish(m, None, raw_sources)
+            if pb.id in self.failed_rules:
+                reason = self.failed_rules[pb.id]
+                published = f"{finalized_matches} finding(s) of this rule published at finalize before it failed"
+                self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, "*", "window", "executed_failed",
+                                        finalized_matches, 0, {"error": reason, "reasons": [reason, published]})
+                if getattr(self, "_stage", None) is not None and pb.id in self._stage_owner_accounts:
+                    self._stage.finished_owners.add(self._stage_owner_accounts[pb.id].name)
+                pb.release_state()
+                continue
             cells = [c for c in self.repo.rule_cells(self.hunt_id, rule_id=pb.id)
                      if c["target"] != "*" and c["state"] != "split"]
             any_partial = any(c["state"] in ("evaluated_partial", "executed_failed", "planned", "match_on_partial")
