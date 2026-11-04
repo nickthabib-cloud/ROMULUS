@@ -20,6 +20,8 @@ from romulus.detect.tamper import TAMPER_PLAYBOOKS
 from romulus.detect.tls import TLS_PLAYBOOKS
 from romulus.detect.windows_account_events import WINDOWS_ACCOUNT_PLAYBOOKS
 from romulus.detect.windows_auth_events import WINDOWS_AUTH_EVENT_PLAYBOOKS
+from romulus.detect.windows_catalog_events import CATALOG_EVENT_RULES
+from romulus.detect.windows_catalog_state import RULES as WINDOWS_CATALOG_STATE_RULES
 from romulus.detect.windows_common import share_windows_lineage
 from romulus.detect.windows_correlations import WINDOWS_CORRELATION_PLAYBOOKS
 from romulus.detect.windows_credentials import WINDOWS_CREDENTIAL_PLAYBOOKS
@@ -37,14 +39,18 @@ from romulus.detect.windows_registry_events import WINDOWS_REGISTRY_PLAYBOOKS
 from romulus.detect.windows_remote import WINDOWS_REMOTE_PLAYBOOKS
 from romulus.detect.windows_scripts import WINDOWS_SCRIPT_PLAYBOOKS
 
-PACK_VERSION = "pack@42"
+PACK_VERSION = "pack@43"
 WINDOWS_PROCESS_PLAYBOOKS = (WINDOWS_LINEAGE_PLAYBOOKS + WINDOWS_PROXY_PLAYBOOKS + WINDOWS_CREDENTIAL_PLAYBOOKS
                              + WINDOWS_DEFENSE_PLAYBOOKS + WINDOWS_REMOTE_PLAYBOOKS)
 WINDOWS_HOST_PLAYBOOKS = list(WINDOWS_MEMORY_PLAYBOOKS + WINDOWS_REGISTRY_PLAYBOOKS
-                            + WINDOWS_ENDPOINT_PLAYBOOKS + WINDOWS_FILE_PLAYBOOKS)
+                            + WINDOWS_ENDPOINT_PLAYBOOKS + WINDOWS_FILE_PLAYBOOKS
+                            + CATALOG_EVENT_RULES + tuple(rule for rule in WINDOWS_CATALOG_STATE_RULES
+                                                         if issubclass(rule, WindowsEventRule)))
 WINDOWS_DOMAIN_PLAYBOOKS = list(WINDOWS_AUTH_EVENT_PLAYBOOKS + WINDOWS_ACCOUNT_PLAYBOOKS
                               + WINDOWS_REGISTRATION_PLAYBOOKS + WINDOWS_DIRECTORY_PLAYBOOKS
-                              + WINDOWS_CORRELATION_PLAYBOOKS)
+                              + WINDOWS_CORRELATION_PLAYBOOKS
+                              + tuple(rule for rule in WINDOWS_CATALOG_STATE_RULES
+                                      if not issubclass(rule, WindowsEventRule)))
 ALL_PLAYBOOKS = (HOST_PLAYBOOKS + HIJACK_PLAYBOOKS + KERNEL_FILE_PLAYBOOKS + LINEAGE_PLAYBOOKS + AUTH_PLAYBOOKS
                  + TAMPER_PLAYBOOKS + NETWORK_PLAYBOOKS + DNS_PLAYBOOKS + SESSION_PLAYBOOKS + TLS_PLAYBOOKS + FLOW_PLAYBOOKS
                  + CORRELATION_PLAYBOOKS + INDICATOR_PLAYBOOKS + CONTEXT_PLAYBOOKS + PACKET_PLAYBOOKS

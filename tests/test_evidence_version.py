@@ -30,6 +30,7 @@ PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf211
                    14: "d25c8cff3b459118ce377eb4c49c0d63736f68b4411fc520f8a32cbfa5107a9a"}
 WINDOWS_EVIDENCE_FILES = ("community.py", "windows.py", "windows_catalog.py", "windows_reassembly.py")
 PINNED_WINDOWS = {
+    "windows-ecs@12": "f77b93e9fb7012437e7b1e158cbfd4675e1381bfe3985a3b783f3c75ffdea223",
     "windows-ecs@11": "89b0392c0b506597732e45f1ada089cfee28c773f6f346d4993286a239c47f54",
     "windows-ecs@10": "3253f9ad37fe28bbede48043781594a03152874e8875094b0abea9cede271dcf",
     "windows-ecs@1": "8c2f1668700a3f7d0a143eef00473770e2e5c746fadf6ce3b2c95ae6bbe6a419",

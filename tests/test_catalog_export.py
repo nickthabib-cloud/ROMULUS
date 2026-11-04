@@ -25,7 +25,7 @@ def test_catalog_export_has_the_public_ui_schema_and_round_trips_json():
     }
     assert document["schema_version"] == 1
     assert document["attack_version"] == "20.0"
-    assert document["pack_version"] == "pack@42"
+    assert document["pack_version"] == "pack@43"
     assert json.loads(json.dumps(document)) == document
 
 
@@ -41,7 +41,7 @@ def test_catalog_export_contains_sorted_rules_techniques_strengths_and_telemetry
     guessing = next(item for item in techniques if item["id"] == "T1110.001")
     assert guessing["strength"] == "positive-only"
     assert "host.ssh_password_guessing" in guessing["rule_ids"]
-    assert guessing["telemetry_families"] == ["auth"]
+    assert guessing["telemetry_families"] == ["auth", "database_audit"]
     assert set(guessing) >= {
         "data_sources",
         "data_components",

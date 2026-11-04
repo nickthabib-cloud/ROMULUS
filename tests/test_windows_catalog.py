@@ -176,7 +176,7 @@ def test_collection_requirements_are_event_specific_for_security_and_sysmon():
 
 def test_every_sacl_dependent_security_class_requires_scoped_attestation():
     expected = {
-        "object_access_sacl": {4656, 4657, 4663, 4670},
+        "object_access_sacl": {4656, 4657, 4661, 4663, 4670},
         "directory_service_sacl": {4662, 5136, 5137, 5138, 5139, 5141},
     }
     actual = {fact: set() for fact in expected}

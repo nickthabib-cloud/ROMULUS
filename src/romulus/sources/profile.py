@@ -108,6 +108,11 @@ ARKIME_SESSION_MARKERS = ("firstPacket", "lastPacket", "network.community_id")
 # A flattened Winlogbeat/Elastic Agent object does not expose child mappings, so aliases name the native leaf.
 # Forwarded events deliberately map host identity to the computer that wrote the event, not the collector.
 WINDOWS_FIELD_MAPPINGS: dict[str, tuple[str, ...]] = {
+    "remote.channel_name": ("winlog.event_data.ChannelName",),
+    "wfp.source_address": ("winlog.event_data.SourceAddress",),
+    "wfp.source_port": ("winlog.event_data.SourcePort",),
+    "wfp.destination_address": ("winlog.event_data.DestAddress",),
+    "wfp.destination_port": ("winlog.event_data.DestPort",),
     "event.dataset": ("event.dataset", "data_stream.dataset"),
     "event.channel": ("winlog.channel",),
     "event.provider": ("winlog.provider_name",),

@@ -229,6 +229,7 @@ class Sweep:
         self._windows_inventory: dict[str, set[str]] = {}
         self._windows_inventory_reasons: dict[str, list[str]] = {}
         self._windows_read_tokens: dict[str, set[str]] = {}
+        self._windows_dynamic_classes: dict[str, tuple] = {}
         self._windows_selective: set[str] = set()
         self._windows_record_ids: RecordIdContinuity | None = None
         self._windows_scripts: ScriptBlockAssembler | None = None
@@ -435,6 +436,47 @@ class Sweep:
         if contract is None or contract.role != "host" or contract.os_family != "windows":
             return []
         read_tokens = getattr(self, "_windows_read_tokens", {}).get(target)
+        wfp_reader = any("network_filter" in (*rule.families, *rule.context_families) for rule in getattr(self, "pack", ()))
+        rdp_reader = any("remote_access" in (*rule.families, *rule.context_families) for rule in getattr(self, "pack", ()))
+        class_searchable = all(contract.supports(field, "eq") for field in (
+            "event.channel", "event.provider", "event.code"))
+        if rdp_reader and not class_searchable:
+            from romulus.hunt.windows_filters import RDP_CORE_CHANNEL
+
+            self._windows_inventory_reasons.setdefault(target, []).append(
+                "RdpCoreTS records not fetched: event-class mapping cannot safely exclude unscoped channel traffic")
+            families = {family for rule in getattr(self, "pack", ()) for family in (*rule.families, *rule.context_families)}
+            channels = sorted({event.channel for event in EVENT_CLASSES if event.family in families
+                               and event.channel.casefold() != RDP_CORE_CHANNEL.casefold()
+                               and (not wfp_reader or event.channel.casefold() != 'security')})
+            if channels and contract.supports('event.channel', 'in'):
+                return [[Predicate(field='event.channel', op='in', value=channels)]]
+            for field in ('event.channel', 'event.dataset', contract.time_field):
+                if contract.supports(field, 'exists') and contract.supports(field, 'missing'):
+                    return [[Predicate(field=field, op='exists'), Predicate(field=field, op='missing')]]
+        if rdp_reader and read_tokens is None and class_searchable:
+            families = {family for rule in getattr(self, "pack", ()) for family in (*rule.families, *rule.context_families)}
+            read_tokens = {event.token for event in EVENT_CLASSES if event.family in families}
+            self._windows_inventory_reasons.setdefault(target, []).append(
+                "Windows class inventory unavailable; RdpCoreTS retrieval uses explicitly declared classes")
+        if wfp_reader and read_tokens is None and class_searchable:
+            families = {family for rule in getattr(self, "pack", ()) for family in (*rule.families, *rule.context_families)}
+            read_tokens = {event.token for event in EVENT_CLASSES if event.family in families}
+            self._windows_inventory_reasons.setdefault(target, []).append(
+                "Windows class inventory unavailable; retrieval uses known class scopes, with dynamic providers unresolved")
+        if wfp_reader and not class_searchable:
+            self._windows_inventory_reasons.setdefault(target, []).append(
+                "Windows Security records not fetched: class mapping cannot safely exclude unscoped WFP traffic")
+            # Preserve other known channels when their identity can be queried. Security
+            # cannot be safely split into bounded reads under this incomplete contract.
+            families = {family for rule in getattr(self, "pack", ()) for family in (*rule.families, *rule.context_families)}
+            channels = sorted({event.channel for event in EVENT_CLASSES
+                               if event.family in families and event.channel.casefold() != "security"})
+            if channels and contract.supports("event.channel", "in"):
+                return [[Predicate(field="event.channel", op="in", value=channels)]]
+            for field in ("event.channel", "event.dataset", contract.time_field):
+                if contract.supports(field, "exists") and contract.supports(field, "missing"):
+                    return [[Predicate(field=field, op="exists"), Predicate(field=field, op="missing")]]
         if read_tokens is not None and all(contract.supports(field, "eq") for field in (
                 "event.channel", "event.provider", "event.code")):
             control_tokens = {
@@ -442,10 +484,15 @@ class Sweep:
                 if event.key in COLLECTION_CHANGE_EVENTS
             }
             selected = [event for event in EVENT_CLASSES if event.token in read_tokens | control_tokens]
+            selected.extend(event for event in self._windows_dynamic_classes.get(target, ())
+                            if event.token in read_tokens)
+            from romulus.hunt.windows_filters import is_rdp_core, rdp_channel_groups, rdp_class_requested
+
+            selected = [event for event in selected if not is_rdp_core(event) or rdp_class_requested(event, getattr(self, "pack", ()))]
             if selected:
                 self._windows_selective.add(target)
                 self.stats.setdefault("windows_class_filter", {})[target] = [event.token for event in selected]
-                object_readers = {playbook.id for playbook in self.pack
+                object_readers = {playbook.id for playbook in getattr(self, "pack", ())
                                   if "windows" in playbook.os_families
                                   and "object_access" in (*playbook.families, *playbook.context_families)}
                 process_only = object_readers == {"win.lsass_process_access"} and contract.supports("object.type", "eq")
@@ -454,10 +501,42 @@ class Sweep:
                     group = [Predicate(field="event.channel", op="eq", value=event.channel),
                              Predicate(field="event.provider", op="eq", value=event.provider),
                              Predicate(field="event.code", op="eq", value=event.event_id)]
+                    if is_rdp_core(event):
+                        scoped_groups = rdp_channel_groups(contract, group, event, getattr(self, "pack", ()))
+                        if scoped_groups is None:
+                            reason = "RdpCoreTS channel records not fetched: mapping cannot filter native ChannelName"
+                            reasons = self._windows_inventory_reasons.setdefault(target, [])
+                            if reason not in reasons:
+                                reasons.append(reason)
+                        else:
+                            groups.extend(scoped_groups)
+                        continue
+                    if event.family == "network_filter":
+                        # WFP auditing can dwarf all other host telemetry. Only the
+                        # declared loopback-tunnel predicate reads these connections.
+                        if event.event_id != 5156:
+                            continue
+                        from romulus.hunt.windows_filters import wfp_tunnel_groups
+
+                        scoped_groups = wfp_tunnel_groups(contract, group)
+                        if scoped_groups is None:
+                            reason = "WFP tunnel records not fetched: mapping cannot filter native ports and loopback addresses"
+                            reasons = self._windows_inventory_reasons.setdefault(target, [])
+                            if reason not in reasons:
+                                reasons.append(reason)
+                        else:
+                            groups.extend(scoped_groups)
+                        continue
                     if process_only and event.family == "object_access":
                         group.append(Predicate(field="object.type", op="eq", value="Process"))
                     groups.append(group)
                 self.stats.setdefault("windows_process_object_filter", {})[target] = process_only
+                if not groups:
+                    # Empty any_of means no restriction to the compiler. If every
+                    # requested class was deliberately withheld, issue an explicit
+                    # contradiction instead of accidentally fetching all telemetry.
+                    return [[Predicate(field="event.code", op="exists"),
+                             Predicate(field="event.code", op="missing")]]
                 return groups
         groups: list[list[Predicate]] = []
         if contract.supports("event.dataset", "in"):
@@ -572,6 +651,14 @@ class Sweep:
             )
         self._windows_inventory[target] = inventory
         self._windows_inventory_reasons[target] = reasons
+        # Named SQL instances are concrete classes resolved from the existing
+        # bounded aggregate (at most SearchIntent.max_records buckets). Keep
+        # those identities rather than searching for a literal wildcard provider.
+        static_tokens = {event.token for event in EVENT_CLASSES}
+        self._windows_dynamic_classes[target] = tuple(
+            event for token, event in sorted(classes_by_token.items())
+            if event.family == "database_audit" and token not in static_tokens
+        )
         self.stats.setdefault("windows_inventory", {})[target] = {
             "cataloged_classes": len(inventory), "uncatalogued_classes": uncatalogued_total,
             "counts": dict(sorted(counts.items())), "reasons": reasons,
@@ -590,6 +677,12 @@ class Sweep:
                     set(playbook.families) | set(playbook.context_families)
                 )
             )
+            if "database_audit" in (*playbook.families, *playbook.context_families):
+                read_tokens.update(event.token for event in self._windows_dynamic_classes[target])
+        from romulus.hunt.windows_filters import is_rdp_core, rdp_class_requested
+
+        read_tokens.difference_update(event.token for event in EVENT_CLASSES
+                                      if is_rdp_core(event) and not rdp_class_requested(event, self.pack))
         self._windows_read_tokens[target] = read_tokens
         unassessed = []
         for token in sorted(inventory - read_tokens):
@@ -911,6 +1004,21 @@ class Sweep:
                     required.append(event_class)
         else:
             required = list(catalog)
+        if any(event.family == "database_audit" for event in required):
+            # A default-instance declaration represents this SQL event shape,
+            # not a requirement that a differently named instance also exist.
+            # Preserve each concrete observed provider in collection evidence.
+            observed_sql = [event for event in (*EVENT_CLASSES, *self._windows_dynamic_classes.get(target, ()))
+                            if event.family == "database_audit" and event.token in inventory]
+            expanded = {}
+            for event in required:
+                equivalents = [observed for observed in observed_sql
+                               if event.family == "database_audit"
+                               and observed.channel.casefold() == event.channel.casefold()
+                               and observed.event_id == event.event_id]
+                for concrete in equivalents or [event]:
+                    expanded[concrete.token] = concrete
+            required = list(expanded.values())
         for event_class in required:
             if event_class.token not in inventory:
                 reasons.append(
