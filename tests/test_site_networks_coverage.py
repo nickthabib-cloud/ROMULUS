@@ -142,7 +142,7 @@ def _sweep(tmp_path, monkeypatch, events) -> Repo:
                                                              "_source": {}} for e in events])
 
     monkeypatch.setattr(sweep_mod, "execute", execute)
-    monkeypatch.setattr(sweep_mod, "normalize_hits", lambda hits, boots=None: (list(events), {}, []))
+    monkeypatch.setattr(sweep_mod, "normalize_hits", lambda hits, boots=None, **_kwargs: (list(events), {}, []))
     engine = make_engine(":memory:")
     migrate(engine)
     repo = Repo(engine)

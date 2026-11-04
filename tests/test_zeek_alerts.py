@@ -1,5 +1,5 @@
 """net.zeek_alert: Zeek's intel and signature matches are reported, notices are judged by a sourced table of notice
-types, and a weird (or a notice outside the table) is context, never a finding. Claims name Zeek and the record kind."""
+types, a notice outside the table is a lead, and a weird is context, never a finding. Claims name Zeek and the record kind."""
 import pytest
 
 from romulus.catalog.attack import load_attack_bundle
@@ -57,11 +57,11 @@ def test_a_tabled_notice_is_reported_at_its_table_lane_with_its_source(note):
     assert any(", ".join(entry.attack) in note_text for note_text in match.notes)
 
 
-def test_an_untabled_notice_is_named_as_context_and_folds_address_pairs():
+def test_an_untabled_notice_is_a_lead_and_folds_address_pairs():
     rows = [notice("Site::Custom_Notice", i, src=f"10.0.0.{i + 1}", **{"id.orig_h": f"10.0.0.{i + 1}"})
             for i in range(3)]
     _rule, [match] = run(rows)
-    assert (match.proposed_lane, match.severity) == ("context", "low")
+    assert (match.proposed_lane, match.severity) == ("lead", "low")
     assert "Zeek raised notice Site::Custom_Notice 3 time(s)" in match.claim
     assert "across 3 address pair(s)" in match.claim and "not in ROMULUS's table" in match.claim
 

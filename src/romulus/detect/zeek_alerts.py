@@ -207,7 +207,8 @@ class ZeekAlerts(_Grouped):
                      "this evaluator reads",
         "lanes": "intel and signature matches lead; tabled notices at their table lane (high only where the notice "
                  "states a completed step: a login after guessing, a successful Heartbleed read, a malware hash, "
-                 "remote execution or replication calls, exploit-shaped SMB); untabled notices and weirds context",
+                 "remote execution or replication calls, exploit-shaped SMB); untabled notices lead at low "
+                 "severity; weirds context",
     }
 
     def scope_partition(self, events: list[TypedEvent]) -> list[TypedEvent]:
@@ -269,6 +270,8 @@ class ZeekAlerts(_Grouped):
         if kind == "notice" and name in NOTICE_TYPES:
             notice = NOTICE_TYPES[name]
             return notice.lane, notice.severity
+        if kind == "notice":
+            return "lead", "low"      # an untabled notice may come from a site's exploit or CVE package
         return "context", "low"
 
     def finalize(self):
@@ -315,7 +318,8 @@ class ZeekAlerts(_Grouped):
             shown = ", ".join(f"{a} to {b}" for a, b in pairs) + more(len(pairs), total)
             what = (f"Zeek raised notice {name}" if kind == "notice" else f"Zeek logged weird {_quoted(name)}")
             claim = (f"{what} {n} time(s) ({span}) across {at_least}{total} address pair(s) ({shown})." + said
-                     + (" This notice type is not in ROMULUS's table of Zeek notice types, so it is kept as context."
+                     + (" This notice type is not in ROMULUS's table of Zeek notice types, so it is a lead: a "
+                        "site's detection or CVE package may raise it, and its meaning is the script's."
                         if kind == "notice" else
                         " A weird is a protocol or parsing anomaly; alone it is context, not a finding."))
         claim += self.told(evs, state, missing, many, one)
