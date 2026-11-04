@@ -294,6 +294,13 @@ from tests import throughput_fixture as tf
 # every digest of GOLDEN_STACK is the earlier one: candidates 3b23f98d..., rule_cells 0ede3bea..., manifest
 # 35b8a013..., and every other table as it was. The sweep's Zeek plumbing (per-family coverage of records no
 # normalizer read, Zeek deduplication, the rule guard) changes nothing in this fixture.
+# Additional Windows readers contribute zero-evaluated coverage cells on this Linux fixture.
+# Seven changed Windows rule versions also affect coverage only; every prior cell field is
+# identical after restoring those versions. Findings, citations and other stored tables are unchanged.
+# Nine Windows rule decisions changed their versions. In this Linux fixture they evaluate no records;
+# restoring those versions reproduces every coverage-cell field and all other table digests.
+# Only the rule_cells fingerprints change; the manifest, findings and citations are identical.
+# The server/startup child rule's later version bump likewise moves only rule_cells.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
     "audit": "23d9b87c75d030df8ff5bcbf07deacc75416c325dd74bcc89243cc1b5488ae93",
@@ -313,9 +320,9 @@ GOLDEN_STACK = {
     "events": "0165d2807ffee33aaef17dd70ba004ec4c87fa4c5f29e9dc75ba833f57b93ff7",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "0fbedb27ca9a4cb72354178444ee9aabc49f377b2c933074fe03ef29c8fbb08a",
-    "manifest": "c1521555eec7f36b00db15bf8831b41750528e9ce6689028f9b997f2fe8df0a5",
+    "manifest": "ae375fa1371815047377279c299b0e2e9d3e1b16fee0484e5237b1547e78d4b3",
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
-    "rule_cells": "0559ff84fdad5aba3937debd5ae080bae3d1462224bbbfb07d997811aa24289d",
+    "rule_cells": '3e363f4b2c2bba9a167a4d86a03923d855e77a5d8406f3f8772f55af8dea53b5',
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
     "tasks": "c65df4ab88c05661371cf32b49a1d22ef84d6753488bdb946c8e29376d486260",
 }
@@ -347,17 +354,17 @@ GOLDEN_NON_BASELINE_SEMANTICS = {
         "ts": "d8015c1ff0b135e082a5fef2ab1cb88206470e30beee157a0cfc7790d48b8310",
     },
     "rule_cells": {
-        "all_fields": "ebc1e012ba2e2e0042b8c6562ed5340b24ad9590f65c6c05bcc09fa0ccfc229a",
-                      "count": 10717,
-                      "rule_id": "9caeac97c87fa9a7aef6ef86be92a95d50e6b18939da819396d31bb111782452",
-        "rule_version": "b17138dbb3ad3486340907645b8666e06b1e8b25ed2188db442839e4a0876a4c",
-                      "target": "a35f40fdaa7629d18c2fc60a62c2d5973a7825d42003d9fe98cb1cc3aaea8688",
-                      "partition": "95e3d097e1cc511905823bffde2e78080dbf094673e215836dccc7abab092ad1",
-                      "state": "136fdf33b6e1274c31c0eca4b5a73d62f4640c5db0885a90a8d95dac55fdcb0a",
-                      "matched": "3c2541883b534227cf2132ad81904f88c3f8470f20766bbe517d74e18c50dab1",
-                      "evaluated": "225ef78c6f8645539dea056b631c571944bb8280bc5a41344d2352fb243389d9",
-                      "detail": "5f79b0523f6e3334e6d88342ef802c0070f2fc1345dbf8493ac9c94f7f558f0b"
-                  },
+        "all_fields": "de3bd12977ac9bb63fc3509c6cf224aa310ed25f6b1d13dd392391ffd450d89d",
+        "count": 12563,
+        "rule_id": "cb113cf586e2d6b38d9b946aa560605b7b1002fd80b15903f85ee15ef31fec68",
+        "rule_version": "6bee9f954e45ae7bc38d409c6f9f20478526d881841fcfe3685aa7c716a8cf7e",
+        "target": "28be82d907786442cad6b29a68221ae51bb78c44ceb1db6f8ac185d497a18f25",
+        "partition": "b55173864631da90f3c5ba0b34da90b5851d5e1ae1f08a313eedbd59ba8a8968",
+        "state": "ca5ff7b9a69767b658ddedade55f3ecddcf3fcf16150d8db84944362cb7eb97e",
+        "matched": "d9292fd6b7bf24ef1d3ddaae381056d7a07a183a09e49125a274231d00bea7f5",
+        "evaluated": "fe746f9ce71c535d46540c0811f81a9b800b07c7bad9999972262d162fe45820",
+        "detail": "31942199fe373b4d4545764186f460dd8631f0cd39176c0142aa849fd01cda0f"
+},
 }
 GOLDEN_NORMALIZED = {
     "arkime_sessions3-x": "76c065038118637c891297b82047c3ea0fcb2ace74b102729e0fe80275ae33fa",

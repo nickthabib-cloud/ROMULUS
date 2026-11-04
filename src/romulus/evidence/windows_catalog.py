@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 
@@ -372,6 +373,56 @@ EVENT_CLASSES = (
     _sysmon(255, "audit_config", "Sysmon error"),
 )
 
+APPLICATION = "Application"
+PROCESS_EXIT_MONITOR = "Microsoft-Windows-ProcessExitMonitor"
+RDP_CORE_CHANNEL = "Microsoft-Windows-RemoteDesktopServices-RdpCoreTS/Operational"
+RDP_CORE_PROVIDER = "Microsoft-Windows-RemoteDesktopServices-RdpCoreTS"
+WINSOCK_CHANNEL = "Microsoft-Windows-Winsock-WS2HELP/Operational"
+WINSOCK_PROVIDER = "Microsoft-Windows-Winsock-WS2HELP"
+_MSSQL_EVENTS = {15457: "SQL option changed", 33205: "SQL audit record", 15281: "SQL procedure blocked",
+                 18454: "SQL login succeeded", 18456: "SQL login failed"}
+_SQL_DOC = "https://learn.microsoft.com/sql/relational-databases/performance-monitor/sql-server-deprecated-features-object"
+EVENT_CLASSES += (
+    WindowsEventClass(APPLICATION, PROCESS_EXIT_MONITOR, 3001, "silent_process_exit", "process exit monitored",
+                      "https://learn.microsoft.com/windows-hardware/drivers/debugger/registry-entries-for-silent-process-exit"),
+    *(WindowsEventClass(APPLICATION, "MSSQLSERVER", code, "database_audit", name, _SQL_DOC)
+      for code, name in _MSSQL_EVENTS.items()),
+    *(WindowsEventClass("Security", provider, 33205, "database_audit", "SQL audit record",
+                        "https://learn.microsoft.com/sql/relational-databases/security/auditing/sql-server-audit-database-engine")
+      for provider in ("MSSQLSERVER", "MSSQLSERVER$AUDIT")),
+    _security(4826, "boot_configuration", "boot configuration loaded"),
+    *(WindowsEventClass(APPLICATION, "ESENT", code, "ese_database", name,
+                                     "https://learn.microsoft.com/windows/win32/extensible-storage-engine/extensible-storage-engine")
+      for code, name in ((216, "engine detached"), (325, "database created"), (326, "database attached"), (327, "database detached"))),
+    _operational(WINSOCK_CHANNEL, WINSOCK_PROVIDER, 1, "winsock_catalog", "LSP installed",
+                 "https://learn.microsoft.com/windows/win32/winsock/categorizing-layered-service-providers-and-applications"),
+    *(_operational(channel, provider, code, "application_compatibility", name,
+                   "https://learn.microsoft.com/windows/deployment/upgrade/compatibility-fixes-for-windows-8-windows-7-and-windows-vista")
+      for channel, provider, code, name in (
+          ("Microsoft-Windows-Application-Experience/Program-Telemetry", "Microsoft-Windows-Application-Experience", 500, "compatibility fix applied"),
+          ("Microsoft-Windows-Application-Experience/Program-Compatibility-Assistant", "Microsoft-Windows-Program-Compatibility-Assistant", 17, "compatibility resolver fired"))),
+    *(_operational(RDP_CORE_CHANNEL, RDP_CORE_PROVIDER, code, "remote_access", "RDP connection activity", _RDP_DOCS)
+      for code in (65, 66, 68, 72, 101, 103, 104, 129, 131, 132, 140, 148, 168)),
+    *(WindowsEventClass(APPLICATION, "MsiInstaller", code, "msi_install", "installer transaction",
+                        "https://learn.microsoft.com/windows/win32/msi/event-logging") for code in (1040, 1042)),
+    *(_operational(WINRM_CHANNEL, WINRM_PROVIDER, code, "remote_access", "WinRM authentication", _WINRM_DOCS) for code in (169, 193)),
+    *(_operational(BITS_CHANNEL, BITS_PROVIDER, code, "remote_access", "BITS job activity", _BITS_DOCS) for code in (4, 5, 61, 209)),
+    *(_security(code, "security_enumeration", "security membership enumerated") for code in (4798, 4799)),
+    _security(4703, "privilege_adjustment", "process privileges adjusted"),
+    _system("Microsoft-Windows-DistributedCOM", 10016, "dcom_access", "DCOM permission denied",
+            "https://learn.microsoft.com/troubleshoot/windows-client/application-management/event-10016-logged-when-accessing-dcom"),
+    *(_security(code, "network_filter", "filtering platform permitted operation") for code in (5156, 5158)),
+    _security(4661, "object_access", "SAM object handle requested"),
+    _system("Service Control Manager", 7036, "system_state", "service state changed",
+            "https://learn.microsoft.com/windows/win32/services/service-control-manager"),
+    *(_security(code, "system_state", "security subsystem activity") for code in (4985, 4627, 4611, 4673)),
+    *(_system("NETLOGON", code, "system_state", "machine account authentication failed",
+              "https://learn.microsoft.com/troubleshoot/windows-server/windows-security/troubleshoot-kerberos-domain-join") for code in (5805, 5723)),
+)
+
+EVENT_CLASSES = tuple(WindowsEventClass(row.channel, row.provider, row.event_id, row.family, row.name,
+                                       row.documentation_url + f"#event-id-{row.event_id}")
+                      if str(row.event_id) not in row.documentation_url else row for row in EVENT_CLASSES)
 _BY_KEY = {event_class.key: event_class for event_class in EVENT_CLASSES}
 if len(_BY_KEY) != len(EVENT_CLASSES):  # pragma: no cover - import-time catalog invariant
     raise RuntimeError("duplicate Windows event class")
@@ -464,6 +515,13 @@ def event_classes_for_families(families: set[str] | frozenset[str]) -> tuple[Win
 
 
 _SECURITY_AUDIT: dict[int, tuple[tuple[str, str], ...]] = {
+    4826: (("Other Policy Change Events", "success"),),
+    4798: (("User Account Management", "success"),),
+    4799: (("Security Group Management", "success"),),
+    4703: (("Authorization Policy Change", "success"),),
+    4661: (("SAM", "success"), ("Handle Manipulation", "success")),
+    5156: (("Filtering Platform Connection", "success"),),
+    5158: (("Filtering Platform Connection", "success"),),
     4688: (("Process Creation", "success"),),
     4689: (("Process Termination", "success"),),
     **{event_id: (("Logon", "success"),) for event_id in (4624, 4648)},
@@ -543,7 +601,7 @@ _SECURITY_AUDIT: dict[int, tuple[tuple[str, str], ...]] = {
     ),
     4719: (("Audit Policy Change", "success"),),
 }
-_OBJECT_ACCESS_SACL_EVENTS = frozenset({4656, 4657, 4663, 4670})
+_OBJECT_ACCESS_SACL_EVENTS = frozenset({4656, 4657, 4661, 4663, 4670})
 _DIRECTORY_SERVICE_SACL_EVENTS = frozenset({4662, 5136, 5137, 5138, 5139, 5141})
 
 
@@ -558,6 +616,8 @@ def _channel_requirement(event: WindowsEventClass) -> tuple[str, dict, str]:
 def collection_requirements(event: WindowsEventClass) -> tuple[tuple[str, dict, str], ...]:
     """Site facts required before absence of this event class can support a negative."""
     requirements: list[tuple[str, dict, str]] = []
+    if event.channel.casefold() == "application":
+        return (("application_event_log", {}, "Windows Application event log"),)
     if event.provider.casefold() == SYSMON.casefold():
         requirements.append(("sysmon", {"event_id": event.event_id}, f"Sysmon event id {event.event_id}"))
     if (
@@ -625,4 +685,13 @@ def lookup_event_class(channel: object, provider: object, event_id: object) -> W
         numeric_id = int(event_id)
     except (TypeError, ValueError):
         return None
-    return _BY_KEY.get((channel.casefold(), provider.casefold(), numeric_id))
+    exact = _BY_KEY.get((channel.casefold(), provider.casefold(), numeric_id))
+    if exact is not None:
+        return exact
+    if (channel.casefold() == "security" and numeric_id == 33205
+            and re.fullmatch(r"mssql\$[^$]+\$audit", provider.casefold())):
+        return WindowsEventClass(channel, provider, numeric_id, "database_audit", _MSSQL_EVENTS[numeric_id], _SQL_DOC)
+    if channel.casefold() == "application" and numeric_id in _MSSQL_EVENTS and (
+            provider.casefold() in {"mssql", "mssqlserver"} or provider.casefold().startswith("mssql$")):
+        return WindowsEventClass(channel, provider, numeric_id, "database_audit", _MSSQL_EVENTS[numeric_id], _SQL_DOC)
+    return None

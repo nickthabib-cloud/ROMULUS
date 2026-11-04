@@ -248,3 +248,30 @@ def test_a_failing_store_still_ends_the_sweep(monkeypatch, tmp_path):
 
     with pytest.raises(sqlite3.OperationalError):
         sweep(monkeypatch, tmp_path, [_flows(1)], pack=[StoreFails()])
+
+
+def test_a_publishing_failure_during_consume_ends_the_sweep_and_is_not_the_rules(monkeypatch, tmp_path):
+    def broken_publish(*args, **kwargs):
+        raise ValueError("invalid adapter response")
+
+    monkeypatch.setattr(sw, "publish_match", broken_publish)
+    with pytest.raises(ValueError, match="invalid adapter response"):
+        sweep(monkeypatch, tmp_path, [_flows(2)], pack=[_Every()])
+
+
+def test_a_rule_that_raises_mid_batch_fails_only_itself(monkeypatch, tmp_path):
+    class SecondRaises(_Every):
+        id = "test.second_raises"
+        seen = 0
+
+        def match(self, event):
+            self.seen += 1
+            if self.seen == 2:
+                raise KeyError("a defect on the second record")
+            return super().match(event)
+
+    repo, run = sweep(monkeypatch, tmp_path, [_flows(3)], pack=[SecondRaises(), _Every()])
+    [cell] = [c for c in repo.rule_cells("h1") if c["rule_id"] == "test.second_raises" and c["partition"] != "window"]
+    assert cell["state"] == "executed_failed" and "KeyError" in cell["detail"]["error"]
+    assert {c["rule_id"] for c in repo.candidates("h1")} == {"test.every"}
+    assert set(run.stats["rule_failures"]) == {"test.second_raises"}

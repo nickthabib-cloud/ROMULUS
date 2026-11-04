@@ -221,7 +221,7 @@ class Playbook:
         self.evaluated += len(out)
         return out
 
-    def consume_partition(self, events: list[TypedEvent]) -> list[Match]:
+    def consume_partition(self, events: list[TypedEvent]) -> Iterable[Match]:
         """Consume a sweep partition after applying this playbook's OS scope exactly once.
 
         Direct calls to ``consume`` retain the public playbook behavior used by focused rule tests. The sweep
@@ -230,7 +230,7 @@ class Playbook:
         """
         return self.consume_scoped_partition(self.scope_partition(events))
 
-    def consume_scoped_partition(self, scoped: list[TypedEvent]) -> list[Match]:
+    def consume_scoped_partition(self, scoped: list[TypedEvent]) -> Iterable[Match]:
         """Consume an already OS- and family-scoped partition.
 
         The sweep keeps ``scoped`` so a bounded-state failure can count exactly the records the rule did not
@@ -242,9 +242,19 @@ class Playbook:
             self._first_record_time = min(first, getattr(self, "_first_record_time", first))
         self._events_pre_scoped = True
         try:
-            return self.consume(scoped)
+            matches = self.consume(scoped)
         finally:
             self._events_pre_scoped = False
+        if isinstance(matches, (list, tuple)):
+            return matches
+
+        def stream():
+            self._events_pre_scoped = True
+            try:
+                yield from matches
+            finally:
+                self._events_pre_scoped = False
+        return stream()
 
     def consume(self, events: list[TypedEvent]) -> list[Match]:
         """Direct playbooks return matches immediately (publishable before the hunt ends)."""

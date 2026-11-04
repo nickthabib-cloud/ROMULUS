@@ -17,6 +17,17 @@ from tests.windows_fixtures import (
 )
 
 _REPRESENTATIVE_FIELDS = {
+    "silent_process_exit": ("monitor.exited_image",),
+    "database_audit": ("db.action",),
+    "msi_install": ("msi.action",),
+    "boot_configuration": ("boot.kernel_debug",),
+    "ese_database": ("ese.action",),
+    "winsock_catalog": ("lsp.name",),
+    "application_compatibility": ("compat.action",),
+    "security_enumeration": ("enum.action",),
+    "privilege_adjustment": ("privilege.enabled", "process.executable"),
+    "dcom_access": ("dcom.scope",),
+    "network_filter": ("wfp.application",),
     "process_exec": ("process.executable",),
     "process_termination": ("process.executable",),
     "net_socket": ("source.ip", "destination.ip"),

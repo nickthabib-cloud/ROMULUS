@@ -226,13 +226,28 @@ class _RegistryRule(WindowsEventRule):
 
 class RegistryRunKeys(_RegistryRule):
     id = "win.registry_run_keys"
-    version = "6"
+    version = '7'
     title = "Run, RunOnce or RunOnceEx registry entry changed"
     attack = ("T1547.001",)
     benign = ("application installers and per-user startup preferences",)
     next_checks = ("inspect the referenced payload and its signer", "follow the writer and subsequent logon executions")
     research = ("https://attack.mitre.org/techniques/T1547/001/",
                 "https://learn.microsoft.com/en-us/troubleshoot/windows-client/shell-experience/standard-user-cannot-run-commnad-via-runonce")
+
+    @staticmethod
+    def _system_named_writable_operand(event, target):
+        from romulus.detect.windows_cmdline import is_user_writable, split_argv
+        from romulus.detect.windows_events import basename
+        from romulus.detect.windows_path_data import writable_windows_path
+        from romulus.detect.windows_system_data import SYSTEM_BINARIES
+        value = event.get('registry.value')
+        if target.action != 'written' or not isinstance(value, str) or _uncertain(event):
+            return False
+        if value.count('"') % 2:
+            return False
+        argv = split_argv(value)
+        return bool(argv and basename(argv[0]) in SYSTEM_BINARIES
+                    and (is_user_writable(argv[0]) or writable_windows_path(argv[0])))
 
     def _judge_target(self, event, target):
         key = _software(target) if target else None
@@ -244,7 +259,10 @@ class RegistryRunKeys(_RegistryRule):
         if key == (*prefix, "explorer", "user shell folders") and target.name == "startup":
             return self.report(event, target, "startup_folder", "Per-user Startup folder location")
         if key and key[:-1] == prefix and key[-1] in {"run", "runonce"}:
-            return self.report(event, target, "run_key", "Logon Run/RunOnce entry")
+            high = self._system_named_writable_operand(event, target)
+            description = ("Logon Run/RunOnce entry naming a system-named executable in a writable-indicator directory"
+                           if high else "Logon Run/RunOnce entry")
+            return self.report(event, target, "run_key", description, high=high)
         # Section names need not be numbered; Depend belongs immediately beneath a section.
         if (key and key[:4] == (*prefix, "runonceex")
                 and (len(key) in {4, 5} or (len(key) == 6 and key[-1] == "depend"))):

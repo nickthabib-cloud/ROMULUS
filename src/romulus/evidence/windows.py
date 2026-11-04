@@ -24,7 +24,7 @@ from romulus.evidence.windows_catalog import WINDOWS_DATASETS, WindowsEventClass
 if TYPE_CHECKING:
     from romulus.detect.bounded import Account, StateBudget
 
-WINDOWS_NORMALIZER = "windows-ecs@11"
+WINDOWS_NORMALIZER = "windows-ecs@14"
 # This is already far beyond what the 64 MiB assembler can retain at normal 4104 chunk sizes, while bounding every
 # completeness vector even when hostile metadata claims billions of parts.
 SCRIPT_BLOCK_MAX_PARTS = 4_096
@@ -158,6 +158,26 @@ _OBJECT_ACCESS_CODES = {
         "undefined_bit_6", "undefined_bit_7",
     ), strict=True)),
 }
+# SAM message labels are defined by the native msobjs.dll resource table; the request
+# schema and its object-dependent access semantics are documented at event 4661.
+# https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4661
+_SAM_ACCESS_CODES = {
+    **dict(zip((f"%%{code}" for code in range(5392, 5401)), (
+        "ReadPasswordParameters", "WritePasswordParameters", "ReadOtherParameters", "WriteOtherParameters",
+        "CreateUser", "CreateGlobalGroup", "CreateLocalGroup", "GetLocalGroupMembership", "ListAccounts",
+    ), strict=True)),
+    **dict(zip((f"%%{code}" for code in range(5410, 5416)), (
+        "AddMember", "RemoveMember", "ListMembers", "Undefined Access (no effect) Bit 5",
+        "Undefined Access (no effect) Bit 6", "Undefined Access (no effect) Bit 7",
+    ), strict=True)),
+    **dict(zip((f"%%{code}" for code in range(5440, 5449)), (
+        "ReadGeneralInformation", "ReadPreferences", "WritePreferences", "ReadLogon", "ReadAccount",
+        "WriteAccount", "ChangePassword (with knowledge of old password)",
+        "SetPassword (without knowledge of old password)", "ListGroups",
+    ), strict=True)),
+}
+_OBJECT_ACCESS_CODES.update({name: _SAM_ACCESS_CODES for name in (
+    "sam_user", "sam_group", "sam_alias", "sam_domain", "sam_server")})
 
 _REGISTRY_ROOTS = {
     "hklm": "hkey_local_machine",
@@ -703,6 +723,19 @@ def read_windows_event(hit: dict) -> WindowsRecord:
         time_origin = "winlog.time_created" if winlog.get("time_created") else "@timestamp"
         data["TimeCreated"] = fv(time_created, f"{hit['_id']}:{time_origin}")
     _parsed_hashes(data)
+    if event_class.family in {"silent_process_exit", "database_audit", "boot_configuration", "ese_database",
+                              "winsock_catalog", "application_compatibility", "msi_install", "security_enumeration",
+                              "privilege_adjustment", "dcom_access", "network_filter", "remote_access"}:
+        for name, path in (("EnvelopeProcessId", "process.pid"), ("EnvelopeActorSid", "user.identifier"),
+                           ("ConnectionActivity", "activity_id")):
+            # These keys are reserved internal aliases, never native payload facts.
+            # Remove case variants too because _put supports case-insensitive native names.
+            for key in tuple(data):
+                if key.casefold() == name.casefold():
+                    data.pop(key)
+            value = _get(winlog, path)
+            if value is not None:
+                data[name] = fv(value, f"{hit['_id']}:winlog.{path}")
     return WindowsRecord(hit, event_class, data, caveats)
 
 
@@ -1263,9 +1296,9 @@ def _audit_outcome(record: WindowsRecord) -> Outcome:
 
 
 def _address_fields(
-    fields: dict[str, FieldValue], record: WindowsRecord, role: str, *native_names: str,
+    fields: dict[str, FieldValue], record: WindowsRecord, role: str, *native_names: str, transform=_ip,
 ) -> None:
-    _put(fields, record, f"{role}.ip", *native_names, transform=_ip)
+    _put(fields, record, f"{role}.ip", *native_names, transform=transform)
     item = fields.get(f"{role}.ip")
     if item is None:
         return
@@ -1517,9 +1550,222 @@ def _registry_fields(fields: dict[str, FieldValue], record: WindowsRecord) -> Ou
     return Outcome.success
 
 
+def _host_port(value: object) -> tuple[str, int | None]:
+    """Parse native endpoint notation without mistaking bare IPv6 for a port."""
+    text = str(value).strip()
+    try:
+        return _ip(text), None
+    except ValueError:
+        pass
+    if text.startswith("["):
+        host, separator, tail = text[1:].partition("]")
+        if not separator or (tail and not tail.startswith(":")):
+            raise ValueError("invalid bracketed endpoint")
+        port = tail[1:] if tail else ""
+    else:
+        host, separator, port = text.rpartition(":")
+        if not separator:
+            raise ValueError("missing endpoint separator")
+    number = _integer(port) if port else None
+    if number is not None and not 0 <= number <= 65535:
+        raise ValueError("port is outside the valid range")
+    return _ip(host), number
+
+
+def _wfp_port(value: object) -> int:
+    # The server-side WFP filter matches native decimal port fields. Accept only
+    # representations for which that typed retrieval contract is a superset.
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise TypeError("port must be canonical decimal text or integer")
+    text = str(value)
+    if not re.fullmatch(r"0|[1-9][0-9]{0,4}", text) or int(text) > 65535:
+        raise ValueError("port must be canonical decimal in 0..65535")
+    return int(text)
+
+
+def _wfp_address(value: object) -> str:
+    # Retrieval uses native-address prefixes, so padding is outside this schema.
+    # Expanded IPv6 remains supported and is canonicalized by the common parser.
+    if not isinstance(value, str):
+        raise TypeError("WFP address must be text")
+    if value != value.strip():
+        raise ValueError("WFP address contains surrounding whitespace")
+    return _ip(value)
+
+
+def _boot_option(value: object) -> object:
+    text = str(value)
+    if text in {"%%1846", "%%1848"}:
+        return {"%%1846": "Default", "%%1848": "Off"}[text]
+    return _message_value(value)
+
+
+_CATALOG_FAMILIES = frozenset({
+    "silent_process_exit", "database_audit", "boot_configuration", "ese_database", "winsock_catalog",
+    "application_compatibility", "msi_install", "security_enumeration", "privilege_adjustment",
+    "dcom_access", "network_filter",
+})
+
+
+def _sql_audit_fields(value: str) -> dict[str, str]:
+    """Read audit headers once; everything after statement belongs to SQL text."""
+    headers = {"action_id", "succeeded", "object_name", "server_principal_name", "database_name",
+               "client_ip", "application_name", "session_id", "statement"}
+    result: dict[str, str] = {}
+    lines = value.splitlines()
+    for index, line in enumerate(lines):
+        name, separator, text = line.partition(":")
+        name = name.strip().casefold()
+        if not separator or name not in headers:
+            continue
+        if name == "statement":
+            # SQL comments and literals can themselves contain header-looking lines.
+            # They must never overwrite authoritative metadata or truncate the SQL.
+            result[name] = "\n".join([text, *lines[index + 1:]]).strip()
+            break
+        if text.strip():
+            result.setdefault(name, text.strip())
+    return result
+
+
+def _catalog_fields(fields: dict[str, FieldValue], record: WindowsRecord) -> Outcome | None:
+    family, code = record.event_class.family, record.event_class.event_id
+    if family not in _CATALOG_FAMILIES and family != "remote_access":
+        return None
+    _put(fields, record, "process.pid", "EnvelopeProcessId", transform=_integer)
+    _put(fields, record, "process.actor_sid", "EnvelopeActorSid")
+    if family == "remote_access":
+        return None
+    mappings = {
+        "silent_process_exit": (("monitor.exited_image", "param1"), ("monitor.initiating_image", "param2"),
+                                ("monitor.exited_creation_time", "param4")),
+        "ese_database": (("ese.instance", "param1"), ("ese.database_path", "param5")),
+        "winsock_catalog": (("lsp.name", "LSPName"), ("lsp.installer", "Installer"),
+                            ("lsp.catalog", "Catalog"), ("lsp.guid", "GUID"), ("lsp.category", "Category")),
+        "application_compatibility": (("compat.exe_path", "ExePath"), ("compat.fix_name", "FixName"),
+                                      ("compat.resolver", "ResolverName"), ("compat.fix_id", "FixID"),
+                                      ("compat.flags", "Flags")),
+        "msi_install": (("msi.package", "param1"),),
+        "security_enumeration": (("enum.target_name", "TargetUserName"), ("enum.target_sid", "TargetSid"),
+                                 ("enum.target_domain", "TargetDomainName"), ("enum.caller_process", "CallerProcessName")),
+        "dcom_access": tuple((f"dcom.{name}", f"param{index}") for index, name in enumerate(
+            ("permission", "scope", "operation", "clsid", "appid", "domain", "user", "user_sid", "address"), 1)),
+        "network_filter": (("wfp.application", "Application"), ("wfp.layer", "LayerName")),
+    }
+    for typed, native in mappings.get(family, ()):
+        transform = _guid if typed in {"lsp.guid", "compat.fix_id", "dcom.clsid", "dcom.appid"} else None
+        _put(fields, record, typed, native, transform=transform)
+    for typed in ("monitor.exited_image", "monitor.initiating_image", "ese.database_path", "lsp.installer",
+                  "compat.exe_path", "enum.caller_process", "wfp.application"):
+        _path_metadata(fields, typed, typed + "_key")
+    if family == "silent_process_exit":
+        _put(fields, record, "monitor.exit_code", "param3", transform=_integer)
+    elif family == "ese_database":
+        fields["ese.action"] = fv({216: "engine_detached", 325: "created", 326: "attached", 327: "detached"}[code], fields["event.code"].origin)
+        _put(fields, record, "ese.pid", "param2", transform=_integer)
+    elif family == "application_compatibility":
+        fields["compat.action"] = fv("shim_applied" if code == 500 else "resolver_fired", fields["event.code"].origin)
+        _put(fields, record, "compat.pid", "ProcessId", transform=_integer)
+    elif family == "msi_install":
+        fields["msi.action"] = fv("transaction_begin" if code == 1040 else "transaction_end", fields["event.code"].origin)
+        _put(fields, record, "msi.client_pid", "param2", transform=_integer)
+        item = fields.get("msi.package")
+        if item:
+            text = str(item.value)
+            kind = "url" if re.match(r"(?i)^(?:https?|ftp)://[^\s/]+", text) else "product_code" if _GUID.fullmatch(text) else "path"
+            fields["msi.package_kind"] = fv(kind, item.origin + "#computed:package-kind")
+            if kind == "path":
+                _path_metadata(fields, "msi.package", "msi.package_key")
+    elif family == "database_audit":
+        fields["db.instance"] = fields["event.provider"]
+        fields["db.action"] = fv({15457: "option_changed", 33205: "audit_record", 15281: "procedure_blocked",
+                                  18456: "login_failed", 18454: "login_succeeded"}[code], fields["event.code"].origin)
+        if code == 15457:
+            for name, native in (("name", "param1"), ("old", "param2"), ("new", "param3")):
+                _put(fields, record, f"db.option.{name}", native)
+        elif code == 15281:
+            _put(fields, record, "db.blocked.procedure", "param6")
+        elif code == 33205:
+            raw = record.data.get("param1")
+            if raw:
+                audit = _sql_audit_fields(str(raw.value)[:_DETAILS_MAX_CHARS])
+                for name, source in (("action_id", "action_id"), ("object_name", "object_name"),
+                                     ("statement", "statement"), ("server_principal", "server_principal_name"),
+                                     ("database", "database_name"), ("application", "application_name")):
+                    if audit.get(source):
+                        fields[f"db.audit.{name}"] = fv(audit[source].strip(), raw.origin + "#parsed:" + source)
+                for name, transform in (("succeeded", _boolean), ("client_ip", _ip)):
+                    if name in audit:
+                        try:
+                            fields[f"db.audit.{name}"] = fv(transform(audit[name]), raw.origin + "#parsed:" + name)
+                        except (ValueError, TypeError):
+                            record.caveats.append(f"SQL audit {name} is malformed; field omitted")
+                if len(str(raw.value)) > _DETAILS_MAX_CHARS:
+                    record.caveats.append("SQL audit text exceeds retained detail limit; parsed fields are partial")
+        else:
+            _put(fields, record, "db.login.name", "param1")
+            if code == 18456:
+                _put(fields, record, "db.login.reason", "param2")
+            _put(fields, record, "db.login.client_ip", "param3" if code == 18456 else "param2",
+                 transform=lambda value: _ip(re.sub(r"(?i)^\s*\[CLIENT:\s*|\]\s*$", "", str(value))))
+        if code == 33205:
+            result = fields.get("db.audit.succeeded")
+            return Outcome.unknown if result is None else Outcome.success if result.value else Outcome.failure
+        return Outcome.failure if code in {18456, 15281} else Outcome.success
+    elif family == "boot_configuration":
+        for name, native in (("kernel_debug", "KernelDebug"), ("test_signing", "TestSigning"),
+                             ("flight_signing", "FlightSigning"), ("disable_integrity_checks", "DisableIntegrityChecks"),
+                             ("hypervisor_debug", "HypervisorDebug")):
+            _put(fields, record, f"boot.{name}.raw", native)
+            item = record.data.get(native)
+            if item:
+                if str(item.value) in {"%%1842", "%%1843"}:
+                    fields[f"boot.{name}"] = fv(item.value == "%%1842", item.origin + "#parsed:boot-setting")
+                else:
+                    record.caveats.append(f"Unknown boot setting {native}; boolean omitted")
+        for name, native in (("advanced_options", "AdvancedOptions"), ("config_access_policy", "ConfigAccessPolicy"),
+                             ("vsm_launch_type", "VsmLaunchType")):
+            _put(fields, record, f"boot.{name}", native, transform=_boot_option)
+    elif family == "security_enumeration":
+        fields["enum.action"] = fv("local_group_members" if code == 4799 else "local_user_groups", fields["event.code"].origin)
+        _put(fields, record, "enum.caller_pid", "CallerProcessId", transform=_integer)
+        if fields.get("enum.caller_pid") and fields["enum.caller_pid"].value == 0:
+            fields.pop("enum.caller_pid")
+    elif family == "privilege_adjustment":
+        _put(fields, record, "privilege.enabled", "EnabledPrivilegeList", transform=lambda v: str(v).split())
+        _put(fields, record, "privilege.disabled", "DisabledPrivilegeList", transform=lambda v: str(v).split())
+        _put(fields, record, "process.executable", "ProcessName")
+        _path_metadata(fields, "process.executable", "process.executable_key")
+        _put(fields, record, "process.pid", "ProcessId", transform=_integer)
+    elif family == "network_filter":
+        _put(fields, record, "wfp.layer", "LayerName", transform=lambda value:
+             {"%%14610": "Receive/Accept", "%%14611": "Connect"}.get(str(value), str(value)))
+        _put(fields, record, "process.pid", "ProcessID", transform=_integer)
+        _address_fields(fields, record, "source", "SourceAddress", transform=_wfp_address)
+        _address_fields(fields, record, "destination", "DestAddress", transform=_wfp_address)
+        _put(fields, record, "source.port", "SourcePort", transform=_wfp_port)
+        _put(fields, record, "destination.port", "DestPort", transform=_wfp_port)
+        direction = {"%%14592": "ingress", "%%14593": "egress"}.get(str(record.value("Direction")))
+        if direction:
+            fields["network.direction"] = fv(direction, record.origin("Direction") + "#parsed:wfp-direction")
+            local, remote = ("destination.ip", "source.ip") if direction == "ingress" else ("source.ip", "destination.ip")
+            for typed, key in (("network.local_address", local), ("network.remote_address", remote)):
+                if key in fields:
+                    fields[typed] = fields[key]
+        elif record.value("Direction"):
+            record.caveats.append("Unknown WFP direction; local and remote address roles omitted")
+        _put(fields, record, "network.transport", "Protocol", transform=lambda v: {6: "tcp", 17: "udp", 1: "icmp", 58: "icmp6"}.get(_integer(v), str(v)))
+    elif family == "dcom_access":
+        return Outcome.failure
+    return Outcome.success
+
+
 def _semantic_fields(fields: dict[str, FieldValue], record: WindowsRecord, host: str) -> Outcome:
     event_id, family = record.event_class.event_id, record.event_class.family
     _account_fields(fields, record)
+    extra = _catalog_fields(fields, record)
+    if extra is not None:
+        return extra
     if family in {"process_exec", "process_termination"}:
         _process_fields(fields, record, host)
         return Outcome.success
@@ -1588,6 +1834,17 @@ def _semantic_fields(fields: dict[str, FieldValue], record: WindowsRecord, host:
         _put(fields, record, "audit.config.error", "Description", "Error")
         return Outcome.success
     if family == "system_state":
+        if event_id not in {12, 13, 6005, 6006}:
+            fields["system.event"] = fv("service_state_changed" if event_id == 7036 else "security_activity",
+                                        fields["event.code"].origin)
+            _put(fields, record, "service.name", "param1")
+            _put(fields, record, "service.state", "param2")
+            _put(fields, record, "security.logon_process", "LogonProcessName")
+            _put(fields, record, "security.service", "Service")
+            _put(fields, record, "security.privileges", "PrivilegeList", transform=lambda v: str(v).split())
+            _put(fields, record, "security.group_membership", "GroupMembership")
+            _put(fields, record, "transaction.id", "TransactionId")
+            return Outcome.failure if event_id in {5805, 5723} else _audit_outcome(record)
         state = "boot_start" if event_id in {12, 6005} else "boot_stop"
         fields["system.event"] = fv(state, fields["event.code"].origin)
         fields["process.fence"] = fv("boot", fields["event.code"].origin)
@@ -1634,7 +1891,7 @@ def _semantic_fields(fields: dict[str, FieldValue], record: WindowsRecord, host:
     if family == "registry_change":
         return _registry_fields(fields, record)
     if family == "object_access":
-        fields["object.action"] = fv({4656: "handle_requested", 4663: "accessed", 4670: "permissions_changed"}.get(
+        fields["object.action"] = fv({4656: "handle_requested", 4661: "handle_requested", 4663: "accessed", 4670: "permissions_changed"}.get(
             event_id, "accessed"), fields["event.code"].origin)
         _put(fields, record, "object.server", "ObjectServer")
         _put(fields, record, "object.type", "ObjectType")
@@ -1813,8 +2070,33 @@ def _semantic_fields(fields: dict[str, FieldValue], record: WindowsRecord, host:
         actions = {1149: "rdp_authentication", 21: "rdp_logon", 22: "rdp_shell_start",
                    24: "rdp_disconnect", 25: "rdp_reconnect", 6: "winrm_listener_started",
                    91: "winrm_session", 3: "bits_job_created", 59: "bits_transfer_started",
-                   60: "bits_transfer_completed"}
+                   60: "bits_transfer_completed", 4: "bits_job_complete", 5: "bits_job_cancelled",
+                   61: "bits_transfer_error", 209: "bits_notification", 169: "winrm_authentication",
+                   193: "winrm_virtual_account", 131: "rdp_connection_accepted", 132: "rdp_channel_created",
+                   148: "rdp_channel_closed", 168: "rdp_client_resolution", 104: "rdp_client_timezone",
+                   68: "rdp_connection_setup", 129: "rdp_listener"}
         fields["remote.action"] = fv(actions.get(event_id, "remote_activity"), fields["event.code"].origin)
+        activity = record.hit["_source"]["winlog"].get("activity_id")
+        if isinstance(activity, str) and activity:
+            fields["remote.connection_activity"] = fv(activity, f"{record.hit['_id']}:winlog.activity_id")
+        elif activity not in (None, ""):
+            record.caveats.append("winlog.activity_id is malformed; connection correlation was omitted")
+        _put(fields, record, "remote.channel_name", "ChannelName")
+        _put(fields, record, "remote.tunnel_id", "TunnelID")
+        _put(fields, record, "remote.conn_type", "ConnType")
+        _put(fields, record, "remote.monitor_width", "MonitorWidth", transform=_integer)
+        _put(fields, record, "remote.monitor_height", "MonitorHeight", transform=_integer)
+        _put(fields, record, "remote.auth_mechanism", "authenticationMechanism")
+        if record.value("ClientIP") is not None:
+            try:
+                ip, port = _host_port(record.value("ClientIP"))
+                origin = record.origin("ClientIP")
+                fields["source.ip"] = fv(ip, origin + "#parsed:host-port")
+                fields["source.is_loopback"] = fv(ipaddress.ip_address(ip).is_loopback, origin + "#computed:loopback")
+                if port is not None:
+                    fields["source.port"] = fv(port, origin + "#parsed:host-port")
+            except (ValueError, TypeError) as exc:
+                record.caveats.append(f"ClientIP is malformed and source endpoint was omitted: {exc}")
         address_names = (
             ("Param3", "IpAddress", "Address", "ClientAddress", "SourceNetworkAddress")
             if event_id == 1149 else
@@ -1830,12 +2112,23 @@ def _semantic_fields(fields: dict[str, FieldValue], record: WindowsRecord, host:
         _put(fields, record, "remote.domain", *domain_names)
         _put(fields, record, "remote.resource", "ResourceUri", "Url", "RemoteName", "connection")
         _put(fields, record, "bits.job_id", "JobId", "Id", transform=_guid)
-        _put(fields, record, "bits.job_name", "jobTitle", "JobName", "name")
-        _put(fields, record, "bits.owner", "jobOwner")
+        _put(fields, record, "bits.job_name", "jobTitle", "JobName", "name", "string")
+        _put(fields, record, "bits.owner", "jobOwner", "string2")
         _put(fields, record, "bits.process_path", "processPath")
         _put(fields, record, "bits.process_id", "processId", transform=_integer)
         _put(fields, record, "bits.remote_url", "Url", "RemoteName")
         _put(fields, record, "bits.local_file", "LocalName", "FileName")
+        remote = fields.get("bits.remote_url")
+        if remote:
+            text = str(remote.value).casefold()
+            scheme = text.split(":", 1)[0] if "://" in text else "unc" if text.startswith("\\\\") else "file"
+            fields["bits.url_scheme"] = fv(scheme, remote.origin + "#computed:url-scheme")
+        if event_id == 169 and fields.get("remote.user"):
+            user = fields["remote.user"]
+            domain, separator, name = str(user.value).partition("\\")
+            fields["remote.user"] = fv(name if separator else domain, user.origin)
+            if separator:
+                fields["remote.domain"] = fv(domain, user.origin)
         return Outcome.failure if _status_failed(record) else Outcome.success
     return Outcome.unknown
 
