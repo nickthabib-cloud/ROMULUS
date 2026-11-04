@@ -404,9 +404,13 @@ def test_a_value_with_more_sip_uris_than_are_read_is_withheld():
 # ---- linear time ---------------------------------------------------------------------------------------------------
 
 N = 256 * 1024
+# A backtracking pattern that is quadratic on 256 KB takes seconds at the least (about 6.5e10 steps); a linear one takes
+# a few milliseconds, and the slowest (_SQL_TOKEN_IN_COMMENT) about 40 ms on an idle machine. 250 ms keeps that margin
+# under a loaded test run while still failing any super-linear pattern by an order of magnitude.
+LINEAR_LIMIT = 0.25
 
 
-def _time(fn, limit: float = 0.05) -> float:
+def _time(fn, limit: float = LINEAR_LIMIT) -> float:
     """The fastest of up to three runs (one when the first is within the limit: a busy machine gets two more)."""
     best = float("inf")
     for _ in range(3):
@@ -447,7 +451,7 @@ def test_every_pattern_reads_adversarial_input_in_linear_time(name, pattern):
             for count, _match in enumerate(pattern.finditer(text)):
                 if count == 100_000:
                     break
-        assert _time(run) < 0.05, (name, label)
+        assert _time(run) < LINEAR_LIMIT, (name, label)
 
 
 def _fields():
@@ -487,9 +491,9 @@ def _fields():
 
 
 @pytest.mark.parametrize("log,columns", list(_fields()), ids=[f"{log}-{i}" for i, (log, _) in enumerate(_fields())])
-def test_an_adversarial_256_kb_value_is_normalized_in_under_50_ms(log, columns):
+def test_an_adversarial_256_kb_value_is_normalized_in_linear_time(log, columns):
     row = zl.ROWS[log].with_(**columns)
     h = zl.plain(row, "big")
     event = normalize_plain_zeek(h, sensor=zl.SENSOR)
     assert json.dumps(event.model_dump(mode="json"))
-    assert _time(lambda: normalize_plain_zeek(h, sensor=zl.SENSOR)) < 0.05, (log, list(columns))
+    assert _time(lambda: normalize_plain_zeek(h, sensor=zl.SENSOR)) < LINEAR_LIMIT, (log, list(columns))

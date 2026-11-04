@@ -1062,7 +1062,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-net-long-unidentified-session"></a>
 ### `net.long_unidentified_session` — Long data-carrying connection with no identified protocol on a port its sensor cannot judge
 
-- Version: `6`; status: `active`
+- Version: `7`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1095`](https://attack.mitre.org/techniques/T1095/), [`T1571`](https://attack.mitre.org/techniques/T1571/), [`T1573`](https://attack.mitre.org/techniques/T1573/)
@@ -1074,7 +1074,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-net-outbound-volume-asymmetry"></a>
 ### `net.outbound_volume_asymmetry` — Internal address sent much more data to one external address than it received
 
-- Version: `5`; status: `active`
+- Version: `6`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1041`](https://attack.mitre.org/techniques/T1041/), [`T1048`](https://attack.mitre.org/techniques/T1048/), [`T1567`](https://attack.mitre.org/techniques/T1567/)
@@ -1086,7 +1086,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-net-port-scan"></a>
 ### `net.port_scan` — One source contacted many distinct ports on one destination
 
-- Version: `10`; status: `active`
+- Version: `11`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **full-search**
 - ATT&CK: [`T1046`](https://attack.mitre.org/techniques/T1046/), [`T1595.001`](https://attack.mitre.org/techniques/T1595/001/)
@@ -1096,7 +1096,7 @@ Invalid mappings are excluded from coverage:
 <a id="rule-net-protocol-port-mismatch"></a>
 ### `net.protocol_port_mismatch` — Application protocol and port disagree on a connection
 
-- Version: `7`; status: `active`
+- Version: `8`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1095`](https://attack.mitre.org/techniques/T1095/), [`T1571`](https://attack.mitre.org/techniques/T1571/), [`T1572`](https://attack.mitre.org/techniques/T1572/)

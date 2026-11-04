@@ -6,9 +6,9 @@ from romulus.hunt import sweep as sw
 from tests import throughput_fixture as tf
 
 CANDIDATE_GOLDENS = {
-    4: (35, "3b23f98dbf25d34c4921bbec2cba932991746ad9d4a11e8963988d7c8c421bee"),
-    8: (35, "3b23f98dbf25d34c4921bbec2cba932991746ad9d4a11e8963988d7c8c421bee"),
-    16: (35, "3b23f98dbf25d34c4921bbec2cba932991746ad9d4a11e8963988d7c8c421bee"),
+    4: (35, "02c5eb67a3b1a86948920d429194da593380330bd3cd7e66d720c6d898b5b15c"),
+    8: (35, "02c5eb67a3b1a86948920d429194da593380330bd3cd7e66d720c6d898b5b15c"),
+    16: (35, "02c5eb67a3b1a86948920d429194da593380330bd3cd7e66d720c6d898b5b15c"),
 }
 
 

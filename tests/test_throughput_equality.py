@@ -284,6 +284,9 @@ from tests import throughput_fixture as tf
 # Windows proxy, script, citation and bounded-revision semantics increment Windows rule versions.
 # Only rule_version changes in 6,887 coverage cells across 97 Windows rules in this Linux fixture.
 # Restoring those versions reproduces every table and semantic-field digest; all findings remain identical.
+# Zeek conn reading increments net.protocol_port_mismatch, net.long_unidentified_session,
+# net.outbound_volume_asymmetry and net.port_scan; only their rule_version changes (in candidates, cells and the
+# manifest), and restoring those versions reproduces every digest.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
     "audit": "23d9b87c75d030df8ff5bcbf07deacc75416c325dd74bcc89243cc1b5488ae93",
@@ -296,16 +299,16 @@ GOLDEN_STACK = {
     "baseline_window_counts": "7cc0f5555260b0533927f47cfe29e6a543e2d921b0cc79e4b6b89f418d6052f8",
     "baseline_window_event_hours": "bb58c65144b135443e75a690b7b2f8137ebac6b827f8e8bd8cc7606a01c53e52",
     "baseline_window_scope_hours": "07f4081d18fb5be1dfc23c1eecd4e63eef7af093c1a70eaa7f4ea05fc772006f",
-    "candidates": "3b23f98dbf25d34c4921bbec2cba932991746ad9d4a11e8963988d7c8c421bee",
+    "candidates": "02c5eb67a3b1a86948920d429194da593380330bd3cd7e66d720c6d898b5b15c",
     "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
     "event_citations": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     "event_entities": "40eefa75e2cfa03734adb2e57b3da8719aa150bcdc65e72a758d84ba3e1f31b7",
     "events": "0165d2807ffee33aaef17dd70ba004ec4c87fa4c5f29e9dc75ba833f57b93ff7",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "0fbedb27ca9a4cb72354178444ee9aabc49f377b2c933074fe03ef29c8fbb08a",
-    "manifest": "35b8a0132fc6747d24e7efe50b32fa0c44c8eefaffcebf5d8795f01438b0a8f1",
+    "manifest": "58578d72f4b2170a14517710153af45ff88990746d65fc4c844c13cf1b6ce198",
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
-    "rule_cells": "0ede3beaf59df4de531ac0d313b3a93d6c9f50eb1ad404a809bc24add83f2185",
+    "rule_cells": "90af812692b2907834e4dcaa37c9d7c0eac082043db47c22ee4f0cd0f86eb222",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
     "tasks": "c65df4ab88c05661371cf32b49a1d22ef84d6753488bdb946c8e29376d486260",
 }
@@ -314,7 +317,7 @@ GOLDEN_STACK = {
 # checked field by field.
 GOLDEN_NON_BASELINE_SEMANTICS = {
     "candidates": {
-        "all_fields": "7b24cd315e4dd449433731f2405ada13616b0e1c647bb3c4bdd98e3ff4293e24",
+        "all_fields": "ebade75bf4ff0f0d177ce1aec25372322c3539cdc4c06e5eadd4d814d998b398",
         "benign_alternatives": "8e3c0bf9bd14733cc2b4a049393aded638eaa0e93632c2c69d1428a52a4cc221",
         "claim": "94f373eede1b0deee042a316fc9ede39a619bbef58ded217ad94860f9fd4a2b0",
         "claim_type": "1ccc0da03751218f3bb63463a348cd5519fb63c2eec9e0d2e83259f18bfc6681",
@@ -331,16 +334,16 @@ GOLDEN_NON_BASELINE_SEMANTICS = {
         "priority": "aa73edc71e40ea4964645f62817edb7b3e790121d824db413442d99a21c05d5d",
         "priority_reasons": "b473ae5921bb2f50e3cc347ad18a3a5b6557ecacdaca7568e9f2f10b2fde3a9b",
         "rule_id": "2ae926e61da026e299be84e4e716e9bd0a33eb9a6ea3c97196c3167fc017a257",
-        "rule_version": "cbca529ae2a2cea47a87d3595513d4d4fe63a44b80760ade9050ec23392a1647",
+        "rule_version": "e9ee0131f452bf18f93ada2b9cdd29dab49a0bf0ea10ad60bc16e996b8561ff1",
         "severity": "b2e229e267531f35a076f4db58edc48cbea38cce613ae2a6954cb6b1bf5ea20c",
         "source_presence": "4b20d257ae462d3a6c1af7eeddf340a1558a100d29f517eb7b5c7564fa778d1c",
         "ts": "d8015c1ff0b135e082a5fef2ab1cb88206470e30beee157a0cfc7790d48b8310",
     },
     "rule_cells": {
-        "all_fields": "5ffbcf60d2eb96f240cb43b96f6ba294ab944bf32ebf81465445bff80adf9133",
+        "all_fields": "fb60bc435cffc5ae51a22d2898f59b000f1896523aa7a16238ebbb9326734eab",
                       "count": 10646,
                       "rule_id": "9ef91e8f298a297308417d67b28ef44dc488841f79a07bc8358ab1cb797efe62",
-        "rule_version": "7e913b4f4bce9822479668c96b8a8a2402d8efe52da3311992d597d39780ed0f",
+        "rule_version": "0f166e36e8251018d881f9c5423c3712bfec273e9ab8d6ef5c0c13d08aec5044",
                       "target": "4a231d37bd821a12102aedcb08319addc2bb8d465e326e35f798658d4940c9c5",
                       "partition": "c5e3dd9bd630991ca3e6f5e6921923c038d29fad9215dece94f544bead04090a",
                       "state": "ebd5c7de5e0a1d1a4101483fe37ce56d6ec74d9e3642392a02a18e504baa6fc4",
