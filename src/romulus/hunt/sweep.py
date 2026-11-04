@@ -2034,20 +2034,28 @@ class Sweep:
                 pb.heartbeat = self.heartbeat
             finalized_matches = 0
             if pb.id not in self.failed_rules:
+                # Only the rule's own code is guarded. Publishing (the store, citation reads from the source) is
+                # outside the guard, so its failures end the sweep and are never recorded as the rule's defect.
                 try:
                     matches = iter(self._finalize_rule(pb))
-                    while True:
-                        try:
-                            m = next(matches)
-                        except StopIteration:
-                            break
-                        finalized_matches += 1
-                        raw_sources = ({**agg_raw, **self._merge_staged_match_raw(m)} if pb.staged else agg_raw)
-                        self._publish(m, None, raw_sources)
                 except INFRASTRUCTURE_ERRORS:
                     raise
                 except Exception as exc:  # noqa: BLE001 - one rule's defect must not cost the other rules
                     self._rule_failed(pb, exc, "finalize")
+                    matches = iter(())
+                while True:
+                    try:
+                        m = next(matches)
+                    except StopIteration:
+                        break
+                    except INFRASTRUCTURE_ERRORS:
+                        raise
+                    except Exception as exc:  # noqa: BLE001 - one rule's defect must not cost the other rules
+                        self._rule_failed(pb, exc, "finalize")
+                        break
+                    finalized_matches += 1
+                    raw_sources = ({**agg_raw, **self._merge_staged_match_raw(m)} if pb.staged else agg_raw)
+                    self._publish(m, None, raw_sources)
             if pb.id in self.failed_rules:
                 reason = self.failed_rules[pb.id]
                 published = f"{finalized_matches} finding(s) of this rule published at finalize before it failed"
