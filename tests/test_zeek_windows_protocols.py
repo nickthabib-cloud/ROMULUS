@@ -210,6 +210,43 @@ def test_a_krb_error_types_its_code_only_when_zeek_wrote_the_codes_name():
     assert not normalize(zl.plain(zl.KERBEROS.with_(client="/EXAMPLE.TEST"))).has("auth.target_account")
 
 
+@pytest.mark.parametrize("request_type", [None, "", "AP"])
+def test_a_kerberos_error_with_no_kdc_request_is_an_application_servers_never_the_accounts(request_type):
+    """Zeek's Kerberos analyzer also reads the AP exchange inside GSSAPI (an SMB or HTTP session's authentication):
+    its KRB-ERROR is the application server's. It names no account failure and is not the event's outcome."""
+    zeek = {k: v for k, v in zl.KERBEROS.zeek.items() if k not in (
+        "request_type", "service", "from", "till", "cipher", "forwardable", "renewable", "client_cert_subject",
+        "client_cert_fuid", "server_cert_subject", "server_cert_fuid")}
+    zeek.update({"id.resp_p": 445, "success": False, "error_msg": "KRB_AP_ERR_MODIFIED"})
+    if request_type is not None:
+        zeek["request_type"] = request_type
+    for shape, h in zl.in_every_shape(zl.Row("kerberos", zeek), "ap-").items():
+        event = normalize(h)
+        assert (event.get("kerberos.error_code"), event.get("kerberos.error_source")) == (41, "application_server")
+        for name in ("auth.status", "auth.target_account", "user.name", "user.domain"):
+            assert not event.has(name), (shape, name)
+        assert event.outcome == Outcome.unknown and event.get("kerberos.client_name") == "alice", shape
+        assert any("application server" in caveat for caveat in event.caveats), shape
+    # the KDC's own error for an AS request is the account's
+    kdc = normalize(zl.plain(zl.Row("kerberos", {**zeek, "request_type": "AS", "error_msg": "KDC_ERR_PREAUTH_FAILED"})))
+    assert (kdc.get("auth.status"), kdc.get("kerberos.error_code"), kdc.outcome) == (24, 24, Outcome.failure)
+    assert kdc.get("auth.target_account") == "name:example.test\\alice" and not kdc.has("kerberos.error_source")
+
+
+def test_the_account_is_also_typed_bare_for_a_join_across_sources():
+    """auth.target_account is built as the Windows events build a key from a name, but a Windows event keys the same
+    account by its SID where it has one, and Kerberos writes a realm where Windows writes a NetBIOS domain: a join
+    reads the bare, casefolded user.name and user.domain."""
+    for row, domain in ((zl.KERBEROS, "example.test"), (zl.NTLM, "example")):
+        for shape, event in every_shape(row).items():
+            assert (event.get("user.name"), event.get("user.domain")) == ("alice", domain), (row.log, shape)
+    upper = normalize(zl.plain(zl.NTLM.with_(username="Alice", domainname="EXAMPLE")))
+    assert (upper.get("user.name"), upper.get("user.domain")) == ("alice", "example")
+    assert not normalize(zl.plain(zl.NTLM.with_(domainname="-"))).has("user.domain")
+    machine = normalize(zl.plain(zl.KERBEROS.with_(client="host/ws01.example.test/EXAMPLE.TEST")))
+    assert machine.get("user.name") == "host/ws01.example.test" and machine.get("user.domain") == "example.test"
+
+
 def test_kerberos_encryption_type_names_and_numbers():
     """Zeek's cipher names (KRB::cipher_name) and the IANA Kerberos Encryption Type Numbers they denote."""
     assert KERBEROS_ETYPES == {
@@ -333,7 +370,7 @@ def test_a_simple_binds_argument_is_never_typed_in_any_shape_or_spelling(spellin
         assert event.get("auth.cleartext_credentials_present") is True, (shape, spelling)
 
 
-@pytest.mark.parametrize("operation", [None, 7, "", "bind", " BIND "])
+@pytest.mark.parametrize("operation", [None, 7, "", "bind", " BIND ", "modify", "extended"])
 def test_an_argument_whose_operation_cannot_be_read_is_withheld(operation):
     row = zl.LDAP.with_(argument=S)
     row = row.without("opcode") if operation is None else row.with_(opcode=operation)
@@ -357,8 +394,14 @@ def test_zeeks_own_redaction_and_an_anonymous_bind():
     (f"(userPassword={S})", True), (f"(&(uid=alice)(USERPASSWORD;binary={S}))", True),
     (f"(unicodePwd~={S})", True), (f"(userPassword>={S})", True), (f"(userPassword=a*{S}*)", True),
     (f"(1.2.840.113556.1.4.803:userPassword:={S})", True), (f"(2.5.4.35={S})", True),
-    (f"(ms-Mcs-AdmPwd={S})", True),
+    (f"(ms-Mcs-AdmPwd={S})", True), (f"(OID.2.5.4.35={S})", True), (f"(oid.1.2.840.113556.1.4.90={S})", True),
+    (f"(unixUserPassword={S})", True), (f"(msSFU30Password={S})", True), (f"(userPassword ={S})", True),
+    (f"(userPassword = {S})", True), (f"(userPassword ~= {S})", True), (f"(userPassword:2.5.13.17:={S})", True),
+    (f"({S}:userPassword:=)", True), (f"(userPassword=*){S})", True), (f"(userPassword=*{S})", True),
+    (f"(userPassword={S}*)", True), (f"(&(cn=a)(userPassword=*){S}))", True),
     ("(ms-Mcs-AdmPwd=*)", False), ("(&(objectClass=computer)(ms-Mcs-AdmPwd=*))", False),
+    ("(!(userPassword=*))", False), ("(|(userPassword=*)(unicodePwd=*))", False), ("(userPassword = * )", False),
+    ("(&(objectCategory=computer)(ms-Mcs-AdmPwdExpirationTime>=0))", False),
     ("(description=reset the userPassword policy)", False), ("(servicePrincipalName=*)", False),
     ("(userPasswordHint=x)", False), ("(cn=passwords)", False),
 ])
@@ -410,6 +453,22 @@ def test_the_asset_logs_type_what_zeek_saw_as_context():
     for shape, event in every_shape(zl.KNOWN_HOSTS).items():
         assert event.get("asset.ip") == zl.WS and event.get("asset.kind") == "host", shape
         assert not any(kind == "ip" for kind, _value, _role in event.entities()), shape   # no connection named
+
+
+@pytest.mark.parametrize("row", [zl.SOFTWARE, zl.KNOWN_HOSTS, zl.KNOWN_SERVICES, zl.KNOWN_CERTS],
+                         ids=lambda row: row.log)
+def test_elastics_host_ip_is_never_read_as_the_asset(row):
+    """Elastic renames the asset's address into host.ip, where Elastic Agent writes the shipper's own addresses: the
+    address is read from the Zeek line, and without it is not typed."""
+    h = zl.elastic(row, "sensor-ip")
+    h["_source"]["host"]["ip"] = ["192.0.2.250"]            # the shipper's address
+    h["_source"].setdefault("server", {})["ip"] = ["192.0.2.250"]
+    event = normalize(h)
+    assert event.get("asset.ip") == row.zeek["host"]
+    assert event.fields["asset.ip"].origin.endswith(":event.original#original.host")
+    bare = zl.elastic(row, "sensor-ip-bare", original=False)
+    bare["_source"]["host"]["ip"] = ["192.0.2.250"]
+    assert not normalize(bare).has("asset.ip")
 
 
 def test_a_software_urls_userinfo_is_removed_and_flagged():

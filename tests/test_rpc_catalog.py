@@ -17,10 +17,10 @@ def test_the_table_covers_the_interfaces_lateral_movement_and_domain_abuse_use()
     names = {name for interface in rc.INTERFACES for name in interface.zeek_names}
     assert {"svcctl", "atsvc", "ITaskSchedulerService", "IWbemServices", "IRemoteSCMActivator", "drsuapi", "samr",
             "lsarpc", "srvsvc", "netlogon", "efsrpc", "efsrpc2", "netdfs", "FileServerVssAgent", "spoolss",
-            "winreg", "wkssvc"} <= names
+            "winreg", "wkssvc", "IRemoteWinspool", "InitShutdown", "WindowsShutdown"} <= names
     documents = {interface.document for interface in rc.INTERFACES}
     assert {"MS-SCMR", "MS-TSCH", "MS-WMI", "MS-DCOM", "MS-DRSR", "MS-SAMR", "MS-SRVS", "MS-NRPC", "MS-EFSR",
-            "MS-DFSNM", "MS-FSRVP", "MS-RPRN", "MS-RRP", "MS-WKST"} <= documents
+            "MS-DFSNM", "MS-FSRVP", "MS-RPRN", "MS-RRP", "MS-WKST", "MS-PAR", "MS-RSP"} <= documents
 
 
 @pytest.mark.parametrize("endpoint,operation,op_class", [
@@ -35,9 +35,23 @@ def test_the_table_covers_the_interfaces_lateral_movement_and_domain_abuse_use()
     ("netlogon", "DsrEnumerateDomainTrusts", "enumeration"), ("wkssvc", "NetrWkstaUserEnum", "enumeration"),
     ("efsrpc", "EfsRpcOpenFileRaw", "coercion"), ("efsrpc2", "EfsRpcEncryptFileSrv", "coercion"),
     ("netdfs", "NetrDfsRemoveStdRoot", "coercion"), ("FileServerVssAgent", "IsPathSupported", "coercion"),
-    ("spoolss", "RpcRemoteFindFirstPrinterChangeNotificationEx", "coercion"),
+    ("spoolss", "RpcRemoteFindFirstPrinterChangeNotificationEx", "print_notification"),
+    ("spoolss", "RpcRemoteFindFirstPrinterChangeNotification", "print_notification"),
+    ("spoolss", "RpcAddPrinterDriverEx", "driver_install"),
+    ("IRemoteWinspool", "RpcAsyncAddPrinterDriver", "driver_install"),
     ("winreg", "BaseRegSaveKey", "remote_registry"), ("winreg", "BaseRegSetValue", "remote_registry"),
+    ("winreg", "BaseInitiateSystemShutdown", "remote_shutdown"),
+    ("winreg", "BaseInitiateSystemShutdownEx", "remote_shutdown"), ("winreg", "BaseAbortSystemShutdown", "other"),
+    ("InitShutdown", "BaseInitiateShutdown", "remote_shutdown"),
+    ("WindowsShutdown", "WsdrInitiateShutdown", "remote_shutdown"),
     ("samr", "SamrAddMemberToAlias", "account_change"), ("lsarpc", "LsarRetrievePrivateData", "credential_access"),
+    ("drsuapi", "DRSAddSidHistory", "sid_history"), ("lsarpc", "LsarAddAccountRights", "account_rights_change"),
+    ("lsarpc", "LsarAddPrivilegesToAccount", "account_rights_change"),
+    ("lsarpc", "LsarCreateAccount", "account_rights_change"), ("lsarpc", "LsarSetSecret", "secret_write"),
+    ("lsarpc", "LsarStorePrivateData", "secret_write"), ("svcctl", "ControlService", "service_control"),
+    ("svcctl", "DeleteService", "service_delete"), ("netlogon", "NetrServerReqChallenge", "secure_channel"),
+    ("netlogon", "NetrServerAuthenticate3", "secure_channel"),
+    ("netlogon", "NetrServerPasswordSet2", "secure_channel"),
 ])
 def test_the_classes_of_the_calls_that_matter(endpoint, operation, op_class):
     assert rc.lookup_zeek(endpoint, operation).op_class == op_class
@@ -116,11 +130,27 @@ def test_every_technique_is_a_current_technique_of_the_pinned_attack_bundle():
     for technique_id in sorted(ids):
         technique = attack.technique(technique_id)
         assert not technique.revoked and not technique.deprecated, technique_id
-    assert all(op.attack for _interface, op in OPERATIONS)
-
-
-def test_the_coercion_operations_name_the_research_they_rest_on():
-    """Which operations reach a coerced authentication is public research, not the protocol documents: each says so."""
     for _interface, op in OPERATIONS:
-        if op.op_class == "coercion":
+        if op.op_class in rc.NON_ATTACK_CLASSES:
+            assert not op.attack, op.name           # routine: the input of a rate rule, never a technique by itself
+        else:
+            assert op.attack or op.verify, op.name  # an attack class without a technique says why
+
+
+def test_coercion_is_only_the_calls_no_routine_client_makes():
+    """EFSR, DFSNM and FSRVP; the print spooler's notification is its own class (every print client sends it). Which
+    operations reach a coerced authentication is public research, not the protocol documents: each says so."""
+    documents = {interface.document for interface, op in OPERATIONS if op.op_class == "coercion"}
+    assert documents == {"MS-EFSR", "MS-DFSNM", "MS-FSRVP"}
+    for _interface, op in OPERATIONS:
+        if op.op_class in ("coercion", "print_notification", "driver_install"):
             assert op.verify, op.name
+
+
+def test_a_listed_operation_carries_a_technique_or_says_why():
+    with pytest.raises(ValueError):
+        rc.RpcOperation(1, "X", "service_control", ())
+    with pytest.raises(ValueError):
+        rc.RpcOperation(1, "X", "secure_channel", ("T1210",))
+    with pytest.raises(ValueError):
+        rc.RpcOperation(1, "X", rc.OTHER, ("T1210",))

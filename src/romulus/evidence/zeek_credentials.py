@@ -858,22 +858,27 @@ def _config_pairs(text: str, items: list[str], offsets: list[int],
 # ---- LDAP search filters -------------------------------------------------------------------------------------------
 
 # Attributes whose value is a password or a secret derived from one: RFC 4519 userPassword (2.5.4.35), RFC 3112
-# authPassword (1.3.6.1.4.1.4203.1.3.4), Active Directory's unicodePwd (1.2.840.113556.1.4.90) and dBCSPwd
-# (1.2.840.113556.1.4.55), its password histories and supplementalCredentials ([MS-ADA3]), the LAPS password attributes,
-# the gMSA msDS-ManagedPassword, and Samba's password attributes.
+# authPassword (1.3.6.1.4.1.4203.1.3.4), Active Directory's unicodePwd (1.2.840.113556.1.4.90), dBCSPwd
+# (1.2.840.113556.1.4.55), unixUserPassword and msSFU30Password (Services for UNIX), its password histories and
+# supplementalCredentials ([MS-ADA3]), the LAPS password attributes, the gMSA msDS-ManagedPassword, and Samba's password
+# attributes. A numeric OID may be written with RFC 4512's legacy "OID." prefix.
 LDAP_PASSWORD_ATTRIBUTES = frozenset({
-    "userpassword", "authpassword", "unicodepwd", "dbcspwd", "ntpwdhistory", "lmpwdhistory",
-    "supplementalcredentials", "ms-mcs-admpwd", "mslaps-password", "mslaps-encryptedpassword",
+    "userpassword", "authpassword", "unicodepwd", "dbcspwd", "unixuserpassword", "mssfu30password", "ntpwdhistory",
+    "lmpwdhistory", "supplementalcredentials", "ms-mcs-admpwd", "mslaps-password", "mslaps-encryptedpassword",
     "mslaps-encryptedpasswordhistory", "mslaps-encrypteddsrmpassword", "mslaps-encrypteddsrmpasswordhistory",
     "msds-managedpassword", "sambantpassword", "sambalmpassword", "sambapasswordhistory",
     "2.5.4.35", "1.3.6.1.4.1.4203.1.3.4", "1.2.840.113556.1.4.90", "1.2.840.113556.1.4.55",
 })
 # what every name above holds: a filter holding none of these is not scanned
 _LDAP_PASSWORD_CUES = ("pass", "pwd", "credential", "2.5.4.35", "1.3.6.1.4.1.4203.1.3.4", "1.2.840.113556.1.4.")
-# a password attribute as a whole attribute description (with its options after ";"), in lowercased text
+# a password attribute as a whole attribute description (with its options after ";"), in lowercased text, and the
+# whitespace after it
 _LDAP_PASSWORD_ATTRIBUTE = re.compile(
-    r"(?<![a-z0-9.;-])(?:" + "|".join(map(re.escape, sorted(LDAP_PASSWORD_ATTRIBUTES, key=len, reverse=True)))
-    + r")(?:;[a-z0-9-]*+)*+(?![a-z0-9.-])")
+    r"(?<![a-z0-9.;-])(?:oid\.)?(?:" + "|".join(map(re.escape, sorted(LDAP_PASSWORD_ATTRIBUTES, key=len, reverse=True)))
+    + r")(?:;[a-z0-9-]*+)*+(?![a-z0-9.-])\s*+")
+# a presence test's rest after the attribute: "=*)" (whitespace allowed) where the item closes, then the filter goes on
+# with another item, closes its enclosing one, or ends
+_LDAP_PRESENCE = re.compile(r"=\s*+\*\s*+\)(?=[()]|$)")
 LDAP_FILTER_WITHHELD = ("this LDAP search filter compares a password attribute with a value (Zeek writes a filter's "
                         "values unescaped, so where that value ends cannot be told): the filter was withheld")
 
@@ -881,14 +886,16 @@ LDAP_FILTER_WITHHELD = ("this LDAP search filter compares a password attribute w
 def scrub_ldap_filter(text: str) -> Scrubbed:
     """A search filter as Zeek writes it ("(&(objectClass=user)(userPassword=...))"), withheld whole when it compares
     a password attribute with a value: an equality, approximate, ordering, substring or extensible assertion on it (an
-    extensible one Zeek writes "(rule:attribute:=value)"). A presence test ("(userPassword=*)") sends no value and is
-    kept, as is every filter that names no such attribute."""
+    extensible one Zeek writes "(attribute:rule:=value)"), whitespace around the operator allowed. A presence test sends
+    no value and is kept, but only exactly "(attribute=*)", opened by its own "(" and closed where the next item begins
+    or the enclosing one closes ("(userPassword=*)x)" is a value); so is every filter that names no such attribute."""
     lowered = text.lower()
     if not any(cue in lowered for cue in _LDAP_PASSWORD_CUES):
         return Scrubbed(text)
     for found in _LDAP_PASSWORD_ATTRIBUTE.finditer(lowered):
-        end = found.end()
-        if lowered.startswith("=*", end) and (end + 2 == len(lowered) or lowered[end + 2] == ")"):
+        start, end = found.start(), found.end()
+        opened = start > 0 and lowered[start - 1] == "("
+        if opened and _LDAP_PRESENCE.match(lowered, end):
             continue                        # a presence test: no value
         if lowered.startswith(("=", ":", "~=", ">=", "<="), end):
             return Scrubbed(None, redacted=True, caveats=[LDAP_FILTER_WITHHELD])

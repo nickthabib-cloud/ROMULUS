@@ -9,18 +9,33 @@ same table, never a table of its own.
 
 Classes (the operation's effect as its protocol document defines it, never the outcome of the call):
 
-- ``service_create``, ``service_start``, ``service_modify``: the Service Control Manager creates, starts, or changes a
-  service's configuration ([MS-SCMR]).
+- ``service_create``, ``service_start``, ``service_modify``, ``service_control``, ``service_delete``: the Service
+  Control Manager creates, starts, changes the configuration of, sends a control (stop, pause) to, or deletes a
+  service ([MS-SCMR]).
 - ``task_register``: a scheduled task or AT job is registered, run or enabled, or a task's account is set ([MS-TSCH]).
 - ``wmi_dcom``: WMI calls and DCOM activation ([MS-WMI], [MS-DCOM]).
 - ``replication``: directory replication between domain controllers ([MS-DRSR]).
+- ``sid_history``: SID history is added to an account ([MS-DRSR] IDL_DRSAddSidHistory).
 - ``enumeration``: accounts, groups, sessions, shares, trusts or the password policy are listed or looked up ([MS-SAMR],
   [MS-LSAT], [MS-LSAD], [MS-SRVS], [MS-NRPC], [MS-WKST], [MS-SCMR], [MS-DRSR]).
-- ``coercion``: an operation that takes a path or name the server then authenticates to (EFSR, DFSNM, FSRVP, the print
-  spooler's change notification), the forced-authentication shape.
+- ``coercion``: an operation that takes a path or name the server then authenticates to, and that no routine client
+  sends to another host (EFSR, DFSNM, FSRVP): the forced-authentication shape.
+- ``print_notification``: the print spooler's remote change notification ([MS-RPRN]
+  RpcRemoteFindFirstPrinterChangeNotification(Ex)). The server opens a connection back to the client name the call
+  gives, so it can force authentication as ``coercion`` does, but every print client sends it to its print server:
+  it is a class of its own, never coercion by itself.
+- ``driver_install``: a printer driver is installed on the server ([MS-RPRN] RpcAddPrinterDriverEx, [MS-PAR]
+  RpcAsyncAddPrinterDriver), the call the PrintNightmare exploitation makes.
 - ``remote_registry``: the remote registry ([MS-RRP]).
+- ``remote_shutdown``: the host is told to shut down or restart ([MS-RRP] BaseInitiateSystemShutdown(Ex), [MS-RSP]).
 - ``account_change``: an account is created, deleted, changed, given a password, or added to a group ([MS-SAMR]).
+- ``account_rights_change``: an LSA account is created or given privileges or user rights ([MS-LSAD]).
 - ``credential_access``: LSA secrets are read ([MS-LSAD]).
+- ``secret_write``: an LSA secret is set or private data stored ([MS-LSAD]).
+- ``secure_channel``: Netlogon's secure-channel setup and machine-password calls ([MS-NRPC] NetrServerReqChallenge,
+  NetrServerAuthenticate*, NetrServerPasswordSet*). Not an attack class: every domain member makes these calls to its
+  domain controllers as routine. It exists so that a rule over their rate (the Zerologon shape: many authentication
+  attempts in a short time) reads the one table; it carries no technique.
 - ``other``: every operation and interface this table does not list. An unknown endpoint, UUID, operation or opnum is
   ``other``, never a guess.
 
@@ -37,14 +52,19 @@ drsuapi 25-30, samr 73, netdfs 23-25) and write ``unknown-<opnum>``; an interfac
 ``unknown-<uuid>``. Both forms resolve here by number.
 
 ATT&CK ids are Enterprise 20 technique ids. ``verify`` names what was not confirmed against a primary source: the
-operation's class or its technique comes from public research on the technique, not from the protocol document.
+operation's class or its technique comes from public research on the technique, not from the protocol document, or no
+technique fits.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-CLASSES = ("service_create", "service_start", "service_modify", "task_register", "wmi_dcom", "replication",
-           "enumeration", "coercion", "remote_registry", "account_change", "credential_access", "other")
+CLASSES = ("service_create", "service_start", "service_modify", "service_control", "service_delete", "task_register",
+           "wmi_dcom", "replication", "sid_history", "enumeration", "coercion", "print_notification",
+           "driver_install", "remote_registry", "remote_shutdown", "account_change", "account_rights_change",
+           "credential_access", "secret_write", "secure_channel", "other")
+# classes that are not an attack's on their own: their operations carry no technique
+NON_ATTACK_CLASSES = frozenset({"secure_channel"})
 OTHER = "other"
 
 
@@ -59,6 +79,10 @@ class RpcOperation:
     def __post_init__(self):
         if self.op_class not in CLASSES or self.op_class == OTHER:
             raise ValueError(f"{self.name}: a listed operation has a class other than {OTHER!r}")
+        if self.op_class in NON_ATTACK_CLASSES and self.attack:
+            raise ValueError(f"{self.name}: a non-attack class carries no technique")
+        if not self.attack and self.op_class not in NON_ATTACK_CLASSES and not self.verify:
+            raise ValueError(f"{self.name}: an attack class without a technique must say why")
 
 
 @dataclass(frozen=True)
@@ -90,8 +114,11 @@ def _ops(op_class: str, attack: tuple[str, ...], spec: str, verify: str = "") ->
     return tuple(out)
 
 
+_DRIVER_RESEARCH = ("a driver install is the PrintNightmare exploitation's call (remote code execution and privilege "
+                    "escalation as SYSTEM); T1547.012 names print processors, the nearest technique to a print "
+                    "driver's DLL")
 _COERCION_RESEARCH = ("which operations reach the coerced authentication is public research (PetitPotam, DFSCoerce, "
-                      "ShadowCoerce, the printer bug), not the protocol document")
+                      "ShadowCoerce), not the protocol document")
 
 INTERFACES: tuple[RpcInterface, ...] = (
     RpcInterface("367abb81-9844-35f1-ad32-98f038001003", ("svcctl",), "MS-SCMR", "Service Control Manager Remote", (
@@ -102,6 +129,10 @@ INTERFACES: tuple[RpcInterface, ...] = (
               "11:ChangeServiceConfigW 23:ChangeServiceConfigA 36:ChangeServiceConfig2A 37:ChangeServiceConfig2W"),
         *_ops("enumeration", ("T1007",),
               "14:EnumServicesStatusW 26:EnumServicesStatusA 41:EnumServicesStatusExA 42:EnumServicesStatusExW"),
+        *_ops("service_control", ("T1489",), "1:ControlService 50:ControlServiceExA 51:ControlServiceExW",
+              "a control can stop, pause or interrogate a service; dce_rpc.log does not say which"),
+        *_ops("service_delete", ("T1489",), "2:DeleteService",
+              "a remote service is also deleted after its own run (the PsExec pattern), which is not T1489"),
     )),
     RpcInterface("1ff70682-0a51-30e8-076d-740be8cee98b", ("atsvc",), "MS-TSCH", "ATSvc (AT jobs)",
                  _ops("task_register", ("T1053.002",), "0:NetrJobAdd")),
@@ -133,6 +164,7 @@ INTERFACES: tuple[RpcInterface, ...] = (
               "the technique of these replication calls (a rogue domain controller pushing changes) is ATT&CK's "
               "description of DCShadow, not the protocol document"),
         *_ops("enumeration", ("T1018",), "16:DRSDomainControllerInfo"),
+        *_ops("sid_history", ("T1134.005",), "20:DRSAddSidHistory"),
     )),
     RpcInterface("12345778-1234-abcd-ef00-0123456789ac", ("samr",), "MS-SAMR", "Security Account Manager Remote", (
         *_ops("enumeration", ("T1087.002",),
@@ -163,6 +195,10 @@ INTERFACES: tuple[RpcInterface, ...] = (
               "13:LsarEnumerateTrustedDomains 26:LsarQueryInfoTrustedDomain 39:LsarQueryTrustedDomainInfo "
               "48:LsarQueryTrustedDomainInfoByName 50:LsarEnumerateTrustedDomainsEx 73:LsarQueryForestTrustInformation"),
         *_ops("credential_access", ("T1003.004",), "30:LsarQuerySecret 43:LsarRetrievePrivateData"),
+        *_ops("account_rights_change", ("T1098",),
+              "10:LsarCreateAccount 19:LsarAddPrivilegesToAccount 37:LsarAddAccountRights"),
+        *_ops("secret_write", (), "29:LsarSetSecret 42:LsarStorePrivateData",
+              "no ATT&CK technique describes writing an LSA secret: none is given"),
     )),
     RpcInterface("4b324fc8-1670-01d3-1278-5a47bf6ee188", ("srvsvc",), "MS-SRVS", "Server Service Remote", (
         *_ops("enumeration", ("T1135",), "15:NetrShareEnum 16:NetrShareGetInfo 36:NetrShareEnumSticky"),
@@ -170,12 +206,14 @@ INTERFACES: tuple[RpcInterface, ...] = (
         *_ops("enumeration", ("T1082",), "21:NetrServerGetInfo"),
         *_ops("enumeration", ("T1124",), "28:NetrRemoteTOD"),
     )),
-    RpcInterface("12345678-1234-abcd-ef00-01234567cffb", ("netlogon",), "MS-NRPC", "Netlogon Remote",
-                 _ops("enumeration", ("T1482",),
-                      "19:NetrEnumerateTrustedDomains 36:NetrEnumerateTrustedDomainsEx 40:DsrEnumerateDomainTrusts "
-                      "43:DsrGetForestTrustInformation 44:NetrGetForestTrustInformation"),
-                 note="the secure-channel calls (NetrServerReqChallenge, NetrServerAuthenticate3, "
-                      "NetrServerPasswordSet2) are every domain member's routine and stay other"),
+    RpcInterface("12345678-1234-abcd-ef00-01234567cffb", ("netlogon",), "MS-NRPC", "Netlogon Remote", (
+        *_ops("enumeration", ("T1482",),
+              "19:NetrEnumerateTrustedDomains 36:NetrEnumerateTrustedDomainsEx 40:DsrEnumerateDomainTrusts "
+              "43:DsrGetForestTrustInformation 44:NetrGetForestTrustInformation"),
+        *_ops("secure_channel", (),
+              "4:NetrServerReqChallenge 5:NetrServerAuthenticate 6:NetrServerPasswordSet 15:NetrServerAuthenticate2 "
+              "26:NetrServerAuthenticate3 30:NetrServerPasswordSet2"),
+    ), note="secure_channel is every domain member's routine: it is the input of a rate rule, not a finding"),
     RpcInterface("6bffd098-a112-3610-9833-46c3f87e345a", ("wkssvc",), "MS-WKST", "Workstation Service Remote", (
         *_ops("enumeration", ("T1033",), "2:NetrWkstaUserEnum"),
         *_ops("enumeration", ("T1082",), "0:NetrWkstaGetInfo"),
@@ -210,11 +248,18 @@ INTERFACES: tuple[RpcInterface, ...] = (
                  "File Server Remote VSS", _ops("coercion", ("T1187",), "8:IsPathSupported 9:IsPathShadowCopied",
                                                 _COERCION_RESEARCH)),
     RpcInterface("12345678-1234-abcd-ef00-0123456789ab", ("spoolss",), "MS-RPRN", "Print System Remote",
-                 _ops("coercion", ("T1187",),
-                      "62:RpcRemoteFindFirstPrinterChangeNotification "
-                      "65:RpcRemoteFindFirstPrinterChangeNotificationEx", _COERCION_RESEARCH),
+                 (*_ops("print_notification", ("T1187",),
+                        "62:RpcRemoteFindFirstPrinterChangeNotification "
+                        "65:RpcRemoteFindFirstPrinterChangeNotificationEx",
+                        "the printer bug: these calls can force authentication, and every print client makes them"),
+                  *_ops("driver_install", ("T1068", "T1210", "T1547.012"), "89:RpcAddPrinterDriverEx",
+                        _DRIVER_RESEARCH)),
                  note="Zeek does not log RpcSplOpenPrinter or RpcClosePrinter by default "
                       "(DCE_RPC::ignored_operations)"),
+    RpcInterface("76f03f96-cdfd-44fc-a22c-64950a001209", ("IRemoteWinspool",), "MS-PAR",
+                 "Print System Asynchronous Remote",
+                 _ops("driver_install", ("T1068", "T1210", "T1547.012"), "39:RpcAsyncAddPrinterDriver",
+                      _DRIVER_RESEARCH)),
     RpcInterface("338cd001-2244-31f1-aaaa-900038001003", ("winreg",), "MS-RRP", "Windows Remote Registry", (
         *_ops("remote_registry", ("T1012",),
               "0:OpenClassesRoot 1:OpenCurrentUser 2:OpenLocalMachine 3:OpenPerformanceData 4:OpenUsers "
@@ -228,9 +273,14 @@ INTERFACES: tuple[RpcInterface, ...] = (
               "35:BaseRegDeleteKeyEx"),
         *_ops("remote_registry", ("T1003.002", "T1003.004"), "20:BaseRegSaveKey 31:BaseRegSaveKeyEx",
               "a saved hive is credential material only when it is SAM or SECURITY, which dce_rpc.log does not name"),
+        *_ops("remote_shutdown", ("T1529",), "24:BaseInitiateSystemShutdown 30:BaseInitiateSystemShutdownEx"),
     ), note="Zeek does not log BaseRegCloseKey, BaseRegGetVersion, BaseRegOpenKey, BaseRegQueryValue, "
             "BaseRegDeleteKeyEx, OpenLocalMachine, BaseRegEnumKey or OpenClassesRoot by default "
-            "(DCE_RPC::ignored_operations); the shutdown calls (24, 25, 30) are not registry access and stay other"),
+            "(DCE_RPC::ignored_operations); an aborted shutdown (25) stays other"),
+    RpcInterface("894de0c0-0d55-11d3-a322-00c04fa321a1", ("InitShutdown",), "MS-RSP", "Remote Shutdown (InitShutdown)",
+                 _ops("remote_shutdown", ("T1529",), "0:BaseInitiateShutdown 2:BaseInitiateShutdownEx")),
+    RpcInterface("d95afe70-a6d5-4259-822e-2c84da1ddb0d", ("WindowsShutdown",), "MS-RSP",
+                 "Remote Shutdown (WindowsShutdown)", _ops("remote_shutdown", ("T1529",), "0:WsdrInitiateShutdown")),
     RpcInterface("3919286a-b10c-11d0-9ba8-00c04fd92ef5", ("dssetup",), "MS-DSSP", "Directory Services Setup", (),
                  note="listed so the UUID is named correctly (it is not an LSA interface); no operation classified"),
 )

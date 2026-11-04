@@ -26,10 +26,15 @@ table (rpc_catalog); kerberos `kerberos_tx`; ntlm `ntlm_tx`; rdp and rfb `remote
 `ldap_tx`; dhcp `address_assignment`; software and the known_* logs `asset_observed` (context: an asset Zeek saw).
 These are the sensor's view of a protocol exchange, never a host's record of a logon: where a value means what a
 Windows auth event's typed field means, it is typed under that name and type (`auth.target_account`, the account key;
-`auth.encryption_type`, the ticket's encryption type number; `auth.status`, a KRB-ERROR's code; `source.hostname`, the
-workstation an NTLM client names), and every other value under the protocol's own names (`kerberos.service` is the
-service principal, where a Windows event's `auth.service_name` is an account name). An authentication's result (Kerberos
-success, NTLM's GSS-API result, VNC's) is the event's outcome.
+`user.name` and `user.domain`, the account's bare name and domain, casefolded; `auth.encryption_type`, the ticket's
+encryption type number; `auth.status`, the KDC's error code for an AS or TGS request; `source.hostname`, the workstation
+an NTLM client names), and every other value under the protocol's own names (`kerberos.service` is the service
+principal, where a Windows event's `auth.service_name` is an account name). `auth.target_account` is built as the
+Windows events build a key from a name, but it is not a join key across sources: a Windows event keys an account by its
+SID where it has one, and names its domain by NetBIOS name where Kerberos names the realm; a join reads `user.name` and
+`user.domain`. An authentication's result (a KDC's answer to an AS or TGS request, NTLM's GSS-API result, VNC's) is the
+event's outcome; a Kerberos error Zeek saw with no such request (an application server's, inside GSSAPI) is
+`kerberos.error_code` with `kerberos.error_source` "application_server", and names no account.
 
 Secrets. Credential values (Malcolm's `related.password`, `url.password`, `url.full` and `post_password_*`, Zeek's
 own `password` columns, the argument of a credential command (FTP PASS/ACCT/ADAT, IRC PASS/OPER/AUTHENTICATE and JOIN
@@ -530,19 +535,11 @@ def _read_strings(value, shape):
     return kept or None
 
 
-def _read_ip1(value, shape):
-    """An address, which a shipper may have written as a one-element list (Elastic's host.ip)."""
-    if isinstance(value, list) and len(value) == 1:
-        value = value[0]
-    return _read_ip(value, shape)
-
-
 READERS = {"ip": _read_ip, "port": lambda v, s: _read_count(v, s, 65535), "count": _read_count,
            "seconds": _read_seconds, "text": _read_text, "flag": _read_flag, "services": _read_services,
            "names": _read_names, "mac": _read_mac, "list": _read_vector, "text1": _read_text1,
            "count_text": _read_count_text, "time": _read_time, "hex": _read_hex, "hexes": _read_hexes,
-           "addresses": _read_addresses, "seconds_list": _read_seconds_list, "strings": _read_strings,
-           "ip1": _read_ip1}
+           "addresses": _read_addresses, "seconds_list": _read_seconds_list, "strings": _read_strings}
 # divisors to seconds (a division of two exact integers is correctly rounded; a product with 1e-9 is not)
 _UNITS = {"ns": 1e9, "ms": 1e3}
 
@@ -1021,6 +1018,8 @@ def _analyzer(hit: dict, record: ZeekRecord, declared_sensor: str | None) -> Typ
         identity = [RawRef(target=f"zeek:{host or ''}:{log.name}",
                            native_id=f"{key}|{when.isoformat()}|{sequence}|{_signature(f)}")]
     success = f.get(_SUCCESS_FIELDS.get(log.name, ""))
+    if log.name == "kerberos" and not _kdc_record(f):
+        success = None                              # an application server's result is not the account's outcome
     outcome = Outcome.unknown if success is None else Outcome.success if success.value else Outcome.failure
     return TypedEvent(id=event_id(log.family, identity, ZEEK_NORMALIZER), family=log.family, ts=when, host=host,
                       outcome=outcome, fields=f, raw=[ref], normalizer=ZEEK_NORMALIZER, caveats=caveats)
@@ -1582,20 +1581,54 @@ def _rpc(f, reader, log, caveats, guard):
 
 def _account_key(name: str, domain: str) -> str:
     """An account as the Windows auth events key one by name: "name:" and domain\\name (the name alone without a
-    domain), casefolded."""
+    domain), casefolded. Not a join key across sources: a Windows event keys the same account by its SID where it has
+    one, and names its domain by NetBIOS name where Kerberos names the realm; `user.name` and `user.domain` are the bare
+    forms a join reads."""
     joined = f"{domain}\\{name}" if domain and domain not in ("-", ".") else name
     return f"name:{joined.casefold()}"
 
 
+def _account(f: dict[str, FieldValue], name: str, domain: str, origin: str) -> None:
+    """The account an authentication names: its key (`auth.target_account`) and its bare name and domain, casefolded."""
+    f["auth.target_account"] = fv(_account_key(name, domain), origin)
+    f["user.name"] = fv(name.casefold(), origin)
+    if domain and domain not in ("-", "."):
+        f["user.domain"] = fv(domain.casefold(), origin)
+
+
+# the request types whose replies and errors are the KDC's (AS-REQ, TGS-REQ)
+_KDC_REQUESTS = frozenset({"AS", "TGS"})
+def _kdc_record(f: dict[str, FieldValue]) -> bool:
+    request = f.get("kerberos.request_type")
+    return request is not None and request.value.strip().upper() in _KDC_REQUESTS
+
+
+KERBEROS_NOT_KDC = ("Zeek saw no AS or TGS request for this Kerberos record (as for an AP exchange's error inside "
+                    "GSSAPI): its result is read as an application server's, not as a KDC's answer for the account")
+
+
 def _kerberos(f, reader, log, caveats, guard):
     """The ticket's encryption type number, the KRB-ERROR's code, and the client principal's name, realm and account.
-    Zeek writes the client "name/realm", or the realm alone for a KRB-ERROR that names no client."""
+    Zeek writes the client "name/realm", or the realm alone for a KRB-ERROR that names no client. Only a record of an
+    AS or TGS request is the KDC's answer: its error code is `auth.status`, its result the event's outcome, and the
+    client its account. Any other record (Zeek's Kerberos analyzer also reads the AP exchange inside GSSAPI, whose
+    errors an application server sends) types its code as `kerberos.error_code` with `kerberos.error_source`
+    "application_server", and names no account."""
+    kdc = _kdc_record(f)
     cipher = f.get("kerberos.cipher")
     if cipher is not None and (number := kerberos_etype(cipher.value)) is not None:
         f["auth.encryption_type"] = fv(number, f"{cipher.origin}#derived:kerberos-etype")
     error = f.get("kerberos.error_msg")
     if error is not None and error.value.strip() in KERBEROS_ERRORS:
-        f["auth.status"] = fv(KERBEROS_ERRORS[error.value.strip()], f"{error.origin}#derived:kerberos-error-code")
+        code = fv(KERBEROS_ERRORS[error.value.strip()], f"{error.origin}#derived:kerberos-error-code")
+        f["kerberos.error_code"] = code
+        if kdc:
+            f["auth.status"] = code
+    success = f.get("kerberos.success")
+    failed = error if error is not None else success if success is not None and success.value is False else None
+    if not kdc and failed is not None:
+        f["kerberos.error_source"] = fv("application_server", f"{failed.origin}#derived:no-kdc-request")
+        caveats.append(KERBEROS_NOT_KDC)
     client = f.get("kerberos.client")
     if client is None:
         return
@@ -1604,7 +1637,8 @@ def _kerberos(f, reader, log, caveats, guard):
     origin = f"{client.origin}#derived:principal"
     if name:
         f["kerberos.client_name"] = fv(name, origin)
-        f["auth.target_account"] = fv(_account_key(name, realm), origin)
+        if kdc:
+            _account(f, name, realm, origin)
     if realm:
         f["kerberos.client_realm"] = fv(realm, origin)
 
@@ -1620,8 +1654,7 @@ def _ntlm(f, reader, log, caveats, guard):
     if user is not None and user.value.strip():
         parts = [user] + ([domain] if domain is not None else [])
         origin = "+".join([parts[0].origin, *(_path(value) for value in parts[1:])])
-        f["auth.target_account"] = fv(_account_key(user.value.strip(), domain.value.strip() if domain else ""),
-                                      f"{origin}#derived:account")
+        _account(f, user.value.strip(), domain.value.strip() if domain else "", f"{origin}#derived:account")
 
 
 def _rdp(f, reader, log, caveats, guard):
@@ -1639,14 +1672,16 @@ _SIMPLE_BIND = "bind simple"
 _SASL_BIND = "bind sasl"
 _BIND = "bind"
 _SICILY_BINDS = frozenset({"sicily_negotiate", "sicily_response"})
+# the binds whose argument Zeek writes as a mechanism (SASL) or the NTLM signature (Sicily), never a password
+_MECHANISM_BINDS = frozenset({"sasl", *_SICILY_BINDS})
 # SASL mechanisms that send the password itself (RFC 4616 PLAIN; the LOGIN mechanism)
 _SASL_CLEARTEXT = frozenset({"PLAIN", "LOGIN"})
 
 
 def _ldap(f, reader, log, caveats, guard):
-    """A bind's argument is withheld when the bind is simple (its argument is the password, or Zeek's "REDACTED" for
-    it), when its kind was not recorded, and when the operation cannot be read; a SASL bind's argument (its mechanism)
-    is kept. A search filter that compares a password attribute with a value is withheld. Then each one-element list
+    """An argument is kept only where Zeek writes a mechanism there: a SASL bind's (its mechanism) or a Sicily bind's
+    (the NTLM signature). It is withheld for a simple bind (its argument is the password, or Zeek's "REDACTED" for it),
+    a bind whose kind was not recorded, any other operation, and an operation that cannot be read. A search filter that compares a password attribute with a value is withheld. Then each one-element list
     gives its scalar, and a bind its kind."""
     if log.name == "ldap":
         _ldap_arguments(f, reader, log, caveats, guard)
@@ -1690,10 +1725,12 @@ def _ldap_arguments(f, reader, log, caveats, guard):
             guard.present.append(f"{written}#simple-bind")
             guard.withheld = True
         return
-    if _BIND in names and written is not None:
-        # a bind whose kind Zeek did not record (it saw the response alone): it may have been simple
+    if written is not None and not all(_bind_kind(name) in _MECHANISM_BINDS for name in names):
+        # Zeek writes an argument only for a bind: kept only where it is a SASL mechanism or the NTLM signature; a bind
+        # whose kind Zeek did not record (it saw the response alone) may have been simple, and an argument beside any
+        # other operation is not one Zeek's script writes
         f.pop("ldap.arguments", None)
-        guard.unknown.append(f"{written}#bind-of-unknown-kind")
+        guard.unknown.append(f"{written}#argument-of-{'unknown-bind' if _BIND in names else 'other-operation'}")
         guard.withheld = True
         if ZEEK_ARGUMENT_WITHHELD not in caveats:
             caveats.append(ZEEK_ARGUMENT_WITHHELD)

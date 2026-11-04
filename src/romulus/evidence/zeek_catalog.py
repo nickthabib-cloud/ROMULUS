@@ -96,10 +96,9 @@ SHAPE_NAMES = {MALCOLM: "Malcolm", ELASTIC: "Elastic", SECURITY_ONION: "Security
 # "time" an absolute time (epoch seconds, or an ISO-8601 time a shipper converted it to); "hex" and "hexes" lowercase
 # digests; "addresses" a set or vector of addresses in the order written; "seconds_list" a vector of intervals;
 # "strings" one string or a list of them (a field Zeek 6.1 wrote as a set or vector and later Zeek as one string), a
-# string never split, since its text can hold commas (a distinguished name); "ip1" an address a shipper may have
-# written as a one-element list.
+# string never split, since its text can hold commas (a distinguished name).
 KINDS = frozenset({"ip", "port", "count", "seconds", "text", "flag", "services", "names", "mac", "list", "text1",
-                   "count_text", "time", "hex", "hexes", "addresses", "seconds_list", "strings", "ip1"})
+                   "count_text", "time", "hex", "hexes", "addresses", "seconds_list", "strings"})
 
 
 @dataclass(frozen=True, eq=False)
@@ -1095,6 +1094,11 @@ DCE_RPC = _log("dce_rpc", "rpc_tx", (
        elastic=("zeek.dce_rpc.operation",), security_onion=("dce_rpc.operation",), plain=("operation",)),
 ), doc="base/protocols/dce-rpc/main.zeek", transport="tcp", key=("zeek.uid",))
 
+# The account a kerberos or ntlm row names (zeek.py) is typed as auth.target_account, the key Windows auth events build
+# from a name, and as the bare user.name and user.domain. auth.target_account is not a join key across sources: a
+# Windows event keys an account by its SID where it has one, and its domain is a NetBIOS name where Kerberos writes the
+# realm; a join reads user.name and user.domain.
+#
 # kerberos.log has no proto and Kerberos runs over UDP and TCP; Elastic's pipeline sets network.transport "tcp" on every
 # document and computes its Community ID from that, so Elastic's Community ID is not read (Malcolm computes none for
 # kerberos: logstash/maps/zeek_log_transport.yaml leaves it out as either transport)
@@ -1362,11 +1366,19 @@ DHCP = _log("dhcp", "address_assignment", (
 ), doc="base/protocols/dhcp/main.zeek", transport="udp", key=("zeek.uids",))
 
 # The asset logs name no connection: a host, a service or a certificate Zeek saw, or software it identified. Malcolm
-# writes the asset's address to source.ip (known_hosts, known_certs, software) or destination.ip (known_services);
-# Elastic to host.ip (a one-element list) and server.ip.
+# writes the asset's address to source.ip (known_hosts, known_certs, software) or destination.ip (known_services).
+# Elastic renames it to host.ip (and copies it to server.ip), the field where Elastic Agent writes the shipper's own
+# addresses: that list cannot be told from the sensor's, so Elastic's asset address is read only from the column as
+# Zeek named it (zeek.<stream>.host, json.host) or from the Zeek line kept in event.original.
+
+
+def _elastic_asset(stream: str) -> tuple[str, ...]:
+    return (f"zeek.{stream}.host", "json.host", "original:host")
+
+
 SOFTWARE = _log("software", "asset_observed", (
-    _f("asset.ip", "host", "ip1", malcolm=("source.ip",), elastic=("host.ip",), security_onion=("source.ip",),
-       plain=("host",)),
+    _f("asset.ip", "host", "ip", malcolm=("source.ip",), elastic=_elastic_asset("software"),
+       security_onion=("source.ip",), plain=("host",)),
     _f("asset.port", "host_p", "port", malcolm=("source.port",), elastic=("zeek.software.host_p",),
        security_onion=("source.port",), plain=("host_p",)),
     _f("software.type", "software_type", "text", malcolm=("zeek.software.software_type",),
@@ -1388,11 +1400,12 @@ SOFTWARE = _log("software", "asset_observed", (
 ), doc="base/frameworks/software/main.zeek", key=("asset.ip",))
 
 KNOWN_HOSTS = _log("known_hosts", "asset_observed", (
-    _f("asset.ip", "host", "ip1", malcolm=("source.ip",), elastic=("host.ip",), plain=("host",)),
+    _f("asset.ip", "host", "ip", malcolm=("source.ip",), elastic=_elastic_asset("known_hosts"), plain=("host",)),
 ), absent=_NO_SO_KNOWN, renamed_only=(ELASTIC,), doc="policy/protocols/conn/known-hosts.zeek", key=("asset.ip",))
 
 KNOWN_SERVICES = _log("known_services", "asset_observed", (
-    _f("asset.ip", "host", "ip1", malcolm=("destination.ip",), elastic=("server.ip", "host.ip"), plain=("host",)),
+    _f("asset.ip", "host", "ip", malcolm=("destination.ip",),
+       elastic=_elastic_asset("known_services"), plain=("host",)),
     _f("asset.port", "port_num", "port", malcolm=("destination.port",), elastic=("server.port",),
        plain=("port_num",)),
     _f("asset.transport", "port_proto", "text", malcolm=("network.transport",), elastic=("network.transport",),
@@ -1403,7 +1416,7 @@ KNOWN_SERVICES = _log("known_services", "asset_observed", (
     key=("asset.ip",), sequence=("asset.port",))
 
 KNOWN_CERTS = _log("known_certs", "asset_observed", (
-    _f("asset.ip", "host", "ip1", malcolm=("source.ip",), elastic=("server.ip", "host.ip"), plain=("host",)),
+    _f("asset.ip", "host", "ip", malcolm=("source.ip",), elastic=_elastic_asset("known_certs"), plain=("host",)),
     _f("asset.port", "port_num", "port", malcolm=("source.port",), elastic=("server.port",), plain=("port_num",)),
     _f("x509.subject", "subject", "text", malcolm=("zeek.known_certs.subject",),
        elastic=("tls.server.x509.subject.distinguished_name", "tls.server.subject"), plain=("subject",)),

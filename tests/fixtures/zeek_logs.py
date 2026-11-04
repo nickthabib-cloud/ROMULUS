@@ -1314,8 +1314,8 @@ def malformed_rows() -> list[tuple[str, dict, str]]:
     mutated("software-major-text", "plain", SOFTWARE, lambda s: s.update({"version.major": "eight"}), "version.major")
     mutated("known-services-port-range", "plain", KNOWN_SERVICES, lambda s: s.update(port_num=70000), "port_num")
     mutated("known-certs-serial-not-hex", "plain", KNOWN_CERTS, lambda s: s.update(serial="not hex"), "serial")
-    mutated("known-hosts-two-addresses", "elastic", KNOWN_HOSTS,
-            lambda s: s["host"].update(ip=["10.0.0.5", "10.0.0.6"]), "host.ip")
+    mutated("known-hosts-two-addresses", "plain", KNOWN_HOSTS, lambda s: s.update(host=["10.0.0.5", "10.0.0.6"]),
+            "host")
     return rows
 
 
