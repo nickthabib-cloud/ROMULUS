@@ -266,6 +266,27 @@ _ELASTIC_ONLY = frozenset(name for log in ZEEK_LOGS for name in log.names.get(EL
     name for log in ZEEK_LOGS for name in log.names.get(SECURITY_ONION, ()))
 
 
+def _may_be_zeek(src) -> bool:
+    """Whether a record carries a field by which `zeek_record` can read it as Zeek's: an `event.provider` or
+    `event.module` of "zeek", or a `zeek.*` `event.dataset` or `data_stream.dataset`. Every path of `zeek_record` that
+    returns a record needs one of them, so any other record (every Suricata, Arkime and host record) is not Zeek, and
+    is told so without the full recognition."""
+    if not isinstance(src, dict):
+        return False
+    event = src.get("event")
+    if isinstance(event, dict):
+        if event.get("provider") == "zeek" or event.get("module") == "zeek":
+            return True
+        dataset = event.get("dataset")
+        if isinstance(dataset, str) and dataset.startswith("zeek."):
+            return True
+    stream = src.get("data_stream")
+    if isinstance(stream, dict):
+        dataset = stream.get("dataset")
+        return isinstance(dataset, str) and dataset.startswith("zeek.")
+    return False
+
+
 def zeek_record(src: dict) -> ZeekRecord | None:
     """The Zeek shape of an indexed record, from shipper-written fields only, or None for a record that is not Zeek.
 
@@ -289,6 +310,8 @@ def zeek_record(src: dict) -> ZeekRecord | None:
     is not Zeek; a dotted dataset that is not `zeek.*` is not a Zeek log name, and the record keeps the path it took
     before Zeek was read. These shippers write the fields as objects, which is how every other normalizer reads
     `event.dataset` too. Plain Zeek JSON carries no such field: a site declares it, and `plain_record` reads it."""
+    if not _may_be_zeek(src):
+        return None
     provider = _nested(src, _PROVIDER)
     if provider in ("suricata", "arkime"):
         return None

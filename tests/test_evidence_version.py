@@ -63,8 +63,9 @@ ZEEK_EVIDENCE_FILES = ("certificates.py", "community.py", "rpc_catalog.py", "zee
                        "zeek_credentials.py")
 PINNED_ZEEK = {
     # unreleased: re-pinned when a Zeek record's raw digest became the digest of its stored form, credentials masked
-    # (scrub_zeek_source); typed values are unchanged
-    "zeek-ecs@1": "56cb0e7b2387cdf679d95d35976e01ef9e691c00b7689093c8b0afc8ea35cc02",
+    # (scrub_zeek_source); typed values are unchanged. Re-pinned again when zeek_record gained a precheck that turns
+    # away a record carrying no Zeek marker before the full recognition: every recognition result is unchanged.
+    "zeek-ecs@1": "a0913ccf746ede45a5f39255d94aca832da9a95dbb3276729f53bc1be6c4d085",
 }
 # The packet stage's normalizer: HTTP bodies rebuilt by TShark -> http_body events, and TCP connections rebuilt
 # from per-segment payload -> tcp_stream events (with the shell analysis and the tables it reads).
