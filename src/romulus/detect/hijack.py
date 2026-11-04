@@ -46,8 +46,9 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, argv_incomplete, pf
-from romulus.detect.bounded import HOT_COUNT, KeyedStore, RecentIds
-from romulus.detect.correlation import StageMissing, boot_of, boots_conflict
+from romulus.detect.bounded import HOT_COUNT, CitationUnavailable, KeyedStore, RecentIds
+from romulus.detect.citing import citation_group
+from romulus.detect.correlation import boot_of, boots_conflict
 from romulus.detect.host import (
     _FLAG_ONLY,
     DAEMON,
@@ -756,7 +757,7 @@ class NonRootWriteRootExecutedFile(Playbook):
         unique = sorted(set(ids))
         loaded = self.load(unique)
         if len(loaded) != len(unique):
-            raise StageMissing(f"{self.id}: {len(unique) - len(loaded)} cited event(s) absent from the stage")
+            raise CitationUnavailable(f"{self.id}: {len(unique) - len(loaded)} cited event(s) absent from the stage")
         return {event.id: event for event in loaded}
 
     def finalize(self):
@@ -769,25 +770,49 @@ class NonRootWriteRootExecutedFile(Playbook):
                 by_account[write.account].append(write)
             for account in sorted(by_account):
                 actors = sorted(by_account[account], key=lambda w: (w.ts, w.event_id))
-                match = self._finding(key[0], key[1], account, [w for w in actors if not w.kernel],
-                                      [w for w in actors if w.kernel], state)
-                if match is None:
-                    continue
-                if getattr(match, "own_path", None):
-                    own[(key[0], account)].append((match.own_path, match))
-                else:
-                    out.append(match)
+                with citation_group(self, out, (*key, account), actors):
+                    match = self._finding(key[0], key[1], account, [w for w in actors if not w.kernel],
+                                          [w for w in actors if w.kernel], state)
+                    if match is None:
+                        continue
+                    if getattr(match, "own_path", None):
+                        own[(key[0], account)].append((match.own_path, match))
+                    else:
+                        out.append(match)
         # The same account name elevating its own files under the same layout on several hosts (configuration
         # management run against each of them) is one lead; a host whose layout differs keeps its own.
         layouts: dict[tuple[str, frozenset[str]], list[str]] = defaultdict(list)
         for host, account in sorted(own):
             layouts[(account, _layout(own[(host, account)]))].append(host)
         for (account, layout), hosts in sorted(layouts.items(), key=lambda kv: (kv[0][0], sorted(kv[0][1]))):
-            if len(hosts) == 1:
-                out.append(self._own_group(hosts[0], account, own[(hosts[0], account)]))
-            else:
-                out.append(self._own_across(account, layout, {host: own[(host, account)] for host in hosts}))
+            with citation_group(self, out, (account, tuple(sorted(layout)), tuple(hosts)), own):
+                if len(hosts) == 1:
+                    out.append(self._own_group(hosts[0], account, own[(hosts[0], account)]))
+                else:
+                    out.append(self._own_across(account, layout, {host: own[(host, account)] for host in hosts}))
         return out
+
+    def uncited_finding(self, key, actors, match):
+        host, path, account = key
+        state = self.files.peek((host, path), _File())
+        writes = [w for w in actors if not w.kernel]
+        kernel = [w for w in actors if w.kernel]
+        series = [(executor, s) for executor, s in state.runs.items()
+                  if not _own_elevation(executor, actors)]
+        config = schedule_config(path) if any(not w.assumed for w in writes) else None
+        own_only = not series and config is None
+        if own_only:
+            series = list(state.runs.items())
+        changes = sorted(c for c in state.changes if c[2] == account)
+        content = [c for c in changes if c[3] != "attributes"]
+        after = any(content and s.ok_ts and s.ok_ts.last() > content[0][0] for _executor, s in series)
+        web = any(w.web for w in [*writes, *kernel])
+        match.proposed_lane = ("urgent" if after else "high") if web else ("high" if after else "lead")
+        if own_only or (not changes and not state.counts.get(account, (0, 0))[1]):
+            match.proposed_lane = "lead"
+        match.entities = [("host", host, "host"), ("account", account, "actor")]
+        match.group_key = f"{host}|{account}|{path}"
+        return match
 
     def _own_across(self, account: str, layout: frozenset[str],
                     by_host: dict[str, list[tuple[str, Match]]]) -> Match:

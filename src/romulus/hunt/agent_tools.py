@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from romulus.agent.models import EntityRef, PivotResult
 from romulus.agent.toolbox import Toolbox
 from romulus.config import Settings
-from romulus.detect.registry import fresh_direct_pack
+from romulus.detect.registry import bind_windows_site, fresh_direct_pack
 from romulus.evidence.typed import TypedEvent
 from romulus.hunt.expansion import ExpansionEngine, expansion_windows
 from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkResult
@@ -66,10 +66,14 @@ class HuntToolExecutor:
         }, owner_token=self.owner_token)
         self.repo.mark_expansion_link_evaluated(link_id, owner_token=self.owner_token)
 
-    def run(self, session_id: str, anchor_id: str, request, *, anchor_ts: datetime) -> PivotResult:
+    def run(self, session_id: str, anchor_id: str, request, *, anchor_ts: datetime | None) -> PivotResult:
         candidate = self.repo.candidate(anchor_id)
         if candidate is None or candidate["hunt_id"] != self.hunt_id:
             return PivotResult(status="unsupported", reasons=["anchor finding is not in this hunt"])
+        if candidate["ts"] is None or anchor_ts is None:
+            return PivotResult(status="partial", reasons=[
+                "anchor observation time unavailable; time-based pivot was not evaluated",
+            ])
         query_start = int(getattr(self.pivot, "source_queries", 0))
         link_key = {"agent_tool": request.tool}
         if request.tool == "auth_activity":
@@ -94,7 +98,7 @@ class HuntToolExecutor:
     def _publish_direct(self, session_id: str, candidate: dict, result: LinkResult,
                         events: list[TypedEvent]) -> list[str]:
         candidate_ids = []
-        for playbook in fresh_direct_pack():
+        for playbook in bind_windows_site(fresh_direct_pack(), getattr(self.pivot, "site_facts", None)):
             for match in playbook.consume(events):
                 mark_hypothesis_relation(
                     match, anchor_id=candidate["id"], link_type=result.link_type,
@@ -124,6 +128,10 @@ class HuntToolExecutor:
         candidate = self.repo.candidate(anchor_id)
         if candidate is None or candidate["hunt_id"] != self.hunt_id:
             return PivotResult(status="unsupported", reasons=["anchor finding is not in this hunt"])
+        if candidate["ts"] is None:
+            return PivotResult(status="partial", reasons=[
+                "anchor observation time unavailable; time-based link was not evaluated",
+            ])
         anchor_events = self._events(candidate["event_ids"])
         anchor = LinkAnchor(
             finding_id=candidate["id"], ts=_utc(candidate["ts"]),

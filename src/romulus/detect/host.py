@@ -14,7 +14,7 @@ from typing import ClassVar, NamedTuple
 from romulus.detect import netdef
 from romulus.detect.base import Match, Playbook, argv_incomplete, basename, outcome_phrase, pf
 from romulus.detect.bounded import HOT_COUNT, HeldExamples, KeyedStore, RecentIds, SpillList, StateExhausted
-from romulus.detect.citing import BoundStage, Ends, bound_note, cite_group, cited_phrase, more
+from romulus.detect.citing import BoundStage, Ends, bound_note, citation_group, cite_group, cited_phrase, more
 from romulus.detect.linux_argv import canonical, program, read_operand_paths
 from romulus.detect.observed import (
     Observed,
@@ -418,7 +418,7 @@ class WebServiceSpawnsInterpreter(Playbook):
             key = (e.host, user, command_shape(argv), packaged)
             state = self.shapes.get(key)
             if state is None:
-                state = [0, HeldExamples(self.CITE), {}]
+                state = [0, HeldExamples(self.CITE), {}, {}]
                 if not self.shapes.put(key, state):
                     # its rarity cannot be judged without the shape's count: a lead per shape, published as read
                     self.note_limit("shapes_unheld", "the web-service interpreter shapes' disk budget is spent; a run "
@@ -434,6 +434,10 @@ class WebServiceSpawnsInterpreter(Playbook):
             hour = e.ts.replace(minute=0, second=0, microsecond=0)
             hours[hour] = hours.get(hour, 0) + 1
             if state[1].offer(e):
+                if state[0] <= self.RARE_MAX:
+                    state[3][e.id] = "|".join(sorted(ref.key for ref in e.raw))
+                else:
+                    state[3].clear()
                 self._pending.append(e)
                 self._fresh.append(state[1])
         return matches
@@ -473,45 +477,76 @@ class WebServiceSpawnsInterpreter(Playbook):
     def finalize(self):
         out = []
         for key in self.order:
-            state = self.shapes.peek(key)
-            evs = state[1].events(self.load)
-            host_, user, shape, packaged = key
-            n = state[0]
-            if packaged and n <= self.RARE_MAX:
-                # Rare, no typed indicator, and the script sits where a web-service account cannot write: most
-                # likely the application's own helper (daemon start-up, maintenance), not code a request supplied.
-                claim = (f"System-directory helper: account '{user}' on {host_} ran '{shape}' {n} time(s) in the "
-                         f"window; the script operand '{packaged}' is under a system directory (package ownership "
-                         f"not verified) and the command line carries no typed indicator (retained for context).")
-                out.append(Match(self.id, claim, "aggregate_observation", evs[:5], [pf(evs[0], "process.argv")],
-                                 evs[0].ts, "low", "context", "high", _exec_entities(evs[0]),
-                                 group_key=f"packaged|{host_}|{user}|{shape}"))
-                continue
-            distinct_hours, busiest = self._hour_stats(state)
-            scheduled = distinct_hours >= self.ROUTINE_MIN_HOURS and busiest * 2 <= n
-            if n > self.RARE_MAX and not scheduled:
-                evs = sorted(evs, key=lambda e: (e.ts, e.id))
-                claim = (f"Repeated shape: account '{user}' on {host_} executed '{shape}' {n} times; the runs are not "
-                         f"spread across {self.ROUTINE_MIN_HOURS} or more hours like a schedule (most fall within one "
-                         f"hour or few hours), and no typed indicator was found on the command line."
-                         + (f" The earliest {len(evs)} runs are cited." if len(evs) < n else ""))
-                out.append(Match(self.id, claim, "aggregate_observation", evs, [pf(e, "process.argv") for e in evs],
-                                 evs[0].ts, "medium", "lead", "high", _exec_entities(evs[0]),
-                                 group_key=f"burst|{host_}|{user}|{shape}" + (f"|{packaged}" if packaged else "")))
-                continue
-            if n > self.RARE_MAX:
-                claim = (f"Routine pattern: account '{user}' on {host_} executed '{shape}' {n} times in the window, "
-                         f"spread across {distinct_hours} distinct hours like a schedule "
-                         f"(stack-counted; retained for context)." + cited_phrase(min(5, len(evs)), n, False, "runs",
-                                                                                  "run"))
-                out.append(Match(self.id, claim, "aggregate_observation", evs[:5], [pf(evs[0], "process.argv")],
-                                 evs[0].ts, "low", "context", "high", _exec_entities(evs[0]),
-                                 group_key=f"routine|{host_}|{user}|{shape}" + (f"|{packaged}" if packaged else "")))
-                continue
-            for e in evs:
-                argv = e.get("process.argv")
-                out.append(self._event_match(e, user, argv, [], count=n, runs=evs))
+            with citation_group(self, out, key, self.shapes.peek(key)):
+                state = self.shapes.peek(key)
+                evs = state[1].events(self.load)
+                host_, user, shape, packaged = key
+                n = state[0]
+                if packaged and n <= self.RARE_MAX:
+                    # Rare, no typed indicator, and the script sits where a web-service account cannot write: most
+                    # likely the application's own helper (daemon start-up, maintenance), not code a request supplied.
+                    claim = (f"System-directory helper: account '{user}' on {host_} ran '{shape}' {n} time(s) in the "
+                             f"window; the script operand '{packaged}' is under a system directory (package ownership "
+                             f"not verified) and the command line carries no typed indicator (retained for context).")
+                    out.append(Match(self.id, claim, "aggregate_observation", evs[:5], [pf(evs[0], "process.argv")],
+                                     evs[0].ts, "low", "context", "high", _exec_entities(evs[0]),
+                                     group_key=f"packaged|{host_}|{user}|{shape}"))
+                    continue
+                distinct_hours, busiest = self._hour_stats(state)
+                scheduled = distinct_hours >= self.ROUTINE_MIN_HOURS and busiest * 2 <= n
+                if n > self.RARE_MAX and not scheduled:
+                    evs = sorted(evs, key=lambda e: (e.ts, e.id))
+                    claim = (f"Repeated shape: account '{user}' on {host_} executed '{shape}' {n} times; the runs are not "
+                             f"spread across {self.ROUTINE_MIN_HOURS} or more hours like a schedule (most fall within one "
+                             f"hour or few hours), and no typed indicator was found on the command line."
+                             + (f" The earliest {len(evs)} runs are cited." if len(evs) < n else ""))
+                    out.append(Match(self.id, claim, "aggregate_observation", evs, [pf(e, "process.argv") for e in evs],
+                                     evs[0].ts, "medium", "lead", "high", _exec_entities(evs[0]),
+                                     group_key=f"burst|{host_}|{user}|{shape}" + (f"|{packaged}" if packaged else "")))
+                    continue
+                if n > self.RARE_MAX:
+                    claim = (f"Routine pattern: account '{user}' on {host_} executed '{shape}' {n} times in the window, "
+                             f"spread across {distinct_hours} distinct hours like a schedule "
+                             f"(stack-counted; retained for context)." + cited_phrase(min(5, len(evs)), n, False, "runs",
+                                                                                      "run"))
+                    out.append(Match(self.id, claim, "aggregate_observation", evs[:5], [pf(evs[0], "process.argv")],
+                                     evs[0].ts, "low", "context", "high", _exec_entities(evs[0]),
+                                     group_key=f"routine|{host_}|{user}|{shape}" + (f"|{packaged}" if packaged else "")))
+                    continue
+                for e in evs:
+                    argv = e.get("process.argv")
+                    out.append(self._event_match(e, user, argv, [], count=n, runs=evs))
         return out
+
+    def citation_reference_groups(self, store, key, state):
+        from romulus.detect.citing import state_citation_ids
+
+        if store is self.shapes and not key[3] and state[0] <= self.RARE_MAX:
+            # Rare shapes publish each run independently; each run is its own publishing group.
+            yield from ([identity] for identity in state[1].ids())
+        else:
+            yield state_citation_ids(state)
+
+    def uncited_finding(self, key, state, match):
+        host, user, shape, packaged = key
+        n = state[0]
+        hours, busiest = self._hour_stats(state)
+        routine = n > self.RARE_MAX and hours >= self.ROUTINE_MIN_HOURS and busiest * 2 <= n
+        context = (packaged and n <= self.RARE_MAX) or routine
+        match.proposed_lane, match.severity = ("context", "low") if context else ("lead", "medium")
+        if packaged and n <= self.RARE_MAX:
+            match.group_key = f"packaged|{host}|{user}|{shape}"
+        elif n > self.RARE_MAX:
+            match.group_key = f"{'routine' if routine else 'burst'}|{host}|{user}|{shape}" + (f"|{packaged}" if packaged else "")
+        match.entities = [("host", host, "host"), ("account", user, "actor")]
+        match.claim = (f"Account '{user}' on {host} ran command shape '{shape}' {n} time(s). "
+                       + match.notes[0])
+        if not packaged and n <= self.RARE_MAX:
+            from dataclasses import replace
+
+            return [replace(match, ts=ref[0], group_key="", identity_key=state[3][ref[1]])
+                    for ref, _event in state[1].items]
+        return match
 
 
 class DownloaderFeedsInterpreter(Playbook):
@@ -1232,8 +1267,9 @@ class SshLoginFromExternal(Playbook):
     def finalize(self):
         out = []
         for host, user, ip in self.order:
-            journal, audit, last, store, ends = self.groups.peek((host, user, ip))
-            out.append(self._login_match((host, user, ip), journal, audit, last, store.events(self.load), ends))
+            with citation_group(self, out, (host, user, ip), self.groups.peek((host, user, ip))):
+                journal, audit, last, store, ends = self.groups.peek((host, user, ip))
+                out.append(self._login_match((host, user, ip), journal, audit, last, store.events(self.load), ends))
         return out
 
     def _login_match(self, key: tuple, journal: int, audit: int, last, evs: list[TypedEvent],
@@ -1400,8 +1436,9 @@ class UnbackedExecutable(Playbook):
     def finalize(self):
         out = []
         for key in sorted(self.groups.keys()):
-            counts, (first, last), uids, store, ends = self.groups.peek(key)
-            out.append(self._group_match(key, counts, first, last, uids, store.events(self.load), ends))
+            with citation_group(self, out, key, self.groups.peek(key)):
+                counts, (first, last), uids, store, ends = self.groups.peek(key)
+                out.append(self._group_match(key, counts, first, last, uids, store.events(self.load), ends))
         return out
 
     def _group_match(self, key: tuple, counts: dict, first: float, last: float, uids: set,

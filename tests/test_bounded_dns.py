@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from romulus.detect import bounded, dns
+from romulus.detect import dns
 from romulus.evidence.typed import RawRef, TypedEvent, fv
 
 T0 = datetime(2024, 11, 4, 0, 0, tzinfo=UTC)
@@ -294,7 +294,8 @@ def test_reverse_lookup_state_grows_with_distinct_names_not_with_lookups(monkeyp
 def test_only_the_disk_budget_refuses_and_coverage_says_so(monkeypatch, tmp_path, cls, make):
     """States beyond the hot set go to disk; once the disk budget is spent a record needing a new state is refused
     (not evaluated, coverage partial), while records of states already held are still evaluated."""
-    monkeypatch.setattr(bounded, "DISK_BUDGET", 1)
+    from tests.storage_capacity_fixture import refuse_new_stores_after_spill
+    refuse_new_stores_after_spill(monkeypatch, 1)
     rule = small(monkeypatch, cls, tmp_path)
     run_batches(rule, [[make(1)], [make(2)], [make(i) for i in range(3, 8)] + [make(1), make(2)]])
     assert rule.capped == 5 and rule.evaluated == 4

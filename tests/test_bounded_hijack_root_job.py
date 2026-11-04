@@ -3,6 +3,7 @@ state spills to disk and is read back exactly, and only a disk budget refuses a 
 from datetime import timedelta
 
 from romulus.detect.hijack import NonRootWriteRootExecutedFile
+from tests.storage_capacity_fixture import refuse_after_spill
 from tests.test_hijack_root_job import JOB, T0, VI, cron_open, cron_runs, ex, web
 
 
@@ -12,7 +13,7 @@ def _run(partitions, tmp_path, hot=None, budget=None, monkeypatch=None):
     pb = NonRootWriteRootExecutedFile()
     pb.spill_dir = tmp_path
     if budget is not None:
-        pb.files.disk_budget = budget
+        refuse_after_spill(pb, pb.files, budget)
     store = {}
     for part in partitions:
         assert pb.consume(list(part)) == []

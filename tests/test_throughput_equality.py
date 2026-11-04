@@ -279,6 +279,11 @@ from tests import throughput_fixture as tf
 # The report's per-rule coverage field states what each rule searched instead of a negative claim (search_result:
 # 'searched in full: N record(s) evaluated, none matched', 'searched in part: ...', 'no data in scope for this rule',
 # and the positive-only texts no longer present absence as a later goal), so only the manifest digest changes; findings, cells and every other digest are unchanged.
+# Fleet host paging changes Windows rule versions in the Linux coverage inventory.
+# Candidate fields, citations, lanes, raw records, links and the manifest stay identical.
+# Windows proxy, script, citation and bounded-revision semantics increment Windows rule versions.
+# Only rule_version changes in 6,887 coverage cells across 97 Windows rules in this Linux fixture.
+# Restoring those versions reproduces every table and semantic-field digest; all findings remain identical.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
     "audit": "23d9b87c75d030df8ff5bcbf07deacc75416c325dd74bcc89243cc1b5488ae93",
@@ -298,9 +303,9 @@ GOLDEN_STACK = {
     "events": "0165d2807ffee33aaef17dd70ba004ec4c87fa4c5f29e9dc75ba833f57b93ff7",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "0fbedb27ca9a4cb72354178444ee9aabc49f377b2c933074fe03ef29c8fbb08a",
-    "manifest": "6e4c0053d5276fb990ca5061be81e7f5e6add2db2498b6fe96411827d25d784a",
+    "manifest": "35b8a0132fc6747d24e7efe50b32fa0c44c8eefaffcebf5d8795f01438b0a8f1",
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
-    "rule_cells": "d70340c4fa4480f5548aec33f1229cf9061b74e729325f4acde8472b4f3d735b",
+    "rule_cells": "0ede3beaf59df4de531ac0d313b3a93d6c9f50eb1ad404a809bc24add83f2185",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
     "tasks": "c65df4ab88c05661371cf32b49a1d22ef84d6753488bdb946c8e29376d486260",
 }
@@ -332,17 +337,17 @@ GOLDEN_NON_BASELINE_SEMANTICS = {
         "ts": "d8015c1ff0b135e082a5fef2ab1cb88206470e30beee157a0cfc7790d48b8310",
     },
     "rule_cells": {
-        "all_fields": "ace432fd442b09ac96a22cc64e07b0a5d8b868c7baf15e146e210b1b6d52140f",
-        "count": 5534,
-        "detail": "c174e2cb56c91f760f17ec89574d8fcaa2cbe4d479bf33a58d4893bbfad3e294",
-        "evaluated": "f5a4a4e3c2f8aeaa483813029dda529f094f61e69d9b32759fde7c3f60f8f111",
-        "matched": "4759fb925992f6e2069bbd2e8280b61086649acff76f2d84b26fea5072401e14",
-        "partition": "3d4d6dcdebe7338195de1d0b9f200572e188623027d2f5697ecab2daaa0b876e",
-        "rule_id": "ee3c478d32a1f3bbf3a055629a2e28b483605a354bf5e6e7ac1044f218cb3077",
-        "rule_version": "0e3977af9d00d33c113579a4829cb4ebfd56b8343f695bd38413cf62ef474f79",
-        "state": "584fd98280615d93f01b6b247c30cdd8237b68ae738df1e0eef0df598b586014",
-        "target": "e44ab979d5d8b44a6d713c765b284dfc7fdd95a24b9569d6b68e443fd9449fcd",
-    },
+        "all_fields": "5ffbcf60d2eb96f240cb43b96f6ba294ab944bf32ebf81465445bff80adf9133",
+                      "count": 10646,
+                      "rule_id": "9ef91e8f298a297308417d67b28ef44dc488841f79a07bc8358ab1cb797efe62",
+        "rule_version": "7e913b4f4bce9822479668c96b8a8a2402d8efe52da3311992d597d39780ed0f",
+                      "target": "4a231d37bd821a12102aedcb08319addc2bb8d465e326e35f798658d4940c9c5",
+                      "partition": "c5e3dd9bd630991ca3e6f5e6921923c038d29fad9215dece94f544bead04090a",
+                      "state": "ebd5c7de5e0a1d1a4101483fe37ce56d6ec74d9e3642392a02a18e504baa6fc4",
+                      "matched": "abe850c26a4ee346e79ba4fd7bd8ede450816266048c6ec19edc3ea412b85e05",
+                      "evaluated": "46a2b405dd7c3911a24fa59bf7e59214c3ec183722e47a13d996ef2a7c03d696",
+                      "detail": "11994913b28abcc2a6f59e7ebbb7549bdac2ed97829b04395d92fa5fe56ef08c"
+                  },
 }
 GOLDEN_NORMALIZED = {
     "arkime_sessions3-x": "76c065038118637c891297b82047c3ea0fcb2ace74b102729e0fe80275ae33fa",

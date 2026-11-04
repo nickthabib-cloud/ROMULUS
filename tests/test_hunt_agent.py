@@ -330,6 +330,7 @@ def test_cli_exposes_hunt_resume_and_prints_result(monkeypatch, capsys, tmp_path
 )
 def test_cli_maps_agent_mode_and_no_agent_alias(monkeypatch, capsys, tmp_path, flags, expected):
     settings = Settings(agent_mode="model", home=tmp_path, es_index_patterns=["logs-*"])
+    _new_hunt(settings)
     seen = {}
     monkeypatch.setattr(cli, "load_settings", lambda _path: settings)
     monkeypatch.setattr(hunt_run, "create_hunt", lambda *_args, **_kwargs: "h1")

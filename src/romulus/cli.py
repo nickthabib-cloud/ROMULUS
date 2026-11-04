@@ -62,17 +62,31 @@ def cmd_hunt(args) -> int:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     s = load_settings(_env_file(args))
     if args.action == "start":
+        from romulus.hunt.run import _lease_seconds
+        from romulus.store.db import maintenance_lease
         agent_mode = "off" if args.no_agent else (args.agent_mode or s.agent_mode)
         s = s.model_copy(update={"agent_mode": agent_mode})
         start, end = _parse_time(args.start, s.mission_timezone), _parse_time(args.end, s.mission_timezone)
         user = os.environ.get("USER") or os.environ.get("USERNAME") or "cli"
+        hid = None
         try:
-            hid = create_hunt(s, start, end, created_by=f"cli:{user}", style=args.style,
-                              hypothesis=args.hypothesis or "",
-                              original_input={"start": args.start, "end": args.end, "tz": s.mission_timezone},
-                              expand=not args.no_expand, ai_agent=False if args.no_agent else None)
-        except ValueError as e:
-            print(f"hunt not created: {e}", file=sys.stderr)
+            repo = open_repo(s)
+            with maintenance_lease(repo.engine, wait_seconds=30, allow_nested=True, on_wait=lambda: print(
+                    "Waiting up to 30 seconds for database maintenance before creating the hunt...", file=sys.stderr,
+                    flush=True)):
+                hid = create_hunt(s, start, end, created_by=f"cli:{user}", style=args.style,
+                                  hypothesis=args.hypothesis or "",
+                                  original_input={"start": args.start, "end": args.end, "tz": s.mission_timezone},
+                                  expand=not args.no_expand, ai_agent=False if args.no_agent else None)
+                owner = repo.claim_hunt(hid, _lease_seconds(s))["lease_owner"]
+        except (ValueError, RuntimeError) as e:
+            if hid is None:
+                print(f"hunt not created: {e}", file=sys.stderr)
+            else:
+                print(f"hunt {hid} was created but could not be claimed: {e}. "
+                      f"Check its state at /hunts/{hid}. If still planned, delete it at /hunts/{hid}/delete "
+                      "and start a new hunt; planned hunts cannot be resumed.",
+                      file=sys.stderr)
             return EXIT_FAIL
         print(f"hunt {hid} created [{start.isoformat()}, {end.isoformat()})")
         ai = ai_agent_entry(s, False if args.no_agent else None)
@@ -82,7 +96,8 @@ def cmd_hunt(args) -> int:
         def show(c):
             if c["lane"] in ("urgent", "high"):
                 print(f"  [{c['lane'].upper():6}] {c['rule_id']}: {c['claim'][:180]}", flush=True)
-        res = run_hunt(s, hid, agent_mode=agent_mode, on_candidate=show, expand=not args.no_expand)
+        res = run_hunt(s, hid, agent_mode=agent_mode, on_candidate=show, expand=not args.no_expand,
+                       claimed_owner=owner)
         print(json.dumps(res, indent=2, default=str) if args.json else
               f"done: {res['execution_state']} {res['detection_result']} lanes={res['lanes']} "
               f"stats={ {k: v for k, v in res['stats'].items() if k != 'skips'} }\n" + _ai_agent_line(res))
@@ -141,21 +156,19 @@ def cmd_findings(args) -> int:
 
 def cmd_report(args) -> int:
     from romulus.hunt.run import open_repo
+    from romulus.report.bundle import write_reports
     from romulus.report.manifest import publish_revision
-    from romulus.report.markdown import render
     s = load_settings(_env_file(args))
     repo = open_repo(s)
     user = os.environ.get("USER") or os.environ.get("USERNAME") or "cli"
     m = publish_revision(repo, args.hunt_id, actor=f"cli:{user}")
     out_dir = s.reports_dir / args.hunt_id
     out_dir.mkdir(parents=True, exist_ok=True)
-    stem = f"{m['revision']['id']}"
-    jpath, mpath = out_dir / f"{stem}.json", out_dir / f"{stem}.md"
-    jpath.write_text(json.dumps(m, indent=2, sort_keys=True), encoding="utf-8")
-    mpath.write_text(render(m), encoding="utf-8")
+    paths = write_reports(repo, m, out_dir)
     print(f"revision {m['revision']['number']}: {len(m['findings'])} findings/leads, "
           f"broken citations={m['integrity']['broken_citations']}")
-    print(f"  {jpath}\n  {mpath}")
+    for path in paths.values():
+        print(f"  {path}")
     return EXIT_OK if m["integrity"]["finalizable"] else EXIT_FAIL
 
 
@@ -304,7 +317,7 @@ def main(argv: list[str] | None = None) -> int:
     fp = sub.add_parser("findings", help="list candidates of a hunt, ranked by lane and priority")
     fp.add_argument("hunt_id")
     fp.add_argument("--lane", action="append", choices=["urgent", "high", "lead", "context"])
-    rp = sub.add_parser("report", help="publish a new immutable report revision (JSON + technical Markdown)")
+    rp = sub.add_parser("report", help="publish a report revision (JSON, technical Markdown and executive DOCX)")
     rp.add_argument("hunt_id")
     up = sub.add_parser("user", help="manage web UI accounts")
     up.add_argument("action", choices=["add"])

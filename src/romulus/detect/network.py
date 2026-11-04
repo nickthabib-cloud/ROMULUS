@@ -5,9 +5,17 @@ from __future__ import annotations
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
-from romulus.detect.bounded import HOT_COUNT, KeyedStore
-from romulus.detect.citing import BoundStage, Ends, Named, bound_note, cite_extra, cited_phrase, more
-from romulus.detect.correlation import StageMissing
+from romulus.detect.bounded import HOT_COUNT, CitationUnavailable, KeyedStore
+from romulus.detect.citing import (
+    BoundStage,
+    Ends,
+    Named,
+    bound_note,
+    citation_group,
+    cite_extra,
+    cited_phrase,
+    more,
+)
 from romulus.detect.dns import endpoints
 from romulus.detect.flows import suricata_source_opened
 from romulus.evidence.typed import TypedEvent
@@ -93,6 +101,10 @@ class _Grouped(Playbook):
         """Whether a group's state can still be reported (finalize reads only these from disk)."""
         return True
 
+    def refreshes_citation_on_next_record(self, store, state) -> bool:
+        """An unfilled sample necessarily stages its next record, regardless of timestamp ordering."""
+        return store is self.groups and len(state.held) < EXAMPLE_LIMIT
+
     def drain_staged(self) -> list[TypedEvent]:
         # each kept record once (an example may also be a named value's record), then the bounds' holds
         out, self._pending = list({e.id: e for e in self._pending}.values()) + self.bounds.drain(), []
@@ -157,7 +169,7 @@ class _Grouped(Playbook):
         def events(ids):
             found = load(ids)
             if len(found) != len(set(ids)):
-                raise StageMissing(f"{self.id}: {len(set(ids)) - len(found)} cited event(s) absent from the stage")
+                raise CitationUnavailable(f"{self.id}: {len(set(ids)) - len(found)} cited event(s) absent from the stage")
             return found
 
         return cite_extra(load, events, state.ends, [e.id for e in examples], named)
@@ -174,7 +186,7 @@ class _Grouped(Playbook):
         found = {e.id: e for e in self.load(ids)} if ids else {}
         missing = [i for i in ids if i not in found]
         if missing:
-            raise StageMissing(f"{self.id}: {len(missing)} cited event(s) absent from the stage")
+            raise CitationUnavailable(f"{self.id}: {len(missing)} cited event(s) absent from the stage")
         return [found[x] if isinstance(x, str) else x for x in state.held]
 
     def reported(self):
@@ -236,51 +248,59 @@ class SuricataAlertStack(_Grouped):
     def finalize(self):
         out = []
         for key, state in self.reported():
-            evs, missing, context = self.cite(state)
-            src, dst, cat, sev = key
-            n = state.count
-            sigs = sorted(state.bag("sigs"), key=lambda s: (str(s[1]), str(s[0])))
-            named = sorted(state.names("sigs", self.SIGNATURES_NAMED).values(), key=lambda s: (str(s[1]), str(s[0])))
-            if cat == "Not Suspicious Traffic" or sev == 3:
-                lane, severity = "context", "low"
-            elif sev == 1:
-                lane, severity = "high", "high"
-            else:
-                lane, severity = "lead", "medium"
-            names = "; ".join(f"'{s[1]}' (sid {s[0]})" for s in named[:3])
-            # the signatures of the cited alerts, ordered as the claim names signatures: by name, then id
-            cited_sigs = [sid for sid, _name in sorted(
-                {(e.get("alert.signature_id"), e.get("alert.signature")) for e in evs
-                 if e.get("alert.signature_id") is not None}, key=lambda s: (str(s[1]), str(s[0])))]
-            cited_sigs = list(dict.fromkeys(cited_sigs))
-            capped = bool(state.extra.get("sigs_capped"))
-            at_least = "at least " if capped else ""
-            in_cited = (f" All {len(sigs)} signatures are in cited alerts." if len(cited_sigs) >= len(sigs) and not capped
-                        else f" {len(cited_sigs)} of {at_least or 'the '}{len(sigs)} signatures are in cited alerts.")
-            listed = more(min(3, len(named)), len(sigs))
-            claim = (f"Suricata raised {n} '{cat}' alert(s) at severity {sev} across {at_least}{len(sigs)} distinct "
-                     f"signature(s) for traffic from {src} to {dst} ({self.span(state)}): {names}"
-                     f"{listed + ' or more' if capped and listed else listed}."
-                     + (in_cited if len(sigs) > 1 else "")
-                     + self.told(evs, state, missing, "alerts", "alert")
-                     + " IDS alerts are signature matches, not proof of successful exploitation.")
-            e0 = evs[0]
-            m = Match(self.id, claim, self.claim_type, evs, [pf(e0, "alert.signature"), pf(e0, "alert.severity"),
-                                                            pf(e0, "source.ip"), pf(e0, "destination.ip")],
-                      e0.ts, severity, lane, "medium", e0.entities(), group_key=f"{src}|{dst}|{cat}|{sev}",
-                      context_ids=context)
-            techs = sorted({t for e in evs for t in _values(e.get("alert.mitre_technique_id")) if t})
-            if techs:
-                others = len(state.bag("tech")) - len(techs)
-                shown = f"{techs[:8]}{more(min(8, len(techs)), len(techs))}"
-                m.notes.append(f"signature metadata ATT&CK of the cited alerts: {shown}"
-                               + (f"; {others} other technique id(s) are in alerts not cited" if others > 0 else ""))
-            others = len(sigs) - len(cited_sigs)
-            shown = f"{cited_sigs[:10]}{more(min(10, len(cited_sigs)), len(cited_sigs))}"
-            m.notes.append(f"signatures of the cited alerts: {shown}"
-                           + (f"; {at_least}{others} other signature(s) are in alerts not cited" if others > 0 else ""))
-            out.append(m)
+            with citation_group(self, out, key, state):
+                evs, missing, context = self.cite(state)
+                src, dst, cat, sev = key
+                n = state.count
+                sigs = sorted(state.bag("sigs"), key=lambda s: (str(s[1]), str(s[0])))
+                named = sorted(state.names("sigs", self.SIGNATURES_NAMED).values(), key=lambda s: (str(s[1]), str(s[0])))
+                if cat == "Not Suspicious Traffic" or sev == 3:
+                    lane, severity = "context", "low"
+                elif sev == 1:
+                    lane, severity = "high", "high"
+                else:
+                    lane, severity = "lead", "medium"
+                names = "; ".join(f"'{s[1]}' (sid {s[0]})" for s in named[:3])
+                # the signatures of the cited alerts, ordered as the claim names signatures: by name, then id
+                cited_sigs = [sid for sid, _name in sorted(
+                    {(e.get("alert.signature_id"), e.get("alert.signature")) for e in evs
+                     if e.get("alert.signature_id") is not None}, key=lambda s: (str(s[1]), str(s[0])))]
+                cited_sigs = list(dict.fromkeys(cited_sigs))
+                capped = bool(state.extra.get("sigs_capped"))
+                at_least = "at least " if capped else ""
+                in_cited = (f" All {len(sigs)} signatures are in cited alerts." if len(cited_sigs) >= len(sigs) and not capped
+                            else f" {len(cited_sigs)} of {at_least or 'the '}{len(sigs)} signatures are in cited alerts.")
+                listed = more(min(3, len(named)), len(sigs))
+                claim = (f"Suricata raised {n} '{cat}' alert(s) at severity {sev} across {at_least}{len(sigs)} distinct "
+                         f"signature(s) for traffic from {src} to {dst} ({self.span(state)}): {names}"
+                         f"{listed + ' or more' if capped and listed else listed}."
+                         + (in_cited if len(sigs) > 1 else "")
+                         + self.told(evs, state, missing, "alerts", "alert")
+                         + " IDS alerts are signature matches, not proof of successful exploitation.")
+                e0 = evs[0]
+                m = Match(self.id, claim, self.claim_type, evs, [pf(e0, "alert.signature"), pf(e0, "alert.severity"),
+                                                                pf(e0, "source.ip"), pf(e0, "destination.ip")],
+                          e0.ts, severity, lane, "medium", e0.entities(), group_key=f"{src}|{dst}|{cat}|{sev}",
+                          context_ids=context)
+                techs = sorted({t for e in evs for t in _values(e.get("alert.mitre_technique_id")) if t})
+                if techs:
+                    others = len(state.bag("tech")) - len(techs)
+                    shown = f"{techs[:8]}{more(min(8, len(techs)), len(techs))}"
+                    m.notes.append(f"signature metadata ATT&CK of the cited alerts: {shown}"
+                                   + (f"; {others} other technique id(s) are in alerts not cited" if others > 0 else ""))
+                others = len(sigs) - len(cited_sigs)
+                shown = f"{cited_sigs[:10]}{more(min(10, len(cited_sigs)), len(cited_sigs))}"
+                m.notes.append(f"signatures of the cited alerts: {shown}"
+                               + (f"; {at_least}{others} other signature(s) are in alerts not cited" if others > 0 else ""))
+                out.append(m)
         return out
+
+
+    def uncited_finding(self, key, state, match):
+        _src, _dst, category, severity = key
+        match.proposed_lane, match.severity = (("context", "low") if category == "Not Suspicious Traffic" or severity == 3
+                                               else ("high", "high") if severity == 1 else ("lead", "medium"))
+        return match
 
 
 class WebScanBurst(_Grouped):
@@ -328,23 +348,24 @@ class WebScanBurst(_Grouped):
     def finalize(self):
         out = []
         for key, state in self.reported():
-            n, errs = state.count, state.errors
-            if n < self.MIN_REQUESTS or errs / n < self.MIN_ERROR_RATIO:
-                continue
-            evs, missing, context = self.cite(state)
-            host, src = key
-            uas = sorted(state.names("uas", self.AGENTS_NAMED).values())
-            claim = (f"{n} HTTP requests to {host} from {src} ({self.span(state)}), {errs} ({errs / n:.0%}) with "
-                     f"4xx/5xx responses across {len(state.bag('urls'))}+ distinct URLs."
-                     + self.told(evs, state, missing, "requests", "request"))
-            m = Match(self.id, claim, self.claim_type, evs, [pf(evs[0], "source.ip")], evs[0].ts, self.severity,
-                      self.lane, "high", evs[0].entities(), group_key=f"{host}|{src}", context_ids=context)
-            if uas:
-                every = len(state.bag("uas"))
-                m.notes.append("user-agent strings of cited requests (self-reported, not proof of tool): "
-                               + "; ".join(f"'{ua}'" for ua in uas)
-                               + (more(len(uas), every) if every < 10 else " and possibly more"))
-            out.append(m)
+            with citation_group(self, out, key, state):
+                n, errs = state.count, state.errors
+                if n < self.MIN_REQUESTS or errs / n < self.MIN_ERROR_RATIO:
+                    continue
+                evs, missing, context = self.cite(state)
+                host, src = key
+                uas = sorted(state.names("uas", self.AGENTS_NAMED).values())
+                claim = (f"{n} HTTP requests to {host} from {src} ({self.span(state)}), {errs} ({errs / n:.0%}) with "
+                         f"4xx/5xx responses across {len(state.bag('urls'))}+ distinct URLs."
+                         + self.told(evs, state, missing, "requests", "request"))
+                m = Match(self.id, claim, self.claim_type, evs, [pf(evs[0], "source.ip")], evs[0].ts, self.severity,
+                          self.lane, "high", evs[0].entities(), group_key=f"{host}|{src}", context_ids=context)
+                if uas:
+                    every = len(state.bag("uas"))
+                    m.notes.append("user-agent strings of cited requests (self-reported, not proof of tool): "
+                                   + "; ".join(f"'{ua}'" for ua in uas)
+                                   + (more(len(uas), every) if every < 10 else " and possibly more"))
+                out.append(m)
         return out
 
 
@@ -424,20 +445,21 @@ class DnsSubdomainEnumeration(_Grouped):
     def finalize(self):
         out = []
         for key, state in self.reported():
-            distinct = len(state.bag("names"))
-            if distinct < self.MIN_DISTINCT:
-                continue
-            evs, missing, context = self.cite(state)
-            src, dom = key
-            at_least = "at least " if state.extra.get("names_capped") else ""
-            shown = len({str(e.get("dns.question.name")).lower() for e in evs if e.get("dns.question.name")})
-            claim = (f"{src} issued {state.count} DNS queries for {at_least}{distinct} distinct names under '{dom}' "
-                     f"({self.span(state)}). {min(shown, distinct)} of {at_least or 'the '}{distinct} names are in "
-                     f"cited records." + self.told(evs, state, missing, "queries", "query"))
-            out.append(Match(self.id, claim, self.claim_type, evs, [pf(evs[0], "source.ip"),
-                                                                     pf(evs[0], "dns.question.name")],
-                             evs[0].ts, self.severity, self.lane, "medium", evs[0].entities(),
-                             group_key=f"{src}|{dom}", context_ids=context))
+            with citation_group(self, out, key, state):
+                distinct = len(state.bag("names"))
+                if distinct < self.MIN_DISTINCT:
+                    continue
+                evs, missing, context = self.cite(state)
+                src, dom = key
+                at_least = "at least " if state.extra.get("names_capped") else ""
+                shown = len({str(e.get("dns.question.name")).lower() for e in evs if e.get("dns.question.name")})
+                claim = (f"{src} issued {state.count} DNS queries for {at_least}{distinct} distinct names under '{dom}' "
+                         f"({self.span(state)}). {min(shown, distinct)} of {at_least or 'the '}{distinct} names are in "
+                         f"cited records." + self.told(evs, state, missing, "queries", "query"))
+                out.append(Match(self.id, claim, self.claim_type, evs, [pf(evs[0], "source.ip"),
+                                                                         pf(evs[0], "dns.question.name")],
+                                 evs[0].ts, self.severity, self.lane, "medium", evs[0].entities(),
+                                 group_key=f"{src}|{dom}", context_ids=context))
         return out
 
 
@@ -487,24 +509,25 @@ class ToolUserAgentHttp(_Grouped):
     def finalize(self):
         out = []
         for key, state in self.reported():
-            evs, missing, context = self.cite(state)
-            src, dst, hostname, ua = key
-            urls = sorted(u for u in state.names("urls", self.URLS_NAMED).values())
-            every = len([u for u in state.bag("urls") if u])
-            # the user agents as recorded (each quoted one with a cited record); the grouping token is not a value
-            agents = sorted(state.names("agents", self.AGENTS_NAMED).values())
-            n_agents = len(state.bag("agents"))
-            quoted = ", ".join(f"'{agent}'" for agent in agents) + (
-                more(len(agents), n_agents) if n_agents < self.AGENTS_COUNTED else " and possibly more")
-            tools = " or ".join(sorted(state.bag("tools")))
-            claim = (f"{state.count} HTTP request(s) from {src} to {dst} (Host: {hostname}) with user agent(s) "
-                     f"{quoted} ({self.span(state)}), which matched the {tools} tool signature; URLs include {urls}"
-                     + (more(len(urls), every) if every < 50 else " and possibly more") + "."
-                     + self.told(evs, state, missing, "requests", "request") + " The user agent is self-reported.")
-            out.append(Match(self.id, claim, self.claim_type, evs, [pf(evs[0], "user_agent.original"),
-                                                                     pf(evs[0], "source.ip")],
-                             evs[0].ts, self.severity, self.lane, "medium", evs[0].entities(),
-                             group_key=f"{src}|{dst}|{ua}", context_ids=context))
+            with citation_group(self, out, key, state):
+                evs, missing, context = self.cite(state)
+                src, dst, hostname, ua = key
+                urls = sorted(u for u in state.names("urls", self.URLS_NAMED).values())
+                every = len([u for u in state.bag("urls") if u])
+                # the user agents as recorded (each quoted one with a cited record); the grouping token is not a value
+                agents = sorted(state.names("agents", self.AGENTS_NAMED).values())
+                n_agents = len(state.bag("agents"))
+                quoted = ", ".join(f"'{agent}'" for agent in agents) + (
+                    more(len(agents), n_agents) if n_agents < self.AGENTS_COUNTED else " and possibly more")
+                tools = " or ".join(sorted(state.bag("tools")))
+                claim = (f"{state.count} HTTP request(s) from {src} to {dst} (Host: {hostname}) with user agent(s) "
+                         f"{quoted} ({self.span(state)}), which matched the {tools} tool signature; URLs include {urls}"
+                         + (more(len(urls), every) if every < 50 else " and possibly more") + "."
+                         + self.told(evs, state, missing, "requests", "request") + " The user agent is self-reported.")
+                out.append(Match(self.id, claim, self.claim_type, evs, [pf(evs[0], "user_agent.original"),
+                                                                         pf(evs[0], "source.ip")],
+                                 evs[0].ts, self.severity, self.lane, "medium", evs[0].entities(),
+                                 group_key=f"{src}|{dst}|{ua}", context_ids=context))
         return out
 
 
@@ -605,50 +628,71 @@ class PortScan(_Grouped):
                 return True
         return False
 
+    def _scan_ports(self, key, state):
+        src, dst = key
+        answered = {port for port, seen in state.replies.items() if self._answered(src, dst, port, seen)}
+        unanswered = set(state.replies)-answered
+        client_range = {port for port in unanswered if port >= self.EPHEMERAL_FLOOR}
+        probed = state.bag("ports") | (unanswered-client_range)
+        return answered, unanswered, client_range, probed
+
+    def uncited_finding(self, key, state, match):
+        answered, _unanswered, _client_range, probed = self._scan_ports(key, state)
+        if len(probed) < self.MIN_PORTS:
+            match.proposed_lane, match.severity = "context", "low"
+        match.claim += f" {len(probed)} port(s) look probed; {len(answered)} answer earlier requests."
+        return match
+
     def finalize(self):
         rows = []
+        uncited = []
         for key, state in self.reported():
-            src, dst = key
-            forward = state.bag("ports")
-            replies = state.replies
-            ports = forward | set(replies)
-            if len(ports) < self.MIN_PORTS:
-                continue
-            evs, missing, context = self.cite(state)
-            answered = {port for port, seen in replies.items() if self._answered(src, dst, port, seen)}
-            unanswered = set(replies) - answered
-            client_range = {port for port in unanswered if port >= self.EPHEMERAL_FLOOR}
-            probed = forward | (unanswered - client_range)
-            sample = sorted(state.names("ports", self.PORTS_NAMED).values())
-            claim = (f"{state.count} flow record(s) from {src} to {dst} covering {len(ports)} distinct destination "
-                     f"ports ({self.span(state)}); e.g. {sample}{more(len(sample), len(ports))}.")
-            if replies:
-                cited_sports = sorted({e.get("source.port") for e in evs if isinstance(e.get("source.port"), int)
-                                       and e.get("source.port") < 1024 <= (e.get("destination.port") or 0)})
-                claim += (f" {len(replies)} of the ports were reached from source ports below 1024"
-                          + (f" (cited: {cited_sports[:5]})" if cited_sports else "") + ": "
-                          f"on {len(answered)} a flow from {dst} in the opposite direction started earlier (the shape "
-                          f"of a request and its answer), {len(client_range)} go to client "
-                          f"(ephemeral) ports with no recorded request, and {len(unanswered) - len(client_range)} "
-                          f"have neither, the shape of a scan sent from a fixed low source port.")
-                if "requests" in self.limits:
-                    claim += (" The index of earlier flows reached its disk budget, so some answers may be counted as "
-                              "probes.")
-            claim += self.told(evs, state, missing, "flow records", "flow record")
-            # how many of the counted ports the cited records show
-            in_cited = {e.get("destination.port") for e in evs if isinstance(e.get("destination.port"), int)}
-            low = (f", and {len(in_cited & set(replies))} of the {len(replies)} reached from a source port below "
-                   f"1024," if replies else "")
-            claim += f" {len(in_cited & ports)} of the {len(ports)} ports{low} are in cited records."
-            if len(probed) >= self.MIN_PORTS:
-                lane, severity = self.lane, self.severity
-            else:
-                lane, severity = "context", "low"     # mostly a service answering clients: kept visible, not a lead
-                claim += f" Only {len(probed)} port(s) look probed."
-            opened = sorted(port for port in state.names("opened", self.PORTS_NAMED).values() if port in probed)
-            rows.append((src, dst, claim, lane, severity, evs, len(probed), opened, len(answered), context))
+            with citation_group(self, uncited, key, state):
+                src, dst = key
+                forward = state.bag("ports")
+                replies = state.replies
+                ports = forward | set(replies)
+                if len(ports) < self.MIN_PORTS:
+                    continue
+                evs, missing, context = self.cite(state)
+                answered, unanswered, client_range, probed = self._scan_ports(key, state)
+                sample = sorted(state.names("ports", self.PORTS_NAMED).values())
+                claim = (f"{state.count} flow record(s) from {src} to {dst} covering {len(ports)} distinct destination "
+                         f"ports ({self.span(state)}); e.g. {sample}{more(len(sample), len(ports))}.")
+                if replies:
+                    cited_sports = sorted({e.get("source.port") for e in evs if isinstance(e.get("source.port"), int)
+                                           and e.get("source.port") < 1024 <= (e.get("destination.port") or 0)})
+                    claim += (f" {len(replies)} of the ports were reached from source ports below 1024"
+                              + (f" (cited: {cited_sports[:5]})" if cited_sports else "") + ": "
+                              f"on {len(answered)} a flow from {dst} in the opposite direction started earlier (the shape "
+                              f"of a request and its answer), {len(client_range)} go to client "
+                              f"(ephemeral) ports with no recorded request, and {len(unanswered) - len(client_range)} "
+                              f"have neither, the shape of a scan sent from a fixed low source port.")
+                    if "requests" in self.limits:
+                        claim += (" The index of earlier flows reached its disk budget, so some answers may be counted as "
+                                  "probes.")
+                claim += self.told(evs, state, missing, "flow records", "flow record")
+                # how many of the counted ports the cited records show
+                in_cited = {e.get("destination.port") for e in evs if isinstance(e.get("destination.port"), int)}
+                low = (f", and {len(in_cited & set(replies))} of the {len(replies)} reached from a source port below "
+                       f"1024," if replies else "")
+                claim += f" {len(in_cited & ports)} of the {len(ports)} ports{low} are in cited records."
+                if len(probed) >= self.MIN_PORTS:
+                    lane, severity = self.lane, self.severity
+                else:
+                    lane, severity = "context", "low"     # mostly a service answering clients: kept visible, not a lead
+                    claim += f" Only {len(probed)} port(s) look probed."
+                opened = sorted(port for port in state.names("opened", self.PORTS_NAMED).values() if port in probed)
+                rows.append((src, dst, claim, lane, severity, evs, len(probed), opened, len(answered), context))
         scanned = {(src, dst) for src, dst, _claim, lane, *_rest in rows if lane == self.lane}
-        out = []
+        scanned.update(tuple(match.group_key.split("|")) for match in uncited if match.proposed_lane == self.lane)
+        for match in uncited:
+            src, dst = match.group_key.split("|")
+            if match.proposed_lane == "context" and (dst, src) in scanned:
+                match.proposed_lane, match.severity = self.lane, self.severity
+                match.claim += (f" The opposite direction, {dst} to {src}, is reported as a port scan lead, "
+                                "so this pair is raised to the same lane.")
+        out = list(uncited)
         for src, dst, claim, lane, severity, evs, n_probed, opened, n_answered, context in rows:
             if lane == "context" and (dst, src) in scanned:
                 # The target's side of a scan that is itself a lead belongs to that attack: keep it visible at the

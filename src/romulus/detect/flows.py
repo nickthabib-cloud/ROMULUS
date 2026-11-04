@@ -38,18 +38,20 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
-from romulus.detect.bounded import HOT_COUNT, KeyedStore, Limit, RecentIds
+from romulus.detect.bounded import HOT_COUNT, CitationUnavailable, KeyedStore, Limit, RecentIds
 from romulus.detect.citing import (
     BoundStage,
     Ends,
     Holds,
     bound_note,
+    citation_call,
+    citation_group,
     cite_with_bounds,
     cited_phrase,
     drained_holds,
     more,
 )
-from romulus.detect.correlation import StageMissing, canon_ip, external, routable_remote
+from romulus.detect.correlation import canon_ip, external, routable_remote
 from romulus.detect.netdef import assume_direction
 from romulus.evidence.typed import TypedEvent
 
@@ -521,7 +523,7 @@ class _FlowRule(Playbook):
         wanted = list(dict.fromkeys(ids))
         loaded = self.load(wanted)
         if len(loaded) != len(wanted):
-            raise StageMissing(f"{self.id}: {len(wanted) - len(loaded)} cited event(s) absent from the stage")
+            raise CitationUnavailable(f"{self.id}: {len(wanted) - len(loaded)} cited event(s) absent from the stage")
         return sorted(loaded, key=lambda e: (e.ts, e.id))
 
     def _cite(self, ends: Ends, ids, limit: int = EXAMPLE_LIMIT) -> tuple[list[TypedEvent], set[str]]:
@@ -827,7 +829,7 @@ class IcmpEchoTunnel(_FlowRule):
         return True
 
     def finalize(self):
-        matches = [self._match(key, self.pairs.peek(key)) for key in sorted(self.pairs.keys(candidates=True))]
+        matches = [_citation for key in sorted(self.pairs.keys(candidates=True)) for _citation in citation_call(self, self._match, key, self.pairs.peek(key))]
         return matches
 
     def _match(self, key, pair: _IcmpEchoPair) -> Match:
@@ -909,6 +911,14 @@ class IcmpEchoTunnel(_FlowRule):
                       group_key=f"{client}|{peer}|{transport}")
         match.notes.append("ATT&CK context: T1095 / T1572 (ICMP protocol tunneling) and T1048.003 (unencrypted "
                            "non-C2 exfiltration), if the traffic is unauthorized")
+        return match
+
+    def uncited_finding(self, key, state, match):
+        pair = state[0]
+        if any(self._sensor_reportable(pair, sensor) and self._echo_asymmetric(pair, sensor) for sensor in pair.payload):
+            match.proposed_lane, match.severity = "high", "high"
+        else:
+            match.severity = "medium"
         return match
 
 
@@ -1193,22 +1203,23 @@ class HorizontalSweep(_FlowRule):
     def finalize(self):
         out = []
         for key, group, dests in self._groups():
-            src, transport, _port, scope = key
-            limits = self.THRESHOLDS[scope]
-            share = self.EXTERNAL_MIN_SILENT_SHARE if scope == "external" else 0.0
-            qualifying = [busiest_window(dests, width, min_size=limits[width], min_silent_share=share)
-                          for width in self.WINDOWS]
-            qualifying = [window for window in qualifying if window is not None]
-            if not qualifying:
-                continue
-            high = None
-            if scope == "internal" and transport == "tcp" and internal_address(src):
-                high = busiest_window(dests, 3600, min_size=self.HIGH_MIN_DESTINATIONS,
-                                      min_silent_share=self.HIGH_MIN_SILENT_SHARE)
-            # the window that decided the lane: the high window, else the widest qualifying window
-            deciding = high or max(qualifying, key=lambda window: (window.width, window.size))
-            out.append(((key[0], key[1], -1 if key[2] is None else key[2], key[3]),
-                        self._match(key, group, dests, deciding, high is not None)))
+            with citation_group(self, out, key, group):
+                src, transport, _port, scope = key
+                limits = self.THRESHOLDS[scope]
+                share = self.EXTERNAL_MIN_SILENT_SHARE if scope == "external" else 0.0
+                qualifying = [busiest_window(dests, width, min_size=limits[width], min_silent_share=share)
+                              for width in self.WINDOWS]
+                qualifying = [window for window in qualifying if window is not None]
+                if not qualifying:
+                    continue
+                high = None
+                if scope == "internal" and transport == "tcp" and internal_address(src):
+                    high = busiest_window(dests, 3600, min_size=self.HIGH_MIN_DESTINATIONS,
+                                          min_silent_share=self.HIGH_MIN_SILENT_SHARE)
+                # the window that decided the lane: the high window, else the widest qualifying window
+                deciding = high or max(qualifying, key=lambda window: (window.width, window.size))
+                out.append(((key[0], key[1], -1 if key[2] is None else key[2], key[3]),
+                            self._match(key, group, dests, deciding, high is not None)))
         return [match for _order, match in sorted(out, key=lambda item: item[0])]
 
     def _match(self, key, group: _SweepGroup, dests: dict[str, _Destination], deciding: _Window,
@@ -1519,8 +1530,8 @@ class ProtocolPortMismatch(_FlowRule):
         return True
 
     def finalize(self):
-        out = [self._mismatch(key, self.mismatches.peek(key))
-               for key in sorted(self.mismatches.keys(), key=lambda k: (ip_sort_key(k[0]),) + k[1:])]
+        out = [_citation
+               for key in sorted(self.mismatches.keys(), key=lambda k: (ip_sort_key(k[0]),) + k[1:]) for _citation in citation_call(self, self._mismatch, key, self.mismatches.peek(key))]
         groups = KeyedStore(self, "ppm_unidentified_groups", self.HOT_GROUPS)
         for i, (key, entry) in enumerate(self.unidentified.items()):
             if key in self.identified:
@@ -1536,9 +1547,20 @@ class ProtocolPortMismatch(_FlowRule):
             if i % FINALIZE_TRIM == FINALIZE_TRIM - 1:
                 groups.trim()
         for key in sorted(groups.keys(), key=lambda k: (ip_sort_key(k[0]),) + k[1:]):
-            out.append(self._unidentified(key, groups.peek(key)))
+            with citation_group(self, out, key, groups.peek(key)):
+                out.append(self._unidentified(key, groups.peek(key)))
         groups.clear()
         return out
+
+    def uncited_finding(self, key, state, match):
+        server, port, transport, kind = key
+        if isinstance(kind, str):
+            match.group_key = f"{server}|{transport}/{port}|unidentified|{kind}"
+        else:
+            group = state[0]
+            names = ", ".join(protocol_label(kind, group.alternatives))
+            match.group_key = f"{server}|{transport}/{port}|{names}"
+        return match
 
     def _mismatch(self, key, group: _Mismatch) -> Match:
         dst, port, transport, protocols = key
@@ -1838,10 +1860,15 @@ class LongUnidentifiedSession(_FlowRule):
             group.add(pieces, self.MIN_SECONDS)
             if i % FINALIZE_TRIM == FINALIZE_TRIM - 1:
                 groups.trim()
-        out = [self._match(key, groups.peek(key))
-               for key in sorted(groups.keys(candidates=True), key=lambda k: (ip_sort_key(k[0]),) + k[1:])]
+        out = [_citation
+               for key in sorted(groups.keys(candidates=True), key=lambda k: (ip_sort_key(k[0]),) + k[1:]) for _citation in citation_call(self, self._match, key, groups.peek(key))]
         groups.clear()
         return out
+
+    def uncited_finding(self, key, state, match):
+        dst, port, transport = key
+        match.group_key = f"{dst}|{transport}/{port}"
+        return match
 
     def _match(self, key, group: _LongGroup) -> Match:
         dst, port, transport = key
@@ -2222,8 +2249,8 @@ class OutboundVolumeAsymmetry(_FlowRule):
                 senders.trim()
         self._note_not_read(not_read, largest, sorted(shaped, reverse=True))
         # a reported source sent data to the destination, so it is one of the destination's senders
-        matches = [self._match(src, dst, totals, totals_by_source.peek(src)[0], senders.peek(dst)[0] - 1)
-                   for src, dst, totals in sorted(hits, key=lambda hit: hit[:2])]
+        matches = [_citation
+                   for src, dst, totals in sorted(hits, key=lambda hit: hit[:2]) for _citation in citation_call(self, self._match, src, dst, totals, totals_by_source.peek(src)[0], senders.peek(dst)[0] - 1)]
         uncited = sum(match is None for match in matches)
         if uncited:
             self.limits["uncited"] = _Uncited(

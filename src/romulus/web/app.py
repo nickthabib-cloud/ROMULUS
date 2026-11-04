@@ -10,7 +10,13 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -18,9 +24,10 @@ from romulus.agent.provider import egress_banners
 from romulus.config import Settings
 from romulus.decide.policy import LANE_ORDER
 from romulus.hunt.run import open_repo
+from romulus.report.bundle import write_reports
 from romulus.report.manifest import internal_networks_view, investigations_for_hunt, publish_revision
-from romulus.report.markdown import render as render_md
 from romulus.site import SiteChangedError, SiteValidationError, load_site_facts, save_site_facts
+from romulus.store.db import compact, maintenance_lease
 from romulus.web import site_form
 from romulus.web.auth import RateLimiter, Sessions, csrf_ok, verify
 
@@ -101,7 +108,8 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         deleted = request.query_params.get("deleted", "")
         # only confirm a deletion that the audit log actually records (the query string is spoofable)
         confirmed = deleted if deleted and repo.latest_audit(deleted, "hunt.delete") else ""
-        return page(request, "hunts.html", u, hunts=rows, deleted=confirmed)
+        return page(request, "hunts.html", u, hunts=rows, deleted=confirmed,
+                    compaction_failed=bool(confirmed and repo.latest_audit(confirmed, "hunt.compaction_failed")))
 
     @app.get("/hunts/new", response_class=HTMLResponse)
     def new_hunt_form(request: Request):
@@ -172,7 +180,8 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
 
     def _timeline_findings(hunt_id: str) -> list[dict]:
         return [{"id": c["id"], "lane": c["lane"], "rule_id": c["rule_id"], "claim": c["claim"],
-                 "observed_at": str(c["ts"]), "entities": c["entities"], "event_ids": c["event_ids"],
+                 "observed_at": str(c["ts"]) if c["ts"] is not None else None,
+                 "entities": c["entities"], "event_ids": c["event_ids"],
                  "source_link_id": c.get("source_link_id")}
                 for c in repo.candidates(hunt_id, ["urgent", "high", "lead"])]
 
@@ -198,7 +207,7 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         tl = build_timeline(findings, graph["edges"], analyst, window.get("start"), window.get("end"),
                             titles=titles, lanes=lanes, kinds=kinds, styles=styles)
         pick = sorted(({**f, "title": titles.get(f["rule_id"], f["rule_id"])} for f in findings),
-                      key=lambda f: (f["observed_at"], f["id"]))
+                      key=lambda f: (f["observed_at"] is None, f["observed_at"] or "", f["id"]))
         return page(request, "timeline.html", u, h=h, tl=tl, analyst_links=analyst, pick=pick,
                     all_lanes=LANES, all_kinds=ROW_KINDS, all_styles=LINK_STYLES)
 
@@ -246,7 +255,7 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
 
     # ------------------------------------------------------------------ findings
     @app.get("/findings/{cid}", response_class=HTMLResponse)
-    def finding(request: Request, cid: str):
+    def finding(request: Request, cid: str, host_after: str = ""):
         u = need(request)
         c = repo.candidate(cid)
         if c is None:
@@ -257,7 +266,9 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         gates = dict(c["gate_results"])
         notes = gates.pop("_notes", [])
         pred_fields = {p["field"] for p in c["predicate_fields"]}
+        fleet_hosts, fleet_next = repo.candidate_hosts(cid, after=host_after)
         return page(request, "finding.html", u, c=c, gates=gates, notes=notes, events=events, raws=raws,
+                    fleet_hosts=fleet_hosts, fleet_next=fleet_next, fleet_after=host_after,
                     pred_fields=pred_fields, dispositions=repo.dispositions(cid), statuses=STATUSES,
                     pretty=lambda v: json.dumps(v, indent=2, ensure_ascii=False, sort_keys=True, default=str))
 
@@ -314,15 +325,17 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         if s.reports_dir.resolve() in rdir.parents and rdir.is_dir():
             import shutil
             shutil.rmtree(rdir, ignore_errors=True)
-        # Return freed pages to the filesystem, but never while a hunt may be writing: VACUUM blocks
-        # writers and could push a running sweep past its busy timeout. Compaction then simply waits
-        # for the next deletion made while nothing is running.
-        if not repo.hunts_with_live_lease():
-            try:
-                with repo.engine.connect() as c:
-                    c.exec_driver_sql("VACUUM")
-            except Exception:  # noqa: BLE001, S110 - best-effort; the deletion already committed
-                pass
+        # The same cross-process lease guards hunt claims through the final
+        # checkpoint, closing the check-then-VACUUM race with a new hunt.
+        try:
+            with maintenance_lease(repo.engine):
+                if not repo.hunts_with_live_lease():
+                    compact(repo.engine)
+        except Exception as error:  # deletion has already committed
+            import logging
+            logging.getLogger(__name__).exception("Hunt deletion compaction failed for %s", hunt_id)
+            repo.audit(f"web:{u['u']}", "hunt.compaction_failed", hunt_id=hunt_id,
+                       detail={"error": str(error)[:500]})
         return RedirectResponse(f"/?deleted={hunt_id}&removed={counts.get('candidates', 0)}", status_code=303)
 
     # ------------------------------------------------------------------ site setup
@@ -392,21 +405,23 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         m = publish_revision(repo, hunt_id, f"web:{u['u']}")
         out = s.reports_dir / hunt_id
         out.mkdir(parents=True, exist_ok=True)
-        (out / f"{m['revision']['id']}.json").write_text(json.dumps(m, indent=2, sort_keys=True), encoding="utf-8")
-        (out / f"{m['revision']['id']}.md").write_text(render_md(m), encoding="utf-8")
+        write_reports(repo, m, out)
         return RedirectResponse(f"/hunts/{hunt_id}#reports", status_code=303)
 
     @app.get("/reports/{hunt_id}/{rev_id}.{ext}")
     def get_report(request: Request, hunt_id: str, rev_id: str, ext: str):
         need(request)
-        if ext not in ("md", "json") or not rev_id.startswith(hunt_id + "-r") or "/" in rev_id or ".." in rev_id:
+        appendix = (ext == "jsonl" and rev_id.startswith("fleet-hosts-") and len(rev_id) == 76
+                    and all(char in "0123456789abcdef" for char in rev_id[12:]))
+        if (not appendix and (ext not in ("md", "json", "docx") or not rev_id.startswith(hunt_id + "-r"))
+                or "/" in rev_id or ".." in rev_id):
             raise HTTPException(404)
         p = (s.reports_dir / hunt_id / f"{rev_id}.{ext}").resolve()
         if s.reports_dir.resolve() not in p.parents or not p.exists():
             raise HTTPException(404)
-        media = "text/markdown; charset=utf-8" if ext == "md" else "application/json"
-        return PlainTextResponse(p.read_text(encoding="utf-8"), media_type=media,
-                                 headers={"Content-Disposition": f'attachment; filename="{rev_id}.{ext}"'})
+        media = {"md": "text/markdown; charset=utf-8", "json": "application/json", "jsonl": "application/x-ndjson",
+                 "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}[ext]
+        return FileResponse(p, media_type=media, filename=f"{rev_id}.{ext}")
 
     @app.exception_handler(HTTPException)
     async def http_exc(request: Request, exc: HTTPException):

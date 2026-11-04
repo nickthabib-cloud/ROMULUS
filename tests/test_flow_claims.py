@@ -583,7 +583,7 @@ def test_releasing_holds_costs_the_same_however_many_holds_the_stage_has(tmp_pat
     try:
         db = stage.db
         n = 200_000
-        db.executemany("INSERT INTO event VALUES (?, '{}', 0)", [(f"e{i}",) for i in range(n)])
+        db.executemany("INSERT INTO event(id,body,kept) VALUES (?, '{}', 0)", [(f"e{i}",) for i in range(n)])
         db.executemany("INSERT INTO hold VALUES (?, 'rule', 1)", [(f"e{i}",) for i in range(n)])
         db.executemany("INSERT INTO event_raw VALUES (?, ?)", [(f"e{i}", f"k{i}") for i in range(n)])
         db.executemany("INSERT INTO raw VALUES (?, '{}', 0)", [(f"k{i}",) for i in range(n)])
@@ -601,7 +601,7 @@ def test_releasing_holds_costs_the_same_however_many_holds_the_stage_has(tmp_pat
         stage.close()
 
 
-def test_a_held_event_that_becomes_kept_drops_its_release_bookkeeping(tmp_path):
+def test_a_held_event_that_becomes_kept_retains_native_provenance_after_release(tmp_path):
     from romulus.hunt.stage import EventStage
     [a] = events(eve("a"))
     raw = {r.key: {"doc": r.native_id} for r in a.raw}
@@ -610,9 +610,14 @@ def test_a_held_event_that_becomes_kept_drops_its_release_bookkeeping(tmp_path):
         stage.hold([("r1", a)], raw)
         assert stage.db.execute("SELECT COUNT(*) FROM event_raw").fetchone()[0] == len(a.raw)
         stage.put([a], raw)
-        assert stage.db.execute("SELECT COUNT(*) FROM event_raw").fetchone()[0] == 0
+        references = sorted((a.id, ref.key) for ref in a.raw)
+        assert stage.db.execute("SELECT id,key FROM event_raw ORDER BY id,key").fetchall() == references
+        assert stage.db.execute("SELECT kept FROM event WHERE id=?", (a.id,)).fetchone() == (1,)
         stage.release("r1", [a.id])
-        assert stage.load([a.id]) and set(stage.raw_sources([a])) == {r.key for r in a.raw}
+        assert stage.db.execute("SELECT COUNT(*) FROM hold").fetchone()[0] == 0
+        assert stage.db.execute("SELECT id,key FROM event_raw ORDER BY id,key").fetchall() == references
+        assert stage.count() == 1 and stage.load([a.id]) == [a]
+        assert stage.raw_sources([a]) == raw
     finally:
         stage.close()
 

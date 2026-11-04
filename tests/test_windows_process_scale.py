@@ -108,7 +108,7 @@ def test_mission_volume_streams_in_batches_without_unbounded_growth():
 def test_withdrawn_members_at_volume_leave_an_exact_tally_and_bounded_citations():
     # 200 hosts, each with one Word process and 20 identical PowerShell children; a termination of Word read later
     # falls between the 10th and 11th child on every host, withdrawing the parent of 10 children per host.
-    from romulus.detect.windows_common import WITHDRAWN_CITED
+    from romulus.detect.windows_common import FLEET_HOST_SAMPLE, WITHDRAWN_CITED
     from romulus.detect.windows_lineage import LureAppSpawnsCodeRunner
     from tests.windows_process_support import security4688, security4689
 
@@ -137,5 +137,5 @@ def test_withdrawn_members_at_volume_leave_an_exact_tally_and_bounded_citations(
     assert "2000 record(s) were excluded after later records withdrew their parent" in tally.claim
     [group] = [rule.groups.peek(key) for key in rule.order.keys()]  # noqa: SIM118 (a KeyedStore)
     assert len(group.withdrawn) <= WITHDRAWN_CITED and len(group.withdrawn_bounds) <= 2
-    assert len(tally.events) <= 8 + WITHDRAWN_CITED + 2
+    assert len(tally.events) <= FLEET_HOST_SAMPLE + 8 + WITHDRAWN_CITED + 2
     assert rule.undecided == {"parent_ended": 2000}

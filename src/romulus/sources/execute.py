@@ -30,8 +30,12 @@ def execute(client: ElasticClient, intent: SearchIntent, contract: FieldContract
     started = datetime.now(UTC)
 
     def outcome(**kw) -> SearchOutcome:
+        try:
+            version = client.version
+        except SourceError:
+            version = ""
         return SearchOutcome(target=intent.target, fingerprint=q.fingerprint, started_at=started,
-                             ended_at=datetime.now(UTC), backend_version=client.version, **kw)
+                             ended_at=datetime.now(UTC), backend_version=version, **kw)
 
     try:
         if intent.kind == "raw":

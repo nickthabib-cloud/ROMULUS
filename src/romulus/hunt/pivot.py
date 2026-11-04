@@ -24,7 +24,7 @@ from romulus.agent.tools import (
 )
 from romulus.detect.bounded import StateBudget
 from romulus.detect.host import ExecLineage
-from romulus.detect.registry import fresh_direct_pack
+from romulus.detect.registry import bind_windows_site, fresh_direct_pack
 from romulus.evidence.auditd import AuditParseError, AuditRecord, parse_record
 from romulus.evidence.normalize import AUDIT_LOGIN_TYPES, normalize_hits
 from romulus.evidence.typed import TypedEvent
@@ -1672,7 +1672,7 @@ class PivotExecutor:
         self._save_selected_events(retained, raw_sources, task_by_event, task_ids)
 
         candidate_ids: list[str] = []
-        for playbook in fresh_direct_pack():
+        for playbook in bind_windows_site(fresh_direct_pack(), self.site_facts):
             for match in playbook.consume(retained):
                 row = publish_match(
                     self.repo, self.hunt_id, playbook, match, task_ids[0] if task_ids else None,

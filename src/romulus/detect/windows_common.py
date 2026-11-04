@@ -40,13 +40,22 @@ import hashlib
 import ntpath
 import re
 from bisect import insort
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, PredicateField
-from romulus.detect.bounded import HOT_COUNT, HeldExamples, KeyedStore, RecentIds
-from romulus.detect.citing import BoundStage, Ends, bound_note, cite_group, cited_phrase
+from romulus.detect.bounded import HOT_COUNT, CitationUnavailable, HeldExamples, KeyedStore, RecentIds
+from romulus.detect.citing import (
+    BoundStage,
+    Ends,
+    bound_note,
+    citation_group,
+    cite_group,
+    cited_phrase,
+    uncited_positive,
+)
 from romulus.detect.host import add_unheld, alone, exec_order
 from romulus.detect.windows_cmdline import PARSED
 from romulus.evidence.typed import TypedEvent
@@ -490,8 +499,10 @@ class _Group:
     repeats: int = 0
     emitted_records: int = 0
     sample_hosts: list = field(default_factory=list)
+    fleet_host_tail: str | None = None
     ends: Ends = field(default_factory=Ends)
     examples: HeldExamples = field(default_factory=lambda: HeldExamples(8))
+    host_examples: HeldExamples = field(default_factory=lambda: HeldExamples(FLEET_HOST_SAMPLE))
     # members a later record of their parent pid withdrew (taken out of the counts), the ids of those that were
     # held examples (cited as context of the final tally, at most WITHDRAWN_CITED), and of those that bound the
     # stated interval (at most two; never counted as a remaining member)
@@ -503,7 +514,8 @@ class _Group:
         return self.__dict__
 
     def __setstate__(self, state):
-        self.__dict__.update({"excluded": 0, "withdrawn": [], "withdrawn_bounds": []})
+        self.__dict__.update({"excluded": 0, "withdrawn": [], "withdrawn_bounds": [], "fleet_host_tail": None,
+                              "host_examples": HeldExamples(FLEET_HOST_SAMPLE)})
         self.__dict__.update(state)
 
 
@@ -696,7 +708,7 @@ class WindowsProcessRule(Playbook):
         member_key = (shape, event.host)
         member = self.members_store.get(member_key)
         if member is None:
-            if not self.members_store.put(member_key, [1]):
+            if not self.members_store.put(member_key, [1, event.id, None]):
                 self.note_limit("fleet_members", "the per-(shape, host) membership store took no new host; this "
                                                  "record is published on its own")
                 add_unheld(out, alone(self.record_match(event, hit), self, event))
@@ -704,6 +716,14 @@ class WindowsProcessRule(Playbook):
             # first record of this (shape, host): published at its own lane, with its own content
             out.append(self.record_match(event, hit))
             self._note_group(shape, hit, event, new_host=True)
+            return shape, "own"
+        if member[0] <= 0:
+            # A later parent correction withdrew this host's earlier members.
+            # Reactivate its existing linked-list node instead of linking it twice.
+            member[0], member[1] = 1, event.id
+            self.members_store.put(member_key, member)
+            out.append(self.record_match(event, hit))
+            self._note_group(shape, hit, event, new_host=True, link_host=False)
             return shape, "own"
         # a repeat on a host already reported for this shape: merge
         member[0] += 1
@@ -739,15 +759,16 @@ class WindowsProcessRule(Playbook):
                     group.sample_hosts.remove(event.host)
             else:
                 group.repeats -= 1
-            held = len(group.examples.items)
-            group.examples.items = [item for item in group.examples.items if item[0][1] != event.id]
-            if len(group.examples.items) < held and len(group.withdrawn) < WITHDRAWN_CITED:
+            held = sum(len(examples.items) for examples in (group.examples, group.host_examples))
+            for examples in (group.examples, group.host_examples):
+                examples.items = [item for item in examples.items if item[0][1] != event.id]
+            if sum(len(examples.items) for examples in (group.examples, group.host_examples)) < held and len(group.withdrawn) < WITHDRAWN_CITED:
                 group.withdrawn.append(event.id)
             if event.id in group.ends.ids() and event.id not in group.withdrawn_bounds:
                 group.withdrawn_bounds.append(event.id)
             self.groups.put(shape, group)
 
-    def _note_group(self, shape: str, hit: Hit, event: TypedEvent, *, new_host: bool) -> _Group | None:
+    def _note_group(self, shape: str, hit: Hit, event: TypedEvent, *, new_host: bool, link_host=True) -> _Group | None:
         group = self.groups.get(shape)
         if group is None:
             group = _Group(hit.behavior, hit.common or hit.text, hit.lane, hit.severity, hit.attack,
@@ -760,8 +781,16 @@ class WindowsProcessRule(Playbook):
         group.records += 1
         if new_host:
             group.hosts += 1
+            if link_host:
+                member = self.members_store.get((shape, event.host))
+                member[2] = group.fleet_host_tail
+                self.members_store.put((shape, event.host), member)
+                group.fleet_host_tail = event.host
             if len(group.sample_hosts) < FLEET_HOST_SAMPLE:
                 group.sample_hosts.append(event.host)
+            if group.host_examples.offer(event):
+                self._pending.append(event)
+                self._fresh.append(group.host_examples)
         else:
             group.repeats += 1
         if _LANE_RANK[hit.lane] < _LANE_RANK[group.lane]:
@@ -769,11 +798,31 @@ class WindowsProcessRule(Playbook):
         if _SEVERITY_RANK[hit.severity] < _SEVERITY_RANK[group.severity]:
             group.severity = hit.severity
         self.bounds.offer_at(shape, group.ends, event)
-        if group.examples.offer(event):
+        if self._offer_group_example(group, event, hit, new_host=new_host):
             self._pending.append(event)
             self._fresh.append(group.examples)
         self.groups.put(shape, group)
         return group
+
+    def _offer_group_example(self, group, event, hit, *, new_host):
+        return group.examples.offer(event)
+
+    def fleet_hosts(self, shape, tail):
+        """Stream members in deterministic reverse first-observation order.
+
+        Membership rows also form a singly linked list, with only its head kept
+        in the group. Neither publishing nor paging needs a hunt-sized Python
+        host list; withdrawn hosts remain traversable but are not yielded.
+        """
+        while tail is not None:
+            member = self.members_store.peek((shape, tail))
+            if member is None or len(member) < 3:
+                reason = f'Host list for fleet shape {shape} could not be fully read at host {tail}.'
+                self.note_limit('fleet_hosts', reason)
+                raise LookupError(reason)
+            if member[0] > 0:
+                yield tail, member[1]
+            tail = member[2]
 
     def record_match(self, event: TypedEvent, hit: Hit) -> Match:
         command = event.get("process.command_line")
@@ -789,14 +838,13 @@ class WindowsProcessRule(Playbook):
         """The merged finding of a repeating shape, under one identity (`<rule>|fleet|<shape>`). Published at the
         first repeat with the count so far, and revised in place to the exact tally when the sweep ends."""
         try:
-            examples = group.examples.events(self.load)
+            examples = list({event.id: event for event in [*group.examples.events(self.load),
+                                                           *group.host_examples.events(self.load)]}.values())
             cited, missing, context = cite_group(self.load, examples, self.bounds, group.ends, named=group.withdrawn)
-        except LookupError as exc:
-            self.note_limit("fleet_citations", f"a repeating shape's held records were not loadable ({exc}); its "
-                                               f"fleet finding is not published")
-            return None
+        except LookupError:
+            return uncited_positive(self, f"{self.id}|fleet|{shape}", group)
         if not cited:
-            return None
+            return uncited_positive(self, f"{self.id}|fleet|{shape}", group)
         first = datetime.fromtimestamp(group.ends.first[0], UTC).isoformat() if group.ends.first else "?"
         last = datetime.fromtimestamp(group.ends.last[0], UTC).isoformat() if group.ends.last else "?"
         more = group.hosts - len(group.sample_hosts)
@@ -837,6 +885,11 @@ class WindowsProcessRule(Playbook):
                      + cited_phrase(len(cited), group.records, not missing))
             reason = ""
         anchor = next((item for item in members if item.id not in context), members[0] if members else cited[0])
+        first_records = {event_id for event_id in group.host_examples.ids() if event_id not in withdrawn}
+        named = sum(item.id in first_records for item in members)
+        claim += (f' All {group.hosts} host names are retained in the paged host list. '
+                  f'First-record citations cover {named} host(s), with a bound of {FLEET_HOST_SAMPLE}; '
+                  f'{max(0, group.hosts - named)} additional host(s) are counted without a first-record citation.')
         predicate = [PredicateField(field=name, value=value, origin=origin)
                      for name, value, origin in group.predicate]
         return Match(self.id, claim, "aggregate_observation", cited, predicate, anchor.ts, group.severity,
@@ -844,9 +897,47 @@ class WindowsProcessRule(Playbook):
                      [f"ATT&CK context (not proof): {', '.join(group.attack)}",
                       ("a repeating shape is merged into one finding at the lane of its records; new hosts keep "
                        "their own findings")],
-                     group_key=f"{self.id}|fleet|{shape}", context_ids=context, revision_reason=reason)
+                     group_key=f"{self.id}|fleet|{shape}", context_ids=context, revision_reason=reason,
+                     fleet_hosts=self.fleet_hosts(shape, group.fleet_host_tail), fleet_host_count=group.hosts,
+                     fleet_hosts_complete=True)
+
+    def uncited_finding(self, key, state, match):
+        if isinstance(state, _Group):
+            match.proposed_lane, match.severity = state.lane, state.severity
+            match.claim = (f"{state.common}: {state.records} recorded member(s) across {state.hosts} host(s); "
+                           f"no citation could be retained for group {key}.")
+            match.revision_reason = "the group tally is retained without an available citation"
+            match.fleet_host_count = state.hosts
+            match.fleet_hosts = self.fleet_hosts(str(key).rsplit('|', 1)[-1], state.fleet_host_tail)
+            match.fleet_hosts_complete = True
+        return match
 
     # ---- finalize ----
+    @contextmanager
+    def _child_citations(self, child_id):
+        try:
+            yield
+        except CitationUnavailable as error:
+            # A deferred decision is not yet a positive. Keep this child unresolved,
+            # without abandoning unrelated children or already-computed fleet groups.
+            self.note_limit("parent_children", f"Parent re-judgement for child {child_id} is incomplete: {error}")
+
+    def _finalize_fold(self, event, hit, out):
+        try:
+            return self._fold(event, hit, out)
+        except CitationUnavailable:
+            shape = self._shape(event, hit)
+            group = self.groups.peek(shape)
+            if group is not None:
+                out.append(uncited_positive(self, f"{self.id}|fleet|{shape}", group))
+                return shape, "repeat"
+            # The hit is already computed from this available record; a failed fold
+            # cannot discard it or invent a group that was never admitted.
+            match = self.record_match(event, hit)
+            match.notes.append("Fleet correlation was incomplete because a retained citation was unavailable.")
+            out.append(match)
+            return None, "own"
+
     def _load_one(self, child_id: str) -> TypedEvent | None:
         found = [event for event in self.load([child_id]) if event.id == child_id]
         if not found:
@@ -907,53 +998,62 @@ class WindowsProcessRule(Playbook):
             deferred = {str(key) for key in self.deferred.keys()}  # noqa: SIM118 (a KeyedStore)
             # 1. children undecided at observation time, judged now against the complete history
             for child_id in sorted(deferred):
-                event = self._load_one(child_id)
-                if event is None:
-                    continue
-                try:
-                    hits = self._checked_judge(event)
-                except Undecided as undecided:
-                    self._count_undecided(event, undecided)
-                    continue
-                self.evaluated += 1
-                for hit in hits:
-                    self._fold(event, hit, out)
+                with self._child_citations(child_id):
+                    event = self._load_one(child_id)
+                    if event is None:
+                        continue
+                    try:
+                        hits = self._checked_judge(event)
+                    except Undecided as undecided:
+                        self._count_undecided(event, undecided)
+                        continue
+                    self.evaluated += 1
+                    for hit in hits:
+                        self._finalize_fold(event, hit, out)
             # 2. children judged early whose parent pid gained a record inside their window: re-judge, and publish a
             #    correction when the answer changed, or the finding when a match appears that was not there before
             #    (every pid-path child was staged when first judged, so any dirty one can be re-read here)
             for child_id in self.lineage.dirty_ids():
-                if child_id in deferred:
-                    continue
-                event = self._load_one(child_id)
-                if event is None:
-                    continue
-                early = self.early.peek(child_id)
-                hits, undecided = self._rejudge(event)
-                if early is None:
-                    for hit in hits:                        # a match that a late record revealed
-                        self._fold(event, hit, out)
-                    continue
-                signature, folds = early
-                if _signature(hits) == signature:
-                    continue
-                # the earlier decision no longer holds: the record leaves every group it was counted in; its own
-                # finding (when it had one) is revised in place, and a record that was only a merged repeat has
-                # its new decision published as any record's would be
-                self._exclude(event, folds)
-                if any(role == "own" for _shape, role in folds):
-                    out.append(self._correction(event, signature, hits, undecided))
-                else:
-                    if undecided is not None:
-                        self._count_undecided(event, undecided)
-                    for hit in hits:
-                        self._fold(event, hit, out)
+                with self._child_citations(child_id):
+                    if child_id in deferred:
+                        continue
+                    event = self._load_one(child_id)
+                    if event is None:
+                        continue
+                    early = self.early.peek(child_id)
+                    hits, undecided = self._rejudge(event)
+                    if early is None:
+                        for hit in hits:                        # a match that a late record revealed
+                            self._finalize_fold(event, hit, out)
+                        continue
+                    signature, folds = early
+                    if _signature(hits) == signature:
+                        continue
+                    # the earlier decision no longer holds: the record leaves every group it was counted in; its own
+                    # finding (when it had one) is revised in place, and a record that was only a merged repeat has
+                    # its new decision published as any record's would be
+                    self._exclude(event, folds)
+                    if any(role == "own" for _shape, role in folds):
+                        out.append(self._correction(event, signature, hits, undecided))
+                        # The corrected own finding no longer contributes to its
+                        # former fleet group. A later finalize must not withdraw
+                        # those same members again.
+                        self.early.put(event.id, (_signature(hits), ((None, "own"),)))
+                    else:
+                        if undecided is not None:
+                            self._count_undecided(event, undecided)
+                        revised_folds = []
+                        for hit in hits:
+                            revised_folds.append(self._finalize_fold(event, hit, out))
+                        self.early.put(event.id, (_signature(hits), tuple(revised_folds)))
         # 3. every merged finding is revised in place to its exact final tally (idempotent: a re-run writes nothing);
         #    one already published is revised even when exclusions left it no repeat
         for shape in self.order.keys():  # noqa: SIM118 (a KeyedStore: first-insertion order, keys on disk too)
             group = self.groups.peek(shape)
-            if group is None or (group.repeats <= 0 and not group.emitted_records):
-                continue
-            merged = self._fleet_match(shape, group, final=True)
-            if merged is not None:
-                out.append(merged)
+            with citation_group(self, out, f"{self.id}|fleet|{shape}", group):
+                if group is None or (group.repeats <= 0 and not group.emitted_records):
+                    continue
+                merged = self._fleet_match(shape, group, final=True)
+                if merged is not None:
+                    out.append(merged)
         return out

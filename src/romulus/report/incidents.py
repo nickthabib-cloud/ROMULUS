@@ -55,11 +55,13 @@ def incident_narrative(incident: dict, finding_by_id: dict[str, dict], edges: li
     (rule metadata such as ATT&CK tactics), `hypothesis` (inferred links) or `gap` (what is not known)."""
     members = incident["timeline"]
     first, last = finding_by_id[members[0]], finding_by_id[members[-1]]
+    timed = all(finding_by_id[item]["observed_at"] is not None for item in members)
     where = ", ".join(incident["hosts"]) or "no recorded host"
     who = f" involving account(s) {', '.join(incident['accounts'])}" if incident["accounts"] else ""
     sentences = [{
         "text": (f"{len(members)} finding(s) on {where}{who}, from {first['observed_at']} to "
-                 f"{last['observed_at']}."),
+                 f"{last['observed_at']}." if timed else
+                 f"{len(members)} finding(s) on {where}{who}; observation time not recorded for every finding."),
         "cites": list(members), "kind": "observed",
     }]
     member_set = set(members)
@@ -76,8 +78,9 @@ def incident_narrative(incident: dict, finding_by_id: dict[str, dict], edges: li
 
     how, via = reached(first["id"])
     sentences.append({
-        "text": (f"The earliest finding is {_title(first['rule_id'])} ({first['lane']}) at "
-                 f"{first['observed_at']}{how}."),
+        "text": (f"{'The earliest finding is' if timed else 'A recorded finding is'} "
+                 f"{_title(first['rule_id'])} ({first['lane']}) at "
+                 f"{first['observed_at'] or 'time not recorded'}{how}."),
         "cites": [first["id"]] + via, "kind": "observed",
     })
     entry = finding_by_id[incident["entry_point"]]
@@ -85,7 +88,8 @@ def incident_narrative(incident: dict, finding_by_id: dict[str, dict], edges: li
         # Observed links can reach back in time (a login session, the same process), so the finding no observed
         # link leads into is not always the earliest one.
         sentences.append({
-            "text": (f"No observed link leads into {_title(entry['rule_id'])} at {entry['observed_at']}; "
+            "text": (f"No observed link leads into {_title(entry['rule_id'])} at "
+                     f"{entry['observed_at'] or 'time not recorded'}; "
                      f"expansion treats it as the entry point."),
             "cites": [entry["id"]], "kind": "observed",
         })
@@ -93,7 +97,8 @@ def incident_narrative(incident: dict, finding_by_id: dict[str, dict], edges: li
         finding = finding_by_id[item]
         how, via = reached(item)
         sentences.append({
-            "text": f"Then {_title(finding['rule_id'])} ({finding['lane']}) at {finding['observed_at']}{how}.",
+            "text": (f"{'Then' if timed else 'Also'} {_title(finding['rule_id'])} ({finding['lane']}) at "
+                     f"{finding['observed_at'] or 'time not recorded'}{how}."),
             "cites": [item] + via, "kind": "observed",
         })
     if incident["attack_tactics"]:
@@ -216,7 +221,8 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
     anchor_by_id = {row["id"]: row for row in repo.expansion_anchors(hunt_id)}
     incidents = []
     for finding_ids in components.values():
-        finding_ids.sort(key=lambda item: (finding_by_id[item]["observed_at"], item))
+        finding_ids.sort(key=lambda item: (finding_by_id[item]["observed_at"] is None,
+                                          finding_by_id[item]["observed_at"] or "", item))
         member_set = set(finding_ids)
         incoming = {edge["to"] for edge in edges if edge["style"] == "observed"
                     and edge["from"] in member_set and edge["to"] in member_set}
@@ -260,5 +266,6 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
         }
         incident["narrative"] = incident_narrative(incident, finding_by_id, edges)
         incidents.append(incident)
-    incidents.sort(key=lambda incident: (finding_by_id[incident["finding_ids"][0]]["observed_at"], incident["id"]))
+    incidents.sort(key=lambda incident: (finding_by_id[incident["finding_ids"][0]]["observed_at"] is None,
+                                        finding_by_id[incident["finding_ids"][0]]["observed_at"] or "", incident["id"]))
     return {"nodes": nodes, "edges": edges, "links": links, "incidents": incidents}

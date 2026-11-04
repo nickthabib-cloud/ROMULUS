@@ -6,6 +6,8 @@ import json
 import time
 import uuid
 from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from itertools import groupby, islice
@@ -32,7 +34,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.sqlite import insert
 
 from romulus.store import schema as t
-from romulus.store.db import read_snapshot, utcnow, write_txn
+from romulus.store.db import maintenance_lease, read_snapshot, utcnow, write_txn
 
 # The origin suffix of a boot id a hunt's boot-interval map placed (the normalizer's BOOT_INTERVAL_ORIGIN; the
 # store does not import the evidence layer, and a test keeps the two equal).
@@ -57,6 +59,7 @@ SEVERITY_STRENGTH = {"informational": 0, "low": 1, "medium": 2, "high": 3, "crit
 AGENT_PAGE_PLAN_LIMIT = 256
 AGENT_PAGE_ITEM_LIMIT = 250_000
 CANDIDATE_FILTER_SNAPSHOT_LIMIT = 5_000
+_candidate_writer = ContextVar("candidate_writer", default=None)
 
 
 # Rows per executemany call: one compiled single-row statement runs over each chunk, so a batch of any size never
@@ -414,7 +417,7 @@ class Repo:
 
     # ---- hunts ------------------------------------------------------------------------------
     def create_hunt(self, hunt_id: str, manifest: dict, digest_: str, created_by: str, parent: str | None = None):
-        with write_txn(self.engine) as c:
+        with maintenance_lease(self.engine), write_txn(self.engine) as c:
             c.execute(t.hunt.insert().values(id=hunt_id, created_at=utcnow(), created_by=created_by, manifest=manifest,
                                              manifest_digest=digest_, parent_hunt_id=parent, execution_state="planned"))
             c.execute(t.audit_event.insert().values(at=utcnow(), actor=created_by, action="hunt.create",
@@ -448,7 +451,7 @@ class Repo:
         now = now or utcnow()
         owner_token = owner_token or uuid.uuid4().hex
         lease_until = now + timedelta(seconds=lease_seconds)
-        with write_txn(self.engine) as c:
+        with maintenance_lease(self.engine), write_txn(self.engine) as c:
             current = c.execute(select(t.hunt).where(t.hunt.c.id == hunt_id)).mappings().one()
             state = current["execution_state"]
             action = "hunt.claim"
@@ -690,6 +693,7 @@ class Repo:
                 t.baseline_segment.c.built_by_hunt_id == hunt_id,
             )).values(status="revoked"))
             rm("disposition_events", t.disposition_event.delete().where(t.disposition_event.c.candidate_id.in_(cand_ids)))
+            rm("candidate_hosts", t.candidate_host.delete().where(t.candidate_host.c.candidate_id.in_(cand_ids)))
             rm("candidates", t.candidate.delete().where(t.candidate.c.hunt_id == hunt_id))
             rm("case_steps", t.case_step.delete().where(t.case_step.c.case_id.in_(case_ids)))
             rm("model_calls", t.model_call.delete().where(t.model_call.c.hunt_id == hunt_id))
@@ -707,6 +711,7 @@ class Repo:
             rm("rule_cells", t.rule_run.delete().where(t.rule_run.c.hunt_id == hunt_id))
             rm("tasks", t.task.delete().where(t.task.c.hunt_id == hunt_id))
             rm("report_revisions", t.report_manifest.delete().where(t.report_manifest.c.hunt_id == hunt_id))
+            rm("report_hosts", t.report_host.delete().where(t.report_host.c.hunt_id == hunt_id))
             rm("source_profiles", t.source_profile.delete().where(t.source_profile.c.hunt_id == hunt_id))
             rm("audit_records", t.audit_event.delete().where(t.audit_event.c.hunt_id == hunt_id,
                                                              t.audit_event.c.actor == SYSTEM_ACTOR))
@@ -1494,10 +1499,24 @@ class Repo:
         with self.engine.connect() as c:
             return self._candidate_subject_raw_identity(c, row)
 
+    @contextmanager
+    def candidate_publication(self):
+        """Candidate decision and its streamed host list share one fenced transaction."""
+        active = _candidate_writer.get()
+        if active is not None and active[0] is self.engine:
+            yield active[1]
+            return
+        with write_txn(self.engine) as connection:
+            token = _candidate_writer.set((self.engine, connection))
+            try:
+                yield connection
+            finally:
+                _candidate_writer.reset(token)
+
     def save_candidate(self, row: dict, *, canonicalize_agent: bool = False,
                        owner_token: str | None = None) -> bool:
         """Insert once, while retaining deterministic provenance for the two supported duplicate cases."""
-        with write_txn(self.engine) as c:
+        with self.candidate_publication() as c:
             self._fence_lease(c, row["hunt_id"], owner_token)
             existing = c.execute(select(t.candidate).where(
                 t.candidate.c.id == row["id"],
@@ -1685,28 +1704,40 @@ class Repo:
         "rule_version", "claim", "claim_type", "event_ids", "context_event_ids", "predicate_fields", "entities",
         "severity", "confidence", "lane", "priority", "priority_reasons", "gate_results",
     )
-    # How many revision summaries the candidate itself carries (the audit table holds every previous version whole).
+    # Candidate summaries and audit citation diffs are independently bounded.
     REVISION_SUMMARIES = 8
 
-    def revise_candidate(self, row: dict, reason: str, *, owner_token: str | None = None) -> str:
-        """Revise a direct (sweep) finding in place under the same id, in one transaction. Returns "inserted" (no
+    def revise_candidate(self, row: dict, reason: str, *, owner_token: str | None = None,
+                         evidence_view: bool = False, bounded_revision: bool = False) -> str:
+        """Revise a direct finding or opted-in script evidence view under the same id, in one transaction. Returns "inserted" (no
         candidate had the id), "revised", or "" (nothing written).
 
         - Inserted as a new candidate when the id does not exist yet (nothing was published to revise).
         - Idempotent: a candidate whose recorded revision digest equals this revision's writes nothing (a re-run
           finalize or a resume).
-        - Nothing is lost: every record the earlier version cited stays cited (as context when the corrected claim is
-          not about it); the earlier version (claim, lane, severity, event ids, rule version) with the reason and time
-          is appended to the audit table, and the candidate keeps a bounded list of revision summaries; analyst
+        - Ordinary revisions retain prior citations as context. Bounded aggregate revisions replace them with
+          first/latest witnesses. Audit rows carry bounded citation diffs plus full-list counts and digests,
+          and the candidate keeps a bounded list of revision summaries; analyst
           dispositions recorded against the id are untouched; expansion anchors keep pointing at the same id (their
           copied lane and severity follow the revision).
         - It never deletes a candidate and never moves one to the context lane. The caller states the reason; a lane
-          is lowered only by a revision whose evidence changed, which the reason must say."""
+          is lowered only by a revision whose evidence changed, which the reason must say.
+        - evidence_view explicitly permits grouped script-content revisions owned by an investigator or expansion.
+          Existing hunt/rule/group identity and discovery ownership remain fixed; discovery routes merge without
+          creating an evidence revision when the preferred content is unchanged."""
         if not reason:
             raise ValueError("a candidate revision needs its reason")
         if row.get("lane") == "context":
             raise ValueError("a revision never moves a direct finding to the context lane")
-        if row.get("source_case_id") is not None or row.get("source_anchor_id") is not None:
+
+        def script_view(candidate):
+            return (candidate.get("claim_type") == "script_content" and bool(candidate.get("group_key"))
+                    and any(item.get("field") == "script.view" and item.get("value") in {"fragment", "single", "joined"}
+                            for item in candidate.get("predicate_fields", [])))
+
+        if evidence_view and not script_view(row):
+            raise ValueError("an evidence view revision requires grouped script content with a script.view predicate")
+        if not evidence_view and (row.get("source_case_id") is not None or row.get("source_anchor_id") is not None):
             raise ValueError("only direct (sweep) findings are revised in place")
         revised = {field: row[field] for field in self._REVISION_FIELDS if field != "gate_results"}
         digest = hashlib.sha256(json.dumps(
@@ -1714,9 +1745,13 @@ class Repo:
                                          if not str(k).startswith("_")}},
             sort_keys=True, separators=(",", ":"), default=str,
         ).encode()).hexdigest()
-        with write_txn(self.engine) as c:
+        with self.candidate_publication() as c:
             self._fence_lease(c, row["hunt_id"], owner_token)
             existing = c.execute(select(t.candidate).where(t.candidate.c.id == row["id"])).mappings().first()
+            if evidence_view and existing is not None and (
+                    not script_view(existing) or any(existing[field] != row.get(field)
+                                                      for field in ("hunt_id", "rule_id", "group_key"))):
+                raise ValueError("an evidence view revision must retain the existing hunt, rule and group identity")
             if existing is None:
                 gates = {**(row["gate_results"] or {}), "_revision": {"digest": digest, "count": 0}}
                 c.execute(t.candidate.insert().values(**{**row, "gate_results": gates}, created_at=utcnow()))
@@ -1725,6 +1760,46 @@ class Repo:
                 return "inserted"
             previous_gates = dict(existing["gate_results"] or {})
             history = dict(previous_gates.get("_revision") or {})
+            incoming_gates = dict(row["gate_results"] or {})
+            if evidence_view:
+                def preference(candidate):
+                    predicates = candidate.get("predicate_fields") or []
+                    quality = [item["value"] for item in predicates if item.get("field") == "script.view_quality"
+                               and isinstance(item.get("value"), int) and not isinstance(item["value"], bool)]
+                    if quality:
+                        return max(quality)
+                    ranks = {"fragment": 0, "single": 1, "joined": 2}
+                    return max((ranks.get(item.get("value"), -1) for item in predicates
+                                if item.get("field") == "script.view"), default=-1)
+
+                indexed = {
+                    (reach["anchor_id"], reach["link_id"], reach["link_type"], reach["strength"]): reach
+                    for reach in [*previous_gates.get("_context_reaches", []), *incoming_gates.get("_context_reaches", [])]
+                }
+                if indexed:
+                    incoming_gates["_context_reaches"] = [indexed[key] for key in sorted(indexed)]
+                origin = previous_gates.get("_evidence_view_origin")
+                if origin is not None:
+                    incoming_gates["_evidence_view_origin"] = origin
+                # A rediscovery may add a route without providing a preferred view.
+                # Merge that provenance atomically without changing the claim,
+                # analyst disposition, ownership, or evidence-revision history.
+                same_view = all(existing[field] == value for field, value in revised.items())
+                same_gates = ({k: v for k, v in previous_gates.items() if not str(k).startswith("_")}
+                              == {k: v for k, v in incoming_gates.items() if not str(k).startswith("_")})
+                if preference(row) <= preference(existing) or history.get("digest") == digest or same_view and same_gates:
+                    gates = dict(previous_gates)
+                    for key in ("_context_reaches", "_evidence_view_origin"):
+                        if key in incoming_gates:
+                            gates[key] = incoming_gates[key]
+                    if gates != previous_gates:
+                        c.execute(t.candidate.update().where(t.candidate.c.id == row["id"]).values(gate_results=gates))
+                        c.execute(t.audit_event.insert().values(
+                            at=utcnow(), actor="system", action="candidate.merge_evidence_view_routes",
+                            hunt_id=row["hunt_id"], detail={"candidate_id": row["id"],
+                                                          "routes": gates.get("_context_reaches", [])},
+                        ))
+                    return ""
             if history.get("digest") == digest:
                 return ""
             if existing["lane"] == "context":
@@ -1734,14 +1809,19 @@ class Repo:
             new_events = list(row["event_ids"] or [])
             new_context = set(row.get("context_event_ids") or [])
             subject = [event_id for event_id in new_events if event_id not in new_context]
-            event_ids = list(dict.fromkeys([*new_events, *old_events]))
+            event_ids = list(dict.fromkeys(new_events if bounded_revision else [*new_events, *old_events]))
             context = sorted(set(event_ids) - set(subject))
             at = utcnow()
             summary = {"at": at.isoformat(), "reason": reason, "lane": existing["lane"],
                        "severity": existing["severity"], "claim": str(existing["claim"])[:500],
                        "rule_version": existing["rule_version"]}
             summaries = [*list(history.get("summaries") or []), summary][-self.REVISION_SUMMARIES:]
-            gates = dict(row["gate_results"] or {})
+            gates = incoming_gates
+            # Membership is a separate durable stream. Keep its retained count while
+            # the accompanying revision adds a delta, avoiding a full host recount.
+            for key in ("_fleet_hosts_retained", "_fleet_hosts_complete"):
+                if key in previous_gates:
+                    gates.setdefault(key, previous_gates[key])
             gates["_notes"] = sorted({*(str(note) for note in gates.get("_notes", [])),
                                       f"revised in place: {reason}"})
             gates["_revision"] = {"digest": digest, "count": int(history.get("count") or 0) + 1,
@@ -1755,14 +1835,149 @@ class Repo:
                     "candidate_id": row["id"], "reason": reason, "digest": digest,
                     "previous": {
                         "claim": existing["claim"], "lane": existing["lane"], "severity": existing["severity"],
-                        "event_ids": old_events, "context_event_ids": sorted(old_context),
                         "rule_version": existing["rule_version"],
                     },
-                    "revised": {"lane": values["lane"], "severity": values["severity"],
-                                "event_ids": event_ids},
+                    "revised": {"lane": values["lane"], "severity": values["severity"]},
+                    "citations": self._citation_revision(old_events, event_ids, old_context, context),
                 },
             ))
             return "revised"
+
+    @staticmethod
+    def _citation_revision(previous, revised, previous_context, revised_context):
+        """Audit consumers read decision summaries; no consumer reconstructs events from these lists.
+
+        Count and SHA256 cover each complete sorted list; only twenty added/removed ids are copied.
+        The retained typed evidence remains addressable independently of this bounded audit summary.
+        """
+        def fingerprint(values):
+            ordered = sorted(values)
+            return {"count": len(ordered), "sha256": hashlib.sha256(
+                json.dumps(ordered, separators=(",", ":")).encode()).hexdigest()}
+        before, after = set(previous), set(revised)
+        added, removed = sorted(after-before), sorted(before-after)
+        return {"previous": fingerprint(previous), "revised": fingerprint(revised),
+                "previous_context": fingerprint(previous_context), "revised_context": fingerprint(revised_context),
+                "added": added[:20], "removed": removed[:20],
+                "added_count": len(added), "removed_count": len(removed),
+                "added_sha256": fingerprint(added)["sha256"], "removed_sha256": fingerprint(removed)["sha256"],
+                "sample_limit": 20}
+
+    def save_candidate_hosts(self, candidate_id, hunt_id, hosts, *, owner_token=None, replace=False,
+                             expected_count=None, claim=None):
+        """Consume host membership without materializing the fleet in candidate JSON."""
+        from sqlalchemy.dialects.sqlite import insert
+
+        with self.candidate_publication() as connection:
+            self._fence_lease(connection, hunt_id, owner_token)
+            stored = connection.execute(select(t.candidate).where(
+                t.candidate.c.id == candidate_id)).mappings().one()
+            if stored["hunt_id"] != hunt_id:
+                raise ValueError("fleet membership must belong to the candidate hunt")
+            gates = dict(stored["gate_results"] or {})
+            retained = gates.get("_fleet_hosts_retained")
+            if replace:
+                connection.execute(t.candidate_host.delete().where(t.candidate_host.c.candidate_id == candidate_id))
+                retained = 0
+            elif retained is None:
+                retained = connection.execute(select(func.count()).select_from(t.candidate_host).where(
+                    t.candidate_host.c.candidate_id == candidate_id)).scalar_one()
+            statement = insert(t.candidate_host).on_conflict_do_nothing()
+            batch = []
+            reason = ""
+            try:
+                for host, event_id in hosts:
+                    batch.append({"candidate_id": candidate_id, "host": host, "first_event_id": event_id})
+                    if len(batch) == 100:
+                        retained += connection.execute(statement, batch).rowcount
+                        batch.clear()
+            except (LookupError, RuntimeError) as error:
+                # Optional membership reads may fail after the positive was computed.
+                # Commit the retained prefix with an explicit incomplete-list claim.
+                reason = f"{type(error).__name__}: {str(error)[:300]}"
+            if batch:
+                retained += connection.execute(statement, batch).rowcount
+            if expected_count is None:
+                expected_count = retained if replace else max(gates.get("_fleet_host_count", 0), retained)
+            gates["_fleet_host_count"] = expected_count
+            gates["_fleet_hosts_retained"] = retained
+            gates["_fleet_hosts_complete"] = retained == expected_count and not reason
+            gates["_notes"] = [note for note in gates.get("_notes", [])
+                               if not str(note).startswith("Host list coverage is partial:")]
+            updated_claim = claim if claim is not None else stored["claim"]
+            if not gates["_fleet_hosts_complete"]:
+                note = (f"Host list coverage is partial: {retained} of {expected_count} counted host names "
+                        f"are retained in the paged list" + (f" ({reason})" if reason else "") + ".")
+                gates["_notes"].append(note)
+                complete_phrase = f"All {expected_count} host names are retained in the paged host list."
+                updated_claim = updated_claim.replace(complete_phrase, "").strip() + " " + note
+            values = {"claim": updated_claim, "gate_results": gates}
+            connection.execute(t.candidate.update().where(t.candidate.c.id == candidate_id).values(**values))
+            return values
+
+    def candidate_hosts(self, candidate_id, *, after="", limit=50):
+        limit = min(100, max(1, limit))
+        with self.engine.connect() as connection:
+            rows = connection.execute(select(t.candidate_host).where(
+                t.candidate_host.c.candidate_id == candidate_id, t.candidate_host.c.host > after
+            ).order_by(t.candidate_host.c.host).limit(limit+1)).mappings().all()
+        page = [dict(row) for row in rows[:limit]]
+        return page, page[-1]["host"] if len(rows) > limit else ""
+
+    @staticmethod
+    def report_host_line(row):
+        """Canonical appendix bytes, shared by the snapshot digest and exported JSONL."""
+        return json.dumps({"host": row["host"], "first_event_id": row["first_event_id"]},
+                          ensure_ascii=True, sort_keys=True, separators=(",", ":"))+"\n"
+
+    def snapshot_candidate_hosts(self, candidate_id, hunt_id, *, expected_count, complete, expected_candidate=None):
+        """Copy a consistent membership stream; future revisions cannot change this appendix."""
+        from sqlalchemy import literal
+        from sqlalchemy.dialects.sqlite import insert
+
+        with self.candidate_publication() as connection:
+            # pysqlite legacy mode does not begin a transaction for SELECT. Fence
+            # other processes before checking the decision and hashing its hosts.
+            if not connection.connection.driver_connection.in_transaction:
+                connection.exec_driver_sql("BEGIN IMMEDIATE")
+            current = connection.execute(select(t.candidate).where(
+                t.candidate.c.id == candidate_id)).mappings().one()
+            if current["hunt_id"] != hunt_id:
+                raise ValueError("report membership must belong to the candidate hunt")
+            if expected_candidate is not None and any(current[name] != expected_candidate[name]
+                                                     for name in (*self._REVISION_FIELDS, "ts", "group_key")):
+                raise RuntimeError("Candidate changed while building report; publish a fresh report revision")
+            hasher, count = hashlib.sha256(), 0
+            query = select(t.candidate_host.c.host, t.candidate_host.c.first_event_id).where(
+                t.candidate_host.c.candidate_id == candidate_id).order_by(t.candidate_host.c.host)
+            for batch in connection.execute(query).mappings().partitions(100):
+                for row in batch:
+                    hasher.update(self.report_host_line(row).encode("utf-8"))
+                    count += 1
+            snapshot = hasher.hexdigest()
+            connection.execute(insert(t.report_host).from_select(
+                ["hunt_id", "snapshot", "host", "first_event_id"],
+                select(literal(hunt_id), literal(snapshot), t.candidate_host.c.host,
+                       t.candidate_host.c.first_event_id).where(t.candidate_host.c.candidate_id == candidate_id)
+            ).on_conflict_do_nothing())
+        return {"sha256": snapshot, "filename": f"fleet-hosts-{snapshot}.jsonl", "count": count,
+                "expected_count": expected_count, "complete": bool(complete and count == expected_count)}
+
+    def report_hosts(self, hunt_id, snapshot):
+        """Keyset pages of an immutable report appendix, without an open reader between pages."""
+        after = None
+        while True:
+            query = select(t.report_host.c.host, t.report_host.c.first_event_id).where(
+                t.report_host.c.hunt_id == hunt_id, t.report_host.c.snapshot == snapshot)
+            if after is not None:
+                query = query.where(t.report_host.c.host > after)
+            with self.engine.connect() as connection:
+                rows = connection.execute(query.order_by(t.report_host.c.host).limit(100)).mappings().all()
+            if not rows:
+                return
+            for row in rows:
+                yield dict(row)
+            after = rows[-1]["host"]
 
     def candidates(self, hunt_id: str, lanes: list[str] | None = None) -> list[dict]:
         q = select(t.candidate).where(t.candidate.c.hunt_id == hunt_id)
@@ -4598,6 +4813,13 @@ class Repo:
             self._fence_lease(c, hunt_id, owner_token)
             for start in range(0, len(rows), INSERT_CHUNK):
                 c.execute(_RULE_CELL_UPSERT, rows[start:start + INSERT_CHUNK])
+
+    def clear_uncited_anchor_cells(self, hunt_id: str, *, owner_token=None):
+        """The final context pass recomputes these named citation-gap cells on resume."""
+        with write_txn(self.engine) as connection:
+            self._fence_lease(connection, hunt_id, owner_token)
+            connection.execute(t.rule_run.delete().where(t.rule_run.c.hunt_id == hunt_id,
+                                                         t.rule_run.c.target == "context:uncited_anchor"))
 
     def rule_cells(self, hunt_id: str, rule_ids: set[str] | None = None,
                    *, rule_id: str | None = None, max_id: int | None = None) -> list[dict]:

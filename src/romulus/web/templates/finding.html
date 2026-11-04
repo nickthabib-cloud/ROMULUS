@@ -9,11 +9,32 @@
     <div><span class="label">Severity</span> {{ c.severity }}</div>
     <div><span class="label">Confidence</span> {{ c.confidence }}</div>
     <div><span class="label">Priority</span> {{ '%.0f' % c.priority }} — {{ c.priority_reasons | join('; ') }}</div>
-    <div><span class="label">Observed (UTC)</span> {{ c.ts }}</div>
+    <div><span class="label">Observed (UTC)</span> {{ c.ts if c.ts is not none else 'Not recorded' }}</div>
     <div><span class="label">Claim type</span> {{ c.claim_type }}</div>
     <div><span class="label">Rule version</span> {{ c.rule_version }}</div>
   </div>
 </section>
+
+{% set origin = gates.get('_evidence_view_origin') or {} %}
+{% set origin_case = c.source_case_id or origin.get('source_case_id') %}
+{% set origin_anchor = c.source_anchor_id or origin.get('source_anchor_id') %}
+{% set origin_link = c.source_link_id or origin.get('source_link_id') %}
+{% if origin_case or origin_anchor or origin_link %}
+<h2>Discovery origin</h2>
+<ul>
+  {% if origin_case %}<li>Investigator case: <span class="mono">{{ origin_case }}</span></li>{% endif %}
+  {% if origin_anchor %}<li>Expansion anchor: <span class="mono">{{ origin_anchor }}</span></li>{% endif %}
+  {% if origin_link %}<li>Discovery link: <span class="mono">{{ origin_link }}</span></li>{% endif %}
+</ul>
+{% endif %}
+
+{% if fleet_hosts %}
+<h2>Hosts in this finding ({{ gates.get('_fleet_host_count', fleet_hosts | length) }})</h2>
+<table class="grid"><thead><tr><th>Host</th><th>First recorded witness</th></tr></thead>
+<tbody>{% for host in fleet_hosts %}<tr><td>{{ host.host }}</td><td class="mono">{{ host.first_event_id }}</td></tr>{% endfor %}</tbody></table>
+{% if fleet_after %}<a href="/findings/{{ c.id }}">First host page</a>{% endif %}
+{% if fleet_next %}<a href="/findings/{{ c.id }}?host_after={{ fleet_next | urlencode }}">Next host page</a>{% endif %}
+{% endif %}
 
 <h2>What the claim rests on</h2>
 <table class="grid">

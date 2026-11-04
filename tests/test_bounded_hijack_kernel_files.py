@@ -3,6 +3,7 @@ changes and their groups spill to disk and read back exactly; only a disk budget
 from datetime import timedelta
 
 from romulus.detect.kernel_files import PersistencePathChange, RootExecNonRootModifiableFile
+from tests.storage_capacity_fixture import refuse_after_spill
 from tests.test_kernel_files import JOB, T0, change, pexec, root_exec, user_exec
 
 
@@ -14,7 +15,7 @@ def _staged_run(cls, partitions, directory, hot=None, monkeypatch=None, budgets=
     pb = cls()
     pb.spill_dir = directory
     for name, budget in (budgets or {}).items():
-        getattr(pb, name).disk_budget = budget
+        refuse_after_spill(pb, getattr(pb, name), budget)
     store = {}
     for part in partitions:
         found = pb.consume(list(part))

@@ -10,7 +10,7 @@ import pytest
 
 from romulus.detect import bounded
 from romulus.detect.base import Playbook
-from romulus.detect.bounded import KeyedStore, Spill, SpillList, StateBudget, StateExhausted, live_stores
+from romulus.detect.bounded import KeyedStore, Spill, SpillList, StateBudget, StateExhausted
 from romulus.evidence.typed import RawRef, TypedEvent, fv
 from romulus.hunt import sweep as sw
 from romulus.sources.models import Completeness, SearchOutcome, Window
@@ -78,12 +78,12 @@ def _sweep(monkeypatch, tmp_path, pack, batches, budget: StateBudget):
     feed = iter(batches)
     monkeypatch.setattr(sw, "normalize_hits", lambda records, boots: (next(feed), {}, []))
     monkeypatch.setattr(sw, "state_budget", lambda settings, stage_dir: budget)
+    monkeypatch.setattr(sw, "fresh_pack", lambda: pack)
     sweep = sw.Sweep(repo, object(), "h1", Window(start=START, end=START + timedelta(hours=1)),
                      {"romulus-host-x": None}, stage_dir=tmp_path)
     sweep.pack = pack
     for pb in pack:
         pb.spill_dir, pb.budget = tmp_path, budget
-    budget.plan(live_stores(pack) + 1)          # one floor per store of this pack, and one for the event stage
     for n in range(len(batches)):
         start = START + timedelta(minutes=5 * n)
         sweep.run_partition("romulus-host-x", None, [], Window(start=start, end=start + timedelta(minutes=5)), est=1)
@@ -119,7 +119,9 @@ def test_a_store_past_its_floor_refuses_only_its_own_new_keys_and_never_another_
     # three stores (two rules' and the event stage's): a floor of 80,000 / 6 each, half the total shared
     assert budget.floor == 80_000 // 6 and budget.pool == 80_000 - 3 * (80_000 // 6)
     assert list(budget.full) == [f"{growing.id}:notes"]               # only the busy store took no new key
-    assert growing.notes.disk_bytes >= budget.floor                   # growth of existing states counted it
+    # An oversized atomic batch may stay in memory instead of overshooting the physical byte ceiling.
+    assert growing.notes.disk_bytes <= budget.floor + budget.pool
+    assert growing.held >= 20*len(batches)                            # accepted recurring states are retained
     mine = _parts(cells, growing.id)
     assert mine[0]["state"] == "evaluated_complete" and mine[0]["evaluated"] == 21
     # once past its floor with the headroom spent, the recurring hosts are still evaluated (their states update);
@@ -128,7 +130,7 @@ def test_a_store_past_its_floor_refuses_only_its_own_new_keys_and_never_another_
     assert mine[-1]["detail"]["state_capped"] == 4
     window = next(c for c in cells if c["rule_id"] == growing.id and c["target"] == "*")
     assert window["state"] in ("evaluated_partial", "match_on_partial")
-    assert any("past its guaranteed floor" in r for r in window["detail"]["reasons"])
+    assert any("hunt byte allowance" in r for r in window["detail"]["reasons"])
     # the quiet store's floor was never taken: its new keys are all held
     assert _parts(cells, quiet.id)[-1]["evaluated"] == 3 and not _parts(cells, quiet.id)[-1]["detail"].get(
         "state_capped")
@@ -329,6 +331,8 @@ def test_replacing_a_key_held_on_disk_is_not_a_new_key_under_a_spent_budget(tmp_
     owner = _Owner()
     owner.spill_dir = tmp_path
     store = KeyedStore(owner, "r", hot=1, disk_budget=1)
+    from tests.storage_capacity_fixture import refuse_after_spill
+    refuse_after_spill(owner, store, 1)
     store.put("a", [1])
     store.put("b", [2])
     store.trim()                                        # "a" on disk; the budget is now spent
@@ -424,6 +428,8 @@ def test_an_existing_process_keeps_its_lineage_when_the_disk_budget_is_spent(tmp
     owner.spill_dir = tmp_path
     lineage = ProcessLineage(owner)
     lineage.records.hot_size, lineage.records.disk_budget = 1, 1
+    from tests.storage_capacity_fixture import refuse_after_spill
+    refuse_after_spill(owner, lineage.records, 1)
     lineage.observe(_exec("x1", 100, 0))
     lineage.observe(_exec("y1", 200, 1))
     lineage.observe(_exec("w1", 400, 2))
@@ -517,7 +523,7 @@ def _owner(tmp_path, budget, name="test.store", strong=False):
     return owner
 
 
-def test_every_store_keeps_its_floor_whatever_another_store_holds(tmp_path):
+def test_detection_can_use_idle_floors_and_refuses_only_at_physical_capacity(tmp_path):
     budget = StateBudget(tmp_path, disk_total=300_000, reserve=0)
     budget.plan(3)                                                   # floor 50,000; 150,000 shared
     busy, quiet = _owner(tmp_path, budget, "busy"), _owner(tmp_path, budget, "quiet")
@@ -527,16 +533,61 @@ def test_every_store_keeps_its_floor_whatever_another_store_holds(tmp_path):
         if not big.put(f"k{i}", "x" * 1000 + str(i)):
             refused += 1
         big.trim()
-    assert refused and budget.pool_used >= budget.pool and big.disk_bytes < 210_000
+    assert refused and busy.spill().path.stat().st_size >= budget.disk_total - busy.spill()._page
+    assert big.disk_bytes > budget.floor + budget.pool
     taken = 0
     for i in range(60):                                               # about 1 KB each: the floor holds ~45
         if small.put(f"k{i}", "y" * 1000 + str(i)):
             taken += 1
         small.trim()
-    assert 40 <= taken < 60 and small.disk_bytes >= budget.floor - 2_000
+    # The first quiet key remains in memory; its next new key reports the actual physical exhaustion.
+    assert 1 <= taken < 60
+    assert len(small) == taken
+    assert sum(path.stat().st_size for path in tmp_path.rglob("*") if path.is_file()) <= budget.disk_total
     assert set(budget.full) == {"busy:s", "quiet:s"}
     busy.close_spill()
     quiet.close_spill()
+
+
+def test_oversized_spill_batch_is_atomic_and_repeated_refusals_keep_other_owner_floor(tmp_path):
+    budget = StateBudget(tmp_path, disk_total=256*1024, reserve=0)
+    budget.plan(3)
+    busy, quiet = _owner(tmp_path, budget, "busy"), _owner(tmp_path, budget, "quiet")
+    big, small = KeyedStore(busy, "s", hot=1), KeyedStore(quiet, "s", hot=1)
+    for n in range(100):
+        assert big.put(f"k{n}", "x"*4096+str(n))
+    for _ in range(20):
+        big.trim()
+    assert len(budget._capacity_refusals) == 1 and not budget.forced and not budget.broken
+    assert len(big) == 100 and big.on_disk == 0
+    assert busy.spill().db.execute("SELECT count(*) FROM s").fetchone()[0] == 0
+    assert busy.spill().db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    assert not big.put("refused", "new")
+    for n in range(20):
+        assert small.put(f"q{n}", "y"*1024+str(n))
+        small.trim()
+    assert len(small) == 20 and small.on_disk == 19
+    assert sum(path.stat().st_size for path in tmp_path.rglob("*") if path.is_file()) <= budget.disk_total
+    busy.close_spill()
+    quiet.close_spill()
+
+
+def test_physical_refusal_is_local_to_writing_store_in_shared_spill(tmp_path):
+    budget = StateBudget(tmp_path, disk_total=256*1024, reserve=0)
+    budget.plan(3)
+    owner = _owner(tmp_path, budget, "shared")
+    busy, sibling = KeyedStore(owner, "exec_lineage", hot=1), KeyedStore(owner, "socket_witnesses", hot=1)
+    for n in range(100):
+        assert busy.put(f"exec{n}", "x"*4096+str(n))
+    busy.trim()
+    assert budget.new_key_reason(busy.account())
+    assert not budget.new_key_reason(sibling.account()) and not budget.broken
+    for n in range(20):
+        assert sibling.put(f"socket{n}", "y"*256+str(n))
+        sibling.trim()
+    assert sibling.on_disk == 19 and len(sibling) == 20 and len(busy) == 100
+    assert len(budget._capacity_refusals) == 1 and not budget.forced
+    owner.close_spill()
 
 
 class _Citer(Playbook):
@@ -575,7 +626,7 @@ class _StrongCiter(_Citer):
     state_slice = "strong"
 
 
-def test_the_event_stage_is_charged_and_below_the_reserve_takes_only_strong_citations(monkeypatch, tmp_path):
+def test_the_event_stage_preserves_compact_strong_witnesses_at_the_reserve(monkeypatch, tmp_path):
     free = {"bytes": 10 * 2**30}
     monkeypatch.setattr(StateBudget, "free", lambda self: free["bytes"])
     budget = StateBudget(tmp_path, disk_total=2**40, reserve=2**30)
@@ -590,14 +641,13 @@ def test_the_event_stage_is_charged_and_below_the_reserve_takes_only_strong_cita
     routine.consume = consume
     sweep, cells = _sweep(monkeypatch, tmp_path, [routine, strong], _batches(3), budget)
     stage = next(a for a in budget.accounts if a.name == "event_stage")
-    assert stage.used > 0                                            # the stage's growth is in the budget
+    assert stage.used == 0 and budget.disk_used > 0                  # billed growth is released with deleted files
     assert budget.low_space
-    assert strong.loaded == 21                                       # a strong rule's citations are still staged
-    assert routine.loaded is None                                    # a routine rule's later ones are not
+    assert strong.loaded == 21                                      # compact references preserve every strong witness
+    assert routine.loaded == 42                                     # these compact references also fit allocated pages
     window = next(c for c in cells if c["rule_id"] == routine.id and c["target"] == "*")
-    assert window["state"] == "evaluated_partial"
-    assert any("event stage took no new citation" in r for r in window["detail"]["reasons"])
-    assert any("finalize stopped" in r for r in window["detail"]["reasons"])
+    assert not any("finalize stopped" in reason for reason in window["detail"].get("reasons", []))
+    assert not any("stage" in rule.limits for rule in (routine, strong))
     assert any("below the reserve" in r for r in sweep.partial_reasons)
 
 

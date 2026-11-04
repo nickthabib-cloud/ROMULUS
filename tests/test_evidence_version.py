@@ -30,10 +30,17 @@ PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf211
                    14: "d25c8cff3b459118ce377eb4c49c0d63736f68b4411fc520f8a32cbfa5107a9a"}
 WINDOWS_EVIDENCE_FILES = ("community.py", "windows.py", "windows_catalog.py", "windows_reassembly.py")
 PINNED_WINDOWS = {
+    "windows-ecs@11": "89b0392c0b506597732e45f1ada089cfee28c773f6f346d4993286a239c47f54",
+    "windows-ecs@10": "3253f9ad37fe28bbede48043781594a03152874e8875094b0abea9cede271dcf",
     "windows-ecs@1": "8c2f1668700a3f7d0a143eef00473770e2e5c746fadf6ce3b2c95ae6bbe6a419",
     "windows-ecs@2": "c8931d60bb8eeb86c02b50d07950baea0e4225e01d3b9999cd12454609093255",
     "windows-ecs@3": "f0a941924e4c0b95b0e2f9dbc2635ae325708c7739b3fcf780e803e7dbfdf203",
     "windows-ecs@4": "6d31ffa710c230e79dc39509fd40740e69c35240028cfbc0a4759cb587dafd7d",
+    "windows-ecs@5": "7ee0edd8506debc8fe682226a6ce8b87a9dc689e56e0fe58363a01e50262b0d6",
+    "windows-ecs@6": "ce4b42e3ec76bc710b30631b261e0a6b78cab03539066d7237a9f86097e9cecc",
+    "windows-ecs@7": "46edd73e96683bc4762130b48ad158c13664101a185fb3cd9f361b2ba66c0f78",
+    "windows-ecs@9": "c7c70f9618344ea9ec418499d03747524e2b187491de32420da96002a35dbddc",
+    "windows-ecs@8": "1d6de025af778e584dfc052227555d628b830af0735a61f4b26e61787905cdee",
 }
 # The packet stage's normalizer: HTTP bodies rebuilt by TShark -> http_body events, and TCP connections rebuilt
 # from per-segment payload -> tcp_stream events (with the shell analysis and the tables it reads).

@@ -114,7 +114,9 @@
     <label>Directory sync accounts (SIDs or <span class="mono">DOMAIN\name</span>, one per line)<textarea
       name="directory_sync_accounts" rows="4" class="mono">{{ form.directory_sync_accounts }}</textarea></label>
   </div>
-  <p class="help">Rules about directory replication need both lists; without them they report "not configured".</p>
+  <label><input type="checkbox" name="directory_sync_accounts_declared" value="1"
+    {% if form.directory_sync_accounts_declared %}checked{% endif %}>Declare the sync-account list complete, including when empty</label>
+  <p class="help">Enter known accounts or explicitly declare an empty list. Leaving the list undeclared keeps replication authorization unresolved.</p>
 
   <h2>Internal networks</h2>
   <p class="help">Now in use: {{ networks }}</p>

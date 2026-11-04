@@ -32,6 +32,8 @@ def candidate_id(m: Match, hunt_id: str) -> str:
     own records: records cited only to support what its claim states (`Match.context_ids`) do not name it, so two
     findings about different records stay apart, and one finding stays one whatever context it cites."""
     ident = m.group_key or "|".join(sorted(r.key for e in m.events if e.id not in m.context_ids for r in e.raw))
+    if not ident and m.citation_unavailable:
+        ident = m.identity_key
     return hashlib.sha256(f"{hunt_id}|{m.playbook_id}|{ident}".encode()).hexdigest()[:20]
 
 
@@ -83,8 +85,11 @@ def decide(m: Match, hunt_id: str) -> Decision:
             notes.extend(sorted(set(e.caveats)))
             break
     admitted = all(not v.startswith("fail") for v in gates.values())
-    if not admitted:
+    if not admitted and not m.citation_unavailable:
         lane = "context"
+    elif m.citation_unavailable:
+        coverage = "a surviving reference is retained" if m.events else "no citation could be retained"
+        notes.append(f"Citation coverage is partial: {coverage}; lane reflects the computed positive.")
 
     reasons = [f"severity {severity} (+{SEV_WEIGHT[severity]})", f"confidence {confidence} (+{CONF_WEIGHT[confidence]})"]
     score = SEV_WEIGHT[severity] + CONF_WEIGHT[confidence]

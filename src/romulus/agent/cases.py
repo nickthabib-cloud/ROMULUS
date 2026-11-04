@@ -45,8 +45,15 @@ def seed_partition_families(
     return tuple(families) or (case_id,)
 
 
-def _ts(value) -> datetime:
+def _ts(value) -> datetime | None:
+    if value is None:
+        return None
     return value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
+
+
+def _time_key(candidate: dict) -> tuple:
+    when = _ts(candidate["ts"])
+    return when is None, when, candidate["id"]
 
 
 def _entities(candidate: dict) -> list[EntityRef]:
@@ -77,7 +84,7 @@ def primary_seed_entity(candidate: dict) -> EntityRef | None:
 
 
 def _make_cluster(seeds: list[dict], primary: EntityRef | None) -> SeedCluster:
-    ordered = sorted(seeds, key=lambda c: (_ts(c["ts"]), c["id"]))
+    ordered = sorted(seeds, key=_time_key)
     ids = [c["id"] for c in ordered]
     identity = f"{primary.kind}:{primary.value}" if primary else ids[0]
     cid = "case-" + hashlib.sha256((identity + "|" + "|".join(ids)).encode()).hexdigest()[:16]
@@ -106,6 +113,10 @@ def cluster_seed_candidates(
     for candidate in candidates:
         primary = primary_seed_entity(candidate)
         key = (primary.kind, primary.value) if primary else ("candidate", candidate["id"], candidate["id"])
+        if candidate["ts"] is None:
+            # No observed time means no evidence for membership in a time cluster.
+            # Keep this positive visible as an independent investigation seed.
+            key = ("untimed", candidate["id"], candidate["id"])
         grouped[key].append(candidate)
         primary_by_key[key] = primary
 
@@ -113,14 +124,15 @@ def cluster_seed_candidates(
     for key, seeds in grouped.items():
         current: list[dict] = []
         latest: datetime | None = None
-        for seed in sorted(seeds, key=lambda c: (_ts(c["ts"]), c["id"])):
+        for seed in sorted(seeds, key=_time_key):
             when = _ts(seed["ts"])
-            if current and latest is not None and (when - latest > gap or len(current) >= max_seeds):
+            if current and latest is not None and (when is None or when - latest > gap or len(current) >= max_seeds):
                 clusters.append(_make_cluster(current, primary_by_key[key]))
                 current = []
             current.append(seed)
             latest = when
         if current:
             clusters.append(_make_cluster(current, primary_by_key[key]))
-    return sorted(clusters, key=lambda c: (_LANE_ORDER.get(c.lane, 9), -c.priority, c.first_ts, c.id))
+    return sorted(clusters, key=lambda c: (_LANE_ORDER.get(c.lane, 9), -c.priority,
+                                           c.first_ts is None, c.first_ts, c.id))
 

@@ -239,8 +239,7 @@ def test_same_event_seen_by_another_hunt_scopes_raw_provenance_without_reownersh
 
 
 def test_aggregate_stage_keeps_main_branch_event_and_raw_behavior(tmp_path):
-    sweep = object.__new__(sw.Sweep)
-    sweep.stage_dir = tmp_path
+    sweep = sw.Sweep(_repo(), None, "h1", Window(start=T0, end=T0+timedelta(minutes=1)), {}, stage_dir=tmp_path)
     first = _event(3).model_copy(update={"raw": [RawRef(target="a", native_id="1", digest="a")]})
     later = first.model_copy(update={"raw": [RawRef(target="b", native_id="2", digest="b")]})
     stage = sweep._event_stage()

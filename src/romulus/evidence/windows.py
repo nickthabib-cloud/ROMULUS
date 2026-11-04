@@ -24,7 +24,7 @@ from romulus.evidence.windows_catalog import WINDOWS_DATASETS, WindowsEventClass
 if TYPE_CHECKING:
     from romulus.detect.bounded import Account, StateBudget
 
-WINDOWS_NORMALIZER = "windows-ecs@4"
+WINDOWS_NORMALIZER = "windows-ecs@11"
 # This is already far beyond what the 64 MiB assembler can retain at normal 4104 chunk sizes, while bounding every
 # completeness vector even when hostile metadata claims billions of parts.
 SCRIPT_BLOCK_MAX_PARTS = 4_096
@@ -145,6 +145,20 @@ _ACCESS_CODES = {
     "%%4424": "write_attributes",
 }
 
+# Message ids and their object-specific meanings are defined by Windows msobjs.dll.
+# Rights bits alone are ambiguous across file, key and process object types.
+_OBJECT_ACCESS_CODES = {
+    "process": dict(zip((f"%%{code}" for code in range(4480, 4494)), (
+        "terminate", "create_thread", "set_session_id", "vm_operation", "vm_read", "vm_write",
+        "dup_handle", "create_process", "set_quota", "set_information", "query_information",
+        "set_termination_port", "undefined_bit_12", "undefined_bit_13",
+    ), strict=True)),
+    "key": dict(zip((f"%%{code}" for code in range(4432, 4440)), (
+        "query_value", "set_value", "create_sub_key", "enumerate_sub_keys", "notify", "create_link",
+        "undefined_bit_6", "undefined_bit_7",
+    ), strict=True)),
+}
+
 _REGISTRY_ROOTS = {
     "hklm": "hkey_local_machine",
     "hkey_local_machine": "hkey_local_machine",
@@ -211,6 +225,7 @@ class RecordIdContinuity:
         root.chmod(0o700)
         self.path = root / "windows-continuity.db"
         self._db = sqlite3.connect(self.path)
+        self._db.execute("PRAGMA journal_mode=MEMORY")
         self.path.chmod(0o600)
         self._db.execute(
             "CREATE TABLE continuity ("
@@ -228,17 +243,18 @@ class RecordIdContinuity:
     def _cap(self) -> None:
         if self.budget is None:
             return
-        headroom = self.budget.headroom()
+        headroom = self.budget.physical_allowance(self.account) if self.account is not None else self.budget.headroom()
         if headroom is None:
             return
         pages = self._db.execute("PRAGMA page_count").fetchone()[0]
-        self._db.execute(f"PRAGMA max_page_count = {pages + headroom // self._page + 1}")
+        self._db.execute(f"PRAGMA max_page_count = {pages + headroom // self._page}")
 
     def _charge_growth(self) -> None:
         size = self._db.execute("PRAGMA page_count").fetchone()[0] * self._page
         growth = size - self._size
         if growth > 0 and self.budget is not None and self.account is not None:
             self.budget.charge(self.account, growth)
+            self.budget.physical_account(self.account, growth)
             self.budget.grew(growth)
         self._size = size
 
@@ -259,6 +275,8 @@ class RecordIdContinuity:
         if getattr(self, "_tempdir", None) is not None:
             shutil.rmtree(self._tempdir, ignore_errors=True)
             self._tempdir = None
+            if self.budget is not None and self.account is not None:
+                self.budget.release_physical_account(self.account)
 
     def __del__(self):
         with contextlib.suppress(Exception):
@@ -337,7 +355,10 @@ class RecordIdContinuity:
                     self._db.rollback()
                     reason = f"writing Windows continuity state failed ({exc})"
                     if self.budget is not None:
-                        self.budget.fail(reason)
+                        if "full" in str(exc).lower():
+                            self.budget.refuse_capacity(self.account, reason)
+                        else:
+                            self.budget.fail(reason)
                     record_refusal(group, reason)
                     continue
                 touched.add(key)
@@ -540,7 +561,7 @@ def windows_record_signature(hit: dict) -> str:
     for container in ("event_data", "user_data"):
         content = winlog.get(container)
         if isinstance(content, dict):
-            native.update(content)
+            native.update({name: value for name, value in content.items() if name != "xml_name"})
     original = _get(source, "event.original")
     if not native and isinstance(original, str) and original:
         try:
@@ -552,6 +573,7 @@ def windows_record_signature(hit: dict) -> str:
         or native.get("TimeCreated")
         or native.get("SystemTime")
         or _get(source, "event.created")
+        or source.get("@timestamp")
     )
     if native_time not in (None, ""):
         native.setdefault("TimeCreated", native_time)
@@ -627,6 +649,8 @@ def _structured_data(winlog: dict, native_id: str) -> dict[str, FieldValue]:
         if not isinstance(content, dict):
             raise WindowsInputError(f"winlog.{container} must be an object")
         for name, value in content.items():
+            if name == "xml_name":
+                continue
             if name in values:
                 raise WindowsInputError(f"duplicate Windows field {name!r} across structured copies")
             values[str(name)] = fv(value, f"{native_id}:winlog.{container}.{name}")
@@ -674,9 +698,10 @@ def read_windows_event(hit: dict) -> WindowsRecord:
         if not isinstance(original, str):
             raise WindowsInputError("event.original must be text")
         data = _xml_data(original, hit["_id"])
-    time_created = winlog.get("time_created")
+    time_created = winlog.get("time_created") or source.get("@timestamp")
     if time_created not in (None, "") and "TimeCreated" not in data:
-        data["TimeCreated"] = fv(time_created, f"{hit['_id']}:winlog.time_created")
+        time_origin = "winlog.time_created" if winlog.get("time_created") else "@timestamp"
+        data["TimeCreated"] = fv(time_created, f"{hit['_id']}:{time_origin}")
     _parsed_hashes(data)
     return WindowsRecord(hit, event_class, data, caveats)
 
@@ -854,7 +879,10 @@ def _powershell_data_fields(fields: dict[str, FieldValue], record: WindowsRecord
             record.caveats.append(f"{name} exceeds {_POWERSHELL_DATA_MAX_BYTES} bytes and was not parsed")
             continue
         remaining -= size
-        parsed = {key.casefold(): value for key, value in _key_value_lines(text).items()}
+        context = _key_value_lines(text)
+        if record.event_class.event_id == 800 and name == "param2" and context:
+            fields["script.context"] = fv(context, item.origin)
+        parsed = {key.casefold(): value for key, value in context.items()}
         for typed, native in (
             ("script.host_application", "HostApplication"),
             ("script.engine_version", "EngineVersion"),
@@ -872,9 +900,11 @@ def _access_fields(
         return
     names: list[str] = []
     codes: list[str] = []
+    object_type = str(record.data.get("ObjectType").value).casefold() if "ObjectType" in record.data else ""
+    object_codes = _OBJECT_ACCESS_CODES.get(object_type, {})
     for token in re.findall(r"%%\d+|[^\s,;]+", str(item.value)):
         if token.startswith("%%"):
-            name = _ACCESS_CODES.get(token)
+            name = object_codes.get(token) or _ACCESS_CODES.get(token)
             if name is None:
                 record.caveats.append(f"{native} contains unknown Windows message code {token!r}; it was omitted")
                 continue
@@ -902,7 +932,7 @@ def _native_value_is_absent(name: str, value: object) -> bool:
     if value in (None, ""):
         return True
     text = str(value).strip().casefold()
-    if text == "-":
+    if text == "-" and name.casefold() != "startmodule":
         return True
     if name.casefold().endswith("sid") and text in {"null sid", "s-1-0-0"}:
         return True
@@ -914,6 +944,16 @@ def _native_value_is_absent(name: str, value: object) -> bool:
 def _put(fields: dict[str, FieldValue], record: WindowsRecord, typed: str, *native: str, transform=None) -> None:
     for name in native:
         item = record.data.get(name)
+        if item is None:
+            folded = record.__dict__.get("_folded_data")
+            if folded is None:
+                folded = {}
+                for key, field in record.data.items():
+                    folded.setdefault(key.casefold(), []).append(field)
+                record.__dict__["_folded_data"] = folded
+            candidates = folded.get(name.casefold(), [])
+            if candidates and all(field.value == candidates[0].value for field in candidates):
+                item = candidates[0]
         if item is None or _native_value_is_absent(name, item.value):
             continue
         try:
@@ -1163,7 +1203,7 @@ _TASK_ACTIONS = {
 
 _FILE_ACTIONS = {
     2: "creation_time_changed", 11: "created", 15: "alternate_data_stream_created",
-    23: "deleted_archived", 26: "deleted",
+    23: "deleted_archived", 26: "deleted", 29: "executable_detected",
 }
 
 _REGISTRY_ACTIONS = {12: "object", 13: "value_set", 14: "object_renamed", 4657: "value_modified"}
@@ -1306,7 +1346,7 @@ def _account_change_fields(fields: dict[str, FieldValue], record: WindowsRecord)
     if uac_changes:
         changes, origin = uac_changes
         fields["account.uac_changes"] = fv(changes, origin + "#parsed:uac-flags")
-    return Outcome.failure if event_id == 4766 or _status_failed(record) else Outcome.success
+    return Outcome.failure if event_id == 4766 or _status_failed(record) else _audit_outcome(record)
 
 
 def _local_name(element) -> str:
@@ -1424,6 +1464,14 @@ def _file_change_fields(fields: dict[str, FieldValue], record: WindowsRecord) ->
     _put(fields, record, "file.previous_creation_time", "PreviousCreationUtcTime")
     _put(fields, record, "file.creation_time", "CreationUtcTime")
     _put(fields, record, "file.hash.sha256", "Hashes.SHA256")
+    _put(fields, record, "file.is_executable", "IsExecutable", transform=_boolean)
+    hashes = {algorithm.casefold(): str(item.value).casefold() for algorithm in ("MD5", "SHA1", "SHA256", "IMPHASH")
+              if (item := record.data.get(f"Hashes.{algorithm}")) is not None}
+    if hashes:
+        origin = next(item.origin for algorithm in ("MD5", "SHA1", "SHA256", "IMPHASH")
+                      if (item := record.data.get(f"Hashes.{algorithm}")) is not None)
+        marker = "#parsed:sysmon-hashes"
+        fields["file.hashes"] = fv(hashes, origin if origin.endswith(marker) else origin + marker)
     _put(fields, record, "file.stream.content", "Contents")
     path = fields.get("file.path")
     if path:
@@ -1609,6 +1657,7 @@ def _semantic_fields(fields: dict[str, FieldValue], record: WindowsRecord, host:
                                    fields["event.code"].origin)
         for typed, native in (("wmi.operation", "Operation"), ("wmi.namespace", "EventNamespace"),
                               ("wmi.namespace", "NamespaceName"),
+                              ("wmi.namespace", "Namespace"), ("wmi.filter", "ESS"),
                               ("wmi.name", "Name"), ("wmi.query", "Query"),
                               ("wmi.type", "Type"), ("wmi.destination", "Destination"),
                               ("wmi.consumer", "Consumer"), ("wmi.filter", "Filter"),
@@ -1635,6 +1684,9 @@ def _semantic_fields(fields: dict[str, FieldValue], record: WindowsRecord, host:
         _put(fields, record, "script.block_id", "ScriptBlockId", transform=_guid)
         _put(fields, record, "script.path", "Path", "ScriptName")
         _put(fields, record, "script.text", "ScriptBlockText", "Payload")
+        if event_id == 800:
+            _put(fields, record, "script.text", "param1")
+            _put(fields, record, "script.module_payload", "param3")
         _put(fields, record, "script.context", "ContextInfo", transform=_key_value_lines)
         _put(fields, record, "script.host_application", "HostApplication")
         _put(fields, record, "script.engine_version", "EngineVersion")
@@ -1652,7 +1704,7 @@ def _semantic_fields(fields: dict[str, FieldValue], record: WindowsRecord, host:
         _put(fields, record, "script.message_total", "MessageTotal", transform=_integer)
         _put(fields, record, "script.runspace_id", "RunspaceId", transform=_guid)
         _put(fields, record, "script.pipeline_id", "PipelineId", transform=_guid)
-        complete = True
+        complete = event_id != 800
         if event_id == 4104:
             block_id = fields.get("script.block_id")
             number = fields.get("script.message_number")
@@ -1685,10 +1737,15 @@ def _semantic_fields(fields: dict[str, FieldValue], record: WindowsRecord, host:
             complete,
             fields["event.code"].origin + "#computed:single-part",
         )
+        fields["script.view"] = fv(
+            "single" if event_id != 4104 or complete else "fragment",
+            fields["event.code"].origin + "#computed:script-view",
+        )
         return Outcome.success
     if family in {"directory_access", "directory_change"}:
         prefix = "directory.access" if family == "directory_access" else "directory.change"
-        fields[f"{prefix}.action"] = fv({4662: "accessed", 5136: "modified", 5137: "created",
+        fields[f"{prefix}.action"] = fv({4662: "accessed", 4706: "trust_created", 4716: "trust_modified",
+                                         5136: "modified", 5137: "created",
                                          5138: "undeleted", 5139: "moved", 5141: "deleted"}.get(event_id),
                                         fields["event.code"].origin)
         _put(fields, record, "directory.object.server", "ObjectServer")
@@ -1701,6 +1758,14 @@ def _semantic_fields(fields: dict[str, FieldValue], record: WindowsRecord, host:
         _put(fields, record, f"{prefix}.operation_type", "OperationType", transform=_message_value)
         _put(fields, record, "directory.attribute.ldap_name", "AttributeLDAPDisplayName")
         _put(fields, record, "directory.attribute.value", "AttributeValue")
+        for suffix, names, transform in (
+            ("domain_name", ("DomainName",), None), ("domain_sid", ("DomainSid",), None),
+            ("type", ("TdoType", "TrustType"), _integer),
+            ("direction", ("TdoDirection", "TrustDirection"), _integer),
+            ("attributes", ("TdoAttributes", "TrustAttributes"), _integer),
+            ("sid_filtering_enabled", ("SidFilteringEnabled",), None),
+        ):
+            _put(fields, record, f"directory.trust.{suffix}", *names, transform=transform)
         properties = record.data.get("Properties")
         if properties:
             guids = [match.group(1).casefold() for match in _GUID_IN_TEXT.finditer(str(properties.value))]
@@ -1763,9 +1828,12 @@ def _semantic_fields(fields: dict[str, FieldValue], record: WindowsRecord, host:
         domain_names = ("Param2", "DomainName") if event_id == 1149 else ("DomainName",)
         _put(fields, record, "remote.user", *user_names)
         _put(fields, record, "remote.domain", *domain_names)
-        _put(fields, record, "remote.resource", "ResourceUri", "Url", "RemoteName")
-        _put(fields, record, "bits.job_id", "JobId", transform=_guid)
-        _put(fields, record, "bits.job_name", "JobName")
+        _put(fields, record, "remote.resource", "ResourceUri", "Url", "RemoteName", "connection")
+        _put(fields, record, "bits.job_id", "JobId", "Id", transform=_guid)
+        _put(fields, record, "bits.job_name", "jobTitle", "JobName", "name")
+        _put(fields, record, "bits.owner", "jobOwner")
+        _put(fields, record, "bits.process_path", "processPath")
+        _put(fields, record, "bits.process_id", "processId", transform=_integer)
         _put(fields, record, "bits.remote_url", "Url", "RemoteName")
         _put(fields, record, "bits.local_file", "LocalName", "FileName")
         return Outcome.failure if _status_failed(record) else Outcome.success

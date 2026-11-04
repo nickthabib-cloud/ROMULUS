@@ -3,6 +3,8 @@ visible to every reader of candidates."""
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -118,6 +120,21 @@ def test_a_revision_never_moves_a_finding_to_context_and_needs_a_reason():
     with pytest.raises(ValueError):
         repo.revise_candidate(row, "")
     assert repo.candidates("h1")[0]["lane"] == "high"
+
+
+def test_audit_citation_diff_bounds_samples_but_digests_each_full_list():
+    from romulus.store.repo import Repo
+    before = [f"before-{number}" for number in range(50)]
+    after = [f"after-{number}" for number in range(60)]
+    diff = Repo._citation_revision(before, after, before[1:], after[1:])
+    def digest(values):
+        return hashlib.sha256(json.dumps(sorted(values), separators=(",", ":")).encode()).hexdigest()
+    assert len(diff["added"]) == len(diff["removed"]) == 20
+    assert diff["added_count"] == 60 and diff["removed_count"] == 50
+    assert diff["added_sha256"] == digest(after) and diff["removed_sha256"] == digest(before)
+    for name, values in (("previous", before), ("revised", after),
+                         ("previous_context", before[1:]), ("revised_context", after[1:])):
+        assert diff[name] == {"count": len(values), "sha256": digest(values)}
 
 
 def test_a_revision_of_an_unpublished_id_inserts_it_once():

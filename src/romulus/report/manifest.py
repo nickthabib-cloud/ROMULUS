@@ -290,6 +290,8 @@ def _coverage(cells: list[dict], targets: list[str] | None = None, rule_ids: lis
         if matched:
             claim = "none (rule matched)" + "".join(f"; {s}" for s in dict.fromkeys(scope[rule])) \
                 + ("; coverage incomplete: " + "; ".join(reasons) if reasons else "")
+        elif set(states) == {"not_applicable_no_events"} and not reasons:
+            claim = "no data in scope for this rule"
         elif states.get("positive_only") or states.get("positive_only_partial") or rule in POSITIVE_ONLY_RULE_IDS:
             # decided by what the rule can prove *now*, not by cells stored under an older pack: a hunt swept
             # before a rule became positive-only must not render its old no_match_complete as "complete"
@@ -582,18 +584,25 @@ def _investigations(repo: Repo, hunt_id: str, candidates: list[dict], agent: dic
     }
 
 
+def _discovery_origin(candidate: dict) -> dict:
+    """Older evidence-view rows kept discovery ownership in their gate metadata."""
+    origin = (candidate.get("gate_results") or {}).get("_evidence_view_origin") or {}
+    return {**candidate, **{name: candidate.get(name) if candidate.get(name) is not None else origin.get(name)
+                            for name in ("source_case_id", "source_anchor_id", "source_link_id")}}
+
+
 def investigations_for_hunt(repo: Repo, hunt_id: str) -> dict:
     """Shared live/report projection for every investigator summary renderer."""
     agent_audit = repo.latest_audit(hunt_id, "hunt.agent_summary")
     agent = agent_audit["detail"] if agent_audit else {"status": "unknown"}
-    return _investigations(repo, hunt_id, repo.candidates(hunt_id), agent)
+    return _investigations(repo, hunt_id, [_discovery_origin(row) for row in repo.candidates(hunt_id)], agent)
 
 
 def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
     h = repo.get_hunt(hunt_id)
     if h is None:
         raise KeyError(hunt_id)
-    cands = repo.candidates(hunt_id)
+    cands = [_discovery_origin(row) for row in repo.candidates(hunt_id)]
     cands.sort(key=lambda c: (LANE_ORDER.get(c["lane"], 9), -c["priority"], str(c["ts"])))
     findings = []
     for c in cands:
@@ -606,7 +615,8 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
             "id": c["id"], "lane": c["lane"], "severity": c["severity"], "confidence": c["confidence"],
             "priority": c["priority"], "priority_reasons": c["priority_reasons"], "rule_id": c["rule_id"],
             "rule_version": c["rule_version"], "claim": c["claim"], "claim_type": c["claim_type"],
-            "observed_at": str(c["ts"]), "entities": c["entities"], "predicate_fields": c["predicate_fields"],
+            "observed_at": str(c["ts"]) if c["ts"] is not None else None,
+            "entities": c["entities"], "predicate_fields": c["predicate_fields"],
             "gates": gates, "notes": notes, "benign_alternatives": c["benign_alternatives"],
             "next_checks": c["next_checks"], "citations": _citations(repo, c),
             "source_case_id": c.get("source_case_id"),
@@ -616,6 +626,10 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
             "disposition_history": [{"actor": d["actor"], "at": str(d["at"]), "status": d["status"],
                                      "note": d["note"]} for d in disp],
         })
+        if "_fleet_host_count" in gates:
+            findings[-1]["fleet_hosts"] = repo.snapshot_candidate_hosts(
+                c["id"], hunt_id, expected_count=gates["_fleet_host_count"],
+                complete=gates.get("_fleet_hosts_complete", False), expected_candidate=c)
     lane_counts = Counter(c["lane"] for c in cands)
     with repo.engine.connect() as conn:
         tasks = conn.execute(select(t.task.c.state, func.count()).where(t.task.c.hunt_id == hunt_id)
@@ -662,6 +676,10 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
                       "broken_incident_citations": len(broken_incidents),
                       "broken_incident_event_ids": broken_incidents[:50],
                       "finalizable": broken == 0 and not broken_inv and not broken_incidents}
+    fleet_gaps = sum(not finding["fleet_hosts"]["complete"] for finding in findings if "fleet_hosts" in finding)
+    if fleet_gaps:
+        m["integrity"]["incomplete_fleet_host_lists"] = fleet_gaps
+        m["integrity"]["finalizable"] = False
     return _jsonable(m)
 
 
@@ -737,7 +755,8 @@ def canonical_manifest(repo: Repo, hunt_id: str, actor: str = "canonical") -> di
     for row in link_rows:
         anchor = candidate_rows.get(row["anchor_id"])
         anchor_key = candidate_keys.get(row["anchor_id"], row["anchor_id"])
-        anchor_ts = _as_utc(anchor["ts"]) if anchor is not None else _as_utc(row["window_start"])
+        anchor_ts = (_as_utc(anchor["ts"]) if anchor is not None and anchor["ts"] is not None
+                     else _as_utc(row["window_start"]))
         offsets = {
             "start_seconds": (_as_utc(row["window_start"]) - anchor_ts).total_seconds(),
             "end_seconds": (_as_utc(row["window_end"]) - anchor_ts).total_seconds(),
@@ -811,7 +830,7 @@ def canonical_manifest(repo: Repo, hunt_id: str, actor: str = "canonical") -> di
     for incident in graph["incidents"]:
         incident["finding_ids"] = sorted(incident["finding_ids"])
         incident["timeline"] = sorted(
-            incident["timeline"], key=lambda item: (observed_at.get(item, ""), item),
+            incident["timeline"], key=lambda item: (observed_at.get(item) is None, observed_at.get(item) or "", item),
         )
         incident["link_ids"] = sorted(incident["link_ids"])
         member_ids = set(incident["finding_ids"])
@@ -822,7 +841,7 @@ def canonical_manifest(repo: Repo, hunt_id: str, actor: str = "canonical") -> di
         entry_candidates = member_ids - incoming
         incident["entry_point"] = min(
             entry_candidates or member_ids,
-            key=lambda item: (observed_at.get(item, ""), item),
+            key=lambda item: (observed_at.get(item) is None, observed_at.get(item) or "", item),
         )
         open_ends = incident["open_ends"]
         for key in ("unexpanded_anchors", "pending_anchors", "partial_anchors", "unresolved_links"):

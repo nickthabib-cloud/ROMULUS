@@ -46,18 +46,12 @@ from typing import Any
 import httpx
 
 from romulus.config import Settings, redact_text
+from romulus.errors import SourceError
 from romulus.sources.models import CompiledQuery, Completeness, SearchOutcome
 
 
 class WriteAttemptBlocked(RuntimeError):
     """Raised before any request that is not on the read-only allowlist leaves the process."""
-
-
-class SourceError(RuntimeError):
-    def __init__(self, message: str, retryable: bool = False, status: int | None = None):
-        super().__init__(message)
-        self.retryable = retryable
-        self.status = status
 
 
 class SourceBudgetExhausted(SourceError):
@@ -281,7 +275,19 @@ class ElasticClient:
             retry = r.status_code in (429, 502, 503, 504)
             raise SourceError(redact_text(f"HTTP {r.status_code} {method} {path}: {r.text[:300]}", self.settings),
                               retryable=retry, status=r.status_code)
-        return r.json() if r.content else {}
+        try:
+            result = r.json() if r.content else {}
+        except ValueError as error:
+            raise SourceError(f"non-JSON response HTTP {r.status_code} {method} {path}") from error
+        # Every allowed endpoint returns an object. Search consumers must not turn
+        # malformed hit containers into either a crash or a complete empty result.
+        invalid = not isinstance(result, dict)
+        if not invalid and "hits" in result:
+            hits = result["hits"]
+            invalid = not isinstance(hits, dict) or not isinstance(hits.get("hits", []), list)
+        if invalid:
+            raise SourceError(f"invalid JSON response shape HTTP {r.status_code} {method} {path}")
+        return result
 
     # -- metadata --------------------------------------------------------------------------
     def probe(self) -> tuple[dict, Backend, str | None]:

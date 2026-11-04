@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, ClassVar, Literal
@@ -29,7 +30,7 @@ class Match:
     claim_type: str
     events: list[TypedEvent]
     predicate: list[PredicateField]
-    ts: datetime
+    ts: datetime | None
     severity: str
     proposed_lane: str
     confidence: str                  # high | medium | low
@@ -47,6 +48,16 @@ class Match:
     # same identity (a later record changed the answer, or a merged finding's final tally): the publication revises
     # that candidate in place, and this is the stated reason. Empty for every ordinary match.
     revision_reason: str = ""
+    # A computed positive whose optional source citations could not be retained/retrieved.
+    citation_unavailable: bool = False
+    # Burst aggregates replace bounded first/latest witnesses rather than accumulating history.
+    bounded_revision: bool = False
+    # Streamed host membership, persisted separately from the bounded candidate JSON.
+    fleet_hosts: Iterable[tuple[str, str]] = ()
+    fleet_host_count: int = 0
+    fleet_hosts_complete: bool = False
+    # Native subject identity retained in detection state when the event citation is unavailable.
+    identity_key: str = ""
 
     def __post_init__(self) -> None:
         # A positive stays valid on a command line some of whose arguments were lost; the claim says so.
@@ -120,6 +131,9 @@ class Playbook:
     next_checks: ClassVar[tuple[str, ...]] = ()
     kind: ClassVar[str] = "direct"            # direct | aggregate | context
     anchor_class: ClassVar[str] = "execution"
+    # Alternate evidence views of one stable group (such as fragment/joined script blocks) replace their
+    # citations in place even when rediscovered through expansion. Empty keeps raw-subject identity semantics.
+    evidence_view_field: ClassVar[str] = ""
     # False for rules that read script *text*: text can show intent but can never prove that something
     # did not run, so such rules publish positives only and never write a complete negative.
     assures_negative: ClassVar[bool] = True
@@ -223,6 +237,9 @@ class Playbook:
         evaluate; direct callers use :meth:`consume_partition`.
         """
         self.os_applicable += len(scoped)
+        if scoped:
+            first = min(event.ts for event in scoped)
+            self._first_record_time = min(first, getattr(self, "_first_record_time", first))
         self._events_pre_scoped = True
         try:
             return self.consume(scoped)
@@ -303,7 +320,7 @@ class Playbook:
         """This playbook's private on-disk tables (created on first use)."""
         if self._spill is None:
             from romulus.detect.bounded import Spill
-            self._spill = Spill(self.spill_dir, self.state_budget())
+            self._spill = Spill(self.spill_dir, self.state_budget(), owner=self)
         return self._spill
 
     def refuse_unevaluated(self, events: list[TypedEvent], evaluated: int, text: str) -> None:

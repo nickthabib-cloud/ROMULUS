@@ -80,6 +80,8 @@ def _form_from_view(content: dict, **overrides) -> FormData:
     fields += [(f"g{blank}.new", "1"), (f"g{blank}.hosts", "")]
     for key in ("domain_controllers", "directory_sync_accounts", "internal_networks", "external_networks"):
         fields.append((key, shown[key]))
+    if shown["directory_sync_accounts_declared"]:
+        fields.append(("directory_sync_accounts_declared", "1"))
     replaced = dict(overrides)
     fields = [(key, replaced.pop(key, value)) for key, value in fields] + list(replaced.items())
     return FormData(fields)
@@ -90,6 +92,25 @@ def _post(form: FormData) -> dict[str, list[str]]:
     for key, value in form.multi_items():
         data.setdefault(key, []).append(value)
     return data
+
+
+@pytest.mark.parametrize("declared", [False, True])
+def test_unchanged_web_form_preserves_absent_vs_declared_empty_sync_list(site, declared):
+    settings, _repo, login = site
+    text = 'schema: romulus-site-collection@1\ndomain_controllers: [dc01.example.test]\n'
+    if declared:
+        text += 'directory_sync_accounts: []\ndirectory_sync_accounts_declared: true\n'
+    _write(settings.home, text)
+    before = load_site_facts(settings.home)
+    lead = login("lead1")
+    page = lead.get("/site").text
+    tag = re.search(r'<input[^>]*name="directory_sync_accounts_declared"[^>]*>', page, re.DOTALL).group()
+    assert ("checked" in tag) is declared
+    response = lead.post("/site", data=_post(_form_from_view(before.content, csrf=_csrf(page), digest=_digest(page))))
+    assert response.status_code == 200
+    after = load_site_facts(settings.home)
+    assert after.digest == before.digest
+    assert ("directory_sync_accounts" in after.content) is declared
 
 
 def _write(home, text: str = VALID):

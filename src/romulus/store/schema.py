@@ -209,7 +209,7 @@ candidate = Table(
     Column("context_event_ids", JSON),
     Column("predicate_fields", JSON, nullable=False),   # [{field, value, raw_path}]
     Column("entities", JSON, nullable=False),
-    Column("ts", DateTime(timezone=True), nullable=False),
+    Column("ts", DateTime(timezone=True)),              # NULL only when a computed positive has no recoverable time
     Column("severity", String, nullable=False),
     Column("confidence", String, nullable=False),
     Column("lane", String, nullable=False),
@@ -226,6 +226,14 @@ candidate = Table(
 )
 Index("ix_candidate_hunt_lane", candidate.c.hunt_id, candidate.c.lane, candidate.c.priority)
 
+candidate_host = Table(
+    "candidate_host", metadata,
+    Column("candidate_id", String, ForeignKey("candidate.id", ondelete="CASCADE"), primary_key=True),
+    Column("host", String, primary_key=True),
+    Column("first_event_id", String, nullable=False),
+    sqlite_with_rowid=False,
+)
+
 expansion_anchor = Table(
     "expansion_anchor", metadata,
     Column("id", String, primary_key=True),              # the anchored candidate id
@@ -236,7 +244,7 @@ expansion_anchor = Table(
     Column("host", String),
     Column("lane", String, nullable=False),
     Column("severity", String, nullable=False),
-    Column("ts", DateTime(timezone=True), nullable=False),
+    Column("ts", DateTime(timezone=True)),              # untimed positives remain explicitly unexpanded
     Column("status", String, nullable=False),            # pending | expanded_complete | expanded_partial | unexpanded
     Column("reasons", JSON, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
@@ -366,6 +374,15 @@ report_manifest = Table(
     Column("digest", String, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint("hunt_id", "revision", name="uq_report_rev"),
+)
+
+report_host = Table(
+    "report_host", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id", ondelete="CASCADE"), primary_key=True),
+    Column("snapshot", String, primary_key=True),
+    Column("host", String, primary_key=True),
+    Column("first_event_id", String, nullable=False),
+    sqlite_with_rowid=False,
 )
 
 user = Table(

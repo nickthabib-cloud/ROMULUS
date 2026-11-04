@@ -15,14 +15,17 @@ calls parsed from script text).
 """
 from __future__ import annotations
 
+import ntpath
 from typing import ClassVar
 
 from romulus.detect.base import PredicateField
+from romulus.detect.powershell_tokens import read_script
 from romulus.detect.windows_cmdline import (
     PARSED,
     PARSED_DECODED,
     has_switch,
     is_ordinal,
+    is_remote_path,
     is_user_writable,
     operands,
     parse_powershell,
@@ -39,8 +42,13 @@ from romulus.detect.windows_common import (
     WindowsProcessRule,
     clip,
     image_name,
+    parent_predicate,
     parsed_field,
+    resolve_parent,
 )
+from romulus.detect.windows_lineage import LureAppSpawnsCodeRunner
+from romulus.detect.windows_path_data import has_short_name, installation_parts
+from romulus.detect.windows_scripts import HIGH_TOOLS, amsi_bypass, downloads, runs_code
 from romulus.evidence.typed import TypedEvent
 
 # Download cmdlets and their characteristic members/parameters, matched as code words in parsed script text.
@@ -55,6 +63,81 @@ _DOWNLOAD_MEMBERS = {
 }
 _EXEC_WORDS = {"invoke-expression", "iex", "invoke-command", "icm"}
 
+# Each library's proxy-export family comes from its original LOLBAS entry.
+# A-suffixed exports retain their documented function family; Ex is additionally
+# documented at https://learn.microsoft.com/previous-versions/windows/internet-explorer/ie-developer/platform-apis/aa768006(v=vs.85).
+_PROXY_EXPORTS = {
+    "url": ({"openurl", "openurla", "fileprotocolhandler"}, "https://lolbas-project.github.io/lolbas/Libraries/Url/"),
+    "ieframe": ({"openurl"}, "https://lolbas-project.github.io/lolbas/Libraries/Ieframe/"),
+    "shdocvw": ({"openurl"}, "https://lolbas-project.github.io/lolbas/Libraries/Shdocvw/"),
+    "advpack": ({"registerocx", "launchinfsection", "launchinfsectionex"}, "https://lolbas-project.github.io/lolbas/Libraries/Advpack/"),
+    "ieadvpack": ({"registerocx", "launchinfsection", "launchinfsectionex"}, "https://lolbas-project.github.io/lolbas/Libraries/Ieadvpack/"),
+    "setupapi": ({"installhinfsection"}, "https://lolbas-project.github.io/lolbas/Libraries/Setupapi/"),
+    "syssetup": ({"setupinfobjectinstallaction"}, "https://lolbas-project.github.io/lolbas/Libraries/Syssetup/"),
+    "pcwutl": ({"launchapplication"}, "https://lolbas-project.github.io/lolbas/Libraries/Pcwutl/"),
+    "zipfldr": ({"routethecall"}, "https://lolbas-project.github.io/lolbas/Libraries/Zipfldr/"),
+    "shell32": ({"shellexec_rundll", "shellexec_rundlla", "control_rundll", "control_rundllasuser", "control_rundllw"}, "https://lolbas-project.github.io/lolbas/Libraries/Shell32/"),
+    "scrobj": ({"generatetypelib"}, "https://lolbas-project.github.io/lolbas/Libraries/Scrobj/"),
+    "dfshim": ({"shopenverbapplication"}, "https://lolbas-project.github.io/lolbas/Libraries/Dfshim/"),
+    "shimgvw": ({"imageview_fullscreen"}, "https://lolbas-project.github.io/lolbas/Libraries/Shimgvw/"),
+    "mshtml": ({"printhtml"}, "https://lolbas-project.github.io/lolbas/Libraries/Mshtml/"),
+}
+
+# Names, not trust: these suppress only a bare-name/CWD inference. An explicitly
+# writable path or a proxy export is still evaluated. KnownDLL membership varies
+# with Windows version; no endpoint registry inventory is inferred from this list.
+# Microsoft's published KnownDLL defaults (archived original KB Q102985):
+# https://ftp.zx.net.nz/pub/Patches/ftp.microsoft.com/MISC/KB/en-us/102/985.HTM
+# Current search-order and per-system KnownDLL registry contract:
+# https://learn.microsoft.com/windows/win32/dlls/dynamic-link-library-search-order
+_SYSTEM_LIBRARIES = frozenset({
+    'advapi32.dll', 'comdlg32.dll', 'crtdll.dll', 'gdi32.dll', 'kernel32.dll', 'lz32.dll',
+    'olecli32.dll', 'olesvr32.dll', 'rpcrt4.dll', 'shell32.dll', 'user32.dll', 'version.dll',
+    # Windows Update component registration list (each name below):
+    # https://learn.microsoft.com/troubleshoot/windows-client/installing-updates-features-roles/additional-resources-for-windows-update
+    'atl.dll', 'urlmon.dll', 'mshtml.dll', 'shdocvw.dll', 'browseui.dll', 'jscript.dll', 'vbscript.dll',
+    'scrrun.dll', 'msxml.dll', 'msxml3.dll', 'msxml6.dll', 'actxprxy.dll', 'softpub.dll', 'wintrust.dll',
+    'dssenh.dll', 'rsaenh.dll', 'gpkcsp.dll', 'sccbase.dll', 'slbcsp.dll', 'cryptdlg.dll', 'oleaut32.dll',
+    'ole32.dll', 'initpki.dll', 'wuapi.dll', 'wuaueng.dll', 'wuaueng1.dll', 'wucltui.dll', 'wups.dll',
+    'wups2.dll', 'wuweb.dll', 'qmgr.dll', 'qmgrprxy.dll', 'wucltux.dll', 'muweb.dll', 'wuwebv.dll',
+    # https://learn.microsoft.com/windows/win32/api/winternl/nf-winternl-ntqueryinformationprocess
+    'ntdll.dll',
+    # https://learn.microsoft.com/windows-server/administration/windows-commands/rundll32-printui
+    'printui.dll',
+    # https://lolbas-project.github.io/lolbas/Libraries/Scrobj/
+    'scrobj.dll',
+    # https://lolbas-project.github.io/lolbas/Libraries/Dfshim/
+    'dfshim.dll',
+    # https://learn.microsoft.com/windows/win32/api/comsvcs/nf-comsvcs-cocreateactivity
+    'comsvcs.dll',
+    # https://learn.microsoft.com/windows/win32/api/davclnt/nf-davclnt-davregisterauthcallback
+    'davclnt.dll',
+}) | frozenset(name + '.dll' for name in _PROXY_EXPORTS)
+
+# Microsoft names these built-in applets; this does not exclude third-party CPLs.
+# https://learn.microsoft.com/windows/win32/shell/controlpanel-canonical-names
+# https://learn.microsoft.com/windows/win32/shell/executing-control-panel-items
+# Original Microsoft KB Q313808, archived after the original URL was retired:
+# https://ftp.zx.net.nz/pub/archive/ftp.microsoft.com/MISC/KB/en-us/313/808.HTM
+# https://learn.microsoft.com/windows/security/operating-system-security/network-security/windows-firewall/tools
+# Microsoft's Windows XP remediation names wscui.cpl as the Security Center entry:
+# https://www.microsoft.com/en-us/wdsi/threats/malware-encyclopedia-description?Name=SecurityMasterAV
+_SYSTEM_CPLS = frozenset({'appwiz.cpl', 'desk.cpl', 'hdwwiz.cpl', 'inetcpl.cpl', 'intl.cpl',
+    'irprops.cpl', 'joy.cpl', 'main.cpl', 'mmsys.cpl', 'powercfg.cpl', 'sysdm.cpl', 'tabletpc.cpl',
+    'telephon.cpl', 'timedate.cpl', 'wscui.cpl', 'firewall.cpl', 'access.cpl', 'ncpa.cpl',
+    'nusrmgr.cpl', 'nwc.cpl', 'odbccp32.cpl', 'sapi.cpl'})
+
+# The cited entries establish the proxy-script names, not a signature or an
+# assertion that an arbitrary supplied URL was executed.
+_PROXY_SCRIPTS = {
+    'pubprn.vbs': 'https://lolbas-project.github.io/lolbas/Scripts/Pubprn/',
+    'syncappvpublishingserver.vbs': 'https://lolbas-project.github.io/lolbas/Scripts/Syncappvpublishingserver/',
+    'winrm.vbs': 'https://lolbas-project.github.io/lolbas/Scripts/Winrm/',
+    'manage-bde.wsf': 'https://lolbas-project.github.io/lolbas/Scripts/Manage-bde/',
+}
+# SyncAppv's documented embedded script text is evaluated by its PowerShell child;
+# the child process/script rules see the URL as code. This table reads plain argv.
+
 
 def _command_argv(event: TypedEvent) -> list[str]:
     argv = split_argv(str(event.get("process.command_line")))
@@ -63,9 +146,139 @@ def _command_argv(event: TypedEvent) -> list[str]:
     return argv
 
 
+def place_operand(event: TypedEvent, token: str, *, dll_search: bool = False) -> tuple[str, str]:
+    """Place a relative operand only with an absolute working directory in its record."""
+    operand = token.strip().strip('"')
+    if is_remote_path(operand) or operand.casefold().startswith(("javascript:", "vbscript:")):
+        return operand, ""
+    if dll_search and not ntpath.dirname(operand) and not ntpath.splitdrive(operand)[0]:
+        return operand, "; resolved through the DLL search order"
+    directory = event.get("process.current_directory")
+    drive = ntpath.splitdrive(directory)[0] if isinstance(directory, str) else ""
+    operand_drive, operand_tail = ntpath.splitdrive(operand)
+    if (not ntpath.isabs(operand)
+            and _absolute_directory(directory)
+            and (not operand_drive or operand_drive.casefold() == drive.casefold())):
+        return ntpath.normpath(ntpath.join(directory, operand_tail)), "; placed using the recorded working directory"
+    return operand, ""
+
+
+def _unc_path(path):
+    return is_remote_path(path)
+
+
+def _absolute_directory(directory):
+    if not isinstance(directory, str):
+        return False
+    drive, tail = ntpath.splitdrive(directory)
+    return (is_remote_path(directory) or bool(drive and tail.startswith(('\\', '/')))
+            or directory.replace('/', '\\').casefold().startswith(('%windir%\\', '%systemroot%\\', '\\systemroot\\')))
+
+
+def _system_library_path(path):
+    # Inspect the literal directory, not the library basename: a short filename
+    # under a literal system directory does not infer an unknown long directory.
+    parts = installation_parts(ntpath.dirname(path.replace('/', '\\')))
+    return parts in {('windows', 'system32'), ('windows', 'syswow64')}
+
+
+def _writable_operand(event, token, label, behavior, attack, *, dll_search=False):
+    placed, note = place_operand(event, token, dll_search=dll_search)
+    unc = _unc_path(placed)
+    predicate = [parsed_field(event, token)]
+    if "placed using" in note:
+        value = event.fields["process.current_directory"]
+        predicate.append(PredicateField("process.current_directory", value.value, value.origin))
+    if has_short_name(placed) and not unc and not _system_library_path(placed):
+        return Hit(behavior, f"{label} was given target '{clip(placed)}'; path recorded in 8.3 short form; "
+                   f"its long location is not recorded{note}", "lead", "medium", attack, predicate,
+                   content=f"{behavior}:short-path")
+    if dll_search and not ntpath.dirname(placed) and not ntpath.splitdrive(placed)[0]:
+        recognized = placed.casefold()
+        if not ntpath.splitext(recognized)[1]:
+            recognized += '.dll'
+        if recognized in _SYSTEM_LIBRARIES or recognized in _SYSTEM_CPLS:
+            return None
+        directory = event.get("process.current_directory")
+        if not isinstance(directory, str):
+            return None
+        if not (_absolute_directory(directory)
+                and (_unc_path(directory) or is_user_writable(directory) or has_short_name(directory))):
+            return None
+        value = event.fields["process.current_directory"]
+        predicate.append(PredicateField("process.current_directory", value.value, value.origin))
+        if has_short_name(directory) and not is_remote_path(directory):
+            return Hit(behavior, f"{label} named '{clip(placed)}'; the recorded working directory "
+                       f"'{clip(directory)}' has a path recorded in 8.3 short form; its long location is not recorded",
+                       "lead", "medium", attack, predicate, content=f"{behavior}:short-cwd")
+        return Hit(behavior, f"{label} named '{clip(placed)}', which is not a recognized Windows system library; "
+                   f"the standard search order reaches the recorded working directory ({clip(directory)}) "
+                   "after the application and system directories, so it may load from there",
+                   "lead", "medium", attack, predicate, content=f"{behavior}:search-order")
+    if not unc and not is_user_writable(placed):
+        return None
+    location = ("a remote URL" if unc and '://' in placed else "a UNC path") if unc else "a user-writable location"
+    return Hit(behavior, f"{label} was given a target in {location} ({clip(placed)}){note}",
+               "lead", "medium", attack, predicate, content=f"{behavior}:{'unc' if unc else 'writable'}")
+
+
+def _rundll_arguments(argv):
+    rest = [token for token in argv[1:] if token]
+    if not rest:
+        return "", "", []
+    library, comma, entry = rest[0].partition(",")
+    if comma and entry:
+        return library, entry, rest[1:]
+    return library, rest[1] if len(rest) > 1 else "", rest[2:]
+
+
+def _proxy_export(event, argv):
+    target = rundll32_target(argv)
+    if target is None:
+        return None
+    library, entry = target
+    exports, source = _PROXY_EXPORTS.get(library, ((), ""))
+    operand, recorded_entry, args = _rundll_arguments(argv)
+    remote = next((arg for arg in args if is_remote_path(arg) or url_in(arg)), None)
+    if entry not in exports:
+        if remote:
+            return Hit("rundll32_remote_argument",
+                       f"rundll32 export '{recorded_entry}' was given remote argument '{clip(remote)}'; "
+                       "successful loading or execution is not established", "lead", "medium", ("T1218.011",),
+                       [parsed_field(event, clip(' '.join(argv[1:])))],
+                       content=f"rundll32:argument:{library}:{entry}")
+        return None
+    if library == "shell32" and entry in {"control_rundll", "control_rundllasuser", "control_rundllw"}:
+        cpl = args[0].split(",", 1)[0] if args else ""
+        placed, _note = place_operand(event, cpl, dll_search=True)
+        if not remote and (not cpl or _system_library_path(placed)
+                           or not ntpath.dirname(cpl) and cpl.casefold() in _SYSTEM_CPLS):
+            return None
+    placed, note = place_operand(event, operand, dll_search=True)
+    payload = clip(" ".join(args)) if args else "not recorded"
+    predicate = [parsed_field(event, clip(" ".join(argv[1:])))]
+    if "placed using" in note:
+        value = event.fields["process.current_directory"]
+        predicate.append(PredicateField("process.current_directory", value.value, value.origin))
+    if remote:
+        return Hit("rundll32_proxy_export",
+                   f"rundll32 export '{recorded_entry}' was given remote argument '{clip(remote)}'; "
+                   f"this proxy export of '{clip(placed)}' names a remote target; "
+                   "successful loading or execution is not established",
+                   "high", "high", ("T1218.011", "T1105"), predicate,
+                   content=f"rundll32:export:{library}:{entry}:remote",
+                   notes=(f"Proxy-export family source: {source}",))
+    if any(has_short_name(arg.split(',', 1)[0]) and not _system_library_path(arg.split(',', 1)[0]) for arg in args):
+        note += "; target path recorded in 8.3 short form; its long location is not recorded"
+    return Hit("rundll32_proxy_export",
+               f"rundll32 named proxy export '{recorded_entry}' of '{clip(placed)}'{note}; target: {payload}; "
+               "successful loading or execution is not established", "lead", "medium", ("T1218.011",),
+               predicate, content=f"rundll32:export:{library}:{entry}", notes=(f"Proxy-export family source: {source}",))
+
+
 class MshtaExecution(WindowsProcessRule):
     id = "win.mshta_remote_or_inline"
-    version = "2"
+    version = "6"
     title = "mshta ran a remote HTA or inline script"
     assures_negative = False
     positive_only_reason = ("mshta is recognised from argv, and a payload can also be delivered by other binaries "
@@ -102,8 +315,11 @@ class MshtaExecution(WindowsProcessRule):
                 return [self._hit(event, token, f"a remote target ({url})", "mshta_remote")]
             if lowered.startswith(("javascript:", "vbscript:")):
                 return [self._hit(event, token, "an inline script", "mshta_inline")]
-            if lowered.startswith("\\\\"):
-                return [self._hit(event, token, f"a UNC path ({token.strip()})", "mshta_unc")]
+            if is_remote_path(lowered):
+                location = "a remote URL" if '://' in lowered else "a UNC path"
+                return [self._hit(event, token, f"{location} ({token.strip()})", "mshta_unc")]
+            if lowered.endswith(".hta") and (hit := _writable_operand(event, token, "mshta", "mshta_local", self.attack)):
+                return [hit]
         return []
 
     def _hit(self, event: TypedEvent, token: str, what: str, shape: str) -> Hit:
@@ -113,18 +329,19 @@ class MshtaExecution(WindowsProcessRule):
 
 class Rundll32Execution(WindowsProcessRule):
     id = "win.rundll32_proxy"
-    version = "3"
+    version = "7"
     title = "rundll32 proxied execution (script protocol, remote DLL, or LSASS MiniDump)"
     assures_negative = False
     positive_only_reason = ("rundll32 and its target are read from argv; the same proxying can be done by other means, "
                             "so a window without a match proves nothing")
     severity, lane = "high", "high"
-    attack = ("T1218.011", "T1059.007", "T1059.005", "T1003.001")
+    attack = ("T1218.011", "T1059.007", "T1059.005", "T1003.001", "T1105")
     benign = ("Windows and third-party software calling rundll32 with a local system DLL and a real export",)
     next_checks = ("the DLL or URL named", "rundll32's network and file activity", "for a MiniDump, the written file")
     card: ClassVar[dict] = {
-        "behavior": "rundll32.exe with a javascript:/vbscript: protocol, a UNC/URL DLL, or comsvcs.dll MiniDump "
-                    "against a process id",
+        "behavior": "rundll32.exe with an inline script protocol, a remote library or proxy-export target, a "
+                    "comsvcs MiniDump request, an outside-system Control_RunDLL target, or a library path/search "
+                    "operand that warrants investigation",
         "telemetry": "Sysmon 1 or Security 4688 (process.command_line)",
         "fidelity": "the arguments show what rundll32 was asked to load; positive-only. A comsvcs MiniDump shape is a "
                     "credential-access request, not proof a dump was written.",
@@ -134,7 +351,8 @@ class Rundll32Execution(WindowsProcessRule):
         "next_pivot": "the named DLL/URL; for MiniDump, the output file and the target process",
         "adds": "rundll32 proxy execution and the comsvcs MiniDump credential-dump shape",
         "research_basis": "ATT&CK Enterprise 20.0 T1218.011, T1003.001; LOLBAS rundll32/comsvcs (reimplemented)",
-        "lanes": "high; the comsvcs MiniDump shape is worded as a credential-access request",
+        "lanes": "high for inline, remote-library, remote-proxy-target and MiniDump shapes; lead for local "
+                 "proxy exports, writable operands, unresolved short paths and unknown bare libraries with a writable CWD",
         "retrieval": "the sweep retrieves every process-creation record; this reads those whose image is rundll32.exe",
     }
 
@@ -142,14 +360,15 @@ class Rundll32Execution(WindowsProcessRule):
         if image_name(event.get("process.executable_key"))[0] != "rundll32.exe":
             return []
         argv = _command_argv(event)
-        for token in argv[1:]:
+        library, _entry, _args = _rundll_arguments(argv)
+        for token in (library,):
             url = url_in(token)
             lowered = token.strip().strip('"').casefold()
             if lowered.startswith(("javascript:", "vbscript:")):
                 return [Hit("rundll32_proxy", "rundll32 was run with an inline script protocol", self.lane,
                             self.severity, ("T1218.011", "T1059.007", "T1059.005"),
                             [parsed_field(event, token)], content="rundll32:script")]
-            if url or lowered.startswith("\\\\"):
+            if url or _unc_path(lowered):
                 return [Hit("rundll32_proxy", f"rundll32 was asked to load a remote DLL ({token.strip()})", self.lane,
                             self.severity, ("T1218.011", "T1105"), [parsed_field(event, token)],
                             content="rundll32:remote")]
@@ -161,12 +380,17 @@ class Rundll32Execution(WindowsProcessRule):
                             f"rundll32 was run with comsvcs.dll MiniDump (entry '{entry}'), the shape used to dump a "
                             f"process's memory", self.lane, self.severity, ("T1003.001", "T1218.011"),
                             [parsed_field(event, clip(" ".join(argv[1:])))], content="rundll32:comsvcs")]
+        if hit := _proxy_export(event, argv):
+            return [hit]
+        if library and (hit := _writable_operand(
+                event, library, "rundll32", "rundll32_writable", ("T1218.011",), dll_search=True)):
+            return [hit]
         return []
 
 
 class Regsvr32Execution(WindowsProcessRule):
     id = "win.regsvr32_scriptlet"
-    version = "2"
+    version = "6"
     title = "regsvr32 registered a remote or scriptlet payload (Squiblydoo)"
     assures_negative = False
     positive_only_reason = ("regsvr32's install flag and target are read from argv; a window without a match proves "
@@ -194,22 +418,30 @@ class Regsvr32Execution(WindowsProcessRule):
             return []
         argv = _command_argv(event)
         for token in argv[1:]:
-            if token.casefold().startswith(("/i:", "-i:", "–i:")):
+            if token.casefold().startswith(("/i:", "-i:")):
                 target = switch_value(token) or ""
                 url = url_in(token)
-                remote = bool(url) or target.strip().startswith("\\\\")
+                remote = bool(url) or is_remote_path(target)
                 scriptlet = target.strip().strip('"').casefold().endswith(".sct")
                 if remote or scriptlet:
                     what = "a remote target" if remote else "a scriptlet (.sct)"
                     return [Hit("regsvr32_scriptlet", f"regsvr32 was run with /i: naming {what} ({clip(target)})",
                                 self.lane, self.severity, self.attack, [parsed_field(event, token)],
                                 content=f"regsvr32:{'remote' if remote else 'sct'}")]
+        # regsvr32 accepts exactly these flags; other slash-prefixed tokens are operands.
+        # https://learn.microsoft.com/windows-server/administration/windows-commands/regsvr32
+        rest = [token for token in argv[1:] if token.casefold() not in {
+            '/s', '/u', '/n', '/c', '/i', '-s', '-u', '-n', '-c', '-i'}
+            and not token.casefold().startswith(('/i:', '-i:'))]
+        for token in rest:
+            if hit := _writable_operand(event, token, "regsvr32", "regsvr32_writable", self.attack, dll_search=True):
+                return [hit]
         return []
 
 
 class CertutilDownloadDecode(WindowsProcessRule):
     id = "win.certutil_download_decode"
-    version = "2"
+    version = "5"
     title = "certutil used to download or decode a file"
     assures_negative = False
     positive_only_reason = ("certutil's download and decode flags are read from argv; a window without a match proves "
@@ -253,7 +485,7 @@ class CertutilDownloadDecode(WindowsProcessRule):
 
 class BitsadminTransfer(WindowsProcessRule):
     id = "win.bitsadmin_transfer"
-    version = "2"
+    version = "5"
     title = "bitsadmin created a transfer job"
     assures_negative = False
     positive_only_reason = ("bitsadmin's transfer verb and URL are read from argv; a window without a match proves "
@@ -290,7 +522,7 @@ class BitsadminTransfer(WindowsProcessRule):
 
 class CurlDownload(WindowsProcessRule):
     id = "win.curl_download_to_disk"
-    version = "3"
+    version = "6"
     title = "curl.exe downloaded to a file"
     assures_negative = False
     positive_only_reason = ("curl and its output flag are read from argv; a window without a match proves nothing, as "
@@ -331,19 +563,19 @@ class CurlDownload(WindowsProcessRule):
 
 class ScriptHostRemoteOrWritable(WindowsProcessRule):
     id = "win.script_host_untrusted_script"
-    version = "2"
+    version = "6"
     title = "wscript or cscript ran a script from a user-writable or remote location"
     assures_negative = False
     positive_only_reason = ("the script path is read from argv and a path can be renamed or relocated; a window "
                             "without a match proves nothing")
     severity, lane = "medium", "lead"
-    attack = ("T1059.005", "T1059.007", "T1218")
+    attack = ("T1059.005", "T1059.007", "T1218", "T1216", "T1216.001", "T1216.002")
     benign = ("administrators running maintenance scripts from a per-user profile path",
               "software that stores and runs its own scripts under ProgramData")
     next_checks = ("the script file named", "the script host's network and child activity")
     card: ClassVar[dict] = {
-        "behavior": "wscript.exe or cscript.exe whose script-file operand is under a user-writable path "
-                    "(Temp, AppData, Users, ProgramData, Downloads) or a UNC path",
+        "behavior": "wscript.exe or cscript.exe with a writable/remote/short-form script path, any remote "
+                    "script moniker argument (remote or local writable), or a sourced proxy script with a remote URL argument",
         "telemetry": "Sysmon 1 or Security 4688 (process.command_line)",
         "fidelity": "the arguments name a script in an untrusted location; positive-only (the file may be renamed or "
                     "may not have run)",
@@ -352,7 +584,7 @@ class ScriptHostRemoteOrWritable(WindowsProcessRule):
         "next_pivot": "the script's content and what the host did next",
         "adds": "the wscript/cscript untrusted-location shape",
         "research_basis": "ATT&CK Enterprise 20.0 T1059.005/.007, T1218; cross-cutting user-writable-path theme",
-        "lanes": "lead",
+        "lanes": "high for remote script:/scriptlet: monikers; lead for local writable monikers, other path and proxy-URL shapes",
         "retrieval": "the sweep retrieves every process-creation record; this reads those whose image is "
                      "wscript.exe/cscript.exe",
     }
@@ -361,18 +593,54 @@ class ScriptHostRemoteOrWritable(WindowsProcessRule):
         if image_name(event.get("process.executable_key"))[0] not in {"wscript.exe", "cscript.exe"}:
             return []
         argv = _command_argv(event)
-        for token in operands(argv[1:]):
-            if is_user_writable(token) or url_in(token) or token.strip().strip('"').startswith("\\\\"):
-                where = "a UNC path" if token.strip().strip('"').startswith("\\\\") else "a user-writable location"
+        scripts = operands(argv[1:])[:1]
+        script = scripts[0] if scripts else "<unrecorded>"
+        name = ntpath.basename(script).casefold()
+        # Every argument can carry a moniker. Plain URL arguments are a lead only
+        # with a named proxy script; ordinary script arguments do not become code.
+        local_moniker = None
+        for position, token in enumerate(argv[1:], 1):
+            if not token.casefold().startswith(('script:', 'scriptlet:')):
+                continue
+            target = token.partition(':')[2]
+            remote = is_remote_path(target)
+            if remote or is_user_writable(target):
+                hit = Hit("script_host_proxy", f"script host script '{clip(script)}' was given "
+                            f"{'remote' if remote else 'local user-writable'} moniker "
+                            f"'{clip(token)}' at argument {position} (argv position after the executable); "
+                            "successful execution is not established", "high" if remote else "lead",
+                            "high" if remote else "medium", self.attack,
+                            [parsed_field(event, script), parsed_field(event, token)],
+                            content=f"scripthost:moniker:{name}")
+                if remote:
+                    return [hit]
+                if local_moniker is None:
+                    local_moniker = hit
+        if local_moniker is not None:
+            return [local_moniker]
+        if name in _PROXY_SCRIPTS:
+            for position, token in enumerate(argv[1:], 1):
+                if url_in(token) or is_remote_path(token) and '://' in token:
+                    return [Hit("script_host_proxy", f"proxy script '{clip(script)}' was given remote URL "
+                                f"'{clip(token)}' at argument {position} (argv position after the executable); "
+                                "successful execution is not established", "lead", "medium", self.attack,
+                                [parsed_field(event, script), parsed_field(event, token)],
+                                content=f"scripthost:proxy-url:{name}",
+                                notes=(f"Proxy-script source: {_PROXY_SCRIPTS[name]}",))]
+        for token in scripts:
+            if is_remote_path(token):
+                where = "a remote URL" if '://' in token else "a UNC path"
                 return [Hit("script_host_untrusted", f"a script host was given a script in {where} ({clip(token)})",
                             self.lane, self.severity, self.attack, [parsed_field(event, token)],
                             content="scripthost:untrusted")]
+            if hit := _writable_operand(event, token, "a script host", "script_host_untrusted", self.attack):
+                return [hit]
         return []
 
 
 class MsiexecRemotePackage(WindowsProcessRule):
     id = "win.msiexec_remote_package"
-    version = "2"
+    version = "5"
     title = "msiexec installed a package from a remote source"
     assures_negative = False
     positive_only_reason = ("the package source is read from argv; a window without a match proves nothing")
@@ -402,7 +670,7 @@ class MsiexecRemotePackage(WindowsProcessRule):
             return []
         for token in argv[1:]:
             url = url_in(token)
-            if url or token.strip().strip('"').startswith("\\\\"):
+            if is_remote_path(token) or url:
                 return [Hit("msiexec_remote", f"msiexec was asked to install a remote package ({clip(token)})",
                             self.lane, self.severity, self.attack, [parsed_field(event, token)],
                             content="msiexec:remote")]
@@ -411,27 +679,28 @@ class MsiexecRemotePackage(WindowsProcessRule):
 
 class CompilerProxyExecution(WindowsProcessRule):
     id = "win.dotnet_lolbin_proxy"
-    version = "2"
-    title = "a .NET LOLBin (InstallUtil, Regasm, Regsvcs, MSBuild, odbcconf, cmstp) proxied execution"
+    version = "6"
+    title = "A build, install or XML utility received proxy-execution arguments"
     assures_negative = False
     positive_only_reason = ("the LOLBin and its payload flag are read from argv; a window without a match proves "
                             "nothing, and these tools have legitimate build and install uses")
     severity, lane = "high", "lead"
-    attack = ("T1218.004", "T1218.009", "T1127.001", "T1218.008", "T1218.003")
+    attack = ("T1218.004", "T1218.009", "T1127.001", "T1218.008", "T1218.003", "T1220")
     benign = (("genuine software builds (MSBuild on a developer or build host) and assembly installs (InstallUtil, "
                "Regasm, Regsvcs) during deployment"),)
     next_checks = ("the project, inf or assembly named", "the tool's network and child activity")
     card: ClassVar[dict] = {
         "behavior": "InstallUtil with /logfile= /LogToConsole=false /U, Regasm/Regsvcs with /U, MSBuild building an "
                     "inline-task project from a user-writable/remote path, odbcconf /a with a REGSVR action, or cmstp "
-                    "with an .inf",
+                    "with an .inf, or msxsl given XML/XSL operands in a user-writable path",
         "telemetry": "Sysmon 1 or Security 4688 (process.command_line)",
         "fidelity": "the arguments show the proxy-execution shape; positive-only",
         "benign_and_cost": "build and deployment hosts use these legitimately, so lane is lead and repeats merge",
         "query_cost": "none beyond the sweep",
         "next_pivot": "the named project/assembly/inf and the tool's children",
-        "adds": "the .NET/MSBuild/odbcconf/cmstp proxy-execution shapes",
-        "research_basis": "ATT&CK Enterprise 20.0 T1218.004/.009/.008/.003, T1127.001; LOLBAS (reimplemented)",
+        "adds": "the .NET/MSBuild/odbcconf/cmstp and msxsl proxy-execution shapes",
+        "research_basis": "ATT&CK Enterprise 20.0 T1218.004/.009/.008/.003, T1127.001, T1220; "
+                          "https://attack.mitre.org/techniques/T1220/; LOLBAS (reimplemented)",
         "lanes": "lead: common on build and deployment hosts",
         "retrieval": "the sweep retrieves every process-creation record; this reads those whose image is one of the "
                      "named .NET LOLBins",
@@ -447,9 +716,14 @@ class CompilerProxyExecution(WindowsProcessRule):
             return [self._hit(event, rest, name.split(".")[0], "T1218.009", "regasm")]
         if name == "msbuild.exe":
             for token in operands(rest):
-                if is_user_writable(token) or url_in(token) or token.strip().strip('"').startswith("\\\\"):
+                if is_user_writable(token) or url_in(token) or is_remote_path(token):
                     return [self._hit(event, [token], "MSBuild (project from an untrusted path)",
                                       "T1127.001", "msbuild")]
+        if name == "msxsl.exe":
+            for token in operands(rest):
+                if token.casefold().endswith((".xsl", ".xslt", ".xml")) and (hit := _writable_operand(
+                        event, token, "msxsl", "msxsl_writable", ("T1220",))):
+                    return [hit]
         if name == "odbcconf.exe" and any("regsvr" in token.casefold() for token in rest):
             return [self._hit(event, rest, "odbcconf (REGSVR action)", "T1218.008", "odbcconf")]
         if name == "cmstp.exe" and any(token.strip().strip('"').casefold().endswith(".inf") for token in rest):
@@ -464,8 +738,12 @@ class CompilerProxyExecution(WindowsProcessRule):
 
 class PowerShellEncodedOrCradle(WindowsProcessRule):
     id = "win.powershell_encoded_or_cradle"
-    version = "2"
+    version = "6"
     title = "PowerShell ran an encoded command or a download cradle"
+    uses_parent = True
+    parent_images = LureAppSpawnsCodeRunner.parent_images | frozenset({
+        "w3wp.exe", "httpd.exe", "nginx.exe", "tomcat.exe", "sqlservr.exe",
+    })
     assures_negative = False
     positive_only_reason = ("the command is read from PowerShell's argv and script text, which can be obfuscated or "
                             "built at run time; a window without a match proves nothing, and only decoded/observed "
@@ -484,17 +762,41 @@ class PowerShellEncodedOrCradle(WindowsProcessRule):
                      "UTF-16LE, decoded here and labelled parsed",
         "fidelity": "the host arguments and parsed script show what PowerShell was asked to run; positive-only. A "
                     "download cmdlet in the text is 'a download was requested', not 'a payload was fetched'.",
-        "benign_and_cost": "encoded commands and Invoke-WebRequest have legitimate uses; lane high for encoded, and "
+        "benign_and_cost": "encoded commands and Invoke-WebRequest have legitimate uses; encoded-only is lead, and "
                            "repeats merge per shape so a fleet-wide management command is triaged once",
         "query_cost": "none beyond the sweep",
         "next_pivot": "the decoded command, PowerShell's network connection, and the 4104 script block",
         "adds": "PowerShell encoded-command decoding and download-cradle detection by parsed tokens",
         "research_basis": "ATT&CK Enterprise 20.0 T1059.001, T1027.010, T1105, T1140; the Microsoft PowerShell host "
                           "parameter reference; SigmaHQ encoded-command patterns (reimplemented, not copied)",
-        "lanes": "high for an encoded command or a cradle piped to Invoke-Expression; a bare download cmdlet is lead",
+        "lanes": "encoded-only and bare downloads are lead; high requires a decoded cradle, offensive or AMSI call shape, or a lure/server parent",
         "retrieval": "the sweep retrieves every process-creation record; this reads those whose image is "
                      "powershell.exe/pwsh.exe",
     }
+
+    def candidate_child(self, event: TypedEvent) -> bool:
+        return image_name(event.get("process.executable_key"))[0] in {None, "powershell.exe", "pwsh.exe"}
+
+    def _fleet_match(self, shape, group, *, final):
+        match = super()._fleet_match(shape, group, final=final)
+        if match is None or group.behavior != "powershell_encoded" or match.proposed_lane != "high":
+            return match
+        # A pid-resolved parent is separate evidence. Reuse the lineage's bounded
+        # citation store for one representative, rather than storing parent bodies
+        # in each fleet group or claiming a parent from an uncited child field.
+        for event in match.events:
+            if event.id in match.context_ids:
+                continue
+            for hit in self.judge(event):
+                if hit.behavior != group.behavior or not hit.context:
+                    continue
+                seen = {item.id for item in match.events}
+                match.events.extend(item for item in hit.context if item.id not in seen)
+                match.context_ids.update(item.id for item in hit.context)
+                match.raw_copies.update(hit.raw_copies)
+                match.predicate = list(hit.predicate)
+                return match
+        return match
 
     def judge(self, event: TypedEvent) -> list[Hit]:
         if image_name(event.get("process.executable_key"))[0] not in {"powershell.exe", "pwsh.exe"}:
@@ -502,6 +804,20 @@ class PowerShellEncodedOrCradle(WindowsProcessRule):
         argv = _command_argv(event)
         call = parse_powershell(argv[1:])
         hits: list[Hit] = []
+        parsed = read_script(call.script) if call.script is not None else None
+        strong = bool(parsed and (parsed.commands & HIGH_TOOLS or amsi_bypass(parsed)
+                                 or downloads(parsed) and runs_code(parsed)))
+        parent_fields, parent_context, parent_raw = [], [], {}
+        parent_note = ""
+        try:
+            parent = resolve_parent(event, self.lineage)
+        except Undecided:
+            parent = None
+        if parent and parent.name in self.parent_images:
+            strong = True
+            parent_fields, parent_context, _how, parent_raw = parent_predicate(event, parent)
+            parent_note = f"; recorded parent image '{parent.name}' supports the high lane"
+        encoded_lane = "high" if strong else "lead"
         if call.source == "encodedcommand":
             origin = event.fields["process.command_line"].origin
             if call.script is not None:
@@ -510,9 +826,11 @@ class PowerShellEncodedOrCradle(WindowsProcessRule):
                 note = ("the command line is truncated before decoding; only a prefix was read"
                         if call.truncated else "")
                 hits.append(Hit("powershell_encoded",
-                                f"PowerShell was run with an encoded command; decoded: '{clip(call.script)}'",
-                                self.lane, self.severity, ("T1059.001", "T1027.010"), [value],
-                                content="ps:encoded", notes=tuple(n for n in (note,) if n)))
+                                f"PowerShell was run with an encoded command; decoded: '{clip(call.script)}'{parent_note}",
+                                encoded_lane, "high" if strong else "medium", ("T1059.001", "T1027.010"), [value, *parent_fields],
+                                context=parent_context, raw_copies=parent_raw,
+                                content="ps:encoded", parent_name=parent.name if parent else "",
+                                notes=tuple(n for n in (note,) if n)))
             else:
                 reason = call.decode_error or "no value followed -EncodedCommand"
                 value = PredicateField(field="process.command_line",
@@ -520,8 +838,9 @@ class PowerShellEncodedOrCradle(WindowsProcessRule):
                                        origin=f"{origin}{PARSED}")
                 hits.append(Hit("powershell_encoded",
                                 f"PowerShell was run with -EncodedCommand but its value could not be decoded "
-                                f"({reason})", self.lane, self.severity, ("T1059.001", "T1027.010"), [value],
-                                content="ps:encoded-bad"))
+                                f"({reason}){parent_note}", encoded_lane, "high" if strong else "medium", ("T1059.001", "T1027.010"), [value, *parent_fields],
+                                context=parent_context, raw_copies=parent_raw,
+                                content="ps:encoded-bad", parent_name=parent.name if parent else ""))
         cradle = self._cradle(event, call)
         if cradle is not None:
             hits.append(cradle)
@@ -541,16 +860,16 @@ class PowerShellEncodedOrCradle(WindowsProcessRule):
                 break
         if download is None:
             return None
-        executes = any(token.kind == "word" and token.text in _EXEC_WORDS for token in tokens)
+        executes = runs_code(read_script(call.script))
         origin = event.fields["process.command_line"].origin
         value = PredicateField(field="process.command_line", value=clip(call.script),
                                origin=f"{origin}{PARSED}")
         lane = self.lane if executes else "lead"
-        tail = " and piped into Invoke-Expression" if executes else ""
+        tail = " and a code-evaluation call" if executes else ""
         return Hit("powershell_cradle",
-                   f"PowerShell script called {download}{tail} (a download cradle)", lane, self.severity,
+                   f"PowerShell script called {download}{tail}", lane, self.severity,
                    ("T1059.001", "T1105") + (("T1140",) if executes else ()), [value],
-                   content=f"ps:cradle:{download}{'+iex' if executes else ''}")
+                   content=f"ps:cradle:{download}{'+eval' if executes else ''}")
 
 
 WINDOWS_PROXY_PLAYBOOKS = [

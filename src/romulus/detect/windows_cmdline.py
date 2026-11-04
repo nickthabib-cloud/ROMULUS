@@ -140,7 +140,7 @@ def has_switch(args: list[str], *names: str) -> bool:
 
 def operands(args: list[str]) -> list[str]:
     """The arguments that are not switches."""
-    return [arg for arg in args if arg and not is_switch(arg)]
+    return [arg for arg in args if arg and (not is_switch(arg) or is_remote_path(arg))]
 
 
 # ---- cmd.exe payloads ----------------------------------------------------------------------------------------------
@@ -657,7 +657,7 @@ def rundll32_target(argv: list[str]) -> tuple[str, str] | None:
     """(dll basename without extension, entry point) for a `rundll32 <dll>,<entry> ...` or `rundll32 <dll> <entry>`
     invocation, both casefolded, or None. Handles the comma- or space-joined forms, a quoted or path-qualified DLL,
     a missing `.dll`, and an ordinal entry (`#24`, `#+24`, `#-4294967272`)."""
-    rest = [token for token in argv[1:] if token and not is_switch(token)]
+    rest = [token for token in argv[1:] if token]
     if not rest:
         return None
     first = rest[0].strip().strip('"')
@@ -757,14 +757,24 @@ def path_key(text: str) -> str:
 
 
 def is_remote_path(text: str) -> bool:
-    key = text.strip().strip('"').strip("'").replace("/", "\\")
-    return key.startswith("\\\\") and not key.startswith(("\\\\?\\", "\\\\.\\"))
+    """Remote operand identity; local device/extended drive namespaces stay local."""
+    raw = text.strip().strip('"').strip("'")
+    if re.match(r'^(?:https?|ftps?|file)://[^\s/\\]+', raw, re.IGNORECASE):
+        return True
+    key = raw.replace("/", "\\").casefold()
+    for prefix in ("\\\\?\\unc\\", "\\??\\unc\\", "\\\\.\\unc\\", "\\\\?\\globalroot\\device\\mup\\"):
+        if key.startswith(prefix):
+            return len([part for part in key[len(prefix):].split('\\') if part]) >= 2
+    return (key.startswith("\\\\") and not key.startswith(("\\\\?\\", "\\\\.\\"))
+            and len([part for part in key[2:].split('\\') if part]) >= 2)
 
 
 def is_user_writable(text: str) -> bool:
     """Whether a path operand points under a user-writable location (never for a remote path)."""
+    from romulus.detect.windows_path_data import writable_windows_path
     raw = text.strip().strip('"').strip("'").casefold()
     if any(raw.startswith(var) for var in _USER_WRITABLE_VARS):
         return True
     key = "\\" + path_key(text).lstrip("\\")
-    return not is_remote_path(text) and any(part in key + "\\" for part in _USER_WRITABLE_PARTS)
+    return not is_remote_path(text) and (writable_windows_path(text, directory=True)
+        or any(part in key + "\\" for part in _USER_WRITABLE_PARTS))

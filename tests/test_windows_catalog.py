@@ -52,7 +52,7 @@ EXPECTED_CLASSES = {
         *((TASK_CHANNEL, TASK_PROVIDER, event_id) for event_id in (106, 129, 140, 141, 200, 201)),
     },
     "file_change": {
-        *((SYSMON_CHANNEL, SYSMON, event_id) for event_id in (2, 11, 15, 23, 26)),
+        *((SYSMON_CHANNEL, SYSMON, event_id) for event_id in (2, 11, 15, 23, 26, 29)),
     },
     "process_access": {(SYSMON_CHANNEL, SYSMON, 10)},
     "image_load": {

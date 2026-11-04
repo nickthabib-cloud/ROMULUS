@@ -112,6 +112,7 @@ WINDOWS_FIELD_MAPPINGS: dict[str, tuple[str, ...]] = {
     "event.channel": ("winlog.channel",),
     "event.provider": ("winlog.provider_name",),
     "event.code": ("winlog.event_id",),
+    "object.type": ("winlog.event_data.ObjectType",),
     "host.name": ("winlog.computer_name",),
     "process.command_line": ("winlog.event_data.CommandLine",),
     "process.executable": (
@@ -225,6 +226,13 @@ def contract_from_types(
         if not available:
             continue
         common_ops = set.intersection(*(OPS_BY_TYPE.get(native_type, set()) for _, native_type in available))
+        # Object-type equality is case-insensitive locally. The compiler's wildcard
+        # form is not supported by flattened fields on Elasticsearch 8.19; a plain
+        # term would silently miss differently cased values. Keep retrieval broad
+        # until the contract carries a backend capability for that operation.
+        # https://www.elastic.co/guide/en/elasticsearch/reference/8.19/flattened.html#supported-operations
+        if typed == "object.type" and any(kind == "flattened" for _, kind in available):
+            common_ops.discard("eq")
         native, native_type = available[0]
         fields[typed] = FieldSpec(
             native=native,

@@ -73,7 +73,7 @@
 <tr class="row-{{ c.lane }}">
   <td><span class="pill l-{{ c.lane }}">{{ c.lane }}</span></td>
   <td>{{ c.severity }}</td><td>{{ c.confidence }}</td>
-  <td class="mono">{{ c.ts.strftime('%m-%d %H:%M:%S') }}</td>
+  <td class="mono">{{ c.ts.strftime('%m-%d %H:%M:%S') if c.ts is not none else 'Not recorded' }}</td>
   <td class="mono">{{ c.rule_id }}</td>
   <td><a href="/findings/{{ c.id }}">{{ c.claim | truncate(220) }}</a></td>
 </tr>
@@ -117,6 +117,7 @@
 {% for r in reports %}
 <li>Revision {{ r.revision }} ({{ r.created_at.strftime('%Y-%m-%d %H:%M') }}):
   <a href="/reports/{{ h.id }}/{{ r.id }}.md">technical (Markdown)</a> ·
+  <a href="/reports/{{ h.id }}/{{ r.id }}.docx">executive (Word)</a> ·
   <a href="/reports/{{ h.id }}/{{ r.id }}.json">manifest (JSON)</a></li>
 {% else %}<li>No report revisions yet.</li>{% endfor %}
 </ul>

@@ -680,7 +680,11 @@ def test_cli_no_agent_turns_the_ai_agent_off_for_the_hunt(monkeypatch, capsys, t
 
     seen = {}
     monkeypatch.setattr(cli, "load_settings", lambda _path: Settings(home=tmp_path))
-    monkeypatch.setattr(hunt_run, "create_hunt", lambda *a, **kw: seen.update(kw) or "h1")
+    def create(settings, *args, **kwargs):
+        seen.update(kwargs)
+        hunt_run.open_repo(settings).create_hunt("h1", {}, "digest", "test")
+        return "h1"
+    monkeypatch.setattr(hunt_run, "create_hunt", create)
     monkeypatch.setattr(hunt_run, "run_hunt", lambda *a, **kw: {
         "execution_state": "completed_within_scope", "detection_result": "leads_only", "lanes": {}, "stats": {},
         "ai_agent": {"status": "disabled", "reason": "the AI agent was not requested for this hunt"}})

@@ -182,7 +182,8 @@ class Dossier:
 
 
 def _candidate_key(row: dict) -> tuple:
-    return (LANE_ORDER.get(row["lane"], 99), -float(row["priority"]), row["ts"], row["id"])
+    return (LANE_ORDER.get(row["lane"], 99), -float(row["priority"]),
+            row["ts"] is None, row["ts"], row["id"])
 
 
 def _entity_value(entities: list, kind: str) -> str | None:
@@ -213,7 +214,7 @@ def _finding_row(row: dict, aliases: AliasBook) -> dict:
         "claim": _claim(row["claim"], alias),
         "host": _entity_value(row.get("entities") or [], "host"),
         "account": _entity_value(row.get("entities") or [], "account"),
-        "time": str(row["ts"]),
+        "time": str(row["ts"]) if row["ts"] is not None else None,
     }
 
 
@@ -263,7 +264,7 @@ def _budget(repo: Repo, hunt_id: str, manifest: dict) -> dict:
 def _incidents(repo: Repo, hunt_id: str, candidates: list[dict], aliases: AliasBook) -> list[dict]:
     graph_findings = [{
         "id": row["id"], "lane": row["lane"], "rule_id": row["rule_id"],
-        "observed_at": str(row["ts"]), "entities": row.get("entities") or [],
+        "observed_at": str(row["ts"]) if row["ts"] is not None else None, "entities": row.get("entities") or [],
         "event_ids": row.get("event_ids") or [], "citations": [],
         "source_link_id": row.get("source_link_id"),
     } for row in candidates]

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict
@@ -21,7 +21,7 @@ from romulus.detect.bounded import StateBudget, StateExhausted, live_stores
 from romulus.detect.host import bind_lineage_citation_loader
 from romulus.detect.netdef import DIRECTION_ASSUMED_REASON
 from romulus.detect.observed import observation
-from romulus.detect.registry import fresh_pack
+from romulus.detect.registry import bind_windows_site, fresh_pack
 from romulus.evidence.normalize import (
     BOOT_FILL_FAMILIES,
     BOOT_INTERVAL_ORIGIN,
@@ -41,7 +41,12 @@ from romulus.evidence.windows_catalog import (
     lookup_event_class,
 )
 from romulus.evidence.windows_reassembly import SCRIPT_FINALIZE_BATCH_SIZE, ScriptBlockAssembler
-from romulus.hunt.publish import LineageCitationFetcher, publish_match
+from romulus.hunt.publish import (
+    LineageCitationFetcher,
+    SourceCitationFetcher,
+    WindowsCitationFetcher,
+    publish_match,
+)
 from romulus.hunt.stage import EventStage
 from romulus.site import SiteFacts, absent_site_facts
 from romulus.sources.es import ElasticClient, fetch_limit
@@ -240,18 +245,27 @@ class Sweep:
         # One state budget for the hunt: the disk every playbook's spill may use (and the free space left on the
         # stage volume), and the memory their hot sets share. Read the stage volume's free space before the sweep.
         self.budget = state_budget(settings, stage_dir)
-        self.pack: list[Playbook] = fresh_pack()
+        self.pack: list[Playbook] = bind_windows_site(fresh_pack(), self.site_facts)
         bind_lineage_citation_loader(self.pack, LineageCitationFetcher(client, contracts).load)
         for pb in self.pack:
             pb.spill_dir = stage_dir          # a playbook's on-disk join tables live beside the event stage
             pb.budget = self.budget
+            pb.window_start = window.start
+            if hasattr(pb, "citation_fields"):
+                pb.citation_fetcher = WindowsCitationFetcher(client)
+            else:
+                pb.citation_fetcher = SourceCitationFetcher(client)
         self._has_windows = any(contract is not None and contract.os_family == "windows"
                                 for contract in contracts.values())
-        # one guaranteed floor per live store of the pack (a store shared by several rules counts once), and one for
-        # the event stage, which holds the citations of every rule. Windows hunts add independent floors for their
-        # id-only delivery guard and continuity state, so event volume cannot take a detector store's floor.
+        # Plan only detection stores. Citation owners have no floor and yield their optional cache bytes first.
+        # Windows hunts additionally own id-only delivery, continuity and script assembly state.
+        stage_owners = [pb for pb in self.pack if pb.staged and not hasattr(pb, "citation_fields")]
         self.budget.plan(live_stores(self.pack) + 1 + (3 if self._has_windows else 0))
         self._stage_account = self.budget.account("event_stage")
+        self._stage_owner_accounts = {pb.id: self.budget.account("event_stage:"+pb.id,
+                                                               strong=pb.state_slice == "strong", yields=True)
+                                      for pb in stage_owners}
+        self._stage_owners = {}
         self._windows_seen_account = self.budget.account("windows_seen") if self._has_windows else None
         self._windows_continuity_account = (
             self.budget.account("windows_continuity") if self._has_windows else None
@@ -290,11 +304,26 @@ class Sweep:
         broken: those citations are lost to their rules, which say so."""
         import sqlite3
         stage = self._event_stage()
+        stage.owners = self._stage_owners
+        self._stage_owners = {}
+        # A bound can be replaced many times within one partition. Its new hold and release cancel
+        # before disk admission; only the surviving references need storage or source-body pages.
+        released_counts = Counter((owner, identity) for owner, ids in released for identity in ids)
+        surviving = []
+        for owner, event in held:
+            key = (owner, event.id)
+            if released_counts[key]:
+                released_counts[key] -= 1
+            else:
+                surviving.append((owner, event))
+        released_by_owner = defaultdict(list)
+        for (owner, identity), count in released_counts.items():
+            released_by_owner[owner].extend([identity]*count)
         try:
             if events:
                 stage.put(events, raw_sources)
-            stage.hold(list(held), raw_sources)
-            for owner, ids in released:
+            stage.hold(surviving, raw_sources)
+            for owner, ids in released_by_owner.items():
                 stage.release(owner, ids)
         except sqlite3.OperationalError as exc:
             self.budget.fail(f"writing the event stage failed ({exc})")
@@ -304,6 +333,7 @@ class Sweep:
                                            f"({self.budget.broken}); findings that cite them are not computed")
             return
         self._charge_stage(stage)
+        stage.owners = {}
 
     def _record_playbook_batch(
         self,
@@ -323,26 +353,20 @@ class Sweep:
                 self._sources_for(match, raw_sources) if pb.staged else raw_sources,
             )
         if pb.staged:
-            # Joining aggregates keep full events and raw copies on disk, not in memory. Below the stage
-            # volume's reserve the stage takes only strong rules' citations; another rule's held examples are
-            # then not loadable, and its finalize says so.
+            # Full-body joining rules share the stage's bounded byte allowance, including strong rules.
+            # Reference-only authentication bursts return no full bodies here.
             drained = pb.drain_staged()
             held_ids, released_ids = pb.drain_bounds()
             if released_ids:
                 released.append((pb.id, released_ids))
-            if drained and self.budget.hard and pb.state_slice != "strong":
-                pb.note_limit(
-                    "stage",
-                    f"the event stage took no new citation of this rule ({self.budget.hard}); "
-                    "its findings that cite them are not computed",
-                )
-                return
+            account = self._stage_owner_accounts.get(pb.id, self._stage_account)
             # An event returned more often than it is held is also staged to be kept.
             holds = Counter(held_ids)
             copies = Counter(event.id for event in drained)
             for event in drained:
                 if copies[event.id] > holds[event.id]:
                     staged.setdefault(event.id, event)
+                    self._stage_owners.setdefault(event.id, []).append(account)
             for event in {event.id: event for event in drained if holds[event.id]}.values():
                 held.extend([(pb.id, event)] * holds[event.id])
         elif pb.kind == "aggregate":
@@ -351,10 +375,7 @@ class Sweep:
 
     def _charge_stage(self, stage: EventStage) -> None:
         """Charge the stage file's growth beyond the most it has held to the event stage's account."""
-        size = stage.db.execute("PRAGMA page_count").fetchone()[0] * stage.db.execute("PRAGMA page_size").fetchone()[0]
-        if size > self._stage_size:
-            self.budget.charge(self._stage_account, size - self._stage_size)
-            self._stage_size = size
+        stage.charge_growth()
 
     def _publish(self, m: Match, task_id: str | None, raw_sources: dict[str, dict]):
         playbook = next(playbook for playbook in self.pack if playbook.id == m.playbook_id)
@@ -424,11 +445,20 @@ class Sweep:
             if selected:
                 self._windows_selective.add(target)
                 self.stats.setdefault("windows_class_filter", {})[target] = [event.token for event in selected]
-                return [[
-                    Predicate(field="event.channel", op="eq", value=event.channel),
-                    Predicate(field="event.provider", op="eq", value=event.provider),
-                    Predicate(field="event.code", op="eq", value=event.event_id),
-                ] for event in selected]
+                object_readers = {playbook.id for playbook in self.pack
+                                  if "windows" in playbook.os_families
+                                  and "object_access" in (*playbook.families, *playbook.context_families)}
+                process_only = object_readers == {"win.lsass_process_access"} and contract.supports("object.type", "eq")
+                groups = []
+                for event in selected:
+                    group = [Predicate(field="event.channel", op="eq", value=event.channel),
+                             Predicate(field="event.provider", op="eq", value=event.provider),
+                             Predicate(field="event.code", op="eq", value=event.event_id)]
+                    if process_only and event.family == "object_access":
+                        group.append(Predicate(field="object.type", op="eq", value="Process"))
+                    groups.append(group)
+                self.stats.setdefault("windows_process_object_filter", {})[target] = process_only
+                return groups
         groups: list[list[Predicate]] = []
         if contract.supports("event.dataset", "in"):
             groups.append([Predicate(field="event.dataset", op="in", value=list(WINDOWS_HOST_DATASETS))])
@@ -1403,7 +1433,6 @@ class Sweep:
                         self._charge_stage(stage)
                     except sqlite3.OperationalError as exc:
                         reason = f"compact baseline stage failed ({exc})"
-                        self.budget.fail(reason)
                         self.partial_reasons.append(f"{target} {pkey}: {reason}")
                         self.repo.save_baseline_window_cell(self.hunt_id, {
                             "rule_id": pb.id, "version": pb.spec.version, "target": target,
@@ -1442,6 +1471,13 @@ class Sweep:
             # records that need a new key in it (each rule's own refusal path), and every match that needs no new
             # state still publishes.
             pb.bind_raw(raw_sources, target)
+            if getattr(pb, "needs_live_loader", False):
+                current_events = {event.id: event for event in events}
+                def load_live(ids, current_events=current_events):
+                    missing = [identity for identity in ids if identity not in current_events]
+                    return ([current_events[identity] for identity in ids if identity in current_events]
+                            + self._event_stage().load(missing))
+                pb.bind_loader(load_live)
             try:
                 matches = pb.consume_scoped_partition(scoped_events)
             except StateExhausted as exc:
@@ -1674,8 +1710,11 @@ class Sweep:
             stage = self._stage = EventStage(
                 self.stage_dir,
                 budget=getattr(self, "budget", None),
+                account=getattr(self, "_stage_account", None),
                 windows_account=getattr(self, "_windows_seen_account", None),
             )
+            stage.owner_accounts = self._stage_owner_accounts
+            stage.playbooks = self.pack
         return stage
 
     def _windows_continuity(self) -> RecordIdContinuity:
@@ -1767,7 +1806,12 @@ class Sweep:
         stage = self._event_stage()
         loaded = {event.id: event for event in stage.load([event.id for event in match.events])}
         match.events = [loaded.get(event.id, event) for event in match.events]
-        return stage.raw_sources(match.events)
+        sources = stage.raw_sources(match.events)
+        from romulus.hunt.citations import COMPACT_CITATION_NOTE
+        for event in match.events:
+            if any(ref.key not in sources for ref in event.raw) and COMPACT_CITATION_NOTE not in event.caveats:
+                event.caveats.append(COMPACT_CITATION_NOTE)
+        return sources
 
     def finalize(self):
         self.heartbeat()
@@ -1786,7 +1830,9 @@ class Sweep:
                 pb.bind_loader(stage.load)
                 pb.heartbeat = self.heartbeat
             ms = self._finalize_rule(pb)
+            finalized_matches = 0
             for m in ms:
+                finalized_matches += 1
                 raw_sources = ({**agg_raw, **self._merge_staged_match_raw(m)} if pb.staged else agg_raw)
                 self._publish(m, None, raw_sources)
             cells = [c for c in self.repo.rule_cells(self.hunt_id, rule_id=pb.id)
@@ -1799,7 +1845,7 @@ class Sweep:
             any_partial = any_partial or bool(limits)
             evaluated = sum(c["evaluated"] or 0 for c in cells)
             consumed_matches = sum(c["matched"] or 0 for c in cells)
-            matched_any = bool(ms) or consumed_matches > 0
+            matched_any = finalized_matches > 0 or consumed_matches > 0
             if not pb.assures_negative and not matched_any:
                 # positive-only aggregate (argv/text-identified): never a complete negative
                 state = "positive_only_partial" if (any_partial or not cells) else "positive_only"
@@ -1818,7 +1864,9 @@ class Sweep:
                 reasons.append(DIRECTION_ASSUMED_REASON)
             reasons += limits + pb.coverage_notes()
             self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, "*", "window", state,
-                                    len(ms) + consumed_matches, evaluated, {"reasons": reasons})
+                                    finalized_matches + consumed_matches, evaluated, {"reasons": reasons})
+            if getattr(self, "_stage", None) is not None and pb.id in self._stage_owner_accounts:
+                self._stage.finished_owners.add(self._stage_owner_accounts[pb.id].name)
             pb.release_state()
         agg_raw.clear()
         if self.budget.spent:
@@ -1831,20 +1879,31 @@ class Sweep:
         self.close_stage()
 
     @staticmethod
-    def _finalize_rule(pb: Playbook) -> list[Match]:
+    def _finalize_rule(pb: Playbook):
         """A rule's finalize. When it needs disk the stage volume cannot give, the rule publishes what it can from
         state readable without writing (`finalize_fallback`: strong per-record items), and its window cell says
         which results were not computed (the hunt goes on)."""
         from romulus.detect.correlation import StageMissing
-        try:
-            return pb.finalize()
-        except (StateExhausted, StageMissing, LookupError) as exc:
+        def fallback(exc):
             pb.note_limit("state_disk", f"finalize stopped: {exc}; this rule's groupings were not computed, only "
                                         f"what it could publish without disk")
             try:
                 return pb.finalize_fallback(str(exc))
             except (StateExhausted, StageMissing, LookupError):
                 return []
+        try:
+            matches = pb.finalize()
+        except (StateExhausted, StageMissing, LookupError) as exc:
+            return fallback(exc)
+        if isinstance(matches, (list, tuple)):
+            return matches
+
+        def stream():
+            try:
+                yield from matches
+            except (StateExhausted, StageMissing, LookupError) as exc:
+                yield from fallback(exc)
+        return stream()
 
     def close_stage(self) -> None:
         """Remove the disk stage, Windows continuity state and playbook spills on every controlled exit path."""
@@ -1860,5 +1919,9 @@ class Sweep:
         if stage is not None:
             stage.close()
             self._stage = None
+            # These closed private files remained billed until their containing stage directory was removed.
+            for store in (continuity, scripts):
+                if store is not None and store.account is not None:
+                    self.budget.release_physical_account(store.account)
         for pb in getattr(self, "pack", ()):
             pb.close_spill()

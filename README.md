@@ -114,6 +114,8 @@ All settings live in `$ROMULUS_HOME/.env` (template: [`.env.example`](.env.examp
 - the domain controllers and directory-sync accounts;
 - the site's internal networks. These can be set here or with `ROMULUS_INTERNAL_NETWORKS`/`ROMULUS_EXTERNAL_NETWORKS` in `.env`, but not both.
 
+Tick the sync-account declaration after checking the site's complete list, including when the checked list is empty. An empty list saved without that declaration leaves authorization unresolved.
+
 Windows logs cannot show whether a kind of event was being recorded at all. Results therefore name the collection that was not attested, so analysts can see where the hunt was blind. ROMULUS reports what it finds; it never claims that nothing is there. Every change is validated and audited, and hunts record the file's digest. A stopped hunt cannot resume after the file changes; start a new hunt over its window instead.
 
 ## AI investigating agent (In progress)

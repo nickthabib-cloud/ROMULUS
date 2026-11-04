@@ -237,7 +237,7 @@ class _TelemetryBudget:
 
 
 def _candidate_key(row: dict) -> tuple:
-    return (LANE_ORDER.get(row["lane"], 99), -float(row["priority"]), row["ts"], row["id"])
+    return (LANE_ORDER.get(row["lane"], 99), -float(row["priority"]), row["ts"] is None, row["ts"], row["id"])
 
 
 def _result(status: str, *, coverage: dict | None = None, counts: dict | None = None,
@@ -519,7 +519,7 @@ class Toolbox:
             claim = f"{claim[:180]}…[+{len(claim) - 180} chars: get_finding {alias}]"
         return {
             "alias": alias, "lane": candidate["lane"], "rule_id": candidate["rule_id"],
-            "claim": claim, "time": str(candidate["ts"]),
+            "claim": claim, "time": str(candidate["ts"]) if candidate["ts"] is not None else None,
             "entities": self._candidate_entities(candidate),
         }
 
@@ -677,7 +677,7 @@ class Toolbox:
         )
         findings = [{
             "id": row["id"], "lane": row["lane"], "rule_id": row["rule_id"],
-            "observed_at": str(row["ts"]), "entities": row.get("entities") or [],
+            "observed_at": str(row["ts"]) if row["ts"] is not None else None, "entities": row.get("entities") or [],
             "event_ids": row.get("event_ids") or [], "citations": [],
             "source_link_id": row.get("source_link_id"),
         } for row in candidates]
@@ -1001,6 +1001,8 @@ class Toolbox:
             return _result("unsupported", data={"error": {
                 "code": "pivot_unavailable", "message": "the hunt layer did not provide a pivot executor",
             }})
+        if anchor["ts"] is None:
+            return self._semantic_refusal("observation_time_unavailable", "the finding has no recorded observation time")
         anchor_ts = self._utc(anchor["ts"])
         result = self.executor.run(self.session_id, anchor["id"], request, anchor_ts=anchor_ts)
         return self._pivot_result(result, page=1, identity=identity)

@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
-from contextlib import contextmanager
+import time
+from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -13,6 +15,82 @@ from sqlalchemy import Engine, create_engine, event, text
 from romulus.store.schema import metadata
 
 _write_lock = threading.Lock()
+_memory_maintenance_lock = threading.Lock()
+_maintenance_held = threading.local()
+
+
+@contextmanager
+def maintenance_lease(engine: Engine, *, wait_seconds: float = 0, on_wait=None, allow_nested: bool = False):
+    """Acquire a bounded maintenance lease, allowing nested calls on this thread."""
+    database = engine.url.database
+    key = str(Path(database).resolve()) if database and database != ":memory:" else ":memory:"
+    held = getattr(_maintenance_held, "keys", None)
+    if held is None:
+        held = _maintenance_held.keys = {}
+    if held.get(key):
+        yield
+        return
+    deadline = time.monotonic() + max(0, wait_seconds)
+    notified = False
+    with ExitStack() as stack:
+        while True:
+            try:
+                stack.enter_context(_maintenance_lease_once(engine))
+                break
+            except RuntimeError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                if not notified and on_wait is not None:
+                    on_wait()
+                notified = True
+                time.sleep(min(0.1, remaining))
+        held[key] = allow_nested
+        try:
+            yield
+        finally:
+            del held[key]
+
+
+@contextmanager
+def _maintenance_lease_once(engine: Engine):
+    """Serialize maintenance with hunt claims across processes for this database.
+
+    OS file locks release on process exit. The lock file stays in place to avoid
+    replacing a locked inode while another process is opening it.
+    """
+    database = engine.url.database
+    if not database or database == ":memory:":
+        if not _memory_maintenance_lock.acquire(blocking=False):
+            raise RuntimeError("Database maintenance is active; try again after compaction")
+        try:
+            yield
+        finally:
+            _memory_maintenance_lock.release()
+        return
+    with Path(str(Path(database).resolve()) + ".maintenance.lock").open("a+b") as handle:
+        handle.seek(0, 2)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            raise RuntimeError("Database maintenance is active; try again after compaction") from error
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def utcnow() -> datetime:
@@ -38,8 +116,8 @@ def make_engine(db_path: Path | str) -> Engine:
         cur.execute("PRAGMA synchronous=NORMAL")
         cur.execute("PRAGMA foreign_keys=ON")
         cur.execute("PRAGMA busy_timeout=30000")
-        # after a checkpoint, shrink the write-ahead log back to this size: one large transaction
-        # (deleting a big hunt) must not leave a gigabyte-sized log file behind
+        # SQLite applies this at the next WAL reset. A large final transaction can leave a larger file;
+        # explicit compaction checkpoints again after VACUUM to release that allocation immediately.
         cur.execute(f"PRAGMA journal_size_limit={WAL_SIZE_LIMIT}")
         cur.close()
 
@@ -66,14 +144,18 @@ def compact(engine: Engine) -> dict:
     VACUUM rewrites the file and blocks writers while it runs, so callers make sure no hunt is active."""
     before = space_report(engine)
     raw = engine.raw_connection()
+    dbapi = raw.driver_connection
+    isolation = dbapi.isolation_level
     try:
-        dbapi = raw.driver_connection
         dbapi.isolation_level = None
         dbapi.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         dbapi.execute("VACUUM")
         dbapi.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     finally:
-        raw.close()
+        try:
+            dbapi.isolation_level = isolation
+        finally:
+            raw.close()
     return {"before": before, "after": space_report(engine)}
 
 
@@ -84,13 +166,35 @@ def migrate(engine: Engine) -> None:
         return
     from alembic import command
     from alembic.config import Config
+    from alembic.migration import MigrationContext
+    from alembic.script import ScriptDirectory
 
     here = Path(__file__).resolve().parent
     cfg = Config()
     cfg.set_main_option("script_location", str(here / "migrations"))
-    with engine.begin() as conn:
-        cfg.attributes["connection"] = conn
-        command.upgrade(cfg, "head")
+    with engine.connect() as conn:
+        if set(MigrationContext.configure(conn).get_current_heads()) == set(ScriptDirectory.from_config(cfg).get_heads()):
+            # Ordinary opens must remain read-only: no writer lock or whole-database FK scan at the current head.
+            return
+        conn.rollback()
+        # SQLite batch migrations replace tables. Foreign-key cascades during that replacement would delete
+        # children even though every parent is copied back. Disable enforcement before BEGIN, then validate
+        # the complete migrated graph inside the transaction before committing it.
+        conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        conn.commit()
+        try:
+            conn.exec_driver_sql("BEGIN IMMEDIATE")
+            cfg.attributes["connection"] = conn
+            command.upgrade(cfg, "head")
+            if conn.exec_driver_sql("PRAGMA foreign_key_check").first() is not None:
+                raise RuntimeError("Migration would leave invalid foreign-key references")
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.exec_driver_sql("PRAGMA foreign_keys=ON")
+            conn.commit()
 
 
 def write_txn(engine: Engine):

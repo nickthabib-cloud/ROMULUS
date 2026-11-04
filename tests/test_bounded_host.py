@@ -7,6 +7,7 @@ import pytest
 
 from romulus.detect import host
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
+from tests.storage_capacity_fixture import refuse_configured_stores
 
 T0 = datetime(2024, 11, 4, 0, 0, tzinfo=UTC)
 _n = 0
@@ -29,6 +30,7 @@ def staged_run(cls, partitions, directory, *, hot=None, monkeypatch=None, budget
     rule.spill_dir = directory
     for name, budget in (budgets or {}).items():
         getattr(rule, name).disk_budget = budget
+    refuse_configured_stores(rule)
     stage, out = {}, []
     for part in partitions:
         out += rule.consume(list(part))

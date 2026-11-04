@@ -31,7 +31,14 @@ import yaml
 
 from romulus.detect.base import LANES, SEVERITIES, Match, Playbook, basename, pf
 from romulus.detect.bounded import HOT_COUNT, HeldExamples, KeyedStore
-from romulus.detect.citing import BoundStage, Ends, bound_note, cite_extra, cited_phrase
+from romulus.detect.citing import (
+    BoundStage,
+    Ends,
+    bound_note,
+    citation_group,
+    cite_extra,
+    cited_phrase,
+)
 from romulus.detect.host import (
     AWK_INTERPRETERS,
     SCRIPT_FILE_INTERPRETERS,
@@ -370,9 +377,10 @@ class IndicatorMatch(Playbook):
         groups = [(key, store) for store, keys in stores for key in keys]
         for key, store in sorted(groups, key=lambda item: str(item[0])):
             state = store.peek(key)
-            out.append(self._finding(key, state[0], state[1], state[2].events(self.load),
-                                     state[3] if len(state) > 5 else None,
-                                     operating_systems=state[-2], ends=state[-1]))
+            with citation_group(self, out, key, state):
+                out.append(self._finding(key, state[0], state[1], state[2].events(self.load),
+                                         state[3] if len(state) > 5 else None,
+                                         operating_systems=state[-2], ends=state[-1]))
         return out
 
     def finalize_fallback(self, reason: str) -> list[Match]:
@@ -380,11 +388,23 @@ class IndicatorMatch(Playbook):
         out = []
         for store in (self.groups, self.overflow):
             for key, state in sorted(store.hot.items(), key=lambda item: str(item[0])):
-                m = self._finding(key, state[0], state[1], state[2].events(self.load),
-                                  state[3] if len(state) > 5 else None, operating_systems=state[-2], ends=state[-1])
-                m.notes.append(f"published from memory only: the groups on disk could not be read ({reason})")
-                out.append(m)
+                with citation_group(self, out, key, state):
+                    m = self._finding(key, state[0], state[1], state[2].events(self.load),
+                                      state[3] if len(state) > 5 else None, operating_systems=state[-2], ends=state[-1])
+                    m.notes.append(f"published from memory only: the groups on disk could not be read ({reason})")
+                    out.append(m)
         return out
+
+    def uncited_finding(self, key, state, match):
+        indicator = self.by_id[key[0]]
+        match.severity = indicator.severity
+        match.proposed_lane = "lead" if key[1] == "argument" else indicator.lane
+        match.claim_type = "mention" if key[1] == "argument" else "aggregate_observation"
+        match.entities = [("host", str(key[2]), "observer")] if key[2] else []
+        match.claim = (f"{state[0]} recorded matches of indicator {indicator.id} ({indicator.label}, list "
+                       f"{indicator.source}) for {key[1]} '{key[3]}' on {key[2]}; no citation could be retained. "
+                       "The positive is published from the recorded group state.")
+        return match
 
     def _finding(self, key: tuple, n: int, field_name: str, evs: list[TypedEvent],
                  values: list[str] | None = None, *, operating_systems: set[str], ends: Ends | None = None) -> Match:

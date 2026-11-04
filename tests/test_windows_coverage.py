@@ -1423,7 +1423,13 @@ def test_playbook_os_families_filter_before_required_field_evaluation():
 
 
 def test_existing_linux_rules_do_not_silently_widen_to_windows_events():
-    from romulus.detect.registry import WINDOWS_PROCESS_PLAYBOOKS
+    from romulus.detect.registry import (
+        WINDOWS_DOMAIN_PLAYBOOKS,
+        WINDOWS_HOST_PLAYBOOKS,
+        WINDOWS_LINKED_PLAYBOOKS,
+        WINDOWS_PROCESS_PLAYBOOKS,
+        WINDOWS_SCRIPT_PLAYBOOKS,
+    )
 
     windows_families = {event.family for event in EVENT_CLASSES}
     windows_enabled = {
@@ -1432,9 +1438,12 @@ def test_existing_linux_rules_do_not_silently_widen_to_windows_events():
         if windows_families.intersection(playbook.families) and "windows" in playbook.os_families
     }
 
-    # Only the cross-platform indicator rule and the purpose-built Windows process rules read Windows families;
+    # Only the cross-platform indicator rule and the purpose-built Windows rules read Windows families;
     # every Linux host rule stays scoped to linux.
-    assert windows_enabled == {"ioc.indicator_match"} | {cls.id for cls in WINDOWS_PROCESS_PLAYBOOKS}
+    assert windows_enabled == {"ioc.indicator_match"} | {
+        cls.id for cls in WINDOWS_PROCESS_PLAYBOOKS + WINDOWS_HOST_PLAYBOOKS + WINDOWS_DOMAIN_PLAYBOOKS
+        + list(WINDOWS_LINKED_PLAYBOOKS) + list(WINDOWS_SCRIPT_PLAYBOOKS)
+    }
 
 
 def test_wrong_os_same_family_is_not_a_complete_negative(monkeypatch):
@@ -2026,7 +2035,7 @@ def test_5000_host_windows_sweep_refuses_bounded_state_without_crashing(tmp_path
     assert any("counts over them may include duplicates" in reason for reason in cell["detail"]["reasons"])
     assert "state_capped" not in cell["detail"]
     assert any("host/channel groups" in reason for reason in cell["detail"]["reasons"])
-    assert "windows_seen" in budget.full
+    assert "windows_continuity" in budget.full
     assert refused > 0
     assert len(cell["detail"]["reasons"]) < 10
     sweep.close_stage()
