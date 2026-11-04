@@ -1,6 +1,7 @@
 """Native telemetry regressions for bounded static PowerShell start requests."""
 import base64
 import json
+import os
 import subprocess
 import sys
 import time
@@ -157,8 +158,11 @@ def test_native_receiver_rebinding_and_other_name_writes_keep_exact_facts(source
 
 
 def test_native_nested_wmi_create_reading_has_linear_cost():
+    # the child runs this file as a script, so it needs the repository root to import the `tests` package
+    root = str(Path(__file__).resolve().parents[1])
+    env = {**os.environ, 'PYTHONPATH': os.pathsep.join(p for p in (root, os.environ.get('PYTHONPATH')) if p)}
     child = subprocess.run([sys.executable, str(Path(__file__).resolve()), '--wmi-cost-probe'],
-                           capture_output=True, text=True, timeout=20, check=False)
+                           capture_output=True, text=True, timeout=20, check=False, env=env)
     assert child.returncode == 0, child.stdout + child.stderr
     timings = json.loads(child.stdout)
     assert timings[-1]['seconds'] < 2
