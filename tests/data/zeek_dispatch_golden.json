@@ -1900,428 +1900,428 @@
     "ts": "2024-11-18T14:06:24Z"
    },
    {
-    "caveats": [],
+    "id": "fcab017adde946e3709a7da8",
     "family": "process_exec",
+    "ts": "2026-01-02T03:04:06Z",
+    "host": "ws01",
+    "outcome": "success",
     "fields": {
-     "account.domain": {
-      "origin": "security-4688-10001:winlog.event_data.TargetDomainName",
-      "value": "example"
-     },
-     "account.name": {
-      "origin": "security-4688-10001:winlog.event_data.TargetUserName",
-      "value": "analyst"
-     },
-     "auth.target_account": {
-      "origin": "security-4688-10001:winlog.event_data.TargetUserSid",
-      "value": "sid:s-1-5-21-111-222-333-1100"
-     },
-     "auth.target_user": {
-      "origin": "security-4688-10001:winlog.event_data.TargetUserSid",
-      "value": "sid:s-1-5-21-111-222-333-1100"
+     "event.code": {
+      "value": 4688,
+      "origin": "security-4688-10001:winlog.event_id"
      },
      "event.channel": {
-      "origin": "security-4688-10001:winlog.channel",
-      "value": "Security"
-     },
-     "event.code": {
-      "origin": "security-4688-10001:winlog.event_id",
-      "value": 4688
-     },
-     "event.created": {
-      "origin": "security-4688-10001:winlog.time_created",
-      "value": "2026-01-02T03:04:06+00:00"
-     },
-     "event.ingested": {
-      "origin": "security-4688-10001:@timestamp",
-      "value": "2026-01-02T03:04:06+00:00"
+      "value": "Security",
+      "origin": "security-4688-10001:winlog.channel"
      },
      "event.provider": {
-      "origin": "security-4688-10001:winlog.provider_name",
-      "value": "Microsoft-Windows-Security-Auditing"
-     },
-     "host.full_name": {
-      "origin": "security-4688-10001:winlog.computer_name",
-      "value": "ws01.example.test"
-     },
-     "host.name": {
-      "origin": "security-4688-10001:winlog.computer_name#short-name",
-      "value": "ws01"
+      "value": "Microsoft-Windows-Security-Auditing",
+      "origin": "security-4688-10001:winlog.provider_name"
      },
      "host.os.family": {
-      "origin": "security-4688-10001:winlog.computer_name#known-os",
-      "value": "windows"
+      "value": "windows",
+      "origin": "security-4688-10001:winlog.computer_name#known-os"
      },
-     "process.command_line": {
-      "origin": "security-4688-10001:winlog.event_data.CommandLine",
-      "value": "whoami.exe /groups"
+     "host.name": {
+      "value": "ws01",
+      "origin": "security-4688-10001:winlog.computer_name#short-name"
      },
-     "process.entity_id": {
-      "origin": "security-4688-10001:winlog.event_data.NewProcessId",
-      "value": "pid:ws01:2001"
+     "host.full_name": {
+      "value": "ws01.example.test",
+      "origin": "security-4688-10001:winlog.computer_name"
      },
-     "process.executable": {
-      "origin": "security-4688-10001:winlog.event_data.NewProcessName",
-      "value": "C:\\Windows\\System32\\whoami.exe"
+     "winlog.computer_name": {
+      "value": "ws01.example.test",
+      "origin": "security-4688-10001:winlog.computer_name"
      },
-     "process.executable_canonical_key": {
-      "origin": "security-4688-10001:winlog.event_data.NewProcessName#canonical:windows-path",
-      "value": "c:\\windows\\system32\\whoami.exe"
-     },
-     "process.executable_key": {
-      "origin": "security-4688-10001:winlog.event_data.NewProcessName",
-      "value": "c:\\windows\\system32\\whoami.exe"
-     },
-     "process.executable_key.device_path": {
-      "origin": "security-4688-10001:winlog.event_data.NewProcessName#parsed:path-prefix",
-      "value": false
-     },
-     "process.executable_key.extended_prefix": {
-      "origin": "security-4688-10001:winlog.event_data.NewProcessName#parsed:path-prefix",
-      "value": false
-     },
-     "process.executable_key.short_name": {
-      "origin": "security-4688-10001:winlog.event_data.NewProcessName#parsed:8dot3",
-      "value": false
-     },
-     "process.id_kind": {
-      "origin": "security-4688-10001:winlog.event_data.NewProcessId",
-      "value": "fenced_pid"
-     },
-     "process.pid": {
-      "origin": "security-4688-10001:winlog.event_data.NewProcessId",
-      "value": 2001
-     },
-     "process.ppid": {
-      "origin": "security-4688-10001:winlog.event_data.ProcessId",
-      "value": 700
-     },
-     "process.session_id": {
-      "origin": "security-4688-10001:winlog.event_data.TargetLogonId",
-      "value": "0x55"
-     },
-     "process.session_key": {
-      "origin": "security-4688-10001:winlog.event_data.TargetLogonId",
-      "value": "ws01:0x55"
-     },
-     "process.subject_session_id": {
-      "origin": "security-4688-10001:winlog.event_data.SubjectLogonId",
-      "value": "0x44"
-     },
-     "process.target_session_id": {
-      "origin": "security-4688-10001:winlog.event_data.TargetLogonId",
-      "value": "0x55"
-     },
-     "process.target_user_domain": {
-      "origin": "security-4688-10001:winlog.event_data.TargetDomainName",
-      "value": "EXAMPLE"
-     },
-     "process.target_user_name": {
-      "origin": "security-4688-10001:winlog.event_data.TargetUserName",
-      "value": "analyst"
-     },
-     "process.target_user_sid": {
-      "origin": "security-4688-10001:winlog.event_data.TargetUserSid",
-      "value": "S-1-5-21-111-222-333-1100"
-     },
-     "user.domain": {
-      "origin": "security-4688-10001:winlog.event_data.SubjectDomainName",
-      "value": "example"
-     },
-     "user.entity_id": {
-      "origin": "security-4688-10001:winlog.event_data.SubjectUserSid",
-      "value": "sid:s-1-5-21-111-222-333-1001"
-     },
-     "user.name": {
-      "origin": "security-4688-10001:winlog.event_data.SubjectUserName",
-      "value": "administrator"
+     "winlog.record_id": {
+      "value": 10001,
+      "origin": "security-4688-10001:winlog.record_id"
      },
      "windows.event_data.CommandLine": {
-      "origin": "security-4688-10001:winlog.event_data.CommandLine",
-      "value": "whoami.exe /groups"
+      "value": "whoami.exe /groups",
+      "origin": "security-4688-10001:winlog.event_data.CommandLine"
      },
      "windows.event_data.NewProcessId": {
-      "origin": "security-4688-10001:winlog.event_data.NewProcessId",
-      "value": "0x7d1"
+      "value": "0x7d1",
+      "origin": "security-4688-10001:winlog.event_data.NewProcessId"
      },
      "windows.event_data.NewProcessName": {
-      "origin": "security-4688-10001:winlog.event_data.NewProcessName",
-      "value": "C:\\Windows\\System32\\whoami.exe"
+      "value": "C:\\Windows\\System32\\whoami.exe",
+      "origin": "security-4688-10001:winlog.event_data.NewProcessName"
      },
      "windows.event_data.ProcessId": {
-      "origin": "security-4688-10001:winlog.event_data.ProcessId",
-      "value": "0x2bc"
+      "value": "0x2bc",
+      "origin": "security-4688-10001:winlog.event_data.ProcessId"
      },
      "windows.event_data.SubjectDomainName": {
-      "origin": "security-4688-10001:winlog.event_data.SubjectDomainName",
-      "value": "EXAMPLE"
+      "value": "EXAMPLE",
+      "origin": "security-4688-10001:winlog.event_data.SubjectDomainName"
      },
      "windows.event_data.SubjectLogonId": {
-      "origin": "security-4688-10001:winlog.event_data.SubjectLogonId",
-      "value": "0x44"
+      "value": "0x44",
+      "origin": "security-4688-10001:winlog.event_data.SubjectLogonId"
      },
      "windows.event_data.SubjectUserName": {
-      "origin": "security-4688-10001:winlog.event_data.SubjectUserName",
-      "value": "Administrator"
+      "value": "Administrator",
+      "origin": "security-4688-10001:winlog.event_data.SubjectUserName"
      },
      "windows.event_data.SubjectUserSid": {
-      "origin": "security-4688-10001:winlog.event_data.SubjectUserSid",
-      "value": "S-1-5-21-111-222-333-1001"
+      "value": "S-1-5-21-111-222-333-1001",
+      "origin": "security-4688-10001:winlog.event_data.SubjectUserSid"
      },
      "windows.event_data.TargetDomainName": {
-      "origin": "security-4688-10001:winlog.event_data.TargetDomainName",
-      "value": "EXAMPLE"
+      "value": "EXAMPLE",
+      "origin": "security-4688-10001:winlog.event_data.TargetDomainName"
      },
      "windows.event_data.TargetLogonId": {
-      "origin": "security-4688-10001:winlog.event_data.TargetLogonId",
-      "value": "0x55"
+      "value": "0x55",
+      "origin": "security-4688-10001:winlog.event_data.TargetLogonId"
      },
      "windows.event_data.TargetUserName": {
-      "origin": "security-4688-10001:winlog.event_data.TargetUserName",
-      "value": "analyst"
+      "value": "analyst",
+      "origin": "security-4688-10001:winlog.event_data.TargetUserName"
      },
      "windows.event_data.TargetUserSid": {
-      "origin": "security-4688-10001:winlog.event_data.TargetUserSid",
-      "value": "S-1-5-21-111-222-333-1100"
+      "value": "S-1-5-21-111-222-333-1100",
+      "origin": "security-4688-10001:winlog.event_data.TargetUserSid"
      },
      "windows.event_data.TimeCreated": {
-      "origin": "security-4688-10001:winlog.time_created",
-      "value": "2026-01-02T03:04:06Z"
-     },
-     "winlog.computer_name": {
-      "origin": "security-4688-10001:winlog.computer_name",
-      "value": "ws01.example.test"
-     },
-     "winlog.record_id": {
-      "origin": "security-4688-10001:winlog.record_id",
-      "value": 10001
-     }
-    },
-    "host": "ws01",
-    "id": "886d7a83254c1cf5c44db23e",
-    "normalizer": "windows-ecs@4",
-    "outcome": "success",
-    "raw": [
-     {
-      "digest": "718c3aa3d586722fa9959a7f37178f1125ed5b338e5a634dc91cd2aee9dd0ce6",
-      "native_id": "security-4688-10001",
-      "target": "logs-windows-fixture"
-     }
-    ],
-    "ts": "2026-01-02T03:04:06Z"
-   },
-   {
-    "caveats": [],
-    "family": "process_exec",
-    "fields": {
-     "event.channel": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.channel",
-      "value": "Microsoft-Windows-Sysmon/Operational"
-     },
-     "event.code": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_id",
-      "value": 1
+      "value": "2026-01-02T03:04:06Z",
+      "origin": "security-4688-10001:winlog.time_created"
      },
      "event.created": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.UtcTime",
-      "value": "2026-01-02T03:04:05+00:00"
+      "value": "2026-01-02T03:04:06+00:00",
+      "origin": "security-4688-10001:winlog.time_created"
      },
      "event.ingested": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:@timestamp",
-      "value": "2026-01-02T03:05:03+00:00"
-     },
-     "event.provider": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.provider_name",
-      "value": "Microsoft-Windows-Sysmon"
-     },
-     "file.hash.md5": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Hashes#parsed:sysmon-hashes",
-      "value": "0123456789abcdef"
-     },
-     "file.hash.sha256": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Hashes#parsed:sysmon-hashes",
-      "value": "abcdef0123456789"
-     },
-     "host.full_name": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.computer_name",
-      "value": "ws01.example.test"
-     },
-     "host.name": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.computer_name#short-name",
-      "value": "ws01"
-     },
-     "host.os.family": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.computer_name#known-os",
-      "value": "windows"
-     },
-     "process.command_line": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.CommandLine",
-      "value": "powershell.exe -NoProfile -Command Get-Date"
-     },
-     "process.entity_id": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessGuid",
-      "value": "guid:00000000-0000-0000-0000-00000000003a"
-     },
-     "process.executable": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image",
-      "value": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
-     },
-     "process.executable_canonical_key": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image#canonical:windows-path",
-      "value": "c:\\windows\\system32\\windowspowershell\\v1.0\\powershell.exe"
-     },
-     "process.executable_key": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image",
-      "value": "c:\\windows\\system32\\windowspowershell\\v1.0\\powershell.exe"
-     },
-     "process.executable_key.device_path": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image#parsed:path-prefix",
-      "value": false
-     },
-     "process.executable_key.extended_prefix": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image#parsed:path-prefix",
-      "value": false
-     },
-     "process.executable_key.short_name": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image#parsed:8dot3",
-      "value": false
-     },
-     "process.guid": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessGuid",
-      "value": "00000000-0000-0000-0000-00000000003a"
-     },
-     "process.id_kind": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessGuid",
-      "value": "guid"
-     },
-     "process.parent.entity_id": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentProcessGuid",
-      "value": "guid:00000000-0000-0000-0000-00000000274a"
-     },
-     "process.parent.executable": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage",
-      "value": "C:\\Windows\\explorer.exe"
-     },
-     "process.parent.executable_canonical_key": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage#canonical:windows-path",
-      "value": "c:\\windows\\explorer.exe"
-     },
-     "process.parent.executable_key": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage",
-      "value": "c:\\windows\\explorer.exe"
-     },
-     "process.parent.executable_key.device_path": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage#parsed:path-prefix",
-      "value": false
-     },
-     "process.parent.executable_key.extended_prefix": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage#parsed:path-prefix",
-      "value": false
-     },
-     "process.parent.executable_key.short_name": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage#parsed:8dot3",
-      "value": false
-     },
-     "process.parent.guid": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentProcessGuid",
-      "value": "00000000-0000-0000-0000-00000000274a"
-     },
-     "process.pid": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessId",
-      "value": 1058
-     },
-     "process.ppid": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentProcessId",
-      "value": 700
-     },
-     "process.user": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.User",
-      "value": "EXAMPLE\\analyst"
-     },
-     "user.domain": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.User",
-      "value": "example"
+      "value": "2026-01-02T03:04:06+00:00",
+      "origin": "security-4688-10001:@timestamp"
      },
      "user.entity_id": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.User",
-      "value": "name:example\\analyst"
+      "value": "sid:s-1-5-21-111-222-333-1001",
+      "origin": "security-4688-10001:winlog.event_data.SubjectUserSid"
      },
      "user.name": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.User",
-      "value": "analyst"
+      "value": "administrator",
+      "origin": "security-4688-10001:winlog.event_data.SubjectUserName"
      },
-     "windows.event_data.CommandLine": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.CommandLine",
-      "value": "powershell.exe -NoProfile -Command Get-Date"
+     "user.domain": {
+      "value": "example",
+      "origin": "security-4688-10001:winlog.event_data.SubjectDomainName"
      },
-     "windows.event_data.Hashes": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Hashes",
-      "value": "SHA256=ABCDEF0123456789,MD5=0123456789ABCDEF"
+     "auth.target_account": {
+      "value": "sid:s-1-5-21-111-222-333-1100",
+      "origin": "security-4688-10001:winlog.event_data.TargetUserSid"
      },
-     "windows.event_data.Hashes.MD5": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Hashes#parsed:sysmon-hashes",
-      "value": "0123456789abcdef"
+     "auth.target_user": {
+      "value": "sid:s-1-5-21-111-222-333-1100",
+      "origin": "security-4688-10001:winlog.event_data.TargetUserSid"
      },
-     "windows.event_data.Hashes.SHA256": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Hashes#parsed:sysmon-hashes",
-      "value": "abcdef0123456789"
+     "account.name": {
+      "value": "analyst",
+      "origin": "security-4688-10001:winlog.event_data.TargetUserName"
      },
-     "windows.event_data.Image": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image",
-      "value": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+     "account.domain": {
+      "value": "example",
+      "origin": "security-4688-10001:winlog.event_data.TargetDomainName"
      },
-     "windows.event_data.ParentImage": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage",
-      "value": "C:\\Windows\\explorer.exe"
+     "process.command_line": {
+      "value": "whoami.exe /groups",
+      "origin": "security-4688-10001:winlog.event_data.CommandLine"
      },
-     "windows.event_data.ParentProcessGuid": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentProcessGuid",
-      "value": "{00000000-0000-0000-0000-00000000274a}"
+     "process.executable": {
+      "value": "C:\\Windows\\System32\\whoami.exe",
+      "origin": "security-4688-10001:winlog.event_data.NewProcessName"
      },
-     "windows.event_data.ParentProcessId": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentProcessId",
-      "value": "700"
+     "process.pid": {
+      "value": 2001,
+      "origin": "security-4688-10001:winlog.event_data.NewProcessId"
      },
-     "windows.event_data.ProcessGuid": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessGuid",
-      "value": "{00000000-0000-0000-0000-00000000003a}"
+     "process.ppid": {
+      "value": 700,
+      "origin": "security-4688-10001:winlog.event_data.ProcessId"
      },
-     "windows.event_data.ProcessId": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessId",
-      "value": "1058"
+     "process.target_user_sid": {
+      "value": "S-1-5-21-111-222-333-1100",
+      "origin": "security-4688-10001:winlog.event_data.TargetUserSid"
      },
-     "windows.event_data.TimeCreated": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.time_created",
-      "value": "2026-01-02T03:05:03Z"
+     "process.target_user_name": {
+      "value": "analyst",
+      "origin": "security-4688-10001:winlog.event_data.TargetUserName"
      },
-     "windows.event_data.User": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.User",
-      "value": "EXAMPLE\\analyst"
+     "process.target_user_domain": {
+      "value": "EXAMPLE",
+      "origin": "security-4688-10001:winlog.event_data.TargetDomainName"
      },
-     "windows.event_data.UtcTime": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.UtcTime",
-      "value": "2026-01-02 03:04:05.000"
+     "process.subject_session_id": {
+      "value": "0x44",
+      "origin": "security-4688-10001:winlog.event_data.SubjectLogonId"
      },
-     "winlog.computer_name": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.computer_name",
-      "value": "ws01.example.test"
+     "process.target_session_id": {
+      "value": "0x55",
+      "origin": "security-4688-10001:winlog.event_data.TargetLogonId"
      },
-     "winlog.record_id": {
-      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.record_id",
-      "value": 10058
+     "process.session_id": {
+      "value": "0x55",
+      "origin": "security-4688-10001:winlog.event_data.TargetLogonId"
+     },
+     "process.session_key": {
+      "value": "ws01:0x55",
+      "origin": "security-4688-10001:winlog.event_data.TargetLogonId"
+     },
+     "process.entity_id": {
+      "value": "pid:ws01:2001",
+      "origin": "security-4688-10001:winlog.event_data.NewProcessId"
+     },
+     "process.id_kind": {
+      "value": "fenced_pid",
+      "origin": "security-4688-10001:winlog.event_data.NewProcessId"
+     },
+     "process.executable_key": {
+      "value": "c:\\windows\\system32\\whoami.exe",
+      "origin": "security-4688-10001:winlog.event_data.NewProcessName"
+     },
+     "process.executable_canonical_key": {
+      "value": "c:\\windows\\system32\\whoami.exe",
+      "origin": "security-4688-10001:winlog.event_data.NewProcessName#canonical:windows-path"
+     },
+     "process.executable_key.extended_prefix": {
+      "value": false,
+      "origin": "security-4688-10001:winlog.event_data.NewProcessName#parsed:path-prefix"
+     },
+     "process.executable_key.device_path": {
+      "value": false,
+      "origin": "security-4688-10001:winlog.event_data.NewProcessName#parsed:path-prefix"
+     },
+     "process.executable_key.short_name": {
+      "value": false,
+      "origin": "security-4688-10001:winlog.event_data.NewProcessName#parsed:8dot3"
      }
     },
-    "host": "ws01",
-    "id": "c6f385248f22c77fd0f20ccf",
-    "normalizer": "windows-ecs@4",
-    "outcome": "success",
     "raw": [
      {
-      "digest": "b01a67b4c72aa0dca127935cc96d54ad67b8a1e69ebd2e670b1be40fac31bdfc",
-      "native_id": "microsoft-windows-sysmon-operational-1-10058",
-      "target": "logs-windows-fixture"
+      "target": "logs-windows-fixture",
+      "native_id": "security-4688-10001",
+      "digest": "718c3aa3d586722fa9959a7f37178f1125ed5b338e5a634dc91cd2aee9dd0ce6"
      }
     ],
-    "ts": "2026-01-02T03:04:05Z"
+    "normalizer": "windows-ecs@11",
+    "caveats": []
+   },
+   {
+    "id": "a088876bd33709269d2c7a4e",
+    "family": "process_exec",
+    "ts": "2026-01-02T03:04:05Z",
+    "host": "ws01",
+    "outcome": "success",
+    "fields": {
+     "event.code": {
+      "value": 1,
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_id"
+     },
+     "event.channel": {
+      "value": "Microsoft-Windows-Sysmon/Operational",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.channel"
+     },
+     "event.provider": {
+      "value": "Microsoft-Windows-Sysmon",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.provider_name"
+     },
+     "host.os.family": {
+      "value": "windows",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.computer_name#known-os"
+     },
+     "host.name": {
+      "value": "ws01",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.computer_name#short-name"
+     },
+     "host.full_name": {
+      "value": "ws01.example.test",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.computer_name"
+     },
+     "winlog.computer_name": {
+      "value": "ws01.example.test",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.computer_name"
+     },
+     "winlog.record_id": {
+      "value": 10058,
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.record_id"
+     },
+     "windows.event_data.CommandLine": {
+      "value": "powershell.exe -NoProfile -Command Get-Date",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.CommandLine"
+     },
+     "windows.event_data.Hashes": {
+      "value": "SHA256=ABCDEF0123456789,MD5=0123456789ABCDEF",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Hashes"
+     },
+     "windows.event_data.Image": {
+      "value": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image"
+     },
+     "windows.event_data.ParentImage": {
+      "value": "C:\\Windows\\explorer.exe",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage"
+     },
+     "windows.event_data.ParentProcessGuid": {
+      "value": "{00000000-0000-0000-0000-00000000274a}",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentProcessGuid"
+     },
+     "windows.event_data.ParentProcessId": {
+      "value": "700",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentProcessId"
+     },
+     "windows.event_data.ProcessGuid": {
+      "value": "{00000000-0000-0000-0000-00000000003a}",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessGuid"
+     },
+     "windows.event_data.ProcessId": {
+      "value": "1058",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessId"
+     },
+     "windows.event_data.User": {
+      "value": "EXAMPLE\\analyst",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.User"
+     },
+     "windows.event_data.UtcTime": {
+      "value": "2026-01-02 03:04:05.000",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.UtcTime"
+     },
+     "windows.event_data.TimeCreated": {
+      "value": "2026-01-02T03:05:03Z",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.time_created"
+     },
+     "windows.event_data.Hashes.SHA256": {
+      "value": "abcdef0123456789",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Hashes#parsed:sysmon-hashes"
+     },
+     "windows.event_data.Hashes.MD5": {
+      "value": "0123456789abcdef",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Hashes#parsed:sysmon-hashes"
+     },
+     "event.created": {
+      "value": "2026-01-02T03:04:05+00:00",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.UtcTime"
+     },
+     "event.ingested": {
+      "value": "2026-01-02T03:05:03+00:00",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:@timestamp"
+     },
+     "user.entity_id": {
+      "value": "name:example\\analyst",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.User"
+     },
+     "user.name": {
+      "value": "analyst",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.User"
+     },
+     "user.domain": {
+      "value": "example",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.User"
+     },
+     "process.command_line": {
+      "value": "powershell.exe -NoProfile -Command Get-Date",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.CommandLine"
+     },
+     "process.executable": {
+      "value": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image"
+     },
+     "process.parent.executable": {
+      "value": "C:\\Windows\\explorer.exe",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage"
+     },
+     "process.pid": {
+      "value": 1058,
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessId"
+     },
+     "process.ppid": {
+      "value": 700,
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentProcessId"
+     },
+     "process.guid": {
+      "value": "00000000-0000-0000-0000-00000000003a",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessGuid"
+     },
+     "process.parent.guid": {
+      "value": "00000000-0000-0000-0000-00000000274a",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentProcessGuid"
+     },
+     "process.user": {
+      "value": "EXAMPLE\\analyst",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.User"
+     },
+     "process.entity_id": {
+      "value": "guid:00000000-0000-0000-0000-00000000003a",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessGuid"
+     },
+     "process.id_kind": {
+      "value": "guid",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessGuid"
+     },
+     "process.parent.entity_id": {
+      "value": "guid:00000000-0000-0000-0000-00000000274a",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentProcessGuid"
+     },
+     "process.executable_key": {
+      "value": "c:\\windows\\system32\\windowspowershell\\v1.0\\powershell.exe",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image"
+     },
+     "process.executable_canonical_key": {
+      "value": "c:\\windows\\system32\\windowspowershell\\v1.0\\powershell.exe",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image#canonical:windows-path"
+     },
+     "process.executable_key.extended_prefix": {
+      "value": false,
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image#parsed:path-prefix"
+     },
+     "process.executable_key.device_path": {
+      "value": false,
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image#parsed:path-prefix"
+     },
+     "process.executable_key.short_name": {
+      "value": false,
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image#parsed:8dot3"
+     },
+     "process.parent.executable_key": {
+      "value": "c:\\windows\\explorer.exe",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage"
+     },
+     "process.parent.executable_canonical_key": {
+      "value": "c:\\windows\\explorer.exe",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage#canonical:windows-path"
+     },
+     "process.parent.executable_key.extended_prefix": {
+      "value": false,
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage#parsed:path-prefix"
+     },
+     "process.parent.executable_key.device_path": {
+      "value": false,
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage#parsed:path-prefix"
+     },
+     "process.parent.executable_key.short_name": {
+      "value": false,
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage#parsed:8dot3"
+     },
+     "file.hash.md5": {
+      "value": "0123456789abcdef",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Hashes#parsed:sysmon-hashes"
+     },
+     "file.hash.sha256": {
+      "value": "abcdef0123456789",
+      "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Hashes#parsed:sysmon-hashes"
+     }
+    },
+    "raw": [
+     {
+      "target": "logs-windows-fixture",
+      "native_id": "microsoft-windows-sysmon-operational-1-10058",
+      "digest": "b01a67b4c72aa0dca127935cc96d54ad67b8a1e69ebd2e670b1be40fac31bdfc"
+     }
+    ],
+    "normalizer": "windows-ecs@11",
+    "caveats": []
    },
    {
     "caveats": [],
@@ -14863,214 +14863,214 @@
    "errors": [],
    "events": [
     {
-     "caveats": [],
+     "id": "fcab017adde946e3709a7da8",
      "family": "process_exec",
+     "ts": "2026-01-02T03:04:06Z",
+     "host": "ws01",
+     "outcome": "success",
      "fields": {
-      "account.domain": {
-       "origin": "security-4688-10001:winlog.event_data.TargetDomainName",
-       "value": "example"
-      },
-      "account.name": {
-       "origin": "security-4688-10001:winlog.event_data.TargetUserName",
-       "value": "analyst"
-      },
-      "auth.target_account": {
-       "origin": "security-4688-10001:winlog.event_data.TargetUserSid",
-       "value": "sid:s-1-5-21-111-222-333-1100"
-      },
-      "auth.target_user": {
-       "origin": "security-4688-10001:winlog.event_data.TargetUserSid",
-       "value": "sid:s-1-5-21-111-222-333-1100"
+      "event.code": {
+       "value": 4688,
+       "origin": "security-4688-10001:winlog.event_id"
       },
       "event.channel": {
-       "origin": "security-4688-10001:winlog.channel",
-       "value": "Security"
-      },
-      "event.code": {
-       "origin": "security-4688-10001:winlog.event_id",
-       "value": 4688
-      },
-      "event.created": {
-       "origin": "security-4688-10001:winlog.time_created",
-       "value": "2026-01-02T03:04:06+00:00"
-      },
-      "event.ingested": {
-       "origin": "security-4688-10001:@timestamp",
-       "value": "2026-01-02T03:04:06+00:00"
+       "value": "Security",
+       "origin": "security-4688-10001:winlog.channel"
       },
       "event.provider": {
-       "origin": "security-4688-10001:winlog.provider_name",
-       "value": "Microsoft-Windows-Security-Auditing"
-      },
-      "host.full_name": {
-       "origin": "security-4688-10001:winlog.computer_name",
-       "value": "ws01.example.test"
-      },
-      "host.name": {
-       "origin": "security-4688-10001:winlog.computer_name#short-name",
-       "value": "ws01"
+       "value": "Microsoft-Windows-Security-Auditing",
+       "origin": "security-4688-10001:winlog.provider_name"
       },
       "host.os.family": {
-       "origin": "security-4688-10001:winlog.computer_name#known-os",
-       "value": "windows"
+       "value": "windows",
+       "origin": "security-4688-10001:winlog.computer_name#known-os"
       },
-      "process.command_line": {
-       "origin": "security-4688-10001:winlog.event_data.CommandLine",
-       "value": "whoami.exe /groups"
+      "host.name": {
+       "value": "ws01",
+       "origin": "security-4688-10001:winlog.computer_name#short-name"
       },
-      "process.entity_id": {
-       "origin": "security-4688-10001:winlog.event_data.NewProcessId",
-       "value": "pid:ws01:2001"
-      },
-      "process.executable": {
-       "origin": "security-4688-10001:winlog.event_data.NewProcessName",
-       "value": "C:\\Windows\\System32\\whoami.exe"
-      },
-      "process.executable_canonical_key": {
-       "origin": "security-4688-10001:winlog.event_data.NewProcessName#canonical:windows-path",
-       "value": "c:\\windows\\system32\\whoami.exe"
-      },
-      "process.executable_key": {
-       "origin": "security-4688-10001:winlog.event_data.NewProcessName",
-       "value": "c:\\windows\\system32\\whoami.exe"
-      },
-      "process.executable_key.device_path": {
-       "origin": "security-4688-10001:winlog.event_data.NewProcessName#parsed:path-prefix",
-       "value": false
-      },
-      "process.executable_key.extended_prefix": {
-       "origin": "security-4688-10001:winlog.event_data.NewProcessName#parsed:path-prefix",
-       "value": false
-      },
-      "process.executable_key.short_name": {
-       "origin": "security-4688-10001:winlog.event_data.NewProcessName#parsed:8dot3",
-       "value": false
-      },
-      "process.id_kind": {
-       "origin": "security-4688-10001:winlog.event_data.NewProcessId",
-       "value": "fenced_pid"
-      },
-      "process.pid": {
-       "origin": "security-4688-10001:winlog.event_data.NewProcessId",
-       "value": 2001
-      },
-      "process.ppid": {
-       "origin": "security-4688-10001:winlog.event_data.ProcessId",
-       "value": 700
-      },
-      "process.session_id": {
-       "origin": "security-4688-10001:winlog.event_data.TargetLogonId",
-       "value": "0x55"
-      },
-      "process.session_key": {
-       "origin": "security-4688-10001:winlog.event_data.TargetLogonId",
-       "value": "ws01:0x55"
-      },
-      "process.subject_session_id": {
-       "origin": "security-4688-10001:winlog.event_data.SubjectLogonId",
-       "value": "0x44"
-      },
-      "process.target_session_id": {
-       "origin": "security-4688-10001:winlog.event_data.TargetLogonId",
-       "value": "0x55"
-      },
-      "process.target_user_domain": {
-       "origin": "security-4688-10001:winlog.event_data.TargetDomainName",
-       "value": "EXAMPLE"
-      },
-      "process.target_user_name": {
-       "origin": "security-4688-10001:winlog.event_data.TargetUserName",
-       "value": "analyst"
-      },
-      "process.target_user_sid": {
-       "origin": "security-4688-10001:winlog.event_data.TargetUserSid",
-       "value": "S-1-5-21-111-222-333-1100"
-      },
-      "user.domain": {
-       "origin": "security-4688-10001:winlog.event_data.SubjectDomainName",
-       "value": "example"
-      },
-      "user.entity_id": {
-       "origin": "security-4688-10001:winlog.event_data.SubjectUserSid",
-       "value": "sid:s-1-5-21-111-222-333-1001"
-      },
-      "user.name": {
-       "origin": "security-4688-10001:winlog.event_data.SubjectUserName",
-       "value": "administrator"
-      },
-      "windows.event_data.CommandLine": {
-       "origin": "security-4688-10001:winlog.event_data.CommandLine",
-       "value": "whoami.exe /groups"
-      },
-      "windows.event_data.NewProcessId": {
-       "origin": "security-4688-10001:winlog.event_data.NewProcessId",
-       "value": "0x7d1"
-      },
-      "windows.event_data.NewProcessName": {
-       "origin": "security-4688-10001:winlog.event_data.NewProcessName",
-       "value": "C:\\Windows\\System32\\whoami.exe"
-      },
-      "windows.event_data.ProcessId": {
-       "origin": "security-4688-10001:winlog.event_data.ProcessId",
-       "value": "0x2bc"
-      },
-      "windows.event_data.SubjectDomainName": {
-       "origin": "security-4688-10001:winlog.event_data.SubjectDomainName",
-       "value": "EXAMPLE"
-      },
-      "windows.event_data.SubjectLogonId": {
-       "origin": "security-4688-10001:winlog.event_data.SubjectLogonId",
-       "value": "0x44"
-      },
-      "windows.event_data.SubjectUserName": {
-       "origin": "security-4688-10001:winlog.event_data.SubjectUserName",
-       "value": "Administrator"
-      },
-      "windows.event_data.SubjectUserSid": {
-       "origin": "security-4688-10001:winlog.event_data.SubjectUserSid",
-       "value": "S-1-5-21-111-222-333-1001"
-      },
-      "windows.event_data.TargetDomainName": {
-       "origin": "security-4688-10001:winlog.event_data.TargetDomainName",
-       "value": "EXAMPLE"
-      },
-      "windows.event_data.TargetLogonId": {
-       "origin": "security-4688-10001:winlog.event_data.TargetLogonId",
-       "value": "0x55"
-      },
-      "windows.event_data.TargetUserName": {
-       "origin": "security-4688-10001:winlog.event_data.TargetUserName",
-       "value": "analyst"
-      },
-      "windows.event_data.TargetUserSid": {
-       "origin": "security-4688-10001:winlog.event_data.TargetUserSid",
-       "value": "S-1-5-21-111-222-333-1100"
-      },
-      "windows.event_data.TimeCreated": {
-       "origin": "security-4688-10001:winlog.time_created",
-       "value": "2026-01-02T03:04:06Z"
+      "host.full_name": {
+       "value": "ws01.example.test",
+       "origin": "security-4688-10001:winlog.computer_name"
       },
       "winlog.computer_name": {
-       "origin": "security-4688-10001:winlog.computer_name",
-       "value": "ws01.example.test"
+       "value": "ws01.example.test",
+       "origin": "security-4688-10001:winlog.computer_name"
       },
       "winlog.record_id": {
-       "origin": "security-4688-10001:winlog.record_id",
-       "value": 10001
+       "value": 10001,
+       "origin": "security-4688-10001:winlog.record_id"
+      },
+      "windows.event_data.CommandLine": {
+       "value": "whoami.exe /groups",
+       "origin": "security-4688-10001:winlog.event_data.CommandLine"
+      },
+      "windows.event_data.NewProcessId": {
+       "value": "0x7d1",
+       "origin": "security-4688-10001:winlog.event_data.NewProcessId"
+      },
+      "windows.event_data.NewProcessName": {
+       "value": "C:\\Windows\\System32\\whoami.exe",
+       "origin": "security-4688-10001:winlog.event_data.NewProcessName"
+      },
+      "windows.event_data.ProcessId": {
+       "value": "0x2bc",
+       "origin": "security-4688-10001:winlog.event_data.ProcessId"
+      },
+      "windows.event_data.SubjectDomainName": {
+       "value": "EXAMPLE",
+       "origin": "security-4688-10001:winlog.event_data.SubjectDomainName"
+      },
+      "windows.event_data.SubjectLogonId": {
+       "value": "0x44",
+       "origin": "security-4688-10001:winlog.event_data.SubjectLogonId"
+      },
+      "windows.event_data.SubjectUserName": {
+       "value": "Administrator",
+       "origin": "security-4688-10001:winlog.event_data.SubjectUserName"
+      },
+      "windows.event_data.SubjectUserSid": {
+       "value": "S-1-5-21-111-222-333-1001",
+       "origin": "security-4688-10001:winlog.event_data.SubjectUserSid"
+      },
+      "windows.event_data.TargetDomainName": {
+       "value": "EXAMPLE",
+       "origin": "security-4688-10001:winlog.event_data.TargetDomainName"
+      },
+      "windows.event_data.TargetLogonId": {
+       "value": "0x55",
+       "origin": "security-4688-10001:winlog.event_data.TargetLogonId"
+      },
+      "windows.event_data.TargetUserName": {
+       "value": "analyst",
+       "origin": "security-4688-10001:winlog.event_data.TargetUserName"
+      },
+      "windows.event_data.TargetUserSid": {
+       "value": "S-1-5-21-111-222-333-1100",
+       "origin": "security-4688-10001:winlog.event_data.TargetUserSid"
+      },
+      "windows.event_data.TimeCreated": {
+       "value": "2026-01-02T03:04:06Z",
+       "origin": "security-4688-10001:winlog.time_created"
+      },
+      "event.created": {
+       "value": "2026-01-02T03:04:06+00:00",
+       "origin": "security-4688-10001:winlog.time_created"
+      },
+      "event.ingested": {
+       "value": "2026-01-02T03:04:06+00:00",
+       "origin": "security-4688-10001:@timestamp"
+      },
+      "user.entity_id": {
+       "value": "sid:s-1-5-21-111-222-333-1001",
+       "origin": "security-4688-10001:winlog.event_data.SubjectUserSid"
+      },
+      "user.name": {
+       "value": "administrator",
+       "origin": "security-4688-10001:winlog.event_data.SubjectUserName"
+      },
+      "user.domain": {
+       "value": "example",
+       "origin": "security-4688-10001:winlog.event_data.SubjectDomainName"
+      },
+      "auth.target_account": {
+       "value": "sid:s-1-5-21-111-222-333-1100",
+       "origin": "security-4688-10001:winlog.event_data.TargetUserSid"
+      },
+      "auth.target_user": {
+       "value": "sid:s-1-5-21-111-222-333-1100",
+       "origin": "security-4688-10001:winlog.event_data.TargetUserSid"
+      },
+      "account.name": {
+       "value": "analyst",
+       "origin": "security-4688-10001:winlog.event_data.TargetUserName"
+      },
+      "account.domain": {
+       "value": "example",
+       "origin": "security-4688-10001:winlog.event_data.TargetDomainName"
+      },
+      "process.command_line": {
+       "value": "whoami.exe /groups",
+       "origin": "security-4688-10001:winlog.event_data.CommandLine"
+      },
+      "process.executable": {
+       "value": "C:\\Windows\\System32\\whoami.exe",
+       "origin": "security-4688-10001:winlog.event_data.NewProcessName"
+      },
+      "process.pid": {
+       "value": 2001,
+       "origin": "security-4688-10001:winlog.event_data.NewProcessId"
+      },
+      "process.ppid": {
+       "value": 700,
+       "origin": "security-4688-10001:winlog.event_data.ProcessId"
+      },
+      "process.target_user_sid": {
+       "value": "S-1-5-21-111-222-333-1100",
+       "origin": "security-4688-10001:winlog.event_data.TargetUserSid"
+      },
+      "process.target_user_name": {
+       "value": "analyst",
+       "origin": "security-4688-10001:winlog.event_data.TargetUserName"
+      },
+      "process.target_user_domain": {
+       "value": "EXAMPLE",
+       "origin": "security-4688-10001:winlog.event_data.TargetDomainName"
+      },
+      "process.subject_session_id": {
+       "value": "0x44",
+       "origin": "security-4688-10001:winlog.event_data.SubjectLogonId"
+      },
+      "process.target_session_id": {
+       "value": "0x55",
+       "origin": "security-4688-10001:winlog.event_data.TargetLogonId"
+      },
+      "process.session_id": {
+       "value": "0x55",
+       "origin": "security-4688-10001:winlog.event_data.TargetLogonId"
+      },
+      "process.session_key": {
+       "value": "ws01:0x55",
+       "origin": "security-4688-10001:winlog.event_data.TargetLogonId"
+      },
+      "process.entity_id": {
+       "value": "pid:ws01:2001",
+       "origin": "security-4688-10001:winlog.event_data.NewProcessId"
+      },
+      "process.id_kind": {
+       "value": "fenced_pid",
+       "origin": "security-4688-10001:winlog.event_data.NewProcessId"
+      },
+      "process.executable_key": {
+       "value": "c:\\windows\\system32\\whoami.exe",
+       "origin": "security-4688-10001:winlog.event_data.NewProcessName"
+      },
+      "process.executable_canonical_key": {
+       "value": "c:\\windows\\system32\\whoami.exe",
+       "origin": "security-4688-10001:winlog.event_data.NewProcessName#canonical:windows-path"
+      },
+      "process.executable_key.extended_prefix": {
+       "value": false,
+       "origin": "security-4688-10001:winlog.event_data.NewProcessName#parsed:path-prefix"
+      },
+      "process.executable_key.device_path": {
+       "value": false,
+       "origin": "security-4688-10001:winlog.event_data.NewProcessName#parsed:path-prefix"
+      },
+      "process.executable_key.short_name": {
+       "value": false,
+       "origin": "security-4688-10001:winlog.event_data.NewProcessName#parsed:8dot3"
       }
      },
-     "host": "ws01",
-     "id": "886d7a83254c1cf5c44db23e",
-     "normalizer": "windows-ecs@4",
-     "outcome": "success",
      "raw": [
       {
-       "digest": "718c3aa3d586722fa9959a7f37178f1125ed5b338e5a634dc91cd2aee9dd0ce6",
+       "target": "logs-windows-fixture",
        "native_id": "security-4688-10001",
-       "target": "logs-windows-fixture"
+       "digest": "718c3aa3d586722fa9959a7f37178f1125ed5b338e5a634dc91cd2aee9dd0ce6"
       }
      ],
-     "ts": "2026-01-02T03:04:06Z"
+     "normalizer": "windows-ecs@11",
+     "caveats": []
     }
    ],
    "hits": [
@@ -15128,214 +15128,214 @@
    "errors": [],
    "events": [
     {
-     "caveats": [],
+     "id": "fcab017adde946e3709a7da8",
      "family": "process_exec",
+     "ts": "2026-01-02T03:04:06Z",
+     "host": "ws01",
+     "outcome": "success",
      "fields": {
-      "account.domain": {
-       "origin": "security-4688-10001:winlog.event_data.TargetDomainName",
-       "value": "example"
-      },
-      "account.name": {
-       "origin": "security-4688-10001:winlog.event_data.TargetUserName",
-       "value": "analyst"
-      },
-      "auth.target_account": {
-       "origin": "security-4688-10001:winlog.event_data.TargetUserSid",
-       "value": "sid:s-1-5-21-111-222-333-1100"
-      },
-      "auth.target_user": {
-       "origin": "security-4688-10001:winlog.event_data.TargetUserSid",
-       "value": "sid:s-1-5-21-111-222-333-1100"
+      "event.code": {
+       "value": 4688,
+       "origin": "security-4688-10001:winlog.event_id"
       },
       "event.channel": {
-       "origin": "security-4688-10001:winlog.channel",
-       "value": "Security"
-      },
-      "event.code": {
-       "origin": "security-4688-10001:winlog.event_id",
-       "value": 4688
-      },
-      "event.created": {
-       "origin": "security-4688-10001:winlog.time_created",
-       "value": "2026-01-02T03:04:06+00:00"
-      },
-      "event.ingested": {
-       "origin": "security-4688-10001:@timestamp",
-       "value": "2026-01-02T03:04:06+00:00"
+       "value": "Security",
+       "origin": "security-4688-10001:winlog.channel"
       },
       "event.provider": {
-       "origin": "security-4688-10001:winlog.provider_name",
-       "value": "Microsoft-Windows-Security-Auditing"
-      },
-      "host.full_name": {
-       "origin": "security-4688-10001:winlog.computer_name",
-       "value": "ws01.example.test"
-      },
-      "host.name": {
-       "origin": "security-4688-10001:winlog.computer_name#short-name",
-       "value": "ws01"
+       "value": "Microsoft-Windows-Security-Auditing",
+       "origin": "security-4688-10001:winlog.provider_name"
       },
       "host.os.family": {
-       "origin": "security-4688-10001:winlog.computer_name#known-os",
-       "value": "windows"
+       "value": "windows",
+       "origin": "security-4688-10001:winlog.computer_name#known-os"
       },
-      "process.command_line": {
-       "origin": "security-4688-10001:winlog.event_data.CommandLine",
-       "value": "whoami.exe /groups"
+      "host.name": {
+       "value": "ws01",
+       "origin": "security-4688-10001:winlog.computer_name#short-name"
       },
-      "process.entity_id": {
-       "origin": "security-4688-10001:winlog.event_data.NewProcessId",
-       "value": "pid:ws01:2001"
-      },
-      "process.executable": {
-       "origin": "security-4688-10001:winlog.event_data.NewProcessName",
-       "value": "C:\\Windows\\System32\\whoami.exe"
-      },
-      "process.executable_canonical_key": {
-       "origin": "security-4688-10001:winlog.event_data.NewProcessName#canonical:windows-path",
-       "value": "c:\\windows\\system32\\whoami.exe"
-      },
-      "process.executable_key": {
-       "origin": "security-4688-10001:winlog.event_data.NewProcessName",
-       "value": "c:\\windows\\system32\\whoami.exe"
-      },
-      "process.executable_key.device_path": {
-       "origin": "security-4688-10001:winlog.event_data.NewProcessName#parsed:path-prefix",
-       "value": false
-      },
-      "process.executable_key.extended_prefix": {
-       "origin": "security-4688-10001:winlog.event_data.NewProcessName#parsed:path-prefix",
-       "value": false
-      },
-      "process.executable_key.short_name": {
-       "origin": "security-4688-10001:winlog.event_data.NewProcessName#parsed:8dot3",
-       "value": false
-      },
-      "process.id_kind": {
-       "origin": "security-4688-10001:winlog.event_data.NewProcessId",
-       "value": "fenced_pid"
-      },
-      "process.pid": {
-       "origin": "security-4688-10001:winlog.event_data.NewProcessId",
-       "value": 2001
-      },
-      "process.ppid": {
-       "origin": "security-4688-10001:winlog.event_data.ProcessId",
-       "value": 700
-      },
-      "process.session_id": {
-       "origin": "security-4688-10001:winlog.event_data.TargetLogonId",
-       "value": "0x55"
-      },
-      "process.session_key": {
-       "origin": "security-4688-10001:winlog.event_data.TargetLogonId",
-       "value": "ws01:0x55"
-      },
-      "process.subject_session_id": {
-       "origin": "security-4688-10001:winlog.event_data.SubjectLogonId",
-       "value": "0x44"
-      },
-      "process.target_session_id": {
-       "origin": "security-4688-10001:winlog.event_data.TargetLogonId",
-       "value": "0x55"
-      },
-      "process.target_user_domain": {
-       "origin": "security-4688-10001:winlog.event_data.TargetDomainName",
-       "value": "EXAMPLE"
-      },
-      "process.target_user_name": {
-       "origin": "security-4688-10001:winlog.event_data.TargetUserName",
-       "value": "analyst"
-      },
-      "process.target_user_sid": {
-       "origin": "security-4688-10001:winlog.event_data.TargetUserSid",
-       "value": "S-1-5-21-111-222-333-1100"
-      },
-      "user.domain": {
-       "origin": "security-4688-10001:winlog.event_data.SubjectDomainName",
-       "value": "example"
-      },
-      "user.entity_id": {
-       "origin": "security-4688-10001:winlog.event_data.SubjectUserSid",
-       "value": "sid:s-1-5-21-111-222-333-1001"
-      },
-      "user.name": {
-       "origin": "security-4688-10001:winlog.event_data.SubjectUserName",
-       "value": "administrator"
-      },
-      "windows.event_data.CommandLine": {
-       "origin": "security-4688-10001:winlog.event_data.CommandLine",
-       "value": "whoami.exe /groups"
-      },
-      "windows.event_data.NewProcessId": {
-       "origin": "security-4688-10001:winlog.event_data.NewProcessId",
-       "value": "0x7d1"
-      },
-      "windows.event_data.NewProcessName": {
-       "origin": "security-4688-10001:winlog.event_data.NewProcessName",
-       "value": "C:\\Windows\\System32\\whoami.exe"
-      },
-      "windows.event_data.ProcessId": {
-       "origin": "security-4688-10001:winlog.event_data.ProcessId",
-       "value": "0x2bc"
-      },
-      "windows.event_data.SubjectDomainName": {
-       "origin": "security-4688-10001:winlog.event_data.SubjectDomainName",
-       "value": "EXAMPLE"
-      },
-      "windows.event_data.SubjectLogonId": {
-       "origin": "security-4688-10001:winlog.event_data.SubjectLogonId",
-       "value": "0x44"
-      },
-      "windows.event_data.SubjectUserName": {
-       "origin": "security-4688-10001:winlog.event_data.SubjectUserName",
-       "value": "Administrator"
-      },
-      "windows.event_data.SubjectUserSid": {
-       "origin": "security-4688-10001:winlog.event_data.SubjectUserSid",
-       "value": "S-1-5-21-111-222-333-1001"
-      },
-      "windows.event_data.TargetDomainName": {
-       "origin": "security-4688-10001:winlog.event_data.TargetDomainName",
-       "value": "EXAMPLE"
-      },
-      "windows.event_data.TargetLogonId": {
-       "origin": "security-4688-10001:winlog.event_data.TargetLogonId",
-       "value": "0x55"
-      },
-      "windows.event_data.TargetUserName": {
-       "origin": "security-4688-10001:winlog.event_data.TargetUserName",
-       "value": "analyst"
-      },
-      "windows.event_data.TargetUserSid": {
-       "origin": "security-4688-10001:winlog.event_data.TargetUserSid",
-       "value": "S-1-5-21-111-222-333-1100"
-      },
-      "windows.event_data.TimeCreated": {
-       "origin": "security-4688-10001:winlog.time_created",
-       "value": "2026-01-02T03:04:06Z"
+      "host.full_name": {
+       "value": "ws01.example.test",
+       "origin": "security-4688-10001:winlog.computer_name"
       },
       "winlog.computer_name": {
-       "origin": "security-4688-10001:winlog.computer_name",
-       "value": "ws01.example.test"
+       "value": "ws01.example.test",
+       "origin": "security-4688-10001:winlog.computer_name"
       },
       "winlog.record_id": {
-       "origin": "security-4688-10001:winlog.record_id",
-       "value": 10001
+       "value": 10001,
+       "origin": "security-4688-10001:winlog.record_id"
+      },
+      "windows.event_data.CommandLine": {
+       "value": "whoami.exe /groups",
+       "origin": "security-4688-10001:winlog.event_data.CommandLine"
+      },
+      "windows.event_data.NewProcessId": {
+       "value": "0x7d1",
+       "origin": "security-4688-10001:winlog.event_data.NewProcessId"
+      },
+      "windows.event_data.NewProcessName": {
+       "value": "C:\\Windows\\System32\\whoami.exe",
+       "origin": "security-4688-10001:winlog.event_data.NewProcessName"
+      },
+      "windows.event_data.ProcessId": {
+       "value": "0x2bc",
+       "origin": "security-4688-10001:winlog.event_data.ProcessId"
+      },
+      "windows.event_data.SubjectDomainName": {
+       "value": "EXAMPLE",
+       "origin": "security-4688-10001:winlog.event_data.SubjectDomainName"
+      },
+      "windows.event_data.SubjectLogonId": {
+       "value": "0x44",
+       "origin": "security-4688-10001:winlog.event_data.SubjectLogonId"
+      },
+      "windows.event_data.SubjectUserName": {
+       "value": "Administrator",
+       "origin": "security-4688-10001:winlog.event_data.SubjectUserName"
+      },
+      "windows.event_data.SubjectUserSid": {
+       "value": "S-1-5-21-111-222-333-1001",
+       "origin": "security-4688-10001:winlog.event_data.SubjectUserSid"
+      },
+      "windows.event_data.TargetDomainName": {
+       "value": "EXAMPLE",
+       "origin": "security-4688-10001:winlog.event_data.TargetDomainName"
+      },
+      "windows.event_data.TargetLogonId": {
+       "value": "0x55",
+       "origin": "security-4688-10001:winlog.event_data.TargetLogonId"
+      },
+      "windows.event_data.TargetUserName": {
+       "value": "analyst",
+       "origin": "security-4688-10001:winlog.event_data.TargetUserName"
+      },
+      "windows.event_data.TargetUserSid": {
+       "value": "S-1-5-21-111-222-333-1100",
+       "origin": "security-4688-10001:winlog.event_data.TargetUserSid"
+      },
+      "windows.event_data.TimeCreated": {
+       "value": "2026-01-02T03:04:06Z",
+       "origin": "security-4688-10001:winlog.time_created"
+      },
+      "event.created": {
+       "value": "2026-01-02T03:04:06+00:00",
+       "origin": "security-4688-10001:winlog.time_created"
+      },
+      "event.ingested": {
+       "value": "2026-01-02T03:04:06+00:00",
+       "origin": "security-4688-10001:@timestamp"
+      },
+      "user.entity_id": {
+       "value": "sid:s-1-5-21-111-222-333-1001",
+       "origin": "security-4688-10001:winlog.event_data.SubjectUserSid"
+      },
+      "user.name": {
+       "value": "administrator",
+       "origin": "security-4688-10001:winlog.event_data.SubjectUserName"
+      },
+      "user.domain": {
+       "value": "example",
+       "origin": "security-4688-10001:winlog.event_data.SubjectDomainName"
+      },
+      "auth.target_account": {
+       "value": "sid:s-1-5-21-111-222-333-1100",
+       "origin": "security-4688-10001:winlog.event_data.TargetUserSid"
+      },
+      "auth.target_user": {
+       "value": "sid:s-1-5-21-111-222-333-1100",
+       "origin": "security-4688-10001:winlog.event_data.TargetUserSid"
+      },
+      "account.name": {
+       "value": "analyst",
+       "origin": "security-4688-10001:winlog.event_data.TargetUserName"
+      },
+      "account.domain": {
+       "value": "example",
+       "origin": "security-4688-10001:winlog.event_data.TargetDomainName"
+      },
+      "process.command_line": {
+       "value": "whoami.exe /groups",
+       "origin": "security-4688-10001:winlog.event_data.CommandLine"
+      },
+      "process.executable": {
+       "value": "C:\\Windows\\System32\\whoami.exe",
+       "origin": "security-4688-10001:winlog.event_data.NewProcessName"
+      },
+      "process.pid": {
+       "value": 2001,
+       "origin": "security-4688-10001:winlog.event_data.NewProcessId"
+      },
+      "process.ppid": {
+       "value": 700,
+       "origin": "security-4688-10001:winlog.event_data.ProcessId"
+      },
+      "process.target_user_sid": {
+       "value": "S-1-5-21-111-222-333-1100",
+       "origin": "security-4688-10001:winlog.event_data.TargetUserSid"
+      },
+      "process.target_user_name": {
+       "value": "analyst",
+       "origin": "security-4688-10001:winlog.event_data.TargetUserName"
+      },
+      "process.target_user_domain": {
+       "value": "EXAMPLE",
+       "origin": "security-4688-10001:winlog.event_data.TargetDomainName"
+      },
+      "process.subject_session_id": {
+       "value": "0x44",
+       "origin": "security-4688-10001:winlog.event_data.SubjectLogonId"
+      },
+      "process.target_session_id": {
+       "value": "0x55",
+       "origin": "security-4688-10001:winlog.event_data.TargetLogonId"
+      },
+      "process.session_id": {
+       "value": "0x55",
+       "origin": "security-4688-10001:winlog.event_data.TargetLogonId"
+      },
+      "process.session_key": {
+       "value": "ws01:0x55",
+       "origin": "security-4688-10001:winlog.event_data.TargetLogonId"
+      },
+      "process.entity_id": {
+       "value": "pid:ws01:2001",
+       "origin": "security-4688-10001:winlog.event_data.NewProcessId"
+      },
+      "process.id_kind": {
+       "value": "fenced_pid",
+       "origin": "security-4688-10001:winlog.event_data.NewProcessId"
+      },
+      "process.executable_key": {
+       "value": "c:\\windows\\system32\\whoami.exe",
+       "origin": "security-4688-10001:winlog.event_data.NewProcessName"
+      },
+      "process.executable_canonical_key": {
+       "value": "c:\\windows\\system32\\whoami.exe",
+       "origin": "security-4688-10001:winlog.event_data.NewProcessName#canonical:windows-path"
+      },
+      "process.executable_key.extended_prefix": {
+       "value": false,
+       "origin": "security-4688-10001:winlog.event_data.NewProcessName#parsed:path-prefix"
+      },
+      "process.executable_key.device_path": {
+       "value": false,
+       "origin": "security-4688-10001:winlog.event_data.NewProcessName#parsed:path-prefix"
+      },
+      "process.executable_key.short_name": {
+       "value": false,
+       "origin": "security-4688-10001:winlog.event_data.NewProcessName#parsed:8dot3"
       }
      },
-     "host": "ws01",
-     "id": "886d7a83254c1cf5c44db23e",
-     "normalizer": "windows-ecs@4",
-     "outcome": "success",
      "raw": [
       {
-       "digest": "00295662ec4ca40044f1fae5c4484fef8f1878d9150e4d00dfe766605835f900",
+       "target": "logs-windows-fixture",
        "native_id": "security-4688-10001",
-       "target": "logs-windows-fixture"
+       "digest": "00295662ec4ca40044f1fae5c4484fef8f1878d9150e4d00dfe766605835f900"
       }
      ],
-     "ts": "2026-01-02T03:04:06Z"
+     "normalizer": "windows-ecs@11",
+     "caveats": []
     }
    ],
    "hits": [
@@ -15382,218 +15382,218 @@
    "errors": [],
    "events": [
     {
-     "caveats": [],
+     "id": "a088876bd33709269d2c7a4e",
      "family": "process_exec",
+     "ts": "2026-01-02T03:04:05Z",
+     "host": "ws01",
+     "outcome": "success",
      "fields": {
-      "event.channel": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.channel",
-       "value": "Microsoft-Windows-Sysmon/Operational"
-      },
       "event.code": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_id",
-       "value": 1
+       "value": 1,
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_id"
       },
-      "event.created": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.UtcTime",
-       "value": "2026-01-02T03:04:05+00:00"
-      },
-      "event.ingested": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:@timestamp",
-       "value": "2026-01-02T03:05:03+00:00"
+      "event.channel": {
+       "value": "Microsoft-Windows-Sysmon/Operational",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.channel"
       },
       "event.provider": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.provider_name",
-       "value": "Microsoft-Windows-Sysmon"
-      },
-      "file.hash.md5": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Hashes#parsed:sysmon-hashes",
-       "value": "0123456789abcdef"
-      },
-      "file.hash.sha256": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Hashes#parsed:sysmon-hashes",
-       "value": "abcdef0123456789"
-      },
-      "host.full_name": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.computer_name",
-       "value": "ws01.example.test"
-      },
-      "host.name": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.computer_name#short-name",
-       "value": "ws01"
+       "value": "Microsoft-Windows-Sysmon",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.provider_name"
       },
       "host.os.family": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.computer_name#known-os",
-       "value": "windows"
+       "value": "windows",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.computer_name#known-os"
       },
-      "process.command_line": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.CommandLine",
-       "value": "powershell.exe -NoProfile -Command Get-Date"
+      "host.name": {
+       "value": "ws01",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.computer_name#short-name"
       },
-      "process.entity_id": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessGuid",
-       "value": "guid:00000000-0000-0000-0000-00000000003a"
-      },
-      "process.executable": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image",
-       "value": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
-      },
-      "process.executable_canonical_key": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image#canonical:windows-path",
-       "value": "c:\\windows\\system32\\windowspowershell\\v1.0\\powershell.exe"
-      },
-      "process.executable_key": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image",
-       "value": "c:\\windows\\system32\\windowspowershell\\v1.0\\powershell.exe"
-      },
-      "process.executable_key.device_path": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image#parsed:path-prefix",
-       "value": false
-      },
-      "process.executable_key.extended_prefix": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image#parsed:path-prefix",
-       "value": false
-      },
-      "process.executable_key.short_name": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image#parsed:8dot3",
-       "value": false
-      },
-      "process.guid": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessGuid",
-       "value": "00000000-0000-0000-0000-00000000003a"
-      },
-      "process.id_kind": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessGuid",
-       "value": "guid"
-      },
-      "process.parent.entity_id": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentProcessGuid",
-       "value": "guid:00000000-0000-0000-0000-00000000274a"
-      },
-      "process.parent.executable": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage",
-       "value": "C:\\Windows\\explorer.exe"
-      },
-      "process.parent.executable_canonical_key": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage#canonical:windows-path",
-       "value": "c:\\windows\\explorer.exe"
-      },
-      "process.parent.executable_key": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage",
-       "value": "c:\\windows\\explorer.exe"
-      },
-      "process.parent.executable_key.device_path": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage#parsed:path-prefix",
-       "value": false
-      },
-      "process.parent.executable_key.extended_prefix": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage#parsed:path-prefix",
-       "value": false
-      },
-      "process.parent.executable_key.short_name": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage#parsed:8dot3",
-       "value": false
-      },
-      "process.parent.guid": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentProcessGuid",
-       "value": "00000000-0000-0000-0000-00000000274a"
-      },
-      "process.pid": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessId",
-       "value": 1058
-      },
-      "process.ppid": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentProcessId",
-       "value": 700
-      },
-      "process.user": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.User",
-       "value": "EXAMPLE\\analyst"
-      },
-      "user.domain": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.User",
-       "value": "example"
-      },
-      "user.entity_id": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.User",
-       "value": "name:example\\analyst"
-      },
-      "user.name": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.User",
-       "value": "analyst"
-      },
-      "windows.event_data.CommandLine": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.CommandLine",
-       "value": "powershell.exe -NoProfile -Command Get-Date"
-      },
-      "windows.event_data.Hashes": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Hashes",
-       "value": "SHA256=ABCDEF0123456789,MD5=0123456789ABCDEF"
-      },
-      "windows.event_data.Hashes.MD5": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Hashes#parsed:sysmon-hashes",
-       "value": "0123456789abcdef"
-      },
-      "windows.event_data.Hashes.SHA256": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Hashes#parsed:sysmon-hashes",
-       "value": "abcdef0123456789"
-      },
-      "windows.event_data.Image": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image",
-       "value": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
-      },
-      "windows.event_data.ParentImage": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage",
-       "value": "C:\\Windows\\explorer.exe"
-      },
-      "windows.event_data.ParentProcessGuid": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentProcessGuid",
-       "value": "{00000000-0000-0000-0000-00000000274a}"
-      },
-      "windows.event_data.ParentProcessId": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentProcessId",
-       "value": "700"
-      },
-      "windows.event_data.ProcessGuid": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessGuid",
-       "value": "{00000000-0000-0000-0000-00000000003a}"
-      },
-      "windows.event_data.ProcessId": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessId",
-       "value": "1058"
-      },
-      "windows.event_data.TimeCreated": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.time_created",
-       "value": "2026-01-02T03:05:03Z"
-      },
-      "windows.event_data.User": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.User",
-       "value": "EXAMPLE\\analyst"
-      },
-      "windows.event_data.UtcTime": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.UtcTime",
-       "value": "2026-01-02 03:04:05.000"
+      "host.full_name": {
+       "value": "ws01.example.test",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.computer_name"
       },
       "winlog.computer_name": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.computer_name",
-       "value": "ws01.example.test"
+       "value": "ws01.example.test",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.computer_name"
       },
       "winlog.record_id": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.record_id",
-       "value": 10058
+       "value": 10058,
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.record_id"
+      },
+      "windows.event_data.CommandLine": {
+       "value": "powershell.exe -NoProfile -Command Get-Date",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.CommandLine"
+      },
+      "windows.event_data.Hashes": {
+       "value": "SHA256=ABCDEF0123456789,MD5=0123456789ABCDEF",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Hashes"
+      },
+      "windows.event_data.Image": {
+       "value": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image"
+      },
+      "windows.event_data.ParentImage": {
+       "value": "C:\\Windows\\explorer.exe",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage"
+      },
+      "windows.event_data.ParentProcessGuid": {
+       "value": "{00000000-0000-0000-0000-00000000274a}",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentProcessGuid"
+      },
+      "windows.event_data.ParentProcessId": {
+       "value": "700",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentProcessId"
+      },
+      "windows.event_data.ProcessGuid": {
+       "value": "{00000000-0000-0000-0000-00000000003a}",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessGuid"
+      },
+      "windows.event_data.ProcessId": {
+       "value": "1058",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessId"
+      },
+      "windows.event_data.User": {
+       "value": "EXAMPLE\\analyst",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.User"
+      },
+      "windows.event_data.UtcTime": {
+       "value": "2026-01-02 03:04:05.000",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.UtcTime"
+      },
+      "windows.event_data.TimeCreated": {
+       "value": "2026-01-02T03:05:03Z",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.time_created"
+      },
+      "windows.event_data.Hashes.SHA256": {
+       "value": "abcdef0123456789",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Hashes#parsed:sysmon-hashes"
+      },
+      "windows.event_data.Hashes.MD5": {
+       "value": "0123456789abcdef",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Hashes#parsed:sysmon-hashes"
+      },
+      "event.created": {
+       "value": "2026-01-02T03:04:05+00:00",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.UtcTime"
+      },
+      "event.ingested": {
+       "value": "2026-01-02T03:05:03+00:00",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:@timestamp"
+      },
+      "user.entity_id": {
+       "value": "name:example\\analyst",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.User"
+      },
+      "user.name": {
+       "value": "analyst",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.User"
+      },
+      "user.domain": {
+       "value": "example",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.User"
+      },
+      "process.command_line": {
+       "value": "powershell.exe -NoProfile -Command Get-Date",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.CommandLine"
+      },
+      "process.executable": {
+       "value": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image"
+      },
+      "process.parent.executable": {
+       "value": "C:\\Windows\\explorer.exe",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage"
+      },
+      "process.pid": {
+       "value": 1058,
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessId"
+      },
+      "process.ppid": {
+       "value": 700,
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentProcessId"
+      },
+      "process.guid": {
+       "value": "00000000-0000-0000-0000-00000000003a",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessGuid"
+      },
+      "process.parent.guid": {
+       "value": "00000000-0000-0000-0000-00000000274a",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentProcessGuid"
+      },
+      "process.user": {
+       "value": "EXAMPLE\\analyst",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.User"
+      },
+      "process.entity_id": {
+       "value": "guid:00000000-0000-0000-0000-00000000003a",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessGuid"
+      },
+      "process.id_kind": {
+       "value": "guid",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessGuid"
+      },
+      "process.parent.entity_id": {
+       "value": "guid:00000000-0000-0000-0000-00000000274a",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentProcessGuid"
+      },
+      "process.executable_key": {
+       "value": "c:\\windows\\system32\\windowspowershell\\v1.0\\powershell.exe",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image"
+      },
+      "process.executable_canonical_key": {
+       "value": "c:\\windows\\system32\\windowspowershell\\v1.0\\powershell.exe",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image#canonical:windows-path"
+      },
+      "process.executable_key.extended_prefix": {
+       "value": false,
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image#parsed:path-prefix"
+      },
+      "process.executable_key.device_path": {
+       "value": false,
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image#parsed:path-prefix"
+      },
+      "process.executable_key.short_name": {
+       "value": false,
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image#parsed:8dot3"
+      },
+      "process.parent.executable_key": {
+       "value": "c:\\windows\\explorer.exe",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage"
+      },
+      "process.parent.executable_canonical_key": {
+       "value": "c:\\windows\\explorer.exe",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage#canonical:windows-path"
+      },
+      "process.parent.executable_key.extended_prefix": {
+       "value": false,
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage#parsed:path-prefix"
+      },
+      "process.parent.executable_key.device_path": {
+       "value": false,
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage#parsed:path-prefix"
+      },
+      "process.parent.executable_key.short_name": {
+       "value": false,
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage#parsed:8dot3"
+      },
+      "file.hash.md5": {
+       "value": "0123456789abcdef",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Hashes#parsed:sysmon-hashes"
+      },
+      "file.hash.sha256": {
+       "value": "abcdef0123456789",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Hashes#parsed:sysmon-hashes"
       }
      },
-     "host": "ws01",
-     "id": "c6f385248f22c77fd0f20ccf",
-     "normalizer": "windows-ecs@4",
-     "outcome": "success",
      "raw": [
       {
-       "digest": "b01a67b4c72aa0dca127935cc96d54ad67b8a1e69ebd2e670b1be40fac31bdfc",
+       "target": "logs-windows-fixture",
        "native_id": "microsoft-windows-sysmon-operational-1-10058",
-       "target": "logs-windows-fixture"
+       "digest": "b01a67b4c72aa0dca127935cc96d54ad67b8a1e69ebd2e670b1be40fac31bdfc"
       }
      ],
-     "ts": "2026-01-02T03:04:05Z"
+     "normalizer": "windows-ecs@11",
+     "caveats": []
     }
    ],
    "hits": [
@@ -15649,218 +15649,218 @@
    "errors": [],
    "events": [
     {
-     "caveats": [],
+     "id": "a088876bd33709269d2c7a4e",
      "family": "process_exec",
+     "ts": "2026-01-02T03:04:05Z",
+     "host": "ws01",
+     "outcome": "success",
      "fields": {
-      "event.channel": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.channel",
-       "value": "Microsoft-Windows-Sysmon/Operational"
-      },
       "event.code": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_id",
-       "value": 1
+       "value": 1,
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_id"
       },
-      "event.created": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.UtcTime",
-       "value": "2026-01-02T03:04:05+00:00"
-      },
-      "event.ingested": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:@timestamp",
-       "value": "2026-01-02T03:05:03+00:00"
+      "event.channel": {
+       "value": "Microsoft-Windows-Sysmon/Operational",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.channel"
       },
       "event.provider": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.provider_name",
-       "value": "Microsoft-Windows-Sysmon"
-      },
-      "file.hash.md5": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Hashes#parsed:sysmon-hashes",
-       "value": "0123456789abcdef"
-      },
-      "file.hash.sha256": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Hashes#parsed:sysmon-hashes",
-       "value": "abcdef0123456789"
-      },
-      "host.full_name": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.computer_name",
-       "value": "ws01.example.test"
-      },
-      "host.name": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.computer_name#short-name",
-       "value": "ws01"
+       "value": "Microsoft-Windows-Sysmon",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.provider_name"
       },
       "host.os.family": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.computer_name#known-os",
-       "value": "windows"
+       "value": "windows",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.computer_name#known-os"
       },
-      "process.command_line": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.CommandLine",
-       "value": "powershell.exe -NoProfile -Command Get-Date"
+      "host.name": {
+       "value": "ws01",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.computer_name#short-name"
       },
-      "process.entity_id": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessGuid",
-       "value": "guid:00000000-0000-0000-0000-00000000003a"
-      },
-      "process.executable": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image",
-       "value": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
-      },
-      "process.executable_canonical_key": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image#canonical:windows-path",
-       "value": "c:\\windows\\system32\\windowspowershell\\v1.0\\powershell.exe"
-      },
-      "process.executable_key": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image",
-       "value": "c:\\windows\\system32\\windowspowershell\\v1.0\\powershell.exe"
-      },
-      "process.executable_key.device_path": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image#parsed:path-prefix",
-       "value": false
-      },
-      "process.executable_key.extended_prefix": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image#parsed:path-prefix",
-       "value": false
-      },
-      "process.executable_key.short_name": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image#parsed:8dot3",
-       "value": false
-      },
-      "process.guid": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessGuid",
-       "value": "00000000-0000-0000-0000-00000000003a"
-      },
-      "process.id_kind": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessGuid",
-       "value": "guid"
-      },
-      "process.parent.entity_id": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentProcessGuid",
-       "value": "guid:00000000-0000-0000-0000-00000000274a"
-      },
-      "process.parent.executable": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage",
-       "value": "C:\\Windows\\explorer.exe"
-      },
-      "process.parent.executable_canonical_key": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage#canonical:windows-path",
-       "value": "c:\\windows\\explorer.exe"
-      },
-      "process.parent.executable_key": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage",
-       "value": "c:\\windows\\explorer.exe"
-      },
-      "process.parent.executable_key.device_path": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage#parsed:path-prefix",
-       "value": false
-      },
-      "process.parent.executable_key.extended_prefix": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage#parsed:path-prefix",
-       "value": false
-      },
-      "process.parent.executable_key.short_name": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage#parsed:8dot3",
-       "value": false
-      },
-      "process.parent.guid": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentProcessGuid",
-       "value": "00000000-0000-0000-0000-00000000274a"
-      },
-      "process.pid": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessId",
-       "value": 1058
-      },
-      "process.ppid": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentProcessId",
-       "value": 700
-      },
-      "process.user": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.User",
-       "value": "EXAMPLE\\analyst"
-      },
-      "user.domain": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.User",
-       "value": "example"
-      },
-      "user.entity_id": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.User",
-       "value": "name:example\\analyst"
-      },
-      "user.name": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.User",
-       "value": "analyst"
-      },
-      "windows.event_data.CommandLine": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.CommandLine",
-       "value": "powershell.exe -NoProfile -Command Get-Date"
-      },
-      "windows.event_data.Hashes": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Hashes",
-       "value": "SHA256=ABCDEF0123456789,MD5=0123456789ABCDEF"
-      },
-      "windows.event_data.Hashes.MD5": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Hashes#parsed:sysmon-hashes",
-       "value": "0123456789abcdef"
-      },
-      "windows.event_data.Hashes.SHA256": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Hashes#parsed:sysmon-hashes",
-       "value": "abcdef0123456789"
-      },
-      "windows.event_data.Image": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image",
-       "value": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
-      },
-      "windows.event_data.ParentImage": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage",
-       "value": "C:\\Windows\\explorer.exe"
-      },
-      "windows.event_data.ParentProcessGuid": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentProcessGuid",
-       "value": "{00000000-0000-0000-0000-00000000274a}"
-      },
-      "windows.event_data.ParentProcessId": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentProcessId",
-       "value": "700"
-      },
-      "windows.event_data.ProcessGuid": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessGuid",
-       "value": "{00000000-0000-0000-0000-00000000003a}"
-      },
-      "windows.event_data.ProcessId": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessId",
-       "value": "1058"
-      },
-      "windows.event_data.TimeCreated": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.time_created",
-       "value": "2026-01-02T03:05:03Z"
-      },
-      "windows.event_data.User": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.User",
-       "value": "EXAMPLE\\analyst"
-      },
-      "windows.event_data.UtcTime": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.UtcTime",
-       "value": "2026-01-02 03:04:05.000"
+      "host.full_name": {
+       "value": "ws01.example.test",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.computer_name"
       },
       "winlog.computer_name": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.computer_name",
-       "value": "ws01.example.test"
+       "value": "ws01.example.test",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.computer_name"
       },
       "winlog.record_id": {
-       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.record_id",
-       "value": 10058
+       "value": 10058,
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.record_id"
+      },
+      "windows.event_data.CommandLine": {
+       "value": "powershell.exe -NoProfile -Command Get-Date",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.CommandLine"
+      },
+      "windows.event_data.Hashes": {
+       "value": "SHA256=ABCDEF0123456789,MD5=0123456789ABCDEF",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Hashes"
+      },
+      "windows.event_data.Image": {
+       "value": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image"
+      },
+      "windows.event_data.ParentImage": {
+       "value": "C:\\Windows\\explorer.exe",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage"
+      },
+      "windows.event_data.ParentProcessGuid": {
+       "value": "{00000000-0000-0000-0000-00000000274a}",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentProcessGuid"
+      },
+      "windows.event_data.ParentProcessId": {
+       "value": "700",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentProcessId"
+      },
+      "windows.event_data.ProcessGuid": {
+       "value": "{00000000-0000-0000-0000-00000000003a}",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessGuid"
+      },
+      "windows.event_data.ProcessId": {
+       "value": "1058",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessId"
+      },
+      "windows.event_data.User": {
+       "value": "EXAMPLE\\analyst",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.User"
+      },
+      "windows.event_data.UtcTime": {
+       "value": "2026-01-02 03:04:05.000",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.UtcTime"
+      },
+      "windows.event_data.TimeCreated": {
+       "value": "2026-01-02T03:05:03Z",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.time_created"
+      },
+      "windows.event_data.Hashes.SHA256": {
+       "value": "abcdef0123456789",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Hashes#parsed:sysmon-hashes"
+      },
+      "windows.event_data.Hashes.MD5": {
+       "value": "0123456789abcdef",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Hashes#parsed:sysmon-hashes"
+      },
+      "event.created": {
+       "value": "2026-01-02T03:04:05+00:00",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.UtcTime"
+      },
+      "event.ingested": {
+       "value": "2026-01-02T03:05:03+00:00",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:@timestamp"
+      },
+      "user.entity_id": {
+       "value": "name:example\\analyst",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.User"
+      },
+      "user.name": {
+       "value": "analyst",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.User"
+      },
+      "user.domain": {
+       "value": "example",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.User"
+      },
+      "process.command_line": {
+       "value": "powershell.exe -NoProfile -Command Get-Date",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.CommandLine"
+      },
+      "process.executable": {
+       "value": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image"
+      },
+      "process.parent.executable": {
+       "value": "C:\\Windows\\explorer.exe",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage"
+      },
+      "process.pid": {
+       "value": 1058,
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessId"
+      },
+      "process.ppid": {
+       "value": 700,
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentProcessId"
+      },
+      "process.guid": {
+       "value": "00000000-0000-0000-0000-00000000003a",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessGuid"
+      },
+      "process.parent.guid": {
+       "value": "00000000-0000-0000-0000-00000000274a",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentProcessGuid"
+      },
+      "process.user": {
+       "value": "EXAMPLE\\analyst",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.User"
+      },
+      "process.entity_id": {
+       "value": "guid:00000000-0000-0000-0000-00000000003a",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessGuid"
+      },
+      "process.id_kind": {
+       "value": "guid",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ProcessGuid"
+      },
+      "process.parent.entity_id": {
+       "value": "guid:00000000-0000-0000-0000-00000000274a",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentProcessGuid"
+      },
+      "process.executable_key": {
+       "value": "c:\\windows\\system32\\windowspowershell\\v1.0\\powershell.exe",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image"
+      },
+      "process.executable_canonical_key": {
+       "value": "c:\\windows\\system32\\windowspowershell\\v1.0\\powershell.exe",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image#canonical:windows-path"
+      },
+      "process.executable_key.extended_prefix": {
+       "value": false,
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image#parsed:path-prefix"
+      },
+      "process.executable_key.device_path": {
+       "value": false,
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image#parsed:path-prefix"
+      },
+      "process.executable_key.short_name": {
+       "value": false,
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Image#parsed:8dot3"
+      },
+      "process.parent.executable_key": {
+       "value": "c:\\windows\\explorer.exe",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage"
+      },
+      "process.parent.executable_canonical_key": {
+       "value": "c:\\windows\\explorer.exe",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage#canonical:windows-path"
+      },
+      "process.parent.executable_key.extended_prefix": {
+       "value": false,
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage#parsed:path-prefix"
+      },
+      "process.parent.executable_key.device_path": {
+       "value": false,
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage#parsed:path-prefix"
+      },
+      "process.parent.executable_key.short_name": {
+       "value": false,
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.ParentImage#parsed:8dot3"
+      },
+      "file.hash.md5": {
+       "value": "0123456789abcdef",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Hashes#parsed:sysmon-hashes"
+      },
+      "file.hash.sha256": {
+       "value": "abcdef0123456789",
+       "origin": "microsoft-windows-sysmon-operational-1-10058:winlog.event_data.Hashes#parsed:sysmon-hashes"
       }
      },
-     "host": "ws01",
-     "id": "c6f385248f22c77fd0f20ccf",
-     "normalizer": "windows-ecs@4",
-     "outcome": "success",
      "raw": [
       {
-       "digest": "03461e9acbd0018edc54c370b1b480cc7a697bce23670950895abd4e9265e842",
+       "target": "logs-windows-fixture",
        "native_id": "microsoft-windows-sysmon-operational-1-10058",
-       "target": "logs-windows-fixture"
+       "digest": "03461e9acbd0018edc54c370b1b480cc7a697bce23670950895abd4e9265e842"
       }
      ],
-     "ts": "2026-01-02T03:04:05Z"
+     "normalizer": "windows-ecs@11",
+     "caveats": []
     }
    ],
    "hits": [
@@ -37554,5 +37554,6 @@
    ],
    "skips": {}
   }
- }
+ },
+ "windows_baseline": "4dea9e3"
 }

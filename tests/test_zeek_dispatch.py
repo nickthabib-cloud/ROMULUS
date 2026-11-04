@@ -10,6 +10,9 @@ in two shipper shapes, the Zeek ICMP shape, Zeek conn rows in every shape, rows 
 that writes it, and rows of logs still outside the catalog. The golden is regenerated only when a baseline moves, never
 to make a dispatch change pass; its non-Zeek groups equal those of the golden made before Zeek records were read at all
 (commit 54bfa96), and its core analyzer groups those the core analyzer logs' own golden compared with that baseline.
+The Windows groups (and the Windows events of the whole batch) were made by the Windows producer of commit 4dea9e3
+(`windows_baseline`), whose output for these records changed after b13fdfe; that producer reads them before any Zeek
+recognition, so nothing Zeek-related changes them.
 
 Two classes, decided by the records themselves:
 - every group whose rows' log the catalog now reads as a Windows-protocol log changes from that skip to events of the
@@ -49,7 +52,7 @@ def dumped(events, skips, errors) -> dict:
 
 
 def test_the_golden_holds_the_baseline_of_every_shape():
-    assert GOLDEN["baseline"] == "b13fdfe"
+    assert GOLDEN["baseline"] == "b13fdfe" and GOLDEN["windows_baseline"] == "4dea9e3"
     producers = {e["normalizer"] for record in RECORDS.values() for e in record["events"]}
     assert producers == {NORMALIZER_VERSION, WINDOWS_NORMALIZER, ZEEK_NORMALIZER}
     assert {"linux-audit-group", "systemd-journal-sshd", "apache-access", "windows-security-elastic_agent",
