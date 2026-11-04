@@ -36,21 +36,12 @@ SHAPES = ("malcolm", "elastic", "security_onion", "plain")
 QTYPES = {"A": 1, "PTR": 12, "TXT": 16, "AXFR": 252, "ANY": 255, "CNAME": 5, "NULL": 10}
 RCODES = {"NOERROR": 0, "NXDOMAIN": 3, "REFUSED": 5}
 
-ALERT_STACK_GAP = ("net.suricata_alert_stack requires alert.severity and alert.category, which Zeek's notice, "
-                   "weird, signatures and intel logs do not write, and words its claim 'Suricata raised': an alert "
-                   "stack that reads Zeek's alerts is a detect change")
 CERTIFICATE_LINK_GAP = ("ssl.log names the server certificate but not its validity or fingerprint, which are on the "
                         "x509 row: a link from the ssl row to its certificate row (by fingerprint) must attach them "
                         "before the short-lived rule can judge a Zeek session")
 CERTIFICATE_IDENTITY_GAP = ("detect/tls.py identifies a certificate by SHA-1, else by its names as written: Suricata "
                             "writes the subject in RFC 4514 order with a SHA-1, Zeek in RFC 2253 order with a SHA-256, "
                             "so one certificate seen by both sensors is two groups (a detect change)")
-TRANSACTION_COUNT_GAP = ("detect/dns.py DnsZoneTransferOrAnyRequest counts a transaction record (no dns.type) once as "
-                         "a question and once as an answer in the record total its claim cites against (a detect "
-                         "change)")
-ANSWER_TYPE_GAP = ("detect/indicators.py matches a DNS answer's data only for name-valued types (CNAME, NS, PTR, MX, "
-                   "DNAME); Zeek's dns.log writes no answer type, so a listed name reached through a CNAME is not "
-                   "matched on a Zeek row (a detect change)")
 
 
 def iso(ts: float) -> str:
@@ -191,15 +182,14 @@ def test_zone_transfer_or_any_request_reports_the_same_items(shape):
                                                 f"{CLIENT}|{RESOLVER}|ANY"}
 
 
-def test_gap_zone_transfer_counts_a_transaction_record_as_two_records():
-    """A Zeek row is the question and its answer in one record; the rule's record total counts it once as each, so
-    its claim says "1 of the 2 records are cited" where Suricata's two records are "All 2 records"."""
+def test_zone_transfer_counts_a_transaction_record_once():
+    """A Zeek row is the question and its answer in one record: the rule's record total counts it once, so its one
+    record is cited in full, as Suricata's two records are."""
     zeek, suricata = dns_twins([dns_transaction(1, "corp-example.test", "AXFR", "REFUSED")], "malcolm")
     [z], [s] = run_rule(DnsZoneTransferOrAnyRequest(), zeek), run_rule(DnsZoneTransferOrAnyRequest(), suricata)
     assert (z.group_key, z.proposed_lane) == (s.group_key, s.proposed_lane)
-    assert "1 of the 2 records are cited" in z.claim and "All 2 records are cited" in s.claim, TRANSACTION_COUNT_GAP
-    assert z.claim.replace("1 of the 2 records are cited, including the first and the last",
-                           "All 2 records are cited") == s.claim
+    assert "of the 2 records" not in z.claim and "All 2 records are cited" in s.claim
+    assert "record is cited" in z.claim or "The one record" in z.claim or "the one record" in z.claim, z.claim
 
 
 # ---- HTTP ------------------------------------------------------------------------------------------------------------
@@ -351,13 +341,22 @@ def test_indicators_on_a_dns_question_count_records_as_each_sensor_writes_them(s
     assert z.claim.startswith("1 dns_query record(s)") and s.claim.startswith("2 dns_query record(s)")
 
 
-def test_gap_a_listed_name_behind_a_cname_answer():
+def test_a_listed_name_behind_a_cname_answer():
+    """Zeek writes no answer type: answer data that is not an address is matched as a name, as Suricata's typed
+    CNAME answer is."""
     row, hits = dns_transaction(1, "www.example.org", answers=(("CNAME", "edge.listed-example.net", 60),))
     zeek, suricata = zeek_events([row], "malcolm"), normalized(hits)
     from_suricata = run_rule(IndicatorMatch(LISTED), suricata)
     from_zeek = run_rule(IndicatorMatch(LISTED), zeek)
+    assert zeek[0].get("dns.answers")[0]["type"] is None
     assert [m.group_key.split("|")[1] for m in from_suricata] == ["dns_answer"]
-    assert zeek[0].get("dns.answers")[0]["type"] is None and from_zeek == [], ANSWER_TYPE_GAP
+    assert [m.group_key for m in from_zeek] == [m.group_key for m in from_suricata]
+
+
+def test_an_untyped_answer_address_is_never_matched_as_a_name():
+    listed = indicators(("ind-domain", "domain", "listed-example.net"), ("ind-ip", "ip", "192.0.2.99"))
+    row, _hits = dns_transaction(1, "www.example.org", answers=(("A", "192.0.2.10", 60),))
+    assert run_rule(IndicatorMatch(listed), zeek_events([row], "malcolm")) == []
 
 
 # ---- hard negatives --------------------------------------------------------------------------------------------------
@@ -392,9 +391,9 @@ def test_benign_lookalikes_are_evaluated_in_full_and_reported_by_neither_sensor(
 
 # ---- the IDS alert stack ---------------------------------------------------------------------------------------------
 
-def test_gap_zeek_alerts_are_not_read_by_the_suricata_alert_stack():
-    """A Zeek notice and the Suricata alert of the same traffic: the alert stack reports the alert and counts each
-    Zeek alert as missing its required severity, so its search over Zeek alerts is partial, never a negative."""
+def test_zeek_alerts_are_left_to_their_own_rule_by_the_suricata_alert_stack():
+    """A Zeek notice and the Suricata alert of the same traffic: the alert stack reports the alert and neither
+    evaluates nor counts missing the Zeek alerts, which net.zeek_alert reads."""
     zeek = zeek_events([zl.NOTICE, zl.SIGNATURES, zl.WEIRD, zl.INTEL], "malcolm")
     alert = {"_ts": zl.T0, "timestamp": iso(zl.T0), "event_type": "alert", "src_ip": zl.CLIENT, "src_port": 51040,
              "dest_ip": zl.SERVER, "dest_port": 443, "proto": "TCP",
@@ -402,6 +401,10 @@ def test_gap_zeek_alerts_are_not_read_by_the_suricata_alert_stack():
                        "category": "Generic Protocol Command Decode", "action": "allowed"}}
     suricata = normalized([eve("alert-1", alert)])
     rule = SuricataAlertStack()
-    assert run_rule(rule, zeek) == [] and rule.missing_required == 4, ALERT_STACK_GAP
-    [match] = run_rule(SuricataAlertStack(), suricata)
-    assert match.claim.startswith("Suricata raised")
+    assert run_rule(rule, zeek) == [] and (rule.missing_required, rule.evaluated) == (0, 0)
+    assert rule.scope_partition(zeek) == []
+    both = SuricataAlertStack()
+    [match] = run_rule(both, zeek + suricata)
+    assert match.claim.startswith("Suricata raised") and (both.evaluated, both.missing_required) == (1, 0)
+    [alone] = run_rule(SuricataAlertStack(), suricata)
+    assert alone.claim == match.claim

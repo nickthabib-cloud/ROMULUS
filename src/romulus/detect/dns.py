@@ -113,7 +113,8 @@ def qtype(value) -> str | None:
 
 
 def rcode(value) -> str | None:
-    """Canonical reply code mnemonic ('NXDOMAIN'), from a mnemonic or a number."""
+    """Canonical reply code mnemonic ('NXDOMAIN'), from a mnemonic, a number or the generic 'RCODEn' form (which
+    names a code by its number, so 'RCODE3' is NXDOMAIN)."""
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
@@ -123,6 +124,8 @@ def rcode(value) -> str | None:
     text = value.strip().upper()
     if text.isascii() and text.isdigit():
         return rcode(int(text))
+    if text.startswith("RCODE") and text[5:].isascii() and text[5:].isdigit():
+        return rcode(int(text[5:]))
     return text if text and text.isascii() and text.isalnum() else None
 
 
@@ -521,14 +524,16 @@ class _DnsAggregate(Playbook):
 class _ZoneGroup:
     """One (client, server, transfer zone or ANY) group of the zone-transfer rule."""
 
-    __slots__ = ("any_names", "asked_by_flow", "deciding", "ends", "examples", "named", "replies", "requests", "span",
-                 "transports")
+    __slots__ = ("any_names", "asked_by_flow", "deciding", "ends", "examples", "named", "records", "replies",
+                 "requests", "span", "transports")
 
     def __init__(self):
         self.ends = Ends()                          # the records bounding the span
         self.named = Named(5)                       # the first ANY-question names, each with its record
         self.requests: Counter = Counter()          # qtype counts of questions
         self.replies: Counter = Counter()           # (qtype, rcode) counts
+        self.records = 0                            # records read into the group, each once (a transaction record
+        #                                             is both a question and an answer)
         self.transports: set[str] = set()
         self.any_names: set[str] = set()
         self.span = _Span()
@@ -539,7 +544,7 @@ class _ZoneGroup:
 
 class DnsZoneTransferOrAnyRequest(_DnsAggregate):
     id = "net.dns_zone_transfer_or_any_request"
-    version = "5"
+    version = "6"
     title = "DNS zone-transfer (AXFR/IXFR) or ANY question sent by one client to one server"
     required_fields = ()
     severity, lane = "medium", "lead"
@@ -607,14 +612,15 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
             self.evaluated += 1
             if question_type not in self.REQUEST_TYPES:
                 continue
-            added = [self._add(event, record_role, client, server, question_type, name)
+            counted: set = set()            # the groups this record is already counted in
+            added = [self._add(event, record_role, client, server, question_type, name, counted)
                      for name in question_names(event) or [""]]
             if not all(added):
                 self._disk_full()
         self._trim()
         return []
 
-    def _add(self, event, record_role, client, server, question_type, name) -> bool:
+    def _add(self, event, record_role, client, server, question_type, name, counted: set) -> bool:
         if question_type in self.TRANSFER_TYPES:
             key = (client, server, "transfer", name)
         else:
@@ -622,6 +628,9 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
         group = self.groups.setdefault(key, _ZoneGroup)
         if group is None:
             return False
+        if key not in counted:
+            counted.add(key)
+            group.records += 1
         if question_type not in self.TRANSFER_TYPES and name:
             self._named(group.named, name, event)
         if question_type not in self.TRANSFER_TYPES and name and name not in group.any_names:
@@ -718,7 +727,7 @@ class DnsZoneTransferOrAnyRequest(_DnsAggregate):
                     lane, severity = self.lane, self.severity
                 evs, missing, context = self._cite(group.ends, _fill(first, self._events(group.examples.ids())),
                                                    list(group.named.ids.values()))
-                claim += (cited_phrase(len(evs), sum(asked.values()) + sum(replies.values()), not missing)
+                claim += (cited_phrase(len(evs), group.records, not missing)
                           + bound_note(missing, group.ends))
                 e0 = first[0] if first else evs[0]
                 predicate = [pf(e, name) for e in (first or evs[:2])

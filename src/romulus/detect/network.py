@@ -217,15 +217,20 @@ class SuricataAlertStack(_Grouped):
     next_checks = ("ip_sessions for the source", "http_requests to the destination in the same minutes",
                    "entity_timeline of the destination host after the first alert")
 
-    version = "3"
+    version = "4"
     SIGNATURES_NAMED = 10
     SIGNATURES_HELD = 2000      # distinct signatures held per group; beyond it the count is "at least"
+
+    def scope_partition(self, events: list[TypedEvent]) -> list[TypedEvent]:
+        # Zeek's notice, weird, signature and intel records are net.zeek_alert's input: neither evaluated nor
+        # missing here
+        return [event for event in super().scope_partition(events) if event.get("alert.provider") != "zeek"]
 
     def consume(self, events):
         """Group by (source, destination, category, severity); signatures are listed inside the group so a
         scanner triggering hundreds of signatures is one item, not hundreds. The first SIGNATURES_NAMED distinct
-        signatures each keep a cited record: those are the ones the claim names."""
-        for e in self.applicable(events):
+        signatures each keep a cited record: those are the ones the claim names. Zeek's alerts are another rule's."""
+        for e in self.applicable([event for event in events if event.get("alert.provider") != "zeek"]):
             key = (e.get("source.ip"), e.get("destination.ip"), e.get("alert.category"), e.get("alert.severity"))
             state = self.keep(key, e)
             if state is None:
