@@ -317,7 +317,7 @@ GOLDEN_STACK = {
 # checked field by field.
 GOLDEN_NON_BASELINE_SEMANTICS = {
     "candidates": {
-        "all_fields": "7b24cd315e4dd449433731f2405ada13616b0e1c647bb3c4bdd98e3ff4293e24",
+        "all_fields": "ebade75bf4ff0f0d177ce1aec25372322c3539cdc4c06e5eadd4d814d998b398",
         "benign_alternatives": "8e3c0bf9bd14733cc2b4a049393aded638eaa0e93632c2c69d1428a52a4cc221",
         "claim": "94f373eede1b0deee042a316fc9ede39a619bbef58ded217ad94860f9fd4a2b0",
         "claim_type": "1ccc0da03751218f3bb63463a348cd5519fb63c2eec9e0d2e83259f18bfc6681",
@@ -334,16 +334,16 @@ GOLDEN_NON_BASELINE_SEMANTICS = {
         "priority": "aa73edc71e40ea4964645f62817edb7b3e790121d824db413442d99a21c05d5d",
         "priority_reasons": "b473ae5921bb2f50e3cc347ad18a3a5b6557ecacdaca7568e9f2f10b2fde3a9b",
         "rule_id": "2ae926e61da026e299be84e4e716e9bd0a33eb9a6ea3c97196c3167fc017a257",
-        "rule_version": "cbca529ae2a2cea47a87d3595513d4d4fe63a44b80760ade9050ec23392a1647",
+        "rule_version": "e9ee0131f452bf18f93ada2b9cdd29dab49a0bf0ea10ad60bc16e996b8561ff1",
         "severity": "b2e229e267531f35a076f4db58edc48cbea38cce613ae2a6954cb6b1bf5ea20c",
         "source_presence": "4b20d257ae462d3a6c1af7eeddf340a1558a100d29f517eb7b5c7564fa778d1c",
         "ts": "d8015c1ff0b135e082a5fef2ab1cb88206470e30beee157a0cfc7790d48b8310",
     },
     "rule_cells": {
-        "all_fields": "5ffbcf60d2eb96f240cb43b96f6ba294ab944bf32ebf81465445bff80adf9133",
+        "all_fields": "fb60bc435cffc5ae51a22d2898f59b000f1896523aa7a16238ebbb9326734eab",
                       "count": 10646,
                       "rule_id": "9ef91e8f298a297308417d67b28ef44dc488841f79a07bc8358ab1cb797efe62",
-        "rule_version": "7e913b4f4bce9822479668c96b8a8a2402d8efe52da3311992d597d39780ed0f",
+        "rule_version": "0f166e36e8251018d881f9c5423c3712bfec273e9ab8d6ef5c0c13d08aec5044",
                       "target": "4a231d37bd821a12102aedcb08319addc2bb8d465e326e35f798658d4940c9c5",
                       "partition": "c5e3dd9bd630991ca3e6f5e6921923c038d29fad9215dece94f544bead04090a",
                       "state": "ebd5c7de5e0a1d1a4101483fe37ce56d6ec74d9e3642392a02a18e504baa6fc4",
