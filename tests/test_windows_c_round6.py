@@ -261,10 +261,18 @@ def test_failed_native_compact_subsets_reuse_exhausted_plan(tmp_path, monkeypatc
                 full.append(len(args[0]))
                 raise
         monkeypatch.setattr(stage, "_write_compact", write)
+        from romulus.hunt import stage as stage_module
+        compact = stage_module.compact_event
+        compressed = []
+        def counted(event):
+            compressed.append(event.id)
+            return compact(event)
+        monkeypatch.setattr(stage_module, "compact_event", counted)
         before = stage._reference_plan_builds
         stage._put_compact(pending, accounts=(sweep._stage_owner_accounts[rule.id],))
+        assert len(compressed) == len(pending)
         assert full.count(1) == 4
-        assert stage._reference_plan_builds-before == (2 if admit_small else 1)
+        assert stage._reference_plan_builds == before == 1
         assert stage.count() == len(pairs)+int(admit_small)
         assert [event.id for event in stage.load([event.id for event in pending])] == ([small.id] if admit_small else [])
         sweep.finalize()
@@ -317,15 +325,15 @@ def test_actual_full_reclaims_progressively_and_keeps_each_native_group(tmp_path
         assert reclaimed and max(reclaimed) <= 4
         assert len(reclaimed) > 1 and stage._reference_plan_builds == 1
         assert any("SEARCH" in row[3] and "event_time" in row[3] for row in stage.db.execute(
-            "EXPLAIN QUERY PLAN SELECT ts,id FROM event INDEXED BY event_time "
-            "WHERE (reclaim&3)=1 AND (reclaim&4)=0 AND (ts,id)>(?,?) ORDER BY ts,id LIMIT 4", (0, "")))
+            "EXPLAIN QUERY PLAN SELECT seq,id,reclaim FROM event INDEXED BY event_time "
+            "WHERE (seq,id)>(?,?) ORDER BY seq,id LIMIT 128", (0, "")))
         assert strong_ids <= after
         for _key, state in routine.groups.items():  # noqa: PERF102 -- KeyedStore has no values().
             assert any(eid in after for eid in state.held)
         assert budget.physical_used <= budget.disk_total
         with budget.reclamation_write():
             stage._evict_references(4096)
-        assert stage._reference_plan_builds == 2
+        assert stage._reference_plan_builds == 1
     finally:
         owner.close_spill()
         sweep.close_stage()

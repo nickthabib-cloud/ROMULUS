@@ -17,6 +17,7 @@ from romulus.detect.windows_cmdline import (
 )
 from romulus.detect.windows_events import WindowsEventRule, basename, integer, writable
 from romulus.detect.windows_events import signal as _signal
+from romulus.detect.windows_path_data import has_short_name, writable_windows_path
 from romulus.evidence.windows_catalog import (
     EVENTLOG,
     SECURITY,
@@ -54,6 +55,8 @@ def _expand(path):
 
 
 def _unusual(path):
+    if writable_windows_path(path) or has_short_name(path):
+        return True
     text = ntpath.normpath(_expand(path).replace("/", "\\")).casefold()
     if text.startswith(("\\\\?\\", "\\??\\")):
         text = text[4:]
@@ -136,7 +139,7 @@ def _risks(executable: str, args: list[str], *, depth=0) -> list[str]:
 
 class ServiceRegistration(WindowsEventRule):
     id = "win.service_registration"
-    version = "6"
+    version = "7"
     title = "Service registration contains a risky executable configuration"
     families = ("service_change",)
     windows_event_classes = (("Security", SECURITY, 4697), ("System", "Service Control Manager", 7045))
@@ -227,7 +230,7 @@ def _task_structure(event) -> bool:
 
 class ScheduledTaskRegistration(BehaviorFleetRule):
     id = "win.scheduled_task_registration"
-    version = "6"
+    version = "7"
     title = "Scheduled task record contains a risky action configuration"
     families = ("scheduled_task",)
     windows_event_classes = tuple(("Security", SECURITY, code) for code in (4698, 4702)) + tuple(
@@ -338,7 +341,7 @@ class ScheduledTaskRegistration(BehaviorFleetRule):
 
 class WindowsAuditTamper(WindowsEventRule):
     id = "win.audit_state_change"
-    version = "5"
+    version = "6"
     title = "Windows logging state, configuration, or log contents changed"
     families = ("audit_config",)
     windows_event_classes = tuple(("Security", EVENTLOG, code) for code in (1100, 1102, 1104, 1108)) + (

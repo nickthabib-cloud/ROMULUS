@@ -72,7 +72,7 @@ def citation_group(owner, out=None, key=None, state=None):
         out.extend(finding if isinstance(finding, list) else [finding])
 
 
-def uncited_positive(owner, key, state=None):
+def uncited_positive(owner, key, state=None, *, triggering_record=None):
     """Publish a computed group from detection state without inventing a cited event."""
     from dataclasses import fields, is_dataclass
 
@@ -115,11 +115,10 @@ def uncited_positive(owner, key, state=None):
             if bounds:
                 visit(bounds, depth+1)
     visit(state)
+    visit(triggering_record)
     identity = key if isinstance(key, str) else "|".join(map(str, key)) if isinstance(key, tuple) else str(key)
     note = f"Group {identity}: no citation could be retained; this positive is published from its recorded detection state."
     timestamp = min(times) if times else getattr(owner, "_first_record_time", None) or getattr(owner, "window_start", None)
-    if timestamp is None:
-        raise ValueError("an uncited positive requires a recorded or evaluation-window timestamp")
     match = Match(owner.id, f"{owner.title}: {note}", owner.claim_type, [], [],
                   timestamp, owner.severity, owner.lane,
                   "medium", notes=[note], group_key=identity, citation_unavailable=True)
@@ -128,6 +127,8 @@ def uncited_positive(owner, key, state=None):
     findings = result if isinstance(result, list) else [result]
     retained = False
     for finding in findings:
+        if finding.ts is None:
+            finding.ts = min((event.ts for event in finding.events if event.ts is not None), default=None)
         # A factory may split one state into per-record findings. Those may cite only their own exact raw-key
         # identity; borrowing another run's survivor would change both the evidence and canonical identity.
         record_identity = "" if finding.group_key else finding.identity_key
@@ -149,12 +150,22 @@ def uncited_positive(owner, key, state=None):
             continue
         retained = True
         finding.events = [survivor]
+        if finding.ts is None:
+            finding.ts = survivor.ts
         partial = note.replace("no citation could be retained",
                                "a surviving reference is retained, but citation coverage is partial")
         finding.notes = [partial if item == note else item for item in finding.notes]
         # The surviving record does not necessarily support every specific statement in the original claim.
         # Keep computed lane/identity and a truthful generic claim, with missing predicate lineage explicit.
         finding.claim = f"{owner.title}: {partial}"
+    for finding in findings:
+        if finding.ts is None:
+            missing_time = (f"Group {finding.group_key or identity}: the positive has no retained record or "
+                            "evaluation-window time; its time is unavailable.")
+            owner.note_limit("citation_time", missing_time)
+            # Factories may share the original notes list across their split findings.
+            finding.notes = [*finding.notes, missing_time]
+            finding.claim += " " + missing_time
     owner.note_limit("citation_reference", f"Group {identity}: citation coverage is partial; "
                      "the positive is published from recorded detection state." if retained else note)
     return result

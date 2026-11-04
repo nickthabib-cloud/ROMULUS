@@ -73,7 +73,7 @@
 <tr class="row-{{ c.lane }}">
   <td><span class="pill l-{{ c.lane }}">{{ c.lane }}</span></td>
   <td>{{ c.severity }}</td><td>{{ c.confidence }}</td>
-  <td class="mono">{{ c.ts.strftime('%m-%d %H:%M:%S') }}</td>
+  <td class="mono">{{ c.ts.strftime('%m-%d %H:%M:%S') if c.ts is not none else 'Not recorded' }}</td>
   <td class="mono">{{ c.rule_id }}</td>
   <td><a href="/findings/{{ c.id }}">{{ c.claim | truncate(220) }}</a></td>
 </tr>

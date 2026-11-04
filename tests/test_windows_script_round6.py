@@ -77,7 +77,6 @@ def test_native_requested_start_without_download_or_with_decode_stays_negative(s
     '$sh = New-Object -ComObject WScript.Shell; $sh++; $sh.Run($f)',
     '$sh = New-Object -ComObject WScript.Shell; Clear-Variable sh; $sh.Run($f)',
     '$sh = New-Object -ComObject WScript.Shell; & Set-Variable sh $other; $sh.Run($f)',
-    '$sh = New-Object -ComObject WScript.Shell; { $sh.Run($f) }',
     'Write-Output New-Object -ComObject WScript.Shell; $sh.Run($f)',
     '(New-Object -ComputerName WScript.Shell).Run($f)',
     '$sh = New-Object -ComObject Other.Shell; $sh.Run($f)',

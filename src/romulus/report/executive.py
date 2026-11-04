@@ -1,10 +1,12 @@
 """Executive Word document rendered from the same immutable report manifest."""
+import re
 from xml.etree.ElementTree import Element, SubElement, tostring
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from romulus.report.markdown import _CTRL, BANNER, outcome_sentence
+from romulus.report.markdown import BANNER, outcome_sentence
 
 _WORD = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_XML_INVALID = re.compile(r"[^\x09\x0a\x0d\x20-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
 
 
 def write(m, path, technical_name):
@@ -17,7 +19,7 @@ def write(m, path, technical_name):
         if bold:
             SubElement(SubElement(r, f"{{{_WORD}}}rPr"), f"{{{_WORD}}}b")
         text = SubElement(r, f"{{{_WORD}}}t", {"{http://www.w3.org/XML/1998/namespace}space": "preserve"})
-        text.text = _CTRL.sub("", str(value))
+        text.text = _XML_INVALID.sub("", str(value))
 
     paragraph(BANNER)
     paragraph("ROMULUS executive report", bold=True)

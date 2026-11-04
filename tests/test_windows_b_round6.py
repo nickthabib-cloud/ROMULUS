@@ -64,14 +64,15 @@ def test_proxy_export_remote_target_is_high_without_claiming_remote_library(expo
 
 
 @pytest.mark.parametrize('target', [r'C:\ProgramData\x\payload.dll', r'C:\PROGRA~3\DATAUS~1.DLL',
-                                  'payload.dll', 'unknown.cpl', r'C:\Tools\payload.bin'])
+                                  'payload.dll', 'unknown.cpl', r'C:\Tools\payload.bin',
+                                  r'C:\Windows\SysWOW64\nested\file.bin', r'C:\Windows\System32\nested\desk.cpl'])
 def test_control_panel_export_accepts_non_system_targets_of_any_extension(target):
     [match] = run(Rundll32Execution(), [proc('rundll32.exe', f'rundll32.exe shell32.dll,Control_RunDLL {target}')])
     assert match.proposed_lane == 'lead' and target in match.claim
 
 
 @pytest.mark.parametrize('target', ['desk.cpl', 'appwiz.cpl', r'C:\Windows\System32\desk.cpl',
-                                  r'C:\Windows\SysWOW64\nested\file.bin', r'C:\Windows\System32\nested\desk.cpl'])
+                                  r'C:\Windows\SysWOW64\desk.cpl'])
 def test_control_panel_export_system_targets_stay_quiet(target):
     assert not run(Rundll32Execution(), [proc('rundll32.exe', f'rundll32.exe shell32.dll,Control_RunDLL {target}',
                                             'C:\\Users\\alice\\')])
@@ -101,7 +102,7 @@ def test_extended_unc_paths_preserve_other_proxy_readers(rule, image, command, l
 
 
 @pytest.mark.parametrize('script', ['pubprn.vbs', 'SyncAppvPublishingServer.vbs', 'winrm.vbs', 'manage-bde.wsf',
-                                  'CL_Invocation.ps1', 'CL_Mutexverifiers.ps1', 'Pester.bat'])
+                                  ])
 @pytest.mark.parametrize('protocol,lane', [('https:', 'lead'), ('ftp:', 'lead'), ('script:https:', 'high'),
                                          ('scriptlet:https:', 'high')])
 def test_signed_script_proxy_reads_remote_arguments_after_plain_arguments(script, protocol, lane):

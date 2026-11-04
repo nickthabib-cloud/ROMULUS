@@ -558,7 +558,7 @@ def test_oversized_spill_batch_is_atomic_and_repeated_refusals_keep_other_owner_
         assert big.put(f"k{n}", "x"*4096+str(n))
     for _ in range(20):
         big.trim()
-    assert len(budget.forced) == 1 and not budget.broken
+    assert len(budget._capacity_refusals) == 1 and not budget.forced and not budget.broken
     assert len(big) == 100 and big.on_disk == 0
     assert busy.spill().db.execute("SELECT count(*) FROM s").fetchone()[0] == 0
     assert busy.spill().db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
@@ -586,7 +586,7 @@ def test_physical_refusal_is_local_to_writing_store_in_shared_spill(tmp_path):
         assert sibling.put(f"socket{n}", "y"*256+str(n))
         sibling.trim()
     assert sibling.on_disk == 19 and len(sibling) == 20 and len(busy) == 100
-    assert len(budget.forced) == 1
+    assert len(budget._capacity_refusals) == 1 and not budget.forced
     owner.close_spill()
 
 

@@ -30,7 +30,7 @@ class Match:
     claim_type: str
     events: list[TypedEvent]
     predicate: list[PredicateField]
-    ts: datetime
+    ts: datetime | None
     severity: str
     proposed_lane: str
     confidence: str                  # high | medium | low

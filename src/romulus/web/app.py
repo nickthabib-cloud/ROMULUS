@@ -180,7 +180,8 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
 
     def _timeline_findings(hunt_id: str) -> list[dict]:
         return [{"id": c["id"], "lane": c["lane"], "rule_id": c["rule_id"], "claim": c["claim"],
-                 "observed_at": str(c["ts"]), "entities": c["entities"], "event_ids": c["event_ids"],
+                 "observed_at": str(c["ts"]) if c["ts"] is not None else None,
+                 "entities": c["entities"], "event_ids": c["event_ids"],
                  "source_link_id": c.get("source_link_id")}
                 for c in repo.candidates(hunt_id, ["urgent", "high", "lead"])]
 
@@ -206,7 +207,7 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         tl = build_timeline(findings, graph["edges"], analyst, window.get("start"), window.get("end"),
                             titles=titles, lanes=lanes, kinds=kinds, styles=styles)
         pick = sorted(({**f, "title": titles.get(f["rule_id"], f["rule_id"])} for f in findings),
-                      key=lambda f: (f["observed_at"], f["id"]))
+                      key=lambda f: (f["observed_at"] is None, f["observed_at"] or "", f["id"]))
         return page(request, "timeline.html", u, h=h, tl=tl, analyst_links=analyst, pick=pick,
                     all_lanes=LANES, all_kinds=ROW_KINDS, all_styles=LINK_STYLES)
 

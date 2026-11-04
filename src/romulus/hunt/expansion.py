@@ -518,12 +518,15 @@ class ExpansionEngine:
                 "depth": depth, "parent_anchor_id": parent, "host": host, "lane": candidate["lane"],
                 "severity": candidate["severity"], "ts": candidate["ts"], "status": "pending", "reasons": [],
             }
+            if candidate["ts"] is None:
+                row.update(status="unexpanded", reasons=["observation time unavailable"])
             if not self.repo.save_expansion_anchor(row, owner_token=self.owner_token):
                 continue
             existing.add(candidate["id"])
             depths[candidate["id"]] = depth
             added.append(row)
-            self._anchor_plan(row, candidate=candidate, events=events)
+            if candidate["ts"] is not None:
+                self._anchor_plan(row, candidate=candidate, events=events)
         return added
 
     def _seed_anchors(self) -> list[dict]:
@@ -546,7 +549,8 @@ class ExpansionEngine:
     def _anchor_priority(self, row: dict) -> tuple:
         return (
             LANE_ORDER.get(row["lane"], 9), SEVERITY_ORDER.get(row["severity"], 9),
-            _utc(row["ts"]), self._identity(row), row["id"],
+            row["ts"] is None, _utc(row["ts"]) if row["ts"] is not None else None,
+            self._identity(row), row["id"],
         )
 
     def _ordered_anchors(self, rows: list[dict]) -> list[dict]:
@@ -569,7 +573,7 @@ class ExpansionEngine:
             return self.max_source_queries
         shares = 0
         for row in all_rows:
-            if row["depth"] >= self.max_depth:
+            if row["depth"] >= self.max_depth or row["ts"] is None:
                 continue
             share = self.per_anchor_source_queries
             # The default manifest reserves the portable/Linux plan. Windows anchors add the same four-query

@@ -615,7 +615,8 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
             "id": c["id"], "lane": c["lane"], "severity": c["severity"], "confidence": c["confidence"],
             "priority": c["priority"], "priority_reasons": c["priority_reasons"], "rule_id": c["rule_id"],
             "rule_version": c["rule_version"], "claim": c["claim"], "claim_type": c["claim_type"],
-            "observed_at": str(c["ts"]), "entities": c["entities"], "predicate_fields": c["predicate_fields"],
+            "observed_at": str(c["ts"]) if c["ts"] is not None else None,
+            "entities": c["entities"], "predicate_fields": c["predicate_fields"],
             "gates": gates, "notes": notes, "benign_alternatives": c["benign_alternatives"],
             "next_checks": c["next_checks"], "citations": _citations(repo, c),
             "source_case_id": c.get("source_case_id"),
@@ -754,7 +755,8 @@ def canonical_manifest(repo: Repo, hunt_id: str, actor: str = "canonical") -> di
     for row in link_rows:
         anchor = candidate_rows.get(row["anchor_id"])
         anchor_key = candidate_keys.get(row["anchor_id"], row["anchor_id"])
-        anchor_ts = _as_utc(anchor["ts"]) if anchor is not None else _as_utc(row["window_start"])
+        anchor_ts = (_as_utc(anchor["ts"]) if anchor is not None and anchor["ts"] is not None
+                     else _as_utc(row["window_start"]))
         offsets = {
             "start_seconds": (_as_utc(row["window_start"]) - anchor_ts).total_seconds(),
             "end_seconds": (_as_utc(row["window_end"]) - anchor_ts).total_seconds(),
@@ -828,7 +830,7 @@ def canonical_manifest(repo: Repo, hunt_id: str, actor: str = "canonical") -> di
     for incident in graph["incidents"]:
         incident["finding_ids"] = sorted(incident["finding_ids"])
         incident["timeline"] = sorted(
-            incident["timeline"], key=lambda item: (observed_at.get(item, ""), item),
+            incident["timeline"], key=lambda item: (observed_at.get(item) is None, observed_at.get(item) or "", item),
         )
         incident["link_ids"] = sorted(incident["link_ids"])
         member_ids = set(incident["finding_ids"])
@@ -839,7 +841,7 @@ def canonical_manifest(repo: Repo, hunt_id: str, actor: str = "canonical") -> di
         entry_candidates = member_ids - incoming
         incident["entry_point"] = min(
             entry_candidates or member_ids,
-            key=lambda item: (observed_at.get(item, ""), item),
+            key=lambda item: (observed_at.get(item) is None, observed_at.get(item) or "", item),
         )
         open_ends = incident["open_ends"]
         for key in ("unexpanded_anchors", "pending_anchors", "partial_anchors", "unresolved_links"):

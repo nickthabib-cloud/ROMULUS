@@ -66,7 +66,7 @@ class _Linked(WindowsEventRule, ContextPlaybook):
 
 
 class WindowsKerberosLogonLink(_Linked):
-    version = "2"
+    version = "3"
     id, title = "win.kerberos_logon_link", "Service-ticket and logon records share a nonzero logon GUID"
     link_types = ("kerberos_logon",)
     families = ("auth",)
@@ -101,7 +101,7 @@ class WindowsKerberosLogonLink(_Linked):
 
 
 class WindowsProcessSessionLink(_Linked):
-    version = "2"
+    version = "3"
     id, title = "win.process_session_link", "Process and logon records share a host and canonical session ID"
     link_types = ("process_session",)
     required_by_family: ClassVar = {"auth": ("auth.session_id",)}

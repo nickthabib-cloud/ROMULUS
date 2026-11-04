@@ -304,7 +304,7 @@ def fold_constants(tokens, budget=None, limits=None):
                 return True
             following = bracket_ends[following] + 1
         operator = reader.value(following)
-        return (operator in {'=', '++', '--'} or operator in {'+', '-'}
+        return (operator in {'=', '++', '--', '+=', '-=', '*=', '/=', '%='} or operator in {'+', '-'}
                 and reader.value(following + 1) in {'=', operator})
 
     def note_evidence(begin, end, value):
@@ -360,11 +360,11 @@ def fold_constants(tokens, budget=None, limits=None):
         if token.kind == 'op' and token.value in {'{', '}'}:
             # No control-flow or function execution is assumed across a scriptblock boundary.
             reader.variables.clear()
-        if token.kind == 'op' and token.value == '=':
+        if token.kind == 'op' and token.value in {'=', '+=', '-=', '*=', '/=', '%='}:
             # Only exact scalar assignments below are understood. Indexed/property writes,
             # compound writes and aliases may mutate any shared array/object constant.
             reader.variables.clear()
-        if (token.kind == 'word' and token.value in {'++', '--'}
+        if (token.kind in {'word', 'op'} and token.value in {'++', '--'}
                 or token.kind == 'op' and token.value in {'+', '-'} and index + 1 < len(tokens)
                 and tokens[index + 1].kind == 'op' and tokens[index + 1].value == token.value):
             reader.variables.clear()

@@ -209,7 +209,7 @@ candidate = Table(
     Column("context_event_ids", JSON),
     Column("predicate_fields", JSON, nullable=False),   # [{field, value, raw_path}]
     Column("entities", JSON, nullable=False),
-    Column("ts", DateTime(timezone=True), nullable=False),
+    Column("ts", DateTime(timezone=True)),              # NULL only when a computed positive has no recoverable time
     Column("severity", String, nullable=False),
     Column("confidence", String, nullable=False),
     Column("lane", String, nullable=False),
@@ -244,7 +244,7 @@ expansion_anchor = Table(
     Column("host", String),
     Column("lane", String, nullable=False),
     Column("severity", String, nullable=False),
-    Column("ts", DateTime(timezone=True), nullable=False),
+    Column("ts", DateTime(timezone=True)),              # untimed positives remain explicitly unexpanded
     Column("status", String, nullable=False),            # pending | expanded_complete | expanded_partial | unexpanded
     Column("reasons", JSON, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),

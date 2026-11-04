@@ -241,10 +241,14 @@ def test_routine_volume_spends_only_its_own_floors_and_strong_records_still_publ
     flood = [[flow(5000 * b + i, T0 + timedelta(minutes=b, seconds=i % 60)) for i in range(5000)] for b in range(4)]
     later = _strong_batch(T0 + timedelta(hours=2))
     published, cells = run_sweep(monkeypatch, tmp_path, _pack(monkeypatch), [*flood, later], budget)
-    # the port scan's stores went past their floors once the shared headroom was spent; no strong store did
-    assert budget.full and all(name.startswith(network.PortScan.id) for name in budget.full)
+    # Routine spill refusals remain in history, while reclaimed citation capacity permits later records.
+    assert budget.full and all(name.startswith(network.PortScan.id)
+                               or name == "event_stage:"+network.PortScan.id for name in budget.full)
     scan = [c for c in cells if c["rule_id"] == network.PortScan.id and c["target"] != "*"]
-    assert any(c["state"] == "evaluated_partial" and c["detail"].get("state_capped") for c in scan)
+    assert sum(c["evaluated"] for c in scan) == 20000
+    window = next(c for c in cells if c["rule_id"] == network.PortScan.id and c["target"] == "*")
+    assert window["state"] == "evaluated_partial"
+    assert any("physical whole-hunt byte ceiling" in reason for reason in window["detail"]["reasons"])
     # every strong record read after the flood is found exactly as it would be with room
     [shell] = [m for m in _by_rule(published, WebServiceSpawnsInterpreter.id) if m.events[0].host == "web01"]
     assert shell.proposed_lane == "lead" and "|unheld" not in shell.group_key
@@ -291,7 +295,9 @@ def test_sysmon_volume_cannot_spend_the_indicator_store_floor(monkeypatch, tmp_p
     findings = rule.finalize()
 
     assert stage.windows_refused > 0
-    assert set(budget.full) == {"windows_seen"}
+    # The IOC spill also attempted a refused write before retaining both positives in memory.
+    # Its historical refusal is named even though no IOC input or native citation was lost.
+    assert set(budget.full) == {"windows_seen", f"{rule.id}:ioc_groups"}
     assert len(findings) == 2
     assert {finding.events[0].host for finding in findings} == {"ws01", "linux01"}
     assert not rule.limits

@@ -330,7 +330,7 @@ def test_native_cache_repacking_rolls_back_deleted_events_and_all_id_relations(t
         def __exit__(self, *args):
             return connection.__exit__(*args)
         def executemany(self, sql, rows):
-            if sql == "INSERT INTO event(id,body,kept) VALUES(?,?,?)":
+            if sql == "INSERT INTO event(id,body,kept,reclaim,seq) VALUES(?,?,?,?,?)":
                 raise sqlite3.OperationalError("database or disk is full")
             return connection.executemany(sql, rows)
 
@@ -374,7 +374,7 @@ def test_native_body_quota_history_work_is_linear_and_all_highs_survive(tmp_path
             assert stage._text_rows == 0
         stage.db.set_trace_callback(None)
         owner_queries = [sql for sql in trace if sql.startswith("SELECT c.id FROM citation_owner")]
-        text_queries = [sql for sql in trace if sql.startswith("SELECT id,body,kept FROM event")]
+        text_queries = [sql for sql in trace if sql.startswith("SELECT id,body,kept,reclaim,seq FROM event")]
         assert len(owner_queries) == 1 and len(text_queries) == 1
         # The only history chunk is the seeded text state, rather than every prior compact id each batch.
         history_ids = text_queries[0].split("WHERE id IN (", 1)[1].split(") AND", 1)[0].split(",")

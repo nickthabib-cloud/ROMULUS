@@ -166,13 +166,35 @@ def migrate(engine: Engine) -> None:
         return
     from alembic import command
     from alembic.config import Config
+    from alembic.migration import MigrationContext
+    from alembic.script import ScriptDirectory
 
     here = Path(__file__).resolve().parent
     cfg = Config()
     cfg.set_main_option("script_location", str(here / "migrations"))
-    with engine.begin() as conn:
-        cfg.attributes["connection"] = conn
-        command.upgrade(cfg, "head")
+    with engine.connect() as conn:
+        if set(MigrationContext.configure(conn).get_current_heads()) == set(ScriptDirectory.from_config(cfg).get_heads()):
+            # Ordinary opens must remain read-only: no writer lock or whole-database FK scan at the current head.
+            return
+        conn.rollback()
+        # SQLite batch migrations replace tables. Foreign-key cascades during that replacement would delete
+        # children even though every parent is copied back. Disable enforcement before BEGIN, then validate
+        # the complete migrated graph inside the transaction before committing it.
+        conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        conn.commit()
+        try:
+            conn.exec_driver_sql("BEGIN IMMEDIATE")
+            cfg.attributes["connection"] = conn
+            command.upgrade(cfg, "head")
+            if conn.exec_driver_sql("PRAGMA foreign_key_check").first() is not None:
+                raise RuntimeError("Migration would leave invalid foreign-key references")
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.exec_driver_sql("PRAGMA foreign_keys=ON")
+            conn.commit()
 
 
 def write_txn(engine: Engine):

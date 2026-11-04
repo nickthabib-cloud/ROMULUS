@@ -28,8 +28,8 @@ class SeedCluster(BaseModel):
     entities: list[EntityRef]
     lane: str
     priority: float
-    first_ts: datetime
-    last_ts: datetime
+    first_ts: datetime | None
+    last_ts: datetime | None
 
 
 class AgentDecision(BaseModel):

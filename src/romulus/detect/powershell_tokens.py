@@ -9,6 +9,7 @@ from __future__ import annotations
 import ntpath
 import re
 from dataclasses import dataclass, field, replace
+from itertools import pairwise
 
 MAX_TOKENS = 60_000
 MAX_READ_CHARS = 2_097_152
@@ -16,7 +17,9 @@ MAX_WORD_CHARS = 65_536
 _VARIABLE = re.compile(r"\$[\w?]+(?::(?!:)[\w?]+)?")
 _HERE = {quote: re.compile(r"(?m)^" + re.escape(quote) + "@") for quote in "'\""}
 _QUOTES = {c: "'" for c in "'\u2018\u2019\u201a\u201b"} | {c: '"' for c in '\"\u201c\u201d\u201e'}
-_MODULE_COMMAND_NAME = re.compile(r'[\w.-]+\\[a-z][\w]*-[a-z][\w-]*\Z', re.IGNORECASE | re.ASCII)
+_MODULE_COMMAND_NAME = re.compile(r'[a-z_][\w.-]*\\[a-z][\w]*-[a-z][\w-]*\Z', re.IGNORECASE | re.ASCII)
+_LAUNCHERS = frozenset({'cmd', 'msiexec', 'rundll32', 'regsvr32', 'powershell', 'pwsh',
+                        'wscript', 'cscript', 'mshta'})
 _PROGRAM_SUFFIXES = ('.exe', '.com', '.cmd', '.bat', '.ps1', '.msi', '.msp', '.vbs', '.vbe',
                      '.js', '.jse', '.wsf', '.wsh', '.scr', '.cpl')
 _SHELL_METHODS = {'wscript.shell': frozenset({'run', 'exec'}),
@@ -24,7 +27,10 @@ _SHELL_METHODS = {'wscript.shell': frozenset({'run', 'exec'}),
 
 
 def _path_literal(value):
-    return ('\\' in value or '/' in value) and not _MODULE_COMMAND_NAME.fullmatch(value)
+    # A single relative directory is indistinguishable from an arbitrary module name.
+    # Keep that ambiguity as a start request; namespace-qualified modules are commands.
+    module = _MODULE_COMMAND_NAME.fullmatch(value) and '.' in value.split('\\', 1)[0]
+    return ('\\' in value or '/' in value) and not module
 
 
 def _program_target(value):
@@ -242,7 +248,7 @@ def lex(text: str, *, csharp: bool = False, limits=None) -> tuple[list[Token], b
             else:
                 tokens.append(Token("op", c))
                 i += 1
-        elif text.startswith(("::", "&&"), i):
+        elif text.startswith(("::", "&&", "++", "--", "+=", "-=", "*=", "/=", "%="), i):
             tokens.append(Token("op", text[i:i+2]))
             i += 2
         elif c in "\n;|&(){}[],=+.@" and not text.startswith((".\\", "./"), i):
@@ -321,6 +327,14 @@ def _mark_path_calls(tokens: list[Token]) -> list[Token]:
         path_command = (command_first < command_end and tokens[command_first].kind == 'word'
                         and tokens[command_first].value.rsplit('\\', 1)[-1] in {'join-path', 'resolve-path'}
                         and statements[command_end] == statements[command_first])
+        module_join = (path_command and command_end - command_first == 3
+                       and tokens[command_first].value.rsplit('\\', 1)[-1] == 'join-path'
+                       and all(t.kind == 'string' for t in tokens[command_first+1:command_end])
+                       and _MODULE_COMMAND_NAME.fullmatch(tokens[command_first+1].value + '\\'
+                                                         + tokens[command_first+2].value))
+        if module_join:
+            tokens[begin] = replace(tokens[begin], transforms=tokens[begin].transforms | {'constructed-call'})
+            path_command = False
         if (path_command or first < end and tokens[first].kind == 'variable'
                 and bad[end] == bad[begin+1] and literals[end] > literals[begin+1]):
             tokens[begin] = replace(tokens[begin], transforms=tokens[begin].transforms | {'path-call'})
@@ -391,6 +405,31 @@ def _read_tokens(tokens: list[Token], partial: bool, constant_budget=None) -> Sc
     def finish():
         if command:
             result.arguments.setdefault(command, []).append(tuple(args))
+            launcher = command.removesuffix('.exe')
+            if launcher == 'cmd':
+                result.starts_program |= any(a in {'/c', '/k'} and n + 1 < len(args)
+                                             for n, a in enumerate(args))
+            elif launcher == 'msiexec':
+                result.starts_program |= any(a in {'/i', '/package'} and n + 1 < len(args)
+                                             for n, a in enumerate(args))
+            elif launcher in {'powershell', 'pwsh'}:
+                result.starts_program |= any(a in {'-file', '-command'} and n + 1 < len(args)
+                                             for n, a in enumerate(args))
+            elif launcher in {'wscript', 'cscript'}:
+                result.starts_program |= any(not a.startswith(('/', '-')) or a.startswith('//')
+                                             and '/' in a[2:] for a in args)
+            elif launcher == 'regsvr32':
+                result.starts_program |= any(not (a.startswith(('/', '-'))
+                                             and (a[1:] in {'s', 'u', 'n', 'c', 'i', '?'}
+                                                  or a[1:].startswith('i:'))) for a in args)
+            elif launcher in {'rundll32', 'mshta'}:
+                result.starts_program |= bool(args)
+            elif command == 'start-job':
+                result.starts_program |= '-filepath' in args and args.index('-filepath') + 1 < len(args)
+            elif command in {'invoke-cimmethod', 'invoke-wmimethod'}:
+                pairs = dict(pairwise(args))
+                result.starts_program |= (pairs.get('-classname', pairs.get('-class')) == 'win32_process'
+                                          and pairs.get('-methodname', pairs.get('-name')) == 'create')
 
     def member_literal(position, method):
         end = group_ends.get(position + 1, position + 1)
@@ -411,36 +450,130 @@ def _read_tokens(tokens: list[Token], partial: bool, constant_budget=None) -> Sc
 
     def shell_constructor(begin, end):
         # Exact constructors only. Parenthesis unwrapping shares the bounded expression depth;
-        # receivers are block-local lexical facts, never general object/data-flow inference.
+        # receivers are record-local lexical facts, never general object/data-flow inference.
         for _ in range(32):
             if begin < end and tokens[begin].value == '(' and group_ends.get(begin) == end - 1:
                 begin, end = begin + 1, end - 1
             else:
                 break
-        if end - begin != 3:
+        if end - begin > 64 or begin >= end:
             return ''
-        creator, parameter, progid = tokens[begin:end]
-        if (creator.kind == 'word' and command_name(creator.value) == 'new-object'
-                and parameter.kind == 'word' and len(parameter.value) >= 4
-                and '-comobject'.startswith(parameter.value)
-                and progid.kind in {'word', 'string'} and progid.value.casefold() in _SHELL_METHODS):
-            return progid.value.casefold()
+        parts = tokens[begin:end]
+        values = [part.value.casefold() for part in parts]
+        progid = ''
+        if parts[0].kind == 'word' and command_name(values[0]) == 'new-object':
+            params = [part for part in parts[1:] if part.value != '-strict']
+            if params and params[0].kind == 'word':
+                option, colon, inline = params[0].value.partition(':')
+                if len(option) >= 2 and '-comobject'.startswith(option):
+                    if colon and len(params) == 1:
+                        progid = inline
+                    elif not colon and len(params) == 2 and params[1].kind in {'word', 'string'}:
+                        progid = params[1].value
+        elif (len(values) == 15 and values[0] == '[' and values[1] in {'activator', 'system.activator'}
+              and values[2:7] == [']', '::', 'createinstance', '(', '[']
+              and values[7] in {'type', 'system.type'}
+              and values[8:12] == [']', '::', 'gettypefromprogid', '(']
+              and values[13:] == [')', ')'] and parts[12].kind == 'string'):
+            progid = values[12]
+        progid = re.sub(r'\.[0-9]+$', '', progid.casefold())
+        if progid in _SHELL_METHODS:
+            return progid
         return ''
+
+    def receiver_name(value):
+        # A scoped write can affect an unqualified dynamic-scope read of this name.
+        return variable_name(value).casefold().rsplit(':', 1)[-1].lstrip('$')
+
+    def expression_stop(begin):
+        if begin in group_ends:
+            after = group_ends[begin] + 1
+            if after == len(tokens) or tokens[after].value in {';', '\n', '}', ')'}:
+                return after
+        # Constructors are short; jump over nested argument groups instead of rescanning suffixes.
+        position = begin
+        for _ in range(64):
+            if position >= len(tokens) or tokens[position].value in {';', '\n', '}', ')', '|', '&&'}:
+                return position
+            position = group_ends.get(position, position) + 1
+        return begin
+
+    def receiver_mutator(position, command):
+        # Named parameters may appear in any order; comma-separated names are distinct writes.
+        # A bounded unknown name cannot preserve any proven receiver identity.
+        stop = min(len(tokens), position + 64)
+        names, begin, cursor, mode = [], None, position + 1, 'name'
+        unknown = False
+        while cursor < stop:
+            item = tokens[cursor]
+            value = item.value
+            if item.kind == 'op' and value in {';', '\n', '}', ')', '|', '&&'}:
+                break
+            option, colon, inline = value.partition(':')
+            if item.kind == 'word' and option.startswith('-'):
+                if option == '-name':
+                    mode = 'name'
+                    if colon:
+                        names.append(receiver_name(inline))
+                        mode = 'after-name'
+                elif option == '-value':
+                    mode = 'value'
+                    begin = None if colon else cursor + 1
+                elif option in {'-scope', '-description', '-option', '-visibility'}:
+                    cursor += 1 if colon else 2
+                    continue
+                elif option not in {'-force', '-passthru'}:
+                    unknown = True
+                cursor += 1
+                continue
+            if value == ',' and mode == 'after-name':
+                mode = 'name'
+                cursor += 1
+                continue
+            if mode == 'name':
+                if item.kind in {'word', 'string'}:
+                    names.append(receiver_name(value))
+                else:
+                    unknown = True
+                mode = 'after-name'
+            else:
+                if mode == 'after-name':
+                    begin = cursor
+                mode = 'ignore'
+            cursor = group_ends.get(cursor, cursor) + 1
+        limited = cursor >= stop and cursor < len(tokens)
+        if limited:
+            result.partial = True
+            result.limits.add('MAX_RECEIVER_ARGUMENT_TOKENS=64')
+        if unknown or limited:
+            shell_receivers.clear()
+        else:
+            for name in names:
+                shell_receivers.pop(name, None)
+            if len(names) == 1 and command in {'set-variable', 'sv', 'set'} and begin in group_ends:
+                progid = shell_constructor(begin, group_ends[begin] + 1)
+                if progid:
+                    shell_receivers[names[0]] = progid
 
     for i, token in enumerate(tokens):
         value, previous = token.value, tokens[i-1].value if i else ""
         following = tokens[i+1].value if i + 1 < len(tokens) else ""
         transforms = token.transforms & OBFUSCATING
         result.obfuscation.update(transforms)
-        if token.kind == 'variable' and following in {'+', '-', '++', '--'}:
-            shell_receivers.pop(variable_name(value), None)
+        if token.kind == 'variable' and (following in {'+=', '-=', '*=', '/=', '%=', '++', '--'}
+                                         or previous in {'++', '--'}):
+            shell_receivers.pop(receiver_name(value), None)
         if token.kind == 'variable' and following == '=':
-            name = variable_name(value)
-            shell_receivers.pop(name, None)
+            name = receiver_name(value)
+            cursor = i
+            while cursor >= 0 and tokens[cursor].kind == 'variable':
+                shell_receivers.pop(receiver_name(tokens[cursor].value), None)
+                if cursor < 2 or tokens[cursor-1].value != ',':
+                    break
+                cursor -= 2
             begin = i + 2
-            end = group_ends.get(begin, begin + 2) + 1
-            if ((not i or previous in {';', '\n', '{'}) and end <= len(tokens)
-                    and (end == len(tokens) or tokens[end].value in {';', '\n', '}'})):
+            end = expression_stop(begin)
+            if cursor == i and end <= len(tokens) and (end == len(tokens) or tokens[end].value in {';', '\n', '}', ')'}):
                 progid = shell_constructor(begin, end)
                 if progid:
                     shell_receivers[name] = progid
@@ -486,8 +619,14 @@ def _read_tokens(tokens: list[Token], partial: bool, constant_budget=None) -> Sc
                 begin = group_starts.get(i - 2)
                 progid = shell_constructor(begin, i - 1) if begin is not None else ''
                 if tokens[i-2].kind == 'variable':
-                    progid = shell_receivers.get(variable_name(tokens[i-2].value), '')
+                    progid = shell_receivers.get(receiver_name(tokens[i-2].value), '')
                 result.starts_program |= value.casefold() in _SHELL_METHODS.get(progid, ())
+            if previous == '.' and value.casefold() == 'create' and i >= 2:
+                begin = group_starts.get(i - 2)
+                if begin is not None and i - begin == 7:
+                    parts = tokens[begin+1:i-2]
+                    result.starts_program |= ([t.value.casefold() for t in parts]
+                                              == ['[', 'wmiclass', ']', 'win32_process'])
             if value.casefold() in {'getmethod', 'getprocaddress'}:
                 member_literal(i, value.casefold())
             if value.casefold() == 'invoke' and i >= 3 and tokens[i-3].value in {'.', '::'} and tokens[i-2].kind in {'word', 'string'}:
@@ -513,8 +652,6 @@ def _read_tokens(tokens: list[Token], partial: bool, constant_budget=None) -> Sc
                         result.starts_program |= (typename.casefold() in {'diagnostics.process', 'system.diagnostics.process'}
                                                   and value.casefold() == 'start')
         if value in {";", "\n", "|", "&&", "{", "}"} and token.kind == "op":
-            if value in {'{', '}'}:
-                shell_receivers.clear()
             finish()
             start, called, command, args = True, False, "", []
             invoking_member_target = False
@@ -534,12 +671,15 @@ def _read_tokens(tokens: list[Token], partial: bool, constant_budget=None) -> Sc
             if i + 1 < len(tokens):
                 target = tokens[i+1]
                 result.starts_program |= (target.kind in {'variable', 'data'}
-                                          or target.kind in {'word', 'string'} and _program_target(target.value))
+                                          or target.kind in {'word', 'string'} and _program_target(target.value)
+                                          and command_name(target.value).removesuffix('.exe') not in _LAUNCHERS)
             if following == '(':
                 end = group_ends.get(i + 1, i + 1)
                 path_call = 'path-call' in tokens[i+1].transforms
-                result.starts_program |= path_call
-                if not path_call and constructed_prefix[end] > constructed_prefix[i + 2]:
+                constructed = ('constructed-call' in tokens[i+1].transforms
+                               or constructed_prefix[end] > constructed_prefix[i + 2])
+                result.starts_program |= path_call or end > i + 2 and not constructed
+                if not path_call and constructed:
                     result.obfuscation.add('unresolved-constructed-target')
                     result.obfuscated_execution = result.evaluates_code = True
             continue
@@ -574,17 +714,16 @@ def _read_tokens(tokens: list[Token], partial: bool, constant_budget=None) -> Sc
             name = command_name(value)
             command_position = ((token.kind == "word" or called) and (called or previous not in {"[", ".", "::"})
                                 and following not in {"::", ".", "=", "["})
-            if command_position and _program_target(value):
+            if command_position and _program_target(value) and name.removesuffix('.exe') not in _LAUNCHERS:
                 result.starts_program = True
-                shell_receivers.clear()
             if (command_position and name not in keywords
                     and re.fullmatch(r'[a-z_][\w.-]*', name, re.ASCII)):
                 command = name
                 result.commands.add(command)
                 result.evaluates_code |= command in evaluators
                 result.obfuscated_execution |= bool(transforms)
-                if command != 'new-object':
-                    shell_receivers.clear()
+                if command in {'set-variable', 'sv', 'set', 'clear-variable', 'clv', 'remove-variable', 'rv'}:
+                    receiver_mutator(i, command)
             start, called = False, False
         elif command and token.kind in {"word", "string", "variable"}:
             args.append(value.casefold())

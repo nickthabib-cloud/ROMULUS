@@ -305,7 +305,7 @@ GOLDEN_STACK = {
     "links": "0fbedb27ca9a4cb72354178444ee9aabc49f377b2c933074fe03ef29c8fbb08a",
     "manifest": "35b8a0132fc6747d24e7efe50b32fa0c44c8eefaffcebf5d8795f01438b0a8f1",
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
-    "rule_cells": "8facf7a58590996807a6086c14472c5cfbff060454c8add0ccab54aebb479d6d",
+    "rule_cells": "0ede3beaf59df4de531ac0d313b3a93d6c9f50eb1ad404a809bc24add83f2185",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
     "tasks": "c65df4ab88c05661371cf32b49a1d22ef84d6753488bdb946c8e29376d486260",
 }
@@ -337,10 +337,10 @@ GOLDEN_NON_BASELINE_SEMANTICS = {
         "ts": "d8015c1ff0b135e082a5fef2ab1cb88206470e30beee157a0cfc7790d48b8310",
     },
     "rule_cells": {
-        "all_fields": "24f3d40100b38b0b9d2ed2862fb4bbe782bbb048964cc556cc9a5e578ea754cd",
+        "all_fields": "5ffbcf60d2eb96f240cb43b96f6ba294ab944bf32ebf81465445bff80adf9133",
                       "count": 10646,
                       "rule_id": "9ef91e8f298a297308417d67b28ef44dc488841f79a07bc8358ab1cb797efe62",
-        "rule_version": "815e029b22c75f5fbcabc51ae0e8cdb946890491a5062e9c88ec837a45e20b62",
+        "rule_version": "7e913b4f4bce9822479668c96b8a8a2402d8efe52da3311992d597d39780ed0f",
                       "target": "4a231d37bd821a12102aedcb08319addc2bb8d465e326e35f798658d4940c9c5",
                       "partition": "c5e3dd9bd630991ca3e6f5e6921923c038d29fad9215dece94f544bead04090a",
                       "state": "ebd5c7de5e0a1d1a4101483fe37ce56d6ec74d9e3642392a02a18e504baa6fc4",

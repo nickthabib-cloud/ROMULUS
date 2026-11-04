@@ -74,7 +74,7 @@ def _is_native_messaging(event: TypedEvent, child_name: str) -> bool:
 
 class LureAppSpawnsCodeRunner(WindowsProcessRule):
     id = "win.lure_app_spawns_code_runner"
-    version = "9"
+    version = "10"
     title = "A document, mail, reader or browser application created a shell, script host or LOLBin"
     uses_parent = True
     reads_command_line = False            # the match is images only; the command line is read only to exclude NM

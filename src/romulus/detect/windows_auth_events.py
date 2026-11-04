@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+from collections import OrderedDict
 from datetime import UTC, datetime
 from itertools import islice
 
@@ -71,13 +72,15 @@ class _Burst(WindowsEventRule):
         cls.card = {**cls.card, "lanes": (
             "The first qualifying window for each correlation key and its first eight episodes publishes immediately "
             "as a LEAD. Those episodes revise at non-overlapping-window doublings; later episodes revise at "
-            "episode-count doublings and finalization, "
+            "episode-count doublings and finalization, with immediate re-arm after at least 24 hours of quiet, "
             "retaining first/latest witnesses and the complete reporting-host list.")}
 
     def __init__(self):
         super().__init__()
         self.rows = BurstRows(self)
         self._batch = {}
+        self._checked = OrderedDict()
+        self._checked_frontier = float("-inf")
 
     def eligible(self, event):
         return event.get("event.code") in {4625, 4771, 4776} and event.outcome == Outcome.failure
@@ -89,25 +92,58 @@ class _Burst(WindowsEventRule):
         found = {event.id: event for event in self.rows.compact(ids)}
         return [found[key] for key in ids]
 
+    def _remember_check(self, key, stamp, qualified):
+        # Optional scan hints never compete with evidence for disk capacity. Forgetting a hint
+        # only requests another scan; limit both entry count and telemetry-derived key width.
+        if len(key) <= 512:
+            self._checked[key] = (stamp, qualified)
+            self._checked.move_to_end(key)
+            while len(self._checked) > 128:
+                self._checked.popitem(last=False)
+
     def _maybe(self, key, event_id, stamp, value, host, *, phase):
         identity = row_key(self.id, key)
         state_key = ("replay:" if phase == "finalize" else "window:") + identity
         previous = self.rows.marker(state_key)
         state = json.loads(previous) if previous else None
+        activity_key = "activity:" + state_key
+        quiet_start = None
+        if state is not None:
+            activity = self.rows.marker(activity_key)
+            last_seen, quiet_start = json.loads(activity) if activity is not None else (state["latest_end"], None)
+            if stamp >= last_seen:
+                if stamp-last_seen >= 86400:
+                    quiet_start = stamp
+                self.rows.remember(activity_key, json.dumps([stamp, quiet_start]))
+        checked = self._checked.get(state_key) if self.distinct else None
+        ordered = stamp >= self._checked_frontier
+        if self.distinct:
+            self._checked_frontier = max(self._checked_frontier, stamp)
+            if not ordered:
+                # After eviction we no longer know this key's own high-water mark. A global
+                # frontier conservatively prevents late rows from rebuilding an unsafe hint.
+                self._checked.pop(state_key, None)
         if state is not None and stamp < state["latest_end"]:
             return []
-        if state is None and self.distinct and not self.rows.marked("qualified-key:"+key) and self.rows.prior_value(
-                key, stamp, value, host, event_id, int(stamp//self.seconds)*self.seconds):
+        if (self.distinct and ordered and checked is not None and not checked[1]
+                and self.rows.prior_value(key, stamp, value, host, event_id, stamp-self.seconds)):
+            # In time order, repeating a value already in this window can only remove
+            # distinct values from the preceding negative window, never add one.
+            self._remember_check(state_key, stamp, False)
             return []
         evidence = self.rows.witnesses(key, stamp, self.seconds, self.threshold,
                                        distinct=self.distinct, latest=True)
+        if self.distinct and ordered:
+            self._remember_check(state_key, stamp, len(evidence) == self.threshold)
         if len(evidence) != self.threshold:
             return []
-        self.rows.first("qualified-key:"+key)
         start, end = min(item[1] for item in evidence), max(item[1] for item in evidence)
         # Overlapping windows still advance the episode frontier and its latest witnesses.
         # Count disjoint windows separately, so the checkpoint cadence cannot grow per record.
         new_episode = state is None or start-state["latest_end"] >= self.seconds
+        rearmed = new_episode and quiet_start is not None and start >= quiet_start
+        if rearmed:
+            self.rows.remember(activity_key, json.dumps([stamp, None]))
         counted = state is None or start > state["counted_end"]
         ids = [item[0] for item in evidence]
         if state is not None and ids == state["latest_ids"]:
@@ -125,8 +161,8 @@ class _Burst(WindowsEventRule):
         # Final replay always publishes the latest complete totals and first/latest witnesses.
         windows = state["episode_windows"]
         episodes = state["episodes"]
-        checkpoint = (counted and not windows & (windows-1) if episodes <= 8 else
-                      new_episode and not episodes & (episodes-1))
+        checkpoint = rearmed or (counted and not windows & (windows-1) if episodes <= 8 else
+                                 new_episode and not episodes & (episodes-1))
         if phase == "finalize" or not checkpoint:
             return []
         return self._publish_window(identity, state)
@@ -141,7 +177,9 @@ class _Burst(WindowsEventRule):
         event = max(loaded, key=lambda item: (item.ts, item.id))
         emitted = self.rows.marker("emitted:"+identity)
         emitted = json.loads(emitted) if emitted else None
-        if not final and emitted is not None and state["latest_end"] < emitted["latest_end"]:
+        # A partial replay can retain an older checkpoint when its marker writes were refused.
+        # It must not replace a later observation already published during consume.
+        if emitted is not None and state["latest_end"] < emitted["latest_end"]:
             return []
         total, values, accounts = self.rows.totals(key)
         host_count, host_checkpoint, _ = self.rows.host_checkpoint(key)
@@ -175,7 +213,8 @@ class _Burst(WindowsEventRule):
                         "window is retained even when it overlaps an earlier selection. "
                         "First/latest witnesses and bounds, episode and window totals are retained with this finding; "
                         "intermediate records are not all cited. The first eight episodes revise at window doublings; "
-                        "later episodes revise at episode-count doublings, plus finalization."),
+                        "later episodes revise at episode-count doublings, plus finalization. An episode after "
+                        "at least 24 hours of quiet publishes immediately."),
                        "Reported workstation labels do not establish verified host identities or IP ownership."],
                       group_key="windows-burst:" + hashlib.sha256(identity.encode()).hexdigest(),
                       context_ids=set(selected) - {event.id},
@@ -221,6 +260,9 @@ class _Burst(WindowsEventRule):
         with self.rows.batch():
             # Stream replay catches windows made visible by late or out-of-order target arrivals.
             self.rows.reset_markers("replay:")
+            self.rows.reset_markers("activity:replay:")
+            self._checked.clear()
+            self._checked_frontier = float("-inf")
             for key, event_id, stamp, value, host in self.rows.iterate():
                 if key.startswith('["daily-'):
                     continue
@@ -275,13 +317,15 @@ class _Burst(WindowsEventRule):
 
     def release_state(self):
         self._batch = {}
+        self._checked.clear()
+        self._checked_frontier = float("-inf")
         self._pending = []
         self.rows.close()
         super().release_state()
 
 
 class WindowsPasswordSpray(_Burst):
-    version = "6"
+    version = "7"
     id, title = "win.password_spray", "Failed authentication against many accounts by source or reporting host"
     attack = ("T1110.003",)
     description, units = "Many target accounts were named by failed authentication records", "distinct target-account identities"
@@ -298,7 +342,7 @@ class WindowsPasswordSpray(_Burst):
 
 
 class WindowsBruteForce(_Burst):
-    version = "6"
+    version = "7"
     id, title = "win.brute_force", "Repeated failures against one account by source or reporting host"
     attack = ("T1110.001",)
     description, units, distinct = ("Failed authentication records repeatedly named one account",
@@ -313,7 +357,7 @@ class WindowsBruteForce(_Burst):
 
 
 class WindowsDistributedGuessing(_Burst):
-    version = "6"
+    version = "7"
     id, title = "win.distributed_auth_failures", "Many sources failed authentication against one account"
     attack = ("T1110.001",)
     threshold = 10
@@ -330,7 +374,7 @@ class WindowsDistributedGuessing(_Burst):
 
 
 class WindowsExplicitCredentialFanout(_Burst):
-    version = "6"
+    version = "7"
     id, title = "win.explicit_credential_fanout", "Explicit credentials named several target servers"
     attack = ("T1078",)
     windows_event_classes = (("Security", SECURITY, 4648),)
@@ -353,7 +397,7 @@ class WindowsExplicitCredentialFanout(_Burst):
 
 
 class WindowsKerberoastDiversity(_Burst):
-    version = "6"
+    version = "7"
     id, title = "win.kerberos_service_fanout", "One principal requested tickets for many service names"
     attack = ("T1558.003",)
     windows_event_classes = (("Security", SECURITY, 4769),)
@@ -374,7 +418,7 @@ class WindowsKerberoastDiversity(_Burst):
 
 
 class WindowsHashLogonShape(WindowsEventRule):
-    version = "4"
+    version = "5"
     id, title = "win.hash_logon_shape", "Logon fields have a pass-the-hash-associated shape"
     families = ("auth",)
     windows_event_classes = (("Security", SECURITY, 4624),)
@@ -403,7 +447,7 @@ class WindowsHashLogonShape(WindowsEventRule):
 
 
 class WindowsExternalRdp(WindowsEventRule):
-    version = "4"
+    version = "5"
     id, title = "win.rdp_external_source", "RDP source outside the site's internal-network definition"
     direction_dependent = True
     families = ("auth", "remote_access")

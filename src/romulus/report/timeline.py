@@ -45,6 +45,9 @@ def build_timeline(findings: list[dict], edges: list[dict], analyst_links: list[
     shown = [f for f in reportable if f["lane"] in lanes]
     hidden = {"findings_by_lane": len(reportable) - len(shown), "rows_by_kind": 0, "rows_beyond_page": 0,
               "findings_without_row": 0, "findings_on_hidden_rows": 0, "links_by_style": defaultdict(int), "links_without_both_ends": 0}
+    # Untimed positives are listed explicitly, never placed at an invented point on the time axis.
+    undated = sorted((f for f in shown if f["observed_at"] is None), key=lambda f: f["id"])
+    shown = [f for f in shown if f["observed_at"] is not None]
 
     row_items: dict[tuple[str, str], list[dict]] = defaultdict(list)
     for f in sorted(shown, key=lambda f: (_ts(f["observed_at"]), f["id"])):
@@ -93,5 +96,5 @@ def build_timeline(findings: list[dict], edges: list[dict], analyst_links: list[
         ticks.append({"x": round(LEFT + frac * (WIDTH - LEFT - RIGHT), 1), "label": ts.strftime("%m-%d %H:%M")})
     hidden["links_by_style"] = dict(hidden["links_by_style"])
     return {"width": WIDTH, "height": TOP + max(len(rows), 1) * ROW_H + 30, "left": LEFT, "rows": rows,
-            "links": links, "ticks": ticks, "hidden": hidden, "shown_findings": len(primary),
+            "links": links, "ticks": ticks, "hidden": hidden, "shown_findings": len(primary), "undated": undated,
             "filters": {"lanes": sorted(lanes), "kinds": sorted(kinds), "styles": sorted(styles)}}

@@ -9,7 +9,7 @@
     <div><span class="label">Severity</span> {{ c.severity }}</div>
     <div><span class="label">Confidence</span> {{ c.confidence }}</div>
     <div><span class="label">Priority</span> {{ '%.0f' % c.priority }} — {{ c.priority_reasons | join('; ') }}</div>
-    <div><span class="label">Observed (UTC)</span> {{ c.ts }}</div>
+    <div><span class="label">Observed (UTC)</span> {{ c.ts if c.ts is not none else 'Not recorded' }}</div>
     <div><span class="label">Claim type</span> {{ c.claim_type }}</div>
     <div><span class="label">Rule version</span> {{ c.rule_version }}</div>
   </div>

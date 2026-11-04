@@ -139,7 +139,7 @@ class _FileBehaviorRule(BehaviorFleetRule):
 
 class StartupFileWrite(_FileBehaviorRule):
     id = "win.startup_file_write"
-    version = "6"
+    version = "7"
     title = "File created in a Windows startup folder"
     families = ("file_change",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 11),)
@@ -161,7 +161,7 @@ class StartupFileWrite(_FileBehaviorRule):
 
 class LureApplicationFileWrite(_FileBehaviorRule):
     id = "win.lure_application_file_write"
-    version = "6"
+    version = "7"
     title = "Office or browser process wrote a file in a user-writable directory"
     families = ("file_change",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 11),)
@@ -189,7 +189,7 @@ class LureApplicationFileWrite(_FileBehaviorRule):
 
 class ExecutableAlternateStream(_FileBehaviorRule):
     id = "win.executable_alternate_stream"
-    version = "6"
+    version = "7"
     title = "An alternate file stream was recorded"
     families = ("file_change",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 15),)
@@ -229,7 +229,7 @@ class ExecutableAlternateStream(_FileBehaviorRule):
 
 class ExecutableCreationTimeChange(_FileBehaviorRule):
     id = "win.executable_creation_time_change"
-    version = "6"
+    version = "7"
     title = "Creation time changed on a Windows file"
     families = ("file_change",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 2),)
@@ -257,7 +257,7 @@ class ExecutableCreationTimeChange(_FileBehaviorRule):
 
 class WritableExecutableDeletion(_FileBehaviorRule):
     id = "win.writable_executable_deletion"
-    version = "6"
+    version = "7"
     title = "File deleted from a user-writable or startup location"
     families = ("file_change",)
     windows_event_classes = tuple((SYSMON_CHANNEL, SYSMON, code) for code in (23, 26))
@@ -279,7 +279,7 @@ class WritableExecutableDeletion(_FileBehaviorRule):
 
 class WebRootFileWrite(_FileBehaviorRule):
     id = "win.web_root_file_write"
-    version = "4"
+    version = "5"
     title = "File created in the default IIS web content directory"
     families = ("file_change",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 11),)
@@ -308,7 +308,7 @@ class WebRootFileWrite(_FileBehaviorRule):
 
 class CodeRunnerDnsLookup(WindowsEventRule):
     id = "win.code_runner_dns_lookup"
-    version = "4"
+    version = "5"
     title = "Script host or proxy-execution binary requested DNS resolution"
     families = ("dns_lookup",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 22),)

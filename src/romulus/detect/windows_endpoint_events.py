@@ -57,7 +57,7 @@ def _share_access_names(event):
 
 class WmiSubscription(WindowsEventRule):
     id = "win.wmi_subscription"
-    version = "4"
+    version = "5"
     title = "WMI permanent-subscription component activity"
     families = ("wmi_subscription",)
     windows_event_classes = tuple((SYSMON_CHANNEL, SYSMON, code) for code in (19, 20, 21)) + (
@@ -109,7 +109,7 @@ _PAEXEC_PIPE = re.compile(r"paexec-[0-9]+-[^\\/]+(?:\.exe)?|paexec(?:in|out|err)
 
 class ToolNamedPipe(WindowsEventRule):
     id = "win.tool_named_pipe"
-    version = "4"
+    version = "5"
     title = "Named pipe matches a documented remote-tool default"
     families = ("pipe_event",)
     windows_event_classes = tuple((SYSMON_CHANNEL, SYSMON, code) for code in (17, 18))
@@ -157,7 +157,7 @@ def _share(event: TypedEvent) -> str:
 
 class AdminShareTransfer(WindowsEventRule):
     id = "win.admin_share_transfer"
-    version = "5"
+    version = "6"
     title = "Write or unresolved access to a file through an administrative share"
     families = ("share_access",)
     windows_event_classes = _SECURITY_5145
@@ -194,7 +194,7 @@ class AdminShareTransfer(WindowsEventRule):
 
 class RemoteManagementPipe(BehaviorFleetRule):
     id = "win.remote_management_pipe"
-    version = "6"
+    version = "7"
     count_source_ips = True
     title = "IPC share access to a management RPC pipe"
     families = ("share_access",)
@@ -233,7 +233,7 @@ class RemoteManagementPipe(BehaviorFleetRule):
 
 class GppPolicyFileAccess(BehaviorFleetRule):
     id = "win.gpp_policy_file_access"
-    version = "6"
+    version = "7"
     count_source_ips = True
     title = "SYSVOL access names a Group Policy Preferences policy file"
     families = ("share_access",)
@@ -266,7 +266,7 @@ class GppPolicyFileAccess(BehaviorFleetRule):
 
 class DefenderThreat(WindowsEventRule):
     id = "win.defender_threat"
-    version = "4"
+    version = "5"
     title = "Defender recorded a threat detection or remediation result"
     families = ("defender_event",)
     windows_event_classes = tuple((DEFENDER_CHANNEL, DEFENDER_PROVIDER, code)
@@ -335,7 +335,7 @@ def _dword(value: str) -> int | None:
 
 class DefenderProtection(WindowsEventRule):
     id = "win.defender_protection"
-    version = "4"
+    version = "5"
     title = "Defender protection state or configuration change"
     families = ("defender_event",)
     windows_event_classes = tuple((DEFENDER_CHANNEL, DEFENDER_PROVIDER, code)

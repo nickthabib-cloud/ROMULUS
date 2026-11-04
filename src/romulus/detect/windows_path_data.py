@@ -26,13 +26,26 @@ def has_short_name(path):
 
 # Path indicators documented by the analytic's original researchers; effective ACLs
 # vary by OS and policy. These raise attention, never establish an effective permission.
+# Every suffix below is an attention indicator, not a claim about effective ACLs.
+# Tasks: https://github.com/SigmaHQ/sigma/blob/master/rules/windows/process_creation/proc_creation_win_susp_task_folder_evasion.yml
+# Tasks_Migrated, spool/*, MachineKeys, com/dmp, FxsTmp, Registration/CRMLog:
+# https://github.com/api0cradle/UltimateAppLockerByPassList/blob/master/Generic-AppLockerbypasses.md
+# LogFiles/WMI:
 # https://research.splunk.com/endpoint/c051b68c-60f7-4022-b3ad-773bec7a225b/
+# Additional original inventory (ACLs vary by Windows version):
+# https://gist.github.com/mattifestation/5f9de750470c9e0e1f9c9c33f0ec3e56
+# Architecture equivalents and system-directory tracing retain the same conservative
+# indicator policy; a listed parent never establishes that every child is writable.
+_WRITABLE_SYSTEM_SUFFIXES = (
+    ('tasks',), ('tasks_migrated',), ('tracing',), ('spool', 'drivers', 'color'),
+    ('spool', 'printers'), ('spool', 'servers'), ('microsoft', 'crypto', 'rsa', 'machinekeys'),
+    ('com', 'dmp'), ('fxstmp',), ('logfiles', 'wmi'),
+)
 WRITABLE_WINDOWS_DIRS = (
     ('windows', 'temp'), ('windows', 'tasks'), ('windows', 'tracing'),
-    ('windows', 'system32', 'tasks'), ('windows', 'syswow64', 'tasks'),
-    ('windows', 'system32', 'spool', 'drivers', 'color'),
-    ('windows', 'syswow64', 'spool', 'drivers', 'color'),
-)
+    ('windows', 'registration', 'crmlog'),
+) + tuple(('windows', system, *suffix) for system in ('system32', 'syswow64')
+          for suffix in _WRITABLE_SYSTEM_SUFFIXES)
 
 # Windows built-ins named by ATT&CK's original COM-hijacking case studies.
 # Each identity retains its source; this is deliberately a small positive-only list.
@@ -63,7 +76,9 @@ def installation_parts(path):
     if has_short_name(path):
         return ()
     text = ntpath.normpath(str(path or '').replace('/', '\\')).casefold()
-    canonical = text[4:] if text.startswith(('\\\\?\\', '\\??\\')) else text
+    canonical = text[4:] if text.startswith(('\\\\?\\', '\\??\\', '\\\\.\\')) else text
+    if text.startswith('\\\\.\\'):
+        path = canonical
     parts = local_path_components(path)
     if parts and canonical.startswith(('c:\\', '%systemdrive%\\')):
         return parts
@@ -80,11 +95,12 @@ def protected_platform_path(path):
             and _VERSION.fullmatch(parts[4]) is not None)
 
 
-def writable_windows_path(path):
+def writable_windows_path(path, *, directory=False):
     # Positive directory indicators apply to every local volume. Only the
     # installation scope used to lower attention requires the system volume.
     parts = local_path_components(path) or installation_parts(path)
-    return any(len(parts) > len(prefix) and parts[:len(prefix)] == prefix for prefix in WRITABLE_WINDOWS_DIRS)
+    return any((len(parts) >= len(prefix) if directory else len(parts) > len(prefix))
+               and parts[:len(prefix)] == prefix for prefix in WRITABLE_WINDOWS_DIRS)
 
 
 def path_class(path, *, directory=False):

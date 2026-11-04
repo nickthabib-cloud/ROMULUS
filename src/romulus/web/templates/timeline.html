@@ -29,6 +29,11 @@
   {% if tl.hidden.rows_beyond_page %}<b>{{ tl.hidden.rows_beyond_page }} row(s) beyond this page are not drawn; narrow the filters.</b>{% endif %}
   {% if tl.hidden.findings_without_row %}{{ tl.hidden.findings_without_row }} finding(s) have no host, account or IP and appear only in the findings list.{% endif %}</p>
 
+{% if tl.undated %}
+<h2>Observation time not recorded</h2>
+<p>These findings have no recorded observation time and cannot be placed on the timeline.</p>
+<ul>{% for f in tl.undated %}<li><a href="/findings/{{ f.id }}">{{ f.lane }} · {{ f.claim }}</a></li>{% endfor %}</ul>
+{% endif %}
 <div class="timeline-wrap">
 <svg class="timeline" viewBox="0 0 {{ tl.width }} {{ tl.height }}" width="{{ tl.width }}" height="{{ tl.height }}" role="img" aria-label="Attack-path timeline">
   {% for tick in tl.ticks %}
@@ -52,8 +57,8 @@
 <p class="help">Record a relation you judge exists between two findings. It is stored with your name, drawn in its own style, and labelled as an assertion: it never joins incidents and never reads as proven.</p>
 <form method="post" action="/hunts/{{ h.id }}/links" class="card">
   <input type="hidden" name="csrf" value="{{ csrf }}">
-  <label>From <select name="from_finding">{% for f in pick %}<option value="{{ f.id }}">{{ f.lane }} · {{ f.observed_at }} · {{ f.title }}</option>{% endfor %}</select></label>
-  <label>To <select name="to_finding">{% for f in pick %}<option value="{{ f.id }}">{{ f.lane }} · {{ f.observed_at }} · {{ f.title }}</option>{% endfor %}</select></label>
+  <label>From <select name="from_finding">{% for f in pick %}<option value="{{ f.id }}">{{ f.lane }} · {{ f.observed_at or 'Time not recorded' }} · {{ f.title }}</option>{% endfor %}</select></label>
+  <label>To <select name="to_finding">{% for f in pick %}<option value="{{ f.id }}">{{ f.lane }} · {{ f.observed_at or 'Time not recorded' }} · {{ f.title }}</option>{% endfor %}</select></label>
   <label>Relation <input name="relation" maxlength="200" required placeholder="e.g. same operator, follow-on step"></label>
   <label>Note <textarea name="note" rows="2" maxlength="2000"></textarea></label>
   <button type="submit">Add analyst link</button>
