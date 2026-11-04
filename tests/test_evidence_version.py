@@ -20,7 +20,8 @@ from romulus.hunt import packets as packet_stage
 from romulus.sources import packets as packet_sources
 
 # The files that turn ES/OpenSearch records into typed events (not shellparse.py, which only detectors use).
-EVIDENCE_FILES = ("__init__.py", "auditd.py", "certificates.py", "community.py", "normalize.py", "typed.py")
+EVIDENCE_FILES = ("__init__.py", "auditd.py", "certificates.py", "community.py", "normalize.py", "raw_scrub.py",
+                  "surrogates.py", "typed.py")
 PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf2116524009",
                    10: "e4dffd0944b86200b3c94aa301bead206967c58f565b30d426ee0071bd4f1aa9",
                    11: "150e5e4d74cb0f4891ef4cca7114a709f2038a42fc456e69f7952dcf0f6c9b32",
@@ -35,7 +36,10 @@ PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf211
                    # same golden compares every one of its records). So too when they gained the Windows-protocol
                    # families (smb_tx, rpc_tx, kerberos_tx, ntlm_tx, remote_session, ldap_tx, address_assignment,
                    # asset_observed), which this producer never writes.
-                   14: "c9a00e37d6908e9e9aa28a14c2fdb7c91ba453cc9ea33776baf7e6d1e2c787a3"}
+                   # Then lone UTF-16 surrogates were replaced at the normalization boundary (surrogates.py) and raw
+                   # digests became the digest of the stored form (raw_scrub.py): only inputs that used to crash (a
+                   # lone surrogate) change, and a non-Zeek record's stored form and digest are the record as read.
+                   14: "6a8e1b8cb0edc046d0492055d8fb25b8e6095e249ccdd8945b1f602d18c28672"}
 WINDOWS_EVIDENCE_FILES = ("community.py", "windows.py", "windows_catalog.py", "windows_reassembly.py")
 PINNED_WINDOWS = {
     "windows-ecs@11": "89b0392c0b506597732e45f1ada089cfee28c773f6f346d4993286a239c47f54",
@@ -53,7 +57,9 @@ PINNED_WINDOWS = {
 ZEEK_EVIDENCE_FILES = ("certificates.py", "community.py", "rpc_catalog.py", "zeek.py", "zeek_catalog.py",
                        "zeek_credentials.py")
 PINNED_ZEEK = {
-    "zeek-ecs@1": "e92d2510f3553641cf32e361077eca0048282095a740fec7af955eaac4208efb",
+    # unreleased: re-pinned when a Zeek record's raw digest became the digest of its stored form, credentials masked
+    # (scrub_zeek_source); typed values are unchanged
+    "zeek-ecs@1": "56cb0e7b2387cdf679d95d35976e01ef9e691c00b7689093c8b0afc8ea35cc02",
 }
 # The packet stage's normalizer: HTTP bodies rebuilt by TShark -> http_body events, and TCP connections rebuilt
 # from per-segment payload -> tcp_stream events (with the shell analysis and the tables it reads).

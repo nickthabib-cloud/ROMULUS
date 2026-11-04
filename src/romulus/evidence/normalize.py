@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 
+from romulus.evidence import surrogates
 from romulus.evidence.auditd import (
     AT_FDCWD,
     O_ACCMODE,
@@ -34,6 +35,7 @@ from romulus.evidence.auditd import (
 from romulus.evidence.certificates import certificate_fields as _certificate_fields
 from romulus.evidence.certificates import dn_parts as _dn_parts
 from romulus.evidence.community import community_id
+from romulus.evidence.raw_scrub import clean_source, might_be_zeek
 from romulus.evidence.typed import EVIDENCE_VERSION, FieldValue, Outcome, RawRef, TypedEvent, event_id, fv
 from romulus.evidence.windows import (
     WindowsNotNormalized,
@@ -73,7 +75,13 @@ class AuditCopy(Skip):
 
 
 def raw_digest(source: dict) -> str:
-    return hashlib.sha256(json.dumps(source, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    """The digest of a record as it is stored (raw_scrub.clean_source: any record but a Zeek one, or one holding a
+    lone surrogate, is stored as it is), so a copy fetched again verifies against the stored one."""
+    text = json.dumps(source, sort_keys=True, separators=(",", ":"))
+    if "\\ud" in text or might_be_zeek(source):
+        # a non-BMP or lone surrogate escape, or a Zeek record: the stored form may differ
+        text = json.dumps(clean_source(source), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode()).hexdigest()
 
 
 def _ts(s: str) -> datetime:
@@ -2207,9 +2215,14 @@ def observed_record(hit: dict, boot: list | tuple | None = None) -> TypedEvent |
 
 def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                    audit_parse: Callable[[dict, str], AuditRecord] | None = None,
+                   malformed_text: dict[str, list[str]] | None = None,
                    ) -> tuple[list[TypedEvent], dict[str, int], list[tuple[str, str]]]:
     """Normalize a batch. Returns (events, skip_counts, errors[(raw_id, error)]). `audit_parse` is passed to
     `group_audit`.
+
+    A record holding a lone UTF-16 surrogate in any key or text is normalized with each one replaced by U+FFFD
+    (evidence.surrogates), and every event made from it carries a caveat naming the fields; `malformed_text`, when
+    given, receives each such record's key ("<index>/<id>") with those fields. The caller's hits are not changed.
 
     An audit event's boot id (`host.boot.id`) comes from the shipper's own field, else from journald's copy of one
     of its records when that copy is in the same batch. With `boots` (a hunt's boot-interval map), the batch's boot
@@ -2223,7 +2236,12 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
     audit_hits = []
     audit_copies: list[tuple[tuple[str, int, int], str, str, str]] = []
     journal_boots: list[tuple[str, str, int | None, str, bool]] = []
+    unclean: dict[str, list[str]] = {}
     for h in hits:
+        clean, found = surrogates.sanitize(h["_source"])
+        if found:
+            h = {**h, "_source": clean}
+            unclean[f"{h['_index']}/{h['_id']}"] = found
         ds = _get(h["_source"], "event.dataset") or ""
         try:
             if is_windows_source(h["_source"]):
@@ -2372,4 +2390,19 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
         for event in events[audit_start:]:
             boots.observe_event(event)
         boots.fill(events[audit_start:], incremental=True)
+    for index, event in enumerate(events):
+        # text parsed out of a record's own text (a Suricata EVE line, a Zeek line) can hold a lone surrogate its
+        # record did not show
+        parsed = surrogates.event_paths(event)
+        paths = [path for ref in event.raw for path in unclean.get(ref.key, ())] if unclean else []
+        if parsed:
+            events[index] = surrogates.clean_event(event, paths + parsed)
+            for ref in event.raw:
+                unclean.setdefault(ref.key, []).extend(parsed)
+        elif paths:
+            note = surrogates.caveat(paths)
+            if note not in event.caveats:
+                event.caveats.append(note)
+    if unclean and malformed_text is not None:
+        malformed_text.update(unclean)
     return events, dict(skips), errors

@@ -12,7 +12,8 @@ to make a dispatch change pass; its non-Zeek groups equal those of the golden ma
 (commit 54bfa96), and its core analyzer groups those the core analyzer logs' own golden compared with that baseline.
 The Windows groups (and the Windows events of the whole batch) were made by the Windows producer of commit 4dea9e3
 (`windows_baseline`), whose output for these records changed after b13fdfe; that producer reads them before any Zeek
-recognition, so nothing Zeek-related changes them.
+recognition, so nothing Zeek-related changes them. A Zeek record's digest is over its stored form, its credentials
+masked, so the digest of a credential-bearing record (the SNMP rows' community) is compared as it is computed now.
 
 Two classes, decided by the records themselves:
 - every group whose rows' log the catalog now reads as a Windows-protocol log changes from that skip to events of the
@@ -25,9 +26,9 @@ from pathlib import Path
 
 import pytest
 
-from romulus.evidence.normalize import NORMALIZER_VERSION, normalize_hits
+from romulus.evidence.normalize import NORMALIZER_VERSION, normalize_hits, raw_digest
 from romulus.evidence.windows import WINDOWS_NORMALIZER
-from romulus.evidence.zeek import ZEEK_DUPLICATE, ZEEK_NORMALIZER, zeek_record
+from romulus.evidence.zeek import ZEEK_DUPLICATE, ZEEK_NORMALIZER, scrub_zeek_source, zeek_record
 from romulus.evidence.zeek_catalog import ANALYZER_LOGS, WINDOWS_PROTOCOL_LOGS
 
 GOLDEN = json.loads((Path(__file__).parent / "data" / "zeek_dispatch_golden.json").read_text(encoding="utf-8"))
@@ -44,6 +45,33 @@ def _now_read(name: str):
 
 NEWLY_READ = sorted(name for name in RECORDS if _now_read(name) is not None)
 UNCHANGED = sorted(set(RECORDS) - set(NEWLY_READ))
+
+
+def _scrubbed_digests() -> dict[str, str]:
+    """The digest each golden record has now that a Zeek record's digest is over its stored form, credentials masked
+    (raw_digest), for each record whose stored form differs from its source: only those digests move."""
+    out = {}
+    for record in RECORDS.values():
+        for hit in record["hits"]:
+            if scrub_zeek_source(hit["_source"]) != hit["_source"]:
+                out[f"{hit['_index']}/{hit['_id']}"] = raw_digest(hit["_source"])
+    return out
+
+
+SCRUBBED = _scrubbed_digests()
+
+
+def rebased(dumps: list[dict]) -> list[dict]:
+    """Golden event dumps with the digests of credential-bearing records as they are now computed."""
+    return [{**e, "raw": [{**r, "digest": SCRUBBED.get(f"{r['target']}/{r['native_id']}", r["digest"])}
+                          for r in e["raw"]]} for e in dumps]
+
+
+def test_only_credential_bearing_records_change_their_digest():
+    """The SNMP rows carry a community (a credential): their stored form masks it, so their digest moves."""
+    assert SCRUBBED and {key.rsplit("/", 1)[1] for key in SCRUBBED} <= {
+        h["_id"] for name in RECORDS if name.startswith("zeek-snmp-") for h in RECORDS[name]["hits"]} | {
+        h["_id"] for name in NEWLY_READ for h in RECORDS[name]["hits"]}
 
 
 def dumped(events, skips, errors) -> dict:
@@ -79,6 +107,7 @@ def test_the_golden_holds_the_baseline_of_every_shape():
 @pytest.mark.parametrize("name", UNCHANGED)
 def test_a_record_normalizes_exactly_as_before(name):
     expected = {key: RECORDS[name][key] for key in ("events", "skips", "errors")}
+    expected["events"] = rebased(expected["events"])
     assert dumped(*normalize_hits(RECORDS[name]["hits"])) == expected
 
 
@@ -107,7 +136,7 @@ def test_all_records_in_one_batch_normalize_as_before_apart_from_the_newly_read_
     def kept(dumps):
         return [e for e in dumps if not {r["native_id"] for r in e["raw"]} & changed]
 
-    assert kept([json.loads(e.model_dump_json()) for e in events]) == kept(batch["events"])
+    assert kept([json.loads(e.model_dump_json()) for e in events]) == kept(rebased(batch["events"]))
     expected_skips = dict(batch["skips"])
     for name in NEWLY_READ:
         for reason, count in RECORDS[name]["skips"].items():

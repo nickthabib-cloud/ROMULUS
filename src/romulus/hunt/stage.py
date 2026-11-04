@@ -33,6 +33,7 @@ from pathlib import Path
 from romulus.baseline.spec import Pending, exec_serial
 from romulus.detect.bounded import Account, StateBudget, reclaiming_write
 from romulus.detect.correlation import boot_of
+from romulus.evidence.raw_scrub import clean_event, clean_source
 from romulus.evidence.typed import TypedEvent
 from romulus.hunt.citations import COMPACT_CITATION_NOTE, compact_event, expand_event
 
@@ -717,6 +718,8 @@ class EventStage:
         return fresh, duplicates
 
     def put(self, events: list[TypedEvent], raw_sources: dict[str, dict]) -> None:
+        # an event holding a lone surrogate is staged with it replaced (it could not be serialized otherwise)
+        events = [clean_event(event) for event in events]
         self._flush_reference_states()
         self.refusal_reason = ""
         if not self._sequence_available(len(events)):
@@ -743,7 +746,7 @@ class EventStage:
             f"SELECT id FROM event WHERE id IN ({','.join('?' for _ in ids[start:start+500])})",
             ids[start:start+500])}
         bodies = {identity: event.model_dump_json() for identity, event in first.items() if identity not in present}
-        raws = {ref.key: json.dumps(raw_sources[ref.key], sort_keys=True)
+        raws = {ref.key: json.dumps(clean_source(raw_sources[ref.key]), sort_keys=True)
                 for event in first.values() for ref in event.raw if ref.key in raw_sources}
         return bodies, raws
 
@@ -1102,6 +1105,7 @@ class EventStage:
         self.events += len(events)
 
     def hold(self, held: list[tuple[str, TypedEvent]], raw_sources: dict[str, dict]) -> None:
+        held = [(owner, clean_event(event)) for owner, event in held]
         self._flush_reference_states()
         if not self._sequence_available(len(held)):
             return

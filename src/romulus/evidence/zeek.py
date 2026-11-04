@@ -704,8 +704,10 @@ def _services(value: list[str]) -> tuple[list[str], list[str]]:
     return confirmed, removed
 
 
-def _raw_ref(hit: dict) -> RawRef:
-    encoded = json.dumps(hit["_source"], sort_keys=True, separators=(",", ":")).encode()
+def _raw_ref(hit: dict, stored: dict) -> RawRef:
+    """The record's reference; its digest is over the record as it is stored, with its credentials masked
+    (`scrub_zeek_source`), so a copy fetched again from the source verifies against it once scrubbed the same way."""
+    encoded = json.dumps(stored, sort_keys=True, separators=(",", ":")).encode()
     return RawRef(target=hit["_index"], native_id=hit["_id"], digest=hashlib.sha256(encoded).hexdigest())
 
 
@@ -811,7 +813,8 @@ def _conn(hit: dict, record: ZeekRecord, declared_sensor: str | None) -> TypedEv
         f["auth.cleartext_credentials_present"] = fv(True, f"{nid}:{password}#present")
     if reader.bad:
         f["parse.malformed"] = fv(sorted(set(reader.bad)), f"{nid}:#malformed")
-    ref = _raw_ref(hit)
+    # plain Zeek JSON is stored as scrub_zeek_source reads it (from its own _path), whatever log the site declared
+    ref = _raw_ref(hit, _conn_stored(reader.src, log, shape) if shape != PLAIN else scrub_zeek_source(reader.src))
     uid = f.get("zeek.uid")
     host = sensor.value if sensor is not None else None
     # a record a password was withheld from is its own document (see the analyzer logs' identity below)
@@ -946,6 +949,12 @@ _DNS_FLAGS = ("AA", "TC", "RD", "RA")
 
 
 def _analyzer(hit: dict, record: ZeekRecord, declared_sensor: str | None) -> TypedEvent:
+    return _analyze(hit, record, declared_sensor)[0]
+
+
+def _analyze(hit: dict, record: ZeekRecord, declared_sensor: str | None, *,
+             depth: int = 0, scrubbing: bool = False) -> tuple[TypedEvent, dict]:
+    """The record's typed event, and the record as it is stored (its credentials masked by the same decisions)."""
     shape, log = record.shape, record.log
     reader = _Reader(hit, shape)
     nid = reader.nid
@@ -970,6 +979,7 @@ def _analyzer(hit: dict, record: ZeekRecord, declared_sensor: str | None) -> Typ
         if _present(reader.get(path)):          # a password column: never read, its presence typed
             guard.present.append(path)
             guard.withheld = True
+            guard.mask(path)
     step = _STEPS.get(log.name)
     if step is not None:
         step(f, reader, log, caveats, guard)
@@ -1007,7 +1017,14 @@ def _analyzer(hit: dict, record: ZeekRecord, declared_sensor: str | None) -> Typ
         caveats.append(MALCOLM_MISSING_TS_CAVEAT)
     if reader.bad:
         f["parse.malformed"] = fv(sorted(set(reader.bad)), f"{nid}:#malformed")
-    ref = _raw_ref(hit)
+    if shape == PLAIN and not scrubbing:
+        # plain Zeek JSON is stored as scrub_zeek_source reads it (from its own _path), whatever log the site declared
+        stored = scrub_zeek_source(reader.src)
+    elif log.name in _credential_logs():
+        stored = _stored(reader.src, record, f, guard, depth)
+    else:
+        stored = _scrub_plain_log(reader.src, record, depth)
+    ref = _raw_ref(hit, stored)
     host = sensor.value if sensor is not None else None
     key = next((f[name].value for name in log.key if name in f), None)
     if key is None or guard.withheld:
@@ -1023,7 +1040,7 @@ def _analyzer(hit: dict, record: ZeekRecord, declared_sensor: str | None) -> Typ
         success = None                              # an application server's result is not the account's outcome
     outcome = Outcome.unknown if success is None else Outcome.success if success.value else Outcome.failure
     return TypedEvent(id=event_id(log.family, identity, ZEEK_NORMALIZER), family=log.family, ts=when, host=host,
-                      outcome=outcome, fields=f, raw=[ref], normalizer=ZEEK_NORMALIZER, caveats=caveats)
+                      outcome=outcome, fields=f, raw=[ref], normalizer=ZEEK_NORMALIZER, caveats=caveats), stored
 
 
 _ALERT_KINDS = {"notice": "notice", "weird": "weird", "signatures": "signature", "intel": "intel"}
@@ -1055,6 +1072,15 @@ class _Guard:
     present: list[str] = field(default_factory=list)
     unknown: list[str] = field(default_factory=list)
     withheld: bool = False
+    # the record's own paths whose value was withheld for a credential: the stored record masks them too
+    masked: list[str] = field(default_factory=list)
+
+    def mask(self, path: str | None) -> None:
+        """Mask a withheld value's path in the stored record (a value read from the Zeek line kept in event.original
+        is masked when that line is scrubbed on its own)."""
+        raw = _raw_path_of(path) if path else None
+        if raw is not None and raw not in self.masked:
+            self.masked.append(raw)
 
 
 @dataclass(frozen=True)
@@ -1152,6 +1178,7 @@ def _withhold_arguments(f: dict[str, FieldValue], reader: _Reader, log: ZeekLog,
                 f.pop(typed, None)
                 into.append(f"{written[typed]}#{what}")
                 guard.withheld = True
+                guard.mask(written[typed])
                 if into is guard.unknown and ZEEK_ARGUMENT_WITHHELD not in caveats:
                     caveats.append(ZEEK_ARGUMENT_WITHHELD)
 
@@ -1189,6 +1216,7 @@ def _irc_stale(f: dict[str, FieldValue], name: str, caveats: list[str], guard: _
         if value.value.strip().startswith(_IRC_CHANNEL_KEY):
             guard.present.append(f"{_native(value)}#earlier-channel-key")
             guard.withheld = True
+            guard.mask(_path(value))
         elif name in _IRC_MESSAGES:
             target = f.get("app.arg")
             nick = target.value.strip().split("@", 1)[0].lower() if target is not None else ""
@@ -1196,6 +1224,7 @@ def _irc_stale(f: dict[str, FieldValue], name: str, caveats: list[str], guard: _
             if nick in _IRC_SERVICES or first in _IRC_SERVICE_COMMANDS:
                 guard.unknown.append(f"{_native(value)}#services-message")
                 guard.withheld = True
+                guard.mask(_path(value))
     if dropped:
         caveats.append(ZEEK_IRC_STALE.format(fields=" and ".join(dropped)))
 
@@ -1219,6 +1248,7 @@ def _redact_sql(f: dict[str, FieldValue], rule: _CommandArguments, caveats: list
             del f[typed]
             guard.unknown.append(f"{_native(echo)}#statement-echo")
             guard.withheld = True
+            guard.mask(_path(echo))
             continue
         text = echo.value
         for secret in secrets:
@@ -1235,6 +1265,7 @@ def _scrubbed(f: dict[str, FieldValue], typed: str, value: FieldValue, result: S
     if result.text is None:
         del f[typed]
         guard.withheld = True
+        guard.mask(_path(value))
     elif result.text != value.value:
         f[typed] = fv(result.text, f"{value.origin}#derived:credentials-redacted")
         guard.withheld = True
@@ -1266,6 +1297,7 @@ def _strip_userinfo(f: dict[str, FieldValue], log: ZeekLog, caveats: list[str], 
             del f[typed]
             guard.unknown.append(f"{_native(value)}#unread-sip-uris")
             guard.withheld = True
+            guard.mask(_path(value))
             if SIP_UNREAD not in caveats:
                 caveats.append(SIP_UNREAD)
         elif removed:
@@ -1743,6 +1775,7 @@ def _ldap_arguments(f, reader, log, caveats, guard):
             f.pop("ldap.arguments", None)
             guard.unknown.append(f"{written}#unread-operation")
             guard.withheld = True
+            guard.mask(written)
             if ZEEK_ARGUMENT_WITHHELD not in caveats:
                 caveats.append(ZEEK_ARGUMENT_WITHHELD)
         return
@@ -1751,6 +1784,7 @@ def _ldap_arguments(f, reader, log, caveats, guard):
             f.pop("ldap.arguments", None)
             guard.present.append(f"{written}#simple-bind")
             guard.withheld = True
+            guard.mask(written)
         return
     if written is not None and not all(_bind_kind(name) in _MECHANISM_BINDS for name in names):
         # Zeek writes an argument only for a bind: kept only where it is a SASL mechanism or the NTLM signature; a bind
@@ -1759,6 +1793,7 @@ def _ldap_arguments(f, reader, log, caveats, guard):
         f.pop("ldap.arguments", None)
         guard.unknown.append(f"{written}#argument-of-{'unknown-bind' if _BIND in names else 'other-operation'}")
         guard.withheld = True
+        guard.mask(written)
         if ZEEK_ARGUMENT_WITHHELD not in caveats:
             caveats.append(ZEEK_ARGUMENT_WITHHELD)
         return
@@ -1791,3 +1826,252 @@ _STEPS = {"dns": _dns, "http": _http, "ssl": _ssl, "x509": _x509, "files": _file
           "socks": _socks, "tunnel": _tunnel, "radius": _radius, "redis": _redis, "smb_files": _smb,
           "smb_mapping": _smb, "smb_cmd": _smb, "dce_rpc": _rpc, "kerberos": _kerberos, "ntlm": _ntlm, "rdp": _rdp,
           "ldap": _ldap, "ldap_search": _ldap, "known_services": _known_services}
+
+
+# ---- the stored record -----------------------------------------------------------------------------------------------
+#
+# A record a rule cites is stored whole (its `_source`), so every credential it carries is masked there too, by the same
+# decisions that withhold it from the typed event: a value withheld for a credential (a password column, a credential
+# command's argument, a simple bind's argument, an IRC channel key, an SQL statement or echo that could not be read) is
+# replaced by REDACTED, keeping its key, so its presence stays visible; a value kept with its credentials redacted (a
+# URI without its userinfo, SQL with REDACTED for its password literals, a Redis reply, an LDAP filter) is stored as it
+# was typed. Beside them, wherever a record writes them: any field named `password` (or Malcolm's `post_password_*`),
+# and the userinfo of any URI in any text. The Zeek line a shipper keeps (Elastic's `event.original`, Security Onion's
+# `message`) is read as plain Zeek JSON of the same log and scrubbed the same way; a line that is not a JSON object is
+# withheld whole. Records of no Zeek shape are returned as they are (the same object).
+
+STORED_SECRET = REDACTED
+ORIGINAL_WITHHELD = "<withheld: this kept Zeek line is not a JSON object, so it was not read for credentials>"
+ORIGINAL_LINES = ("event.original", "message")
+_REWRITTEN = ("#derived:credentials-redacted", "#derived:userinfo-removed", "#derived:password-removed")
+_SECRET_KEY = re.compile(r"(?:^|\.)(?:password|post_password[a-z0-9_]*)$", re.IGNORECASE)
+_PLAIN_MARKERS = ("_path", "id.orig_h")
+
+
+def _raw_path_of(path: str) -> str | None:
+    """The record's own path of a typed value's origin path (without what was derived from it); None for a value read
+    from the Zeek line kept in event.original (that line is scrubbed on its own)."""
+    if path.startswith("event.original#"):
+        return None
+    return path.split("#", 1)[0] or None
+
+
+def _shaped(current, value):
+    """`value` in the shape the record wrote `current` in: text for text, a one-element list for one, else the mask."""
+    if isinstance(current, str):
+        return value
+    if isinstance(current, list) and (len(current) == 1 or value == STORED_SECRET):
+        return [value]
+    return STORED_SECRET
+
+
+def _assign(cur, parts: tuple[str, ...], i: int, value) -> None:
+    """Set `value` at every way the record writes the path (nested keys, literal dotted keys or a mix); a path the
+    record does not write, or writes as a placeholder, is left as it is."""
+    if not isinstance(cur, dict):
+        return
+    for j in range(i + 1, len(parts) + 1):
+        key = parts[i] if j == i + 1 else ".".join(parts[i:j])
+        if key not in cur:
+            continue
+        if j == len(parts):
+            if _present(cur[key]):
+                cur[key] = _shaped(cur[key], value)
+        else:
+            _assign(cur[key], parts, j, value)
+
+
+def _generic(value):
+    """(value, changed): every field named password (any depth, nested or literal dotted) masked, and the userinfo of
+    every URI in any text removed; copy on write, so an untouched value is returned as the same object."""
+    if isinstance(value, str):
+        if "://" in value and "@" in value:
+            text, removed, _password = strip_uri_userinfo(value)
+            if removed:
+                return text, True
+        return value, False
+    if isinstance(value, dict):
+        out = None
+        for key, item in value.items():
+            if isinstance(key, str) and _SECRET_KEY.search(key) and _present(item) \
+                    and item not in (STORED_SECRET, [STORED_SECRET]):
+                new, changed = _shaped(item, STORED_SECRET), True
+            else:
+                new, changed = _generic(item)
+            if changed:
+                if out is None:
+                    out = dict(value)
+                out[key] = new
+        return (value, False) if out is None else (out, True)
+    if isinstance(value, list):
+        out = None
+        for index, item in enumerate(value):
+            new, changed = _generic(item)
+            if changed:
+                if out is None:
+                    out = list(value)
+                out[index] = new
+        return (value, False) if out is None else (out, True)
+    return value, False
+
+
+def _copy(value):
+    """A deep copy of a record's JSON values (dicts and lists; every leaf is immutable)."""
+    if isinstance(value, dict):
+        return {key: _copy(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_copy(item) for item in value]
+    return value
+
+
+def _with(src: dict, plan: dict[str, object]) -> dict:
+    """The record with each path of the plan set (on a copy); the same object when the plan is empty."""
+    if not plan:
+        return src
+    out = _copy(src)
+    for path, value in plan.items():
+        _assign(out, _parts(path), 0, value)
+    return src if out == src else out
+
+
+def _scrub_line(text: str, record: ZeekRecord) -> str:
+    """A kept Zeek line, scrubbed as plain Zeek JSON of the record's log (unchanged text when nothing was found)."""
+    try:
+        parsed = json.loads(text)
+    except (ValueError, RecursionError):
+        return ORIGINAL_WITHHELD
+    if not isinstance(parsed, dict):
+        return ORIGINAL_WITHHELD
+    log = record.log
+    plain = (ZeekRecord(PLAIN, (log.name,), "_path", log, "#declared", "") if log is not None
+             else ZeekRecord(PLAIN, record.names, "_path", None, "#declared", ""))
+    scrubbed = _scrub_record(parsed, plain, depth=1)
+    return text if scrubbed == parsed else json.dumps(scrubbed, ensure_ascii=False, separators=(",", ":"))
+
+
+def _scrub_lines(src: dict, record: ZeekRecord, *, quick: bool) -> dict:
+    """The record with its kept Zeek lines scrubbed. `quick`: the log has no credential column, so a line is read only
+    when it holds the word password or a URI with userinfo."""
+    out = src
+    for path in ORIGINAL_LINES:
+        text = dotted(out, path)
+        if not isinstance(text, str) or not _present(text):
+            continue
+        if quick and "password" not in text.lower() and not ("://" in text and "@" in text):
+            continue
+        line = _scrub_line(text, record)
+        if line != text:
+            if out is src:
+                out = _copy(src)
+            _assign(out, _parts(path), 0, line)
+    return out
+
+
+def _stored(src: dict, record: ZeekRecord, f: dict[str, FieldValue], guard: _Guard, depth: int) -> dict:
+    """A credential-bearing log's record as stored: what the typed path withheld masked, what it redacted stored as
+    typed, then the generic rules and the kept lines."""
+    plan: dict[str, object] = dict.fromkeys(guard.masked, STORED_SECRET)
+    for value in f.values():
+        if isinstance(value.value, str) and any(tag in value.origin for tag in _REWRITTEN):
+            raw = _raw_path_of(_path(value))
+            if raw is not None:
+                plan.setdefault(raw, value.value)
+    out, _changed = _generic(_with(src, plan))
+    return _scrub_lines(out, record, quick=False) if depth == 0 else out
+
+
+def _scrub_plain_log(src: dict, record: ZeekRecord, depth: int) -> dict:
+    """A record of a log with no credential column (or of a log outside the catalog): the generic rules and the kept
+    lines."""
+    out, _changed = _generic(src)
+    return _scrub_lines(out, record, quick=True) if depth == 0 else out
+
+
+def _conn_stored(src: dict, log: ZeekLog, shape: str) -> dict:
+    """A conn record as stored: the password values `_credentials_present` looks for masked (conn writes no other
+    credential, and its kept line holds none)."""
+    paths = list(_MALCOLM_PASSWORDS) if shape == MALCOLM else []
+    log_object = log.log_objects.get(shape)
+    if log_object is not None:
+        paths.append(f"{log_object}.password" if log_object else "password")
+    return _with(src, {path: STORED_SECRET for path in paths if _present(dotted(src, path))})
+
+
+def _credential_fields(log: ZeekLog) -> tuple[str, ...]:
+    """Typed fields of a log that can hold a credential: a credential command's arguments and the server's echo of
+    them, URI, SIP URI and host fields, an LDAP bind's argument and search filter, a Redis reply."""
+    rule = _COMMAND_ARGUMENTS.get(log.name)
+    names = [*(rule.arguments + rule.echoes if rule else ()), *_URI_FIELDS.get(log.name, ()),
+             *_SIP_FIELDS.get(log.name, ()), *_HOST_FIELDS.get(log.name, ())]
+    if log.name == "ldap":
+        names.append("ldap.arguments")
+    if log.name == "ldap_search":
+        names.append("ldap.filter")
+    if log.name == "redis":
+        names.append("app.reply")
+    typed = {item.typed for item in log.fields}
+    return tuple(dict.fromkeys(name for name in names if name in typed))
+
+
+@lru_cache(maxsize=1)
+def _credential_logs() -> frozenset[str]:
+    """The logs whose records can carry a credential beyond a field named password: their typed path decides."""
+    return frozenset(log.name for log in ZEEK_LOGS if log is not CONN and (
+        _credential_fields(log) or any(log.secrets.values())))
+
+
+def _credential_paths(log: ZeekLog, shape: str) -> list[str]:
+    """Every path of the record's own fields that can hold a credential, in one shape (fail closed)."""
+    paths = _secret_paths(log, shape)
+    for typed in _credential_fields(log):
+        for path in log.spec(typed).paths.get(shape, ()):
+            if not path.startswith("original:"):
+                paths.append(path[:-3] if path.endswith((":ns", ":ms")) else path)
+    return paths
+
+
+def _fail_closed(src: dict, logs: list[ZeekLog], shapes: tuple[str, ...], record: ZeekRecord, depth: int) -> dict:
+    """A record whose credentials cannot be decided (its typed path could not read it, its shipper cannot be told, or
+    its log is not declared): every field of its candidate logs that can hold one is masked."""
+    plan = {path: STORED_SECRET for log in logs for shape in shapes if shape in log.names
+            for path in _credential_paths(log, shape)}
+    out, _changed = _generic(_with(src, plan))
+    return _scrub_lines(out, record, quick=False) if depth == 0 else out
+
+
+def _scrub_record(src: dict, record: ZeekRecord, depth: int = 0) -> dict:
+    log = record.log
+    if log is CONN:
+        return _conn_stored(src, log, record.shape)
+    if log is not None and record.shape != AMBIGUOUS:
+        if log.name not in _credential_logs():
+            return _scrub_plain_log(src, record, depth)
+        try:
+            return _analyze({"_index": "", "_id": "", "_source": src}, record, None, depth=depth, scrubbing=True)[1]
+        except (ValueError, KeyError, TypeError, AttributeError, OverflowError, RecursionError):
+            return _fail_closed(src, [log], (record.shape,), record, depth)
+    # a log outside the catalog, a record whose shipper cannot be told, or plain JSON naming no log: every catalogued
+    # log its names can denote, in every shape, else every log
+    logs = list(dict.fromkeys(found for name in record.names for shape in SHAPE_NAMES
+                              if (found := lookup_log(shape, name)) is not None and found is not CONN))
+    if record.names and not logs:
+        return _scrub_plain_log(src, record, depth)      # a log outside the catalog: no typed path reads it
+    return _fail_closed(src, logs or [log for log in ZEEK_LOGS if log is not CONN], tuple(SHAPE_NAMES), record,
+                        depth)
+
+
+def scrub_zeek_source(src: dict) -> dict:
+    """A record's `_source` as it may be stored: a Zeek record (any shipper shape, or plain Zeek JSON, recognized by
+    its `_path` or literal `id.orig_h` key) with every credential masked; any other record as it is (the same
+    object)."""
+    if not isinstance(src, dict):
+        return src
+    record = zeek_record(src)
+    if record is None:
+        if not any(key in src for key in _PLAIN_MARKERS):
+            return src
+        try:
+            record = plain_record(src)
+        except ValueError:
+            record = ZeekRecord(PLAIN, (), "_path", None, "#declared", "")
+    return _scrub_record(src, record)
