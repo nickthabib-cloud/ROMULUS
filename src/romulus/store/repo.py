@@ -33,6 +33,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.sqlite import insert
 
+from romulus.evidence.raw_scrub import clean_event, clean_source
 from romulus.store import schema as t
 from romulus.store.db import maintenance_lease, read_snapshot, utcnow, write_txn
 
@@ -1223,8 +1224,10 @@ class Repo:
                       *, owner_token: str | None = None):
         """Persist typed events plus retained raw copies for every record they cite. A row already stored is never
         written again (the first written wins), so a re-save serializes only what is new: the events and raw copies
-        no hunt stored yet, and this hunt's entity rows for events it does not own."""
-        events = list(events)
+        no hunt stored yet, and this hunt's entity rows for events it does not own. Raw copies are stored as
+        raw_scrub.clean_source makes them (credentials masked, lone surrogates replaced), and an event holding a lone
+        surrogate is stored with it replaced, so one record never ends the write."""
+        events = [clean_event(event) for event in events]
         with write_txn(self.engine) as c:
             self._fence_lease(c, hunt_id, owner_token)
             if owner_token is None:
@@ -1406,7 +1409,7 @@ class Repo:
                 t.raw_record.c.id.in_(ids[start:start + 500]))).scalars())
         now = utcnow()
         return [{"id": rid, "target": raw.target, "native_id": raw.native_id, "digest": raw.digest,
-                 "source": raw_sources[raw.key], "first_task_id": task_id, "retrieved_at": now}
+                 "source": clean_source(raw_sources[raw.key]), "first_task_id": task_id, "retrieved_at": now}
                 for rid, raw in wanted.items() if rid not in stored]
 
     @staticmethod

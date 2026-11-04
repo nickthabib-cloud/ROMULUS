@@ -332,6 +332,15 @@ class Sweep:
                     pb.note_limit("stage", f"the event stage could not take this partition's citations "
                                            f"({self.budget.broken}); findings that cite them are not computed")
             return
+        except (ValueError, UnicodeError) as exc:
+            # a citation the stage cannot serialize (the stage replaces lone surrogates, so this is a last resort):
+            # the rules that cite this partition's records say so, and the sweep goes on
+            log.warning("event stage could not serialize a partition's citations: %s", exc.__class__.__name__)
+            for pb in self.pack:
+                if pb.staged:
+                    pb.note_limit("stage", f"the event stage could not serialize this partition's citations "
+                                           f"({exc.__class__.__name__}); findings that cite them are not computed")
+            return
         self._charge_stage(stage)
         stage.owners = {}
 
