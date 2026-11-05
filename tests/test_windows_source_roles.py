@@ -255,6 +255,7 @@ def test_manifest_records_profile_role_and_os_family():
     assert manifest["source_profiles"]["mixed"] == {
         "id": "profile-1", "backend_version": "8.0", "doc_count": 4,
         "datasets": {"windows.security": 4}, "role": "host", "os_family": "windows",
+        "datasets_complete": True,
     }
 
 
