@@ -223,7 +223,7 @@ def test_raw_search_limits_source_and_every_transport_envelope():
     assert "@timestamp" in client.field_caps("idx")["fields"]
     query = compile_es(SearchIntent(kind="raw", target="idx", window=W), C)
     assert list(client.iterate(query, max_records=10)) == [([], {
-        "problems": [], "total": 0, "total_relation": "eq",
+        "problems": [], "total": 0, "total_relation": "eq", "surrogate_free": True,
     })]
 
     by_path = {(request.method, request.url.path): request for request in requests}
