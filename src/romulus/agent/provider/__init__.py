@@ -82,6 +82,9 @@ class AgentReadiness:
             out["options"] = {"effort": s.agent_effort, "max_output_tokens": s.agent_max_output_tokens,
                               "thinking_tokens": s.agent_thinking_tokens,
                               "refusal_fallback": s.agent_refusal_fallback}
+        elif self.provider == "openai_responses":
+            out["options"] = {"effort": s.agent_effort, "max_output_tokens": s.agent_max_output_tokens,
+                              "thinking_tokens": s.agent_thinking_tokens}
         return out
 
 
@@ -134,7 +137,7 @@ def agent_readiness(s: Settings, resolver: Resolver = system_resolver) -> AgentR
         return AgentReadiness("blocked", str(exc), provider, model)
     if not decision.allowed:
         return AgentReadiness("blocked", decision.refusal, provider, model, decision)
-    if decision.egress == "remote" and provider == "openai_compatible" and not s.agent_api_key.get_secret_value():
+    if decision.egress == "remote" and provider in ("openai_compatible", "openai_responses")             and not s.agent_api_key.get_secret_value():
         return AgentReadiness("not_configured", "AGENT_API_KEY is empty (a remote endpoint needs a key)",
                               provider, model, decision)
     if provider == "anthropic" and not s.agent_api_key.get_secret_value():
@@ -153,7 +156,8 @@ def build_provider(s: Settings, *, transport=None, resolver: Resolver = system_r
                    sleep: Callable[[float], None] | None = None,
                    readiness: AgentReadiness | None = None) -> ChatProvider:
     """The ready adapter. `transport` replaces the HTTP transport (tests): an httpx transport for the
-    openai_compatible and ollama adapters, an httpx2 transport (the SDK's HTTP library) for anthropic."""
+    openai_compatible, openai_responses and ollama adapters, an httpx2 transport (the SDK's HTTP library) for
+    anthropic."""
     readiness = readiness or agent_readiness(s, resolver)
     if not readiness.ready:
         raise AgentNotReady(readiness.message())
@@ -168,6 +172,8 @@ def build_provider(s: Settings, *, transport=None, resolver: Resolver = system_r
             raise AgentNotReady(f"agent not configured: {ANTHROPIC_EXTRA_HINT}") from None
     if s.agent_provider == "ollama":
         from romulus.agent.provider.ollama import OllamaProvider as cls
+    elif s.agent_provider == "openai_responses":
+        from romulus.agent.provider.openai_responses import OpenAIResponsesProvider as cls
     else:
         from romulus.agent.provider.openai_compatible import OpenAICompatibleProvider as cls
     return cls(s, readiness.decision, **kwargs)

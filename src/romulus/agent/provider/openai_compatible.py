@@ -93,28 +93,35 @@ class OpenAICompatibleProvider(ChatProvider):
         )
 
     def probe(self) -> list[tuple[str, str, str]]:
-        out: list[tuple[str, str, str]] = []
+        out, reachable = probe_models(self)
+        return out + probe_calls(self) if reachable else out
+
+
+def probe_models(provider: ChatProvider) -> tuple[list[tuple[str, str, str]], bool]:
+    """Doctor checks of the OpenAI-style models list: reachability and whether the model is listed. The flag is
+    False when the endpoint cannot be reached or rejects the key, so no call is worth trying."""
+    out: list[tuple[str, str, str]] = []
+    host = provider.decision.host
+    try:
+        response = provider.http.get("/models")
+    except httpx.HTTPError as exc:
+        return [("agent.reachable", "fail", f"{host}: {exc.__class__.__name__}")], False
+    if response.status_code in (401, 403):
+        return [("agent.reachable", "fail", f"{host} rejected the key (HTTP {response.status_code})")], False
+    if response.status_code == 200:
         try:
-            response = self.http.get("/models")
-        except httpx.HTTPError as exc:
-            return [("agent.reachable", "fail", f"{self.decision.host}: {exc.__class__.__name__}")]
-        if response.status_code in (401, 403):
-            return [("agent.reachable", "fail", f"{self.decision.host} rejected the key (HTTP {response.status_code})")]
-        if response.status_code == 200:
-            try:
-                ids = sorted(str(m.get("id")) for m in response.json().get("data", []))
-            except (ValueError, AttributeError, TypeError):
-                ids = []
-            out.append(("agent.reachable", "ok", f"{self.decision.host} lists {len(ids)} model(s)"))
-            if ids and self.model not in ids:
-                out.append(("agent.model", "fail", f"{self.model} is not among the models the server lists"))
-            elif ids:
-                out.append(("agent.model", "ok", f"{self.model} is listed"))
-        else:
-            out.append(("agent.reachable", "warn", (f"{self.decision.host} does not list models "
-                                                   f"(HTTP {response.status_code}); checking by a call")))
-        out += probe_calls(self)
-        return out
+            ids = sorted(str(m.get("id")) for m in response.json().get("data", []))
+        except (ValueError, AttributeError, TypeError):
+            ids = []
+        out.append(("agent.reachable", "ok", f"{host} lists {len(ids)} model(s)"))
+        if ids and provider.model not in ids:
+            out.append(("agent.model", "fail", f"{provider.model} is not among the models the server lists"))
+        elif ids:
+            out.append(("agent.model", "ok", f"{provider.model} is listed"))
+    else:
+        out.append(("agent.reachable", "warn", (f"{host} does not list models "
+                                               f"(HTTP {response.status_code}); checking by a call")))
+    return out, True
 
 
 def probe_calls(provider: ChatProvider) -> list[tuple[str, str, str]]:
@@ -133,10 +140,10 @@ def probe_calls(provider: ChatProvider) -> list[tuple[str, str, str]]:
     good_tool = tool.ok and any(c.name == PROBE_TOOL.name and (c.arguments or {}).get("ok") is True
                                 for c in tool.tool_calls)
     out.append(("agent.tool_calls", "ok" if good_tool else "fail",
-                "tool calling works" if good_tool else f"no valid tool call: {tool.status} {tool.error}"[:300]))
+                "tool calling works" if good_tool else f"no valid tool call: {tool.status} {tool.error}"))
     good_schema = schema.ok and (schema.parsed or {}).get("ok") is True
     out.append(("agent.json_schema", "ok" if good_schema else "fail",
-                "JSON-schema output works" if good_schema else f"{schema.status} {schema.error}"[:300]))
+                "JSON-schema output works" if good_schema else f"{schema.status} {schema.error}"))
     out += usage_checks(provider.model, (tool, schema))
     return out
 

@@ -116,17 +116,18 @@ class Settings(BaseModel):
     # deterministic search is the default; the model is opt-in per hunt
     agent_mode: Literal["model", "deterministic", "off"] = "off"
 
-    # AI investigating agent: any OpenAI-compatible endpoint, Ollama's native API, or the Claude Messages API
-    # (anthropic, which needs the optional romulus[anthropic] install). Unset means not configured.
-    agent_provider: Literal["openai_compatible", "ollama", "anthropic"] = "openai_compatible"
+    # AI investigating agent: any OpenAI-compatible endpoint, Ollama's native API, the OpenAI Responses API
+    # (openai_responses), or the Claude Messages API (anthropic, which needs the optional romulus[anthropic]
+    # install). Unset means not configured.
+    agent_provider: Literal["openai_compatible", "ollama", "openai_responses", "anthropic"] = "openai_compatible"
     agent_base_url: str = ""
     agent_api_key: SecretStr = SecretStr("")
     agent_model: str = ""
     agent_default: Literal["on", "off"] = "on"
     agent_context_tokens: int = Field(default=0, ge=0, le=10_000_000)    # 0: the server enforces its own limit
     agent_max_output_tokens: int = Field(default=4096, ge=64, le=200_000)
-    # anthropic only: models that think before answering spend part of each call's output allowance on thinking,
-    # so this room is added to AGENT_MAX_OUTPUT_TOKENS; effort sets how much the model thinks
+    # anthropic and openai_responses: models that think before answering spend part of each call's output allowance
+    # on thinking, so this room is added to AGENT_MAX_OUTPUT_TOKENS; effort sets how much the model thinks
     agent_thinking_tokens: int = Field(default=60_000, ge=1024, le=1_000_000)
     agent_effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
     # anthropic only: let the API answer a request its safety classifier declined with the fallback model it

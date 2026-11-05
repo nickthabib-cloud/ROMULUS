@@ -819,6 +819,7 @@ def test_the_port_and_the_other_adapters_never_import_the_anthropic_sdk():
         "import romulus.agent.provider as port, romulus.doctor\n"
         "from romulus.agent.provider.openai_compatible import OpenAICompatibleProvider\n"
         "from romulus.agent.provider.ollama import OllamaProvider\n"
+        "from romulus.agent.provider.openai_responses import OpenAIResponsesProvider\n"
         "from romulus.config import Settings\n"
         "ok = lambda r: httpx.Response(200, json={'model': 'm', 'choices': [{'message': {'content': 'hi'}, "
         "'finish_reason': 'stop'}]})\n"

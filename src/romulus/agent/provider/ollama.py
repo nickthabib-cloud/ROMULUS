@@ -125,5 +125,5 @@ class OllamaProvider(ChatProvider):
         good = tool.ok and any(c.name == PROBE_TOOL.name and (c.arguments or {}).get("ok") is True
                                for c in tool.tool_calls)
         out.append(("agent.tool_calls", "ok" if good else "fail",
-                    "tool calling works" if good else f"no valid tool call: {tool.status} {tool.error}"[:300]))
+                    "tool calling works" if good else f"no valid tool call: {tool.status} {tool.error}"))
         return out + usage_checks(self.model, (tool,))
