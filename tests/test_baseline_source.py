@@ -38,7 +38,7 @@ def test_adapter_reuses_partition_planner_execute_and_normalizer(monkeypatch):
         return outcome
 
     monkeypatch.setattr(module, "execute", one_page)
-    monkeypatch.setattr(module, "normalize_hits", lambda records, boots: (["event"], {}, []))
+    monkeypatch.setattr(module, "normalize_hits", lambda records, boots, **_kwargs: (["event"], {}, []))
     fetched = source.fetch(parts[0])
     assert fetched.completeness == "complete"
     assert fetched.events == ("event",) and fetched.record_count == 2 and fetched.query_count == 1
@@ -104,7 +104,7 @@ def test_adapter_turns_normalization_errors_and_unsupported_records_partial(monk
     monkeypatch.setattr(module, "execute", lambda client, intent, contract, **_kwargs: outcome)
     monkeypatch.setattr(
         module, "normalize_hits",
-        lambda records, boots: ([], {"dataset:unknown is not normalized": 1}, [("1", "bad")]),
+        lambda records, boots, **_kwargs: ([], {"dataset:unknown is not normalized": 1}, [("1", "bad")]),
     )
     fetched = source.fetch(partition)
     assert fetched.completeness == "partial"
@@ -125,7 +125,7 @@ def test_boot_conflict_in_an_hour_makes_the_hour_partial_and_the_map_is_per_hour
     monkeypatch.setattr(module, "execute", lambda *_args, **_kwargs: _complete_outcome())
     maps = []
 
-    def normalize(records, boots):
+    def normalize(records, boots, **_kwargs):
         maps.append(boots)
         if len(maps) == 1:
             # A later record of the same hour refused a placement made from an earlier one.
@@ -204,7 +204,7 @@ def test_fetch_refs_uses_exact_native_ids_and_returns_raw_copies(monkeypatch):
 
     client = Client()
     event = SimpleNamespace(id="event", raw=[])
-    monkeypatch.setattr(module, "normalize_hits", lambda records, boots: ([event], {}, []))
+    monkeypatch.setattr(module, "normalize_hits", lambda records, boots, **_kwargs: ([event], {}, []))
     source = HuntHistorySource(client, {
         "host-index": FieldContract(target="host-index", fields={}, role="host"),
     })

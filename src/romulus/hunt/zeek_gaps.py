@@ -66,7 +66,7 @@ def enrich(sweep,match,raw):
             remaining-=out.returned
             if out.completeness!=Completeness.complete:
                 _note(match,'content-gap witness retrieval incomplete: '+'; '.join(out.reasons))
-            events,_,errors=normalize_hits(out.records,contract=sweep.contracts[target])
+            events,_,errors=normalize_hits(out.records,contract=sweep.contracts[target],surrogate_free=getattr(out,"surrogate_free",False))
             if errors:
                 _note(match,'content-gap witness normalization incomplete')
             fetched.update((event.id,event) for event in events)

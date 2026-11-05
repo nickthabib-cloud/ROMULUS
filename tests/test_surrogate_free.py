@@ -202,7 +202,9 @@ def test_the_flag_is_never_serialized_and_defaults_to_searching():
                             completeness=Completeness.complete)
     assert outcome.surrogate_free is False
     outcome._surrogate_free = True
-    assert outcome.model_copy(update={"records": []}).surrogate_free is True
+    assert outcome.model_copy(update={"reasons": ["x"]}).surrogate_free is True
+    # records replaced (merged samples) carry no proof
+    assert outcome.model_copy(update={"records": [{"_id": "x"}]}).surrogate_free is False
     assert "surrogate" not in outcome.model_dump_json()
 
 

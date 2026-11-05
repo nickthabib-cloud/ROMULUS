@@ -113,7 +113,7 @@ def canonical(sweep,events,raw,reasons):
             remaining-=out.returned
             if out.completeness!=Completeness.complete:
                 reasons.append(('Zeek cumulative-flow lookup incomplete: '+'; '.join(out.reasons),frozenset({'net_flow'})))
-            found,_,errors=normalize_hits(out.records,contract=sweep.contracts[target])
+            found,_,errors=normalize_hits(out.records,contract=sweep.contracts[target],surrogate_free=getattr(out,"surrogate_free",False))
             copies={f"{hit['_index']}/{hit['_id']}":hit['_source'] for hit in out.records}
             if errors:
                 reasons.append(('Zeek cumulative-flow lookup normalization incomplete',frozenset({'net_flow'})))
