@@ -47,6 +47,7 @@ from romulus.hunt.publish import (
 )
 from romulus.hunt.sweep import stored_boot_intervals
 from romulus.hunt.windows_context import publish_windows_link_context
+from romulus.hunt.zeek_links import FETCH_QUERIES as ZEEK_FETCH_QUERIES
 from romulus.hunt.zeek_links import ZEEK_LINK_TYPES
 from romulus.hunt.zeek_links import event_keys as zeek_event_keys
 from romulus.sources.models import Window
@@ -123,6 +124,18 @@ PLAN_CACHE_EVENTS = 100_000
 def fallback_lookup_cap(max_source_queries: int) -> int:
     """Source queries all fallback lookups of a hunt may spend: FALLBACK_LOOKUP_SHARE of the budget, at least 1."""
     return max(1, int(max_source_queries * FALLBACK_LOOKUP_SHARE))
+
+
+def _slot_groups_after(slots) -> list[int]:
+    """For each slot, the budget groups left from it on. One anchor's Zeek variants of a link type share one query
+    budget, so they divide the remaining queries as one slot: counted apart, a many-key anchor would cut every slot's
+    cap below one physical fetch and starve the anchors after it."""
+    seen, counts = set(), [0] * len(slots)
+    for index in range(len(slots) - 1, -1, -1):
+        slot = slots[index]
+        seen.add((slot.row["id"], slot.link_type) if slot.link_type in ZEEK_LINK_TYPES else ("slot", index))
+        counts[index] = len(seen)
+    return counts
 
 
 @dataclass
@@ -963,6 +976,7 @@ class ExpansionEngine:
                 query_count = max(query_count, spent)
             made_progress = False
             known_anchor_ids = {row["id"] for row in all_rows}
+            groups_after = _slot_groups_after(slots)
             for slot_index, slot in enumerate(slots):
                 anchor_row, candidate, anchor = slot.row, slot.candidate, slot.anchor
                 link_type, window, stored = slot.link_type, slot.window, slot.stored
@@ -984,9 +998,10 @@ class ExpansionEngine:
                     continue
                 allowed_budget = root_cap if anchor_row["depth"] == 0 and not stored else self.budget
                 remaining = allowed_budget - query_count
-                # Every physical fetch is budgeted for at least two queries. Do not
-                # let that floor cross the root-anchor reserve or the global cap.
-                if not stored and remaining < 2:
+                # Every physical fetch is budgeted for at least two queries (a Zeek join, which opens its own point
+                # in time, for three). Do not let that floor cross the root-anchor reserve or the global cap.
+                floor = ZEEK_FETCH_QUERIES if link_type in ZEEK_LINK_TYPES else 2
+                if not stored and remaining < floor:
                     stop_reason = "budget"
                     reason = (RESERVED_REASON if anchor_row["depth"] == 0 and root_cap < self.budget
                               else "source query budget exhausted")
@@ -994,8 +1009,7 @@ class ExpansionEngine:
                     anchor_reasons[anchor_row["id"]].append(reason)
                     blocked_anchors.add(anchor_row["id"])
                     continue
-                remaining_slots = len(slots) - slot_index
-                query_cap = min(12, max(2, remaining // max(1, remaining_slots)))
+                query_cap = min(12, max(floor, remaining // max(1, groups_after[slot_index])))
                 self.heartbeat()
                 if link_type in ZEEK_LINK_TYPES:
                     self.fetcher.executor.zeek_deadline = (self.started + self.wall_clock_seconds, self.clock)

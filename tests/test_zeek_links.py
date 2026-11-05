@@ -302,7 +302,9 @@ def test_agreeing_renewals_without_host_witness_remain_named_unresolved(shape):
     result=fetch(pivot,normalize(shape,conn),'address_host')
     assert result.status=='partial'
     assert not any('conflicting' in reason for reason in result.reasons)
-    assert any('matches no host-telemetry host' in reason for reason in result.reasons)
+    # no host telemetry is searchable here, so the witness never ran: no absence is stated
+    assert any('not searched to completion' in reason for reason in result.reasons)
+    assert not any('matches no host-telemetry host' in reason for reason in result.reasons)
     assert {pivot.events[0].id,pivot.events[1].id}<=set(result.evidence_ids)
 
 

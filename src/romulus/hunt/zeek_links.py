@@ -11,6 +11,8 @@ ZEEK_LINK_TYPES = frozenset({'zeek_uid', 'zeek_file', 'certificate', 'address_ho
 MAX_ROWS = 10000
 MAX_KEYS = 1000
 MAX_QUERIES = 128
+# One physical fetch: open and close of its point in time, and at least one search.
+FETCH_QUERIES = 3
 
 
 def values(event, fields):
@@ -93,6 +95,11 @@ class ZeekLink:
             return []
         if remaining <= 0 or queries <= 0:
             self.unresolved(f'Zeek link shared row/query limit reached ({MAX_ROWS} rows, {self.query_cap} queries)')
+            return []
+        if queries < FETCH_QUERIES:
+            # a fetch that cannot finish would spend its queries and return nothing
+            self.unresolved(f'Zeek link query limit {queries} is below one physical fetch ({FETCH_QUERIES} '
+                            'queries); join not started')
             return []
         if intents is None:
             plan=key_intents(self.executor.contracts,logs,self.sensor,fields,keys,window,limit=remaining)
@@ -229,15 +236,22 @@ class ZeekLink:
                         intents = [intent.model_copy(update={'max_records':10,'order':'desc',
                                     'purpose':'expansion:host-witness'})
                                    for intent in self.fetcher._host_intents(witness_window, None, host)]
+                        before = len(self.batches)
                         witnesses = self.query([], (), [host], witness_window,
                             lambda event: event.family not in NETWORK_OBSERVER_FAMILIES
                             and event.host is not None and _first_label(event.host) == _first_label(name),
                             intents=intents, host=True)
+                        searched = len(self.batches) > before and all(
+                            batch.status == 'complete' for batch in self.batches[before:])
                         if not witnesses:
-                            self.unresolved(f'DHCP hostname {name} matches no host-telemetry host in scope')
+                            # an absence is stated only when the probe ran to completion
+                            self.unresolved(f'DHCP hostname {name} matches no host-telemetry host in scope' if searched
+                                            else f'host witness for DHCP hostname {name} not searched to completion; '
+                                                 'host unresolved')
                         else:
                             self.reasons.append('host telemetry existence probe: at most 10 nearest records, '
-                                'including five minutes after the anchor; full host activity is searched by host links')
+                                'including five minutes after the anchor; activity of the mapped host is not searched '
+                                'through this hypothesis link')
         else:
             self.unresolved('required Zeek join is not available')
         linked = sorted((event for event in self.events.values() if event.id not in self.anchor.event_ids),
