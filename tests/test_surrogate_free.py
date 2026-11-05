@@ -46,8 +46,12 @@ def _escape(code: str) -> bytes:
     (b'{"a": "cut ' + BACKSLASH.encode() + b'ud', False),
     # a nested layer spelling the inner backslash as an escape: the inner text parses to a lone surrogate
     (b'{"t": "' + BACKSLASH.encode() + b'"' + _escape("005c") + b'ud800' + BACKSLASH.encode() + b'""}', False),
-    (b'{"a": "' + _escape("0041") + b'"}', False),                       # escaped printable ASCII is never free
+    (b'{"a": "' + _escape("0041") + b'"}', False),                       # an escaped hex digit is never free
+    (b'{"a": "' + _escape("0075") + b'"}', False),                       # nor an escaped "u"
+    (b'{"a": "' + _escape("005C") + b'"}', False),                       # nor an escaped backslash
     (b'{"a": "' + _escape("001b") + b'"}', True),                        # a control-character escape stays free
+    (b'{"a": "a' + _escape("0026") + b'b' + _escape("003c") + b'"}', True),   # Go/.NET HTML-safe escapes stay free
+    (b'{"a": "' + _escape("0067") + b'"}', True),                        # an escaped letter outside hex digits
 ])
 def test_byte_forms_of_a_lone_surrogate(body, free):
     assert surrogate_free(body) is free

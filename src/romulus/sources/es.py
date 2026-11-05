@@ -53,9 +53,12 @@ from romulus.sources.models import CompiledQuery, Completeness, SearchOutcome
 # What the last response this thread parsed said about lone UTF-16 surrogates (see surrogate_free). Each page reads
 # it right after its own request, on the thread that made it, so a prefetch thread never sees another's.
 _response_text = threading.local()
-# A \u escape of a surrogate, of a printable ASCII character (U+0020-U+007F: how a nested layer could spell a
-# backslash, a "u" or a hex digit without showing them), or cut short at the end of the body.
-_SURROGATE_ESCAPE = re.compile(rb"\\u(?:[dD][89a-fA-F]|00[2-7]|[\s\S]{0,3}\Z)")
+# A \u escape of a surrogate, or of a character an escape is spelled with (a backslash, "u", a hex digit: how a
+# nested layer could write an inner escape without showing its letters). Escapes of other characters (Go and .NET
+# write & < > as \u0026 \u003c \u003e) leave a body free.
+_SURROGATE_ESCAPE = re.compile(rb"\\u(?:[dD][89a-fA-F]|00(?:5[cC]|75|3[0-9]|4[1-6]|6[1-6]))")
+# A \u escape cut short at the end of the body; only the tail is searched.
+_CUT_ESCAPE = re.compile(rb"\\u[\s\S]{0,3}\Z")
 # The bytes UTF-8 would give a surrogate (0xED 0xA0-0xBF), or a lead byte cut short.
 _SURROGATE_BYTES = re.compile(rb"\xed(?:[\xa0-\xbf]|\Z)")
 
@@ -66,14 +69,16 @@ def surrogate_free(content: bytes) -> bool:
 
     json.loads keeps a \\uD800-\\uDFFF escape as one and decodes UTF-8 with 'surrogatepass', so a surrogate in a
     parsed value arrives as such an escape or as the three bytes UTF-8 would give it. In text parsed again, its escape
-    must be spelled by the outer layer: either with the letters visible behind an escaped backslash (found here as
-    \\u plus the surrogate's digits) or with some of them written as escapes of printable ASCII, which a canonical
-    serializer never writes (Elasticsearch, OpenSearch and json.dumps write a backslash as \\\\ and printable ASCII as
-    itself), so any such escape makes the body not free. Induction over the nesting depth makes this hold at any depth.
-    A body that is not plain UTF-8, or whose escape or lead byte is cut short, is never free. Two C-speed scans."""
+    must be spelled by the outer layer, and its only letters are a backslash, "u" and hex digits: each reaches the
+    bytes either as itself (the backslash doubled at each layer, so \\u and the surrogate's digits show) or as an
+    escape of that letter, which a canonical serializer never writes (Elasticsearch, OpenSearch and json.dumps write a
+    backslash as \\\\ and ASCII letters and digits as themselves) and which makes the body not free. Induction over
+    the nesting depth makes this hold at any depth. A body that is not plain UTF-8, or whose escape or lead byte is
+    cut short, is never free. C-speed scans."""
     if content.startswith((b"\xef\xbb\xbf", b"\xff\xfe", b"\xfe\xff")) or b"\x00" in content[:4]:
         return False
-    return _SURROGATE_ESCAPE.search(content) is None and _SURROGATE_BYTES.search(content) is None
+    return (_SURROGATE_ESCAPE.search(content) is None and _CUT_ESCAPE.search(content[-6:]) is None
+            and _SURROGATE_BYTES.search(content) is None)
 
 
 def last_response_surrogate_free() -> bool:
