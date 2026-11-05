@@ -7,7 +7,7 @@ Coverage is based only on explicit typed rule metadata. Parent mappings do not i
 Full-search rules read fields that record every occurrence they look for; the matrix describes rule
 capability, not what any hunt searched. ROMULUS reports what it finds and never claims that nothing is there.
 
-To keep the matrix readable, 349 uncovered sub-techniques are collapsed under their parent rows.
+To keep the matrix readable, 350 uncovered sub-techniques are collapsed under their parent rows.
 Every collapsed id and name remains listed and is marked not covered.
 
 ## Strength legend
@@ -32,7 +32,7 @@ A technique is covered only by a rule that explicitly declares that ATT&CK id.
 | TA0003 | Persistence | 41 / 113 | 0 | 41 | 0 | 72 |
 | TA0004 | Privilege Escalation | 45 / 96 | 0 | 43 | 2 | 51 |
 | TA0005 | Stealth | 44 / 151 | 0 | 43 | 1 | 107 |
-| TA0006 | Credential Access | 24 / 68 | 0 | 18 | 6 | 44 |
+| TA0006 | Credential Access | 23 / 68 | 0 | 17 | 6 | 45 |
 | TA0007 | Discovery | 21 / 49 | 2 | 6 | 13 | 28 |
 | TA0008 | Lateral Movement | 10 / 23 | 0 | 9 | 1 | 13 |
 | TA0009 | Collection | 3 / 41 | 0 | 1 | 2 | 38 |
@@ -320,8 +320,7 @@ A technique is covered only by a rule that explicitly declares that ATT&CK id.
 | [`T1556`](https://attack.mitre.org/techniques/T1556/) | Modify Authentication Process | [`T1556.001`](https://attack.mitre.org/techniques/T1556/001/) Domain Controller Authentication — not covered<br>[`T1556.002`](https://attack.mitre.org/techniques/T1556/002/) Password Filter DLL — not covered<br>[`T1556.004`](https://attack.mitre.org/techniques/T1556/004/) Network Device Authentication — not covered<br>[`T1556.005`](https://attack.mitre.org/techniques/T1556/005/) Reversible Encryption — not covered<br>[`T1556.006`](https://attack.mitre.org/techniques/T1556/006/) Multi-Factor Authentication — not covered<br>[`T1556.007`](https://attack.mitre.org/techniques/T1556/007/) Hybrid Identity — not covered<br>[`T1556.008`](https://attack.mitre.org/techniques/T1556/008/) Network Provider DLL — not covered<br>[`T1556.009`](https://attack.mitre.org/techniques/T1556/009/) Conditional Access Policies — not covered<br>1 covered sub-technique(s) listed separately: [`T1556.003`](https://attack.mitre.org/techniques/T1556/003/) | none | — | — |
 | [`T1556.003`](https://attack.mitre.org/techniques/T1556/003/) | Pluggable Authentication Modules | sub-technique of [`T1556`](https://attack.mitre.org/techniques/T1556/) | positive-only | [host.persistence_path_change](#rule-host-persistence-path-change) (positive-only) | file_change<br>process_exec |
 | [`T1557`](https://attack.mitre.org/techniques/T1557/) | Adversary-in-the-Middle | [`T1557.001`](https://attack.mitre.org/techniques/T1557/001/) Name Resolution Poisoning and SMB Relay — not covered<br>[`T1557.002`](https://attack.mitre.org/techniques/T1557/002/) ARP Cache Poisoning — not covered<br>[`T1557.003`](https://attack.mitre.org/techniques/T1557/003/) DHCP Spoofing — not covered<br>[`T1557.004`](https://attack.mitre.org/techniques/T1557/004/) Evil Twin — not covered | none | — | — |
-| [`T1558`](https://attack.mitre.org/techniques/T1558/) | Steal or Forge Kerberos Tickets | [`T1558.002`](https://attack.mitre.org/techniques/T1558/002/) Silver Ticket — not covered<br>[`T1558.005`](https://attack.mitre.org/techniques/T1558/005/) Ccache Files — not covered<br>3 covered sub-technique(s) listed separately: [`T1558.001`](https://attack.mitre.org/techniques/T1558/001/), [`T1558.003`](https://attack.mitre.org/techniques/T1558/003/), [`T1558.004`](https://attack.mitre.org/techniques/T1558/004/) | positive-only | [win.kerberos_loopback_logon](#rule-win-kerberos-loopback-logon) (positive-only)<br>[win.tool_named_pipe](#rule-win-tool-named-pipe) (positive-only)<br>[win.weak_kerberos_ticket_encryption](#rule-win-weak-kerberos-ticket-encryption) (positive-only) | auth<br>pipe_event |
-| [`T1558.001`](https://attack.mitre.org/techniques/T1558/001/) | Golden Ticket | sub-technique of [`T1558`](https://attack.mitre.org/techniques/T1558/) | positive-only | [net.kerberos_long_ticket_lifetime](#rule-net-kerberos-long-ticket-lifetime) (positive-only) | kerberos_tx |
+| [`T1558`](https://attack.mitre.org/techniques/T1558/) | Steal or Forge Kerberos Tickets | [`T1558.001`](https://attack.mitre.org/techniques/T1558/001/) Golden Ticket — not covered<br>[`T1558.002`](https://attack.mitre.org/techniques/T1558/002/) Silver Ticket — not covered<br>[`T1558.005`](https://attack.mitre.org/techniques/T1558/005/) Ccache Files — not covered<br>2 covered sub-technique(s) listed separately: [`T1558.003`](https://attack.mitre.org/techniques/T1558/003/), [`T1558.004`](https://attack.mitre.org/techniques/T1558/004/) | positive-only | [win.kerberos_loopback_logon](#rule-win-kerberos-loopback-logon) (positive-only)<br>[win.tool_named_pipe](#rule-win-tool-named-pipe) (positive-only)<br>[win.weak_kerberos_ticket_encryption](#rule-win-weak-kerberos-ticket-encryption) (positive-only) | auth<br>pipe_event |
 | [`T1558.003`](https://attack.mitre.org/techniques/T1558/003/) | Kerberoasting | sub-technique of [`T1558`](https://attack.mitre.org/techniques/T1558/) | positive-only | [net.kerberos_rc4_service_fanout](#rule-net-kerberos-rc4-service-fanout) (positive-only)<br>[win.kerberos_service_fanout](#rule-win-kerberos-service-fanout) (positive-only)<br>[win.weak_kerberos_ticket_encryption](#rule-win-weak-kerberos-ticket-encryption) (positive-only) | auth<br>kerberos_tx |
 | [`T1558.004`](https://attack.mitre.org/techniques/T1558/004/) | AS-REP Roasting | sub-technique of [`T1558`](https://attack.mitre.org/techniques/T1558/) | positive-only | [win.kerberos_no_preauthentication](#rule-win-kerberos-no-preauthentication) (positive-only) | auth |
 | [`T1606`](https://attack.mitre.org/techniques/T1606/) | Forge Web Credentials | [`T1606.001`](https://attack.mitre.org/techniques/T1606/001/) Web Cookies — not covered<br>[`T1606.002`](https://attack.mitre.org/techniques/T1606/002/) SAML Tokens — not covered | none | — | — |
@@ -1102,18 +1101,6 @@ Invalid mappings are excluded from coverage:
 - Required typed fields: destination.ip<br>network.transport<br>source.ip
 - Behavior: one endpoint pair exchanged bulk ICMP echo payload, materially asymmetric request/reply payload, nonstandard echo codes, or echo traffic sustained for at least 30 minutes at one request/reply exchange per second with payload above normal operating-system defaults
 - Positive-only reason: only typed echo type/code (with code optional where the sensor does not record it) plus complete byte/packet counters are evaluated; flow telemetry does not expose payload bytes, so packet-size and volume shape cannot establish payload entropy or prove a tunnel
-
-<a id="rule-net-kerberos-long-ticket-lifetime"></a>
-### `net.kerberos_long_ticket_lifetime` — TGS requested validity extends beyond ten hours
-
-- Version: `1`; status: `active`
-- Kind: `aggregate`; lane: `lead`; severity: `medium`
-- Coverage strength: **positive-only**
-- ATT&CK: [`T1558.001`](https://attack.mitre.org/techniques/T1558/001/)
-- Telemetry families: kerberos_tx
-- Required typed fields: kerberos.request_type<br>kerberos.till
-- Behavior: TGS requested validity extends beyond ten hours
-- Positive-only reason: Zeek network observations report typed positive evidence; absence and successful action are not established.
 
 <a id="rule-net-kerberos-principal-enumeration"></a>
 ### `net.kerberos_principal_enumeration` — KDC unknown-principal errors for many distinct principals

@@ -327,9 +327,11 @@ GOLDEN_STACK = {
     "events": "0165d2807ffee33aaef17dd70ba004ec4c87fa4c5f29e9dc75ba833f57b93ff7",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "0fbedb27ca9a4cb72354178444ee9aabc49f377b2c933074fe03ef29c8fbb08a",
-    "manifest": '5aa5cf608d0a4a09737c4c70ba1e4101c20c69e72c2c9f673e1f94942ffe4770',
+    # net.kerberos_long_ticket_lifetime unregistered (the requested till marks nearly every Windows TGS): its rule
+    # cells and manifest row are gone; every candidate, raw, event and citation section is unchanged.
+    "manifest": '2e06ddcbd38a16d1ce651e001280ee074b4e7892ef33b7f1df939568ce14dfe3',
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
-    "rule_cells": 'd0e0fd1698b83b3799622f56eed0c3d155bb13031890f6e8b09bf62524de2691',
+    "rule_cells": '37ed0917bffc676505b3d450d992a594e9fee3177d1cf11c2d8fa88fe8f416ab',
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
     "tasks": "c65df4ab88c05661371cf32b49a1d22ef84d6753488bdb946c8e29376d486260",
 }
@@ -361,16 +363,16 @@ GOLDEN_NON_BASELINE_SEMANTICS = {
         "ts": "d8015c1ff0b135e082a5fef2ab1cb88206470e30beee157a0cfc7790d48b8310",
     },
     "rule_cells": {
-        "all_fields": "bd312b826560948131852d03967d73a9af53533d3d824ca8ebb5c11c6876d414",
-        "count": 15332,
-        "rule_id": "13f0e251e6986c8069dd698c7f2013b926850f90c7727b5ab341a3a7bb8adb0d",
-        "rule_version": "2a1aec934917a08a75bf7a039e3af568df6ac43046c7a01ad2ea51bb02e778c3",
-        "target": "cd116b33342ac6d52d9003532ef5a1ff14eacea7e7d7d19a9d30fbf47fd71f1d",
-        "partition": "0cf54d59277457d8a8cab4d0dcddad1d788624dffe4467f1ee0e89020ab65acf",
-        "state": "15c1787d5f9f34b8370b87e4583d9488ec3ab54c16fd49ab876bd352d6c7b5af",
-        "matched": "77b9f2f580f8caa3fccb539a28c4eb3375004196ed1429ab2538a5be8e1e3108",
-        "evaluated": "4a93085d8571f905fa2dfcae0c320308522b1d79e3403f284a4a81322089c97c",
-        "detail": "52ceac1d3294c42c6c7bf24e79140579c5a1762166b28c5533b6cedb3f603485"
+        "all_fields": "5a0c182c766b940086d0e6945ac3b035de034adb4f25bd1d62384a05db667f34",
+        "count": 15261,
+        "rule_id": "e254e06a5b70725e437cf3004200b0f61b05100d1538c13349994d1fd4568879",
+        "rule_version": "fe453f72363f49dfa9462a2f61770e31c12a9d40cf14d4222929030ef28bd126",
+        "target": "bb22fe7c7f4a31ae292ea691f4617e62106177f2a4c6f503fe9cbcd94458229b",
+        "partition": "8a08cb4a3f440cbddfa0ef9d93701943223d6c94b114f753f62c31fcae1414ba",
+        "state": "873ced555502f36931da34afd78c1e52bee897e367c838bd43ed555b375fa99d",
+        "matched": "7446d5b88ba25d65ddea52c6ba99a650a243bb6ab552768b498d99028a557e0e",
+        "evaluated": "235aa831dadae5d0dd50e260c1fc6ef7e84b7a824b0c4f72d0b6ddb4a9a7f6e6",
+        "detail": "e6aacdd939e4391858b7e000f33886e8292d91ae772d7ba9e7fecfab09bf22e1"
 },
 }
 GOLDEN_NORMALIZED = {

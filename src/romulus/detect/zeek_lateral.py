@@ -6,8 +6,8 @@ from ipaddress import ip_address
 from urllib.parse import urlsplit
 
 from romulus.detect.base import Match
-from romulus.detect.netdef import SiteNetworks, current
-from romulus.detect.site_roles import address_member, declared_source
+from romulus.detect.netdef import DIRECTION_ASSUMED_REASON, SiteNetworks, current
+from romulus.detect.site_roles import address_member
 from romulus.detect.windows_events import WindowsEventRule, signal
 from romulus.detect.windows_rpc import RpcRemoteAdminCall as WindowsRpcRemoteAdminCall
 from romulus.evidence.rpc_catalog import lookup_call, lookup_zeek
@@ -151,7 +151,7 @@ class RpcRemoteAdminCall(ZeekBehaviorRule):
         lane = 'high' if call.op_class in self._HIGH else 'lead'
         management = getattr(getattr(self, 'site_facts', None), 'management_hosts', ())
         notes = ()
-        if call.op_class.startswith('service_') and declared_source(event, management, management):
+        if call.op_class.startswith('service_') and address_member(event.get('source.ip'), management):
             notes = ('declared management source; authorized administration can produce this call',)
         text = f'RPC {call.op_class} call observed from {peers[0]} to {peers[1]} on interface {call.interface.uuid}'
         return [signal(event, self.id, text, call.attack, _RPC_FIELDS, lane=lane,
@@ -175,8 +175,7 @@ class WireReplicationCall(ZeekBehaviorRule):
         site = getattr(self, 'site_facts', None)
         controllers = getattr(site, 'domain_controller_addresses', ())
         source_dc, server_dc = (address_member(peer, controllers) for peer in peers)
-        if declared_source(event, getattr(site, 'directory_sync_hosts', ()),
-                           getattr(site, 'directory_sync_addresses', ())):
+        if address_member(event.get('source.ip'), getattr(site, 'directory_sync_addresses', ())):
             lane, notes = 'lead', ('declared directory-sync host; a compromised sync server is a DCSync path',)
         elif not controllers:
             lane, notes = 'lead', ('domain controller addresses not declared',)
@@ -186,6 +185,9 @@ class WireReplicationCall(ZeekBehaviorRule):
             lane, notes = 'lead', ('declared domain-controller source; destination is not a declared domain controller',)
         else:
             lane, notes = 'high', ()
+            if getattr(site, 'directory_sync_hosts', ()) and not getattr(site, 'directory_sync_addresses', ()):
+                notes = (('directory-sync hosts are declared by name only, which a network record cannot match: '
+                          'if this source is one, declare its address'),)
         text = f'Directory replication RPC call observed from {peers[0]} to {peers[1]} on interface {call.interface.uuid}'
         return [signal(event, self.id, text, call.attack, _RPC_FIELDS, lane=lane,
             severity='high' if lane == 'high' else 'medium', notes=notes, common=text,
@@ -206,14 +208,19 @@ class _RemoteSession(ZeekBehaviorRule):
         site = getattr(self, 'site_facts', None)
         internal = getattr(site, 'internal_networks', ())
         networks = _site_networks(tuple(internal), tuple(getattr(site, 'external_networks', ()))) if internal else current()
-        if not networks.configured:
-            lane, notes = 'lead', ('internal networks not declared; source direction is unresolved',)
-        elif networks.is_internal(ip_address(peers[0])):
+        source = ip_address(peers[0])
+        if not any(network.version == source.version for network in networks.internal):
+            # e.g. IPv4-only ranges on a dual-stack site: an IPv6 source cannot be placed inside or outside
+            lane, notes = 'lead', (
+                f'internal networks name no IPv{source.version} range; source direction is unresolved',)
+        elif networks.is_internal(source):
             lane, notes = self.inside_lane, ()
         else:
             lane, notes = 'high', ()
         if lane is None:
             return []
+        if not networks.configured:
+            notes = (*notes, DIRECTION_ASSUMED_REASON)
         text = f'{self.protocol.upper()} session negotiation observed from {peers[0]} to {peers[1]}'
         return [signal(event, self.id, text, self.attack,
             ('source.ip', 'destination.ip', 'destination.port', 'remote.protocol'), lane=lane,
@@ -283,4 +290,6 @@ class TgsLongLifetime(ZeekBehaviorRule):
             common=text, content=json.dumps([event.get('source.ip'),event.get('destination.ip'),event.get('kerberos.client')]))]
 
 
-RULES = (RpcRemoteAdminCall, WireReplicationCall, RdpRemoteSession, VncRemoteSession, HttpWinrm, TgsLongLifetime)
+# TgsLongLifetime is not registered: Windows clients request till 2037-09-13 (no expiry) on ordinary TGS requests,
+# so the requested validity marks nearly every ticket; it needs the granted lifetime, which Zeek does not log.
+RULES = (RpcRemoteAdminCall, WireReplicationCall, RdpRemoteSession, VncRemoteSession, HttpWinrm)

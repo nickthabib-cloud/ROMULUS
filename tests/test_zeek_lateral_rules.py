@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from romulus.detect.netdef import DIRECTION_ASSUMED_REASON
 from romulus.evidence.typed import RawRef, fv
 from tests.fixtures import zeek_logs as zl
 from tests.test_zeek_windows_protocols import every_shape
@@ -65,8 +66,10 @@ def test_management_sensor_name_is_never_the_rpc_client_identity():
     check_shapes('RpcRemoteAdminCall',zl.DCE_RPC,'lead',facts(management_hosts=(zl.SENSOR,)))
     event=next(iter(every_shape(zl.DCE_RPC).values()))
     assert not rule('RpcRemoteAdminCall',facts(management_hosts=(zl.SENSOR,))).judge(event)[0].notes
+    # a network record establishes a declared role by address only: a name there could be client-asserted
     event=event.model_copy(update={'fields':{**event.fields,'source.hostname':fv('SCCM.EXAMPLE.TEST.','test')}})
-    assert rule('RpcRemoteAdminCall',facts(management_hosts=('sccm',))).judge(event)[0].notes
+    assert not rule('RpcRemoteAdminCall',facts(management_hosts=('sccm',))).judge(event)[0].notes
+    assert rule('RpcRemoteAdminCall',facts(management_hosts=(zl.CLIENT,))).judge(event)[0].notes
 
 
 @pytest.mark.parametrize('operation,attack', [('DRSGetNCChanges',('T1003.006',)),('DRSReplicaAdd',('T1207',))])
@@ -99,7 +102,15 @@ def test_remote_sessions_respect_explicit_site_ranges_and_carveouts(name,row,ins
     check_shapes(name,row,'high',facts(internal_networks=('192.0.2.0/24',)))
     check_shapes(name,row,inside,facts(internal_networks=('10.0.0.0/8',)))
     check_shapes(name,row,'high',facts(internal_networks=('10.0.0.0/8',),external_networks=(zl.CLIENT+'/32',)))
-    check_shapes(name,row,'lead',note='internal networks not declared; source direction is unresolved')
+    # undeclared: the default definition decides, with the assumed-direction note
+    check_shapes(name,row,inside,note=DIRECTION_ASSUMED_REASON)
+
+
+@pytest.mark.parametrize('name,row', [('RdpRemoteSession',zl.RDP),('VncRemoteSession',zl.RFB)])
+def test_a_source_family_the_site_names_no_range_of_is_never_outside(name,row):
+    v6=row.with_(**{'id.orig_h':'fd00:10::5','id.resp_h':'fd00:10::20'})
+    check_shapes(name,v6,'lead',facts(internal_networks=('10.0.0.0/8',)),
+                 note='internal networks name no IPv6 range; source direction is unresolved')
 
 
 @pytest.mark.parametrize('name,row', [('RdpRemoteSession',zl.RFB),('VncRemoteSession',zl.RDP)])
@@ -190,8 +201,12 @@ def test_declared_sync_hostname_is_a_source_role_not_observer_role():
     event=next(iter(every_shape(zl.DCE_RPC.with_(endpoint='drsuapi',operation='DRSGetNCChanges')).values()))
     owner=rule('WireReplicationCall',facts(domain_controller_addresses=(zl.DC,),directory_sync_hosts=(zl.SENSOR,)))
     assert owner.judge(event)[0].lane=='high'
+    # a typed source name never lowers DCSync: only a declared address does, and a name-only declaration is named
     event=event.model_copy(update={'fields':{**event.fields,'source.hostname':fv('SYNC01.example.test','source')}})
     owner.site_facts=facts(domain_controller_addresses=(zl.DC,),directory_sync_hosts=('sync01',))
+    [hit]=owner.judge(event)
+    assert hit.lane=='high' and any('declared by name only' in note for note in hit.notes)
+    owner.site_facts=facts(domain_controller_addresses=(zl.DC,),directory_sync_addresses=(zl.CLIENT,))
     assert owner.judge(event)[0].lane=='lead'
 
 
