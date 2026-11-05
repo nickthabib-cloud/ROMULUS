@@ -304,6 +304,10 @@ from tests import throughput_fixture as tf
 # Three Windows RPC rules add only their zero-evaluation coverage cells and manifest rows here.
 # Removing those rules and incidental coverage row ids reproduces the complete prior snapshot;
 # every finding, citation, raw record, event, link and other table digest is unchanged.
+# Coverage includes 36 additional Windows/Zeek rules with zero evaluated/matched records here.
+# Removing their 2,556 cells and 36 manifest coverage rows, restoring seven registered rule versions,
+# and restoring incidental coverage row IDs reconstructs the complete prior snapshot exactly.
+# Findings, evidence, links, requests and all 21 non-coverage section digests remain unchanged.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
     "audit": "23d9b87c75d030df8ff5bcbf07deacc75416c325dd74bcc89243cc1b5488ae93",
@@ -323,9 +327,15 @@ GOLDEN_STACK = {
     "events": "0165d2807ffee33aaef17dd70ba004ec4c87fa4c5f29e9dc75ba833f57b93ff7",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "0fbedb27ca9a4cb72354178444ee9aabc49f377b2c933074fe03ef29c8fbb08a",
-    "manifest": 'e491da1aa7514c60c155880f87211d6651e4690791b204995f4e42dc6261fa31',
+    # The five Zeek rate rules are unregistered until round 3 (355 rule cells and five manifest rows), and
+    # net.kerberos_long_ticket_lifetime unregistered (the requested till marks nearly every Windows TGS): its rule
+    # cells and manifest row are gone; every candidate, raw, event and citation section is unchanged.
+    "manifest": 'aa0f72d7f6080f0e739348c5c84234645fbf0e55cd417f6ab9f7a6b9d4ac79cd',
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
-    "rule_cells": 'f1b39b52b16b44c30c37849f5f9d90f42851820724a0a810bed0c188deb6e33c',
+    # Twenty changed Windows/network contracts carry new versions in 71 coverage cells each.
+    # Restoring only those versions reproduces the complete preceding snapshot; all 35 candidates
+    # and the other 22 stack sections are byte-identical.
+    "rule_cells": '2b0d63cb7669c0f4714d410d46b1e599f031166619178c4d7ade896c78e086a5',
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
     "tasks": "c65df4ab88c05661371cf32b49a1d22ef84d6753488bdb946c8e29376d486260",
 }
@@ -357,16 +367,16 @@ GOLDEN_NON_BASELINE_SEMANTICS = {
         "ts": "d8015c1ff0b135e082a5fef2ab1cb88206470e30beee157a0cfc7790d48b8310",
     },
     "rule_cells": {
-        "all_fields": "c3a0601e46eec47fc44802f54491ea947d4030b46431bb9af8ce74d3f4a3d4e4",
-        "count": 12776,
-        "rule_id": "101efd75f2c5dcb8af5d784cd457ad5e0dff1263486b5f4dab95985ac5022d28",
-        "rule_version": "eee2ab9d71f0735cfda3f7d4c825f440aa8fa8cdcb03db9913d7b7dca1f7fb7d",
-        "target": "11bfcaf95d4447861d57f73f62a9b104f180fed1176ecdea896c505293632e36",
-        "partition": "02d6e04e8ce280a8c6e1e6f274d289dd6025dcf43fded4d4650fd09dce74f1f3",
-        "state": "6cee3bcb76f707add37f1b2f942deece080badc979ef7e706f14da256a5241fd",
-        "matched": "3b41e136bbd01bdd43a4b23c92421059a063fb06def199969a3414afe2822934",
-        "evaluated": "21d8a8ef4483c1c52c27c1b66740da3f920a1039f6aafebe00a3311665e6dded",
-        "detail": "a46007e15267740b4f50fb0f9bee0f646713970db82c5e429b6554230d6e7070"
+        "all_fields": "e47e6dc51cada7632c5bd8e62dfa66adf1c004172a40a869d7dcb476adfa61c2",
+        "count": 14906,
+        "rule_id": "09e51b215b66f0fd90626baa0091d42f0d4cd908089b3f56ffcea24b78540c8f",
+        "rule_version": "aeb008868e6298e33472b1c34975f136072e5eca7c51ffad4b703f564650549a",
+        "target": "232e61ea9eb4cda53fa8bcf3e96503a9b10a58b598d7cd77f8a4d77ca938b113",
+        "partition": "d504cd68e38f03103c3ab728533aa292295224a059b98d49069a5be89eac0956",
+        "state": "7ae41dec1ba8bf51a3b123c7fdc7d1fb92e3a2ef6a82f942ce38c287832c4fa1",
+        "matched": "d855050f44fbb74f83b0739e774b5e7237882d69bb767d011484a9eb226f837c",
+        "evaluated": "a42eab91df2a856470c79090154c2ac36bac175925fb6fc8a459b880ed36062a",
+        "detail": "aa76c663b65d18d2cc38dfdf8b1e4a351d35bcf9321a646227026917dfc73329"
 },
 }
 GOLDEN_NORMALIZED = {

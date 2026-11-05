@@ -32,6 +32,13 @@ def baseline_site(s: Settings, targets: list[str]) -> str:
     return "targets-sha256:" + hashlib.sha256(material.encode()).hexdigest()
 
 
+def inventory_usable(profile) -> bool:
+    """Whether a manifest profile's dataset inventory may stand for the index: complete, or at least naming
+    datasets. An incomplete, empty inventory names nothing, so a planner must not read it as "no datasets"."""
+    profile = profile or {}
+    return bool(profile.get("datasets_complete", True) or profile.get("datasets"))
+
+
 def build_manifest(s: Settings, window: Window, original_input: dict, style: str, targets: list[str],
                    profiles: dict[str, dict], hypothesis: str = "", budgets: dict | None = None,
                    ai_agent: dict | None = None, site_facts: SiteFacts | None = None,
@@ -48,6 +55,9 @@ def build_manifest(s: Settings, window: Window, original_input: dict, style: str
         "source_profiles": {t: {
             "id": p["id"], "backend_version": p["backend_version"], "doc_count": p["doc_count"],
             "datasets": p["datasets"], "role": p["role"], "os_family": p["os_family"],
+            # the preflight inventory names every dataset of the index (else other datasets may exist)
+            "datasets_complete": not any(str(note).startswith("ds inventory truncated")
+                                         for note in p.get("notes") or []),
         } for t, p in profiles.items()},
         "pack": {"version": PACK_VERSION, "playbooks": pack_manifest()},
         "normalizer": NORMALIZER_VERSION,

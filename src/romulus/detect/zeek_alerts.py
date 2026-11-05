@@ -23,8 +23,9 @@ from dataclasses import dataclass
 from typing import ClassVar
 
 from romulus.detect.base import Match, pf
-from romulus.detect.citing import citation_group, more
+from romulus.detect.citing import bound_note, citation_group, more
 from romulus.detect.network import _Grouped, _values
+from romulus.detect.site_roles import address_member
 from romulus.evidence.typed import TypedEvent
 
 ZEEK = "zeek"
@@ -169,7 +170,8 @@ class ZeekAlerts(_Grouped):
     """Zeek's intel and signature matches, notices judged by a sourced table of notice types, and weirds as
     context."""
     id = "net.zeek_alert"
-    version = "1"
+    version = "2"
+    uses_site_facts = True
     title = "Zeek intel match, signature match or notice"
     families = ("net_alert",)
     required_fields = ()
@@ -240,6 +242,7 @@ class ZeekAlerts(_Grouped):
             state = self.keep(key, e)
             if state is None:
                 continue
+            state.count += len({ref.key for ref in e.raw}) - 1
             message = _text(e.get("alert.message"))
             messages = state.bag("messages")
             if message is not None and len(messages) < MESSAGES_HELD:
@@ -274,6 +277,21 @@ class ZeekAlerts(_Grouped):
             return "lead", "low"      # an untabled notice may come from a site's exploit or CVE package
         return "context", "low"
 
+    def site_decision(self, key):
+        lane, severity = self.judged(key)
+        notes = ()
+        # The default BZAR Credential_Access table consists of DRSUAPI replication calls.
+        # This is still the sensor script's heuristic, never independent proof of replication.
+        if key[:2] == ('notice', 'ATTACK::Credential_Access'):
+            controllers = getattr(getattr(self, 'site_facts', None), 'domain_controller_addresses', ())
+            if not controllers:
+                notes = ('domain controller addresses not declared; the notice remains high',)
+            elif address_member(key[2], controllers) and address_member(key[3], controllers):
+                lane, severity = 'lead', 'medium'
+                notes = (('Traffic between declared domain controllers can be routine replication; '
+                          'the BZAR DRSUAPI notice remains a review lead.'),)
+        return lane, severity, notes
+
     def finalize(self):
         out = []
         for key, state in self.reported():
@@ -283,16 +301,15 @@ class ZeekAlerts(_Grouped):
 
     def _match(self, key: tuple, state) -> Match:
         kind, name, src, dst = key
-        lane, severity = self.judged(key)
+        lane, severity, policy_notes = self.site_decision(key)
         evs, missing, context = self.cite(state)
         n = state.count
-        one, many = KIND_WORDS[kind]
         span = self.span(state)
         between = f" on traffic from {src or 'an unrecorded source'} to {dst or 'an unrecorded destination'}" \
             if (src, dst) != ("", "") or kind in ("intel", "signature") or name in NOTICE_TYPES else ""
         messages = sorted(state.bag("messages"))
         said = f" Zeek's message: {'; '.join(_quoted(m) for m in messages)}." if messages else ""
-        notes = []
+        notes = list(policy_notes)
         if kind == "intel":
             where = ", ".join(sorted(state.bag("where"))) or "a place not recorded"
             types = ", ".join(sorted(state.bag("types")))
@@ -322,7 +339,13 @@ class ZeekAlerts(_Grouped):
                         "site's detection or CVE package may raise it, and its meaning is the script's."
                         if kind == "notice" else
                         " A weird is a protocol or parsing anomaly; alone it is context, not a finding."))
-        claim += self.told(evs, state, missing, many, one)
+        claim = claim.replace(f'{n} time(s)', f'{n} raw reference(s)')
+        cited_refs = len({ref.key for event in evs for ref in event.raw})
+        claim += (f' {cited_refs} raw reference(s) are cited as bounded examples; '
+                  'raw references can describe the same network action.')
+        claim += bound_note(missing, state.ends)
+        if missing:
+            notes.append('Citation coverage is partial: supporting records could not all be retained.')
         e0 = evs[0]
         named = "intel.indicator" if kind == "intel" else "alert.signature"
         predicates = [pf(e0, field) for field in (named, "alert.kind", "source.ip", "destination.ip") if e0.has(field)]
@@ -332,7 +355,8 @@ class ZeekAlerts(_Grouped):
         return match
 
     def uncited_finding(self, key, state, match):
-        match.proposed_lane, match.severity = self.judged(key)
+        match.proposed_lane, match.severity, notes = self.site_decision(key)
+        match.notes.extend(notes)
         match.group_key = "|".join(str(part) for part in key)
         return match
 

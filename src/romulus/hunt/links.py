@@ -284,6 +284,7 @@ class LinkResult(BaseModel):
     reasons: list[str] = Field(default_factory=list)
     duration_ms: int = 0
     query_spend: int = 0
+    zeek_budget: dict[str, Any] | None = None
 
 
 def _value(anchor: LinkAnchor, field: str):

@@ -35,7 +35,14 @@ from sqlalchemy.dialects.sqlite import insert
 
 from romulus.store import schema as t
 from romulus.store.cleaning import clean_event, clean_source
-from romulus.store.db import maintenance_lease, read_snapshot, utcnow, write_txn
+from romulus.store.db import (
+    VISIBILITY_LEASE_WAIT,
+    maintenance_lease,
+    read_snapshot,
+    utcnow,
+    write_txn,
+    zeek_visibility_lease,
+)
 
 # The origin suffix of a boot id a hunt's boot-interval map placed (the normalizer's BOOT_INTERVAL_ORIGIN; the
 # store does not import the evidence layer, and a test keeps the two equal).
@@ -687,6 +694,7 @@ class Repo:
             rm("agent_page_plans", t.agent_page_plan.delete().where(t.agent_page_plan.c.hunt_id == hunt_id))
             rm("agent_aliases", t.agent_alias.delete().where(t.agent_alias.c.hunt_id == hunt_id))
             rm("expansion_links", t.expansion_link.delete().where(t.expansion_link.c.hunt_id == hunt_id))
+            rm("zeek_link_budgets", t.zeek_link_budget.delete().where(t.zeek_link_budget.c.hunt_id == hunt_id))
             rm("expansion_anchors", t.expansion_anchor.delete().where(t.expansion_anchor.c.hunt_id == hunt_id))
             rm("baseline_observations", t.baseline_observation.delete().where(
                 t.baseline_observation.c.hunt_id == hunt_id,
@@ -1976,7 +1984,63 @@ class Repo:
     def zeek_visibility_line(row):
         return json.dumps(row, ensure_ascii=True, sort_keys=True, separators=(",", ":"))+"\n"
 
-    def save_zeek_visibility(self, hunt_id, rows):
+    @staticmethod
+    def _zeek_visibility_cleanup_warning(exc):
+        return ("Zeek visibility was published; post-publication orphan cleanup encountered "
+                f"{type(exc).__name__}: {str(getattr(exc, 'orig', exc))[:512]}")
+
+    def save_zeek_visibility(self, hunt_id, rows, *, wait_seconds=VISIBILITY_LEASE_WAIT, heartbeat=None):
+        """Publish one complete appendix, then collect only unreferenced private chunks."""
+        import sqlite3
+
+        from sqlalchemy.exc import OperationalError
+
+        with zeek_visibility_lease(self.engine, wait_seconds=wait_seconds, on_wait=heartbeat):
+            reference = self._save_zeek_visibility_locked(hunt_id, rows)
+            try:
+                self._clean_zeek_visibility_orphans(hunt_id)
+            except (OSError, sqlite3.Error, OperationalError) as exc:
+                reference["cleanup_warning"] = self._zeek_visibility_cleanup_warning(exc)
+            return reference
+
+    def _clean_zeek_visibility_orphans(self, hunt_id):
+        """Keep all publication pointers in SQLite, then delete orphan rows in bounded pages."""
+        table = t.report_zeek_visibility
+        with self.engine.connect() as reader:
+            previous_temp_store = reader.exec_driver_sql("PRAGMA temp_store").scalar_one()
+            reader.exec_driver_sql("PRAGMA temp_store=FILE")
+            try:
+                reader.exec_driver_sql(
+                    "CREATE TEMP TABLE zeek_visibility_keep(snapshot TEXT PRIMARY KEY) WITHOUT ROWID")
+                reader.execute(text(
+                    "INSERT OR IGNORE INTO temp.zeek_visibility_keep "
+                    "SELECT json_extract(body,'$.row_snapshot') FROM report_zeek_visibility "
+                    "WHERE hunt_id=:hunt AND ordinal=-1 AND json_type(body,'$.row_snapshot')='text'"),
+                    {"hunt": hunt_id})
+                reader.commit()
+                after, ordinal = "", -1
+                while True:
+                    keys = reader.execute(text(
+                        "SELECT snapshot,ordinal FROM report_zeek_visibility "
+                        "WHERE hunt_id=:hunt AND snapshot LIKE 'pending-%' "
+                        "AND (snapshot,ordinal)>(:after,:ordinal) "
+                        "AND snapshot NOT IN (SELECT snapshot FROM temp.zeek_visibility_keep) "
+                        "ORDER BY snapshot,ordinal LIMIT 256"),
+                        {"hunt": hunt_id, "after": after, "ordinal": ordinal}).all()
+                    reader.commit()
+                    if not keys:
+                        break
+                    with write_txn(self.engine) as connection:
+                        connection.execute(table.delete().where(table.c.hunt_id == hunt_id,
+                            tuple_(table.c.snapshot, table.c.ordinal).in_(keys)))
+                    after, ordinal = keys[-1]
+            finally:
+                reader.exec_driver_sql("DROP TABLE IF EXISTS temp.zeek_visibility_keep")
+                reader.commit()
+                reader.exec_driver_sql(f"PRAGMA temp_store={int(previous_temp_store)}")
+                reader.commit()
+
+    def _save_zeek_visibility_locked(self, hunt_id, rows):
         """Commit bounded private chunks, then atomically expose the complete immutable appendix.
 
         The digest's ordinal -1 is a small publication record pointing at the
@@ -1984,10 +2048,14 @@ class Repo:
         from seeing a partly committed appendix. Older digest-keyed rows remain
         readable without a publication record.
         """
+        import sqlite3
+
+        from sqlalchemy.exc import OperationalError
+
         table = t.report_zeek_visibility
         pending = "pending-"+uuid.uuid4().hex
         hasher, count, batch, families = hashlib.sha256(), 0, [], {}
-        keep = False
+        keep, published, cleanup_warning = False, False, None
         try:
             for row in rows:
                 hasher.update(self.zeek_visibility_line(row).encode())
@@ -2011,21 +2079,30 @@ class Repo:
                     result = connection.execute(insert(table).values(hunt_id=hunt_id, snapshot=snapshot,
                         ordinal=-1, body={"row_snapshot": pending}).on_conflict_do_nothing())
                     keep = result.rowcount == 1
+            published = True
         finally:
             if not keep:
                 # Failed streams and identical re-publications release their
                 # private chunks without taking one unbounded deletion lock.
-                while True:
-                    with write_txn(self.engine) as connection:
-                        ordinals = connection.execute(select(table.c.ordinal).where(
-                            table.c.hunt_id == hunt_id, table.c.snapshot == pending
-                        ).order_by(table.c.ordinal).limit(256)).scalars().all()
-                        if not ordinals:
-                            break
-                        connection.execute(table.delete().where(table.c.hunt_id == hunt_id,
-                            table.c.snapshot == pending, table.c.ordinal <= ordinals[-1]))
-        return {"sha256": snapshot, "filename": f"zeek-visibility-{snapshot}.jsonl", "count": count,
-                "families": families}
+                try:
+                    while True:
+                        with write_txn(self.engine) as connection:
+                            ordinals = connection.execute(select(table.c.ordinal).where(
+                                table.c.hunt_id == hunt_id, table.c.snapshot == pending
+                            ).order_by(table.c.ordinal).limit(256)).scalars().all()
+                            if not ordinals:
+                                break
+                            connection.execute(table.delete().where(table.c.hunt_id == hunt_id,
+                                table.c.snapshot == pending, table.c.ordinal <= ordinals[-1]))
+                except (OSError, sqlite3.Error, OperationalError) as exc:
+                    if not published:
+                        raise
+                    cleanup_warning = self._zeek_visibility_cleanup_warning(exc)
+        reference = {"sha256": snapshot, "filename": f"zeek-visibility-{snapshot}.jsonl", "count": count,
+                     "families": families}
+        if cleanup_warning:
+            reference["cleanup_warning"] = cleanup_warning
+        return reference
 
     def zeek_visibility_rows(self, hunt_id, snapshot):
         """Read every immutable interval in keyset pages without a hunt-sized Python collection."""
@@ -2514,12 +2591,25 @@ class Repo:
     def save_expansion_link(self, row: dict, *, owner_token: str | None = None) -> bool:
         now = utcnow()
         values = {**row, "created_at": now, "updated_at": now}
+        budget = values.pop("zeek_budget", None)
         with write_txn(self.engine) as c:
             self._fence_lease(c, row["hunt_id"], owner_token)
             result = c.execute(insert(t.expansion_link).values(values).on_conflict_do_nothing(
                 index_elements=["id"],
             ))
+            if result.rowcount and budget is not None:
+                checkpoint = {name: row[name] for name in ("hunt_id", "anchor_id", "link_type", "window_label")}
+                c.execute(insert(t.zeek_link_budget).values(**checkpoint, body=budget).on_conflict_do_update(
+                    index_elements=list(checkpoint), set_={"body": budget},
+                ))
             return bool(result.rowcount)
+
+    def zeek_link_budget(self, hunt_id: str, anchor_id: str, link_type: str, label: str) -> dict | None:
+        with self.engine.connect() as c:
+            return c.execute(select(t.zeek_link_budget.c.body).where(
+                t.zeek_link_budget.c.hunt_id == hunt_id, t.zeek_link_budget.c.anchor_id == anchor_id,
+                t.zeek_link_budget.c.link_type == link_type, t.zeek_link_budget.c.window_label == label,
+            )).scalar_one_or_none()
 
     def mark_expansion_link_evaluated(self, link_id: str, *, owner_token: str | None = None) -> None:
         with write_txn(self.engine) as c:

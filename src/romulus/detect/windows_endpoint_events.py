@@ -92,7 +92,7 @@ class WmiSubscription(WindowsEventRule):
 def _pipe_name(value: object) -> str:
     """Remove only recognized pipe namespace prefixes; never turn an arbitrary path into a pipe basename."""
     name = str(value or "").casefold()
-    for prefix in ("\\\\.\\pipe\\", "\\??\\pipe\\", "\\device\\namedpipe\\", "\\pipe\\", "\\"):
+    for prefix in ('\\\\?\\pipe\\', "\\\\.\\pipe\\", "\\??\\pipe\\", "\\device\\namedpipe\\", "\\pipe\\", "\\"):
         if name.startswith(prefix):
             name = name[len(prefix):]
             break
@@ -109,17 +109,18 @@ _PAEXEC_PIPE = re.compile(r"paexec-[0-9]+-[^\\/]+(?:\.exe)?|paexec(?:in|out|err)
 
 class ToolNamedPipe(WindowsEventRule):
     id = "win.tool_named_pipe"
-    version = "5"
+    version = "6"
     title = "Named pipe matches a documented remote-tool default"
     families = ("pipe_event",)
     windows_event_classes = tuple((SYSMON_CHANNEL, SYSMON, code) for code in (17, 18))
-    attack = ("T1021.002",)
+    attack = ("T1021.002", "T1558")
     benign = ("authorized PsExec, Impacket or red-team use", "any process can choose these pipe names")
     next_checks = ("inspect the process creating or connecting to the pipe", "review remote service and SMB activity")
     research = (_SYSMON_DOC,
                 "https://www.cobaltstrike.com/blog/learn-pipe-fitting-for-all-of-your-offense-projects",
                 "https://blog.nviso.eu/2021/04/26/anatomy-of-cobalt-strike-dll-stagers/",
                 "https://github.com/fortra/impacket/blob/master/examples/psexec.py",
+                "https://github.com/gentilkiwi/kekeo/blob/master/kekeo/modules/kuhl_m_tsssp.c",
                 "https://github.com/poweradminllc/PAExec/blob/master/Remote.cpp",
                 "https://github.com/poweradminllc/PAExec/blob/master/ConsoleRedir.cpp",
                 "https://www.microsoft.com/security/blog/2022/10/18/defenders-beware-a-case-for-post-ransomware-investigations/")
@@ -131,7 +132,8 @@ class ToolNamedPipe(WindowsEventRule):
         tool = ("PsExec" if name == "psexesvc" or _PSEXEC_STREAM.fullmatch(name) else
                 "PAExec" if _PAEXEC_PIPE.fullmatch(name) else
                 "Impacket RemCom" if name == "remcom_communicaton" or _REMCOM_STREAM.fullmatch(name) else
-                "Cobalt Strike" if _COBALT_PIPE.fullmatch(name) else "")
+                "Cobalt Strike" if _COBALT_PIPE.fullmatch(name) else
+                "Kekeo" if name == "kekeo_tsssp_endpoint" else "")
         if not tool:
             return []
         # Template identity excludes random characters and embedded process IDs.
@@ -141,13 +143,94 @@ class ToolNamedPipe(WindowsEventRule):
             template = next((stream for stream in ("stdin", "stdout", "stderr") if name.startswith("remcom_" + stream)), "control")
         elif tool == "PAExec":
             template = next((stream for stream in ("in", "out", "err") if name.startswith("paexec" + stream)), "control")
+        elif tool == "Kekeo":
+            template = "kekeo_tsssp_endpoint"
         else:
             template = "msse-#-server" if name.startswith("msse-") else re.sub(r"[0-9a-f]{2,4}$", "#", name)
         return [signal(event, "tool_pipe", f"Named pipe {self.describe(event.get('pipe.name'))} matched a "
-                       f"documented {tool} default name", self.attack, ("pipe.name", "pipe.action", "process.executable"),
+                       f"documented {tool} default name", ("T1558",) if tool == "Kekeo" else ("T1021.002",),
+                       ("pipe.name", "pipe.action", "process.executable"),
                        content=json.dumps([tool, template, event.get("pipe.action"), event.get("process.executable")]),
                        common=f"Named pipes matched the documented {tool} default template {template}",
                        notes=("Pipe names are attacker-controllable; the name alone does not establish tool identity.",))]
+
+
+def _nested_pipe_name(value):
+    """Accept native pipe names and local pipe namespaces, never a filesystem or remote UNC path."""
+    name, sep = str(value or '').casefold(), '\\'
+    prefixes = (sep * 2 + '.' + sep + 'pipe' + sep, sep * 2 + '?' + sep + 'pipe' + sep,
+                sep + '??' + sep + 'pipe' + sep, sep + 'device' + sep + 'namedpipe' + sep,
+                sep + 'pipe' + sep)
+    for prefix in prefixes:
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+            break
+    else:
+        if name.startswith(sep * 2) or not name.startswith(sep):
+            return ''
+        name = name[1:]
+    parts = name.split(sep)
+    return name if all(parts) and '/' not in name and ':' not in name else ''
+
+
+class PotatoPipeCreated(WindowsEventRule):
+    id = 'win.potato_pipe_created'
+    version = '1'
+    title = 'A non-kernel process created a pipe containing an embedded pipe namespace'
+    families = ('pipe_event',)
+    windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 17),)
+    attack = ('T1134.001',)
+    benign = ('A legitimate application can choose a nested pipe name.',)
+    next_checks = ('Inspect the creating process token and subsequent privileged children.',)
+    research = (_SYSMON_DOC, 'https://github.com/antonioCoco/RoguePotato/blob/master/RoguePotato/RoguePotato.cpp')
+
+    def judge(self, event):
+        if integer(event.get('event.code')) != 17:
+            return []
+        name = _nested_pipe_name(event.get('pipe.name'))
+        pid = integer(event.get('process.pid'))
+        image = event.get('process.executable_key') or event.get('process.executable')
+        # Non-System means a positively identified user-mode image and PID, not an inferred account identity.
+        if ('\\pipe\\' not in name or pid is None or pid in {0, 4}
+                or not image or basename(image) == 'system'):
+            return []
+        actor_fields = ('user.key', 'user.id', 'user.sid', 'user.name')
+        known_actor = any(event.get(field) for field in actor_fields)
+        notes = ('The pipe shape does not establish successful token impersonation.',)
+        if not known_actor:
+            notes += ('The process actor identity is not recorded; the image and PID identify a non-kernel process only.',)
+        return [signal(event, 'potato_pipe_created',
+                       f"Process '{self.describe(image)}' (PID {pid}) created nested pipe '{self.describe(event.get('pipe.name'))}'",
+                       self.attack, ('pipe.name', 'pipe.action', 'process.executable', 'process.executable_key', 'process.pid', *actor_fields),
+                       lane='high', severity='high', notes=notes,
+                       content=json.dumps([name, image]))]
+
+
+_RENAMED_PSEXEC_STREAM = re.compile(r'[^\\/:]+-[^\\/:]+-[1-9][0-9]*-(?:stdin|stdout|stderr)')
+
+
+class RenamedPsExecPipe(WindowsEventRule):
+    id = 'win.renamed_psexec_pipe'
+    version = '1'
+    title = 'A named pipe matches a renamed PsExec service stream'
+    families = ('pipe_event',)
+    windows_event_classes = tuple((SYSMON_CHANNEL, SYSMON, code) for code in (17, 18))
+    attack = ('T1569.002',)
+    benign = ('Authorized renamed PsExec service use can create these streams.',)
+    next_checks = ('Inspect service registration and the creating or connecting process.',)
+    research = (_SYSMON_DOC, 'https://learn.microsoft.com/sysinternals/downloads/psexec')
+
+    def judge(self, event):
+        if integer(event.get('event.code')) not in {17, 18}:
+            return []
+        name = _pipe_name(event.get('pipe.name'))
+        if name.startswith('psexesvc-') or not _RENAMED_PSEXEC_STREAM.fullmatch(name):
+            return []
+        return [signal(event, 'renamed_psexec_pipe',
+                       f"Named pipe '{self.describe(event.get('pipe.name'))}' matches a renamed service stream template",
+                       self.attack, ('pipe.name', 'pipe.action', 'process.executable'), lane='high', severity='high',
+                       notes=('The name does not establish tool identity or successful service execution.',),
+                       content=json.dumps([name.rsplit('-', 1)[-1], event.get('process.executable'), event.get('pipe.action')]))]
 
 
 def _share(event: TypedEvent) -> str:
@@ -194,15 +277,18 @@ class AdminShareTransfer(WindowsEventRule):
 
 class RemoteManagementPipe(BehaviorFleetRule):
     id = "win.remote_management_pipe"
-    version = "7"
+    version = "8"
     count_source_ips = True
     title = "IPC share access to a management RPC pipe"
     families = ("share_access",)
     windows_event_classes = _SECURITY_5145
-    attack = ("T1021.002",)
+    attack = ("T1021.002", "T1187", "T1555")
     benign = ("normal Windows administration, account lookup and domain replication use these pipes",)
     next_checks = ("review the source account and host", "correlate service, task and directory access records")
-    research = (_SHARE_DOC, "https://github.com/fortra/impacket/blob/master/examples/psexec.py")
+    research = (_SHARE_DOC, "https://github.com/fortra/impacket/blob/master/examples/psexec.py",
+                "https://github.com/fortra/impacket/blob/master/examples/dpapi.py",
+                "https://github.com/topotam/PetitPotam/blob/main/PetitPotam.py",
+                "https://github.com/leechristensen/SpoolSample")
 
     def fleet_eligible(self, event, hit):
         return _pipe_name(event.get("share.relative_target")) not in {"svcctl", "atsvc"}
@@ -211,7 +297,8 @@ class RemoteManagementPipe(BehaviorFleetRule):
         if integer(event.get("event.code")) != 5145 or _share(event) != "ipc$":
             return []
         name = _pipe_name(event.get("share.relative_target"))
-        if name not in {"svcctl", "atsvc", "samr", "lsarpc", "drsuapi"}:
+        if name not in {"svcctl", "atsvc", "samr", "lsarpc", "drsuapi", "spoolss",
+                        "protected_storage", "efsrpc", "netlogon"}:
             return []
         mask = integer(event.get("share.access_mask"))
         if name in {"samr", "lsarpc"} and mask is not None and not mask & 0x6 and event.outcome != Outcome.failure:
@@ -225,7 +312,9 @@ class RemoteManagementPipe(BehaviorFleetRule):
         actor = (f" from source IP '{self.describe(event.get('source.ip'))}'" if event.get("source.ip") else
                  f" by account '{self.describe(identity)}'") if identity else ""
         text += actor
-        return [signal(event, "management_pipe", text, self.attack,
+        attack = {"spoolss": ("T1187",), "efsrpc": ("T1187",),
+                  "protected_storage": ("T1555",)}.get(name, ("T1021.002",))
+        return [signal(event, "management_pipe", text, attack,
                        (*_SHARE_FIELDS, "share.session_id"), content=json.dumps([name, event.outcome, account, identity]),
                        common=f"IPC$ access checks named the {name} management RPC pipe by {account}s{actor} with recorded outcome {event.outcome}",
                        notes=("Pipe access alone does not establish service execution or credential extraction.",))]
@@ -382,5 +471,6 @@ class DefenderProtection(WindowsEventRule):
                        content=_content(event, fields))]
 
 
-WINDOWS_ENDPOINT_PLAYBOOKS = (WmiSubscription, ToolNamedPipe, AdminShareTransfer, RemoteManagementPipe,
+WINDOWS_ENDPOINT_PLAYBOOKS = (WmiSubscription, ToolNamedPipe, PotatoPipeCreated, RenamedPsExecPipe,
+                              AdminShareTransfer, RemoteManagementPipe,
                               GppPolicyFileAccess, DefenderThreat, DefenderProtection)

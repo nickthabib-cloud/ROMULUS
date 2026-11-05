@@ -12,13 +12,19 @@ from romulus.evidence.windows_catalog import (
     WINDOWS_CHANNELS,
     collection_requirements,
 )
-from romulus.site import COLLECTION_SCHEMA
+from romulus.site import COLLECTION_SCHEMA, role_address_warnings
 
 AUDIT_SETTINGS = ("success", "failure", "both")
 MAX_GROUPS = 200          # host groups one form may carry; far above a real site's
 MAX_LINES = 5_000         # entries one list field may carry
 _LINES = re.compile(r"[\r\n]+")          # names may contain anything but a line break
 _IDS = re.compile(r"[\r\n,\s]+")
+_OPTIONAL_ROLE_LABELS = {
+    "management_hosts": "management hosts",
+    "domain_controller_addresses": "domain controller addresses",
+    "directory_sync_hosts": "directory sync hosts",
+    "directory_sync_addresses": "directory sync addresses",
+}
 
 
 def known_sysmon_ids() -> list[int]:
@@ -83,7 +89,7 @@ def group_view(group: dict) -> dict:
 
 
 def view(content: dict) -> dict:
-    return {
+    shown = {
         "groups": [group_view(group) for group in content.get("collection") or []],
         "domain_controllers": "\n".join(content.get("domain_controllers") or []),
         "directory_sync_accounts": "\n".join(content.get("directory_sync_accounts") or []),
@@ -94,7 +100,14 @@ def view(content: dict) -> dict:
         "known_audit": known_audit_subcategories(),
         "known_channels": known_channels(),
         "audit_settings": AUDIT_SETTINGS,
+        "role_address_warnings": role_address_warnings(content),
     }
+    for key in _OPTIONAL_ROLE_LABELS:
+        shown[key] = "\n".join(content.get(key) or [])
+        # A hidden form marker keeps an existing empty declaration distinct from
+        # an untouched blank textarea for an undeclared optional list.
+        shown[key + "_declared"] = key in content
+    return shown
 
 
 def _integers(text: str, label: str) -> list[int]:
@@ -164,22 +177,25 @@ def parse_form(form) -> dict:
         document["directory_sync_accounts_declared"] = True
     if groups:
         document["collection"] = groups
-    for key in ("domain_controllers", "directory_sync_accounts", "internal_networks", "external_networks"):
+    for key in ("domain_controllers", "directory_sync_accounts", "internal_networks", "external_networks",
+                *_OPTIONAL_ROLE_LABELS):
         values = _lines(form.get(key, ""))
         if values:
             document[key] = values
-        elif key == "directory_sync_accounts" and form.get("directory_sync_accounts_declared") == "1":
+        elif (key == "directory_sync_accounts" or key in _OPTIONAL_ROLE_LABELS) and form.get(key + "_declared") == "1":
             document[key] = []
     return document
 
 
 def describe_change(before: dict, after: dict) -> list[str]:
     """The top-level parts that changed, for the audit record and the confirmation line."""
-    keys = ("collection", "domain_controllers", "directory_sync_accounts", "internal_networks", "external_networks")
+    keys = ("collection", "domain_controllers", "directory_sync_accounts", "internal_networks", "external_networks",
+            *_OPTIONAL_ROLE_LABELS)
     labels = {"collection": "collection groups", "domain_controllers": "domain controllers",
               "directory_sync_accounts": "directory sync accounts", "internal_networks": "internal networks",
-              "external_networks": "external networks"}
+              "external_networks": "external networks", **_OPTIONAL_ROLE_LABELS}
     return [labels[key] for key in keys if (before.get(key) or []) != (after.get(key) or [])
             or key == "directory_sync_accounts" and (
                 bool(before.get("directory_sync_accounts_declared")) !=
-                bool(after.get("directory_sync_accounts_declared")))]
+                bool(after.get("directory_sync_accounts_declared")))
+            or key in _OPTIONAL_ROLE_LABELS and (key in before) != (key in after)]

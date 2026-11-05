@@ -13,7 +13,7 @@ from romulus.hunt.baseline_stage import run_baseline_stage
 from romulus.hunt.baseline_writer import DEFAULT_RETAIN_BYTES, run_hunt_segment_writer
 from romulus.hunt.expansion import PER_ANCHOR_SOURCE_QUERIES, ExpansionEngine
 from romulus.hunt.links import LinkFetcher, is_agent_reach
-from romulus.hunt.manifest import build_manifest, new_hunt_id
+from romulus.hunt.manifest import build_manifest, inventory_usable, new_hunt_id
 from romulus.hunt.packets import PACKET_NORMALIZER, run_packet_stage
 from romulus.hunt.pivot import PivotExecutor
 from romulus.hunt.site_networks import (
@@ -276,6 +276,7 @@ def _run_expansion(s: Settings, repo: Repo, client: ElasticClient, hunt: dict, c
         dataset_inventory={
             target: set(profile.get("datasets", {}))
             for target, profile in manifest.get("source_profiles", {}).items()
+            if inventory_usable(profile)
         },
         site_facts=ensure_site_unchanged(s.home, manifest.get("site")),
     )
@@ -384,6 +385,7 @@ def _run_investigator(s: Settings, repo: Repo, client: ElasticClient, hunt_id: s
         dataset_inventory={
             target: set(profile.get("datasets", {}))
             for target, profile in hunt["manifest"].get("source_profiles", {}).items()
+            if inventory_usable(profile)
         },
         site_facts=ensure_site_unchanged(s.home, hunt["manifest"].get("site")),
     )

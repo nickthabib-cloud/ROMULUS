@@ -25,7 +25,7 @@ from romulus.evidence.windows_catalog import WINDOWS_DATASETS, WindowsEventClass
 if TYPE_CHECKING:
     from romulus.detect.bounded import Account, StateBudget
 
-WINDOWS_NORMALIZER = "windows-ecs@15"
+WINDOWS_NORMALIZER = "windows-ecs@16"
 # This is already far beyond what the 64 MiB assembler can retain at normal 4104 chunk sizes, while bounding every
 # completeness vector even when hostile metadata claims billions of parts.
 SCRIPT_BLOCK_MAX_PARTS = 4_096
@@ -2172,6 +2172,7 @@ def _semantic_fields(fields: dict[str, FieldValue], record: WindowsRecord, host:
         _put(fields, record, "bits.job_name", "jobTitle", "JobName", "name", "string")
         _put(fields, record, "bits.owner", "jobOwner", "string2")
         _put(fields, record, "bits.process_path", "processPath")
+        _path_metadata(fields, "bits.process_path", "bits.process_path_key")
         _put(fields, record, "bits.process_id", "processId", transform=_integer)
         _put(fields, record, "bits.remote_url", "Url", "RemoteName")
         _put(fields, record, "bits.local_file", "LocalName", "FileName")

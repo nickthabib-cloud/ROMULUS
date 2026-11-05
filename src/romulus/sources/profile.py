@@ -80,6 +80,31 @@ class FieldContract(BaseModel):
         return bool(s and op in s.ops)
 
 
+
+def native_field(contract, path, op='eq'):
+    """Resolve an exact-capable native field or a reported text multifield without guessing a suffix."""
+    if contract.supports(path, op):
+        return path
+    direct = next((name for name, spec in contract.fields.items()
+                   if spec.native == path and op in spec.ops), None)
+    if direct or not any(spec.native == path and spec.type == 'text' for spec in contract.fields.values()):
+        return direct
+    return next((name for name, spec in contract.fields.items()
+                 if spec.native.startswith(path + '.') and op in spec.ops), None)
+
+
+def _aggregation_field(field_types, path):
+    """The native field an inventory aggregation reads for `path`: itself when aggregatable, else a reported exact
+    multifield (a text field's keyword subfield), else None. Resolved on the index's own mapping, never through the
+    typed alias layer, which joins event.dataset and data_stream.dataset into one field that cannot be aggregated.
+    An unmapped field aggregates validly and empty, so it is returned as it is."""
+    kind = field_types.get(path)
+    if kind is None or kind in AGGREGATABLE:
+        return path
+    return next((name for name, sub in sorted(field_types.items())
+                 if name.startswith(path + ".") and sub in AGGREGATABLE), None)
+
+
 def apply_zeek_declaration(contract, site_facts):
     """Bind an explicit site's plain JSON declaration without changing undeclared contracts."""
     declaration = site_facts.zeek.plain_sources.get(contract.target)
@@ -312,17 +337,20 @@ def inventory_key(provider, dataset) -> str:
     return name if name is not None else f"{provider}:"
 
 
-def provider_inventory(client, target: str) -> tuple[list[dict], dict[str, int], list[str]] | None:
+def provider_inventory(client, target: str, *, provider_field='event.provider', dataset_field='event.dataset'
+                       ) -> tuple[list[dict], dict[str, int], list[str]] | None:
     """A mixed index's inventory by (event.provider, event.dataset), paged to exhaustion within a page budget, or None
     when the index holds no Zeek or Suricata rows (it stays an Arkime session index). Returns the buckets, the counts
     by `inventory_key`, and notes (a page budget reached is named as a truncated inventory)."""
+    if provider_field is None or dataset_field is None:
+        return [], {}, ['ds inventory truncated (provider/dataset fields have no exact-searchable aggregation field)']
     after = None
     buckets: list[dict] = []
     notes: list[str] = []
     for _page in range(PROVIDER_INVENTORY_PAGE_LIMIT):
         composite = {"size": PROVIDER_INVENTORY_PAGE_SIZE, "sources": [
-            {"provider": {"terms": {"field": "event.provider", "missing_bucket": True}}},
-            {"dataset": {"terms": {"field": "event.dataset", "missing_bucket": True}}},
+            {"provider": {"terms": {"field": provider_field, "missing_bucket": True}}},
+            {"dataset": {"terms": {"field": dataset_field, "missing_bucket": True}}},
         ]}
         if after is not None:
             composite["after"] = after
@@ -363,6 +391,15 @@ def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfil
                                       "winlog.computer_name" if windows else "host.name"))
     if declaration is not None:
         tf, ds_field, host_field = "ts", "_path", "_romulus_no_observer_field"
+    notes = []
+    declared_dataset = ds_field
+    ds_field = _aggregation_field(field_types, ds_field)
+    if ds_field is None:
+        notes.append(f'ds inventory truncated ({declared_dataset} has no exact-searchable aggregation field)')
+    declared_host = host_field
+    host_field = _aggregation_field(field_types, host_field)
+    if host_field is None:
+        notes.append(f'hosts inventory truncated ({declared_host} has no exact-searchable aggregation field)')
     host_aggregation = ({"composite": {
         "size": HOST_INVENTORY_PAGE_SIZE,
         "sources": [{"host": {"terms": {"field": host_field}}}],
@@ -375,8 +412,11 @@ def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfil
             "hosts": host_aggregation,
         },
     }
+    if ds_field is None:
+        body['aggs'].pop('ds')
+    if host_field is None:
+        body['aggs'].pop('hosts')
     host_counts: dict[str, int] = {}
-    notes = []
     if not windows:
         d = client.search(target, body)
         host_agg = d.get("aggregations", {}).get("hosts", {})
@@ -423,7 +463,9 @@ def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfil
     if schema == "arkime_sessions" and "event.provider" in field_types and "event.dataset" in field_types:
         # Malcolm indexes Zeek and Suricata rows beside Arkime's sessions in one index: each row is read by its own
         # normalizer, so the inventory is by (provider, dataset), not by Arkime protocol.
-        mixed = provider_inventory(client, target)
+        mixed = provider_inventory(client, target,
+            provider_field=_aggregation_field(field_types, 'event.provider'),
+            dataset_field=_aggregation_field(field_types, 'event.dataset'))
         if mixed is not None:
             inventory, datasets, mixed_notes = mixed
             notes = [note for note in notes if not note.startswith("ds inventory truncated")] + mixed_notes
