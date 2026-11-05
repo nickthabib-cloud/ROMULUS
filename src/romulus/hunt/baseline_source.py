@@ -118,7 +118,7 @@ class HuntHistorySource:
             return HistoryFetch(
                 (), "failed", tuple(reasons or ["source fetch failed"]), outcome.returned, queries,
             )
-        events, skips, errors = normalize_hits(outcome.records, self.boots)
+        events, skips, errors = normalize_hits(outcome.records, self.boots, surrogate_free=getattr(outcome, "surrogate_free", False))
         unsupported = sum(value for key, value in skips.items()
                           if key.startswith(("dataset:", "suricata event_type")))
         if errors:

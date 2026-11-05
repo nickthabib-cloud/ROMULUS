@@ -580,14 +580,15 @@ class PivotExecutor:
         return bool(host) and self.site_facts.attests(host, "system_event_log")
 
     def _normalize_pivot_records(
-        self, records: list[dict], raw_families: set[str] | None, contract=None,
+        self, records: list[dict], raw_families: set[str] | None, contract=None, surrogate_free: bool = False,
     ) -> tuple[list[TypedEvent], list[tuple[str, str]]]:
         prefilter = self.optimize_normalization and raw_families
         # one call per leaf: an audit event takes its boot id from a journald copy in the same batch, and nothing
         # (the batch, its audit parses) outlives the leaf, so memory stays bounded by the per-leaf record cap
         parse = _AuditParses()
         selected = _prefilter_raw(records, raw_families, parse) if prefilter else records
-        events, _skips, errors = normalize_hits(selected, audit_parse=parse, contract=contract)
+        events, _skips, errors = normalize_hits(selected, audit_parse=parse, contract=contract,
+                                                surrogate_free=surrogate_free)
         script_blocks = getattr(self, "_script_blocks", None)
         if script_blocks is not None and any(event.family == "script_block" for event in events):
             raw_sources = {
@@ -1222,9 +1223,11 @@ class PivotExecutor:
                         for record in outcome.records
                     }
                     contract=self.contracts[intent.target]
-                    events, errors = (self._normalize_pivot_records(outcome.records,raw_families,contract)
+                    events, errors = (self._normalize_pivot_records(outcome.records,raw_families,contract,
+                                                                    getattr(outcome, "surrogate_free", False))
                                       if contract.zeek_sensor else
-                                      self._normalize_pivot_records(outcome.records,raw_families))
+                                      self._normalize_pivot_records(outcome.records,raw_families,
+                                                                    surrogate_free=getattr(outcome, "surrogate_free", False)))
                     sources.update(script_blocks.sources_for(events))
                     normalization_reasons = [
                         *self._ip_normalization_reasons(leaf_intent, outcome.records),
@@ -1689,7 +1692,8 @@ class PivotExecutor:
                         f"{record['_index']}/{record['_id']}": record["_source"]
                         for record in outcome.records
                     }
-                    events, _skips, errors = normalize_hits(outcome.records)
+                    events, _skips, errors = normalize_hits(outcome.records,
+                                                            surrogate_free=getattr(outcome, "surrogate_free", False))
                     if any(event.family == "script_block" for event in events):
                         events = script_blocks.consume(events, sources)
                         sources.update(script_blocks.sources_for(events))

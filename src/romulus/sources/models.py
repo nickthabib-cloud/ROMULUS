@@ -100,3 +100,10 @@ class SearchOutcome(BaseModel):
     @property
     def surrogate_free(self) -> bool:
         return self._surrogate_free
+
+    def model_copy(self, *, update=None, deep: bool = False):
+        copy = super().model_copy(update=update, deep=deep)
+        if update and "records" in update:
+            # records put together from elsewhere (merged samples) carry no proof: whoever has one sets it again
+            copy._surrogate_free = False
+        return copy
