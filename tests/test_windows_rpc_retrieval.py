@@ -122,7 +122,7 @@ def test_real_query_aware_sweep_retains_client_and_server_calls(tmp_path, monkey
     assert {item['rule_id'] for item in candidates} == {'win.rpc_coercion_call'}
     assert all(item['lane'] == 'high' for item in candidates)
     assert any('client call to' in item['claim'] for item in candidates)
-    assert any('does not name the caller' in item['claim'] for item in candidates)
+    assert any('a caller the server-side record does not name' in item['claim'] for item in candidates)
     assert not instance.failed_rules
 
 
@@ -174,3 +174,25 @@ def test_target_scoped_skip_reports_why_rpc_records_were_withheld():
     instance._record_skips(TARGET, {RPC_REMOTE_SCOPE_SKIP: 200000})
     assert instance.stats['skips_by_target'][TARGET][RPC_REMOTE_SCOPE_SKIP] == 200000
     assert instance.stats['skips'][RPC_REMOTE_SCOPE_SKIP] == 200000
+
+
+def _leaf_clauses(query):
+    if isinstance(query, dict) and 'bool' in query:
+        return sum(_leaf_clauses(item) for key in ('must', 'should', 'filter', 'must_not')
+                   for item in (query['bool'].get(key) or []))
+    return 1
+
+
+@pytest.mark.parametrize('weak', [False, True])
+def test_full_pack_windows_query_stays_under_the_engine_clause_limit(weak):
+    # OpenSearch 2+ and Lucene 9 count every nested leaf against indices.query.bool.max_clause_count (default 1024);
+    # a query over it fails the whole Windows target, so RPC alternatives must not multiply across a group.
+    from romulus.detect.registry import fresh_pack
+    mapping = contract(weak=weak)
+    instance = Sweep(None, None, 'h1', WINDOW, {TARGET: mapping})
+    instance.pack = fresh_pack()
+    groups = instance._any_of_for(TARGET, mapping)
+    rpc = [group for group in groups if any(p.field.startswith('rpc.') for p in group)]
+    assert len(rpc) <= 6
+    body = compile_es(SearchIntent(kind='raw', target=TARGET, window=WINDOW, any_of=groups), mapping).body
+    assert _leaf_clauses(body['query']) < 900

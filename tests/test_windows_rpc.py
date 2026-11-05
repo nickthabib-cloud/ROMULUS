@@ -113,7 +113,7 @@ def test_coercion_claim_and_lane(code, address, lane, phrase):
     assert match.proposed_lane == lane and phrase in match.claim
     assert 'over named pipe' in match.claim and 'was observed' in match.claim
     if code == 6:
-        assert 'does not name the caller' in match.claim
+        assert 'a caller the server-side record does not name' in match.claim
     elif lane == 'high':
         assert '10.0.2.14' in match.claim
     else:
@@ -293,3 +293,30 @@ def test_rpc_missing_last_bound_retains_interval_caveat():
     assert match.events and not match.citation_unavailable
     assert 'record that ends this interval was not kept for citation' in match.claim
     assert 'interval is computed from every record' in match.claim
+
+
+@pytest.mark.parametrize('declared,host,lane', [
+    (('ws01',), 'ws01.example.test', None),
+    (('WS01.Example.Test.',), 'ws01.example.test', None),
+    (('ws01.example.test',), 'ws01', None),
+    (('ws01.other.test',), 'ws01.example.test', 'high'),
+    (('10.0.0.5',), 'ws01.example.test', 'lead'),
+    (('dc01', '10.0.0.5'), 'ws01.example.test', 'lead'),
+])
+def test_declared_controller_matching_by_short_full_and_address(declared, host, lane, tmp_path):
+    instance = rule('RpcReplicationCall')
+    instance.site_facts = replace(load_site_facts(tmp_path), domain_controllers=declared)
+    matches = run(instance, [normalize_windows(hit(uuid=DRSR, opnum='3', protocol='1', host=host))])
+    assert [match.proposed_lane for match in matches] == ([lane] if lane else [])
+    if lane == 'lead':
+        assert any('declared by address' in text for text in matches[0].notes)
+    instance.release_state()
+
+
+@pytest.mark.parametrize('code', [5, 6])
+def test_rpc_claim_is_one_sentence_ending_with_host_and_time(code):
+    instance = rule('RpcCoercionCall')
+    [match] = run(instance, [normalize_windows(hit(code=code))])
+    assert '. on ' not in match.claim and ', was observed' not in match.claim.replace('does not name, was', '')
+    assert match.claim.count(' was observed on ws01 at ') == 1 and match.claim.endswith('.')
+    instance.release_state()

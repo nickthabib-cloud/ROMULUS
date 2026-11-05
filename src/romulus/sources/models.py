@@ -30,7 +30,8 @@ PredicateOp = Literal["eq", "in", "exists", "missing", "prefix", "contains", "gt
 
 class Predicate(BaseModel):
     """One typed condition. `contains` is only legal on fields whose contract allows it, and
-    it is a retrieval aid: evaluators must still apply exact typed logic locally."""
+    it is a retrieval aid: evaluators must still apply exact typed logic locally. Its value is
+    a string, or a list of strings meaning any of them."""
     field: str
     op: PredicateOp
     value: Any = None
