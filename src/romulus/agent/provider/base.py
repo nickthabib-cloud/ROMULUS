@@ -73,10 +73,11 @@ def endpoint_url(s: Settings) -> str:
     return s.agent_base_url.strip() or DEFAULT_BASE_URLS.get(s.agent_provider, "")
 
 
-def error_message(body: str) -> str:
+def error_message(body: str, settings: Settings) -> str:
     """The provider's own message from an error body (`{"error": {"message": ...}}`, `{"error": "..."}` or
-    `{"message": ...}`), whole up to MAX_ERROR_MESSAGE characters; else the start of the body. Redact the body
-    before calling this, so no cut can split a secret."""
+    `{"message": ...}`), whole up to MAX_ERROR_MESSAGE characters; else the start of the body. The body is
+    redacted before it is cut, and the message again once decoded (JSON escapes can hide a secret's text)."""
+    body = redact_text(body, settings)
     try:
         data = json.loads(body)
     except ValueError:
@@ -86,7 +87,9 @@ def error_message(body: str) -> str:
         found = found.get("message")
     elif not isinstance(found, str) and isinstance(data, dict):
         found = data.get("message")
-    return found[:MAX_ERROR_MESSAGE] if isinstance(found, str) and found.strip() else body[:300]
+    if not isinstance(found, str) or not found.strip():
+        return body[:300]
+    return redact_text(found, settings)[:MAX_ERROR_MESSAGE]
 
 
 @dataclass(frozen=True)
@@ -307,7 +310,7 @@ class ChatProvider:
                 raise TransientFailure(f"{exc.__class__.__name__}: {exc}") from None
             if response.status_code in RETRY_STATUSES:
                 raise TransientFailure(f"HTTP {response.status_code}",
-                                       suffix=f": {error_message(redact_text(response.text, self.s))}",
+                                       suffix=f": {error_message(response.text, self.s)}",
                                        retry_after=response.headers.get("retry-after", ""))
             return response
         return self._retrying(once)
@@ -315,7 +318,7 @@ class ChatProvider:
     def _http_error(self, response: httpx.Response, est: int, ms: int, attempts: int) -> ChatResult:
         body = redact_text(response.text, self.s)
         return ChatResult("error", "", "", None, [], Usage(), est, self.model, "", ms, body[:2000],
-                          f"HTTP {response.status_code}: {error_message(body)}", attempts)
+                          f"HTTP {response.status_code}: {error_message(response.text, self.s)}", attempts)
 
     def _finish(self, *, finish_reason: str | None, content: str, tool_calls: list[ToolCall], usage: Usage,
                 est: int, model_reported: str, ms: int, raw: str, attempts: int, request: ChatRequest,

@@ -1,6 +1,7 @@
 """Load runtime configuration from the environment / .env with secret redaction."""
 from __future__ import annotations
 
+import json
 import os
 import re
 from pathlib import Path
@@ -344,12 +345,29 @@ def short_secrets(settings: Settings) -> list[str]:
                   and 0 < len(getattr(settings, name).get_secret_value()) < MIN_SECRET_LENGTH)
 
 
+# how JSON encoders that escape HTML-significant characters write them (lower- and upper-case hex)
+_HTML_SAFE_ESCAPES = ({"&": "\\u0026", "<": "\\u003c", ">": "\\u003e", "'": "\\u0027"},
+                      {"&": "\\u0026", "<": "\\u003C", ">": "\\u003E", "'": "\\u0027"})
+MASKED_SECRET_MIN_LENGTH = 16   # a masked echo (prefix****last four) is matched only for secrets at least this long
+
+
+def _secret_forms(secret: str) -> set[str]:
+    """The secret as text, and as it appears inside a JSON string (escaped, also with HTML-safe escapes)."""
+    escaped = json.dumps(secret)[1:-1]
+    return {secret, escaped, *("".join(table.get(c, c) for c in escaped) for table in _HTML_SAFE_ESCAPES)}
+
+
 def redact_text(text: str, settings: Settings) -> str:
-    """Remove any configured secret value from free text (logs, error messages)."""
+    """Remove any configured secret value from free text (logs, error messages): as written, as escaped inside a
+    JSON string, and as a service's masked echo of a long key (its first characters, asterisks, its last four)."""
     for name in type(settings).model_fields:
         value = getattr(settings, name)
         if isinstance(value, SecretStr):
             secret = value.get_secret_value()
             if secret and len(secret) >= 4:
-                text = text.replace(secret, "<redacted>")
+                for form in sorted(_secret_forms(secret), key=len, reverse=True):
+                    text = text.replace(form, "<redacted>")
+                if len(secret) >= MASKED_SECRET_MIN_LENGTH and "****" in text:
+                    masked = re.escape(secret[:3]) + r"[^\s*]*\*{4,}[^\s*]*?" + re.escape(secret[-4:])
+                    text = re.sub(masked, "<redacted>", text)
     return text

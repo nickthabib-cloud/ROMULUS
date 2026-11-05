@@ -137,7 +137,8 @@ def agent_readiness(s: Settings, resolver: Resolver = system_resolver) -> AgentR
         return AgentReadiness("blocked", str(exc), provider, model)
     if not decision.allowed:
         return AgentReadiness("blocked", decision.refusal, provider, model, decision)
-    if decision.egress == "remote" and provider in ("openai_compatible", "openai_responses")             and not s.agent_api_key.get_secret_value():
+    keyed = provider in ("openai_compatible", "openai_responses")
+    if decision.egress == "remote" and keyed and not s.agent_api_key.get_secret_value():
         return AgentReadiness("not_configured", "AGENT_API_KEY is empty (a remote endpoint needs a key)",
                               provider, model, decision)
     if provider == "anthropic" and not s.agent_api_key.get_secret_value():

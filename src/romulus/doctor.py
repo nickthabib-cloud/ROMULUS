@@ -13,6 +13,7 @@ import httpx
 
 from romulus.agent.provider import EGRESS_SWITCH_VALUE, AgentNotReady, agent_readiness, build_provider
 from romulus.agent.provider.egress import Resolver, system_resolver
+from romulus.agent.provider.openai_responses import LONG_REASONING_EFFORTS, LONG_REASONING_TIMEOUT
 from romulus.config import FULL_ACCESS_ROLE, MIN_SECRET_LENGTH, Settings, redact_text, short_secrets
 from romulus.detect.netdef import INTERNAL_SETTING, SiteNetworks
 from romulus.hunt.site_networks import check_host_addresses
@@ -287,9 +288,16 @@ def check_agent(s: Settings, transport: httpx.BaseTransport | None = None,
         out.append(Check("agent.egress", "warn" if s.model_egress else "ok",
                          f"local endpoint ({d.basis})" + ("; ROMULUS_MODEL_EGRESS is set but not needed: unset it"
                                                           if s.model_egress else "")))
-    if readiness.provider == "openai_compatible" and not s.agent_context_tokens and d.egress == "local":
+    openai_style = readiness.provider in ("openai_compatible", "openai_responses")
+    if openai_style and not s.agent_context_tokens and d.egress == "local":
         out.append(Check("agent.context", "warn", "AGENT_CONTEXT_TOKENS is 0: a local server that silently cuts "
                                                   "long prompts cannot be detected; set it to the model's context window"))
+    long_reasoning = s.agent_effort in LONG_REASONING_EFFORTS and s.agent_timeout_seconds < LONG_REASONING_TIMEOUT
+    if readiness.provider == "openai_responses" and long_reasoning:
+        out.append(Check("agent.timeout", "warn",
+                         f"AGENT_TIMEOUT_SECONDS={s.agent_timeout_seconds} with AGENT_EFFORT={s.agent_effort}: a model "
+                         "can reason without sending anything for longer than that, and a call that times out after "
+                         f"it began is billed and fails; use {LONG_REASONING_TIMEOUT} or more"))
     try:
         provider = build_provider(s, transport=transport, resolver=resolver, readiness=readiness)
     except AgentNotReady as exc:       # an optional SDK that cannot be loaded: not configured, never a traceback

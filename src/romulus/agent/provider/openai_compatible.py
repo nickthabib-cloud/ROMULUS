@@ -5,6 +5,8 @@ lab on public data only, a hosted API. AGENT_BASE_URL is the API root that conta
 """
 from __future__ import annotations
 
+import re
+
 import httpx
 
 from romulus.agent.provider.base import (
@@ -25,6 +27,89 @@ PROBE_TOOL = Tool("report_status", "Report that the check succeeded.", {
 })
 PROBE_SCHEMA = PROBE_TOOL.parameters
 PROBE_MAX_OUTPUT = 512
+
+# OpenAI's strict subset (structured outputs guide): these keywords, every object closed and fully required, the root
+# an object, $ref alone, and these limits; allOf, not, if/then/else, default and the rest are outside it
+OPENAI_STRICT_KEYS = frozenset({"type", "properties", "required", "additionalProperties", "items", "enum", "const",
+                                "anyOf", "$ref", "description", "title", "pattern", "format", "minimum", "maximum",
+                                "exclusiveMinimum", "exclusiveMaximum", "multipleOf", "minItems", "maxItems"})
+OPENAI_FORMATS = frozenset({"date-time", "time", "date", "duration", "email", "hostname", "ipv4", "ipv6", "uuid"})
+OPENAI_DEF_KEYS = ("$defs", "definitions")
+MAX_STRICT_DEPTH = 10
+MAX_STRICT_PROPERTIES = 5000
+MAX_STRICT_ENUM_VALUES = 1000
+STRICT_TYPES = frozenset({"object", "array", "string", "integer", "number", "boolean", "null"})
+
+
+def openai_strict_problems(schema) -> list[str]:
+    """Why `schema` is outside OpenAI's strict subset (empty when it is inside)."""
+    if not isinstance(schema, dict) or schema.get("type") != "object" or "anyOf" in schema:
+        return ["$: the root must be an object schema, not anyOf"]
+    problems: list[str] = []
+    totals = {"properties": 0, "enum": 0}
+    defs = {f"#/{key}/{name}": sub for key in OPENAI_DEF_KEYS if isinstance(schema.get(key), dict)
+            for name, sub in schema[key].items()}
+
+    def walk(node, path: str, depth: int, top: bool = False) -> None:
+        if not isinstance(node, dict):
+            problems.append(f"{path}: not a schema object")
+            return
+        if depth > MAX_STRICT_DEPTH:
+            problems.append(f"{path}: nested deeper than {MAX_STRICT_DEPTH} levels")
+            return
+        problems.extend(f"{path}: '{key}' is not supported" for key in node
+                        if key not in OPENAI_STRICT_KEYS and not (top and key in OPENAI_DEF_KEYS))
+        if "$ref" in node:
+            if set(node) - {"$ref"}:
+                problems.append(f"{path}: $ref must stand alone")
+            if node["$ref"] != "#" and node["$ref"] not in defs:
+                problems.append(f"{path}: $ref {node['$ref']!r} must name a definition in this schema")
+            return
+        kinds = node.get("type")
+        listed = kinds if isinstance(kinds, list) else [] if kinds is None else [kinds]
+        if (isinstance(kinds, list) and not kinds) or any(k not in STRICT_TYPES for k in listed):
+            problems.append(f"{path}: type {kinds!r} is not supported")
+        properties = node.get("properties")
+        if "object" in listed or properties is not None:
+            properties = properties if isinstance(properties, dict) else {}
+            if node.get("additionalProperties") is not False:
+                problems.append(f"{path}: objects must set additionalProperties to false")
+            required = node.get("required") or []
+            if not isinstance(required, list) or set(map(str, required)) != set(properties):
+                problems.append(f"{path}: every property must be required")
+            totals["properties"] += len(properties)
+            for name, sub in properties.items():
+                walk(sub, f"{path}.{name}", depth + 1)
+        if "items" in node:
+            walk(node["items"], f"{path}[]", depth)
+        if "anyOf" in node:
+            if not isinstance(node["anyOf"], list) or not node["anyOf"]:
+                problems.append(f"{path}: anyOf must list schemas")
+            else:
+                for n, sub in enumerate(node["anyOf"]):
+                    walk(sub, f"{path}.anyOf[{n}]", depth)
+        if "enum" in node:
+            totals["enum"] += len(node["enum"]) if isinstance(node["enum"], list) else 0
+        if "format" in node and node["format"] not in OPENAI_FORMATS:
+            problems.append(f"{path}: format {node['format']!r} is not supported")
+        if "pattern" in node:
+            try:
+                re.compile(node["pattern"])
+            except (re.error, TypeError):
+                problems.append(f"{path}: the pattern is not a valid regular expression")
+
+    walk(schema, "$", 1, top=True)
+    for ref, sub in defs.items():
+        walk(sub, ref, 1)
+    if totals["properties"] > MAX_STRICT_PROPERTIES:
+        problems.append(f"{totals['properties']} object properties (at most {MAX_STRICT_PROPERTIES})")
+    if totals["enum"] > MAX_STRICT_ENUM_VALUES:
+        problems.append(f"{totals['enum']} enum values (at most {MAX_STRICT_ENUM_VALUES})")
+    return problems
+
+
+def strict_ok(schema) -> bool:
+    return not openai_strict_problems(schema)
 
 
 def _int(value) -> int | None:
@@ -51,8 +136,10 @@ class OpenAICompatibleProvider(ChatProvider):
             }} for t in request.tools]
             body["tool_choice"] = request.tool_choice
         if request.response_schema is not None:
+            # a schema outside the strict subset would fail every call: it goes loose and the caller validates it
             body["response_format"] = {"type": "json_schema", "json_schema": {
-                "name": request.schema_name, "schema": request.response_schema, "strict": request.strict_schema,
+                "name": request.schema_name, "schema": request.response_schema,
+                "strict": request.strict_schema and strict_ok(request.response_schema),
             }}
         if request.temperature is not None:
             body["temperature"] = request.temperature
@@ -124,19 +211,29 @@ def probe_models(provider: ChatProvider) -> tuple[list[tuple[str, str, str]], bo
     return out, True
 
 
-def probe_calls(provider: ChatProvider) -> list[tuple[str, str, str]]:
-    """Doctor checks shared by adapters: one required tool call and one JSON-schema reply, carrying no telemetry,
-    then usage reporting and model pinning."""
-    out = []
+def probe_results(provider: ChatProvider, max_output: int = PROBE_MAX_OUTPUT) -> tuple:
+    """The doctor's two calls, carrying no telemetry: one required tool call and one JSON-schema reply, each with
+    `max_output` as its output cap. Returns both results, or the ProviderUnavailable that stopped them."""
     user = [{"role": "user", "content": "This is a connectivity check. Call report_status with ok set to true."}]
     try:
         tool = provider.chat(ChatRequest(user, tools=[PROBE_TOOL], tool_choice="required",
-                                         max_output_tokens=PROBE_MAX_OUTPUT))
+                                         max_output_tokens=max_output))
         schema = provider.chat(ChatRequest(
             [{"role": "user", "content": "This is a connectivity check. Reply with ok set to true."}],
-            response_schema=PROBE_SCHEMA, schema_name="report_status", max_output_tokens=PROBE_MAX_OUTPUT))
+            response_schema=PROBE_SCHEMA, schema_name="report_status", max_output_tokens=max_output))
     except ProviderUnavailable as exc:
-        return [("agent.tool_calls", "fail", str(exc))]
+        return (exc,)
+    return tool, schema
+
+
+def probe_calls(provider: ChatProvider, results: tuple | None = None) -> list[tuple[str, str, str]]:
+    """Doctor checks shared by adapters: tool calling and JSON-schema output (from `results`, else from
+    probe_results), then usage reporting and model pinning."""
+    out = []
+    results = results if results is not None else probe_results(provider)
+    if isinstance(results[0], ProviderUnavailable):
+        return [("agent.tool_calls", "fail", str(results[0]))]
+    tool, schema = results
     good_tool = tool.ok and any(c.name == PROBE_TOOL.name and (c.arguments or {}).get("ok") is True
                                 for c in tool.tool_calls)
     out.append(("agent.tool_calls", "ok" if good_tool else "fail",

@@ -7,34 +7,40 @@ policy applies.
 
 Translation: system, developer and user messages become input messages in place; assistant tool calls become
 function_call items and tool results function_call_output items. Function tools are flat and sent strict when their
-schema is inside the strict subset (every property required, no additional properties), else not strict; either way
-each call's arguments are parsed here and, for a schema in that subset, checked against it. A response schema
-becomes text.format. tool_choice auto, required and none are sent as they are, and a reply without the call a
-required choice asked for is invalid_tool_call. Reasoning effort is AGENT_EFFORT, and each call's max_output_tokens
-(which counts reasoning) adds AGENT_THINKING_TOKENS of room for it. Sampling parameters are never sent: reasoning
-models refuse them. Truncation is disabled, so the server refuses a prompt larger than the context window instead
-of dropping its start. Calls stream, so AGENT_TIMEOUT_SECONDS bounds each read rather than the whole reply, and the
-reply is the response the terminal event carries.
+schema is inside OpenAI's strict subset (every property required, no additional properties, only the documented
+keywords), else not strict. The adapter parses every call's arguments and, for a schema inside the strict subset the
+port checks, validates them against it; the caller validates every tool's arguments against its own model. A response
+schema becomes text.format, strict only when it is inside the subset too. tool_choice auto, required and none are
+sent as they are, and a reply without the call a required choice asked for is invalid_tool_call. Reasoning effort is
+AGENT_EFFORT with automatic reasoning summaries (dropped for good after the first request the server refuses for
+them), and each call's max_output_tokens (which counts reasoning) adds AGENT_THINKING_TOKENS of room for it. Sampling
+parameters are never sent: reasoning models refuse them. Truncation is disabled, so OpenAI refuses a prompt larger
+than the context window instead of dropping its start. Calls stream, so AGENT_TIMEOUT_SECONDS bounds each read rather
+than the whole reply, and the reply is the response the terminal event carries. A model can reason silently for
+longer than that: a read that times out after the response began is a failed call, billed and never retried.
 
-Nothing is stored on the server (store=false): reasoning crosses turns as encrypted reasoning items. Each reply's
-output items travel in the provider state of its assistant message (ChatResult.assistant_message()) and are replayed
-unchanged in their place. An assistant turn without provider state (history from another provider) is sent from its
-text and tool calls alone. A state that is malformed or holds anything else, a turn whose text or tool calls no
-longer match its state, or one that holds a configured secret raises HistoryError before anything is sent.
+Responses are sent with store=false, so they are not saved for later retrieval (OpenAI's data retention policy still
+applies): reasoning crosses turns as encrypted reasoning items. Each reply's output items travel in the provider
+state of its assistant message (ChatResult.assistant_message()) and are replayed unchanged in their place. An
+assistant turn without provider state (history from another provider) is sent from its text and tool calls alone. A
+state that is malformed or holds anything else, a turn whose text or tool calls no longer match its state, or one
+that holds a configured secret raises HistoryError before anything is sent.
 
-Usage maps input_tokens (cached tokens included) to prompt tokens, output_tokens (reasoning included) to completion
-tokens, and the cached and cache-write input details to the cache counts. An attempt that broke off after the
-response began is charged as billed: its reported usage, else its prompt estimate and full output allowance.
+A refusal in the reply, a content-filter stop, and a response that failed under a safety policy are refused. Usage
+maps input_tokens (cached tokens included) to prompt tokens, output_tokens (reasoning included) to completion tokens,
+and the cached and cache-write input details to the cache counts. An attempt that broke off after the response began
+is charged as billed: its reported usage, else its prompt estimate and full output allowance.
 
 Field names are checked against OpenAI's API reference, as the official SDK's generated types carry it, and guides:
 - https://developers.openai.com/api/reference/resources/responses/methods/create
 - https://github.com/openai/openai-python/blob/main/src/openai/types/responses/response_create_params.py
 - https://github.com/openai/openai-python/blob/main/src/openai/types/responses/response.py (and response_usage.py,
-  response_input_item_param.py, function_tool_param.py, response_reasoning_item.py, response_output_message.py,
-  response_completed_event.py, response_failed_event.py, response_error_event.py)
+  response_error.py, response_input_item_param.py, function_tool_param.py, response_reasoning_item.py,
+  response_output_message.py, response_completed_event.py, response_failed_event.py, response_error_event.py)
 - https://github.com/openai/openai-python/blob/main/src/openai/types/shared/reasoning.py
-- https://developers.openai.com/api/docs/guides/reasoning (reasoning items without stored responses)
+- https://developers.openai.com/api/docs/guides/reasoning (reasoning items without stored responses, summaries)
 - https://developers.openai.com/api/docs/guides/function-calling
+- https://developers.openai.com/api/docs/guides/structured-outputs (the strict schema subset)
 """
 from __future__ import annotations
 
@@ -65,9 +71,16 @@ from romulus.agent.provider.claude_messages import (
     instance_problems,
     strict_schema_problems,
 )
-from romulus.agent.provider.openai_compatible import _int, probe_calls, probe_models
+from romulus.agent.provider.openai_compatible import (
+    _int,
+    probe_calls,
+    probe_models,
+    probe_results,
+    strict_ok,
+)
 from romulus.config import redact_text
 
+OPENAI_HOST = "api.openai.com"
 # the output items a reply may hold and an assistant turn may replay, with only these fields
 ITEM_KEYS = {"reasoning": frozenset({"type", "id", "summary", "encrypted_content", "content", "status"}),
              "message": frozenset({"type", "id", "role", "status", "content", "phase"}),
@@ -78,6 +91,12 @@ STATE_KEYS = frozenset({"provider", "model", "output"})
 INCOMPLETE_REASONS = {"max_output_tokens": "length", "content_filter": "content_filter"}
 # response error codes worth another attempt, whether in a failed response or a stream error event
 TRANSIENT_CODES = frozenset({"server_error", "rate_limit_exceeded"})
+# response error codes of a response a safety policy stopped: a refusal, never "nothing found"
+REFUSAL_CODES = frozenset({"bio_policy", "misalignment_policy_violation"})
+# reasoning at these efforts can run silent for minutes before the first event; doctor asks for this read timeout
+LONG_REASONING_EFFORTS = frozenset({"high", "xhigh", "max"})
+LONG_REASONING_TIMEOUT = 600
+
 
 
 class _Failed(Exception):
@@ -90,20 +109,12 @@ class _Failed(Exception):
         self.raw = raw
 
 
-def _all_required(node) -> bool:
-    """Whether every object in the schema requires each of its properties, as the API's strict mode needs."""
-    if isinstance(node, list):
-        return all(_all_required(v) for v in node)
-    if not isinstance(node, dict):
-        return True
-    properties = node.get("properties")
-    if isinstance(properties, dict) and set(node.get("required") or []) != set(properties):
-        return False
-    return all(_all_required(v) for v in node.values())
+class _SummaryRefused(Exception):
+    """The server refused the request for its reasoning summary (an organization may need verification)."""
 
 
-def strict_ok(schema) -> bool:
-    return not strict_schema_problems(schema) and _all_required(schema)
+def _dict(value) -> dict:
+    return value if isinstance(value, dict) else {}
 
 
 def _state_problem(state) -> str:
@@ -126,7 +137,8 @@ def _state_problem(state) -> str:
         if kind == "function_call" and not all(isinstance(item.get(k), str) for k in ("call_id", "name", "arguments")):
             return "a malformed function_call item"
         if kind == "reasoning" and (not isinstance(item.get("summary", []), list)
-                                    or not isinstance(item.get("encrypted_content") or "", str)):
+                                    or not isinstance(item.get("content", []), list)
+                                    or not isinstance(item.get("encrypted_content", ""), str)):
             return "a malformed reasoning item"
         if kind == "message":
             parts = item.get("content")
@@ -138,6 +150,19 @@ def _state_problem(state) -> str:
                         or not isinstance(part.get("text" if ptype == "output_text" else "refusal"), str):
                     return "a message item with a malformed content part"
     return ""
+
+
+def _kept(item: dict) -> dict:
+    """An output item as the provider state keeps it: the known fields that are set, and in a message only the
+    known fields of each content part, so a field the API adds later never makes a stored turn unreplayable."""
+    kind = item["type"]
+    kept = {k: v for k, v in item.items() if k in ITEM_KEYS[kind] and v is not None}
+    if kind == "message":
+        kept["content"] = [{k: v for k, v in part.items() if k in PART_KEYS.get(part.get("type"), ()) and v is not None}
+                           for part in item.get("content") or []]
+    if kind == "reasoning":
+        kept.setdefault("summary", [])     # required when the item goes back as input
+    return kept
 
 
 def _plain_texts(items: list[dict]) -> list[str]:
@@ -159,6 +184,10 @@ class OpenAIResponsesProvider(ChatProvider):
     replays_provider_state = True
     sends_sampling = False
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._summaries = True       # off for good once the server refuses a request for its reasoning summary
+
     def _headers(self) -> dict[str, str]:
         key = self.s.agent_api_key.get_secret_value()
         return {"Authorization": f"Bearer {key}"} if key else {}
@@ -169,8 +198,11 @@ class OpenAIResponsesProvider(ChatProvider):
     # ---- one call -------------------------------------------------------------------------------------------
     def _chat(self, request: ChatRequest, messages: list[dict], max_out: int, est: int) -> ChatResult:
         def failed(status: str, error: str, ms: int, attempts: int, raw: str = "") -> ChatResult:
-            return ChatResult(status, "", "", None, [], Usage(), est, self.model, "", ms,
-                              redact_text(raw, self.s)[:2000], redact_text(error, self.s), attempts)
+            result = ChatResult(status, "", "", None, [], Usage(), est, self.model, "", ms,
+                                redact_text(raw, self.s)[:2000], redact_text(error, self.s), attempts)
+            if broken:
+                result.details = {"billed": broken}
+            return result
 
         body = self._body(request, messages, max_out)
         attempts = [0]
@@ -192,29 +224,29 @@ class OpenAIResponsesProvider(ChatProvider):
                 raise
 
         t0 = time.monotonic()
-        try:
-            data, ms, n = self._retrying(once)
-        except _Failed as exc:
-            result = failed(exc.status, exc.error, int((time.monotonic() - t0) * 1000), attempts[0], exc.raw)
-            if broken:
-                result.details = {"billed": broken}
-            return result
-        except ProviderUnavailable as exc:
-            exc.billed = broken      # for AgentBudget.charge_failure: the provider billed these attempts
-            raise
+        while True:
+            try:
+                data, ms, n = self._retrying(once)
+                break
+            except _SummaryRefused:
+                # the request for a reasoning summary was refused before anything was generated: ask without it
+                self._summaries = False
+                body["reasoning"].pop("summary", None)
+            except _Failed as exc:
+                return failed(exc.status, exc.error, int((time.monotonic() - t0) * 1000), attempts[0], exc.raw)
+            except ProviderUnavailable as exc:
+                exc.billed = broken      # for AgentBudget.charge_failure: the provider billed these attempts
+                raise
         try:
             return self._result(request, data, est, ms, n, broken, max_out)
         except (KeyError, TypeError, AttributeError, ValueError):
-            result = failed("error", "the reply is not a Responses API response", ms, n, json.dumps(data, default=str))
-            if broken:
-                result.details = {"billed": broken}
-            return result
+            return failed("error", "the reply is not a Responses API response", ms, n, json.dumps(data, default=str))
 
     def _broken_attempt(self, began: dict, est: int, max_out: int) -> dict:
-        usage = began.get("usage") if isinstance(began.get("usage"), dict) else {}
+        usage = _dict(began.get("usage"))
         prompt, completion = _int(usage.get("input_tokens")), _int(usage.get("output_tokens"))
-        details = usage.get("input_tokens_details") or {}
-        return {"model": began.get("model") or "", "prompt": prompt if prompt is not None else est,
+        details = _dict(usage.get("input_tokens_details"))
+        return {"model": str(began.get("model") or ""), "prompt": prompt if prompt is not None else est,
                 "completion": completion if completion is not None else max_out,
                 "cache_read": _int(details.get("cached_tokens")) or 0,
                 "cache_write": _int(details.get("cache_write_tokens")) or 0,
@@ -228,12 +260,14 @@ class OpenAIResponsesProvider(ChatProvider):
                 code = response.status_code
                 if code != 200:
                     response.read()
-                    text = redact_text(response.text, self.s)
+                    message = error_message(response.text, self.s)
                     if code in RETRY_STATUSES:
-                        raise TransientFailure(f"HTTP {code}", suffix=f": {error_message(text)}",
+                        raise TransientFailure(f"HTTP {code}", suffix=f": {message}",
                                                retry_after=response.headers.get("retry-after", ""))
-                    raise _Failed("too_large" if code == 413 else "error", f"HTTP {code}: {error_message(text)}",
-                                  text)
+                    if code == 400 and "summary" in body["reasoning"] and "summar" in message.lower():
+                        raise _SummaryRefused(message)
+                    raise _Failed("too_large" if code == 413 else "error", f"HTTP {code}: {message}",
+                                  redact_text(response.text, self.s))
                 if "text/event-stream" not in response.headers.get("content-type", ""):
                     response.read()        # a server that answered in one piece
                     try:
@@ -242,6 +276,14 @@ class OpenAIResponsesProvider(ChatProvider):
                         raise _Failed("error", "the reply is not a Responses API response", response.text) from None
                     return self._final({"type": "response.completed", "response": data}, began)
                 return self._events(response, began)
+        except httpx.ReadTimeout:
+            if not began:
+                raise TransientFailure(f"ReadTimeout: no reply within {self.s.agent_timeout_seconds} s") from None
+            # the model may still be reasoning; another attempt would be billed again from the start
+            raise _Failed("error", f"no event for {self.s.agent_timeout_seconds} s after the response began (the "
+                                   "model may still have been reasoning): billed and not retried; raise "
+                                   "AGENT_TIMEOUT_SECONDS (600 or more for reasoning at high effort) or lower "
+                                   "AGENT_EFFORT") from None
         except httpx.TransportError as exc:
             raise TransientFailure(f"{exc.__class__.__name__}: {exc}") from None
         except httpx.HTTPError as exc:       # e.g. a body that cannot be decoded: not a reply worth another try
@@ -274,24 +316,24 @@ class OpenAIResponsesProvider(ChatProvider):
             raise _Failed("error", "the reply stream could not be read: an event is not an object")
         kind = event.get("type")
         if kind in ("response.created", "response.in_progress"):
-            created = event.get("response")
-            began["model"] = str((created.get("model") if isinstance(created, dict) else None)
-                                 or began.get("model") or "")
+            began["model"] = str(_dict(event.get("response")).get("model") or began.get("model") or "")
             return None
         if kind == "error":
-            raise self._failure(event.get("code"), event.get("message"))
+            # the documented event carries code and message itself; some servers nest them in an error object
+            error = _dict(event.get("error")) or event
+            raise self._failure(error.get("code"), error.get("message"))
         if kind in ("response.completed", "response.incomplete", "response.failed"):
             return self._final(event, began)
-        return None
+        return None              # deltas and reasoning-summary events: they keep the stream alive, nothing more
 
     def _final(self, event: dict, began: dict) -> dict:
         data = event.get("response")
         if not isinstance(data, dict):
             raise _Failed("error", f"the {event.get('type')} event carries no response")
         if event["type"] == "response.failed" or data.get("status") == "failed":
-            began.setdefault("model", str(data.get("model") or ""))
+            began["model"] = began.get("model") or str(data.get("model") or "")
             began["usage"] = data.get("usage")
-            error = data.get("error") if isinstance(data.get("error"), dict) else {}
+            error = _dict(data.get("error"))
             raise self._failure(error.get("code"), error.get("message"))
         return data
 
@@ -299,13 +341,18 @@ class OpenAIResponsesProvider(ChatProvider):
         detail = redact_text(str(message or "no message given"), self.s)
         if code in TRANSIENT_CODES:
             return TransientFailure(f"response error {code}", suffix=f": {detail}")
+        if code in REFUSAL_CODES:
+            return _Failed("refused", f"the response was stopped under a safety policy ({code}): {detail}")
         return _Failed("error", f"the response failed ({code or 'no code given'}): {detail}")
 
     # ---- request ----------------------------------------------------------------------------------------------
     def _body(self, request: ChatRequest, messages: list[dict], max_out: int) -> dict:
+        reasoning = {"effort": self.s.agent_effort}
+        if self._summaries:
+            reasoning["summary"] = "auto"     # summaries stream while the model reasons
         # never temperature or top_p: reasoning models refuse sampling parameters
         body: dict = {"model": self.model, "input": self._input(request, messages), "max_output_tokens": max_out,
-                      "reasoning": {"effort": self.s.agent_effort}, "store": False,
+                      "reasoning": reasoning, "store": False,
                       # stateless reasoning: the encrypted items come back to be replayed with the turn
                       "include": ["reasoning.encrypted_content"], "truncation": "disabled", "stream": True}
         if request.tools:
@@ -313,8 +360,10 @@ class OpenAIResponsesProvider(ChatProvider):
                               "parameters": t.parameters, "strict": strict_ok(t.parameters)} for t in request.tools]
             body["tool_choice"] = request.tool_choice
         if request.response_schema is not None:
+            # a schema outside the strict subset would fail every call; it goes loose and is checked on return
             body["text"] = {"format": {"type": "json_schema", "name": request.schema_name,
-                                       "schema": request.response_schema, "strict": request.strict_schema}}
+                                       "schema": request.response_schema,
+                                       "strict": request.strict_schema and strict_ok(request.response_schema)}}
         return body
 
     def _input(self, request: ChatRequest, messages: list[dict]) -> list[dict]:
@@ -386,7 +435,6 @@ class OpenAIResponsesProvider(ChatProvider):
             if kind not in ITEM_KEYS:
                 foreign.append(str(kind))      # no hosted tools are offered: nothing else belongs in a reply
                 continue
-            kept.append({k: v for k, v in item.items() if k in ITEM_KEYS[kind]})
             if kind == "message":
                 for part in item.get("content") or []:
                     if part.get("type") == "output_text":
@@ -398,9 +446,10 @@ class OpenAIResponsesProvider(ChatProvider):
             elif kind == "function_call":
                 calls.append(self._tool_call(str(item.get("call_id") or ""), str(item.get("name") or ""),
                                              item.get("arguments", ""), request))
+            kept.append(_kept(item))
         content = "".join(texts)
         status = data.get("status")
-        reason = (data.get("incomplete_details") or {}).get("reason")
+        reason = _dict(data.get("incomplete_details")).get("reason")
         model = str(data.get("model") or "")
         if status == "completed":
             finish = "tool_calls" if calls else "stop"
@@ -412,12 +461,12 @@ class OpenAIResponsesProvider(ChatProvider):
         if refusals:
             refusal = "the model declined to answer: " + " ".join(r for r in refusals if r).strip()
             calls = []      # never run a tool call from a reply that refused
-        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
-        inputs, outputs = usage.get("input_tokens_details") or {}, usage.get("output_tokens_details") or {}
+        usage = _dict(data.get("usage"))
+        inputs, outputs = _dict(usage.get("input_tokens_details")), _dict(usage.get("output_tokens_details"))
         tokens = Usage(_int(usage.get("input_tokens")), _int(usage.get("output_tokens")),
                        _int(inputs.get("cached_tokens")), _int(inputs.get("cache_write_tokens")))
         details: dict = {"status": status, "model": model,
-                         "reasoning_effort": (data.get("reasoning") or {}).get("effort"),
+                         "reasoning_effort": _dict(data.get("reasoning")).get("effort"),
                          "reasoning_tokens": _int(outputs.get("reasoning_tokens"))}
         if reason:
             details["incomplete_reason"] = reason
@@ -454,7 +503,8 @@ class OpenAIResponsesProvider(ChatProvider):
         return result
 
     def _tool_call(self, call_id: str, name: str, raw, request: ChatRequest) -> ToolCall:
-        """The port's argument parsing, then the tool's schema when it is inside the strict subset."""
+        """The port's argument parsing, then the tool's schema when it is inside the strict subset the port checks;
+        the caller validates every tool's arguments against its own model."""
         call = parse_tool_arguments(call_id, name, raw)
         tool = next((t for t in request.tools if t.name == name), None)
         if call.arguments is not None and tool is not None and not strict_schema_problems(tool.parameters):
@@ -470,9 +520,27 @@ class OpenAIResponsesProvider(ChatProvider):
         if not reachable:
             return out
         configured = self.s.agent_context_tokens
-        out.append(("agent.context", "ok", f"AGENT_CONTEXT_TOKENS={configured}" if configured else
-                    "truncation is disabled: the server refuses a prompt larger than the model's context window"))
+        if configured:
+            out.append(("agent.context", "ok", f"AGENT_CONTEXT_TOKENS={configured}"))
+        elif self.decision.host == OPENAI_HOST:
+            out.append(("agent.context", "ok", ("truncation is disabled: OpenAI refuses a prompt larger than the "
+                                                "model's context window")))
+        elif self.decision.egress == "remote":
+            out.append(("agent.context", "warn", ("AGENT_CONTEXT_TOKENS is 0: whether this server honours disabled "
+                                                  "truncation is unknown, so a cut-off prompt cannot be detected; "
+                                                  "set it to the model's context window")))
+        # the calls carry the real output cap (a cap, not a spend), so a model whose limit is lower fails here
+        results = probe_results(self, self.s.agent_max_output_tokens)
         need = self.s.agent_max_output_tokens + self.s.agent_thinking_tokens
-        out.append(("agent.output", "ok", (f"max_output_tokens {need} per call (AGENT_MAX_OUTPUT_TOKENS + "
-                                           f"AGENT_THINKING_TOKENS); reasoning effort {self.s.agent_effort}")))
-        return out + probe_calls(self)
+        allowance = (f"max_output_tokens {need} per call (AGENT_MAX_OUTPUT_TOKENS + AGENT_THINKING_TOKENS); "
+                     f"reasoning effort {self.s.agent_effort}")
+        rejected = [r for r in results if isinstance(r, ChatResult) and r.status == "error"
+                    and "max_output_tokens" in r.error]
+        answered = [r for r in results if isinstance(r, ChatResult) and r.status != "error"]
+        if rejected:
+            out.append(("agent.output", "fail", f"{allowance}: {rejected[0].error}"))
+        elif answered:
+            out.append(("agent.output", "ok", f"{allowance} accepted"))
+        else:
+            out.append(("agent.output", "warn", f"{allowance}: not confirmed, as the check calls failed"))
+        return out + probe_calls(self, results=results)

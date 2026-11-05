@@ -20,6 +20,7 @@ from romulus.agent.provider import (
     agent_readiness,
     build_provider,
 )
+from romulus.agent.provider.openai_compatible import openai_strict_problems
 from romulus.config import Settings
 from romulus.doctor import check_agent
 
@@ -138,7 +139,7 @@ def test_request_shape_tools_reasoning_output_limit_storage_and_auth(api):
     assert request.headers["authorization"] == f"Bearer {KEY}"
     assert body["model"] == MODEL and body["stream"] is True
     assert body["max_output_tokens"] == 500 + 2000            # output plus room for reasoning
-    assert body["reasoning"] == {"effort": "high"}
+    assert body["reasoning"] == {"effort": "high", "summary": "auto"}
     assert body["store"] is False and body["include"] == ["reasoning.encrypted_content"]
     assert body["truncation"] == "disabled"
     assert "temperature" not in body and "top_p" not in body
@@ -564,3 +565,196 @@ def test_doctor_reports_a_rejected_key_and_makes_no_calls(api):
     route = api.post("/responses")
     checks = check_agent(settings(), resolver=openai_dns)
     assert checks[-1].name == "agent.reachable" and checks[-1].status == "fail" and route.calls == []
+
+
+# ---- review fixes: silent reasoning, summaries, strict subset, refusals, state, usage, doctor ------------------------
+
+CREATED = {"type": "response.created", "response": {"model": MODEL, "status": "in_progress"}}
+
+
+class Stalled(httpx.SyncByteStream):
+    """A stream that sends the created event, then nothing until the read times out."""
+
+    def __iter__(self):
+        yield f"event: response.created\ndata: {json.dumps(CREATED)}\n\n".encode()
+        raise httpx.ReadTimeout("timed out")
+
+
+def stalled(_request=None) -> httpx.Response:
+    return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=Stalled())
+
+
+def test_a_read_timeout_after_the_response_began_is_billed_once_and_never_retried(api):
+    route = api.post("/responses").mock(side_effect=stalled)
+    p, sleeps = build()
+    result = p.chat(ask(max_output_tokens=100))
+    assert result.status == "error" and len(route.calls) == 1 and sleeps == []
+    assert "AGENT_TIMEOUT_SECONDS" in result.error and "not retried" in result.error
+    assert result.details["billed"] == [{"model": MODEL, "prompt": result.prompt_tokens_est, "completion": 2100,
+                                         "cache_read": 0, "cache_write": 0, "worst_case": True}]
+
+
+def test_a_read_timeout_before_the_response_began_is_retried(api):
+    route = api.post("/responses").mock(side_effect=[httpx.ReadTimeout("slow"), streamed(response(message("ok")))])
+    p, sleeps = build()
+    result = p.chat(ask())
+    assert result.ok and len(route.calls) == 2 and len(sleeps) == 1 and "billed" in result.details
+    assert len(result.details["billed"]) == 1
+
+
+def test_reasoning_summary_events_keep_the_stream_alive_and_are_otherwise_ignored(api):
+    summary = {"type": "response.reasoning_summary_text.delta", "item_id": "rs_1", "output_index": 0,
+               "summary_index": 0, "delta": "Checking the status", "sequence_number": 1}
+    done = response({**reasoning(), "summary": [{"type": "summary_text", "text": "Checking the status"}]},
+                    message("ok"))
+    api.post("/responses").mock(return_value=sse(CREATED, summary, {"type": "response.completed", "response": done}))
+    p, _ = build()
+    result = p.chat(ask())
+    assert result.ok and result.provider_state["output"][0]["summary"][0]["text"] == "Checking the status"
+
+
+def test_a_refused_reasoning_summary_is_dropped_for_good(api):
+    refused = httpx.Response(400, json={"error": {"message": "Your organization must be verified to generate "
+                                                             "reasoning summaries.", "param": "reasoning.summary"}})
+    route = api.post("/responses").mock(side_effect=[refused, streamed(response(message("a"))),
+                                                     streamed(response(message("b")))])
+    p, sleeps = build()
+    assert p.chat(ask()).ok and p.chat(ask()).ok and sleeps == []
+    assert [sent(route, n)["reasoning"] for n in range(3)] == [
+        {"effort": "high", "summary": "auto"}, {"effort": "high"}, {"effort": "high"}]
+
+
+@pytest.mark.parametrize("code", ["bio_policy", "misalignment_policy_violation"])
+def test_a_response_stopped_under_a_safety_policy_is_refused(api, code):
+    failed = response(status="failed", error={"code": code, "message": "blocked"}, usage=False)
+    api.post("/responses").mock(return_value=streamed(failed))
+    p, _ = build()
+    result = p.chat(ask())
+    assert result.status == "refused" and code in result.error and result.provider_state is None
+
+
+def test_a_stream_error_event_with_a_nested_error_object_is_read(api):
+    api.post("/responses").mock(return_value=sse(CREATED, {"type": "error", "error": {"code": "invalid_prompt",
+                                                                                      "message": "nested"}}))
+    p, _ = build()
+    result = p.chat(ask())
+    assert result.status == "error" and "invalid_prompt" in result.error and "nested" in result.error
+
+
+def test_malformed_usage_in_a_failed_response_is_an_error_not_a_crash(api):
+    failed = {"status": "failed", "model": MODEL, "output": [], "error": {"code": "invalid_prompt", "message": "x"},
+              "usage": {"input_tokens": 5, "output_tokens": 1, "input_tokens_details": "oops"}}
+    api.post("/responses").mock(return_value=sse({"type": "response.failed", "response": failed}))
+    p, _ = build()
+    result = p.chat(ask())
+    assert result.status == "error" and result.details["billed"][0]["prompt"] == 5
+
+
+OBJ = {"type": "object", "additionalProperties": False}
+
+
+@pytest.mark.parametrize(("schema", "problem"), [
+    ({**OBJ, "properties": {"a": {"allOf": [{"type": "string"}]}}, "required": ["a"]}, "allOf"),
+    ({**OBJ, "$defs": {"x": {"type": "string"}}, "properties": {"a": {"$ref": "#/$defs/x", "description": "d"}},
+      "required": ["a"]}, "$ref must stand alone"),
+    ({**OBJ, "properties": {"page": {"type": "integer", "default": 1}}, "required": ["page"]}, "default"),
+    ({**OBJ, "properties": {"a": {"type": "string"}, "b": {"type": "string"}}, "required": ["a"]}, "required"),
+    ({**OBJ, "properties": {"a": {"type": "string", "format": "uri"}}, "required": ["a"]}, "format"),
+    ({"anyOf": [OBJ]}, "root"),
+])
+def test_a_schema_outside_the_openai_strict_subset_is_sent_loose(api, schema, problem):
+    assert any(problem in p for p in openai_strict_problems(schema)), openai_strict_problems(schema)
+    route = api.post("/responses").mock(return_value=streamed(response(message('{"a": "x"}'))))
+    p, _ = build()
+    assert p.chat(ask(tools=[Tool("loose", "x", schema)])).ok
+    assert sent(route)["tools"][0]["strict"] is False
+
+
+def test_the_openai_strict_subset_accepts_its_documented_keywords():
+    schema = {**OBJ, "required": ["n", "ids", "when", "note", "ref"],
+              "properties": {"n": {"type": "integer", "minimum": 1, "maximum": 9, "description": "d", "title": "N"},
+                             "ids": {"type": "array", "items": {"type": "string", "pattern": "^[a-z]+$"},
+                                     "minItems": 1, "maxItems": 20},
+                             "when": {"type": "string", "format": "date-time"},
+                             "note": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                             "ref": {"$ref": "#/$defs/kind"}},
+              "$defs": {"kind": {"type": "string", "enum": ["a", "b"]}}}
+    assert openai_strict_problems(schema) == []
+
+
+def test_a_response_schema_with_optional_properties_is_sent_loose_and_still_checked(api):
+    schema = {**OBJ, "properties": {"ok": {"type": "boolean"}, "note": {"type": "string"}}, "required": ["ok"]}
+    route = api.post("/responses").mock(side_effect=[streamed(response(message('{"ok": true}'))),
+                                                     streamed(response(message('{"note": "x"}')))])
+    p, _ = build()
+    assert p.chat(ask(response_schema=schema)).ok
+    assert sent(route)["text"]["format"]["strict"] is False
+    assert p.chat(ask(response_schema=schema)).status == "invalid_json"
+
+
+def test_stored_state_keeps_only_known_set_fields_so_later_turns_replay(api):
+    first = response({"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "gAAA", "content": None,
+                      "status": None},
+                     {"type": "message", "id": "msg_1", "role": "assistant", "status": "completed", "phase": None,
+                      "content": [{"type": "output_text", "text": "hi", "annotations": [], "newfield": 1}]})
+    route = api.post("/responses").mock(side_effect=[streamed(first), streamed(response(message("again")))])
+    p, _ = build()
+    turn = p.chat(ask())
+    assert p.chat(ask({"role": "user", "content": "go"}, turn.assistant_message(),
+                      {"role": "user", "content": "more"})).ok
+    assert sent(route)["input"][1:3] == [
+        {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "gAAA"},
+        {"type": "message", "id": "msg_1", "role": "assistant", "status": "completed",
+         "content": [{"type": "output_text", "text": "hi", "annotations": []}]}]
+
+
+def test_json_escaped_and_masked_keys_are_redacted_from_errors(api):
+    key = "sk-proj-local&key<0123456789>wxyz"
+    backslash = chr(92)
+    escaped = key.replace("&", backslash + "u0026").replace("<", backslash + "u003c").replace(">", backslash + "u003e")
+    body = '{"error": {"message": "bad key ' + escaped + ', or Incorrect API key provided: sk-proj-****wxyz."}}'
+    api.post("/responses").mock(return_value=httpx.Response(401, content=body.encode(),
+                                                            headers={"content-type": "application/json"}))
+    p, _ = build(settings(agent_api_key=key))
+    result = p.chat(ask())
+    assert key not in result.error and escaped not in result.raw and "sk-proj-****wxyz" not in result.error
+    assert result.error == "HTTP 401: bad key <redacted>, or Incorrect API key provided: <redacted>."
+
+
+def test_doctor_context_claims_follow_the_endpoint(api):
+    _doctor_endpoint(api)
+    checks = {c.name: c for c in check_agent(settings(), resolver=openai_dns)}
+    assert checks["agent.context"].status == "ok" and "OpenAI refuses" in checks["agent.context"].detail
+    other = "https://models.example/v1"
+    with respx.mock(base_url=other, assert_all_called=False) as elsewhere:
+        _doctor_endpoint(elsewhere)
+        checks = {c.name: c for c in check_agent(settings(agent_base_url=other),
+                                                 resolver=lambda host: ["198.51.100.9"])}
+    assert checks["agent.context"].status == "warn" and "AGENT_CONTEXT_TOKENS" in checks["agent.context"].detail
+    local = "http://10.0.0.5:8000/v1"
+    with respx.mock(base_url=local, assert_all_called=False) as lan:
+        _doctor_endpoint(lan)
+        checks = check_agent(settings(agent_base_url=local, model_egress="", agent_api_key=""), resolver=lambda h: [])
+    contexts = [c for c in checks if c.name == "agent.context"]
+    assert [c.status for c in contexts] == ["warn"] and "local server" in contexts[0].detail
+
+
+@pytest.mark.parametrize(("effort", "timeout", "warned"), [("high", 180, True), ("max", 599, True),
+                                                           ("high", 600, False), ("medium", 180, False)])
+def test_doctor_warns_when_the_read_timeout_is_short_for_long_reasoning(api, effort, timeout, warned):
+    _doctor_endpoint(api)
+    checks = {c.name: c for c in check_agent(settings(agent_effort=effort, agent_timeout_seconds=timeout),
+                                             resolver=openai_dns)}
+    assert ("agent.timeout" in checks) is warned
+    if warned:
+        assert checks["agent.timeout"].status == "warn" and "600" in checks["agent.timeout"].detail
+
+
+def test_doctor_probes_with_the_real_output_cap_and_fails_a_model_whose_limit_is_lower(api):
+    api.get("/models").mock(return_value=httpx.Response(200, json={"data": [{"id": MODEL}]}))
+    route = api.post("/responses").mock(return_value=httpx.Response(400, json={"error": {
+        "message": "max_output_tokens is too large: this model supports at most 32768 output tokens."}}))
+    checks = {c.name: c for c in check_agent(settings(agent_max_output_tokens=8000), resolver=openai_dns)}
+    assert sent(route, 0)["max_output_tokens"] == 8000 + 2000
+    assert checks["agent.output"].status == "fail" and "at most 32768" in checks["agent.output"].detail
+    assert checks["agent.tool_calls"].status == "fail"

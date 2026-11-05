@@ -11,13 +11,14 @@ broke off mid-reply at its full output allowance), so budgets price each attempt
 
 Translation: leading system messages become the top-level system prompt and later ones mid-conversation system
 messages, placed where the API accepts them (after a user turn, last or before an assistant turn; anything else is a
-HistoryError); assistant tool calls become tool_use blocks; consecutive tool results go back in one user message. Tools
-are sent strict, and a schema outside the strict subset the API documents is refused before anything is sent; a
-response schema becomes output_config.format; sampling parameters are never sent. tool_choice "required" becomes
-"auto" with an instruction to call a tool, and a reply without one is invalid_tool_call. Thinking is adaptive,
-AGENT_EFFORT sets how much, and every call's max_tokens adds AGENT_THINKING_TOKENS of room for it. Calls stream
-(large max_tokens values need it), tool inputs stream as generated, and so each tool input is parsed strictly from
-the raw stream and checked against its schema here. The tools and system prompt form a cached prefix, and the
+HistoryError); assistant tool calls become tool_use blocks; consecutive tool results go back in one user message. A
+tool is sent strict when its schema is inside the strict subset the API documents (and the request within its strict
+limits), else not strict; a response schema becomes output_config.format and must be inside the subset, or the request
+is refused before anything is sent; sampling parameters are never sent. tool_choice "required" becomes "auto" with an
+instruction to call a tool, and a reply without one is invalid_tool_call. Thinking is adaptive, AGENT_EFFORT sets how
+much, and every call's max_tokens adds AGENT_THINKING_TOKENS of room for it. Calls stream (large max_tokens values
+need it), tool inputs stream as generated, and so each tool input is parsed strictly from the raw stream and, for a
+strict tool, checked against its schema here (the caller validates every tool's arguments against its own model). The tools and system prompt form a cached prefix, and the
 growing conversation is cached automatically.
 
 Sessions must be append-only, or start fresh. Claude signs its thinking blocks, and they must go back unchanged, in
@@ -44,6 +45,7 @@ from collections.abc import Callable
 from pydantic import SecretStr
 
 from romulus.agent.provider.base import (
+    MAX_ERROR_MESSAGE,
     PROVIDER_STATE,
     RETRY_STATUSES,
     ChatProvider,
@@ -575,11 +577,11 @@ class ClaudeMessagesProvider(ChatProvider):
             return ChatResult(status, "", "", None, [], Usage(), est, self.model, "", ms, "",
                               redact_text(error, self.s)[:2000], attempts)
 
-        problems = self._schema_problems(request)
+        strict, problems = self._strictness(request)
         if problems:
-            return failed("error", "not sent: outside the strict JSON-schema subset the API accepts: "
-                                   + "; ".join(problems[:10]))
-        body, required = self._body(request, messages, max_out)
+            return failed("error", "not sent: the response schema is outside the strict JSON-schema subset the API "
+                                   "accepts: " + "; ".join(problems[:10]))
+        body, required = self._body(request, messages, max_out, strict)
         raw_inputs: dict[int, str] = {}
         attempts = [0]
         broken: list[dict] = []          # attempts that broke off after their reply began: billed all the same
@@ -655,7 +657,10 @@ class ClaudeMessagesProvider(ChatProvider):
                 return message
         except sdk.APIStatusError as exc:
             code, kind = exc.status_code, exc.type or ""
-            detail = redact_text(str(exc.message), self.s)[:300]
+            payload = exc.body if isinstance(exc.body, dict) else {}
+            error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+            message = error.get("message") if isinstance(error.get("message"), str) else str(exc.message)
+            detail = redact_text(message, self.s)[:MAX_ERROR_MESSAGE]
             if code in RETRY_STATUSES or code == OVERLOADED or (code < 300 and kind in RETRY_ERROR_TYPES):
                 where = f"HTTP {code}" if code >= 300 else "stream error"
                 raise TransientFailure(f"{where} {kind}".strip(), suffix=f": {detail}",
@@ -681,24 +686,38 @@ class ClaudeMessagesProvider(ChatProvider):
             raise _Failed("error", f"the reply stream could not be read: {exc}"[:600]) from None
 
     # ---- request ----------------------------------------------------------------------------------------------
-    def _schema_problems(self, request: ChatRequest) -> list[str]:
-        counts = {"optional": 0, "union": 0}
-        problems = [f"tool {t.name}: {p}" for t in request.tools for p in strict_schema_problems(t.parameters, counts)]
+    def _strictness(self, request: ChatRequest) -> tuple[frozenset[str], list[str]]:
+        """The tools to send strict, and why the response schema cannot be sent (empty when it can). A tool is
+        strict when its schema is inside the subset; when the strict tools and the response schema together pass a
+        per-request limit, every tool goes loose. The response schema has no loose form, so its problems refuse."""
+        schema_counts = {"optional": 0, "union": 0}
+        problems: list[str] = []
         if request.response_schema is not None:
-            problems += [f"response schema: {p}" for p in strict_schema_problems(request.response_schema, counts)]
-        if len(request.tools) > MAX_STRICT_TOOLS:
-            problems.append(f"{len(request.tools)} strict tools (at most {MAX_STRICT_TOOLS})")
-        if counts["optional"] > MAX_OPTIONAL_PARAMETERS:
-            problems.append(f"{counts['optional']} optional parameters (at most {MAX_OPTIONAL_PARAMETERS})")
-        if counts["union"] > MAX_UNION_PARAMETERS:
-            problems.append(f"{counts['union']} union-typed parameters (at most {MAX_UNION_PARAMETERS})")
-        return problems
+            problems = [f"response schema: {p}"
+                        for p in strict_schema_problems(request.response_schema, schema_counts)]
+        counts = dict(schema_counts)
+        strict = set()
+        for t in request.tools:
+            tool_counts = {"optional": 0, "union": 0}
+            if not strict_schema_problems(t.parameters, tool_counts):
+                strict.add(t.name)
+                counts = {k: counts[k] + tool_counts[k] for k in counts}
+        if (len(strict) > MAX_STRICT_TOOLS or counts["optional"] > MAX_OPTIONAL_PARAMETERS
+                or counts["union"] > MAX_UNION_PARAMETERS):
+            strict = set()
+        if schema_counts["optional"] > MAX_OPTIONAL_PARAMETERS:
+            problems.append(f"{schema_counts['optional']} optional parameters (at most {MAX_OPTIONAL_PARAMETERS})")
+        if schema_counts["union"] > MAX_UNION_PARAMETERS:
+            problems.append(f"{schema_counts['union']} union-typed parameters (at most {MAX_UNION_PARAMETERS})")
+        return frozenset(strict), problems
 
-    def _body(self, request: ChatRequest, messages: list[dict], max_out: int) -> tuple[dict, list[str]]:
+    def _body(self, request: ChatRequest, messages: list[dict], max_out: int,
+              strict: frozenset[str] = frozenset()) -> tuple[dict, list[str]]:
         """The stream() arguments, and the tools a required-tool instruction named (replayed with the reply)."""
         system, out = self._translate(request, messages)
-        tools = [{"name": t.name, "description": t.description, "input_schema": t.parameters, "strict": True,
-                  # inputs stream as generated; _tool_call parses and checks each one, as the API no longer does
+        tools = [{"name": t.name, "description": t.description, "input_schema": t.parameters,
+                  "strict": t.name in strict,
+                  # inputs stream as generated; _tool_call parses each one, as the API no longer does
                   "eager_input_streaming": True}
                  for t in sorted(request.tools, key=lambda t: t.name)]
         # one explicit cache breakpoint closes the stable prefix (tools, then the system prompt)
@@ -892,7 +911,8 @@ class ClaudeMessagesProvider(ChatProvider):
         """The port's argument parsing on the raw streamed JSON, then the tool's schema."""
         call = parse_tool_arguments(call_id, name, raw)
         tool = next((t for t in request.tools if t.name == name), None)
-        if call.arguments is not None and tool is not None:
+        # a schema outside the subset was sent loose; the caller validates those arguments against its own model
+        if call.arguments is not None and tool is not None and not strict_schema_problems(tool.parameters):
             problems = instance_problems(call.arguments, tool.parameters)
             if problems:
                 return ToolCall(call_id, name, None, raw,
