@@ -2269,7 +2269,7 @@ Invalid mappings are excluded from coverage:
 - Positive-only reason: These recorded Windows signals show positive observations; absence cannot be confirmed.
 
 <a id="rule-win-rpc-replication-call"></a>
-### `win.rpc_replication_call` — A replication RPC client call was observed outside declared domain controllers
+### `win.rpc_replication_call` — A directory replication RPC client call was observed
 
 - Version: `1`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
@@ -2277,7 +2277,7 @@ Invalid mappings are excluded from coverage:
 - ATT&CK: [`T1003.006`](https://attack.mitre.org/techniques/T1003/006/), [`T1207`](https://attack.mitre.org/techniques/T1207/)
 - Telemetry families: rpc_call
 - Required typed fields: rpc.interface_uuid<br>rpc.op_class<br>rpc.protocol<br>rpc.side
-- Behavior: A replication RPC client call was observed outside declared domain controllers
+- Behavior: A directory replication RPC client call was observed
 - Positive-only reason: These recorded Windows signals show positive observations; absence cannot be confirmed.
 
 <a id="rule-win-rundll32-proxy"></a>
