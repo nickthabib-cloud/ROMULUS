@@ -1,29 +1,16 @@
-"""Reading the Windows-protocol Zeek logs changes nothing that normalized before: only their own rows change, from the
-skip every unread dataset gets to typed events.
+"""Catalog dispatch changes only the newly supported Zeek logs.
 
-tests/data/zeek_dispatch_golden.json holds the record groups of `zeek_factory.dispatch_records()` and what
-`normalize_hits` made of them, each group alone and all of them in one batch, produced by the sources at commit
-b13fdfe (`git archive b13fdfe src`, run on the records the factory writes): the conn normalizer and the core analyzer
-logs, before any Windows-protocol log was read. Among them: Filebeat EVE and Malcolm Suricata records of every event
-type, Arkime sessions with and without a provider, an audit event's records, journal and Apache records, Windows events
-in two shipper shapes, the Zeek ICMP shape, Zeek conn rows in every shape, rows of every analyzer log in every shape
-that writes it, and rows of logs still outside the catalog. The golden is regenerated only when a baseline moves, never
-to make a dispatch change pass; its non-Zeek groups equal those of the golden made before Zeek records were read at all
-(commit 54bfa96), and its core analyzer groups those the core analyzer logs' own golden compared with that baseline.
-The Windows groups retain the semantic values captured by the producer at commit
-14fe48562a3d7b4aff9bf15ee9e13c8ec941e9f4 (`windows_baseline`). A producer epoch changes derived
-event ids and producer tags; those are rebased only after a source-guarded comparison proves that
-all typed values, origins, raw references, skips and errors are unchanged. Only the six Windows
-producer/id pairs move, and reversing those replacements restores the complete original golden.
-The Windows producer reads these records before Zeek recognition, so nothing Zeek-related changes them.
-A Zeek record's digest is over its stored form, its credentials
-masked, so the digest of a credential-bearing record (the SNMP rows' community) is compared as it is computed now.
+The fixture holds native record groups and their producer-scoped baseline dumps. Its baseline metadata
+identifies the source used for each group: core shapes, Windows records, and the six health inputs whose
+recorded baseline still skipped them. The current catalog turns only newly supported shipped logs into
+typed events; undeclared plain JSON and uncatalogued logs keep their named skips.
 
-Two classes, decided by the records themselves:
-- every group whose rows' log the catalog now reads as a Windows-protocol log changes from that skip to events of the
-  log's family, and nothing else about it;
-- every other group normalizes exactly as before, typed values, ids, origins, skips and errors: every non-Zeek group,
-  every conn and core analyzer group, and every row of a log still outside the catalog.
+A producer epoch changes its event ids and producer tags. Those fields are rebased only after complete
+native-output comparisons prove every typed value, origin, raw reference, skip and error unchanged.
+The Windows dumps correspond to windows_baseline; the health inputs record unread output from
+health_baseline. Reversing the Zeek identity replacements and removing the added health inputs and
+their batch skips restores the entire previous golden. Credential-bearing raw digests are reconciled
+separately with the credential masking boundary below.
 """
 import json
 from pathlib import Path
@@ -33,18 +20,17 @@ import pytest
 from romulus.evidence.normalize import NORMALIZER_VERSION, normalize_hits, raw_digest
 from romulus.evidence.windows import WINDOWS_NORMALIZER
 from romulus.evidence.zeek import ZEEK_DUPLICATE, ZEEK_NORMALIZER, scrub_zeek_source, zeek_record
-from romulus.evidence.zeek_catalog import ANALYZER_LOGS, WINDOWS_PROTOCOL_LOGS
+from romulus.evidence.zeek_catalog import ANALYZER_LOGS, HEALTH_LOGS, WINDOWS_PROTOCOL_LOGS
 
 GOLDEN = json.loads((Path(__file__).parent / "data" / "zeek_dispatch_golden.json").read_text(encoding="utf-8"))
 RECORDS = GOLDEN["records"]
 
 
 def _now_read(name: str):
-    """The Windows-protocol log the group's rows belong to, by today's recognition and catalog; None for any other
-    group."""
+    """The newly read protocol or health log recognized for this group; None for other groups."""
     recognized = {zeek_record(h["_source"]) for h in RECORDS[name]["hits"]} - {None}
     logs = {record.log for record in recognized}
-    return next(iter(logs)) if len(logs) == 1 and next(iter(logs)) in WINDOWS_PROTOCOL_LOGS else None
+    return next(iter(logs)) if len(logs) == 1 and next(iter(logs)) in (*WINDOWS_PROTOCOL_LOGS, *HEALTH_LOGS) else None
 
 
 NEWLY_READ = sorted(name for name in RECORDS if _now_read(name) is not None)
@@ -84,19 +70,20 @@ def dumped(events, skips, errors) -> dict:
 
 
 def test_the_golden_holds_the_baseline_of_every_shape():
-    assert GOLDEN["baseline"] == "b13fdfe" and GOLDEN["windows_baseline"] == "14fe48562a3d7b4aff9bf15ee9e13c8ec941e9f4"
+    assert (GOLDEN["baseline"] == "b13fdfe" and GOLDEN["windows_baseline"] == "48a6639fda2aa0b4dd57295cfc8530d9b8d566a9"
+            and GOLDEN["health_baseline"] == "48a6639fda2aa0b4dd57295cfc8530d9b8d566a9")
     producers = {e["normalizer"] for record in RECORDS.values() for e in record["events"]}
     assert producers == {NORMALIZER_VERSION, WINDOWS_NORMALIZER, ZEEK_NORMALIZER}
     assert {"linux-audit-group", "systemd-journal-sshd", "apache-access", "windows-security-elastic_agent",
             "malcolm-suricata-ftp", "eve-fileinfo", "arkime-provider", "zeek-icmp", "zeek-conn-malcolm",
             "zeek-conn-security_onion-bare", "zeek-files-5.0-security_onion"} <= set(RECORDS)
     # every analyzer log in every shape that writes it
-    for log in ANALYZER_LOGS:
+    for log in (*ANALYZER_LOGS, *HEALTH_LOGS):
         for shape in log.names:
             assert f"zeek-{log.name}-{shape}" in RECORDS, (log.name, shape)
     # exactly the Windows-protocol rows a shipper indexes (plain Zeek JSON is read only through a site declaration,
     # never by normalize_hits), their variants, and the conn-shaped rows that named smb_files at the baseline
-    shipped = {f"zeek-{log.name}-{shape}" for log in WINDOWS_PROTOCOL_LOGS for shape in set(log.names) - {"plain"}}
+    shipped = {f"zeek-{log.name}-{shape}" for log in (*WINDOWS_PROTOCOL_LOGS, *HEALTH_LOGS) for shape in set(log.names) - {"plain"}}
     variants = {"zeek-ldap-6.1-malcolm", "zeek-ldap-6.1-security_onion", "zeek-ldap_search-6.1-malcolm",
                 "zeek-ldap_search-6.1-security_onion", "zeek-smb_cmd-no-file-malcolm", "zeek-smb_cmd-no-file-elastic",
                 "zeek-smb_cmd-malcolm-text"}

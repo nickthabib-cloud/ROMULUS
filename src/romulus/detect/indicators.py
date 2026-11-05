@@ -40,6 +40,7 @@ from romulus.detect.citing import (
     cited_phrase,
 )
 from romulus.detect.host import (
+    ALONE_NOTE,
     AWK_INTERPRETERS,
     SCRIPT_FILE_INTERPRETERS,
     _awk_script_file_of,
@@ -243,6 +244,18 @@ class IndicatorMatch(Playbook):
     # ---- matching ---------------------------------------------------------------------------------
     def _keep(self, key: tuple, e: TypedEvent, meta: dict) -> None:
         field_name = meta["field"]
+        if reason := getattr(self, "_unaggregated_reason", ""):
+            # The upstream identity store cannot establish cumulative-flow uniqueness.
+            # Reuse the existing single-record finding; never touch retained group counts.
+            self.note_limit("source_identity", reason)
+            m = self._finding(key, 1, field_name, [e], operating_systems={event_os_family(e)})
+            m.group_key = "|".join(map(str, key[:3])) + "|*"
+            item = alone(m, self, e)
+            if item is not None:
+                item.notes = [note for note in item.notes if note != ALONE_NOTE]
+                item.notes.append(reason + "; first matching record cited; later records of this group are not counted")
+            add_unheld(self._alone, item)
+            return
         group_key = key
         state = self.groups.setdefault(key, lambda: [0, field_name, HeldExamples(EXAMPLE_LIMIT), set(), Ends()])
         if state is None:
@@ -378,6 +391,14 @@ class IndicatorMatch(Playbook):
         self._batch = None
         out, self._alone = self._alone, []
         return out
+
+    def consume_unaggregated(self, events, reason):
+        """Publish actual record indicators without modifying cumulative group counts."""
+        self._unaggregated_reason = reason
+        try:
+            return self.consume_scoped_partition(events)
+        finally:
+            self._unaggregated_reason = ""
 
     def retained_events(self) -> list[TypedEvent]:
         return []                               # staged on disk instead

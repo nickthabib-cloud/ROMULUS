@@ -35,6 +35,7 @@ LinkType = Literal[
     "process_lineage", "login_session", "network_flow", "flow_host_side",
     "source_ip", "account", "host_after_anchor", "process_activity",
     "process_session", "kerberos_logon", "remote_logon_source", "service_process",
+    "zeek_uid", "zeek_file", "certificate", "address_host",
 ]
 LinkStrength = Literal["observed", "inferred"]
 WINDOWS_LINK_TYPES = frozenset({
@@ -439,6 +440,12 @@ class LinkFetcher:
         *,
         query_cap: int | None = None,
     ) -> LinkResult:
+        from romulus.hunt.zeek_links import ZEEK_LINK_TYPES, ZeekLink
+        if link_type in ZEEK_LINK_TYPES:
+            join = ZeekLink(self, anchor, link_type, window, query_cap)
+            if join.fetch_key not in self._cache:
+                self._cache[join.fetch_key] = join.run()
+            return self._cache[join.fetch_key]
         # Forward links hash the requested symmetric window and persist the clipped searched window.
         # Service-process links plan from installation time so they do not query pre-install process starts.
         plan_window = self._effective_window(anchor, link_type, window) if link_type == "service_process" else window
@@ -547,6 +554,10 @@ class LinkFetcher:
         return "link-" + self._fetch_key(anchor, link_type, plan_window, key)[:20]
 
     def _plan(self, anchor: LinkAnchor, link_type: LinkType, window: LinkWindow):
+        from romulus.hunt.zeek_links import ZEEK_LINK_TYPES, anchor_key
+        if link_type in ZEEK_LINK_TYPES:
+            return (anchor_key(anchor, link_type), "inferred" if link_type == "address_host" else "observed",
+                    [], lambda event: False, lambda events: Selection([], []), None, [])
         self._planning_host_gaps: list[PivotCoverage] = []
         handlers = {
             "process_lineage": self._lineage,

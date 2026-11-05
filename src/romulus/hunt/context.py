@@ -239,6 +239,12 @@ def _finalize_rule(repo: Repo, hunt_id: str, reaches: _RuleReaches,
         union_events = sorted(bucket["events"].values(), key=lambda event: (event.ts, event.id))
         session_admitted = False
         for match in playbook_cls().consume_linked(rep_anchor, rep_link, union_events):
+            if any(event.get("observer.product")=="zeek" for event in match.events):
+                from itertools import chain, islice
+
+                from romulus.hunt.zeek_context import MAX_ROWS, attach
+                witnesses=chain(union_events,*(link.evidence_events for _anchor,link in pairs))
+                attach(match,list(islice(witnesses,MAX_ROWS+1)),limited=True)
             decision = decide(match, hunt_id)
             if decision.admitted:
                 admitted[match.group_key] = (match, decision, pairs)

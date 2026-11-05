@@ -52,7 +52,7 @@ def test_expansion_binds_the_existing_executor_facts_before_direct_detection(mon
     monkeypatch.setattr(expansion_module, "fresh_direct_pack", lambda: [rule])
     fetcher = SimpleNamespace(executor=SimpleNamespace(site_facts=FACTS))
     engine = ExpansionEngine(repo, "h1", Window(start=START, end=START+timedelta(minutes=1)), fetcher)
-    result = SimpleNamespace(id="L-facts", link_type="source_ip", strength="observed", event_ids=[evidence.id], task_ids=[])
+    result = engine._stored_result(repo.expansion_link("L-facts"))
     rows = engine._evaluate(repo.candidate("F-A"), result)
     assert rule.site_facts is FACTS
     assert len(rows) == 1 and rows[0]["lane"] == "high"

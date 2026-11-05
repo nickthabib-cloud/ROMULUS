@@ -86,7 +86,7 @@ from romulus.evidence.zeek_credentials import (
     strip_uri_userinfo,
 )
 
-ZEEK_NORMALIZER = "zeek-ecs@1"
+ZEEK_NORMALIZER = "zeek-ecs@2"
 ZEEK_DUPLICATE = "duplicate Zeek record copy (sensor/log/uid)"
 ZEEK_INTERIM_SUPERSEDED = "Zeek interim conn record superseded by a later record of the same connection"
 MISSED_BYTES_CAVEAT = ("Zeek missed {n} bytes of this connection in content gaps (missed_bytes): its payload byte "
@@ -560,7 +560,7 @@ def _read_strings(value, shape):
 
 
 READERS = {"ip": _read_ip, "port": lambda v, s: _read_count(v, s, 65535), "count": _read_count,
-           "seconds": _read_seconds, "text": _read_text, "flag": _read_flag, "services": _read_services,
+           "percentage": lambda v, s: _read_seconds(v, MALCOLM), "seconds": _read_seconds, "text": _read_text, "flag": _read_flag, "services": _read_services,
            "names": _read_names, "mac": _read_mac, "list": _read_vector, "text1": _read_text1,
            "count_text": _read_count_text, "time": _read_time, "hex": _read_hex, "hexes": _read_hexes,
            "addresses": _read_addresses, "seconds_list": _read_seconds_list, "strings": _read_strings}

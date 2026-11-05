@@ -323,6 +323,12 @@ def coverage_for_hunt(repo: Repo, hunt_id: str) -> dict:
                          sweep_finished=finished)
     coverage["not_assessed"] = _not_assessed(hm, detail)
     coverage["baseline"] = _baseline_coverage(repo, hunt_id, hm)
+    visibility = repo.latest_audit(hunt_id, "hunt.zeek_visibility")
+    if visibility:
+        from itertools import islice
+        detail = dict(visibility["detail"])
+        detail["preview"] = list(islice(repo.zeek_visibility_rows(hunt_id, detail["snapshot"]["sha256"]), 50))
+        coverage["zeek_visibility"] = detail
     return coverage
 
 

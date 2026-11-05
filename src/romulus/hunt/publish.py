@@ -264,9 +264,21 @@ def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
                   task_id: str | None, raw_sources: dict[str, dict],
                   source_case_id: str | None = None, source_anchor_id: str | None = None,
                   source_link_id: str | None = None, context_reach: dict | None = None,
-                  *, owner_token: str | None = None) -> dict | None:
+                  *, owner_token: str | None = None, zeek_context=None, zeek_context_ids=()) -> dict | None:
     """Persist cited evidence and publish a machine-decided finding once, with stable script-view revisions.
     Context findings are published by the post-expansion pass (romulus.hunt.context.finalize_context)."""
+    if zeek_context is not None and any(event.get("observer.product")=="zeek" for event in match.events):
+        from itertools import islice
+
+        from romulus.hunt.zeek_context import MAX_ROWS, attach
+        witnesses=list(zeek_context[:MAX_ROWS+1])
+        held={event.id for event in witnesses}
+        missing=list(islice((identity for identity in zeek_context_ids if identity not in held),
+                            max(0,MAX_ROWS+1-len(witnesses))))
+        for start in range(0,len(missing),LINEAGE_CITATION_BATCH):
+            witnesses.extend(TypedEvent.model_validate(row["event"]) for row in
+                             repo.citation_events(hunt_id,missing[start:start+LINEAGE_CITATION_BATCH]))
+        attach(match,witnesses,limited=True)
     compact = [event for event in match.events if COMPACT_CITATION_NOTE in event.caveats or any(
         note.startswith("Authentication witness body not retrieved") for note in event.caveats)]
     if compact:

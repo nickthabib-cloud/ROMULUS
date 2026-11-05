@@ -47,6 +47,9 @@ from romulus.hunt.publish import (
 )
 from romulus.hunt.sweep import stored_boot_intervals
 from romulus.hunt.windows_context import publish_windows_link_context
+from romulus.hunt.zeek_links import FETCH_QUERIES as ZEEK_FETCH_QUERIES
+from romulus.hunt.zeek_links import ZEEK_LINK_TYPES
+from romulus.hunt.zeek_links import event_keys as zeek_event_keys
 from romulus.sources.models import Window
 from romulus.store.db import digest
 from romulus.store.repo import Repo
@@ -121,6 +124,18 @@ PLAN_CACHE_EVENTS = 100_000
 def fallback_lookup_cap(max_source_queries: int) -> int:
     """Source queries all fallback lookups of a hunt may spend: FALLBACK_LOOKUP_SHARE of the budget, at least 1."""
     return max(1, int(max_source_queries * FALLBACK_LOOKUP_SHARE))
+
+
+def _slot_groups_after(slots) -> list[int]:
+    """For each slot, the budget groups left from it on. One anchor's Zeek variants of a link type share one query
+    budget, so they divide the remaining queries as one slot: counted apart, a many-key anchor would cut every slot's
+    cap below one physical fetch and starve the anchors after it."""
+    seen, counts = set(), [0] * len(slots)
+    for index in range(len(slots) - 1, -1, -1):
+        slot = slots[index]
+        seen.add((slot.row["id"], slot.link_type) if slot.link_type in ZEEK_LINK_TYPES else ("slot", index))
+        counts[index] = len(seen)
+    return counts
 
 
 @dataclass
@@ -340,6 +355,8 @@ class ExpansionEngine:
 
     @staticmethod
     def _event_link_keys(event: TypedEvent, link_type: LinkType) -> list[dict]:
+        if link_type in ZEEK_LINK_TYPES:
+            return zeek_event_keys(event, link_type)
         if link_type == "process_lineage" and usable_key(event.get("process.pid")):
             return [{"process.pid": event.get("process.pid")}]
         if link_type == "login_session" and usable_key(event.get("process.session_id")):
@@ -421,6 +438,8 @@ class ExpansionEngine:
     def _link_anchors(anchor: LinkAnchor, link_type: LinkType) -> tuple[list[LinkAnchor], list[dict]]:
         keyed: dict[str, tuple[dict, TypedEvent, str | None, datetime]] = {}
         windows_link = link_type in WINDOWS_LINK_TYPES
+        zeek_link = link_type in ZEEK_LINK_TYPES
+        limit = 1000 if zeek_link else MAX_ANCHOR_KEYS
         overflow = False
         for event in anchor.events:
             event_ts = _utc(event.ts)
@@ -440,6 +459,9 @@ class ExpansionEngine:
                         keyed, token, value, MAX_ANCHOR_KEYS + WINDOWS_DROPPED_SCOPE_EXAMPLES,
                         rank=lambda token, value: (abs(value[3] - _utc(anchor.ts)), token),
                     )
+                elif zeek_link:
+                    overflow |= _retain_smallest(keyed, token, value, limit + WINDOWS_DROPPED_SCOPE_EXAMPLES,
+                                                 rank=lambda token, value: token)
                 else:
                     keyed.setdefault(token, value)
         if not keyed:
@@ -448,7 +470,7 @@ class ExpansionEngine:
             (abs(keyed[token][3] - _utc(anchor.ts)), token) if windows_link else (timedelta(0), token)
         ))
         ordered = [keyed[token] for token in tokens]
-        kept, dropped = ordered[:MAX_ANCHOR_KEYS], ordered[MAX_ANCHOR_KEYS:]
+        kept, dropped = ordered[:limit], ordered[limit:]
         if windows_link:
             variants = [
                 anchor.model_copy(update={
@@ -461,8 +483,8 @@ class ExpansionEngine:
             ]
         else:
             variants = [
-                anchor.model_copy(update={"events": [event]})
-                for _key, event, _event_host, _event_ts in kept
+                anchor.model_copy(update={"events": [event], **({"link_key": key} if zeek_link else {})})
+                for key, event, _event_host, _event_ts in kept
             ]
         dropped_keys = [key for key, _event, _host, _ts in dropped]
         if overflow:
@@ -587,6 +609,12 @@ class ExpansionEngine:
                     row["_windows_anchor"] = is_windows
                 if is_windows:
                     share = WINDOWS_PER_ANCHOR_SOURCE_QUERIES
+                is_zeek = row.get("_zeek_anchor")
+                if is_zeek is None:
+                    is_zeek = any(event.get("observer.product") == "zeek" for event in self._anchor_plan(row).events)
+                    row["_zeek_anchor"] = is_zeek
+                if is_zeek:
+                    share += 4 * len(ZEEK_LINK_TYPES)
             shares += share
         return min(self.max_source_queries, shares)
 
@@ -656,6 +684,9 @@ class ExpansionEngine:
                     ),
                 )
         if dropped:
+            if link_type in ZEEK_LINK_TYPES:
+                self._add_reason(anchor_reasons,plan.row["id"],
+                                 "Zeek link hop-key limit 1000 reached; remaining anchor keys unresolved")
             self._add_reason(
                 anchor_reasons, plan.row["id"],
                 "keys_not_expanded:" + json.dumps(dropped, sort_keys=True, separators=(",", ":")),
@@ -790,9 +821,13 @@ class ExpansionEngine:
         for tier, link_types, window_label in TIER_PLAN:
             tier_slots = []
             windows_links = _WINDOWS_TIER_LINKS.get((tier, window_label), ())
-            for link_type in (*link_types, *windows_links):
+            zeek_links = ("zeek_uid", "zeek_file", "certificate") if tier == "T1" else (
+                ("address_host",) if tier == "T2" else ())
+            for link_type in (*link_types, *windows_links, *zeek_links):
                 for anchor_row in ordered:
                     plan = self._anchor_plan(anchor_row)
+                    if link_type in zeek_links and not any(zeek_event_keys(event, link_type) for event in plan.events):
+                        continue
                     if link_type in windows_links and not any(
                         event_os_family(event) == "windows" for event in plan.events
                     ):
@@ -833,6 +868,11 @@ class ExpansionEngine:
         }, owner_token=self.owner_token)
 
     def _evaluate(self, candidate: dict, result: LinkResult) -> list[dict]:
+        if result.link_type == "address_host":
+            # The small sample establishes that a lease's hostname has telemetry.
+            # Dedicated host links own activity searches and their direct findings.
+            self.repo.mark_expansion_link_evaluated(result.id, owner_token=self.owner_token)
+            return []
         # Per link, only the direct (sweep) pack runs: a strong indicator among the linked records is published
         # immediately. Context rules are judged once, after expansion ends, by finalize_context.
         events = self._events(result.event_ids)
@@ -854,6 +894,7 @@ class ExpansionEngine:
                 row = publish_match(
                     self.repo, self.hunt_id, playbook, match, result.task_ids[0] if result.task_ids else None, {},
                     source_anchor_id=candidate["id"], source_link_id=result.id, owner_token=self.owner_token,
+                    zeek_context=events, zeek_context_ids=result.evidence_ids,
                       context_reach={
                           "anchor_id": candidate["id"], "link_id": result.id,
                           "link_type": result.link_type, "strength": result.strength,
@@ -935,6 +976,7 @@ class ExpansionEngine:
                 query_count = max(query_count, spent)
             made_progress = False
             known_anchor_ids = {row["id"] for row in all_rows}
+            groups_after = _slot_groups_after(slots)
             for slot_index, slot in enumerate(slots):
                 anchor_row, candidate, anchor = slot.row, slot.candidate, slot.anchor
                 link_type, window, stored = slot.link_type, slot.window, slot.stored
@@ -956,9 +998,10 @@ class ExpansionEngine:
                     continue
                 allowed_budget = root_cap if anchor_row["depth"] == 0 and not stored else self.budget
                 remaining = allowed_budget - query_count
-                # Every physical fetch is budgeted for at least two queries. Do not
-                # let that floor cross the root-anchor reserve or the global cap.
-                if not stored and remaining < 2:
+                # Every physical fetch is budgeted for at least two queries (a Zeek join, which opens its own point
+                # in time, for three). Do not let that floor cross the root-anchor reserve or the global cap.
+                floor = ZEEK_FETCH_QUERIES if link_type in ZEEK_LINK_TYPES else 2
+                if not stored and remaining < floor:
                     stop_reason = "budget"
                     reason = (RESERVED_REASON if anchor_row["depth"] == 0 and root_cap < self.budget
                               else "source query budget exhausted")
@@ -966,9 +1009,10 @@ class ExpansionEngine:
                     anchor_reasons[anchor_row["id"]].append(reason)
                     blocked_anchors.add(anchor_row["id"])
                     continue
-                remaining_slots = len(slots) - slot_index
-                query_cap = min(12, max(2, remaining // max(1, remaining_slots)))
+                query_cap = min(12, max(floor, remaining // max(1, groups_after[slot_index])))
                 self.heartbeat()
+                if link_type in ZEEK_LINK_TYPES:
+                    self.fetcher.executor.zeek_deadline = (self.started + self.wall_clock_seconds, self.clock)
                 result = self._stored_result(stored) if stored else self.fetcher.fetch(
                     anchor, link_type, window, query_cap=query_cap,
                 )

@@ -49,6 +49,7 @@ from romulus.evidence.zeek import (
     ZEEK_INTERIM_SUPERSEDED,
     ZeekNotNormalized,
     normalize_zeek,
+    plain_record,
     superseded_interim,
     zeek_record,
 )
@@ -2226,7 +2227,7 @@ def zeek_skip_families(names) -> frozenset[str]:
 
 def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                    audit_parse: Callable[[dict, str], AuditRecord] | None = None,
-                   rpc_remote_only: bool = False,
+                   rpc_remote_only: bool = False, contract=None,
                    malformed_text: dict[str, list[str]] | None = None,
                    skip_families: dict[str, frozenset[str] | None] | None = None,
                    ) -> tuple[list[TypedEvent], dict[str, int], list[tuple[str, str]]]:
@@ -2285,11 +2286,12 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                     known = {raw.key for raw in prior.raw}
                     prior.raw.extend(raw for raw in windows_event.raw if raw.key not in known)
                     skips["duplicate Windows event copy (computer/channel/record_id)"] += 1
-            elif (zeek := zeek_record(h["_source"])) is not None:
+            elif (zeek := (plain_record(h["_source"], contract.zeek_log)
+                           if contract is not None and contract.zeek_sensor else zeek_record(h["_source"]))) is not None:
                 # Malcolm's provider, Elastic's zeek.* dataset or Security Onion's module: before the Arkime shape,
                 # because Malcolm adds Arkime's session fields (rootId among them) to the Zeek rows it indexes
                 ds = zeek.token
-                zeek_event = normalize_zeek(h, zeek)
+                zeek_event = normalize_zeek(h, zeek, sensor=contract.zeek_sensor if contract is not None else None)
                 prior = zeek_events.get(zeek_event.id)
                 if prior is None:
                     zeek_events[zeek_event.id] = zeek_event

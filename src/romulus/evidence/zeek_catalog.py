@@ -98,7 +98,7 @@ SHAPE_NAMES = {MALCOLM: "Malcolm", ELASTIC: "Elastic", SECURITY_ONION: "Security
 # "strings" one string or a list of them (a field Zeek 6.1 wrote as a set or vector and later Zeek as one string), a
 # string never split, since its text can hold commas (a distinguished name).
 KINDS = frozenset({"ip", "port", "count", "seconds", "text", "flag", "services", "names", "mac", "list", "text1",
-                   "count_text", "time", "hex", "hexes", "addresses", "seconds_list", "strings"})
+                   "count_text", "time", "hex", "hexes", "addresses", "seconds_list", "percentage", "strings"})
 
 
 @dataclass(frozen=True, eq=False)
@@ -1433,7 +1433,28 @@ WINDOWS_PROTOCOL_LOGS: tuple[ZeekLog, ...] = (SMB_FILES, SMB_MAPPING, SMB_CMD, D
 ANALYZER_LOGS: tuple[ZeekLog, ...] = (DNS, HTTP, SSL, X509, FILES, PE, SSH, NOTICE, WEIRD, SIGNATURES, INTEL, FTP, SMTP,
                                       IRC, MYSQL, TDS, POSTGRESQL, REDIS, SOCKS, TUNNEL, SIP, SNMP, RADIUS,
                                       *WINDOWS_PROTOCOL_LOGS)
-ZEEK_LOGS: tuple[ZeekLog, ...] = (CONN, *ANALYZER_LOGS)
+# Security Onion excludes these health logs by default in elasticfleet/defaults.yaml;
+# no indexed metric layout is claimed for that shape.
+_HEALTH_ABSENT = {SECURITY_ONION: "Security Onion excludes capture_loss and stats from its default indexed logs"}
+CAPTURE_LOSS = _log("capture_loss", "sensor_health", (
+    *(_f(typed, native, kind, malcolm=(f"zeek.capture_loss.{native}",),
+         elastic=(f"zeek.capture_loss.{native}",), plain=(native,))
+      for typed, native, kind in (("health.worker", "peer", "text"),
+                                  ("health.interval_s", "ts_delta", "seconds"),
+                                  ("health.gaps", "gaps", "count"), ("health.acks", "acks", "count"),
+                                  ("health.capture_loss_pct", "percent_lost", "percentage"))),
+), absent=_HEALTH_ABSENT, doc="policy/misc/capture-loss.zeek", key=("health.worker",))
+STATS = _log("stats", "sensor_health", (
+    _f("health.worker", "peer", "text", malcolm=("zeek.stats.peer",), elastic=("zeek.stats.peer",),
+       plain=("peer",)),
+    _f("health.packets_dropped", "pkts_dropped", "count", malcolm=("zeek.stats.pkts_dropped",),
+       elastic=("zeek.stats.packets.dropped",), plain=("pkts_dropped",)),
+    _f("health.packets_link", "pkts_link", "count", malcolm=("zeek.stats.pkts_link",),
+       elastic=("zeek.stats.packets.received",), plain=("pkts_link",)),
+), absent=_HEALTH_ABSENT, doc="policy/misc/stats.zeek", key=("health.worker",))
+HEALTH_LOGS = (CAPTURE_LOSS, STATS)
+
+ZEEK_LOGS: tuple[ZeekLog, ...] = (CONN, *ANALYZER_LOGS, *HEALTH_LOGS)
 _BY_NAME: dict[tuple[str, str], ZeekLog] = {(shape, name): log for log in ZEEK_LOGS
                                             for shape, names in log.names.items() for name in names}
 

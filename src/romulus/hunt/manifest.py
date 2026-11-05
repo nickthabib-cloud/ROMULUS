@@ -87,6 +87,10 @@ def build_manifest(s: Settings, window: Window, original_input: dict, style: str
         "ai_agent": ai_agent or {"requested": False, "state": "not_configured", "reason": "not evaluated"},
         "config_digest": digest(safe_cfg),
     }
+    for target, profile in profiles.items():
+        if profile.get("zeek_sensor"):
+            manifest["source_profiles"][target].update({key: profile.get(key)
+                for key in ("kind", "zeek_sensor", "zeek_log")})
     site = site_facts.manifest_entry() if site_facts is not None else None
     if site is not None:
         manifest["site"] = site

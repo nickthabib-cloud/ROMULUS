@@ -11,7 +11,7 @@ from pydantic import BaseModel
 NETWORK_OBSERVER_FAMILIES = {
     "net_alert", "net_flow", "dns_query", "http_tx", "file_transfer", "tls_session", "ssh_session", "net_session",
     "http_body", "app_tx", "x509_certificate", "smb_tx", "rpc_tx", "kerberos_tx", "ntlm_tx", "remote_session",
-    "ldap_tx", "address_assignment", "asset_observed",
+    "ldap_tx", "address_assignment", "asset_observed", "sensor_health",
 }
 
 

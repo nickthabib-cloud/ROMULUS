@@ -4,8 +4,8 @@ Thirty partitions of Malcolm conn rows and Windows-protocol rows (SMB commands a
 LDAP searches) are swept. Each partition also carries copies of rows an earlier partition read (the same rows shipped
 again under another document id) and interim conn rows of connections whose later records arrive in later partitions.
 The proof:
-- every copy is merged into the event its first copy made, and every interim row of a connection whose later record
-  was already evaluated is superseded, through state the stage keeps on disk, never in Python memory;
+- selective interim-key lookups select the final cumulative record before evaluation; later final copies and
+  interim rows cannot contribute a second connection, through state the stage keeps on disk, never in Python memory;
 - once the first partitions have warmed the caches, the memory Python holds returns to the same level after each
   partition: nothing grows with the number of records swept.
 """
@@ -17,8 +17,8 @@ from dataclasses import replace
 from datetime import timedelta
 
 from romulus.detect.base import Playbook
-from romulus.evidence.zeek import ZEEK_INTERIM_SUPERSEDED
 from romulus.hunt import sweep as sw
+from romulus.hunt import zeek_connections
 from romulus.sources.models import Window
 from romulus.sources.profile import contract_from_types
 from tests import test_sweep as ts
@@ -70,7 +70,8 @@ def _partitions():
 
 
 def test_zeek_volume_streams_through_the_sweep_with_flat_memory_and_disk_state(monkeypatch, tmp_path):
-    contract = contract_from_types("net", {"@timestamp": "date", "event.dataset": "keyword"},
+    contract = contract_from_types("net", {"@timestamp": "date", "event.dataset": "keyword",
+                                            "event.provider": "keyword", "node": "keyword", "zeek.uid": "keyword"},
                                    role="network", os_family="unknown")
     window = Window(start=ts.START, end=ts.START + timedelta(hours=1))
     run = sw.Sweep(ts._repo(), ts.FakeClient(), "h1", window, {"net": contract}, stage_dir=tmp_path / "stage")
@@ -80,6 +81,12 @@ def test_zeek_volume_streams_through_the_sweep_with_flat_memory_and_disk_state(m
     levels = []
     current: list[list[dict]] = [[]]
     monkeypatch.setattr(sw, "execute", lambda client, intent, contract: ts._complete(intent, current[0]))
+    def latest(client, intent, contract, **kwargs):
+        uids={uid for group in intent.any_of for pred in group if pred.field=='zeek.uid' for uid in pred.value}
+        assert len(uids)<=INTERIM_PER_PAGE
+        rows=[zf.malcolm(zf._volume_conn(int(uid[1:]),zf.T0,HOSTS),f'lookup-{uid}') for uid in sorted(uids)]
+        return ts._complete(intent,rows)
+    monkeypatch.setattr(zeek_connections,'execute',latest)
     tracemalloc.start()
     try:
         for page, records in enumerate(_partitions()):
@@ -102,18 +109,16 @@ def test_zeek_volume_streams_through_the_sweep_with_flat_memory_and_disk_state(m
 
     stats = run.stats
     assert stats["errors"] == 0
-    assert stats["skips"]["duplicate typed event across source partitions"] == (PAGES - 1) * COPIES_PER_PAGE
-    assert stats["skips"][ZEEK_INTERIM_SUPERSEDED] == (PAGES - 1) * INTERIM_PER_PAGE
-    # the cross-partition state is on the stage volume, not in memory
+    # Interim keys are selectively resolved before consume; later finals/copies and
+    # late interims cannot add a second cumulative flow to detector state.
+    assert run.pack[0].evaluated == PAGES * (CONN_PER_PAGE + SMB_PER_PAGE)
     stage = run._stage
+    canonical = stage.db.execute("SELECT COUNT(*) FROM zeek_canonical").fetchone()[0]
+    assert canonical == PAGES * CONN_PER_PAGE
     with sqlite3.connect(stage.windows_path) as db:
         seen = db.execute("SELECT COUNT(*) FROM windows_seen").fetchone()[0]
-        interim = db.execute("SELECT COUNT(*), SUM(state = 2) FROM zeek_interim").fetchone()
-    assert seen >= PAGES * (CONN_PER_PAGE + SMB_PER_PAGE)
-    assert interim == ((PAGES - 1) * INTERIM_PER_PAGE, (PAGES - 1) * INTERIM_PER_PAGE)
-    # each partition after the first finished connections whose interim row an earlier one evaluated: named
+    assert seen == PAGES * (CONN_PER_PAGE + SMB_PER_PAGE)
     cells = [c for c in run.repo.rule_cells("h1") if c["rule_id"] == "test.count"]
-    named = [c for c in cells if any("interim record an earlier partition" in reason
-                                     for reason in c["detail"].get("reasons", []))]
-    assert len(named) == PAGES - 1 and all(c["state"] == "evaluated_partial" for c in named)
+    assert len(cells)==PAGES
+    assert not any("both were evaluated" in reason for cell in cells for reason in cell["detail"].get("reasons",[]))
     run.close_stage()

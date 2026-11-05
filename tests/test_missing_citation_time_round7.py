@@ -132,7 +132,8 @@ def test_missing_time_pivot_is_named_refusal_without_executor_call():
     assert executor.calls == []
 
 
-def test_nullable_time_downgrade_refuses_to_drop_untimed_positive(tmp_path):
+@pytest.mark.parametrize("active_transaction", [False, True])
+def test_nullable_time_downgrade_refuses_to_drop_untimed_positive(tmp_path, active_transaction):
     from romulus.store.repo import Repo
 
     engine = make_engine(tmp_path / "untimed.db")
@@ -140,13 +141,24 @@ def test_nullable_time_downgrade_refuses_to_drop_untimed_positive(tmp_path):
     source, _ = _repo_with_finding()
     with source.engine.connect() as src, engine.begin() as dst:
         dst.execute(t.hunt.insert(), [dict(row) for row in src.execute(t.hunt.select()).mappings()])
-    candidate = publish_untimed(Repo(engine))
+    repo = Repo(engine)
+    candidate = publish_untimed(repo)
+    visibility = {"sensor": "sensor-1", "family": "net_flow", "partial": True,
+                  "reasons": ["capture loss 2.3%"], "start": "2026-01-01T00:00:00Z"}
+    snapshot = repo.save_zeek_visibility("h1", [visibility])
     with pytest.raises(RuntimeError, match="untimed positives"), engine.begin() as conn:
+        if active_transaction:
+            conn.execute(t.hunt.update().where(t.hunt.c.id == "h1").values(created_by="rollback-test"))
         command.downgrade(_alembic_config(conn), "0028")
+    engine.dispose()
+    engine = make_engine(tmp_path / "untimed.db")
+    assert "report_zeek_visibility" in inspect(engine).get_table_names()
+    assert list(Repo(engine).zeek_visibility_rows("h1", snapshot["sha256"])) == [visibility]
     assert Repo(engine).candidate(candidate["id"])["ts"] is None
     with engine.connect() as conn:
         assert conn.exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
-        assert conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one() == "0029"
+        assert conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one() == "0030"
+        assert conn.exec_driver_sql("PRAGMA foreign_key_check").all() == []
 
 
 def test_failed_migration_rolls_back_and_restores_foreign_keys(tmp_path, monkeypatch):
@@ -182,3 +194,22 @@ def test_current_schema_can_open_while_another_connection_is_writing(tmp_path):
             migrate(engine)
         finally:
             writer.rollback()
+
+
+def test_visibility_migration_successful_downgrade_and_upgrade(tmp_path):
+    engine = make_engine(tmp_path / "visibility-roundtrip.db")
+    migrate(engine)
+    assert "report_zeek_visibility" in inspect(engine).get_table_names()
+    with engine.begin() as conn:
+        command.downgrade(_alembic_config(conn), "0029")
+    engine.dispose()
+    engine = make_engine(tmp_path / "visibility-roundtrip.db")
+    assert "report_zeek_visibility" not in inspect(engine).get_table_names()
+    with engine.connect() as conn:
+        assert conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one() == "0029"
+        assert conn.exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
+    migrate(engine)
+    assert "report_zeek_visibility" in inspect(engine).get_table_names()
+    with engine.connect() as conn:
+        assert conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one() == "0030"
+        assert conn.exec_driver_sql("PRAGMA foreign_key_check").all() == []

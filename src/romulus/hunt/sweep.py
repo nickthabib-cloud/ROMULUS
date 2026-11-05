@@ -440,6 +440,9 @@ class Sweep:
         playbook = next(playbook for playbook in self.pack if playbook.id == m.playbook_id)
         if m.raw_copies:
             raw_sources = {**m.raw_copies, **raw_sources}      # records the rule kept for citation itself
+        if any(event.get("observer.product") == "zeek" for event in m.events):
+            from romulus.hunt.zeek_gaps import enrich
+            enrich(self, m, raw_sources)
         row = publish_match(self.repo, self.hunt_id, playbook, m, task_id, raw_sources)
         if row is not None:
             self.stats["candidates"] += 1
@@ -1345,9 +1348,211 @@ class Sweep:
         self._mark_all(target, w.key(), "split", {"children": [a.key(), b.key()]})
         return a, b
 
+    def _zeek_visibility_store(self):
+        store = getattr(self, "_zeek_visibility", None)
+        if store is None:
+            from romulus.hunt.zeek_visibility import VisibilityStore
+            directory = self._event_stage().directory
+            settings = getattr(self.client, "settings", None)
+            budget = StateBudget(directory, disk_total=int(
+                getattr(settings,"zeek_visibility_disk_mb",256)*1024**2),
+                reserve=self.budget.reserve, memory_total=2*1024**2)
+            store = self._zeek_visibility = VisibilityStore(directory, budget=budget)
+        return store
+
+    def _observe_zeek_visibility(self, events):
+        import sqlite3
+        if getattr(self,"_zeek_visibility_failure",None):
+            return
+        try:
+            self._zeek_visibility_store().observe(events,self.window)
+        except (OSError,sqlite3.Error) as exc:
+            self._zeek_visibility_failure = f"Zeek visibility state unavailable: {exc}"
+
+    def _note_zeek_inventory_gap(self, target, contract, reasons):
+        if not getattr(self,"_zeek_visibility_enabled",False):
+            return
+        from romulus.hunt.zeek_visibility import _Reasons
+        notes = self.__dict__.setdefault("_zeek_inventory_gaps",{}).setdefault(target,_Reasons())
+        for reason in reasons:
+            notes.append(f"{target}: Zeek sweep inventory incomplete: {reason}"[:1024])
+
+    def _prepare_zeek_visibility(self):
+        import sqlite3
+
+        from romulus.sources.compile import CompileError
+        if hasattr(self,"_zeek_visibility_ready"):
+            return
+        try:
+            if failure := getattr(self,"_zeek_visibility_failure",None):
+                raise OSError(failure)
+            self._finish_zeek_visibility()
+        except (OSError,sqlite3.Error,CompileError) as exc:
+            reason = f"Zeek visibility incomplete: {exc}"
+            ref = self.repo.save_zeek_visibility(self.hunt_id,iter(()))
+            self.repo.audit("system","hunt.zeek_visibility",self.hunt_id,
+                            {"snapshot":ref,"notes":[],"unresolved":[reason]})
+            self.repo.set_rule_cells(self.hunt_id,[
+                self._cell(pb,"zeek:unresolved","visibility:"+self.window.key(),"evaluated_partial",
+                    detail={"reasons":[reason],"zeek_visibility":ref})
+                for pb in self.pack if set(pb.families) & _ZEEK_FAMILIES])
+        self._zeek_visibility_ready = True
+
+    def _finish_zeek_visibility(self):
+        """Join source visibility once across targets before any sensor absence is stated.
+
+        Detailed immutable rows are stored once. Rule cells carry only a sensor,
+        family filter and that snapshot reference, so large hunts remain streamed.
+        """
+        from romulus.hunt.zeek_sources import _marker_refused, zeek_capable
+        from romulus.hunt.zeek_visibility import collect_visibility
+        store = getattr(self, "_zeek_visibility", None)
+        if store is None:
+            if self._profiles is None:
+                self._profiles = self.repo.source_profiles(self.hunt_id)
+            refused = any(
+                any(str(key).startswith("zeek") for key in (self._profiles.get(target) or {}).get("datasets", {}))
+                and any(_marker_refused(contract, log, shape) for log in ZEEK_LOGS for shape in SHAPES)
+                for target,contract in self.contracts.items())
+            if not refused:
+                return
+            store = self._zeek_visibility_store()
+        policy = self.site_facts.zeek
+        settings = getattr(self.client, "settings", None)
+        observed = getattr(self, "_zeek_observed_targets", set())
+        if self._profiles is None:
+            self._profiles = self.repo.source_profiles(self.hunt_id)
+        def relevant(target, contract):
+            profile = self._profiles.get(target) or {}
+            datasets = profile.get("datasets",{})
+            if target in observed or any(str(key).startswith("zeek") for key in datasets):
+                return True
+            # Complete non-Zeek inventory rules out unused shared-template
+            # mappings. Missing or truncated inventory cannot prove absence.
+            count = profile.get("doc_count")
+            unrelated = (bool(profile) and not profile.get("notes") and count is not None
+                         and sum(datasets.values()) >= count)
+            return zeek_capable(contract) and not unrelated
+        contracts = {target: contract for target, contract in self.contracts.items() if relevant(target,contract)}
+        for target,reasons in getattr(self,"_zeek_inventory_gaps",{}).items():
+            if target in contracts:
+                for reason in reasons:
+                    store.reasons.append(reason)
+        for target, contract in contracts.items():
+            profile = self._profiles.get(target) or {}
+            verified = target in observed or any(str(key).startswith("zeek") for key in profile.get("datasets", {}))
+            if verified and any(_marker_refused(contract, log, shape) for log in ZEEK_LOGS for shape in SHAPES):
+                reason = f"{target}: Zeek source markers not exact-searchable; visibility and lookback unresolved"
+                store.reasons.append(reason)
+                self.repo.set_rule_cells(self.hunt_id, [
+                    self._cell(pb, target, "zeek-lookback", "evaluated_partial", detail={"reasons":[reason]})
+                    for pb in self.pack if set(pb.families) & _ZEEK_FAMILIES])
+            ranges = getattr(self, "_zeek_visibility_ranges", {}).get(target) or [self.window]
+            for index, scope in enumerate(ranges):
+                collect_visibility(self.client, {target:contract}, scope, store, policy,
+                    heartbeat=self.heartbeat, activity=False, resolve=False,
+                    max_pages=getattr(settings,"zeek_visibility_max_pages",32),
+                    deadline_seconds=getattr(settings,"zeek_visibility_deadline_seconds",30),
+                    health_lookahead=index == len(ranges)-1)
+        store.resolve_stats(policy.stats_interval_seconds, complete=not store.reasons)
+        from itertools import groupby
+        ref = self.repo.save_zeek_visibility(
+            self.hunt_id, store.snapshot_rows(self.window, policy.capture_loss_threshold_pct))
+        notes = [(f"connections that began more than {policy.connection_lookback_hours:g} hours before the window "
+                 "are evaluated only through Malcolm interim records; Elastic, Security Onion and plain "
+                 "connections beginning earlier are not evaluated"),
+                 "Malcolm diagnostic logs are not assessed: source metric fields are not verified",
+                 "health interval-end lookahead is bounded to 24 hours; uncovered data intervals remain partial"]
+        self.repo.audit("system", "hunt.zeek_visibility", self.hunt_id,
+                        {"snapshot": ref, "notes": notes, "unresolved": sorted(set(store.reasons))})
+        if store.reasons:
+            self.repo.set_rule_cells(self.hunt_id, [
+                self._cell(pb, "zeek:unresolved", "visibility:" + self.window.key(), "evaluated_partial",
+                           detail={"reasons": sorted(set(store.reasons)), "zeek_visibility": ref})
+                for pb in self.pack if set(pb.families) & _ZEEK_FAMILIES])
+        for sensor, rows in groupby(store.summaries(), key=lambda row: row[0]):
+            families = {row[1]: (bool(row[2]), row[3]) for row in rows}
+            cells = []
+            for pb in self.pack:
+                relevant = sorted(set(pb.families) & _ZEEK_FAMILIES)
+                if not relevant:
+                    continue
+                health = store.db.execute('SELECT partial,intervals,reason FROM sensor_health_summary WHERE sensor=?',
+                                          (sensor,)).fetchone()
+                partial = bool(health and health[0]) or any(
+                    families[family][0] for family in set(relevant) & families.keys()) or bool(store.reasons)
+                detail = {"sensor": sensor, "families": relevant, "zeek_visibility": ref,
+                          "reasons": (["sensor visibility is searched in part; complete interval and analyzer "
+                                       "statements are in " + ref["filename"]] if partial else []),
+                          "visibility_unresolved": sorted(set(store.reasons))}
+                if health:
+                    detail["intervals"] = health[1]
+                    if health[0]:
+                        detail["reasons"].insert(0,health[2])
+                cells.append(self._cell(pb, "zeek:" + sensor, "visibility:" + self.window.key(),
+                                        "evaluated_partial" if partial else "evaluated_complete", detail=detail))
+            self.repo.set_rule_cells(self.hunt_id, cells)
+
+    def _zeek_conn_gap(self,target,label,reason):
+        self.repo.set_rule_cells(self.hunt_id,[
+            self._cell(pb,target,label,"evaluated_partial",detail={"reasons":[reason]})
+            for pb in self.pack if "net_flow" in pb.families])
+
+    def _zeek_lookback(self, target, contract, *, observed=False):
+        from romulus.evidence.zeek_catalog import CONN
+        from romulus.hunt.zeek_sources import overlap_groups, source_groups, zeek_capable
+        if not zeek_capable(contract):
+            return
+        done=self.__dict__.setdefault("_zeek_lookback_done",set())
+        if target in done:
+            return
+        if not observed:
+            if self._profiles is None:
+                self._profiles=self.repo.source_profiles(self.hunt_id)
+            profile=self._profiles.get(target)
+            # Dataset terms can omit accepted rows using another shipper marker.
+            # Only a complete empty target proves absence across every representation.
+            if profile is not None and profile.get("doc_count")==0 and not profile.get("notes"):
+                return
+        groups = [group for shape in SHAPES for group in source_groups(contract, CONN, shape)]
+        if not groups:
+            return
+        done.add(target)
+        span = Window(start=self.window.start-timedelta(hours=self.site_facts.zeek.connection_lookback_hours),
+                      end=self.window.start)
+        try:
+            parts = plan_partitions(self.client, target, contract, span, [], groups)
+            for part, count in parts:
+                if count:
+                    branches = [branch for shape in SHAPES for branch in overlap_groups(contract,
+                        source_groups(contract,CONN,shape),self.window.start,part.end,shape=shape)]
+                    self.run_partition(target, contract, [], part, count, any_of=branches)
+        except (SourceError,RuntimeError) as exc:
+            self._zeek_conn_gap(target,"zeek-lookback",str(exc))
+        # Malcolm supplies a verified cumulative end timestamp. It can find an
+        # interim whose original start lies outside the bounded start lookback.
+        if (source_groups(contract, CONN, MALCOLM) and contract.supports("lastPacket", "exists")
+                and contract.supports("zeek.conn.long", "in")):
+            interim = contract.model_copy(update={"time_field": "lastPacket"})
+            branches = [[*group, Predicate(field="zeek.conn.long", op="in", value=[True, "true"])]
+                        for group in source_groups(contract, CONN, MALCOLM)]
+            try:
+                parts=plan_partitions(self.client, target, interim, self.window, [], branches)
+                for part,count in parts:
+                    if count:
+                        self.run_partition(target,interim,[],part,count,any_of=branches,partition_tag="zeek-interim:")
+            except (SourceError,RuntimeError) as exc:
+                self._zeek_conn_gap(target,"zeek-interim-delivery",str(exc))
+        elif source_groups(contract, CONN, MALCOLM):
+            self._zeek_conn_gap(target,"zeek-interim-delivery",
+                "interim connections older than the start lookback are unsupported: no verified searchable "
+                "cumulative end timestamp and interim flag")
+
     def run_target(self, target: str):
+        self._zeek_visibility_enabled=True
         contract = self.contracts[target]
         self._prepare_windows_inventory(target, contract)
+        self._zeek_lookback(target, contract)
         filters = self._filters_for(target, contract)
         any_of = self._any_of_for(target, contract)
         try:
@@ -1356,9 +1561,12 @@ class Sweep:
             self.heartbeat()
         except Exception as e:  # noqa: BLE001 - one source failing must not hide the others
             reason = f"partition planning failed: {e}"[:300]
+            self._note_zeek_inventory_gap(target,contract,[reason])
             self.partial_reasons.append(f"{target}: {reason}")
             self._mark_all(target, f"plan:{self.window.key()}", "executed_failed", {"error": reason})
             return
+        if zeek_ranges := [w for w, _ in parts]:
+            self.__dict__.setdefault("_zeek_visibility_ranges",{})[target] = zeek_ranges
         # persist every planned (rule x target x partition) cell first: anything never executed
         # stays visibly 'planned' and can never be read as a complete negative
         for start in range(0, len(parts), PLANNED_CHUNK):
@@ -1429,7 +1637,7 @@ class Sweep:
         return None
 
     def run_partition(self, target: str, contract: FieldContract, filters: list[Predicate], w: Window, est: int,
-                      *, estimated: bool = False, any_of: list[list[Predicate]] | None = None):
+                      *, estimated: bool = False, any_of: list[list[Predicate]] | None = None, partition_tag: str = ""):
         """Evaluate one partition. `est` is the histogram's exact count for a planned partition; for a half of a
         split one (`estimated`) it is only an estimate, so the half is counted before it is fetched."""
         self.heartbeat()
@@ -1437,10 +1645,10 @@ class Sweep:
         if est > PARTITION_MAX_DOCS and splittable:
             # exact histogram count already exceeds the limit: subdivide before fetching anything
             a, b = self._split(target, w)
-            self.run_partition(target, contract, filters, a, est // 2, estimated=True, any_of=any_of)
-            self.run_partition(target, contract, filters, b, est - est // 2, estimated=True, any_of=any_of)
+            self.run_partition(target, contract, filters, a, est // 2, estimated=True, any_of=any_of, partition_tag=partition_tag)
+            self.run_partition(target, contract, filters, b, est - est // 2, estimated=True, any_of=any_of, partition_tag=partition_tag)
             return
-        pkey = w.key()
+        pkey = partition_tag + w.key()
         intent = self._raw_intent(target, filters, w, est, any_of)
         cap = intent.max_records
         tid = "t-" + digest({"h": self.hunt_id, "target": target, "w": pkey})[:20]
@@ -1460,8 +1668,8 @@ class Sweep:
                                                          "reasons": [f"cap:{cap}<total:{counted}"], "total": counted,
                                                          "returned": 0, "counted": True, "children": children})
             a, b = self._split(target, w)
-            self.run_partition(target, contract, filters, a, counted // 2, estimated=True, any_of=any_of)
-            self.run_partition(target, contract, filters, b, counted // 2, estimated=True, any_of=any_of)
+            self.run_partition(target, contract, filters, a, counted // 2, estimated=True, any_of=any_of, partition_tag=partition_tag)
+            self.run_partition(target, contract, filters, b, counted // 2, estimated=True, any_of=any_of, partition_tag=partition_tag)
             return
         out = self._fetch(intent, contract)
         self._start_prefetch()
@@ -1475,10 +1683,12 @@ class Sweep:
                                                          "children": children})
             half = (out.total or est) // 2
             a, b = self._split(target, w)
-            self.run_partition(target, contract, filters, a, half, estimated=True, any_of=any_of)
-            self.run_partition(target, contract, filters, b, half, estimated=True, any_of=any_of)
+            self.run_partition(target, contract, filters, a, half, estimated=True, any_of=any_of, partition_tag=partition_tag)
+            self.run_partition(target, contract, filters, b, half, estimated=True, any_of=any_of, partition_tag=partition_tag)
             return
         self.stats["partitions"] += 1
+        if out.completeness != Completeness.complete:
+            self._note_zeek_inventory_gap(target,contract,out.reasons or [out.error or "source retrieval incomplete"])
         self.stats["records"] += out.returned
         self.repo.update_task(tid, "executed", outcome={"completeness": out.completeness, "reasons": out.reasons,
                                                         "total": out.total, "returned": out.returned})
@@ -1490,12 +1700,15 @@ class Sweep:
         malformed_text: dict[str, list[str]] = {}
         skip_families: dict[str, frozenset[str] | None] = {}
         events, skips, errors = normalize_hits(out.records, self.boots, malformed_text=malformed_text,
-                                               skip_families=skip_families, rpc_remote_only=True)
+                                               skip_families=skip_families, rpc_remote_only=True, contract=contract)
+        if errors:
+            self._note_zeek_inventory_gap(target,contract,[f"{len(errors)} record normalization failures"])
         if malformed_text:
             # normalized with each lone surrogate replaced (the events name the fields): counted, never partial
             self.stats["malformed_text_records"] = self.stats.get("malformed_text_records", 0) + len(malformed_text)
         raw_sources = {f"{r['_index']}/{r['_id']}": r["_source"] for r in out.records}
         duplicate_events = []
+        zeek_visibility_events = None
         windows_state_reasons: list[str] = []
         zeek_state_reasons: list[tuple[str, frozenset[str]]] = []
         script_reassembly_reasons: list[str] = []
@@ -1510,7 +1723,17 @@ class Sweep:
                     f"later partition is evaluated again, so counts over them may include duplicates"
                 )
         if any(event.normalizer == ZEEK_NORMALIZER for event in events):
+            if getattr(self,"_zeek_visibility_enabled",False):
+                self.__dict__.setdefault("_zeek_observed_targets",set()).add(target)
+                if any(event.get("zeek.log")=="conn" for event in events):
+                    self._zeek_lookback(target,contract,observed=True)
+            events = self._canonical_zeek(events, raw_sources, zeek_state_reasons)
             events, zeek_duplicates, zeek_superseded = self._unique_zeek(events, zeek_state_reasons)
+            from romulus.hunt.zeek_connections import selection_note
+            self._note_zeek_inventory_gap(target,contract,[reason for reason,_ in zeek_state_reasons
+                                                           if not selection_note(reason)])
+            if getattr(self,"_zeek_visibility_enabled",False):
+                zeek_visibility_events = events
             duplicate_events.extend(zeek_duplicates)
             if zeek_superseded:
                 skips[ZEEK_INTERIM_SUPERSEDED] = skips.get(ZEEK_INTERIM_SUPERSEDED, 0) + zeek_superseded
@@ -1637,11 +1860,24 @@ class Sweep:
                 windows_gate_reasons.update(windows_reasons)
                 rule_partial = (affected is ALL_FAMILIES or bool(set(pb.families) & affected)
                                 or bool(windows_reasons))
+                input_events = events
+                unaggregated_events = []
+                identity_reason = getattr(self, "_zeek_canonical_unavailable", "")
+                if identity_reason and pb.kind != "direct":
+                    from romulus.hunt.zeek_connections import connection
+                    uncertain = [event for event in events if connection(event) and event.family in pb.families]
+                    if uncertain:
+                        input_events = [event for event in events if not connection(event)]
+                        if callable(getattr(pb, "consume_unaggregated", None)):
+                            unaggregated_events = pb.scope_partition(uncertain)
+                        else:
+                            windows_reasons.append(f"{len(uncertain)} cumulative flow record(s) withheld from "
+                                                   "aggregate evaluation because canonical identity state is unavailable")
                 if isinstance(pb, BaselinePlaybook):
                     if self.repo.baseline_window_cell_done(
                             self.hunt_id, pb.id, pb.version, target, pkey):
                         continue
-                    ordered = sorted(pb.scope_partition(events), key=lambda item: (
+                    ordered = sorted(pb.scope_partition(input_events), key=lambda item: (
                         item.ts, -1 if exec_serial(item) is None else exec_serial(item), item.id,
                     ))
                     # Unknown or malformed records can hide behavior, so they make retrieval partial, but they do not
@@ -1735,7 +1971,12 @@ class Sweep:
                 )
                 before_assumed = pb.direction_assumed
                 before_limits = {name: limit.records for name, limit in pb.limits.items()}
-                scoped_events = pb.scope_partition(events)
+                scoped_events = pb.scope_partition(input_events)
+                if identity_reason and input_events is not events and not unaggregated_events:
+                    withheld = sum(event.family in pb.families for event in events)-sum(
+                        event.family in pb.families for event in input_events)
+                    if withheld:
+                        pb.refuse("source_identity", identity_reason, withheld)
                 # Every rule reads every batch, whatever the state budget: a store in no-growth mode refuses only
                 # records that need a new key in it (each rule's own refusal path), and every match that needs no new
                 # state still publishes.
@@ -1753,12 +1994,17 @@ class Sweep:
 
                 def consume_matches(pb=pb, scoped_events=scoped_events, before_eval=before_eval,
                                     before_missing=before_missing, before_capped=before_capped,
-                                    rule_errors=rule_errors):
+                                    rule_errors=rule_errors, unaggregated_events=unaggregated_events,
+                                    identity_reason=identity_reason):
                     nonlocal matched, consume_failure
                     try:
                         for match in pb.consume_scoped_partition(scoped_events):
                             matched += 1
                             yield match
+                        if unaggregated_events:
+                            for match in pb.consume_unaggregated(unaggregated_events, identity_reason):
+                                matched += 1
+                                yield match
                     except StateExhausted as exc:
                         # Preserve already published matches and count the unevaluated tail even when a
                         # disk-backed replay refuses growth after yielding some observations.
@@ -1850,11 +2096,19 @@ class Sweep:
         if staged or held or released:
             self._stage_put(list(staged.values()), raw_sources, held, released)
         staged.clear()
+        if zeek_visibility_events is not None:
+            self._observe_zeek_visibility(zeek_visibility_events)
         # the event stage shares the stage volume: its growth counts toward the free-space reserve
         self.budget.check_free()
         # the partition's cells together: a crash before this leaves them all visibly `planned`
         self.repo.set_rule_cells(self.hunt_id, cells)
         self.repo.update_task(tid, "evaluated")
+
+    def _canonical_zeek(self, events, raw_sources, reasons):
+        from romulus.hunt.zeek_connections import canonical
+        selected = canonical(self, events, raw_sources, reasons)
+        reasons[:] = list(dict.fromkeys(reasons))[:256]
+        return selected
 
     def _unique_zeek(self, events: list[TypedEvent], reasons: list[tuple[str, frozenset[str]]]
                      ) -> tuple[list[TypedEvent], list[TypedEvent], int]:
@@ -2249,6 +2503,22 @@ class Sweep:
                 self._stage.finished_owners.add(self._stage_owner_accounts[pb.id].name)
             pb.release_state()
         agg_raw.clear()
+        self._prepare_zeek_visibility()
+        # Visibility completes after every finding has been published. Reflect
+        # its sensor cells in whole-window rollups without rerunning any rule.
+        for pb in self.pack:
+            if not (set(pb.families) & _ZEEK_FAMILIES):
+                continue
+            cells = self.repo.rule_cells(self.hunt_id, rule_id=pb.id)
+            if not any(c["target"].startswith("zeek:") and c["state"] == "evaluated_partial" for c in cells):
+                continue
+            for cell in cells:
+                if cell["target"] == "*" and cell["partition"] == "window" and cell["state"] != "executed_failed":
+                    state = "match_on_partial" if cell["matched"] else "evaluated_partial"
+                    detail = dict(cell["detail"] or {})
+                    detail["reasons"] = list(dict.fromkeys([*detail.get("reasons",[]), WINDOW_ROLLUP_PARTIAL]))
+                    self.repo.set_rule_cell(self.hunt_id,pb.id,pb.version,"*","window",state,
+                        cell["matched"],cell["evaluated"],detail)
         if self.budget.spent:
             self.partial_reasons.append(f"state budget: {self.budget.spent}")
             self.stats["state_budget"] = {"spent": self.budget.spent, "disk_bytes": self.budget.disk_used,
@@ -2287,6 +2557,10 @@ class Sweep:
 
     def close_stage(self) -> None:
         """Remove the disk stage, Windows continuity state and playbook spills on every controlled exit path."""
+        visibility = getattr(self, "_zeek_visibility", None)
+        if visibility is not None:
+            visibility.close()
+            self._zeek_visibility = None
         continuity = getattr(self, "_windows_record_ids", None)
         if continuity is not None:
             continuity.close()

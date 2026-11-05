@@ -580,14 +580,14 @@ class PivotExecutor:
         return bool(host) and self.site_facts.attests(host, "system_event_log")
 
     def _normalize_pivot_records(
-        self, records: list[dict], raw_families: set[str] | None,
+        self, records: list[dict], raw_families: set[str] | None, contract=None,
     ) -> tuple[list[TypedEvent], list[tuple[str, str]]]:
         prefilter = self.optimize_normalization and raw_families
         # one call per leaf: an audit event takes its boot id from a journald copy in the same batch, and nothing
         # (the batch, its audit parses) outlives the leaf, so memory stays bounded by the per-leaf record cap
         parse = _AuditParses()
         selected = _prefilter_raw(records, raw_families, parse) if prefilter else records
-        events, _skips, errors = normalize_hits(selected, audit_parse=parse)
+        events, _skips, errors = normalize_hits(selected, audit_parse=parse, contract=contract)
         script_blocks = getattr(self, "_script_blocks", None)
         if script_blocks is not None and any(event.family == "script_block" for event in events):
             raw_sources = {
@@ -598,8 +598,24 @@ class PivotExecutor:
 
     def _execute(
         self, intent: SearchIntent, contract: FieldContract, *, pit=None,
-        spend_task_id: str | None = None,
+        spend_task_id: str | None = None, physical_query_limit: int | None = None,
     ) -> SearchOutcome:
+        if physical_query_limit is not None:
+            ceiling = physical_query_limit
+            if self.source_query_budget is not None:
+                ceiling = min(ceiling, self.source_query_budget)
+            def spend():
+                if self.source_queries >= ceiling:
+                    return False
+                self.source_queries += 1
+                if spend_task_id is not None:
+                    self.repo.record_task_source_query(spend_task_id, owner_token=self.owner_token)
+                self.heartbeat()
+                return True
+            options = {}
+            if timing := getattr(self, "zeek_deadline", None):
+                options.update(deadline=timing[0], clock=timing[1])
+            return execute(self.client, intent, contract, pit=pit, on_query=spend, **options)
         def budget_outcome() -> SearchOutcome:
             now = datetime.now(UTC)
             prefix = self.source_query_scope or "expansion"
@@ -1018,8 +1034,31 @@ class PivotExecutor:
         fetch_query_start: int | None = None,
         query_cap: int | None = None,
         spend_task_id: str | None = None,
+        record_cap: int | None = None,
     ):
         """Breadth-first capped-window splitting keeps late activity represented within a fixed leaf budget."""
+        if record_cap is not None:
+            # Dependent joins share a physical row budget across hops: splitting a
+            # capped parent would fetch its rows again and consume that budget twice.
+            cap = min(intent.max_records, record_cap)
+            cap = cap if cap <= 2000 else cap // 2000 * 2000
+            bounded = intent.model_copy(update={"max_records": cap})
+            ceiling = (fetch_query_start + query_cap if query_cap is not None and fetch_query_start is not None
+                       else self.source_queries + 128)
+            outcome = self._execute(bounded, contract, spend_task_id=spend_task_id, physical_query_limit=ceiling)
+            if intent.purpose == "expansion:host-witness" and outcome.completeness == Completeness.partial:
+                # This query establishes existence, not complete host history.
+                # Truncating its sample does not make the lease hypothesis partial.
+                reasons = [reason for reason in outcome.reasons if not reason.startswith("cap:")]
+                if not reasons and outcome.returned:
+                    outcome = outcome.model_copy(update={"completeness":Completeness.complete,"reasons":[]})
+            reason = "; ".join(outcome.reasons or [outcome.error or "source retrieval incomplete"])
+            complete = outcome.completeness == Completeness.complete
+            return [(bounded, outcome,
+                     [_range(intent.window.start, intent.window.end,
+                             "bounded host activity existence probe" if intent.purpose == "expansion:host-witness"
+                             else "source retrieval complete")] if complete else [],
+                     [] if complete else [_range(intent.window.start, intent.window.end, reason)])]
         pending = deque([intent])
         leaves = []
         while pending:
@@ -1117,6 +1156,7 @@ class PivotExecutor:
         planning_coverage: list[PivotCoverage] | None = None,
         raw_families: set[str] | None = None,
         persist: bool = True,
+        max_total_records: int | None = None,
     ) -> PivotEventBatch:
         """Execute deterministic typed link intents without evaluating any playbook."""
         if anchor_ts is not None:
@@ -1134,7 +1174,18 @@ class PivotExecutor:
         successful = 0
         incomplete = bool(coverage)
         fetch_query_start = self.source_queries
+        fetched_records = 0
         for intent in intents:
+            if intent.purpose == "expansion:host-witness" and retained:
+                break
+            if max_total_records is not None and fetched_records >= max_total_records:
+                reasons.append(f"Zeek link shared fetched-row limit {max_total_records} reached; remaining sources unresolved")
+                incomplete = True
+                break
+            if max_total_records is not None and query_cap is not None and self.source_queries-fetch_query_start >= query_cap:
+                reasons.append(f"expansion_link_query_cap:{query_cap}; remaining sources unresolved")
+                incomplete = True
+                break
             fingerprint = digest({
                 "source_query_scope": self.source_query_scope or "expansion",
                 "fetch_key": fetch_key,
@@ -1154,7 +1205,9 @@ class PivotExecutor:
             for leaf_intent, outcome, covered_ranges, unresolved_ranges in self._execute_partitions(
                     intent, self.contracts[intent.target], anchor_ts,
                     fetch_query_start=fetch_query_start, query_cap=query_cap,
-                    spend_task_id=task_id):
+                    spend_task_id=task_id,
+                    record_cap=None if max_total_records is None else max_total_records-fetched_records):
+                fetched_records += outcome.returned
                 leaf_reasons = list(outcome.reasons)
                 selected: list[TypedEvent] = []
                 if outcome.completeness == Completeness.failed:
@@ -1168,7 +1221,10 @@ class PivotExecutor:
                         f"{record['_index']}/{record['_id']}": record["_source"]
                         for record in outcome.records
                     }
-                    events, errors = self._normalize_pivot_records(outcome.records, raw_families)
+                    contract=self.contracts[intent.target]
+                    events, errors = (self._normalize_pivot_records(outcome.records,raw_families,contract)
+                                      if contract.zeek_sensor else
+                                      self._normalize_pivot_records(outcome.records,raw_families))
                     sources.update(script_blocks.sources_for(events))
                     normalization_reasons = [
                         *self._ip_normalization_reasons(leaf_intent, outcome.records),
@@ -1750,7 +1806,7 @@ class PivotExecutor:
             for match in playbook.consume(retained):
                 row = publish_match(
                     self.repo, self.hunt_id, playbook, match, task_ids[0] if task_ids else None,
-                    raw_sources, source_case_id=case_id, owner_token=self.owner_token,
+                    raw_sources, source_case_id=case_id, owner_token=self.owner_token, zeek_context=retained,
                 )
                 if row is not None:
                     candidate_ids.append(row["id"])
