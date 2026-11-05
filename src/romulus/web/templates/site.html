@@ -111,9 +111,20 @@
   <div class="two">
     <label>Domain controllers (host names, one per line)<textarea name="domain_controllers" rows="4"
       class="mono">{{ form.domain_controllers }}</textarea></label>
+    <label>Domain controller addresses (IPs or CIDRs, one per line)<textarea name="domain_controller_addresses" rows="4"
+      class="mono">{{ form.domain_controller_addresses }}</textarea></label>
+    <label>Directory sync hosts (host names, one per line)<textarea name="directory_sync_hosts" rows="4"
+      class="mono">{{ form.directory_sync_hosts }}</textarea></label>
+    <label>Directory sync addresses (IPs or CIDRs, one per line)<textarea name="directory_sync_addresses" rows="4"
+      class="mono">{{ form.directory_sync_addresses }}</textarea></label>
+    <label>Management hosts (host names, IPs or CIDRs, one per line)<textarea name="management_hosts" rows="4"
+      class="mono">{{ form.management_hosts }}</textarea></label>
     <label>Directory sync accounts (SIDs or <span class="mono">DOMAIN\name</span>, one per line)<textarea
       name="directory_sync_accounts" rows="4" class="mono">{{ form.directory_sync_accounts }}</textarea></label>
   </div>
+  {% for key in ['management_hosts', 'domain_controller_addresses', 'directory_sync_hosts', 'directory_sync_addresses'] %}
+    {% if form[key ~ '_declared'] %}<input type="hidden" name="{{ key }}_declared" value="1">{% endif %}
+  {% endfor %}
   <label><input type="checkbox" name="directory_sync_accounts_declared" value="1"
     {% if form.directory_sync_accounts_declared %}checked{% endif %}>Declare the sync-account list complete, including when empty</label>
   <p class="help">Enter known accounts or explicitly declare an empty list. Leaving the list undeclared keeps replication authorization unresolved.</p>

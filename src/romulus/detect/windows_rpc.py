@@ -2,7 +2,9 @@
 import ipaddress
 from datetime import UTC, datetime
 
+from romulus.detect.base import pf
 from romulus.detect.citing import bound_note, cited_phrase
+from romulus.detect.site_roles import address_member, host_member
 from romulus.detect.windows_events import WindowsEventRule, signal
 from romulus.evidence.rpc_catalog import INTERFACES, lookup_call
 from romulus.evidence.windows_catalog import RPC_PROVIDER
@@ -104,13 +106,36 @@ class RpcReplicationCall(_RpcCall):
     needs aggregate discovery, and PrinterBug notification requires the target role.
     """
     id = 'win.rpc_replication_call'
+    version = '2'
     title = 'A directory replication RPC client call was observed'
     attack = ('T1003.006', 'T1207')
+
+    def judge(self, event):
+        hits = super().judge(event)
+        if hits and self._directory_sync_source(event):
+            for hit in hits:
+                # A sync-role lead must not fold into an undeclared-DC lead and
+                # lose its role caveat when the bounded fold picks another witness.
+                hit.content += '|declared-directory-sync'
+                if address_member(event.get('source.ip'),
+                                  getattr(getattr(self, 'site_facts', None), 'directory_sync_addresses', ())):
+                    hit.predicate.append(pf(event, 'source.ip'))
+        return hits
+
+    def _directory_sync_source(self, event):
+        site = getattr(self, 'site_facts', None)
+        return (host_member(event.get('host.full_name') or event.host, getattr(site, 'directory_sync_hosts', ()))
+                or address_member(event.get('source.ip'), getattr(site, 'directory_sync_addresses', ())))
 
     def decision(self, event, op_class):
         if op_class != 'replication' or event.get('rpc.side') != 'client':
             return None, ()
-        controllers = getattr(getattr(self, 'site_facts', None), 'domain_controllers', ())
+        site = getattr(self, 'site_facts', None)
+        # On client ETW records the logging host is the source. NetworkAddress
+        # names the target server and cannot establish a directory-sync client.
+        if self._directory_sync_source(event):
+            return 'lead', ('declared directory-sync host; a compromised sync server is a DCSync path',)
+        controllers = getattr(site, 'domain_controllers', ())
         if not controllers:
             return 'lead', ('domain controllers not declared; replication from a domain controller is routine',)
         if _is_controller(event, controllers):

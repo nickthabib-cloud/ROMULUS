@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -77,6 +78,31 @@ def canonical_account(value: str) -> str:
     if _ACCOUNT.fullmatch(normalized):
         return f"name:{normalized.lower()}"
     raise ValueError(f"directory_sync_accounts entry must be a SID or DOMAIN\\name: {value!r}")
+
+
+def _canonical_address(value: str) -> str:
+    text = value.strip()
+    if "%" in text:
+        raise ValueError("scoped addresses are not supported")
+    if "/" in text:
+        # Refuse host bits instead of silently broadening an attested range.
+        return str(ipaddress.ip_network(text, strict=True))
+    return str(ipaddress.ip_address(text))
+
+
+def _role_host(value: str, field: str, addresses: str | None = None) -> str:
+    normalized = _canonical_host(value)
+    try:
+        _canonical_address(normalized)
+    except ValueError:
+        pass
+    else:
+        raise ValueError(f"{field} must contain host names; put IP addresses or CIDRs in {addresses}")
+    if (not normalized or not _HOST_GLOB.fullmatch(normalized) or "*" in normalized or "?" in normalized
+            or ".." in normalized or normalized.startswith(".") or re.fullmatch(r"[0-9.]+", normalized)):
+        guidance = f"; put IP addresses or CIDRs in {addresses}" if addresses else ""
+        raise ValueError(f"{field} must contain host names, not globs{guidance}")
+    return normalized
 
 
 class SysmonFacts(BaseModel):
@@ -271,6 +297,10 @@ class _SiteDocument(BaseModel):
     # ROMULUS_EXTERNAL_NETWORKS; only one of the two places may set it.
     internal_networks: tuple[str, ...] = ()
     external_networks: tuple[str, ...] = ()
+    management_hosts: tuple[str, ...] = ()
+    domain_controller_addresses: tuple[str, ...] = ()
+    directory_sync_hosts: tuple[str, ...] = ()
+    directory_sync_addresses: tuple[str, ...] = ()
 
     @field_validator("internal_networks", "external_networks", mode="before")
     @classmethod
@@ -285,17 +315,35 @@ class _SiteDocument(BaseModel):
         return tuple(str(network) for network in sorted(parsed, key=lambda n: (n.version, int(n.network_address),
                                                                                 n.prefixlen)))
 
-    @field_validator("domain_controllers")
+    @field_validator("domain_controllers", "directory_sync_hosts", mode="before")
     @classmethod
-    def _domain_controllers(cls, value):
-        if any(not isinstance(item, str) for item in value):
-            raise ValueError("domain_controllers entries must be text")
-        normalized = tuple(_canonical_host(item) for item in value)
-        if any(not item or "*" in item or "?" in item or not _HOST_GLOB.fullmatch(item) for item in normalized):
-            raise ValueError("domain_controllers must contain host names, not globs")
+    def _role_hosts(cls, value, info):
+        if not isinstance(value, (list, tuple)) or any(not isinstance(item, str) for item in value):
+            raise ValueError(f"{info.field_name} must be a list of host names")
+        addresses = ("domain_controller_addresses" if info.field_name == "domain_controllers"
+                     else "directory_sync_addresses")
+        normalized = tuple(_role_host(item, info.field_name, addresses) for item in value)
         if len(set(normalized)) != len(normalized):
-            raise ValueError("domain_controllers must not contain duplicates")
+            raise ValueError(f"{info.field_name} must not contain duplicates")
         return normalized
+
+    @field_validator("domain_controller_addresses", "directory_sync_addresses", "management_hosts", mode="before")
+    @classmethod
+    def _role_addresses(cls, value, info):
+        if not isinstance(value, (list, tuple)) or any(not isinstance(item, str) for item in value):
+            raise ValueError(f"{info.field_name} must be a list of text entries")
+        normalized = []
+        for item in value:
+            try:
+                canonical = _canonical_address(item)
+            except ValueError as exc:
+                if info.field_name != "management_hosts":
+                    raise ValueError(f"{info.field_name} requires IP addresses or CIDRs: {item!r}") from exc
+                canonical = _role_host(item, info.field_name)
+            normalized.append(canonical)
+        if len(set(normalized)) != len(normalized):
+            raise ValueError(f"{info.field_name} must not contain duplicates")
+        return tuple(normalized)
 
     @field_validator("directory_sync_accounts")
     @classmethod
@@ -343,6 +391,10 @@ class SiteFacts:
     directory_sync_accounts: tuple[str, ...]
     internal_networks: tuple[str, ...] = ()
     external_networks: tuple[str, ...] = ()
+    management_hosts: tuple[str, ...] = ()
+    domain_controller_addresses: tuple[str, ...] = ()
+    directory_sync_hosts: tuple[str, ...] = ()
+    directory_sync_addresses: tuple[str, ...] = ()
 
     @property
     def zeek(self) -> ZeekPolicy:
@@ -432,6 +484,9 @@ def _facts(document: _SiteDocument) -> SiteFacts:
         content.pop("directory_sync_accounts", None)
     if not document.directory_sync_accounts_declared:
         content.pop("directory_sync_accounts_declared", None)
+    for name in ("management_hosts", "domain_controller_addresses", "directory_sync_hosts", "directory_sync_addresses"):
+        if name not in document.model_fields_set:
+            content.pop(name, None)
     return SiteFacts(
         True,
         _digest(content),
@@ -441,22 +496,28 @@ def _facts(document: _SiteDocument) -> SiteFacts:
         tuple(canonical_account(item) for item in document.directory_sync_accounts),
         document.internal_networks,
         document.external_networks,
+        document.management_hosts,
+        document.domain_controller_addresses,
+        document.directory_sync_hosts,
+        document.directory_sync_addresses,
     )
 
 
 def load_site_facts(home: Path) -> SiteFacts:
     path = Path(home) / COLLECTION_PATH
-    if not path.exists():
-        return _absent()
     try:
-        if path.stat().st_size > MAX_SITE_BYTES:
+        try:
+            size = path.stat().st_size
+        except FileNotFoundError:
+            return _absent()
+        if size > MAX_SITE_BYTES:
             raise SiteValidationError(f"{COLLECTION_PATH.as_posix()} is larger than {MAX_SITE_BYTES} bytes")
         loaded = yaml.load(path.read_text(encoding="utf-8-sig"), Loader=_UniqueKeyLoader)
+        return _facts(_validated(loaded))
     except SiteValidationError:
         raise
-    except (OSError, yaml.YAMLError) as exc:
+    except (OSError, UnicodeError, yaml.YAMLError, TypeError, ValueError, RecursionError) as exc:
         raise SiteValidationError(f"invalid {COLLECTION_PATH.as_posix()}: {exc}") from exc
-    return _facts(_validated(loaded))
 
 
 def validate_site_content(content: dict) -> SiteFacts:

@@ -52,7 +52,7 @@ def test_a_tabled_notice_is_reported_at_its_table_lane_with_its_source(note):
     _rule, [match] = run([notice(note)])
     entry = NOTICE_TYPES[note]
     assert (match.proposed_lane, match.severity) == (entry.lane, entry.severity)
-    assert match.claim.startswith(f"Zeek raised notice {note} 1 time(s) on traffic from {zl.CLIENT} to {zl.SERVER}")
+    assert match.claim.startswith(f"Zeek raised notice {note} 1 raw reference(s) on traffic from {zl.CLIENT} to {zl.SERVER}")
     assert entry.source in match.claim
     assert any(", ".join(entry.attack) in note_text for note_text in match.notes)
 
@@ -62,14 +62,14 @@ def test_an_untabled_notice_is_a_lead_and_folds_address_pairs():
             for i in range(3)]
     _rule, [match] = run(rows)
     assert (match.proposed_lane, match.severity) == ("lead", "low")
-    assert "Zeek raised notice Site::Custom_Notice 3 time(s)" in match.claim
+    assert "Zeek raised notice Site::Custom_Notice 3 raw reference(s)" in match.claim
     assert "across 3 address pair(s)" in match.claim and "not in ROMULUS's table" in match.claim
 
 
 def test_a_weird_alone_is_context_never_a_finding():
     _rule, [match] = run([zl.WEIRD, zl.WEIRD.with_(uid="CweirdConn0000002")])
     assert (match.proposed_lane, match.severity) == ("context", "low")
-    assert match.claim.startswith("Zeek logged weird 'bad_TCP_checksum' 2 time(s)")
+    assert match.claim.startswith("Zeek logged weird 'bad_TCP_checksum' 2 raw reference(s)")
 
 
 def test_the_rule_reads_only_zeek_alerts_and_the_suricata_stack_only_suricata_alerts():
