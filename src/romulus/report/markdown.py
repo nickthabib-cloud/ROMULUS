@@ -399,7 +399,11 @@ def iter_render(m: dict, banner: str = BANNER, *, host_rows=None, visibility_row
             yield f"- {cell(link['link_type'])} ({cell(link['strength'])}), {cell(link['status'])}: "                   f"{cell('; '.join(link.get('reasons', [])))}. Evidence: {cell(', '.join(link['evidence_ids']))}\n"
     if visibility := m["coverage"].get("zeek_visibility"):
         ref = visibility["snapshot"]
-        yield f"\n## Zeek sensor visibility\n\nComplete immutable appendix: [{ref['filename']}]({ref['filename']}) "               f"({ref['count']} statements).\n\n"
+        if ref.get("published") is False:
+            yield ("\n## Zeek sensor visibility\n\nNo visibility appendix was published for this hunt: sensor visibility "
+                   "is unresolved.\n\n")
+        else:
+            yield f"\n## Zeek sensor visibility\n\nComplete immutable appendix: [{ref['filename']}]({ref['filename']}) "               f"({ref['count']} statements).\n\n"
         for note in [*visibility.get("notes", []), *visibility.get("unresolved", [])]:
             yield f"- {cell(note)}\n"
         if visibility_rows is not None:

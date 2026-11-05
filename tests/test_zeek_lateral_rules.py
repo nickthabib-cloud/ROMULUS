@@ -107,6 +107,14 @@ def test_remote_sessions_respect_explicit_site_ranges_and_carveouts(name,row,ins
 
 
 @pytest.mark.parametrize('name,row', [('RdpRemoteSession',zl.RDP),('VncRemoteSession',zl.RFB)])
+def test_an_assumed_definition_never_makes_a_public_source_a_high(name,row):
+    # undeclared networks: a public source may be the site's own address space, so outside is only a caveated lead
+    public=row.with_(**{'id.orig_h':'140.10.1.5','id.resp_h':'140.10.1.20'})
+    check_shapes(name,public,'lead',note=DIRECTION_ASSUMED_REASON)
+    check_shapes(name,public,'high',facts(internal_networks=('10.0.0.0/8',)))
+
+
+@pytest.mark.parametrize('name,row', [('RdpRemoteSession',zl.RDP),('VncRemoteSession',zl.RFB)])
 def test_a_source_family_the_site_names_no_range_of_is_never_outside(name,row):
     v6=row.with_(**{'id.orig_h':'fd00:10::5','id.resp_h':'fd00:10::20'})
     check_shapes(name,v6,'lead',facts(internal_networks=('10.0.0.0/8',)),

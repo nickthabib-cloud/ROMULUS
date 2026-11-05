@@ -35,7 +35,14 @@ from sqlalchemy.dialects.sqlite import insert
 
 from romulus.store import schema as t
 from romulus.store.cleaning import clean_event, clean_source
-from romulus.store.db import maintenance_lease, read_snapshot, utcnow, write_txn, zeek_visibility_lease
+from romulus.store.db import (
+    VISIBILITY_LEASE_WAIT,
+    maintenance_lease,
+    read_snapshot,
+    utcnow,
+    write_txn,
+    zeek_visibility_lease,
+)
 
 # The origin suffix of a boot id a hunt's boot-interval map placed (the normalizer's BOOT_INTERVAL_ORIGIN; the
 # store does not import the evidence layer, and a test keeps the two equal).
@@ -1982,7 +1989,7 @@ class Repo:
         return ("Zeek visibility was published; post-publication orphan cleanup encountered "
                 f"{type(exc).__name__}: {str(getattr(exc, 'orig', exc))[:512]}")
 
-    def save_zeek_visibility(self, hunt_id, rows, *, wait_seconds=5, heartbeat=None):
+    def save_zeek_visibility(self, hunt_id, rows, *, wait_seconds=VISIBILITY_LEASE_WAIT, heartbeat=None):
         """Publish one complete appendix, then collect only unreferenced private chunks."""
         import sqlite3
 

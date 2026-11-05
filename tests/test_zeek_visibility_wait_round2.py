@@ -63,7 +63,8 @@ def test_memory_lease_wait_can_acquire_after_heartbeat(monkeypatch):
     monkeypatch.setattr(db.time, "sleep", lambda _: None)
     try:
         with db.zeek_visibility_lease(engine, on_wait=lambda: beats.append(1)):
-            assert len(beats) == 2
+            # one heartbeat when contention starts, then at most one per VISIBILITY_HEARTBEAT_EVERY seconds
+            assert len(beats) == 1
         assert released == [True]
     finally:
         engine.dispose()

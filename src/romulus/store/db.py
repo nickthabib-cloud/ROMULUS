@@ -23,8 +23,15 @@ _memory_visibility_lock = threading.Lock()
 _visibility_held = threading.local()
 
 
+# A publication holds the lease for about 1 s per 100k visibility rows (measured); a mission-shape snapshot of a few
+# million rows takes about a minute, so a concurrent hunt waits up to ten minutes before its visibility is unresolved.
+VISIBILITY_LEASE_WAIT = 600
+# While waiting, the hunt's lease is kept alive this often (each heartbeat writes the hunt row).
+VISIBILITY_HEARTBEAT_EVERY = 15
+
+
 @contextmanager
-def zeek_visibility_lease(engine: Engine, *, wait_seconds: float = 5, on_wait=None):
+def zeek_visibility_lease(engine: Engine, *, wait_seconds: float = VISIBILITY_LEASE_WAIT, on_wait=None):
     """Serialize chunk publication and collection without holding a SQLite writer.
 
     One lock file per database bounds lock bookkeeping. The OS releases a dead
@@ -42,11 +49,14 @@ def zeek_visibility_lease(engine: Engine, *, wait_seconds: float = 5, on_wait=No
     if not math.isfinite(wait_seconds):
         raise ValueError("Visibility lease wait_seconds must be finite")
     deadline = time.monotonic() + max(0, wait_seconds)
+    last_beat = [None]
 
     def wait():
-        if on_wait is not None:
+        now = time.monotonic()
+        if on_wait is not None and (last_beat[0] is None or now - last_beat[0] >= VISIBILITY_HEARTBEAT_EVERY):
             on_wait()
-        remaining = deadline - time.monotonic()
+            last_beat[0] = now
+        remaining = deadline - now
         if remaining <= 0:
             raise TimeoutError("Zeek visibility publication lease wait expired; visibility is unresolved and no snapshot was published")
         time.sleep(min(0.1, remaining))

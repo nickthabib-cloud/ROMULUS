@@ -216,7 +216,9 @@ class _RemoteSession(ZeekBehaviorRule):
         elif networks.is_internal(source):
             lane, notes = self.inside_lane, ()
         else:
-            lane, notes = 'high', ()
+            # outside the site: high only under a declared definition; an assumed one (RFC 1918 defaults) cannot
+            # carry "from outside the declared site" for networks that use public addresses internally
+            lane, notes = ('high', ()) if networks.configured else ('lead', ())
         if lane is None:
             return []
         if not networks.configured:
