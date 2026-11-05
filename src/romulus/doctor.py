@@ -449,6 +449,8 @@ def check_db_space(s: Settings) -> Check:
 
 
 def check_site(s: Settings) -> Check:
+    from romulus.site import role_address_warnings
+
     try:
         facts = load_site_facts(s.home)
     except SiteValidationError as exc:
@@ -459,11 +461,12 @@ def check_site(s: Settings) -> Check:
             "warn",
             "site/collection.yaml is absent; optional, but nothing is attested",
         )
+    warnings = role_address_warnings(facts.content)
     return Check(
         "site.collection",
-        "ok",
-        f"valid; {len(facts.groups)} collection group(s)",
-        {"digest": facts.digest, "groups": len(facts.groups)},
+        "warn" if warnings else "ok",
+        f"valid; {len(facts.groups)} collection group(s)" + ("; " + "; ".join(warnings) if warnings else ""),
+        {"digest": facts.digest, "groups": len(facts.groups), "warnings": warnings},
     )
 
 

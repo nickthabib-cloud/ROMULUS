@@ -17,6 +17,9 @@ def _address_member(value, entries):
             network = ip_network(entry, strict=True)
         except ValueError:
             continue
+        mapped = getattr(network.network_address, 'ipv4_mapped', None)
+        if mapped is not None and network.prefixlen >= 96:
+            network = ip_network((mapped, network.prefixlen - 96))
         if any(candidate.version == network.version and candidate in network for candidate in candidates):
             return True
     return False

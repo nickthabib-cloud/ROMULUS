@@ -1977,11 +1977,23 @@ class Repo:
     def zeek_visibility_line(row):
         return json.dumps(row, ensure_ascii=True, sort_keys=True, separators=(",", ":"))+"\n"
 
-    def save_zeek_visibility(self, hunt_id, rows):
+    @staticmethod
+    def _zeek_visibility_cleanup_warning(exc):
+        return ("Zeek visibility was published; post-publication orphan cleanup encountered "
+                f"{type(exc).__name__}: {str(getattr(exc, 'orig', exc))[:512]}")
+
+    def save_zeek_visibility(self, hunt_id, rows, *, wait_seconds=5, heartbeat=None):
         """Publish one complete appendix, then collect only unreferenced private chunks."""
-        with zeek_visibility_lease(self.engine):
+        import sqlite3
+
+        from sqlalchemy.exc import OperationalError
+
+        with zeek_visibility_lease(self.engine, wait_seconds=wait_seconds, on_wait=heartbeat):
             reference = self._save_zeek_visibility_locked(hunt_id, rows)
-            self._clean_zeek_visibility_orphans(hunt_id)
+            try:
+                self._clean_zeek_visibility_orphans(hunt_id)
+            except (OSError, sqlite3.Error, OperationalError) as exc:
+                reference["cleanup_warning"] = self._zeek_visibility_cleanup_warning(exc)
             return reference
 
     def _clean_zeek_visibility_orphans(self, hunt_id):
@@ -2029,10 +2041,14 @@ class Repo:
         from seeing a partly committed appendix. Older digest-keyed rows remain
         readable without a publication record.
         """
+        import sqlite3
+
+        from sqlalchemy.exc import OperationalError
+
         table = t.report_zeek_visibility
         pending = "pending-"+uuid.uuid4().hex
         hasher, count, batch, families = hashlib.sha256(), 0, [], {}
-        keep = False
+        keep, published, cleanup_warning = False, False, None
         try:
             for row in rows:
                 hasher.update(self.zeek_visibility_line(row).encode())
@@ -2056,21 +2072,30 @@ class Repo:
                     result = connection.execute(insert(table).values(hunt_id=hunt_id, snapshot=snapshot,
                         ordinal=-1, body={"row_snapshot": pending}).on_conflict_do_nothing())
                     keep = result.rowcount == 1
+            published = True
         finally:
             if not keep:
                 # Failed streams and identical re-publications release their
                 # private chunks without taking one unbounded deletion lock.
-                while True:
-                    with write_txn(self.engine) as connection:
-                        ordinals = connection.execute(select(table.c.ordinal).where(
-                            table.c.hunt_id == hunt_id, table.c.snapshot == pending
-                        ).order_by(table.c.ordinal).limit(256)).scalars().all()
-                        if not ordinals:
-                            break
-                        connection.execute(table.delete().where(table.c.hunt_id == hunt_id,
-                            table.c.snapshot == pending, table.c.ordinal <= ordinals[-1]))
-        return {"sha256": snapshot, "filename": f"zeek-visibility-{snapshot}.jsonl", "count": count,
-                "families": families}
+                try:
+                    while True:
+                        with write_txn(self.engine) as connection:
+                            ordinals = connection.execute(select(table.c.ordinal).where(
+                                table.c.hunt_id == hunt_id, table.c.snapshot == pending
+                            ).order_by(table.c.ordinal).limit(256)).scalars().all()
+                            if not ordinals:
+                                break
+                            connection.execute(table.delete().where(table.c.hunt_id == hunt_id,
+                                table.c.snapshot == pending, table.c.ordinal <= ordinals[-1]))
+                except (OSError, sqlite3.Error, OperationalError) as exc:
+                    if not published:
+                        raise
+                    cleanup_warning = self._zeek_visibility_cleanup_warning(exc)
+        reference = {"sha256": snapshot, "filename": f"zeek-visibility-{snapshot}.jsonl", "count": count,
+                     "families": families}
+        if cleanup_warning:
+            reference["cleanup_warning"] = cleanup_warning
+        return reference
 
     def zeek_visibility_rows(self, hunt_id, snapshot):
         """Read every immutable interval in keyset pages without a hunt-sized Python collection."""

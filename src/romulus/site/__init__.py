@@ -86,8 +86,38 @@ def _canonical_address(value: str) -> str:
         raise ValueError("scoped addresses are not supported")
     if "/" in text:
         # Refuse host bits instead of silently broadening an attested range.
-        return str(ipaddress.ip_network(text, strict=True))
-    return str(ipaddress.ip_address(text))
+        network = ipaddress.ip_network(text, strict=True)
+        mapped = getattr(network.network_address, "ipv4_mapped", None)
+        if mapped is not None and network.prefixlen >= 96:
+            network = ipaddress.ip_network((mapped, network.prefixlen - 96))
+        return str(network.network_address) if network.num_addresses == 1 else str(network)
+    address = ipaddress.ip_address(text)
+    return str(getattr(address, "ipv4_mapped", None) or address)
+
+
+def role_address_warnings(content: dict) -> list[str]:
+    """Explain broad role declarations without changing their accepted scope or saved facts."""
+    labels = {"domain_controller_addresses": "Domain controller",
+              "directory_sync_addresses": "Directory sync", "management_hosts": "Management"}
+    warnings = []
+    for field, label in labels.items():
+        entries = content.get(field) or []
+        if not isinstance(entries, (list, tuple)):
+            continue
+        for entry in entries:
+            if not isinstance(entry, str) or "/" not in entry:
+                continue
+            try:
+                network = ipaddress.ip_network(_canonical_address(entry), strict=True)
+            except ValueError:
+                # Invalid submitted fields are displayed beside their validation
+                # error; they must not prevent other valid warnings from showing.
+                continue
+            minimum = 24 if network.version == 4 else 64
+            if network.prefixlen < minimum:
+                warnings.append(f"{label} address range {network} is broad (shorter than /{minimum} for IPv{network.version}); "
+                                "every address in this range receives the declared role. Verify that the whole range is intended.")
+    return warnings
 
 
 def _role_host(value: str, field: str, addresses: str | None = None) -> str:
@@ -337,8 +367,11 @@ class _SiteDocument(BaseModel):
             try:
                 canonical = _canonical_address(item)
             except ValueError as exc:
-                if info.field_name != "management_hosts":
-                    raise ValueError(f"{info.field_name} requires IP addresses or CIDRs: {item!r}") from exc
+                address_like = (any(char in item for char in "/:%")
+                                or re.fullmatch(r"[0-9.]+", item.strip()) is not None)
+                if info.field_name != "management_hosts" or address_like:
+                    raise ValueError(f"{info.field_name} requires valid IP addresses or CIDRs without host bits: {item!r}; "
+                                     "use the network address for a range, or omit the prefix for one host") from exc
                 canonical = _role_host(item, info.field_name)
             normalized.append(canonical)
         if len(set(normalized)) != len(normalized):

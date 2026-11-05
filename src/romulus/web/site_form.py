@@ -12,7 +12,7 @@ from romulus.evidence.windows_catalog import (
     WINDOWS_CHANNELS,
     collection_requirements,
 )
-from romulus.site import COLLECTION_SCHEMA
+from romulus.site import COLLECTION_SCHEMA, role_address_warnings
 
 AUDIT_SETTINGS = ("success", "failure", "both")
 MAX_GROUPS = 200          # host groups one form may carry; far above a real site's
@@ -100,6 +100,7 @@ def view(content: dict) -> dict:
         "known_audit": known_audit_subcategories(),
         "known_channels": known_channels(),
         "audit_settings": AUDIT_SETTINGS,
+        "role_address_warnings": role_address_warnings(content),
     }
     for key in _OPTIONAL_ROLE_LABELS:
         shown[key] = "\n".join(content.get(key) or [])

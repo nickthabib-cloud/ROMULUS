@@ -11,6 +11,9 @@
 
 {% if saved %}<p class="ok" role="status">Saved. New hunts use these facts.</p>{% endif %}
 {% if error %}<p class="err" role="alert"><b>Not saved.</b> {{ error }}</p>{% endif %}
+{% for warning in form.role_address_warnings %}
+<p class="warn" role="alert">{{ warning }}</p>
+{% endfor %}
 {% if running %}
 <p class="warn">Hunts running now ({{ running | join(', ') }}) keep the facts they started with. After a change, a
   stopped hunt that recorded the old facts cannot be resumed; start a new hunt over its window instead.</p>

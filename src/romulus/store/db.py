@@ -4,6 +4,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
+import math
 import os
 import threading
 import time
@@ -23,12 +24,13 @@ _visibility_held = threading.local()
 
 
 @contextmanager
-def zeek_visibility_lease(engine: Engine):
+def zeek_visibility_lease(engine: Engine, *, wait_seconds: float = 5, on_wait=None):
     """Serialize chunk publication and collection without holding a SQLite writer.
 
     One lock file per database bounds lock bookkeeping. The OS releases a dead
     publisher's lock, so its committed private chunks can be reclaimed later.
     This lock is separate from maintenance and does not block ordinary hunt work.
+    Contention has a finite wait; each retry calls on_wait to keep the hunt alive.
     """
     database = engine.url.database
     key = str(Path(database).resolve()) if database and database != ":memory:" else ":memory:"
@@ -37,13 +39,27 @@ def zeek_visibility_lease(engine: Engine):
         held = _visibility_held.keys = set()
     if key in held:
         raise RuntimeError("A visibility publication cannot recursively publish to the same database")
+    if not math.isfinite(wait_seconds):
+        raise ValueError("Visibility lease wait_seconds must be finite")
+    deadline = time.monotonic() + max(0, wait_seconds)
+
+    def wait():
+        if on_wait is not None:
+            on_wait()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Zeek visibility publication lease wait expired; visibility is unresolved and no snapshot was published")
+        time.sleep(min(0.1, remaining))
+
     if key == ":memory:":
-        with _memory_visibility_lock:
-            held.add(key)
-            try:
-                yield
-            finally:
-                held.remove(key)
+        while not _memory_visibility_lock.acquire(blocking=False):
+            wait()
+        held.add(key)
+        try:
+            yield
+        finally:
+            held.remove(key)
+            _memory_visibility_lock.release()
         return
     with Path(key + ".visibility.lock").open("a+b") as handle:
         handle.seek(0, 2)
@@ -63,7 +79,7 @@ def zeek_visibility_lease(engine: Engine):
             except OSError as error:
                 if error.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
                     raise
-                time.sleep(0.1)
+                wait()
         held.add(key)
         try:
             yield

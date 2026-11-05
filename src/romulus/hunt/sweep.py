@@ -1389,7 +1389,13 @@ class Sweep:
             self._finish_zeek_visibility()
         except (OSError,sqlite3.Error,CompileError) as exc:
             reason = f"Zeek visibility incomplete: {exc}"
-            ref = self.repo.save_zeek_visibility(self.hunt_id,iter(()))
+            # An empty artifact can be rendered with unresolved notes without
+            # another lease attempt or a database publication pointer.
+            import hashlib
+            digest = hashlib.sha256(b"").hexdigest()
+            ref = {"sha256": digest, "filename": f"zeek-visibility-{digest}.jsonl",
+                   "count": 0, "families": {}, "published": False, "complete": False}
+            reason += "; this unresolved fallback publishes no visibility snapshot; zero rows do not establish healthy or complete visibility"
             self.repo.audit("system","hunt.zeek_visibility",self.hunt_id,
                             {"snapshot":ref,"notes":[],"unresolved":[reason]})
             self.repo.set_rule_cells(self.hunt_id,[
@@ -1457,12 +1463,14 @@ class Sweep:
         store.resolve_stats(policy.stats_interval_seconds, complete=not store.reasons)
         from itertools import groupby
         ref = self.repo.save_zeek_visibility(
-            self.hunt_id, store.snapshot_rows(self.window, policy.capture_loss_threshold_pct))
+            self.hunt_id, store.snapshot_rows(self.window, policy.capture_loss_threshold_pct), heartbeat=self.heartbeat)
         notes = [(f"connections that began more than {policy.connection_lookback_hours:g} hours before the window "
                  "are evaluated only through Malcolm interim records; Elastic, Security Onion and plain "
                  "connections beginning earlier are not evaluated"),
                  "Malcolm diagnostic logs are not assessed: source metric fields are not verified",
                  "health interval-end lookahead is bounded to 24 hours; uncovered data intervals remain partial"]
+        if warning := ref.get("cleanup_warning"):
+            notes.append(warning)
         self.repo.audit("system", "hunt.zeek_visibility", self.hunt_id,
                         {"snapshot": ref, "notes": notes, "unresolved": sorted(set(store.reasons))})
         if store.reasons:

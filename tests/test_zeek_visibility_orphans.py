@@ -138,10 +138,10 @@ def test_concurrent_publishers_serialize_streams_and_preserve_both_snapshots(rep
     first_content, second_content = rows("first", 600), rows("second", 300)
 
     @contextmanager
-    def observed_lease(engine):
+    def observed_lease(engine, **kwargs):
         if threading.current_thread().name.startswith("second"):
             second_attempted.set()
-        with real_lease(engine):
+        with real_lease(engine, **kwargs):
             yield
 
     monkeypatch.setattr(module, "zeek_visibility_lease", observed_lease)
