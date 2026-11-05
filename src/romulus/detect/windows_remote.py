@@ -38,8 +38,8 @@ _REMOTE_PARENTS = {
 
 class RemoteExecutionParent(WindowsProcessRule):
     id = "win.remote_execution_child"
-    version = "9"
-    title = "a shell, script host or LOLBin was started by a remote-execution service"
+    version = "10"
+    title = "a process was started by WMI, WinRM or a remote-execution service"
     uses_parent = True
     parent_images = frozenset(_REMOTE_PARENTS)
     reads_command_line = False
@@ -56,9 +56,8 @@ class RemoteExecutionParent(WindowsProcessRule):
         "whether this source and account normally administer this host",
     )
     card: ClassVar[dict] = {
-        "behavior": "a process whose image is a shell, script host or signed proxy-execution binary and whose parent "
-                    "image is wmiprvse.exe, wsmprovhost.exe, winrshost.exe, or a PsExec-style service "
-                    "(PSEXESVC/PAExec/CSExec)",
+        "behavior": "any process started by wmiprvse.exe or wsmprovhost.exe, or a shell, script host or proxy "
+                    "started by winrshost.exe or a PsExec-style service (PSEXESVC/PAExec/CSExec)",
         "telemetry": "Sysmon 1 (process.parent.executable_key typed). Security 4688 (parent resolved from its own "
                      "4688 record through the fenced-pid lineage). Both OS-recorded.",
         "fidelity": "direct action: the child was created by that remote-execution parent (images OS-recorded). It "
@@ -72,31 +71,35 @@ class RemoteExecutionParent(WindowsProcessRule):
         "adds": "the first Windows remote-execution-trace rule (WMI/WinRM/PsExec parentage)",
         "research_basis": "ATT&CK Enterprise 20.0 T1047, T1021.006, T1569.002, T1059; Impacket and PsExec procedure "
                           "artifacts (behaviour, reimplemented)",
-        "lanes": "high: remote execution is a lateral-movement step; merged fleet repeats keep the lane. Severity "
-                 "high because, if adverse, this is remote code execution on the host.",
+        "lanes": "high for the recorded code-runner child shape; other WMI/WinRM children are leads, including "
+                 "routine inventory and configuration-management children.",
         "limits": "when a Security 4688 child names no parent image, its parent is resolved by process id and the finding is published as soon as that is decided. If the only termination of the parent pid that falls between parent and child is recorded in another stream that the sweep reads later (a Sysmon 5 record on a different target), the outcome depends on target order: read first, the finding is published and then revised in place to a lead when the termination arrives; read second, the child is undecided and no finding is published. Findings are never deleted, so the two orders end differently in this case only. A merged fleet finding takes out a record whose parent a later record withdrew, says how many it took out, and is lowered to a lead when no recurrence remains (each remaining record keeps its own finding).",
-        "retrieval": "the sweep retrieves every Windows process-creation record; this reads those whose image is a "
-                     "code runner (a provable subset).",
+        "retrieval": "the sweep retrieves every Windows process-creation record; parentage selects the children.",
     }
+
+    def candidate_child(self, event):
+        # Non-runner WMI/WinRM children also need deferred pid-parent resolution.
+        return True
 
     def judge(self, event: TypedEvent) -> list[Hit]:
         child_name, why = image_name(event.get("process.executable_key"))
         if child_name is None:
             raise Undecided("image", f"the child image cannot be identified: {why}")
-        if child_name not in SPAWNED_CODE_RUNNERS:
-            return []
         parent = resolve_parent(event, self.lineage)
         mechanism = _REMOTE_PARENTS.get(parent.name)
         if mechanism is None:
+            return []
+        runner = child_name in SPAWNED_CODE_RUNNERS
+        if not runner and parent.name not in {'wmiprvse.exe', 'wsmprovhost.exe'}:
             return []
         label, attack_id = mechanism
         predicate, context, how, raw = parent_predicate(event, parent)
         return [Hit(
             behavior="remote_execution_child",
-            text=f"the code runner '{child_name}' was started by {label} (parent resolved from {how})",
-            lane=self.lane,
-            severity=self.severity,
-            attack=(attack_id, "T1059"),
+            text=f"the {'code runner' if runner else 'process'} '{child_name}' was started by {label} (parent resolved from {how})",
+            lane=self.lane if runner else 'lead',
+            severity=self.severity if runner else 'medium',
+            attack=(attack_id, "T1059") if runner else (attack_id,),
             predicate=predicate,
             content=f"{parent.name}>{child_name}",
             common=f"{label} starting '{child_name}'",
@@ -108,7 +111,7 @@ class RemoteExecutionParent(WindowsProcessRule):
 
 class DcomActivatedChild(WindowsProcessRule):
     id = "win.dcom_activated_child"
-    version = "9"
+    version = "10"
     title = "a shell or script host was started by a DCOM-activated application"
     uses_parent = True
     reads_command_line = False
@@ -138,7 +141,7 @@ class DcomActivatedChild(WindowsProcessRule):
         "adds": "the DCOM lateral-movement parentage shape",
         "research_basis": "ATT&CK Enterprise 20.0 T1021.003, T1559.001, T1059; DCOM lateral-movement research "
                           "(behaviour, reimplemented)",
-        "lanes": "lead: DCOM-activated shells are suspicious but legitimate COM automation exists; merged per shape.",
+        "lanes": "lead for parentage alone; high when the cmd payload redirects output to an administrative share.",
         "limits": "when a Security 4688 child names no parent image, its parent is resolved by process id and the finding is published as soon as that is decided. If the only termination of the parent pid that falls between parent and child is recorded in another stream that the sweep reads later (a Sysmon 5 record on a different target), the outcome depends on target order: read first, the finding is published and then revised in place to a lead when the termination arrives; read second, the child is undecided and no finding is published. Findings are never deleted, so the two orders end differently in this case only. A merged fleet finding takes out a record whose parent a later record withdrew, says how many it took out, and is lowered to a lead when no recurrence remains (each remaining record keeps its own finding).",
         "retrieval": "the sweep retrieves every Windows process-creation record; this reads those whose image is a "
                      "shell or script host (a provable subset).",
@@ -171,10 +174,14 @@ class DcomActivatedChild(WindowsProcessRule):
         else:
             notes = (("the parent was resolved by process id (Security 4688 records no parent command line), so "
                       "-Embedding (DCOM activation) could not be confirmed"),)
+        redirect = admin_share_output(event)
+        if redirect:
+            predicate.append(parsed_field(event, clip(str(event.get('process.command_line')))))
         return [Hit(
             behavior="dcom_activated_child",
-            text=f"the code runner '{child_name}' was started by '{parent.name}'{embedding}",
-            lane=self.lane,
+            text=f"the code runner '{child_name}' was started by '{parent.name}'{embedding}" +
+                 (f"; its command payload redirects output to administrative share {redirect[1]}" if redirect else ''),
+            lane='high' if redirect else self.lane,
             severity=self.severity,
             attack=self.attack,
             predicate=predicate,
@@ -189,7 +196,7 @@ class DcomActivatedChild(WindowsProcessRule):
 
 class ServiceChildToAdminShare(WindowsProcessRule):
     id = "win.service_child_output_to_admin_share"
-    version = "9"
+    version = "10"
     title = "a service-hosted command sent its output to an admin share (Impacket smbexec/atexec)"
     reads_command_line = True
     uses_parent = True
@@ -233,10 +240,9 @@ class ServiceChildToAdminShare(WindowsProcessRule):
     def judge(self, event: TypedEvent) -> list[Hit]:
         if image_name(event.get("process.executable_key"))[0] != "cmd.exe":
             return []
-        from romulus.detect.windows_cmdline import cmd_payload
         command = str(event.get("process.command_line"))
-        payload = cmd_payload(command)
-        if payload is None:
+        redirect = admin_share_output(event)
+        if redirect is None:
             return []
         try:
             parent = resolve_parent(event, self.lineage)
@@ -247,26 +253,10 @@ class ServiceChildToAdminShare(WindowsProcessRule):
         who = (f"a cmd process started by '{parent.name}'" if parent is not None
                else "a cmd process (its parent process could not be resolved, so this finding is limited to the "
                     "recorded redirection)")
-        commands = parse_cmd_payload(payload)
-        stages_bat = any(str(target).strip().strip('"').casefold().endswith(".bat")
-                         for cmd in commands for _op, target in cmd.redirects)
-        for cmd in commands:
-            # atexec/wmiexec: the command redirects its output straight to an admin share
-            for _operator, target in cmd.redirects:
-                share = self._admin_share(target)
-                if share is not None:
-                    return [self._hit(event, command, f"{who} redirected output to the admin share {share}",
-                                      f"direct:{share.casefold()}", parent)]
-            # smbexec: `echo <cmd> ^> \\host\C$\__output 2^>^&1 > %TEMP%\execute.bat & ... execute.bat & del ...`
-            if cmd.argv and cmd.argv[0].casefold() == "echo" and stages_bat:
-                for token in cmd.argv[1:]:
-                    share = self._admin_share(token)
-                    if share is not None:
-                        return [self._hit(
-                            event, command,
-                            f"{who} staged a batch file that writes command output to the admin share {share} "
-                            f"(the Impacket smbexec shape)", f"smbexec:{share.casefold()}", parent)]
-        return []
+        kind, share = redirect
+        action = ('staged a batch file that writes command output' if kind == 'smbexec' else 'redirected output')
+        return [self._hit(event, command, f'{who} {action} to the admin share {share}',
+                          f'{kind}:{share.casefold()}', parent)]
 
     def _hit(self, event: TypedEvent, command: str, text: str, content: str, parent: ParentImage | None) -> Hit:
         """The finding; a resolved parent is part of its predicate and cited (its creation record when resolved by
@@ -280,6 +270,38 @@ class ServiceChildToAdminShare(WindowsProcessRule):
         return Hit("service_output_to_share", text, self.lane, self.severity, self.attack, predicate,
                    content=content, common="a service-hosted cmd sending output to an admin share",
                    context=context, raw_copies=raw, parent_name=parent.name if parent is not None else "")
+
+
+def admin_share_output(event):
+    """Recognize actual cmd redirections, including escaped smbexec batch staging."""
+    from romulus.detect.windows_cmdline import cmd_payload
+    if image_name(event.get('process.executable_key'))[0] != 'cmd.exe':
+        return None
+    payload = cmd_payload(str(event.get('process.command_line') or ''))
+    if payload is None:
+        return None
+    commands = parse_cmd_payload(payload)
+    for cmd in commands:
+        for operator, target in cmd.redirects:
+            if '>' not in operator:
+                continue
+            share = ServiceChildToAdminShare._admin_share(target)
+            if share is not None:
+                return 'direct', share
+        stages_bat = any('>' in operator and str(target).strip().strip('"').casefold().endswith('.bat')
+                         for operator, target in cmd.redirects)
+        if cmd.argv and cmd.argv[0].casefold() == 'echo' and stages_bat:
+            # The outer parser removes caret escapes but preserves quotes in the body. Reparse
+            # the text actually staged by this echo; a bare UNC argument or input read is no output.
+            words = cmd.payload.lstrip().split(None, 1)
+            if len(words) != 2 or words[0].lstrip('@').casefold() != 'echo':
+                continue
+            for staged in parse_cmd_payload(words[1], strip_invocation_quotes=False):
+                for operator, target in staged.redirects:
+                    share = ServiceChildToAdminShare._admin_share(target) if '>' in operator else None
+                    if share is not None:
+                        return 'smbexec', share
+    return None
 
 
 WINDOWS_REMOTE_PLAYBOOKS = [RemoteExecutionParent, DcomActivatedChild, ServiceChildToAdminShare]

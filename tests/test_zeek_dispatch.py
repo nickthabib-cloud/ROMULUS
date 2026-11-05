@@ -70,7 +70,7 @@ def dumped(events, skips, errors) -> dict:
 
 
 def test_the_golden_holds_the_baseline_of_every_shape():
-    assert (GOLDEN["baseline"] == "b13fdfe" and GOLDEN["windows_baseline"] == "48a6639fda2aa0b4dd57295cfc8530d9b8d566a9"
+    assert (GOLDEN["baseline"] == "b13fdfe" and GOLDEN["windows_baseline"] == "7dd3fe45728bc3d1ec27b54ba9a2f887d512822c"
             and GOLDEN["health_baseline"] == "48a6639fda2aa0b4dd57295cfc8530d9b8d566a9")
     producers = {e["normalizer"] for record in RECORDS.values() for e in record["events"]}
     assert producers == {NORMALIZER_VERSION, WINDOWS_NORMALIZER, ZEEK_NORMALIZER}

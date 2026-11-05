@@ -284,7 +284,7 @@ def test_all_rules_metadata_and_attack_ids_are_active():
     active = {ref["external_id"] for obj in bundle["objects"]
               if obj.get("type") == "attack-pattern" and not obj.get("revoked") and not obj.get("x_mitre_deprecated")
               for ref in obj.get("external_references", []) if ref.get("source_name") == "mitre-attack"}
-    assert len(WINDOWS_ENDPOINT_PLAYBOOKS) == 7
+    assert len(WINDOWS_ENDPOINT_PLAYBOOKS) == 9
     for rule in WINDOWS_ENDPOINT_PLAYBOOKS:
         assert not rule.assures_negative and rule.positive_only_reason
         assert rule.attack and set(rule.attack) <= active

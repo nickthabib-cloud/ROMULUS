@@ -27,10 +27,13 @@ from romulus.detect.windows_correlations import WINDOWS_CORRELATION_PLAYBOOKS
 from romulus.detect.windows_credentials import WINDOWS_CREDENTIAL_PLAYBOOKS
 from romulus.detect.windows_defense import WINDOWS_DEFENSE_PLAYBOOKS
 from romulus.detect.windows_directory_events import WINDOWS_DIRECTORY_PLAYBOOKS
+from romulus.detect.windows_driver_hashes import RULES as WINDOWS_DRIVER_HASH_RULES
 from romulus.detect.windows_elevation_events import ELEVATION_EVENT_RULES
 from romulus.detect.windows_endpoint_events import WINDOWS_ENDPOINT_PLAYBOOKS
 from romulus.detect.windows_events import WindowsEventRule
 from romulus.detect.windows_file_events import WINDOWS_FILE_PLAYBOOKS
+from romulus.detect.windows_housekeeping import RULES as WINDOWS_HOUSEKEEPING_RULES
+from romulus.detect.windows_image_file_rules import RULES as WINDOWS_IMAGE_FILE_RULES
 from romulus.detect.windows_injection_w4 import RULES as WINDOWS_INJECTION_RULES
 from romulus.detect.windows_lineage import WINDOWS_LINEAGE_PLAYBOOKS
 from romulus.detect.windows_linked import WINDOWS_LINKED_PLAYBOOKS
@@ -43,10 +46,11 @@ from romulus.detect.windows_registry_events import WINDOWS_REGISTRY_PLAYBOOKS
 from romulus.detect.windows_remote import WINDOWS_REMOTE_PLAYBOOKS
 from romulus.detect.windows_rpc import RULES as WINDOWS_RPC_RULES
 from romulus.detect.windows_scripts import WINDOWS_SCRIPT_PLAYBOOKS
+from romulus.detect.windows_sequence_extensions import RULES as WINDOWS_SEQUENCE_RULES
 from romulus.detect.windows_tunnels_w4 import RULES as WINDOWS_TUNNEL_RULES
 from romulus.detect.zeek_alerts import ZEEK_ALERT_PLAYBOOKS
 
-PACK_VERSION = "pack@45"
+PACK_VERSION = "pack@46"
 WINDOWS_PROCESS_PLAYBOOKS = (WINDOWS_LINEAGE_PLAYBOOKS + WINDOWS_PROXY_PLAYBOOKS + WINDOWS_CREDENTIAL_PLAYBOOKS
                              + WINDOWS_DEFENSE_PLAYBOOKS + WINDOWS_REMOTE_PLAYBOOKS)
 WINDOWS_HOST_PLAYBOOKS = list(WINDOWS_MEMORY_PLAYBOOKS + WINDOWS_REGISTRY_PLAYBOOKS
@@ -60,7 +64,9 @@ WINDOWS_DOMAIN_PLAYBOOKS = list(WINDOWS_AUTH_EVENT_PLAYBOOKS + WINDOWS_ACCOUNT_P
                                       if not issubclass(rule, WindowsEventRule)))
 _WINDOWS_ADDITIONS = (tuple(WINDOWS_PROCESS_W4_RULES) + tuple(ELEVATION_EVENT_RULES)
                       + tuple(WINDOWS_INJECTION_RULES) + tuple(WINDOWS_LOLBIN_RULES)
-                      + tuple(WINDOWS_TUNNEL_RULES) + tuple(WINDOWS_RPC_RULES))
+                      + tuple(WINDOWS_TUNNEL_RULES) + tuple(WINDOWS_RPC_RULES)
+                      + WINDOWS_DRIVER_HASH_RULES + WINDOWS_HOUSEKEEPING_RULES
+                      + WINDOWS_IMAGE_FILE_RULES + WINDOWS_SEQUENCE_RULES)
 WINDOWS_PROCESS_PLAYBOOKS += [rule for rule in _WINDOWS_ADDITIONS if issubclass(rule, WindowsProcessRule)]
 WINDOWS_HOST_PLAYBOOKS += [rule for rule in _WINDOWS_ADDITIONS
                          if issubclass(rule, WindowsEventRule) and not issubclass(rule, WindowsProcessRule)]

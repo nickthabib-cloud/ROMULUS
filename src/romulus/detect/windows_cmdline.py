@@ -150,6 +150,7 @@ class CmdCommand:
     """One command of a cmd.exe payload: its words (carets removed) and its redirections as (operator, target)."""
     argv: list[str]
     redirects: list[tuple[str, str]] = field(default_factory=list)
+    payload: str = field(default="", compare=False)
 
 
 def cmd_run(line: str) -> tuple[frozenset[str], str] | None:
@@ -204,9 +205,10 @@ def _strip_outer_quotes(payload: str) -> str:
     return text
 
 
-def parse_cmd_payload(payload: str) -> list[CmdCommand]:
+def parse_cmd_payload(payload: str, *, strip_invocation_quotes: bool = True) -> list[CmdCommand]:
     """Split a cmd payload into commands, removing caret escapes outside quotes and taking out redirections."""
-    text = _strip_outer_quotes(payload)
+    # cmd /c has invocation-level quote removal; a staged batch line does not.
+    text = _strip_outer_quotes(payload) if strip_invocation_quotes else payload
     commands: list[CmdCommand] = []
     current: list[str] = []
     redirects: list[tuple[str, str]] = []
@@ -220,7 +222,7 @@ def parse_cmd_payload(payload: str) -> list[CmdCommand]:
             if not words[0]:
                 words = words[1:]
         if words or redirects:
-            commands.append(CmdCommand(words, list(redirects)))
+            commands.append(CmdCommand(words, list(redirects), "".join(current)))
         current.clear()
         redirects.clear()
 
