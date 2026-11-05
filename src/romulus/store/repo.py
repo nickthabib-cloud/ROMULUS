@@ -415,6 +415,9 @@ def _chunks(rows: Iterable[dict], size: int) -> Iterator[list[dict]]:
 class Repo:
     def __init__(self, engine: Engine):
         self.engine = engine
+        # Per hunt, the exec-capable host holders its source profiles name: profiles are saved once, at creation,
+        # and never changed, so the per-host lookup does not decode every profile again (cleared on save/delete).
+        self._exec_holders: dict[str, list[tuple[str, bool, frozenset[str]]]] = {}
 
     # ---- hunts ------------------------------------------------------------------------------
     def create_hunt(self, hunt_id: str, manifest: dict, digest_: str, created_by: str, parent: str | None = None):
@@ -716,6 +719,7 @@ class Repo:
             rm("report_hosts", t.report_host.delete().where(t.report_host.c.hunt_id == hunt_id))
             rm("report_zeek_visibility", t.report_zeek_visibility.delete().where(t.report_zeek_visibility.c.hunt_id == hunt_id))
             rm("source_profiles", t.source_profile.delete().where(t.source_profile.c.hunt_id == hunt_id))
+            self._exec_holders.pop(hunt_id, None)
             rm("audit_records", t.audit_event.delete().where(t.audit_event.c.hunt_id == hunt_id,
                                                              t.audit_event.c.actor == SYSTEM_ACTOR))
             c.execute(t.hunt.delete().where(t.hunt.c.id == hunt_id))
@@ -1110,6 +1114,7 @@ class Repo:
             _upsert_ignore(c, t.source_profile, [{"id": f"{hunt_id}:{profile['id']}", "hunt_id": hunt_id,
                                                   "target": profile["target"], "kind": profile["kind"],
                                                   "profile": profile, "captured_at": utcnow()}], ["id"])
+        self._exec_holders.pop(hunt_id, None)
 
     # ---- tasks ------------------------------------------------------------------------------
     def upsert_task(self, task_id: str, hunt_id: str, kind: str, owner: str, intent: dict, fp: str,
@@ -3222,11 +3227,19 @@ class Repo:
             targets = set(c.execute(select(table.target).where(
                 table.hunt_id == hunt_id, table.host == host,
             )).scalars())
-            profiles = c.execute(select(t.source_profile.c.target, t.source_profile.c.profile).where(
-                t.source_profile.c.hunt_id == hunt_id,
-            )).all()
+            holders = self._profile_exec_holders(c, hunt_id)
         wanted = host.strip().rstrip(".").casefold()
-        for target, profile in profiles:
+        targets.update(target for target, truncated, names in holders if truncated or wanted in names)
+        return sorted(targets)
+
+    def _profile_exec_holders(self, c, hunt_id: str) -> list[tuple[str, bool, frozenset[str]]]:
+        """(target, inventory truncated, host names) of each exec-capable host profile of the hunt, read once."""
+        cached = self._exec_holders.get(hunt_id)
+        if cached is not None:
+            return cached
+        holders = []
+        for target, profile in c.execute(select(t.source_profile.c.target, t.source_profile.c.profile).where(
+                t.source_profile.c.hunt_id == hunt_id)).all():
             if not isinstance(profile, dict) or profile.get("role") != "host":
                 continue
             datasets = profile.get("datasets") or {}
@@ -3234,16 +3247,16 @@ class Repo:
             exec_capable = any(str(name).startswith("linux.audit") for name in datasets) or (
                 "process.executable" in fields and "process.pid" in fields
             )
-            hosts = profile.get("hosts") or {}
+            if not exec_capable:
+                continue
             inventory_truncated = any(
                 str(note).startswith("hosts inventory truncated")
                 for note in profile.get("notes") or []
             )
-            if exec_capable and (inventory_truncated or wanted in {
-                str(name).strip().rstrip(".").casefold() for name in hosts
-            }):
-                targets.add(str(target))
-        return sorted(targets)
+            names = frozenset(str(name).strip().rstrip(".").casefold() for name in profile.get("hosts") or {})
+            holders.append((str(target), inventory_truncated, names))
+        self._exec_holders[hunt_id] = holders
+        return holders
 
     def upsert_baseline_parents(self, rows: Iterable[dict]) -> None:
         """Keep the latest two observed exec generations for each live PID, ordered by (time, audit serial).

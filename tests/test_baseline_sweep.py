@@ -690,6 +690,23 @@ def test_truncated_exec_capable_profile_is_a_holder_of_every_host():
     assert repo.baseline_parent_targets("h1", "web99") == ["observed", "truncated"]
 
 
+def test_holder_lookup_reads_profiles_once_and_still_sees_later_carry_rows_and_profiles():
+    repo = _repo(["a", "b", "c"])
+    profile = {"kind": "es_index", "role": "host", "os_family": "linux", "datasets": {"linux.audit": 1},
+               "field_types": {}, "notes": []}
+    repo.save_profile("h1", {**profile, "id": "pa", "target": "a", "hosts": {"WEB01.": 1}})
+    assert repo.baseline_parent_targets("h1", "web01") == ["a"]
+    # a carry row written after the first lookup is seen: delivery is read live
+    repo.set_baseline_parent_boot("h1", "b", "web01", "boot-1", START)
+    assert repo.baseline_parent_targets("h1", "web01") == ["a", "b"]
+    # a profile saved after the first lookup is seen: saving clears the per-hunt cache
+    repo.save_profile("h1", {**profile, "id": "pc", "target": "c", "hosts": {"web01": 1}})
+    assert repo.baseline_parent_targets("h1", "web01") == ["a", "b", "c"]
+    # another hunt's lookups never borrow this hunt's holders
+    repo.create_hunt("h2", {"targets": ["a"]}, "digest", "tester")
+    assert repo.baseline_parent_targets("h2", "web01") == []
+
+
 
 def test_a_complete_hour_without_execs_joins_the_carry_ledger(monkeypatch, tmp_path):
     quiet_hour = Window(start=START, end=END)

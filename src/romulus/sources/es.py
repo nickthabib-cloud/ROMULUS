@@ -36,6 +36,7 @@ OpenSearch facts this module relies on (OpenSearch documentation and source):
 from __future__ import annotations
 
 import re
+import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -48,6 +49,41 @@ import httpx
 from romulus.config import Settings, redact_text
 from romulus.errors import SourceError
 from romulus.sources.models import CompiledQuery, Completeness, SearchOutcome
+
+# What the last response this thread parsed said about lone UTF-16 surrogates (see surrogate_free). Each page reads
+# it right after its own request, on the thread that made it, so a prefetch thread never sees another's.
+_response_text = threading.local()
+# A \u escape of a surrogate, or of a character an escape is spelled with (a backslash, "u", a hex digit: how a
+# nested layer could write an inner escape without showing its letters). Escapes of other characters (Go and .NET
+# write & < > as \u0026 \u003c \u003e) leave a body free.
+_SURROGATE_ESCAPE = re.compile(rb"\\u(?:[dD][89a-fA-F]|00(?:5[cC]|75|3[0-9]|4[1-6]|6[1-6]))")
+# A \u escape cut short at the end of the body; only the tail is searched.
+_CUT_ESCAPE = re.compile(rb"\\u[\s\S]{0,3}\Z")
+# The bytes UTF-8 would give a surrogate (0xED 0xA0-0xBF), or a lead byte cut short.
+_SURROGATE_BYTES = re.compile(rb"\xed(?:[\xa0-\xbf]|\Z)")
+
+
+def surrogate_free(content: bytes) -> bool:
+    """Whether a JSON response, once parsed, can hold no lone UTF-16 surrogate anywhere, also in text a normalizer
+    parses out of it again (an EVE line, a journal message, a Zeek original).
+
+    json.loads keeps a \\uD800-\\uDFFF escape as one and decodes UTF-8 with 'surrogatepass', so a surrogate in a
+    parsed value arrives as such an escape or as the three bytes UTF-8 would give it. In text parsed again, its escape
+    must be spelled by the outer layer, and its only letters are a backslash, "u" and hex digits: each reaches the
+    bytes either as itself (the backslash doubled at each layer, so \\u and the surrogate's digits show) or as an
+    escape of that letter, which a canonical serializer never writes (Elasticsearch, OpenSearch and json.dumps write a
+    backslash as \\\\ and ASCII letters and digits as themselves) and which makes the body not free. Induction over
+    the nesting depth makes this hold at any depth. A body that is not plain UTF-8, or whose escape or lead byte is
+    cut short, is never free. C-speed scans."""
+    if content.startswith((b"\xef\xbb\xbf", b"\xff\xfe", b"\xfe\xff")) or b"\x00" in content[:4]:
+        return False
+    return (_SURROGATE_ESCAPE.search(content) is None and _CUT_ESCAPE.search(content[-6:]) is None
+            and _SURROGATE_BYTES.search(content) is None)
+
+
+def last_response_surrogate_free() -> bool:
+    """surrogate_free for the last response this thread parsed (False when none was)."""
+    return getattr(_response_text, "free", False)
 
 
 class WriteAttemptBlocked(RuntimeError):
@@ -264,6 +300,8 @@ class ElasticClient:
             if self.flavor == "opensearch" and self.backend is None:
                 # the OpenSearch table and its point-in-time calls depend on the version: confirm it first
                 self.info()
+        # after info(): its own response must not stand for this one if this request fails
+        _response_text.free = False
         try:
             r = self._http.request(method, path, json=body, params=params)
         except httpx.TimeoutException as e:
@@ -287,6 +325,7 @@ class ElasticClient:
             invalid = not isinstance(hits, dict) or not isinstance(hits.get("hits", []), list)
         if invalid:
             raise SourceError(f"invalid JSON response shape HTTP {r.status_code} {method} {path}")
+        _response_text.free = surrogate_free(r.content)
         return result
 
     # -- metadata --------------------------------------------------------------------------
@@ -456,6 +495,7 @@ class ElasticClient:
                 if on_query is not None and not on_query():
                     raise SourceBudgetExhausted("source query budget exhausted")
                 d = self.search(None, body)
+                free = last_response_surrogate_free()
                 if deadline is not None and clock() >= deadline:
                     raise SourceBudgetExhausted("source wall-clock budget exhausted")
                 self._carry_pit(session, d)
@@ -465,6 +505,7 @@ class ElasticClient:
                     "problems": _response_problems(d),
                     "total": d.get("hits", {}).get("total", {}).get("value"),
                     "total_relation": d.get("hits", {}).get("total", {}).get("relation", "unknown"),
+                    "surrogate_free": free,
                 }
                 if not hits:
                     yield [], meta
@@ -519,12 +560,13 @@ class ElasticClient:
         fetched = 0
         while True:
             d = self._budgeted_search(page, on_query, deadline, clock)
+            free = last_response_surrogate_free()
             self._carry_pit(session, d)
             pit["id"] = session.id
             hits = d.get("hits", {}).get("hits", [])
             total = d.get("hits", {}).get("total", {})
             meta = {"problems": _response_problems(d), "total": total.get("value"),
-                    "total_relation": total.get("relation", "unknown")}
+                    "total_relation": total.get("relation", "unknown"), "surrogate_free": free}
             if len(hits) < size:
                 # the rest of the result: no record after it can share its final time
                 yield hits, meta
@@ -533,20 +575,20 @@ class ElasticClient:
             head = [hit for hit in hits if _sort_value(hit) != boundary]
             fetched += len(head)
             yield head, meta
-            for group, problems in self._tie_group(page, field, spec, boundary, len(hits) - len(head), time_unit,
-                                                   session, pit, on_query, deadline, clock):
+            for group, problems, group_free in self._tie_group(page, field, spec, boundary, len(hits) - len(head),
+                                                               time_unit, session, pit, on_query, deadline, clock):
                 fetched += len(group)
-                yield group, {**meta, "problems": problems}
+                yield group, {**meta, "problems": problems, "surrogate_free": group_free}
             if fetched >= max_records:
                 return
             page["search_after"] = [boundary]
 
     def _tie_group(self, page: dict, field: str, spec, boundary, seen: int, time_unit: str, session: PitSession,
                    pit: dict, on_query: Callable[[], bool] | None, deadline: float | None,
-                   clock: Callable[[], float]) -> Iterator[tuple[list[dict], list[str]]]:
-        """Every record of the page query whose time sort value is `boundary`, in pages of the page size. `seen`
-        records at that value were on the page: a group query that finds fewer was written in the wrong resolution,
-        and is an error rather than a skip."""
+                   clock: Callable[[], float]) -> Iterator[tuple[list[dict], list[str], bool]]:
+        """Every record of the page query whose time sort value is `boundary`, in pages of the page size, with the
+        page's problems and whether its response was surrogate free. `seen` records at that value were on the page:
+        a group query that finds fewer was written in the wrong resolution, and is an error rather than a skip."""
         clauses = [page["query"]] if "query" in page else []
         group = {key: value for key, value in page.items() if key not in ("search_after", "query", "sort", "size")}
         group["query"] = {"bool": {"filter": [*clauses, {"range": {field: _exact_time(boundary, time_unit)}}]}}
@@ -558,9 +600,10 @@ class ElasticClient:
         while True:
             step = min(page["size"], TIE_GROUP_WINDOW - offset)
             if step <= 0:
-                yield [], [f"tie_group_window:{field}={boundary}:{offset}<total:{total}"]
+                yield [], [f"tie_group_window:{field}={boundary}:{offset}<total:{total}"], True
                 return
             d = self._budgeted_search({**group, "from": offset, "size": step}, on_query, deadline, clock)
+            free = last_response_surrogate_free()
             self._carry_pit(session, d)
             pit["id"] = session.id
             hits = d.get("hits", {}).get("hits", [])
@@ -569,7 +612,7 @@ class ElasticClient:
                 raise SourceError(f"the records at one {field} value ({boundary}) could not be read back as a "
                                   f"group: the page held {seen}, the group query found {total}")
             offset += len(hits)
-            yield [hit for hit in hits if _sort_value(hit) == boundary], _response_problems(d)
+            yield [hit for hit in hits if _sort_value(hit) == boundary], _response_problems(d), free
             if len(hits) < step or offset >= total:
                 return
 

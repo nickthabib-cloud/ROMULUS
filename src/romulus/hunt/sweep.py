@@ -1700,7 +1700,8 @@ class Sweep:
         malformed_text: dict[str, list[str]] = {}
         skip_families: dict[str, frozenset[str] | None] = {}
         events, skips, errors = normalize_hits(out.records, self.boots, malformed_text=malformed_text,
-                                               skip_families=skip_families, rpc_remote_only=True, contract=contract)
+                                               skip_families=skip_families, rpc_remote_only=True, contract=contract,
+                                               surrogate_free=out.surrogate_free)
         if errors:
             self._note_zeek_inventory_gap(target,contract,[f"{len(errors)} record normalization failures"])
         if malformed_text:

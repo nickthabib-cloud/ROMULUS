@@ -5,7 +5,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
 
 class Window(BaseModel):
@@ -93,3 +93,17 @@ class SearchOutcome(BaseModel):
     records: list[dict[str, Any]] = []           # {"_id", "_index", "_source"} for raw
     buckets: list[dict[str, Any]] = []           # {"key": {...}, "count": n} for aggregate/histogram
     error: str | None = None
+    # Every response of a raw outcome was surrogate free (sources.es.surrogate_free): its records hold no lone UTF-16
+    # surrogate, so normalization may skip looking for one. Never serialized; False unless established.
+    _surrogate_free: bool = PrivateAttr(default=False)
+
+    @property
+    def surrogate_free(self) -> bool:
+        return self._surrogate_free
+
+    def model_copy(self, *, update=None, deep: bool = False):
+        copy = super().model_copy(update=update, deep=deep)
+        if update and "records" in update:
+            # records put together from elsewhere (merged samples) carry no proof: whoever has one sets it again
+            copy._surrogate_free = False
+        return copy
