@@ -19,6 +19,16 @@ def overlaps(event,window):
     return start < window.end and (end > window.start or start==end and start>=window.start)
 
 
+# Selection notes for net_flow cells: the records were read, so neither makes a sensor's inventory incomplete.
+INTERIM_SELECTED=('latest interim connection selected by greatest cumulative duration; source start time does not '
+                  'establish write order')
+UNKNOWN_END=' connections before the window had no recorded end'
+
+
+def selection_note(reason):
+    return reason==INTERIM_SELECTED or reason.endswith(UNKNOWN_END)
+
+
 def canonical(sweep,events,raw,reasons):
     """Select final or latest cumulative record once per sensor/UID, across all targets.
 
@@ -66,7 +76,7 @@ def canonical(sweep,events,raw,reasons):
         if prior is None or rank(event)>rank(prior):
             chosen[key]=event
     if unknown_ends:
-        reasons.append((f'{unknown_ends} connections before the window had no recorded end',frozenset({'net_flow'})))
+        reasons.append((f'{unknown_ends}{UNKNOWN_END}',frozenset({'net_flow'})))
     pending=[key for key,event in chosen.items() if event.get('conn.interim') is True]
     for keys in batched(pending,1000):
         scoped=Window(start=min(chosen[key].ts for key in keys)-timedelta(seconds=1),
@@ -116,8 +126,7 @@ def canonical(sweep,events,raw,reasons):
                     chosen[key]=chosen[key].model_copy(update={'raw':list(refs.values())})
             raw.update({ref.key:copies[ref.key] for key in keys for ref in chosen[key].raw if ref.key in copies})
         if any(chosen[key].get('conn.interim') is True for key in keys):
-            reasons.append((('latest interim connection selected by greatest cumulative duration; source start time '
-                            'does not establish write order'),frozenset({'net_flow'})))
+            reasons.append((INTERIM_SELECTED,frozenset({'net_flow'})))
     if chosen:
         before=stage.refused
         def remember():

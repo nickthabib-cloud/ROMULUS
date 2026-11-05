@@ -89,6 +89,7 @@ class VisibilityStore:
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
         self.path = directory / 'zeek-visibility.db'
+        self.stats_cadence = None    # declared stats cadence; without it stats rows are notes, never health
         self.db = sqlite3.connect(self.path)
         self.db.execute('PRAGMA journal_mode=DELETE')
         self.db.execute('PRAGMA cache_size=-2048')
@@ -208,6 +209,7 @@ class VisibilityStore:
         self._write('INSERT OR IGNORE INTO issue VALUES (?,?)',(sensor,reason))
 
     def resolve_stats(self,cadence,*,complete):
+        self.stats_cadence=cadence
         previous=None
         for sensor,worker,stamp,dropped,link in self.db.execute('SELECT * FROM stats ORDER BY sensor,worker,time'):
             first = previous is None or previous[:2] != (sensor, worker)
@@ -267,7 +269,10 @@ class VisibilityStore:
                     'SELECT start,end,loss,kind FROM health WHERE sensor=? AND end>? AND start<? ORDER BY start,end',
                     (sensor,start,end)):
                 groups.setdefault(kind, []).append((hstart,hend,loss))
-            workers = [row[0] for row in self.db.execute('SELECT DISTINCT worker FROM stats WHERE sensor=?', (sensor,))]
+            # Workers must each cover the interval only when stats can be health (a declared cadence); otherwise
+            # capture loss governs and stats rows stay notes.
+            workers = [row[0] for row in self.db.execute('SELECT DISTINCT worker FROM stats WHERE sensor=?',
+                                                         (sensor,))] if self.stats_cadence else []
             missing, partial, losses = not groups, False, {}
             # Every observed worker must cover the interval. A healthy worker
             # cannot conceal a missing measurement from its peer.

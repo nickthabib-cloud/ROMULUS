@@ -1729,7 +1729,9 @@ class Sweep:
                     self._zeek_lookback(target,contract,observed=True)
             events = self._canonical_zeek(events, raw_sources, zeek_state_reasons)
             events, zeek_duplicates, zeek_superseded = self._unique_zeek(events, zeek_state_reasons)
-            self._note_zeek_inventory_gap(target,contract,[reason for reason,_ in zeek_state_reasons])
+            from romulus.hunt.zeek_connections import selection_note
+            self._note_zeek_inventory_gap(target,contract,[reason for reason,_ in zeek_state_reasons
+                                                           if not selection_note(reason)])
             if getattr(self,"_zeek_visibility_enabled",False):
                 zeek_visibility_events = events
             duplicate_events.extend(zeek_duplicates)
