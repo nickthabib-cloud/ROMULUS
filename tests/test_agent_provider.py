@@ -819,6 +819,7 @@ def test_the_port_and_the_other_adapters_never_import_the_anthropic_sdk():
         "import romulus.agent.provider as port, romulus.doctor\n"
         "from romulus.agent.provider.openai_compatible import OpenAICompatibleProvider\n"
         "from romulus.agent.provider.ollama import OllamaProvider\n"
+        "from romulus.agent.provider.openai_responses import OpenAIResponsesProvider\n"
         "from romulus.config import Settings\n"
         "ok = lambda r: httpx.Response(200, json={'model': 'm', 'choices': [{'message': {'content': 'hi'}, "
         "'finish_reason': 'stop'}]})\n"
@@ -865,3 +866,14 @@ def test_cli_wording_never_calls_a_partial_hunt_complete():
     from romulus import cli
     line = cli._ai_agent_line({"ai_agent": {"status": "not_configured", "reason": "x"}})
     assert "complete" not in line and "do not depend on it" in line
+
+
+def test_a_response_schema_outside_the_strict_subset_is_sent_loose():
+    loose = {"type": "object", "properties": {"ok": {"type": "boolean"}, "note": {"type": "string"}},
+             "required": ["ok"], "additionalProperties": False}
+    rec = Recorder(completion(content='{"ok": true}'))
+    p, _ = provider(remote_settings(), rec)
+    assert p.chat(ask(response_schema=loose)).ok
+    assert rec.body()["response_format"]["json_schema"]["strict"] is False
+    assert p.chat(ask(response_schema=TOOL.parameters)).ok
+    assert rec.body()["response_format"]["json_schema"]["strict"] is True

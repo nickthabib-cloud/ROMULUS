@@ -22,6 +22,7 @@ TRUNCATION_MARGIN = 32
 MAX_RETRIES = 3                # after the first attempt; then the provider is unavailable
 RETRY_STATUSES = frozenset({408, 409, 429, 500, 502, 503, 504})
 MAX_RETRY_AFTER_SECONDS = 60.0
+MAX_ERROR_MESSAGE = 2000       # a provider's own error message is shown whole up to this length
 STOP_REASONS = frozenset({"stop", "tool_calls", "function_call"})
 T = TypeVar("T")
 
@@ -64,12 +65,31 @@ def estimate_tokens(text: str) -> int:
 
 
 # the documented API root for providers that have one; any other provider needs AGENT_BASE_URL
-DEFAULT_BASE_URLS = {"anthropic": "https://api.anthropic.com"}
+DEFAULT_BASE_URLS = {"anthropic": "https://api.anthropic.com", "openai_responses": "https://api.openai.com/v1"}
 
 
 def endpoint_url(s: Settings) -> str:
     """AGENT_BASE_URL, or the provider's documented API root when it is unset."""
     return s.agent_base_url.strip() or DEFAULT_BASE_URLS.get(s.agent_provider, "")
+
+
+def error_message(body: str, settings: Settings) -> str:
+    """The provider's own message from an error body (`{"error": {"message": ...}}`, `{"error": "..."}` or
+    `{"message": ...}`), whole up to MAX_ERROR_MESSAGE characters; else the start of the body. The body is
+    redacted before it is cut, and the message again once decoded (JSON escapes can hide a secret's text)."""
+    body = redact_text(body, settings)
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return body[:300]
+    found = data.get("error") if isinstance(data, dict) else None
+    if isinstance(found, dict):
+        found = found.get("message")
+    elif not isinstance(found, str) and isinstance(data, dict):
+        found = data.get("message")
+    if not isinstance(found, str) or not found.strip():
+        return body[:300]
+    return redact_text(found, settings)[:MAX_ERROR_MESSAGE]
 
 
 @dataclass(frozen=True)
@@ -208,7 +228,7 @@ class ChatProvider:
 
     # ---- adapter hooks --------------------------------------------------------------------------------
     def _build_http(self, transport: httpx.BaseTransport | None) -> httpx.Client | None:
-        return httpx.Client(base_url=self.s.agent_base_url.strip().rstrip("/"),
+        return httpx.Client(base_url=endpoint_url(self.s).rstrip("/"),
                             timeout=self.s.agent_timeout_seconds, transport=transport,
                             headers=self._headers(), follow_redirects=False,
                             # never through an environment proxy: its host was not classified for egress
@@ -289,15 +309,16 @@ class ChatProvider:
             except httpx.TransportError as exc:
                 raise TransientFailure(f"{exc.__class__.__name__}: {exc}") from None
             if response.status_code in RETRY_STATUSES:
-                raise TransientFailure(f"HTTP {response.status_code}", suffix=f": {response.text[:300]}",
+                raise TransientFailure(f"HTTP {response.status_code}",
+                                       suffix=f": {error_message(response.text, self.s)}",
                                        retry_after=response.headers.get("retry-after", ""))
             return response
         return self._retrying(once)
 
     def _http_error(self, response: httpx.Response, est: int, ms: int, attempts: int) -> ChatResult:
-        body = redact_text(response.text[:2000], self.s)
-        return ChatResult("error", "", "", None, [], Usage(), est, self.model, "", ms, body,
-                          f"HTTP {response.status_code}: {body[:300]}", attempts)
+        body = redact_text(response.text, self.s)
+        return ChatResult("error", "", "", None, [], Usage(), est, self.model, "", ms, body[:2000],
+                          f"HTTP {response.status_code}: {error_message(response.text, self.s)}", attempts)
 
     def _finish(self, *, finish_reason: str | None, content: str, tool_calls: list[ToolCall], usage: Usage,
                 est: int, model_reported: str, ms: int, raw: str, attempts: int, request: ChatRequest,
