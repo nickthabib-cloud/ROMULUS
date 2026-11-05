@@ -44,6 +44,10 @@ def _escape(code: str) -> bytes:
     (b'\xef\xbb\xbf{"a": 1}', False),                                    # not plain UTF-8: never free
     (b'{"a": "cut ' + BACKSLASH.encode() + b'u', False),                 # an escape cut short
     (b'{"a": "cut ' + BACKSLASH.encode() + b'ud', False),
+    # a nested layer spelling the inner backslash as an escape: the inner text parses to a lone surrogate
+    (b'{"t": "' + BACKSLASH.encode() + b'"' + _escape("005c") + b'ud800' + BACKSLASH.encode() + b'""}', False),
+    (b'{"a": "' + _escape("0041") + b'"}', False),                       # escaped printable ASCII is never free
+    (b'{"a": "' + _escape("001b") + b'"}', True),                        # a control-character escape stays free
 ])
 def test_byte_forms_of_a_lone_surrogate(body, free):
     assert surrogate_free(body) is free
@@ -206,3 +210,109 @@ def test_a_free_batch_normalizes_exactly_as_a_searched_one(monkeypatch):
     skipped = normalize_hits(hits, surrogate_free=True)
     assert [e.model_dump(mode="json") for e in skipped[0]] == [e.model_dump(mode="json") for e in searched[0]]
     assert skipped[1:] == searched[1:]
+
+
+def _encode(value, rng: random.Random) -> str:
+    """JSON text as any valid encoder may write it: printable ASCII, quotes and backslashes sometimes as escapes,
+    other characters as escapes or as themselves (a lone surrogate as itself is encoded with surrogatepass)."""
+    if isinstance(value, str):
+        out = ['"']
+        for ch in value:
+            code = ord(ch)
+            if ch == '"':
+                out.append(BACKSLASH + '"' if rng.random() < 0.7 else BACKSLASH + "u0022")
+            elif ch == BACKSLASH:
+                out.append(BACKSLASH * 2 if rng.random() < 0.7 else BACKSLASH + "u005c")
+            elif code < 0x20:
+                out.append(f"{BACKSLASH}u{code:04x}")
+            elif code < 0x80:
+                out.append(ch if rng.random() < 0.8 else f"{BACKSLASH}u{code:04x}")
+            elif code <= 0xFFFF and rng.random() < 0.5:
+                out.append(f"{BACKSLASH}u{code:04x}")
+            else:
+                out.append(ch)
+        out.append('"')
+        return "".join(out)
+    if isinstance(value, dict):
+        return "{" + ",".join(_encode(str(key), rng) + ":" + _encode(item, rng) for key, item in value.items()) + "}"
+    if isinstance(value, list):
+        return "[" + ",".join(_encode(item, rng) for item in value) + "]"
+    return json.dumps(value)
+
+
+def _value_any(rng: random.Random, depth: int = 0):
+    kind = rng.randint(0, 5 if depth < 3 else 2)
+    if kind <= 1:
+        return _text(rng) + rng.choice(["", "u", "ud800", BACKSLASH + "u", "d8", "005c"])
+    if kind == 2:
+        return rng.randint(-5, 5)
+    if kind == 3:
+        return {_text(rng): _value_any(rng, depth + 1) for _ in range(rng.randint(0, 3))}
+    if kind == 4:
+        return [_value_any(rng, depth + 1) for _ in range(rng.randint(0, 3))]
+    return _encode(_value_any(rng, depth + 1), rng)              # JSON text inside text, written by any encoder
+
+
+def test_no_encoder_hides_a_lone_surrogate_at_any_depth():
+    rng = random.Random(51105)
+    checked = free = 0
+    for _ in range(6000):
+        value = {"hits": {"hits": [{"_source": _value_any(rng)} for _ in range(rng.randint(1, 3))]}}
+        body = _encode(value, rng).encode("utf-8", "surrogatepass")
+        checked += 1
+        if not surrogate_free(body):
+            continue
+        free += 1
+        assert not any(_lone(item) for item in _parsed_texts(json.loads(body)))
+    assert 0 < free < checked
+
+
+def test_opensearch_tie_group_pages_carry_their_own_flags():
+    from tests.test_sources_opensearch import SimSearch, query
+
+    sim = SimSearch.from_counts([3, 4, 1, 5])
+    dirty = BACKSLASH.encode() + b"udc00"
+
+    def handler(request):
+        response = sim(request)
+        body = json.loads(request.content) if request.content else {}
+        if request.url.path == "/_search" and body.get("from", None) == 0:
+            raw = response.content.replace(b'"_source":{}', b'"_source":{"t":"x' + dirty + b'"}', 1)
+            return httpx.Response(200, content=raw, headers={"content-type": "application/json"})
+        return response
+
+    client = ElasticClient(Settings(es_url="http://os.invalid", es_flavor="opensearch"),
+                           transport=httpx.MockTransport(handler))
+    pages = list(client.iterate(query(), max_records=10_000, page_size=4))
+    assert pages and any(not meta["surrogate_free"] for _hits, meta in pages)
+    for hits, meta in pages:
+        assert meta["surrogate_free"] is not any("t" in hit.get("_source", {}) for hit in hits)
+
+
+def test_the_sweep_hands_the_outcome_flag_to_normalization(monkeypatch, tmp_path):
+    from romulus.hunt import sweep as sw
+    from tests import test_sweep as ts
+    from tests.test_raw_scrub import _sweep
+
+    seen = []
+    real = sw.normalize_hits
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("surrogate_free"))
+        return real(*args, **kwargs)
+
+    records = [json.loads(json.dumps(h)) for _name, h in SWEPT[:5]]
+    sweep, _repo, engine, window, contract = _sweep(monkeypatch, tmp_path, records)
+
+    def complete(client, intent, contract):
+        out = ts._complete(intent, records)
+        out._surrogate_free = True
+        return out
+
+    monkeypatch.setattr(sw, "execute", complete)
+    monkeypatch.setattr(sw, "normalize_hits", spy)
+    sweep.run_partition("net", contract, [], window, est=len(records), any_of=[])
+    assert seen and seen[0] is True
+    sweep.close_stage()
+    engine.dispose()
+

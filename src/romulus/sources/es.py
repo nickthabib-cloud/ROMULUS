@@ -53,29 +53,27 @@ from romulus.sources.models import CompiledQuery, Completeness, SearchOutcome
 # What the last response this thread parsed said about lone UTF-16 surrogates (see surrogate_free). Each page reads
 # it right after its own request, on the thread that made it, so a prefetch thread never sees another's.
 _response_text = threading.local()
-_ESCAPE = b"\\u"
+# A \u escape of a surrogate, of a printable ASCII character (U+0020-U+007F: how a nested layer could spell a
+# backslash, a "u" or a hex digit without showing them), or cut short at the end of the body.
+_SURROGATE_ESCAPE = re.compile(rb"\\u(?:[dD][89a-fA-F]|00[2-7]|[\s\S]{0,3}\Z)")
+# The bytes UTF-8 would give a surrogate (0xED 0xA0-0xBF), or a lead byte cut short.
+_SURROGATE_BYTES = re.compile(rb"\xed(?:[\xa0-\xbf]|\Z)")
 
 
 def surrogate_free(content: bytes) -> bool:
     """Whether a JSON response, once parsed, can hold no lone UTF-16 surrogate anywhere, also in text a normalizer
-    parses out of it again. json.loads keeps a \\uD800-\\uDFFF escape as one, and decodes UTF-8 with
-    'surrogatepass', so a surrogate arrives either as such an escape (text inside text keeps the escape's letters
-    behind an escaped backslash, which this finds too) or as the three bytes UTF-8 would give it (0xED, 0xA0-0xBF).
-    A body that is not plain UTF-8 is never called free. memchr-speed scans: far cheaper than walking each record."""
+    parses out of it again (an EVE line, a journal message, a Zeek original).
+
+    json.loads keeps a \\uD800-\\uDFFF escape as one and decodes UTF-8 with 'surrogatepass', so a surrogate in a
+    parsed value arrives as such an escape or as the three bytes UTF-8 would give it. In text parsed again, its escape
+    must be spelled by the outer layer: either with the letters visible behind an escaped backslash (found here as
+    \\u plus the surrogate's digits) or with some of them written as escapes of printable ASCII, which a canonical
+    serializer never writes (Elasticsearch, OpenSearch and json.dumps write a backslash as \\\\ and printable ASCII as
+    itself), so any such escape makes the body not free. Induction over the nesting depth makes this hold at any depth.
+    A body that is not plain UTF-8, or whose escape or lead byte is cut short, is never free. Two C-speed scans."""
     if content.startswith((b"\xef\xbb\xbf", b"\xff\xfe", b"\xfe\xff")) or b"\x00" in content[:4]:
         return False
-    index = content.find(_ESCAPE)
-    while index != -1:
-        hex_digits = content[index + 2:index + 4]
-        if len(hex_digits) < 2 or (hex_digits[0] in b"dD" and hex_digits[1] in b"89abcdefABCDEF"):
-            return False
-        index = content.find(_ESCAPE, index + 2)
-    index = content.find(b"\xed")
-    while index != -1:
-        if index + 1 >= len(content) or 0xA0 <= content[index + 1] <= 0xBF:
-            return False
-        index = content.find(b"\xed", index + 1)
-    return True
+    return _SURROGATE_ESCAPE.search(content) is None and _SURROGATE_BYTES.search(content) is None
 
 
 def last_response_surrogate_free() -> bool:
@@ -291,13 +289,14 @@ class ElasticClient:
         check_allowed(method, path, self.flavor)
         if body is not None:
             _scan_body(body)
-        _response_text.free = False
         if path != "/":
             if self.refusal is not None:
                 raise BackendRefused(self.refusal)
             if self.flavor == "opensearch" and self.backend is None:
                 # the OpenSearch table and its point-in-time calls depend on the version: confirm it first
                 self.info()
+        # after info(): its own response must not stand for this one if this request fails
+        _response_text.free = False
         try:
             r = self._http.request(method, path, json=body, params=params)
         except httpx.TimeoutException as e:
