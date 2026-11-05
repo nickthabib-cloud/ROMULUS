@@ -195,6 +195,11 @@ def _not_assessed(hunt_manifest: dict, sweep_detail: dict) -> list[dict]:
                             "count_scope": "whole index at source preflight, not only the hunt window",
                             "reason": "not retrieved by the sweep: no normalizer reads this dataset, so no rule "
                                       "evaluates it"})
+        if not (profiles.get(target) or {}).get("datasets_complete", True):
+            out.append({"target": target, "dataset": f"any dataset other than {', '.join(retrieved)}",
+                        "records": None,
+                        "count_scope": "unknown: the source preflight could not list every dataset of the index",
+                        "reason": "not retrieved by the sweep"})
     for target, classes in sorted((stats.get("windows_unassessed") or {}).items()):
         for event_class in classes:
             if event_class.get("uncatalogued"):

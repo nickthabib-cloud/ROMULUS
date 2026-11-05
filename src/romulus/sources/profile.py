@@ -93,12 +93,16 @@ def native_field(contract, path, op='eq'):
                  if spec.native.startswith(path + '.') and op in spec.ops), None)
 
 
-def _aggregation_field(contract, path):
-    # Aggregations on an unmapped field are valid and empty; preserve that behavior.
-    if path not in contract.fields:
+def _aggregation_field(field_types, path):
+    """The native field an inventory aggregation reads for `path`: itself when aggregatable, else a reported exact
+    multifield (a text field's keyword subfield), else None. Resolved on the index's own mapping, never through the
+    typed alias layer, which joins event.dataset and data_stream.dataset into one field that cannot be aggregated.
+    An unmapped field aggregates validly and empty, so it is returned as it is."""
+    kind = field_types.get(path)
+    if kind is None or kind in AGGREGATABLE:
         return path
-    field = native_field(contract, path)
-    return contract.fields[field].native if field and contract.fields[field].aggregatable else None
+    return next((name for name, sub in sorted(field_types.items())
+                 if name.startswith(path + ".") and sub in AGGREGATABLE), None)
 
 
 def apply_zeek_declaration(contract, site_facts):
@@ -387,14 +391,13 @@ def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfil
                                       "winlog.computer_name" if windows else "host.name"))
     if declaration is not None:
         tf, ds_field, host_field = "ts", "_path", "_romulus_no_observer_field"
-    mapping_contract = contract_from_types(target, field_types)
     notes = []
     declared_dataset = ds_field
-    ds_field = _aggregation_field(mapping_contract, ds_field)
+    ds_field = _aggregation_field(field_types, ds_field)
     if ds_field is None:
         notes.append(f'ds inventory truncated ({declared_dataset} has no exact-searchable aggregation field)')
     declared_host = host_field
-    host_field = _aggregation_field(mapping_contract, host_field)
+    host_field = _aggregation_field(field_types, host_field)
     if host_field is None:
         notes.append(f'hosts inventory truncated ({declared_host} has no exact-searchable aggregation field)')
     host_aggregation = ({"composite": {
@@ -461,8 +464,8 @@ def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfil
         # Malcolm indexes Zeek and Suricata rows beside Arkime's sessions in one index: each row is read by its own
         # normalizer, so the inventory is by (provider, dataset), not by Arkime protocol.
         mixed = provider_inventory(client, target,
-            provider_field=_aggregation_field(mapping_contract, 'event.provider'),
-            dataset_field=_aggregation_field(mapping_contract, 'event.dataset'))
+            provider_field=_aggregation_field(field_types, 'event.provider'),
+            dataset_field=_aggregation_field(field_types, 'event.dataset'))
         if mixed is not None:
             inventory, datasets, mixed_notes = mixed
             notes = [note for note in notes if not note.startswith("ds inventory truncated")] + mixed_notes

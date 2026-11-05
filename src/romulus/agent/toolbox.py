@@ -934,6 +934,7 @@ class Toolbox:
                 not_assessed += 1
             else:
                 not_assessed += len(set(inventory) - set(retrieved))
+                not_assessed += not (profiles.get(target) or {}).get("datasets_complete", True)
         counts["not_assessed"] = not_assessed
         counts["sweep_finished"] = int(finished)
         incomplete = counts["incomplete"] + counts["missing_rule_targets"] + not_assessed

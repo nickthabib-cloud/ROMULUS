@@ -10,6 +10,7 @@ from romulus.detect.registry import bind_windows_site, fresh_direct_pack
 from romulus.evidence.typed import TypedEvent
 from romulus.hunt.expansion import ExpansionEngine, expansion_windows
 from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkResult
+from romulus.hunt.manifest import inventory_usable
 from romulus.hunt.pivot import PivotExecutor
 from romulus.hunt.publish import mark_hypothesis_relation, publish_match
 from romulus.site import ensure_site_unchanged
@@ -198,6 +199,7 @@ def build_agent_toolbox(settings: Settings, repo: Repo, hunt_id: str, *, client,
     inventory = {
         target: tuple(sorted((profile or {}).get("datasets") or []))
         for target, profile in (manifest.get("source_profiles") or {}).items()
+        if inventory_usable(profile)
     }
     pivot = PivotExecutor(
         repo, client, hunt_id, contracts, owner_token=owner_token,
