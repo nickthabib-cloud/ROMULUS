@@ -1,6 +1,7 @@
 """Catalog-derived, sensor-scoped Zeek source predicates shared by bounded readers."""
 from dataclasses import dataclass
 from functools import lru_cache
+from math import floor
 
 from romulus.evidence.zeek import _ELASTIC_ONLY
 from romulus.evidence.zeek_catalog import (
@@ -13,20 +14,14 @@ from romulus.evidence.zeek_catalog import (
     lookup_log,
 )
 from romulus.sources.models import Predicate, SearchIntent, Window
+from romulus.sources.profile import native_field as exact_native_field
 
 
 def native_field(contract, path, op='eq'):
     if path.startswith('original:'):
         return None
     path = path.removesuffix(':ns').removesuffix(':ms')
-    if contract.supports(path, op):
-        return path
-    direct = next((name for name, spec in contract.fields.items()
-                   if spec.native == path and op in spec.ops), None)
-    if direct or not any(spec.native == path and spec.type == 'text' for spec in contract.fields.values()):
-        return direct
-    return next((name for name, spec in contract.fields.items()
-                 if spec.native.startswith(path + '.') and op in spec.ops), None)
+    return exact_native_field(contract, path, op)
 
 
 def overlap_groups(contract, groups, start, partition_end, *, shape=None):
@@ -52,6 +47,9 @@ def overlap_groups(contract, groups, start, partition_end, *, shape=None):
         field,factors = next(iter(fields.items()))
         # An unscoped caller gets the least restrictive verified unit conversion.
         duration = max(0,(start-partition_end).total_seconds())*min(factors)
+        if contract.fields[field].type in {'long', 'integer', 'short'}:
+            # A truncated stored duration can be below the true overlap threshold by less than one unit.
+            duration = floor(duration)
         return [[*group,Predicate(field=field,op=op,value=duration if op=='gte' else None)]
                 for group in groups for op in ('gte','missing')]
     return groups

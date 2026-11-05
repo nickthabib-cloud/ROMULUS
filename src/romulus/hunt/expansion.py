@@ -865,6 +865,7 @@ class ExpansionEngine:
             "coverage": [item.model_dump(mode="json") for item in result.coverage],
             "reasons": result.reasons, "duration_ms": result.duration_ms,
             "query_spend": result.query_spend, "evaluated": 0,
+            "zeek_budget": result.zeek_budget,
         }, owner_token=self.owner_token)
 
     def _evaluate(self, candidate: dict, result: LinkResult) -> list[dict]:

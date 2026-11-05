@@ -304,6 +304,10 @@ from tests import throughput_fixture as tf
 # Three Windows RPC rules add only their zero-evaluation coverage cells and manifest rows here.
 # Removing those rules and incidental coverage row ids reproduces the complete prior snapshot;
 # every finding, citation, raw record, event, link and other table digest is unchanged.
+# Coverage includes 36 additional Windows/Zeek rules with zero evaluated/matched records here.
+# Removing their 2,556 cells and 36 manifest coverage rows, restoring seven registered rule versions,
+# and restoring incidental coverage row IDs reconstructs the complete prior snapshot exactly.
+# Findings, evidence, links, requests and all 21 non-coverage section digests remain unchanged.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
     "audit": "23d9b87c75d030df8ff5bcbf07deacc75416c325dd74bcc89243cc1b5488ae93",
@@ -323,9 +327,9 @@ GOLDEN_STACK = {
     "events": "0165d2807ffee33aaef17dd70ba004ec4c87fa4c5f29e9dc75ba833f57b93ff7",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "0fbedb27ca9a4cb72354178444ee9aabc49f377b2c933074fe03ef29c8fbb08a",
-    "manifest": 'e491da1aa7514c60c155880f87211d6651e4690791b204995f4e42dc6261fa31',
+    "manifest": '5aa5cf608d0a4a09737c4c70ba1e4101c20c69e72c2c9f673e1f94942ffe4770',
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
-    "rule_cells": 'f1b39b52b16b44c30c37849f5f9d90f42851820724a0a810bed0c188deb6e33c',
+    "rule_cells": 'd0e0fd1698b83b3799622f56eed0c3d155bb13031890f6e8b09bf62524de2691',
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
     "tasks": "c65df4ab88c05661371cf32b49a1d22ef84d6753488bdb946c8e29376d486260",
 }
@@ -357,16 +361,16 @@ GOLDEN_NON_BASELINE_SEMANTICS = {
         "ts": "d8015c1ff0b135e082a5fef2ab1cb88206470e30beee157a0cfc7790d48b8310",
     },
     "rule_cells": {
-        "all_fields": "c3a0601e46eec47fc44802f54491ea947d4030b46431bb9af8ce74d3f4a3d4e4",
-        "count": 12776,
-        "rule_id": "101efd75f2c5dcb8af5d784cd457ad5e0dff1263486b5f4dab95985ac5022d28",
-        "rule_version": "eee2ab9d71f0735cfda3f7d4c825f440aa8fa8cdcb03db9913d7b7dca1f7fb7d",
-        "target": "11bfcaf95d4447861d57f73f62a9b104f180fed1176ecdea896c505293632e36",
-        "partition": "02d6e04e8ce280a8c6e1e6f274d289dd6025dcf43fded4d4650fd09dce74f1f3",
-        "state": "6cee3bcb76f707add37f1b2f942deece080badc979ef7e706f14da256a5241fd",
-        "matched": "3b41e136bbd01bdd43a4b23c92421059a063fb06def199969a3414afe2822934",
-        "evaluated": "21d8a8ef4483c1c52c27c1b66740da3f920a1039f6aafebe00a3311665e6dded",
-        "detail": "a46007e15267740b4f50fb0f9bee0f646713970db82c5e429b6554230d6e7070"
+        "all_fields": "bd312b826560948131852d03967d73a9af53533d3d824ca8ebb5c11c6876d414",
+        "count": 15332,
+        "rule_id": "13f0e251e6986c8069dd698c7f2013b926850f90c7727b5ab341a3a7bb8adb0d",
+        "rule_version": "2a1aec934917a08a75bf7a039e3af568df6ac43046c7a01ad2ea51bb02e778c3",
+        "target": "cd116b33342ac6d52d9003532ef5a1ff14eacea7e7d7d19a9d30fbf47fd71f1d",
+        "partition": "0cf54d59277457d8a8cab4d0dcddad1d788624dffe4467f1ee0e89020ab65acf",
+        "state": "15c1787d5f9f34b8370b87e4583d9488ec3ab54c16fd49ab876bd352d6c7b5af",
+        "matched": "77b9f2f580f8caa3fccb539a28c4eb3375004196ed1429ab2538a5be8e1e3108",
+        "evaluated": "4a93085d8571f905fa2dfcae0c320308522b1d79e3403f284a4a81322089c97c",
+        "detail": "52ceac1d3294c42c6c7bf24e79140579c5a1762166b28c5533b6cedb3f603485"
 },
 }
 GOLDEN_NORMALIZED = {

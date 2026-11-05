@@ -70,8 +70,19 @@ class ZeekLink:
         self.task_ids = []
         self.duration = 0
         self.partial = False
-        self.shared = fetcher.__dict__.setdefault('_zeek_link_budgets', {}).setdefault(
-            (anchor.finding_id,kind,window.label), {'rows':0,'keys':set(),'queries':0})
+        repo = getattr(self.executor, 'repo', None)
+        if repo is not None:
+            # Load only this bounded checkpoint; no hunt-sized in-memory budget map.
+            checkpoint = repo.zeek_link_budget(self.executor.hunt_id, anchor.finding_id, kind, window.label)
+            self.shared = dict(checkpoint or {'rows': 0, 'keys': [], 'queries': 0})
+            self.shared['keys'] = set(self.shared['keys'])
+        else:
+            # Lightweight non-persistent executors share their caller-owned lifetime.
+            self.shared = fetcher.__dict__.setdefault('_zeek_link_budgets', {}).setdefault(
+                (anchor.finding_id,kind,window.label), {'rows':0,'keys':set(),'queries':0})
+        if self.shared.get('legacy'):
+            self.unresolved('prior Zeek link has no recoverable examined-row/hop-key checkpoint; '
+                            'remaining joins unresolved under the shared limit')
 
     def unresolved(self, reason):
         self.partial = True
@@ -168,7 +179,17 @@ class ZeekLink:
                 conns = [event for event in self.anchor.events if event.get('zeek.log') == 'conn'
                          and uid in values(event, UID_FIELDS)]
                 if not conns or any(event.get('conn.interim') is True for event in conns):
-                    lookback = LinkWindow(label=self.window.label, start=self.anchor.ts-timedelta(hours=24),
+                    known_starts = []
+                    for event in conns:
+                        try:
+                            start = datetime.fromisoformat(event.get('flow.start'))
+                            if start.tzinfo is not None:
+                                known_starts.append(start)
+                        except (TypeError, ValueError):
+                            continue
+                    lower = (min(known_starts)-timedelta(minutes=1) if known_starts
+                             else self.anchor.ts-timedelta(hours=24))
+                    lookback = LinkWindow(label=self.window.label, start=lower,
                                           end=max(self.window.end,self.anchor.ts+timedelta(hours=24)))
                     fetched = self.query(_logs({'conn'}), UID_FIELDS, [uid], lookback,
                                          lambda event: event.get('zeek.log') == 'conn' and uid in values(event, UID_FIELDS))
@@ -244,8 +265,11 @@ class ZeekLink:
                         searched = len(self.batches) > before and all(
                             batch.status == 'complete' for batch in self.batches[before:])
                         if not witnesses:
-                            # an absence is stated only when the probe ran to completion
-                            self.unresolved(f'DHCP hostname {name} matches no host-telemetry host in scope' if searched
+                            # A completed probe samples nearest records; retained rows can all fail the host filter.
+                            counts = [cell.returned for batch in self.batches[before:] for cell in batch.coverage]
+                            sample = (f'the {sum(counts)} nearest sampled' if counts and all(n is not None for n in counts)
+                                      else 'the nearest sampled records (sample size unavailable)')
+                            self.unresolved(f'DHCP hostname {name}: no matching host record among {sample}' if searched
                                             else f'host witness for DHCP hostname {name} not searched to completion; '
                                                  'host unresolved')
                         else:
@@ -268,4 +292,5 @@ class ZeekLink:
             key=self.key, status='partial' if self.partial else 'complete', event_ids=[event.id for event in linked],
             evidence_ids=sorted(set(self.anchor.event_ids+[event.id for event in linked])),
             reasons=self.reasons, task_ids=sorted(set(self.task_ids)), coverage=self.coverage,
-            duration_ms=self.duration, query_spend=getattr(self.executor, 'source_queries', 0)-self.start_queries)
+            duration_ms=self.duration, query_spend=getattr(self.executor, 'source_queries', 0)-self.start_queries,
+            zeek_budget={**self.shared, 'keys': sorted(self.shared['keys'])})

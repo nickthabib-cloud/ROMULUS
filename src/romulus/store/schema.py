@@ -280,6 +280,16 @@ expansion_link = Table(
 )
 Index("ix_expansion_link_anchor", expansion_link.c.anchor_id, expansion_link.c.link_type)
 
+# One bounded cumulative checkpoint per anchor/link/window, independent of its key variants.
+zeek_link_budget = Table(
+    "zeek_link_budget", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id", ondelete="CASCADE"), primary_key=True),
+    Column("anchor_id", String, ForeignKey("candidate.id", ondelete="CASCADE"), primary_key=True),
+    Column("link_type", String, primary_key=True),
+    Column("window_label", String, primary_key=True),
+    Column("body", JSON, nullable=False),
+)
+
 # A relation an analyst asserts between two findings. Shown on the attack-path timeline in its own style and
 # labelled as an assertion: never an observed or inferred link, never merged into incidents.
 analyst_link = Table(

@@ -1,6 +1,7 @@
 """Engine creation (SQLite WAL), migrations, integrity check and small helpers."""
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -17,6 +18,62 @@ from romulus.store.schema import metadata
 _write_lock = threading.Lock()
 _memory_maintenance_lock = threading.Lock()
 _maintenance_held = threading.local()
+_memory_visibility_lock = threading.Lock()
+_visibility_held = threading.local()
+
+
+@contextmanager
+def zeek_visibility_lease(engine: Engine):
+    """Serialize chunk publication and collection without holding a SQLite writer.
+
+    One lock file per database bounds lock bookkeeping. The OS releases a dead
+    publisher's lock, so its committed private chunks can be reclaimed later.
+    This lock is separate from maintenance and does not block ordinary hunt work.
+    """
+    database = engine.url.database
+    key = str(Path(database).resolve()) if database and database != ":memory:" else ":memory:"
+    held = getattr(_visibility_held, "keys", None)
+    if held is None:
+        held = _visibility_held.keys = set()
+    if key in held:
+        raise RuntimeError("A visibility publication cannot recursively publish to the same database")
+    if key == ":memory:":
+        with _memory_visibility_lock:
+            held.add(key)
+            try:
+                yield
+            finally:
+                held.remove(key)
+        return
+    with Path(key + ".visibility.lock").open("a+b") as handle:
+        handle.seek(0, 2)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        while True:
+            handle.seek(0)
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as error:
+                if error.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                    raise
+                time.sleep(0.1)
+        held.add(key)
+        try:
+            yield
+        finally:
+            held.remove(key)
+            handle.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 @contextmanager

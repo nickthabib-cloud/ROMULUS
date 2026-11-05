@@ -302,7 +302,11 @@ def test_n1_reused_pid_parent_is_not_lost_when_lineage_is_shared_across_rules():
     remote.drain_bounds()
     out += remote.finalize()
     assert len(out) == 1 and out[0].proposed_lane == "high"       # wmiprvse was live at the child, not svchost
-    assert remote.undecided == {}
+    assert evs[1].id in {event.id for event in out[0].events}
+    assert out[0].ts == evs[1].ts
+    # The broader child rule also evaluates the supporting wmiprvse/svchost creations;
+    # their own parent PID has no creation record. The child's resolved parent remains exact.
+    assert remote.undecided == {"parent_unrecorded": 2}
 
 
 def test_n1_security_and_sysmon_targets_either_order_give_the_same_parent():
