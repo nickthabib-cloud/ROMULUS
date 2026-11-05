@@ -321,6 +321,7 @@ class SiteFacts:
         subcategory: str | None = None,
         outcome: Literal["success", "failure"] | None = None,
         channel: str | None = None,
+        provider: str | None = None,
     ) -> bool:
         """Conservatively require every equally specific matching group to attest the requested fact."""
         groups = self._groups_for(host)

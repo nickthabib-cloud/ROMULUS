@@ -1,4 +1,6 @@
 """Selective native Windows queries for high-volume event classes."""
+from romulus.evidence.rpc_catalog import INTERFACES
+from romulus.evidence.windows_catalog import RPC_PROVIDER
 from romulus.sources.models import Predicate
 
 RDP_CORE_PROVIDER = 'Microsoft-Windows-RemoteDesktopServices-RdpCoreTS'
@@ -65,3 +67,44 @@ def wfp_tunnel_groups(contract, base):
             groups.append([*base, Predicate(field=port, op="eq", value=value),
                            Predicate(field=address, op=operation, value=network)])
     return groups
+
+
+def rpc_call_groups(contract):
+    """RPC retrieval is a superset of the tolerant native normalization.
+
+    Case-insensitive contains accepts every canonical UUID's mixed case, braces and
+    whitespace spellings, and every protocol-sequence spelling. Each is one any-of
+    predicate, so a group stays a few clauses whatever the catalog's size: a cross
+    product of per-protocol and per-interface groups would pass the clause limits of
+    some engines and fail the whole Windows query. Extra substring hits
+    are checked by typed fields locally. Missing native leaves also cover XML-only
+    payloads and alternative native key case. Text mappings cannot safely filter
+    values: use the available provider/code predicates, or no restriction if neither
+    is expressible, while preserving every other Windows channel's fallback.
+    """
+    base = []
+    if contract.supports('event.provider', 'eq'):
+        base.append(Predicate(field='event.provider', op='eq', value=RPC_PROVIDER))
+    code = contract.spec('event.code')
+    if code and code.type in {'long', 'integer', 'short'} and contract.supports('event.code', 'in'):
+        bases = [[*base, Predicate(field='event.code', op='in', value=[5, 6])]]
+    elif contract.supports('event.code', 'contains'):
+        # int() accepts zero padding, whitespace and a leading sign as well.
+        bases = [[*base, Predicate(field='event.code', op='contains', value=str(n))] for n in (5, 6)]
+    else:
+        bases = [base]
+    code_scoped = code is not None and (code.type in {'long', 'integer', 'short'}
+                                        or contract.supports('event.code', 'contains'))
+    strict = (contract.supports('event.provider', 'eq') and code_scoped
+              and all(contract.supports(field, op) for field in ('rpc.interface_uuid', 'rpc.protocol')
+                      for op in ('contains', 'missing')))
+    if not strict:
+        return bases, False
+    transport = Predicate(field='rpc.protocol', op='contains', value=['1', '2', 'ncacn_ip_tcp', 'ncacn_np'])
+    interfaces = Predicate(field='rpc.interface_uuid', op='contains', value=[i.uuid for i in INTERFACES])
+    out = []
+    for group in bases:
+        out.append([*group, transport, interfaces])
+        out.append([*group, transport, Predicate(field='rpc.interface_uuid', op='missing')])
+        out.append([*group, Predicate(field='rpc.protocol', op='missing')])
+    return out, True

@@ -147,7 +147,7 @@ class WindowsEventRule(WindowsProcessRule):
         context = [item for item in hit.context if item.id != event.id]
         return Match(self.id, claim, self.claim_type, [event, *context], list(hit.predicate), event.ts,
                      hit.severity, hit.lane, hit.confidence, event.entities(),
-                     [*hit.notes, f"ATT&CK context (not proof): {', '.join(hit.attack)}"],
+                     [*hit.notes, *([f"ATT&CK context (not proof): {', '.join(hit.attack)}"] if hit.attack else [])],
                      raw_copies=dict(hit.raw_copies), context_ids={item.id for item in context})
 
     def _fleet_match(self, shape, group, *, final):

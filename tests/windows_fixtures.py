@@ -82,6 +82,11 @@ _DOCUMENTED_EVENT_KEYS += (
 )
 
 
+# Microsoft-Windows-RPC ETW client/server calls have no event-log channel.
+# Native field contract: https://learn.microsoft.com/windows/win32/rpc/rpc-start-page
+_DOCUMENTED_EVENT_KEYS += (("", "Microsoft-Windows-RPC", 5), ("", "Microsoft-Windows-RPC", 6))
+
+
 @dataclass(frozen=True)
 class LogicalWindowsEvent:
     channel: str
@@ -499,6 +504,9 @@ def _data(provider: str, event_id: int, ordinal: int) -> dict[str, object]:
 
 
 def _catalog_data(provider: str, code: int) -> dict[str, object] | None:
+    if provider == "Microsoft-Windows-RPC":
+        return {"InterfaceUuid": "{367abb81-9844-35f1-ad32-98f038001003}", "ProcNum": "17",
+                "Protocol": "3", "Endpoint": "ntsvcs"}
     if provider == "Microsoft-Windows-ProcessExitMonitor":
         return {"param1": r"C:\Windows\System32\lsass.exe", "param2": "test.exe", "param3": "0", "param4": "0x123"}
     if provider.startswith("MSSQL"):
@@ -652,6 +660,9 @@ def windows_hit(event: LogicalWindowsEvent, shape: Shape, *, old_sysmon: bool = 
             "ecs": {"version": "8.17.0"},
             "event": {"dataset": dataset},
         })
+    if event.provider == "Microsoft-Windows-RPC":
+        source["winlog"].pop("channel")
+        source["winlog"]["event_id"] = str(event.event_id)
     slug = re.sub(r"[^a-z0-9]+", "-", event.channel.casefold()).strip("-")
     return {
         "_index": "logs-windows-fixture",

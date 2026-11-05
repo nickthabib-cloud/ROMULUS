@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 
-from romulus.evidence import surrogates
+from romulus.evidence import rpc_catalog, surrogates
 from romulus.evidence.auditd import (
     AT_FDCWD,
     O_ACCMODE,
@@ -55,6 +55,9 @@ from romulus.evidence.zeek import (
 from romulus.evidence.zeek_catalog import SHAPES, lookup_log
 
 NORMALIZER_VERSION = f"lab-ecs@{EVIDENCE_VERSION}"
+RPC_REMOTE_SCOPE_SKIP = ("RPC calls withheld: local or untyped transport, or unclassified interface; "
+                         "only classified remote-transport calls are evaluated")
+_RPC_INTERFACES = frozenset(interface.uuid for interface in rpc_catalog.INTERFACES)
 # Caveat on a process_exec event whose EXECVE arguments did not all arrive (its process.argv_complete is false).
 INCOMPLETE_ARGV_CAVEAT = "command line incomplete"
 
@@ -2223,6 +2226,7 @@ def zeek_skip_families(names) -> frozenset[str]:
 
 def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                    audit_parse: Callable[[dict, str], AuditRecord] | None = None,
+                   rpc_remote_only: bool = False,
                    malformed_text: dict[str, list[str]] | None = None,
                    skip_families: dict[str, frozenset[str] | None] | None = None,
                    ) -> tuple[list[TypedEvent], dict[str, int], list[tuple[str, str]]]:
@@ -2259,6 +2263,13 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
         try:
             if is_windows_source(h["_source"]):
                 windows_event = normalize_windows(h)
+                if rpc_remote_only and windows_event.family == "rpc_call" and (
+                        windows_event.get("rpc.protocol") not in {"tcp", "named_pipe"}
+                        or windows_event.get("rpc.interface_uuid") not in _RPC_INTERFACES):
+                    # Keep at most this one typed event: local RPC never enters batch,
+                    # deduplication, evidence staging or per-rule fold state.
+                    skips[RPC_REMOTE_SCOPE_SKIP] += 1
+                    continue
                 logical_key = windows_record_key(h)
                 signature = windows_record_signature(h)
                 identity = (logical_key, signature) if logical_key is not None else None
