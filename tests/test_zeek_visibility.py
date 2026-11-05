@@ -1,5 +1,7 @@
 """Visibility uses complete streamed source aggregates, with bounded Python state."""
 import tracemalloc
+from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -7,6 +9,46 @@ import pytest
 from romulus.sources.models import Window
 
 T0 = datetime(2025, 1, 1, tzinfo=UTC)
+
+
+def _observe(store, hits, contract, window):
+    from romulus.evidence.normalize import normalize_hits
+    events, _, errors = normalize_hits(hits, contract=contract)
+    assert not errors
+    store.observe(events, window)
+    return events
+
+
+def _conn(uid, service, *, sensor='sensor', interim=False, native_id=None, **fields):
+    from tests.fixtures import zeek_factory as zf
+    return zf.malcolm(replace(zf.Conn(),uid=uid,service=service,ts=T0.timestamp()+10,**fields),
+                      native_id or uid,sensor=sensor,interim=interim)
+
+
+@contextmanager
+def _canonical_visibility(tmp_path, docs):
+    from romulus.config import Settings
+    from romulus.hunt.sweep import Sweep
+    from romulus.sources.es import ElasticClient
+    from romulus.store.db import make_engine, migrate
+    from romulus.store.repo import Repo
+    from tests.test_zeek_links import NativePivot
+    from tests.zeek_source_support import ZeekES
+    contracts={target:NativePivot('malcolm',hits).contracts['network'].model_copy(
+        update={'target':target,'time_field':'@timestamp'}) for target,hits in docs.items()}
+    backend=ZeekES(docs,{target:'@timestamp' for target in docs})
+    engine=make_engine(tmp_path/'hunt.db');migrate(engine);repo=Repo(engine)
+    repo.create_hunt('h',{'targets':list(docs)},'digest','test')
+    window=Window(start=T0,end=T0+timedelta(minutes=15))
+    sweep=Sweep(repo,ElasticClient(Settings(home=tmp_path),transport=backend.transport()),'h',window,
+                contracts,stage_dir=tmp_path/'stage')
+    sweep.pack=[]
+    try:
+        for target in docs:
+            sweep.run_target(target)
+        yield sweep._zeek_visibility_store()
+    finally:
+        sweep.close_stage();engine.dispose()
 
 
 def test_sensor_health_threshold_missing_health_and_health_only(tmp_path):
@@ -44,61 +86,45 @@ def test_health_straddles_window_and_adjacent_intervals_merge(tmp_path):
 
 
 def test_analyzer_presence_joins_targets_and_conn_services_count_once(tmp_path):
-    from romulus.hunt.zeek_visibility import VisibilityStore
-    store = VisibilityStore(tmp_path)
-    try:
-        for _ in range(3):
-            store.connection('a', 'uid1', 'gssapi,smb,krb,dce_rpc,ntlm')
-        store.connection('b', 'uid2', ['smb', 'smb'])
-        store.analyzer('a', 'smb_files', 1)
+    from tests.fixtures import zeek_logs as zl
+    docs={f'copy-{i}':[_conn('uid1','gssapi,smb,krb,dce_rpc,ntlm',sensor='a',native_id=f'copy-{i}')]
+          for i in range(3)}
+    docs['other']=[_conn('uid2','smb,smb',sensor='b')]
+    docs['analyzer']=[zl.malcolm(replace(zl.SMB_FILES,ts=T0.timestamp()+20),'smb',sensor='a')]
+    with _canonical_visibility(tmp_path,docs) as store:
         gaps = list(store.analyzer_gaps())
         assert not any(g['sensor'] == 'a' and g['family'] == 'smb_tx' for g in gaps)
         assert {(g['sensor'], g['family'], g['connections']) for g in gaps} == {
             ('a', 'kerberos_tx', 1), ('a', 'rpc_tx', 1), ('b', 'smb_tx', 1)}
-    finally:
-        store.close()
 
 
-def test_stream_all_million_intervals_without_python_collection(tmp_path):
-    from romulus.hunt.zeek_visibility import VisibilityStore, composite_pages
-    class Source:
-        calls = 0
-        def search(self, target, body):
-            offset = body['aggs']['visibility']['composite'].get('after', {}).get('n', 0)
-            self.calls += 1
-            rows = [{'key': {'n': n}, 'doc_count': 1} for n in range(offset, min(offset+1000, 1_000_000))]
-            return {'aggregations': {'visibility': {'buckets': rows, 'after_key': {'n': offset+1000}}}}
-    source = Source()
-    reasons = []
+def test_million_distinct_spans_collapse_to_sensor_family_grid(tmp_path):
+    from romulus.hunt.zeek_visibility import VisibilityStore
     store=VisibilityStore(tmp_path)
     tracemalloc.start()
     count=0
     try:
-        for bucket in composite_pages(source, 'network', {'size': 0, 'aggs': {
-                'visibility': {'composite': {'size': 1000, 'sources': [{'n': {'terms': {'field': 'n'}}}]}}}}, reasons):
-            n=bucket['key']['n']; sensor=f'sensor-{n//1000:04d}'; interval=n%1000
-            start=T0.timestamp()+interval*900
-            if interval==0:
-                store.health(sensor,T0.timestamp(),T0.timestamp()+900000,.5 if n%2000 else 2.3,'capture loss')
-            if interval%2:
-                store.activity(sensor,'http_tx',start,start+900,1)
-            else:
-                store.connection(sensor,f'uid-{n}','http',duration=900,start=start,end=start+900)
+        for n in range(1_000_000):
+            sensor=f'sensor-{n//1000:04d}'; offset=n%1000
+            start=T0.timestamp()+offset*.5
+            if offset==0:
+                store.health(sensor,T0.timestamp(),T0.timestamp()+900,.5 if n%2000 else 2.3,'capture loss')
+            store.activity(sensor,'http_tx' if offset%2 else 'net_flow',start,start+.25,1)
             count+=1
-        store.connection_activity(Window(start=T0,end=T0+timedelta(seconds=900000)))
         store.checkpoint()
-        assert store.db.execute('SELECT count(*) FROM flow').fetchone()[0]==500_000
-        assert store.path.stat().st_size>20_000_000
-        assert store.db.execute('SELECT count(*) FROM activity').fetchone()[0]==1_000_000
-        rows=sum(1 for _ in store.visibility(Window(start=T0,end=T0+timedelta(seconds=900000)),1.0))
-        assert rows==1_000_000
+        assert store.db.execute('SELECT count(*) FROM activity').fetchone()[0]==2000
+        rows=records=0
+        for row in store.visibility(Window(start=T0,end=T0+timedelta(minutes=15)),1.0):
+            rows+=1
+            records+=row['records']
+        assert rows==2000
+        assert records==1_000_000
         _,peak=tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
         store.close()
     assert count == 1_000_000
-    assert source.calls == 1001
-    assert reasons == []
+    assert not store.reasons
     assert peak < 8_000_000
 
 
@@ -113,7 +139,7 @@ def test_composite_exhaustion_is_named_and_never_complete():
     assert any('page limit' in reason for reason in reasons)
 
 @pytest.mark.parametrize('shape', ['malcolm','elastic','security_onion','plain'])
-def test_source_owned_aggregate_queries_join_health_and_services_per_sensor(tmp_path, shape):
+def test_streamed_facts_join_source_health_per_sensor(tmp_path, shape):
     from dataclasses import replace
 
     from romulus.config import Settings
@@ -144,7 +170,8 @@ def test_source_owned_aggregate_queries_join_health_and_services_per_sensor(tmp_
     store=VisibilityStore(tmp_path)
     try:
         window=Window(start=T0,end=T0+timedelta(minutes=15))
-        collect_visibility(client,{'network':contract},window,store,ZeekPolicy())
+        _observe(store,hits,contract,window)
+        collect_visibility(client,{'network':contract},window,store,ZeekPolicy(),activity=False)
         rows=list(store.visibility(window,1.0))
         assert rows and all(row['partial'] for row in rows)
         assert any(('no health record' if shape=='security_onion' else '2.3 % capture loss') in row['reason'] for row in rows)
@@ -197,6 +224,7 @@ def test_real_sweep_writes_sensor_scoped_cells_and_durable_interval_reference(tm
     sweep=Sweep(repo,client,'h',Window(start=T0,end=T0+timedelta(minutes=15)),{'network':contract},stage_dir=tmp_path)
     try:
         sweep.run_target('network')
+        sweep.finalize()
         cells=repo.rule_cells('h',rule_id='net.outbound_volume_asymmetry')
         sensor_cells={cell['detail']['sensor']:cell for cell in cells if cell['detail'].get('sensor')}
         assert sensor_cells['healthy']['state']=='evaluated_complete'
@@ -208,39 +236,32 @@ def test_real_sweep_writes_sensor_scoped_cells_and_durable_interval_reference(tm
     assert any('0.99 %' in row['reason'] for row in rows)
     assert any(row['sensor']=='lossy' and row['partial'] for row in rows)
 
-def test_analyzer_counts_final_service_even_empty_supersedes_interim_across_sources(tmp_path):
-    from romulus.hunt.zeek_visibility import VisibilityStore
-    store=VisibilityStore(tmp_path)
-    try:
-        store.connection('sensor','one','smb',interim=True,duration=1)
-        store.connection('sensor','one','',interim=False,duration=2)
-        store.connection('sensor','two','dns',interim=True,duration=1)
-        store.connection('sensor','two','ssh',interim=True,duration=2)
+@pytest.mark.parametrize('final_first',[False,True])
+def test_analyzer_counts_final_service_even_empty_supersedes_interim_across_sources(tmp_path,final_first):
+    earlier=[_conn('one','smb',interim=True,duration=1,missed_bytes=8,native_id='one-interim'),
+             _conn('two','dns',interim=True,duration=1,missed_bytes=9,native_id='two-interim')]
+    later=[_conn('one','',duration=2,missed_bytes=0,native_id='one-final'),
+           _conn('two','ssh',interim=True,duration=2,missed_bytes=12,native_id='two-latest')]
+    docs={'first':later if final_first else earlier,'second':earlier if final_first else later}
+    with _canonical_visibility(tmp_path,docs) as store:
         gaps=list(store.analyzer_gaps())
         assert [(row['family'],row['connections']) for row in gaps]==[('ssh_session',1)]
-        store.content_gap('sensor','one','connection')
-        store.content_gap('sensor','two','connection')
         assert [(row['family'],row['connections']) for row in store.content_gaps()]==[('ssh_session',1)]
-    finally:
-        store.close()
+        assert sum(row['records'] for row in store.visibility(Window(start=T0,end=T0+timedelta(minutes=15)),1))==2
 
 def test_content_gap_counts_are_separate_from_analyzer_absence(tmp_path):
-    from romulus.hunt.zeek_visibility import VisibilityStore
-    store=VisibilityStore(tmp_path)
-    try:
-        store.connection('s','one','http')
-        store.connection('s','two','http,dns')
-        store.analyzer('s','http',5)
-        store.content_gap('s','one','connection')
-        store.content_gap('s','one','connection')
-        store.content_gap('s','two','connection')
+    from tests.fixtures import zeek_logs as zl
+    docs={'flows':[_conn('one','http',sensor='s',missed_bytes=8),
+                   _conn('two','http,dns',sensor='s',history='ShADg')],
+          'duplicate':[_conn('one','http',sensor='s',missed_bytes=8,native_id='copy')],
+          'http':[zl.malcolm(replace(zl.HTTP,ts=T0.timestamp()+20),'http',sensor='s')]}
+    with _canonical_visibility(tmp_path,docs) as store:
         gaps=list(store.content_gaps())
         http=next(row for row in gaps if row['family']=='http_tx')
         assert http['connections']==2
         assert '2 connections had content gaps' in http['reason']
         assert not http['partial']
-    finally:
-        store.close()
+        assert not any(row['family']=='http_tx' for row in store.analyzer_gaps())
 
 def test_stats_interval_deltas_need_declared_cadence_and_complete_continuity(tmp_path):
     from romulus.hunt.zeek_visibility import VisibilityStore
@@ -291,8 +312,9 @@ def test_native_stats_only_health_requires_complete_same_worker_interval(tmp_pat
     store=VisibilityStore(tmp_path)
     window=Window(start=T0,end=T0+timedelta(seconds=300))
     try:
+        _observe(store,hits,contract,window)
         collect_visibility(client,{'network':contract},window,store,
-            ZeekPolicy(stats_interval_seconds=None if mode=='no_cadence' else 300))
+            ZeekPolicy(stats_interval_seconds=None if mode=='no_cadence' else 300),activity=False)
         rows=list(store.visibility(window,1))
         assert rows and all(row['partial']==(mode!='valid') for row in rows)
         if mode in ('valid','lossy'):
@@ -304,16 +326,11 @@ def test_native_stats_only_health_requires_complete_same_worker_interval(tmp_pat
         store.close()
 
 def test_incomplete_analyzer_inventory_never_claims_absence(tmp_path):
-    from romulus.hunt.zeek_visibility import VisibilityStore
-    store=VisibilityStore(tmp_path)
-    try:
-        store.connection('s','uid','smb')
+    with _canonical_visibility(tmp_path,{'flows':[_conn('uid','smb',sensor='s')]}) as store:
         store.reasons.append('source composite page limit reached')
         row=next(store.analyzer_gaps())
         assert 'have no smb_* records in scope' not in row['reason']
         assert 'unresolved' in row['reason'] and row['partial']
-    finally:
-        store.close()
 
 
 def test_custom_security_onion_native_health_target_uses_explicit_site_declaration(tmp_path):
@@ -343,7 +360,8 @@ def test_custom_security_onion_native_health_target_uses_explicit_site_declarati
     store=VisibilityStore(tmp_path)
     window=Window(start=T0,end=T0+timedelta(minutes=15))
     try:
-        collect_visibility(client,contracts,window,store,site.zeek)
+        _observe(store,[data],contracts['network'],window)
+        collect_visibility(client,contracts,window,store,site.zeek,activity=False)
         rows=list(store.visibility(window,1))
         assert rows and all(not row['partial'] for row in rows)
         assert all('0.5 % capture loss' in row['reason'] for row in rows)
@@ -354,7 +372,7 @@ def test_custom_security_onion_native_health_target_uses_explicit_site_declarati
 
 
 @pytest.mark.parametrize('log,field',[('conn','duration'),('files','missing_bytes')])
-def test_malformed_native_measurement_is_named_instead_of_aborting_visibility(tmp_path,log,field):
+def test_malformed_stream_measurement_is_named_instead_of_aborting_visibility(tmp_path,log,field):
     from romulus.config import Settings
     from romulus.hunt.zeek_visibility import VisibilityStore, collect_visibility
     from romulus.site import ZeekPolicy
@@ -367,8 +385,11 @@ def test_malformed_native_measurement_is_named_instead_of_aborting_visibility(tm
     backend=ZeekES({'native':[{'_index':'native','_id':'bad','_source':source}]},{'native':'ts'})
     store=VisibilityStore(tmp_path)
     try:
+        window=Window(start=T0,end=T0+timedelta(minutes=15))
+        events=_observe(store,backend.docs['native'],contract,window)
+        assert field in events[0].get('parse.malformed')
         collect_visibility(ElasticClient(Settings(home=tmp_path),transport=backend.transport()),{'native':contract},
-            Window(start=T0,end=T0+timedelta(minutes=15)),store,ZeekPolicy())
+            window,store,ZeekPolicy(),activity=False)
         assert any('malformed' in reason for reason in store.reasons)
         assert all('have no' not in row['reason'] for row in store.analyzer_gaps())
     finally:
@@ -433,6 +454,7 @@ def test_native_sweep_visibility_preserves_span_log_and_shipper_identity(tmp_pat
     try:
         for target in docs:
             sweep.run_target(target)
+        sweep.finalize()
         cells=repo.rule_cells('h',rule_id=Probe.id)
         detail=repo.latest_audit('h','hunt.zeek_visibility')['detail']
         rows=list(repo.zeek_visibility_rows('h',detail['snapshot']['sha256']))
@@ -539,6 +561,7 @@ def test_native_mixed_markers_keep_http_loss_and_analyzer_presence(tmp_path,layo
                 {'network':contract},stage_dir=tmp_path/'stage');sweep.pack=[Probe()]
     try:
         sweep.run_target('network')
+        sweep.finalize()
         detail=repo.latest_audit('h','hunt.zeek_visibility')['detail']
         rows=list(repo.zeek_visibility_rows('h',detail['snapshot']['sha256']))
         http_rows=[row for row in rows if row['family']=='http_tx']
@@ -580,8 +603,9 @@ def test_native_exclusive_dataset_only_conn_and_health_are_collected(tmp_path,ma
     backend=ZeekES({'network':hits},{'network':'@timestamp'})
     store=VisibilityStore(tmp_path/'stage');window=Window(start=T0,end=T0+timedelta(minutes=15))
     try:
+        _observe(store,hits,contract,window)
         collect_visibility(ElasticClient(Settings(home=tmp_path),transport=backend.transport()),
-                           {'network':contract},window,store,ZeekPolicy())
+                           {'network':contract},window,store,ZeekPolicy(),activity=False)
         rows=list(store.visibility(window,1.0))
         assert rows and all(row['partial'] for row in rows)
         assert any(('2.3 %' if with_health else 'no health record') in row['reason'] for row in rows)

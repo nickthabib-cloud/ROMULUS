@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import copy
+import json
+import math
 import sqlite3
 import time
 from datetime import UTC, datetime
@@ -77,10 +79,10 @@ class _Reasons(list):
 
 
 class VisibilityStore:
-    """One hunt's sensor intervals, service identities and analyzer presence.
+    """One hunt's sensor intervals, service counts and analyzer presence.
 
-    SQL joins combine every target before absence is stated. The shared physical
-    state budget bounds storage; SQLite's page cache bounds Python-independent
+    SQL joins combine every target before absence is stated. An independent
+    physical state budget bounds storage; SQLite's page cache bounds Python-independent
     working memory, and all report rows are streamed in sensor/time order.
     """
     def __init__(self, directory, *, budget=None):
@@ -102,14 +104,18 @@ class VisibilityStore:
             CREATE TABLE IF NOT EXISTS stats(sensor TEXT,worker TEXT,time REAL,dropped REAL,link REAL,
                 PRIMARY KEY(sensor,worker,time,dropped,link)) WITHOUT ROWID;
             CREATE TABLE IF NOT EXISTS issue(sensor TEXT,reason TEXT,PRIMARY KEY(sensor,reason)) WITHOUT ROWID;
-            CREATE TABLE IF NOT EXISTS content_gap(sensor TEXT, identity TEXT, kind TEXT,
-                PRIMARY KEY(sensor,identity,kind)) WITHOUT ROWID;
             CREATE TABLE IF NOT EXISTS summary(sensor TEXT, family TEXT, partial INTEGER, intervals INTEGER,
                 PRIMARY KEY(sensor,family)) WITHOUT ROWID;
-            CREATE TABLE IF NOT EXISTS flow(sensor TEXT, uid TEXT, final INTEGER, duration REAL, start REAL, end REAL,
-                PRIMARY KEY(sensor,uid)) WITHOUT ROWID;
-            CREATE TABLE IF NOT EXISTS service(sensor TEXT, uid TEXT, service TEXT, final INTEGER, duration REAL,
-                PRIMARY KEY(sensor,service,uid,final,duration)) WITHOUT ROWID;
+            CREATE TABLE IF NOT EXISTS stream_service(sensor TEXT, service TEXT, start REAL, n INTEGER, gaps INTEGER,
+                PRIMARY KEY(sensor,service,start)) WITHOUT ROWID;
+            CREATE TABLE IF NOT EXISTS stream_file(sensor TEXT, start REAL, n INTEGER,
+                PRIMARY KEY(sensor,start)) WITHOUT ROWID;
+            CREATE TABLE IF NOT EXISTS partition(target TEXT,start REAL,end REAL,
+                PRIMARY KEY(target,start,end)) WITHOUT ROWID;
+            CREATE TABLE IF NOT EXISTS assessment(sensor TEXT,start REAL,end REAL,partial INTEGER,statements TEXT,
+                PRIMARY KEY(sensor,start,end)) WITHOUT ROWID;
+            CREATE TABLE IF NOT EXISTS sensor_health_summary(sensor TEXT PRIMARY KEY,partial INTEGER,
+                intervals INTEGER,reason TEXT) WITHOUT ROWID;
         ''')
         self.budget = budget or StateBudget(directory)
         self.account = self.budget.account('zeek_visibility')
@@ -145,8 +151,46 @@ class VisibilityStore:
                 self.reasons.append(reason)
 
     def activity(self, sensor, family, start, end, count):
-        self._write('INSERT INTO activity VALUES (?,?,?,?,?) ON CONFLICT(sensor,family,start,end) '
-                    'DO UPDATE SET n=n+excluded.n', (sensor, family, start, end, count))
+        # A span touches grid intervals; its record count belongs to the first.
+        # This keeps counts independent of duration and rows independent of UIDs.
+        first = math.floor(start / 900) * 900
+        stop = max(first + 900, math.ceil(end / 900) * 900)
+        for stamp in range(first, stop, 900):
+            self._write('INSERT INTO activity VALUES (?,?,?,?,?) ON CONFLICT(sensor,family,start,end) '
+                        'DO UPDATE SET n=n+excluded.n', (sensor, family, stamp, stamp+900,
+                                                       count if stamp == first else 0))
+
+    def observe(self, events, window):
+        """Consume the sweep's canonical, deduplicated stream exactly once."""
+        lower, upper = window.start.timestamp(), window.end.timestamp()
+        for event in events:
+            if event.get('observer.product') != 'zeek' or event.family == 'sensor_health':
+                continue
+            sensor = event.host or 'unidentified sensor'
+            if event.get('parse.malformed'):
+                self.reasons.append('malformed Zeek measurements in the canonical stream; visibility unresolved')
+            start = datetime.fromisoformat(event.get('flow.start')).timestamp() if event.has('flow.start') else event.ts.timestamp()
+            end = datetime.fromisoformat(event.get('flow.end')).timestamp() if event.has('flow.end') else start
+            if start >= upper or end < lower or end == lower and start < lower:
+                continue
+            start, end = max(lower, start), min(upper, end)
+            self.activity(sensor, event.family, start, end, 1)
+            log = event.get('zeek.log')
+            if log != 'conn':
+                self.analyzer(sensor, log or '', 1)
+            stamp = math.floor(start/900)*900
+            if log == 'conn':
+                services = event.get('network.protocols') or []
+                services = services if isinstance(services, list) else str(services).split(',')
+                gap = bool((event.get('conn.missed_bytes') or 0) > 0 or
+                           any(c in str(event.get('conn.history') or '').lower() for c in 'gx'))
+                for name in {str(s).strip().lower() for s in services} & SERVICES.keys():
+                    self._write('INSERT INTO stream_service VALUES (?,?,?,?,?) ON CONFLICT(sensor,service,start) '
+                                'DO UPDATE SET n=n+1,gaps=gaps+excluded.gaps', (sensor,name,stamp,1,int(gap)))
+            elif log == 'files' and ((event.get('file.missing_bytes') or 0) > 0 or
+                    (event.get('file.overflow_bytes') or 0) > 0 or event.get('file.timedout') is True):
+                self._write('INSERT INTO stream_file VALUES (?,?,1) ON CONFLICT(sensor,start) '
+                            'DO UPDATE SET n=n+1', (sensor,stamp))
 
     def health(self, sensor, start, end, loss, kind):
         if end > start:
@@ -157,26 +201,6 @@ class VisibilityStore:
         self._write('INSERT INTO analyzer VALUES (?,?,?) ON CONFLICT(sensor,log) DO UPDATE SET n=n+excluded.n',
                     (sensor, group, count))
 
-    def connection(self, sensor, uid, services, *, interim=False, duration=0, start=None, end=None):
-        final = int(not interim)
-        self._write('INSERT INTO flow VALUES (?,?,?,?,?,?) ON CONFLICT(sensor,uid) DO UPDATE SET '
-                    'final=excluded.final,duration=excluded.duration,start=excluded.start,end=excluded.end '
-                    'WHERE excluded.final>final OR (excluded.final=final AND excluded.duration>=duration)',
-                    (sensor,uid,final,duration,start,end))
-        names = services if isinstance(services, list) else str(services or '').split(',')
-        for name in {str(name).strip().lower() for name in names} & SERVICES.keys():
-            self._write('INSERT OR IGNORE INTO service VALUES (?,?,?,?,?)', (sensor, uid, name,final,duration))
-
-    def connection_activity(self,window):
-        """Stream canonical clipped spans once; conn timestamps are not independent activity buckets."""
-        for sensor,start,end,count in self.db.execute(
-                'SELECT sensor,start,end,count(*) FROM flow WHERE start<? AND end>=? '
-                'GROUP BY sensor,start,end ORDER BY sensor,start,end',
-                (window.end.timestamp(),window.start.timestamp())):
-            if end==start:
-                end=start+0.000001
-            self.activity(sensor,'net_flow',max(start,window.start.timestamp()),min(end,window.end.timestamp()),count)
-
     def stats(self,sensor,worker,time,dropped,link):
         self._write('INSERT OR IGNORE INTO stats VALUES (?,?,?,?,?)',(sensor,worker,time,dropped,link))
 
@@ -186,10 +210,12 @@ class VisibilityStore:
     def resolve_stats(self,cadence,*,complete):
         previous=None
         for sensor,worker,stamp,dropped,link in self.db.execute('SELECT * FROM stats ORDER BY sensor,worker,time'):
-            valid=(complete and cadence and previous and previous[:2]==(sensor,worker)
-                   and abs(stamp-previous[2]-cadence)<0.001 and link>0 and 0<=dropped<=link)
+            first = previous is None or previous[:2] != (sensor, worker)
+            valid=(complete and cadence and (first or
+                   abs(stamp-previous[2]-cadence) <= max(1, .1*cadence)) and link>0 and 0<=dropped<=link)
             if valid:
-                self.health(sensor,previous[2],stamp,100*dropped/link,'packet drop')
+                self.health(sensor,stamp-cadence if first else previous[2],stamp,
+                            100*dropped/link,'packet drop:'+worker)
             else:
                 self.issue(sensor,'stats packet counters are interval deltas; interval boundaries unknown '
                            'without declared cadence and complete same-worker measurement continuity')
@@ -200,22 +226,15 @@ class VisibilityStore:
                 'JOIN activity a ON i.sensor=a.sensor ORDER BY i.sensor,a.family,i.reason'):
             yield {'sensor':sensor,'family':family,'partial':False,'reason':f'sensor {sensor}: {reason}'}
 
-    def content_gap(self, sensor, identity, kind):
-        self._write('INSERT OR IGNORE INTO content_gap VALUES (?,?,?)',(sensor,identity,kind))
-
     def content_gaps(self):
         self.checkpoint()
-        for sensor,service,count in self.db.execute(
-                "SELECT s.sensor,s.service,count(DISTINCT g.identity) FROM service s JOIN flow f "
-                "ON s.sensor=f.sensor AND s.uid=f.uid AND s.final=f.final AND s.duration=f.duration "
-                "JOIN content_gap g ON s.sensor=g.sensor AND s.uid=g.identity AND g.kind='connection' "
-                "GROUP BY s.sensor,s.service ORDER BY s.sensor,s.service"):
-            family=SERVICES[service][0]
+        for sensor,service,count in self.db.execute('SELECT sensor,service,sum(gaps) FROM stream_service '
+                'GROUP BY sensor,service HAVING sum(gaps)>0 ORDER BY sensor,service'):
+            family = SERVICES[service][0]
             yield {'sensor':sensor,'family':family,'connections':count,'partial':False,
                    'reason':f'sensor {sensor}: {count} connections had content gaps; {family} content checks '
                             'describe only the bytes the sensor analyzed; positive findings retain their lane'}
-        for sensor,count in self.db.execute("SELECT sensor,count(*) FROM content_gap WHERE kind='file' "
-                                            'GROUP BY sensor ORDER BY sensor'):
+        for sensor,count in self.db.execute('SELECT sensor,sum(n) FROM stream_file GROUP BY sensor ORDER BY sensor'):
             yield {'sensor':sensor,'family':'file_transfer','files':count,'partial':False,
                    'reason':f'sensor {sensor}: {count} files had content gaps; file checks describe only '
                             'the bytes the sensor analyzed; positive findings retain their lane'}
@@ -223,9 +242,7 @@ class VisibilityStore:
     def analyzer_gaps(self):
         self.checkpoint()
         for sensor, service, count in self.db.execute(
-                'SELECT s.sensor,s.service,count(DISTINCT s.uid) FROM service s JOIN flow f '
-                'ON s.sensor=f.sensor AND s.uid=f.uid AND s.final=f.final AND s.duration=f.duration '
-                'GROUP BY s.sensor,s.service ORDER BY s.sensor,s.service'):
+                'SELECT sensor,service,sum(n) FROM stream_service GROUP BY sensor,service ORDER BY sensor,service'):
             family, label, log = SERVICES[service]
             group='smb' if log=='smb_*' else log
             row = self.db.execute('SELECT n FROM analyzer WHERE sensor=? AND log=?', (sensor, group)).fetchone()
@@ -240,31 +257,58 @@ class VisibilityStore:
 
     def visibility(self, window, threshold):
         self.checkpoint()
+        self.db.execute('DELETE FROM assessment')
+        for sensor,start,end in self.db.execute('SELECT DISTINCT sensor,start,end FROM activity ORDER BY sensor,start'):
+            start, end = max(start, window.start.timestamp()), min(end, window.end.timestamp())
+            if start >= end:
+                continue
+            groups = {}
+            for hstart,hend,loss,kind in self.db.execute(
+                    'SELECT start,end,loss,kind FROM health WHERE sensor=? AND end>? AND start<? ORDER BY start,end',
+                    (sensor,start,end)):
+                groups.setdefault(kind, []).append((hstart,hend,loss))
+            workers = [row[0] for row in self.db.execute('SELECT DISTINCT worker FROM stats WHERE sensor=?', (sensor,))]
+            missing, partial, losses = not groups, False, {}
+            # Every observed worker must cover the interval. A healthy worker
+            # cannot conceal a missing measurement from its peer.
+            required = ['packet drop:'+worker for worker in workers] if workers else list(groups)
+            for kind in required:
+                covered = start
+                for hstart,hend,loss in groups.get(kind, []):
+                    missing |= hstart > covered
+                    covered = max(covered, hend)
+                    partial |= loss > 0 and loss >= threshold
+                    if loss > 0:
+                        label = kind.split(':',1)[0]
+                        losses[label] = max(losses.get(label,0),loss)
+                missing |= covered < end
+            # Capture-loss measurements remain relevant alongside worker stats.
+            for kind, measurements in groups.items():
+                for _,_,loss in measurements:
+                    partial |= loss > 0 and loss >= threshold
+                    if loss > 0:
+                        label = kind.split(':',1)[0]
+                        losses[label] = max(losses.get(label,0),loss)
+            statements = [f'estimated {loss:g} % {kind}' for kind,loss in sorted(losses.items())]
+            unreadable = self.db.execute("SELECT 1 FROM issue WHERE sensor=? AND reason LIKE '%health unreadable%' LIMIT 1", (sensor,)).fetchone()
+            if unreadable:
+                missing = True
+                statements.append('health unreadable; complete health coverage could not be established')
+            elif missing:
+                statements.append('no health record covers the complete interval in which the sensor wrote data')
+            if not statements:
+                statements.append('health records cover this data interval')
+            self._write('INSERT OR REPLACE INTO assessment VALUES (?,?,?,?,?)',
+                        (sensor,start,end,int(partial or missing),json.dumps(statements)))
         pending = None
         for sensor, family, start, end, count in self.db.execute(
                 'SELECT sensor,family,start,end,n FROM activity WHERE end>? AND start<? '
                 'ORDER BY sensor,family,start,end', (window.start.timestamp(), window.end.timestamp())):
             start, end = max(start, window.start.timestamp()), min(end, window.end.timestamp())
-            covered = start
-            partial = False
-            missing = False
-            losses = {}
-            for hstart, hend, loss, kind in self.db.execute(
-                    'SELECT start,end,loss,kind FROM health WHERE sensor=? AND end>? AND start<? ORDER BY start,end',
-                    (sensor, start, end)):
-                if hstart > covered:
-                    missing = True
-                covered = max(covered, hend)
-                if loss > 0:
-                    losses[kind] = max(losses.get(kind, 0), loss)
-                partial |= loss >= threshold
-            missing |= covered < end
-            partial |= missing
-            statements = [f'estimated {loss:g} % {kind}' for kind, loss in sorted(losses.items())]
-            if missing:
-                statements.append('no health record covers the complete interval in which the sensor wrote data')
-            if not statements:
-                statements.append('health records cover this data interval')
+            assessed = self.db.execute('SELECT partial,statements FROM assessment WHERE sensor=? AND start=? AND end=?',
+                                      (sensor,start,end)).fetchone()
+            partial, statements = (bool(assessed[0]),json.loads(assessed[1])) if assessed else (
+                True,['health assessment unavailable; visibility state incomplete'])
             signature = (sensor, family, partial, tuple(statements))
             if pending and pending['_signature'] == signature and pending['_end'] == start:
                 pending['_end'] = end
@@ -280,6 +324,11 @@ class VisibilityStore:
     def snapshot_rows(self, window, threshold):
         from itertools import chain
         for row in chain(self.visibility(window, threshold), self.analyzer_gaps(), self.content_gaps(), self.issues()):
+            if 'start' in row:
+                self._write('INSERT INTO sensor_health_summary VALUES (?,?,1,?) ON CONFLICT(sensor) '
+                            'DO UPDATE SET partial=max(partial,excluded.partial),intervals=intervals+1, '
+                            'reason=CASE WHEN excluded.partial>partial THEN excluded.reason ELSE reason END',
+                            (row['sensor'],row['partial'],row['reason']))
             self._write('INSERT INTO summary VALUES (?,?,?,1) ON CONFLICT(sensor,family) '
                         'DO UPDATE SET partial=max(partial,excluded.partial),intervals=intervals+1',
                         (row['sensor'], row['family'], row['partial']))
@@ -305,14 +354,16 @@ class VisibilityStore:
         self.path.unlink(missing_ok=True)
 
 
-def collect_visibility(client, contracts, window, store, policy, *, heartbeat=None):
+def collect_visibility(client, contracts, window, store, policy, *, heartbeat=None,
+                       activity=True, max_pages=32, deadline_seconds=30, resolve=True,
+                       health_lookahead=True):
     """Read fixed sensor/time/log composites; never fall back to a raw traffic scan."""
     from datetime import timedelta
 
     from romulus.evidence.zeek_catalog import HEALTH_LOGS, PLAIN, SHAPES, ZEEK_LOGS, lookup_log
     from romulus.hunt.zeek_sources import native_field, source_groups
     from romulus.sources.compile import build_query
-    from romulus.sources.models import Predicate, SearchIntent, Window
+    from romulus.sources.models import SearchIntent, Window
 
     def stamp(value, plain):
         if isinstance(value, str):
@@ -336,10 +387,9 @@ def collect_visibility(client, contracts, window, store, policy, *, heartbeat=No
             sensor_names = ['sensor' if i==0 else f'sensor{i}' for i in range(len(sensor_fields))]
             sensor_sources = [] if plain else [key(name,contract.fields[field].native)
                                                 for name,field in zip(sensor_names,sensor_fields,strict=True)]
-            dataset_fields=[field for field in (('_path',) if plain else
+            dataset_fields=[field for path in (('_path',) if plain else
                 ('event.dataset','data_stream.dataset') if shape=='elastic' else ('event.dataset',))
-                if contract.supports(field,'in')]
-            dataset=dataset_fields[0] if dataset_fields else ('_path' if plain else 'event.dataset')
+                if (field := native_field(contract, path, 'in'))]
             log_keys=['log' if i==0 else f'log{i}' for i in range(len(dataset_fields))]
             declared = contract.zeek_log if plain else None
             def read(selected, sources, scope=window, metrics=None, filters=(), query_contract=None,
@@ -351,7 +401,8 @@ def collect_visibility(client, contracts, window, store, policy, *, heartbeat=No
                     'composite':{'size':1000,'sources':[*sensor_sources,*sources]}}}}
                 if metrics:
                     body['aggs']['visibility']['aggs']=metrics
-                yield from composite_pages(client,target,body,store.reasons,heartbeat=heartbeat)
+                yield from composite_pages(client,target,body,store.reasons,heartbeat=heartbeat,
+                    max_pages=max_pages, deadline=time.monotonic()+deadline_seconds)
             def sensor(bucket, contract=contract, plain=plain, sensor_names=sensor_names, target=target):
                 result = contract.zeek_sensor if plain else next(
                     (bucket['key'].get(name) for name in sensor_names if bucket['key'].get(name)),None)
@@ -362,9 +413,8 @@ def collect_visibility(client, contracts, window, store, policy, *, heartbeat=No
                 return result
             clock = {'histogram':{'field':contract.time_field,'interval':900}} if plain else {
                 'date_histogram':{'field':contract.time_field,'fixed_interval':'900s'}}
-            observed_conn=False
             data_logs=[log for log in logs if log.family!='sensor_health']
-            if data_logs and (declared or dataset_fields):
+            if activity and data_logs and (declared or dataset_fields):
                 sources=[] if declared else [key(name,contract.fields[field].native)
                     for name,field in zip(log_keys,dataset_fields,strict=True)]
                 sources.append({'time':clock})
@@ -380,21 +430,30 @@ def collect_visibility(client, contracts, window, store, policy, *, heartbeat=No
                     if log.family=='sensor_health':
                         continue
                     who=sensor(bucket); start=stamp(bucket['key']['time'],plain)
-                    if log.name=='conn':
-                        observed_conn=True
-                    else:
-                        store.activity(who,log.family,max(window.start.timestamp(),start),
-                                       min(window.end.timestamp(),start+900),bucket['doc_count'])
+                    store.activity(who,log.family,max(window.start.timestamp(),start),
+                                   min(window.end.timestamp(),start+900),bucket['doc_count'])
+                    if log.name != 'conn':
                         store.analyzer(who,log.name,bucket['doc_count'])
             for log in [item for item in logs if item in HEALTH_LOGS]:
                 paths={spec.typed:next((native_field(contract,path,'exists') for path in spec.paths.get(shape,())
                                        if native_field(contract,path,'exists')),None) for spec in log.fields}
+                required = (('health.interval_s','health.capture_loss_pct') if log.name=='capture_loss' else
+                            ('health.packets_dropped','health.packets_link','health.worker'))
+                # Numeric doc values are aggregatable even when the general
+                # contract advertises only numeric range predicates.
+                def readable(field, contract=contract):
+                    return field and (contract.fields[field].aggregatable or
+                                      contract.fields[field].type in {'float','double'})
+                if not all(readable(paths.get(typed)) for typed in required):
+                    for bucket in read([log],[key('time',contract.time_field)]):
+                        store.issue(sensor(bucket),f'{target}: health unreadable: {log.name} measurement fields not aggregatable')
+                    continue
                 if log.name=='capture_loss' and paths.get('health.interval_s') and paths.get('health.capture_loss_pct'):
                     sources=[key('time',contract.time_field), key('interval',contract.fields[paths['health.interval_s']].native),
                              key('loss',contract.fields[paths['health.capture_loss_pct']].native)]
                     # A health row timestamps the end of its interval. Bounded lookahead
                     # retrieves intervals straddling the hunt's end; missing coverage remains partial.
-                    scope=Window(start=window.start,end=window.end+timedelta(hours=24))
+                    scope=Window(start=window.start,end=window.end+timedelta(hours=24 if health_lookahead else 0))
                     for bucket in read([log],sources,scope):
                         data=bucket['key']
                         try:
@@ -426,89 +485,6 @@ def collect_visibility(client, contracts, window, store, policy, *, heartbeat=No
                             store.stats(who,data['worker'],stamp(data['time'],plain),dropped,link)
                         except (TypeError,ValueError,OverflowError):
                             store.issue(who,'stats measurement missing worker or valid packet counters; interval unknown')
-            conn=next((item for item in data_logs if item.name=='conn'),None)
-            if conn:
-                uid=next((native_field(contract,path,'in') for path in conn.spec('zeek.uid').paths.get(shape,())
-                          if native_field(contract,path,'in')),None)
-                service=next((native_field(contract,path,'in') for path in conn.spec('network.protocols').paths.get(shape,())
-                              if native_field(contract,path,'in')),None)
-                if uid and service:
-                    duration_path=next((path for path in conn.spec('session.duration_s').paths.get(shape,())
-                                        if native_field(contract,path,'exists')),None)
-                    duration_field=native_field(contract,duration_path,'exists') if duration_path else None
-                    interim_field=native_field(contract,'zeek.conn.long','exists') if shape=='malcolm' else None
-                    sources=[key('uid',contract.fields[uid].native),key('service',contract.fields[service].native),
-                             key('time',contract.time_field)]
-                    if not declared and contract.supports(dataset,'exists'):
-                        sources.append(key('conn_log',contract.fields[dataset].native))
-                    if duration_field:
-                        sources.append(key('duration',contract.fields[duration_field].native))
-                    if interim_field:
-                        sources.append(key('interim',contract.fields[interim_field].native))
-                    for typed,label in [('conn.missed_bytes','missed'),('conn.history','history')]:
-                        field=next((native_field(contract,path,'exists') for path in conn.spec(typed).paths.get(shape,())
-                                    if native_field(contract,path,'exists')),None)
-                        if field:
-                            sources.append(key(label,contract.fields[field].native))
-                    scope=Window(start=window.start-timedelta(hours=policy.connection_lookback_hours),end=window.end)
-                    from itertools import chain
-                    streams=[read([conn],sources,scope)]
-                    if (shape=='malcolm' and interim_field and contract.supports('lastPacket','exists')
-                            and contract.supports('firstPacket','lt')):
-                        cutoff=(scope.start.isoformat() if contract.fields['firstPacket'].type.startswith('date')
-                                else scope.start.timestamp()*1000)
-                        streams.append(read([conn],sources,window,
-                            filters=[Predicate(field=interim_field,op='in',value=[True,'true']),
-                                     Predicate(field='firstPacket',op='lt',value=cutoff)],
-                            query_contract=contract.model_copy(update={'time_field':'lastPacket'})))
-                    for bucket in chain.from_iterable(streams):
-                        data=bucket['key']
-                        if not data.get('uid'):
-                            continue
-                        start=stamp(data['time'],plain)
-                        try:
-                            duration=float(data.get('duration') or 0)
-                            missed=float(data.get('missed') or 0)
-                            if not (0<=duration<float('inf') and 0<=missed<float('inf')):
-                                raise ValueError('invalid connection measurements')
-                        except (TypeError,ValueError,OverflowError):
-                            store.reasons.append(f'{target}: malformed connection measurements; coverage unresolved')
-                            continue
-                        if duration_path and duration_path.endswith(':ns'):
-                            duration/=1e9
-                        elif duration_path and duration_path.endswith(':ms'):
-                            duration/=1000
-                        if start+duration<=window.start.timestamp() and start<window.start.timestamp():
-                            continue
-                        who=sensor(bucket)
-                        if missed>0 or any(char in str(data.get('history') or '').lower()
-                                                               for char in 'gx'):
-                            store.content_gap(who,data['uid'],'connection')
-                        store.connection(who,data['uid'],data.get('service'),
-                                         interim=(data.get('interim') in (True,'true','T') or
-                                                  (declared or data.get('conn_log'))=='conn_long'),duration=duration,
-                                         start=start,end=start+duration)
-                elif observed_conn:
-                    store.reasons.append(f'{target}: conn service/UID not aggregatable; analyzer cross-check unresolved')
-            files=next((item for item in data_logs if item.name=='files'),None)
-            if files:
-                fields={typed:next((native_field(contract,path,'exists') for path in files.spec(typed).paths.get(shape,())
-                                   if native_field(contract,path,'exists')),None)
-                        for typed in ('file.fuid','file.missing_bytes','file.overflow_bytes','file.timedout')}
-                if fields['file.fuid']:
-                    sources=[key(typed,contract.fields[field].native) for typed,field in fields.items() if field]
-                    for bucket in read([files],sources):
-                        data=bucket['key']
-                        try:
-                            missing=float(data.get('file.missing_bytes') or 0)
-                            overflow=float(data.get('file.overflow_bytes') or 0)
-                            if not (0<=missing<float('inf') and 0<=overflow<float('inf')):
-                                raise ValueError('invalid file measurements')
-                        except (TypeError,ValueError,OverflowError):
-                            store.reasons.append(f'{target}: malformed file measurements; coverage unresolved')
-                            continue
-                        if missing>0 or overflow>0 or data.get('file.timedout') in (True,'true','T'):
-                            store.content_gap(sensor(bucket),data['file.fuid'],'file')
-    store.connection_activity(window)
-    store.resolve_stats(policy.stats_interval_seconds,complete=not store.reasons)
+    if resolve:
+        store.resolve_stats(policy.stats_interval_seconds,complete=not store.reasons)
     store.checkpoint()

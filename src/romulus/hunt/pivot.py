@@ -1046,10 +1046,18 @@ class PivotExecutor:
             ceiling = (fetch_query_start + query_cap if query_cap is not None and fetch_query_start is not None
                        else self.source_queries + 128)
             outcome = self._execute(bounded, contract, spend_task_id=spend_task_id, physical_query_limit=ceiling)
+            if intent.purpose == "expansion:host-witness" and outcome.completeness == Completeness.partial:
+                # This query establishes existence, not complete host history.
+                # Truncating its sample does not make the lease hypothesis partial.
+                reasons = [reason for reason in outcome.reasons if not reason.startswith("cap:")]
+                if not reasons and outcome.returned:
+                    outcome = outcome.model_copy(update={"completeness":Completeness.complete,"reasons":[]})
             reason = "; ".join(outcome.reasons or [outcome.error or "source retrieval incomplete"])
             complete = outcome.completeness == Completeness.complete
             return [(bounded, outcome,
-                     [_range(intent.window.start, intent.window.end, "source retrieval complete")] if complete else [],
+                     [_range(intent.window.start, intent.window.end,
+                             "bounded host activity existence probe" if intent.purpose == "expansion:host-witness"
+                             else "source retrieval complete")] if complete else [],
                      [] if complete else [_range(intent.window.start, intent.window.end, reason)])]
         pending = deque([intent])
         leaves = []
@@ -1168,6 +1176,8 @@ class PivotExecutor:
         fetch_query_start = self.source_queries
         fetched_records = 0
         for intent in intents:
+            if intent.purpose == "expansion:host-witness" and retained:
+                break
             if max_total_records is not None and fetched_records >= max_total_records:
                 reasons.append(f"Zeek link shared fetched-row limit {max_total_records} reached; remaining sources unresolved")
                 incomplete = True

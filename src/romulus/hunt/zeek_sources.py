@@ -21,8 +21,40 @@ def native_field(contract, path, op='eq'):
     path = path.removesuffix(':ns').removesuffix(':ms')
     if contract.supports(path, op):
         return path
+    direct = next((name for name, spec in contract.fields.items()
+                   if spec.native == path and op in spec.ops), None)
+    if direct or not any(spec.native == path and spec.type == 'text' for spec in contract.fields.values()):
+        return direct
     return next((name for name, spec in contract.fields.items()
-                 if spec.native == path and op in spec.ops), None)
+                 if spec.native.startswith(path + '.') and op in spec.ops), None)
+
+
+def overlap_groups(contract, groups, start, partition_end, *, shape=None):
+    """A safe superset using the selected delivery's verified duration units."""
+    if shape == MALCOLM:
+        field = native_field(contract,'lastPacket','gte')
+        if field and contract.supports(field,'missing'):
+            value = (start.isoformat() if contract.fields[field].type.startswith('date')
+                     else start.timestamp()*1000)
+            return [[*group,Predicate(field=field,op=op,value=value if op=='gte' else None)]
+                    for group in groups for op in ('gte','missing')]
+    fields = {}
+    for log in ZEEK_LOGS:
+        if log.name != 'conn':
+            continue
+        for delivery in (shape,) if shape else SHAPES:
+            for path in log.spec('session.duration_s').paths.get(delivery, ()):
+                field = native_field(contract,path,'gte')
+                if field and contract.supports(field,'missing'):
+                    factor = 1e9 if path.endswith(':ns') else 1000 if path.endswith(':ms') else 1
+                    fields.setdefault(field,[]).append(factor)
+    if fields:
+        field,factors = next(iter(fields.items()))
+        # An unscoped caller gets the least restrictive verified unit conversion.
+        duration = max(0,(start-partition_end).total_seconds())*min(factors)
+        return [[*group,Predicate(field=field,op=op,value=duration if op=='gte' else None)]
+                for group in groups for op in ('gte','missing')]
+    return groups
 
 
 def zeek_capable(contract):
@@ -32,6 +64,19 @@ def zeek_capable(contract):
 
 
 def source_groups(contract, log, shape):
+    """Use only exact capabilities actually reported by the source contract."""
+    class Markers:
+        def __getattr__(self, name):
+            return getattr(contract, name)
+
+        def supports(self, path, op):
+            return native_field(contract, path, op) is not None
+
+    return [[predicate.model_copy(update={'field': native_field(contract, predicate.field, predicate.op)})
+             for predicate in group] for group in _source_groups(Markers(), log, shape)]
+
+
+def _source_groups(contract, log, shape):
     names = sorted(log.names.get(shape, ()))
     if not names:
         return []

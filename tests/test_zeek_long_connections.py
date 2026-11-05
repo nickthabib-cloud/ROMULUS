@@ -229,8 +229,13 @@ def test_fixed_plain_alias_queries_and_normalizes_native_connection(tmp_path,dec
         assert (seen[0].get('conn.interim') is True)==(declared=='conn_long')
         store=VisibilityStore(tmp_path/'visibility')
         try:
-            collect_visibility(client,{'native':contract},window,store,facts.zeek)
-            assert store.db.execute('SELECT final FROM flow').fetchone()==(int(declared!='conn_long'),)
+            store.observe(seen,window)
+            collect_visibility(client,{'native':contract},window,store,facts.zeek,activity=False)
+            rows=list(store.visibility(window,1))
+            assert len(rows)==1 and rows[0]['family']=='net_flow' and rows[0]['records']==1
+            assert rows[0]['start']==now.isoformat()
+            assert datetime.fromisoformat(rows[0]['end'])>=now+timedelta(seconds=100)
+            assert {(row['family'],row['connections']) for row in store.analyzer_gaps()}=={('tls_session',1)}
         finally:
             store.close()
     finally:

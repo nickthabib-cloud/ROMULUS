@@ -1972,11 +1972,18 @@ class Repo:
         return json.dumps(row, ensure_ascii=True, sort_keys=True, separators=(",", ":"))+"\n"
 
     def save_zeek_visibility(self, hunt_id, rows):
-        """Freeze a streamed sensor appendix in bounded inserts; later hunts/revisions cannot change it."""
+        """Commit bounded private chunks, then atomically expose the complete immutable appendix.
+
+        The digest's ordinal -1 is a small publication record pointing at the
+        private row set. This avoids a hunt-sized rename while keeping readers
+        from seeing a partly committed appendix. Older digest-keyed rows remain
+        readable without a publication record.
+        """
         table = t.report_zeek_visibility
         pending = "pending-"+uuid.uuid4().hex
         hasher, count, batch, families = hashlib.sha256(), 0, [], {}
-        with write_txn(self.engine) as connection:
+        keep = False
+        try:
             for row in rows:
                 hasher.update(self.zeek_visibility_line(row).encode())
                 summary = families.setdefault(row["family"], {"intervals": 0, "partial": 0})
@@ -1985,24 +1992,46 @@ class Repo:
                 batch.append({"hunt_id": hunt_id, "snapshot": pending, "ordinal": count, "body": row})
                 count += 1
                 if len(batch) == 256:
-                    connection.execute(table.insert(), batch)
+                    with write_txn(self.engine) as connection:
+                        connection.execute(table.insert(), batch)
                     batch.clear()
             if batch:
-                connection.execute(table.insert(), batch)
+                with write_txn(self.engine) as connection:
+                    connection.execute(table.insert(), batch)
             snapshot = hasher.hexdigest()
-            exists = connection.execute(select(table.c.ordinal).where(
-                table.c.hunt_id == hunt_id, table.c.snapshot == snapshot).limit(1)).first()
-            condition = and_(table.c.hunt_id == hunt_id, table.c.snapshot == pending)
-            if exists:
-                connection.execute(table.delete().where(condition))
-            else:
-                connection.execute(table.update().where(condition).values(snapshot=snapshot))
+            with write_txn(self.engine) as connection:
+                exists = connection.execute(select(table.c.ordinal).where(
+                    table.c.hunt_id == hunt_id, table.c.snapshot == snapshot).limit(1)).first()
+                if exists is None:
+                    result = connection.execute(insert(table).values(hunt_id=hunt_id, snapshot=snapshot,
+                        ordinal=-1, body={"row_snapshot": pending}).on_conflict_do_nothing())
+                    keep = result.rowcount == 1
+        finally:
+            if not keep:
+                # Failed streams and identical re-publications release their
+                # private chunks without taking one unbounded deletion lock.
+                while True:
+                    with write_txn(self.engine) as connection:
+                        ordinals = connection.execute(select(table.c.ordinal).where(
+                            table.c.hunt_id == hunt_id, table.c.snapshot == pending
+                        ).order_by(table.c.ordinal).limit(256)).scalars().all()
+                        if not ordinals:
+                            break
+                        connection.execute(table.delete().where(table.c.hunt_id == hunt_id,
+                            table.c.snapshot == pending, table.c.ordinal <= ordinals[-1]))
         return {"sha256": snapshot, "filename": f"zeek-visibility-{snapshot}.jsonl", "count": count,
                 "families": families}
 
     def zeek_visibility_rows(self, hunt_id, snapshot):
         """Read every immutable interval in keyset pages without a hunt-sized Python collection."""
         table, after = t.report_zeek_visibility, -1
+        if snapshot.startswith("pending-"):
+            return
+        with self.engine.connect() as connection:
+            publication = connection.execute(select(table.c.body).where(
+                table.c.hunt_id == hunt_id, table.c.snapshot == snapshot, table.c.ordinal == -1)).scalar_one_or_none()
+        if publication is not None:
+            snapshot = publication["row_snapshot"]
         while True:
             with self.engine.connect() as connection:
                 rows = connection.execute(select(table.c.ordinal, table.c.body).where(

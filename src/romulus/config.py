@@ -99,6 +99,12 @@ class Settings(BaseModel):
     # clock admits), and the wall clock is the expansion phase's own, so a long sweep never leaves it no time.
     expansion_max_source_queries: int = Field(default=20_000, ge=1, le=1_000_000)
     expansion_wall_clock_minutes: float = Field(default=120.0, gt=0.0)
+    # Visibility has its own disk allowance and source time, outside detector state.
+    # Per-partition health composites normally fit one 1000-bucket page; 32 pages
+    # admit larger sensor fleets while bounding repeated collection at the source.
+    zeek_visibility_disk_mb: float = Field(default=256.0, gt=0.0)
+    zeek_visibility_max_pages: int = Field(default=32, ge=1)
+    zeek_visibility_deadline_seconds: float = Field(default=30.0, gt=0.0)
 
     arkime_url: str = "http://127.0.0.1:8005"
     arkime_username: str = ""
@@ -296,6 +302,9 @@ ENV_MAP = {
     "ROMULUS_BASELINE_CARRY_DISK_GB": "baseline_carry_disk_gb",
     "ROMULUS_EXPANSION_MAX_SOURCE_QUERIES": "expansion_max_source_queries",
     "ROMULUS_EXPANSION_WALL_CLOCK_MINUTES": "expansion_wall_clock_minutes",
+    "ROMULUS_ZEEK_VISIBILITY_DISK_MB": "zeek_visibility_disk_mb",
+    "ROMULUS_ZEEK_VISIBILITY_MAX_PAGES": "zeek_visibility_max_pages",
+    "ROMULUS_ZEEK_VISIBILITY_DEADLINE_SECONDS": "zeek_visibility_deadline_seconds",
     "ARKIME_URL": "arkime_url", "ARKIME_USERNAME": "arkime_username", "ARKIME_PASSWORD": "arkime_password",
     "ARKIME_VERIFY_TLS": "arkime_verify_tls", "ARKIME_BASE_PATH": "arkime_base_path", "ARKIME_AUTH": "arkime_auth",
     "PCAP_ALLOWED_DIRS": "pcap_allowed_dirs", "TSHARK_BIN": "tshark_bin", "MISSION_TIMEZONE": "mission_timezone",

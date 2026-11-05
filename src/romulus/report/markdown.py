@@ -384,7 +384,7 @@ def _render_body(m: dict, banner: str = BANNER) -> str:
         out.append("| none | none | 0 | none | none |")
     out += ["", (f"Context-only items (not listed above): {m['context_items']}. They remain in the JSON manifest "
                  "and the database."), "",
-            "## Versions", "", fence(json.dumps(m["versions"], indent=2, sort_keys=True), "json"), "", banner, ""]
+            "## Versions", "", fence(json.dumps(m["versions"], indent=2, sort_keys=True), "json"), ""]
     return "\n".join(out)
 
 
@@ -415,6 +415,7 @@ def iter_render(m: dict, banner: str = BANNER, *, host_rows=None, visibility_row
                 yield f"- {cell(row['reason'])}\n"
     fleets = [finding for finding in m["findings"] if "fleet_hosts" in finding]
     if not fleets:
+        yield "\n"+banner+"\n"
         return
     if host_rows is None:
         raise ValueError("This manifest references fleet host appendices; a host-stream resolver is required")

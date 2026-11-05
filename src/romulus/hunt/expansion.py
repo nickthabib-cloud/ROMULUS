@@ -425,6 +425,8 @@ class ExpansionEngine:
     def _link_anchors(anchor: LinkAnchor, link_type: LinkType) -> tuple[list[LinkAnchor], list[dict]]:
         keyed: dict[str, tuple[dict, TypedEvent, str | None, datetime]] = {}
         windows_link = link_type in WINDOWS_LINK_TYPES
+        zeek_link = link_type in ZEEK_LINK_TYPES
+        limit = 1000 if zeek_link else MAX_ANCHOR_KEYS
         overflow = False
         for event in anchor.events:
             event_ts = _utc(event.ts)
@@ -444,6 +446,9 @@ class ExpansionEngine:
                         keyed, token, value, MAX_ANCHOR_KEYS + WINDOWS_DROPPED_SCOPE_EXAMPLES,
                         rank=lambda token, value: (abs(value[3] - _utc(anchor.ts)), token),
                     )
+                elif zeek_link:
+                    overflow |= _retain_smallest(keyed, token, value, limit + WINDOWS_DROPPED_SCOPE_EXAMPLES,
+                                                 rank=lambda token, value: token)
                 else:
                     keyed.setdefault(token, value)
         if not keyed:
@@ -452,7 +457,7 @@ class ExpansionEngine:
             (abs(keyed[token][3] - _utc(anchor.ts)), token) if windows_link else (timedelta(0), token)
         ))
         ordered = [keyed[token] for token in tokens]
-        kept, dropped = ordered[:MAX_ANCHOR_KEYS], ordered[MAX_ANCHOR_KEYS:]
+        kept, dropped = ordered[:limit], ordered[limit:]
         if windows_link:
             variants = [
                 anchor.model_copy(update={
@@ -465,8 +470,8 @@ class ExpansionEngine:
             ]
         else:
             variants = [
-                anchor.model_copy(update={"events": [event]})
-                for _key, event, _event_host, _event_ts in kept
+                anchor.model_copy(update={"events": [event], **({"link_key": key} if zeek_link else {})})
+                for key, event, _event_host, _event_ts in kept
             ]
         dropped_keys = [key for key, _event, _host, _ts in dropped]
         if overflow:
@@ -591,7 +596,11 @@ class ExpansionEngine:
                     row["_windows_anchor"] = is_windows
                 if is_windows:
                     share = WINDOWS_PER_ANCHOR_SOURCE_QUERIES
-                if any(event.get("observer.product") == "zeek" for event in self._anchor_plan(row).events):
+                is_zeek = row.get("_zeek_anchor")
+                if is_zeek is None:
+                    is_zeek = any(event.get("observer.product") == "zeek" for event in self._anchor_plan(row).events)
+                    row["_zeek_anchor"] = is_zeek
+                if is_zeek:
                     share += 4 * len(ZEEK_LINK_TYPES)
             shares += share
         return min(self.max_source_queries, shares)
@@ -662,6 +671,9 @@ class ExpansionEngine:
                     ),
                 )
         if dropped:
+            if link_type in ZEEK_LINK_TYPES:
+                self._add_reason(anchor_reasons,plan.row["id"],
+                                 "Zeek link hop-key limit 1000 reached; remaining anchor keys unresolved")
             self._add_reason(
                 anchor_reasons, plan.row["id"],
                 "keys_not_expanded:" + json.dumps(dropped, sort_keys=True, separators=(",", ":")),
@@ -843,6 +855,11 @@ class ExpansionEngine:
         }, owner_token=self.owner_token)
 
     def _evaluate(self, candidate: dict, result: LinkResult) -> list[dict]:
+        if result.link_type == "address_host":
+            # The small sample establishes that a lease's hostname has telemetry.
+            # Dedicated host links own activity searches and their direct findings.
+            self.repo.mark_expansion_link_evaluated(result.id, owner_token=self.owner_token)
+            return []
         # Per link, only the direct (sweep) pack runs: a strong indicator among the linked records is published
         # immediately. Context rules are judged once, after expansion ends, by finalize_context.
         events = self._events(result.event_ids)

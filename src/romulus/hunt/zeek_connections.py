@@ -48,12 +48,13 @@ def canonical(sweep,events,raw,reasons):
         stage._zeek_canonical_table=True
     chosen={}
     others=[]
+    unknown_ends = 0
     for event in events:
         if not connection(event):
             others.append(event);continue
         if not overlaps(event,sweep.window):
-            if not event.has('flow.end') and event.ts<sweep.window.start:
-                reasons.append(('connection end not recorded; overlap with hunt window unresolved',frozenset({'net_flow'})))
+            if event.get('conn.interim') is True and not event.has('flow.end') and event.ts<sweep.window.start:
+                unknown_ends += 1
             continue
         key=(event.host or '',str(event.get('zeek.uid')))
         prior_id=stage.db.execute('SELECT event_id FROM zeek_canonical WHERE sensor=? AND uid=?',key).fetchone()
@@ -64,6 +65,8 @@ def canonical(sweep,events,raw,reasons):
         prior=chosen.get(key)
         if prior is None or rank(event)>rank(prior):
             chosen[key]=event
+    if unknown_ends:
+        reasons.append((f'{unknown_ends} connections before the window had no recorded end',frozenset({'net_flow'})))
     pending=[key for key,event in chosen.items() if event.get('conn.interim') is True]
     for keys in batched(pending,1000):
         scoped=Window(start=min(chosen[key].ts for key in keys)-timedelta(seconds=1),

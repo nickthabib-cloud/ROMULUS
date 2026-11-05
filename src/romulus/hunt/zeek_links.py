@@ -68,6 +68,8 @@ class ZeekLink:
         self.task_ids = []
         self.duration = 0
         self.partial = False
+        self.shared = fetcher.__dict__.setdefault('_zeek_link_budgets', {}).setdefault(
+            (anchor.finding_id,kind,window.label), {'rows':0,'keys':set(),'queries':0})
 
     def unresolved(self, reason):
         self.partial = True
@@ -76,13 +78,19 @@ class ZeekLink:
 
     def query(self, logs, fields, keys, window, retain, *, intents=None, host=False):
         keys = set(keys)
-        additions = keys-self.keys
-        if len(self.keys)+len(additions) > MAX_KEYS:
+        additions = keys-self.shared['keys']
+        if len(self.shared['keys'])+len(additions) > MAX_KEYS:
             self.unresolved(f'Zeek link hop-key limit {MAX_KEYS} reached; remaining joins unresolved')
-            keys = set(sorted(keys)[:max(0, MAX_KEYS-len(self.keys))])
+            keys = (keys & self.shared['keys']) | set(sorted(additions)[:max(0, MAX_KEYS-len(self.shared['keys']))])
+        self.shared['keys'].update(keys)
         self.keys.update(keys)
-        remaining = MAX_ROWS-self.rows
-        queries = self.query_cap-(getattr(self.executor, 'source_queries', 0)-self.start_queries)
+        remaining = MAX_ROWS-self.shared['rows']
+        if host:
+            remaining = min(10,remaining)
+        queries = min(self.query_cap-(getattr(self.executor, 'source_queries', 0)-self.start_queries),
+                      MAX_QUERIES-self.shared['queries'])
+        if not keys:
+            return []
         if remaining <= 0 or queries <= 0:
             self.unresolved(f'Zeek link shared row/query limit reached ({MAX_ROWS} rows, {self.query_cap} queries)')
             return []
@@ -92,13 +100,17 @@ class ZeekLink:
             for reason in plan.reasons:
                 self.unresolved(reason)
         if not intents:
-            self.unresolved('Zeek link source key or sensor is not searchable; join unresolved')
+            self.unresolved('host telemetry contract is not searchable; host witness unresolved' if host else
+                            'Zeek link source key or sensor is not searchable; join unresolved')
             return []
+        before_queries = getattr(self.executor,'source_queries',0)
         batch = self.executor.fetch_intents(self.anchor.finding_id, self.fetch_key, intents,
             lambda event: (host or event.get('observer.name') == self.sensor) and retain(event),
             anchor_ts=self.anchor.ts, query_cap=queries, persist=False, max_total_records=remaining)
         self.batches.append(batch)
         self.rows += sum(cell.returned or 0 for cell in batch.coverage) or len(batch.events)
+        self.shared['rows'] += sum(cell.returned or 0 for cell in batch.coverage) or len(batch.events)
+        self.shared['queries'] += getattr(self.executor,'source_queries',0)-before_queries
         self.partial |= batch.status != 'complete'
         self.reasons.extend(reason for reason in batch.reasons if reason not in self.reasons)
         self.coverage.extend(batch.coverage)
@@ -138,7 +150,7 @@ class ZeekLink:
             if fingerprint:
                 self.window = LinkWindow(label=self.window.label, start=self.anchor.ts-timedelta(days=30),
                                          end=self.anchor.ts+timedelta(minutes=5))
-                self.query(_logs({'x509'}), ('x509.fingerprint',), [fingerprint, fingerprint.upper()], self.window,
+                self.query(_logs({'x509'}), ('x509.fingerprint',), [fingerprint.lower(), fingerprint.upper()], self.window,
                            lambda event: event.get('zeek.log') == 'x509'
                            and event.get('x509.fingerprint') == fingerprint.lower())
             if not self.events:
@@ -148,11 +160,14 @@ class ZeekLink:
             if uid:
                 conns = [event for event in self.anchor.events if event.get('zeek.log') == 'conn'
                          and uid in values(event, UID_FIELDS)]
-                if not conns:
+                if not conns or any(event.get('conn.interim') is True for event in conns):
                     lookback = LinkWindow(label=self.window.label, start=self.anchor.ts-timedelta(hours=24),
-                                          end=self.anchor.ts+timedelta(minutes=5))
-                    conns = self.query(_logs({'conn'}), UID_FIELDS, [uid], lookback,
-                                       lambda event: event.get('zeek.log') == 'conn' and uid in values(event, UID_FIELDS))
+                                          end=max(self.window.end,self.anchor.ts+timedelta(hours=24)))
+                    fetched = self.query(_logs({'conn'}), UID_FIELDS, [uid], lookback,
+                                         lambda event: event.get('zeek.log') == 'conn' and uid in values(event, UID_FIELDS))
+                    conns = list({event.id:event for event in [*conns,*fetched]}.values())
+                if conns and not any(event.get('conn.interim') is not True for event in conns):
+                    self.unresolved('connection still open at the last interim record; later records not searched')
                 self.window = self.span(conns)
                 self.query(_logs(), UID_FIELDS, [uid], self.window, lambda event: uid in values(event, UID_FIELDS))
         elif self.kind == 'zeek_file':
@@ -209,13 +224,20 @@ class ZeekLink:
                         self.unresolved(f'DHCP hostname {name} matches conflicting host telemetry names: {sorted(native)}')
                     else:
                         host = next(iter(native), name)
-                        intents = self.fetcher._host_intents(self.window, None, host)
-                        witnesses = self.query([], (), [host], self.window,
+                        witness_window = LinkWindow(label=self.window.label,
+                            start=self.anchor.ts-timedelta(days=7),end=self.anchor.ts+timedelta(minutes=5))
+                        intents = [intent.model_copy(update={'max_records':10,'order':'desc',
+                                    'purpose':'expansion:host-witness'})
+                                   for intent in self.fetcher._host_intents(witness_window, None, host)]
+                        witnesses = self.query([], (), [host], witness_window,
                             lambda event: event.family not in NETWORK_OBSERVER_FAMILIES
                             and event.host is not None and _first_label(event.host) == _first_label(name),
                             intents=intents, host=True)
                         if not witnesses:
                             self.unresolved(f'DHCP hostname {name} matches no host-telemetry host in scope')
+                        else:
+                            self.reasons.append('host telemetry existence probe: at most 10 nearest records, '
+                                'including five minutes after the anchor; full host activity is searched by host links')
         else:
             self.unresolved('required Zeek join is not available')
         linked = sorted((event for event in self.events.values() if event.id not in self.anchor.event_ids),

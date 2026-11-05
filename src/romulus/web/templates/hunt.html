@@ -106,7 +106,7 @@ Evidence: {{ link.evidence_ids | join(', ') }}</p>
 Complete detail is retained in the report appendix {{ zeek_visibility.snapshot.filename }}.</p>
 <ul>{% for note in zeek_visibility.notes + zeek_visibility.unresolved %}<li>{{ note }}</li>{% endfor %}
 {% for row in zeek_visibility.preview %}<li>{{ row.reason }}</li>{% endfor %}</ul>
-{% for r in reports %}<a href="/reports/{{ h.id }}/{{ zeek_visibility.snapshot.filename }}">Complete visibility appendix (JSONL)</a>{% endfor %}
+{% if zeek_visibility_bundled %}<a href="/reports/{{ h.id }}/{{ zeek_visibility.snapshot.filename }}">Complete visibility appendix (JSONL)</a>{% endif %}
 {% endif %}
 <h2>Tasks</h2>
 <details><summary>{{ tasks | length }} task(s)</summary>

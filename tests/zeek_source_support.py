@@ -8,6 +8,10 @@ from tests.throughput_fixture import MiniES
 
 
 def value(source, path):
+    # Elasticsearch's default dynamic keyword multi-field is indexed beside
+    # text, and never appears as a separate key in _source.
+    if path.endswith('.keyword'):
+        path = path.removesuffix('.keyword')
     if path in source:
         return source[path]
     current = source

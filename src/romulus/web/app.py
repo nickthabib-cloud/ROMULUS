@@ -157,6 +157,17 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
             cands = [c for c in cands if c["lane"] != "context"]
         from romulus.report.manifest import coverage_for_hunt
         cov = coverage_for_hunt(repo, hunt_id)
+        zeek_visibility = cov.get("zeek_visibility")
+        zeek_visibility_bundled = False
+        if zeek_visibility:
+            snapshot = zeek_visibility["snapshot"]
+            digest = snapshot.get("sha256", "")
+            if (isinstance(digest, str) and len(digest) == 64
+                    and all(char in "0123456789abcdef" for char in digest)):
+                filename = f"zeek-visibility-{digest}.jsonl"
+                appendix = (s.reports_dir / hunt_id / filename).resolve()
+                zeek_visibility_bundled = (snapshot.get("filename") == filename
+                    and s.reports_dir.resolve() in appendix.parents and appendix.is_file())
         with repo.engine.connect() as c:
             from sqlalchemy import select
 
@@ -173,7 +184,8 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         # calls a model other than the configured one answered (a provider's refusal fallback)
         answered_by = [r for r in agent_usage["models_reported"] if r["model_reported"] != r["model"]]
         return page(request, "hunt.html", u, h=h, cands=cands, lanes=repo.lane_counts(hunt_id), lane=lane,
-                    coverage=cov["rules"], zeek_visibility=cov.get("zeek_visibility"), tasks=repo.tasks(hunt_id), reports=reports, agent=agent_summary,
+                    coverage=cov["rules"], zeek_visibility=zeek_visibility, zeek_visibility_bundled=zeek_visibility_bundled,
+                    tasks=repo.tasks(hunt_id), reports=reports, agent=agent_summary,
                     investigations=investigations, ai_agent=ai_audit["detail"] if ai_audit else None,
                     egress_banners=banners, answered_by=answered_by,
                     internal_networks=internal_networks_view(repo, hunt_id, h["manifest"]))
