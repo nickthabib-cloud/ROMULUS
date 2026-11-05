@@ -66,7 +66,9 @@ PINNED_WINDOWS = {
 ZEEK_EVIDENCE_FILES = ("certificates.py", "community.py", "rpc_catalog.py", "zeek.py", "zeek_catalog.py",
                        "zeek_credentials.py")
 PINNED_ZEEK = {
-    "zeek-ecs@2": "285b031520e694cc627598b912b32fcf1ecbae106efd5d4b649ebfbe3109e865",
+    # unreleased: re-pinned when the zeek_record precheck (a record with no Zeek marker skips the full recognition)
+    # merged in; every recognition result is unchanged.
+    "zeek-ecs@2": "7ade7bb451eb4cfa7b271def32593544c4beae76573676336eee896a6d00fff4",
     # unreleased: re-pinned when a Zeek record's raw digest became the digest of its stored form, credentials masked
     # (scrub_zeek_source); typed values are unchanged. Re-pinned again when zeek_record gained a precheck that turns
     # away a record carrying no Zeek marker before the full recognition: every recognition result is unchanged.
