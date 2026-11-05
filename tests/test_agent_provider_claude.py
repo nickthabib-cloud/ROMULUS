@@ -389,14 +389,26 @@ def test_requests_never_carry_sampling_parameters_and_records_say_so(tmp_path):
       "additionalProperties": False}, "$ref"),
     ({"type": "array", "items": {"type": "string"}}, "top level"),
 ])
-def test_a_schema_outside_the_strict_subset_is_refused_before_sending(schema, problem):
+def test_a_tool_outside_the_strict_subset_is_sent_loose_and_a_response_schema_is_refused(schema, problem):
     assert any(problem in p for p in strict_schema_problems(schema)), strict_schema_problems(schema)
     ep = Endpoint(reply([text("hi")]))
     p, _ = provider(claude_settings(), ep)
-    result = p.chat(ask(tools=[Tool("bad", "Bad.", schema)]))
-    assert result.status == "error" and "strict" in result.error and ep.calls == []
+    assert p.chat(ask(tools=[Tool("loose", "Loose.", schema), TOOL])).ok
+    sent = {t["name"]: t["strict"] for t in ep.body()["tools"]}
+    assert sent == {"loose": False, "report_status": True}
     result = p.chat(ask(response_schema=schema))
-    assert result.status == "error" and ep.calls == []
+    assert result.status == "error" and "response schema" in result.error and len(ep.calls) == 1
+
+
+def test_a_loose_tool_call_is_parsed_but_left_to_the_caller_to_validate():
+    loose = Tool("page", "Page.", {"type": "object", "properties": {"n": {"type": "integer", "minimum": 1}},
+                                   "required": ["n"], "additionalProperties": False})
+    ep = Endpoint(reply([tool_use(raw='{"n": 0}', name="page")], stop="tool_use"),
+                  reply([tool_use(raw='{"n": tru', name="page")], stop="tool_use"))
+    p, _ = provider(claude_settings(), ep)
+    result = p.chat(ask(tools=[loose]))
+    assert result.ok and result.tool_calls[0].arguments == {"n": 0}
+    assert p.chat(ask(tools=[loose])).status == "invalid_tool_call"
 
 
 def test_the_documented_subset_is_accepted():
@@ -413,13 +425,17 @@ def test_the_documented_subset_is_accepted():
     assert len(bad) == 4
 
 
-def test_the_per_request_complexity_limits_are_checked():
+def test_past_the_per_request_strict_limits_tools_go_loose_and_a_response_schema_is_refused():
     many = [Tool(f"t{n}", "x", TOOL.parameters) for n in range(21)]
-    p, _ = provider(claude_settings(), Endpoint(reply([text("hi")])))
-    assert "strict tools" in p.chat(ask(tools=many)).error
+    ep = Endpoint(reply([text("hi")]))
+    p, _ = provider(claude_settings(), ep)
+    assert p.chat(ask(tools=many)).ok and not any(t["strict"] for t in ep.body()["tools"])
     optional = {"type": "object", "properties": {f"p{n}": {"type": "string"} for n in range(25)}, "required": [],
                 "additionalProperties": False}
-    assert "optional parameters" in p.chat(ask(tools=[Tool("wide", "x", optional)])).error
+    assert p.chat(ask(tools=[Tool("wide", "x", optional), TOOL])).ok
+    assert not any(t["strict"] for t in ep.body()["tools"])
+    result = p.chat(ask(response_schema=optional))
+    assert result.status == "error" and "optional parameters" in result.error and len(ep.calls) == 2
 
 
 # ---- the reply: stop reasons, usage, tool inputs ------------------------------------------------------------
@@ -884,11 +900,12 @@ def test_the_union_limit_is_checked():
              "properties": {f"u{n}": {"anyOf": [{"type": "string"}, {"type": "null"}]} for n in range(17)}}
     ep = Endpoint(reply([text("hi")]))
     p, _ = provider(claude_settings(), ep)
-    result = p.chat(ask(tools=[Tool("wide", "x", union)]))
+    result = p.chat(ask(response_schema=union))
     assert "17 union-typed parameters" in result.error and ep.calls == []
+    assert p.chat(ask(tools=[Tool("wide", "x", union)])).ok and ep.body()["tools"][0]["strict"] is False
     union["properties"].pop("u16")
     union["required"].pop()
-    assert p.chat(ask(tools=[Tool("wide", "x", union)])).ok
+    assert p.chat(ask(tools=[Tool("wide", "x", union)])).ok and ep.body()["tools"][0]["strict"] is True
 
 
 def test_the_sdk_without_its_http_library_is_not_configured(monkeypatch):
@@ -1206,3 +1223,13 @@ def test_with_the_fallback_on_the_worst_case_reserves_a_declined_attempt_and_a_f
 def test_the_output_limit_includes_thinking_for_budget_checks():
     p, _ = provider(claude_settings(agent_thinking_tokens=10_000), Endpoint(reply([text("hi")])))
     assert p.output_limit(ask(max_output_tokens=500)) == 10_500
+
+
+def test_an_api_error_shows_the_provider_message_whole_and_redacted():
+    message = "max_tokens is too large for this model. " + "More detail. " * 40 + f"(key {KEY})"
+    ep = Endpoint(httpx2.Response(400, json={"type": "error", "error": {"type": "invalid_request_error",
+                                                                        "message": message}}))
+    p, _ = provider(claude_settings(), ep)
+    result = p.chat(ask())
+    assert result.status == "error" and result.error.endswith(message.replace(KEY, "<redacted>"))
+    assert KEY not in result.error

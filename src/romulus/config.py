@@ -1,6 +1,7 @@
 """Load runtime configuration from the environment / .env with secret redaction."""
 from __future__ import annotations
 
+import json
 import os
 import re
 from pathlib import Path
@@ -122,17 +123,18 @@ class Settings(BaseModel):
     # deterministic search is the default; the model is opt-in per hunt
     agent_mode: Literal["model", "deterministic", "off"] = "off"
 
-    # AI investigating agent: any OpenAI-compatible endpoint, Ollama's native API, or the Claude Messages API
-    # (anthropic, which needs the optional romulus[anthropic] install). Unset means not configured.
-    agent_provider: Literal["openai_compatible", "ollama", "anthropic"] = "openai_compatible"
+    # AI investigating agent: any OpenAI-compatible endpoint, Ollama's native API, the OpenAI Responses API
+    # (openai_responses), or the Claude Messages API (anthropic, which needs the optional romulus[anthropic]
+    # install). Unset means not configured.
+    agent_provider: Literal["openai_compatible", "ollama", "openai_responses", "anthropic"] = "openai_compatible"
     agent_base_url: str = ""
     agent_api_key: SecretStr = SecretStr("")
     agent_model: str = ""
     agent_default: Literal["on", "off"] = "on"
     agent_context_tokens: int = Field(default=0, ge=0, le=10_000_000)    # 0: the server enforces its own limit
     agent_max_output_tokens: int = Field(default=4096, ge=64, le=200_000)
-    # anthropic only: models that think before answering spend part of each call's output allowance on thinking,
-    # so this room is added to AGENT_MAX_OUTPUT_TOKENS; effort sets how much the model thinks
+    # anthropic and openai_responses: models that think before answering spend part of each call's output allowance
+    # on thinking, so this room is added to AGENT_MAX_OUTPUT_TOKENS; effort sets how much the model thinks
     agent_thinking_tokens: int = Field(default=60_000, ge=1024, le=1_000_000)
     agent_effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
     # anthropic only: let the API answer a request its safety classifier declined with the fallback model it
@@ -352,12 +354,32 @@ def short_secrets(settings: Settings) -> list[str]:
                   and 0 < len(getattr(settings, name).get_secret_value()) < MIN_SECRET_LENGTH)
 
 
+# how JSON encoders that escape HTML-significant characters write them (lower- and upper-case hex)
+_HTML_SAFE_ESCAPES = ({"&": "\\u0026", "<": "\\u003c", ">": "\\u003e", "'": "\\u0027"},
+                      {"&": "\\u0026", "<": "\\u003C", ">": "\\u003E", "'": "\\u0027"})
+MASKED_SECRET_MIN_LENGTH = 16   # a masked echo (prefix****last four) is matched only for secrets at least this long
+
+
+def _secret_forms(secret: str) -> set[str]:
+    """The secret as text, and as it appears inside a JSON string (escaped, also with HTML-safe escapes)."""
+    escaped = json.dumps(secret)[1:-1]
+    return {secret, escaped, *("".join(table.get(c, c) for c in escaped) for table in _HTML_SAFE_ESCAPES)}
+
+
 def redact_text(text: str, settings: Settings) -> str:
-    """Remove any configured secret value from free text (logs, error messages)."""
+    """Remove any configured secret value from free text (logs, error messages): as written, as escaped inside a
+    JSON string, and as a service's masked echo of a long key (its first characters, asterisks, its last four)."""
     for name in type(settings).model_fields:
         value = getattr(settings, name)
         if isinstance(value, SecretStr):
             secret = value.get_secret_value()
             if secret and len(secret) >= 4:
-                text = text.replace(secret, "<redacted>")
+                for form in sorted(_secret_forms(secret), key=len, reverse=True):
+                    text = text.replace(form, "<redacted>")
+                if len(secret) >= MASKED_SECRET_MIN_LENGTH and "****" in text:
+                    # Key characters only, bounded and delimited: never spans punctuation or starts inside a word,
+                    # and stays linear on long runs.
+                    masked = (r"(?<![A-Za-z0-9_-])" + re.escape(secret[:3]) + r"[A-Za-z0-9_-]{0,64}\*{4,64}"
+                              r"[A-Za-z0-9_-]{0,16}?" + re.escape(secret[-4:]) + r"(?![A-Za-z0-9_-])")
+                    text = re.sub(masked, "<redacted>", text)
     return text
