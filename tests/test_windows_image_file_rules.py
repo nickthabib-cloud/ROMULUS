@@ -119,15 +119,15 @@ def test_system_writer_needs_pid_image_and_binary_file_evidence(data):
     assert hits("SystemBinaryFileWrite", data, code=11) == []
 
 
-@pytest.mark.parametrize("path", [
-    r"C:\Windows\System32\payload.dll", r"\\?\C:\Windows\Temp\payload.dll",
-    r"\\server\share\payload.dll", r"\Device\HarddiskVolume2\Users\Public\payload.dll",
-    r"C:\Windows\System32\spool\..\outside.dll", r"C:\Temp\spool",
+@pytest.mark.parametrize("path,lane", [
+    (r"C:\Windows\System32\payload.dll", "high"), (r"\\?\C:\Windows\Temp\payload.dll", "lead"),
+    (r"\\server\share\payload.dll", "high"), (r"\Device\HarddiskVolume2\Users\Public\payload.dll", "high"),
+    (r"C:\Windows\System32\spool\..\outside.dll", "high"), (r"C:\Temp\spool", "lead"),
 ])
-def test_spooler_file_creation_outside_spool_is_high(path):
+def test_spooler_file_creation_outside_spool_has_evidence_supported_lane(path, lane):
     found = hits("SpoolerFileWriteOutsideSpool", {"Image": r"C:\Windows\System32\spoolsv.exe",
                  "TargetFilename": path}, code=11)
-    assert len(found) == 1 and found[0].lane == "high"
+    assert len(found) == 1 and found[0].lane == lane
     assert found[0].attack == ("T1068",)
 
 
@@ -203,7 +203,7 @@ def test_publication_cites_native_image_file_and_pid_without_command_line_infere
                           "TargetFilename": r"C:\Temp\session.log"}, "high"),
     ("SystemBinaryFileWrite", 11, {"ProcessId": "4", "TargetFilename": r"C:\Temp\agent.sys"}, "lead"),
     ("SpoolerFileWriteOutsideSpool", 11, {"Image": r"C:\Windows\SysWOW64\spoolsv.exe",
-                                        "TargetFilename": r"C:\Temp\diagnostic.dat"}, "high"),
+                                        "TargetFilename": r"C:\Temp\diagnostic.dat"}, "lead"),
     ("VolumeRootExecutableWrite", 11, {"TargetFilename": r"D:\agent.exe"}, "lead"),
 ])
 def test_file_and_image_evidence_gives_equal_lanes_across_shipper_shapes(name, code, data, want):

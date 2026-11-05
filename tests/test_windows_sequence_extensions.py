@@ -32,7 +32,11 @@ def test_parent_sequence_is_published_as_soon_as_both_observations_arrive(revers
         'process.guid': 'child', 'process.parent.guid': 'parent'})
     first, second = (child, access) if reverse else (access, child)
     instance = rule('ParentProcessSpoofing')
+    target = event('process_exec', 1, native='target', **{
+        'process.guid': 'parent', 'process.parent.guid': 'other', 'process.executable': r'C:\Windows\explorer.exe'})
+    instance.load = lambda ids: [e for e in (child, target) if e.id in ids]
     try:
+        assert list(instance.consume([target])) == []
         assert list(instance.consume([first])) == []
         [match] = list(instance.consume([second]))
         assert match.proposed_lane == 'high'
@@ -61,7 +65,8 @@ def test_sam_membership_write_uses_symmetric_audit_context(audit_offset):
         'registry.action': 'value_set'})
     batches = [[written]]
     if audit_offset is not None:
-        batches.append([event('account_change', 4732, native='audit', offset=400 + audit_offset)])
+        batches.append([event('account_change', 4732, native='audit', offset=400 + audit_offset,
+                              **{'account.group_id': 'S-1-5-32-544'})])
     matches = run(rule('SamAdminRegistryWithoutAudit'), batches)
     assert bool(matches) is (audit_offset in {None, 301})
     if matches:
@@ -141,6 +146,10 @@ def test_late_accesses_do_not_repeat_completed_parent_sequence_work():
     accesses = [event('process_access', 10, native=f'access-{n}', **{
         'source.guid': 'creator', 'source.pid': 100, 'source.executable': r'C:\Tools\creator.exe',
         'target.guid': 'parent', 'process.access.mask': 0x80}) for n in range(300)]
+    target = event('process_exec', 1, native='target', **{
+        'process.guid': 'parent', 'process.parent.guid': 'other', 'process.executable': r'C:\Windows\explorer.exe'})
+    instance.load = lambda ids: [e for e in children if e.id in ids]
+    assert list(instance.consume([target])) == []
     assert list(instance.consume(children)) == []
     steps = 0
     def progress():

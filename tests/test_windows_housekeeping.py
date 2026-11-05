@@ -66,7 +66,7 @@ def test_loopback_kerberos_network_logon(address):
     record = event(4624, {"LogonType": "3", "AuthenticationPackageName": "kErBeRoS", "IpAddress": address},
                    channel="Security", provider=SECURITY)
     [match] = matches("KerberosLoopbackLogon", record)
-    assert match.proposed_lane == "high" and "network logon" in match.claim.lower()
+    assert match.proposed_lane == "lead" and "network logon" in match.claim.lower()
 
 
 @pytest.mark.parametrize("code,kind,package,address", [
@@ -172,9 +172,10 @@ def test_unusual_bits_creator_is_a_lead(path):
     assert "rare" not in match.claim.lower()
 
 
-@pytest.mark.parametrize("name", ["svchost.exe", "bitsadmin.exe", "powershell.exe", "pwsh.exe"])
-def test_typical_bits_creator_outside_writable_paths_is_negative(name):
-    record = event(3, {"processPath": "C:\\Windows\\System32\\" + name}, channel=BITS_CHANNEL, provider=BITS_PROVIDER)
+@pytest.mark.parametrize("path", [r"C:\Windows\System32\svchost.exe", r"C:\Windows\System32\bitsadmin.exe",
+    r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe", r"C:\Program Files\PowerShell\7\pwsh.exe"])
+def test_typical_bits_creator_at_installed_client_path_is_negative(path):
+    record = event(3, {"processPath": path}, channel=BITS_CHANNEL, provider=BITS_PROVIDER)
     assert not matches("BitsUnusualCreator", record)
 
 
@@ -314,8 +315,8 @@ def test_repeated_housekeeping_records_fold_with_bounded_citations():
     records = [sysmon1(image="attrib.exe", command="attrib.exe +h file.txt", offset=index) for index in range(1000)]
     try:
         result = run(instance, [records[index:index + 100] for index in range(0, 1000, 100)])
-        # The shared Windows fold retains the first observation plus one fleet tally.
-        assert len(result) == 2
+        # The first observation and final tally revise one stable finding.
+        assert len(result) == 1
         [match] = [item for item in result if item.group_key]
         assert match.proposed_lane == "lead" and match.severity == "low"
         assert "1000 Windows event record(s)" in match.claim

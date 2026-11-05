@@ -6,6 +6,7 @@ import json
 import re
 from urllib.parse import urlsplit
 
+from romulus.detect.windows_behavior import BehaviorFleetRule
 from romulus.detect.windows_cmdline import DASHES, SWITCH_STARTS, split_argv
 from romulus.detect.windows_common import Undecided
 from romulus.detect.windows_events import (
@@ -15,9 +16,10 @@ from romulus.detect.windows_events import (
     integer,
     local_path_components,
     signal,
-    writable,
 )
+from romulus.detect.windows_path_data import installation_parts
 from romulus.detect.windows_registry_events import _CU, _LM, _software, _system, _target
+from romulus.evidence.windows import windows_path_key
 from romulus.evidence.windows_catalog import (
     BITS_CHANNEL,
     BITS_PROVIDER,
@@ -130,6 +132,20 @@ def _local_transfer(value):
     return False
 
 
+def _usual_bits_client(image):
+    # Compare whole installed paths, without treating a familiar basename as
+    # evidence that a copy elsewhere belongs to Windows or PowerShell.
+    parts = installation_parts(image)
+    if len(parts) == 3 and parts[:2] in {("windows", "system32"), ("windows", "syswow64")}:
+        return parts[2] in {"svchost.exe", "bitsadmin.exe"}
+    if (len(parts) == 5 and parts[:2] in {("windows", "system32"), ("windows", "syswow64")}
+            and parts[2:] == ("windowspowershell", "v1.0", "powershell.exe")):
+        return True
+    return (len(parts) == 4 and parts[0] in {"program files", "program files (x86)"}
+            and parts[1] == "powershell" and re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", parts[2]) is not None
+            and parts[3] == "pwsh.exe")
+
+
 class _Housekeeping(WindowsEventRule):
     benign = ("Authorized administration and ordinary operating-system activity can produce these records.",)
     next_checks = ("Review the cited fields, authorization and independent evidence of the resulting state.",)
@@ -143,11 +159,28 @@ class _Housekeeping(WindowsEventRule):
             return []
         return self.observe(event)
 
-    def report(self, event, text, fields, *, high=False, low=False, notes=()):
-        content = json.dumps([self.id, *[(field, _folded(event.get(field))) for field in fields]],
+    def report(self, event, text, fields, *, high=False, low=False, notes=(), fold=None):
+        identity = [(field, _folded(event.get(field))) for field in fields] if fold is None else [event.host, *fold]
+        content = json.dumps([self.id, *identity],
                              sort_keys=True, ensure_ascii=True)
         return [signal(event, self.id, text, self.attack, fields, lane="high" if high else "lead",
                        severity="high" if high else "low" if low else "medium", content=content, notes=notes)]
+
+
+class _FoldedHousekeeping(_Housekeeping, BehaviorFleetRule):
+    """Publish the first observation and bounded recurrence revisions under one key."""
+    fold_caveat = ""
+
+    def record_match(self, event, hit):
+        match = super().record_match(event, hit)
+        match.bounded_revision = True
+        return match
+
+    def _fleet_match(self, shape, group, *, final):
+        match = super()._fleet_match(shape, group, final=final)
+        if match is not None and self.fold_caveat:
+            match.notes.append(self.fold_caveat)
+        return match
 
 
 class HiddenSamAccount(_Housekeeping):
@@ -180,6 +213,7 @@ class HiddenSamAccount(_Housekeeping):
 
 class KerberosLoopbackLogon(_Housekeeping):
     id = "win.kerberos_loopback_logon"
+    version = "2"
     title = "A Kerberos network logon names a loopback source"
     families = ("auth",)
     windows_event_classes = (("Security", SECURITY, 4624),)
@@ -192,6 +226,10 @@ class KerberosLoopbackLogon(_Housekeeping):
     def observe(self, event):
         if integer(event.get("auth.logon_type")) != 3 or str(event.get("auth.package")).casefold() != "kerberos":
             return []
+        account = str(event.get("auth.target_account") or "").casefold()
+        name = str(event.get("account.name") or "").casefold()
+        if account == "sid:s-1-5-18" or name.endswith("$") or account.startswith("name:") and account.endswith("$"):
+            return []
         try:
             address = ipaddress.ip_address(str(event.get("source.ip")))
         except ValueError:
@@ -199,12 +237,14 @@ class KerberosLoopbackLogon(_Housekeeping):
         if not (address.is_loopback or getattr(address, "ipv4_mapped", None) and address.ipv4_mapped.is_loopback):
             return []
         return self.report(event, "Windows recorded a Kerberos network logon naming a loopback source",
-                           ("auth.logon_type", "auth.package", "source.ip", "auth.target_account"), high=True,
+                           ("auth.logon_type", "auth.package", "source.ip", "auth.target_account", "account.name"),
+                           high=re.fullmatch(r"sid:s-1-5-21-\d+-\d+-\d+-500", account) is not None,
                            notes=("The logon does not by itself establish ticket forgery, relay or a privilege change.",))
 
 
-class UnexpectedPsRemoteServer(_Housekeeping):
+class UnexpectedPsRemoteServer(_FoldedHousekeeping):
     id = "win.unexpected_ps_remote_server"
+    version = "2"
     title = "PowerShell server mode was launched by an unexpected parent"
     families = ("process_exec",)
     windows_event_classes = _PROCESS
@@ -214,6 +254,7 @@ class UnexpectedPsRemoteServer(_Housekeeping):
     severity = "high"
     lane = "high"
     research = ("https://github.com/PowerShell/PowerShell/blob/master/src/Microsoft.PowerShell.ConsoleHost/host/msh/CommandLineParameterParser.cs",)
+    fold_caveat = "Server-mode startup is observed; a remote session or command outcome is not established."
 
     def observe(self, event):
         image = event.get("process.executable_key") or event.get("process.executable")
@@ -224,9 +265,13 @@ class UnexpectedPsRemoteServer(_Housekeeping):
             raise Undecided("parent", "PowerShell -s server mode was requested; its parent is unresolved")
         if basename(parent) in {"wsmprovhost.exe", "sshd.exe"}:
             return []
-        return self.report(event, f"PowerShell server mode was requested by recorded parent '{self.describe(parent)}'",
-                           _PROC_FIELDS, high=True,
-                           notes=("Server-mode startup is observed; a remote session or command outcome is not established.",))
+        job_parent = basename(parent) in {"powershell.exe", "pwsh.exe", "powershell_ise.exe"}
+        text = f"PowerShell server mode was requested by recorded parent '{self.describe(parent)}'"
+        if job_parent:
+            text += "; ordinary PowerShell Start-Job can launch this out-of-process job host"
+        return self.report(event, text, _PROC_FIELDS, high=not job_parent, notes=(self.fold_caveat,),
+                           fold=(windows_path_key(image), windows_path_key(parent),
+                                 _folded(event.get("process.command_line"))))
 
 
 class BitsLocalTransfer(_Housekeeping):
@@ -248,23 +293,29 @@ class BitsLocalTransfer(_Housekeeping):
                            notes=("The recorded source does not establish API acceptance, transfer success, payload execution or unauthorized use.",))
 
 
-class BitsUnusualCreator(_Housekeeping):
+class BitsUnusualCreator(_FoldedHousekeeping):
     id = "win.bits_unusual_creator"
+    version = "2"
     title = "A BITS job names an unusual creator image or a writable-indicator location"
     families = ("remote_access",)
     windows_event_classes = ((BITS_CHANNEL, BITS_PROVIDER, 3),)
     attack = ("T1197",)
     research = ("https://learn.microsoft.com/windows/win32/bits/background-intelligent-transfer-service-portal",)
+    fold_caveat = "This image-path heuristic does not measure rarity or establish malicious use; legitimate updaters also create BITS jobs."
 
     def observe(self, event):
         image = _image_identity(event.get("bits.process_path_key") or event.get("bits.process_path"))
         if not image:
-            raise Undecided("creator", "The BITS job creator image is unresolved; no usable process path was recorded")
-        if basename(image) in {"svchost.exe", "bitsadmin.exe", "powershell.exe", "pwsh.exe"} and not writable(image):
+            text = "The BITS job creator image is unresolved; no usable process path was recorded"
+            self.note_limit("creator", text)
+            return self.report(event, text, ("bits.process_path", "bits.owner", "bits.job_name", "bits.job_id"),
+                               notes=(self.fold_caveat,), fold=("creator_missing",))
+        if _usual_bits_client(image):
             return []
-        return self.report(event, f"A BITS job names creator image '{self.describe(image)}' outside the usual client names or in a writable-indicator location",
-                           ("bits.process_path", "bits.process_id", "bits.owner", "bits.job_name", "bits.job_id"),
-                           notes=("This image-name/path heuristic does not measure rarity or establish malicious use; legitimate updaters also create BITS jobs.",))
+        image = windows_path_key(image)
+        return self.report(event, f"A BITS job names creator image '{self.describe(image)}' outside the usual installed client paths",
+                           ("bits.process_path", "bits.process_path_key", "bits.process_id", "bits.owner", "bits.job_name", "bits.job_id"),
+                           notes=(self.fold_caveat,), fold=(image,))
 
 
 class RunMruDeletion(_Housekeeping):
@@ -285,8 +336,9 @@ class RunMruDeletion(_Housekeeping):
                            notes=("Routine history cleanup can produce this observation; intent is not established.",))
 
 
-class HiddenFileAttribute(_Housekeeping):
+class HiddenFileAttribute(_FoldedHousekeeping):
     id = "win.hidden_file_attribute"
+    version = "2"
     title = "The attrib utility was asked to set the hidden attribute"
     families = ("process_exec",)
     windows_event_classes = _PROCESS
@@ -295,13 +347,14 @@ class HiddenFileAttribute(_Housekeeping):
     attack = ("T1564.001",)
     severity = "low"
     research = ("https://learn.microsoft.com/windows-server/administration/windows-commands/attrib",)
+    fold_caveat = "The command request does not establish that any file attribute changed."
 
     def observe(self, event):
         image = event.get("process.executable_key") or event.get("process.executable")
         if basename(image) != "attrib.exe" or "+h" not in _arguments(event)[1:]:
             return []
         return self.report(event, "A recorded attrib command requested the hidden file attribute", _PROC_FIELDS, low=True,
-                           notes=("The command request does not establish that any file attribute changed.",))
+                           notes=(self.fold_caveat,), fold=(windows_path_key(image),))
 
 
 class ExecutionPolicyRegistry(_Housekeeping):
@@ -347,8 +400,9 @@ class NewServerShare(_Housekeeping):
                            notes=("The write may create or update a share; a newly active share or enumeration is not established.",))
 
 
-class EventlogWerfault(_Housekeeping):
+class EventlogWerfault(_FoldedHousekeeping):
     id = "win.eventlog_werfault"
+    version = "2"
     title = "WerFault was launched to report the EventLog service host"
     families = ("process_exec",)
     windows_event_classes = _PROCESS
@@ -357,6 +411,7 @@ class EventlogWerfault(_Housekeeping):
     attack = ("T1685.001",)
     severity = "low"
     research = ("https://learn.microsoft.com/windows/win32/wer/", _SYSMON_DOC)
+    fold_caveat = "Error reporting is observed; a service failure may be accidental, and deliberate logging interference is not established."
 
     def observe(self, event):
         image = event.get("process.executable_key") or event.get("process.executable")
@@ -371,7 +426,7 @@ class EventlogWerfault(_Housekeeping):
             return []
         return self.report(event, "WerFault was launched with the recorded EventLog service-host parent PID as its report target",
                            _PROC_FIELDS, low=True,
-                           notes=("Error reporting is observed; a service failure may be accidental, and deliberate logging interference is not established.",))
+                           notes=(self.fold_caveat,), fold=(windows_path_key(image),))
 
 
 class WinrmShellStart(_Housekeeping):

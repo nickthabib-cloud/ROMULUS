@@ -8,6 +8,8 @@ rules are positive-only: a window without the shape is not evidence that none oc
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import ClassVar
 
 from romulus.detect.windows_cmdline import is_remote_path, parse_cmd_payload, split_argv
@@ -38,7 +40,7 @@ _REMOTE_PARENTS = {
 
 class RemoteExecutionParent(WindowsProcessRule):
     id = "win.remote_execution_child"
-    version = "10"
+    version = "11"
     title = "a process was started by WMI, WinRM or a remote-execution service"
     uses_parent = True
     parent_images = frozenset(_REMOTE_PARENTS)
@@ -80,6 +82,20 @@ class RemoteExecutionParent(WindowsProcessRule):
     def candidate_child(self, event):
         # Non-runner WMI/WinRM children also need deferred pid-parent resolution.
         return True
+
+    def _shape(self, event, hit):
+        if hit.lane == 'lead' and hit.behavior == 'remote_execution_child':
+            material = [self.id, event.host, hit.parent_name, event.get('process.executable_key')]
+            return hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()[:32]
+        return super()._shape(event, hit)
+
+    def record_match(self, event, hit):
+        match = super().record_match(event, hit)
+        if hit.lane == 'lead' and hit.behavior == 'remote_execution_child':
+            # The first observation and its bounded rollup share a publication identity.
+            match.group_key = f'{self.id}|fleet|{self._shape(event, hit)}'
+            match.bounded_revision = True
+        return match
 
     def judge(self, event: TypedEvent) -> list[Hit]:
         child_name, why = image_name(event.get("process.executable_key"))

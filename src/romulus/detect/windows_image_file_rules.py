@@ -1,15 +1,20 @@
 """Typed Sysmon process-image and file-writer observations; filenames do not prove payload contents."""
 from __future__ import annotations
 
+import json
 import ntpath
+import re
 
+from romulus.detect.windows_behavior import BehaviorFleetRule
 from romulus.detect.windows_events import (
     WindowsEventRule,
     basename,
     components,
     local_path_components,
     signal,
+    writable,
 )
+from romulus.detect.windows_path_data import has_short_name, installation_parts, path_class
 from romulus.evidence.windows_catalog import SYSMON, SYSMON_CHANNEL
 
 # Suffixes accepted for an OS-recorded process image, not a PATHEXT or argv list.
@@ -43,6 +48,17 @@ PROCESS_IMAGE_SUFFIXES = {
 _IMAGE_FIELDS = ("process.executable", "process.executable_key")
 _FILE_FIELDS = (*_IMAGE_FIELDS, "process.pid", "file.path", "file.path_key", "file.action")
 _SYSMON_DOC = "https://learn.microsoft.com/sysinternals/downloads/sysmon#events"
+_PARENT_FIELDS = ("process.parent.executable", "process.parent.executable_key")
+# Native image suffix conventions, rather than the installer/launch descriptors
+# also accepted by the process-image naming rule. No file headers are inspected.
+_PE_SUFFIXES = PROCESS_IMAGE_SUFFIXES.keys() - {".msi", ".pif"}
+_SID = re.compile(r"s-\d+(?:-\d+)+", re.ASCII)
+_KEY_GUID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", re.ASCII)
+# ESE's default AD database/log/checkpoint names, including rollover log names:
+# https://learn.microsoft.com/windows/win32/extensible-storage-engine/extensible-storage-engine-files
+_ESE_FILE = re.compile(
+    r"(?:ntds\.dit(?:\.jfm)?|temp\.edb|edb(?:tmp|[0-9a-f]{5,8})?\.(?:log|jtx)|"
+    r"edb\.(?:chk|jcp)|edbres[0-9]{5}\.jrs|res[12]\.log)", re.ASCII)
 
 
 def _path(event, stem):
@@ -98,6 +114,105 @@ def _sysmon(event, code, family):
             and str(event.get("event.channel") or "").casefold() == SYSMON_CHANNEL.casefold())
 
 
+def _directory(path):
+    return ntpath.dirname(_normalized_path(path)) or "<unresolved-directory>"
+
+
+def _system_image(path, name):
+    return installation_parts(path) in {
+        ("windows", system, name) for system in ("system32", "syswow64", "sysnative")}
+
+
+def _profile_tail(local, installed, aliases=()):
+    """The recorded roaming application-data suffix of a standard profile path."""
+    if aliases[:1] == ("%appdata%",):
+        return aliases[1:]
+    if aliases[:3] == ("%userprofile%", "appdata", "roaming"):
+        return aliases[3:]
+    if len(local) > 4 and local[0] == "users" and local[2:4] == ("appdata", "roaming"):
+        return local[4:]
+    for prefix in (
+        ("windows", "serviceprofiles", "localservice", "appdata", "roaming"),
+        ("windows", "serviceprofiles", "networkservice", "appdata", "roaming"),
+        *(("windows", system, "config", "systemprofile", "appdata", "roaming")
+          for system in ("system32", "syswow64", "sysnative")),
+    ):
+        if installed[:len(prefix)] == prefix:
+            return installed[len(prefix):]
+    return ()
+
+
+def _lsass_store(path):
+    """Recognize store path shapes, never a host's DC role or service authorization."""
+    if has_short_name(path):
+        return False
+    normalized = _normalized_path(path)
+    aliases = components(normalized)
+    local = local_path_components(normalized) if re.match(r"[a-z]:\\", normalized) else ()
+    installed = installation_parts(normalized)
+    name = basename(normalized)
+    # A data-volume NTDS root is conventional too. Arbitrary custom directory
+    # names need site facts; a directory merely containing "NTDS" is not enough.
+    if ((len(local) == 2 and local[0] == "ntds"
+         or len(installed) == 3 and installed[:2] == ("windows", "ntds"))
+            and _ESE_FILE.fullmatch(name)):
+        return True
+    if installed[:2] == ("windows", "debug") and len(installed) == 3 and name.startswith("netlogon."):
+        return True
+    tail = _profile_tail(local, installed, aliases)
+    if tail[:2] == ("microsoft", "protect"):
+        tail = tail[2:]
+    else:
+        tail = next((installed[4:] for system in ("system32", "syswow64", "sysnative")
+                     if installed[:4] == ("windows", system, "microsoft", "protect")), ())
+    if tail and _SID.fullmatch(tail[0]):
+        rest = tail[1:]
+        if rest[:1] in {("user",), ("machine",)}:
+            rest = rest[1:]
+        if len(rest) == 1:
+            key = rest[0][1:-1] if rest[0].startswith("{") and rest[0].endswith("}") else rest[0]
+            if rest[0] == "preferred" or _KEY_GUID.fullmatch(key):
+                return True
+    # CNG paths: https://learn.microsoft.com/windows/win32/seccng/key-storage-and-retrieval
+    roaming = _profile_tail(local, installed, aliases)
+    common = installed
+    if aliases[:1] == ("%programdata%",):
+        common = ("programdata", *aliases[1:])
+    elif aliases[:1] == ("%allusersprofile%",):
+        tail = aliases[1:]
+        common = ("programdata", *(tail[1:] if tail[:1] == ("application data",) else tail))
+    elif local[:3] == ("documents and settings", "all users", "application data"):
+        common = ("programdata", *local[3:])
+    return ((len(common) == 5 and common[:3] == ("programdata", "microsoft", "crypto")
+             and common[3] in {"keys", "systemkeys"})
+            or (len(roaming) == 4 and roaming[:2] == ("microsoft", "crypto")
+                and roaming[2] in {"keys", "systemkeys"}))
+
+
+def _file_path_with_system_root(path):
+    resolved = _resolved_file(path)
+    if resolved:
+        return resolved
+    # Explicit SystemRoot/WinDir aliases identify the system root without
+    # guessing that a remote share or arbitrary data volume is the system drive.
+    installed = installation_parts(path)
+    normalized = _normalized_path(path)
+    parts = components(normalized)
+    explicit = parts[:1] in {("%systemroot%",), ("%windir%",), ("systemroot",), ("%systemdrive%",)}
+    return (normalized if explicit and len(installed) > 1 and ":" not in basename(path)
+            and not any("%" in part for part in parts[1:]) else "")
+
+
+def _image_directory_class(path):
+    value = path_class(path, directory=True)
+    # Inno's documented temporary instance folder is an identity component,
+    # not a reason to suppress a process or to change its lane.
+    # https://jrsoftware.org/ishelp/topic_consts.htm
+    if writable(path) and "temp" in components(path):
+        value = re.sub(r"(?<=\\)is-[a-z0-9]+(?:-uninstall)?\.tmp(?=\\|$)", "is-<instance>.tmp", value)
+    return value
+
+
 class ClientDriveProcess(WindowsEventRule):
     id = "win.client_drive_process"
     title = "Process image recorded on an RDP redirected client drive"
@@ -120,8 +235,9 @@ class ClientDriveProcess(WindowsEventRule):
                        self.attack, _IMAGE_FIELDS, lane="high", severity="high", content=path)]
 
 
-class NonExecutableProcessImage(WindowsEventRule):
+class NonExecutableProcessImage(BehaviorFleetRule):
     id = "win.non_executable_process_image"
+    version = "2"
     title = "Process image has an extension outside native executable conventions"
     families = ("process_exec",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 1),)
@@ -137,14 +253,19 @@ class NonExecutableProcessImage(WindowsEventRule):
         suffix = _suffix(path)
         if not path or not suffix or suffix in PROCESS_IMAGE_SUFFIXES:
             return []
+        parent = path_class(_path(event, "process.parent.executable"))
+        directory = _image_directory_class(path)
         return [signal(event, "non_executable_image_suffix",
                        f"Sysmon recorded process image '{self.describe(path)}' with extension '{self.describe(suffix)}' outside native executable conventions",
-                       self.attack, _IMAGE_FIELDS, content=path,
+                       self.attack, (*_IMAGE_FIELDS, *_PARENT_FIELDS),
+                       content=json.dumps([suffix, parent, directory]),
+                       common=f"Process images had suffix '{suffix}', parent image class '{parent}' and directory class '{directory}'",
                        notes=("The recorded image extension is unusual; the file format and malicious intent are unconfirmed.",))]
 
 
-class LsassFileWrite(WindowsEventRule):
+class LsassFileWrite(BehaviorFleetRule):
     id = "win.lsass_file_write"
+    version = "2"
     title = "LSASS process recorded creating or overwriting a file"
     families = ("file_change",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 11),)
@@ -159,14 +280,24 @@ class LsassFileWrite(WindowsEventRule):
         if (not _sysmon(event, 11, "file_change") or not path
                 or basename(_path(event, "process.executable")) != "lsass.exe"):
             return []
+        routine = _system_image(_path(event, "process.executable"), "lsass.exe") and _lsass_store(path)
+        directory = _directory(path)
         return [signal(event, "lsass_file_write",
                        f"Sysmon recorded LSASS creating or overwriting file '{self.describe(path)}'",
-                       self.attack, _FILE_FIELDS, lane="high", severity="high", content=path.casefold(),
+                       self.attack, _FILE_FIELDS, lane="lead" if routine else "high",
+                       severity="medium" if routine else "high",
+                       content=json.dumps([event.host, directory]) if routine else path.casefold(),
+                       common=(f"LSASS file writes named a normal-store path shape in directory '{directory}'"
+                               if routine else ""),
                        notes=("A file write by the recorded LSASS image does not alone establish an installed malicious SSP.",))]
 
+    def fleet_eligible(self, event, hit):
+        return hit.lane == "lead"
 
-class SystemBinaryFileWrite(WindowsEventRule):
+
+class SystemBinaryFileWrite(BehaviorFleetRule):
     id = "win.system_binary_file_write"
+    version = "2"
     title = "System pid 4 recorded writing a native binary"
     families = ("file_change",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 11),)
@@ -187,12 +318,14 @@ class SystemBinaryFileWrite(WindowsEventRule):
             return []
         return [signal(event, "system_binary_file_write",
                        f"Sysmon recorded System pid 4 creating or overwriting binary file '{self.describe(path)}'",
-                       self.attack, _FILE_FIELDS, content=path.casefold(),
+                       self.attack, _FILE_FIELDS, content=json.dumps([event.host, _directory(path), _suffix(path)]),
+                       common=f"System pid 4 wrote binary-named files with suffix '{_suffix(path)}' in directory '{_directory(path)}'",
                        notes=("Kernel-mediated creation can accompany SMB transfer; the record alone does not identify a remote sender.",))]
 
 
-class SpoolerFileWriteOutsideSpool(WindowsEventRule):
+class SpoolerFileWriteOutsideSpool(BehaviorFleetRule):
     id = "win.spooler_file_write_outside_spool"
+    version = "2"
     title = "Print spooler recorded writing outside a spool directory"
     families = ("file_change",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 11),)
@@ -203,19 +336,31 @@ class SpoolerFileWriteOutsideSpool(WindowsEventRule):
                 "https://msrc.microsoft.com/update-guide/vulnerability/CVE-2021-34527")
 
     def judge(self, event):
-        path = _resolved_file(_path(event, "file.path"))
+        path = _file_path_with_system_root(_path(event, "file.path"))
         if (not _sysmon(event, 11, "file_change") or not path
                 or basename(_path(event, "process.executable")) != "spoolsv.exe"
                 or "spool" in components(path)[:-1]):
             return []
+        installed = installation_parts(path)
+        system_temp = len(installed) > 2 and installed[:2] == ("windows", "temp")
+        high = _suffix(path) in _PE_SUFFIXES and not system_temp
+        directory = _directory(path)
         return [signal(event, "spooler_outside_spool",
                        f"Sysmon recorded spoolsv.exe creating or overwriting file '{self.describe(path)}' outside a spool directory",
-                       self.attack, _FILE_FIELDS, lane="high", severity="high", content=path,
+                       self.attack, _FILE_FIELDS, lane="high" if high else "lead",
+                       severity="high" if high else "medium",
+                       content=path if high else json.dumps([event.host, _suffix(path), directory]),
+                       common=(f"Spoolsv.exe file writes had suffix '{_suffix(path) or '<no-extension>'}' in directory '{directory}'"
+                               if not high else ""),
                        notes=("The file write is observed; successful exploitation is unconfirmed.",))]
+
+    def fleet_eligible(self, event, hit):
+        return hit.lane == "lead"
 
 
 class VolumeRootExecutableWrite(WindowsEventRule):
     id = "win.volume_root_executable_write"
+    version = "2"
     title = "Native executable artifact created at a local volume root"
     families = ("file_change",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 11),)
@@ -227,7 +372,7 @@ class VolumeRootExecutableWrite(WindowsEventRule):
     def judge(self, event):
         path = _resolved_file(_path(event, "file.path"))
         if (not _sysmon(event, 11, "file_change") or not path
-                or len(local_path_components(path)) != 1 or _suffix(path) not in PROCESS_IMAGE_SUFFIXES):
+                or len(local_path_components(path)) != 1 or _suffix(path) not in {".exe", ".com"}):
             return []
         return [signal(event, "volume_root_executable",
                        f"Sysmon recorded executable-named file '{self.describe(path)}' created or overwritten at a local volume root",
