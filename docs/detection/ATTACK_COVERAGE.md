@@ -302,8 +302,8 @@ A technique is covered only by a rule that explicitly declares that ATT&CK id.
 | [`T1056`](https://attack.mitre.org/techniques/T1056/) | Input Capture | [`T1056.001`](https://attack.mitre.org/techniques/T1056/001/) Keylogging — not covered<br>[`T1056.002`](https://attack.mitre.org/techniques/T1056/002/) GUI Input Capture — not covered<br>[`T1056.004`](https://attack.mitre.org/techniques/T1056/004/) Credential API Hooking — not covered<br>1 covered sub-technique(s) listed separately: [`T1056.003`](https://attack.mitre.org/techniques/T1056/003/) | none | — | — |
 | [`T1056.003`](https://attack.mitre.org/techniques/T1056/003/) | Web Portal Capture | sub-technique of [`T1056`](https://attack.mitre.org/techniques/T1056/) | positive-only | [win.script_credential_harvest](#rule-win-script-credential-harvest) (positive-only) | script_block |
 | [`T1110`](https://attack.mitre.org/techniques/T1110/) | Brute Force | [`T1110.002`](https://attack.mitre.org/techniques/T1110/002/) Password Cracking — not covered<br>[`T1110.004`](https://attack.mitre.org/techniques/T1110/004/) Credential Stuffing — not covered<br>2 covered sub-technique(s) listed separately: [`T1110.001`](https://attack.mitre.org/techniques/T1110/001/), [`T1110.003`](https://attack.mitre.org/techniques/T1110/003/) | positive-only | [host.ssh_success_after_failures](#rule-host-ssh-success-after-failures) (positive-only) | auth |
-| [`T1110.001`](https://attack.mitre.org/techniques/T1110/001/) | Password Guessing | sub-technique of [`T1110`](https://attack.mitre.org/techniques/T1110/) | positive-only | [host.ssh_password_guessing](#rule-host-ssh-password-guessing) (positive-only)<br>[net.ntlm_password_guessing](#rule-net-ntlm-password-guessing) (positive-only)<br>[net.zeek_alert](#rule-net-zeek-alert) (positive-only)<br>[win.brute_force](#rule-win-brute-force) (positive-only)<br>[win.distributed_auth_failures](#rule-win-distributed-auth-failures) (positive-only)<br>[win.mssql_login_bruteforce](#rule-win-mssql-login-bruteforce) (positive-only) | auth<br>database_audit<br>net_alert<br>ntlm_tx |
-| [`T1110.003`](https://attack.mitre.org/techniques/T1110/003/) | Password Spraying | sub-technique of [`T1110`](https://attack.mitre.org/techniques/T1110/) | positive-only | [host.ssh_password_spraying](#rule-host-ssh-password-spraying) (positive-only)<br>[net.ntlm_password_spray](#rule-net-ntlm-password-spray) (positive-only)<br>[win.mssql_login_bruteforce](#rule-win-mssql-login-bruteforce) (positive-only)<br>[win.password_spray](#rule-win-password-spray) (positive-only) | auth<br>database_audit<br>ntlm_tx |
+| [`T1110.001`](https://attack.mitre.org/techniques/T1110/001/) | Password Guessing | sub-technique of [`T1110`](https://attack.mitre.org/techniques/T1110/) | positive-only | [host.ssh_password_guessing](#rule-host-ssh-password-guessing) (positive-only)<br>[net.zeek_alert](#rule-net-zeek-alert) (positive-only)<br>[win.brute_force](#rule-win-brute-force) (positive-only)<br>[win.distributed_auth_failures](#rule-win-distributed-auth-failures) (positive-only)<br>[win.mssql_login_bruteforce](#rule-win-mssql-login-bruteforce) (positive-only) | auth<br>database_audit<br>net_alert |
+| [`T1110.003`](https://attack.mitre.org/techniques/T1110/003/) | Password Spraying | sub-technique of [`T1110`](https://attack.mitre.org/techniques/T1110/) | positive-only | [host.ssh_password_spraying](#rule-host-ssh-password-spraying) (positive-only)<br>[win.mssql_login_bruteforce](#rule-win-mssql-login-bruteforce) (positive-only)<br>[win.password_spray](#rule-win-password-spray) (positive-only) | auth<br>database_audit |
 | [`T1111`](https://attack.mitre.org/techniques/T1111/) | Multi-Factor Authentication Interception | — | none | — | — |
 | [`T1187`](https://attack.mitre.org/techniques/T1187/) | Forced Authentication | — | positive-only | [win.remote_management_pipe](#rule-win-remote-management-pipe) (positive-only)<br>[win.rpc_coercion_call](#rule-win-rpc-coercion-call) (positive-only) | rpc_call<br>share_access |
 | [`T1212`](https://attack.mitre.org/techniques/T1212/) | Exploitation for Credential Access | — | none | — | — |
@@ -321,7 +321,7 @@ A technique is covered only by a rule that explicitly declares that ATT&CK id.
 | [`T1556.003`](https://attack.mitre.org/techniques/T1556/003/) | Pluggable Authentication Modules | sub-technique of [`T1556`](https://attack.mitre.org/techniques/T1556/) | positive-only | [host.persistence_path_change](#rule-host-persistence-path-change) (positive-only) | file_change<br>process_exec |
 | [`T1557`](https://attack.mitre.org/techniques/T1557/) | Adversary-in-the-Middle | [`T1557.001`](https://attack.mitre.org/techniques/T1557/001/) Name Resolution Poisoning and SMB Relay — not covered<br>[`T1557.002`](https://attack.mitre.org/techniques/T1557/002/) ARP Cache Poisoning — not covered<br>[`T1557.003`](https://attack.mitre.org/techniques/T1557/003/) DHCP Spoofing — not covered<br>[`T1557.004`](https://attack.mitre.org/techniques/T1557/004/) Evil Twin — not covered | none | — | — |
 | [`T1558`](https://attack.mitre.org/techniques/T1558/) | Steal or Forge Kerberos Tickets | [`T1558.001`](https://attack.mitre.org/techniques/T1558/001/) Golden Ticket — not covered<br>[`T1558.002`](https://attack.mitre.org/techniques/T1558/002/) Silver Ticket — not covered<br>[`T1558.005`](https://attack.mitre.org/techniques/T1558/005/) Ccache Files — not covered<br>2 covered sub-technique(s) listed separately: [`T1558.003`](https://attack.mitre.org/techniques/T1558/003/), [`T1558.004`](https://attack.mitre.org/techniques/T1558/004/) | positive-only | [win.kerberos_loopback_logon](#rule-win-kerberos-loopback-logon) (positive-only)<br>[win.tool_named_pipe](#rule-win-tool-named-pipe) (positive-only)<br>[win.weak_kerberos_ticket_encryption](#rule-win-weak-kerberos-ticket-encryption) (positive-only) | auth<br>pipe_event |
-| [`T1558.003`](https://attack.mitre.org/techniques/T1558/003/) | Kerberoasting | sub-technique of [`T1558`](https://attack.mitre.org/techniques/T1558/) | positive-only | [net.kerberos_rc4_service_fanout](#rule-net-kerberos-rc4-service-fanout) (positive-only)<br>[win.kerberos_service_fanout](#rule-win-kerberos-service-fanout) (positive-only)<br>[win.weak_kerberos_ticket_encryption](#rule-win-weak-kerberos-ticket-encryption) (positive-only) | auth<br>kerberos_tx |
+| [`T1558.003`](https://attack.mitre.org/techniques/T1558/003/) | Kerberoasting | sub-technique of [`T1558`](https://attack.mitre.org/techniques/T1558/) | positive-only | [win.kerberos_service_fanout](#rule-win-kerberos-service-fanout) (positive-only)<br>[win.weak_kerberos_ticket_encryption](#rule-win-weak-kerberos-ticket-encryption) (positive-only) | auth |
 | [`T1558.004`](https://attack.mitre.org/techniques/T1558/004/) | AS-REP Roasting | sub-technique of [`T1558`](https://attack.mitre.org/techniques/T1558/) | positive-only | [win.kerberos_no_preauthentication](#rule-win-kerberos-no-preauthentication) (positive-only) | auth |
 | [`T1606`](https://attack.mitre.org/techniques/T1606/) | Forge Web Credentials | [`T1606.001`](https://attack.mitre.org/techniques/T1606/001/) Web Cookies — not covered<br>[`T1606.002`](https://attack.mitre.org/techniques/T1606/002/) SAML Tokens — not covered | none | — | — |
 | [`T1621`](https://attack.mitre.org/techniques/T1621/) | Multi-Factor Authentication Request Generation | — | none | — | — |
@@ -349,7 +349,7 @@ A technique is covered only by a rule that explicitly declares that ATT&CK id.
 | [`T1083`](https://attack.mitre.org/techniques/T1083/) | File and Directory Discovery | — | context-only | [context.post_access_discovery](#rule-context-post-access-discovery) (context-only) | process_exec |
 | [`T1087`](https://attack.mitre.org/techniques/T1087/) | Account Discovery | [`T1087.003`](https://attack.mitre.org/techniques/T1087/003/) Email Account — not covered<br>[`T1087.004`](https://attack.mitre.org/techniques/T1087/004/) Cloud Account — not covered<br>2 covered sub-technique(s) listed separately: [`T1087.001`](https://attack.mitre.org/techniques/T1087/001/), [`T1087.002`](https://attack.mitre.org/techniques/T1087/002/) | context-only | [context.post_access_discovery](#rule-context-post-access-discovery) (context-only) | process_exec |
 | [`T1087.001`](https://attack.mitre.org/techniques/T1087/001/) | Local Account | sub-technique of [`T1087`](https://attack.mitre.org/techniques/T1087/) | positive-only | [win.sam_admin_enumeration](#rule-win-sam-admin-enumeration) (positive-only) | object_access<br>security_enumeration |
-| [`T1087.002`](https://attack.mitre.org/techniques/T1087/002/) | Domain Account | sub-technique of [`T1087`](https://attack.mitre.org/techniques/T1087/) | positive-only | [net.kerberos_principal_enumeration](#rule-net-kerberos-principal-enumeration) (positive-only)<br>[net.zeek_alert](#rule-net-zeek-alert) (positive-only)<br>[win.sam_admin_enumeration](#rule-win-sam-admin-enumeration) (positive-only) | kerberos_tx<br>net_alert<br>object_access<br>security_enumeration |
+| [`T1087.002`](https://attack.mitre.org/techniques/T1087/002/) | Domain Account | sub-technique of [`T1087`](https://attack.mitre.org/techniques/T1087/) | positive-only | [net.zeek_alert](#rule-net-zeek-alert) (positive-only)<br>[win.sam_admin_enumeration](#rule-win-sam-admin-enumeration) (positive-only) | net_alert<br>object_access<br>security_enumeration |
 | [`T1120`](https://attack.mitre.org/techniques/T1120/) | Peripheral Device Discovery | — | context-only | [context.post_access_discovery](#rule-context-post-access-discovery) (context-only) | process_exec |
 | [`T1124`](https://attack.mitre.org/techniques/T1124/) | System Time Discovery | — | none | — | — |
 | [`T1135`](https://attack.mitre.org/techniques/T1135/) | Network Share Discovery | — | positive-only | [context.post_access_discovery](#rule-context-post-access-discovery) (context-only)<br>[net.zeek_alert](#rule-net-zeek-alert) (positive-only)<br>[win.new_server_share](#rule-win-new-server-share) (positive-only)<br>[win.smb_host_discovery](#rule-win-smb-host-discovery) (positive-only) | net_alert<br>net_socket<br>process_exec<br>registry_change |
@@ -385,7 +385,7 @@ A technique is covered only by a rule that explicitly declares that ATT&CK id.
 | [`T1072`](https://attack.mitre.org/techniques/T1072/) | Software Deployment Tools | — | none | — | — |
 | [`T1080`](https://attack.mitre.org/techniques/T1080/) | Taint Shared Content | — | none | — | — |
 | [`T1091`](https://attack.mitre.org/techniques/T1091/) | Replication Through Removable Media | — | none | — | — |
-| [`T1210`](https://attack.mitre.org/techniques/T1210/) | Exploitation of Remote Services | — | positive-only | [net.netlogon_authentication_burst](#rule-net-netlogon-authentication-burst) (positive-only)<br>[net.rpc_remote_admin_call](#rule-net-rpc-remote-admin-call) (positive-only)<br>[net.zeek_alert](#rule-net-zeek-alert) (positive-only)<br>[win.rdp_bluekeep_channel](#rule-win-rdp-bluekeep-channel) (positive-only)<br>[win.rpc_remote_admin_call](#rule-win-rpc-remote-admin-call) (positive-only) | net_alert<br>remote_access<br>rpc_call<br>rpc_tx |
+| [`T1210`](https://attack.mitre.org/techniques/T1210/) | Exploitation of Remote Services | — | positive-only | [net.rpc_remote_admin_call](#rule-net-rpc-remote-admin-call) (positive-only)<br>[net.zeek_alert](#rule-net-zeek-alert) (positive-only)<br>[win.rdp_bluekeep_channel](#rule-win-rdp-bluekeep-channel) (positive-only)<br>[win.rpc_remote_admin_call](#rule-win-rpc-remote-admin-call) (positive-only) | net_alert<br>remote_access<br>rpc_call<br>rpc_tx |
 | [`T1534`](https://attack.mitre.org/techniques/T1534/) | Internal Spearphishing | — | none | — | — |
 | [`T1550`](https://attack.mitre.org/techniques/T1550/) | Use Alternate Authentication Material | [`T1550.001`](https://attack.mitre.org/techniques/T1550/001/) Application Access Token — not covered<br>[`T1550.003`](https://attack.mitre.org/techniques/T1550/003/) Pass the Ticket — not covered<br>[`T1550.004`](https://attack.mitre.org/techniques/T1550/004/) Web Session Cookie — not covered<br>1 covered sub-technique(s) listed separately: [`T1550.002`](https://attack.mitre.org/techniques/T1550/002/) | none | — | — |
 | [`T1550.002`](https://attack.mitre.org/techniques/T1550/002/) | Pass the Hash | sub-technique of [`T1550`](https://attack.mitre.org/techniques/T1550/) | positive-only | [win.hash_logon_shape](#rule-win-hash-logon-shape) (positive-only) | auth |
@@ -1102,30 +1102,6 @@ Invalid mappings are excluded from coverage:
 - Behavior: one endpoint pair exchanged bulk ICMP echo payload, materially asymmetric request/reply payload, nonstandard echo codes, or echo traffic sustained for at least 30 minutes at one request/reply exchange per second with payload above normal operating-system defaults
 - Positive-only reason: only typed echo type/code (with code optional where the sensor does not record it) plus complete byte/packet counters are evaluated; flow telemetry does not expose payload bytes, so packet-size and volume shape cannot establish payload entropy or prove a tunnel
 
-<a id="rule-net-kerberos-principal-enumeration"></a>
-### `net.kerberos_principal_enumeration` — KDC unknown-principal errors for many distinct principals
-
-- Version: `2`; status: `active`
-- Kind: `aggregate`; lane: `lead`; severity: `medium`
-- Coverage strength: **positive-only**
-- ATT&CK: [`T1087.002`](https://attack.mitre.org/techniques/T1087/002/)
-- Telemetry families: kerberos_tx
-- Required typed fields: source.ip
-- Behavior: KDC unknown-principal errors for many distinct principals
-- Positive-only reason: Zeek window observations are positive-only; missing outcomes and partial sensor visibility cannot establish absence.
-
-<a id="rule-net-kerberos-rc4-service-fanout"></a>
-### `net.kerberos_rc4_service_fanout` — TGS exchanges with RC4 ticket encryption for many services
-
-- Version: `2`; status: `active`
-- Kind: `aggregate`; lane: `lead`; severity: `medium`
-- Coverage strength: **positive-only**
-- ATT&CK: [`T1558.003`](https://attack.mitre.org/techniques/T1558/003/)
-- Telemetry families: kerberos_tx
-- Required typed fields: source.ip
-- Behavior: TGS exchanges with RC4 ticket encryption for many services
-- Positive-only reason: Zeek window observations are positive-only; missing outcomes and partial sensor visibility cannot establish absence.
-
 <a id="rule-net-long-external-connection"></a>
 ### `net.long_external_connection` — Long-lived TCP connection between an internal and a public address
 
@@ -1148,42 +1124,6 @@ Invalid mappings are excluded from coverage:
 - Required typed fields: destination.ip<br>network.transport<br>source.ip
 - Behavior: a connection lasted at least 30 minutes (records stitched across sensors and Arkime save intervals) and carried data both ways, no sensor identified an application protocol on any of its records, and its destination port is registered for no protocol in the table or only for protocols no sensor that recorded it can parse (a sensor that can parse the registered protocol hands the connection to the protocol/port rule)
 - Positive-only reason: 'no identified protocol' is a statement about the sensors' parsers, not about the traffic; a custom or encrypted channel that a parser happens to label is not seen, so the absence of a match proves nothing
-
-<a id="rule-net-netlogon-authentication-burst"></a>
-### `net.netlogon_authentication_burst` — Repeated Netlogon secure-channel authentication calls
-
-- Version: `2`; status: `active`
-- Kind: `aggregate`; lane: `lead`; severity: `medium`
-- Coverage strength: **positive-only**
-- ATT&CK: [`T1210`](https://attack.mitre.org/techniques/T1210/)
-- Telemetry families: rpc_tx
-- Required typed fields: destination.ip<br>source.ip
-- Behavior: Repeated Netlogon secure-channel authentication calls
-- Positive-only reason: Zeek window observations are positive-only; missing outcomes and partial sensor visibility cannot establish absence.
-
-<a id="rule-net-ntlm-password-guessing"></a>
-### `net.ntlm_password_guessing` — Repeated NTLM authentication attempts for one user
-
-- Version: `2`; status: `active`
-- Kind: `aggregate`; lane: `lead`; severity: `medium`
-- Coverage strength: **positive-only**
-- ATT&CK: [`T1110.001`](https://attack.mitre.org/techniques/T1110/001/)
-- Telemetry families: ntlm_tx
-- Required typed fields: source.ip
-- Behavior: Repeated NTLM authentication attempts for one user
-- Positive-only reason: Zeek window observations are positive-only; missing outcomes and partial sensor visibility cannot establish absence.
-
-<a id="rule-net-ntlm-password-spray"></a>
-### `net.ntlm_password_spray` — One source attempted NTLM authentication for many users
-
-- Version: `2`; status: `active`
-- Kind: `aggregate`; lane: `lead`; severity: `medium`
-- Coverage strength: **positive-only**
-- ATT&CK: [`T1110.003`](https://attack.mitre.org/techniques/T1110/003/)
-- Telemetry families: ntlm_tx
-- Required typed fields: source.ip
-- Behavior: One source attempted NTLM authentication for many users
-- Positive-only reason: Zeek window observations are positive-only; missing outcomes and partial sensor visibility cannot establish absence.
 
 <a id="rule-net-outbound-volume-asymmetry"></a>
 ### `net.outbound_volume_asymmetry` — Internal address sent much more data to one external address than it received

@@ -180,7 +180,8 @@ def test_catalog_maps_rules_to_techniques_and_tactic_rollups_deterministically()
     guessing = first.coverage("T1110.001")
     assert "host.ssh_password_guessing" in guessing.rule_ids
     assert guessing.strength is CoverageStrength.POSITIVE_ONLY
-    assert guessing.telemetry_families == ("auth", "database_audit", "net_alert", "ntlm_tx")
+    # ntlm_tx returns with the registered Zeek rate rules
+    assert guessing.telemetry_families == ("auth", "database_audit", "net_alert")
     assert first == second
     assert tuple(item.technique.id for item in first.coverage_by_technique) == tuple(
         sorted(item.technique.id for item in first.coverage_by_technique)

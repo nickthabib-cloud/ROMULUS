@@ -50,8 +50,10 @@ from romulus.detect.windows_sequence_extensions import RULES as WINDOWS_SEQUENCE
 from romulus.detect.windows_tunnels_w4 import RULES as WINDOWS_TUNNEL_RULES
 from romulus.detect.zeek_alerts import ZEEK_ALERT_PLAYBOOKS
 from romulus.detect.zeek_lateral import RULES as ZEEK_LATERAL_PLAYBOOKS
-from romulus.detect.zeek_rates import RULES as ZEEK_RATE_PLAYBOOKS
 from romulus.detect.zeek_smb import RULES as ZEEK_SMB_PLAYBOOKS
+
+# The Zeek rate rules (zeek_rates.RULES) are not registered until their published summaries are monotonic and
+# the spray rule keeps its canonical hit high; their code and tests stay.
 
 PACK_VERSION = "pack@47"
 WINDOWS_PROCESS_PLAYBOOKS = (WINDOWS_LINEAGE_PLAYBOOKS + WINDOWS_PROXY_PLAYBOOKS + WINDOWS_CREDENTIAL_PLAYBOOKS
@@ -81,7 +83,7 @@ ALL_PLAYBOOKS = (HOST_PLAYBOOKS + HIJACK_PLAYBOOKS + KERNEL_FILE_PLAYBOOKS + LIN
                  + CORRELATION_PLAYBOOKS + INDICATOR_PLAYBOOKS + CONTEXT_PLAYBOOKS + PACKET_PLAYBOOKS
                  + WINDOWS_PROCESS_PLAYBOOKS + WINDOWS_HOST_PLAYBOOKS + WINDOWS_DOMAIN_PLAYBOOKS
                  + list(WINDOWS_LINKED_PLAYBOOKS) + list(WINDOWS_SCRIPT_PLAYBOOKS) + ZEEK_ALERT_PLAYBOOKS
-                 + list(ZEEK_LATERAL_PLAYBOOKS) + list(ZEEK_RATE_PLAYBOOKS) + list(ZEEK_SMB_PLAYBOOKS)
+                 + list(ZEEK_LATERAL_PLAYBOOKS) + list(ZEEK_SMB_PLAYBOOKS)
                  + BASELINE_PLAYBOOKS)
 _ANCHOR_CLASSES = {playbook.id: playbook.anchor_class for playbook in ALL_PLAYBOOKS}
 
