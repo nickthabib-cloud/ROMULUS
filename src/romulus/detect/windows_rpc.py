@@ -116,9 +116,11 @@ class RpcReplicationCall(_RpcCall):
         if _is_controller(event, controllers):
             return None, ()
         if any(_is_address(name) for name in controllers):
-            # An address cannot be matched to the logging host's name, so the host may be a declared controller.
-            return 'lead', ('Some domain controllers are declared by address, which cannot be matched to the logging '
-                            'host name; declare them by host name.',)
+            # An address cannot be matched to the logging host's name. The call stays high: a replication client
+            # outside the named controllers is never demoted on an unmatchable declaration.
+            return 'high', (('Some domain controllers are declared by address, which cannot be matched to the '
+                             'logging host name: if this host is one of them, the call is routine. Declare '
+                             'controllers by host name.'),)
         return 'high', ()
 
 

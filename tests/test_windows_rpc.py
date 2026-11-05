@@ -300,17 +300,22 @@ def test_rpc_missing_last_bound_retains_interval_caveat():
     (('WS01.Example.Test.',), 'ws01.example.test', None),
     (('ws01.example.test',), 'ws01', None),
     (('ws01.other.test',), 'ws01.example.test', 'high'),
-    (('10.0.0.5',), 'ws01.example.test', 'lead'),
-    (('dc01', '10.0.0.5'), 'ws01.example.test', 'lead'),
+    (('10.0.0.5',), 'ws01.example.test', 'high'),
+    (('dc01', '10.0.0.5'), 'ws01.example.test', 'high'),
 ])
 def test_declared_controller_matching_by_short_full_and_address(declared, host, lane, tmp_path):
     instance = rule('RpcReplicationCall')
     instance.site_facts = replace(load_site_facts(tmp_path), domain_controllers=declared)
     matches = run(instance, [normalize_windows(hit(uuid=DRSR, opnum='3', protocol='1', host=host))])
     assert [match.proposed_lane for match in matches] == ([lane] if lane else [])
-    if lane == 'lead':
+    if any(name[0].isdigit() for name in declared):
         assert any('declared by address' in text for text in matches[0].notes)
     instance.release_state()
+
+
+def test_rpc_catalog_fits_one_any_of_retrieval_predicate():
+    # Retrieval sends every classified interface as one contains predicate, which compiles at most 256 values.
+    assert 0 < len(INTERFACES) <= 256
 
 
 @pytest.mark.parametrize('code', [5, 6])
