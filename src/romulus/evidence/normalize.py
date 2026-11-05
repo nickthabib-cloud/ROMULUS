@@ -2230,6 +2230,7 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                    rpc_remote_only: bool = False, contract=None,
                    malformed_text: dict[str, list[str]] | None = None,
                    skip_families: dict[str, frozenset[str] | None] | None = None,
+                   surrogate_free: bool = False,
                    ) -> tuple[list[TypedEvent], dict[str, int], list[tuple[str, str]]]:
     """Normalize a batch. Returns (events, skip_counts, errors[(raw_id, error)]). `audit_parse` is passed to
     `group_audit`.
@@ -2241,6 +2242,8 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
     A record holding a lone UTF-16 surrogate in any key or text is normalized with each one replaced by U+FFFD
     (evidence.surrogates), and every event made from it carries a caveat naming the fields; `malformed_text`, when
     given, receives each such record's key ("<index>/<id>") with those fields. The caller's hits are not changed.
+    With `surrogate_free` (every hit came from a response `sources.es.surrogate_free` proved free) neither the hits
+    nor their events can hold one, and neither is searched.
 
     An audit event's boot id (`host.boot.id`) comes from the shipper's own field, else from journald's copy of one
     of its records when that copy is in the same batch. With `boots` (a hunt's boot-interval map), the batch's boot
@@ -2256,7 +2259,7 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
     journal_boots: list[tuple[str, str, int | None, str, bool]] = []
     unclean: dict[str, list[str]] = {}
     for h in hits:
-        clean, found = surrogates.sanitize(h["_source"])
+        clean, found = (h["_source"], ()) if surrogate_free else surrogates.sanitize(h["_source"])
         if found:
             h = {**h, "_source": clean}
             unclean[f"{h['_index']}/{h['_id']}"] = found
@@ -2422,7 +2425,7 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
         for event in events[audit_start:]:
             boots.observe_event(event)
         boots.fill(events[audit_start:], incremental=True)
-    for index, event in enumerate(events):
+    for index, event in enumerate(() if surrogate_free else events):
         # text parsed out of a record's own text (a Suricata EVE line, a Zeek line) can hold a lone surrogate its
         # record did not show
         parsed = surrogates.event_paths(event)

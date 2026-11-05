@@ -44,7 +44,9 @@ PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf211
                    # The observer families also include sensor_health, and an explicit source declaration may
                    # route plain Zeek through its own producer. Every previous generic/native shape stays
                    # identical; only the Zeek producer changes its epoch and adds health records.
-                   14: "848ef3f76d2c1c0c9c712fa859e08dacfb6a351133e8b0299920edb0be3ee98c"}
+                   # Then normalize_hits may skip looking for lone surrogates in a batch whose every response was
+                   # proved free of them (sources.es.surrogate_free): output is identical for every input.
+                   14: "58e297746c69d2869d2638b154c09c1753bad61bf29e03feae1128ed1d1ae6c9"}
 WINDOWS_EVIDENCE_FILES = ("community.py", "windows.py", "windows_catalog.py", "windows_reassembly.py", "rpc_catalog.py")
 PINNED_WINDOWS = {
     "windows-ecs@15": "25b5a842851ea66af4086d63dc5aac56fe8d0ec486396a456ed6330cc8ed721b",

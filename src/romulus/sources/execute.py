@@ -40,6 +40,7 @@ def execute(client: ElasticClient, intent: SearchIntent, contract: FieldContract
     try:
         if intent.kind == "raw":
             records, reasons, total, rel = [], [], None, "unknown"
+            free = True
             try:
                 iterate_kwargs = {"pit": pit}
                 if on_query is not None or deadline is not None:
@@ -47,6 +48,7 @@ def execute(client: ElasticClient, intent: SearchIntent, contract: FieldContract
                 for hits, meta in client.iterate(q, intent.max_records, **iterate_kwargs):
                     reasons += meta["problems"]
                     total, rel = meta["total"], meta["total_relation"]
+                    free = free and meta.get("surrogate_free", False)
                     records += [_record(h) for h in hits]
             except SourceBudgetExhausted as error:
                 reasons.append(str(error))
@@ -55,9 +57,11 @@ def execute(client: ElasticClient, intent: SearchIntent, contract: FieldContract
             if rel != "eq":
                 reasons.append(f"total_relation:{rel}")
             # the records join the outcome as they are: validating the outcome would copy every record dict
-            return outcome(completeness=Completeness.partial if reasons else Completeness.complete,
-                           reasons=sorted(set(reasons)), total=total, total_relation=rel,
-                           returned=len(records)).model_copy(update={"records": records})
+            raw = outcome(completeness=Completeness.partial if reasons else Completeness.complete,
+                          reasons=sorted(set(reasons)), total=total, total_relation=rel,
+                          returned=len(records)).model_copy(update={"records": records})
+            raw._surrogate_free = free
+            return raw
 
         if intent.kind == "aggregate":
             buckets, reasons, total, rel = [], [], None, "unknown"
