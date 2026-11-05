@@ -349,7 +349,7 @@ def test_link_persists_only_the_records_its_final_selection_cites(monkeypatch):
     )
     monkeypatch.setattr(
         executor, "_normalize_pivot_records",
-        lambda _records, _families: ([root, child, unrelated], []),
+        lambda _records, _families, **_kwargs: ([root, child, unrelated], []),
     )
 
     result = LinkFetcher(executor, T0, T1).fetch(

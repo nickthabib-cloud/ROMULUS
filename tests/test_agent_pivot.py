@@ -428,7 +428,7 @@ def test_ip_timeline_searches_each_host_dataset_and_reports_dataset_coverage(mon
             returned=int(record is not None), records=[record] if record else [],
         )
 
-    def fake_normalize(records):
+    def fake_normalize(records, **_kwargs):
         if not records:
             return [], {}, []
         dataset = records[0]["_source"]["event"]["dataset"]
@@ -771,7 +771,7 @@ def test_partial_pivot_retains_events_and_publishes_direct_matches(monkeypatch):
         )
 
     monkeypatch.setattr(pivot_module, "execute", fake_execute)
-    monkeypatch.setattr(pivot_module, "normalize_hits", lambda _records: ([event], {}, []))
+    monkeypatch.setattr(pivot_module, "normalize_hits", lambda _records, **_kwargs: ([event], {}, []))
     contracts = {"romulus-host-x": contract_from_types("romulus-host-x", {
         "@timestamp": "date", "event.dataset": "keyword", "host.name": "keyword",
     })}
@@ -830,7 +830,7 @@ def test_windows_process_tree_persists_only_its_fenced_selection(monkeypatch):
         )
 
     monkeypatch.setattr(pivot_module, "execute", fake_execute)
-    monkeypatch.setattr(pivot_module, "normalize_hits", lambda _records: (
+    monkeypatch.setattr(pivot_module, "normalize_hits", lambda _records, **_kwargs: (
         [root, child, unrelated], {}, [],
     ))
     contracts = {"winlogbeat-x": contract_from_types("winlogbeat-x", {
@@ -871,7 +871,7 @@ def test_displaced_pivot_worker_cannot_write_after_normalization(monkeypatch):
             records=[record],
         )
 
-    def displacing_normalize(_records):
+    def displacing_normalize(_records, **_kwargs):
         second = repo.claim_hunt(
             "h1", lease_seconds=60, resume=True, now=START + timedelta(seconds=61),
         )
@@ -926,7 +926,7 @@ def test_capped_dense_pivot_splits_and_late_event_reaches_time_spread_digest(mon
             returned=len(leaf_records), records=leaf_records,
         )
 
-    def fake_normalize(raw_records):
+    def fake_normalize(raw_records, **_kwargs):
         events = [
             _process_event(
                 ["echo"], event_id=record["_id"],
@@ -1006,7 +1006,7 @@ def test_unsplittable_partial_pivot_reports_complete_and_unresolved_time_ranges(
         )
 
     monkeypatch.setattr(pivot_module, "execute", fake_execute)
-    monkeypatch.setattr(pivot_module, "normalize_hits", lambda raw_records: (
+    monkeypatch.setattr(pivot_module, "normalize_hits", lambda raw_records, **_kwargs: (
         [_process_event(["echo"], event_id=record["_id"],
                         ts=datetime.fromisoformat(record["_source"]["@timestamp"]))
          for record in raw_records], {}, [],
@@ -1058,7 +1058,7 @@ def test_partition_limited_dense_pivot_reads_tail_and_reports_unresolved_middle(
         )
 
     monkeypatch.setattr(pivot_module, "execute", fake_execute)
-    monkeypatch.setattr(pivot_module, "normalize_hits", lambda raw_records: (
+    monkeypatch.setattr(pivot_module, "normalize_hits", lambda raw_records, **_kwargs: (
         [_process_event(
             ["echo"], event_id=record["_id"],
             ts=datetime.fromisoformat(record["_source"]["@timestamp"]),
@@ -1130,7 +1130,7 @@ def test_terminal_head_tail_share_pit_and_keep_exact_prefix_when_tail_has_shard_
         )
 
     monkeypatch.setattr(pivot_module, "execute", fake_execute)
-    monkeypatch.setattr(pivot_module, "normalize_hits", lambda raw_records: (
+    monkeypatch.setattr(pivot_module, "normalize_hits", lambda raw_records, **_kwargs: (
         [_process_event(
             ["echo"], event_id=record["_id"],
             ts=datetime.fromisoformat(record["_source"]["@timestamp"]),
@@ -1173,7 +1173,7 @@ def test_terminal_sample_keeps_exact_suffix_when_head_has_shard_failure(monkeypa
         )
 
     monkeypatch.setattr(pivot_module, "execute", fake_execute)
-    monkeypatch.setattr(pivot_module, "normalize_hits", lambda raw_records: (
+    monkeypatch.setattr(pivot_module, "normalize_hits", lambda raw_records, **_kwargs: (
         [_process_event(
             ["echo"], event_id=record["_id"],
             ts=datetime.fromisoformat(record["_source"]["@timestamp"]),
@@ -1217,7 +1217,7 @@ def test_terminal_sample_with_an_unparseable_cutoff_claims_no_coverage(monkeypat
         )
 
     monkeypatch.setattr(pivot_module, "execute", fake_execute)
-    monkeypatch.setattr(pivot_module, "normalize_hits", lambda raw_records: (
+    monkeypatch.setattr(pivot_module, "normalize_hits", lambda raw_records, **_kwargs: (
         [_process_event(["echo"], event_id=record["_id"]) for record in raw_records], {}, [],
     ))
     contracts = {"romulus-host-x": contract_from_types("romulus-host-x", {
@@ -1252,7 +1252,7 @@ def test_terminal_short_capped_page_claims_no_coverage(monkeypatch):
         )
 
     monkeypatch.setattr(pivot_module, "execute", fake_execute)
-    monkeypatch.setattr(pivot_module, "normalize_hits", lambda raw_records: (
+    monkeypatch.setattr(pivot_module, "normalize_hits", lambda raw_records, **_kwargs: (
         [_process_event(["echo"], event_id=record["_id"]) for record in raw_records], {}, [],
     ))
     contracts = {"romulus-host-x": contract_from_types("romulus-host-x", {
@@ -1284,7 +1284,7 @@ def test_pivot_coverage_is_rendered_in_utc_for_offset_request_bounds(monkeypatch
         )
 
     monkeypatch.setattr(pivot_module, "execute", fake_execute)
-    monkeypatch.setattr(pivot_module, "normalize_hits", lambda _records: ([_process_event()], {}, []))
+    monkeypatch.setattr(pivot_module, "normalize_hits", lambda _records, **_kwargs: ([_process_event()], {}, []))
     contracts = {"romulus-host-x": contract_from_types("romulus-host-x", {
         "@timestamp": "date", "event.dataset": "keyword", "host.name": "keyword",
     })}
@@ -1338,7 +1338,7 @@ def test_terminal_dense_pivot_reserves_anchor_neighborhood_in_digest(monkeypatch
         )
 
     monkeypatch.setattr(pivot_module, "execute", fake_execute)
-    def fake_normalize(raw_records):
+    def fake_normalize(raw_records, **_kwargs):
         events = [_process_event(
             ["echo"], event_id=record["_id"],
             ts=datetime.fromisoformat(record["_source"]["@timestamp"]),
