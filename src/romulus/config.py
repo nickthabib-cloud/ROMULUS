@@ -368,6 +368,9 @@ def redact_text(text: str, settings: Settings) -> str:
                 for form in sorted(_secret_forms(secret), key=len, reverse=True):
                     text = text.replace(form, "<redacted>")
                 if len(secret) >= MASKED_SECRET_MIN_LENGTH and "****" in text:
-                    masked = re.escape(secret[:3]) + r"[^\s*]*\*{4,}[^\s*]*?" + re.escape(secret[-4:])
+                    # Key characters only, bounded and delimited: never spans punctuation or starts inside a word,
+                    # and stays linear on long runs.
+                    masked = (r"(?<![A-Za-z0-9_-])" + re.escape(secret[:3]) + r"[A-Za-z0-9_-]{0,64}\*{4,64}"
+                              r"[A-Za-z0-9_-]{0,16}?" + re.escape(secret[-4:]) + r"(?![A-Za-z0-9_-])")
                     text = re.sub(masked, "<redacted>", text)
     return text

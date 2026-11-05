@@ -109,6 +109,18 @@ class _Failed(Exception):
         self.raw = raw
 
 
+def _refuses_summary(body: str, message: str) -> bool:
+    """Whether a 400 is about the reasoning-summary request itself: its error names that parameter, or names none
+    and speaks of summaries. An error about another parameter (an input item's summary) is not."""
+    try:
+        param = (json.loads(body).get("error") or {}).get("param")
+    except (ValueError, AttributeError):
+        param = None
+    if isinstance(param, str) and param:
+        return param == "reasoning.summary"
+    return "summar" in message.lower() and "input[" not in message
+
+
 class _SummaryRefused(Exception):
     """The server refused the request for its reasoning summary (an organization may need verification)."""
 
@@ -264,7 +276,7 @@ class OpenAIResponsesProvider(ChatProvider):
                     if code in RETRY_STATUSES:
                         raise TransientFailure(f"HTTP {code}", suffix=f": {message}",
                                                retry_after=response.headers.get("retry-after", ""))
-                    if code == 400 and "summary" in body["reasoning"] and "summar" in message.lower():
+                    if code == 400 and "summary" in body["reasoning"] and _refuses_summary(response.text, message):
                         raise _SummaryRefused(message)
                     raise _Failed("too_large" if code == 413 else "error", f"HTTP {code}: {message}",
                                   redact_text(response.text, self.s))

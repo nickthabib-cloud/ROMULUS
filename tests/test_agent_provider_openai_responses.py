@@ -624,6 +624,17 @@ def test_a_refused_reasoning_summary_is_dropped_for_good(api):
         {"effort": "high", "summary": "auto"}, {"effort": "high"}, {"effort": "high"}]
 
 
+def test_another_parameters_summary_error_keeps_reasoning_summaries(api):
+    other = httpx.Response(400, json={"error": {"message": "Missing required parameter: 'input[1].summary'.",
+                                                "param": "input[1].summary"}})
+    route = api.post("/responses").mock(side_effect=[other, streamed(response(message("b")))])
+    p, _ = build()
+    first = p.chat(ask())
+    assert first.status == "error" and "input[1].summary" in first.error
+    assert p.chat(ask()).ok
+    assert [sent(route, n)["reasoning"] for n in range(2)] == [{"effort": "high", "summary": "auto"}] * 2
+
+
 @pytest.mark.parametrize("code", ["bio_policy", "misalignment_policy_violation"])
 def test_a_response_stopped_under_a_safety_policy_is_refused(api, code):
     failed = response(status="failed", error={"code": code, "message": "blocked"}, usage=False)
@@ -758,3 +769,17 @@ def test_doctor_probes_with_the_real_output_cap_and_fails_a_model_whose_limit_is
     assert sent(route, 0)["max_output_tokens"] == 8000 + 2000
     assert checks["agent.output"].status == "fail" and "at most 32768" in checks["agent.output"].detail
     assert checks["agent.tool_calls"].status == "fail"
+
+
+def test_masked_key_pattern_never_spans_telemetry_and_stays_linear():
+    import time
+
+    from romulus.config import redact_text
+    s = settings(agent_api_key="sk-proj-0123456789abcdefdata")
+    record = '{"task":"task-runner","pw":"****","note":"metadata"}'
+    assert redact_text(record, s) == record
+    assert redact_text("key sk-proj-****data rejected", s) == "key <redacted> rejected"
+    run = "disk-" * 16000 + "****" + "data"
+    started = time.perf_counter()
+    assert redact_text(run, s) == run
+    assert time.perf_counter() - started < 1.0
