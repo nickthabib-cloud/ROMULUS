@@ -1,4 +1,5 @@
 """RPC ETW call observations; the records do not establish an operation's outcome."""
+import ipaddress
 from datetime import UTC, datetime
 
 from romulus.detect.citing import bound_note, cited_phrase
@@ -34,9 +35,9 @@ class _RpcCall(WindowsEventRule):
                 f'({call.operation.name}, opnum {call.operation.opnum}) over {transport}')
         if side == 'client' and event.get('rpc.network_address'):
             text += f' to {event.get("rpc.network_address")}'
-        text += ' was observed.'
         if side == 'server':
-            text += ' The server-side record does not name the caller.'
+            text += ', from a caller the server-side record does not name,'
+        text += ' was observed'
         content = repr((event.host, side, call.interface.uuid, call.op_class, event.get('rpc.network_address')))
         return [signal(event, self.id, text, call.attack, _FIELDS, lane=lane,
                        severity='high' if lane == 'high' else 'medium', content=content, notes=notes)]
@@ -71,7 +72,7 @@ class _RpcCall(WindowsEventRule):
         last = datetime.fromtimestamp(group.ends.last[0], UTC).isoformat() if group.ends.last else '?'
         match.claim = (f'{group.records} RPC call record(s) on {", ".join(group.sample_hosts)}, '
                        f'first {first}, last {last}, folded by host, side, interface, operation class and address. '
-                       f'One cited call: {group.common}'
+                       f'One cited call: {group.common}.'
                        + cited_phrase(len(match.events), group.records, not missing_bounds)
                        + bound_note(missing_bounds, group.ends))
         if match.events:
@@ -93,7 +94,7 @@ class RpcCoercionCall(_RpcCall):
         if op_class != 'coercion':
             return None, ()
         if event.get('rpc.side') == 'client' and not event.get('rpc.network_address'):
-            return 'lead', ('The client target network address was not recorded.',)
+            return 'lead', ('The client target network address was not recorded, or could not be read.',)
         return 'high', ()
 
 
@@ -103,7 +104,7 @@ class RpcReplicationCall(_RpcCall):
     needs aggregate discovery, and PrinterBug notification requires the target role.
     """
     id = 'win.rpc_replication_call'
-    title = 'A replication RPC client call was observed outside declared domain controllers'
+    title = 'A directory replication RPC client call was observed'
     attack = ('T1003.006', 'T1207')
 
     def decision(self, event, op_class):
@@ -112,12 +113,37 @@ class RpcReplicationCall(_RpcCall):
         controllers = getattr(getattr(self, 'site_facts', None), 'domain_controllers', ())
         if not controllers:
             return 'lead', ('domain controllers not declared; replication from a domain controller is routine',)
-        full = str(event.get('host.full_name') or event.host).casefold().rstrip('.')
-        for name in controllers:
-            declared = str(name).strip().rstrip('.').casefold()
-            if declared == full or ('.' not in declared and declared == event.host.casefold()):
-                return None, ()
+        if _is_controller(event, controllers):
+            return None, ()
+        if any(_is_address(name) for name in controllers):
+            # An address cannot be matched to the logging host's name. The call stays high: a replication client
+            # outside the named controllers is never demoted on an unmatchable declaration.
+            return 'high', (('Some domain controllers are declared by address, which cannot be matched to the '
+                             'logging host name: if this host is one of them, the call is routine. Declare '
+                             'controllers by host name.'),)
         return 'high', ()
+
+
+def _is_address(name) -> bool:
+    try:
+        ipaddress.ip_address(str(name).strip())
+    except ValueError:
+        return False
+    return True
+
+
+def _is_controller(event, controllers) -> bool:
+    """Whether the logging host is a declared controller. A record or declaration with only a short name matches
+    by first label; when both are full names they must be equal, so a same-named host in another domain is not one."""
+    full = str(event.get('host.full_name') or event.host).strip().rstrip('.').casefold()
+    short = full.split('.', 1)[0]
+    for name in controllers:
+        declared = str(name).strip().rstrip('.').casefold()
+        if declared == full:
+            return True
+        if ('.' not in declared or '.' not in full) and declared.split('.', 1)[0] == short:
+            return True
+    return False
 
 
 class RpcRemoteAdminCall(_RpcCall):

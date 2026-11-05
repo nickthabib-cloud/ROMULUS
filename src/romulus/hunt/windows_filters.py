@@ -73,7 +73,10 @@ def rpc_call_groups(contract):
     """RPC retrieval is a superset of the tolerant native normalization.
 
     Case-insensitive contains accepts every canonical UUID's mixed case, braces and
-    whitespace spellings, and every protocol-sequence spelling. Extra substring hits
+    whitespace spellings, and every protocol-sequence spelling. Each is one any-of
+    predicate, so a group stays a few clauses whatever the catalog's size: a cross
+    product of per-protocol and per-interface groups would pass the clause limits of
+    some engines and fail the whole Windows query. Extra substring hits
     are checked by typed fields locally. Missing native leaves also cover XML-only
     payloads and alternative native key case. Text mappings cannot safely filter
     values: use the available provider/code predicates, or no restriction if neither
@@ -97,12 +100,11 @@ def rpc_call_groups(contract):
                       for op in ('contains', 'missing')))
     if not strict:
         return bases, False
+    transport = Predicate(field='rpc.protocol', op='contains', value=['1', '2', 'ncacn_ip_tcp', 'ncacn_np'])
+    interfaces = Predicate(field='rpc.interface_uuid', op='contains', value=[i.uuid for i in INTERFACES])
     out = []
     for group in bases:
-        for protocol in ('1', '2', 'ncacn_ip_tcp', 'ncacn_np'):
-            transport = Predicate(field='rpc.protocol', op='contains', value=protocol)
-            for interface in INTERFACES:
-                out.append([*group, transport, Predicate(field='rpc.interface_uuid', op='contains', value=interface.uuid)])
-            out.append([*group, transport, Predicate(field='rpc.interface_uuid', op='missing')])
+        out.append([*group, transport, interfaces])
+        out.append([*group, transport, Predicate(field='rpc.interface_uuid', op='missing')])
         out.append([*group, Predicate(field='rpc.protocol', op='missing')])
     return out, True

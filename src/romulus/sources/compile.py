@@ -36,10 +36,14 @@ def _pred_native(p: Predicate, native: str) -> dict:
     if p.op == "prefix":
         return {"prefix": {f: {"value": str(v)}}}
     if p.op == "contains":
-        if not isinstance(v, str) or not v:
-            raise CompileError("'contains' needs a non-empty string")
+        # A list is any of its strings: one clause group, so alternatives never multiply across a group's predicates.
+        values = v if isinstance(v, list) else [v]
+        if not values or len(values) > 256 or not all(isinstance(item, str) and item for item in values):
+            raise CompileError("'contains' needs a non-empty string, or a list of at most 256 of them")
         # case_insensitive keeps retrieval a superset of case-insensitive local evaluators
-        return {"wildcard": {f: {"value": f"*{_escape_wildcard(v)}*", "case_insensitive": True}}}
+        clauses = [{"wildcard": {f: {"value": f"*{_escape_wildcard(item)}*", "case_insensitive": True}}}
+                   for item in values]
+        return clauses[0] if len(clauses) == 1 else {"bool": {"should": clauses, "minimum_should_match": 1}}
     if p.op == "gte":
         return {"range": {f: {"gte": v}}}
     if p.op == "lt":
