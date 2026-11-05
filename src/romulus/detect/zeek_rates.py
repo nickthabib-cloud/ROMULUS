@@ -27,6 +27,7 @@ def _name(value):
 
 
 class _Rate(ZeekWindowRule):
+    version = '2'
     citation_fields = _FIELDS
     required_fields = ('source.ip',)
     benign = ('Authorized administration, scanners and ordinary authentication can produce rate leads.',)
@@ -75,7 +76,7 @@ class ZerologonRate(_Rate):
 
 
 class Rc4TgsFanout(_Rate):
-    id, title = 'net.kerberos_rc4_service_fanout', 'RC4 service-ticket requests for many distinct services'
+    id, title = 'net.kerberos_rc4_service_fanout', 'TGS exchanges with RC4 ticket encryption for many services'
     families = ('kerberos_tx',)
     seconds, threshold, distinct = 300, 10, True
     attack, research = ('T1558.003',), (_KRB,)
@@ -88,9 +89,10 @@ class Rc4TgsFanout(_Rate):
         return (source,), service, 'attempt'
 
     def describe(self, event, total_refs, distinct_members, role):
-        return 'lead', (f'Source {event.get("source.ip")} requested RC4 TGS tickets for at least '
+        return 'lead', (f'Source {event.get("source.ip")} had TGS exchanges with RC4 ticket encryption for at least '
                         f'{distinct_members} distinct services in five minutes ({total_refs} raw references).'), (
             'Distinct services reduce repeated legacy-service noise; a legacy RC4 domain can still explain this lead.',
+            'Zeek cipher describes the issued ticket encryption, not a requested cipher preference.',
             'The breadth threshold is a review heuristic, not proof of ticket cracking.',
         )
 
@@ -133,6 +135,8 @@ class NtlmPasswordSpray(_Rate):
     families = ('ntlm_tx',)
     seconds, threshold, distinct = 600, 10, True
     attack, research = ('T1110.003',), (_NTLM,)
+    success_fields = ('source.ip', 'ntlm.username', 'ntlm.domain', 'ntlm.success')
+    success_requires_member = True
 
     def select(self, event):
         source, account = _source(event), _account(event)
@@ -147,7 +151,7 @@ class NtlmPasswordSpray(_Rate):
         return ('high' if later else 'lead',
                 f'Source {event.get("source.ip")} has NTLM attempts for at least {distinct_members} distinct users '
                 f'in ten minutes ({total_refs} raw references)'
-                + (' followed by a later recorded authentication success.' if later else '.'),
+                + (f' followed by a later recorded authentication success for {_account(event)}.' if later else '.'),
                 (*_ATTEMPT_NOTES, 'A later success is temporally associated; the records do not prove which credential or intent caused it.'))
 
 

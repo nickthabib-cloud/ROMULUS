@@ -242,6 +242,7 @@ class VncRemoteSession(_RemoteSession):
 
 
 class HttpWinrm(ZeekBehaviorRule):
+    version = '2'
     id, title = 'net.http_winrm', 'An HTTP request targeted the WinRM service path'
     families = ('http_tx',)
     required_fields = ('source.ip', 'destination.ip', 'destination.port', 'url.original')
@@ -256,7 +257,7 @@ class HttpWinrm(ZeekBehaviorRule):
             path = urlsplit(event.get('url.original') or '').path
         except (ValueError, TypeError):
             return []
-        if path != '/wsman':
+        if path.casefold() != '/wsman':
             return []
         text = f'HTTP /wsman request observed from {peers[0]} to {peers[1]}:{event.get("destination.port")}'
         return [signal(event, self.id, text, self.attack,

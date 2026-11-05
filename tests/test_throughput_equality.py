@@ -331,7 +331,10 @@ GOLDEN_STACK = {
     # cells and manifest row are gone; every candidate, raw, event and citation section is unchanged.
     "manifest": '2e06ddcbd38a16d1ce651e001280ee074b4e7892ef33b7f1df939568ce14dfe3',
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
-    "rule_cells": '37ed0917bffc676505b3d450d992a594e9fee3177d1cf11c2d8fa88fe8f416ab',
+    # Twenty changed Windows/network contracts carry new versions in 71 coverage cells each.
+    # Restoring only those versions reproduces the complete preceding snapshot; all 35 candidates
+    # and the other 22 stack sections are byte-identical.
+    "rule_cells": 'a56167713ffb33b4073ad5bfb266aef15ee810d4dc3f92633cc2d2e1f0e35206',
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
     "tasks": "c65df4ab88c05661371cf32b49a1d22ef84d6753488bdb946c8e29376d486260",
 }
@@ -363,10 +366,10 @@ GOLDEN_NON_BASELINE_SEMANTICS = {
         "ts": "d8015c1ff0b135e082a5fef2ab1cb88206470e30beee157a0cfc7790d48b8310",
     },
     "rule_cells": {
-        "all_fields": "5a0c182c766b940086d0e6945ac3b035de034adb4f25bd1d62384a05db667f34",
+        "all_fields": "bb09301f05ee2f08f36646ca3c691e881bb10ddc8c3c9fb3139e86e1ef6d3a6a",
         "count": 15261,
         "rule_id": "e254e06a5b70725e437cf3004200b0f61b05100d1538c13349994d1fd4568879",
-        "rule_version": "fe453f72363f49dfa9462a2f61770e31c12a9d40cf14d4222929030ef28bd126",
+        "rule_version": "dcedd50963cd5b682d0b923e672911ccf958d36dad8f4ced5351324f7a34d985",
         "target": "bb22fe7c7f4a31ae292ea691f4617e62106177f2a4c6f503fe9cbcd94458229b",
         "partition": "8a08cb4a3f440cbddfa0ef9d93701943223d6c94b114f753f62c31fcae1414ba",
         "state": "873ced555502f36931da34afd78c1e52bee897e367c838bd43ed555b375fa99d",

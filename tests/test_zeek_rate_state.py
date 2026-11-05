@@ -157,7 +157,10 @@ def test_success_does_not_count_as_an_attempt_and_promotes_existing_lead_immedia
         assert len(lead) == 1 and lead[0].proposed_lane == "lead"
         assert high.proposed_lane == "high" and high.group_key == lead[0].group_key and high.revision_reason
         assert "3 attempt references" in high.claim and "success" in {row.id for row in high.events}
-        assert not list(rule.consume([event("more-success", 4, role="success"), event("d", 5)]))
+        [revision] = list(rule.consume([event("more-success", 4, role="success"), event("d", 5)]))
+        assert revision.proposed_lane == "high" and revision.group_key == high.group_key
+        assert revision.bounded_revision and revision.revision_reason
+        assert "4 attempt references" in revision.claim
         assert not list(rule.finalize())
     finally:
         rule.release_state()
@@ -213,7 +216,7 @@ def test_citations_use_actual_refs_and_standard_fetcher_without_fake_event_ids()
     try:
         rows = [event(str(n), n) for n in range(4)]
         rule.load = lambda ids: [row for row in rows if row.id in ids]
-        [match] = list(rule.consume(rows))
+        match = list(rule.consume(rows))[-1]
         assert len(match.events) <= 3 and {row.id for row in match.events} <= {row.id for row in rows}
         sources = {ref.key: {"native": ref.native_id} for row in rows for ref in row.raw}
         SourceCitationFetcher(None).hydrate(match, sources)
