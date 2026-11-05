@@ -277,16 +277,20 @@ class VisibilityStore:
             # Every observed worker must cover the interval. A healthy worker
             # cannot conceal a missing measurement from its peer.
             required = ['packet drop:'+worker for worker in workers] if workers else list(groups)
+            gaps = []
             for kind in required:
-                covered = start
+                covered, gap = start, False
                 for hstart,hend,loss in groups.get(kind, []):
-                    missing |= hstart > covered
+                    gap |= hstart > covered
                     covered = max(covered, hend)
                     partial |= loss > 0 and loss >= threshold
                     if loss > 0:
                         label = kind.split(':',1)[0]
                         losses[label] = max(losses.get(label,0),loss)
-                missing |= covered < end
+                gap |= covered < end
+                missing |= gap
+                if gap and kind.startswith('packet drop:'):
+                    gaps.append(kind.split(':',1)[1])
             # Capture-loss measurements remain relevant alongside worker stats.
             for kind, measurements in groups.items():
                 for _,_,loss in measurements:
@@ -299,6 +303,9 @@ class VisibilityStore:
             if unreadable:
                 missing = True
                 statements.append('health unreadable; complete health coverage could not be established')
+            elif gaps:
+                statements.append(f'stats worker(s) {", ".join(sorted(gaps))} have no packet-drop measurement for part '
+                                  'of the interval in which the sensor wrote data')
             elif missing:
                 statements.append('no health record covers the complete interval in which the sensor wrote data')
             if not statements:
