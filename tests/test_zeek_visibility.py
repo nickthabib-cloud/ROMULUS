@@ -320,8 +320,12 @@ def test_native_stats_only_health_requires_complete_same_worker_interval(tmp_pat
         if mode in ('valid','lossy'):
             assert any(('2 % packet drop' if mode=='lossy' else '0.1 % packet drop') in row['reason'] for row in rows)
             assert not any('no health record' in row['reason'] for row in rows)
-        else:
+        elif mode=='no_cadence':
+            # stats without a cadence are notes, and nothing else measured health
             assert any('no health record' in row['reason'] for row in rows)
+        else:
+            # a declared cadence makes each worker's measurements health: the gap names the worker
+            assert any('no packet-drop measurement' in row['reason'] for row in rows)
     finally:
         store.close()
 
