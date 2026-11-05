@@ -95,6 +95,19 @@
 </tbody>
 </table>
 
+{% for link in investigations.get('link_accounting', []) %}
+{% if link.link_type in ['zeek_uid', 'zeek_file', 'certificate', 'address_host'] %}
+<p><b>{{ link.link_type }}</b> ({{ link.strength }}), {{ link.status }}: {{ link.reasons | join('; ') }}.
+Evidence: {{ link.evidence_ids | join(', ') }}</p>
+{% endif %}{% endfor %}
+{% if zeek_visibility %}
+<h2>Zeek sensor visibility</h2>
+<p>Preview of {{ zeek_visibility.preview | length }} of {{ zeek_visibility.snapshot.count }} statements.
+Complete detail is retained in the report appendix {{ zeek_visibility.snapshot.filename }}.</p>
+<ul>{% for note in zeek_visibility.notes + zeek_visibility.unresolved %}<li>{{ note }}</li>{% endfor %}
+{% for row in zeek_visibility.preview %}<li>{{ row.reason }}</li>{% endfor %}</ul>
+{% for r in reports %}<a href="/reports/{{ h.id }}/{{ zeek_visibility.snapshot.filename }}">Complete visibility appendix (JSONL)</a>{% endfor %}
+{% endif %}
 <h2>Tasks</h2>
 <details><summary>{{ tasks | length }} task(s)</summary>
 <table class="grid small">

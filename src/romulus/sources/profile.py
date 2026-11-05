@@ -5,7 +5,7 @@ import json
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_serializer
 
 from romulus.evidence.zeek_catalog import MALCOLM, lookup_log
 from romulus.store.db import digest
@@ -58,6 +58,18 @@ class FieldContract(BaseModel):
     hosts: tuple[str, ...] = ()
     host_inventory_complete: bool = True
 
+    zeek_sensor: str | None = None
+    zeek_log: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        data = handler(self)
+        if self.zeek_sensor is None:
+            data.pop("zeek_sensor", None)
+        if self.zeek_log is None:
+            data.pop("zeek_log", None)
+        return data
+
     def spec(self, typed: str, *, os_family: str | None = None) -> FieldSpec | None:
         if os_family == "linux" and self.linux_fields:
             return self.linux_fields.get(typed)
@@ -66,6 +78,18 @@ class FieldContract(BaseModel):
     def supports(self, typed: str, op: str) -> bool:
         s = self.fields.get(typed)
         return bool(s and op in s.ops)
+
+
+def apply_zeek_declaration(contract, site_facts):
+    """Bind an explicit site's plain JSON declaration without changing undeclared contracts."""
+    declaration = site_facts.zeek.plain_sources.get(contract.target)
+    if declaration is None:
+        return contract
+    stamp = contract.fields.get("ts")
+    if stamp is None or stamp.type not in {"double", "float", "long", "integer"}:
+        raise ValueError("declared plain Zeek source requires numeric epoch-second ts")
+    return contract.model_copy(update={"zeek_sensor": declaration.sensor, "zeek_log": declaration.log,
+                                       "time_field": "ts", "role": "network", "os_family": "unknown"})
 
 
 class SourceProfile(BaseModel):
@@ -325,10 +349,11 @@ def provider_inventory(client, target: str) -> tuple[list[dict], dict[str, int],
     return buckets, dict(sorted(datasets.items())), notes
 
 
-def build_profile(client, target: str) -> tuple[SourceProfile, FieldContract]:
+def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfile, FieldContract]:
     """Read-only preflight of one concrete index."""
     field_types = flatten_mapping(client.mapping(target))
     schema = schema_of(field_types)
+    declaration = site_facts.zeek.plain_sources.get(target) if site_facts is not None else None
     # Arkime sessions: time is the first packet; the "dataset" is the session protocol and the
     # reporting host is the capture node
     windows = "winlog.computer_name" in field_types
@@ -336,6 +361,8 @@ def build_profile(client, target: str) -> tuple[SourceProfile, FieldContract]:
     tf, ds_field, host_field = (("firstPacket", "protocol", "node") if schema == "arkime_sessions"
                                 else ("@timestamp", dataset_field,
                                       "winlog.computer_name" if windows else "host.name"))
+    if declaration is not None:
+        tf, ds_field, host_field = "ts", "_path", "_romulus_no_observer_field"
     host_aggregation = ({"composite": {
         "size": HOST_INVENTORY_PAGE_SIZE,
         "sources": [{"host": {"terms": {"field": host_field}}}],
@@ -414,16 +441,30 @@ def build_profile(client, target: str) -> tuple[SourceProfile, FieldContract]:
         "time_max": aggs.get("tmax", {}).get("value_as_string"),
         "doc_count": d.get("hits", {}).get("total", {}).get("value"), "notes": notes,
     }
+    if declaration is not None:
+        role, os_family = "network", "unknown"
+        datasets = {"zeek:"+name: count for name, count in datasets.items()}
+        if declaration.log is not None:
+            datasets = {"zeek:"+declaration.log: prof["doc_count"] or 0}
+        prof.update(kind="plain_zeek", role=role, os_family=os_family, datasets=datasets,
+                    hosts={declaration.sensor: prof["doc_count"] or 0}, zeek_sensor=declaration.sensor,
+                    zeek_log=declaration.log,
+                    time_min=datetime.fromtimestamp(aggs["tmin"]["value"], UTC).isoformat()
+                        if aggs.get("tmin", {}).get("value") is not None else None,
+                    time_max=datetime.fromtimestamp(aggs["tmax"]["value"], UTC).isoformat()
+                        if aggs.get("tmax", {}).get("value") is not None else None)
     if inventory is not None:
         prof["inventory"] = inventory
     # Role and OS are source semantics, so they intentionally participate in the profile id. Adding them changes
     # ids made by older builds; the manifest also records both values explicitly for resume validation.
     pid = digest({k: v for k, v in prof.items() if k != "captured_at"})[:16]
     profile = SourceProfile(id=pid, **prof)
-    return profile, contract_from_types(
+    contract = contract_from_types(
         target,
         field_types,
         role=role, os_family=os_family,
         hosts=tuple(sorted(profile.hosts)),
         host_inventory_complete=not any(note.startswith("hosts inventory truncated") for note in notes),
     )
+
+    return profile, apply_zeek_declaration(contract, site_facts) if declaration is not None else contract

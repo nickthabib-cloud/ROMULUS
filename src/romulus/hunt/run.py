@@ -63,6 +63,7 @@ def create_hunt(s: Settings, start: datetime, end: datetime, created_by: str, st
     window = Window(start=start, end=end)
     client = ElasticClient(s)
     profiles, targets = {}, []
+    site_facts = load_site_facts(s.home)
     if not s.es_index_patterns:
         raise ValueError("no ES_INDEX_PATTERNS configured: nothing to hunt")
     for pat in s.es_index_patterns:
@@ -72,10 +73,10 @@ def create_hunt(s: Settings, start: datetime, end: datetime, created_by: str, st
             raise ValueError(f"source pattern {pat!r} resolves to no index or data stream; fix the "
                              f"configuration or remove the pattern before hunting")
         for target in resolved:
-            prof, _contract = build_profile(client, target)
+            options = {"site_facts": site_facts} if target in (site_facts.content.get("zeek") or {}).get("plain_sources", {}) else {}
+            prof, _contract = build_profile(client, target, **options)
             profiles[target] = prof.model_dump(mode="json")
             targets.append(target)
-    site_facts = load_site_facts(s.home)
     manifest = build_manifest(s, window, original_input or {"start": start.isoformat(), "end": end.isoformat()},
                               style, targets, profiles, hypothesis, ai_agent=ai_agent_entry(s, ai_agent),
                               site_facts=site_facts)
@@ -100,8 +101,10 @@ def _contracts(s: Settings, repo: Repo, hunt: dict, client: ElasticClient,
     hunt_id = hunt["id"]
     manifest = hunt["manifest"]
     contracts = {}
+    site_facts = ensure_site_unchanged(s.home, manifest.get("site"))
     for target in manifest["targets"]:
-        profile, contract = build_profile(client, target)
+        options = {"site_facts": site_facts} if target in (site_facts.content.get("zeek") or {}).get("plain_sources", {}) else {}
+        profile, contract = build_profile(client, target, **options)
         recorded = manifest.get("source_profiles", {}).get(target)
         if hunt.get("_resume_scope_check") and recorded and (
             recorded.get("role") not in (None, profile.role)

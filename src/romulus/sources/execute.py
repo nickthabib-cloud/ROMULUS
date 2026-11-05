@@ -111,7 +111,8 @@ def execute(client: ElasticClient, intent: SearchIntent, contract: FieldContract
             shell, d = client.run(q)
             if d is None:
                 return shell
-            buckets = [{"key": b["key_as_string"], "count": b["doc_count"]}
+            buckets = [{"key": (datetime.fromtimestamp(b["key"], UTC).isoformat() if contract.zeek_sensor
+                               else b["key_as_string"]), "count": b["doc_count"]}
                        for b in d.get("aggregations", {}).get("h", {}).get("buckets", [])]
             return shell.model_copy(update={"buckets": buckets, "returned": len(buckets)})
     except SourceError as e:

@@ -108,7 +108,7 @@ class HuntToolExecutor:
                     self.repo, self.hunt_id, playbook, match,
                     result.task_ids[0] if result.task_ids else None, {},
                     source_case_id=session_id, source_anchor_id=candidate["id"],
-                    source_link_id=result.id, owner_token=self.owner_token,
+                    source_link_id=result.id, owner_token=self.owner_token, zeek_context=events, zeek_context_ids=result.evidence_ids,
                 )
                 if row is not None:
                     candidate_ids.append(row["id"])

@@ -221,11 +221,49 @@ class CollectionGroup(BaseModel):
         return any(fnmatchcase(full, pattern) or fnmatchcase(short, pattern) for pattern in self.hosts)
 
 
+class PlainZeekSource(BaseModel):
+    """A target explicitly declared to contain native Zeek JSON, never inferred from an index name."""
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    sensor: str = Field(min_length=1, max_length=255)
+    log: str | None = None
+
+    @field_validator("sensor")
+    @classmethod
+    def _sensor(cls, value):
+        if not value.strip() or any(ord(char) < 32 for char in value):
+            raise ValueError("sensor must be nonempty printable text")
+        return value.strip()
+
+    @field_validator("log")
+    @classmethod
+    def _log(cls, value):
+        from romulus.evidence.zeek_catalog import lookup_log
+        if value is not None and lookup_log("plain", value) is None:
+            raise ValueError("plain log must name a catalogued Zeek log")
+        return value.strip().lower() if value is not None else None
+
+
+class ZeekPolicy(BaseModel):
+    """Capture visibility and bounded connection history.
+
+    Zeek describes capture loss under one percent as tolerable; any measured loss
+    remains a caveat, and this threshold determines partial search coverage.
+    """
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+
+    capture_loss_threshold_pct: float = Field(default=1.0, ge=0)
+    connection_lookback_hours: float = Field(default=24.0, gt=0)
+    # Explicit deployment attestation; native stats rows do not declare their cadence.
+    stats_interval_seconds: float | None = Field(default=None, gt=0)
+    plain_sources: dict[str, PlainZeekSource] = Field(default_factory=dict)
+
+
 class _SiteDocument(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_name: Literal[COLLECTION_SCHEMA] = Field(alias="schema", serialization_alias="schema")
     collection: tuple[CollectionGroup, ...] = ()
+    zeek: ZeekPolicy | None = None
     domain_controllers: tuple[str, ...] = ()
     directory_sync_accounts: tuple[str, ...] = ()
     directory_sync_accounts_declared: StrictBool = False
@@ -306,6 +344,10 @@ class SiteFacts:
     internal_networks: tuple[str, ...] = ()
     external_networks: tuple[str, ...] = ()
 
+    @property
+    def zeek(self) -> ZeekPolicy:
+        return ZeekPolicy.model_validate(self.content.get("zeek") or {})
+
     def _groups_for(self, host: str) -> tuple[CollectionGroup, ...]:
         matches = tuple(group for group in self.groups if group.hosts != "all" and group.matches(host))
         if matches:
@@ -382,6 +424,8 @@ def _validated(loaded: object) -> _SiteDocument:
 
 def _facts(document: _SiteDocument) -> SiteFacts:
     content = document.model_dump(mode="json", by_alias=True)
+    if document.zeek is None:
+        content.pop("zeek", None)
     # Older saves materialized default empty lists, so an empty list alone cannot
     # attest that the lead checked the site's synchronization accounts.
     if not document.directory_sync_accounts and not document.directory_sync_accounts_declared:

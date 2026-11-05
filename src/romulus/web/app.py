@@ -173,7 +173,7 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         # calls a model other than the configured one answered (a provider's refusal fallback)
         answered_by = [r for r in agent_usage["models_reported"] if r["model_reported"] != r["model"]]
         return page(request, "hunt.html", u, h=h, cands=cands, lanes=repo.lane_counts(hunt_id), lane=lane,
-                    coverage=cov["rules"], tasks=repo.tasks(hunt_id), reports=reports, agent=agent_summary,
+                    coverage=cov["rules"], zeek_visibility=cov.get("zeek_visibility"), tasks=repo.tasks(hunt_id), reports=reports, agent=agent_summary,
                     investigations=investigations, ai_agent=ai_audit["detail"] if ai_audit else None,
                     egress_banners=banners, answered_by=answered_by,
                     internal_networks=internal_networks_view(repo, hunt_id, h["manifest"]))
@@ -413,6 +413,8 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         need(request)
         appendix = (ext == "jsonl" and rev_id.startswith("fleet-hosts-") and len(rev_id) == 76
                     and all(char in "0123456789abcdef" for char in rev_id[12:]))
+        appendix |= (ext == "jsonl" and rev_id.startswith("zeek-visibility-") and len(rev_id) == 80
+                     and all(char in "0123456789abcdef" for char in rev_id[16:]))
         if (not appendix and (ext not in ("md", "json", "docx") or not rev_id.startswith(hunt_id + "-r"))
                 or "/" in rev_id or ".." in rev_id):
             raise HTTPException(404)

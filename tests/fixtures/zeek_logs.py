@@ -281,13 +281,19 @@ KNOWN_CERTS = Row("known_certs", {"host": DC, "port_num": 636, "subject": "CN=dc
 WINDOWS_ROWS = (SMB_FILES, SMB_MAPPING, SMB_CMD, DCE_RPC, KERBEROS, NTLM, RDP, RFB, LDAP, LDAP_SEARCH, DHCP, SOFTWARE,
                 KNOWN_HOSTS, KNOWN_SERVICES, KNOWN_CERTS)
 
+# Health layouts: Zeek policy/misc/{capture-loss,stats}.zeek; Elastic published
+# zeek stats packets.dropped/received fields. SO 2.4 excludes both by default.
+CAPTURE_LOSS = Row("capture_loss", {"peer": "worker-1", "ts_delta": 900.0, "gaps": 23,
+                                    "acks": 1000, "percent_lost": 2.3})
+STATS = Row("stats", {"peer": "worker-1", "pkts_dropped": 12, "pkts_link": 1000})
+
 ROWS = {row.log: row for row in (DNS, HTTP, SSL, X509, FILES, PE, SSH, NOTICE, WEIRD, SIGNATURES, INTEL, FTP, SMTP,
-                                 IRC, MYSQL, TDS, POSTGRESQL, REDIS, SOCKS, TUNNEL, SIP, SNMP, RADIUS, *WINDOWS_ROWS)}
+                                 IRC, MYSQL, TDS, POSTGRESQL, REDIS, SOCKS, TUNNEL, SIP, SNMP, RADIUS, CAPTURE_LOSS, STATS, *WINDOWS_ROWS)}
 # shipper streams and dataset names that differ from Zeek's own log name
 ELASTIC_STREAMS = {"signatures": "signature"}
 SO_NAMES = {"files": "file"}
 # logs a shipper publishes no pipeline for (the catalog's absent_shapes)
-NOT_WRITTEN = {"tds": {"elastic"}, "postgresql": {"elastic", "security_onion"},
+NOT_WRITTEN = {"capture_loss": {"security_onion"}, "stats": {"security_onion"}, "tds": {"elastic"}, "postgresql": {"elastic", "security_onion"},
                "redis": {"elastic", "security_onion"}, "smb_cmd": {"security_onion"},
                "ldap": {"elastic"}, "ldap_search": {"elastic"}, "known_hosts": {"security_onion"},
                "known_services": {"security_onion"}, "known_certs": {"security_onion"}}
@@ -676,6 +682,7 @@ def _malcolm_windows(log: str, source: dict, z: dict, text: bool) -> None:
 _IDS = {"id.orig_h": "source.address", "id.orig_p": "source.port", "id.resp_h": "destination.address",
         "id.resp_p": "destination.port", "uid": "zeek.session_id"}
 ELASTIC_RENAMES = {
+    "stats": {"pkts_dropped": "zeek.stats.packets.dropped", "pkts_link": "zeek.stats.packets.received"},
     "dns": {**_IDS, "proto": "network.transport", "Z": None, "auth": None, "addl": None},
     "http": {**_IDS, "method": "http.request.method", "referrer": "http.request.referrer",
              "status_code": "http.response.status_code", "version": "http.version",

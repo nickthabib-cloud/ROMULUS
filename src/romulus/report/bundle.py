@@ -38,6 +38,27 @@ def write_reports(repo, manifest, directory):
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
+    if visibility := manifest["coverage"].get("zeek_visibility"):
+        ref = visibility["snapshot"]
+        snapshot = ref["sha256"]
+        if (len(snapshot) != 64 or any(char not in "0123456789abcdef" for char in snapshot)
+                or ref["filename"] != f"zeek-visibility-{snapshot}.jsonl"):
+            raise ValueError("Invalid visibility appendix reference")
+        hasher, count, temporary = hashlib.sha256(), 0, None
+        try:
+            with NamedTemporaryFile(dir=directory, prefix=".visibility-", suffix=".tmp", delete=False) as output:
+                temporary = Path(output.name)
+                for row in repo.zeek_visibility_rows(manifest["hunt"]["id"], snapshot):
+                    line = repo.zeek_visibility_line(row).encode("utf-8")
+                    output.write(line)
+                    hasher.update(line)
+                    count += 1
+            if count != ref["count"] or hasher.hexdigest() != snapshot:
+                raise ValueError("Zeek visibility appendix differs from its report manifest")
+            os.replace(temporary, directory/ref["filename"])
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
     staged = {}
     try:
         for ext in paths:
@@ -45,7 +66,8 @@ def write_reports(repo, manifest, directory):
                 staged[ext] = Path(output.name)
         with staged["md"].open("w", encoding="utf-8") as output:
             output.writelines(markdown.iter_render(manifest, host_rows=lambda ref: repo.report_hosts(
-                manifest["hunt"]["id"], ref["sha256"])))
+                manifest["hunt"]["id"], ref["sha256"]), visibility_rows=lambda ref: repo.zeek_visibility_rows(
+                    manifest["hunt"]["id"], ref["sha256"])))
         executive.write(manifest, staged["docx"], paths["md"].name)
         staged["json"].write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
         # All renderers have completed before any existing revision file is replaced.

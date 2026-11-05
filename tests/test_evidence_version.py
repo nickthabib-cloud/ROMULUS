@@ -41,7 +41,10 @@ PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf211
                    # lone surrogate) change, and a non-Zeek record's stored form and digest are the record as read.
                    # Then normalize_hits gained an optional report of the families a skipped record could have fed,
                    # and the package registers its cleaners with the store on import: no output changed.
-                   14: "d79eeeaca41f3d1fd0ea170c5138c89c8634fc4c95a3e564ece0a49631afd1dd"}
+                   # The observer families also include sensor_health, and an explicit source declaration may
+                   # route plain Zeek through its own producer. Every previous generic/native shape stays
+                   # identical; only the Zeek producer changes its epoch and adds health records.
+                   14: "848ef3f76d2c1c0c9c712fa859e08dacfb6a351133e8b0299920edb0be3ee98c"}
 WINDOWS_EVIDENCE_FILES = ("community.py", "windows.py", "windows_catalog.py", "windows_reassembly.py", "rpc_catalog.py")
 PINNED_WINDOWS = {
     "windows-ecs@15": "25b5a842851ea66af4086d63dc5aac56fe8d0ec486396a456ed6330cc8ed721b",
@@ -63,6 +66,7 @@ PINNED_WINDOWS = {
 ZEEK_EVIDENCE_FILES = ("certificates.py", "community.py", "rpc_catalog.py", "zeek.py", "zeek_catalog.py",
                        "zeek_credentials.py")
 PINNED_ZEEK = {
+    "zeek-ecs@2": "285b031520e694cc627598b912b32fcf1ecbae106efd5d4b649ebfbe3109e865",
     # unreleased: re-pinned when a Zeek record's raw digest became the digest of its stored form, credentials masked
     # (scrub_zeek_source); typed values are unchanged
     "zeek-ecs@1": "56cb0e7b2387cdf679d95d35976e01ef9e691c00b7689093c8b0afc8ea35cc02",

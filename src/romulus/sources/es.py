@@ -599,6 +599,8 @@ _PER_SECOND = {"ms": 1_000, "ns": 1_000_000_000}
 def _exact_time(value, time_unit: str) -> dict:
     """A range matching exactly one time: an OpenSearch date sort value (epoch milliseconds for a `date` field,
     nanoseconds for `date_nanos`), written as ISO-8601 text with nine fraction digits, which names either exactly."""
+    if time_unit == "s" and isinstance(value, (int, float)) and not isinstance(value, bool):
+        return {"gte": value, "lte": value}
     per_second = _PER_SECOND.get(time_unit)
     if per_second is None or isinstance(value, bool) or not isinstance(value, int):
         raise SourceError(f"a time sort value is not an epoch number in a known resolution: {value!r} ({time_unit})")

@@ -69,7 +69,7 @@ class CompiledQuery(BaseModel):
     body: dict[str, Any]
     fingerprint: str
     # the time field's resolution, which an OpenSearch date sort value is written in (`date` ms, `date_nanos` ns)
-    time_unit: Literal["ms", "ns"] = "ms"
+    time_unit: Literal["ms", "ns", "s"] = "ms"
 
 
 class Completeness(StrEnum):

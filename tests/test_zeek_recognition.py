@@ -17,7 +17,7 @@ from tests.fixtures import zeek_factory as zf
 from tests.fixtures import zeek_logs as zl
 
 # a zeek.<name> dataset only Elastic writes (Security Onion names no log so)
-ELASTIC_ONLY = {"connection", "files", "signature", "smb_cmd", "known_hosts", "known_services", "known_certs"}
+ELASTIC_ONLY = {"connection", "files", "signature", "smb_cmd", "known_hosts", "known_services", "known_certs", "capture_loss", "stats"}
 # Elastic streams whose documents keep no zeek.<stream> object (their pipelines index only the columns they rename):
 # with Security Onion 2.3's markers forged onto one, nothing tells it from a Security Onion record, which is then read
 # as one (and these logs are no log of Security Onion's catalog: a counted skip)
@@ -189,3 +189,60 @@ def test_malcolms_rows_that_carry_event_module_are_still_malcolms(log):
     assert (record.shape, record.recognized_by) == ("malcolm", "event.provider")
     [event] = normalize_hits([h])[0]
     assert event.get("zeek.log") == log and event.host == zl.SENSOR
+
+@pytest.mark.parametrize('name',sorted(ELASTIC_ONLY))
+@pytest.mark.parametrize('mapped_stream',[False,True])
+def test_exclusive_dataset_source_predicates_follow_existing_recognition(name,mapped_stream):
+    from romulus.evidence.zeek_catalog import lookup_log
+    from romulus.hunt.zeek_sources import source_groups
+    from romulus.sources.compile import build_query
+    from romulus.sources.models import SearchIntent, Window
+    from tests.test_zeek_links import NativePivot
+    from tests.zeek_source_support import matches
+
+    log=lookup_log('elastic',name);hit=written(log.name)['elastic']()
+    original=NativePivot('elastic',[hit]).contracts['network']
+    hit['_source'].pop('data_stream')
+    contract=NativePivot('elastic',[hit]).contracts['network']
+    if mapped_stream:
+        contract.fields['data_stream.dataset']=original.fields['data_stream.dataset']
+    record=zeek_record(hit['_source'])
+    assert record.shape=='elastic' and record.log is log
+    event=normalize_hits([hit])[0][0]
+    from datetime import timedelta
+    groups=source_groups(contract,log,'elastic')
+    assert groups
+    intent=SearchIntent(kind='raw',target='network',window=Window(start=event.ts-timedelta(seconds=1),
+        end=event.ts+timedelta(seconds=1)),any_of=groups)
+    assert matches(build_query(intent,contract),hit['_source'])
+
+
+@pytest.mark.parametrize('variant',['ambiguous_http','suricata_provider','arkime_provider','so_precedence','zeek_provider'])
+def test_exclusive_source_branch_preserves_recognition_precedence(variant):
+    from datetime import timedelta
+
+    from romulus.evidence.zeek_catalog import CONN, HTTP
+    from romulus.hunt.zeek_sources import source_groups
+    from romulus.sources.compile import build_query
+    from romulus.sources.models import SearchIntent, Window
+    from tests.test_zeek_links import NativePivot
+    from tests.zeek_source_support import matches
+
+    hit=zl.elastic(zl.HTTP,'http') if variant=='ambiguous_http' else zf.elastic(zf.FULL,'conn')
+    event=normalize_hits([hit])[0][0];log=HTTP if variant=='ambiguous_http' else CONN
+    hit['_source'].pop('data_stream')
+    if variant.endswith('_provider'):
+        hit['_source']['event']['provider']=variant.removesuffix('_provider')
+    if variant=='so_precedence':
+        hit['_source']['event']['module']='zeek';hit['_source']['data_stream']={'dataset':'zeek'}
+    contract=NativePivot('elastic',[hit]).contracts['network'] if variant=='zeek_provider' else None
+    if contract is None:
+        from romulus.sources.profile import contract_from_types
+        from tests.test_zeek_links import types_of
+        contract=contract_from_types('network',types_of(hit['_source']),role='network')
+    groups=source_groups(contract,log,'elastic')
+    selected=bool(groups) and matches(build_query(SearchIntent(kind='raw',target='network',
+        window=Window(start=event.ts-timedelta(seconds=1),end=event.ts+timedelta(seconds=1)),any_of=groups),contract),hit['_source'])
+    record=zeek_record(hit['_source'])
+    assert selected==(variant=='zeek_provider')
+    assert (record is not None and record.shape=='elastic')==selected

@@ -23,10 +23,12 @@ from romulus.evidence.zeek import (
     normalize_plain_zeek,
     zeek_record,
 )
-from romulus.evidence.zeek_catalog import ANALYZER_LOGS, SHAPES, lookup_log
+from romulus.evidence.zeek_catalog import ANALYZER_LOGS, HEALTH_LOGS, SHAPES, lookup_log
 from tests.fixtures import zeek_logs as zl
 
-LOGS = {log.name: log for log in ANALYZER_LOGS}
+# These shared shape/field/secret checks apply to health records too; they remain
+# separate from analyzer content in the production catalog.
+LOGS = {log.name: log for log in (*ANALYZER_LOGS, *HEALTH_LOGS)}
 # Natives a log's own step reads in a shape outside its catalog table (Security Onion writes both files layouts'
 # identifiers to log.id.uid and Zeek 5.0's first hosts to source.ip and destination.ip)
 STEP_READ = {("files", "security_onion"): {"uid", "conn_uids", "tx_hosts", "rx_hosts"}}

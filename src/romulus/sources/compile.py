@@ -129,6 +129,8 @@ def build_query(intent: SearchIntent, contract: FieldContract) -> dict:
     os_family = _intent_os_family(intent)
     must = [{"range": {tf: {"gte": intent.window.start.isoformat(), "lt": intent.window.end.isoformat(),
                             "format": "strict_date_optional_time"}}}]
+    if contract.zeek_sensor:
+        must = [{"range": {tf: {"gte": intent.window.start.timestamp(), "lt": intent.window.end.timestamp()}}}]
     must += [_pred(p, contract, os_family=os_family) for p in intent.filters]
     query: dict = {"bool": {"filter": must}}
     if intent.any_of:
@@ -146,7 +148,7 @@ def compile_es(intent: SearchIntent, contract: FieldContract, flavor: str = "ela
     query = build_query(intent, contract)
     if intent.kind == "raw":
         time_sort = {"order": intent.order}
-        if flavor != "opensearch":
+        if flavor != "opensearch" and not contract.zeek_sensor:
             # OpenSearch's field sort refuses `format`; its date sort values are the field's own epoch numbers
             time_sort["format"] = "strict_date_optional_time_nanos"
         body = {
@@ -176,6 +178,10 @@ def compile_es(intent: SearchIntent, contract: FieldContract, flavor: str = "ela
                                                   "min_doc_count": 0,
                                                   "extended_bounds": {"min": intent.window.start.isoformat(),
                                                                       "max": intent.window.end.isoformat()}}}}}
+        if contract.zeek_sensor:
+            body["aggs"]["h"] = {"histogram": {"field": contract.time_field, "interval": sec,
+                "min_doc_count": 0, "extended_bounds": {"min": intent.window.start.timestamp(),
+                                                         "max": intent.window.end.timestamp()}}}
     else:
         raise CompileError(f"unknown intent kind {intent.kind}")
     fp = digest({"target": intent.target, "kind": intent.kind, "body": body})
@@ -185,5 +191,7 @@ def compile_es(intent: SearchIntent, contract: FieldContract, flavor: str = "ela
 
 def time_unit(contract: FieldContract) -> str:
     """The resolution of the time field's epoch sort values: nanoseconds for `date_nanos`, else milliseconds."""
+    if contract.zeek_sensor:
+        return "s"
     time_spec = contract.fields.get(contract.time_field)
     return "ns" if time_spec is not None and time_spec.type == "date_nanos" else "ms"

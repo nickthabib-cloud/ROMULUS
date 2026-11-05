@@ -47,6 +47,8 @@ from romulus.hunt.publish import (
 )
 from romulus.hunt.sweep import stored_boot_intervals
 from romulus.hunt.windows_context import publish_windows_link_context
+from romulus.hunt.zeek_links import ZEEK_LINK_TYPES
+from romulus.hunt.zeek_links import event_keys as zeek_event_keys
 from romulus.sources.models import Window
 from romulus.store.db import digest
 from romulus.store.repo import Repo
@@ -340,6 +342,8 @@ class ExpansionEngine:
 
     @staticmethod
     def _event_link_keys(event: TypedEvent, link_type: LinkType) -> list[dict]:
+        if link_type in ZEEK_LINK_TYPES:
+            return zeek_event_keys(event, link_type)
         if link_type == "process_lineage" and usable_key(event.get("process.pid")):
             return [{"process.pid": event.get("process.pid")}]
         if link_type == "login_session" and usable_key(event.get("process.session_id")):
@@ -587,6 +591,8 @@ class ExpansionEngine:
                     row["_windows_anchor"] = is_windows
                 if is_windows:
                     share = WINDOWS_PER_ANCHOR_SOURCE_QUERIES
+                if any(event.get("observer.product") == "zeek" for event in self._anchor_plan(row).events):
+                    share += 4 * len(ZEEK_LINK_TYPES)
             shares += share
         return min(self.max_source_queries, shares)
 
@@ -790,9 +796,13 @@ class ExpansionEngine:
         for tier, link_types, window_label in TIER_PLAN:
             tier_slots = []
             windows_links = _WINDOWS_TIER_LINKS.get((tier, window_label), ())
-            for link_type in (*link_types, *windows_links):
+            zeek_links = ("zeek_uid", "zeek_file", "certificate") if tier == "T1" else (
+                ("address_host",) if tier == "T2" else ())
+            for link_type in (*link_types, *windows_links, *zeek_links):
                 for anchor_row in ordered:
                     plan = self._anchor_plan(anchor_row)
+                    if link_type in zeek_links and not any(zeek_event_keys(event, link_type) for event in plan.events):
+                        continue
                     if link_type in windows_links and not any(
                         event_os_family(event) == "windows" for event in plan.events
                     ):
@@ -854,6 +864,7 @@ class ExpansionEngine:
                 row = publish_match(
                     self.repo, self.hunt_id, playbook, match, result.task_ids[0] if result.task_ids else None, {},
                     source_anchor_id=candidate["id"], source_link_id=result.id, owner_token=self.owner_token,
+                    zeek_context=events, zeek_context_ids=result.evidence_ids,
                       context_reach={
                           "anchor_id": candidate["id"], "link_id": result.id,
                           "link_type": result.link_type, "strength": result.strength,
@@ -969,6 +980,8 @@ class ExpansionEngine:
                 remaining_slots = len(slots) - slot_index
                 query_cap = min(12, max(2, remaining // max(1, remaining_slots)))
                 self.heartbeat()
+                if link_type in ZEEK_LINK_TYPES:
+                    self.fetcher.executor.zeek_deadline = (self.started + self.wall_clock_seconds, self.clock)
                 result = self._stored_result(stored) if stored else self.fetcher.fetch(
                     anchor, link_type, window, query_cap=query_cap,
                 )

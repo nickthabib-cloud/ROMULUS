@@ -388,9 +388,31 @@ def _render_body(m: dict, banner: str = BANNER) -> str:
     return "\n".join(out)
 
 
-def iter_render(m: dict, banner: str = BANNER, *, host_rows=None):
+def iter_render(m: dict, banner: str = BANNER, *, host_rows=None, visibility_rows=None):
     """Render host appendices incrementally; the resolver reads the manifest's immutable references."""
     yield _render_body(m, banner)
+    zeek_links = [link for link in (m.get("investigations") or {}).get("link_accounting", [])
+                  if link.get("link_type") in {"zeek_uid", "zeek_file", "certificate", "address_host"}]
+    if zeek_links:
+        yield "\n## Zeek evidence links\n\n"
+        for link in zeek_links:
+            yield f"- {cell(link['link_type'])} ({cell(link['strength'])}), {cell(link['status'])}: "                   f"{cell('; '.join(link.get('reasons', [])))}. Evidence: {cell(', '.join(link['evidence_ids']))}\n"
+    if visibility := m["coverage"].get("zeek_visibility"):
+        ref = visibility["snapshot"]
+        yield f"\n## Zeek sensor visibility\n\nComplete immutable appendix: [{ref['filename']}]({ref['filename']}) "               f"({ref['count']} statements).\n\n"
+        for note in [*visibility.get("notes", []), *visibility.get("unresolved", [])]:
+            yield f"- {cell(note)}\n"
+        if visibility_rows is not None:
+            count = 0
+            for row in visibility_rows(ref):
+                yield f"- {cell(row['reason'])}\n"
+                count += 1
+            if count != ref["count"]:
+                raise ValueError("Zeek visibility appendix differs from its manifest")
+        else:
+            yield "\nPreview only; the complete statements are in the referenced appendix.\n\n"
+            for row in visibility.get("preview", []):
+                yield f"- {cell(row['reason'])}\n"
     fleets = [finding for finding in m["findings"] if "fleet_hosts" in finding]
     if not fleets:
         return
@@ -414,6 +436,6 @@ def iter_render(m: dict, banner: str = BANNER, *, host_rows=None):
     yield banner+"\n"
 
 
-def render(m: dict, banner: str = BANNER, *, host_rows=None) -> str:
+def render(m: dict, banner: str = BANNER, *, host_rows=None, visibility_rows=None) -> str:
     """Convenience renderer; file/download callers use iter_render to stream large appendices."""
-    return "".join(iter_render(m, banner, host_rows=host_rows))
+    return "".join(iter_render(m, banner, host_rows=host_rows, visibility_rows=visibility_rows))

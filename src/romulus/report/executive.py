@@ -37,6 +37,23 @@ def write(m, path, technical_name):
                       f"See {technical_name}, Fleet host appendix, finding {finding['id']}, for every retained host.")
         for check in finding["next_checks"]:
             paragraph("Recommended check: "+check)
+    if visibility := m["coverage"].get("zeek_visibility"):
+        ref = visibility["snapshot"]
+        paragraph("Zeek sensor visibility", bold=True)
+        shown = len(visibility.get('preview', []))
+        paragraph(f"Preview of {shown} of {ref['count']} statements; "
+                  f"{ref['count']-shown} omitted from this preview. Full text also in {technical_name}.")
+        p = SubElement(body, f"{{{_WORD}}}p")
+        link = SubElement(p, f"{{{_WORD}}}hyperlink", {
+            "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id": "visibility"})
+        SubElement(SubElement(link, f"{{{_WORD}}}r"), f"{{{_WORD}}}t").text = ref['filename']
+        for note in [*visibility.get("notes", []), *visibility.get("unresolved", [])]:
+            paragraph(note)
+        for row in visibility.get("preview", []):
+            paragraph(row["reason"])
+    for link in (m.get("investigations") or {}).get("link_accounting", []):
+        if link.get("link_type") in {"zeek_uid", "zeek_file", "certificate", "address_host"}:
+            paragraph(f"{link['link_type']}: {link.get('status', 'unresolved')}; " + "; ".join(link.get("reasons", [])))
     paragraph(BANNER)
     section = SubElement(body, f"{{{_WORD}}}sectPr")
     SubElement(section, f"{{{_WORD}}}pgSz", {f"{{{_WORD}}}w": "12240", f"{{{_WORD}}}h": "15840"})
@@ -56,3 +73,10 @@ def write(m, path, technical_name):
         archive.writestr("[Content_Types].xml", content_types)
         archive.writestr("_rels/.rels", relationships)
         archive.writestr("word/document.xml", tostring(document, encoding="utf-8", xml_declaration=True))
+        if visibility:
+            namespace = "http://schemas.openxmlformats.org/package/2006/relationships"
+            rels = Element(f"{{{namespace}}}Relationships")
+            SubElement(rels, f"{{{namespace}}}Relationship", {
+                "Id": "visibility", "Target": visibility["snapshot"]["filename"], "TargetMode": "External",
+                "Type": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"})
+            archive.writestr("word/_rels/document.xml.rels", tostring(rels, encoding="utf-8", xml_declaration=True))
