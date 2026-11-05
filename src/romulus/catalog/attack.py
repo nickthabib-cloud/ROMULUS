@@ -20,6 +20,9 @@ from .models import (
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_ATTACK_BUNDLE = ROOT / "content" / "attack" / "enterprise-attack-20.0.json.gz"
 PINNED_JSON_SHA256 = "81113ba98afa2928f3dcff62022539f7ce30c315c32e14422f11ff95ce534352"
+# ATT&CK for ICS, the same release: ICS rule ids are validated against it as Enterprise ids are against the above.
+ICS_ATTACK_BUNDLE = ROOT / "content" / "attack" / "ics-attack-20.0.json.gz"
+ICS_PINNED_JSON_SHA256 = "7bffdff9853f04117a607bb5de652140a5724a3a06afc88bdc3faee37103d622"
 MAX_UNCOMPRESSED_BYTES = 64 * 1024 * 1024
 _CHUNK_BYTES = 1024 * 1024
 
