@@ -148,14 +148,16 @@ def _usual_bits_client(image):
 
 
 def _installed_powershell_parent(image):
+    if not isinstance(image, str) or not image.isascii():
+        return False
     if basename(image) in {"powershell.exe", "pwsh.exe"} and _usual_bits_client(image):
         return True
     parts = installation_parts(image)
     if len(parts) == 4 and parts[-1] == "pwsh.exe":
-        if parts[:3] == ("program files", "powershell", "7-preview"):
+        if parts[0] in {'program files', 'program files (x86)'} and parts[1:3] == ('powershell', '7-preview'):
             return True
         if (parts[:2] == ("program files", "windowsapps")
-                and re.fullmatch(r"microsoft\.powershell_[0-9]+(?:\.[0-9]+){3}_(?:x86|x64|arm64)__8wekyb3d8bbwe",
+                and re.fullmatch(r"microsoft\.powershell(?:preview)?_[0-9]+(?:\.[0-9]+){3}_(?:x86|x64|arm64)__8wekyb3d8bbwe",
                                  parts[2]) is not None):
             return True
     return (len(parts) == 5 and parts[:2] in {("windows", "system32"), ("windows", "syswow64")}
@@ -263,7 +265,7 @@ class KerberosLoopbackLogon(_Housekeeping):
 
 class UnexpectedPsRemoteServer(_FoldedHousekeeping):
     id = "win.unexpected_ps_remote_server"
-    version = "4"
+    version = "5"
     title = "PowerShell server mode was launched by an unexpected parent"
     families = ("process_exec",)
     windows_event_classes = _PROCESS
@@ -279,13 +281,14 @@ class UnexpectedPsRemoteServer(_FoldedHousekeeping):
         image = event.get("process.executable_key") or event.get("process.executable")
         if basename(image) not in {"powershell.exe", "pwsh.exe"} or not _server_mode(_arguments(event)):
             return []
-        parent = _image_identity(event.get("process.parent.executable_key") or event.get("process.parent.executable"))
+        parent = _image_identity(event.get("process.parent.executable") or event.get("process.parent.executable_key"))
         if not parent:
             raise Undecided("parent", "PowerShell -s server mode was requested; its parent is unresolved")
         if basename(parent) in {"wsmprovhost.exe", "sshd.exe"}:
             return []
         job_parent = _installed_powershell_parent(parent)
-        text = f"PowerShell server mode was requested by recorded parent '{self.describe(parent)}'"
+        display_parent = (event.get('process.parent.executable_key') or parent) if parent.isascii() else parent
+        text = f"PowerShell server mode was requested by recorded parent '{self.describe(display_parent)}'"
         if job_parent:
             text += "; ordinary PowerShell Start-Job can launch this out-of-process job host"
         return self.report(event, text, _PROC_FIELDS, high=not job_parent, notes=(self.fold_caveat,),

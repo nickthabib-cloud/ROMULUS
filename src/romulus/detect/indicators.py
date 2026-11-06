@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import os
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -31,7 +32,7 @@ import yaml
 
 from romulus.content.indicator_values import KINDS as SUPPORTED_KINDS
 from romulus.content.indicator_values import normalize_value
-from romulus.detect.base import LANES, SEVERITIES, Match, Playbook, basename, pf
+from romulus.detect.base import SEVERITIES, Match, Playbook, basename, pf
 from romulus.detect.bounded import HOT_COUNT, HeldExamples, KeyedStore
 from romulus.detect.citing import (
     BoundStage,
@@ -132,7 +133,7 @@ def load_indicators(directory: Path | None = None) -> IndicatorSet:
                 raise IndicatorFileError(f"{where}: kind must be one of {sorted(KINDS)}")
             if not isinstance(values, list) or not values or not all(isinstance(v, str) and v for v in values):
                 raise IndicatorFileError(f"{where}: values must be a non-empty list of strings")
-            if item.get("lane", "lead") not in LANES or item.get("severity", "medium") not in SEVERITIES:
+            if item.get("lane", "lead") not in {'high', 'lead', 'context'} or item.get("severity", "medium") not in SEVERITIES:
                 raise IndicatorFileError(f"{where}: lane or severity is not a known value")
             for v in values:
                 _check_value(kind, v, where)
@@ -186,7 +187,7 @@ class IndicatorMatch(Playbook):
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "ioc.indicator_match"
     anchor_class = "indicator"
-    version = f"6+{_SET.digest}"
+    version = f"7+{_SET.digest}"
     title = "Indicator list match in the field that gives it meaning"
     kind = "aggregate"
     claim_type = "observed_action"
@@ -225,6 +226,8 @@ class IndicatorMatch(Playbook):
         self._overlay = None
         self._kind_seen = set()
         self._batch_kind_seen = set()
+        self._kind_unsearchable = Counter()
+        self._batch_kind_unsearchable = Counter()
         self._configure_content()
         # (indicator id, role, host, value) -> [count, matched field, cited records]
         self.groups = KeyedStore(self, "ioc_groups", self.HOT, disk_budget=self.GROUPS_DISK)
@@ -245,6 +248,8 @@ class IndicatorMatch(Playbook):
             extra += ('x509_certificate',)
         if 'url' in self._content_kinds:
             extra += ('remote_access',)
+        if {'url', 'sha256'} & self._content_kinds:
+            extra += ('http_body',)
         self.families = tuple(dict.fromkeys((*type(self).families, *extra)))
 
     def bind_indicators(self, repo, pins):
@@ -285,16 +290,16 @@ class IndicatorMatch(Playbook):
             for row in self._overlay.find(kind, value):
                 yield self._from_row(row)
 
-    def _unsearchable(self, seen):
-        return [f'Indicator kind {kind} cannot be searched in these delivered records: no complete typed '
+    def _unsearchable(self, counts):
+        return [f'Indicator kind {kind} cannot be searched in {count} delivered record(s): no complete typed '
                 'value was available; no negative result is asserted.'
-                for kind in sorted(self._content_kinds - seen)]
+                for kind, count in sorted(counts.items()) if count]
 
     def coverage_notes(self):
-        return [*super().coverage_notes(), *self._unsearchable(self._kind_seen)]
+        return [*super().coverage_notes(), *self._unsearchable(self._kind_unsearchable)]
 
     def partition_coverage_notes(self):
-        return self._unsearchable(self._batch_kind_seen)
+        return self._unsearchable(self._batch_kind_unsearchable)
 
     def _content_values(self, event):
         """Typed value, actual predicate fields, and the role established by the record."""
@@ -306,8 +311,6 @@ class IndicatorMatch(Playbook):
                 value = normalize_value(kind, value)
             except ValueError:
                 return None
-            self._kind_seen.add(kind)
-            self._batch_kind_seen.add(kind)
             key = (kind, value, role)
             if key in seen:
                 return None
@@ -325,6 +328,8 @@ class IndicatorMatch(Playbook):
             hashes = event.get('file.hashes')
             if isinstance(hashes, dict) and (item := offer(kind, hashes.get(kind), ('file.hashes',), role)):
                 yield item
+        if event.family == 'http_body' and (item := offer('sha256', event.get('file.sha256'), ('file.sha256',), 'hash:body')):
+            yield item
         for side in ('server', 'client'):
             role = 'certificate:'+side
             name = f'tls.{side}.hash_sha1'
@@ -349,22 +354,32 @@ class IndicatorMatch(Playbook):
                 yield item
             if item := offer('url', event.get('url.full'), ('url.full',), 'url:record'):
                 yield item
-            elif event.family in ('http_tx', 'http_access'):
-                target = event.get('url.original')
-                if item := offer('url', target, ('url.original',), 'url:request'):
+            elif event.family in ('http_tx', 'http_access', 'http_body', 'net_session'):
+                def scalar(value):
+                    return value[0] if isinstance(value, list) and len(value) == 1 else value
+                target_field = 'url.path' if event.family == 'net_session' else 'url.original'
+                target = scalar(event.get(target_field))
+                host = scalar(event.get('http.hostname'))
+                if item := offer('url', target, (target_field,), 'url:request'):
                     yield item
-                elif isinstance(target, str) and target.startswith('/') and isinstance(event.get('http.hostname'), str):
+                elif isinstance(target, str) and target.startswith('/') and isinstance(host, str):
                     scheme_field = 'url.scheme' if event.has('url.scheme') else 'http.scheme'
                     scheme = event.get(scheme_field)
+                    if not scheme and event.family in ('http_tx', 'net_session'):
+                        scheme = 'http'
                     if isinstance(scheme, str):
-                        names = (scheme_field, 'http.hostname', 'url.original')
-                        if item := offer('url', scheme+'://'+event.get('http.hostname')+target, names, 'url:reconstructed'):
+                        names = (*((scheme_field,) if event.has(scheme_field) else ()), 'http.hostname', target_field)
+                        if item := offer('url', scheme+'://'+host+target, names, 'url:reconstructed'):
                             yield item
 
     def _content(self, event):
+        available = set()
         for kind, value, fields, role in self._content_values(event):
+            available.add(kind)
             for ind in self._matching(kind, value):
                 self._keep((ind.id, role, event.host, value), event, {'field': fields})
+        self._kind_unsearchable.update(self._content_kinds - available)
+        self._batch_kind_unsearchable.update(self._content_kinds - available)
 
     # Groups (indicator, role, host, value): the first 20 records cited (staged, held as ids) and a count. A listed
     # domain's subdomains are each a value, so there may be very many: HOT groups in memory, the rest on the rule's
@@ -535,6 +550,7 @@ class IndicatorMatch(Playbook):
         if not self.set.indicators and self._overlay is None:
             return []
         self._batch_kind_seen = set()
+        self._batch_kind_unsearchable = Counter()
         self._batch = events
         for e in events:
             if e.family not in self.families:
@@ -603,6 +619,7 @@ class IndicatorMatch(Playbook):
 
     def uncited_finding(self, key, state, match):
         indicator = self._indicator(key[0])
+        match.attack = indicator.attack if indicator.list_version else ()
         match.severity = indicator.severity
         match.proposed_lane = "lead" if key[1] == "argument" else indicator.lane
         match.claim_type = "mention" if key[1] == "argument" else "aggregate_observation"
@@ -688,6 +705,7 @@ class IndicatorMatch(Playbook):
                 'hash:image': f'a loaded image with {algorithm} {value} was observed',
                 'hash:file': f'a file-change observation carries {algorithm} {value}',
                 'hash:transfer': f'a file with {algorithm} {value} was observed in a transfer',
+                'hash:body': f'a response body with {algorithm} {value} was observed in packets',
                 'hash:record': f'a recorded file hash is {algorithm} {value}'}[role]
             claim = f'In {n} {e0.family} record(s) on {host}, {description}, matching {listed} ({span}).'
             lane, claim_type = ind.lane, 'aggregate_observation'
@@ -698,7 +716,7 @@ class IndicatorMatch(Playbook):
             lane, claim_type = ind.lane, 'network_observation'
         elif role.startswith('url:'):
             label = {'url:record': 'recorded URL', 'url:request': 'HTTP request target URL',
-                     'url:reconstructed': 'HTTP URL from typed scheme, host and request target'}[role]
+                     'url:reconstructed': 'reconstructed HTTP URL from the recorded host and request target'}[role]
             claim = f'In {n} {e0.family} record(s), the {label} is {value}, matching {listed} ({span}).'
             lane, claim_type = ind.lane, 'network_observation'
         else:
@@ -710,7 +728,8 @@ class IndicatorMatch(Playbook):
             names = next((fields for kind, candidate, fields, context_role in self._content_values(e0)
                           if kind == ind.kind and candidate == value and context_role == role), names)
         m = Match(self.id, claim, claim_type, evs, [pf(e0, name) for name in names], e0.ts, ind.severity, lane, "medium",
-                  e0.entities(), group_key="|".join(map(str, key)), context_ids=context)
+                  e0.entities(), group_key="|".join(map(str, key)), context_ids=context,
+                  attack=ind.attack if ind.list_version else ())
         if ind.attack:
             m.notes.append(f"indicator ATT&CK context: {list(ind.attack)}")
         m.claim += cited_phrase(len(evs), n, not missing) + (bound_note(missing, ends) if ends is not None else "")

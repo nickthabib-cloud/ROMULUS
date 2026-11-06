@@ -7,6 +7,10 @@ import io
 import yaml
 
 
+def _csv_cell(value):
+    return "'" + value if value[:1] in {'=', '+', '-', '@', '\t', '\r'} else value
+
+
 def export_indicators(store, list_id, version=None, format='yaml'):
     """Validate before streaming and keep only one value row in memory."""
     if format not in {'yaml', 'csv'}:
@@ -21,12 +25,13 @@ def export_indicators(store, list_id, version=None, format='yaml'):
         if format == 'csv':
             buffer = io.StringIO(newline='')
             writer = csv.writer(buffer, lineterminator='\n')
-            writer.writerow(['kind', 'value', 'label', 'attack'])
+            writer.writerow(['kind', 'value', 'label', 'attack', 'lane', 'severity'])
             yield buffer.getvalue()
             for row in rows:
                 buffer.seek(0)
                 buffer.truncate(0)
-                writer.writerow([row['kind'], row['value'], row['label'], ';'.join(row['attack'])])
+                writer.writerow([_csv_cell(value) for value in (
+                    row['kind'], row['value'], row['label'], ';'.join(row['attack']), row['lane'], row['severity'])])
                 yield buffer.getvalue()
             return
         provenance = {key: metadata[key] for key in (

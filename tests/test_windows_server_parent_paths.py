@@ -23,6 +23,8 @@ SHAPES = ("winlogbeat_7", "winlogbeat_8", "elastic_agent")
     r"C:\Program Files\WindowsApps\Microsoft.PowerShell_7.5.0.0_x64__8wekyb3d8bbwe\pwsh.exe",
     r"C:\Program Files\WindowsApps\Microsoft.PowerShell_7.5.0.0_x86__8wekyb3d8bbwe\pwsh.exe",
     r"\\?\C:\Program Files\WindowsApps\Microsoft.PowerShell_7.6.0.0_arm64__8wekyb3d8bbwe\PWSH.EXE",
+    r"C:\Program Files (x86)\PowerShell\7-preview\pwsh.exe",
+    r"C:\Program Files\WindowsApps\Microsoft.PowerShellPreview_7.6.0.0_x64__8wekyb3d8bbwe\pwsh.exe",
 ])
 def test_installed_preview_and_msix_start_job_parents_are_leads(shape, parent):
     record = sysmon1(image="pwsh.exe", command="pwsh.exe -s -NoLogo -NoProfile",
@@ -52,6 +54,9 @@ def test_installed_preview_and_msix_start_job_parents_are_leads(shape, parent):
     r"C:\Users\alice\WindowsApps\Microsoft.PowerShell_7.5.0.0_x64__8wekyb3d8bbwe\pwsh.exe",
     r"D:\Program Files\WindowsApps\Microsoft.PowerShell_7.5.0.0_x64__8wekyb3d8bbwe\pwsh.exe",
     r"\\server\Program Files\WindowsApps\Microsoft.PowerShell_7.5.0.0_x64__8wekyb3d8bbwe\pwsh.exe",
+    "C:\\Program File\u017f\\PowerShell\\7-preview\\pwsh.exe",
+    "C:\\Program Files\\Power\u017fhell\\7\\pwsh.exe",
+    "C:\\Program Files\\WindowsApps\\Micro\u017foft.PowerShell_7.5.0.0_x64__8wekyb3d8bbwe\\pwsh.exe",
 ])
 def test_noncanonical_start_job_parent_paths_stay_high(shape, parent):
     record = sysmon1(image="pwsh.exe", command="pwsh.exe -s -NoLogo -NoProfile",
@@ -61,6 +66,8 @@ def test_noncanonical_start_job_parent_paths_stay_high(shape, parent):
         [match] = run(rule, [record])
         assert match.proposed_lane == "high"
         assert "Start-Job" not in match.claim
+        if not parent.isascii():
+            assert parent in match.claim
     finally:
         rule.release_state()
 

@@ -113,3 +113,32 @@ def test_refused_late_replay_still_publishes_a_previously_unpublished_positive()
         assert owner.limit_reasons()
     finally:
         owner.release_state()
+
+
+@pytest.mark.parametrize('fail_at', [1, 2, 5])
+def test_late_spray_replay_save_refusal_does_not_hide_a_later_named_success(monkeypatch, fail_at):
+    from tests.test_sweep import _repo
+    from tests.test_windows_auth_round5 import publish
+    owner, repo = NtlmPasswordSpray(), _repo()
+    future = normalize(zl.elastic(ntlm('future', 1000, 'future-user', success=False), 'future'))
+    rows = [*failures('late', omit_hit=True), ntlm('late-hit', 45, 'victim15', success=True)]
+    try:
+        assert not list(owner.consume([future]))
+        assert not list(owner.consume([normalize(zl.elastic(row, f'late-{n}')) for n, row in enumerate(rows)]))
+        original, calls = owner._save_episode, 0
+        def full(key, body, previous):
+            nonlocal calls
+            calls += 1
+            if calls == fail_at:
+                raise StateExhausted('transient episode storage full')
+            return original(key, body, previous)
+        monkeypatch.setattr(owner, '_save_episode', full)
+        for match in owner.finalize():
+            publish(repo, owner, match)
+        [candidate] = repo.candidates('h1')
+        assert candidate['lane'] == 'high'
+        assert candidate['gate_results']['aggregate_summary']['peak'] == 40
+        assert 'victim15' in candidate['claim'].lower()
+    finally:
+        owner.release_state()
+        repo.engine.dispose()

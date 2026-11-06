@@ -1,4 +1,4 @@
-"""Regression proofs for the single final review's material Sigma findings."""
+"""Typed Sigma boundaries preserve unknown fields, scope and intact evidence."""
 import pytest
 
 from romulus.content.sigma_parser import evaluate_ast, parse_rule

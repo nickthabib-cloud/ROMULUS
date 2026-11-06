@@ -202,6 +202,9 @@ class ExpansionEngine:
         self._fallback_queries = 0
         # anchor id -> its hunt-independent identity, the last tie-break of the anchor order
         self._identities: dict[str, str] = {}
+        hunt = repo.get_hunt(hunt_id) if hasattr(repo, 'get_hunt') else None
+        self._imported_rule_ids = {'sigma.' + row['id'] for row in ((hunt or {}).get('manifest', {}).get(
+            'sigma_rules') or {}).get('applied', [])}
         # Planning inputs live only for this run, least recently used first, holding at most PLAN_CACHE_EVENTS cited
         # records in all; variants share those event objects.
         self._plans: OrderedDict[str, _AnchorPlan] = OrderedDict()
@@ -575,6 +578,13 @@ class ExpansionEngine:
             self._identity(row), row["id"],
         )
 
+    def _is_imported(self, row: dict) -> bool:
+        if not self._imported_rule_ids:
+            return False
+        plan = self._plans.get(row['id'])
+        candidate = plan.candidate if plan is not None else self.repo.candidate(row['candidate_id'])
+        return candidate['rule_id'] in self._imported_rule_ids
+
     def _ordered_anchors(self, rows: list[dict]) -> list[dict]:
         """Round-robin hosts while retaining deterministic priority within each host."""
         by_host: dict[str, deque[dict]] = defaultdict(deque)
@@ -586,6 +596,10 @@ class ExpansionEngine:
             for host in hosts:
                 if by_host[host]:
                     ordered.append(by_host[host].popleft())
+        if self._imported_rule_ids:
+            # Keep host fairness inside each lane and provenance tier. An imported critical severity cannot
+            # displace a curated low-severity anchor of the same lane.
+            ordered.sort(key=lambda row: (LANE_ORDER.get(row['lane'], 9), self._is_imported(row)))
         return ordered
 
     def _budget_for(self, all_rows: list[dict]) -> int:
@@ -838,6 +852,9 @@ class ExpansionEngine:
                         ) if not slot.done
                     )
             if tier_slots:
+                if self._imported_rule_ids:
+                    tier_slots.sort(key=lambda slot: (
+                        LANE_ORDER.get(slot.row['lane'], 9), slot.candidate['rule_id'] in self._imported_rule_ids))
                 return tier_slots
         return []
 
@@ -1059,6 +1076,8 @@ class ExpansionEngine:
             link for link in self.repo.expansion_links(self.hunt_id)
             if not is_agent_reach(link["link_type"], link["strength"])
         ]
+        imported_consumers = self.repo.expansion_rule_consumers(
+            self.hunt_id, self._imported_rule_ids) if self._imported_rule_ids else 0
         for row in self.repo.expansion_anchors(self.hunt_id):
             # Only anchors this run worked are finalized: those still pending. An anchor a previous run finalized
             # (resume re-runs expansion) was never scheduled here, so its recorded status and reasons stand; above
@@ -1072,6 +1091,8 @@ class ExpansionEngine:
                 reason for link in links if link["status"] != "complete"
                 for reason in (link["reasons"] or [f"{link['link_type']} {link['status']}"])
             ]))
+            if imported_consumers and not self._is_imported(row) and any('budget' in reason for reason in reasons):
+                reasons.append(f'budget spent on {imported_consumers} imported-rule anchors')
             if row["id"] in blocked_anchors:
                 status = "expanded_partial" if links else "unexpanded"
             else:

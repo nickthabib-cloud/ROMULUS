@@ -14,7 +14,7 @@ from sqlalchemy.dialects.sqlite import insert
 from romulus.catalog.attack import load_attack_bundle
 from romulus.content.indicator_import import _json_depth
 from romulus.content.indicator_lists import _audit, _json, _serial, _text
-from romulus.content.indicator_values import _safe_text
+from romulus.content.indicator_values import _SECRET_LITERAL, _URI_USERINFO, _safe_text
 from romulus.evidence.normalize import normalize_hits
 from romulus.store import schema as t
 from romulus.store.db import read_snapshot, utcnow, write_txn
@@ -95,7 +95,7 @@ def _row(document, parsed, *, upstream, commit, path, actor):
     mapping = {**parsed['mapping'], 'reasons': list(parsed['reasons']), 'tag_drops': dropped}
     row = {
         'rule_id': _text(document.get('id', ''), 'Sigma rule id', 256),
-        'title': _text(document.get('title', ''), 'Sigma title', 2048),
+        'title': _rule_text(document.get('title', ''), limit=2048),
         'author': _text(document.get('author', ''), 'Sigma author', 2048),
         'level': _text(document.get('level', 'informational'), 'Sigma level', 64),
         'sigma_status': _text(document.get('status', 'experimental'), 'Sigma status', 64),
@@ -111,17 +111,42 @@ def _row(document, parsed, *, upstream, commit, path, actor):
             'lane': 'lead', 'activation_reason': ''}
 
 
-def _credential_free(value):
-    """Refuse credential-like rule literals as well as metadata before storing either."""
-    if isinstance(value, str):
-        _safe_text(value.replace('\r', ' ').replace('\n', ' ').replace('\t', ' '), limit=1024 * 1024)
-    elif isinstance(value, dict):
-        for key, child in value.items():
-            _credential_free(key)
-            _credential_free(child)
-    elif isinstance(value, list):
-        for child in value:
-            _credential_free(child)
+def _rule_text(value, *, limit=1024 * 1024):
+    """Rule prose and detection syntax are not credential assignments."""
+    if not isinstance(value, str) or len(value) > limit:
+        raise ValueError('Invalid Sigma text type or field size')
+    if any(ord(char) < 32 or 127 <= ord(char) <= 159 or 0xD800 <= ord(char) <= 0xDFFF for char in value):
+        raise ValueError('Invalid Sigma text character')
+    return value
+
+
+def _credential_free(document):
+    """Return a sanitized document and whether a high-confidence secret was withheld.
+
+    Keyword-colon strings are common attacker-tool syntax. Only operator metadata
+    uses that heuristic; secret literals and URI user information are withheld
+    everywhere before either the AST or import diagnostics can retain them.
+    """
+    withheld = False
+
+    def clean(value, relaxed):
+        nonlocal withheld
+        if isinstance(value, str):
+            flat = value.replace('\r', ' ').replace('\n', ' ').replace('\t', ' ')
+            if _SECRET_LITERAL.search(flat) or _URI_USERINFO.search(flat):
+                withheld = True
+                return '<withheld credential-like literal>'
+            (_rule_text if relaxed else _safe_text)(flat, limit=1024 * 1024)
+            return value
+        if isinstance(value, dict):
+            return {clean(key, relaxed): clean(child, relaxed) for key, child in value.items()}
+        if isinstance(value, list):
+            return [clean(child, relaxed) for child in value]
+        return value
+
+    descriptive = {'detection', 'title', 'description', 'falsepositives', 'references', 'fields'}
+    result = {clean(key, False): clean(value, key in descriptive) for key, value in document.items()}
+    return result, withheld
 
 
 def _pairs(pairs):
@@ -215,8 +240,11 @@ class SigmaRules:
                 try:
                     relative = _text(relative, 'Sigma path', 2048)
                     doc = load_rule(path)
-                    _credential_free(doc)
+                    doc, withheld = _credential_free(doc)
                     parsed = parse_rule(doc)
+                    if withheld:
+                        parsed['ast'] = {}
+                        parsed['reasons'] = ['credential_like_literal', *parsed['reasons']]
                     row = _row(doc, parsed, upstream=upstream, commit=commit, path=relative, actor=actor)
                 except (ValueError, OSError, TypeError, KeyError):
                     report['skipped'] += 1

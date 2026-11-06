@@ -35,7 +35,7 @@ def test_created_hunt_uses_its_active_ast_and_lane_after_retirement(tmp_path, mo
                      stage_dir=tmp_path/'stage')
     try:
         owner = next(rule for rule in instance.pack if rule.id == 'sigma.'+rid)
-        assert owner.lane == 'lead' and owner.version == '1+'+pin['applied'][0]['digest']
+        assert owner.lane == 'lead' and owner.version == '2+'+pin['applied'][0]['digest']
         assert owner.metadata['activation_reason'] == ''
         catalog = build_catalog(repo=repo)
         [entry] = [row for row in _rules(catalog) if row['id'] == owner.id]
@@ -90,6 +90,52 @@ def test_real_sweep_routes_native_classes_and_publishes_only_positive_coverage(t
         assert not instance.failed_rules
         assert all(cell['state'] != 'no_match_complete' for cell in repo.rule_cells('h1'))
         assert any(cell['state'].startswith('positive_only') for cell in repo.rule_cells('h1') if cell['rule_id'] == dns.id)
+    finally:
+        instance.close_stage()
+        repo.engine.dispose()
+
+
+def test_real_sweep_revises_one_sigma_group_across_partitions_with_distinct_citations(tmp_path, monkeypatch):
+    from romulus.detect.sigma import SigmaRule
+    from romulus.evidence.windows_catalog import SYSMON, SYSMON_CHANNEL
+    from romulus.hunt import sweep as module
+    from romulus.sources.es import ElasticClient
+    from tests.test_sigma_playbook import row
+    from tests.test_sweep import _repo
+    from tests.test_windows_rpc_retrieval import TARGET, WINDOW, contract
+    from tests.throughput_fixture import MiniES
+    from tests.windows_fixtures import LogicalWindowsEvent, windows_hit
+    owner = SigmaRule(dict(row(), lane='high', activation_reason='Mission-approved predicate'))
+    monkeypatch.setattr(module, 'fresh_pack', lambda: [owner])
+    raws = []
+    for number in range(500):
+        timestamp = WINDOW.start+timedelta(minutes=30*(number//250), seconds=number % 250)
+        raw = windows_hit(LogicalWindowsEvent(SYSMON_CHANNEL, SYSMON, 1, 'ws01.example.test', number+1,
+            timestamp.isoformat(), {'Image': r'C:\Tools\evil.exe', 'ParentImage': r'C:\Windows\cmd.exe',
+                'CommandLine': 'evil.exe --'+str(number % 4)}), 'elastic_agent')
+        raw['_index'] = TARGET
+        raws.append(raw)
+    es = MiniES({TARGET: raws}, {TARGET: '@timestamp'})
+    client = ElasticClient(Settings(es_url='http://es.invalid'), transport=es.transport())
+    repo = _repo()
+    instance = Sweep(repo, client, 'h1', WINDOW, {TARGET: contract()}, stage_dir=tmp_path)
+    try:
+        midpoint = WINDOW.start+timedelta(minutes=30)
+        for window in [Window(start=WINDOW.start, end=midpoint), Window(start=midpoint, end=WINDOW.end)]:
+            instance.run_partition(TARGET, contract(), [], window, 250)
+        instance.finalize()
+        [candidate] = repo.candidates('h1')
+        assert candidate['lane'] == 'high'
+        assert candidate['gate_results']['aggregate_summary']['count'] == 500
+        assert candidate['gate_results']['_revision']['count'] == 1
+        assert len(candidate['event_ids']) <= owner.EXAMPLE_LIMIT
+        assert not instance.failed_rules
+        assert not candidate['gate_results'].get('_citation_unavailable')
+        citations = repo.citation_events('h1', candidate['event_ids'])
+        assert len(citations) == len(candidate['event_ids'])
+        assert {item['event']['fields']['process.command_line']['value'] for item in citations} == {
+            'evil.exe --'+str(number) for number in range(4)}
+        assert '500 record(s)' in candidate['claim']
     finally:
         instance.close_stage()
         repo.engine.dispose()

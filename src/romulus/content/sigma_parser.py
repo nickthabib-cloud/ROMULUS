@@ -173,23 +173,6 @@ def _wildcard(pattern, value):
     return p == len(pattern)
 
 
-def _placeholder(value):
-    if not isinstance(value, str):
-        return False
-    opened = False
-    index = 0
-    while index < len(value):
-        if value[index] == '\\' and index + 1 < len(value) and value[index + 1] == '%':
-            index += 2
-            continue
-        if value[index] == '%':
-            if opened:
-                return True
-            opened = True
-        index += 1
-    return False
-
-
 def _number(value):
     if type(value) not in (int, float, str):
         raise ValueError('Numeric modifier requires a finite number')
@@ -205,8 +188,6 @@ def _number(value):
 def _strings(value, modifiers):
     if not isinstance(value, str):
         raise ValueError('String modifier requires a string')  # noqa: TRY004 - validation API
-    if _placeholder(value):
-        raise ValueError('Unsupported placeholder value')
     cased = 'cased' in modifiers
     encoding = next((name for name in ('base64', 'base64offset') if name in modifiers), None)
     if encoding:
@@ -311,10 +292,11 @@ def _field(key, value, mapping):
         if type(value) is not bool or set(modifiers) != {'exists'}:
             raise ValueError('The exists modifier requires one boolean value')
         return {'type': 'exists', 'fields': fields, 'value': value}
-    if any(_placeholder(item) for item in values):
-        raise ValueError('Unsupported placeholder value')
-    return {'type': 'field', 'fields': fields, 'all': 'all' in modifiers,
+    node = {'type': 'field', 'fields': fields, 'all': 'all' in modifiers,
             'groups': [_value(item, [mod for mod in modifiers if mod != 'all']) for item in values]}
+    if field in mapping.get('conversions', {}):
+        node['conversion'] = mapping['conversions'][field]
+    return node
 
 
 def _selection(value, mapping):
@@ -454,7 +436,7 @@ def parse_rule(document, mapping=None):
                 reasons.append(str(exc))
         if reasons:
             return {'ast': {}, 'mapping': mapping, 'reasons': list(dict.fromkeys(reasons))}
-        scope_keys = ('families', 'event_codes', 'os_families', 'windows_event_classes', 'scope')
+        scope_keys = ('families', 'event_codes', 'os_families', 'windows_event_classes', 'scope', 'field_inventory')
         ast = {'version': 1, 'selectors': compiled,
                'condition': {'type': 'or', 'children': parsed_conditions},
                'scope': {key: mapping[key] for key in scope_keys if key in mapping}}
@@ -532,12 +514,62 @@ def _in_scope(scope, event):
     return True
 
 
-def evaluate_ast(ast, event):
-    """Evaluate typed fields only; unknown comparisons cannot become NOT positives."""
+def _class_matches(event, event_class):
+    channel, provider, code = event_class
+    return (str(event.get('event.channel', '')).casefold() == str(channel).casefold()
+            and str(event.get('event.provider', '')).casefold() == str(provider).casefold()
+            and str(event.get('event.code')) == str(code))
+
+
+def _observable_fields(scope, event):
+    inventory = scope.get('field_inventory')
+    if inventory is None:
+        from romulus.content.sigma_mapping import _windows_fields
+        from romulus.evidence.windows_catalog import SECURITY, lookup_event_class
+        native = lookup_event_class(event.get('event.channel'), event.get('event.provider'), event.get('event.code'))
+        if native is not None:
+            fields = _windows_fields(native)
+            absence = fields - ({'process.parent.executable'} if native.provider == SECURITY
+                                and native.event_id == 4688 else set())
+            return fields, absence
+        # Explicit custom mappings without a native class retain their contract;
+        # old pinned native ASTs still receive class-aware absence semantics.
+        return None, None
+    for row in inventory:
+        if ('event_class' in row and _class_matches(event, row['event_class'])
+                or row.get('family') == event.family):
+            return set(row['fields']), set(row.get('absence_fields', row['fields']))
+    return set(), set()
+
+
+def _converted_value(node, event, field):
+    conversion = node.get('conversion', {})
+    if not any(_class_matches(event, cls) for cls in conversion.get('event_classes', [])):
+        return event.get(field), {field}, None
+    if conversion.get('type') == 'security_registry_target':
+        path, name = event.get(field), event.get('registry.value_name')
+        if isinstance(path, str) and isinstance(name, str):
+            for native, hive in (('\\REGISTRY\\MACHINE', 'HKLM'), ('\\REGISTRY\\USER', 'HKU'),
+                                 ('HKLM', 'HKLM'), ('HKU', 'HKU')):
+                if path.casefold() == native.casefold() or path.casefold().startswith(native.casefold()+'\\'):
+                    return hive+path[len(native):].rstrip('\\')+'\\'+name, {field, 'registry.value_name'}, None
+        return None, {field}, 'registry_target_conversion_unavailable: registry.path and registry.value_name'
+    return None, {field}, 'unsupported_typed_conversion: '+field
+
+
+def evaluate_ast_detail(ast, event):
+    """Return a match, cited typed fields and reasons for undecidable comparisons.
+
+    Alternative mappings compare only delivered alternatives. Absence is evidence
+    only when the native class declares that field observable. Unknown comparisons
+    remain unknown through negation and are exposed to coverage accounting.
+    """
     if ast.get('version') != 1 or not _in_scope(ast.get('scope', {}), event):
-        return False, []
+        return False, [], []
     selectors = ast['selectors']
     cache = {}
+    observable, absence = _observable_fields(ast.get('scope', {}), event)
+    unknown = set()
 
     def evaluate(node):
         kind = node['type']
@@ -552,22 +584,47 @@ def evaluate_ast(ast, event):
                 cache[name] = evaluate(selectors[name])
             return cache[name]
         fields = node['fields']
-        present = {name for name in fields if name in event.fields}
+        present = {name for name in fields if name in event.fields and (observable is None or name in observable)}
+        if not present and absence is not None and not absence.intersection(fields):
+            unknown.add('typed_field_unavailable_for_event_class: '+', '.join(fields))
+            return None, set()
         if kind == 'exists':
             return bool(present) == node['value'], present
+        # A missing second representation must not poison a known comparison or
+        # supply an invented null. No delivered alternative remains unknown except
+        # for an explicit absence test on a class that can observe the field.
+        compared = [field for field in fields if field in present]
+        if not compared:
+            compared = [field for field in fields if absence is None or field in absence]
         groups = []
         for alternatives in node['groups']:
             results = []
-            for field in fields:
-                values = (None if event.get('process.argv_complete') is False
-                          and field in ('process.command_line', 'process.argv') else event.get(field))
+            for field in compared:
+                values, cited, reason = _converted_value(node, event, field)
+                if reason:
+                    unknown.add(reason)
+                incomplete = (event.get('process.argv_complete') is False
+                              and field in ('process.command_line', 'process.argv'))
+                if incomplete:
+                    values = None
+                    unknown.add('incomplete_typed_value: '+field)
                 values = values if isinstance(values, list) else [values]
-                outcomes = [_matches(expected, actual) for expected in alternatives for actual in values]
+                outcomes = ([None] if reason or incomplete else
+                            [_matches(expected, actual) for expected in alternatives for actual in values])
                 # Empty observed lists contain no match, not a missing scalar.
                 outcome = True if True in outcomes else None if None in outcomes else False
-                results.append((outcome, {field} if field in present else set()))
+                if outcome is None and not reason and not incomplete:
+                    unknown.add(('missing_typed_value: ' if field not in present or values == [None]
+                                 else 'invalid_typed_value: ')+field)
+                results.append((outcome, cited if field in present else set()))
             groups.append(_combine('or', results))
         return _combine('and' if node['all'] else 'or', groups)
 
     matched, fields = evaluate(ast['condition'])
-    return matched is True, sorted(fields) if matched is True else []
+    return matched is True, sorted(fields) if matched is True else [], sorted(unknown)
+
+
+def evaluate_ast(ast, event):
+    """Evaluate typed fields while preserving the public two-item result."""
+    matched, fields, _unknown = evaluate_ast_detail(ast, event)
+    return matched, fields

@@ -53,7 +53,7 @@ from romulus.detect.zeek_lateral import RULES as ZEEK_LATERAL_PLAYBOOKS
 from romulus.detect.zeek_rates import RULES as ZEEK_RATE_PLAYBOOKS
 from romulus.detect.zeek_smb import RULES as ZEEK_SMB_PLAYBOOKS
 
-PACK_VERSION = "pack@49"
+PACK_VERSION = "pack@50"
 WINDOWS_PROCESS_PLAYBOOKS = (WINDOWS_LINEAGE_PLAYBOOKS + WINDOWS_PROXY_PLAYBOOKS + WINDOWS_CREDENTIAL_PLAYBOOKS
                              + WINDOWS_DEFENSE_PLAYBOOKS + WINDOWS_REMOTE_PLAYBOOKS)
 WINDOWS_HOST_PLAYBOOKS = list(WINDOWS_MEMORY_PLAYBOOKS + WINDOWS_REGISTRY_PLAYBOOKS
@@ -95,8 +95,10 @@ def rule_kind(rule_id: str) -> str:
     return "context" if kind == "baseline" else kind
 
 
-def anchor_class_for_rule(rule_id: str) -> str:
+def anchor_class_for_rule(rule_id: str, *, metadata=None) -> str:
     """Resolve only registered rule identities; rule-name substrings carry no semantics."""
+    if metadata is not None and rule_id in metadata:
+        return metadata[rule_id].anchor_class
     return _ANCHOR_CLASSES.get(rule_id, Playbook.anchor_class)
 
 

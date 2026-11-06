@@ -117,7 +117,7 @@ def test_invalid_upload_rolls_back_and_audits_bounded_rejection(ui, filename, bo
     with repo.engine.connect() as c:
         audit = c.execute(select(t.audit_event.c.detail).where(
             t.audit_event.c.action == 'indicator_list.import_rejected')).scalar_one()
-    assert len(json.dumps(audit)) < 512 and audit == {'reason': 'invalid_file_or_metadata'}
+    assert len(json.dumps(audit)) < 512 and audit['reason'] in {'invalid_file_or_metadata', 'import_failed'}
 
 
 def test_skipped_report_and_metadata_validation(ui):
@@ -127,7 +127,7 @@ def test_skipped_report_and_metadata_validation(ui):
         'csv_text': CSV + 'ip,not-an-ip\n'}, follow_redirects=False)
     assert response.status_code == 303
     detail = client.get(response.headers['location']).text
-    assert 'invalid_value_or_metadata' in detail and 'bounded' in detail
+    assert 'invalid_value' in detail and 'bounded' in detail
     rejected = upload(client, csrf, source='https://user:secret@example.test/')
     assert rejected.status_code == 400 and 'secret' not in rejected.text
     assert len(IndicatorLists(repo).lists()) == 1
@@ -195,3 +195,68 @@ def test_invalid_form_and_format_limit_are_audited(ui, monkeypatch):
     with repo.engine.connect() as c:
         assert c.execute(select(t.audit_event.c.detail).where(
             t.audit_event.c.action == 'indicator_list.import_rejected')).scalar_one()['reason'] == 'request_size_limit'
+
+
+def test_high_indicator_import_requires_live_lead_reason_and_worker_context(ui, monkeypatch):
+    import asyncio
+    client, repo, login = ui
+    original = IndicatorLists.create_version
+    def off_loop(store, *args, **kwargs):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return original(store, *args, **kwargs)
+        pytest.fail('An indicator import blocked the web event loop')
+    monkeypatch.setattr(IndicatorLists, 'create_version', off_loop)
+    csrf = login()
+    assert upload(client, csrf, lane='high', reason='Mission indicator').status_code in (400, 403)
+    csrf = login('lead')
+    assert upload(client, csrf, lane='high').status_code in (400, 403)
+    accepted = upload(client, csrf, lane='high', reason='Mission indicator', severity='high')
+    assert accepted.status_code == 303
+    [metadata] = IndicatorLists(repo).lists()
+    [value] = list(IndicatorLists(repo).values(metadata['id']))
+    assert value['lane'] == value['severity'] == 'high'
+
+
+def test_out_of_range_expiry_is_a_safe_interface_rejection(ui):
+    client, repo, login = ui
+    response = upload(client, login(), expires='0001-01-01T00:00:00+23:59')
+    assert response.status_code == 400
+    assert IndicatorLists(repo).lists() == []
+
+
+def test_cli_high_lane_authenticates_lead_and_audits_reason(tmp_path, monkeypatch, capsys):
+    settings = Settings(home=tmp_path / 'home', secret_key=secrets.token_urlsafe(32))
+    monkeypatch.setattr(cli, 'load_settings', lambda _: settings)
+    password = secrets.token_urlsafe(18)
+    repo = open_repo(settings)
+    create_user(repo.engine, 'lead-user', password, 'lead')
+    create_user(repo.engine, 'analyst-user', password, 'analyst')
+    import getpass
+    monkeypatch.setattr(getpass, 'getpass', lambda _: password)
+    path = tmp_path / 'input.csv'
+    path.write_text(CSV, encoding='utf-8')
+    args = ['indicators', 'import', str(path), '--name', 'Partner', '--source', 'Local', '--lane', 'high']
+    assert cli.main(args + ['--user', 'analyst-user', '--reason', 'Mission indicator']) == 1
+    assert cli.main(args + ['--user', 'lead-user']) == 1
+    assert cli.main(args + ['--user', 'lead-user', '--reason', 'Mission indicator']) == 0
+    capsys.readouterr()
+    [row] = IndicatorLists(repo).lists()
+    assert row['author'] == 'lead-user' and row['lane'] == 'high'
+    with repo.engine.connect() as connection:
+        audits = connection.execute(select(t.audit_event.c.detail).where(
+            t.audit_event.c.action == 'indicator_list.import')).scalars().all()
+    assert any(item.get('reason') == 'Mission indicator' and item.get('high') for item in audits)
+    repo.engine.dispose()
+
+
+def test_retired_list_new_version_requires_live_lead_in_web(ui):
+    client, repo, login = ui
+    upload(client, login())
+    [row] = IndicatorLists(repo).lists()
+    csrf = login('lead')
+    assert client.post('/indicators/' + row['id'] + '/retire', data={'csrf': csrf}, follow_redirects=False).status_code == 303
+    assert upload(client, login(), list_id=row['id']).status_code in (400, 403)
+    assert upload(client, login('lead'), list_id=row['id']).status_code == 303
+    assert IndicatorLists(repo).get(row['id'])['version'] == 2

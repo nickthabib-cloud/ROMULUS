@@ -314,6 +314,10 @@ from tests import throughput_fixture as tf
 # its only changes are 426 rule-cell versions (71 cells per changed rule).
 # Restoring those six named versions reproduces every field in all 23 sections;
 # all 35 candidates, citations, lanes, the manifest and normalization stay exact.
+# Rate replay checkpoints, ASCII PowerShell parents and typed HTTP/body indicators change only 497 coverage
+# versions here: 71 cells each for the five rate rules, win.unexpected_ps_remote_server and ioc.indicator_match.
+# Restoring those seven named versions reproduces all 23 complete sections; the 35 candidates, claims, lanes,
+# citations, requests, evidence, manifest and every other field remain identical.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
     "audit": "23d9b87c75d030df8ff5bcbf07deacc75416c325dd74bcc89243cc1b5488ae93",
@@ -342,7 +346,7 @@ GOLDEN_STACK = {
     # Twenty changed Windows/network contracts carry new versions in 71 coverage cells each.
     # Restoring only those versions reproduces the complete preceding snapshot; all 35 candidates
     # and the other 22 stack sections are byte-identical.
-    "rule_cells": 'c3ec362d3f24714ca48fc50d96e80d0ece1545e6a126ae4feee3e60a0ea2373b',
+    "rule_cells": 'd2d7ad9716d7d267bff078a67d3de153435f1f35f3a59c9c28dd28279ce2f4de',
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
     "tasks": "c65df4ab88c05661371cf32b49a1d22ef84d6753488bdb946c8e29376d486260",
 }
@@ -374,10 +378,10 @@ GOLDEN_NON_BASELINE_SEMANTICS = {
         "ts": "d8015c1ff0b135e082a5fef2ab1cb88206470e30beee157a0cfc7790d48b8310",
     },
     "rule_cells": {
-        "all_fields": 'c18af832ca670cff424a6a00a45160883263def494cb734b6244f76046d246bb',
+        "all_fields": '5ce75c0e19f062e3b901bec3b95c40de16cb721d45448c24d0e95ed9d4323647',
         "count": 15261,
         "rule_id": 'e254e06a5b70725e437cf3004200b0f61b05100d1538c13349994d1fd4568879',
-        "rule_version": 'e911c7361155c0fd9cafe64f11fa3dc8f0a1e84ed18fe890cb545b78ded121b5',
+        "rule_version": 'f22c87145ad75df8d0d05ab86ba56d7bf43b7396c5ffa5e980ae58fa9dd9990b',
         "target": 'bb22fe7c7f4a31ae292ea691f4617e62106177f2a4c6f503fe9cbcd94458229b',
         "partition": '8a08cb4a3f440cbddfa0ef9d93701943223d6c94b114f753f62c31fcae1414ba',
         "state": '873ced555502f36931da34afd78c1e52bee897e367c838bd43ed555b375fa99d',

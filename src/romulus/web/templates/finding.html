@@ -44,7 +44,8 @@
 {% endfor %}</tbody></table>
 
 <h2>Admission gates</h2>
-<ul>{% for k, v in gates.items() if k != 'aggregate_summary' %}<li><span class="mono">{{ k }}</span>: {{ v }}</li>{% endfor %}</ul>
+<ul>{% for k, v in gates.items() if k not in ('aggregate_summary', '_attack') %}<li><span class="mono">{{ k }}</span>: {{ v }}</li>{% endfor %}</ul>
+{% if gates.get('_attack') %}<h2>ATT&CK mappings</h2><p>{{ gates['_attack'] | join(', ') }}</p>{% endif %}
 {% if notes %}<h2>Notes</h2><ul>{% for n in notes %}<li>{{ n }}</li>{% endfor %}</ul>{% endif %}
 
 <div class="two">

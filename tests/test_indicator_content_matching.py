@@ -114,7 +114,7 @@ def test_url_does_not_guess_scheme_or_normalize_path_and_query():
     try:
         assert run(owner, net_event('http_tx', http__hostname='example.test',
                                    url__original='/Case?q=1&x=2')) == []
-        assert any('url' in note and 'cannot' in note for note in owner.coverage_notes())
+        assert not owner.coverage_notes()  # Cleartext HTTP was searched; HTTPS was not inferred.
         assert run(owner, net_event('http_tx', 'other', url__full='https://example.test/case?x=2&q=1')) == []
     finally:
         owner.release_state()

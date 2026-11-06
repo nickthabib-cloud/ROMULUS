@@ -34,6 +34,7 @@ from romulus.agent.models import EntityRef, PivotResult
 from romulus.agent.provider.base import Tool
 from romulus.agent.safety import injection_flags
 from romulus.decide.policy import LANE_ORDER
+from romulus.detect.metadata import is_sigma_id, pinned_rule_ids
 from romulus.detect.registry import ALL_PLAYBOOKS
 from romulus.evidence.typed import TypedEvent
 from romulus.report.incidents import build_incident_graph
@@ -72,7 +73,7 @@ class ListFindingsArgs(_Args):
     @field_validator("rule")
     @classmethod
     def _registered_rule(cls, value: str | None) -> str | None:
-        if value is not None and value not in _RULE_IDS:
+        if value is not None and value not in _RULE_IDS and not is_sigma_id(value):
             raise ValueError("rule must be an identifier from the loaded detector registry")
         return value
 
@@ -454,8 +455,7 @@ class Toolbox:
             if args.page != 1:
                 return self._semantic_refusal("cursor_required", "a continuation page requires its cursor")
             manifest = ((self.repo.get_hunt(self.hunt_id) or {}).get("manifest") or {})
-            rules = {str(item["id"]) for item in (manifest.get("pack") or {}).get("playbooks", [])
-                     if isinstance(item, dict) and item.get("id")}
+            rules = pinned_rule_ids(manifest)
             coverage = self._coverage(rules)
             counts = {
                 "rules": len(coverage["rules"]), "gaps": len(coverage["gaps"]),
@@ -524,6 +524,11 @@ class Toolbox:
         }
 
     def _list_findings(self, args: ListFindingsArgs) -> dict:
+        if args.rule is not None and is_sigma_id(args.rule):
+            manifest = ((self.repo.get_hunt(self.hunt_id) or {}).get('manifest') or {})
+            pinned = {'sigma.' + pin['id'] for pin in (manifest.get('sigma_rules') or {}).get('applied', [])}
+            if args.rule not in pinned:
+                return self._semantic_refusal('invalid_arguments', 'rule must be pinned in this hunt')
         identity = {"kind": "findings", "lane": args.lane, "rule": args.rule, "entity": args.entity}
         stored = self.repo.agent_page_plan(self.hunt_id, args.cursor) if args.cursor else None
         if args.cursor is not None and stored is None:

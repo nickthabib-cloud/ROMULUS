@@ -199,8 +199,8 @@ def test_csv_malformed_structure_is_fatal(tmp_path, body):
 
 def test_per_field_and_row_limits_are_reported(tmp_path):
     rows, summary = parsed(document(tmp_path, 'kind,value,label\nip,192.0.2.1,' + 'x' * 17000 + '\n', '.csv'))
-    assert not rows
-    assert summary['skipped_count'] == 1
+    assert rows[0].value == '192.0.2.1' and rows[0].label == ''
+    assert summary['noted_by_reason'] == {'label_redacted': 1}
 
 
 def test_json_numeric_overflow_is_rejected_even_in_unused_metadata(tmp_path):
@@ -280,8 +280,8 @@ def test_unpaired_surrogates_are_invalid_values(kind):
 def test_credential_url_in_label_is_not_stored(tmp_path):
     rows, summary = parsed(document(tmp_path,
         'kind,value,label\nip,192.0.2.1,https://user:SECRET_SENTINEL@example.com\n', '.csv'))
-    assert not rows
-    assert summary['skipped_count'] == 1
+    assert rows[0].value == '192.0.2.1' and rows[0].label == ''
+    assert summary['noted_by_reason'] == {'label_redacted': 1}
     assert 'SECRET_SENTINEL' not in json.dumps(summary)
 
 

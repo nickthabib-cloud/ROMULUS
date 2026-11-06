@@ -63,9 +63,10 @@ def test_explicit_high_override_survives_the_real_publication_policy():
 
 
 @pytest.mark.slow
-def test_two_thousand_rules_and_hundred_thousand_events_use_indexed_bounded_state():
+@pytest.mark.parametrize('classes', [1000, 2000])
+def test_two_thousand_rules_and_hundred_thousand_events_use_indexed_bounded_state(classes):
     # Input events are already owned by the sweep. Measure additional rule/index state.
-    events = [net_event('process_exec', str(i), host__os__family='windows', event__code=i % 2000,
+    events = [net_event('process_exec', str(i), host__os__family='windows', event__code=i % classes,
         event__channel='Synthetic', event__provider='Synthetic', process__executable=r'C:\benign.exe')
         for i in range(100000)]
     tracemalloc.start()
@@ -75,16 +76,16 @@ def test_two_thousand_rules_and_hundred_thousand_events_use_indexed_bounded_stat
         for i in range(2000):
             metadata = deepcopy(template)
             metadata['id'] = str(i)
-            metadata['mapping'] = dict(template['mapping'], windows_event_classes=[['Synthetic', 'Synthetic', i]],
-                                       event_codes=[str(i)])
+            metadata['mapping'] = dict(template['mapping'], windows_event_classes=[['Synthetic', 'Synthetic', i % classes]],
+                                       event_codes=[str(i % classes)])
             metadata['ast']['scope'].update(metadata['mapping'])
             owners.append(SigmaRule(metadata))
         index = SigmaEventIndex(events)
         for owner in owners:
             assert list(owner.consume_scoped_partition(index.for_rule(owner))) == []
-        assert sum(owner.match_evaluations for owner in owners) == 100000
+        assert sum(owner.match_evaluations for owner in owners) == 100000*(2000//classes)
         assert index.records == 100000
-        assert index.buckets == 2000
+        assert index.buckets == classes
         assert tracemalloc.get_traced_memory()[1] < 64 * 1024 * 1024
     finally:
         tracemalloc.stop()

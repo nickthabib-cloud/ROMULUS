@@ -531,7 +531,7 @@ class ZeekWindowRule(Playbook, ABC):
                 self.note_limit('zeek_window_episodes', f'Episode summary retention is partial: {error}')
                 match = self._emit_episode(key, body=body,
                     partial='Episode summary storage is partial; this positive uses accepted current window counts without claiming complete retained episode history.',
-                    unpublished_only=getattr(self, '_replaying', False))
+                    unpublished_only=getattr(self, '_replaying', False) and self._replay_was_published)
             else:
                 match = None if getattr(self, '_replaying', False) else self._emit_episode(key, body=body, immediate_only=True)
             if match is not None:
@@ -612,13 +612,8 @@ class ZeekWindowRule(Playbook, ABC):
         body['lane'] = min(body['lane'], rank)
         return body, old
 
-    def _emit_episode(self, key, *, force=False, body=None, partial='', immediate_only=False, unpublished_only=False):
+    def _published_checkpoint(self, key):
         db = self.rows.store().db
-        if body is None:
-            row = db.execute('SELECT body FROM episodes WHERE k=?', (key,)).fetchone()
-            if row is None:
-                return None
-            body = json.loads(row[0])
         identity = self.id + '|zeek-window|' + hashlib.sha256(key.encode()).hexdigest()
         previous, digest, packed, loaded = db.execute('SELECT lane,summary,published,loaded FROM marks WHERE k=?', (key,)).fetchone()
         checkpoint = json.loads(packed) if packed else {}
@@ -656,6 +651,17 @@ class ZeekWindowRule(Playbook, ABC):
                 packed = serialized
             except StateExhausted as error:
                 self.note_limit('zeek_published_checkpoint', f'The restored published checkpoint could not be cached: {error}')
+        return previous, digest, checkpoint, packed
+
+    def _emit_episode(self, key, *, force=False, body=None, partial='', immediate_only=False, unpublished_only=False):
+        db = self.rows.store().db
+        if body is None:
+            row = db.execute('SELECT body FROM episodes WHERE k=?', (key,)).fetchone()
+            if row is None:
+                return None
+            body = json.loads(row[0])
+        previous, digest, checkpoint, packed = self._published_checkpoint(key)
+        identity = self.id + '|zeek-window|' + hashlib.sha256(key.encode()).hexdigest()
         published = checkpoint.get('metrics')
         if unpublished_only and published:
             return None
@@ -868,18 +874,20 @@ class ZeekWindowRule(Playbook, ABC):
         previous, refused = None, False
         for key, identity, stamp, member, role, weight, payload in cursor:
             if previous is not None and key != previous:
-                match = self._emit_episode(previous, force=True, unpublished_only=refused,
+                match = self._emit_episode(previous, force=True, unpublished_only=refused and self._replay_was_published,
                     partial='Retained-history reconstruction is partial after a refusal; this is a positive lower bound.' if refused else '')
                 if match is not None:
                     yield match
                 refused = False
+            if key != previous:
+                self._replay_was_published = bool(self._published_checkpoint(key)[2].get('metrics'))
             event = self.rows.event(key, identity, stamp, role, payload)
             before = sum(limit.hits for limit in self.limits.values())
             yield from self._accepted_forward(key, event, member, role, weight)
             refused |= sum(limit.hits for limit in self.limits.values()) != before
             previous = key
         if previous is not None:
-            match = self._emit_episode(previous, force=True, unpublished_only=refused,
+            match = self._emit_episode(previous, force=True, unpublished_only=refused and self._replay_was_published,
                 partial='Retained-history reconstruction is partial after a refusal; this is a positive lower bound.' if refused else '')
             if match is not None:
                 yield match

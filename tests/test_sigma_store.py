@@ -143,8 +143,9 @@ def test_directory_limits_are_atomic_and_paths_are_local(tmp_path, monkeypatch):
         repo.engine.dispose()
 
 
-def test_credential_like_predicate_is_rejected_without_persisting_the_literal(tmp_path):
-    doc = document(detection={'selection': {'CommandLine|contains': 'password=private-value'},
+def test_credential_literal_is_reference_only_without_persisting_the_literal(tmp_path):
+    secret = 'AKIA'+'A'*16
+    doc = document(detection={'selection': {'CommandLine|contains': secret},
                               'condition': 'selection'})
     from romulus.content.sigma_store import SigmaRules
     repo = _repo()
@@ -154,9 +155,27 @@ def test_credential_like_predicate_is_rejected_without_persisting_the_literal(tm
     try:
         store = SigmaRules(repo)
         report = store.import_directory(root, upstream='Local', commit='a'*40, actor='analyst')
-        assert report['skipped'] == 1 and store.list() == []
+        assert report['skipped'] == 0 and report['reference-only'] == 1
+        [row] = store.list()
+        assert row['ast'] == {} and 'credential_like_literal' in row['mapping']['reasons']
+        assert secret not in json.dumps(row)
         with repo.engine.connect() as c:
-            assert 'private-value' not in json.dumps(list(c.execute(select(t.audit_event.c.detail)).scalars()))
+            assert secret not in json.dumps(list(c.execute(select(t.audit_event.c.detail)).scalars()))
+    finally:
+        repo.engine.dispose()
+
+
+@pytest.mark.parametrize('literal', ['token::elevate', '/password:', '--api-key=',
+                                    r'%APPDATA%\mission.exe', 'password=private-value'])
+def test_detection_syntax_and_descriptive_credential_words_remain_drafts(tmp_path, literal):
+    repo, store, rid = imported(tmp_path, document(
+        title='Tool token: argument', description='Detects password: syntax',
+        falsepositives=['Scripts that pass Password: on the command line'],
+        references=['https://example.test/reference?token=1'],
+        detection={'selection': {'CommandLine|contains': literal}, 'condition': 'selection'}))
+    try:
+        assert store.get(rid)['status'] == 'draft'
+        assert store.get(rid)['mapping']['reasons'] == []
     finally:
         repo.engine.dispose()
 

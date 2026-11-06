@@ -21,7 +21,8 @@ def test_csv_export_roundtrips_the_selected_version(tmp_path):
             name='Mission', source='Partner CSV', author='analyst')
         text = ''.join(export_indicators(store, first['id'], 1, 'csv'))
         assert list(csv.DictReader(io.StringIO(text))) == [{
-            'kind': 'sha256', 'value': 'ab'*32, 'label': 'A, "quoted" label', 'attack': 'T1059'}]
+            'kind': 'sha256', 'value': 'ab'*32, 'label': 'A, "quoted" label', 'attack': 'T1059',
+            'lane': 'lead', 'severity': 'medium'}]
         path = tmp_path/'roundtrip.csv'
         path.write_text(text, encoding='utf-8')
         parsed = parse_indicator_file(path)

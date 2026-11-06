@@ -205,6 +205,16 @@ def cmd_indicators(args) -> int:
     author = f"cli:{user}"
     try:
         if args.action == "import":
+            import getpass
+
+            from romulus.web.auth import RateLimiter, verify
+            role = 'analyst'
+            if args.user or args.lane == 'high':
+                username = args.user or input('Lead username: ')
+                account = verify(repo.engine, username, getpass.getpass('Password: '), 'local-cli', RateLimiter())
+                if account is None:
+                    raise PermissionError('An active account is required')
+                author, role = account['username'], account['role']
             expiry = datetime.fromisoformat(args.expires) if args.expires else None
             if expiry is not None and expiry.tzinfo is None:
                 expiry = expiry.replace(tzinfo=UTC)
@@ -212,7 +222,8 @@ def cmd_indicators(args) -> int:
                 raise ValueError("Unknown indicator list")
             result = parse_indicator_file(Path(args.file), include_non_ids=args.include_non_ids)
             row = store.create_version(result.rows, name=args.name, source=args.source, author=author,
-                expires_at=expiry, notes=args.notes, list_id=args.list_id, report=result.summary)
+                expires_at=expiry, notes=args.notes, list_id=args.list_id, report=result.summary,
+                role=role, lane=args.lane, severity=args.severity, reason=args.reason)
             print(json.dumps(row, indent=2, default=str))
         else:
             if args.out and Path(args.out).as_posix().startswith("//"):
@@ -227,9 +238,10 @@ def cmd_indicators(args) -> int:
                 for chunk in export_indicators(store, args.list_id, args.version, format=args.format):
                     output.write(chunk)
         return EXIT_OK
-    except (ValueError, OSError, UnicodeError):
+    except (ValueError, OSError, UnicodeError, OverflowError, PermissionError, EOFError) as exc:
         if args.action == "import":
-            repo.audit(author, "indicator_list.import_rejected", detail={"reason": "invalid_file_or_metadata"})
+            if not getattr(exc, 'audit_recorded', False):
+                repo.audit(author, "indicator_list.import_rejected", detail={"reason": "invalid_file_or_metadata"})
             print("indicator import rejected: invalid local CSV/JSON file or metadata; no version was saved", file=sys.stderr)
         else:
             print("indicator export failed: invalid list, version or local output path", file=sys.stderr)
@@ -418,6 +430,10 @@ def main(argv: list[str] | None = None) -> int:
     indicator_import.add_argument("--include-non-ids", action="store_true")
     indicator_import.add_argument("--list-id", help="create a new version of an existing list")
     indicator_import.add_argument("--notes", default="")
+    indicator_import.add_argument('--lane', choices=['high', 'lead', 'context'], default='lead')
+    indicator_import.add_argument('--severity', choices=['critical', 'high', 'medium', 'low', 'info'], default='medium')
+    indicator_import.add_argument('--reason', default='', help='required for any high lane')
+    indicator_import.add_argument('--user', help='authenticate an account for lead-only imports')
     indicator_export = indicator_actions.add_parser("export", help="export a complete list version")
     indicator_export.add_argument("list_id")
     indicator_export.add_argument("--version", type=int)

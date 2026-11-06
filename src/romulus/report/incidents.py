@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from collections import defaultdict
 
+from romulus.content.attack_tags import technique_tactics
+from romulus.detect.metadata import hunt_rule_metadata
 from romulus.detect.registry import ALL_PLAYBOOKS
 from romulus.store.db import digest
 from romulus.store.repo import Repo
@@ -14,8 +16,8 @@ _PLAYBOOKS = {playbook.id: playbook for playbook in ALL_PLAYBOOKS}
 GROUPING_KINDS = frozenset({"aggregate", "packet"})
 
 
-def _groups(rule_id: str) -> bool:
-    return getattr(_PLAYBOOKS.get(rule_id), "kind", "direct") in GROUPING_KINDS
+def _groups(rule_id: str, rules=None) -> bool:
+    return getattr((rules or _PLAYBOOKS).get(rule_id), "kind", "direct") in GROUPING_KINDS
 
 
 def _incident_role(row: dict, _finding_by_id: dict[str, dict]) -> str:
@@ -45,15 +47,17 @@ _TACTICS = {
 }
 
 
-def _title(rule_id: str) -> str:
-    return getattr(_PLAYBOOKS.get(rule_id), "title", None) or rule_id
+def _title(rule_id: str, rules=None) -> str:
+    return getattr((rules or _PLAYBOOKS).get(rule_id), "title", None) or rule_id
 
 
-def incident_narrative(incident: dict, finding_by_id: dict[str, dict], edges: list[dict]) -> list[dict]:
+def incident_narrative(incident: dict, finding_by_id: dict[str, dict], edges: list[dict], rules=None) -> list[dict]:
     """A deterministic account of one incident, built from typed fields only, in time order.
     Each sentence carries its citations and a kind: `observed` (what the cited findings record), `mapping`
     (rule metadata such as ATT&CK tactics), `hypothesis` (inferred links) or `gap` (what is not known)."""
     members = incident["timeline"]
+    def title(finding):
+        return finding.get('rule_title') or _title(finding['rule_id'], rules)
     first, last = finding_by_id[members[0]], finding_by_id[members[-1]]
     timed = all(finding_by_id[item]["observed_at"] is not None for item in members)
     where = ", ".join(incident["hosts"]) or "no recorded host"
@@ -79,7 +83,7 @@ def incident_narrative(incident: dict, finding_by_id: dict[str, dict], edges: li
     how, via = reached(first["id"])
     sentences.append({
         "text": (f"{'The earliest finding is' if timed else 'A recorded finding is'} "
-                 f"{_title(first['rule_id'])} ({first['lane']}) at "
+                 f"{title(first)} ({first['lane']}) at "
                  f"{first['observed_at'] or 'time not recorded'}{how}."),
         "cites": [first["id"]] + via, "kind": "observed",
     })
@@ -88,7 +92,7 @@ def incident_narrative(incident: dict, finding_by_id: dict[str, dict], edges: li
         # Observed links can reach back in time (a login session, the same process), so the finding no observed
         # link leads into is not always the earliest one.
         sentences.append({
-            "text": (f"No observed link leads into {_title(entry['rule_id'])} at "
+            "text": (f"No observed link leads into {title(entry)} at "
                      f"{entry['observed_at'] or 'time not recorded'}; "
                      f"expansion treats it as the entry point."),
             "cites": [entry["id"]], "kind": "observed",
@@ -97,7 +101,7 @@ def incident_narrative(incident: dict, finding_by_id: dict[str, dict], edges: li
         finding = finding_by_id[item]
         how, via = reached(item)
         sentences.append({
-            "text": (f"{'Then' if timed else 'Also'} {_title(finding['rule_id'])} ({finding['lane']}) at "
+            "text": (f"{'Then' if timed else 'Also'} {title(finding)} ({finding['lane']}) at "
                      f"{finding['observed_at'] or 'time not recorded'}{how}."),
             "cites": [item] + via, "kind": "observed",
         })
@@ -135,7 +139,9 @@ def _entity_id(kind: str, value: str) -> str:
 
 def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict:
     """Observed expansion edges form components; inferred edges remain visible suggestions."""
+    rules = hunt_rule_metadata(repo, hunt_id)
     finding_by_id = {finding["id"]: finding for finding in findings}
+    attack_by_finding, tactics_by_finding = {}, {}
     nodes = [{
         "id": finding["id"], "kind": "finding", "lane": finding["lane"],
         "observed_at": finding["observed_at"], "rule_id": finding["rule_id"],
@@ -155,6 +161,12 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
         if finding.get("source_link_id"):
             children[finding["source_link_id"]].append(finding["id"])
         stored = repo.candidate(finding["id"]) if hasattr(repo, "candidate") else None
+        explicit_attack = finding.get('attack') or ((stored or {}).get('gate_results') or {}).get('_attack')
+        rule = rules.get(finding['rule_id'])
+        attack = tuple(explicit_attack or getattr(rule, 'attack', ()))
+        attack_by_finding[finding['id']] = attack
+        tactics_by_finding[finding['id']] = (technique_tactics(attack) if explicit_attack else
+            getattr(rule, 'tactics', tuple(tactic for technique in attack for tactic in _TACTICS.get(technique, ()))))
         event_ids = list((stored or finding).get("event_ids") or [])
         context_ids = set((stored or finding).get("context_event_ids") or [])
         cited = set(event_ids) - context_ids
@@ -204,7 +216,7 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
             parent[max(left_root, right_root)] = min(left_root, right_root)
 
     joining = [edge for edge in edges if edge["incident_role"] == "evidence"]
-    grouping = {item for item, finding in finding_by_id.items() if _groups(finding["rule_id"])}
+    grouping = {item for item, finding in finding_by_id.items() if _groups(finding["rule_id"], rules)}
     for edge in joining:
         if edge["from"] not in grouping and edge["to"] not in grouping:
             union(edge["from"], edge["to"])
@@ -228,9 +240,8 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
                     and edge["from"] in member_set and edge["to"] in member_set}
         entry_candidates = [item for item in finding_ids if item not in incoming]
         entry_point = entry_candidates[0] if entry_candidates else finding_ids[0]
-        techniques = sorted({technique for item in finding_ids
-                             for technique in getattr(_PLAYBOOKS.get(finding_by_id[item]["rule_id"]), "attack", ())})
-        tactics = sorted({tactic for technique in techniques for tactic in _TACTICS.get(technique, ())})
+        techniques = sorted({technique for item in finding_ids for technique in attack_by_finding[item]})
+        tactics = sorted({tactic for item in finding_ids for tactic in tactics_by_finding[item]})
         entity_ids = sorted({entity for item in finding_ids for entity in finding_entities[item]})
         hosts = sorted({str(entity_nodes[item]["value"]) for item in entity_ids
                         if entity_nodes[item]["entity_kind"] == "host"})
@@ -264,7 +275,7 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
             "open_ends": {"unexpanded_anchors": unexpanded, "pending_anchors": pending, "partial_anchors": partial,
                           "unresolved_links": unresolved},
         }
-        incident["narrative"] = incident_narrative(incident, finding_by_id, edges)
+        incident["narrative"] = incident_narrative(incident, finding_by_id, edges, rules)
         incidents.append(incident)
     incidents.sort(key=lambda incident: (finding_by_id[incident["finding_ids"][0]]["observed_at"] is None,
                                         finding_by_id[incident["finding_ids"][0]]["observed_at"] or "", incident["id"]))

@@ -125,7 +125,6 @@ def test_hashes_are_split_into_explicit_typed_fields_and_citations_are_typed():
     ({'Image|re': 'evil.*'}, 'selection', 're'),
     ({'Image|expand': '%secret%'}, 'selection', 'expand'),
     ({'Image|fieldref': 'ParentImage'}, 'selection', 'fieldref'),
-    ({'Image': '%MACHINES%'}, 'selection', 'placeholder'),
     ({'NotMapped': 'evil'}, 'selection', 'NotMapped'),
     ({'Image|unknown': 'evil'}, 'selection', 'unknown'),
     ({'Image': 'evil'}, 'selection | count() by User > 1', 'aggregation'),
@@ -145,6 +144,12 @@ def test_unsupported_rule_is_wholly_reference_only(selection, condition, reason)
     parsed = parse_rule(rule({'selection': selection, 'condition': condition}), MAPPING)
     assert parsed['reasons'] and any(reason.lower() in item.lower() for item in parsed['reasons'])
     assert parsed['ast'] == {}
+
+
+def test_percent_variable_without_expand_is_a_literal_comparison():
+    ast = compiled({'CommandLine|contains': '%APPDATA%\\mission.exe'})
+    assert evaluate_ast(ast, event(process__command_line=r'cmd /c %APPDATA%\mission.exe'))[0]
+    assert not evaluate_ast(ast, event(process__command_line=r'cmd /c C:\Users\a\AppData\mission.exe'))[0]
 
 
 def test_unsupported_unused_selector_and_correlation_are_not_dropped():

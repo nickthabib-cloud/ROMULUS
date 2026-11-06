@@ -1052,9 +1052,11 @@ indicator_list = Table(
     Column("digest", String, nullable=False),
     Column("status", String, nullable=False),
     Column("notes", Text, nullable=False, default=""),
+    Column("lane", String, nullable=False, default="lead", server_default="lead"),
+    Column("severity", String, nullable=False, default="medium", server_default="medium"),
     PrimaryKeyConstraint("id", "version"),
     CheckConstraint("version > 0", name="ck_indicator_list_version"),
-    CheckConstraint("status IN ('active','expired','retired')", name="ck_indicator_list_status"),
+    CheckConstraint("status IN ('importing','active','expired','retired')", name="ck_indicator_list_status"),
 )
 
 indicator_value = Table(

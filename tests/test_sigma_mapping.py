@@ -177,7 +177,7 @@ def _ast(source, field, value):
 
 @pytest.mark.parametrize("shape", ["winlogbeat_8", "elastic_agent"])
 @pytest.mark.parametrize(("category", "code", "namespace"), [
-    ("process_creation", 1, "file"), ("file_event", 11, "file"), ("image_load", 7, "image")])
+    ("process_creation", 1, "file"), ("create_stream_hash", 15, "file"), ("image_load", 7, "image")])
 def test_hash_comparison_executes_against_native_hashes_by_role(shape, category, code, namespace):
     from romulus.content.sigma_parser import evaluate_ast
     ast = _ast({"product": "windows", "category": category}, "Hashes", "SHA256=" + "ab" * 32)

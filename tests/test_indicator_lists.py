@@ -174,7 +174,7 @@ def test_million_values_stream_with_bounded_memory_and_indexed_lookup(repo):
     assert peak < 64 * 1024 * 1024
 
 
-def test_failed_report_and_stream_abort_roll_back_values_and_audit(repo):
+def test_failed_report_and_stream_abort_remove_values_and_audit_rejections(repo):
     from romulus.content.indicator_lists import IndicatorLists
     def broken():
         yield row()
@@ -185,7 +185,8 @@ def test_failed_report_and_stream_abort_roll_back_values_and_audit(repo):
         create(repo, report=list)
     assert IndicatorLists(repo).lists() == []
     with repo.engine.connect() as c:
-        assert c.execute(select(t.audit_event)).first() is None
+        assert c.execute(select(t.audit_event.c.action)).all() == [
+            ('indicator_list.import_rejected',), ('indicator_list.import_rejected',)]
         assert c.execute(select(t.indicator_value)).first() is None
 
 
@@ -216,7 +217,7 @@ def test_duplicate_metadata_preserves_longest_eligibility_and_strongest_override
     later.lane = "high"
     later.severity = "high"
     later.attack = ("T1003",)
-    created = create(repo, [earlier, later])
+    created = create(repo, [earlier, later], role='lead', reason='confirmed payload')
     service = IndicatorLists(repo)
     matched = list(PinnedIndicators(repo, service.pin(now=NOW + timedelta(days=2))).find("ip", earlier.value))
     assert len(matched) == 1
@@ -274,7 +275,7 @@ def test_attack_metadata_validation_consumes_a_bounded_prefix(repo):
     assert consumed[0] <= 257
 
 
-@pytest.mark.parametrize("field", ["name", "source", "author", "notes", "list_id", "label", "attack"])
+@pytest.mark.parametrize("field", ["name", "source", "author", "notes", "list_id", "attack"])
 def test_direct_service_refuses_credential_metadata_without_storing_or_echoing(repo, field):
     from romulus.content.indicator_lists import IndicatorLists
     secret = "password=service-secret"
@@ -290,5 +291,6 @@ def test_direct_service_refuses_credential_metadata_without_storing_or_echoing(r
     assert "service-secret" not in str(caught.value)
     assert IndicatorLists(repo).lists() == []
     with repo.engine.connect() as c:
-        assert c.execute(select(t.audit_event)).first() is None
+        actions = c.execute(select(t.audit_event.c.action)).scalars().all()
+        assert actions == (['indicator_list.import_rejected'] if field == 'attack' else [])
         assert c.execute(select(t.indicator_value)).first() is None

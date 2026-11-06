@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from romulus.agent.cases import seed_candidate_ids
 from romulus.agent.provider import egress_banners
 from romulus.decide.policy import LANE_ORDER
+from romulus.detect.metadata import hunt_rule_metadata, is_sigma_id, pinned_rule_ids
 from romulus.detect.netdef import recorded_view
 from romulus.detect.registry import ALL_PLAYBOOKS
 from romulus.hunt.publish import subject_event_ids
@@ -115,9 +116,13 @@ PCAP_CELL_PREFIX = "arkime-pcap:"
 def _scope(cell: dict) -> list[str]:
     """What a cell says it examined, when it says so (the packet stage names its selection)."""
     detail = cell.get("detail") or {}
-    if not isinstance(detail, dict) or not detail.get("selection"):
+    if not isinstance(detail, dict):
         return []
-    out = [f"examined on {cell['target'].removeprefix(PCAP_CELL_PREFIX)}: {detail['selection']}"]
+    out = [str(reason) for reason in detail.get('reasons', [])
+           if str(reason).startswith('Indicator kind ')]
+    if not detail.get('selection'):
+        return out
+    out.append(f"examined on {cell['target'].removeprefix(PCAP_CELL_PREFIX)}: {detail['selection']}")
     if isinstance(detail.get("http_sessions_without_body_type"), int):
         out.append(f"{detail['http_sessions_without_body_type']} HTTP session(s) there had no body type and were "
                    "outside that selection")
@@ -257,7 +262,7 @@ def _not_assessed(hunt_manifest: dict, sweep_detail: dict) -> list[dict]:
 
 
 def _coverage(cells: list[dict], targets: list[str] | None = None, rule_ids: list[str] | None = None,
-              sweep_finished: bool = True) -> dict:
+              sweep_finished: bool = True, metadata=None) -> dict:
     """Per-rule search result: what each rule searched, never a claim that nothing is there. 'searched in full'
     requires: the sweep finished, every manifest target has cells for the rule, no cell is planned/failed/partial,
     and at least one evaluated partition with no match. Anything less is 'searched in part' with the reason;
@@ -279,6 +284,7 @@ def _coverage(cells: list[dict], targets: list[str] | None = None, rule_ids: lis
         by_rule.setdefault(rid, Counter())
     rows = []
     for rule, states in sorted(by_rule.items()):
+        dynamic = (metadata or {}).get(rule)
         reasons = []
         if not sweep_finished:
             reasons.append("sweep did not finish")
@@ -297,10 +303,12 @@ def _coverage(cells: list[dict], targets: list[str] | None = None, rule_ids: lis
                 + ("; coverage incomplete: " + "; ".join(reasons) if reasons else "")
         elif set(states) == {"not_applicable_no_events"} and not reasons:
             claim = "no data in scope for this rule"
-        elif states.get("positive_only") or states.get("positive_only_partial") or rule in POSITIVE_ONLY_RULE_IDS:
+        elif (states.get("positive_only") or states.get("positive_only_partial") or rule in POSITIVE_ONLY_RULE_IDS
+              or dynamic is not None and not dynamic.assures_negative):
             # decided by what the rule can prove *now*, not by cells stored under an older pack: a hunt swept
             # before a rule became positive-only must not render its old no_match_complete as "complete"
-            base = (_RULE_POSITIVE_ONLY.get(rule) or POSITIVE_ONLY_CLAIMS.get(rule)
+            base = (_po(dynamic.positive_only_reason) if dynamic is not None and dynamic.positive_only_reason else
+                    _RULE_POSITIVE_ONLY.get(rule) or POSITIVE_ONLY_CLAIMS.get(rule)
                     or _po("the rule identifies programs or actions from argv or text"))
             claim = base + "".join(f"; {s}" for s in dict.fromkeys(scope[rule])) \
                 + ("; coverage incomplete: " + "; ".join(reasons) if reasons else "")
@@ -324,8 +332,8 @@ def coverage_for_hunt(repo: Repo, hunt_id: str) -> dict:
     detail = (sweep or {}).get("detail") or {}
     finished = bool(sweep and detail.get("finished", detail.get("complete")))
     coverage = _coverage(repo.rule_cells(hunt_id), targets=hm.get("targets"),
-                         rule_ids=[p["id"] for p in (hm.get("pack") or {}).get("playbooks", [])],
-                         sweep_finished=finished)
+                         rule_ids=sorted(pinned_rule_ids(hm)),
+                         sweep_finished=finished, metadata=hunt_rule_metadata(repo, manifest=hm))
     coverage["not_assessed"] = _not_assessed(hm, detail)
     coverage["baseline"] = _baseline_coverage(repo, hunt_id, hm)
     visibility = repo.latest_audit(hunt_id, "hunt.zeek_visibility")
@@ -385,7 +393,7 @@ def coverage_for_rules(repo: Repo, hunt_id: str, rule_ids: set[str]) -> dict:
     finished = bool(sweep and detail.get("finished", detail.get("complete")))
     coverage = _coverage(
         repo.rule_cells(hunt_id, rule_ids), targets=hm.get("targets"),
-        rule_ids=sorted(rule_ids), sweep_finished=finished,
+        rule_ids=sorted(rule_ids), sweep_finished=finished, metadata=hunt_rule_metadata(repo, manifest=hm),
     )
     presence = repo.rule_presence_counts(
         hunt_id, {(gap["target"], gap["partition"]) for gap in coverage["gaps"]},
@@ -613,6 +621,7 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
     h = repo.get_hunt(hunt_id)
     if h is None:
         raise KeyError(hunt_id)
+    metadata = hunt_rule_metadata(repo, manifest=h['manifest'])
     cands = [_discovery_origin(row) for row in repo.candidates(hunt_id)]
     cands.sort(key=lambda c: (LANE_ORDER.get(c["lane"], 9), -c["priority"], str(c["ts"])))
     findings = []
@@ -622,6 +631,7 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
         disp = repo.dispositions(c["id"])
         gates = dict(c["gate_results"])
         notes = gates.pop("_notes", [])
+        attack = gates.pop('_attack', [])
         gates.pop("aggregate_summary", None)
         findings.append({
             "id": c["id"], "lane": c["lane"], "severity": c["severity"], "confidence": c["confidence"],
@@ -638,6 +648,11 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
             "disposition_history": [{"actor": d["actor"], "at": str(d["at"]), "status": d["status"],
                                      "note": d["note"]} for d in disp],
         })
+        rule = metadata.get(c['rule_id'])
+        if is_sigma_id(c['rule_id']) and rule is not None:
+            findings[-1]['rule_title'] = rule.title
+        if attack:
+            findings[-1]['attack'] = attack
         if "_fleet_host_count" in gates:
             findings[-1]["fleet_hosts"] = repo.snapshot_candidate_hosts(
                 c["id"], hunt_id, expected_count=gates["_fleet_host_count"],
@@ -681,6 +696,20 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
                      "model": hm["model"], "romulus": hm["romulus_version"]},
         "generated_by": actor,
     }
+    lists = hm.get('indicator_lists') or {}
+    if lists.get('applied') or lists.get('excluded'):
+        m['versions']['indicator_lists'] = {
+            'excluded_expired_values': sum(pin.get('excluded_expired_values', 0) for pin in lists.get('applied', [])),
+            'applied': [{key: pin.get(key, 0 if key == 'excluded_expired_values' else None)
+                         for key in ('id', 'version', 'digest', 'excluded_expired_values')}
+                        for pin in lists.get('applied', [])],
+            'excluded': [{key: pin[key] for key in ('id', 'version', 'digest', 'reason') if key in pin}
+                         for pin in lists.get('excluded', [])],
+        }
+    sigma = hm.get('sigma_rules') or {}
+    if sigma.get('applied'):
+        m['versions']['sigma_rules'] = {'digest': sigma.get('digest'), 'applied': [
+            {key: pin[key] for key in ('id', 'version', 'digest') if key in pin} for pin in sigma['applied']]}
     broken_inv = _broken_investigation_citations(repo, m["investigations"])
     broken_incidents = _broken_investigation_citations(repo, incident_graph)
     m["integrity"] = {"broken_citations": broken, "broken_investigation_citations": len(broken_inv),

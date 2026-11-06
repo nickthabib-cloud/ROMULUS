@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from sqlalchemy import select
+from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
 
 from romulus.content.indicator_import import CSV_MAX_BYTES, JSON_MAX_BYTES, parse_indicator_file
@@ -87,7 +88,7 @@ def register_indicator_routes(app, repo, need, page):
                     raise HTTPException(413, 'Indicator form fields exceed the size limit')
                 pieces.append(piece)
             request._body = b''.join(pieces)
-        return await request.form(max_files=1, max_fields=10, max_part_size=FIELD_MAX_BYTES)
+        return await request.form(max_files=1, max_fields=16, max_part_size=FIELD_MAX_BYTES)
 
     def field(form, key, limit, default=''):
         value = form.get(key, default)
@@ -118,6 +119,9 @@ def register_indicator_routes(app, repo, need, page):
                 raise HTTPException(403, 'bad CSRF token')
             name, source = field(form, 'name', 256), field(form, 'source', 2048)
             notes = field(form, 'notes', 16384)
+            lane = field(form, 'lane', 16, 'lead')
+            severity = field(form, 'severity', 16, 'medium')
+            reason = field(form, 'reason', 2048)
             list_id = field(form, 'list_id', 128) or None
             expires = field(form, 'expires', 64)
             expires_at = datetime.fromisoformat(expires) if expires else None
@@ -149,17 +153,21 @@ def register_indicator_routes(app, repo, need, page):
                             destination.write(chunk)
                     else:
                         destination.write(text.encode('utf-8'))
-                result = parse_indicator_file(path, include_non_ids=include == '1')
-                row = store.create_version(result.rows, name=name, source=source, author=user['u'],
-                    notes=notes, list_id=list_id, expires_at=expires_at, report=result.summary)
+                def import_list():
+                    result = parse_indicator_file(path, include_non_ids=include == '1')
+                    return store.create_version(result.rows, name=name, source=source, author=user['u'],
+                        notes=notes, list_id=list_id, expires_at=expires_at, report=result.summary,
+                        role=user['r'], lane=lane, severity=severity, reason=reason)
+                row = await run_in_threadpool(import_list)
             return RedirectResponse(f"/indicators/{row['id']}?version={row['version']}", status_code=303)
         except HTTPException as exc:
             if exc.status_code in (400, 413):
                 repo.audit(user['u'], 'indicator_list.import_rejected', detail={
                     'reason': 'request_size_limit' if exc.status_code == 413 else 'invalid_form'})
             raise
-        except (ValueError, OSError, UnicodeError):
-            repo.audit(user['u'], 'indicator_list.import_rejected', detail={'reason': 'invalid_file_or_metadata'})
+        except (ValueError, OSError, UnicodeError, OverflowError, PermissionError) as exc:
+            if not getattr(exc, 'audit_recorded', False):
+                repo.audit(user['u'], 'indicator_list.import_rejected', detail={'reason': 'invalid_file_or_metadata'})
             raise HTTPException(400, 'Import rejected: invalid CSV/JSON file or metadata; no version was saved') from None
         finally:
             if form is not None:
