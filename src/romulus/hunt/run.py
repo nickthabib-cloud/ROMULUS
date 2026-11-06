@@ -91,6 +91,8 @@ def create_hunt(s: Settings, start: datetime, end: datetime, created_by: str, st
     }
     from romulus.content.indicator_lists import IndicatorLists
     manifest['indicator_lists'] = IndicatorLists(repo).pin()
+    from romulus.content.sigma_store import SigmaRules
+    manifest['sigma_rules'] = SigmaRules(repo).pin()
     hid = new_hunt_id()
     repo.create_hunt(hid, manifest, digest(manifest), created_by)
     for p in profiles.values():

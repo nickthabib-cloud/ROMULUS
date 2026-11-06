@@ -21,6 +21,7 @@ def _rule_strength(rule: RuleMetadata) -> str:
 def _rules(catalog: Catalog) -> list[dict[str, Any]]:
     return [
         {
+            **({'provenance': dict(rule.provenance)} if rule.provenance else {}),
             "id": rule.id,
             "version": rule.version,
             "title": rule.title,

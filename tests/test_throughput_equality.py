@@ -308,6 +308,12 @@ from tests import throughput_fixture as tf
 # Removing their 2,556 cells and 36 manifest coverage rows, restoring seven registered rule versions,
 # and restoring incidental coverage row IDs reconstructs the complete prior snapshot exactly.
 # Findings, evidence, links, requests and all 21 non-coverage section digests remain unchanged.
+# Rate coalescing and early-hit semantics, plus canonical preview/MSIX PowerShell,
+# bump five network rate contracts and the PowerShell server contract from 3 to 4.
+# This fixture has no qualifying rate/PowerShell/analyst-indicator/Sigma matches:
+# its only changes are 426 rule-cell versions (71 cells per changed rule).
+# Restoring those six named versions reproduces every field in all 23 sections;
+# all 35 candidates, citations, lanes, the manifest and normalization stay exact.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
     "audit": "23d9b87c75d030df8ff5bcbf07deacc75416c325dd74bcc89243cc1b5488ae93",
@@ -336,7 +342,7 @@ GOLDEN_STACK = {
     # Twenty changed Windows/network contracts carry new versions in 71 coverage cells each.
     # Restoring only those versions reproduces the complete preceding snapshot; all 35 candidates
     # and the other 22 stack sections are byte-identical.
-    "rule_cells": '46f579137656b9c9277441dc764c57dc33cc98ada499b9e9c1809f91d8d198fa',
+    "rule_cells": 'c3ec362d3f24714ca48fc50d96e80d0ece1545e6a126ae4feee3e60a0ea2373b',
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
     "tasks": "c65df4ab88c05661371cf32b49a1d22ef84d6753488bdb946c8e29376d486260",
 }
@@ -368,10 +374,10 @@ GOLDEN_NON_BASELINE_SEMANTICS = {
         "ts": "d8015c1ff0b135e082a5fef2ab1cb88206470e30beee157a0cfc7790d48b8310",
     },
     "rule_cells": {
-        "all_fields": 'ebc55fec9179697358c93c9bfbb08e90ec8a152eecf2559f374fcc49e91a46dc',
+        "all_fields": 'c18af832ca670cff424a6a00a45160883263def494cb734b6244f76046d246bb',
         "count": 15261,
         "rule_id": 'e254e06a5b70725e437cf3004200b0f61b05100d1538c13349994d1fd4568879',
-        "rule_version": '1aeb0e5e87816e0a17c6367222ccc9730fe50cd9833a03e98d8b240f53a02e8b',
+        "rule_version": 'e911c7361155c0fd9cafe64f11fa3dc8f0a1e84ed18fe890cb545b78ded121b5',
         "target": 'bb22fe7c7f4a31ae292ea691f4617e62106177f2a4c6f503fe9cbcd94458229b',
         "partition": '8a08cb4a3f440cbddfa0ef9d93701943223d6c94b114f753f62c31fcae1414ba',
         "state": '873ced555502f36931da34afd78c1e52bee897e367c838bd43ed555b375fa99d',

@@ -401,11 +401,11 @@ def test_0024_downgrade_keeps_segment_children_and_snapshot_membership(tmp_path)
     assert not {"events_basis", "first_event_hour"} & columns
 
 
-def test_0031_is_the_single_head_and_0017_leaves_stored_candidates_about_every_record_they_cite(tmp_path):
+def test_0032_is_the_single_head_and_0017_leaves_stored_candidates_about_every_record_they_cite(tmp_path):
     engine = make_engine(tmp_path / "candidate-context.db")
     with engine.begin() as connection:
         cfg = _alembic_config(connection)
-        assert ScriptDirectory.from_config(cfg).get_heads() == ["0031"]
+        assert ScriptDirectory.from_config(cfg).get_heads() == ["0032"]
         command.upgrade(cfg, "0016")
         connection.exec_driver_sql(
             "INSERT INTO hunt (id, created_at, created_by, manifest, manifest_digest, execution_state) "

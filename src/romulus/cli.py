@@ -251,6 +251,46 @@ def cmd_web(args) -> int:
     return EXIT_OK
 
 
+def cmd_sigma(args) -> int:
+    import getpass
+
+    from romulus.content.sigma_store import SigmaRules
+    from romulus.hunt.run import open_repo
+    from romulus.web.auth import RateLimiter, verify
+
+    repo = open_repo(load_settings(_env_file(args)))
+    try:
+        store = SigmaRules(repo)
+        if args.action == 'import':
+            result = store.import_directory(args.directory, upstream=args.upstream, commit=args.commit,
+                actor=f"cli:{os.environ.get('USER') or os.environ.get('USERNAME') or '?'}")
+        elif args.action == 'list':
+            result = store.list(limit=args.limit, offset=args.offset, status=args.status)
+        elif args.action == 'show':
+            result = store.get(args.rule_id)
+            if result is None:
+                raise ValueError('Missing Sigma rule')
+        else:
+            username = args.user or input('Lead username: ')
+            account = verify(repo.engine, username, getpass.getpass('Password: '), 'local-cli', RateLimiter())
+            if account is None or account['role'] != 'lead':
+                print('Sigma change refused: a live lead account is required.', file=sys.stderr)
+                return EXIT_FAIL
+            if args.action == 'activate':
+                result = store.activate(args.rule_id, args.positive, args.benign, actor=account['username'],
+                    role=account['role'], lane=args.lane, reason=args.reason)
+            else:
+                result = store.retire(args.rule_id, actor=account['username'], role=account['role'])
+        print(json.dumps(result, indent=2))
+        return EXIT_OK
+    except (ValueError, OSError, PermissionError, EOFError):
+        print('Sigma operation rejected: check local input, content status, fixture results and limits.',
+              file=sys.stderr)
+        return EXIT_FAIL
+    finally:
+        repo.engine.dispose()
+
+
 def cmd_db(args) -> int:
     from romulus.hunt.run import open_repo
     from romulus.store.db import compact
@@ -383,6 +423,28 @@ def main(argv: list[str] | None = None) -> int:
     indicator_export.add_argument("--version", type=int)
     indicator_export.add_argument("--format", choices=["yaml", "csv"], default="yaml")
     indicator_export.add_argument("--out", help="local output file (default: stdout)")
+    sigma = sub.add_parser('sigma', help='import and manage offline typed Sigma rules')
+    sigma_actions = sigma.add_subparsers(dest='action', required=True)
+    sigma_import = sigma_actions.add_parser('import', help='import a local Sigma YAML directory')
+    sigma_import.add_argument('directory')
+    sigma_import.add_argument('--upstream', required=True)
+    sigma_import.add_argument('--commit', required=True)
+    sigma_list = sigma_actions.add_parser('list', help='list a page of local Sigma rules')
+    sigma_list.add_argument('--limit', type=int, default=100)
+    sigma_list.add_argument('--offset', type=int, default=0)
+    sigma_list.add_argument('--status', choices=['draft', 'reference-only', 'active', 'retired'])
+    sigma_show = sigma_actions.add_parser('show', help='show a local Sigma rule and mapping')
+    sigma_show.add_argument('rule_id')
+    sigma_activate = sigma_actions.add_parser('activate', help='verify fixtures and activate as a lead')
+    sigma_activate.add_argument('rule_id')
+    sigma_activate.add_argument('--positive', required=True)
+    sigma_activate.add_argument('--benign', required=True)
+    sigma_activate.add_argument('--lane', choices=['lead', 'high'], default='lead')
+    sigma_activate.add_argument('--reason', default='')
+    sigma_activate.add_argument('--user', help='lead username (default: prompt)')
+    sigma_retire = sigma_actions.add_parser('retire', help='retire a rule as a lead')
+    sigma_retire.add_argument('rule_id')
+    sigma_retire.add_argument('--user', help='lead username (default: prompt)')
     dp = sub.add_parser("db", help="database maintenance")
     dp.add_argument("action", choices=["compact"], help="compact: return space freed by deleted hunts to the disk")
     replay = sub.add_parser("replay", help="export frozen investigator briefs, run them, and summarize results")
@@ -413,7 +475,7 @@ def main(argv: list[str] | None = None) -> int:
         p.error("hunt resume needs a hunt id")
     handlers = {"doctor": cmd_doctor, "hunt": cmd_hunt, "findings": cmd_findings, "report": cmd_report,
                 "user": cmd_user, "web": cmd_web, "replay": cmd_replay, "db": cmd_db,
-                "indicators": cmd_indicators}
+                "indicators": cmd_indicators, "sigma": cmd_sigma}
     return handlers[args.cmd](args)
 
 

@@ -90,11 +90,13 @@ def _rule_metadata(playbook: type) -> RuleMetadata:
         attack_exempt=str(getattr(playbook, "attack_exempt", "")),
         behavior=str(card.get("behavior", "")),
         fidelity=str(card.get("fidelity", "")),
+        provenance=MappingProxyType(dict(card.get('provenance', {}))),
     )
 
 
 def _rule_document(rule: RuleMetadata) -> dict[str, Any]:
     return {
+        **({'provenance': dict(rule.provenance)} if rule.provenance else {}),
         "id": rule.id,
         "version": rule.version,
         "title": rule.title,
@@ -151,6 +153,7 @@ def _rule_from_document(item: dict[str, Any]) -> RuleMetadata:
         attack_exempt=str(item["attack_exempt"]),
         behavior=str(item["behavior"]),
         fidelity=str(item["fidelity"]),
+        provenance=MappingProxyType(dict(item.get('provenance', {}))),
     )
 
 
@@ -226,6 +229,7 @@ def build_catalog(
     attack: AttackKnowledge | None = None,
     playbooks: Iterable[type] | None = None,
     strict: bool = False,
+    repo=None,
 ) -> Catalog:
     """Return a sorted catalog; strict mode makes invalid ATT&CK mappings fail."""
     public_rules, pack_version = _public_pack()
@@ -235,6 +239,11 @@ def build_catalog(
         if playbooks is not None
         else public_rules
     )
+    if repo is not None:
+        from romulus.content.sigma_store import SigmaRules
+        from romulus.detect.sigma import SigmaRule
+        rules = tuple(sorted((*rules, *(_rule_metadata(SigmaRule(row))
+                                       for row in SigmaRules(repo).iter_rules())), key=lambda item: item.id))
     invalid = _rule_issues(rules, attack)
     if strict and invalid:
         issue = invalid[0]

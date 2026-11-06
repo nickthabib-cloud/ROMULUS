@@ -191,8 +191,21 @@ def test_full_pack_windows_query_stays_under_the_engine_clause_limit(weak):
     mapping = contract(weak=weak)
     instance = Sweep(None, None, 'h1', WINDOW, {TARGET: mapping})
     instance.pack = fresh_pack()
+    from romulus.content.sigma_parser import ast_digest, parse_rule
+    from romulus.detect.sigma import SigmaRule
+    for index in range(500):
+        parsed = parse_rule({'title': 'Synthetic class retrieval',
+            'logsource': {'product': 'windows', 'service': ('sysmon', 'security', 'system', 'powershell')[index % 4]},
+            'detection': {'selection': {'EventID': index+1000000000}, 'condition': 'selection'}})
+        assert not parsed['reasons']
+        instance.pack.append(SigmaRule({'id': str(index), 'title': 'Synthetic class retrieval',
+            'author': 'In-house tests', 'upstream': 'Synthetic', 'upstream_path': 'retrieval.yml',
+            'upstream_commit': 'a'*40, 'ast': parsed['ast'], 'mapping': parsed['mapping'],
+            'digest': ast_digest(parsed['ast']), 'status': 'active', 'level': 'high', 'lane': 'lead',
+            'activation_reason': '', 'tags': []}))
     groups = instance._any_of_for(TARGET, mapping)
     rpc = [group for group in groups if any(p.field.startswith('rpc.') for p in group)]
     assert len(rpc) <= 6
     body = compile_es(SearchIntent(kind='raw', target=TARGET, window=WINDOW, any_of=groups), mapping).body
     assert _leaf_clauses(body['query']) < 900
+    assert not any(str(index+1000000000) in str(body['query']) for index in range(500))
