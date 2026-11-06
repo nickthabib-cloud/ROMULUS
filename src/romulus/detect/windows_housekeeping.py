@@ -151,6 +151,13 @@ def _installed_powershell_parent(image):
     if basename(image) in {"powershell.exe", "pwsh.exe"} and _usual_bits_client(image):
         return True
     parts = installation_parts(image)
+    if len(parts) == 4 and parts[-1] == "pwsh.exe":
+        if parts[:3] == ("program files", "powershell", "7-preview"):
+            return True
+        if (parts[:2] == ("program files", "windowsapps")
+                and re.fullmatch(r"microsoft\.powershell_[0-9]+(?:\.[0-9]+){3}_(?:x86|x64|arm64)__8wekyb3d8bbwe",
+                                 parts[2]) is not None):
+            return True
     return (len(parts) == 5 and parts[:2] in {("windows", "system32"), ("windows", "syswow64")}
             and parts[2:] == ("windowspowershell", "v1.0", "powershell_ise.exe"))
 
@@ -256,7 +263,7 @@ class KerberosLoopbackLogon(_Housekeeping):
 
 class UnexpectedPsRemoteServer(_FoldedHousekeeping):
     id = "win.unexpected_ps_remote_server"
-    version = "3"
+    version = "4"
     title = "PowerShell server mode was launched by an unexpected parent"
     families = ("process_exec",)
     windows_event_classes = _PROCESS

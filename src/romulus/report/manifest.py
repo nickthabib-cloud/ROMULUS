@@ -622,6 +622,7 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
         disp = repo.dispositions(c["id"])
         gates = dict(c["gate_results"])
         notes = gates.pop("_notes", [])
+        gates.pop("aggregate_summary", None)
         findings.append({
             "id": c["id"], "lane": c["lane"], "severity": c["severity"], "confidence": c["confidence"],
             "priority": c["priority"], "priority_reasons": c["priority_reasons"], "rule_id": c["rule_id"],
