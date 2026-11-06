@@ -52,6 +52,7 @@ from romulus.hunt.publish import (
     LineageCitationFetcher,
     SourceCitationFetcher,
     WindowsCitationFetcher,
+    bind_aggregate_history,
     publish_match,
 )
 from romulus.hunt.stage import EventStage
@@ -296,6 +297,7 @@ class Sweep:
         self.pack: list[Playbook] = bind_windows_site(fresh_pack(), self.site_facts)
         bind_lineage_citation_loader(self.pack, LineageCitationFetcher(client, contracts).load)
         for pb in self.pack:
+            bind_aggregate_history(repo, hunt_id, pb)
             pb.spill_dir = stage_dir          # a playbook's on-disk join tables live beside the event stage
             pb.budget = self.budget
             pb.window_start = window.start

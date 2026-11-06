@@ -6,7 +6,7 @@ import json
 
 import httpx
 
-from romulus.decide.policy import decide
+from romulus.decide.policy import candidate_group_id, decide
 from romulus.detect.base import Match, Playbook
 from romulus.detect.observed import pointer_body
 from romulus.errors import SourceError
@@ -16,6 +16,19 @@ from romulus.hunt.citations import COMPACT_CITATION_NOTE
 from romulus.store.repo import Repo, raw_id
 
 LINEAGE_CITATION_BATCH = 500
+
+
+def bind_aggregate_history(repo: Repo, hunt_id: str, playbook: Playbook) -> None:
+    """Restore one bounded published checkpoint on demand, without a hunt-wide cache."""
+    def load(group_key):
+        existing = repo.candidate(candidate_group_id(playbook.id, group_key, hunt_id))
+        summary = ((existing or {}).get('gate_results') or {}).get('aggregate_summary')
+        if not summary:
+            return None
+        events = [TypedEvent.model_validate(row['event']) for row in
+                  repo.citation_events(hunt_id, list(existing.get('event_ids') or ())[:4])]
+        return {'summary': dict(summary), 'lane': existing['lane'], 'events': events}
+    playbook.published_aggregate = load
 
 
 def _retrieval_note(error):
@@ -267,6 +280,8 @@ def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
                   *, owner_token: str | None = None, zeek_context=None, zeek_context_ids=()) -> dict | None:
     """Persist cited evidence and publish a machine-decided finding once, with stable script-view revisions.
     Context findings are published by the post-expansion pass (romulus.hunt.context.finalize_context)."""
+    if source_case_id is None and source_anchor_id is None:
+        bind_aggregate_history(repo, hunt_id, playbook)
     if zeek_context is not None and any(event.get("observer.product")=="zeek" for event in match.events):
         from itertools import islice
 
@@ -343,6 +358,7 @@ def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
             **({"_citation_unavailable": True} if match.citation_unavailable else {}),
             **({"_fleet_host_count": match.fleet_host_count} if match.fleet_host_count else {}),
             **({"_context_reaches": [context_reach]} if context_reach else {}),
+            **({"aggregate_summary": dict(match.aggregate_summary)} if match.aggregate_summary else {}),
         },
         "benign_alternatives": list(playbook.benign),
         "next_checks": list(playbook.next_checks),

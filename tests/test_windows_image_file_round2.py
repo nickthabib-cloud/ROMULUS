@@ -32,6 +32,9 @@ def decide(name, event):
 @pytest.mark.parametrize("path", [
     r"C:\Windows\NTDS\edbtmp.log", r"C:\Windows\NTDS\edb00001.log",
     r"C:\Windows\NTDS\temp.edb", r"D:\NTDS\edb00001.log", r"D:\NTDS\ntds.dit",
+    r"C:\Users\alice\Documents\NTDS\edb00001.log",
+    r"C:\Temp\Windows\NTDS\edbtmp.log", r"C:\Windows\NTDS-backup\edbtmp.log",
+    r"D:\Windows\NTDS\edbtmp.log",
     "\\\\?\\C:\\Windows\\NTDS\\edbtmp.log", r"\??\C:\Windows\NTDS\temp.edb",
     r"%SystemRoot%\NTDS\edbtmp.log", r"\SystemRoot\NTDS\temp.edb",
     "C:\\Users\\alice\\AppData\\Roaming\\Microsoft\\Protect\\" + SID + "\\" + GUID,
@@ -56,8 +59,6 @@ def test_lsass_standard_store_shapes_are_leads_and_never_dropped(path):
 
 @pytest.mark.parametrize("path", [
     r"C:\Windows\System32\mimilsa.log", r"C:\Temp\mimilsa.log",
-    r"C:\Users\alice\Documents\NTDS\edb00001.log",
-    r"C:\Temp\Windows\NTDS\edbtmp.log", r"C:\Windows\NTDS-backup\edbtmp.log",
     r"C:\Windows\NTDS\mimilsa.log", r"D:\NTDS\payload.dll",
     r"C:\Windows\debug\netlogon-credentials.txt",
     r"C:\Temp\Microsoft\Crypto\Keys\key-0001",
@@ -67,7 +68,6 @@ def test_lsass_standard_store_shapes_are_leads_and_never_dropped(path):
     "C:\\Users\\alice\\AppData\\Roaming\\Microsoft\\Protect\\" + SID + "\\{" + GUID,
     "C:\\Users\\alice\\AppData\\Roaming\\Microsoft\\Protect\\" + SID + "\\" + GUID + "}",
     r"\\server\share\Windows\NTDS\edbtmp.log",
-    r"D:\Windows\NTDS\edbtmp.log",
 ])
 def test_lsass_store_lookalikes_and_memssp_remain_high(path):
     [hit] = decide("LsassFileWrite", file_event(path))

@@ -9,6 +9,7 @@ from romulus.detect.windows_sequence_extensions import (
     SmbHostDiscovery,
 )
 from tests.windows_event_support import event, run
+from tests.windows_process_support import stored
 
 
 def creation(guid, parent, image, *, offset=0):
@@ -28,7 +29,12 @@ def test_creators_handle_to_its_child_is_not_parent_spoofing_in_any_arrival_orde
                creation('child', 'parent', r'C:\Tools\child.exe', offset=2)]
     owner = ParentProcessSpoofing()
     try:
-        assert run(owner, [[records[n]] for n in order]) == []
+        matches = run(owner, [[records[n]] for n in order])
+        if order in {(1, 2, 0), (2, 1, 0)}:
+            [match] = matches
+            assert match.proposed_lane == 'lead' and 'creator' in match.revision_reason.lower()
+        else:
+            assert matches == []
         assert owner.rows.store().execute("SELECT COUNT(*) FROM windows_rows WHERE k LIKE '[\"access\",%'").fetchone()[0] == 0
     finally:
         owner.release_state()
@@ -154,13 +160,12 @@ def test_late_target_in_same_partition_can_hydrate_children_before_the_stage_is_
         owner.release_state()
 
 
-def test_unknown_target_parent_waits_for_completion_and_is_then_published_once():
+def test_unknown_target_parent_publishes_immediately_and_is_not_republished_at_finalize():
     records = [access(), creation('child', 'parent', r'C:\Tools\child.exe', offset=2)]
     owner = ParentProcessSpoofing()
     owner.load = lambda ids: [e for e in records if e.id in ids]
     try:
-        assert list(owner.consume(records)) == []
-        [match] = list(owner.finalize())
+        [match] = list(owner.consume(records))
         assert match.proposed_lane == 'high'
         assert any('target creation record' in note for note in match.notes)
         assert not list(owner.finalize())
@@ -203,25 +208,24 @@ def test_retained_unknown_target_sequence_can_publish_when_optional_growth_is_re
     owner = ParentProcessSpoofing()
     owner.load = lambda ids: [e for e in records if e.id in ids]
     try:
-        assert list(owner.consume(records)) == []
+        [match] = list(owner.consume(records))
         monkeypatch.setattr(owner.rows, 'room', lambda: False)
-        [match] = list(owner.finalize())
+        assert list(owner.finalize()) == []
         assert match.proposed_lane == 'high'
     finally:
         owner.release_state()
 
 
-@pytest.mark.parametrize('parent,positive', [('actor', False), ('other', True)])
-def test_live_target_creation_resolves_retained_children_even_when_new_indexes_are_full(monkeypatch, parent, positive):
+@pytest.mark.parametrize('parent,lane', [('actor', 'lead'), ('other', 'high')])
+def test_live_target_creation_resolves_retained_children_even_when_new_indexes_are_full(monkeypatch, parent, lane):
     records = [access(), creation('child', 'parent', r'C:\Tools\child.exe', offset=2)]
     target = creation('parent', parent, r'C:\Windows\explorer.exe')
     owner = ParentProcessSpoofing()
     owner.load = lambda ids: [e for e in records if e.id in ids]
     try:
-        assert list(owner.consume(records)) == []
+        initial = list(owner.consume(records))
         monkeypatch.setattr(owner.rows, 'room', lambda: False)
-        matches = [*owner.consume([target]), *owner.finalize()]
-        assert bool(matches) is positive
-        assert all(m.proposed_lane == 'high' for m in matches)
+        [match] = stored([*initial, *owner.consume([target]), *owner.finalize()])
+        assert match.proposed_lane == lane
     finally:
         owner.release_state()

@@ -327,15 +327,16 @@ GOLDEN_STACK = {
     "events": "0165d2807ffee33aaef17dd70ba004ec4c87fa4c5f29e9dc75ba833f57b93ff7",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "0fbedb27ca9a4cb72354178444ee9aabc49f377b2c933074fe03ef29c8fbb08a",
-    # The five Zeek rate rules are unregistered until round 3 (355 rule cells and five manifest rows), and
-    # net.kerberos_long_ticket_lifetime unregistered (the requested till marks nearly every Windows TGS): its rule
-    # cells and manifest row are gone; every candidate, raw, event and citation section is unchanged.
-    "manifest": 'aa0f72d7f6080f0e739348c5c84234645fbf0e55cd417f6ab9f7a6b9d4ac79cd',
+    # Five zero-evaluation Zeek rate registrations add 355 coverage cells and five manifest rules.
+    # Five Windows contract-version bumps change only rule_version in their 355 existing cells.
+    # Removing those additions, restoring those versions and incidental cell IDs reproduces the
+    # complete preceding snapshot; all 35 candidates and 21 non-coverage sections are identical.
+    "manifest": '2e06ddcbd38a16d1ce651e001280ee074b4e7892ef33b7f1df939568ce14dfe3',
     "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
     # Twenty changed Windows/network contracts carry new versions in 71 coverage cells each.
     # Restoring only those versions reproduces the complete preceding snapshot; all 35 candidates
     # and the other 22 stack sections are byte-identical.
-    "rule_cells": '2b0d63cb7669c0f4714d410d46b1e599f031166619178c4d7ade896c78e086a5',
+    "rule_cells": '46f579137656b9c9277441dc764c57dc33cc98ada499b9e9c1809f91d8d198fa',
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
     "tasks": "c65df4ab88c05661371cf32b49a1d22ef84d6753488bdb946c8e29376d486260",
 }
@@ -367,16 +368,16 @@ GOLDEN_NON_BASELINE_SEMANTICS = {
         "ts": "d8015c1ff0b135e082a5fef2ab1cb88206470e30beee157a0cfc7790d48b8310",
     },
     "rule_cells": {
-        "all_fields": "e47e6dc51cada7632c5bd8e62dfa66adf1c004172a40a869d7dcb476adfa61c2",
-        "count": 14906,
-        "rule_id": "09e51b215b66f0fd90626baa0091d42f0d4cd908089b3f56ffcea24b78540c8f",
-        "rule_version": "aeb008868e6298e33472b1c34975f136072e5eca7c51ffad4b703f564650549a",
-        "target": "232e61ea9eb4cda53fa8bcf3e96503a9b10a58b598d7cd77f8a4d77ca938b113",
-        "partition": "d504cd68e38f03103c3ab728533aa292295224a059b98d49069a5be89eac0956",
-        "state": "7ae41dec1ba8bf51a3b123c7fdc7d1fb92e3a2ef6a82f942ce38c287832c4fa1",
-        "matched": "d855050f44fbb74f83b0739e774b5e7237882d69bb767d011484a9eb226f837c",
-        "evaluated": "a42eab91df2a856470c79090154c2ac36bac175925fb6fc8a459b880ed36062a",
-        "detail": "aa76c663b65d18d2cc38dfdf8b1e4a351d35bcf9321a646227026917dfc73329"
+        "all_fields": 'ebc55fec9179697358c93c9bfbb08e90ec8a152eecf2559f374fcc49e91a46dc',
+        "count": 15261,
+        "rule_id": 'e254e06a5b70725e437cf3004200b0f61b05100d1538c13349994d1fd4568879',
+        "rule_version": '1aeb0e5e87816e0a17c6367222ccc9730fe50cd9833a03e98d8b240f53a02e8b',
+        "target": 'bb22fe7c7f4a31ae292ea691f4617e62106177f2a4c6f503fe9cbcd94458229b',
+        "partition": '8a08cb4a3f440cbddfa0ef9d93701943223d6c94b114f753f62c31fcae1414ba',
+        "state": '873ced555502f36931da34afd78c1e52bee897e367c838bd43ed555b375fa99d',
+        "matched": '7446d5b88ba25d65ddea52c6ba99a650a243bb6ab552768b498d99028a557e0e',
+        "evaluated": '235aa831dadae5d0dd50e260c1fc6ef7e84b7a824b0c4f72d0b6ddb4a9a7f6e6',
+        "detail": 'e6aacdd939e4391858b7e000f33886e8292d91ae772d7ba9e7fecfab09bf22e1'
 },
 }
 GOLDEN_NORMALIZED = {

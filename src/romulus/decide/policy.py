@@ -26,6 +26,11 @@ class Decision:
     notes: list[str] = field(default_factory=list)
 
 
+def candidate_group_id(rule_id: str, group_key: str, hunt_id: str) -> str:
+    """Resolve a documented group identity without constructing an evidence view."""
+    return hashlib.sha256(f"{hunt_id}|{rule_id}|{group_key}".encode()).hexdigest()[:20]
+
+
 def candidate_id(m: Match, hunt_id: str) -> str:
     """Stable identity within a hunt: hunt + rule + exact evidence (or documented aggregate group key).
     Scoped to the hunt so re-hunting the same data creates that hunt's own candidates. The evidence is the finding's
@@ -34,7 +39,7 @@ def candidate_id(m: Match, hunt_id: str) -> str:
     ident = m.group_key or "|".join(sorted(r.key for e in m.events if e.id not in m.context_ids for r in e.raw))
     if not ident and m.citation_unavailable:
         ident = m.identity_key
-    return hashlib.sha256(f"{hunt_id}|{m.playbook_id}|{ident}".encode()).hexdigest()[:20]
+    return candidate_group_id(m.playbook_id, ident, hunt_id)
 
 
 def decide(m: Match, hunt_id: str) -> Decision:

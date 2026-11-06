@@ -1,4 +1,4 @@
-"""An unrelated successful account cannot strengthen a password spray to HIGH."""
+"""A named success during the qualifying spray retains native account/outcome proof."""
 from dataclasses import replace
 
 import pytest
@@ -12,35 +12,35 @@ from tests.windows_process_support import run
 
 @pytest.mark.parametrize('shape', tuple(zl.WRITERS))
 @pytest.mark.parametrize('reverse', [False, True])
-@pytest.mark.parametrize('account,expected', [('user0','high'),('unrelated','lead'),('','lead')])
-def test_success_requires_a_sprayed_account_and_names_it(shape, reverse, account, expected):
+@pytest.mark.parametrize('account,expected', [('user0','high'),('newuser','high'),('','lead')])
+def test_success_names_any_recorded_account_during_the_qualifying_spray(shape, reverse, account, expected):
     rows=rows_for('NtlmPasswordSpray',10)
     rows.append(replace(zl.NTLM.with_(uid='CmembershipSuccess',username=account,success=True),ts=zl.T0+11))
     [match]=evaluate('NtlmPasswordSpray',rows,shape,reverse=reverse)
     lane,claim,notes=match
     assert lane==expected
     if expected=='high':
-        assert 'user0' in claim.casefold()
+        assert account in claim.casefold()
     else:
         assert 'later recorded authentication success for' not in claim.casefold()
-        assert any('success' in note.casefold() and ('unrelated' in note.casefold() or 'not among' in note.casefold()) for note in notes)
+        assert any('account identity' in note.casefold() for note in notes)
 
 
 @pytest.mark.parametrize('shape', tuple(zl.WRITERS))
-def test_success_for_expired_account_does_not_strengthen_a_later_spray(shape):
+def test_success_for_an_expired_failed_account_strengthens_the_current_spray(shape):
     rows=[replace(zl.NTLM.with_(uid='ColdAttempt',username='olduser',success=False),ts=zl.T0)]
     rows += [replace(row,ts=row.ts+700) for row in rows_for('NtlmPasswordSpray',10)]
     rows.append(replace(zl.NTLM.with_(uid='ColdSuccess',username='olduser',success=True),ts=zl.T0+711))
     [match]=evaluate('NtlmPasswordSpray',rows,shape)
-    assert match[0]=='lead'
+    assert match[0]=='high' and 'olduser' in match[1]
 
 
 @pytest.mark.parametrize('shape', tuple(zl.WRITERS))
-def test_matching_account_in_a_different_domain_is_unrelated(shape):
+def test_success_in_a_different_domain_names_the_observed_successful_account(shape):
     rows=rows_for('NtlmPasswordSpray',10)
     rows.append(replace(zl.NTLM.with_(uid='CdomainSuccess',username='user0',domainname='OTHER',success=True),ts=zl.T0+11))
     [match]=evaluate('NtlmPasswordSpray',rows,shape)
-    assert match[0]=='lead'
+    assert match[0]=='high' and 'other' in match[1].casefold()
 
 
 @pytest.mark.parametrize('shape', tuple(zl.WRITERS))

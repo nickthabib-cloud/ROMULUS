@@ -35,9 +35,9 @@ def evaluate(rule, records):
 
 @pytest.mark.parametrize("shape", SHAPES)
 @pytest.mark.parametrize("name,sid,lane", [
-    ("DC01$", "S-1-5-21-1-2-3-1000", None),
+    ("DC01$", "S-1-5-21-1-2-3-1000", "lead"),
     ("Administrator", "S-1-5-18", None),
-    ("DC01$", "S-1-5-21-1-2-3-500", None),
+    ("DC01$", "S-1-5-21-1-2-3-500", "high"),
     ("Administrator", "S-1-5-21-1-2-3-500", "high"),
     ("renamed-admin", "S-1-5-21-4-5-6-500", "high"),
     ("Administrator", "S-1-5-21-1-2-3-1001", "lead"),
@@ -74,7 +74,8 @@ def test_powershell_jobs_fold_across_parent_pids_and_commands_without_losing_fac
     records = []
     for index in range(50):
         record = sysmon1(image="powershell.exe", command="powershell.exe -s -NoLogo -NoProfile",
-                         parent_image="powershell.exe", ppid=700 + index, offset=index)
+                         parent_image=r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+                         ppid=700 + index, offset=index)
         record.fields["process.parent.command_line"] = fv(f"powershell.exe -File job{index}.ps1", "test:parent")
         records.append(record)
     rule = UnexpectedPsRemoteServer()

@@ -21,10 +21,9 @@ from romulus.hunt.citations import COMPACT_CITATION_NOTE, compact_event, expand_
 _SAMPLE = 3
 _BATCH_WRITES = 256
 _BATCH_BYTES = 1024 * 1024
-_BATCH_KEYS = 256
 _ROW_CHUNK = 128
 _PARTIAL_CITATIONS = (
-    "Citation coverage is partial: the sample retains at most three events and three native references per event; "
+    "Citation coverage is partial: the sample retains at most four events and three native references per event; "
     "counted attempt references are deduplicated independently of this citation sample."
 )
 
@@ -57,6 +56,7 @@ class _WindowRows:
     schema = (
         "CREATE TABLE history(k TEXT,id TEXT,ts REAL,member TEXT,role TEXT,weight INTEGER,payload BLOB,PRIMARY KEY(k,id))",
         "CREATE INDEX history_time ON history(k,ts,id)",
+        "CREATE INDEX history_success ON history(k,member,ts,id) WHERE role='success'",
         "CREATE TABLE success_proofs(k TEXT,id TEXT,proof TEXT,PRIMARY KEY(k,id))",
         "CREATE TABLE raw_refs(k TEXT,ref TEXT,id TEXT,target TEXT,native_id TEXT,digest TEXT,priority INTEGER,PRIMARY KEY(k,ref))",
         "CREATE INDEX raw_refs_event ON raw_refs(k,id,priority,ref)",
@@ -64,7 +64,7 @@ class _WindowRows:
         "CREATE TABLE active(k TEXT,id TEXT,ts REAL,member TEXT,weight INTEGER,PRIMARY KEY(k,id))",
         "CREATE INDEX active_time ON active(k,ts,id)",
         "CREATE TABLE members(k TEXT,member TEXT,n INTEGER,PRIMARY KEY(k,member))",
-        "CREATE TABLE marks(k TEXT PRIMARY KEY,lane INTEGER,summary TEXT)",
+        "CREATE TABLE marks(k TEXT PRIMARY KEY,lane INTEGER,summary TEXT,published TEXT,loaded INTEGER NOT NULL DEFAULT 0)",
         "CREATE TABLE episodes(k TEXT PRIMARY KEY,body TEXT)",
     )
 
@@ -376,7 +376,7 @@ class ZeekWindowRule(Playbook, ABC):
     # Success selection/account proof is deliberately separate from potentially
     # large attempt citation facts. Subclasses declare facts needed by describe.
     success_fields: ClassVar[tuple[str, ...]] = ()
-    success_requires_member: ClassVar[bool] = False
+    success_history_noise: ClassVar[bool] = False
 
     def __init__(self):
         super().__init__()
@@ -413,7 +413,6 @@ class ZeekWindowRule(Playbook, ABC):
             self.rows.flush()
 
     def _consume(self, events):
-        touched = set()
         for event in sorted(events, key=lambda item: (item.ts, item.id)):
             if event.family not in self.families or not event.normalizer.startswith("zeek-ecs@"):
                 continue
@@ -440,18 +439,7 @@ class ZeekWindowRule(Playbook, ABC):
             if stored is None:
                 continue
             canonical, weight = stored
-            touched.add(key)
             yield from self._accepted_forward(key, canonical, member, role, weight)
-            if len(touched) >= _BATCH_KEYS:
-                for touched_key in sorted(touched):
-                    match = self._emit_episode(touched_key, force=True)
-                    if match is not None:
-                        yield match
-                touched.clear()
-        for key in sorted(touched):
-            match = self._emit_episode(key, force=True)
-            if match is not None:
-                yield match
 
     def _accepted_forward(self, key, event, member, role, weight):
         try:
@@ -490,27 +478,47 @@ class ZeekWindowRule(Playbook, ABC):
                     self.note_limit('zeek_window_episodes', f'Episode summary retention is partial: {error}')
         if (distinct if self.distinct else total) < self.threshold:
             return
-        if role == "success":
+        shared_prior = None
+        if role == "success" and self.success_history_noise:
+            row = self.rows.store().db.execute('SELECT body FROM episodes WHERE k=?', (key,)).fetchone()
+            context = json.loads(row[0]) if row else {}
+            start = context.get('current_start')
+            if start is None:
+                # A missing optional episode body cannot fabricate temporal order.
+                # The most recent retained attempt gives a conservative bound.
+                latest = self.rows.store().db.execute('SELECT MAX(ts) FROM active WHERE k=?', (key,)).fetchone()[0]
+                start = latest
+                self.note_limit('zeek_window_success_context', 'The episode start was unavailable; success timing uses the latest retained attempt as a conservative bound.')
+            if start is None or event.ts.timestamp() <= start:
+                return
+            if not member:
+                role = 'unnamed_success'
+            else:
+                shared_prior = self._prior_success(key, member, start)
+                if shared_prior is not None:
+                    role = 'shared_success'
+        elif role == "success":
             latest = self.rows.store().db.execute("SELECT ts FROM active WHERE k=? ORDER BY ts DESC,id DESC LIMIT 1",
                                                   (key,)).fetchone()
             # Equal timestamps do not establish that success followed attempts.
             if latest is None or latest[0] >= event.ts.timestamp():
                 return
-            if self.success_requires_member and (not member or not self.rows.store().db.execute(
-                    'SELECT 1 FROM members WHERE k=? AND member=?', (key, member)).fetchone()):
-                role = 'unrelated_success'
         decision = self.describe(event, total, distinct, role)
         if decision is not None:
+            body, old = self._record_episode(key, event, total, distinct, role, member, decision,
+                                            new_episode=below, success_prior=shared_prior)
             try:
                 if summary_error is not None:
                     raise summary_error
-                self._record_episode(key, event, total, distinct, role, member, decision)
-                match = self._emit_episode(key)
+                self._save_episode(key, body, old)
             except StateExhausted as error:
                 self.note_limit('zeek_window_episodes', f'Episode summary retention is partial: {error}')
-                match = self._single_publish(key, event, *decision)
-                if match is not None:
-                    match.notes.append('Episode summary storage is partial; this positive uses the accepted current window counts without claiming a complete episode or peak summary.')
+                if getattr(self, '_replaying', False):
+                    return
+                match = self._emit_episode(key, body=body,
+                    partial='Episode summary storage is partial; this positive uses accepted current window counts without claiming complete retained episode history.')
+            else:
+                match = None if getattr(self, '_replaying', False) else self._emit_episode(key, body=body)
             if match is not None:
                 yield match
 
@@ -521,7 +529,13 @@ class ZeekWindowRule(Playbook, ABC):
             return None, len(packed) - len(previous or '') + (0 if previous else len(key)+96)
         self.rows.write('derived', save)
 
-    def _record_episode(self, key, event, total, distinct, role, member, decision):
+    def _prior_success(self, key, member, start):
+        row = self.rows.store().db.execute(
+            "SELECT id,ts,payload FROM history WHERE k=? AND member=? AND role='success' AND ts<? "
+            'ORDER BY ts DESC,id DESC LIMIT 1', (key, member, start)).fetchone()
+        return self.rows.event(key, row[0], row[1], 'success', row[2]) if row else None
+
+    def _record_episode(self, key, event, total, distinct, role, member, decision, *, new_episode=False, success_prior=None):
         lane, _claim, notes = decision
         if lane not in LANES:
             raise ValueError('Zeek describe returned an unsupported lane')
@@ -530,9 +544,12 @@ class ZeekWindowRule(Playbook, ABC):
         body = json.loads(old) if old else {'active':False, 'episodes':0, 'peak':0,
             'lane':len(LANES), 'success':None, 'success_member':None}
         stamp = event.ts.timestamp()
+        if new_episode:
+            body['active'] = False
         if not body['active']:
             body['episodes'] += 1
             body['active'] = True
+            body['current_start'] = stamp
         if 'first' not in body:
             body['first'] = stamp
             body['first_event'] = compact_event(event).hex()
@@ -542,54 +559,168 @@ class ZeekWindowRule(Playbook, ABC):
             body.update(peak=metric, total=total, distinct=distinct, peak_ts=stamp,
                         peak_event=compact_event(event).hex(), notes=list(notes))
         rank = LANES.index(lane)
-        if role == 'unrelated_success' and not body.get('other_success'):
-            body['other_success'] = compact_event(event).hex()
-            body['other_success_member'] = member
+        if role in {'shared_success','unnamed_success'} and not body.get(role):
+            body[role] = compact_event(event).hex()
+            if success_prior is not None:
+                body['shared_prior'] = compact_event(success_prior).hex()
         if role == 'success' and rank < body['lane']:
             body['success'] = compact_event(event).hex()
             body['success_member'] = member
+            body['success_start'] = body['current_start']
         body['lane'] = min(body['lane'], rank)
-        self._save_episode(key, body, old)
+        return body, old
 
-    def _emit_episode(self, key, *, force=False):
+    def _emit_episode(self, key, *, force=False, body=None, partial=''):
         db = self.rows.store().db
-        row = db.execute('SELECT body FROM episodes WHERE k=?', (key,)).fetchone()
-        if row is None:
-            return None
-        body = json.loads(row[0])
-        previous, digest = db.execute('SELECT lane,summary FROM marks WHERE k=?', (key,)).fetchone()
+        if body is None:
+            row = db.execute('SELECT body FROM episodes WHERE k=?', (key,)).fetchone()
+            if row is None:
+                return None
+            body = json.loads(row[0])
+        identity = self.id + '|zeek-window|' + hashlib.sha256(key.encode()).hexdigest()
+        previous, digest, packed, loaded = db.execute('SELECT lane,summary,published,loaded FROM marks WHERE k=?', (key,)).fetchone()
+        checkpoint = json.loads(packed) if packed else {}
+        provider = getattr(self, 'published_aggregate', None)
+        if provider is not None and not loaded:
+            original_digest = digest
+            remote = provider(identity)
+            if remote:
+                digest = digest or 'restored published checkpoint'
+                checkpoint = {'metrics': remote['summary']}
+                previous = LANES.index(remote['lane'])
+                context = {'total': remote['summary'].get('total_refs'),
+                           'distinct': remote['summary'].get('distinct_members'),
+                           'peak_ts': remote['summary']['peak_end']}
+                for witness in remote['events']:
+                    selected = self.select(witness)
+                    sample = compact_event(self.compact(witness).model_copy(update={'raw':witness.raw[:_SAMPLE]})).hex()
+                    if (witness.ts.timestamp() == remote['summary']['first']
+                            and ('first_event' not in context or selected is not None and selected[2] == 'attempt')):
+                        context['first_event'] = sample
+                    if (witness.ts.timestamp() == remote['summary']['peak_end']
+                            and ('peak_event' not in context or selected is not None and selected[2] == 'attempt')):
+                        context['peak_event'] = sample
+                    start = remote['summary'].get('success_episode_start', remote['summary']['first'])
+                    if (selected is not None and selected[2] == 'success' and witness.ts.timestamp() > start
+                            and 'success' not in context):
+                        context.update(success=sample, success_member=selected[1], success_start=start)
+                checkpoint['body'] = context
+            serialized = json.dumps(checkpoint, sort_keys=True, separators=(',', ':')) if checkpoint else None
+            def hydrate(db):
+                db.execute('UPDATE marks SET lane=?,summary=?,published=?,loaded=1 WHERE k=?', (previous,digest,serialized,key))
+                return None, len(serialized or '')-len(packed or '')+len(digest or '')-len(original_digest or '')
+            try:
+                self.rows.write('marks', hydrate, growing=False)
+                packed = serialized
+            except StateExhausted as error:
+                self.note_limit('zeek_published_checkpoint', f'The restored published checkpoint could not be cached: {error}')
+        published = checkpoint.get('metrics')
+        context = checkpoint.get('body', {})
+        covered = not published or body['first'] <= published['first'] and body['last'] >= published['last']
+        if published:
+            important = (body['lane'] < previous or body['peak'] > published['peak']
+                         or body['episodes'] > published['episodes']
+                         or body['current_start'] > published['last'])
+            if not important and (not force or not covered):
+                return None
+            body = dict(body)
+            if body['peak'] < published['peak']:
+                if not context.get('peak_event') or context.get('total') is None or context.get('distinct') is None:
+                    self.note_limit('zeek_published_peak', 'The retained peak remains published; its bounded native checkpoint was unavailable for reconciliation.')
+                    return None
+                body.update(peak=published['peak'], peak_event=context['peak_event'],
+                            peak_ts=context['peak_ts'], total=context['total'], distinct=context['distinct'])
+            if body['first'] > published['first']:
+                if not context.get('first_event'):
+                    self.note_limit('zeek_published_first', 'The retained first window remains published; its bounded native checkpoint was unavailable.')
+                    return None
+                body.update(first=published['first'], first_event=context['first_event'])
+            body['last'] = max(body['last'], published['last'])
         # A summary refused during promotion still contains the weaker episode.
         # Preserve the fallback's stronger native witness until replay rebuilds it.
         if previous < body['lane']:
+            if context.get('success'):
+                body = {**body, 'lane': previous, 'success': context['success'],
+                        'success_member': context.get('success_member'),
+                        'success_start': context.get('success_start', published['first']), 'retained_success': True}
+            else:
+                self.note_limit('zeek_published_witness', 'A stronger published lane remains retained; its outcome witness was unavailable for this summary revision.')
+                return None
+        summary = {name: body[name] for name in ('episodes','peak','first','last')}
+        summary.update(peak_start=body['peak_ts']-self.seconds, peak_end=body['peak_ts'])
+        summary['current_episode_start'] = body['current_start']
+        summary.update(total_refs=body['total'], distinct_members=body['distinct'])
+        if body.get('success'):
+            summary['success_episode_start'] = body.get('success_start', summary['first'])
+        continuity = summary['episodes']
+        if published and continuity < published['episodes']:
+            summary['episodes'] = published['episodes']
+            if force and covered:
+                summary['continuity_episodes'] = continuity
+            elif 'continuity_episodes' in published:
+                summary['continuity_episodes'] = published['continuity_episodes']
+        if published and (any(summary[name] < published[name] for name in ('peak','last'))
+                          or summary['first'] > published['first']):
             return None
-        # Replay may temporarily reconstruct only a prefix of an already published key.
-        if not force and previous <= body['lane']:
-            return None
+        reasons = []
+        if published:
+            if body['lane'] < previous:
+                reasons.append(f'Lane strengthened from {LANES[previous]} to {LANES[body["lane"]]}')
+            if summary['peak'] > published['peak']:
+                reasons.append(f'Peak increased from {published["peak"]} to {summary["peak"]}')
+            if summary['episodes'] > published['episodes']:
+                reasons.append(f'Episode count increased from {published["episodes"]} to {summary["episodes"]}')
+            elif summary['current_episode_start'] > published.get('current_episode_start', published['last']):
+                reasons.append('A new qualifying episode started')
+            if not reasons and not force:
+                return None
+            if force and summary['last'] > published['last']:
+                reasons.append('Last qualifying window extended at finalize')
+            if force and summary['first'] < published['first']:
+                reasons.append('Earlier retained history extends the first qualifying window')
         peak = expand_event(bytes.fromhex(body['peak_event']))
         decision = self.describe(peak, body['total'], body['distinct'], 'attempt')
         if decision is None:
             return None
         _lane, claim, notes = decision
         metric = 'distinct members' if self.distinct else 'attempt references'
-        claim += (f" Across {body['episodes']} qualifying episode{'s' if body['episodes'] != 1 else ''}; "
+        qualifier = ' previously observed (historical bound)' if continuity < summary['episodes'] else ''
+        claim += (f" Across {summary['episodes']} qualifying episode{'s' if summary['episodes'] != 1 else ''}{qualifier}; "
                   f"peak {body['peak']} {metric} in one window.")
+        if 'continuity_episodes' in summary:
+            notes = (*notes, f'The last completed retained-history continuity reconstruction has {summary["continuity_episodes"]} continuous episode(s), connecting previously observed windows. The historical published bound of {summary["episodes"]} episode observations is preserved.')
+        elif continuity < summary['episodes']:
+            notes = (*notes, 'The historical episode bound is retained while earlier continuity is being reconstructed; this forward prefix does not establish that prior episodes were connected.')
         samples = [expand_event(bytes.fromhex(body['first_event'])), peak]
         if body.get('success'):
             success = expand_event(bytes.fromhex(body['success']))
             samples.append(success)
             claim += f" A qualifying episode also had a later recorded authentication success for {body['success_member']}."
-        elif body.get('other_success'):
-            samples.append(expand_event(bytes.fromhex(body['other_success'])))
-        if body.get('other_success'):
-            notes = (*notes, 'A recorded success was not among the active sprayed accounts; it is unrelated to the spray membership and does not strengthen its lane.')
+            notes = tuple(dict.fromkeys([*notes, *self.describe(success, body['total'], body['distinct'], 'success')[2]]))
+            if body.get('retained_success') and self.success_history_noise:
+                prior = self._prior_success(key, body['success_member'], body.get('success_start', body['first']))
+                if prior is not None:
+                    samples.append(prior)
+                    notes = (*notes, 'Newly retained pre-episode success history for the same account indicates a shared source; the previously published HIGH and its native success witness remain retained.')
+        elif body.get('shared_success'):
+            shared = expand_event(bytes.fromhex(body['shared_success']))
+            samples.append(shared)
+            if body.get('shared_prior'):
+                samples.append(expand_event(bytes.fromhex(body['shared_prior'])))
+            notes = tuple(dict.fromkeys([*notes, *self.describe(shared, body['total'], body['distinct'], 'shared_success')[2]]))
+        elif body.get('unnamed_success'):
+            unnamed = expand_event(bytes.fromhex(body['unnamed_success']))
+            samples.append(unnamed)
+            notes = (*notes, 'A recorded success lacks an account identity; no named successful account was established.')
         iso = lambda stamp: datetime.fromtimestamp(stamp, UTC).isoformat()
         summaries = [f"First qualifying window: {iso(body['first']-self.seconds)} through {iso(body['first'])}.",
                      f"Last qualifying window: {iso(body['last']-self.seconds)} through {iso(body['last'])}.",
                      f"Peak qualifying window: {iso(body['peak_ts']-self.seconds)} through {iso(body['peak_ts'])}."]
         lane = LANES[min(previous, body['lane'])]
-        identity = self.id + '|zeek-window|' + hashlib.sha256(key.encode()).hexdigest()
         sampled = list({event.id:event for event in samples}.values())
-        fingerprint = json.dumps([lane, claim, summaries, [event.id for event in sampled]], sort_keys=True)
+        if partial:
+            notes = (*notes, partial)
+        fingerprint = json.dumps([lane, claim, summaries, list(notes), [event.id for event in sampled]], sort_keys=True)
         if digest == fingerprint:
             return None
         result = Match(self.id, claim, self.claim_type, sampled,
@@ -597,10 +728,15 @@ class ZeekWindowRule(Playbook, ABC):
             peak.ts, 'high' if lane in {'urgent','high'} else self.severity, lane, 'medium', peak.entities(),
             [*notes, *summaries, _PARTIAL_CITATIONS, 'ATT&CK context (not proof): '+', '.join(self.attack)],
             group_key=identity, bounded_revision=True,
-            revision_reason='Later qualifying episodes or a larger peak revise this source observation.' if digest else '')
+            revision_reason='; '.join(reasons or ['Retained episode context completed at finalize']) if digest else '',
+            aggregate_summary=summary)
         def mark(db):
-            db.execute('UPDATE marks SET lane=?,summary=? WHERE k=?', (LANES.index(lane),fingerprint,key))
-            return None, len(fingerprint)-len(digest or '')
+            fields = ('first_event','peak_event','total','distinct','peak_ts',
+                      'success','success_member','success_start')
+            checkpoint = {'metrics': summary, 'body': {name:body[name] for name in fields if name in body}}
+            serialized = json.dumps(checkpoint, sort_keys=True, separators=(',', ':'))
+            db.execute('UPDATE marks SET lane=?,summary=?,published=? WHERE k=?', (LANES.index(lane),fingerprint,serialized,key))
+            return None, len(fingerprint)-len(digest or '')+len(serialized)-len(packed or '')
         try:
             self.rows.write('marks',mark,growing=False)
         except StateExhausted as error:
@@ -663,6 +799,13 @@ class ZeekWindowRule(Playbook, ABC):
             self.rows.flush()
 
     def _finalize(self):
+        self._replaying = True
+        try:
+            yield from self._replay()
+        finally:
+            self._replaying = False
+
+    def _replay(self):
         if not self.rows.ready:
             return
         try:
@@ -673,16 +816,20 @@ class ZeekWindowRule(Playbook, ABC):
         # The ordered index streams all history; neither replay nor expiry drops
         # accepted facts or builds a hunt-wide list of keys, members or matches.
         cursor = self.rows.store().db.execute("SELECT k,id,ts,member,role,weight,payload FROM history ORDER BY k,ts,id")
-        previous = None
+        previous, refused = None, False
         for key, identity, stamp, member, role, weight, payload in cursor:
             if previous is not None and key != previous:
-                match = self._emit_episode(previous, force=True)
-                if match is not None:
-                    yield match
+                if not refused:
+                    match = self._emit_episode(previous, force=True)
+                    if match is not None:
+                        yield match
+                refused = False
             event = self.rows.event(key, identity, stamp, role, payload)
+            before = sum(limit.hits for limit in self.limits.values())
             yield from self._accepted_forward(key, event, member, role, weight)
+            refused |= sum(limit.hits for limit in self.limits.values()) != before
             previous = key
-        if previous is not None:
+        if previous is not None and not refused:
             match = self._emit_episode(previous, force=True)
             if match is not None:
                 yield match
