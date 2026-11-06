@@ -144,18 +144,20 @@ def _profile_tail(local, installed, aliases=()):
 
 def _lsass_store(path):
     """Recognize store path shapes, never a host's DC role or service authorization."""
-    if has_short_name(path):
-        return False
     normalized = _normalized_path(path)
     aliases = components(normalized)
-    local = local_path_components(normalized) if re.match(r"[a-z]:\\", normalized) else ()
+    volume = local_path_components(normalized)
+    local = volume if re.match(r"[a-z]:\\", normalized) else ()
     installed = installation_parts(normalized)
     name = basename(normalized)
-    # A data-volume NTDS root is conventional too. Arbitrary custom directory
-    # names need site facts; a directory merely containing "NTDS" is not enough.
-    if ((len(local) == 2 and local[0] == "ntds"
-         or len(installed) == 3 and installed[:2] == ("windows", "ntds"))
-            and _ESE_FILE.fullmatch(name)):
+    # AD database and log locations may be moved independently. With a canonical
+    # LSASS writer, an exact ESE filename on a recorded local volume is enough
+    # for a store-shaped lead, without asserting the host's role or authorization.
+    if volume and _ESE_FILE.fullmatch(name):
+        return True
+    if has_short_name(path):
+        return False
+    if len(installed) == 3 and installed[:2] == ("windows", "ntds") and _ESE_FILE.fullmatch(name):
         return True
     if installed[:2] == ("windows", "debug") and len(installed) == 3 and name.startswith("netlogon."):
         return True
@@ -265,7 +267,7 @@ class NonExecutableProcessImage(BehaviorFleetRule):
 
 class LsassFileWrite(BehaviorFleetRule):
     id = "win.lsass_file_write"
-    version = "2"
+    version = "3"
     title = "LSASS process recorded creating or overwriting a file"
     families = ("file_change",)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 11),)

@@ -192,7 +192,7 @@ def test_late_success_and_late_added_refs_are_replayed_without_changing_forward_
         assert not list(rule.consume([event("a", 0), event("b", 1), event("s", 3, role="success")]))
         assert not list(rule.consume([event("a", 0, refs=["a", "extra"])]))
         replay = list(rule.finalize())
-        assert [match.proposed_lane for match in replay] == ["lead", "high"]
+        assert [match.proposed_lane for match in replay] == ["high"]
         match = replay[-1]
         assert match.proposed_lane == "high" and "3 attempt references" in match.claim
     finally:

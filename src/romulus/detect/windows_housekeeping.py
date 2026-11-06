@@ -6,6 +6,7 @@ import json
 import re
 from urllib.parse import urlsplit
 
+from romulus.detect.site_roles import host_member
 from romulus.detect.windows_behavior import BehaviorFleetRule
 from romulus.detect.windows_cmdline import DASHES, SWITCH_STARTS, split_argv
 from romulus.detect.windows_common import Undecided
@@ -146,6 +147,14 @@ def _usual_bits_client(image):
             and parts[3] == "pwsh.exe")
 
 
+def _installed_powershell_parent(image):
+    if basename(image) in {"powershell.exe", "pwsh.exe"} and _usual_bits_client(image):
+        return True
+    parts = installation_parts(image)
+    return (len(parts) == 5 and parts[:2] in {("windows", "system32"), ("windows", "syswow64")}
+            and parts[2:] == ("windowspowershell", "v1.0", "powershell_ise.exe"))
+
+
 class _Housekeeping(WindowsEventRule):
     benign = ("Authorized administration and ordinary operating-system activity can produce these records.",)
     next_checks = ("Review the cited fields, authorization and independent evidence of the resulting state.",)
@@ -213,7 +222,7 @@ class HiddenSamAccount(_Housekeeping):
 
 class KerberosLoopbackLogon(_Housekeeping):
     id = "win.kerberos_loopback_logon"
-    version = "2"
+    version = "3"
     title = "A Kerberos network logon names a loopback source"
     families = ("auth",)
     windows_event_classes = (("Security", SECURITY, 4624),)
@@ -228,7 +237,10 @@ class KerberosLoopbackLogon(_Housekeeping):
             return []
         account = str(event.get("auth.target_account") or "").casefold()
         name = str(event.get("account.name") or "").casefold()
-        if account == "sid:s-1-5-18" or name.endswith("$") or account.startswith("name:") and account.endswith("$"):
+        if not name and account.startswith("name:"):
+            name = account[5:].rsplit("\\", 1)[-1]
+        own_machine = name.endswith("$") and host_member(name[:-1], (event.get("host.full_name") or event.host,))
+        if account == "sid:s-1-5-18" or own_machine:
             return []
         try:
             address = ipaddress.ip_address(str(event.get("source.ip")))
@@ -244,7 +256,7 @@ class KerberosLoopbackLogon(_Housekeeping):
 
 class UnexpectedPsRemoteServer(_FoldedHousekeeping):
     id = "win.unexpected_ps_remote_server"
-    version = "2"
+    version = "3"
     title = "PowerShell server mode was launched by an unexpected parent"
     families = ("process_exec",)
     windows_event_classes = _PROCESS
@@ -265,7 +277,7 @@ class UnexpectedPsRemoteServer(_FoldedHousekeeping):
             raise Undecided("parent", "PowerShell -s server mode was requested; its parent is unresolved")
         if basename(parent) in {"wsmprovhost.exe", "sshd.exe"}:
             return []
-        job_parent = basename(parent) in {"powershell.exe", "pwsh.exe", "powershell_ise.exe"}
+        job_parent = _installed_powershell_parent(parent)
         text = f"PowerShell server mode was requested by recorded parent '{self.describe(parent)}'"
         if job_parent:
             text += "; ordinary PowerShell Start-Job can launch this out-of-process job host"

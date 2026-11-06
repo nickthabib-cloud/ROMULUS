@@ -1778,6 +1778,15 @@ class Repo:
             previous_gates = dict(existing["gate_results"] or {})
             history = dict(previous_gates.get("_revision") or {})
             incoming_gates = dict(row["gate_results"] or {})
+            # Episode summaries opt in to monotonic publication. This check is
+            # inside the candidate transaction: a fresh evaluator's replay
+            # prefix must not lower a finding stored by an earlier evaluator.
+            if published := previous_gates.get("aggregate_summary"):
+                incoming = incoming_gates.get("aggregate_summary")
+                if (not incoming or LANE_STRENGTH[row["lane"]] < LANE_STRENGTH[existing["lane"]]
+                        or any(incoming[name] < published[name] for name in ("peak", "episodes", "last"))
+                        or incoming["first"] > published["first"]):
+                    return ""
             if evidence_view:
                 def preference(candidate):
                     predicates = candidate.get("predicate_fields") or []

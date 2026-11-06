@@ -160,7 +160,7 @@ def test_late_accesses_do_not_repeat_completed_parent_sequence_work():
     try:
         matches = list(instance.consume(accesses))
         assert len(matches) == 300
-        assert {m.events[0].id for m in matches} == {e.id for e in children}
+        assert {e.id for m in matches for e in m.events if e.family == 'process_exec'} == {e.id for e in children}
     finally:
         instance.rows.store().db.set_progress_handler(None, 0)
         instance.release_state()

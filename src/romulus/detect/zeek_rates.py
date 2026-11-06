@@ -27,7 +27,7 @@ def _name(value):
 
 
 class _Rate(ZeekWindowRule):
-    version = '2'
+    version = '3'
     citation_fields = _FIELDS
     required_fields = ('source.ip',)
     benign = ('Authorized administration, scanners and ordinary authentication can produce rate leads.',)
@@ -136,7 +136,7 @@ class NtlmPasswordSpray(_Rate):
     seconds, threshold, distinct = 600, 10, True
     attack, research = ('T1110.003',), (_NTLM,)
     success_fields = ('source.ip', 'ntlm.username', 'ntlm.domain', 'ntlm.success')
-    success_requires_member = True
+    success_history_noise = True
 
     def select(self, event):
         source, account = _source(event), _account(event)
@@ -148,11 +148,17 @@ class NtlmPasswordSpray(_Rate):
 
     def describe(self, event, total_refs, distinct_members, role):
         later = role == 'success'
+        notes = _ATTEMPT_NOTES
+        if later:
+            notes += ('A later success is temporally associated; the records do not prove which credential or intent caused it.',)
+        elif role == 'shared_success':
+            notes += ((f'This source already logged a success for {_account(event)} before the qualifying episode; '
+                       'shared-source or NAT authentication history keeps this observation a lead.'),)
         return ('high' if later else 'lead',
                 f'Source {event.get("source.ip")} has NTLM attempts for at least {distinct_members} distinct users '
                 f'in ten minutes ({total_refs} raw references)'
                 + (f' followed by a later recorded authentication success for {_account(event)}.' if later else '.'),
-                (*_ATTEMPT_NOTES, 'A later success is temporally associated; the records do not prove which credential or intent caused it.'))
+                notes)
 
 
 class NtlmPasswordGuessing(NtlmPasswordSpray):

@@ -58,6 +58,9 @@ class Match:
     fleet_hosts_complete: bool = False
     # Native subject identity retained in detection state when the event citation is unavailable.
     identity_key: str = ""
+    # Opt-in bounded episode metadata, persisted with the candidate so replay
+    # and fresh evaluator instances cannot replace stronger published evidence.
+    aggregate_summary: dict[str, int | float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         # A positive stays valid on a command line some of whose arguments were lost; the claim says so.
