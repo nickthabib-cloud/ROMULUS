@@ -42,9 +42,7 @@ def test_registered_pack_publishes_the_complete_lateral_slice_with_resolvable_so
     try:
         hunt.run_partition('net', contract, [], window, est=len(hits), any_of=[])
         hunt.finalize()
-        # the rate rules are not registered (they return once their summaries are monotonic): only the rest publish
-        expected = {cls.id for cls in (*LATERAL, *SMB)}
-        assert not {cls.id for cls in RATES} & {candidate['rule_id'] for candidate in repo.candidates('h1')}
+        expected = {cls.id for cls in (*LATERAL, *RATES, *SMB)}
         found = {candidate['rule_id'] for candidate in repo.candidates('h1')}
         assert expected <= found, expected-found
         assert hunt.stats['errors'] == 0
