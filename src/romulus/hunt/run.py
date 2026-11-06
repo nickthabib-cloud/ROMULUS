@@ -89,6 +89,8 @@ def create_hunt(s: Settings, start: datetime, end: datetime, created_by: str, st
         "enabled": expand, "max_depth": 3, "per_anchor_source_queries": PER_ANCHOR_SOURCE_QUERIES,
         "max_source_queries": s.expansion_max_source_queries, "wall_clock_minutes": s.expansion_wall_clock_minutes,
     }
+    from romulus.content.indicator_lists import IndicatorLists
+    manifest['indicator_lists'] = IndicatorLists(repo).pin()
     hid = new_hunt_id()
     repo.create_hunt(hid, manifest, digest(manifest), created_by)
     for p in profiles.values():

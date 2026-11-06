@@ -295,6 +295,10 @@ class Sweep:
         # stage volume), and the memory their hot sets share. Read the stage volume's free space before the sweep.
         self.budget = state_budget(settings, stage_dir)
         self.pack: list[Playbook] = bind_windows_site(fresh_pack(), self.site_facts)
+        indicator_pins = (repo.get_hunt(hunt_id)['manifest']).get('indicator_lists')
+        for pb in self.pack:
+            if hasattr(pb, 'bind_indicators'):
+                pb.bind_indicators(repo, indicator_pins)
         bind_lineage_citation_loader(self.pack, LineageCitationFetcher(client, contracts).load)
         for pb in self.pack:
             bind_aggregate_history(repo, hunt_id, pb)
@@ -2072,6 +2076,8 @@ class Sweep:
                 else:
                     state = "evaluated_partial" if incomplete else "no_match_complete"
                 reasons = list(base_reasons)
+                if hasattr(pb, 'partition_coverage_notes'):
+                    reasons.extend(pb.partition_coverage_notes())
                 reasons.extend(windows_reasons)
                 if consume_failure:
                     reasons.append(consume_failure)

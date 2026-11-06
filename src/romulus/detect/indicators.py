@@ -29,6 +29,8 @@ from pathlib import Path
 
 import yaml
 
+from romulus.content.indicator_values import KINDS as SUPPORTED_KINDS
+from romulus.content.indicator_values import normalize_value
 from romulus.detect.base import LANES, SEVERITIES, Match, Playbook, basename, pf
 from romulus.detect.bounded import HOT_COUNT, HeldExamples, KeyedStore
 from romulus.detect.citing import (
@@ -51,7 +53,9 @@ from romulus.detect.host import (
 from romulus.evidence.shellparse import SHELLS, UnknownShellScript, shell_script_file_of
 from romulus.evidence.typed import TypedEvent, event_os_family
 
-KINDS = {"program_name", "ip", "cidr", "domain", "ja3", "ja4", "hassh"}
+KINDS = set(SUPPORTED_KINDS)
+HASH_KINDS = ('md5', 'sha1', 'sha256')
+CONTENT_KINDS = {*HASH_KINDS, 'url', 'x509_sha1', 'x509_sha256'}
 EXAMPLE_LIMIT = 20
 ADDRESS_FIELDS = (("source.ip", "source"), ("destination.ip", "destination"))
 DOMAIN_FIELDS = ("dns.question.name", "dns.question.names", "http.hostname", "url.domain")
@@ -84,6 +88,10 @@ class Indicator:
     lane: str
     attack: tuple[str, ...] = ()
     source: str = ""
+    list_name: str = ""
+    author: str = ""
+    list_version: int = 0
+    age_days: int = 0
 
 
 @dataclass
@@ -136,6 +144,11 @@ def load_indicators(directory: Path | None = None) -> IndicatorSet:
 
 
 def _check_value(kind: str, value: str, where: str) -> None:
+    if kind in CONTENT_KINDS:
+        try:
+            normalize_value(kind, value)
+        except ValueError as exc:
+            raise IndicatorFileError(f'{where}: {exc}') from exc
     try:
         if kind == "ip":
             ipaddress.ip_address(value)
@@ -207,8 +220,12 @@ class IndicatorMatch(Playbook):
                 elif ind.kind == "domain":
                     self.domains[v.lower().rstrip(".")] = ind
                 else:
-                    self.prints[(ind.kind, v.lower())] = ind
+                    self.prints[(ind.kind, normalize_value(ind.kind, v) if ind.kind in CONTENT_KINDS else v.lower())] = ind
         self.by_id = {ind.id: ind for ind in self.set.indicators}
+        self._overlay = None
+        self._kind_seen = set()
+        self._batch_kind_seen = set()
+        self._configure_content()
         # (indicator id, role, host, value) -> [count, matched field, cited records]
         self.groups = KeyedStore(self, "ioc_groups", self.HOT, disk_budget=self.GROUPS_DISK)
         # (indicator id, role, host, "*") -> [count, matched field, cited records, sample values]: matches of a new
@@ -219,6 +236,135 @@ class IndicatorMatch(Playbook):
         self._alone: list[Match] = []
         self.bounds = BoundStage()          # the records bounding each group's span, held while they bound it
         self.load = lambda ids: []
+
+    def _configure_content(self):
+        self._content_kinds = ({ind.kind for ind in self.set.indicators}
+                               | (self._overlay.kinds if self._overlay else set())) & CONTENT_KINDS
+        extra = ('file_change', 'image_load') if set(HASH_KINDS) & self._content_kinds else ()
+        if 'x509_sha256' in self._content_kinds:
+            extra += ('x509_certificate',)
+        if 'url' in self._content_kinds:
+            extra += ('remote_access',)
+        self.families = tuple(dict.fromkeys((*type(self).families, *extra)))
+
+    def bind_indicators(self, repo, pins):
+        """Use the hunt's immutable eligibility snapshot; values remain in SQLite."""
+        if pins and pins.get('applied'):
+            from romulus.content.indicator_lists import PinnedIndicators
+            self._overlay = PinnedIndicators(repo, pins)
+            self.version = f'{type(self).version}+{self._overlay.digest[:12]}'
+        self._configure_content()
+
+    @staticmethod
+    def _from_row(row):
+        source = row['list']
+        return Indicator(row['id'], row['kind'], (row['value'],), row['label'], row['severity'], row['lane'],
+                         tuple(row['attack']), source['source'], source['name'], source['author'],
+                         source['version'], source['age_days'])
+
+    def _indicator(self, identity):
+        if identity in self.by_id:
+            return self.by_id[identity]
+        row = self._overlay.get(identity) if self._overlay else None
+        if row is None:
+            raise IndicatorFileError('A matched pinned indicator version is unavailable')
+        return self._from_row(row)
+
+    def _matching(self, kind, value, *, local=True):
+        if local:
+            source = self.names if kind == 'program_name' else self.ips if kind == 'ip' else None
+            ind = source.get(value.lower()) if source is not None else self.prints.get(
+                (kind, value if kind in CONTENT_KINDS else value.lower()))
+            if ind is not None:
+                yield ind
+        if self._overlay and kind in self._overlay.kinds:
+            try:
+                value = normalize_value(kind, value)
+            except ValueError:
+                return
+            for row in self._overlay.find(kind, value):
+                yield self._from_row(row)
+
+    def _unsearchable(self, seen):
+        return [f'Indicator kind {kind} cannot be searched in these delivered records: no complete typed '
+                'value was available; no negative result is asserted.'
+                for kind in sorted(self._content_kinds - seen)]
+
+    def coverage_notes(self):
+        return [*super().coverage_notes(), *self._unsearchable(self._kind_seen)]
+
+    def partition_coverage_notes(self):
+        return self._unsearchable(self._batch_kind_seen)
+
+    def _content_values(self, event):
+        """Typed value, actual predicate fields, and the role established by the record."""
+        seen = set()
+        def offer(kind, value, names, role):
+            if kind not in self._content_kinds or not isinstance(value, str):
+                return None
+            try:
+                value = normalize_value(kind, value)
+            except ValueError:
+                return None
+            self._kind_seen.add(kind)
+            self._batch_kind_seen.add(kind)
+            key = (kind, value, role)
+            if key in seen:
+                return None
+            seen.add(key)
+            return kind, value, names, role
+        for kind in HASH_KINDS:
+            role = {'process_exec': 'hash:process', 'image_load': 'hash:image',
+                    'file_change': 'hash:file', 'file_transfer': 'hash:transfer'}.get(event.family, 'hash:record')
+            prefixes = ('image.hash', 'file.hash', 'process.hash') if event.family == 'image_load' else (
+                'process.hash', 'file.hash', 'image.hash')
+            for prefix in prefixes:
+                name = prefix+'.'+kind
+                if item := offer(kind, event.get(name), (name,), role):
+                    yield item
+            hashes = event.get('file.hashes')
+            if isinstance(hashes, dict) and (item := offer(kind, hashes.get(kind), ('file.hashes',), role)):
+                yield item
+        for side in ('server', 'client'):
+            role = 'certificate:'+side
+            name = f'tls.{side}.hash_sha1'
+            if item := offer('x509_sha1', event.get(name), (name,), role):
+                yield item
+            name = f'tls.{side}.certificates'
+            certificates = event.get(name)
+            for certificate in certificates if isinstance(certificates, list) else ():
+                if isinstance(certificate, dict):
+                    for alg in ('sha1', 'sha256'):
+                        if item := offer('x509_'+alg, certificate.get(alg), (name,), role):
+                            yield item
+            name = f'tls.{side}.cert_chain_fps'
+            fingerprints = event.get(name)
+            for value in fingerprints if isinstance(fingerprints, list) else ():
+                if item := offer('x509_sha256', value, (name,), role):
+                    yield item
+        if item := offer('x509_sha256', event.get('x509.fingerprint'), ('x509.fingerprint',), 'certificate:observed'):
+            yield item
+        if 'url' in self._content_kinds:
+            if item := offer('url', event.get('bits.remote_url'), ('bits.remote_url',), 'url:record'):
+                yield item
+            if item := offer('url', event.get('url.full'), ('url.full',), 'url:record'):
+                yield item
+            elif event.family in ('http_tx', 'http_access'):
+                target = event.get('url.original')
+                if item := offer('url', target, ('url.original',), 'url:request'):
+                    yield item
+                elif isinstance(target, str) and target.startswith('/') and isinstance(event.get('http.hostname'), str):
+                    scheme_field = 'url.scheme' if event.has('url.scheme') else 'http.scheme'
+                    scheme = event.get(scheme_field)
+                    if isinstance(scheme, str):
+                        names = (scheme_field, 'http.hostname', 'url.original')
+                        if item := offer('url', scheme+'://'+event.get('http.hostname')+target, names, 'url:reconstructed'):
+                            yield item
+
+    def _content(self, event):
+        for kind, value, fields, role in self._content_values(event):
+            for ind in self._matching(kind, value):
+                self._keep((ind.id, role, event.host, value), event, {'field': fields})
 
     # Groups (indicator, role, host, value): the first 20 records cited (staged, held as ids) and a count. A listed
     # domain's subdomains are each a value, so there may be very many: HOT groups in memory, the rest on the rule's
@@ -290,8 +436,7 @@ class IndicatorMatch(Playbook):
     def _programs(self, e: TypedEvent) -> None:
         exe = e.get("process.executable")
         exe_name = self._program_basename(e, str(exe)) if exe else ""
-        if exe_name.lower() in self.names:
-            ind = self.names[exe_name.lower()]
+        for ind in self._matching('program_name', exe_name):
             self._keep((ind.id, "executed", e.host, exe_name), e, {"ind": ind, "field": "process.executable"})
         argv = e.get("process.argv")
         if not isinstance(argv, list) or not argv:
@@ -299,16 +444,18 @@ class IndicatorMatch(Playbook):
         script = script_operand(argv)
         script_base = self._program_basename(e, script) if script else ""
         script_name = script_base.lower() if script_base else None
-        if script_name in self.names:
-            ind = self.names[script_name]
+        for ind in self._matching('program_name', script_name or ''):
             self._keep((ind.id, "script", e.host, script_base), e, {"ind": ind, "field": "process.argv"})
         for token in argv[1:]:
             token_base = self._program_basename(e, token)
             name = token_base.lower()
-            if name in self.names and name != script_name:
-                ind = self.names[name]
-                self._keep((ind.id, "argument", e.host, token_base), e, {"ind": ind, "field": "process.argv"})
-                break
+            if name != script_name:
+                found = False
+                for ind in self._matching('program_name', name):
+                    self._keep((ind.id, "argument", e.host, token_base), e, {"ind": ind, "field": "process.argv"})
+                    found = True
+                if found:
+                    break
 
     def _addresses(self, e: TypedEvent) -> None:
         for fname, side in ADDRESS_FIELDS:
@@ -322,6 +469,14 @@ class IndicatorMatch(Playbook):
             ind = self.ips.get(str(ip)) or next((i for net, i in self.nets if ip in net), None)
             if ind is not None:
                 self._keep((ind.id, f"address:{side}", e.host, str(ip)), e, {"ind": ind, "field": fname})
+            for ind in self._matching('ip', str(ip), local=False):
+                self._keep((ind.id, f'address:{side}', e.host, str(ip)), e, {'field': fname})
+            if self._overlay and 'cidr' in self._overlay.kinds:
+                # At most 33 IPv4 / 129 IPv6 indexed probes, independent of list size.
+                for prefix in range(ip.max_prefixlen, -1, -1):
+                    network = str(ipaddress.ip_network(f'{ip}/{prefix}', strict=False))
+                    for ind in self._matching('cidr', network, local=False):
+                        self._keep((ind.id, f'address:{side}', e.host, str(ip)), e, {'field': fname})
 
     def _listed_domain(self, value: str) -> tuple[str, Indicator] | None:
         name = value.lower().rstrip(".")
@@ -357,24 +512,29 @@ class IndicatorMatch(Playbook):
         seen = set()            # one record counts once per (indicator, role, name), whichever fields carry it
         for role, fname, value in candidates:
             hit = self._listed_domain(value)
-            if hit is None:
-                continue
-            name, ind = hit
-            key = (ind.id, role, e.host, name)
-            if key not in seen:
-                seen.add(key)
-                self._keep(key, e, {"ind": ind, "field": fname})
+            name = value.lower().rstrip('.')
+            def matches(hit=hit, name=name):
+                if hit is not None:
+                    yield hit[1]
+                labels = name.split('.')
+                for index in range(len(labels)):
+                    yield from self._matching('domain', '.'.join(labels[index:]), local=False)
+            for ind in matches():
+                key = (ind.id, role, e.host, name)
+                if key not in seen:
+                    seen.add(key)
+                    self._keep(key, e, {"ind": ind, "field": fname})
 
     def _fingerprints(self, e: TypedEvent) -> None:
         for kind, fname in FINGERPRINT_FIELDS.items():
             for value in _as_list(e.get(fname)):
-                ind = self.prints.get((kind, value.lower()))
-                if ind is not None:
+                for ind in self._matching(kind, value):
                     self._keep((ind.id, kind, e.host, value), e, {"ind": ind, "field": fname})
 
     def consume(self, events):
-        if not self.set.indicators:
+        if not self.set.indicators and self._overlay is None:
             return []
+        self._batch_kind_seen = set()
         self._batch = events
         for e in events:
             if e.family not in self.families:
@@ -382,12 +542,14 @@ class IndicatorMatch(Playbook):
             self.evaluated += 1
             if e.family == "process_exec":
                 self._programs(e)
-            if self.ips or self.nets:
+            if self.ips or self.nets or self._overlay and {'ip', 'cidr'} & self._overlay.kinds:
                 self._addresses(e)
-            if self.domains:
+            if self.domains or self._overlay and 'domain' in self._overlay.kinds:
                 self._domains(e)
-            if self.prints:
+            if self.prints or self._overlay and set(FINGERPRINT_FIELDS) & self._overlay.kinds:
                 self._fingerprints(e)
+            if self._content_kinds:
+                self._content(e)
         self._batch = None
         out, self._alone = self._alone, []
         return out
@@ -405,6 +567,8 @@ class IndicatorMatch(Playbook):
 
     # ---- publishing -------------------------------------------------------------------------------
     def finalize(self):
+        if self._overlay is not None:
+            return self._stream_finalized()
         out = []
         stores = ((self.groups, self.groups.keys()), (self.overflow, self.overflow.keys()))
         groups = [(key, store) for store, keys in stores for key in keys]
@@ -415,6 +579,15 @@ class IndicatorMatch(Playbook):
                                          state[3] if len(state) > 5 else None,
                                          operating_systems=state[-2], ends=state[-1]))
         return out
+
+    def _stream_finalized(self):
+        for store in (self.groups, self.overflow):
+            for key, state in store.items():
+                out = []
+                with citation_group(self, out, key, state):
+                    out.append(self._finding(key, state[0], state[1], state[2].events(self.load),
+                        state[3] if len(state) > 5 else None, operating_systems=state[-2], ends=state[-1]))
+                yield from out
 
     def finalize_fallback(self, reason: str) -> list[Match]:
         """A group store whose disk table cannot be read: the groups held in memory, each complete for its key."""
@@ -429,7 +602,7 @@ class IndicatorMatch(Playbook):
         return out
 
     def uncited_finding(self, key, state, match):
-        indicator = self.by_id[key[0]]
+        indicator = self._indicator(key[0])
         match.severity = indicator.severity
         match.proposed_lane = "lead" if key[1] == "argument" else indicator.lane
         match.claim_type = "mention" if key[1] == "argument" else "aggregate_observation"
@@ -437,6 +610,9 @@ class IndicatorMatch(Playbook):
         match.claim = (f"{state[0]} recorded matches of indicator {indicator.id} ({indicator.label}, list "
                        f"{indicator.source}) for {key[1]} '{key[3]}' on {key[2]}; no citation could be retained. "
                        "The positive is published from the recorded group state.")
+        if indicator.list_name:
+            match.notes.append(f'List {indicator.list_name}; source {indicator.source}; author {indicator.author}; '
+                               f'version {indicator.list_version}; age {indicator.age_days} days.')
         return match
 
     def _finding(self, key: tuple, n: int, field_name: str, evs: list[TypedEvent],
@@ -454,7 +630,7 @@ class IndicatorMatch(Playbook):
 
             evs, missing, context = cite_extra(load, load, ends, list(known))
         evs = sorted(evs, key=lambda x: (x.ts, x.id))
-        ind: Indicator = self.by_id[key[0]]
+        ind = self._indicator(key[0])
         if values is not None:
             value = values[0]               # an overflow group: worded by its first value, then the others
         e0 = evs[0]
@@ -464,6 +640,9 @@ class IndicatorMatch(Playbook):
             first, last = evs[0].ts, evs[-1].ts
         span = f"{first.isoformat()} – {last.isoformat()}"
         listed = f"indicator {ind.id} ({ind.label}, list {ind.source})"
+        if ind.list_name:
+            listed = (f'indicator {ind.id} ({ind.label}, list {ind.list_name}, source {ind.source}, '
+                      f'author {ind.author}, version {ind.list_version}, age {ind.age_days} days)')
         process_record = ("Windows process-creation" if operating_systems == {"windows"} else
                           "auditd exec" if operating_systems == {"linux"} else "process-execution")
         executable_source = ("kernel-recorded executable" if operating_systems == {"linux"}
@@ -503,11 +682,34 @@ class IndicatorMatch(Playbook):
                      f"matches {listed} at a label boundary ({span}). The SNI is the name the client asked "
                      f"for; the certificate the server returned is a separate check.")
             lane, claim_type = ind.lane, "network_observation"
+        elif role.startswith('hash:'):
+            algorithm = {'md5': 'MD5', 'sha1': 'SHA-1', 'sha256': 'SHA-256'}[ind.kind]
+            description = {'hash:process': f'a process image with {algorithm} {value} ran',
+                'hash:image': f'a loaded image with {algorithm} {value} was observed',
+                'hash:file': f'a file-change observation carries {algorithm} {value}',
+                'hash:transfer': f'a file with {algorithm} {value} was observed in a transfer',
+                'hash:record': f'a recorded file hash is {algorithm} {value}'}[role]
+            claim = f'In {n} {e0.family} record(s) on {host}, {description}, matching {listed} ({span}).'
+            lane, claim_type = ind.lane, 'aggregate_observation'
+        elif role.startswith('certificate:'):
+            algorithm = 'SHA-1' if ind.kind == 'x509_sha1' else 'SHA-256'
+            claim = (f'In {n} {e0.family} record(s) observed by {host}, a {role.split(":")[1]} certificate '
+                     f'with {algorithm} fingerprint {value} was observed, matching {listed} ({span}).')
+            lane, claim_type = ind.lane, 'network_observation'
+        elif role.startswith('url:'):
+            label = {'url:record': 'recorded URL', 'url:request': 'HTTP request target URL',
+                     'url:reconstructed': 'HTTP URL from typed scheme, host and request target'}[role]
+            claim = f'In {n} {e0.family} record(s), the {label} is {value}, matching {listed} ({span}).'
+            lane, claim_type = ind.lane, 'network_observation'
         else:
             claim = (f"{n} session record(s) observed by {host} carry {role.upper()} client fingerprint {value}, "
                      f"matching {listed} ({span}).")
             lane, claim_type = ind.lane, "network_observation"
-        m = Match(self.id, claim, claim_type, evs, [pf(e0, field_name)], e0.ts, ind.severity, lane, "medium",
+        names = (field_name,) if isinstance(field_name, str) else field_name
+        if ind.kind in CONTENT_KINDS:
+            names = next((fields for kind, candidate, fields, context_role in self._content_values(e0)
+                          if kind == ind.kind and candidate == value and context_role == role), names)
+        m = Match(self.id, claim, claim_type, evs, [pf(e0, name) for name in names], e0.ts, ind.severity, lane, "medium",
                   e0.entities(), group_key="|".join(map(str, key)), context_ids=context)
         if ind.attack:
             m.notes.append(f"indicator ATT&CK context: {list(ind.attack)}")

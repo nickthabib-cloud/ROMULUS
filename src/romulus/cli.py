@@ -192,6 +192,50 @@ def cmd_user(args) -> int:
     return EXIT_OK
 
 
+def cmd_indicators(args) -> int:
+    from contextlib import ExitStack
+    from datetime import UTC, datetime
+
+    from romulus.content.indicator_import import parse_indicator_file
+    from romulus.content.indicator_lists import IndicatorLists
+    from romulus.hunt.run import open_repo
+    repo = open_repo(load_settings(_env_file(args)))
+    store = IndicatorLists(repo)
+    user = os.environ.get("USER") or os.environ.get("USERNAME") or "cli"
+    author = f"cli:{user}"
+    try:
+        if args.action == "import":
+            expiry = datetime.fromisoformat(args.expires) if args.expires else None
+            if expiry is not None and expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=UTC)
+            if args.list_id is not None and store.get(args.list_id) is None:
+                raise ValueError("Unknown indicator list")
+            result = parse_indicator_file(Path(args.file), include_non_ids=args.include_non_ids)
+            row = store.create_version(result.rows, name=args.name, source=args.source, author=author,
+                expires_at=expiry, notes=args.notes, list_id=args.list_id, report=result.summary)
+            print(json.dumps(row, indent=2, default=str))
+        else:
+            if args.out and Path(args.out).as_posix().startswith("//"):
+                raise ValueError("A local export path is required")
+            from romulus.content.indicator_export import export_indicators
+            if store.get(args.list_id, args.version) is None:
+                raise ValueError("Unknown indicator list version")
+            if args.version is not None and args.version < 1:
+                raise ValueError("Invalid version")
+            with ExitStack() as stack:
+                output = stack.enter_context(Path(args.out).open("w", encoding="utf-8", newline="")) if args.out else sys.stdout
+                for chunk in export_indicators(store, args.list_id, args.version, format=args.format):
+                    output.write(chunk)
+        return EXIT_OK
+    except (ValueError, OSError, UnicodeError):
+        if args.action == "import":
+            repo.audit(author, "indicator_list.import_rejected", detail={"reason": "invalid_file_or_metadata"})
+            print("indicator import rejected: invalid local CSV/JSON file or metadata; no version was saved", file=sys.stderr)
+        else:
+            print("indicator export failed: invalid list, version or local output path", file=sys.stderr)
+        return EXIT_FAIL
+
+
 def cmd_web(args) -> int:
     import uvicorn
 
@@ -324,6 +368,21 @@ def main(argv: list[str] | None = None) -> int:
     up.add_argument("username")
     up.add_argument("--role", choices=["lead", "analyst"], default="analyst")
     sub.add_parser("web", help="serve the browser UI on ROMULUS_WEB_BIND")
+    indicators = sub.add_parser("indicators", help="import and export offline analyst indicators")
+    indicator_actions = indicators.add_subparsers(dest="action", required=True)
+    indicator_import = indicator_actions.add_parser("import", help="import a local CSV or STIX/MISP JSON file")
+    indicator_import.add_argument("file")
+    indicator_import.add_argument("--name", required=True)
+    indicator_import.add_argument("--source", required=True)
+    indicator_import.add_argument("--expires", help="ISO 8601 expiry (default: 90 days after import)")
+    indicator_import.add_argument("--include-non-ids", action="store_true")
+    indicator_import.add_argument("--list-id", help="create a new version of an existing list")
+    indicator_import.add_argument("--notes", default="")
+    indicator_export = indicator_actions.add_parser("export", help="export a complete list version")
+    indicator_export.add_argument("list_id")
+    indicator_export.add_argument("--version", type=int)
+    indicator_export.add_argument("--format", choices=["yaml", "csv"], default="yaml")
+    indicator_export.add_argument("--out", help="local output file (default: stdout)")
     dp = sub.add_parser("db", help="database maintenance")
     dp.add_argument("action", choices=["compact"], help="compact: return space freed by deleted hunts to the disk")
     replay = sub.add_parser("replay", help="export frozen investigator briefs, run them, and summarize results")
@@ -353,7 +412,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "hunt" and args.action == "resume" and not args.hunt_id:
         p.error("hunt resume needs a hunt id")
     handlers = {"doctor": cmd_doctor, "hunt": cmd_hunt, "findings": cmd_findings, "report": cmd_report,
-                "user": cmd_user, "web": cmd_web, "replay": cmd_replay, "db": cmd_db}
+                "user": cmd_user, "web": cmd_web, "replay": cmd_replay, "db": cmd_db,
+                "indicators": cmd_indicators}
     return handlers[args.cmd](args)
 
 

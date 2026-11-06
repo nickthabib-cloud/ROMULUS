@@ -30,6 +30,7 @@ from romulus.site import SiteChangedError, SiteValidationError, load_site_facts,
 from romulus.store.db import compact, maintenance_lease
 from romulus.web import site_form
 from romulus.web.auth import RateLimiter, Sessions, csrf_ok, verify
+from romulus.web.indicator_routes import IndicatorBodyLimit, register_indicator_routes
 
 HERE = Path(__file__).resolve().parent
 COOKIE = "romulus_session"
@@ -48,6 +49,7 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
     sessions = Sessions(s.secret_key.get_secret_value())
     limiter = RateLimiter()
     app = FastAPI(title="ROMULUS", docs_url=None, redoc_url=None, openapi_url=None)
+    app.add_middleware(IndicatorBodyLimit)
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
     tpl = Jinja2Templates(directory=HERE / "templates")
     tpl.env.autoescape = True
@@ -73,6 +75,8 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
                                                      "banner": "UNCLASSIFIED // FOR TRAINING USE", **ctx})
 
     # ------------------------------------------------------------------ auth
+    register_indicator_routes(app, repo, need, page)
+
     @app.get("/login", response_class=HTMLResponse)
     def login_form(request: Request, error: str = ""):
         return tpl.TemplateResponse(request, "login.html", {"error": error, "user": None,
