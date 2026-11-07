@@ -62,6 +62,32 @@ def test_explicit_high_override_survives_the_real_publication_policy():
         repo.engine.dispose()
 
 
+def test_hundreds_of_rules_share_one_native_class_with_matching_bounded_state(monkeypatch):
+    monkeypatch.setattr(SigmaRule, 'HOT', 8)
+    monkeypatch.setattr(SigmaRule, 'TRIM_EVERY', 16)
+    owners = [SigmaRule(row(number)) for number in range(300)]
+    events = [net_event('process_exec', str(number), host__os__family='windows', event__code=1,
+        event__channel='Microsoft-Windows-Sysmon/Operational', event__provider='Microsoft-Windows-Sysmon',
+        process__executable=r'C:\Tools\evil.exe' if number < 60 else r'C:\Tools\benign.exe',
+        process__command_line='evil.exe --'+str(number % 5)) for number in range(100)]
+    try:
+        index = SigmaEventIndex(events)
+        for owner in owners:
+            [match] = owner.consume_scoped_partition(index.for_rule(owner))
+            assert match.aggregate_summary['count'] == 60
+            assert '5 distinct command lines, 5 cited' in match.claim
+            assert len(match.events) <= owner.EXAMPLE_LIMIT
+            owner.drain_staged()
+            assert len(owner.delivered.hot) <= 8 and owner.delivered.on_disk > 0
+            assert len(owner.command_keys.hot) <= 8
+            assert len(owner.groups.hot) <= 1 and len(owner.bounds.pending) <= 2
+        assert sum(owner.match_evaluations for owner in owners) == 30000
+        assert index.records == 100 and index.buckets == 1
+    finally:
+        for owner in owners:
+            owner.close_spill()
+
+
 @pytest.mark.slow
 @pytest.mark.parametrize('classes', [1000, 2000])
 def test_two_thousand_rules_and_hundred_thousand_events_use_indexed_bounded_state(classes):

@@ -920,8 +920,7 @@ class Toolbox:
             } for row in exemplars],
         }
         manifest = ((self.repo.get_hunt(self.hunt_id) or {}).get("manifest") or {})
-        rules = {str(item["id"]) for item in (manifest.get("pack") or {}).get("playbooks", [])
-                 if isinstance(item, dict) and item.get("id")}
+        rules = pinned_rule_ids(manifest)
         targets = {str(target) for target in manifest.get("targets") or []}
         counts = self.repo.rule_cell_coverage_counts(self.hunt_id, rules, targets)
         counts["missing_rule_targets"] = max(

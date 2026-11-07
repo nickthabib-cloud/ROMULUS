@@ -166,7 +166,7 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
         attack = tuple(explicit_attack or getattr(rule, 'attack', ()))
         attack_by_finding[finding['id']] = attack
         tactics_by_finding[finding['id']] = (technique_tactics(attack) if explicit_attack else
-            getattr(rule, 'tactics', tuple(tactic for technique in attack for tactic in _TACTICS.get(technique, ()))))
+            (getattr(rule, 'tactics', ()) or tuple(tactic for technique in attack for tactic in _TACTICS.get(technique, ()))))
         event_ids = list((stored or finding).get("event_ids") or [])
         context_ids = set((stored or finding).get("context_event_ids") or [])
         cited = set(event_ids) - context_ids

@@ -68,7 +68,7 @@ def hunt_rule_metadata(repo, hunt_id=None, *, manifest=None, rule_ids=None):
         tactics = tuple(sorted({tag.removeprefix('attack.').replace('_', '-') for tag in tags
                                if tag.removeprefix('attack.').replace('_', '-') in _TACTICS}))
         rules[rule_id] = SimpleNamespace(
-            id=rule_id, title=pin.get('title', rule_id), version='2+' + pin['digest'],
+            id=rule_id, title=pin.get('title', rule_id), version='3+' + pin['digest'],
             lane=pin.get('lane', 'lead'), severity={'informational': 'info'}.get(
                 pin.get('level'), pin.get('level', 'medium')),
             attack=attack, tactics=tactics, kind='aggregate',

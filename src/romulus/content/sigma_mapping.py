@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from romulus.evidence.windows_catalog import (
     EVENT_CLASSES,
+    EVENTLOG,
     LEGACY_POWERSHELL_CHANNEL,
     POWERSHELL_CHANNEL,
     SECURITY,
@@ -166,7 +167,11 @@ def _windows_fields(event):
             fields.add('file.stream.content')
         if code in {6, 7}:
             fields.update(_IMAGE.values())
-            fields.update(name for name in _HASH_FIELDS if name.startswith('image.'))
+            fields.update(_HASH_FIELDS)
+            if code == 6:
+                fields.discard('image.original_file_name')
+        if code == 7:
+            fields.add('process.original_file_name')
         if code in {12, 13, 14}:
             fields.update({'registry.path', 'registry.event_type'})
         if code == 13:
@@ -184,9 +189,13 @@ def _windows_fields(event):
         elif code == 4689:
             fields.update({'process.executable', 'process.pid'})
         if event.family in {'auth', 'account_change', 'service_change', 'registry_change',
-                            'object_access', 'scheduled_task', 'directory_access', 'directory_change'} or code in {4688, 4689}:
+                            'object_access', 'scheduled_task', 'directory_access', 'directory_change',
+                            'share_access', 'audit_config', 'boot_configuration', 'security_enumeration',
+                            'privilege_adjustment', 'system_state'} or code in {4688, 4689}:
             fields.update({'user.name', 'user.domain'})
-        if event.family == 'account_change' or code in {4624, 4625, 4648, 4768, 4769, 4770, 4771, 4776}:
+        if event.family == 'account_change' or code in {
+                4624, 4625, 4634, 4647, 4648, 4688, 4703, 4768, 4769, 4770, 4771, 4776, 4778, 4779,
+                4798, 4799, 4964}:
             fields.update({'account.name', 'account.domain'})
         if code in {4624, 4625, 4634}:
             fields.add('auth.logon_type')
@@ -194,10 +203,14 @@ def _windows_fields(event):
             fields.add('auth.package')
         if code in {4624, 4625}:
             fields.add('auth.logon_process')
-        if code in {4624, 4625, 4648}:
+        if code in {4624, 4625, 4648, 4656, 4661, 4663, 4670, 4703}:
             fields.update({'process.executable', 'process.pid'})
-        if code in {4624, 4625, 4648, 4768, 4769, 4770, 4771}:
+        if code in {4624, 4625, 4648, 4768, 4769, 4770, 4771, 5140, 5145}:
             fields.update({'source.ip', 'source.port'})
+        if code in {4778, 4779}:
+            fields.add('source.ip')
+        if code in {4624, 4625, 4776, 4778, 4779}:
+            fields.add('source.hostname')
         if code in {4768, 4769, 4770, 4771}:
             fields.add('auth.service_name')
         if code == 4697:
@@ -208,8 +221,12 @@ def _windows_fields(event):
         if code in {5156, 5158}:
             fields.update({'wfp.application', 'process.pid', 'source.ip', 'source.port',
                            'destination.ip', 'destination.port', 'network.transport'})
+    elif event.provider == EVENTLOG and event.channel == 'Security' and code == 1102:
+        fields.update({'user.name', 'user.domain'})
     elif event.family == 'service_change':
         fields.update(_SERVICE.values() if code == 7045 else {'service.name', 'service.start_type'})
+    elif event.channel == 'System' and event.provider == 'Service Control Manager' and code == 7036:
+        fields.add('service.name')
     elif event.family == 'script_block':
         if code == 4104:
             fields.update({'script.text', 'script.block_id', 'script.path'})
@@ -222,19 +239,28 @@ def _windows_fields(event):
     return fields
 
 
-# Non-Windows families have no native EventID. These are the mapped fields the
-# existing normalizers can retain; a delivered typed value is always authoritative.
+# Family mappings also cover generic rules over endpoint and observer telemetry.
+# These are the mapped fields the existing normalizers can retain. Absence has a
+# narrower contract where one family contains several native observation types.
+_ENDPOINT_FIELDS = set(_NETWORK.values()) - {'source.hostname', 'destination.hostname'}
+_AUDIT_PROCESS_FIELDS = set(_LINUX.values()) - {'process.cwd', 'file.path', 'service.name'}
+_AUDIT_HEADER_FIELDS = {'process.executable', 'process.pid', 'process.uid', 'process.auid', 'process.user'}
 _FAMILY_FIELDS = {
-    'process_exec': set(_LINUX.values()) - {'file.path', 'service.name'},
-    'process_observed': set(_LINUX.values()) - {'file.path', 'service.name'},
-    'file_change': {'file.path', 'process.executable', 'process.pid', 'process.uid'},
-    'service_change': {'service.name', 'process.pid'},
-    'net_flow': set(_NETWORK.values()) - {'source.hostname', 'destination.hostname'},
-    'net_socket': set(_NETWORK.values()) - {'source.hostname', 'destination.hostname'},
+    'process_exec': _AUDIT_PROCESS_FIELDS | {'process.cwd'},
+    'process_observed': _AUDIT_PROCESS_FIELDS,
+    'file_change': _AUDIT_PROCESS_FIELDS | {'file.path'},
+    'auth': {'process.pid', 'process.auid', 'user.name', 'source.ip'},
+    'account_change': _AUDIT_HEADER_FIELDS | {'account.name', 'source.ip'},
+    'service_change': _AUDIT_HEADER_FIELDS | {'service.name'},
+    'system_state': _AUDIT_HEADER_FIELDS,
+    'audit_config': _AUDIT_PROCESS_FIELDS,
+    'net_flow': _ENDPOINT_FIELDS,
+    'net_socket': set(_NETWORK.values()) | _AUDIT_PROCESS_FIELDS,
     'dns_query': {'dns.question.name', 'dns.answers', 'source.ip', 'source.port',
                   'destination.ip', 'destination.port', 'network.transport'},
-    'http_tx': {'url.original', 'http.request.method', 'http.hostname', 'http.response.status_code',
-                'user_agent.original', 'source.ip', 'source.port', 'destination.ip', 'destination.port'},
+    'dns_lookup': {'dns.question.name', 'dns.answers'},
+    'http_tx': _ENDPOINT_FIELDS | {'url.original', 'http.request.method', 'http.hostname',
+                                  'http.response.status_code', 'user_agent.original'},
     'http_access': {'url.original', 'http.request.method', 'http.response.status_code',
                     'user_agent.original', 'source.ip'},
     # Session rows may represent protocols other than HTTP. An absent application
@@ -243,6 +269,37 @@ _FAMILY_FIELDS = {
                     'url.path', 'http.hostname', 'http.request.method', 'http.response.status_code',
                     'user_agent.original'},
 }
+_FAMILY_ABSENCE_FIELDS = {
+    'process_exec': _FAMILY_FIELDS['process_exec'],
+    'process_observed': _FAMILY_FIELDS['process_observed'],
+    'file_change': _FAMILY_FIELDS['file_change'],
+    'auth': _FAMILY_FIELDS['auth'],
+    'account_change': _FAMILY_FIELDS['account_change'],
+    'service_change': {'service.name', 'process.pid'},
+    'system_state': _FAMILY_FIELDS['system_state'],
+    'audit_config': _FAMILY_FIELDS['audit_config'],
+    'net_flow': _ENDPOINT_FIELDS,
+    'net_socket': _ENDPOINT_FIELDS,
+    'dns_query': _FAMILY_FIELDS['dns_query'],
+    'dns_lookup': _FAMILY_FIELDS['dns_lookup'],
+    'http_tx': _FAMILY_FIELDS['http_tx'],
+    'http_access': {'source.ip'},
+    'net_session': _ENDPOINT_FIELDS,
+}
+
+
+def _validate_family_inventory():
+    required = {family for row in LOGSOURCE_TABLE if row.product != 'windows' for family in row.families}
+    missing = required - _FAMILY_FIELDS.keys()
+    missing_absence = required - _FAMILY_ABSENCE_FIELDS.keys()
+    if missing or missing_absence:
+        raise RuntimeError('Missing Sigma family inventory: '+', '.join(sorted(missing | missing_absence)))
+    for family in required:
+        if not _FAMILY_ABSENCE_FIELDS[family] <= _FAMILY_FIELDS[family]:
+            raise RuntimeError('Sigma absence inventory exceeds observable fields: '+family)
+
+
+_validate_family_inventory()
 
 
 def _targets(fields):
@@ -419,6 +476,7 @@ def map_rule(logsource, selectors):
             result['rationale'].append('Security 4657 TargetObject converts the native hive and appends '
                                        'the separately typed value name; missing conversion inputs stay unknown.')
     else:
-        result['field_inventory'] = [{'family': family, 'fields': sorted(targets & _FAMILY_FIELDS.get(family, set()))}
+        result['field_inventory'] = [{'family': family, 'fields': sorted(targets & _FAMILY_FIELDS[family]),
+                                     'absence_fields': sorted(targets & _FAMILY_ABSENCE_FIELDS[family])}
                                      for family in result['families']]
     return result

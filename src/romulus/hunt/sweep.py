@@ -1886,6 +1886,7 @@ class Sweep:
                 target_fallback = not relevant_events and (
                     target_os == "unknown" or target_os in pb.os_families
                 )
+                sigma_rule_reasons = []
                 if sigma_events is not None:
                     reason_view = coverage_view(pb)
                     signature = reason_signature(reason_view)
@@ -1894,8 +1895,9 @@ class Sweep:
                             target, contract, reason_view, out.records, gap_reasons, w, continuity_times)})
                     sigma_reason_detail = sigma_reasons[signature]
                     windows_reasons = visible_reasons(sigma_reason_detail)
-                    windows_reasons.extend(exclusion_reasons(pb))
+                    sigma_rule_reasons = list(exclusion_reasons(pb))
                     windows_gate_reasons.update(sigma_reason_detail['reasons'])
+                    windows_gate_reasons.update(sigma_rule_reasons)
                 else:
                     windows_reasons = self._windows_rule_reasons(
                         target, contract, pb, out.records, gap_reasons, w, continuity_times,
@@ -1912,7 +1914,7 @@ class Sweep:
                     windows_reasons.append(unsupported_reason)
                 windows_gate_reasons.update(windows_reasons)
                 rule_partial = (affected is ALL_FAMILIES or bool(set(pb.families) & affected)
-                                or bool(windows_reasons))
+                                or bool(windows_reasons) or bool(sigma_rule_reasons))
                 input_events = events if sigma_events is None else sigma_events
                 unaggregated_events = []
                 identity_reason = getattr(self, "_zeek_canonical_unavailable", "")
@@ -2093,7 +2095,8 @@ class Sweep:
                 target_applicable = target_fallback or pb.os_applicable > before_os
                 rule_partial = target_applicable and rule_partial
                 if isinstance(pb, SigmaRule) and (pb._batch_argument_gap or pb._batch_unknown
-                                                 or 'sigma_publication_budget' in pb.limits):
+                                                 or 'sigma_publication_budget' in pb.limits
+                                                 or 'sigma_command_identity' in pb.limits):
                     rule_partial = True
                 # records a full state budget kept from evaluation: never a clean evaluation of this partition
                 capped = pb.capped - before_capped
@@ -2116,10 +2119,11 @@ class Sweep:
                     state = "positive_only_partial" if incomplete else "positive_only"
                 else:
                     state = "evaluated_partial" if incomplete else "no_match_complete"
-                reasons = list(base_reasons)
+                reasons = list(sigma_rule_reasons) if sigma_events is not None else list(base_reasons)
                 if hasattr(pb, 'partition_coverage_notes'):
                     reasons.extend(pb.partition_coverage_notes())
-                reasons.extend(windows_reasons)
+                if sigma_events is None:
+                    reasons.extend(windows_reasons)
                 if consume_failure:
                     reasons.append(consume_failure)
                 if error_reason and (error_affected is ALL_FAMILIES or set(pb.families) & error_affected):
@@ -2142,6 +2146,9 @@ class Sweep:
                     reasons.append(f"state_capped={capped}: records not evaluated because a state budget of this rule "
                                    f"was full; " + "; ".join(refused))
                     detail["state_capped"] = capped
+                if sigma_events is not None:
+                    reasons.extend(windows_reasons)
+                    reasons.extend(base_reasons)
                 cells.append(self._cell(pb, target, pkey, state, matched, evaluated, detail))
             except INFRASTRUCTURE_ERRORS:
                 raise

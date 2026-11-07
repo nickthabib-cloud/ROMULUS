@@ -35,7 +35,7 @@ def test_created_hunt_uses_its_active_ast_and_lane_after_retirement(tmp_path, mo
                      stage_dir=tmp_path/'stage')
     try:
         owner = next(rule for rule in instance.pack if rule.id == 'sigma.'+rid)
-        assert owner.lane == 'lead' and owner.version == '2+'+pin['applied'][0]['digest']
+        assert owner.lane == 'lead' and owner.version == '3+'+pin['applied'][0]['digest']
         assert owner.metadata['activation_reason'] == ''
         catalog = build_catalog(repo=repo)
         [entry] = [row for row in _rules(catalog) if row['id'] == owner.id]

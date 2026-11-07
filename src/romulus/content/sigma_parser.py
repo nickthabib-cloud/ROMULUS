@@ -522,23 +522,43 @@ def _class_matches(event, event_class):
 
 
 def _observable_fields(scope, event):
+    from romulus.content.sigma_mapping import _FAMILY_ABSENCE_FIELDS, _FAMILY_FIELDS, _windows_fields
+    from romulus.evidence.windows_catalog import SECURITY, lookup_event_class
+    native = lookup_event_class(event.get('event.channel'), event.get('event.provider'), event.get('event.code'))
+    native_fields = None if native is None else _windows_fields(native)
+    native_absence = None if native is None else native_fields - (
+        {'process.parent.executable'} if native.provider == SECURITY and native.event_id == 4688 else set())
     inventory = scope.get('field_inventory')
     if inventory is None:
-        from romulus.content.sigma_mapping import _windows_fields
-        from romulus.evidence.windows_catalog import SECURITY, lookup_event_class
-        native = lookup_event_class(event.get('event.channel'), event.get('event.provider'), event.get('event.code'))
-        if native is not None:
-            fields = _windows_fields(native)
-            absence = fields - ({'process.parent.executable'} if native.provider == SECURITY
-                                and native.event_id == 4688 else set())
+        if ('windows_event_classes' in scope and 'scope' in scope
+                and not scope['windows_event_classes'] and event.family in _FAMILY_FIELDS):
+            fields = _FAMILY_FIELDS[event.family]
+            absence = _FAMILY_ABSENCE_FIELDS[event.family]
+            if native_fields is not None:
+                fields = fields & native_fields
+                absence = absence & native_absence
             return fields, absence
         # Explicit custom mappings without a native class retain their contract;
         # old pinned native ASTs still receive class-aware absence semantics.
-        return None, None
+        return native_fields, native_absence
     for row in inventory:
         if ('event_class' in row and _class_matches(event, row['event_class'])
                 or row.get('family') == event.family):
-            return set(row['fields']), set(row.get('absence_fields', row['fields']))
+            stored = set(row['fields'])
+            absence = set(row.get('absence_fields', row['fields'])) & stored
+            if 'event_class' in row:
+                current, current_absence = native_fields, native_absence
+            else:
+                current = _FAMILY_FIELDS.get(row['family'])
+                current_absence = _FAMILY_ABSENCE_FIELDS.get(row['family'], set())
+                if current is not None and native_fields is not None:
+                    current = current & native_fields
+                    current_absence = current_absence & native_absence
+            if current is None:
+                return stored, absence
+            # Stored inventories cannot hide delivered typed values or grant
+            # absence evidence beyond the current native-class/family contract.
+            return ((stored | event.fields.keys()) & current, absence & current_absence)
     return set(), set()
 
 

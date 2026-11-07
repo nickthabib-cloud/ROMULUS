@@ -94,6 +94,92 @@ def test_grouping_uses_executable_parent_and_host_but_keeps_distinct_commands_to
         owner.close_spill()
 
 
+@pytest.mark.parametrize('category,code,field,label', [
+    ('process_creation', 1, 'process.command_line', 'command lines'),
+    ('ps_script', 4104, 'script.text', 'script texts'),
+    ('image_load', 7, 'process.command_line', 'command lines'),
+])
+def test_native_folds_count_distinct_payloads_and_cite_first_and_last_arrivals(category, code, field, label):
+    from romulus.evidence.windows import normalize_windows
+    from romulus.evidence.windows_catalog import (
+        POWERSHELL_CHANNEL,
+        POWERSHELL_PROVIDER,
+        SYSMON,
+        SYSMON_CHANNEL,
+    )
+    from tests.windows_fixtures import LogicalWindowsEvent, windows_hit
+    parsed = parse_rule({'title': 'Native payloads', 'logsource': {'product': 'windows', 'category': category},
+        'detection': {'selection': {'EventID': code}, 'condition': 'selection'}})
+    owner = SigmaRule(dict(row(), ast=parsed['ast'], mapping=parsed['mapping']))
+    repo = _repo()
+    staged = {}
+    owner.bind_loader(lambda ids: [staged[identity] for identity in ids if identity in staged])
+    channel, provider = ((POWERSHELL_CHANNEL, POWERSHELL_PROVIDER) if category == 'ps_script'
+                         else (SYSMON_CHANNEL, SYSMON))
+    events = []
+    for number in range(40):
+        value = 'evil.exe --'+str(number % 30)
+        data = {'Image': r'C:\Tools\evil.exe', 'ParentImage': r'C:\Windows\cmd.exe', 'CommandLine': value,
+                'ImageLoaded': r'C:\Tools\evil.dll', 'ScriptBlockText': value, 'ScriptBlockId': 'block-'+str(number)}
+        if category == 'ps_script':
+            data.pop('CommandLine')
+        event = normalize_windows(windows_hit(LogicalWindowsEvent(channel, provider, code, 'ws01', number+1,
+            (process().ts+timedelta(seconds=number)).isoformat(), data), 'elastic_agent'))
+        assert event.get(field) == value
+        events.append(event)
+    try:
+        for start in range(0, 40, 10):
+            [match] = owner.consume(events[start:start+10])
+            sources = {ref.key: {'serial': event.id} for event in match.events for ref in event.raw}
+            publish_match(repo, 'h1', owner, match, None, sources)
+            staged.update((event.id, event) for event in owner.drain_staged())
+        [candidate] = repo.candidates('h1')
+        citations = repo.citation_events('h1', candidate['event_ids'])
+        cited = {item['event']['fields'][field]['value'] for item in citations}
+        assert {f'evil.exe --{number}' for number in [*range(8), *range(22, 30)]} <= cited
+        assert len(candidate['event_ids']) <= owner.EXAMPLE_LIMIT
+        assert f'30 distinct {label}, {len(cited)} cited' in candidate['claim']
+        assert candidate['gate_results']['aggregate_summary']['count'] == 40
+    finally:
+        owner.close_spill()
+        repo.engine.dispose()
+
+
+def test_distinct_command_identity_spills_and_survives_repeated_values():
+    owner = SigmaRule(row())
+    try:
+        [match] = owner.consume(process(number, command='evil.exe --'+str(number % 700)) for number in range(1400))
+        assert '700 distinct command lines, 16 cited' in match.claim
+        assert match.aggregate_summary['count'] == 1400
+        assert owner.command_keys.on_disk > 0
+        assert len(owner.command_keys.hot) <= owner.HOT
+        assert len(owner._pending) <= 2
+        assert len(owner._command_pending) <= 1
+        assert len(owner.drain_staged()) <= owner.EXAMPLE_LIMIT+2
+    finally:
+        owner.close_spill()
+
+
+def test_native_image_loads_keep_loaded_paths_separate_without_inventing_commands():
+    from romulus.evidence.windows import normalize_windows
+    from romulus.evidence.windows_catalog import SYSMON, SYSMON_CHANNEL
+    from tests.windows_fixtures import LogicalWindowsEvent, windows_hit
+    parsed = parse_rule({'title': 'Native image loads',
+        'logsource': {'product': 'windows', 'category': 'image_load'},
+        'detection': {'selection': {'EventID': 7}, 'condition': 'selection'}})
+    owner = SigmaRule(dict(row(), ast=parsed['ast'], mapping=parsed['mapping']))
+    events = [normalize_windows(windows_hit(LogicalWindowsEvent(SYSMON_CHANNEL, SYSMON, 7, 'ws01', number+1,
+        process().ts.isoformat(), {'Image': r'C:\Tools\loader.exe', 'ImageLoaded': path}), 'elastic_agent'))
+        for number, path in enumerate([r'C:\Tools\one.dll', r'C:\Tools\two.dll'])]
+    try:
+        matches = owner.consume(events)
+        assert len(matches) == 2 and all(match.aggregate_summary['count'] == 1 for match in matches)
+        assert all('distinct command lines' not in match.claim for match in matches)
+        assert len(owner.command_keys) == 0
+    finally:
+        owner.close_spill()
+
+
 @pytest.mark.parametrize('category,family,field,first,second', [
     ('network_connection', 'net_socket', 'destination.ip', '192.0.2.1', '192.0.2.2'),
     ('network_connection', 'net_socket', 'destination.hostname', 'one.example', 'two.example'),

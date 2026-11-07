@@ -182,6 +182,7 @@ class IndicatorLists:
         with _import_lease(self.engine, list_id) as acquired:
             if not acquired:
                 raise ValueError("An import is already active for this indicator list")
+            rejection = None
             with write_txn(self.engine) as c:
                 c.exec_driver_sql("BEGIN IMMEDIATE")
                 previous = c.execute(select(t.indicator_list).where(t.indicator_list.c.id == list_id).order_by(
@@ -189,13 +190,20 @@ class IndicatorLists:
                 if previous and previous["status"] == "importing":
                     raise ValueError("An import is already active for this indicator list")
                 reactivated = bool(previous and previous["status"] == "retired")
-                if reactivated and role != "lead":
-                    raise PermissionError("Only a lead may create a new version of a retired indicator list")
                 version = (previous["version"] if previous else 0) + 1
-                metadata = {"id": list_id, "version": version, "name": name, "source": source, "author": author,
-                            "created_at": now, "expires_at": expires_at, "notes": notes,
-                            "lane": lane, "severity": severity}
-                c.execute(t.indicator_list.insert().values(**metadata, status="importing", digest="pending"))
+                if reactivated and role != "lead":
+                    _audit(c, at=now, actor=author, action="indicator_list.import_rejected", detail={
+                        "id": list_id, "version": version, "role": role,
+                        "reason": "retired_list_reactivation_requires_lead"})
+                    rejection = PermissionError("Only a lead may create a new version of a retired indicator list")
+                    rejection.audit_recorded = True
+                else:
+                    metadata = {"id": list_id, "version": version, "name": name, "source": source, "author": author,
+                                "created_at": now, "expires_at": expires_at, "notes": notes,
+                                "lane": lane, "severity": severity}
+                    c.execute(t.indicator_list.insert().values(**metadata, status="importing", digest="pending"))
+            if rejection is not None:
+                raise rejection
             duplicates, high = 0, lane == "high"
             batch, details = [], []
             noted, rejected = Counter(), Counter()
@@ -286,7 +294,9 @@ class IndicatorLists:
                     latest = c.execute(_latest().where(t.indicator_list.c.id == list_id)).mappings().first()
                     reactivated = reactivated or bool(latest and latest["status"] == "retired")
                     if reactivated and role != "lead":
-                        raise PermissionError("Only a lead may create a new version of a retired indicator list")
+                        error = PermissionError("Only a lead may create a new version of a retired indicator list")
+                        error.import_rejection_reason = "retired_list_reactivation_requires_lead"
+                        raise error
                     c.execute(t.indicator_list.update().where(t.indicator_list.c.id == list_id,
                         t.indicator_list.c.version == version).values(digest=content_digest, status=status))
                     _audit(c, at=now, actor=author, action="indicator_list.import", detail={
@@ -297,7 +307,8 @@ class IndicatorLists:
                 # Counts and the response are read after releasing the final publication writer.
                 return self.get(list_id, version)
             except BaseException as error:
-                if self._discard_import(list_id, version, actor=author, reason="import_failed"):
+                if self._discard_import(list_id, version, actor=author,
+                        reason=getattr(error, "import_rejection_reason", "import_failed")):
                     error.audit_recorded = True
                 raise
 

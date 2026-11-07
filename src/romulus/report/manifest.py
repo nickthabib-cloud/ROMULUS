@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter, defaultdict
 from datetime import UTC
 
@@ -111,6 +112,7 @@ POSITIVE_ONLY_RULE_IDS = frozenset({cls.id for cls in ALL_PLAYBOOKS if not cls.a
 
 
 PCAP_CELL_PREFIX = "arkime-pcap:"
+_INDICATOR_GAP = re.compile(r'^Indicator kind ([a-z0-9_]+) cannot be searched in (\d+) delivered record\(s\):')
 
 
 def _scope(cell: dict) -> list[str]:
@@ -119,7 +121,7 @@ def _scope(cell: dict) -> list[str]:
     if not isinstance(detail, dict):
         return []
     out = [str(reason) for reason in detail.get('reasons', [])
-           if str(reason).startswith('Indicator kind ')]
+           if str(reason).startswith('Indicator kind ') and not _INDICATOR_GAP.match(str(reason))]
     if not detail.get('selection'):
         return out
     out.append(f"examined on {cell['target'].removeprefix(PCAP_CELL_PREFIX)}: {detail['selection']}")
@@ -273,6 +275,7 @@ def _coverage(cells: list[dict], targets: list[str] | None = None, rule_ids: lis
     evaluated: Counter = Counter()
     rule_targets: dict[str, set] = defaultdict(set)
     scope: dict[str, list[str]] = defaultdict(list)
+    indicator_gaps = Counter()
     for c in cells:
         by_rule[c["rule_id"]][c["state"]] += 1
         if c["target"] != "*":
@@ -280,6 +283,15 @@ def _coverage(cells: list[dict], targets: list[str] | None = None, rule_ids: lis
             # packet-stage cells are written per source target as "arkime-pcap:<target>"
             rule_targets[c["rule_id"]].add(c["target"].removeprefix(PCAP_CELL_PREFIX))
         scope[c["rule_id"]] += _scope(c)
+        detail = c.get('detail') or {}
+        if c['target'] != '*' and isinstance(detail, dict):
+            for reason in detail.get('reasons', []):
+                if parsed := _INDICATOR_GAP.match(str(reason)):
+                    kind, count = parsed.groups()
+                    indicator_gaps[c['rule_id'], c['target'].removeprefix(PCAP_CELL_PREFIX), kind] += int(count)
+    for (rule_id, target, kind), count in sorted(indicator_gaps.items()):
+        scope[rule_id].append(f'Indicator kind {kind} cannot be searched in {count} delivered record(s): '
+            f'no complete typed value was available; no negative result is asserted. Target: {target}.')
     for rid in rule_ids or []:
         by_rule.setdefault(rid, Counter())
     rows = []

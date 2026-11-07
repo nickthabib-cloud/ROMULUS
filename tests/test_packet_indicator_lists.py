@@ -106,15 +106,14 @@ def test_packet_resume_keeps_the_original_indicator_pin_after_a_list_edit(tmp_pa
         repo.engine.dispose()
 
 
-def test_packet_coverage_counts_kinds_unsearchable_in_delivered_bodies(tmp_path, monkeypatch):
-    repo, _lists, _meta = repository([ImportedIndicator('md5', 'ab'*16)])
+def test_packet_coverage_counts_only_kinds_delivered_bodies_can_carry(tmp_path, monkeypatch):
+    repo, _lists, _meta = repository([ImportedIndicator('md5', 'ab'*16), ImportedIndicator('url', URL+'/other')])
     try:
         stage(tmp_path, monkeypatch, repo, [response(), response(offset=1)])
         cells = [cell for cell in repo.rule_cells('h1') if cell['rule_id'] == RULE]
         assert len(cells) == 1
         assert cells[0]['evaluated'] == 2 and cells[0]['matched'] == 0
-        assert any('md5 cannot be searched in 2 delivered record(s)' in reason
-                   for reason in cells[0]['detail']['reasons'])
+        assert not any('md5 cannot be searched' in reason for reason in cells[0]['detail']['reasons'])
         assert cells[0]['state'] == 'positive_only'
     finally:
         repo.engine.dispose()
@@ -130,6 +129,68 @@ def test_packet_stage_uses_shipped_indicators_without_a_local_overlay(tmp_path, 
         found = [row for row in repo.candidates('h1') if row['rule_id'] == RULE]
         assert len(found) == 1 and 'source address 192.0.2.174' in found[0]['claim']
         assert found[0]['lane'] == 'high'
+        assert not [cell for cell in repo.rule_cells('h1') if cell['rule_id'] == RULE]
+    finally:
+        repo.engine.dispose()
+
+
+@pytest.mark.parametrize('kind,value', [
+    ('ip', '192.0.2.174'), ('md5', 'ab'*16), ('sha1', 'ab'*20),
+    ('domain', 'example.test'), ('program_name', 'payload.exe'),
+])
+def test_packet_indicator_cell_requires_a_pinned_body_kind(tmp_path, monkeypatch, kind, value):
+    repo, _lists, _meta = repository([ImportedIndicator(kind, value)])
+    try:
+        stage(tmp_path, monkeypatch, repo, [response()])
+        assert not [cell for cell in repo.rule_cells('h1') if cell['rule_id'] == RULE]
+        if kind == 'ip':
+            assert any(row['rule_id'] == RULE for row in repo.candidates('h1'))
+    finally:
+        repo.engine.dispose()
+
+
+def test_packet_indicator_cell_does_not_inherit_another_rules_limit(tmp_path, monkeypatch):
+    from romulus.detect.base import Playbook
+
+    class LimitedBodyRule(Playbook):
+        id = 'fixture.body_limit'
+        version = '1'
+        families = ('http_body',)
+        def consume(self, events):
+            self.evaluated += len(events)
+            self.note_limit('fixture', 'Only the earlier rule reached its state budget')
+        def finalize(self):
+            return []
+
+    monkeypatch.setattr(hp, 'PACKET_PLAYBOOKS', [LimitedBodyRule])
+    repo, _lists, _meta = repository([ImportedIndicator('sha256', SHA256)])
+    try:
+        summary = stage(tmp_path, monkeypatch, repo, [response()])
+        [cell] = [cell for cell in repo.rule_cells('h1') if cell['rule_id'] == RULE]
+        assert cell['state'] == 'matched'
+        assert not any('earlier rule' in reason for reason in cell['detail']['reasons'])
+        assert any('earlier rule' in reason for reason in summary['partial_reasons'])
+    finally:
+        repo.engine.dispose()
+
+
+@pytest.mark.parametrize('pinned_body_kind', [False, True])
+def test_packet_matching_keeps_shipped_body_indicators_with_optional_pinned_lists(
+        tmp_path, monkeypatch, pinned_body_kind):
+    shipped = indicators.Indicator('shipped.body', 'sha256', (SHA256,),
+                                   'Listed body', 'high', 'high')
+    monkeypatch.setattr(indicators, '_SET', indicators.IndicatorSet([shipped], 'fixture'))
+    rows = [ImportedIndicator('url', URL)] if pinned_body_kind else []
+    repo, _lists, _meta = repository(rows)
+    try:
+        stage(tmp_path, monkeypatch, repo, [response()])
+        found = [row for row in repo.candidates('h1') if row['rule_id'] == RULE]
+        assert len(found) == 1 + int(pinned_body_kind)
+        assert any('response body with SHA-256' in row['claim'] for row in found)
+        cells = [cell for cell in repo.rule_cells('h1') if cell['rule_id'] == RULE]
+        assert len(cells) == int(pinned_body_kind)
+        if pinned_body_kind:
+            assert any('HTTP request target URL' in row['claim'] for row in found)
     finally:
         repo.engine.dispose()
 

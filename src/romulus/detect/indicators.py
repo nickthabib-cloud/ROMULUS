@@ -27,6 +27,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -57,6 +58,13 @@ from romulus.evidence.typed import TypedEvent, event_os_family
 KINDS = set(SUPPORTED_KINDS)
 HASH_KINDS = ('md5', 'sha1', 'sha256')
 CONTENT_KINDS = {*HASH_KINDS, 'url', 'x509_sha1', 'x509_sha256'}
+_HASH_FAMILIES = frozenset({'process_exec', 'image_load', 'file_change', 'file_transfer'})
+CONTENT_FAMILIES = {
+    'md5': _HASH_FAMILIES, 'sha1': _HASH_FAMILIES, 'sha256': _HASH_FAMILIES | {'http_body'},
+    'url': frozenset({'http_tx', 'http_access', 'net_session', 'remote_access', 'http_body'}),
+    'x509_sha1': frozenset({'tls_session', 'net_session'}),
+    'x509_sha256': frozenset({'tls_session', 'net_session', 'x509_certificate'}),
+}
 EXAMPLE_LIMIT = 20
 ADDRESS_FIELDS = (("source.ip", "source"), ("destination.ip", "destination"))
 DOMAIN_FIELDS = ("dns.question.name", "dns.question.names", "http.hostname", "url.domain")
@@ -187,7 +195,7 @@ class IndicatorMatch(Playbook):
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "ioc.indicator_match"
     anchor_class = "indicator"
-    version = f"7+{_SET.digest}"
+    version = f"8+{_SET.digest}"
     title = "Indicator list match in the field that gives it meaning"
     kind = "aggregate"
     claim_type = "observed_action"
@@ -369,7 +377,19 @@ class IndicatorMatch(Playbook):
                         scheme = 'http'
                     if isinstance(scheme, str):
                         names = (*((scheme_field,) if event.has(scheme_field) else ()), 'http.hostname', target_field)
-                        if item := offer('url', scheme+'://'+host+target, names, 'url:reconstructed'):
+                        authority = host
+                        try:
+                            explicit_port = urlsplit(scheme+'://'+host).port
+                        except ValueError:
+                            return
+                        port = event.get('destination.port')
+                        if explicit_port is None and port is not None:
+                            if not isinstance(port, int) or isinstance(port, bool) or not 0 < port <= 65535:
+                                return
+                            if port != {'http': 80, 'https': 443}.get(scheme.lower()):
+                                authority += ':'+str(port)
+                                names += ('destination.port',)
+                        if item := offer('url', scheme+'://'+authority+target, names, 'url:reconstructed'):
                             yield item
 
     def _content(self, event):
@@ -378,8 +398,9 @@ class IndicatorMatch(Playbook):
             available.add(kind)
             for ind in self._matching(kind, value):
                 self._keep((ind.id, role, event.host, value), event, {'field': fields})
-        self._kind_unsearchable.update(self._content_kinds - available)
-        self._batch_kind_unsearchable.update(self._content_kinds - available)
+        missing = {kind for kind in self._content_kinds - available if event.family in CONTENT_FAMILIES[kind]}
+        self._kind_unsearchable.update(missing)
+        self._batch_kind_unsearchable.update(missing)
 
     # Groups (indicator, role, host, value): the first 20 records cited (staged, held as ids) and a count. A listed
     # domain's subdomains are each a value, so there may be very many: HOT groups in memory, the rest on the rule's

@@ -47,10 +47,54 @@ def test_misp_composites_and_deleted_values(tmp_path):
         {'type': 'domain', 'value': 'deleted.example', 'deleted': True},
     ]})
     assert {(r.kind, r.value) for r in rows} == {
-        ('program_name', 'payload.exe'), ('md5', 'a' * 32), ('sha1', 'b' * 40),
-        ('program_name', 'loader.dll'), ('sha256', 'c' * 64),
+        ('md5', 'a' * 32), ('sha1', 'b' * 40), ('sha256', 'c' * 64),
         ('domain', 'example.com'), ('ip', '192.0.2.1'), ('cidr', '192.0.3.0/24')}
     assert report['skipped_by_reason'] == {'deleted': 1}
+    assert report['noted_by_reason'] == {'filename_not_imported': 3}
+
+
+@pytest.mark.parametrize('address', ['not-an-address', '999.2.3.4', '192.0.2.1/99'])
+def test_misp_domain_survives_an_invalid_composite_address(tmp_path, address):
+    rows, report = parse(tmp_path, {'Attribute': [
+        {'type': 'domain|ip', 'value': 'Example.COM|' + address}]})
+    assert [(r.kind, r.value) for r in rows] == [('domain', 'example.com')]
+    assert report['counts_by_kind'] == {'domain': 1}
+    assert report['skipped_by_reason'] == {'invalid_value': 1}
+
+
+@pytest.mark.parametrize('deleted', [True, 1, '1'])
+def test_misp_deleted_flags_exclude_the_attribute(tmp_path, deleted):
+    rows, report = parse(tmp_path, {'Attribute': [
+        {'type': 'domain', 'value': 'deleted.example', 'deleted': deleted}]})
+    assert rows == []
+    assert report['skipped_by_reason'] == {'deleted': 1}
+
+
+def test_misp_filename_hash_does_not_flag_a_genuine_executable(repo, tmp_path):
+    from romulus.detect.indicators import IndicatorMatch, IndicatorSet
+    from romulus.evidence.typed import fv
+    from tests.test_indicators import exec_event
+
+    rows, report = parse(tmp_path, {'Attribute': [
+        {'type': 'filename|sha256', 'value': 'svchost.exe|' + 'c' * 64}]})
+    store = IndicatorLists(repo)
+    create(repo, rows, report=report, lane='high', severity='critical', role='lead',
+           reason='Confirmed sample hash')
+    owner = IndicatorMatch(IndicatorSet())
+    owner.bind_indicators(repo, store.pin(NOW))
+    genuine = exec_event([r'C:\Windows\System32\svchost.exe', '-k', 'netsvcs'],
+                         r'C:\Windows\System32\svchost.exe', 'genuine')
+    genuine.fields['process.hash.sha256'] = fv('d' * 64, 'fixture:hash')
+    malicious = exec_event([r'C:\Temp\renamed.exe'], r'C:\Temp\renamed.exe', 'malicious')
+    malicious.fields['process.hash.sha256'] = fv('c' * 64, 'fixture:hash')
+    try:
+        owner.consume([genuine, malicious])
+        matches = list(owner.finalize())
+        assert len(matches) == 1
+        assert matches[0].proposed_lane == 'high'
+        assert [event.id for event in matches[0].events] == ['malicious']
+    finally:
+        owner.release_state()
 
 
 @pytest.mark.parametrize('format', ['csv', 'misp', 'stix'])
@@ -174,8 +218,16 @@ def test_retired_list_reactivation_requires_lead_and_is_audited(repo):
     store = IndicatorLists(repo)
     meta = create(repo)
     store.retire(meta['id'], actor='lead', role='lead')
-    with pytest.raises(PermissionError):
+    with pytest.raises(PermissionError) as caught:
         create(repo, list_id=meta['id'])
+    assert getattr(caught.value, 'audit_recorded', False)
+    with repo.engine.connect() as c:
+        rejection = c.execute(select(t.audit_event.c.actor, t.audit_event.c.detail).where(
+            t.audit_event.c.action == 'indicator_list.import_rejected')).one()
+    assert rejection.actor == 'analyst'
+    assert rejection.detail['id'] == meta['id']
+    assert rejection.detail['reason'] == 'retired_list_reactivation_requires_lead'
+    assert store.get(meta['id'])['status'] == 'retired'
     revived = create(repo, list_id=meta['id'], role='lead')
     assert revived['version'] == 2
     with repo.engine.connect() as c:
@@ -183,6 +235,27 @@ def test_retired_list_reactivation_requires_lead_and_is_audited(repo):
             t.audit_event.c.action == 'indicator_list.import',
             t.audit_event.c.detail['version'].as_integer() == 2)).scalar()
     assert detail['reactivated_retired'] is True
+
+
+def test_retirement_during_import_has_one_specific_rejection_and_removes_staging(repo):
+    store = IndicatorLists(repo)
+    meta = create(repo)
+    def rows():
+        yield ImportedIndicator('sha256', 'a' * 64)
+        store.retire(meta['id'], actor='lead', role='lead')
+    with pytest.raises(PermissionError) as caught:
+        create(repo, rows(), list_id=meta['id'])
+    assert getattr(caught.value, 'audit_recorded', False)
+    with repo.engine.connect() as c:
+        details = c.execute(select(t.audit_event.c.detail).where(
+            t.audit_event.c.action == 'indicator_list.import_rejected')).scalars().all()
+        assert c.execute(select(t.indicator_value).where(
+            t.indicator_value.c.list_version == 2)).first() is None
+        assert c.execute(select(t.indicator_list).where(
+            t.indicator_list.c.version == 2)).first() is None
+    assert len(details) == 1
+    assert details[0]['reason'] == 'retired_list_reactivation_requires_lead'
+    assert store.get(meta['id'])['status'] == 'retired'
 
 
 def test_service_converts_out_of_range_expiry_to_validation_error(repo):

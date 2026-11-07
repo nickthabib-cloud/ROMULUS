@@ -31,8 +31,12 @@ class _Fold:
     lane: str = 'context'
     ends: Ends = field(default_factory=Ends)
     examples: HeldExamples = field(default_factory=lambda: HeldExamples(2))
-    commands: HeldExamples = field(default_factory=lambda: HeldExamples(16))
-    command_keys: set[str] = field(default_factory=set)
+    command_first: HeldExamples = field(default_factory=lambda: HeldExamples(8))
+    command_last: HeldExamples = field(default_factory=lambda: HeldExamples(8))
+    command_first_keys: list[str] = field(default_factory=list)
+    command_last_keys: list[str] = field(default_factory=list)
+    command_count: int = 0
+    commands_exact: bool = True
     published: bool = False
     groups: int = 0
     exact: bool = True
@@ -62,7 +66,7 @@ class SigmaRule(Playbook):
         self.metadata = row
         self.id = 'sigma.'+row['id']
         self.title = row['title']
-        self.version = '2+'+row['digest']
+        self.version = '3+'+row['digest']
         self.ast = row['ast']
         mapping = row['mapping']
         self.category = mapping.get('category', '')
@@ -88,10 +92,12 @@ class SigmaRule(Playbook):
         self.groups = KeyedStore(self, 'sigma_groups', self.HOT)
         self.delivered = KeyedStore(self, 'sigma_delivered', self.HOT)
         self.overflow_keys = KeyedStore(self, 'sigma_overflow_keys', self.HOT)
+        self.command_keys = KeyedStore(self, 'sigma_commands', self.HOT)
         self.overflow = _Fold(None)
         self.bounds = BoundStage()
         self._pending = []
         self._fresh = []
+        self._command_pending = {}
         self.load = lambda ids: []
         self._detailed_groups = 0
         self._overflow_key = 'sigma-overflow:'+row['id']
@@ -108,6 +114,8 @@ class SigmaRule(Playbook):
         category = self.category
         if category == 'process_creation':
             values = [(name, event.get(name)) for name in ('process.executable', 'process.parent.executable')]
+        elif category in {'image_load', 'driver_load'}:
+            values = [(name, event.get(name)) for name in ('process.executable', 'image.path')]
         elif category == 'network_connection':
             values = [(name, event.get(name)) for name in
                       ('destination.ip', 'destination.hostname', 'destination.address', 'destination.domain',
@@ -139,16 +147,43 @@ class SigmaRule(Playbook):
         if state.examples.offer(event):
             self._pending.append(event)
             self._fresh.append(state.examples)
-        command = event.get('process.command_line')
+        _name, command = self._command(event)
         if command is None:
-            command = event.get('process.argv')
-        if command is not None and len(state.command_keys) < state.commands.limit:
-            digest = hashlib.sha256(_encoded(command).encode()).hexdigest()
-            if digest not in state.command_keys:
-                state.command_keys.add(digest)
-                if state.commands.offer(event):
-                    self._pending.append(event)
-                    self._fresh.append(state.commands)
+            return
+        digest = hashlib.sha256(_encoded(command).encode()).hexdigest()
+        identity = (key, digest)
+        if self.command_keys.get(identity) is not None:
+            return
+        if self.command_keys.put(identity, True):
+            state.command_count += 1
+        else:
+            state.commands_exact = False
+            account = self.command_keys.account()
+            reason = self.budget.new_key_reason(account)
+            text = ('Sigma payload identity budget: distinct counts are lower bounds; matching records and '
+                    f'bounded payload citations are retained ({reason}).')
+            self.note_limit('sigma_command_identity', text, 1)
+            limit = self.limits.get('state_budget:'+account.name)
+            if limit is not None:
+                limit.text = text
+        if digest in state.command_first_keys or digest in state.command_last_keys:
+            return
+        if state.command_first.offer(event):
+            state.command_first_keys.append(digest)
+        else:
+            if len(state.command_last) >= state.command_last.limit:
+                state.command_last.items.pop(0)
+                state.command_last_keys.pop(0)
+            state.command_last.offer(event)
+            state.command_last_keys.append(digest)
+        # Only the surviving head/tail witnesses reach the stage at the batch boundary.
+        self._command_pending[key] = state
+
+    def _command(self, event):
+        if self.category == 'ps_script':
+            return 'script.text', event.get('script.text')
+        name = 'process.command_line' if event.get('process.command_line') is not None else 'process.argv'
+        return name, event.get(name)
 
     def _coverage_budget(self):
         if not self.overflow.count:
@@ -166,6 +201,8 @@ class SigmaRule(Playbook):
                  sorted(self._batch_unknown.items())]
         if self.overflow.count:
             notes.append(self.limits['sigma_publication_budget'].text)
+        if 'sigma_command_identity' in self.limits:
+            notes.append(self.limits['sigma_command_identity'].text)
         return notes
 
     def consume(self, events):
@@ -218,8 +255,10 @@ class SigmaRule(Playbook):
             if kept % self.TRIM_EVERY == 0:
                 self.delivered.trim()
                 self.overflow_keys.trim()
+                self.command_keys.trim()
         self.delivered.trim()
         self.overflow_keys.trim()
+        self.command_keys.trim()
         self._coverage_budget()
         output = []
         for key, state in changed.items():
@@ -241,12 +280,18 @@ class SigmaRule(Playbook):
 
     def drain_staged(self):
         out, self._pending = self._pending+self.bounds.drain(), []
+        for state in self._command_pending.values():
+            for examples in (state.command_first, state.command_last):
+                out.extend(item[1] for item in examples.items if item[1] is not None)
+                examples.staged()
+        self._command_pending = {}
         for examples in self._fresh:
             examples.staged()
         self._fresh = []
         self.groups.trim()
         self.delivered.trim()
         self.overflow_keys.trim()
+        self.command_keys.trim()
         return out
 
     def drain_bounds(self):
@@ -264,7 +309,7 @@ class SigmaRule(Playbook):
                 *([f"Lead lane override: {provenance['activation_reason']}"]
                   if provenance['activation_reason'] else [])]
 
-    def _claim(self, state):
+    def _claim(self, state, command_cited=0):
         provenance = self.metadata
         first, last = (datetime.fromtimestamp(bound[0], UTC).isoformat()
                        for bound in (state.ends.first, state.ends.last))
@@ -272,6 +317,10 @@ class SigmaRule(Playbook):
         count = f'{state.count} record(s)' if state.exact else f'{state.count} matching delivery record(s)'
         claim = (f"{count} {subject} matched the Sigma rule {self.title} ({provenance['upstream_path']}@"
                  f"{provenance['upstream_commit']}) ({first} – {last}).")
+        if state.command_count or not state.commands_exact:
+            label = 'script texts' if self.category == 'ps_script' else 'command lines'
+            distinct = state.command_count if state.commands_exact else max(state.command_count, command_cited)
+            claim += f" {'' if state.commands_exact else 'At least '}{distinct} distinct {label}, {command_cited} cited."
         if state is self.overflow:
             claim += (f' This positive summary retains {state.groups} additional group(s) beyond the '
                       f'{self.PUBLICATION_LIMIT}-group publication budget; their separate candidates are withheld.')
@@ -289,7 +338,8 @@ class SigmaRule(Playbook):
         return match
 
     def _finding(self, key, state):
-        examples = state.examples.events(self.load)+state.commands.events(self.load)
+        examples = (state.examples.events(self.load)+state.command_first.events(self.load)
+                    +state.command_last.events(self.load))
         known = {event.id: event for event in examples}
         for side in (0, 1):
             pending = self.bounds.pending.get((key, side))
@@ -306,11 +356,16 @@ class SigmaRule(Playbook):
         for event in events:
             matched, fields, _unknown = evaluate_ast_detail(self.ast, event)
             names = list(dict.fromkeys(fields)) if matched else []
+            command_field, command = self._command(event)
+            if command is not None and command_field not in names:
+                names.append(command_field)
             names.extend(name for name in ('event.code', 'event.channel', 'event.provider')
                          if event.has(name) and name not in names)
             predicates.extend(pf(event, name) for name in names if event.has(name))
         entities = list(dict.fromkeys(entity for event in events for entity in event.entities()))
-        match = Match(self.id, self._claim(state), self.claim_type, events, predicates,
+        command_cited = len({hashlib.sha256(_encoded(command).encode()).hexdigest() for event in events
+                             if (command := self._command(event)[1]) is not None})
+        match = Match(self.id, self._claim(state, command_cited), self.claim_type, events, predicates,
             datetime.fromtimestamp(state.ends.first[0], UTC), self.severity, state.lane, 'medium', entities,
             context_ids=context)
         match.claim += cited_phrase(len(events), state.count, not missing)+bound_note(missing, state.ends)
@@ -352,9 +407,11 @@ class SigmaRule(Playbook):
         self.groups.clear()
         self.delivered.clear()
         self.overflow_keys.clear()
+        self.command_keys.clear()
         self.bounds.clear()
         self._pending = []
         self._fresh = []
+        self._command_pending = {}
 
 
 class SigmaEventIndex:

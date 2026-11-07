@@ -197,6 +197,68 @@ def test_mapping_exclusions_are_named_on_cells(tmp_path, monkeypatch):
         repo.engine.dispose()
 
 
+@pytest.mark.parametrize('kind,needle,reason_total', [
+    ('exclusion', 'Sigma mapping exclusion:', 101),
+    ('unknown', 'missing_typed_value: process.original_file_name', 102),
+    ('publication', 'Sigma publication budget:', 101),
+])
+def test_real_sweep_keeps_rule_specific_reasons_ahead_of_shared_native_reasons(
+        tmp_path, monkeypatch, kind, needle, reason_total):
+    if kind == 'exclusion':
+        owner = SigmaRule(metadata({'selection': {'Image|endswith': '\\evil.exe'}, 'condition': 'selection'},
+                                   category='network_connection'))
+    elif kind == 'unknown':
+        owner = SigmaRule(metadata({'selection': {'OriginalFileName': 'evil.exe'}, 'condition': 'selection'},
+                                   category='process_creation'))
+    else:
+        owner = SigmaRule(metadata({'selection': {'EventID': 1}, 'condition': 'selection'},
+                                   category='process_creation'))
+        owner.PUBLICATION_LIMIT = 0
+    instance, repo = run_rules(tmp_path, monkeypatch, [owner],
+        lambda _proxy: [f'native gap {number}: '+('long reason '*100) for number in range(100)])
+    try:
+        [cell] = repo.rule_cells('h1')
+        detail = cell['detail']
+        assert any(needle in reason for reason in detail['reasons'][:8])
+        assert detail['reason_total'] == reason_total
+        assert detail['reason_omitted'] == reason_total-8
+        assert detail['reason_truncated'] == 100
+        assert len(detail['reasons']) == 9 and max(map(len, detail['reasons'])) <= 256
+        assert len(json.dumps(detail)) < 3000
+        assert not instance.failed_rules
+    finally:
+        instance.close_stage()
+        repo.engine.dispose()
+
+
+@pytest.mark.parametrize('shared_reasons', [0, 100])
+def test_real_sweep_retains_positive_and_names_partial_distinct_counts_when_digest_state_is_full(
+        tmp_path, monkeypatch, shared_reasons):
+    from romulus.evidence.windows_catalog import SYSMON, SYSMON_CHANNEL
+    from tests.test_windows_rpc_retrieval import TARGET, WINDOW
+    from tests.windows_fixtures import LogicalWindowsEvent, windows_hit
+    owner = SigmaRule(metadata({'selection': {'EventID': 1}, 'condition': 'selection'}, category='process_creation'))
+    raw = windows_hit(LogicalWindowsEvent(SYSMON_CHANNEL, SYSMON, 1, 'ws01', 1, WINDOW.start.isoformat(),
+        {'Image': r'C:\Tools\evil.exe', 'CommandLine': 'evil.exe --late'}), 'elastic_agent')
+    raw['_index'] = TARGET
+    def reasons(_proxy):
+        owner.budget.force_full('disk capacity refused command identities',
+                                lambda account: account.name.endswith(':sigma_commands'))
+        return [f'native gap {number}' for number in range(shared_reasons)]
+    instance, repo = run_rules(tmp_path, monkeypatch, [owner], reasons, raws=[raw])
+    try:
+        [cell] = repo.rule_cells('h1')
+        assert cell['state'] == 'match_on_partial' and cell['evaluated'] == 1
+        assert 'distinct counts are lower bounds' in ' '.join(cell['detail']['reasons'][:8])
+        [candidate] = repo.candidates('h1')
+        assert 'At least 1 distinct command lines, 1 cited' in candidate['claim']
+        assert candidate['gate_results']['aggregate_summary']['count'] == 1
+        assert not instance.failed_rules
+    finally:
+        instance.close_stage()
+        repo.engine.dispose()
+
+
 def test_script_finalize_batches_publish_one_cited_sigma_group_and_bounded_coverage(tmp_path, monkeypatch):
     from datetime import timedelta
 

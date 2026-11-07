@@ -230,7 +230,7 @@ def test_catalog_coercion_and_replication_operations_use_catalog_attack(interfac
 def test_new_rules_are_registered_once_without_a_site_detection_gate():
     from romulus.detect.registry import PACK_VERSION, fresh_pack
     from romulus.evidence.windows import WINDOWS_NORMALIZER
-    assert PACK_VERSION == 'pack@50' and WINDOWS_NORMALIZER == 'windows-ecs@16'
+    assert PACK_VERSION == 'pack@51' and WINDOWS_NORMALIZER == 'windows-ecs@16'
     ids = [instance.id for instance in fresh_pack()]
     for name in ('win.rpc_coercion_call', 'win.rpc_replication_call', 'win.rpc_remote_admin_call'):
         assert ids.count(name) == 1

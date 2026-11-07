@@ -965,6 +965,7 @@ def run_packet_stage(s: Settings, repo, client, hunt_id: str, window: Window, co
             summary["http_sessions_without_body_type"][target] = unclassified
             run.run(sessions)
             heartbeat()
+            shared_reasons = tuple(run.partial)
             for pb in run.pack:
                 matched = run.published.get(pb.id, 0)
                 # The shipped-only IndicatorMatch API also supports small direct
@@ -974,16 +975,17 @@ def run_packet_stage(s: Settings, repo, client, hunt_id: str, window: Window, co
                     publish_match(repo, hunt_id, pb, m, None, run.raw_sources, owner_token=owner_token)
                     matched += 1
                 run.c["matched"] += matched
-                reasons = [*run.partial, *pb.limit_reasons()]
+                reasons = [*shared_reasons, *pb.limit_reasons()]
                 state = ("match_on_partial" if reasons else "matched") if matched else \
                     ("positive_only_partial" if reasons else "positive_only")
                 rule_selection = ("Only bodies whose Arkime magic is text, script or executable are carved; "
                                   +selection if pb is run.indicator else selection)
-                repo.set_rule_cell(hunt_id, pb.id, pb.version, f"{PCAP_TARGET}:{target}", window.key(), state,
-                                   matched, pb.evaluated,
-                                   {**run.c, "selection": rule_selection, "http_sessions_without_body_type": unclassified,
-                                    "reasons": [*reasons, *pb.coverage_notes()], "notes": run.notes,
-                                    "unexamined_sessions": run.unexamined}, owner_token=owner_token)
+                if pb is not run.indicator or (pb._overlay is not None and {'url', 'sha256'} & pb._overlay.kinds):
+                    repo.set_rule_cell(hunt_id, pb.id, pb.version, f"{PCAP_TARGET}:{target}", window.key(), state,
+                                       matched, pb.evaluated,
+                                       {**run.c, "selection": rule_selection, "http_sessions_without_body_type": unclassified,
+                                        "reasons": [*reasons, *pb.coverage_notes()], "notes": run.notes,
+                                        "unexamined_sessions": run.unexamined}, owner_token=owner_token)
                 run.partial.extend(reason for reason in pb.limit_reasons() if reason not in run.partial)
             for k in COUNTERS:
                 summary[k] += run.c[k]

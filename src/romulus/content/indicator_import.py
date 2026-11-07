@@ -455,7 +455,7 @@ def _misp_rows(attributes: Iterable[dict], result: ImportResult, include_non_ids
         if not isinstance(attr, dict):
             result._skip('invalid_misp_attribute', position)
             continue
-        if attr.get('deleted') is True:
+        if attr.get('deleted') in (True, '1'):
             result._skip('deleted', position)
             continue
         attr_type = attr.get('type')
@@ -478,19 +478,18 @@ def _misp_rows(attributes: Iterable[dict], result: ImportResult, include_non_ids
                 if len(pieces) != 2:
                     raise ValueError('invalid filename and hash')
                 value = pieces[1]
-                try:
-                    program = normalize_value('program_name', pieces[0])
-                except ValueError:
-                    pass
-                else:
-                    values.append(('program_name', program))
             elif attr_type == 'domain|ip':
                 pieces = value.split('|')
                 if len(pieces) != 2:
                     raise ValueError('invalid domain and address')
-                value = pieces[0]
+                value = normalize_value('domain', pieces[0])
                 address_kind = 'cidr' if '/' in pieces[1] else 'ip'
-                values.append((address_kind, normalize_value(address_kind, pieces[1])))
+                try:
+                    address = normalize_value(address_kind, pieces[1])
+                except ValueError:
+                    result._skip('invalid_value', position)
+                else:
+                    values.append((address_kind, address))
             if attr_type in {'ip-src|port', 'ip-dst|port'}:
                 pieces = value.split('|')
                 if (len(pieces) != 2 or not pieces[1].isascii() or not pieces[1].isdigit()
@@ -503,6 +502,8 @@ def _misp_rows(attributes: Iterable[dict], result: ImportResult, include_non_ids
         except ValueError:
             result._skip('invalid_value', position)
             continue
+        if attr_type.startswith('filename|'):
+            result._note('filename_not_imported', position)
         label = _label(attr.get('comment', ''), result, position)
         values.append((kind, value))
         for value_kind, value in values:

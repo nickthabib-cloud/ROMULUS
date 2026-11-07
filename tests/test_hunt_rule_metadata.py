@@ -50,7 +50,7 @@ def test_resolver_uses_pinned_fields_and_network_category_without_global_mutatio
         metadata = hunt_rule_metadata(repo, 'h1')['sigma.' + rule_id]
         assert metadata.title == 'Pinned network predicate'
         assert metadata.lane == 'lead'
-        assert metadata.version == '2+' + pins['applied'][0]['digest']
+        assert metadata.version == '3+' + pins['applied'][0]['digest']
         assert metadata.attack == ('T1071',)
         assert metadata.tactics == ('command-and-control',)
         assert metadata.kind == 'aggregate' and metadata.anchor_class == 'network_observation'

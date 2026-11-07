@@ -16,6 +16,8 @@
 <dl>{% for kind, count in item.import_report.get('counts_by_kind', {}).items() %}<dt>{{ kind }}</dt><dd>{{ count }}</dd>{% endfor %}</dl>
 <ul>{% for reason, count in item.import_report.get('skipped_by_reason', {}).items() %}<li>{{ reason }}: {{ count }}</li>{% endfor %}</ul>
 <details><summary>Skipped row details</summary><ul>{% for detail in item.import_report.get('skipped', []) %}<li>Position {{ detail.position }}: {{ detail.reason }}</li>{% endfor %}</ul></details>
+<ul>{% for reason, count in item.import_report.get('noted_by_reason', {}).items() %}<li>{{ reason }}: {{ count }}</li>{% endfor %}</ul>
+<details><summary>Import notes</summary><ul>{% for detail in item.import_report.get('notes', []) %}<li>{% if detail.position is defined %}Position {{ detail.position }}: {% endif %}{{ detail.reason }}{% if detail.id is defined %} ({{ detail.id }}){% endif %}{% if detail.replacement is defined %}; replacement: {{ detail.replacement }}{% endif %}</li>{% endfor %}</ul></details>
 <h2>Values (first 100)</h2>
 <p>Use the complete export for every value in this version.</p>
 <table class="grid"><thead><tr><th>Kind</th><th>Value</th><th>Label</th><th>ATT&amp;CK</th><th>Value expiry</th><th>Lane / severity</th></tr></thead><tbody>
