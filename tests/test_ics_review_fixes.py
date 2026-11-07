@@ -32,6 +32,27 @@ def test_unusable_request_endpoints_are_named_as_missing(sender, receiver):
     assert any('1 ICS requests had no typed endpoints' in note for note in owner.coverage_notes())
 
 
+@pytest.mark.parametrize('subfunction', [None, ''])
+def test_modbus_diagnostics_without_a_subfunction_are_not_a_clean_mode_change_evaluation(subfunction):
+    owner = rule('ModeChangeOrRestart')
+    extra = {} if subfunction is None else {'ics.subfunction': subfunction}
+    request = event(op='diagnostic', **{'ics.function_code': 8, 'ics.function_name': 'DIAGNOSTICS'}, **extra)
+    assert run(owner, [request]) == []
+    assert owner.missing_required == 1
+    assert any('1 Modbus diagnostics requests (function 8) had no typed subfunction' in note
+               for note in owner.coverage_notes())
+
+
+def test_typed_modbus_diagnostics_stay_judged_and_other_rules_ignore_them():
+    owner = rule('ModeChangeOrRestart')
+    typed = event(op='diagnostic', **{'ics.function_code': 8, 'ics.subfunction': 0})
+    assert run(owner, [typed]) == [] and owner.missing_required == 0
+    restart = event(op='restart', **{'ics.function_code': 8, 'ics.subfunction': 1})
+    assert [hit.proposed_lane for hit in run(rule('ModeChangeOrRestart'), [restart])] == ['high']
+    writes = rule('WriteOrControlCommand')
+    assert run(writes, [event(op='diagnostic', **{'ics.function_code': 8})]) == [] and writes.missing_required == 0
+
+
 def test_unknown_write_capable_protocol_functions_are_not_a_clean_evaluation():
     owner = rule('WriteOrControlCommand')
     assert run(owner, [event(op='other', protocol='s7comm')]) == []

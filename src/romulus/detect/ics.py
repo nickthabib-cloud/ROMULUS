@@ -201,6 +201,9 @@ class _Command(ZeekBehaviorRule):
     def selected_operation(self,event):
         return event.get('ics.op_class') in self.operations
 
+    def unjudged_operation(self,event):
+        """A (coverage key, note) when this request's operation cannot be classed for this rule."""
+
     def _unjudged(self,key,text):
         counts=self.__dict__.setdefault('_ics_unjudged',{})
         counts[key]=counts.get(key,0)+1
@@ -297,6 +300,9 @@ class _Command(ZeekBehaviorRule):
                     self._unjudged('ics_unknown_function',
                         '{count} requests used functions outside the catalogue and were not judged.')
                     continue
+                if (gap:=self.unjudged_operation(event)) is not None:
+                    self._unjudged(*gap)
+                    continue
                 if not _request_peers(event):
                     self._unjudged('ics_request_endpoints','{count} ICS requests had no typed endpoints.')
                     continue
@@ -374,6 +380,16 @@ class ModeChangeOrRestart(_Command):
     title='ICS mode-change or restart request observed'
     attack=('T0858','T0816')
     operations=frozenset({'mode_change','restart'})
+
+    def unjudged_operation(self,event):
+        # Base modbus.log has no subfunction column, so a diagnostics request there may be Restart
+        # Communications or Force Listen Only Mode; only a typed subfunction separates them from echo/counters.
+        if (event.get('ics.protocol')=='modbus' and event.get('ics.function_code')==8
+                and event.get('ics.op_class')=='diagnostic' and event.get('ics.subfunction') in (None,'')):
+            return ('ics_modbus_diagnostic_subfunction',
+                    ('{count} Modbus diagnostics requests (function 8) had no typed subfunction; '
+                     'restart or listen-only mode changes among them were not judged.'))
+        return None
 
     def judge(self,event):
         if not self.selected_operation(event) or not (peers:=_request_peers(event)):

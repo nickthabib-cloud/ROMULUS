@@ -9,8 +9,8 @@ from romulus.hunt.zeek_sources import _marker_refused, native_field, source_grou
 from romulus.sources.models import Predicate
 
 SELECTION_NOTE = ('Routine read requests and responses were excluded at retrieval where verified native function fields permit it; '
-    'ICS rules evaluated write, control, program-transfer, mode-change, restart, diagnostic and discovery '
-    'functions, unknown functions, and exceptions.')
+    'ICS rules evaluated write, control, program-transfer, mode-change, restart and discovery functions '
+    'and exceptions; requests whose function or subfunction is not typed are counted as not judged.')
 
 
 @dataclass
