@@ -157,7 +157,7 @@ def test_nullable_time_downgrade_refuses_to_drop_untimed_positive(tmp_path, acti
     assert Repo(engine).candidate(candidate["id"])["ts"] is None
     with engine.connect() as conn:
         assert conn.exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
-        assert conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one() == "0033"
+        assert conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one() == "0034"
         assert conn.exec_driver_sql("PRAGMA foreign_key_check").all() == []
 
 
@@ -211,5 +211,5 @@ def test_visibility_migration_successful_downgrade_and_upgrade(tmp_path):
     migrate(engine)
     assert "report_zeek_visibility" in inspect(engine).get_table_names()
     with engine.connect() as conn:
-        assert conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one() == "0033"
+        assert conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one() == "0034"
         assert conn.exec_driver_sql("PRAGMA foreign_key_check").all() == []

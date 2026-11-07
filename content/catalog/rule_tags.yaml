@@ -1,0 +1,1246 @@
+tools:
+- name: AnyDesk, TeamViewer, RustDesk, ScreenConnect, MeshCentral/MeshAgent, Atera,
+    VNC servers, NoMachine
+  kind: dual-use
+  rules: []
+- name: BPFDoor
+  kind: offensive
+  rules: []
+- name: Brute Ratel C4
+  kind: dual-use
+  rules: []
+- name: chisel
+  kind: dual-use
+  rules: []
+- name: Cobalt Strike (Beacon; Linux via third-party CrossC2)
+  kind: dual-use
+  rules: []
+- name: Ebury and patched OpenSSH/PAM backdoors
+  kind: offensive
+  rules: []
+- name: Empire (python agent on Linux)
+  kind: dual-use
+  rules: []
+- name: enum4linux(-ng), smbmap, smbclient, rpcclient, ldapsearch, kerbrute, NetExec/CrackMapExec
+  kind: dual-use
+  rules: []
+- name: frp (fast reverse proxy)
+  kind: dual-use
+  rules: []
+- name: gost, 3proxy, microsocks and other SOCKS/HTTP proxy servers
+  kind: dual-use
+  rules: []
+- name: Havoc
+  kind: dual-use
+  rules: []
+- name: hydra, medusa, ncrack, patator, crowbar
+  kind: dual-use
+  rules: []
+- name: Impacket (secretsdump, psexec/smbexec/wmiexec/atexec, GetUserSPNs, ntlmrelayx)
+  kind: dual-use
+  rules: []
+- name: iodine, dnscat2, dns2tcp
+  kind: dual-use
+  rules: []
+- name: john, hashcat
+  kind: dual-use
+  rules:
+  - host.credential_store_read
+- name: Kinsing, TeamTNT-style kits, Hildegard, Doki, Skidmap; XMRig miners
+  kind: offensive
+  rules:
+  - host.download_piped_to_shell
+- name: LD_PRELOAD rootkits (libprocesshider, BEURK, Jynx2, Azazel), OrBit, Symbiote-style
+  kind: offensive
+  rules: []
+- name: ligolo-ng
+  kind: dual-use
+  rules: []
+- name: linpeas, LinEnum, linux-exploit-suggester, lse.sh, linuxprivchecker, unix-privesc-check
+  kind: dual-use
+  rules:
+  - host.download_piped_to_shell
+  - host.downloader_feeds_interpreter
+  - host.script_from_temp_dir
+- name: Linux implants from public reporting (Exaramel for Linux, Winnti for Linux,
+    RotaJakiro, HiddenWasp)
+  kind: offensive
+  rules: []
+- name: LKM rootkits (Diamorphine, Reptile, Medusa/MEDUSA)
+  kind: offensive
+  rules: []
+- name: Metasploit Framework / Meterpreter (incl. mettle Linux payloads)
+  kind: dual-use
+  rules:
+  - host.web_service_spawns_interpreter
+- name: mimipenguin, LaZagne (Linux), 3snake, sshd/sudo ptrace sniffers
+  kind: offensive
+  rules:
+  - host.credential_store_read
+- name: Mirai/Gafgyt variants, XorDDoS, Tsunami/Kaiten, Kaiji
+  kind: offensive
+  rules:
+  - host.download_piped_to_shell
+- name: Mythic (agents such as Poseidon, Merlin, Medusa)
+  kind: dual-use
+  rules: []
+- name: netcat family (nc, ncat, netcat-openbsd, netcat-traditional, busybox nc)
+  kind: dual-use
+  rules: []
+- name: Network-device implants (VPNFilter, Cyclops Blink and similar router/firewall
+    malware)
+  kind: offensive
+  rules: []
+- name: ngrok (and similar tunnelling services)
+  kind: dual-use
+  rules: []
+- name: nikto, nuclei, gobuster, ffuf, feroxbuster, dirb, wpscan, whatweb
+  kind: dual-use
+  rules:
+  - net.tool_user_agent_http
+  - web.scan_burst
+- name: nmap, masscan, zmap, rustscan, naabu
+  kind: dual-use
+  rules:
+  - net.port_scan
+  - net.tool_user_agent_http
+- name: OpenSSH forwarding, sshuttle, autossh, plink
+  kind: dual-use
+  rules: []
+- name: pspy
+  kind: dual-use
+  rules: []
+- name: ptunnel, icmpsh, hans and similar ICMP tunnels
+  kind: dual-use
+  rules: []
+- name: Public local privilege-escalation exploits (PwnKit, Dirty Pipe, Dirty COW,
+    Looney Tunables, etc.)
+  kind: offensive
+  rules:
+  - host.exec_from_temp_dir
+- name: Pupy
+  kind: dual-use
+  rules: []
+- name: pwncat / pwncat-cs
+  kind: dual-use
+  rules:
+  - host.ssh_authorized_keys_write
+- name: rclone (and megacmd, aws/gsutil/azcopy CLIs used for exfiltration)
+  kind: dual-use
+  rules: []
+- name: reGeorg, Neo-reGeorg, suo5, Tunna, ABPTTS (HTTP tunnelling through web shells)
+  kind: offensive
+  rules: []
+- name: Responder, mitm6, bettercap, ettercap, arpspoof
+  kind: dual-use
+  rules: []
+- name: scp, sftp, rsync, curl/wget uploads, transfer services
+  kind: dual-use
+  rules: []
+- name: Sliver
+  kind: dual-use
+  rules:
+  - host.exec_from_temp_dir
+- name: socat
+  kind: dual-use
+  rules: []
+- name: sqlmap
+  kind: dual-use
+  rules:
+  - net.suricata_alert_stack
+  - web.scan_burst
+- name: Tailscale, ZeroTier, Cloudflare Tunnel (cloudflared), WireGuard
+  kind: dual-use
+  rules: []
+- name: tcpdump, tshark/dumpcap, scapy
+  kind: dual-use
+  rules: []
+- name: Tor client
+  kind: dual-use
+  rules: []
+- name: VShell / Supershell family (open-source C2 seen with Linux implants)
+  kind: offensive
+  rules:
+  - host.download_piped_to_shell
+  - host.downloader_feeds_interpreter
+- name: Web shells (weevely, p0wny-shell, b374k, China Chopper, P.A.S. Webshell, Godzilla/Behinder-style)
+  kind: offensive
+  rules:
+  - host.web_service_spawns_interpreter
+lotl:
+- name: 7z
+  platform: Linux
+  rules: []
+- name: adduser
+  platform: Linux
+  rules: []
+- name: apt
+  platform: Linux
+  rules: []
+- name: apt-get
+  platform: Linux
+  rules: []
+- name: arp
+  platform: Linux
+  rules: []
+- name: at
+  platform: Linux
+  rules:
+  - host.downloader_feeds_interpreter
+- name: auditctl
+  platform: Linux
+  rules: []
+- name: augenrules
+  platform: Linux
+  rules: []
+- name: awk
+  platform: Linux
+  rules: []
+- name: base32
+  platform: Linux
+  rules:
+  - host.download_piped_to_shell
+- name: base64
+  platform: Linux
+  rules:
+  - host.credential_store_read
+  - host.download_piped_to_shell
+- name: bash
+  platform: Linux
+  rules:
+  - host.download_piped_to_shell
+  - host.downloader_feeds_interpreter
+  - host.web_service_spawns_interpreter
+- name: batch
+  platform: Linux
+  rules:
+  - host.downloader_feeds_interpreter
+- name: busybox awk
+  platform: Linux
+  rules: []
+- name: busybox sh
+  platform: Linux
+  rules:
+  - host.download_piped_to_shell
+  - host.downloader_feeds_interpreter
+  - host.web_service_spawns_interpreter
+- name: busybox wget
+  platform: Linux
+  rules:
+  - host.download_piped_to_shell
+  - host.downloader_feeds_interpreter
+- name: bzip2
+  platform: Linux
+  rules: []
+- name: cargo
+  platform: Linux
+  rules: []
+- name: cat
+  platform: Linux
+  rules:
+  - host.credential_store_read
+- name: cat /etc/passwd
+  platform: Linux
+  rules: []
+- name: chage
+  platform: Linux
+  rules: []
+- name: chattr
+  platform: Linux
+  rules: []
+- name: chmod
+  platform: Linux
+  rules: []
+- name: chown
+  platform: Linux
+  rules: []
+- name: chpasswd
+  platform: Linux
+  rules: []
+- name: chroot
+  platform: Linux
+  rules: []
+- name: cp
+  platform: Linux
+  rules:
+  - host.credential_store_read
+- name: crictl
+  platform: Linux
+  rules: []
+- name: crontab
+  platform: Linux
+  rules:
+  - host.downloader_feeds_interpreter
+- name: crontab -l
+  platform: Linux
+  rules: []
+- name: ctr
+  platform: Linux
+  rules: []
+- name: curl
+  platform: Linux
+  rules:
+  - host.download_piped_to_shell
+  - host.downloader_feeds_interpreter
+- name: daemon
+  platform: Linux
+  rules: []
+- name: dash
+  platform: Linux
+  rules:
+  - host.download_piped_to_shell
+  - host.downloader_feeds_interpreter
+  - host.web_service_spawns_interpreter
+- name: dd
+  platform: Linux
+  rules: []
+- name: debugfs
+  platform: Linux
+  rules: []
+- name: df
+  platform: Linux
+  rules: []
+- name: dig
+  platform: Linux
+  rules: []
+- name: disown (builtin)
+  platform: Linux
+  rules: []
+- name: dkms
+  platform: Linux
+  rules: []
+- name: dnf
+  platform: Linux
+  rules: []
+- name: doas
+  platform: Linux
+  rules: []
+- name: docker
+  platform: Linux
+  rules: []
+- name: dpkg
+  platform: Linux
+  rules: []
+- name: dpkg -l
+  platform: Linux
+  rules: []
+- name: drill
+  platform: Linux
+  rules: []
+- name: ed
+  platform: Linux
+  rules: []
+- name: env
+  platform: Linux
+  rules: []
+- name: fdisk
+  platform: Linux
+  rules: []
+- name: find
+  platform: Linux
+  rules: []
+- name: firewall-cmd
+  platform: Linux
+  rules:
+  - host.firewall_rule_change_command
+- name: flock
+  platform: Linux
+  rules: []
+- name: fping
+  platform: Linux
+  rules: []
+- name: ftp
+  platform: Linux
+  rules: []
+- name: gawk
+  platform: Linux
+  rules: []
+- name: gdb
+  platform: Linux
+  rules: []
+- name: gem
+  platform: Linux
+  rules: []
+- name: getcap
+  platform: Linux
+  rules: []
+- name: getent
+  platform: Linux
+  rules: []
+- name: git
+  platform: Linux
+  rules: []
+- name: go
+  platform: Linux
+  rules: []
+- name: gpasswd
+  platform: Linux
+  rules: []
+- name: grep
+  platform: Linux
+  rules:
+  - host.credential_store_read
+- name: groupadd
+  platform: Linux
+  rules: []
+- name: gzip
+  platform: Linux
+  rules:
+  - host.download_piped_to_shell
+- name: head
+  platform: Linux
+  rules:
+  - host.credential_store_read
+- name: host
+  platform: Linux
+  rules: []
+- name: hostname
+  platform: Linux
+  rules: []
+- name: hostnamectl
+  platform: Linux
+  rules: []
+- name: hping3
+  platform: Linux
+  rules: []
+- name: id
+  platform: Linux
+  rules: []
+- name: ifconfig
+  platform: Linux
+  rules: []
+- name: insmod
+  platform: Linux
+  rules: []
+- name: ionice
+  platform: Linux
+  rules: []
+- name: ip
+  platform: Linux
+  rules: []
+- name: ip6tables
+  platform: Linux
+  rules:
+  - host.firewall_rule_change_command
+- name: iptables
+  platform: Linux
+  rules:
+  - host.firewall_rule_change_command
+- name: journalctl
+  platform: Linux
+  rules: []
+- name: kmod
+  platform: Linux
+  rules: []
+- name: ksh
+  platform: Linux
+  rules:
+  - host.download_piped_to_shell
+  - host.downloader_feeds_interpreter
+  - host.web_service_spawns_interpreter
+- name: kubectl
+  platform: Linux
+  rules: []
+- name: last
+  platform: Linux
+  rules: []
+- name: ld.so
+  platform: Linux
+  rules: []
+- name: ldconfig
+  platform: Linux
+  rules: []
+- name: ldd
+  platform: Linux
+  rules: []
+- name: less
+  platform: Linux
+  rules:
+  - host.credential_store_read
+- name: logger
+  platform: Linux
+  rules: []
+- name: logrotate
+  platform: Linux
+  rules: []
+- name: losetup
+  platform: Linux
+  rules: []
+- name: lsblk
+  platform: Linux
+  rules: []
+- name: lsmod
+  platform: Linux
+  rules: []
+- name: lsof
+  platform: Linux
+  rules: []
+- name: ltrace
+  platform: Linux
+  rules: []
+- name: lua
+  platform: Linux
+  rules:
+  - host.web_service_spawns_interpreter
+- name: luajit
+  platform: Linux
+  rules:
+  - host.web_service_spawns_interpreter
+- name: man
+  platform: Linux
+  rules: []
+- name: mawk
+  platform: Linux
+  rules: []
+- name: mkfifo
+  platform: Linux
+  rules: []
+- name: mknod
+  platform: Linux
+  rules: []
+- name: modprobe
+  platform: Linux
+  rules: []
+- name: more
+  platform: Linux
+  rules: []
+- name: mount
+  platform: Linux
+  rules: []
+- name: nano
+  platform: Linux
+  rules: []
+- name: nc (see tools.yaml)
+  platform: Linux
+  rules: []
+- name: netstat
+  platform: Linux
+  rules: []
+- name: nft
+  platform: Linux
+  rules:
+  - host.firewall_rule_change_command
+- name: nice
+  platform: Linux
+  rules: []
+- name: node
+  platform: Linux
+  rules:
+  - host.web_service_spawns_interpreter
+- name: nodejs
+  platform: Linux
+  rules:
+  - host.web_service_spawns_interpreter
+- name: nohup
+  platform: Linux
+  rules: []
+- name: nping
+  platform: Linux
+  rules: []
+- name: npm
+  platform: Linux
+  rules: []
+- name: nsenter
+  platform: Linux
+  rules: []
+- name: nslookup
+  platform: Linux
+  rules: []
+- name: od
+  platform: Linux
+  rules:
+  - host.download_piped_to_shell
+- name: openssl
+  platform: Linux
+  rules: []
+- name: parted
+  platform: Linux
+  rules: []
+- name: passwd
+  platform: Linux
+  rules: []
+- name: perf
+  platform: Linux
+  rules: []
+- name: perl
+  platform: Linux
+  rules:
+  - host.web_service_spawns_interpreter
+- name: php
+  platform: Linux
+  rules:
+  - host.web_service_spawns_interpreter
+- name: php-cli
+  platform: Linux
+  rules:
+  - host.web_service_spawns_interpreter
+- name: ping
+  platform: Linux
+  rules: []
+- name: pip
+  platform: Linux
+  rules: []
+- name: pip3
+  platform: Linux
+  rules: []
+- name: pkexec
+  platform: Linux
+  rules: []
+- name: podman
+  platform: Linux
+  rules: []
+- name: ps
+  platform: Linux
+  rules: []
+- name: python
+  platform: Linux
+  rules:
+  - host.python_pty_spawn
+- name: python2
+  platform: Linux
+  rules:
+  - host.python_pty_spawn
+- name: python3
+  platform: Linux
+  rules:
+  - host.python_pty_spawn
+- name: pythonX.Y
+  platform: Linux
+  rules:
+  - host.python_pty_spawn
+- name: resolvectl
+  platform: Linux
+  rules: []
+- name: rlwrap
+  platform: Linux
+  rules: []
+- name: rm
+  platform: Linux
+  rules: []
+- name: rmmod
+  platform: Linux
+  rules: []
+- name: route
+  platform: Linux
+  rules: []
+- name: rpm
+  platform: Linux
+  rules: []
+- name: rpm -qa
+  platform: Linux
+  rules: []
+- name: rsync
+  platform: Linux
+  rules: []
+- name: ruby
+  platform: Linux
+  rules:
+  - host.web_service_spawns_interpreter
+- name: scp
+  platform: Linux
+  rules: []
+- name: screen
+  platform: Linux
+  rules: []
+- name: setarch
+  platform: Linux
+  rules: []
+- name: setcap
+  platform: Linux
+  rules: []
+- name: setfacl
+  platform: Linux
+  rules: []
+- name: setsid
+  platform: Linux
+  rules: []
+- name: sftp
+  platform: Linux
+  rules: []
+- name: sgdisk
+  platform: Linux
+  rules: []
+- name: sh
+  platform: Linux
+  rules:
+  - host.download_piped_to_shell
+  - host.downloader_feeds_interpreter
+  - host.web_service_spawns_interpreter
+- name: shred
+  platform: Linux
+  rules: []
+- name: ss
+  platform: Linux
+  rules: []
+- name: ssh
+  platform: Linux
+  rules: []
+- name: sshpass
+  platform: Linux
+  rules: []
+- name: start-stop-daemon
+  platform: Linux
+  rules: []
+- name: stdbuf
+  platform: Linux
+  rules: []
+- name: strace
+  platform: Linux
+  rules: []
+- name: strings
+  platform: Linux
+  rules:
+  - host.credential_store_read
+- name: su
+  platform: Linux
+  rules: []
+- name: sudo
+  platform: Linux
+  rules: []
+- name: sudo -l
+  platform: Linux
+  rules: []
+- name: sudoedit
+  platform: Linux
+  rules: []
+- name: systemctl
+  platform: Linux
+  rules:
+  - host.downloader_feeds_interpreter
+- name: systemctl list-units
+  platform: Linux
+  rules: []
+- name: systemd-run
+  platform: Linux
+  rules:
+  - host.downloader_feeds_interpreter
+- name: tail
+  platform: Linux
+  rules:
+  - host.credential_store_read
+- name: tar
+  platform: Linux
+  rules: []
+- name: taskset
+  platform: Linux
+  rules: []
+- name: telnet
+  platform: Linux
+  rules: []
+- name: tftp
+  platform: Linux
+  rules: []
+- name: time
+  platform: Linux
+  rules: []
+- name: timeout
+  platform: Linux
+  rules: []
+- name: tmux
+  platform: Linux
+  rules: []
+- name: top
+  platform: Linux
+  rules: []
+- name: touch
+  platform: Linux
+  rules: []
+- name: truncate
+  platform: Linux
+  rules: []
+- name: ufw
+  platform: Linux
+  rules:
+  - host.firewall_rule_change_command
+- name: uname
+  platform: Linux
+  rules: []
+- name: unshare
+  platform: Linux
+  rules: []
+- name: unzip
+  platform: Linux
+  rules: []
+- name: useradd
+  platform: Linux
+  rules: []
+- name: userdel
+  platform: Linux
+  rules: []
+- name: usermod
+  platform: Linux
+  rules: []
+- name: uudecode
+  platform: Linux
+  rules:
+  - host.download_piped_to_shell
+- name: vi
+  platform: Linux
+  rules: []
+- name: view
+  platform: Linux
+  rules: []
+- name: vim
+  platform: Linux
+  rules: []
+- name: vipw
+  platform: Linux
+  rules: []
+- name: w
+  platform: Linux
+  rules: []
+- name: wget
+  platform: Linux
+  rules:
+  - host.download_piped_to_shell
+  - host.downloader_feeds_interpreter
+- name: who
+  platform: Linux
+  rules: []
+- name: whoami
+  platform: Linux
+  rules: []
+- name: wipefs
+  platform: Linux
+  rules: []
+- name: xargs
+  platform: Linux
+  rules: []
+- name: xxd
+  platform: Linux
+  rules:
+  - host.download_piped_to_shell
+- name: xz
+  platform: Linux
+  rules: []
+- name: yum
+  platform: Linux
+  rules: []
+- name: zcat
+  platform: Linux
+  rules:
+  - host.download_piped_to_shell
+- name: zip
+  platform: Linux
+  rules: []
+- name: zsh
+  platform: Linux
+  rules:
+  - host.download_piped_to_shell
+  - host.downloader_feeds_interpreter
+  - host.web_service_spawns_interpreter
+themes:
+- name: /etc/passwd and /etc/shadow
+  description: /etc/passwd and /etc/shadow.
+  rules:
+  - context.credential_access
+  - host.credential_store_read
+- name: Abuse Elevation Control Mechanism
+  description: Abuse Elevation Control Mechanism.
+  rules:
+  - context.privilege_probing
+- name: Account created or modified, then authenticated from the network
+  description: Account created or modified, then authenticated from the network.
+  rules: []
+- name: Account Discovery
+  description: Account Discovery.
+  rules:
+  - context.post_access_discovery
+- name: Account Manipulation
+  description: Account Manipulation.
+  rules:
+  - host.ssh_authorized_keys_write
+- name: Active Scanning
+  description: Active Scanning.
+  rules:
+  - net.port_scan
+  - web.scan_burst
+- name: Adversary-in-the-Middle
+  description: Adversary-in-the-Middle.
+  rules:
+  - net.suricata_alert_stack
+- name: Application Layer Protocol
+  description: Application Layer Protocol.
+  rules:
+  - net.suricata_alert_stack
+- name: Archive Collected Data
+  description: Archive Collected Data.
+  rules:
+  - context.staging_and_transfer
+- name: Archive via Utility
+  description: Archive via Utility.
+  rules:
+  - context.staging_and_transfer
+- name: At
+  description: At.
+  rules:
+  - host.nonroot_write_root_executed_file
+- name: Beaconing session joined to its host process
+  description: Beaconing session joined to its host process.
+  rules: []
+- name: Client fingerprint versus host process identity
+  description: Client fingerprint versus host process identity.
+  rules: []
+- name: Clock-skew calibration from exact sshd joins (supporting method)
+  description: Clock-skew calibration from exact sshd joins (supporting method).
+  rules: []
+- name: Command and Scripting Interpreter
+  description: Command and Scripting Interpreter.
+  rules:
+  - host.exec_from_temp_dir
+  - host.script_from_temp_dir
+  - host.web_service_spawns_interpreter
+- name: Command Obfuscation
+  description: Command Obfuscation.
+  rules:
+  - host.download_piped_to_shell
+- name: Compile After Delivery
+  description: Compile After Delivery.
+  rules:
+  - host.exec_from_temp_dir
+- name: Credentials from Password Stores
+  description: Credentials from Password Stores.
+  rules:
+  - context.credential_access
+- name: Credentials from Web Browsers
+  description: Credentials from Web Browsers.
+  rules:
+  - context.credential_access
+- name: Credentials In Files
+  description: Credentials In Files.
+  rules:
+  - context.credential_access
+- name: Cron
+  description: Cron.
+  rules:
+  - host.downloader_feeds_interpreter
+  - host.nonroot_write_root_executed_file
+- name: Deobfuscate/Decode Files or Information
+  description: Deobfuscate/Decode Files or Information.
+  rules:
+  - host.download_piped_to_shell
+- name: Disable or Modify System Firewall
+  description: Disable or Modify System Firewall.
+  rules:
+  - host.firewall_rule_change_command
+- name: DNS
+  description: DNS.
+  rules:
+  - net.dns_subdomain_enumeration
+- name: DNS resolution joined to the connection and the process
+  description: DNS resolution joined to the connection and the process.
+  rules: []
+- name: DNS tunnelling shape joined to the issuing host process
+  description: DNS tunnelling shape joined to the issuing host process.
+  rules: []
+- name: Download flow followed by execution of the downloaded path
+  description: Download flow followed by execution of the downloaded path.
+  rules: []
+- name: Encrypted/Encoded File
+  description: Encrypted/Encoded File.
+  rules:
+  - context.staging_and_transfer
+- name: Exfiltration Over Alternative Protocol
+  description: Exfiltration Over Alternative Protocol.
+  rules:
+  - context.staging_and_transfer
+- name: Exploit Public-Facing Application
+  description: Exploit Public-Facing Application.
+  rules:
+  - host.web_service_spawns_interpreter
+- name: Exploitation for Credential Access
+  description: Exploitation for Credential Access.
+  rules:
+  - net.suricata_alert_stack
+- name: Exploitation for Privilege Escalation
+  description: Exploitation for Privilege Escalation.
+  rules:
+  - context.privilege_probing
+  - host.exec_from_temp_dir
+- name: Exploitation of Remote Services
+  description: Exploitation of Remote Services.
+  rules:
+  - net.suricata_alert_stack
+- name: External Remote Services
+  description: External Remote Services.
+  rules:
+  - host.ssh_login_external_source
+- name: File and Directory Discovery
+  description: File and Directory Discovery.
+  rules:
+  - context.post_access_discovery
+- name: Hijack Execution Flow
+  description: Hijack Execution Flow.
+  rules:
+  - host.nonroot_write_root_executed_file
+- name: Host firewall change followed by flow state changes
+  description: Host firewall change followed by flow state changes.
+  rules:
+  - host.firewall_rule_change_command
+- name: Inbound exploit alert followed by service-account process activity on the
+    target
+  description: Inbound exploit alert followed by service-account process activity
+    on the target.
+  rules: []
+- name: Inbound web request followed by a web-service child process
+  description: Inbound web request followed by a web-service child process.
+  rules: []
+- name: Ingress Tool Transfer
+  description: Ingress Tool Transfer.
+  rules:
+  - host.download_piped_to_shell
+  - host.downloader_feeds_interpreter
+  - net.tool_user_agent_http
+- name: Internal scan source joined to the scanning process
+  description: Internal scan source joined to the scanning process.
+  rules: []
+- name: Interpreter, shell or web-service account with an external socket
+  description: Interpreter, shell or web-service account with an external socket.
+  rules: []
+- name: Large outbound transfer joined to staging and archiving on the host
+  description: Large outbound transfer joined to staging and archiving on the host.
+  rules: []
+- name: Lateral SSH chain across hosts
+  description: Lateral SSH chain across hosts.
+  rules: []
+- name: Lateral Tool Transfer
+  description: Lateral Tool Transfer.
+  rules:
+  - context.lateral_movement
+  - context.staging_and_transfer
+- name: Local Account
+  description: Local Account.
+  rules:
+  - context.post_access_discovery
+- name: Local Accounts
+  description: Local Accounts.
+  rules:
+  - host.ssh_login_external_source
+- name: Local Data Staging
+  description: Local Data Staging.
+  rules:
+  - context.staging_and_transfer
+- name: Local Groups
+  description: Local Groups.
+  rules:
+  - context.post_access_discovery
+- name: Local Storage Discovery
+  description: Local Storage Discovery.
+  rules:
+  - context.post_access_discovery
+- name: Login session to commands to network effects
+  description: Login session to commands to network effects.
+  rules: []
+- name: Long-lived session joined to its host process
+  description: Long-lived session joined to its host process.
+  rules: []
+- name: Malicious Copy and Paste
+  description: Malicious Copy and Paste.
+  rules:
+  - host.download_piped_to_shell
+- name: Malicious File
+  description: Malicious File.
+  rules:
+  - host.exec_from_temp_dir
+- name: Match Legitimate Resource Name or Location
+  description: Match Legitimate Resource Name or Location.
+  rules:
+  - host.exec_from_temp_dir
+  - host.script_from_temp_dir
+- name: Network Denial of Service
+  description: Network Denial of Service.
+  rules:
+  - host.firewall_rule_change_command
+- name: Network Service Discovery
+  description: Network Service Discovery.
+  rules:
+  - net.port_scan
+- name: Network Share Discovery
+  description: Network Share Discovery.
+  rules:
+  - context.post_access_discovery
+- name: New listener joined to inbound sessions (bind shell, relay, proxy)
+  description: New listener joined to inbound sessions (bind shell, relay, proxy).
+  rules: []
+- name: Non-TCP/UDP tunnelling joined to raw-socket processes
+  description: Non-TCP/UDP tunnelling joined to raw-socket processes.
+  rules: []
+- name: OS Credential Dumping
+  description: OS Credential Dumping.
+  rules:
+  - host.credential_store_read
+- name: Outbound to web services joined to a non-browser process
+  description: Outbound to web services joined to a non-browser process.
+  rules: []
+- name: Password Managers
+  description: Password Managers.
+  rules:
+  - context.credential_access
+- name: Password Policy Discovery
+  description: Password Policy Discovery.
+  rules:
+  - context.post_access_discovery
+- name: Peripheral Device Discovery
+  description: Peripheral Device Discovery.
+  rules:
+  - context.post_access_discovery
+- name: Permission Groups Discovery
+  description: Permission Groups Discovery.
+  rules:
+  - context.post_access_discovery
+- name: Persistence write followed by periodic outbound connections
+  description: Persistence write followed by periodic outbound connections.
+  rules: []
+- name: Private Keys
+  description: Private Keys.
+  rules:
+  - context.credential_access
+- name: Process Discovery
+  description: Process Discovery.
+  rules:
+  - context.post_access_discovery
+- name: Process outbound connection joined to a flagged network flow
+  description: Process outbound connection joined to a flagged network flow.
+  rules: []
+- name: Python
+  description: Python.
+  rules:
+  - host.python_pty_spawn
+- name: Remote Desktop Protocol
+  description: Remote Desktop Protocol.
+  rules:
+  - context.lateral_movement
+- name: Remote Services
+  description: Remote Services.
+  rules:
+  - context.lateral_movement
+- name: Reverse-shell argv destination joined to the network session
+  description: Reverse-shell argv destination joined to the network session.
+  rules: []
+- name: Scanning IP Blocks
+  description: Scanning IP Blocks.
+  rules:
+  - net.port_scan
+- name: Scheduled Task/Job
+  description: Scheduled Task/Job.
+  rules:
+  - host.downloader_feeds_interpreter
+  - host.nonroot_write_root_executed_file
+- name: Server Software Component
+  description: Server Software Component.
+  rules:
+  - host.web_service_spawns_interpreter
+- name: Service Exhaustion Flood
+  description: Service Exhaustion Flood.
+  rules:
+  - web.scan_burst
+- name: Session payload joined to host commands
+  description: Session payload joined to host commands.
+  rules: []
+- name: Setuid and Setgid
+  description: Setuid and Setgid.
+  rules:
+  - context.privilege_probing
+- name: Shell History
+  description: Shell History.
+  rules:
+  - context.credential_access
+- name: SMB/Windows Admin Shares
+  description: SMB/Windows Admin Shares.
+  rules:
+  - context.lateral_movement
+- name: Software Discovery
+  description: Software Discovery.
+  rules:
+  - context.post_access_discovery
+- name: SSH
+  description: SSH.
+  rules:
+  - context.entry_point_promotion
+  - context.lateral_movement
+  - host.ssh_login_external_source
+- name: SSH authentication joined to the network SSH session (client software, HASSH,
+    server key)
+  description: SSH authentication joined to the network SSH session (client software,
+    HASSH, server key).
+  rules: []
+- name: SSH Authorized Keys
+  description: SSH Authorized Keys.
+  rules:
+  - host.ssh_authorized_keys_write
+- name: SSH client with forwarding options joined to a long-lived SSH session (tunnel)
+  description: SSH client with forwarding options joined to a long-lived SSH session
+    (tunnel).
+  rules: []
+- name: Sudo and Sudo Caching
+  description: Sudo and Sudo Caching.
+  rules:
+  - context.privilege_probing
+- name: System Information Discovery
+  description: System Information Discovery.
+  rules:
+  - context.post_access_discovery
+- name: System Network Configuration Discovery
+  description: System Network Configuration Discovery.
+  rules:
+  - context.post_access_discovery
+- name: System Network Connections Discovery
+  description: System Network Connections Discovery.
+  rules:
+  - context.post_access_discovery
+- name: System Owner/User Discovery
+  description: System Owner/User Discovery.
+  rules:
+  - context.post_access_discovery
+- name: System Service Discovery
+  description: System Service Discovery.
+  rules:
+  - context.post_access_discovery
+- name: Systemd Service
+  description: Systemd Service.
+  rules:
+  - host.nonroot_write_root_executed_file
+- name: Systemd Timers
+  description: Systemd Timers.
+  rules:
+  - host.nonroot_write_root_executed_file
+- name: Unix Shell
+  description: Unix Shell.
+  rules:
+  - host.download_piped_to_shell
+  - host.downloader_feeds_interpreter
+  - host.web_service_spawns_interpreter
+- name: Upload, new server-side file, request to it, web-service execution (web-shell
+    chain)
+  description: Upload, new server-side file, request to it, web-service execution
+    (web-shell chain).
+  rules: []
+- name: User Execution
+  description: User Execution.
+  rules:
+  - host.exec_from_temp_dir
+- name: Valid Accounts
+  description: Valid Accounts.
+  rules:
+  - context.entry_point_promotion
+  - host.ssh_login_external_source
+- name: Vulnerability Scanning
+  description: Vulnerability Scanning.
+  rules:
+  - web.scan_burst
+- name: Web Protocols
+  description: Web Protocols.
+  rules:
+  - net.tool_user_agent_http
+- name: Web Shell
+  description: Web Shell.
+  rules:
+  - host.web_service_spawns_interpreter
+- name: Windows Remote Management
+  description: Windows Remote Management.
+  rules:
+  - context.lateral_movement
+- name: Wordlist Scanning
+  description: Wordlist Scanning.
+  rules:
+  - web.scan_burst

@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "catalog_nav.html" %}
+<h1>{{ rule.title }}</h1>
+<p>{{ rule.id }} · version {{ rule.version }} · {{ rule.source }} · {{ rule.lane }} / {{ rule.severity }}</p>
+<h2>Behavior claim</h2><p>{{ rule.behavior }}</p>
+<h2>What a hit proves and does not prove</h2><p>{{ rule.fidelity }}</p>
+<p>Assurance: {{ rule.assurance }}. Positive-only reason: {{ rule.positive_only_reason }}</p>
+<h2>Predicate</h2><pre>{{ rule.predicate }}</pre>
+<p>Thresholds: {{ rule.thresholds }}</p>
+<h2>Required telemetry and typed fields</h2>
+<p>Families: {{ rule.families | join(', ') }}. Fields: {{ rule.required_fields | join(', ') or 'not recorded' }}</p>
+{% if rule.source == 'Sigma' %}<p>Referenced predicate fields (including alternatives): {{ rule.referenced_fields | join(', ') }}. The readable condition above preserves their boolean relationships.</p>{% endif %}
+{% for family, fields in rule.required_by_family.items() %}<p>{{ family }}: {{ fields | join(', ') }}</p>{% endfor %}
+<h2>Applicability</h2>{% for item in rule.applicability %}<p>{{ item.text }}</p>{% endfor %}
+<p class="help">Profiles older than 30 days and incomplete inventories are unknown. Applicability describes profile evidence, not a guarantee that every record has the field.</p>
+<h2>Performance</h2>
+{% if rule.performance is not none %}<p>{{ rule.performance.hits }} hits over retained hunts; {{ rule.performance.recent_hits }} in the last {{ last_n }} hunts. {{ deleted }} deleted hunt(s) excluded.</p>
+<p>Last fired: {% if rule.performance.last_hunt %}<a href="/hunts/{{ rule.performance.last_hunt | urlencode }}">{{ rule.performance.last_hunt }}</a> {{ rule.performance.last_at }}{% else %}never fired{% endif %}</p>
+<p>Disposition events (existing outcomes, including history): {% for status, count in rule.performance.outcomes.items() %}{{ status }}: {{ count }}; {% else %}none recorded{% endfor %}</p>
+{% else %}<p>Per-list hit attribution is not recorded; shared matcher counts are on <a href="/catalog/rules/ioc.indicator_match">ioc.indicator_match</a>.</p>{% endif %}
+<h2>Benign causes</h2><ul>{% for item in rule.benign %}<li>{{ item }}</li>{% else %}<li>not recorded</li>{% endfor %}</ul>
+<h2>Next checks</h2><ul>{% for item in rule.next_checks %}<li>{{ item }}</li>{% else %}<li>not recorded</li>{% endfor %}</ul>
+<h2>ATT&amp;CK</h2><p>{{ rule.attack_ids | join(', ') or 'not recorded' }}</p>
+{% for kind, rows in tags.items() %}<h3>{{ kind }}</h3><p>{% for row in rows %}{{ row.name }}; {% else %}not recorded{% endfor %}</p>{% endfor %}
+<h2>Active suppressions</h2><p>No rule suppressions are stored by this kit.</p>
+<h2>Research and provenance</h2><ul>{% for url in rule.research %}<li><a href="{{ url }}" rel="noreferrer">{{ url }}</a></li>{% else %}<li>not recorded</li>{% endfor %}</ul>
+<p>License: {{ rule.license }}</p>{% for key, value in rule.provenance.items() %}<p>{{ key }}: {{ value }}</p>{% endfor %}
+{% if rule.indicator_id %}<a href="/indicators/{{ rule.indicator_id | urlencode }}">Indicator list and typed values</a>{% endif %}
+{% endblock %}

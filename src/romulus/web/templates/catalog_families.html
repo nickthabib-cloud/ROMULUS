@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Telemetry families</h1>{% include "catalog_nav.html" %}
+{% for row in rows %}
+<section class="card"><h2>{{ row.name }}</h2>
+<p>{% for source in row.sources %}{{ source.text }}<br>{% endfor %}</p>
+<p>Required typed field contract: {{ row.fields | join(', ') or 'not recorded' }}</p>
+<p>{{ row.rule_count }} rules: {% for rule in row.rules %}<a href="/catalog/rules/{{ rule.id | urlencode }}">{{ rule.id }}</a> {% endfor %}</p>
+<a href="/catalog?family={{ row.name | urlencode }}">All rules in this family</a></section>
+{% endfor %}{% if next_url %}<a href="{{ next_url }}">Next page</a>{% endif %}
+{% endblock %}

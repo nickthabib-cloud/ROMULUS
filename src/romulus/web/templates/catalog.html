@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Detection catalog · ROMULUS{% endblock %}
+{% block content %}
+<h1>Detection catalog</h1>
+{% include "catalog_nav.html" %}
+<form method="get" action="/catalog" class="card">
+<label>Search <input name="q" maxlength="256" value="{{ filters.q }}"></label>
+<label>Family <select name="family"><option value="">All</option>{% for family in families %}<option {% if filters.family == family %}selected{% endif %}>{{ family }}</option>{% endfor %}</select></label>
+<label>Tactic <input name="tactic" value="{{ filters.tactic }}" maxlength="128" placeholder="execution"></label>
+<label>Technique <input name="technique" value="{{ filters.technique }}" maxlength="128" placeholder="T1059"></label>
+{% for key, options in [('lane', ['urgent','high','lead','context']), ('assurance', ['full-search','positive-only','context-only']), ('applicability', ['runs','not applicable','unknown']), ('source', ['built-in','Sigma','indicator list'])] %}
+<label>{{ key }} <select name="{{ key }}"><option value="">All</option>{% for option in options %}<option {% if filters[key] == option %}selected{% endif %}>{{ option }}</option>{% endfor %}</select></label>
+{% endfor %}
+<label><input type="checkbox" name="never_fired" value="1" {% if filters.never_fired == '1' %}checked{% endif %}> Never fired</label>
+<button type="submit">Filter</button></form>
+<p><a href="/catalog/export?format=csv&amp;{{ export_query }}">CSV</a> · <a href="/catalog/export?format=md&amp;{{ export_query }}">Markdown</a></p>
+<p>Hits use retained hunt data; {{ deleted }} deleted hunt(s) excluded. Recent hits: last {{ last_n }} hunts. List-specific hit attribution is not recorded.</p>
+<table class="grid"><thead><tr><th>Rule</th><th>Families / ATT&amp;CK</th><th>Lane / severity</th><th>Assurance / source</th><th>Applicability</th><th>Hits (recent)</th></tr></thead><tbody>
+{% for row in rows %}<tr><td><a href="/catalog/rules/{{ row.id | urlencode }}">{{ row.id }}</a><br>{{ row.title }}</td><td>{{ row.families | join(', ') }}<br>{{ row.attack_ids | join(', ') }}</td><td>{{ row.lane }} / {{ row.severity }}</td><td>{{ row.assurance }}<br>{{ row.source }}</td><td>{% for item in row.applicability %}{{ item.text }}<br>{% endfor %}</td><td>{% if row.performance is not none %}{{ row.performance.hits }} ({{ row.performance.recent_hits }}){% else %}not recorded per list{% endif %}</td></tr>{% endfor %}
+</tbody></table>
+{% if next_url %}<p><a href="{{ next_url }}">Next page</a></p>{% endif %}
+<h2>Assurance legend</h2>{% for strength, description in legend %}<p><strong>{{ strength.value }}</strong>: {{ description }}</p>{% endfor %}
+{% endblock %}

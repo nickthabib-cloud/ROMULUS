@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ kind }}</h1>{% include "catalog_nav.html" %}
+{% for covered in [true, false] %}
+<h2>{{ 'Covered' if covered else 'Not covered' }}</h2>
+<table class="grid"><thead><tr><th>Name</th><th>Details</th><th>Rules</th></tr></thead><tbody>
+{% for row in rows if (row.rules | length > 0) == covered %}
+<tr><td>{{ row.name }}</td><td>{{ row.kind or row.platform or row.description }}</td><td>{% for id in row.rules %}<a href="/catalog/rules/{{ id | urlencode }}">{{ id }}</a><br>{% else %}not covered{% endfor %}</td></tr>
+{% endfor %}</tbody></table>{% endfor %}
+{% if next_url %}<a href="{{ next_url }}">Next page</a>{% endif %}
+{% endblock %}
