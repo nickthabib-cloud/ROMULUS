@@ -112,7 +112,7 @@ def test_a_record_bridging_two_stretches_merges_them_and_keeps_the_first_read_ci
     _out, _peak, stage = drive(rule, [[late], [early], [bridge]])
     parts = rule.conns.peek("1:bridge")["parts"]
     assert len(parts) == 1 and parts[0][3] == late.id                 # read first, so it is the stretch's citation
-    assert set(stage) == {late.id, early.id}                          # each record that opened a stretch is staged
+    assert set(stage) == {late.id, early.id, bridge.id}                # retain potential exact-start witnesses too
 
 
 def test_session_disk_budget_refuses_new_connections_and_says_so(monkeypatch):

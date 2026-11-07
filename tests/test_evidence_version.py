@@ -69,6 +69,7 @@ PINNED_WINDOWS = {
 ZEEK_EVIDENCE_FILES = ("certificates.py", "community.py", "ics_catalog.py", "rpc_catalog.py", "zeek.py", "zeek_catalog.py",
                        "zeek_credentials.py")
 PINNED_ZEEK = {
+    "zeek-ecs@4": "578105067235fea7843c65d746fa523440d32639a4b2259f9ccef3004efaf702",
     "zeek-ecs@3": "93c7a682f05558dcfaab69f49444d90bf095fc7652efa1c62d5c9777081b99fa",
     # unreleased: re-pinned when the zeek_record precheck (a record with no Zeek marker skips the full recognition)
     # merged in; every recognition result is unchanged.

@@ -7,14 +7,18 @@ programming.sig (all its script types), python.sig (Python bytecode), and
 libmagic.sig (setup scripts). ELF objects and core dumps are not executable images.
 https://github.com/zeek/zeek/tree/5862ccc5e13e6127cda5932a7f18aaf070c8b63b/scripts/base/frameworks/files/magic
 
-Every file, analyzer join and fold is indexed on disk. Memory holds one file and
-its bounded citation witnesses at a time; only the shared disk budget refuses facts.
+Executable and unknown-type file proofs, compact analyzer joins and folds are
+indexed on disk. Resolved benign FUIDs retain only fixed-size fingerprints so
+late context can be rejected without keeping benign events. Memory holds one
+file and bounded citation witnesses; only the shared disk budget refuses facts.
 """
 from __future__ import annotations
 
 import hashlib
 import ipaddress
+import json
 import re
+from datetime import datetime
 from typing import ClassVar
 from urllib.parse import unquote, urlsplit
 
@@ -24,6 +28,7 @@ from romulus.detect.netdef import DIRECTION_ASSUMED_REASON, assume_direction, cu
 from romulus.detect.windows_rows import row_key
 from romulus.detect.windows_sequence_extensions import _Rows
 from romulus.detect.zeek_smb import _MIME
+from romulus.evidence.typed import RawRef, TypedEvent, fv
 from romulus.hunt.citations import COMPACT_CITATION_NOTE, compact_event, expand_event
 
 CONTENT_TYPES = {
@@ -51,7 +56,13 @@ _FIELDS = frozenset({
     'file.source', 'file.is_orig', 'file.mime_type', 'file.name', 'file.seen_bytes', 'pe.is_exe',
     'file.missing_bytes', 'file.overflow_bytes', 'file.timedout', 'http.hostname', 'url.original',
     'http.orig_fuids', 'http.resp_fuids', 'smb.share', 'smb.path', 'smb.name',
+    'http.request.content_encoding', 'http.response.content_encoding',
 })
+_CONTEXT_FIELDS = frozenset({'observer.name', 'observer.product', 'zeek.log', 'zeek.uid',
+    'source.ip', 'destination.ip', 'source.port', 'destination.port', 'http.hostname', 'url.original',
+    'file.fuid', 'smb.share', 'smb.path', 'smb.name', 'http.request.content_encoding', 'http.response.content_encoding'})
+_UNKNOWN_MIME = frozenset({'', 'application/octet-stream'})
+_DIRECTION_UNKNOWN = 'SMB file direction not recorded; the connection peers are cited without assigning the file sender.'
 _LOGGING = ('Only observed sniffed executable or script content is assessed. File completion and execution '
             'are not established; missing analyzer context cannot establish a negative.')
 _REF_NOTE = 'Only three native references per transfer witness are retained; citation reference coverage is partial.'
@@ -71,7 +82,7 @@ def _address(value):
     return str(address) if address and not (address.is_unspecified or address.is_multicast) else None
 
 
-def _masquerade(value, *, uri=False):
+def _masquerade(value, *, uri=False, encoding=''):
     if not _text(value):
         return False
     try:
@@ -79,6 +90,13 @@ def _masquerade(value, *, uri=False):
     except ValueError:
         return False
     name = value.replace('\\', '/').rsplit('/', 1)[-1]
+    # A decoded HTTP entity can retain its encoded wire name. A suffix is
+    # removed only with explicit matching-side Content-Encoding evidence.
+    if 'gzip' in {token.strip().casefold() for token in _text(encoding).split(',')}:
+        for suffix in ('.gz', '.gzip'):
+            if name.casefold().endswith(suffix):
+                name = name[:-len(suffix)]
+                break
     return '.' in name and name.rsplit('.', 1)[-1].casefold() in _PASSIVE
 
 
@@ -100,8 +118,9 @@ class _TransferRows(_Rows):
          'sender TEXT,receiver TEXT,protocol TEXT,event BLOB)'),
         'CREATE INDEX IF NOT EXISTS transfer_files_fuid ON transfer_files(sensor,fuid,k)',
         ('CREATE TABLE IF NOT EXISTS transfer_context(k TEXT PRIMARY KEY,sensor TEXT,fuid TEXT,uid TEXT,'
-         'sender TEXT,receiver TEXT,protocol TEXT,event BLOB)'),
+         'sender TEXT,receiver TEXT,protocol TEXT,facts TEXT)'),
         'CREATE INDEX IF NOT EXISTS transfer_context_fuid ON transfer_context(sensor,fuid,protocol,k)',
+        'CREATE TABLE IF NOT EXISTS transfer_benign(k BLOB PRIMARY KEY)',
         'CREATE TABLE IF NOT EXISTS transfer_pe(sensor TEXT,fuid TEXT,event BLOB,PRIMARY KEY(sensor,fuid))',
         ('CREATE TABLE IF NOT EXISTS transfer_verdict(k TEXT PRIMARY KEY,gkey TEXT,lane TEXT,category TEXT,'
          'content TEXT,sender TEXT,receiver TEXT,ts REAL,event BLOB,context BLOB,pe BLOB)'),
@@ -120,9 +139,26 @@ class _TransferRows(_Rows):
             len(v.encode()) if isinstance(v, str) else len(v) if isinstance(v, bytes) else 16 for v in values))
         return True
 
+    def benign(self, sensor, fuid):
+        key = hashlib.sha256(row_key(sensor, fuid).encode()).digest()
+        return bool(self.store().execute('SELECT 1 FROM transfer_benign WHERE k=?', (key,)).fetchone())
+
+    def discard_benign(self, sensor, fuid):
+        key = hashlib.sha256(row_key(sensor, fuid).encode()).digest()
+        if not self.benign(sensor, fuid) and not self.insert('INSERT INTO transfer_benign VALUES(?)', (key,)):
+            return
+        # Exact disk fingerprints reject a later context row too. A bounded
+        # lossy filter would discard context for a real executable on collision.
+        size = self.store().execute('SELECT COALESCE(SUM(LENGTH(k)+LENGTH(sensor)+LENGTH(fuid)+LENGTH(uid)+'
+            'LENGTH(sender)+LENGTH(receiver)+LENGTH(protocol)+LENGTH(facts)+256),0) FROM transfer_context '
+            'WHERE sensor=? AND fuid=?', (sensor, fuid)).fetchone()[0]
+        self.store().write('DELETE FROM transfer_context WHERE sensor=? AND fuid=?', [(sensor, fuid)], account=self.account)
+        self.owner.state_budget().charge(self.account, -size)
+
 
 class ExecutableTransfer(Playbook):
     id = 'net.executable_transfer'
+    version = "2"
     title = 'Executable or script content transferred over HTTP, FTP or SMB'
     families = ('file_transfer', 'http_tx', 'smb_tx')
     context_families = ('http_tx', 'smb_tx')
@@ -144,7 +180,7 @@ class ExecutableTransfer(Playbook):
         'fidelity': 'Sniffed content and typed sender/receiver; completion and execution unknown.',
         'benign_and_cost': benign[0], 'query_cost': 'Disk-backed sensor/FUID/UID/peer joins and folded counts.',
         'next_pivot': next_checks[0], 'adds': title, 'research_basis': '; '.join(research),
-        'lanes': 'Masquerade high; unusual ingress or nonadministrative SMB lateral transfer lead; other downloads context.',
+        'lanes': 'Masquerade and uncovered administrative-share writes high; unusual ingress or SMB writes lead; routine SMB reads context.',
         'retrieval': _LOGGING,
     }
 
@@ -181,7 +217,16 @@ class ExecutableTransfer(Playbook):
         protocol = _text(event.get('file.source')).upper()
         if protocol not in {'HTTP', 'FTP', 'SMB'}:
             return
+        mime = _text(event.get('file.mime_type')).split(';', 1)[0].strip().casefold()
+        if mime not in CONTENT_TYPES and mime not in _UNKNOWN_MIME:
+            self.rows.discard_benign(sensor, fuid)
+            return
         peers = self._direction(event)
+        if peers is None and protocol == 'SMB' and event.get('file.is_orig') is None:
+            source, destination = _address(event.get('source.ip')), _address(event.get('destination.ip'))
+            if source and destination and source != destination:
+                peers = source, destination
+                event = event.model_copy(update={'caveats': [*event.caveats, _DIRECTION_UNKNOWN]})
         if peers is None:
             self.missing_required += 1
             self.evaluated -= 1
@@ -195,48 +240,74 @@ class ExecutableTransfer(Playbook):
             return
         yield from self._evaluate_fuid(sensor, fuid)
 
+    def _context_tuple(self, event, fuid, side):
+        facts = [[name, value.value, value.origin] for name, value in sorted(event.fields.items())
+                 if name in _CONTEXT_FIELDS]
+        if side:
+            facts.append([side, [fuid], event.fields[side].origin])
+        caveats = [*event.caveats]
+        if len(event.raw) > 3:
+            caveats.append(_REF_NOTE)
+            self.note_limit('transfer_references', _REF_NOTE)
+        return json.dumps([event.id, event.ts.isoformat(), event.normalizer, event.outcome.value,
+            facts, [[ref.target, ref.native_id, ref.digest] for ref in event.raw[:3]], caveats],
+            ensure_ascii=True, separators=(',', ':'))
+
+    @staticmethod
+    def _context_event(payload):
+        identity, stamp, normalizer, outcome, facts, refs, caveats = json.loads(payload)
+        fields = {name: fv(value, origin) for name, value, origin in facts}
+        return TypedEvent(id=identity, ts=datetime.fromisoformat(stamp), normalizer=normalizer, outcome=outcome,
+            family='http_tx' if fields['zeek.log'].value == 'http' else 'smb_tx',
+            host=fields['observer.name'].value, fields=fields,
+            raw=[RawRef(target=target, native_id=native_id, digest=digest) for target, native_id, digest in refs],
+            caveats=caveats)
+
     def _context(self, event, sensor):
         uid = _text(event.get('zeek.uid'))
         source, destination = _address(event.get('source.ip')), _address(event.get('destination.ip'))
         if not uid or not source or not destination:
             return
         if event.family == 'smb_tx':
-            fuids = [(event.get('file.fuid'), source, destination, 'SMB')]
+            fuids = [(event.get('file.fuid'), source, destination, 'SMB', '')]
         else:
             fuids = []
             for name, sender, receiver in (('http.orig_fuids', source, destination),
                                            ('http.resp_fuids', destination, source)):
                 values = event.get(name)
                 if isinstance(values, list):
-                    fuids.extend((fuid, sender, receiver, 'HTTP') for fuid in values if _text(fuid))
-        for fuid, sender, receiver, protocol in fuids:
-            if not _text(fuid):
+                    fuids.extend((fuid, sender, receiver, 'HTTP', name) for fuid in values if _text(fuid))
+        for fuid, sender, receiver, protocol, side in fuids:
+            if not _text(fuid) or self.rows.benign(sensor, fuid):
                 continue
             key = row_key(sensor, fuid, uid, event.id)
             if not self.rows.store().execute('SELECT 1 FROM transfer_context WHERE k=?', (key,)).fetchone():
                 self.rows.insert('INSERT INTO transfer_context VALUES(?,?,?,?,?,?,?,?)',
-                                 (key, sensor, fuid, uid, sender, receiver, protocol, self._pack(event)))
+                                 (key, sensor, fuid, uid, sender, receiver, protocol, self._context_tuple(event, fuid, side)))
             yield from self._evaluate_fuid(sensor, fuid)
 
-    def _classify(self, row):
+    def _classify(self, row, *, final=False):
         _key, sensor, fuid, uid, sender, receiver, protocol, payload = row
         event = expand_event(payload)
         mime = _text(event.get('file.mime_type')).split(';', 1)[0].strip().casefold()
         content, pe = CONTENT_TYPES.get(mime), b''
-        if content is None:
+        weak = mime == 'application/x-setupscript'
+        if content is None or weak:
             proof = self.rows.store().execute('SELECT event FROM transfer_pe WHERE sensor=? AND fuid=?', (sensor, fuid)).fetchone()
-            if not proof:
+            if not proof and content is None:
                 return None
-            content, pe = 'PE', proof[0]
+            if proof:
+                content, pe, weak = 'PE', proof[0], False
         contexts = self.rows.store().execute(
-            'SELECT uid,sender,receiver,event FROM transfer_context WHERE sensor=? AND fuid=? AND protocol=? ORDER BY k',
+            'SELECT uid,sender,receiver,facts FROM transfer_context WHERE sensor=? AND fuid=? AND protocol=? ORDER BY k',
             (sensor, fuid, protocol))
         best, available = None, False
         carrying = event.get('file.conn_uids')
         uids = {uid} if uid else {v for v in carrying if _text(v)} if isinstance(carrying, list) else set()
         internal_sender = current().is_internal(ipaddress.ip_address(sender))
         internal_receiver = current().is_internal(ipaddress.ip_address(receiver))
-        mismatch = _masquerade(event.get('file.name'))
+        mismatch = not weak and _masquerade(event.get('file.name'))
+        compressed_name = _text(event.get('file.name')).casefold().endswith(('.gz', '.gzip'))
         for cuid, csender, creceiver, context in contexts:
             if uids and cuid not in uids:
                 continue
@@ -244,12 +315,14 @@ class ExecutableTransfer(Playbook):
                 continue
             if protocol == 'SMB' and {csender, creceiver} != {sender, receiver}:
                 continue
-            meta = expand_event(context)
+            meta = self._context_event(context)
+            admin = False
             if protocol == 'SMB':
                 share = _text(meta.get('smb.share')).casefold()
                 if not share:
                     continue
-                if share in {'admin$', 'ipc$'} or re.fullmatch(r'[a-z]\$', share):
+                admin = share in {'admin$', 'ipc$'} or re.fullmatch(r'[a-z]\$', share) is not None
+                if admin:
                     seen = event.get('file.seen_bytes')
                     covered = (content == 'PE' and event.get('file.is_orig') is True
                                and isinstance(seen, int) and not isinstance(seen, bool) and seen > 0
@@ -257,14 +330,24 @@ class ExecutableTransfer(Playbook):
                                and (csender, creceiver) == (sender, receiver))
                     if covered:
                         return 'admin'
-                    if not (mismatch or _masquerade(meta.get('smb.name'))):
-                        continue
             available = True
-            hidden = mismatch or _masquerade(meta.get('url.original'), uri=True) or _masquerade(meta.get('smb.name'))
-            if hidden:
+            side = 'request' if sender == meta.get('source.ip') else 'response'
+            encoding = meta.get(f'http.{side}.content_encoding') if protocol == 'HTTP' else ''
+            hidden = not weak and (_masquerade(event.get('file.name'), encoding=encoding)
+                or _masquerade(meta.get('url.original'), uri=True, encoding=encoding)
+                or _masquerade(meta.get('smb.name')))
+            if weak:
+                lane, category = 'lead', 'setup-script'
+            elif hidden:
                 lane, category = 'high', 'masquerade'
-            elif protocol == 'SMB' and internal_sender and internal_receiver:
-                lane, category = 'lead', 'lateral'
+            elif protocol == 'SMB':
+                orig = event.get('file.is_orig')
+                if admin:
+                    lane, category = ('high' if orig is True else 'lead'), 'admin-share'
+                elif orig is False:
+                    lane, category = 'context', 'download'
+                else:
+                    lane, category = 'lead', 'lateral'
             elif (protocol == 'HTTP' and not internal_sender and internal_receiver
                   and (_literal_host(meta.get('http.hostname')) or
                        (meta.get('destination.port') is not None and meta.get('destination.port') != 80))):
@@ -273,21 +356,25 @@ class ExecutableTransfer(Playbook):
                 continue
             else:
                 lane, category = 'context', 'download'
-            candidate = (lane, category, content, payload, context, pe)
+            candidate = (lane, category, content, payload, self._pack(meta), pe)
             if best is None or _RANK[lane] > _RANK[best[0]]:
                 best = candidate
         if protocol == 'SMB':
             return best
-        if mismatch and (best is None or best[0] != 'high'):
+        if best is not None:
+            return best
+        if mismatch and (protocol != 'HTTP' or not compressed_name or final):
             return 'high', 'masquerade', content, payload, b'', pe
+        if weak:
+            return 'lead', 'setup-script', content, payload, b'', pe
         if protocol == 'FTP':
             return ('lead', 'ingress', content, payload, b'', pe) if not internal_sender and internal_receiver else (
                 'context', 'download', content, payload, b'', pe)
         return best if available else None
 
-    def _evaluate_fuid(self, sensor, fuid):
+    def _evaluate_fuid(self, sensor, fuid, *, final=False):
         for row in self.rows.store().execute('SELECT * FROM transfer_files WHERE sensor=? AND fuid=? ORDER BY k', (sensor, fuid)):
-            result = self._classify(row)
+            result = self._classify(row, final=final)
             if not result or result == 'admin':
                 continue
             lane, category, content, payload, context, pe = result
@@ -355,11 +442,16 @@ class ExecutableTransfer(Playbook):
         selected = sorted(events.values(), key=lambda e: (e.ts, e.id))
         lateral = current().is_internal(ipaddress.ip_address(sender)) and current().is_internal(ipaddress.ip_address(receiver))
         techniques = (('T1036.008', 'T1570' if lateral else 'T1105') if category == 'masquerade' else
-                      ('T1570',) if category == 'lateral' else ('T1105',) if category == 'ingress' else ())
+                      ('T1570',) if category in {'lateral', 'admin-share'} else ('T1105',) if category == 'ingress' else ())
         count_text = f'{count} file' + ('s' if count != 1 else '')
         claim = (f'Executable or script transfers were observed to receiver {receiver} ({count_text}).' if lane == 'context' else
                  f'{content} content was observed sent from {sender} to {receiver} ({count_text}; {category}).')
         notes = [_LOGGING, 'Counts use distinct sensor/file/sender/receiver identities; citations retain first, last and strongest witnesses.']
+        if any(_DIRECTION_UNKNOWN in event.caveats for event in selected):
+            claim = f'{content} content was observed between {sender} and {receiver} ({count_text}; {category}; direction not recorded).'
+            notes.append(_DIRECTION_UNKNOWN)
+        if category == 'setup-script':
+            notes.append('Setup-script MIME can identify configuration text such as INF or INI; it is not executable proof by itself.')
         if not current().configured:
             notes.append(DIRECTION_ASSUMED_REASON)
         if techniques:
@@ -408,7 +500,8 @@ class ExecutableTransfer(Playbook):
         if not self.rows.ready:
             return
         for row in self.rows.store().execute('SELECT * FROM transfer_files ORDER BY k'):
-            if self._classify(row) is None:
+            yield from self._evaluate_fuid(row[1], row[2], final=True)
+            if self._classify(row, final=True) is None:
                 event = expand_event(row[7])
                 mime = _text(event.get('file.mime_type')).split(';', 1)[0].strip().casefold()
                 pe = self.rows.store().execute('SELECT 1 FROM transfer_pe WHERE sensor=? AND fuid=?', (row[1], row[2])).fetchone()

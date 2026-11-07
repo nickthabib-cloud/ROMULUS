@@ -13,6 +13,8 @@ their batch skips restores the entire previous golden. ICS inputs use the final 
 their shipped rows become transactions while undeclared plain JSON keeps its skip.
 Credential-bearing raw digests are reconciled
 separately with the credential masking boundary below.
+Legacy file rows with one sender and receiver also preserve those existing host facts as source/destination
+address aliases. The producer rebase retains every other typed value, origin, raw reference, skip and error.
 """
 import json
 from pathlib import Path
