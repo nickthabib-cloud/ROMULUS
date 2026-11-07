@@ -438,9 +438,13 @@ def flow_view(event: TypedEvent, kind: str) -> FlowView | None:
     if transport not in PORTED:
         sport = dport = None
     start, end = _epoch(event.get("flow.start")), _epoch(event.get("flow.end"))
+    # Zeek leaves duration unset only for a zero-length (single-packet) final record; a row whose own packet counts
+    # show more, or an interim record, lost the field in the pipeline and stays missing.
+    packets = [n for n in (_int(event.get("flow.pkts_toserver")), _int(event.get("flow.pkts_toclient"))) if n is not None]
     no_duration = (sensor_of(event) == ZEEK and start is not None and not event.has("flow.end")
                    and not event.has("session.duration_s")
-                   and not ZEEK_DURATION_FIELDS.intersection(event.get("parse.malformed") or ()))
+                   and not ZEEK_DURATION_FIELDS.intersection(event.get("parse.malformed") or ())
+                   and event.get("conn.interim") is not True and sum(packets) <= 1)
     timed = start is not None and (end is not None or no_duration)
     start = start if start is not None else event.ts.timestamp()
     end = max(end if end is not None else start, start)

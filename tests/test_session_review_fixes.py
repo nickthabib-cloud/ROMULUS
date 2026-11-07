@@ -107,6 +107,17 @@ def test_durationless_zeek_record_never_extends_a_long_span(point_first):
 
 
 @pytest.mark.parametrize("shape", SHAPES)
+def test_multi_packet_zeek_row_without_duration_is_missing_not_a_point(shape):
+    # a pipeline that drops duration must not turn a long exchange into a clean zero-length evaluation
+    row = normalize(WRITERS[shape](Conn(duration=None, orig_pkts=5000, resp_pkts=7000), "stripped"))
+    view = flow_view(row, "flow")
+    assert view is not None and not view.timed
+    rule = LongExternalConnection()
+    assert run(rule, [row]) == []
+    assert rule.missing_required == 1 and rule.evaluated == 0
+
+
+@pytest.mark.parametrize("shape", SHAPES)
 def test_malformed_zeek_duration_is_still_missing_instead_of_an_omitted_duration(shape):
     hit = WRITERS[shape](Conn(duration=None), "bad-duration")
     path = {"plain": ("duration",), "malcolm": ("zeek", "conn", "duration"),
