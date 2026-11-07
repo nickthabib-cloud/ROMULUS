@@ -90,11 +90,12 @@ NET_FAMILIES ={"net_alert", "net_flow", "dns_query", "http_tx", "file_transfer",
 # an exec, socket or file record of that event and carries the whole audit family set.
 _AUDIT_ADMIN = {"account_change", "service_change", "audit_config", "system_state"}
 LINUX_DATASET_FAMILIES = {
-    "linux.audit": {"process_exec", "net_socket", "auth", "file_change", "process_observed"} | _AUDIT_ADMIN,
+    "linux.audit": {"process_exec", "net_socket", "auth", "file_change", "file_access", "kernel_module", "process_observed"} | _AUDIT_ADMIN,
     "linux.audit.socket": {"net_socket", "process_observed"},
-    "linux.audit.file": {"file_change", "process_observed"},
+    "linux.audit.file": {"file_change", "file_access", "process_observed"},
+    "linux.audit.module": {"kernel_module", "process_observed"},
     "linux.audit.observed": {"process_observed"},
-    "linux.audit.auth": {"process_exec", "net_socket", "auth", "file_change", "process_observed"} | _AUDIT_ADMIN,
+    "linux.audit.auth": {"process_exec", "net_socket", "auth", "file_change", "file_access", "kernel_module", "process_observed"} | _AUDIT_ADMIN,
     "linux.audit.admin": _AUDIT_ADMIN,
     "arkime.session": {"net_session"},
     "systemd.journal": {"auth", "privilege_use", "service_change"},
@@ -317,6 +318,10 @@ class Sweep:
             pb.spill_dir = stage_dir          # a playbook's on-disk join tables live beside the event stage
             pb.budget = self.budget
             pb.window_start = window.start
+            pb.window_end = window.end
+            if pb.id == "host.telemetry_gap_after_tamper":
+                pb.persisted_loader = lambda ids: [
+                    TypedEvent.model_validate(row["event"]) for row in repo.citation_events(hunt_id, ids)]
             if hasattr(pb, "citation_fields"):
                 pb.citation_fetcher = WindowsCitationFetcher(client)
             else:
@@ -462,6 +467,15 @@ class Sweep:
             from romulus.hunt.zeek_gaps import enrich
             enrich(self, m, raw_sources)
         row = publish_match(self.repo, self.hunt_id, playbook, m, task_id, raw_sources)
+        if m.playbook_id in {"host.download_then_execute", "host.authorized_key_then_login"}:
+            for observer in self.pack:
+                if observer.id == "host.tool_cleanup":
+                    observer.observe_linked_match(m)
+        if m.playbook_id in {"host.audit_rules_tamper", "host.security_or_logging_service_stop",
+                             "host.log_or_history_clearing"}:
+            for observer in self.pack:
+                if observer.id == "host.telemetry_gap_after_tamper":
+                    observer.observe_tamper_match(m)
         if row is not None:
             self.stats["candidates"] += 1
             self.on_candidate(row)
@@ -2133,7 +2147,8 @@ class Sweep:
                     state = "evaluated_partial" if incomplete else "evaluated_complete"
                 elif matched:
                     state = "match_on_partial" if incomplete else "matched"
-                elif not pb.assures_negative:
+                elif not (pb.assures_negative_for(scoped_events) if hasattr(pb, "assures_negative_for")
+                          else pb.assures_negative):
                     # script-text rules can show intent but never prove absence (spec section 1)
                     state = "positive_only_partial" if incomplete else "positive_only"
                 else:

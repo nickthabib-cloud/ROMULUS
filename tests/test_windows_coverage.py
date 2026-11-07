@@ -1438,9 +1438,9 @@ def test_existing_linux_rules_do_not_silently_widen_to_windows_events():
         if windows_families.intersection(playbook.families) and "windows" in playbook.os_families
     }
 
-    # Only the cross-platform indicator rule and the purpose-built Windows rules read Windows families;
-    # every Linux host rule stays scoped to linux.
-    assert windows_enabled == {"ioc.indicator_match"} | {
+    # Cross-platform indicator, SSH and alert/host joins are explicit; Linux-only host rules stay scoped.
+    assert windows_enabled == {"ioc.indicator_match", "net.outbound_ssh_external",
+                               "corr.alert_then_host_execution"} | {
         cls.id for cls in WINDOWS_PROCESS_PLAYBOOKS + WINDOWS_HOST_PLAYBOOKS + WINDOWS_DOMAIN_PLAYBOOKS
         + list(WINDOWS_LINKED_PLAYBOOKS) + list(WINDOWS_SCRIPT_PLAYBOOKS)
     }

@@ -246,7 +246,11 @@ def test_native_scale4_releases_use_global_room_without_poisoning_later_findings
     monkeypatch.setattr(sw, "state_budget", lambda settings, stage_dir: budget)
     snapshot = fixture.run_stack(tmp_path, docs=fixture.build(4))
     assert not budget.broken
-    assert len(snapshot["candidates"]) == 51
+    # The prior 51 finding groups/lanes remain; credential access and staging add two.
+    # SSH inputs are explicitly partial at this larger load under the same physical cap.
+    assert len(snapshot["candidates"]) == 53
+    assert fixture.digests(snapshot)["candidates"] == (
+        "87af0182a76dbfd28b34ea9da2b23feeae638a9e48ca36060cc81836158fda31")
     assert any(row["rule_id"] == "host.shell_spawned_by_connected_process" and row["event_ids"]
                for row in snapshot["candidates"])
 

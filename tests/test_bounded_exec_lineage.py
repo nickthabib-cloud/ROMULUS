@@ -11,6 +11,7 @@ from romulus.detect.hijack import NonRootWriteRootExecutedFile
 from romulus.detect.host import DAEMON, ExecLineage, share_lineage
 from romulus.detect.kernel_files import PersistencePathChange
 from romulus.detect.lineage import ReverseShellByLineage
+from romulus.detect.linux_sequences import LinuxSequence
 from romulus.detect.registry import fresh_pack
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
 
@@ -57,7 +58,12 @@ def test_the_pack_holds_each_exec_once_in_one_compact_store(monkeypatch, tmp_pat
             pb.bind_raw(raw, "host-target")
             pb.consume(batch)
             if pb.staged:
-                pb.drain_staged()
+                drained = pb.drain_staged()
+                if isinstance(pb, LinuxSequence):
+                    assert drained == []
+                    if pb._spill is not None:
+                        assert all(not rows for _sql, rows in pb._spill._buffers.values())
+                    assert pb.retained_events() == [] and pb.pending_count == 0
     stores = _stores(pack)
     lineage = [s for s in stores if s.name == "exec_lineage"]
     assert len(lineage) == 1 and not [s for s in stores if s.name in OLD_EXEC_STORES]
@@ -71,17 +77,46 @@ def test_the_pack_holds_each_exec_once_in_one_compact_store(monkeypatch, tmp_pat
     assert len(records) == 1 and records[0].on_disk >= n - 50
     citation_per_exec = records[0].disk_bytes / records[0].on_disk
     assert citation_per_exec <= 250, citation_per_exec
-    # the real database bytes of every rule's spill per exec include the record, both key forms and their indexes,
-    # and the compact pointer kept for citation
+    # Preserve the original physical byte bound for the original rule population, including both key forms,
+    # their indexes and compact source pointers. New temporal join predicates have separate scalar tables.
     spilled = 0
     for pb in pack:
-        if pb._spill is not None:
+        if pb._spill is not None and not isinstance(pb, LinuxSequence):
             spilled += pb._spill.db.execute("PRAGMA page_count").fetchone()[0] * pb._spill._page
     assert spilled / n <= 1200, spilled / n
+    linux = [pb for pb in pack if isinstance(pb, LinuxSequence)]
+    witnesses = {id(pb.witnesses): pb.witnesses for pb in linux}
+    assert len(witnesses) == 1
+    [witness] = witnesses.values()
+    assert witness.count() == n and not witness.pending
+    expected_roles = {
+        "host.download_then_execute": [("execute", n)],
+        "host.tool_cleanup": [("execute", n)],
+        "host.unbrokered_privilege_transition": [("exec", n)],
+        "corr.alert_then_host_execution": [("execution", n)],
+    }
+    new_spills = []
+    for pb in linux:
+        roles = list(pb.query("SELECT role,COUNT(*) FROM records GROUP BY role")) if pb._tables else []
+        assert roles == expected_roles.get(pb.id, [])
+        if pb.id == "host.telemetry_gap_after_tamper":
+            assert pb.query("SELECT COUNT(*) FROM clock").fetchone()[0] == n
+        if pb._spill is not None:
+            new_spills.append(pb._spill)
+    new_spills.append(witness._spill)
+    new_bytes = 0
+    for spill in new_spills:
+        actual = spill.db.execute("PRAGMA page_count").fetchone()[0] * spill._page
+        assert spill.budget._physical[("spill", id(spill))][0] == actual
+        assert spill.budget.physical_used <= spill.budget.disk_total
+        new_bytes += actual
     print(f"\n{n:,} execs; lineage {per_exec:.0f} B each, citation pointers {citation_per_exec:.0f} B each, "
-          f"all spill databases {spilled / n:.0f} B per exec")
+          f"original spill databases {spilled / n:.0f} B per exec; new scalar/witness bytes {new_bytes}")
     for pb in pack:
-        pb.close_spill()
+        if isinstance(pb, LinuxSequence):
+            pb.release_state()
+        else:
+            pb.close_spill()
 
 
 def _exec(eid, pid, ppid, exe, ts, *, boot=None, user="root", uid="0", auid=None, host="h1"):

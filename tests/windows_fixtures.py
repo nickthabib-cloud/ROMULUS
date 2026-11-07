@@ -26,7 +26,7 @@ _DOCUMENTED_EVENT_KEYS = (
         4768, 4769, 4770, 4771, 4776, 4778, 4779, 4964,
         4704, 4705, 4706, 4716, 4725, 4729, 4733, 4741, 4742, 4743, 4757, 4765, 4766, 4767, 4781, 4794,
         4699, 4700, 4701, 4657, 4656, 4663, 4670, 4662,
-        5136, 5137, 5138, 5139, 5141, 5140, 5145,
+        5136, 5137, 5138, 5139, 5141, 5140, 5142, 5143, 5144, 5145,
     )],
     *[("Microsoft-Windows-Sysmon/Operational", SYSMON, event_id) for event_id in (
         1, 3, 5, 2, 11, 15, 23, 26, 29, 10, 6, 7, 8, 25, 12, 13, 14,
@@ -376,6 +376,11 @@ def _security_data(event_id: int, ordinal: int) -> dict[str, object]:
             "AttributeLDAPDisplayName": "servicePrincipalName",
             "AttributeValue": "HTTP/app.example.test",
         }
+    if event_id in {5142, 5143, 5144}:
+        data = {**subject, "ShareName": r"\\*\Inventory", "ShareLocalPath": r"\??\C:\Shares\Inventory"}
+        if event_id == 5143:
+            data.update({"OldSD": "D:(A;;FR;;;AU)", "NewSD": "D:(A;;FR;;;AU)"})
+        return data
     if event_id in {5140, 5145}:
         return {
             **subject,

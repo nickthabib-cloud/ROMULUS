@@ -14,6 +14,9 @@ from romulus.detect.ics import RULES as ICS_PLAYBOOKS
 from romulus.detect.indicators import INDICATOR_PLAYBOOKS
 from romulus.detect.kernel_files import KERNEL_FILE_PLAYBOOKS
 from romulus.detect.lineage import LINEAGE_PLAYBOOKS
+from romulus.detect.linux_direct import DIRECT_RULES as LINUX_DIRECT_RULES
+from romulus.detect.linux_sequences import SEQUENCE_RULES as LINUX_SEQUENCE_RULES
+from romulus.detect.linux_sequences import share_linux_witnesses
 from romulus.detect.network import NETWORK_PLAYBOOKS
 from romulus.detect.packets import PACKET_PLAYBOOKS
 from romulus.detect.sessions import SESSION_PLAYBOOKS
@@ -48,6 +51,7 @@ from romulus.detect.windows_remote import WINDOWS_REMOTE_PLAYBOOKS
 from romulus.detect.windows_rpc import RULES as WINDOWS_RPC_RULES
 from romulus.detect.windows_scripts import WINDOWS_SCRIPT_PLAYBOOKS
 from romulus.detect.windows_sequence_extensions import RULES as WINDOWS_SEQUENCE_RULES
+from romulus.detect.windows_share_events import WINDOWS_SHARE_PLAYBOOKS
 from romulus.detect.windows_tunnels_w4 import RULES as WINDOWS_TUNNEL_RULES
 from romulus.detect.zeek_alerts import ZEEK_ALERT_PLAYBOOKS
 from romulus.detect.zeek_cleartext import RULES as ZEEK_CLEARTEXT_PLAYBOOKS
@@ -56,11 +60,11 @@ from romulus.detect.zeek_rates import RULES as ZEEK_RATE_PLAYBOOKS
 from romulus.detect.zeek_smb import RULES as ZEEK_SMB_PLAYBOOKS
 from romulus.detect.zeek_transfer import RULES as ZEEK_TRANSFER_PLAYBOOKS
 
-PACK_VERSION = "pack@53"
+PACK_VERSION = "pack@54"
 WINDOWS_PROCESS_PLAYBOOKS = (WINDOWS_LINEAGE_PLAYBOOKS + WINDOWS_PROXY_PLAYBOOKS + WINDOWS_CREDENTIAL_PLAYBOOKS
                              + WINDOWS_DEFENSE_PLAYBOOKS + WINDOWS_REMOTE_PLAYBOOKS)
 WINDOWS_HOST_PLAYBOOKS = list(WINDOWS_MEMORY_PLAYBOOKS + WINDOWS_REGISTRY_PLAYBOOKS
-                            + WINDOWS_ENDPOINT_PLAYBOOKS + WINDOWS_FILE_PLAYBOOKS
+                            + WINDOWS_ENDPOINT_PLAYBOOKS + WINDOWS_FILE_PLAYBOOKS + WINDOWS_SHARE_PLAYBOOKS
                             + CATALOG_EVENT_RULES + tuple(rule for rule in WINDOWS_CATALOG_STATE_RULES
                                                          if issubclass(rule, WindowsEventRule)))
 WINDOWS_DOMAIN_PLAYBOOKS = list(WINDOWS_AUTH_EVENT_PLAYBOOKS + WINDOWS_ACCOUNT_PLAYBOOKS
@@ -87,6 +91,7 @@ ALL_PLAYBOOKS = (HOST_PLAYBOOKS + HIJACK_PLAYBOOKS + KERNEL_FILE_PLAYBOOKS + LIN
                  + list(ZEEK_LATERAL_PLAYBOOKS) + list(ZEEK_SMB_PLAYBOOKS) + list(ZEEK_RATE_PLAYBOOKS)
                  + list(ZEEK_CLEARTEXT_PLAYBOOKS) + list(ZEEK_TRANSFER_PLAYBOOKS)
                  + list(ICS_PLAYBOOKS)
+                 + LINUX_DIRECT_RULES + LINUX_SEQUENCE_RULES
                  + BASELINE_PLAYBOOKS)
 _ANCHOR_CLASSES = {playbook.id: playbook.anchor_class for playbook in ALL_PLAYBOOKS}
 
@@ -113,6 +118,7 @@ def fresh_pack():
     # window cells in the sweep and are judged by the later baseline stage.
     pack = [cls() for cls in ALL_PLAYBOOKS if cls.kind not in ("context", "packet")]
     share_lineage(pack)           # one Linux exec lineage for every rule that keeps one
+    share_linux_witnesses(pack)   # one compact citation store for the Linux sequence rules
     share_windows_lineage(pack)   # one Windows process-history store for every parent-resolving Windows rule
     return pack
 

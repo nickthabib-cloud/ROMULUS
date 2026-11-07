@@ -156,6 +156,8 @@ def _host_datasets(
             "audit_config": ("linux.audit",),
             "system_state": ("linux.audit",),
             "file_change": ("linux.audit",),
+            "file_access": ("linux.audit",),
+            "kernel_module": ("linux.audit",),
             "process_observed": ("linux.audit",),
             "http_access": ("apache.access",),
             "web_error": ("apache.error",),

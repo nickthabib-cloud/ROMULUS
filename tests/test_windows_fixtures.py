@@ -52,6 +52,7 @@ _REPRESENTATIVE_FIELDS = {
     "directory_access": ("directory.object.dn",),
     "directory_change": ("directory.object.dn", "directory.trust.domain_name"),
     "share_access": ("share.name",),
+    "share_change": ("share.name", "share.local_path", "share.change"),
     "defender_event": ("defender.threat.name",),
     "remote_access": ("source.ip", "bits.job_id", "remote.resource", "remote.action"),
 }
