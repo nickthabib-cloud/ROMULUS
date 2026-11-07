@@ -77,7 +77,7 @@ def test_each_changed_rule_carries_a_new_version():
     # the six direction-dependent rules (coverage semantics) and the four whose claim or reason wording changed (most
     # of them since changed again: lineage read from observed process records, claims that say what they cite)
     versions = {pb.id: pb.version for pb in ALL_PLAYBOOKS if pb.id in AFFECTED | WORDING}
-    assert versions == {"bl.ext_dest": "1", "net.horizontal_sweep": "6", "net.long_external_connection": "5", "net.beaconing": "6",
+    assert versions == {"bl.ext_dest": "1", "net.horizontal_sweep": "6", "net.long_external_connection": "6", "net.beaconing": "7",
                         "net.rare_client_fingerprint": "4", "net.tls_self_signed_certificate_outbound": "4",
                         "net.tls_short_lived_or_new_certificate_outbound": "4",
                         "host.ssh_login_external_source": "6", "host.interpreter_external_connection": "8",

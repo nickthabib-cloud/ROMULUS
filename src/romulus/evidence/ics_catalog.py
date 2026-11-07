@@ -17,7 +17,9 @@ Code/field sources (transcribed tables, not packet data):
 - CIP tag services are vendor specific, never universal 0x4c/0x4d:
   Rockwell 1756-PM020I-EN-P (September 2025), pp.16-18,24:
   https://literature.rockwellautomation.com/idc/groups/literature/documents/pm/1756-pm020_-en-p.pdf
-  Only an explicit Symbol class (0x6b) permits those classifications here.
+  An explicit Symbol class (0x6b), or the symbolic-path convention when the
+  parser records no class, permits those classifications. The latter is
+  accompanied by a vendor-service caveat by the normalizer.
 
 Shipper placement:
 - cisagov/Malcolm 541160e513de90ed4ea5af1d1ed7a8a64758bf8d (Apache-2.0),
@@ -65,7 +67,9 @@ MODBUS = _table((
     (5, "WRITE_SINGLE_COIL", "write"), (6, "WRITE_SINGLE_REGISTER", "write"),
     (8, "DIAGNOSTICS", "diagnostic"), (15, "WRITE_MULTIPLE_COILS", "write"),
     (16, "WRITE_MULTIPLE_REGISTERS", "write"), (17, "REPORT_SLAVE_ID", "discovery"),
+    (20, "READ_FILE_RECORD", "read"), (21, "WRITE_FILE_RECORD", "write"),
     (22, "MASK_WRITE_REGISTER", "write"), (23, "READ_WRITE_MULTIPLE_REGISTERS", "write"),
+    (24, "READ_FIFO_QUEUE", "read"),
     (43, "ENCAP_INTERFACE_TRANSPORT", "other"),
 ))
 DNP3 = _table((
@@ -157,7 +161,7 @@ def lookup_function(protocol: str, code: int | None = None, *, name: str | None 
         return Function(code, native, "other")
     if protocol == "s7comm" and code == 40 and subfunction == "P_PROGRAM":
         return Function(40, "PLC Control", "mode_change")
-    if protocol == "cip" and class_id == 0x6b:
+    if protocol == "cip" and class_id in (None, 0x6b):
         tags = {0x4c: ("Read Tag", "read"), 0x4d: ("Write Tag", "write"),
                 0x52: ("Read Tag Fragmented", "read"), 0x53: ("Write Tag Fragmented", "write")}
         if code in tags:
@@ -235,4 +239,3 @@ def retrieval_selection(log: str, shape: str) -> RetrievalSelection:
         # ERROR_PDU/error services are different native values, never excluded here.
         return RetrievalSelection((field,), reads)
     return RetrievalSelection()
-

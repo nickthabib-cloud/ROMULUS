@@ -277,6 +277,3 @@ def test_bacnet_control_service_alone_does_not_imply_request(shape):
     e = normalize(zi.ROWS["bacnet_device_control"].with_(device_state=None, result=None), shape)
     assert e.get("ics.is_request") is None
     assert e.get("ics.exception") is None
-
-
-

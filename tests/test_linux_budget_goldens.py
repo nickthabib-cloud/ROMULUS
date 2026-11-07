@@ -5,12 +5,12 @@ from romulus.detect.bounded import StateBudget
 from romulus.hunt import sweep as sw
 from tests import throughput_fixture as tf
 
-# All 35 finding identities and lanes are retained. Three beacons now cite the equivalent Suricata flow
-# witnesses, with their sensor wording, citation timestamps and rule version; see test_throughput_equality.
+# All 35 finding identities and lanes are retained. Three beacons cite Arkime first and retain the equivalent
+# Suricata witnesses; sensor attribution, cited timestamps and versions follow. See test_throughput_equality.
 CANDIDATE_GOLDENS = {
-    4: (35, "da95d96fed05254a800f1449ee757093126d4cb5207cea04f07e6ef11d2f2c47"),
-    8: (35, "da95d96fed05254a800f1449ee757093126d4cb5207cea04f07e6ef11d2f2c47"),
-    16: (35, "da95d96fed05254a800f1449ee757093126d4cb5207cea04f07e6ef11d2f2c47"),
+    4: (35, "6531915996fd5b464b73a18dab49e7cbe2f679eccc4e71ec6618458629b3a4e3"),
+    8: (35, "6531915996fd5b464b73a18dab49e7cbe2f679eccc4e71ec6618458629b3a4e3"),
+    16: (35, "6531915996fd5b464b73a18dab49e7cbe2f679eccc4e71ec6618458629b3a4e3"),
 }
 
 

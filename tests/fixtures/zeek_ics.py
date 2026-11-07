@@ -157,4 +157,3 @@ def hit(record, shape="malcolm", nid="ics-1", *, text=False, sensor=zl.SENSOR):
             kept = {k: v for k, v in cols.items() if k in ("fc_request", "fc_reply", "iin")}
         source[log] = kept
     return {"_id": nid, "_index": zl.INDEX[shape], "_source": source}
-

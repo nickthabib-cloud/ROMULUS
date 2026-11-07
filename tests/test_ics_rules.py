@@ -136,7 +136,8 @@ def test_exception_burst_counts_distinct_requests_and_never_claims_denial():
     assert 'denial of service occurred' not in match.claim.lower()
     repeated=[row.model_copy(update={'fields':{**row.fields,
         'ics.transaction_id':fv('1','same transaction')}}) for row in rows]
-    assert not run(rule('ExceptionBurst'),repeated)
+    [reused] = run(rule('ExceptionBurst'),repeated)
+    assert '20 exception responses' in reused.claim
 
 
 def test_exception_rows_without_transaction_identity_cannot_prove_many_requests():
@@ -153,11 +154,11 @@ def test_real_protocol_requests_reach_the_command_detector_in_each_carried_shape
     for shape in zi.SHAPES_BY_LOG[log]:
         normalized=normalize(zi.ROWS[log],shape)
         matches=run(rule('WriteOrControlCommand'),[normalized])
+        assert len(matches)==1 and matches[0].proposed_lane=='lead', (log,shape)
+        assert 'request observed' in matches[0].claim
         if shape=='security_onion' and log=='modbus':
-            assert matches==[]  # this shipper discards native request/response direction
-        else:
-            assert len(matches)==1 and matches[0].proposed_lane=='lead', (log,shape)
-            assert 'request observed' in matches[0].claim
+            assert 'transaction summary' in ' '.join(matches[0].notes)
+            assert 'acknowledged without exception' not in matches[0].claim
 
 
 def test_dnp3_transaction_summary_can_prove_a_request_without_inventing_packet_direction():

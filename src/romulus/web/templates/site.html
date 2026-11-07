@@ -135,6 +135,8 @@
   <h2>Internal networks</h2>
   <label>ICS control hosts (IPs or CIDRs, one per line)<textarea name="ics_control_hosts" rows="4"
     class="mono">{{ form.ics_control_hosts }}</textarea></label>
+  <p class="help">Include every host that legitimately sends write or control commands: HMI, SCADA,
+    engineering stations, and PLCs, gateways or data concentrators acting as masters.</p>
   <p class="help">Now in use: {{ networks }}</p>
   {% if env_networks %}
   <p class="warn">This server also sets <span class="mono">ROMULUS_INTERNAL_NETWORKS</span> or

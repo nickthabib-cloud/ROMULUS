@@ -4,11 +4,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from romulus.evidence.ics_catalog import retrieval_selection
-from romulus.evidence.zeek_catalog import MALCOLM, PLAIN, SHAPES, ZEEK_LOGS, lookup_log
+from romulus.evidence.zeek_catalog import PLAIN, SHAPES, ZEEK_LOGS, lookup_log
 from romulus.hunt.zeek_sources import _marker_refused, native_field, source_groups
 from romulus.sources.models import Predicate
 
-SELECTION_NOTE = ('Routine read requests and responses were excluded at retrieval by native function; '
+SELECTION_NOTE = ('Routine read requests and responses were excluded at retrieval where verified native function fields permit it; '
     'ICS rules evaluated write, control, program-transfer, mode-change, restart, diagnostic and discovery '
     'functions, unknown functions, and exceptions.')
 
@@ -41,6 +41,9 @@ def selection(contract, profile):
         return Selection(reasons=['ICS retrieval is unfiltered: dataset inventory is incomplete.'])
     candidates=candidates or logs
     groups=[]
+    filtered_names=set()
+    has_filter=False
+    reasons=[]
     for log in candidates:
         if not plain:
             for item in inventory:
@@ -64,10 +67,10 @@ def selection(contract, profile):
             matched=True
             policy=retrieval_selection(log.name,shape)
             if not policy.read_fields:
-                # Logs containing no routine read function have no polling to exclude. If this is a known
-                # read-carrying log with no safe selector, the entire target deliberately falls back.
+                # A read-unfilterable log remains an unfiltered marker branch. Other logs on this target
+                # retain their safe polling selectors; an absent inventory entry also passes the catch-all.
                 if log.name in {'dnp3','dnp3_objects'}:
-                    return Selection(reasons=[f'ICS retrieval is unfiltered: {log.name} {shape} has no safe indexed function/exception selection.'])
+                    reasons.append(f'ICS retrieval is unfiltered for {log.name} {shape}: no safe indexed function/exception selection.')
                 groups.extend(markers)
                 continue
             reads=[native_field(contract,path,'not_in') for path in policy.read_fields]
@@ -76,7 +79,12 @@ def selection(contract, profile):
             if not all(reads) or not all(exceptions) or not all(nonzero):
                 return Selection(reasons=[f'ICS retrieval is unfiltered: {log.name} {shape} native function or exception field is unmapped or not filterable.'])
             row=[Predicate(field=path,op='not_in',value=list(policy.read_values)) for path in reads]
+            has_filter=True
             for marker in markers:
+                discriminator=native_field(contract,'_path' if plain else 'event.dataset','in')
+                for predicate in marker:
+                    if predicate.field==discriminator and predicate.op in {'in','eq'}:
+                        filtered_names.update(predicate.value if predicate.op=='in' else [predicate.value])
                 groups.append([*marker,*row])
                 groups.extend([*marker,Predicate(field=path,op='exists')] for path in exceptions)
                 for path in nonzero:
@@ -88,18 +96,23 @@ def selection(contract, profile):
             return Selection(reasons=[f'ICS retrieval is unfiltered: {log.name} source markers are not filterable.'])
     if not groups:
         return Selection()
+    if not has_filter:
+        return Selection(reasons=reasons)
     if not (plain and contract.zeek_log):
         marker='_path' if plain else 'event.dataset'
         field=native_field(contract,marker,'not_in')
         if field is None:
             return Selection(reasons=['ICS retrieval is unfiltered: native dataset discriminator is not filterable.'])
-        names=sorted({name if plain or shape==MALCOLM else 'zeek.'+name
-                      for log in logs for shape,values in log.names.items() for name in values})
-        groups.append([Predicate(field=field,op='not_in',value=names)])
+        # Only names with actual polling-filter branches can be excluded here. New datasets appearing
+        # after preflight, rollover or resume pass through, even when already known to the global catalog.
+        groups.append([Predicate(field=field,op='not_in',value=sorted(filtered_names))])
         if not plain:
             # A non-Zeek producer may use an identical bare dataset. Keep it independent of Zeek filtering.
             provider=native_field(contract,'event.provider','not_in')
-            if inventory and provider and contract.supports(provider,'exists'):
+            if provider and contract.supports(provider,'exists') and contract.supports(provider,'missing'):
+                groups.append([Predicate(field=provider,op='missing')])
                 groups.append([Predicate(field=provider,op='exists'),
                                Predicate(field=provider,op='not_in',value=['zeek'])])
-    return Selection(groups,[SELECTION_NOTE],True)
+            else:
+                return Selection(reasons=['ICS retrieval is unfiltered: records without a provider cannot be selected safely.'])
+    return Selection(groups,[SELECTION_NOTE,*reasons],True)

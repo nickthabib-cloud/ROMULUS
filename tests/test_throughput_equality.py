@@ -320,15 +320,15 @@ from tests import throughput_fixture as tf
 # citations, requests, evidence, manifest and every other field remain identical.
 # Port-aware HTTP indicator matching and kind-scoped coverage change only the IOC contract version in its
 # 71 cells here. Restoring that one version reproduces all 23 sections, including every candidate and manifest.
-# Shared flow inputs retain the same 35 finding identities and lanes. Three beacon findings cite Suricata
-# flow records, with unchanged connection counts and interval statistics; the other 32 findings are exact.
-# Their event/entity/raw projections and six baseline-exclusion source targets follow those witnesses.
-# Coverage includes seven additional rules, the timing/indicator contracts, and the source-specific counts.
+# Shared flow inputs retain the same 35 finding identities, lanes and severities. Three beacon findings cite
+# Arkime first and retain Suricata witnesses, with unchanged connection counts and interval statistics;
+# the other 32 findings are exact. Added witness rows, entity links and exclusion targets follow those citations.
+# All 639 changed coverage cells differ only by the nine changed rule versions.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
     "audit": "23d9b87c75d030df8ff5bcbf07deacc75416c325dd74bcc89243cc1b5488ae93",
     "baseline_counts": "1a021de3254f91225689f1bdc8ce3e0cfd416c90a4148bcd4f1c93b6db9cb16d",
-    "baseline_hunt_exclusions": "6edce6e2a9c7ce132fb18481f529f6713c561be7693c0c2638d183a38ae0be4d",
+    "baseline_hunt_exclusions": "2104a2b641a185061b19a1d1384f3798ff0f3c4161f54d6d6a9a016b0e1aac45",
     "baseline_observations": "814031e4a439a6faa3218d7b3687d2391534916c44f015b4d7b7993b7d15070f",
     "baseline_scope_hours": "fe1ef875f82a6cad7d9c7884b1936614584a9f9e0e4c008e4790ee46edf6361d",
     "baseline_segments": "e2ca9f003a97f77ac300789266c9e646610317f5577318c4b556b464a8a6fc48",
@@ -336,23 +336,23 @@ GOLDEN_STACK = {
     "baseline_window_counts": "7cc0f5555260b0533927f47cfe29e6a543e2d921b0cc79e4b6b89f418d6052f8",
     "baseline_window_event_hours": "bb58c65144b135443e75a690b7b2f8137ebac6b827f8e8bd8cc7606a01c53e52",
     "baseline_window_scope_hours": "07f4081d18fb5be1dfc23c1eecd4e63eef7af093c1a70eaa7f4ea05fc772006f",
-    "candidates": "da95d96fed05254a800f1449ee757093126d4cb5207cea04f07e6ef11d2f2c47",
-    "entities": "7c24e61dfb6998491faa301462e9fdc3cfb0e647e8d6d28f280517b804d63165",
+    "candidates": "6531915996fd5b464b73a18dab49e7cbe2f679eccc4e71ec6618458629b3a4e3",
+    "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
     "event_citations": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-    "event_entities": "e46388616e20fc4db32e8d22d7f51f83683129e26ec8fce404da04d32b88c593",
-    "events": "d51c3aa71fe51426fac5d2b5f40043dce12a3847605cc2bd401e60e39c588336",
+    "event_entities": "fd60da944607b1936edea6651adc4cb9e47a7b34edac732ec150d103b8afb110",
+    "events": "f0a94b3be1c5c6e96c190f4979be1c2f56c5692e3a648a6d38de4af03ef67b70",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "0fbedb27ca9a4cb72354178444ee9aabc49f377b2c933074fe03ef29c8fbb08a",
     # Five zero-evaluation Zeek rate registrations add 355 coverage cells and five manifest rules.
     # Five Windows contract-version bumps change only rule_version in their 355 existing cells.
     # Removing those additions, restoring those versions and incidental cell IDs reproduces the
     # complete preceding snapshot; all 35 candidates and 21 non-coverage sections are identical.
-    "manifest": '38faeb5992a7fabf49e66aef4a2163b839bb141054dddd350a1872f354546897',
-    "raw": "a81357c736b707d2ee99f76b5b4f8d1233dfed9844a71c7c219372b8b3e9f433",
+    "manifest": "351f4b170a899cf19c38d12939380126d107cb595b4c7ab1268296fadbf65561",
+    "raw": "49399de9c6d36b9443ccd2f39a8dcabb827e299b41e49573d6e58f6f623176f7",
     # Twenty changed Windows/network contracts carry new versions in 71 coverage cells each.
     # Restoring only those versions reproduces the complete preceding snapshot; all 35 candidates
     # and the other 22 stack sections are byte-identical.
-    "rule_cells": 'f80a53f45a2f9dd6dd619e196512c8de4ed770c409d5d30dbbe906db644b9422',
+    "rule_cells": "f5f5bcea0566338ca8238e5810788513ee6ed51ba1b04b8dbc88b3df49115592",
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
     "tasks": "c65df4ab88c05661371cf32b49a1d22ef84d6753488bdb946c8e29376d486260",
 }
@@ -361,15 +361,15 @@ GOLDEN_STACK = {
 # checked field by field.
 GOLDEN_NON_BASELINE_SEMANTICS = {
     "candidates": {
-        "all_fields": "9fd11aeb74d43862118340258bec0e20c14742f548d283aceccad12a9b34b856",
+        "all_fields": "3e5b39b097825afd0ce6f374f84122e6d2134faff9b7f99c5103bea73de53f6f",
         "benign_alternatives": "8e3c0bf9bd14733cc2b4a049393aded638eaa0e93632c2c69d1428a52a4cc221",
-        "claim": "5ae5b58fa4ccce398ae86ea2876859edd2335fa8632378303eb4aa0562e2d6f5",
+        "claim": "396958027c8b7993105a3e00423eed2956fac7bac5d04dc2976b218d0f9d1505",
         "claim_type": "1ccc0da03751218f3bb63463a348cd5519fb63c2eec9e0d2e83259f18bfc6681",
         "confidence": "307872061aea17d3b0ed62d34865ad350c9b4cb9cc7d2cea041ca39011ee3e7e",
         "context_event_records": "af444f5420b16faa27b03fe9091a6b2db5006bcc5da813d573f7a01c97490121",
         "count": 35,
-        "entities": "d09384d002c3f8717072917bac3d3a1294c4aab1dd99fcc23775d5b7307b115a",
-        "event_records": "f9ebdb43b8e63fdc22d23f93a2eab60c46accc66379257cae534287f1db24081",
+        "entities": "dfb7f8d1a995807f75365452dae6c80e325d1f2d1ad42f1fd1a2bb1292b98d21",
+        "event_records": "20e2c55161cf3c68215dc4e15722b83b9e25867be1ab77da05ff005892602b4b",
         "gate_results": "1494f3c1cd4853709e0ccaa599c397076f29a9b8ef2431c339d607cabb57f46e",
         "group_key": "e568af201841df36a89a8f8cebf9384f4fae5219b5fa742761a17778c24e21db",
         "lane": "2a992b1fbb25d9d7cddc90e6ada69d30c0eb0e743881c35e567bd8cc08828f3b",
@@ -378,16 +378,16 @@ GOLDEN_NON_BASELINE_SEMANTICS = {
         "priority": "aa73edc71e40ea4964645f62817edb7b3e790121d824db413442d99a21c05d5d",
         "priority_reasons": "b473ae5921bb2f50e3cc347ad18a3a5b6557ecacdaca7568e9f2f10b2fde3a9b",
         "rule_id": "2ae926e61da026e299be84e4e716e9bd0a33eb9a6ea3c97196c3167fc017a257",
-        "rule_version": "0bfdff9a79fb6a0406e168ad268d2578f6e528716cdd443a2129c3d6f62b1ac3",
+        "rule_version": "af6ddae9b9eed36ff8ff98a0c73db5be83cd452ea294e3df6b6febe0725b07ed",
         "severity": "b2e229e267531f35a076f4db58edc48cbea38cce613ae2a6954cb6b1bf5ea20c",
         "source_presence": "4b20d257ae462d3a6c1af7eeddf340a1558a100d29f517eb7b5c7564fa778d1c",
-        "ts": "d783022fbeb6ab1800221b231285115788919175f9dc1481216a31707234dab2",
+        "ts": "d8015c1ff0b135e082a5fef2ab1cb88206470e30beee157a0cfc7790d48b8310",
     },
     "rule_cells": {
-        "all_fields": 'a46cb4949b377ada1ab4358653d003c0b0ad0bd3933d77d48d40336e7ce9a392',
+        "all_fields": "0df75e9d8a95e1e98608ab5ac5a2907e233a67a9b9a5097fae3549ad8b63a50d",
         "count": 15758,
         "rule_id": 'ff9f673cb631d50f91948d268a7342a1a19c25c8b4c099a13e521acaa8807f30',
-        "rule_version": 'e1c8b6e3e14aa448d10a5f0b4c0428e3c0f227acb4a278016ca8c9426c155efa',
+        "rule_version": "52e0a2ae2593617b7405e8ae52085fa2f91f255438bbae4f0ff4f8b36864134e",
         "target": 'ba0cf0a1239380578f0d7f7faf7c5202a80024ef2815838ab1b059e28ef5ca7a',
         "partition": '08db801c30252039241bb64a0a03dd3a58798babbe62b7aa11db66e83a82bfe9',
         "state": '2c9ed719c5f13e5cbc727dbdc794cb3029a528304c9a5a788e200622f3c52bac',

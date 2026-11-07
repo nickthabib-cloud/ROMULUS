@@ -1060,7 +1060,7 @@ def _analyze(hit: dict, record: ZeekRecord, declared_sensor: str | None, *,
         if computed is not None:
             f["network.community_id"] = fv(computed, f"{nid}:id.orig_h+id.orig_p+id.resp_h+id.resp_p+proto"
                                                      f"#computed:community_id_v1")
-    if guard.present and log.family != "ics_tx":
+    if guard.present:
         f["auth.cleartext_credentials_present"] = fv(True, f"{nid}:{'+'.join(dict.fromkeys(guard.present))}#present")
     elif guard.unknown:
         f["auth.cleartext_credentials_unknown"] = fv(True, f"{nid}:{'+'.join(dict.fromkeys(guard.unknown))}#unknown")
@@ -1921,7 +1921,8 @@ def _ics(f, reader, log, caveats, guard):
     userdata = name == "s7comm" and f.get("ics.rosctr") is not None and f["ics.rosctr"].value == 7
     if name == "s7comm_read_szl":
         operation = ICSFunction(4, "Read SZL", "discovery")
-    elif protocol in ("cotp",) or name in ("cip_identity", "cip_io"):
+    elif ((protocol == "cip" and any("class_id" in path for path in reader.bad))
+          or protocol == "cotp" or name in ("cip_identity", "cip_io")):
         operation = ICSFunction(code.value if code else None, native.value if native else "unknown", "other")
     else:
         operation = lookup_ics_function(protocol, code.value if code else None,
@@ -1935,6 +1936,9 @@ def _ics(f, reader, log, caveats, guard):
         f["ics.function_code"] = fv(operation.code, _derived(source, "ics-catalog"))
     if operation.program_direction is not None:
         f["ics.program_direction"] = fv(operation.program_direction, _derived(source, "ics-catalog"))
+    if protocol == "cip" and class_id is None and operation.op_class in ("read", "write") \
+            and operation.code in (0x4c, 0x4d, 0x52, 0x53):
+        caveats.append("vendor tag service on a symbolic path")
 
     request = None
     request_field = f.get("ics.request_type")
@@ -1975,6 +1979,27 @@ def _ics(f, reader, log, caveats, guard):
         request = request_field.value
     if request is not None:
         f["ics.is_request"] = fv(request, _derived(request_field or anchor, "native-request-direction"))
+    elif name == "modbus" and native is not None and operation.op_class != "read":
+        # Older base rows omit PDU direction. A non-read function, including
+        # an exception reply, still proves the corresponding request was sent.
+        # Keep this as logical request evidence rather than a packet direction.
+        f["ics.request_observed"] = fv(True, _derived(native, "modbus-function-request"))
+
+    direction = f.get("ics.is_orig")
+    derived_endpoints = False
+    if direction is not None:
+        for typed, conn in (("ics.sender", "conn.orig_h" if direction.value else "conn.resp_h"),
+                            ("ics.receiver", "conn.resp_h" if direction.value else "conn.orig_h")):
+            if typed not in f and conn in f:
+                f[typed] = fv(f[conn].value,
+                              f"{f[conn].origin}+{direction.origin}#derived:packet-direction")
+                derived_endpoints = True
+        if derived_endpoints:
+            f["ics.endpoint_basis"] = fv("is_orig+connection_roles", _derived(direction, "endpoint-basis"))
+            caveats.append("ICS packet endpoints derived from is_orig and recorded connection roles")
+            for typed, packet in (("source.ip", "ics.sender"), ("destination.ip", "ics.receiver")):
+                if typed not in f and packet in f:
+                    f[typed] = f[packet]
 
     # Base Modbus has pdu_type but no source_h. Its own parser explicitly defines
     # REQ as is_orig and RESP as !is_orig. Missing pdu_type never implies a direction.
