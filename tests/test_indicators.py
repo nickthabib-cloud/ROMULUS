@@ -151,7 +151,8 @@ def test_fingerprint_matches_list_valued_session_fields(rule):
 
 @pytest.mark.parametrize("body, error", [
     ("schema_version: 2\nindicators: []\n", "schema_version"),
-    ("schema_version: 1\nindicators:\n  - {id: a, kind: url, values: [x]}\n", "kind"),
+    ("schema_version: 1\nindicators:\n  - {id: a, kind: unknown, values: [x]}\n", "kind"),
+    ("schema_version: 1\nindicators:\n  - {id: a, kind: url, values: [x]}\n", "invalid"),
     ("schema_version: 1\nindicators:\n  - {id: a, kind: ip, values: [999.1.1.1]}\n", "valid ip"),
     ("schema_version: 1\nindicators:\n  - {id: a, kind: program_name, values: [/tmp/x]}\n", "basenames"),
     (("schema_version: 1\nindicators:\n  - {id: a, kind: ip, values: [192.0.2.1]}\n"

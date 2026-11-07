@@ -18,6 +18,13 @@ from romulus.baseline.carry import HourParents
 from romulus.baseline.playbook import BaselineCell, BaselinePlaybook
 from romulus.baseline.reasons import summarize
 from romulus.baseline.spec import KeyContext, exec_serial
+from romulus.content.sigma_coverage import (
+    bounded_details,
+    coverage_view,
+    exclusion_reasons,
+    reason_signature,
+    visible_reasons,
+)
 from romulus.detect import netdef
 from romulus.detect.base import Match, Playbook
 from romulus.detect.bounded import StateBudget, StateExhausted, live_stores
@@ -295,6 +302,15 @@ class Sweep:
         # stage volume), and the memory their hot sets share. Read the stage volume's free space before the sweep.
         self.budget = state_budget(settings, stage_dir)
         self.pack: list[Playbook] = bind_windows_site(fresh_pack(), self.site_facts)
+        manifest = repo.get_hunt(hunt_id)['manifest'] if repo is not None else {}
+        indicator_pins = manifest.get('indicator_lists')
+        if manifest.get('sigma_rules'):
+            from romulus.content.sigma_store import load_pinned
+            from romulus.detect.sigma import SigmaRule
+            self.pack.extend(SigmaRule(row) for row in load_pinned(repo, manifest['sigma_rules']))
+        for pb in self.pack:
+            if hasattr(pb, 'bind_indicators'):
+                pb.bind_indicators(repo, indicator_pins)
         bind_lineage_citation_loader(self.pack, LineageCitationFetcher(client, contracts).load)
         for pb in self.pack:
             bind_aggregate_history(repo, hunt_id, pb)
@@ -471,6 +487,9 @@ class Sweep:
         wfp_reader = any("network_filter" in (*rule.families, *rule.context_families) for rule in getattr(self, "pack", ()))
         rdp_reader = any("remote_access" in (*rule.families, *rule.context_families) for rule in getattr(self, "pack", ()))
         rpc_reader = any("rpc_call" in (*rule.families, *rule.context_families) for rule in getattr(self, "pack", ()))
+        sigma_classes = {(str(c).casefold(), str(p).casefold(), int(i))
+                         for rule in getattr(self, 'pack', ()) if getattr(rule, 'id', '').startswith('sigma.')
+                         for c, p, i in rule.windows_event_classes}
         rpc_groups = []
         strict_rpc = False
         if rpc_reader:
@@ -529,6 +548,11 @@ class Sweep:
                 process_only = object_readers == {"win.lsass_process_access"} and contract.supports("object.type", "eq")
                 groups = list(rpc_groups)
                 for event in selected:
+                    if event.key in sigma_classes:
+                        groups.append([Predicate(field='event.channel', op='eq', value=event.channel),
+                                       Predicate(field='event.provider', op='eq', value=event.provider),
+                                       Predicate(field='event.code', op='eq', value=event.event_id)])
+                        continue
                     if event.family == "rpc_call":
                         continue
                     group = [Predicate(field="event.channel", op="eq", value=event.channel),
@@ -1304,6 +1328,8 @@ class Sweep:
     # -------------------------------------------------------------------------------------
     def _cell(self, pb: Playbook, target: str, pkey: str, state: str, matched: int = 0, evaluated: int = 0,
               detail: dict | None = None) -> dict:
+        if pb.id.startswith('sigma.'):
+            detail = bounded_details(detail)
         return {"rule_id": pb.id, "version": pb.version, "target": target, "partition": pkey, "state": state,
                 "matched": matched, "evaluated": evaluated, "detail": detail or {}}
 
@@ -1843,6 +1869,9 @@ class Sweep:
         held: list[tuple[str, TypedEvent]] = []          # (playbook, event) holds of interval bounds
         released: list[tuple[str, list[str]]] = []       # (playbook, ids) holds the playbooks let go
         target_os = contract.os_family if contract is not None else "linux"
+        from romulus.detect.sigma import SigmaEventIndex, SigmaRule
+        sigma_index = SigmaEventIndex(events) if any(isinstance(pb, SigmaRule) for pb in self.pack) else None
+        sigma_reasons = {}
         for pb in self.pack:
             if pb.id in self.failed_rules:
                 self._failed_rule_cell(pb, target, pkey, cells)
@@ -1851,13 +1880,28 @@ class Sweep:
             try:
                 # families a rule reads only as context (its lineage) do not make a partition an evaluation of it
                 evaluated_families = set(pb.families) - set(pb.context_families)
-                relevant_events = [event for event in events if event.family in evaluated_families]
+                sigma_events = sigma_index.for_rule(pb) if isinstance(pb, SigmaRule) else None
+                relevant_events = (sigma_events if sigma_events is not None else
+                                   [event for event in events if event.family in evaluated_families])
                 target_fallback = not relevant_events and (
                     target_os == "unknown" or target_os in pb.os_families
                 )
-                windows_reasons = self._windows_rule_reasons(
-                    target, contract, pb, out.records, gap_reasons, w, continuity_times,
-                )
+                sigma_rule_reasons = []
+                if sigma_events is not None:
+                    reason_view = coverage_view(pb)
+                    signature = reason_signature(reason_view)
+                    if signature not in sigma_reasons:
+                        sigma_reasons[signature] = bounded_details({'reasons': self._windows_rule_reasons(
+                            target, contract, reason_view, out.records, gap_reasons, w, continuity_times)})
+                    sigma_reason_detail = sigma_reasons[signature]
+                    windows_reasons = visible_reasons(sigma_reason_detail)
+                    sigma_rule_reasons = list(exclusion_reasons(pb))
+                    windows_gate_reasons.update(sigma_reason_detail['reasons'])
+                    windows_gate_reasons.update(sigma_rule_reasons)
+                else:
+                    windows_reasons = self._windows_rule_reasons(
+                        target, contract, pb, out.records, gap_reasons, w, continuity_times,
+                    )
                 if (script_metadata_reasons and contract.os_family == "windows"
                         and "script_block" in pb.families):
                     windows_reasons.extend(script_metadata_reasons)
@@ -1870,8 +1914,8 @@ class Sweep:
                     windows_reasons.append(unsupported_reason)
                 windows_gate_reasons.update(windows_reasons)
                 rule_partial = (affected is ALL_FAMILIES or bool(set(pb.families) & affected)
-                                or bool(windows_reasons))
-                input_events = events
+                                or bool(windows_reasons) or bool(sigma_rule_reasons))
+                input_events = events if sigma_events is None else sigma_events
                 unaggregated_events = []
                 identity_reason = getattr(self, "_zeek_canonical_unavailable", "")
                 if identity_reason and pb.kind != "direct":
@@ -1982,8 +2026,8 @@ class Sweep:
                 )
                 before_assumed = pb.direction_assumed
                 before_limits = {name: limit.records for name, limit in pb.limits.items()}
-                scoped_events = pb.scope_partition(input_events)
-                if identity_reason and input_events is not events and not unaggregated_events:
+                scoped_events = input_events if sigma_events is not None else pb.scope_partition(input_events)
+                if identity_reason and pb.kind != 'direct' and input_events is not events and not unaggregated_events:
                     withheld = sum(event.family in pb.families for event in events)-sum(
                         event.family in pb.families for event in input_events)
                     if withheld:
@@ -2050,6 +2094,10 @@ class Sweep:
                 missing = pb.missing_required - before_missing
                 target_applicable = target_fallback or pb.os_applicable > before_os
                 rule_partial = target_applicable and rule_partial
+                if isinstance(pb, SigmaRule) and (pb._batch_argument_gap or pb._batch_unknown
+                                                 or 'sigma_publication_budget' in pb.limits
+                                                 or 'sigma_command_identity' in pb.limits):
+                    rule_partial = True
                 # records a full state budget kept from evaluation: never a clean evaluation of this partition
                 capped = pb.capped - before_capped
                 # records skipped or judged for a direction the default internal-network definition only assumes
@@ -2071,8 +2119,11 @@ class Sweep:
                     state = "positive_only_partial" if incomplete else "positive_only"
                 else:
                     state = "evaluated_partial" if incomplete else "no_match_complete"
-                reasons = list(base_reasons)
-                reasons.extend(windows_reasons)
+                reasons = list(sigma_rule_reasons) if sigma_events is not None else list(base_reasons)
+                if hasattr(pb, 'partition_coverage_notes'):
+                    reasons.extend(pb.partition_coverage_notes())
+                if sigma_events is None:
+                    reasons.extend(windows_reasons)
                 if consume_failure:
                     reasons.append(consume_failure)
                 if error_reason and (error_affected is ALL_FAMILIES or set(pb.families) & error_affected):
@@ -2080,6 +2131,10 @@ class Sweep:
                 if missing:
                     reasons.append(f"missing_required={missing}: records lacked a field this rule needs")
                 detail = {"missing_required": missing, "reasons": reasons}
+                if sigma_events is not None:
+                    detail['_sigma_reason_omitted'] = sigma_reason_detail['reason_omitted']
+                    detail['_sigma_reason_truncated'] = sigma_reason_detail['reason_truncated']
+                    detail['undecidable_comparisons'] = sum(pb._batch_unknown.values())
                 if assumed:
                     reasons.append(DIRECTION_ASSUMED_REASON)
                     detail["direction_assumed"] = assumed
@@ -2091,6 +2146,9 @@ class Sweep:
                     reasons.append(f"state_capped={capped}: records not evaluated because a state budget of this rule "
                                    f"was full; " + "; ".join(refused))
                     detail["state_capped"] = capped
+                if sigma_events is not None:
+                    reasons.extend(windows_reasons)
+                    reasons.extend(base_reasons)
                 cells.append(self._cell(pb, target, pkey, state, matched, evaluated, detail))
             except INFRASTRUCTURE_ERRORS:
                 raise
@@ -2356,6 +2414,8 @@ class Sweep:
         finalized = 0
         matched: Counter[str] = Counter()
         evaluated: Counter[str] = Counter()
+        sigma_details: dict[str, dict] = {}
+        sigma_unknown: Counter[str] = Counter()
         truncation_reasons: set[str] = set()
         for batch in batched(assembler.finalize(), SCRIPT_FINALIZE_BATCH_SIZE):
             events = list(batch)
@@ -2378,6 +2438,13 @@ class Sweep:
                     continue
                 evaluated[pb.id] += len(scoped)
                 pb.bind_raw(raw_sources, "script-block-finalize")
+                if pb.id.startswith('sigma.') and getattr(pb, 'needs_live_loader', False):
+                    current = {event.id: event for event in events}
+                    def load_script(ids, current=current):
+                        missing = [identity for identity in ids if identity not in current]
+                        return ([current[identity] for identity in ids if identity in current]
+                                + self._event_stage().load(missing))
+                    pb.bind_loader(load_script)
                 try:
                     matches = pb.consume_scoped_partition(scoped)
                 except StateExhausted as exc:
@@ -2391,6 +2458,11 @@ class Sweep:
                 finally:
                     pb.bind_raw({})
                 matched[pb.id] += len(matches)
+                if pb.id.startswith('sigma.'):
+                    detail = sigma_details.get(pb.id, {'reasons': []})
+                    detail['reasons'] = [*detail['reasons'], *pb.partition_coverage_notes()]
+                    sigma_details[pb.id] = bounded_details(detail)
+                    sigma_unknown[pb.id] += sum(pb._batch_unknown.values())
                 self._record_playbook_batch(pb, matches, raw_sources, None, staged, held, released)
             if staged or held or released:
                 self._stage_put(list(staged.values()), raw_sources, held, released)
@@ -2404,10 +2476,16 @@ class Sweep:
         for pb in self.pack:
             if not evaluated[pb.id]:
                 continue
+            detail = {'reasons': [reason]}
+            if pb.id.startswith('sigma.'):
+                detail = dict(sigma_details.get(pb.id, {'reasons': []}))
+                detail['reasons'] = [*detail['reasons'], reason]
+                detail['undecidable_comparisons'] = sigma_unknown[pb.id]
+                detail = bounded_details(detail)
             self.repo.set_rule_cell(
                 self.hunt_id, pb.id, pb.version, "script-block-finalize", "incomplete",
                 "match_on_partial" if matched[pb.id] else "evaluated_partial",
-                matched[pb.id], evaluated[pb.id], {"reasons": [reason]},
+                matched[pb.id], evaluated[pb.id], detail,
             )
 
     def _retain_aggregate_raw(self, pb: Playbook, raw_sources: dict[str, dict]):
@@ -2508,8 +2586,11 @@ class Sweep:
             if any(DIRECTION_ASSUMED_REASON in ((c["detail"] or {}).get("reasons") or []) for c in cells):
                 reasons.append(DIRECTION_ASSUMED_REASON)
             reasons += limits + pb.coverage_notes()
+            detail = {'reasons': reasons}
+            if pb.id.startswith('sigma.'):
+                detail = bounded_details(detail)
             self.repo.set_rule_cell(self.hunt_id, pb.id, pb.version, "*", "window", state,
-                                    finalized_matches + consumed_matches, evaluated, {"reasons": reasons})
+                                    finalized_matches + consumed_matches, evaluated, detail)
             if getattr(self, "_stage", None) is not None and pb.id in self._stage_owner_accounts:
                 self._stage.finished_owners.add(self._stage_owner_accounts[pb.id].name)
             pb.release_state()
@@ -2528,6 +2609,8 @@ class Sweep:
                     state = "match_on_partial" if cell["matched"] else "evaluated_partial"
                     detail = dict(cell["detail"] or {})
                     detail["reasons"] = list(dict.fromkeys([*detail.get("reasons",[]), WINDOW_ROLLUP_PARTIAL]))
+                    if pb.id.startswith('sigma.'):
+                        detail = bounded_details(detail)
                     self.repo.set_rule_cell(self.hunt_id,pb.id,pb.version,"*","window",state,
                         cell["matched"],cell["evaluated"],detail)
         if self.budget.spent:

@@ -61,6 +61,8 @@ class Match:
     # Opt-in bounded episode metadata, persisted with the candidate so replay
     # and fresh evaluator instances cannot replace stronger published evidence.
     aggregate_summary: dict[str, int | float] = field(default_factory=dict)
+    # Optional validated technique context specific to this finding, rather than every match of its rule.
+    attack: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         # A positive stays valid on a command line some of whose arguments were lost; the claim says so.

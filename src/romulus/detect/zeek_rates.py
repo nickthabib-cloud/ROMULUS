@@ -27,7 +27,7 @@ def _name(value):
 
 
 class _Rate(ZeekWindowRule):
-    version = '3'
+    version = '5'
     citation_fields = _FIELDS
     required_fields = ('source.ip',)
     benign = ('Authorized administration, scanners and ordinary authentication can produce rate leads.',)

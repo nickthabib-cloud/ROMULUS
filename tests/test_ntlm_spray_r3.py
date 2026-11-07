@@ -96,10 +96,8 @@ def test_second_round_hit_stays_high_after_earlier_failure_expires(shape, revers
 
 @pytest.mark.parametrize("shape", SHAPES)
 @pytest.mark.parametrize("reverse", [False, True])
-def test_same_account_success_before_first_qualifying_window_keeps_shared_source_lead(shape, reverse):
-    # The prior success is after the first attempt (t=100), but before the
-    # first qualifying window (t=109). Episode start is not the first attempt.
-    rows = [*failures("shared", 100), ntlm("sharedPrior", 105, HIT, success=True),
+def test_same_account_success_before_first_attempt_keeps_shared_source_lead(shape, reverse):
+    rows = [*failures("shared", 100), ntlm("sharedPrior", 90, HIT, success=True),
             ntlm("sharedHit", 140, HIT, success=True)]
     candidate, _ = persisted_spray(rows, shape, reverse)
     assert candidate["lane"] == "lead"
@@ -143,8 +141,8 @@ def test_same_account_success_inside_episode_does_not_demote_a_later_hit(shape, 
 
 @pytest.mark.parametrize("shape", SHAPES)
 @pytest.mark.parametrize("reverse", [False, True])
-def test_success_at_episode_start_is_not_strictly_later(shape, reverse):
-    rows = [*failures("boundary", omit_hit=True), ntlm("boundaryHit", 9, HIT, success=True)]
+def test_success_at_first_attempt_is_not_strictly_later(shape, reverse):
+    rows = [*failures("boundary", omit_hit=True), ntlm("boundaryHit", 0, HIT, success=True)]
     candidate, _ = persisted_spray(rows, shape, reverse)
     assert candidate["lane"] == "lead"
     assert "later recorded authentication success for" not in candidate["claim"].casefold()

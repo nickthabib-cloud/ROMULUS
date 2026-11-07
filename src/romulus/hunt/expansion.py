@@ -169,6 +169,21 @@ class _PlannedSlot:
     stored: dict | None
     done: bool = False
 
+def _curated_first(items, lane_of, imported):
+    """Reorder peers inside each lane's existing positions, only when an imported peer is present."""
+    grouped = defaultdict(list)
+    any_imported = False
+    for item in items:
+        is_imported = imported(item)
+        any_imported |= is_imported
+        grouped[lane_of(item)].append((is_imported, item))
+    if not any_imported:
+        return items
+    lanes = {lane: iter([item for flag, item in peers if not flag] +
+                        [item for flag, item in peers if flag]) for lane, peers in grouped.items()}
+    return [next(lanes[lane_of(item)]) for item in items]
+
+
 class ExpansionEngine:
     def __init__(
         self, repo: Repo, hunt_id: str, hunt_window: Window, fetcher: LinkFetcher,
@@ -202,6 +217,9 @@ class ExpansionEngine:
         self._fallback_queries = 0
         # anchor id -> its hunt-independent identity, the last tie-break of the anchor order
         self._identities: dict[str, str] = {}
+        hunt = repo.get_hunt(hunt_id) if hasattr(repo, 'get_hunt') else None
+        self._imported_rule_ids = {'sigma.' + row['id'] for row in ((hunt or {}).get('manifest', {}).get(
+            'sigma_rules') or {}).get('applied', [])}
         # Planning inputs live only for this run, least recently used first, holding at most PLAN_CACHE_EVENTS cited
         # records in all; variants share those event objects.
         self._plans: OrderedDict[str, _AnchorPlan] = OrderedDict()
@@ -575,6 +593,13 @@ class ExpansionEngine:
             self._identity(row), row["id"],
         )
 
+    def _is_imported(self, row: dict) -> bool:
+        if not self._imported_rule_ids:
+            return False
+        plan = self._plans.get(row['id'])
+        candidate = plan.candidate if plan is not None else self.repo.candidate(row['candidate_id'])
+        return candidate['rule_id'] in self._imported_rule_ids
+
     def _ordered_anchors(self, rows: list[dict]) -> list[dict]:
         """Round-robin hosts while retaining deterministic priority within each host."""
         by_host: dict[str, deque[dict]] = defaultdict(deque)
@@ -586,6 +611,8 @@ class ExpansionEngine:
             for host in hosts:
                 if by_host[host]:
                     ordered.append(by_host[host].popleft())
+        if self._imported_rule_ids:
+            ordered = _curated_first(ordered, lambda row: row['lane'], self._is_imported)
         return ordered
 
     def _budget_for(self, all_rows: list[dict]) -> int:
@@ -838,6 +865,9 @@ class ExpansionEngine:
                         ) if not slot.done
                     )
             if tier_slots:
+                if self._imported_rule_ids:
+                    tier_slots = _curated_first(tier_slots, lambda slot: slot.row['lane'],
+                        lambda slot: slot.candidate['rule_id'] in self._imported_rule_ids)
                 return tier_slots
         return []
 
@@ -923,7 +953,8 @@ class ExpansionEngine:
         if executor is not None and hasattr(executor, "source_queries"):
             executor.source_queries = query_count
         anchor_reasons: dict[str, list[str]] = defaultdict(list)
-        blocked_anchors: set[str] = set()
+        # One existing blocked-anchor entry also records the typed cause; diagnostic text is never a cause.
+        blocked_anchors: dict[str, bool] = {}
         stop_reason = "fixpoint"
         source_failed = False
         # anchor id -> (the query limit it was stopped under, the reasons that stop added). The limit grows when the
@@ -938,14 +969,14 @@ class ExpansionEngine:
                 if row["depth"] >= self.max_depth:
                     reason = f"maximum expansion depth {self.max_depth} reached"
                     anchor_reasons[row["id"]].append(reason)
-                    blocked_anchors.add(row["id"])
+                    blocked_anchors[row['id']] = False
                     stop_reason = "depth_limit"
                     continue
                 plan = self._anchor_plan(row)
                 candidate_ts = _utc(plan.candidate["ts"])
                 if not (_utc(self.window.start) <= candidate_ts < _utc(self.window.end)):
                     self._add_reason(anchor_reasons, row["id"], "anchor outside the hunt window")
-                    blocked_anchors.add(row["id"])
+                    blocked_anchors[row['id']] = False
                     continue
                 eligible.append(row)
             # Always choose the globally lowest unfinished tier, so every anchor, and a newly discovered one, gets its
@@ -963,7 +994,7 @@ class ExpansionEngine:
             for anchor_id, (limit, added) in list(budget_blocked.items()):
                 if (root_cap if depths[anchor_id] == 0 else self.budget) > limit:
                     del budget_blocked[anchor_id]
-                    blocked_anchors.discard(anchor_id)
+                    blocked_anchors.pop(anchor_id, None)
                     for reason in added:
                         anchor_reasons[anchor_id].remove(reason)
                     released = True
@@ -995,7 +1026,7 @@ class ExpansionEngine:
                     anchor_reasons[anchor_row["id"]].extend(added)
                     if budget_reason == "source query budget exhausted":
                         budget_blocked[anchor_row["id"]] = (self.budget, added)
-                    blocked_anchors.add(anchor_row["id"])
+                    blocked_anchors[anchor_row['id']] = True
                     continue
                 allowed_budget = root_cap if anchor_row["depth"] == 0 and not stored else self.budget
                 remaining = allowed_budget - query_count
@@ -1008,7 +1039,7 @@ class ExpansionEngine:
                               else "source query budget exhausted")
                     budget_blocked[anchor_row["id"]] = (allowed_budget, [reason])
                     anchor_reasons[anchor_row["id"]].append(reason)
-                    blocked_anchors.add(anchor_row["id"])
+                    blocked_anchors[anchor_row['id']] = True
                     continue
                 query_cap = min(12, max(floor, remaining // max(1, groups_after[slot_index])))
                 self.heartbeat()
@@ -1059,6 +1090,8 @@ class ExpansionEngine:
             link for link in self.repo.expansion_links(self.hunt_id)
             if not is_agent_reach(link["link_type"], link["strength"])
         ]
+        imported_consumers = self.repo.expansion_rule_consumers(
+            self.hunt_id, self._imported_rule_ids) if self._imported_rule_ids else 0
         for row in self.repo.expansion_anchors(self.hunt_id):
             # Only anchors this run worked are finalized: those still pending. An anchor a previous run finalized
             # (resume re-runs expansion) was never scheduled here, so its recorded status and reasons stand; above
@@ -1072,6 +1105,8 @@ class ExpansionEngine:
                 reason for link in links if link["status"] != "complete"
                 for reason in (link["reasons"] or [f"{link['link_type']} {link['status']}"])
             ]))
+            if imported_consumers and not self._is_imported(row) and blocked_anchors.get(row['id'], False):
+                reasons.append(f'budget spent on {imported_consumers} imported-rule anchors')
             if row["id"] in blocked_anchors:
                 status = "expanded_partial" if links else "unexpanded"
             else:

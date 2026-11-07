@@ -192,6 +192,62 @@ def cmd_user(args) -> int:
     return EXIT_OK
 
 
+def cmd_indicators(args) -> int:
+    from contextlib import ExitStack
+    from datetime import UTC, datetime
+
+    from romulus.content.indicator_import import parse_indicator_file
+    from romulus.content.indicator_lists import IndicatorLists
+    from romulus.hunt.run import open_repo
+    repo = open_repo(load_settings(_env_file(args)))
+    store = IndicatorLists(repo)
+    user = os.environ.get("USER") or os.environ.get("USERNAME") or "cli"
+    author = f"cli:{user}"
+    try:
+        if args.action == "import":
+            import getpass
+
+            from romulus.web.auth import RateLimiter, verify
+            role = 'analyst'
+            if args.user or args.lane == 'high':
+                username = args.user or input('Lead username: ')
+                account = verify(repo.engine, username, getpass.getpass('Password: '), 'local-cli', RateLimiter())
+                if account is None:
+                    raise PermissionError('An active account is required')
+                author, role = account['username'], account['role']
+            expiry = datetime.fromisoformat(args.expires) if args.expires else None
+            if expiry is not None and expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=UTC)
+            if args.list_id is not None and store.get(args.list_id) is None:
+                raise ValueError("Unknown indicator list")
+            result = parse_indicator_file(Path(args.file), include_non_ids=args.include_non_ids)
+            row = store.create_version(result.rows, name=args.name, source=args.source, author=author,
+                expires_at=expiry, notes=args.notes, list_id=args.list_id, report=result.summary,
+                role=role, lane=args.lane, severity=args.severity, reason=args.reason)
+            print(json.dumps(row, indent=2, default=str))
+        else:
+            if args.out and Path(args.out).as_posix().startswith("//"):
+                raise ValueError("A local export path is required")
+            from romulus.content.indicator_export import export_indicators
+            if store.get(args.list_id, args.version) is None:
+                raise ValueError("Unknown indicator list version")
+            if args.version is not None and args.version < 1:
+                raise ValueError("Invalid version")
+            with ExitStack() as stack:
+                output = stack.enter_context(Path(args.out).open("w", encoding="utf-8", newline="")) if args.out else sys.stdout
+                for chunk in export_indicators(store, args.list_id, args.version, format=args.format):
+                    output.write(chunk)
+        return EXIT_OK
+    except (ValueError, OSError, UnicodeError, OverflowError, PermissionError, EOFError) as exc:
+        if args.action == "import":
+            if not getattr(exc, 'audit_recorded', False):
+                repo.audit(author, "indicator_list.import_rejected", detail={"reason": "invalid_file_or_metadata"})
+            print("indicator import rejected: invalid local CSV/JSON file or metadata; no version was saved", file=sys.stderr)
+        else:
+            print("indicator export failed: invalid list, version or local output path", file=sys.stderr)
+        return EXIT_FAIL
+
+
 def cmd_web(args) -> int:
     import uvicorn
 
@@ -205,6 +261,46 @@ def cmd_web(args) -> int:
     uvicorn.run(create_app(s, env), host=host, port=int(port), log_level="info",
                 ssl_certfile=s.web_tls_cert or None, ssl_keyfile=s.web_tls_key or None, proxy_headers=False)
     return EXIT_OK
+
+
+def cmd_sigma(args) -> int:
+    import getpass
+
+    from romulus.content.sigma_store import SigmaRules
+    from romulus.hunt.run import open_repo
+    from romulus.web.auth import RateLimiter, verify
+
+    repo = open_repo(load_settings(_env_file(args)))
+    try:
+        store = SigmaRules(repo)
+        if args.action == 'import':
+            result = store.import_directory(args.directory, upstream=args.upstream, commit=args.commit,
+                actor=f"cli:{os.environ.get('USER') or os.environ.get('USERNAME') or '?'}")
+        elif args.action == 'list':
+            result = store.list(limit=args.limit, offset=args.offset, status=args.status)
+        elif args.action == 'show':
+            result = store.get(args.rule_id)
+            if result is None:
+                raise ValueError('Missing Sigma rule')
+        else:
+            username = args.user or input('Lead username: ')
+            account = verify(repo.engine, username, getpass.getpass('Password: '), 'local-cli', RateLimiter())
+            if account is None or account['role'] != 'lead':
+                print('Sigma change refused: a live lead account is required.', file=sys.stderr)
+                return EXIT_FAIL
+            if args.action == 'activate':
+                result = store.activate(args.rule_id, args.positive, args.benign, actor=account['username'],
+                    role=account['role'], lane=args.lane, reason=args.reason)
+            else:
+                result = store.retire(args.rule_id, actor=account['username'], role=account['role'])
+        print(json.dumps(result, indent=2))
+        return EXIT_OK
+    except (ValueError, OSError, PermissionError, EOFError):
+        print('Sigma operation rejected: check local input, content status, fixture results and limits.',
+              file=sys.stderr)
+        return EXIT_FAIL
+    finally:
+        repo.engine.dispose()
 
 
 def cmd_db(args) -> int:
@@ -324,6 +420,47 @@ def main(argv: list[str] | None = None) -> int:
     up.add_argument("username")
     up.add_argument("--role", choices=["lead", "analyst"], default="analyst")
     sub.add_parser("web", help="serve the browser UI on ROMULUS_WEB_BIND")
+    indicators = sub.add_parser("indicators", help="import and export offline analyst indicators")
+    indicator_actions = indicators.add_subparsers(dest="action", required=True)
+    indicator_import = indicator_actions.add_parser("import", help="import a local CSV or STIX/MISP JSON file")
+    indicator_import.add_argument("file")
+    indicator_import.add_argument("--name", required=True)
+    indicator_import.add_argument("--source", required=True)
+    indicator_import.add_argument("--expires", help="ISO 8601 expiry (default: 90 days after import)")
+    indicator_import.add_argument("--include-non-ids", action="store_true")
+    indicator_import.add_argument("--list-id", help="create a new version of an existing list")
+    indicator_import.add_argument("--notes", default="")
+    indicator_import.add_argument('--lane', choices=['high', 'lead', 'context'], default='lead')
+    indicator_import.add_argument('--severity', choices=['critical', 'high', 'medium', 'low', 'info'], default='medium')
+    indicator_import.add_argument('--reason', default='', help='required for any high lane')
+    indicator_import.add_argument('--user', help='authenticate an account for lead-only imports')
+    indicator_export = indicator_actions.add_parser("export", help="export a complete list version")
+    indicator_export.add_argument("list_id")
+    indicator_export.add_argument("--version", type=int)
+    indicator_export.add_argument("--format", choices=["yaml", "csv"], default="yaml")
+    indicator_export.add_argument("--out", help="local output file (default: stdout)")
+    sigma = sub.add_parser('sigma', help='import and manage offline typed Sigma rules')
+    sigma_actions = sigma.add_subparsers(dest='action', required=True)
+    sigma_import = sigma_actions.add_parser('import', help='import a local Sigma YAML directory')
+    sigma_import.add_argument('directory')
+    sigma_import.add_argument('--upstream', required=True)
+    sigma_import.add_argument('--commit', required=True)
+    sigma_list = sigma_actions.add_parser('list', help='list a page of local Sigma rules')
+    sigma_list.add_argument('--limit', type=int, default=100)
+    sigma_list.add_argument('--offset', type=int, default=0)
+    sigma_list.add_argument('--status', choices=['draft', 'reference-only', 'active', 'retired'])
+    sigma_show = sigma_actions.add_parser('show', help='show a local Sigma rule and mapping')
+    sigma_show.add_argument('rule_id')
+    sigma_activate = sigma_actions.add_parser('activate', help='verify fixtures and activate as a lead')
+    sigma_activate.add_argument('rule_id')
+    sigma_activate.add_argument('--positive', required=True)
+    sigma_activate.add_argument('--benign', required=True)
+    sigma_activate.add_argument('--lane', choices=['lead', 'high'], default='lead')
+    sigma_activate.add_argument('--reason', default='')
+    sigma_activate.add_argument('--user', help='lead username (default: prompt)')
+    sigma_retire = sigma_actions.add_parser('retire', help='retire a rule as a lead')
+    sigma_retire.add_argument('rule_id')
+    sigma_retire.add_argument('--user', help='lead username (default: prompt)')
     dp = sub.add_parser("db", help="database maintenance")
     dp.add_argument("action", choices=["compact"], help="compact: return space freed by deleted hunts to the disk")
     replay = sub.add_parser("replay", help="export frozen investigator briefs, run them, and summarize results")
@@ -353,7 +490,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "hunt" and args.action == "resume" and not args.hunt_id:
         p.error("hunt resume needs a hunt id")
     handlers = {"doctor": cmd_doctor, "hunt": cmd_hunt, "findings": cmd_findings, "report": cmd_report,
-                "user": cmd_user, "web": cmd_web, "replay": cmd_replay, "db": cmd_db}
+                "user": cmd_user, "web": cmd_web, "replay": cmd_replay, "db": cmd_db,
+                "indicators": cmd_indicators, "sigma": cmd_sigma}
     return handlers[args.cmd](args)
 
 

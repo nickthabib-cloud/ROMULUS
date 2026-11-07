@@ -59,6 +59,7 @@ from pathlib import Path
 
 from romulus.config import Settings
 from romulus.detect.correlation import external
+from romulus.detect.indicators import IndicatorMatch
 from romulus.detect.packets import PACKET_PLAYBOOKS, ShellAnalysis, analyze_body, analyze_stream, publishable
 from romulus.evidence.typed import RawRef, TypedEvent, event_id, fv
 from romulus.hunt.publish import publish_match
@@ -98,6 +99,9 @@ SELECTION_WINDOW = (_SELECTED + "with firstPacket inside the hunt window; lastPa
 MAX_SESSIONS = 2000                       # session documents (segments), not logical sessions
 MAX_BODY_BYTES = 1024 * 1024
 EXCERPT_BYTES = 4096
+# Bound typed events, excerpts and pending group witnesses independently of the
+# number of HTTP responses TShark rebuilt in a capture.
+BODY_EVENT_BATCH = 256
 PCAP_TARGET = "arkime-pcap"
 # The packet stage's normalizer (HTTP body -> http_body, TCP connection -> tcp_stream). Bump on any change to the
 # functions tests/test_evidence_version.py pins to this version (`_body_event`, `_stream_event`, `analyze_body`,
@@ -365,13 +369,26 @@ def _ports(batch: list[dict]) -> list[int]:
 class _Target:
     """One Arkime target's run: counters, partial reasons, and the packet rules over its responses."""
 
-    def __init__(self, s: Settings, name: str, window: Window, work: Path, packets: ArkimePackets, heartbeat):
+    def __init__(self, s: Settings, name: str, window: Window, work: Path, packets: ArkimePackets, heartbeat,
+                 *, repo=None, hunt_id=None, owner_token=None):
         self.s, self.name, self.window, self.work, self.packets, self.heartbeat = s, name, window, work, packets, \
             heartbeat
         self.c = dict.fromkeys(COUNTERS, 0)
         self.partial: list[str] = []
         self.notes: list[str] = []
         self.pack = [cls() for cls in PACKET_PLAYBOOKS if "http_body" in cls.families]
+        self.repo, self.hunt_id, self.owner_token = repo, hunt_id, owner_token
+        self.indicator = None
+        self.published = {}
+        if repo is not None and hunt_id is not None:
+            from romulus.hunt.sweep import state_budget
+            self.indicator = IndicatorMatch()
+            self.indicator.bind_indicators(repo, (repo.get_hunt(hunt_id) or {}).get('manifest', {}).get('indicator_lists'))
+            self.indicator.families = tuple(dict.fromkeys((*self.indicator.families, 'http_body')))
+            self.indicator.spill_dir = work
+            self.indicator.budget = state_budget(s, work)
+            self.indicator.bind_loader(self._load)
+            self.pack.append(self.indicator)
         self.raw_sources: dict[str, dict] = {}
         self.spans: dict[tuple, tuple[float | None, float | None]] = {}
         self.fetched: set[tuple] = set()
@@ -498,12 +515,46 @@ class _Target:
                 continue
             events.append(ev)
             raws[ev.raw[0].key] = raw
-        self.c["responses"] += len(events)
+            if len(events) >= BODY_EVENT_BATCH:
+                self._consume_bodies(events, raws)
+                events, raws = [], {}
+        self._consume_bodies(events, raws)
+
+    def _load(self, ids):
+        return [TypedEvent.model_validate(row['event']) for row in self.repo.citation_events(self.hunt_id, ids)]
+
+    def _consume_bodies(self, events, raws):
+        if not events:
+            return
+        self.c['responses'] += len(events)
         for pb in self.pack:
-            pb.consume(events)
+            if pb is not self.indicator:
+                pb.consume(events)
+                continue
+            pb.bind_raw(raws)
+            try:
+                for match in pb.consume_partition(events):
+                    publish_match(self.repo, self.hunt_id, pb, match, None, raws, owner_token=self.owner_token)
+                    self.published[pb.id] = self.published.get(pb.id, 0)+1
+                # Only matching witnesses reach the hunt database. Group samples
+                # and moving span bounds hold IDs; finalization reloads them in
+                # bounded groups instead of keeping a body/raw lifetime map.
+                retained = {event.id: event for event in pb.drain_staged()}
+                pb.drain_bounds()
+                if retained:
+                    self.repo.save_evidence(self.hunt_id, retained.values(), raws, None, owner_token=self.owner_token)
+            finally:
+                pb.bind_raw({})
         self.raw_sources.update(raws)
         keep = {e.raw[0].key for pb in self.pack for e in pb.retained_events()}
         self.raw_sources = {k: v for k, v in self.raw_sources.items() if k in keep}
+
+    def close(self):
+        for pb in self.pack:
+            try:
+                pb.release_state()
+            finally:
+                pb.close_spill()
 
     def _ids(self, keys: set[tuple]) -> list[str]:
         """Arkime session ids (every segment) of these logical sessions, sorted and capped."""
@@ -901,9 +952,11 @@ def run_packet_stage(s: Settings, repo, client, hunt_id: str, window: Window, co
     work_root = s.stage_path
     work_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix=PCAP_PREFIX, dir=work_root))
+    run = None
     try:
         for target in targets:
-            run = _Target(s, target, window, work, packets, heartbeat)
+            run = _Target(s, target, window, work, packets, heartbeat,
+                          repo=repo, hunt_id=hunt_id, owner_token=owner_token)
             sessions, partial, selection = _candidates(client, target, contracts[target], window)
             run.c["candidates"] = len(sessions)
             run.partial += partial
@@ -912,18 +965,28 @@ def run_packet_stage(s: Settings, repo, client, hunt_id: str, window: Window, co
             summary["http_sessions_without_body_type"][target] = unclassified
             run.run(sessions)
             heartbeat()
+            shared_reasons = tuple(run.partial)
             for pb in run.pack:
-                matches = pb.finalize()
+                matched = run.published.get(pb.id, 0)
+                # The shipped-only IndicatorMatch API also supports small direct
+                # callers with a list result. Packet input must stream every group.
+                matches = (pb._stream_finalized() if pb is run.indicator and pb._overlay is None else pb.finalize())
                 for m in matches:
                     publish_match(repo, hunt_id, pb, m, None, run.raw_sources, owner_token=owner_token)
-                run.c["matched"] += len(matches)
-                state = ("match_on_partial" if run.partial else "matched") if matches else \
-                    ("positive_only_partial" if run.partial else "positive_only")
-                repo.set_rule_cell(hunt_id, pb.id, pb.version, f"{PCAP_TARGET}:{target}", window.key(), state,
-                                   len(matches), pb.evaluated,
-                                   {**run.c, "selection": selection, "http_sessions_without_body_type": unclassified,
-                                    "reasons": list(run.partial), "notes": run.notes,
-                                    "unexamined_sessions": run.unexamined})
+                    matched += 1
+                run.c["matched"] += matched
+                reasons = [*shared_reasons, *pb.limit_reasons()]
+                state = ("match_on_partial" if reasons else "matched") if matched else \
+                    ("positive_only_partial" if reasons else "positive_only")
+                rule_selection = ("Only bodies whose Arkime magic is text, script or executable are carved; "
+                                  +selection if pb is run.indicator else selection)
+                if pb is not run.indicator or (pb._overlay is not None and {'url', 'sha256'} & pb._overlay.kinds):
+                    repo.set_rule_cell(hunt_id, pb.id, pb.version, f"{PCAP_TARGET}:{target}", window.key(), state,
+                                       matched, pb.evaluated,
+                                       {**run.c, "selection": rule_selection, "http_sessions_without_body_type": unclassified,
+                                        "reasons": [*reasons, *pb.coverage_notes()], "notes": run.notes,
+                                        "unexamined_sessions": run.unexamined}, owner_token=owner_token)
+                run.partial.extend(reason for reason in pb.limit_reasons() if reason not in run.partial)
             for k in COUNTERS:
                 summary[k] += run.c[k]
             summary["partial_reasons"] += run.partial
@@ -933,9 +996,13 @@ def run_packet_stage(s: Settings, repo, client, hunt_id: str, window: Window, co
             summary["streams"][target] = _run_streams(s, repo, client, hunt_id, window, target, contracts[target],
                                                       work, packets, heartbeat, owner_token)
             summary["partial_reasons"] += summary["streams"][target].pop("partial_reasons")
+            run.close()
+            run = None
         summary["status"] = "partial" if summary["partial_reasons"] else "complete"
         summary["finished"] = True
     finally:
+        if run is not None:
+            run.close()
         shutil.rmtree(work, ignore_errors=True)
         if own:
             packets.close()

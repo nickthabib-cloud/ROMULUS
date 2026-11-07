@@ -355,6 +355,7 @@ def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
         "gate_results": {
             **decision.gates,
             "_notes": decision.notes,
+            **({"_attack": list(match.attack)} if match.attack else {}),
             **({"_citation_unavailable": True} if match.citation_unavailable else {}),
             **({"_fleet_host_count": match.fleet_host_count} if match.fleet_host_count else {}),
             **({"_context_reaches": [context_reach]} if context_reach else {}),

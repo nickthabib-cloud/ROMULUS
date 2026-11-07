@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Indicators · ROMULUS{% endblock %}
+{% block content %}
+<h1>Indicators</h1>
+<p>Active, unexpired lists apply to new hunts. Hunts keep the versions they started with.</p>
+<table class="grid"><thead><tr><th>Name</th><th>Source</th><th>Version</th><th>Values</th><th>Status</th><th>Expires</th></tr></thead>
+<tbody>{% for item in lists %}<tr><td><a href="/indicators/{{ item.id }}">{{ item.name }}</a></td><td>{{ item.source }}</td>
+<td>{{ item.version }}</td><td>{{ item.value_count }}</td><td>{{ item.status }}</td><td>{{ item.expires_at }}</td></tr>
+{% else %}<tr><td colspan="6">No indicator lists.</td></tr>{% endfor %}</tbody></table>
+{% if offset %}<a href="/indicators?offset={{ [0, offset - 100] | max }}">Previous page</a>{% endif %}
+{% if lists | length == 100 %}<a href="/indicators?offset={{ offset + 100 }}">Next page</a>{% endif %}
+<h2>Create or upload a list</h2>
+<p>Upload an offline CSV or STIX/MISP JSON file, or paste CSV with required <span class="mono">kind,value</span> columns.
+Optional CSV columns: label, attack. Kinds are never guessed. CSV limit: 128 MiB; JSON limit: 16 MiB.</p>
+{% from 'indicator_list.html' import import_form with context %}
+{{ import_form() }}
+{% endblock %}

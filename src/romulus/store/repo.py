@@ -1221,6 +1221,17 @@ class Repo:
         # databases upgraded from link-only accounting without double-counting.
         return max(task_spend, link_spend)
 
+    def expansion_rule_consumers(self, hunt_id: str, rule_ids: set[str]) -> int:
+        """Count distinct deterministic anchors from these rules that actually spent source queries."""
+        if not rule_ids:
+            return 0
+        with self.engine.connect() as c:
+            return int(c.execute(select(func.count(func.distinct(t.expansion_link.c.anchor_id))).select_from(
+                t.expansion_link.join(t.candidate, t.candidate.c.id == t.expansion_link.c.anchor_id),
+            ).where(t.expansion_link.c.hunt_id == hunt_id, t.candidate.c.rule_id.in_(rule_ids),
+                    t.expansion_link.c.query_spend > 0, t.expansion_link.c.strength != 'agent_hypothesis',
+                    ~t.expansion_link.c.link_type.like('agent_%'))).scalar_one())
+
     def host_resolution_tasks(self, hunt_id: str) -> list[dict]:
         """The hunt's durable host-address lookups (one per looked-up address and window), oldest first."""
         with self.engine.connect() as c:

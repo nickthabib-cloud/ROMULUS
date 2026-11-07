@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 
@@ -133,6 +133,7 @@ class RuleMetadata:
     attack_exempt: str
     behavior: str
     fidelity: str
+    provenance: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from romulus.decide.policy import decide
 from romulus.detect.base import ContextAnchor, ContextLink
+from romulus.detect.metadata import hunt_rule_metadata, is_sigma_id
 from romulus.detect.registry import anchor_class_for_rule
 from romulus.detect.windows_linked import WINDOWS_LINKED_PLAYBOOKS
 from romulus.evidence.typed import TypedEvent
@@ -22,7 +23,9 @@ def publish_windows_link_context(repo, hunt_id, candidate, result, events, *, ow
                repo.citation_events(hunt_id, subject_event_ids(candidate))]
     if not anchors:
         return []
-    anchor = ContextAnchor(candidate["id"], anchor_class_for_rule(candidate["rule_id"]), candidate["lane"],
+    metadata = (hunt_rule_metadata(repo, hunt_id, rule_ids={candidate['rule_id']})
+                if is_sigma_id(candidate['rule_id']) else None)
+    anchor = ContextAnchor(candidate["id"], anchor_class_for_rule(candidate["rule_id"], metadata=metadata), candidate["lane"],
                            candidate["claim"], anchors, candidate["rule_id"], anchors[0].ts)
     link = ContextLink(result.id, result.link_type, result.strength, result.key, events, result.status,
                        result.reasons, result.window.start, result.window.end)

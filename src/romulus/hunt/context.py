@@ -10,6 +10,7 @@ from romulus.decide.policy import Decision, decide
 from romulus.detect.base import ContextAnchor, ContextLink, Match, Playbook
 from romulus.detect.context import _session_key
 from romulus.detect.correlation import merge_unknown_boot
+from romulus.detect.metadata import hunt_rule_metadata
 from romulus.detect.registry import anchor_class_for_rule, fresh_context_pack
 from romulus.evidence.typed import TypedEvent
 from romulus.hunt.links import is_agent_reach
@@ -290,7 +291,7 @@ def _withdraw_dropped(repo: Repo, hunt_id: str, rule_ids: set[str], produced_ids
         )
 
 
-def _uncited_anchor_cells(repo, hunt_id, *, owner_token=None):
+def _uncited_anchor_cells(repo, hunt_id, *, owner_token=None, metadata=None):
     """An uncited positive survives, but its unavailable link evidence cannot assure context coverage."""
     repo.clear_uncited_anchor_cells(hunt_id, owner_token=owner_token)
     rules = fresh_context_pack()
@@ -300,7 +301,7 @@ def _uncited_anchor_cells(repo, hunt_id, *, owner_token=None):
         for candidate in page:
             if not (candidate.get("gate_results") or {}).get("_citation_unavailable"):
                 continue
-            anchor_class = anchor_class_for_rule(candidate["rule_id"])
+            anchor_class = anchor_class_for_rule(candidate["rule_id"], metadata=metadata)
             reason = (f"Context expansion for anchor {candidate['id']} from {candidate['rule_id']} "
                       f"(group {candidate['group_key']}) could not read linked evidence: no citation could be retained. "
                       "The computed positive is retained; this context rule was not assessed through that anchor.")
@@ -319,7 +320,8 @@ def finalize_context(repo: Repo, hunt_id: str, *, owner_token: str | None = None
     per group key across reaches, and the result is upserted as one candidate per (rule, group key). A candidate
     a previous pass produced that this pass no longer does is withdrawn to the context lane. Order-independent:
     the output depends only on the set of reaches."""
-    _uncited_anchor_cells(repo, hunt_id, owner_token=owner_token)
+    metadata = hunt_rule_metadata(repo, hunt_id)
+    _uncited_anchor_cells(repo, hunt_id, owner_token=owner_token, metadata=metadata)
     link_rows = sorted((row for row in repo.expansion_links(hunt_id)
                         if row["evaluated"] and not is_agent_reach(row["link_type"], row["strength"])),
                        key=lambda row: (row["anchor_id"], row["id"]))
@@ -357,7 +359,7 @@ def finalize_context(repo: Repo, hunt_id: str, *, owner_token: str | None = None
         anchor = anchors.get(anchor_id)
         if anchor is None:
             anchor = anchors[anchor_id] = ContextAnchor(
-                id=cand["id"], anchor_class=anchor_class_for_rule(cand["rule_id"]), lane=cand["lane"],
+                id=cand["id"], anchor_class=anchor_class_for_rule(cand["rule_id"], metadata=metadata), lane=cand["lane"],
                 claim=cand["claim"], events=events(subject_event_ids(cand)), rule_id=cand["rule_id"],
                 ts=_aware(cand["ts"]))
         link = ContextLink(id=row["id"], link_type=row["link_type"], strength=row["strength"], key=row["key"],

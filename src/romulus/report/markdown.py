@@ -105,11 +105,11 @@ def _render_body(m: dict, banner: str = BANNER) -> str:
     for i, f in enumerate(m["findings"], 1):
         claim = f["claim"] if len(f["claim"]) <= 140 else f["claim"][:139] + "…"
         out.append(f"| [{i}](#f-{f['id']}) | {f['lane']} | {f['severity']} | {f['confidence']} | "
-                   f"{esc(f['observed_at'][:19] if f['observed_at'] else 'Not recorded')} | {esc(f['rule_id'])} | {esc(claim)} |")
+                   f"{esc(f['observed_at'][:19] if f['observed_at'] else 'Not recorded')} | {esc(f.get('rule_title') or f['rule_id'])} | {esc(claim)} |")
     out.append("")
 
     for i, f in enumerate(m["findings"], 1):
-        out += [f'<a id="f-{f["id"]}"></a>', "", f"### {i}. {esc(f['rule_id'])} ({f['lane']})", "",
+        out += [f'<a id="f-{f["id"]}"></a>', "", f"### {i}. {esc(f.get('rule_title') or f['rule_id'])} ({f['lane']})", "",
                 f"**Claim.** {esc(f['claim'])}", "",
                 f"- Finding ID: `{f['id']}` · rule version {esc(f['rule_version'])} · claim type {esc(f['claim_type'])}",
                 f"- Observed at: {esc(f['observed_at']) + ' UTC' if f['observed_at'] else 'Not recorded'}",

@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Indicator list · ROMULUS{% endblock %}
+{% block content %}
+{% if item is defined %}
+<h1>{{ item.name }}</h1>
+<p>Version {{ item.version }} · {{ item.status }} · {{ item.value_count }} unique values</p>
+<dl><dt>Source</dt><dd>{{ item.source }}</dd><dt>Author</dt><dd>{{ item.author }}</dd>
+<dt>Created</dt><dd>{{ item.created_at }}</dd><dt>Expires</dt><dd>{{ item.expires_at }}</dd>
+<dt>Digest</dt><dd class="mono">{{ item.digest }}</dd><dt>Notes</dt><dd>{{ item.notes }}</dd></dl>
+<form method="get"><label>View version <input type="number" name="version" min="1" max="{{ latest.version }}" value="{{ item.version }}"></label><button>View</button></form>
+<p><a href="/indicators/{{ item.id }}/export?version={{ item.version }}&amp;format=csv">Export complete CSV</a> ·
+<a href="/indicators/{{ item.id }}/export?version={{ item.version }}&amp;format=yaml">Export rule-pack YAML</a></p>
+<h2>Import report</h2>
+<p>{{ item.import_report.get('accepted', 0) }} accepted; {{ item.import_report.get('skipped_count', 0) }} skipped.</p>
+<p>Diagnostic details are bounded; totals include all rows. {{ item.import_report.get('details_truncated', 0) }} additional details omitted.</p>
+<dl>{% for kind, count in item.import_report.get('counts_by_kind', {}).items() %}<dt>{{ kind }}</dt><dd>{{ count }}</dd>{% endfor %}</dl>
+<ul>{% for reason, count in item.import_report.get('skipped_by_reason', {}).items() %}<li>{{ reason }}: {{ count }}</li>{% endfor %}</ul>
+<details><summary>Skipped row details</summary><ul>{% for detail in item.import_report.get('skipped', []) %}<li>Position {{ detail.position }}: {{ detail.reason }}</li>{% endfor %}</ul></details>
+<ul>{% for reason, count in item.import_report.get('noted_by_reason', {}).items() %}<li>{{ reason }}: {{ count }}</li>{% endfor %}</ul>
+<details><summary>Import notes</summary><ul>{% for detail in item.import_report.get('notes', []) %}<li>{% if detail.position is defined %}Position {{ detail.position }}: {% endif %}{{ detail.reason }}{% if detail.id is defined %} ({{ detail.id }}){% endif %}{% if detail.replacement is defined %}; replacement: {{ detail.replacement }}{% endif %}</li>{% endfor %}</ul></details>
+<h2>Values (first 100)</h2>
+<p>Use the complete export for every value in this version.</p>
+<table class="grid"><thead><tr><th>Kind</th><th>Value</th><th>Label</th><th>ATT&amp;CK</th><th>Value expiry</th><th>Lane / severity</th></tr></thead><tbody>
+{% for value in values %}<tr><td>{{ value.kind }}</td><td class="mono">{{ value.value }}</td><td>{{ value.label }}</td><td>{{ value.attack | join(', ') }}</td><td>{{ value.expires_at or item.expires_at }}</td><td>{{ value.lane }} / {{ value.severity }}</td></tr>{% endfor %}</tbody></table>
+{% if user.r == 'lead' and latest.status != 'retired' %}
+<form method="post" action="/indicators/{{ item.id }}/retire"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Retire latest version</button></form>
+{% endif %}
+<h2>Upload a new version</h2>
+{% endif %}
+{{ import_form() }}
+{% endblock %}
+{% macro import_form() %}
+<form method="post" action="/indicators" enctype="multipart/form-data" class="site-form">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+{% if item is defined %}<input type="hidden" name="list_id" value="{{ item.id }}">{% endif %}
+<label>Name<input name="name" maxlength="256" required value="{{ item.name if item is defined else '' }}"></label>
+<label>Source<input name="source" maxlength="2048" required value="{{ item.source if item is defined else '' }}"></label>
+<label>Default lane<select name="lane"><option value="lead">Lead</option><option value="context">Context</option>{% if user.r == 'lead' %}<option value="high">High (lead approval)</option>{% endif %}</select></label>
+<label>Default severity<select name="severity">{% for value in ['critical','high','medium','low','info'] %}<option value="{{ value }}" {% if value == 'medium' %}selected{% endif %}>{{ value }}</option>{% endfor %}</select></label>
+<label>High-lane reason<input name="reason" maxlength="2048"></label>
+<label>Expiry (ISO 8601, UTC)<input name="expires" maxlength="64" placeholder="Leave empty for 90 days"></label>
+<p>The default expiry is 90 days after import, recorded on the saved version.</p>
+<label>CSV or JSON file<input type="file" name="file" accept=".csv,.json"></label>
+<label>Or CSV text<textarea name="csv_text" rows="5" maxlength="65536" placeholder="kind,value"></textarea></label>
+<label class="check"><input type="checkbox" name="include_non_ids" value="1"> Include MISP attributes marked to_ids: false</label>
+<label>Notes<textarea name="notes" maxlength="16384" rows="2"></textarea></label>
+<button>Import list</button>
+</form>
+{% endmacro %}

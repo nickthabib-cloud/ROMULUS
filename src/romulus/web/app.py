@@ -30,6 +30,7 @@ from romulus.site import SiteChangedError, SiteValidationError, load_site_facts,
 from romulus.store.db import compact, maintenance_lease
 from romulus.web import site_form
 from romulus.web.auth import RateLimiter, Sessions, csrf_ok, verify
+from romulus.web.indicator_routes import IndicatorBodyLimit, register_indicator_routes
 
 HERE = Path(__file__).resolve().parent
 COOKIE = "romulus_session"
@@ -48,6 +49,7 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
     sessions = Sessions(s.secret_key.get_secret_value())
     limiter = RateLimiter()
     app = FastAPI(title="ROMULUS", docs_url=None, redoc_url=None, openapi_url=None)
+    app.add_middleware(IndicatorBodyLimit)
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
     tpl = Jinja2Templates(directory=HERE / "templates")
     tpl.env.autoescape = True
@@ -73,6 +75,8 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
                                                      "banner": "UNCLASSIFIED // FOR TRAINING USE", **ctx})
 
     # ------------------------------------------------------------------ auth
+    register_indicator_routes(app, repo, need, page)
+
     @app.get("/login", response_class=HTMLResponse)
     def login_form(request: Request, error: str = ""):
         return tpl.TemplateResponse(request, "login.html", {"error": error, "user": None,
@@ -199,7 +203,7 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
 
     @app.get("/hunts/{hunt_id}/timeline", response_class=HTMLResponse)
     def timeline(request: Request, hunt_id: str):
-        from romulus.detect.registry import ALL_PLAYBOOKS
+        from romulus.detect.metadata import hunt_rule_metadata
         from romulus.report.incidents import build_incident_graph
         from romulus.report.timeline import LANES, LINK_STYLES, ROW_KINDS, build_timeline
         u = need(request)
@@ -213,7 +217,8 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         styles = [v for v in params.getlist("style") if v in LINK_STYLES] if explicit else list(LINK_STYLES)
         findings = _timeline_findings(hunt_id)
         graph = build_incident_graph(repo, hunt_id, findings)
-        titles = {p.id: p.title for p in ALL_PLAYBOOKS}
+        titles = {rule_id: rule.title for rule_id, rule in
+                  hunt_rule_metadata(repo, manifest=h['manifest']).items()}
         analyst = repo.analyst_links(hunt_id)
         window = h["manifest"].get("window") or {}
         tl = build_timeline(findings, graph["edges"], analyst, window.get("start"), window.get("end"),
