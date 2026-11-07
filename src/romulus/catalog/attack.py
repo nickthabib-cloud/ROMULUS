@@ -1,4 +1,4 @@
-"""Bounded loader for the pinned ATT&CK Enterprise STIX bundle."""
+"""Bounded loader for pinned ATT&CK STIX bundles."""
 
 from __future__ import annotations
 
@@ -209,7 +209,8 @@ def load_attack_bundle(
                         sorted(
                             str(phase["phase_name"])
                             for phase in item.get("kill_chain_phases", ())
-                            if phase.get("kill_chain_name") == "mitre-attack" and phase.get("phase_name")
+                            if phase.get("kill_chain_name") in {"mitre-attack", "mitre-ics-attack"}
+                            and phase.get("phase_name")
                         )
                     ),
                     platforms=tuple(sorted(map(str, item.get("x_mitre_platforms", ())))),

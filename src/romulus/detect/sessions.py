@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import heapq
 import sqlite3
+import statistics
 from bisect import bisect_left, bisect_right
 from collections import Counter
 from datetime import UTC, datetime
+from itertools import pairwise
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
@@ -496,10 +498,11 @@ class Beaconing(_Stitched):
         return _both_routable(e) and not (_public(e.get("destination.ip")) and not _public(e.get("source.ip")))
 
     TRIM_EVERY = 10_000
+    TIMING_HOT = 1024             # bounded scratch avoids needing disk for a small, already-held positive
 
     def __init__(self):
         super().__init__()
-        self.starts = SpillList(self, "beacon_starts", self.HOT)
+        self.starts = SpillList(self, "beacon_starts", min(self.HOT, self.TIMING_HOT))
 
     @staticmethod
     def _median(rows, count):
@@ -515,7 +518,12 @@ class Beaconing(_Stitched):
         raise ValueError("incomplete beacon interval statistics")
 
     def _timing(self, key, count):
-        """Starts and interval-value counts stay on the capped spill database, including for one huge pair."""
+        """Small populations use bounded scratch; larger populations use the capped spill database."""
+        if not self.starts.on_disk:
+            starts = sorted(order[0] for order, _record in self.starts.buffer if order[1] == key)
+            gaps = [second - first for first, second in pairwise(starts)]
+            median = statistics.median(gaps)
+            return median, statistics.median(abs(gap - median) for gap in gaps)
         spill = self.spill()
         if not getattr(self, "_timing_ready", False):
             spill.table("beacon_gaps", "value REAL PRIMARY KEY, copies INTEGER")
@@ -533,7 +541,7 @@ class Beaconing(_Stitched):
             if previous is not None:
                 pending[start - previous] += 1
             previous = start
-            if len(pending) >= self.HOT:
+            if len(pending) >= self.starts.hot_size:
                 spill.write("INSERT INTO beacon_gaps VALUES (?, ?) ON CONFLICT(value) DO UPDATE SET copies=copies+excluded.copies",
                             list(pending.items()))
                 pending.clear()
@@ -576,11 +584,12 @@ class Beaconing(_Stitched):
                     self.refuse("disk", "the connection-start disk budget is spent; a connection is not evaluated")
                     continue
                 s.add(part)
-                if len(self.starts.buffer) >= self.HOT:
+                if len(self.starts.buffer) >= self.starts.hot_size:
                     self.starts.trim(0)
             if i % self.TRIM_EVERY == self.TRIM_EVERY - 1:
                 series.trim()
-        self.starts.trim(0)
+        if self.starts.on_disk:
+            self.starts.trim(0)
         out = []
         for (src, dst, dport, transport), s in series.items():
             with citation_group(self, out, (src, dst, dport, transport), s):

@@ -14,6 +14,7 @@ from romulus.evidence.normalize import normalize_hits
 from romulus.evidence.zeek import AMBIGUOUS, zeek_record
 from romulus.evidence.zeek_catalog import ZEEK_LOGS
 from tests.fixtures import zeek_factory as zf
+from tests.fixtures import zeek_ics as zi
 from tests.fixtures import zeek_logs as zl
 
 # a zeek.<name> dataset only Elastic writes (Security Onion names no log so)
@@ -25,6 +26,9 @@ ELASTIC_WITHOUT_OBJECT = {"known_hosts", "known_services", "known_certs"}
 
 
 def written(log: str) -> dict:
+    if log in zi.ROWS:
+        return {shape: (lambda shape=shape: zi.hit(zi.ROWS[log], shape, f"{shape}-{log}"))
+                for shape in zi.SHAPES_BY_LOG[log]}
     if log == "conn":
         return {shape: (lambda shape=shape: zf.WRITERS[shape](zf.FULL, f"{shape}-conn")) for shape in zf.SHAPES}
     return {shape: (lambda shape=shape: zl.WRITERS[shape](zl.ROWS[log], f"{shape}-{log}")) for shape in

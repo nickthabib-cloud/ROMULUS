@@ -98,7 +98,8 @@ SHAPE_NAMES = {MALCOLM: "Malcolm", ELASTIC: "Elastic", SECURITY_ONION: "Security
 # "strings" one string or a list of them (a field Zeek 6.1 wrote as a set or vector and later Zeek as one string), a
 # string never split, since its text can hold commas (a distinguished name).
 KINDS = frozenset({"ip", "port", "count", "seconds", "text", "flag", "services", "names", "mac", "list", "text1",
-                   "count_text", "time", "hex", "hexes", "addresses", "seconds_list", "percentage", "strings"})
+                   "count_text", "time", "hex", "hexes", "addresses", "seconds_list", "percentage", "strings",
+                   "ics_code", "ics_values"})
 
 
 @dataclass(frozen=True, eq=False)
@@ -1454,7 +1455,159 @@ STATS = _log("stats", "sensor_health", (
 ), absent=_HEALTH_ABSENT, doc="policy/misc/stats.zeek", key=("health.worker",))
 HEALTH_LOGS = (CAPTURE_LOSS, STATS)
 
-ZEEK_LOGS: tuple[ZeekLog, ...] = (CONN, *ANALYZER_LOGS, *HEALTH_LOGS)
+
+# ---- industrial protocol records -----------------------------------------------------------------------------------
+# Field placement and versioned primary sources: ics_catalog.py. Packet endpoints
+# and connection endpoints are separate; Malcolm deletes its saved id.* copies.
+_ICS_ABSENT = {ELASTIC: "the Elastic Zeek integration publishes no stream for this ICSNPP log",
+               SECURITY_ONION: "Security Onion publishes no ingest pipeline for this ICSNPP log"}
+
+
+def _ics_field(log: str, typed: str, native: str, kind: str, *, malcolm: str | None = None,
+               elastic: str | None = None, so: str | None = None, base: bool = False) -> ZeekField:
+    paths = {MALCOLM: (malcolm or f"zeek.{log}.{native}",), PLAIN: (native,)}
+    if base:
+        paths[ELASTIC] = (elastic or f"zeek.{log}.{native}",)
+        if so is not None:
+            paths[SECURITY_ONION] = (so,)
+    return _f(typed, native, kind, **paths)
+
+
+def _ics_log(name: str, columns: tuple[tuple[str, str, str], ...], *, packet=True,
+             moves: dict[str, str] | None = None) -> ZeekLog:
+    base = name in ("modbus", "dnp3")
+    moves = moves or {}
+    absent = () if base else (ELASTIC, SECURITY_ONION)
+    fields = list(_endpoints(name, absent=absent))
+    if packet:
+        # ECS source is a packet sender here, not an originator.
+        fields = [f for f in fields if f.typed not in ("source.ip", "destination.ip", "source.port", "destination.port")]
+        for typed, native, kind, malcolm in (
+            ("ics.sender", "source_h", "ip", "source.ip"),
+            ("ics.receiver", "destination_h", "ip", "destination.ip"),
+            ("source.ip", "source_h", "ip", "source.ip"),
+            ("destination.ip", "destination_h", "ip", "destination.ip"),
+            ("source.port", "source_p", "port", "source.port"),
+            ("destination.port", "destination_p", "port", "destination.port"),
+            ("ics.is_orig", "is_orig", "flag", "network.is_orig"),
+        ):
+            fields.append(_ics_field(name, typed, native, kind, malcolm=malcolm))
+    for side in ("orig", "resp"):
+        for suffix, kind in (("h", "ip"), ("p", "port")):
+            native = f"id.{side}_{suffix}"
+            if packet:
+                fields.append(_f(f"conn.{side}_{suffix}", native, kind, plain=(native,)))
+            else:
+                endpoint = f"{'source' if side == 'orig' else 'destination'}.{'ip' if suffix == 'h' else 'port'}"
+                paths = {MALCOLM: (endpoint,), PLAIN: (native,)}
+                if base:
+                    paths[ELASTIC] = (endpoint, endpoint.replace(".ip", ".address"))
+                    paths[SECURITY_ONION] = (endpoint,)
+                fields.append(_f(f"conn.{side}_{suffix}", native, kind, **paths))
+    for typed, native, kind in columns:
+        so = None
+        elastic = None
+        if name == "modbus":
+            if native == "func":
+                elastic, so = "zeek.modbus.function", "modbus.function"
+            elif native == "exception":
+                so = "modbus.exception"
+        elif name == "dnp3":
+            so = f"dnp3.{native}"
+            elastic = {"fc_request": "zeek.dnp3.function.request",
+                       "fc_reply": "zeek.dnp3.function.reply"}.get(native)
+        spec = _ics_field(name, typed, native, kind, malcolm=moves.get(native),
+                          elastic=elastic, so=so, base=base)
+        if name == "dnp3" and native == "iin":
+            spec.paths[ELASTIC] = ("original:iin",)
+        if name == "modbus" and native in ("tid", "unit"):
+            # JSON keeps tid/unit; Malcolm text parser names them trans_id/unit_id.
+            spec.paths[MALCOLM] = (f"zeek.modbus.{native}",
+                                    f"zeek.modbus.{'trans_id' if native == 'tid' else 'unit_id'}")
+        fields.append(spec)
+    return _log(name, "ics_tx", tuple(fields), absent={} if base else _ICS_ABSENT,
+                doc=f"https://github.com/cisagov/icsnpp-{('modbus' if name.startswith('modbus') else 'dnp3' if name.startswith('dnp3') else 'enip' if name.startswith(('enip', 'cip')) else 'bacnet' if name.startswith('bacnet') else 's7comm')}",
+                key=("zeek.uid",), sequence=("ics.transaction_id", "ics.function_code", "ics.is_request"),
+                secrets={shape: ((f"zeek.{name}.protection_password", f"zeek.{name}.secure_auth_key")
+                                 if shape == MALCOLM else ("protection_password", "secure_auth_key"))
+                         for shape in (MALCOLM, PLAIN)})
+
+
+_ICS_FUNCTION = ("ics.function_name", "func", "text")
+_ICS_TID = ("ics.transaction_id", "tid", "count")
+_ICS_UNIT = ("ics.unit", "unit", "count")
+_ICS_PACKET_REQUEST = ("ics.request_type", "request_response", "text")
+_ICS_MODBUS_MOVES = {"func": "zeek.modbus.func", "tid": "zeek.modbus.trans_id",
+                     "unit": "zeek.modbus.unit_id", "request_response": "zeek.modbus.network_direction",
+                     "exception_code": "zeek.modbus.exception", "mei_type": "zeek.modbus.mei_type"}
+MODBUS = _ics_log("modbus", (_ICS_FUNCTION, _ICS_TID, _ICS_UNIT,
+    ("ics.request_type", "pdu_type", "text"), ("ics.status", "exception", "text")), packet=False,
+    moves={"pdu_type": "zeek.modbus.network_direction"})
+MODBUS_DETAILED = _ics_log("modbus_detailed", (_ICS_FUNCTION, _ICS_TID, _ICS_UNIT,
+    ("ics.address", "address", "count"), ("ics.quantity", "quantity", "count"),
+    ("ics.request_values", "request_values", "ics_values"), ("ics.response_values", "response_values", "ics_values"),
+    ("ics.matched", "matched", "flag"), ("ics.subfunction", "request_subfunction_code", "text"),
+    ("ics.status", "exception_code", "text"), ("ics.mei", "mei_type", "text")),
+    packet=False, moves=_ICS_MODBUS_MOVES)
+MODBUS_MASK = _ics_log("modbus_mask_write_register", (_ICS_FUNCTION, _ICS_TID, _ICS_UNIT,
+    _ICS_PACKET_REQUEST, ("ics.address", "address", "count"),
+    ("ics.and_mask", "and_mask", "count"), ("ics.or_mask", "or_mask", "count")),
+    moves={**_ICS_MODBUS_MOVES, "address": "zeek.modbus_detailed.address"})
+MODBUS_IDENTIFICATION = _ics_log("modbus_read_device_identification",
+    (_ICS_FUNCTION, _ICS_TID, _ICS_UNIT, _ICS_PACKET_REQUEST, ("ics.mei", "mei_type", "text")),
+    moves=_ICS_MODBUS_MOVES)
+MODBUS_MULTIPLE = _ics_log("modbus_read_write_multiple_registers",
+    (_ICS_FUNCTION, _ICS_TID, _ICS_UNIT, _ICS_PACKET_REQUEST,
+     ("ics.address", "write_start_address", "count"), ("ics.read_address", "read_start_address", "count"),
+     ("ics.quantity", "read_quantity", "count"), ("ics.request_values", "write_registers", "ics_values"),
+     ("ics.response_values", "read_registers", "ics_values")), moves=_ICS_MODBUS_MOVES)
+DNP3 = _ics_log("dnp3", (("ics.request_function_name", "fc_request", "text"),
+    ("ics.response_function_name", "fc_reply", "text"), ("ics.iin", "iin", "count")), packet=False)
+DNP3_CONTROL = _ics_log("dnp3_control", (("ics.function_name", "function_code", "text"),
+    ("ics.address", "index_number", "count"), ("ics.status", "status_code", "text")))
+DNP3_OBJECTS = _ics_log("dnp3_objects", (("ics.function_name", "function_code", "text"),
+    ("ics.address", "range_low", "count"), ("ics.quantity", "object_count", "count")))
+S7COMM = _ics_log("s7comm", (("ics.function_code", "function_code", "ics_code"),
+    ("ics.function_name", "function_name", "text"), ("ics.rosctr", "rosctr_code", "count"),
+    ("ics.request_type", "rosctr_name", "text"), ("ics.transaction_id", "pdu_reference", "count"),
+    ("ics.subfunction", "subfunction_code", "text"), ("ics.status_code", "error_code", "ics_code"),
+    ("ics.error_class", "error_class", "text")))
+S7COMM_PLUS = _ics_log("s7comm_plus", (("ics.function_code", "function_code", "ics_code"),
+    ("ics.function_name", "function_name", "text"), ("ics.opcode", "opcode", "ics_code")))
+S7COMM_SZL = _ics_log("s7comm_read_szl", (("ics.request_type", "method", "text"),
+    ("ics.transaction_id", "pdu_reference", "count"), ("ics.address", "szl_id", "ics_code"),
+    ("ics.status_code", "return_code", "ics_code")))
+S7COMM_TRANSFER = _ics_log("s7comm_upload_download", (("ics.request_type", "rosctr", "text"),
+    ("ics.transaction_id", "pdu_reference", "count"), ("ics.function_name", "function_name", "text"),
+    ("ics.status", "function_status", "text")), moves={"rosctr": "zeek.s7comm_upload_download.rosctr_name"})
+COTP = _ics_log("cotp", (("ics.function_code", "pdu_code", "ics_code"), ("ics.function_name", "pdu_name", "text")))
+ENIP = _ics_log("enip", (("ics.function_code", "enip_command_code", "ics_code"),
+    ("ics.function_name", "enip_command", "text"), ("ics.status", "enip_status", "text"),
+    ("ics.correlation_id", "packet_correlation_id", "text")))
+CIP = _ics_log("cip", (("ics.function_code", "cip_service_code", "ics_code"),
+    ("ics.function_name", "cip_service", "text"), ("ics.request_type", "direction", "text"),
+    ("ics.transaction_id", "cip_sequence_count", "count"), ("ics.status_code", "cip_status_code", "ics_code"),
+    ("ics.status", "cip_status", "text"), ("ics.class_id", "class_id", "ics_code")))
+CIP_IDENTITY = _ics_log("cip_identity", ())
+CIP_IO = _ics_log("cip_io", (("ics.transaction_id", "sequence_number", "count"),))
+BACNET = _ics_log("bacnet", (("ics.function_name", "pdu_service", "text"),
+    ("ics.request_type", "pdu_type", "text"), ("ics.transaction_id", "invoke_id", "count"),
+    ("ics.status", "result_code", "text")))
+BACNET_DISCOVERY = _ics_log("bacnet_discovery", (("ics.function_name", "pdu_service", "text"),),
+    moves={"pdu_service": "zeek.bacnet.pdu_service"})
+BACNET_PROPERTY = _ics_log("bacnet_property", (("ics.function_name", "pdu_service", "text"),
+    ("ics.transaction_id", "invoke_id", "count"), ("ics.address", "instance_number", "count")),
+    moves={"pdu_service": "zeek.bacnet.pdu_service"})
+BACNET_CONTROL = _ics_log("bacnet_device_control", (("ics.function_name", "pdu_service", "text"),
+    ("ics.transaction_id", "invoke_id", "count"), ("ics.status", "result_code", "text"),
+    ("ics.request_type", "result", "text"), ("ics.device_state", "device_state", "text")),
+    moves={"pdu_service": "zeek.bacnet.pdu_service", "invoke_id": "zeek.bacnet.invoke_id"})
+ICS_LOGS = (MODBUS, MODBUS_DETAILED, MODBUS_MASK, MODBUS_IDENTIFICATION, MODBUS_MULTIPLE,
+            DNP3, DNP3_CONTROL, DNP3_OBJECTS, S7COMM, S7COMM_PLUS, S7COMM_SZL, S7COMM_TRANSFER, COTP,
+            ENIP, CIP, CIP_IDENTITY, CIP_IO, BACNET, BACNET_DISCOVERY, BACNET_PROPERTY, BACNET_CONTROL)
+
+
+ZEEK_LOGS: tuple[ZeekLog, ...] = (CONN, *ANALYZER_LOGS, *HEALTH_LOGS, *ICS_LOGS)
 _BY_NAME: dict[tuple[str, str], ZeekLog] = {(shape, name): log for log in ZEEK_LOGS
                                             for shape, names in log.names.items() for name in names}
 

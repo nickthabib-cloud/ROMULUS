@@ -52,7 +52,7 @@ def test_zeek_logs_outside_the_catalog_are_left_out_of_retrieval_and_named_as_no
         "zeek", {"@timestamp": "date", "event.dataset": "keyword", "network.transport": "keyword"},
         role="network", os_family="unknown",
     )
-    profile = {"role": "network", "datasets": {"zeek.connection": 1000, "zeek.dns": 50, "zeek.modbus": 7}}
+    profile = {"role": "network", "datasets": {"zeek.connection": 1000, "zeek.dns": 50, "zeek.opcua_binary": 7}}
     sweep = sw.Sweep(_repo(), FakeClient(), "h1", Window(
         start=START, end=START + timedelta(minutes=5),
     ), {"zeek": contract})
@@ -75,11 +75,11 @@ def test_a_mixed_malcolm_index_leaves_out_only_its_uncatalogued_zeek_logs():
         role="network", os_family="unknown",
     )
     inventory = [{"provider": "zeek", "dataset": "conn", "records": 10},
-                 {"provider": "zeek", "dataset": "modbus", "records": 3},
+                 {"provider": "zeek", "dataset": "opcua_binary", "records": 3},
                  {"provider": "suricata", "dataset": "alert", "records": 2},
                  {"provider": None, "dataset": None, "records": 5}]
     profile = {"role": "network", "kind": "mixed_network", "inventory": inventory,
-               "datasets": {"arkime.session": 5, "suricata.eve.alert": 2, "zeek:conn": 10, "zeek:modbus": 3}}
+               "datasets": {"arkime.session": 5, "suricata.eve.alert": 2, "zeek:conn": 10, "zeek:opcua_binary": 3}}
     sweep = sw.Sweep(_repo(), FakeClient(), "h1", Window(
         start=START, end=START + timedelta(minutes=5),
     ), {"malcolm": contract})

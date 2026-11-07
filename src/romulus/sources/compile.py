@@ -25,10 +25,11 @@ def _pred_native(p: Predicate, native: str) -> dict:
     v = p.value
     if p.op == "eq":
         return {"term": {f: v}}
-    if p.op == "in":
+    if p.op in {"in", "not_in"}:
         if not isinstance(v, list) or not v or len(v) > 1000:
             raise CompileError("'in' needs a non-empty list of at most 1000 values")
-        return {"terms": {f: v}}
+        terms = {"terms": {f: v}}
+        return {"bool": {"must_not": [terms]}} if p.op == "not_in" else terms
     if p.op == "exists":
         return {"exists": {"field": f}}
     if p.op == "missing":
@@ -123,7 +124,7 @@ def _pred(p: Predicate, contract: FieldContract, *, os_family: str | None = None
     clauses = [_pred_native(p, native) for native in natives]
     if len(clauses) == 1:
         return clauses[0]
-    if p.op == "missing":
+    if p.op in {"missing", "not_in"}:
         return {"bool": {"filter": clauses}}
     return {"bool": {"should": clauses, "minimum_should_match": 1}}
 

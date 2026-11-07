@@ -1292,7 +1292,7 @@ def malformed_rows() -> list[tuple[str, dict, str]]:
     # unreadable: no time; a log outside the catalog is a counted skip
     mutated("no-time", "plain", DNS, lambda s: s.pop("ts"), "error")
     mutated("time-garbage", "elastic", HTTP, lambda s: s.update({"@timestamp": "yesterday"}), "error")
-    mutated("uncatalogued-log", "malcolm", DNS, lambda s: s["event"].update(dataset="modbus"), "skip")
+    mutated("uncatalogued-log", "malcolm", DNS, lambda s: s["event"].update(dataset="bsap"), "skip")
     # the Windows-protocol logs: wrong types, integers beyond Zeek's count, values no reader takes
     mutated("smb-size-huge", "plain", SMB_FILES, lambda s: s.update(size=10**30), "size")
     mutated("smb-size-text", "security_onion", SMB_FILES, lambda s: s["file"].update(size="big"), "file.size")

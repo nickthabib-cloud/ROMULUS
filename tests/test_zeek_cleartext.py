@@ -182,3 +182,11 @@ def test_many_distinct_connections_use_disk_facts_and_two_witnesses():
         assert not getattr(owner, 'groups', {})
     finally:
         owner.release_state()
+
+
+def test_grouped_connections_do_not_attribute_all_credentials_to_the_first_account():
+    rows=[zl.HTTP.with_(uid='A1',username='alice'),
+          replace(zl.HTTP.with_(uid='B2',username='bob'),ts=zl.T0+1)]
+    [match]=run([every_shape(row)['plain'] for row in rows])
+    assert 'for account alice (2 connections)' not in match.claim
+    assert 'First cited account: alice.' in match.claim

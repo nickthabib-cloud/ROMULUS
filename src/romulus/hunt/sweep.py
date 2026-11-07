@@ -1584,6 +1584,24 @@ class Sweep:
                 "interim connections older than the start lookback are unsupported: no verified searchable "
                 "cumulative end timestamp and interim flag")
 
+    def _select_ics(self, target, contract, any_of):
+        from romulus.hunt.ics_filters import selection
+
+        if self._profiles is None:
+            self._profiles = self.repo.source_profiles(self.hunt_id)
+        plan = selection(contract, self._profiles.get(target) or {})
+        if plan.selected and any(pb.id == 'ioc.indicator_match' and (
+                getattr(pb, 'ips', None) or getattr(pb, 'nets', None)
+                or {'ip', 'cidr'} & getattr(getattr(pb, '_overlay', None), 'kinds', set()))
+                for pb in getattr(self, 'pack', ())):
+            from romulus.hunt.ics_filters import Selection
+
+            plan = Selection(reasons=[('ICS retrieval is unfiltered to retain routine reads for active IP/CIDR '
+                                      'indicator searches; polling exclusion must not hide listed contacts.')])
+        self.__dict__.setdefault('_ics_selection', {})[target] = plan
+        return ([[*previous, *group] for previous in any_of for group in plan.groups]
+                if any_of and plan.groups else plan.groups or any_of)
+
     def run_target(self, target: str):
         self._zeek_visibility_enabled=True
         contract = self.contracts[target]
@@ -1591,6 +1609,7 @@ class Sweep:
         self._zeek_lookback(target, contract)
         filters = self._filters_for(target, contract)
         any_of = self._any_of_for(target, contract)
+        any_of = self._select_ics(target, contract, any_of)
         try:
             self.heartbeat()
             parts = plan_partitions(self.client, target, contract, self.window, filters, any_of)
@@ -2131,6 +2150,9 @@ class Sweep:
                 if missing:
                     reasons.append(f"missing_required={missing}: records lacked a field this rule needs")
                 detail = {"missing_required": missing, "reasons": reasons}
+                if 'ics_tx' in pb.families and (selection := getattr(self, '_ics_selection', {}).get(target)):
+                    reasons.extend(selection.reasons)
+                    detail['ics_retrieval_filtered'] = selection.selected
                 if sigma_events is not None:
                     detail['_sigma_reason_omitted'] = sigma_reason_detail['reason_omitted']
                     detail['_sigma_reason_truncated'] = sigma_reason_detail['reason_truncated']

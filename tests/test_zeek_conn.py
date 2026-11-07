@@ -402,23 +402,23 @@ def test_every_catalogued_log_has_a_fixture_in_every_shape():
 
 
 def test_uncatalogued_logs_are_skips_the_sweep_counts_as_unevaluated_never_errors():
-    """Every uncatalogued log in every shape is also in the dispatch golden, compared with what it was before."""
+    """An unnormalized ICS log keeps its skip; it must not become an error or a typed transaction."""
     malcolm = zf.malcolm(zf.Conn())
-    malcolm["_source"]["event"]["dataset"] = "modbus"
+    malcolm["_source"]["event"]["dataset"] = "opcua_binary"
     elastic = zf.elastic(zf.Conn())
-    elastic["_source"]["event"]["dataset"] = elastic["_source"]["data_stream"]["dataset"] = "zeek.modbus"
+    elastic["_source"]["event"]["dataset"] = elastic["_source"]["data_stream"]["dataset"] = "zeek.opcua_binary"
     so = zf.security_onion(zf.Conn())
-    so["_source"]["event"]["dataset"] = "zeek.modbus"
+    so["_source"]["event"]["dataset"] = "zeek.opcua_binary"
     bare = zf.security_onion(zf.Conn(), "so-bare", bare=True)
-    bare["_source"]["event"]["dataset"] = "modbus"
+    bare["_source"]["event"]["dataset"] = "opcua_binary"
     listed = zf.malcolm(zf.Conn(), "listed")
     listed["_source"]["event"]["dataset"] = ["smb_files", "smb_cmd"]
     events, skips, errors = normalize_hits([malcolm, elastic, so, bare, listed])
     assert events == [] and errors == []
-    assert skips == {"dataset:modbus is not normalized": 2, "dataset:zeek.modbus is not normalized": 2,
+    assert skips == {"dataset:opcua_binary is not normalized": 2, "dataset:zeek.opcua_binary is not normalized": 2,
                      "dataset:['smb_files', 'smb_cmd'] is not normalized": 1}
-    with pytest.raises(ZeekNotNormalized, match=r"^dataset:modbus is not normalized$"):
-        normalize_plain_zeek(zf.plain(zf.Conn(), path="modbus"))
+    with pytest.raises(ZeekNotNormalized, match=r"^dataset:opcua_binary is not normalized$"):
+        normalize_plain_zeek(zf.plain(zf.Conn(), path="opcua_binary"))
 
 
 def test_errors_are_tagged_with_the_dispatch_token():

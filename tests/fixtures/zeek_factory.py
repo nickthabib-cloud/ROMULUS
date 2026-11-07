@@ -34,7 +34,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
 from romulus.evidence.community import community_id
-from tests.fixtures import zeek_logs
+from tests.fixtures import zeek_ics, zeek_logs
 
 SENSOR = "sensor-zeek-01"
 # Malcolm, Elastic and Security Onion keep Zeek's first-packet time to the millisecond, so the logical records here
@@ -245,6 +245,9 @@ WRITERS = {"malcolm": malcolm, "elastic": elastic, "security_onion": security_on
 def in_every_shape(record: Conn | zeek_logs.Row, prefix: str = "") -> dict[str, dict]:
     """The logical record in every shape that writes its log (a conn record, or an analyzer log's row)."""
     if isinstance(record, zeek_logs.Row):
+        if record.log in zeek_ics.SHAPES_BY_LOG:
+            return {shape: zeek_ics.hit(record, shape, f"{prefix}{shape}-{record.log}")
+                    for shape in zeek_ics.SHAPES_BY_LOG[record.log]}
         return zeek_logs.in_every_shape(record, prefix)
     return {shape: WRITERS[shape](record, f"{prefix}{shape}") for shape in SHAPES}
 
@@ -298,7 +301,7 @@ TUNNELLED = Conn(uid="CinnerTunnel001", tunnel_parents=(PARENT_UID,), resp_p=80,
 FULL = Conn(tunnel_parents=(PARENT_UID,), vlan=110, inner_vlan=220, ja4t="64240_2-4-8-1-3_1460_8",
             ja4ts="65160_2-4-8-1-3_1460_7", ja4l="1050_64", ja4ls="2120_128")
 # a logical record per catalogued log (the gate test fails when a catalogued log has none)
-LOG_FIXTURES: dict[str, Conn | zeek_logs.Row] = {"conn": FULL, **zeek_logs.ROWS}
+LOG_FIXTURES: dict[str, Conn | zeek_logs.Row] = {"conn": FULL, **zeek_logs.ROWS, **zeek_ics.ROWS}
 MULTI_SERVICE = Conn(resp_p=445, service="gssapi,smb,krb,dce_rpc,ntlm")
 REMOVED_SERVICE = Conn(resp_p=8443, service="http,-ssl")
 SPICY_SERVICE = Conn(resp_p=88, service="spicy_krb_tcp")
@@ -352,7 +355,7 @@ def malformed_rows() -> list[tuple[str, dict, str]]:
     # no readable log name: not taken as Zeek, the record keeps the path it took before (here an Arkime session)
     mutated("no-log-name", "malcolm", lambda s: s["event"].pop("dataset"), "not-zeek")
     mutated("log-name-number", "security_onion", lambda s: s["event"].update(dataset=5), "error")
-    mutated("uncatalogued-log", "malcolm", lambda s: s["event"].update(dataset="modbus"), "skip")
+    mutated("uncatalogued-log", "malcolm", lambda s: s["event"].update(dataset="bsap"), "skip")
     mutated("dataset-array-uncatalogued", "malcolm", lambda s: s["event"].update(dataset=["modbus", "dnp3"]),
             "skip")
     # a list naming catalogued logs is a log only when the row carries the log's object
@@ -544,6 +547,11 @@ def dispatch_records() -> dict[str, list[dict]]:
     merges across groups in the one-batch reading."""
     out = dict(previous_shapes())
     for name, record in LOG_FIXTURES.items():
+        if name in zeek_ics.SHAPES_BY_LOG:
+            for shape in zeek_ics.SHAPES_BY_LOG[name]:
+                nid, sensor = f"golden-{shape}-{name}", f"sensor-{shape}-{name}"
+                out[f"zeek-{name}-{shape}"] = [zeek_ics.hit(record, shape, nid, sensor=sensor)]
+            continue
         for shape in zeek_logs.shapes_of(name) if name != "conn" else SHAPES:
             nid, sensor = f"golden-{shape}-{name}", f"sensor-{shape}-{name}"
             if name == "conn":

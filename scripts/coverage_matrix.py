@@ -51,6 +51,12 @@ def _gitignored_private_output(path: Path) -> bool:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     catalog = build_catalog()
+    invalid_ics = [issue for issue in catalog.invalid_attack_ids
+                   if catalog.rule(issue.rule_id).attack_domain == 'ics']
+    if invalid_ics:
+        issue = invalid_ics[0]
+        print(f'ICS mapping invalid: {issue.rule_id} {issue.attack_id} {issue.reason}', file=sys.stderr)
+        return 1
     if args.private:
         output = (args.output or PRIVATE_OUTPUT).resolve()
         if not _gitignored_private_output(output):

@@ -125,7 +125,7 @@
     <label>Directory sync accounts (SIDs or <span class="mono">DOMAIN\name</span>, one per line)<textarea
       name="directory_sync_accounts" rows="4" class="mono">{{ form.directory_sync_accounts }}</textarea></label>
   </div>
-  {% for key in ['management_hosts', 'domain_controller_addresses', 'directory_sync_hosts', 'directory_sync_addresses'] %}
+  {% for key in ['management_hosts', 'domain_controller_addresses', 'directory_sync_hosts', 'directory_sync_addresses', 'ics_control_hosts'] %}
     {% if form[key ~ '_declared'] %}<input type="hidden" name="{{ key }}_declared" value="1">{% endif %}
   {% endfor %}
   <label><input type="checkbox" name="directory_sync_accounts_declared" value="1"
@@ -133,6 +133,8 @@
   <p class="help">Enter known accounts or explicitly declare an empty list. Leaving the list undeclared keeps replication authorization unresolved.</p>
 
   <h2>Internal networks</h2>
+  <label>ICS control hosts (IPs or CIDRs, one per line)<textarea name="ics_control_hosts" rows="4"
+    class="mono">{{ form.ics_control_hosts }}</textarea></label>
   <p class="help">Now in use: {{ networks }}</p>
   {% if env_networks %}
   <p class="warn">This server also sets <span class="mono">ROMULUS_INTERNAL_NETWORKS</span> or

@@ -204,10 +204,12 @@ def test_zeek_source_groups_are_empty_where_nothing_can_be_searched():
 def test_the_raw_family_prefilter_keeps_only_zeek_rows_of_the_requested_family():
     dns = zl.malcolm(zl.ROWS["dns"], "dns-1")
     conn = zf.malcolm(zf.Conn(), "conn-1")
-    unread = zf.malcolm(zf.Conn(), "modbus-1")
-    unread["_source"]["event"]["dataset"] = "modbus"
-    kept = _prefilter_raw([dns, conn, unread], {"dns_query"})
-    assert [hit["_id"] for hit in kept] == ["dns-1", "modbus-1"]
+    unread = zf.malcolm(zf.Conn(), "opcua-1")
+    unread["_source"]["event"]["dataset"] = "opcua_binary"
+    ics = zf.malcolm(zf.Conn(), "modbus-1")
+    ics["_source"]["event"]["dataset"] = "modbus"
+    kept = _prefilter_raw([dns, conn, ics, unread], {"dns_query"})
+    assert [hit["_id"] for hit in kept] == ["dns-1", "opcua-1"]
     [event] = normalize_hits(kept[:1])[0]
     assert event.family == "dns_query"
 

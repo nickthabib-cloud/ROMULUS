@@ -5,12 +5,12 @@ from romulus.detect.bounded import StateBudget
 from romulus.hunt import sweep as sw
 from tests import throughput_fixture as tf
 
-# Rule-version bumps only (the Zeek conn and alert reading: see test_throughput_equality); with those versions
-# restored the digest is the earlier 3b23f98dbf25d34c4921bbec2cba932991746ad9d4a11e8963988d7c8c421bee.
+# All 35 finding identities and lanes are retained. Three beacons now cite the equivalent Suricata flow
+# witnesses, with their sensor wording, citation timestamps and rule version; see test_throughput_equality.
 CANDIDATE_GOLDENS = {
-    4: (35, "6defcd4239f14d594e0df3d84f8bf83d114920e61475ca29d6ab56ccc15b115f"),
-    8: (35, "6defcd4239f14d594e0df3d84f8bf83d114920e61475ca29d6ab56ccc15b115f"),
-    16: (35, "6defcd4239f14d594e0df3d84f8bf83d114920e61475ca29d6ab56ccc15b115f"),
+    4: (35, "da95d96fed05254a800f1449ee757093126d4cb5207cea04f07e6ef11d2f2c47"),
+    8: (35, "da95d96fed05254a800f1449ee757093126d4cb5207cea04f07e6ef11d2f2c47"),
+    16: (35, "da95d96fed05254a800f1449ee757093126d4cb5207cea04f07e6ef11d2f2c47"),
 }
 
 

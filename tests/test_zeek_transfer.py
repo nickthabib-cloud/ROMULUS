@@ -236,3 +236,13 @@ def test_fresh_replay_prefix_cannot_lower_published_count_or_masquerade_lane():
             owner.release_state()
     [saved] = [candidate for candidate in repo.candidates('h1') if candidate['rule_id'] == 'net.executable_transfer']
     assert saved['lane'] == 'high' and '4 files' in saved['claim']
+
+
+@pytest.mark.parametrize('mime,is_orig',[('application/x-dosexec',False),('text/x-python',True),
+                                        ('application/x-executable',True)])
+@pytest.mark.parametrize('shape',SHAPES)
+def test_admin_share_does_not_hide_masquerades_outside_the_existing_pe_write_rule(mime,is_orig,shape):
+    files=zl.FILES.with_(fuid=zl.FUID_SMB,uid=zl.UID_SMB,source='SMB',mime_type=mime,
+        is_orig=is_orig,filename='photo.jpg',**{'id.resp_h':zl.DC,'id.resp_p':445})
+    matches=run([files,zl.SMB_FILES.with_(name='photo.jpg')],shape)
+    assert any(match.proposed_lane=='high' for match in matches)

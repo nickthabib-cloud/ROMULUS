@@ -250,7 +250,15 @@ class ExecutableTransfer(Playbook):
                 if not share:
                     continue
                 if share in {'admin$', 'ipc$'} or re.fullmatch(r'[a-z]\$', share):
-                    return 'admin'
+                    seen = event.get('file.seen_bytes')
+                    covered = (content == 'PE' and event.get('file.is_orig') is True
+                               and isinstance(seen, int) and not isinstance(seen, bool) and seen > 0
+                               and _text(meta.get('smb.path')) and _text(meta.get('smb.name'))
+                               and (csender, creceiver) == (sender, receiver))
+                    if covered:
+                        return 'admin'
+                    if not (mismatch or _masquerade(meta.get('smb.name'))):
+                        continue
             available = True
             hidden = mismatch or _masquerade(meta.get('url.original'), uri=True) or _masquerade(meta.get('smb.name'))
             if hidden:

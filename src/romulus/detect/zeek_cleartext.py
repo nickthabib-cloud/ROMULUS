@@ -124,15 +124,15 @@ class CleartextCredentials(Playbook):
             return None
         self.rows.remember(marker, signature)
         account = event.get('user.name') or event.get('auth.target_account')
-        account_text = f' for account {account}' if isinstance(account, str) and account else ''
+        account_text = f' First cited account: {account}.' if isinstance(account, str) and account else ''
         notes = [_POSITIVE, 'This is a credential-transport hygiene observation, not attack evidence by itself.',
                  'Counts are distinct (connection UID, sensor); first and last credential witnesses are cited.',
                  'ATT&CK context (not proof): T1078; T1040 is exposure context.']
         if not current().configured:
             notes.append(DIRECTION_ASSUMED_REASON)
         return Match(self.id,
-            f'A credential was sent in cleartext over {protocol.upper()} from {client} to {server}{account_text} '
-            f'({count} connection' + ('s' if count != 1 else '') + ').',
+            f'A credential was sent in cleartext over {protocol.upper()} from {client} to {server} '
+            f'({count} connection' + ('s' if count != 1 else '') + ').' + account_text,
             self.claim_type, selected,
             [pf(ev, name) for ev in selected for name in sorted(_FIELDS) if ev.has(name)],
             selected[-1].ts, 'low', lane, 'medium', event.entities(), notes,

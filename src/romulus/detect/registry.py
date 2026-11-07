@@ -10,6 +10,7 @@ from romulus.detect.dns import DNS_PLAYBOOKS
 from romulus.detect.flows import FLOW_PLAYBOOKS
 from romulus.detect.hijack import HIJACK_PLAYBOOKS
 from romulus.detect.host import HOST_PLAYBOOKS, share_lineage
+from romulus.detect.ics import RULES as ICS_PLAYBOOKS
 from romulus.detect.indicators import INDICATOR_PLAYBOOKS
 from romulus.detect.kernel_files import KERNEL_FILE_PLAYBOOKS
 from romulus.detect.lineage import LINEAGE_PLAYBOOKS
@@ -85,6 +86,7 @@ ALL_PLAYBOOKS = (HOST_PLAYBOOKS + HIJACK_PLAYBOOKS + KERNEL_FILE_PLAYBOOKS + LIN
                  + list(WINDOWS_LINKED_PLAYBOOKS) + list(WINDOWS_SCRIPT_PLAYBOOKS) + ZEEK_ALERT_PLAYBOOKS
                  + list(ZEEK_LATERAL_PLAYBOOKS) + list(ZEEK_SMB_PLAYBOOKS) + list(ZEEK_RATE_PLAYBOOKS)
                  + list(ZEEK_CLEARTEXT_PLAYBOOKS) + list(ZEEK_TRANSFER_PLAYBOOKS)
+                 + list(ICS_PLAYBOOKS)
                  + BASELINE_PLAYBOOKS)
 _ANCHOR_CLASSES = {playbook.id: playbook.anchor_class for playbook in ALL_PLAYBOOKS}
 

@@ -59,6 +59,9 @@ from functools import lru_cache
 
 from romulus.evidence.certificates import certificate_fields, dn_parts, name_key
 from romulus.evidence.community import community_id
+from romulus.evidence.ics_catalog import MAX_VALUES as MAX_ICS_VALUES
+from romulus.evidence.ics_catalog import Function as ICSFunction
+from romulus.evidence.ics_catalog import lookup_function as lookup_ics_function
 from romulus.evidence.rpc_catalog import lookup_zeek, zeek_opnum, zeek_uuid
 from romulus.evidence.typed import FieldValue, Outcome, RawRef, TypedEvent, event_id, fv
 from romulus.evidence.zeek_catalog import (
@@ -559,11 +562,35 @@ def _read_strings(value, shape):
     return kept or None
 
 
+
+def _read_ics_code(value, shape):
+    """A native hexadecimal code string, or a numeric count (never a bool)."""
+    if isinstance(value, str) and re.fullmatch(r"0x[0-9a-fA-F]{1,8}", value.strip()):
+        return int(value, 16)
+    return _read_count(value, shape, 0xffffffff)
+
+
+def _read_ics_values(value, shape):
+    """A bounded numeric preview; protocol payload strings never become values."""
+    if isinstance(value, str) and shape == MALCOLM:
+        value = value.split(",", MAX_ICS_VALUES)
+    if not isinstance(value, list):
+        return _BAD
+    items = []
+    for item in value[:MAX_ICS_VALUES]:
+        number = _read_count(item, shape, 65535)
+        if number is _BAD:
+            return _BAD
+        items.append(number)
+    return {"items": items, "truncated": len(value) > MAX_ICS_VALUES}
+
+
 READERS = {"ip": _read_ip, "port": lambda v, s: _read_count(v, s, 65535), "count": _read_count,
            "percentage": lambda v, s: _read_seconds(v, MALCOLM), "seconds": _read_seconds, "text": _read_text, "flag": _read_flag, "services": _read_services,
            "names": _read_names, "mac": _read_mac, "list": _read_vector, "text1": _read_text1,
            "count_text": _read_count_text, "time": _read_time, "hex": _read_hex, "hexes": _read_hexes,
-           "addresses": _read_addresses, "seconds_list": _read_seconds_list, "strings": _read_strings}
+           "addresses": _read_addresses, "seconds_list": _read_seconds_list, "strings": _read_strings,
+           "ics_code": _read_ics_code, "ics_values": _read_ics_values}
 # divisors to seconds (a division of two exact integers is correctly rounded; a product with 1e-9 is not)
 _UNITS = {"ns": 1e9, "ms": 1e3}
 
@@ -1006,6 +1033,8 @@ def _analyze(hit: dict, record: ZeekRecord, declared_sensor: str | None, *,
     step = _STEPS.get(log.name)
     if step is not None:
         step(f, reader, log, caveats, guard)
+    if log.family == "ics_tx":
+        _ics(f, reader, log, caveats, guard)
     _withhold_arguments(f, reader, log, caveats, guard)
     _strip_userinfo(f, log, caveats, guard)
     if log.family == "app_tx":
@@ -1031,7 +1060,7 @@ def _analyze(hit: dict, record: ZeekRecord, declared_sensor: str | None, *,
         if computed is not None:
             f["network.community_id"] = fv(computed, f"{nid}:id.orig_h+id.orig_p+id.resp_h+id.resp_p+proto"
                                                      f"#computed:community_id_v1")
-    if guard.present:
+    if guard.present and log.family != "ics_tx":
         f["auth.cleartext_credentials_present"] = fv(True, f"{nid}:{'+'.join(dict.fromkeys(guard.present))}#present")
     elif guard.unknown:
         f["auth.cleartext_credentials_unknown"] = fv(True, f"{nid}:{'+'.join(dict.fromkeys(guard.unknown))}#unknown")
@@ -1854,6 +1883,157 @@ def _known_services(f, reader, log, caveats, guard):
 # SNMP's community needs no step: Zeek writes it only from an SNMPv1 or v2c message's header (an SNMPv3 header has
 # none), whatever the session's version column says (that is its first message's), so it is always a cleartext
 # community and only its presence is typed (the catalog's secret paths).
+
+# ---- industrial protocols ------------------------------------------------------------------------------------------
+def _ics(f, reader, log, caveats, guard):
+    name = log.name
+    protocol = ("modbus" if name.startswith("modbus") else "dnp3" if name.startswith("dnp3")
+                else "s7comm_plus" if name == "s7comm_plus" else "s7comm" if name.startswith("s7comm")
+                else "enip" if name == "enip" else "cip" if name.startswith("cip")
+                else "bacnet" if name.startswith("bacnet") else "cotp")
+    anchor = f["zeek.log"]
+    f["ics.protocol"] = fv(protocol, _derived(anchor, "protocol-log"))
+    native = f.get("ics.function_name")
+    if name == "dnp3":
+        native = f.get("ics.request_function_name") or f.get("ics.response_function_name")
+        if "ics.request_function_name" in f:
+            f["ics.request_observed"] = fv(True, _derived(f["ics.request_function_name"], "request-column"))
+    if name == "modbus_detailed":
+        # The parser fills these only from request handlers, including a
+        # request joined to an earlier response. This record remains a summary.
+        request_column = next((f[key] for key in ("ics.subfunction", "ics.request_values") if key in f), None)
+        if request_column is not None:
+            f["ics.request_observed"] = fv(True, _derived(request_column, "request-column"))
+    if native is not None:
+        f["ics.native_function_name"] = native
+    code = f.get("ics.function_code")
+    sub = f.get("ics.subfunction")
+    mei = f.get("ics.mei")
+    class_id = f.get("ics.class_id")
+    subfunction = sub.value if sub else None
+    if isinstance(subfunction, str) and re.fullmatch(r"0x[0-9a-fA-F]{1,8}", subfunction):
+        subfunction = int(subfunction, 16)
+    userdata = name == "s7comm" and f.get("ics.rosctr") is not None and f["ics.rosctr"].value == 7
+    if name == "s7comm_read_szl":
+        operation = ICSFunction(4, "Read SZL", "discovery")
+    elif protocol in ("cotp",) or name in ("cip_identity", "cip_io"):
+        operation = ICSFunction(code.value if code else None, native.value if native else "unknown", "other")
+    else:
+        operation = lookup_ics_function(protocol, code.value if code else None,
+                                        name=native.value if native else None,
+                                        subfunction=subfunction, mei=mei.value if mei else None,
+                                        class_id=class_id.value if class_id else None, userdata=userdata)
+    source = code or native or anchor
+    f["ics.function_name"] = fv(operation.name, _derived(source, "ics-catalog"))
+    f["ics.op_class"] = fv(operation.op_class, _derived(source, "ics-catalog"))
+    if operation.code is not None:
+        f["ics.function_code"] = fv(operation.code, _derived(source, "ics-catalog"))
+    if operation.program_direction is not None:
+        f["ics.program_direction"] = fv(operation.program_direction, _derived(source, "ics-catalog"))
+
+    request = None
+    request_field = f.get("ics.request_type")
+    request_type = str(request_field.value).strip().lower() if request_field else ""
+    if request_type in ("req", "request", "job-request", "confirmed_request", "unconfirmed_request", "write-property"):
+        request = True
+    elif request_type in ("resp", "response", "ack", "ack-data", "simple_ack", "complex_ack",
+                          "error_pdu", "reject_pdu", "abort_pdu"):
+        request = False
+    # Native user-data methods are encoded in this parser's generated function name.
+    if userdata and native is not None:
+        if native.value.startswith("Request: "):
+            request, request_field = True, native
+        elif native.value.startswith("Response: "):
+            request, request_field = False, native
+    if name == "bacnet_discovery" and operation.name in ("who_is", "who_has"):
+        request, request_field = True, native
+    if name == "bacnet_property" and native is not None:
+        if native.value in ("write-property", "read-property-request", "read-property-multiple-request"):
+            request, request_field = True, native
+        elif native.value in ("read-property-ack", "read-property-multiple-ack") or native.value.startswith("ERROR: "):
+            request, request_field = False, native
+    if name == "bacnet_device_control":
+        if request_type in ("success", "error", "reject", "abort"):
+            request = False
+        elif operation.code in (17, 20) and "ics.device_state" in f:
+            # Only the two request handlers write device_state; the response
+            # handler instead writes an explicit result token.
+            request, request_field = True, f["ics.device_state"]
+    if protocol == "dnp3" and name != "dnp3" and operation.code is not None:
+        if operation.code <= 33:
+            request, request_field = True, native
+        elif operation.code in (129, 130, 131):
+            request, request_field = False, native
+    if request is None and "ics.is_orig" in f and protocol in ("modbus", "s7comm", "s7comm_plus", "cip", "enip") \
+            and name not in ("cip_io", "cip_identity"):
+        request_field = f["ics.is_orig"]
+        request = request_field.value
+    if request is not None:
+        f["ics.is_request"] = fv(request, _derived(request_field or anchor, "native-request-direction"))
+
+    # Base Modbus has pdu_type but no source_h. Its own parser explicitly defines
+    # REQ as is_orig and RESP as !is_orig. Missing pdu_type never implies a direction.
+    if name == "modbus" and request is not None:
+        for typed, conn in (("ics.sender", "conn.orig_h" if request else "conn.resp_h"),
+                            ("ics.receiver", "conn.resp_h" if request else "conn.orig_h")):
+            if conn in f:
+                f[typed] = fv(f[conn].value, _derived(f[conn], "modbus-pdu-direction"))
+        for typed, endpoint in (("source.ip", "ics.sender"), ("destination.ip", "ics.receiver")):
+            if endpoint in f:
+                f[typed] = f[endpoint]
+
+    status, status_code, exception = f.get("ics.status"), f.get("ics.status_code"), None
+    exception_source = status or status_code or request_field or anchor
+    if protocol == "modbus":
+        if status is not None or (native is not None and native.value.endswith("_EXCEPTION")):
+            exception = True
+        elif request is False and not any("exception" in path for path in reader.bad):
+            exception = False
+    elif protocol == "dnp3":
+        if "ics.iin" in f:
+            # The low IIN byte contains function/object/parameter/configuration errors;
+            # class-event availability, local mode and restart are not exceptions.
+            exception_source = f["ics.iin"]
+            exception = bool(exception_source.value & 0x003f)
+        elif status is not None:
+            exception = status.value != "Success"
+    elif protocol in ("s7comm", "s7comm_plus", "cip"):
+        if status_code is not None and request is False:
+            exception = (status_code.value != 255 if name == "s7comm_read_szl" else status_code.value != 0)
+        if name == "s7comm" and request is False and "ics.error_class" in f:
+            error_class = f["ics.error_class"]
+            if error_class.value != "No error":
+                exception, exception_source = True, error_class
+    elif protocol == "enip" and status is not None and request is False:
+        exception = status.value != "Success"
+    elif protocol == "bacnet":
+        if name == "bacnet_device_control" and request_type in ("success", "error", "reject", "abort"):
+            exception, exception_source = request_type != "success", request_field
+        elif request_type in ("error_pdu", "reject_pdu", "abort_pdu"):
+            exception = True
+        elif request_type in ("simple_ack", "complex_ack"):
+            exception = False
+        elif native is not None and native.value.startswith("ERROR: "):
+            exception, exception_source = True, native
+        elif name == "bacnet_property" and native is not None and native.value.endswith("-ack"):
+            exception, exception_source = False, native
+    if exception is not None:
+        f["ics.exception"] = fv(exception, _derived(exception_source, "native-exception-status"))
+
+    truncated = False
+    for typed in ("ics.request_values", "ics.response_values"):
+        values = f.get(typed)
+        if values is not None:
+            truncated = truncated or values.value["truncated"]
+            f[typed] = fv(values.value["items"], values.origin)
+            if "ics.values" not in f:
+                f["ics.values"] = f[typed]
+    if "ics.values" in f:
+        f["ics.values_truncated"] = fv(truncated, _derived(f["ics.values"], "bounded-value-preview"))
+    if truncated:
+        caveats.append(f"ICS values preview truncated to {MAX_ICS_VALUES} values per request/response; "
+                       "remaining values were not typed")
+
 _STEPS = {"dns": _dns, "http": _http, "ssl": _ssl, "x509": _x509, "files": _files, "ssh": _ssh, "ftp": _ftp,
           "socks": _socks, "tunnel": _tunnel, "radius": _radius, "redis": _redis, "smb_files": _smb,
           "smb_mapping": _smb, "smb_cmd": _smb, "dce_rpc": _rpc, "kerberos": _kerberos, "ntlm": _ntlm, "rdp": _rdp,
@@ -1877,6 +2057,7 @@ ORIGINAL_WITHHELD = "<withheld: this kept Zeek line is not a JSON object, so it 
 ORIGINAL_LINES = ("event.original", "message")
 _REWRITTEN = ("#derived:credentials-redacted", "#derived:userinfo-removed", "#derived:password-removed")
 _SECRET_KEY = re.compile(r"(?:^|\.)(?:password|post_password[a-z0-9_]*)$", re.IGNORECASE)
+_ICS_SECRET_KEY = re.compile(r"(?:^|[._])(?:password|key|keys)$", re.IGNORECASE)
 _PLAIN_MARKERS = ("_path", "id.orig_h")
 
 
@@ -1913,7 +2094,7 @@ def _assign(cur, parts: tuple[str, ...], i: int, value) -> None:
             _assign(cur[key], parts, j, value)
 
 
-def _generic(value):
+def _generic(value, *, ics=False):
     """(value, changed): every field named password (any depth, nested or literal dotted) masked, and the userinfo of
     every URI in any text removed; copy on write, so an untouched value is returned as the same object."""
     if isinstance(value, str):
@@ -1925,11 +2106,11 @@ def _generic(value):
     if isinstance(value, dict):
         out = None
         for key, item in value.items():
-            if isinstance(key, str) and _SECRET_KEY.search(key) and _present(item) \
+            if isinstance(key, str) and (_SECRET_KEY.search(key) or (ics and _ICS_SECRET_KEY.search(key))) and _present(item) \
                     and item not in (STORED_SECRET, [STORED_SECRET]):
                 new, changed = _shaped(item, STORED_SECRET), True
             else:
-                new, changed = _generic(item)
+                new, changed = _generic(item, ics=ics)
             if changed:
                 if out is None:
                     out = dict(value)
@@ -1938,7 +2119,7 @@ def _generic(value):
     if isinstance(value, list):
         out = None
         for index, item in enumerate(value):
-            new, changed = _generic(item)
+            new, changed = _generic(item, ics=ics)
             if changed:
                 if out is None:
                     out = list(value)
@@ -2008,15 +2189,16 @@ def _stored(src: dict, record: ZeekRecord, f: dict[str, FieldValue], guard: _Gua
             raw = _raw_path_of(_path(value))
             if raw is not None:
                 plan.setdefault(raw, value.value)
-    out, _changed = _generic(_with(src, plan))
+    out, _changed = _generic(_with(src, plan), ics=record.log is not None and record.log.family == "ics_tx")
     return _scrub_lines(out, record, quick=False) if depth == 0 else out
 
 
 def _scrub_plain_log(src: dict, record: ZeekRecord, depth: int) -> dict:
     """A record of a log with no credential column (or of a log outside the catalog): the generic rules and the kept
     lines."""
-    out, _changed = _generic(src)
-    return _scrub_lines(out, record, quick=True) if depth == 0 else out
+    ics = record.log is not None and record.log.family == "ics_tx"
+    out, _changed = _generic(src, ics=ics)
+    return _scrub_lines(out, record, quick=not ics) if depth == 0 else out
 
 
 def _conn_stored(src: dict, log: ZeekLog, shape: str) -> dict:
@@ -2067,7 +2249,7 @@ def _fail_closed(src: dict, logs: list[ZeekLog], shapes: tuple[str, ...], record
     its log is not declared): every field of its candidate logs that can hold one is masked."""
     plan = {path: STORED_SECRET for log in logs for shape in shapes if shape in log.names
             for path in _credential_paths(log, shape)}
-    out, _changed = _generic(_with(src, plan))
+    out, _changed = _generic(_with(src, plan), ics=any(log.family == "ics_tx" for log in logs))
     return _scrub_lines(out, record, quick=False) if depth == 0 else out
 
 

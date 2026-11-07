@@ -25,7 +25,7 @@ class Window(BaseModel):
         return f"{self.start.isoformat()}/{self.end.isoformat()}"
 
 
-PredicateOp = Literal["eq", "in", "exists", "missing", "prefix", "contains", "gte", "lt", "cidr"]
+PredicateOp = Literal["eq", "in", "not_in", "exists", "missing", "prefix", "contains", "gte", "lt", "cidr"]
 
 
 class Predicate(BaseModel):

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 
-from .build import strength_for_rule
+from .build import build_catalog, strength_for_rule
 from .models import (
     COVERAGE_STRENGTH_LEGEND,
     TECHNIQUE_STRENGTH_POLICY,
@@ -233,6 +233,13 @@ def render_public(catalog: Catalog) -> str:
     lines += _summary(catalog)
     lines += _tactic_tables(catalog)
     lines += _metadata_issues(catalog)
+    ics = build_catalog(playbooks=catalog.rules, domain='ics')
+    lines += [f'## ATT&CK for ICS {ics.attack_version}', '',
+              ('ICS mappings are validated against the separate pinned ICS bundle. '
+               'Request observations do not establish physical process outcomes.'), '']
+    lines += _summary(ics)
+    lines += _tactic_tables(ics)
+    lines += _metadata_issues(ics)
     lines += ["## Rule card summaries", ""]
     for rule in catalog.rules:
         lines += _rule_card(rule)

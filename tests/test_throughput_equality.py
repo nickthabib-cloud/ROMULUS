@@ -320,11 +320,15 @@ from tests import throughput_fixture as tf
 # citations, requests, evidence, manifest and every other field remain identical.
 # Port-aware HTTP indicator matching and kind-scoped coverage change only the IOC contract version in its
 # 71 cells here. Restoring that one version reproduces all 23 sections, including every candidate and manifest.
+# Shared flow inputs retain the same 35 finding identities and lanes. Three beacon findings cite Suricata
+# flow records, with unchanged connection counts and interval statistics; the other 32 findings are exact.
+# Their event/entity/raw projections and six baseline-exclusion source targets follow those witnesses.
+# Coverage includes seven additional rules, the timing/indicator contracts, and the source-specific counts.
 GOLDEN_STACK = {
     "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
     "audit": "23d9b87c75d030df8ff5bcbf07deacc75416c325dd74bcc89243cc1b5488ae93",
     "baseline_counts": "1a021de3254f91225689f1bdc8ce3e0cfd416c90a4148bcd4f1c93b6db9cb16d",
-    "baseline_hunt_exclusions": "33dc264dde3965bf4aa1d58bf8c403124bb35f437643ab9c8f6c52026340da1f",
+    "baseline_hunt_exclusions": "6edce6e2a9c7ce132fb18481f529f6713c561be7693c0c2638d183a38ae0be4d",
     "baseline_observations": "814031e4a439a6faa3218d7b3687d2391534916c44f015b4d7b7993b7d15070f",
     "baseline_scope_hours": "fe1ef875f82a6cad7d9c7884b1936614584a9f9e0e4c008e4790ee46edf6361d",
     "baseline_segments": "e2ca9f003a97f77ac300789266c9e646610317f5577318c4b556b464a8a6fc48",
@@ -332,23 +336,23 @@ GOLDEN_STACK = {
     "baseline_window_counts": "7cc0f5555260b0533927f47cfe29e6a543e2d921b0cc79e4b6b89f418d6052f8",
     "baseline_window_event_hours": "bb58c65144b135443e75a690b7b2f8137ebac6b827f8e8bd8cc7606a01c53e52",
     "baseline_window_scope_hours": "07f4081d18fb5be1dfc23c1eecd4e63eef7af093c1a70eaa7f4ea05fc772006f",
-    "candidates": "6defcd4239f14d594e0df3d84f8bf83d114920e61475ca29d6ab56ccc15b115f",
-    "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
+    "candidates": "da95d96fed05254a800f1449ee757093126d4cb5207cea04f07e6ef11d2f2c47",
+    "entities": "7c24e61dfb6998491faa301462e9fdc3cfb0e647e8d6d28f280517b804d63165",
     "event_citations": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-    "event_entities": "40eefa75e2cfa03734adb2e57b3da8719aa150bcdc65e72a758d84ba3e1f31b7",
-    "events": "0165d2807ffee33aaef17dd70ba004ec4c87fa4c5f29e9dc75ba833f57b93ff7",
+    "event_entities": "e46388616e20fc4db32e8d22d7f51f83683129e26ec8fce404da04d32b88c593",
+    "events": "d51c3aa71fe51426fac5d2b5f40043dce12a3847605cc2bd401e60e39c588336",
     "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
     "links": "0fbedb27ca9a4cb72354178444ee9aabc49f377b2c933074fe03ef29c8fbb08a",
     # Five zero-evaluation Zeek rate registrations add 355 coverage cells and five manifest rules.
     # Five Windows contract-version bumps change only rule_version in their 355 existing cells.
     # Removing those additions, restoring those versions and incidental cell IDs reproduces the
     # complete preceding snapshot; all 35 candidates and 21 non-coverage sections are identical.
-    "manifest": '2e06ddcbd38a16d1ce651e001280ee074b4e7892ef33b7f1df939568ce14dfe3',
-    "raw": "725a735679f5ca620ca5a4abf3145f7aef1ede27750a8b247e61c297ac02865a",
+    "manifest": '38faeb5992a7fabf49e66aef4a2163b839bb141054dddd350a1872f354546897',
+    "raw": "a81357c736b707d2ee99f76b5b4f8d1233dfed9844a71c7c219372b8b3e9f433",
     # Twenty changed Windows/network contracts carry new versions in 71 coverage cells each.
     # Restoring only those versions reproduces the complete preceding snapshot; all 35 candidates
     # and the other 22 stack sections are byte-identical.
-    "rule_cells": '8d9c87b2d7c8a9edf46a8ef8dbda897f0c6bf68e113f574ef76dfb25aa2d59df',
+    "rule_cells": 'f80a53f45a2f9dd6dd619e196512c8de4ed770c409d5d30dbbe906db644b9422',
     "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
     "tasks": "c65df4ab88c05661371cf32b49a1d22ef84d6753488bdb946c8e29376d486260",
 }
@@ -357,15 +361,15 @@ GOLDEN_STACK = {
 # checked field by field.
 GOLDEN_NON_BASELINE_SEMANTICS = {
     "candidates": {
-        "all_fields": "e61a9884a3f7927b804675657f1ef6ae8bae6eccaffb0af39b637930572d8fb2",
+        "all_fields": "9fd11aeb74d43862118340258bec0e20c14742f548d283aceccad12a9b34b856",
         "benign_alternatives": "8e3c0bf9bd14733cc2b4a049393aded638eaa0e93632c2c69d1428a52a4cc221",
-        "claim": "94f373eede1b0deee042a316fc9ede39a619bbef58ded217ad94860f9fd4a2b0",
+        "claim": "5ae5b58fa4ccce398ae86ea2876859edd2335fa8632378303eb4aa0562e2d6f5",
         "claim_type": "1ccc0da03751218f3bb63463a348cd5519fb63c2eec9e0d2e83259f18bfc6681",
         "confidence": "307872061aea17d3b0ed62d34865ad350c9b4cb9cc7d2cea041ca39011ee3e7e",
         "context_event_records": "af444f5420b16faa27b03fe9091a6b2db5006bcc5da813d573f7a01c97490121",
         "count": 35,
-        "entities": "dfb7f8d1a995807f75365452dae6c80e325d1f2d1ad42f1fd1a2bb1292b98d21",
-        "event_records": "20e95e203b846d9ee194e97d157589d48720f22fd8ec7dad3c7875d31d307104",
+        "entities": "d09384d002c3f8717072917bac3d3a1294c4aab1dd99fcc23775d5b7307b115a",
+        "event_records": "f9ebdb43b8e63fdc22d23f93a2eab60c46accc66379257cae534287f1db24081",
         "gate_results": "1494f3c1cd4853709e0ccaa599c397076f29a9b8ef2431c339d607cabb57f46e",
         "group_key": "e568af201841df36a89a8f8cebf9384f4fae5219b5fa742761a17778c24e21db",
         "lane": "2a992b1fbb25d9d7cddc90e6ada69d30c0eb0e743881c35e567bd8cc08828f3b",
@@ -374,22 +378,22 @@ GOLDEN_NON_BASELINE_SEMANTICS = {
         "priority": "aa73edc71e40ea4964645f62817edb7b3e790121d824db413442d99a21c05d5d",
         "priority_reasons": "b473ae5921bb2f50e3cc347ad18a3a5b6557ecacdaca7568e9f2f10b2fde3a9b",
         "rule_id": "2ae926e61da026e299be84e4e716e9bd0a33eb9a6ea3c97196c3167fc017a257",
-        "rule_version": "7ee20eb98dc8eae9cdd306d67a881412968f8fb9bc9697d2e29369bf07977462",
+        "rule_version": "0bfdff9a79fb6a0406e168ad268d2578f6e528716cdd443a2129c3d6f62b1ac3",
         "severity": "b2e229e267531f35a076f4db58edc48cbea38cce613ae2a6954cb6b1bf5ea20c",
         "source_presence": "4b20d257ae462d3a6c1af7eeddf340a1558a100d29f517eb7b5c7564fa778d1c",
-        "ts": "d8015c1ff0b135e082a5fef2ab1cb88206470e30beee157a0cfc7790d48b8310",
+        "ts": "d783022fbeb6ab1800221b231285115788919175f9dc1481216a31707234dab2",
     },
     "rule_cells": {
-        "all_fields": '2f449916b13616ff0ca8bdcec55c9c5550323a354504c830e0550338c66f2ae8',
-        "count": 15261,
-        "rule_id": 'e254e06a5b70725e437cf3004200b0f61b05100d1538c13349994d1fd4568879',
-        "rule_version": 'b3ba79edbdad329cba6631cb6e69b362f68ca3c97bbb5892add2abdc4a189845',
-        "target": 'bb22fe7c7f4a31ae292ea691f4617e62106177f2a4c6f503fe9cbcd94458229b',
-        "partition": '8a08cb4a3f440cbddfa0ef9d93701943223d6c94b114f753f62c31fcae1414ba',
-        "state": '873ced555502f36931da34afd78c1e52bee897e367c838bd43ed555b375fa99d',
-        "matched": '7446d5b88ba25d65ddea52c6ba99a650a243bb6ab552768b498d99028a557e0e',
-        "evaluated": '235aa831dadae5d0dd50e260c1fc6ef7e84b7a824b0c4f72d0b6ddb4a9a7f6e6',
-        "detail": 'e6aacdd939e4391858b7e000f33886e8292d91ae772d7ba9e7fecfab09bf22e1'
+        "all_fields": 'a46cb4949b377ada1ab4358653d003c0b0ad0bd3933d77d48d40336e7ce9a392',
+        "count": 15758,
+        "rule_id": 'ff9f673cb631d50f91948d268a7342a1a19c25c8b4c099a13e521acaa8807f30',
+        "rule_version": 'e1c8b6e3e14aa448d10a5f0b4c0428e3c0f227acb4a278016ca8c9426c155efa',
+        "target": 'ba0cf0a1239380578f0d7f7faf7c5202a80024ef2815838ab1b059e28ef5ca7a',
+        "partition": '08db801c30252039241bb64a0a03dd3a58798babbe62b7aa11db66e83a82bfe9',
+        "state": '2c9ed719c5f13e5cbc727dbdc794cb3029a528304c9a5a788e200622f3c52bac',
+        "matched": 'be37cf703bd2e8fb2bc413665ada0cb0adca7d37dc42eca84934e1bf85e99a11',
+        "evaluated": '0ad307e582c57c39d5680a24f7c3a324e7e5df958eb7aa43ab95c39bf51e7dbd',
+        "detail": '685776ced6cf01199fd8343c6454d0bdd31aa4fbb44a8c7ad9eb4206e96fabeb'
 },
 }
 GOLDEN_NORMALIZED = {
