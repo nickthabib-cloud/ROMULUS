@@ -106,7 +106,7 @@ def _listed_actor(event, facts):
 
 class DirectoryReplicationAccess(ReplicationSourceJoin, WindowsEventRule):
     id = "win.directory_replication_access"
-    version = "8"
+    version = "9"
     title = "A directory access record named replication extended rights"
     families = ("directory_access", "auth")
     context_families = ("auth",)

@@ -347,7 +347,7 @@ GOLDEN_STACK = {'anchors': '41228c5a5ac779a4178656ed1292cea125732d2991b15312e6a2
  'links': '8fb8da9a2bfc8fca7eac6f0361659105d14345cf6d683d63817ce0829eabe673',
  'manifest': '17e916afc9a75a11f375b4116fbc65d906e49ea9c812d43aaa5bd7eec99c2789',
  'raw': 'b85b03c11c502b9e1e1f05702cd348b5ec1e79fb661a787fa6bf4c39dc31d871',
- 'rule_cells': '14f4a1d4f979712ba6a3d88f7fb973a98a968aff80d95d79fc4ff343defb9915',
+ 'rule_cells': 'ed1fe1a796ff4b5807ffa3a8d90928097b6fdaf559849d0a00794f4d687b77e4',
  'stats': '18fcb2f6b78a17228b3a60b50bd103d66b5a07884252c753349b21b12889ced5',
  'tasks': 'aff8bcff2641089d919982d0ec3b13034f2dd1ab2ffa4e4416db6cbfe3220cfa'}
 # Captured directly from the S7 fixture through _non_baseline_semantic_digests. Typed-event-derived hashes and
@@ -374,14 +374,14 @@ GOLDEN_NON_BASELINE_SEMANTICS = {'candidates': {'all_fields': 'f9197e6dcf1847905
                 'severity': 'fa0e16a58cb764a8ae958fbde474648dfe753ee8bd14593c9d56c74fb39a620b',
                 'source_presence': '3770c51822192b772dfb9df91031b662cb6e5877a4cc5a569d3bb9ed831e649f',
                 'ts': 'e60f4ddf845fc42727b5b4f6cf23a672b0fb2f2ec221ca3c6ba071a67bcc6b82'},
- 'rule_cells': {'all_fields': 'c636e29653e376cb4ef294df517cd1f2b2c08747628b1521e8d017da98264650',
+ 'rule_cells': {'all_fields': 'b1ef4d7ac8d231e3e2c9c2c7d740615b6f9ccfa5f8bbfe54474c287fba2287bc',
                 'count': 17220,
                 'detail': 'b2d0a2a7ba4b1a51412c1e923f58f47f630e981b843abbde1b84f8253a9440f2',
                 'evaluated': 'ef1cccfa6ec23d7a5eb73d5f1c7786bb37860a8d48338291ad7d6007825953f9',
                 'matched': '864628001c8b636cf52eb109dadba1cc1325af343b59359e67b3803ccff18936',
                 'partition': '85fddca5c66ae8a33cfa2a65e93546cb013b4f4e5154b47c7827a402f317e8d8',
                 'rule_id': '9260f06a98952a5a822d34f7c9a249ae41bd6bbc5946791b251736c9163b3bc4',
-                'rule_version': '6a8cc559acfcd0ef8a6d38bdb260663c9968c50debc8d33688c906fa190623eb',
+                'rule_version': '7e8497dc44bb71c71e6aa467975bb75437fee19f164fe5dba3ce2c86168d66c9',
                 'state': 'b7d0fe039645057d8785073e552869415d06897e4689393932de95b20d70d18f',
                 'target': 'd07123225c1c59d2a50c738dfef667634c86add0db6fc35ac4c8c2ea03a00557'}}
 GOLDEN_NORMALIZED = {'arkime_sessions3-x': '7407ea2345be798c29751a3c9470e3b6988dac5ce7d9f5d5c2ffe3b0bb3f7903',

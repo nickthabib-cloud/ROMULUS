@@ -29,41 +29,81 @@ _FIELDS = (
 )
 
 
-def broad_write_allow(descriptor):
-    """Read allow ACEs for Everyone/Authenticated Users, without asserting effective ACL access.
+def broad_write_aces(descriptor):
+    """Recorded broad write-capable allow bits by trustee and object scope.
 
-    SDDL ACE order and deny rules can restrict effective access. This positive signal
-    names the recorded write-capable allow ACE, not an effective-permissions calculation.
+    SDDL ACE order and deny rules can restrict effective access. This positive
+    signal compares recorded allow bits, not effective permissions.
     https://learn.microsoft.com/windows/win32/secauthz/ace-strings
+    https://learn.microsoft.com/windows/win32/secauthz/sid-strings
     https://learn.microsoft.com/windows/win32/fileio/file-security-and-access-rights
     """
+    grants = {}
     if not isinstance(descriptor, str):
-        return False
+        return grants
+    write_bits = 0x2 | 0x4 | 0x10 | 0x100 | 0x40000 | 0x80000
+    rights_bits = {"GA": write_bits, "FA": write_bits, "GW": 0x116, "FW": 0x116,
+                   "WD": 0x40000, "WO": 0x80000}
+    trustees = {"WD": "S-1-1-0", "AU": "S-1-5-11", "AN": "S-1-5-7", "DU": "DU"}
     for body in re.findall(r"\(([^()]*)\)", descriptor):
         parts = body.split(";")
         if len(parts) != 6:
             continue
-        kind, flags, rights, _, _, trustee = (part.upper() for part in parts)
+        kind, flags, rights, object_guid, inherit_guid, trustee = (part.upper() for part in parts)
         if kind not in {"A", "OA"} or "IO" in {flags[n : n + 2] for n in range(0, len(flags), 2)}:
             continue
-        if trustee not in {"WD", "AU", "S-1-1-0", "S-1-5-11"}:
+        trustee = trustees.get(trustee, trustee)
+        if trustee not in {"S-1-1-0", "S-1-5-11", "S-1-5-7", "DU"} and not re.fullmatch(
+            r"S-1-5-21-\d+-\d+-\d+-513", trustee
+        ):
             continue
-        tokens = {rights[n : n + 2] for n in range(0, len(rights), 2)}
-        if tokens & {"GA", "GW", "FA", "FW", "WD", "WO"}:
-            return True
-        try:
-            mask = (
-                int(rights, 16)
-                if rights.lower().startswith("0x")
-                else int(rights, 16)
-                if re.fullmatch(r"[0-9A-F]{8}", rights)
-                else 0
-            )
-        except ValueError:
-            mask = 0
-        if mask & (0x10000000 | 0x40000000 | 0x2 | 0x4 | 0x10 | 0x100 | 0x40000 | 0x80000):
-            return True
-    return False
+        mask = 0
+        if rights.startswith("0X") or re.fullmatch(r"[0-9A-F]{8}", rights):
+            try:
+                mask = int(rights, 16)
+            except ValueError:
+                pass
+            if mask & 0x10000000:
+                mask |= write_bits
+            if mask & 0x40000000:
+                mask |= 0x116
+        else:
+            for offset in range(0, len(rights), 2):
+                mask |= rights_bits.get(rights[offset : offset + 2], 0)
+        mask &= write_bits
+        if mask:
+            scope = trustee, kind, object_guid, inherit_guid
+            grants[scope] = grants.get(scope, 0) | mask
+    return grants
+
+
+def broad_write_allow(descriptor):
+    return bool(broad_write_aces(descriptor))
+
+
+def system_path_parts(path):
+    local = local_path_components(path)
+    if local and local[0] == "windows":
+        return local[1:]
+    parts = components(ntpath.normpath(str(path or "").replace("/", "\\")))
+    if parts and parts[0] in {"%systemroot%", "%windir%"}:
+        return parts[1:]
+    return None
+
+
+# OS-created shares are recognized only by both the share name and its
+# conventional system-root-relative path. A broad write grant is still HIGH.
+_OS_SHARE_PATHS = {"print$": ("system32", "spool", "drivers"),
+                   "sysvol": ("sysvol",), "netlogon": ("sysvol",)}
+
+
+def os_share_path(name, path):
+    names = components(name)
+    prefix = _OS_SHARE_PATHS.get(names[-1] if names else "")
+    parts = system_path_parts(path)
+    return bool(prefix and parts is not None and (
+        parts == prefix if names[-1] == "print$" else parts[:len(prefix)] == prefix
+    ))
 
 
 def exposed_path(path):
@@ -86,7 +126,7 @@ def exposed_path(path):
 
 class ShareCreated(WindowsEventRule):
     id = "win.share_created"
-    version = "1"
+    version = "2"
     title = "A network share was added, modified or deleted"
     families = ("share_change",)
     windows_event_classes = tuple(("Security", SECURITY, code) for code in (5142, 5143, 5144))
@@ -102,27 +142,46 @@ class ShareCreated(WindowsEventRule):
         change = event.get("share.change")
         if change not in {"added", "modified", "deleted"} or not event.get("share.name"):
             return []
-        path_signal = exposed_path(event.get("share.local_path"))
-        acl_signal = broad_write_allow(event.get("share.security_descriptor.new"))
+        path = event.get("share.local_path.new") or event.get("share.local_path")
+        old_path, new_path = event.get("share.local_path.old"), event.get("share.local_path.new")
+        path_changed = bool(
+            isinstance(old_path, str) and old_path and isinstance(new_path, str) and new_path
+            and ntpath.normcase(ntpath.normpath(old_path.replace("/", "\\")))
+            != ntpath.normcase(ntpath.normpath(new_path.replace("/", "\\")))
+        )
+        path_signal = (
+            exposed_path(path) if change == "added"
+            else path_changed and system_path_parts(new_path) is not None
+        ) and not os_share_path(event.get("share.name"), path)
+        old_sd, new_sd = event.get("share.security_descriptor.old"), event.get("share.security_descriptor.new")
+        old_grants, new_grants = broad_write_aces(old_sd), broad_write_aces(new_sd)
+        old_dacl_recorded = isinstance(old_sd, str) and "D:" in old_sd.upper()
+        acl_signal = bool(new_grants) if change == "added" else (
+            old_dacl_recorded and any(mask & ~old_grants.get(scope, 0) for scope, mask in new_grants.items())
+        )
         lane = "context" if change == "deleted" else "high" if path_signal or acl_signal else "lead"
         reasons = []
         if path_signal and change != "deleted":
             reasons.append(
                 "The recorded path is a drive root, system tree or conventional user-writable location; effective permissions were not inspected."
+                if change == "added" else "The typed old and new paths record a change to a system path."
             )
         if acl_signal and change != "deleted":
             reasons.append(
-                "The new descriptor contains a write-capable allow ACE for Everyone or Authenticated Users; effective access depends on the complete ACL."
+                "The new descriptor records a broad write-capable allow ACE for Everyone, Authenticated Users, Domain Users or Anonymous; effective access depends on the complete ACL."
+                if change == "added" else "The new descriptor adds broad write-capable allow bits that the old descriptor lacked; effective access depends on the complete ACL."
             )
-        if not event.get("share.local_path"):
+        if not path:
             reasons.append("The share local path was not recorded.")
+        if change == "modified" and not old_dacl_recorded:
+            reasons.append("The old descriptor's DACL was not recorded; a newly added broad write grant cannot be established.")
         return [
             signal(
                 event,
                 "share_" + change,
                 f"A network share was {change}: {self.describe(event.get('share.name'))}",
                 self.attack,
-                _FIELDS,
+                (*_FIELDS, "share.local_path.old", "share.local_path.new"),
                 lane=lane,
                 severity="high" if lane == "high" else "info" if lane == "context" else "medium",
                 notes=tuple(reasons),

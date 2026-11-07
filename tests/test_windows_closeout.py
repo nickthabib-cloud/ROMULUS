@@ -96,7 +96,8 @@ def test_share_descriptor_allow_write_not_deny_read_or_unrelated_trustee(sd, lan
         event(
             "share_change",
             5143,
-            **{"share.change": "modified", "share.name": "Data", "share.security_descriptor.new": sd},
+            **{"share.change": "modified", "share.name": "Data",
+               "share.security_descriptor.old": "D:", "share.security_descriptor.new": sd},
         )
     )
     assert hit.lane == lane

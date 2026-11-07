@@ -2051,7 +2051,7 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 <a id="rule-win-directory-replication-access"></a>
 ### `win.directory_replication_access` — A directory access record named replication extended rights
 
-- Version: `8`; status: `active`
+- Version: `9`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1003.006`](https://attack.mitre.org/techniques/T1003/006/)
@@ -3393,7 +3393,7 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 <a id="rule-win-share-created"></a>
 ### `win.share_created` — A network share was added, modified or deleted
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1021.002`](https://attack.mitre.org/techniques/T1021/002/), [`T1135`](https://attack.mitre.org/techniques/T1135/)

@@ -11,7 +11,7 @@ import hashlib
 import json
 
 from romulus.detect.base import pf
-from romulus.detect.site_roles import declared_source
+from romulus.detect.site_roles import address_member, host_member
 from romulus.detect.windows_linked import _session
 from romulus.detect.windows_rows import WindowsRows, row_key
 from romulus.evidence.typed import Outcome
@@ -136,13 +136,33 @@ class ReplicationSourceJoin:
                     continue
                 if self._sync_rows.put(row_key("logon", dc_name(event), session), event):
                     yield from self._publish_sync_pending(
-                        row_key("replication", dc_name(event), session), final=False
+                        row_key("replication", dc_name(event), session), final=self.one_shot
                     )
-            elif self._sync_sensitive(event) and self.judge(event):
+            elif self._sync_sensitive(event):
+                hits = self.judge(event)
+                if not hits:
+                    continue
                 session = self._sync_session(event)
                 key = row_key("replication", dc_name(event), session)
                 if self._sync_rows.put(key, event):
-                    yield from self._publish_sync_event(event, final=False)
+                    yield from self._publish_sync_event(event, final=self.one_shot)
+                elif not self._sync_rows.store().execute(
+                    "SELECT 1 FROM windows_rows WHERE k=? AND id=?", (key, event.id)
+                ).fetchone():
+                    # A computed positive does not need the refused join row to
+                    # publish. Keep a source decision already supported by a
+                    # retained logon; refusal cannot lower that evidence's lane.
+                    hit = hits[0]
+                    status, _, _ = self.source_decision(event)
+                    hit.notes += (
+                        "source unresolved: join state refused at the disk ceiling"
+                        if status == "unresolved"
+                        else "join state refused at the disk ceiling; the currently supported source decision is retained.",
+                    )
+                    self.evaluated += 1
+                    if not self._events_pre_scoped:
+                        self.os_applicable += 1
+                    yield self.record_match(event, hit)
             else:
                 yield from super().consume([event])
 
@@ -208,13 +228,15 @@ class ReplicationSourceJoin:
             return "unresolved", None, {}
         logon, raw = pair
         facts = self.site_facts
-        if declared_source(logon, hosts=facts.directory_sync_hosts, addresses=facts.directory_sync_addresses):
-            return "declared", logon, raw
-        if not logon.get("source.ip") or (
-            not facts.directory_sync_addresses and not logon.get("source.hostname")
-        ):
+        # WorkstationName in a 4624 is client-reported. When an address can
+        # be checked against declared addresses, a claimed name cannot override it.
+        if facts.directory_sync_addresses and logon.get("source.ip"):
+            listed = address_member(logon.get("source.ip"), facts.directory_sync_addresses)
+        elif facts.directory_sync_hosts and logon.get("source.hostname"):
+            listed = host_member(logon.get("source.hostname"), facts.directory_sync_hosts)
+        else:
             return "unresolved", logon, raw
-        return "undeclared", logon, raw
+        return "declared" if listed else "undeclared", logon, raw
 
     def source_hit(self, event, hit, status, logon, raw):
         notes = list(hit.notes)
@@ -230,6 +252,12 @@ class ReplicationSourceJoin:
                 "The declared directory-sync account source host is unresolved: no matching successful 4624 with a checkable source was in the hunt."
             )
         if logon is not None:
+            if self.site_facts.directory_sync_hosts and logon.get("source.hostname") and (
+                not self.site_facts.directory_sync_addresses or not logon.get("source.ip")
+            ):
+                hit.text += "; the source name is client-reported by the matching logon"
+                hit.common += "; the source name is client-reported by the matching logon"
+                notes.append("The source-name comparison uses client-reported WorkstationName, not a verified host identity.")
             hit.context.append(logon)
             hit.raw_copies.update(raw)
             for item, names in (
