@@ -35,6 +35,7 @@ from romulus.evidence.auditd import (
 from romulus.evidence.certificates import certificate_fields as _certificate_fields
 from romulus.evidence.certificates import dn_parts as _dn_parts
 from romulus.evidence.community import community_id
+from romulus.evidence.linux_catalog import WATCH_PLACEHOLDERS, module_syscall
 from romulus.evidence.raw_scrub import clean_source, might_be_zeek
 from romulus.evidence.typed import EVIDENCE_VERSION, FieldValue, Outcome, RawRef, TypedEvent, event_id, fv
 from romulus.evidence.windows import (
@@ -199,7 +200,7 @@ def _partner_boot(partners: dict, host: str, ts: float, serial: int,
 # ---------------------------------------------------------------------------------------------
 
 # Families an audit group yields. Their records name no boot of their own; the boot-interval map may supply it.
-BOOT_FILL_FAMILIES = frozenset({"process_exec", "net_socket", "file_change", "auth", "account_change",
+BOOT_FILL_FAMILIES = frozenset({"process_exec", "net_socket", "file_change", "file_access", "kernel_module", "auth", "account_change",
                                 "service_change", "audit_config", "system_state", "process_observed"})
 # How far inside one boot's observed span, and away from every other boot's span and every boot record that names
 # no boot, an event's time must lie before the event is placed in that boot. Every time compared is the host's own
@@ -1138,11 +1139,63 @@ def _file_targets(call: FileCall, items: dict[int, tuple[dict, AuditRecord]], fa
             + [(c, _KIND_CHANGE[call.kind], slot) for c in attempted])
 
 
+def normalize_module_group(host: str, members: list[tuple[dict, AuditRecord]], syscall: str | None) -> TypedEvent:
+    """Module-load/unload observations: names come from KERN_MODULE, paths only from PATH.
+
+    init_module receives memory, not a pathname. A finit_module PATH can identify its fd's file;
+    without it, a module name is never invented from the command line or a pointer argument.
+    """
+    found = next(((hit, record) for hit, record in members if record.type == "SYSCALL"), None)
+    module = next(((hit, record) for hit, record in members if record.type == "KERN_MODULE"), None)
+    hit, record = found or module
+    origin = f"{hit['_id']}:event.original#auditd:{record.type}"
+    fields = {"audit.serial": fv(record.serial, f"{origin}.msg.serial"),
+              **_audit_boot_field(members), **_audit_time(hit["_id"], record.ts)}
+    if found:
+        fields.update(_syscall_process_fields(hit["_id"], record))
+    op = "unload" if syscall == "delete_module" else "load" if syscall else None
+    if module:
+        mh, mr = module
+        morigin = f"{mh['_id']}:event.original#auditd:KERN_MODULE"
+        if mr.fields.get("name"):
+            fields["module.name"] = fv(mr.fields["name"], f"{morigin}.name")
+        if mr.fields.get("op") in {"load", "unload"}:
+            if op and op != mr.fields["op"]:
+                raise AuditParseError("module operation disagrees between SYSCALL and KERN_MODULE")
+            op = mr.fields["op"]
+    if op:
+        fields["module.op"] = fv(op, f"{origin}.arch+syscall" if syscall else f"{origin}.type+op")
+    refs = [_ref(h) for h, r in members if r.type in {"SYSCALL", "KERN_MODULE"}]
+    caveats = [] if op else ["module operation unknown: the SYSCALL companion and an explicit operation are absent"]
+    if syscall == "finit_module":
+        items = _path_items(members)
+        paths = [(h, r) for h, r in items.values() if r.fields.get("nametype") != "PARENT"]
+        resolved = []
+        cwd = next(((h, r) for h, r in members if r.type == "CWD"), None)
+        for ph, pr in paths:
+            path, used, suffix, _why = _resolve(pr.fields.get("name"), None, record, cwd, [])
+            if path:
+                resolved.append((path, ph, used, suffix))
+        if len(resolved) == 1:
+            path, ph, used, suffix = resolved[0]
+            fields["module.path"] = fv(path, f"{ph['_id']}:event.original#auditd:PATH.name{suffix}")
+            refs += [_ref(ph), *[_ref(h) for h in used]]
+        else:
+            caveats.append("module file path unknown: no unique resolved PATH record names it")
+    outcome = Outcome.success if record.fields.get("success") == "yes" else (
+        Outcome.failure if record.fields.get("success") == "no" else Outcome.unknown)
+    refs = list({ref.key: ref for ref in refs}.values())
+    return TypedEvent(id=event_id("kernel_module", refs), family="kernel_module",
+                      ts=datetime.fromtimestamp(record.ts, UTC), host=host or None, outcome=outcome,
+                      fields=fields, raw=refs, normalizer=NORMALIZER_VERSION, caveats=caveats)
+
+
 def normalize_file_group(host: str, members: list[tuple[dict, AuditRecord]], call: FileCall) -> list[TypedEvent]:
     """file_change events from a SYSCALL record of a file-changing call and its PATH records: one per changed file.
 
     An open is a change only with write intent (write access, O_TRUNC) or when it created the file; a read-only
-    open raises Skip. What cannot be decided stays absent, never defaulted: a file whose name cannot be placed has
+    open is retained as file_access only with a recorded non-placeholder watch key. What cannot be decided stays
+    absent, never defaulted: a file whose name cannot be placed has
     no `file.path`, and a call whose records do not say what changed has no `file.change`; rules count both as
     missing fields. A failed call is kept with outcome failure: it is an attempt."""
     by_type = {r.type: (h, r) for h, r in members if r.type in ("SYSCALL", "CWD", "PROCTITLE")}
@@ -1182,8 +1235,14 @@ def normalize_file_group(host: str, members: list[tuple[dict, AuditRecord]], cal
                 base[name] = fv(str(value), f"{origin}.a{index}")
     targets = [] if call.by_fd else _file_targets(call, items, outcome == Outcome.failure, flags)
     write = flags is not None and ((flags & O_ACCMODE) in (O_WRONLY, O_RDWR) or bool(flags & O_TRUNC))
-    if call.kind == "open" and flags is not None and not write and not targets:
-        raise Skip("audit open without write intent")
+    read = call.kind == "open" and flags is not None and not write and not targets
+    family = "file_access" if read else "file_change"
+    if read:
+        if str(rs.fields.get("key") or "").casefold() in WATCH_PLACEHOLDERS:
+            raise Skip("audit open without write intent")
+        base["file.access"] = fv("read", f"{origin}.arch+syscall+key")
+        targets = [(item, None, 0) for item in items.values()
+                   if item[1].fields.get("nametype") in {"NORMAL", "UNKNOWN"}]
     extra = [_ref(by_type["PROCTITLE"][0])] if "PROCTITLE" in by_type else []
     if not targets:
         why = ("the call acts on an open file descriptor, so the kernel records no path for the file" if call.by_fd
@@ -1193,7 +1252,7 @@ def normalize_file_group(host: str, members: list[tuple[dict, AuditRecord]], cal
         if change:
             fields["file.change"] = fv(change, f"{origin}.syscall")
         refs = [_ref(hs), *extra]
-        return [TypedEvent(id=event_id("file_change", refs), family="file_change",
+        return [TypedEvent(id=event_id(family, refs), family=family,
                            ts=datetime.fromtimestamp(rs.ts, UTC), host=host or None, outcome=outcome, fields=fields,
                            raw=refs, normalizer=NORMALIZER_VERSION, caveats=[*caveats, f"file path unknown: {why}"])]
     cwd = by_type.get("CWD")
@@ -1217,7 +1276,7 @@ def normalize_file_group(host: str, members: list[tuple[dict, AuditRecord]], cal
             fields["file.nametype"] = fv(pr.fields["nametype"], f"{porigin}.nametype")
         fields.update(_owner_fields("file", ph, pr))
         refs = list({r.key: r for r in [_ref(hs), _ref(ph), *[_ref(h) for h in used], *extra]}.values())
-        events.append(TypedEvent(id=event_id("file_change", refs), family="file_change",
+        events.append(TypedEvent(id=event_id(family, refs), family=family,
                                  ts=datetime.fromtimestamp(rs.ts, UTC), host=host or None, outcome=outcome,
                                  fields=fields, raw=refs, normalizer=NORMALIZER_VERSION, caveats=event_caveats))
     return events
@@ -2372,11 +2431,22 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
             continue
         if "EXECVE" not in types:
             sys_rec = next((r for _, r in members if r.type == "SYSCALL"), None)
+            module_call = module_syscall(sys_rec)
+            if module_call is not None or "KERN_MODULE" in types:
+                try:
+                    events.append(normalize_module_group(host, members, module_call))
+                    _observed_or_skip(events, skips, errors, host, members, None)
+                except (AuditParseError, ValueError, KeyError) as e:
+                    errors.append((members[0][0]["_id"], f"linux.audit.module: {e}"))
+                continue
             syscall = socket_syscall(sys_rec) if sys_rec is not None else None
             file_call = file_syscall(sys_rec) if sys_rec is not None and syscall is None else None
             if file_call is not None:
                 try:
-                    events.extend(normalize_file_group(host, members, file_call))
+                    files = normalize_file_group(host, members, file_call)
+                    events.extend(files)
+                    if any(event.family == "file_access" for event in files):
+                        _observed_or_skip(events, skips, errors, host, members, None)
                 except Skip as s:
                     _observed_or_skip(events, skips, errors, host, members, s.reason)
                 except (AuditParseError, ValueError, KeyError) as e:
@@ -2425,6 +2495,18 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
         for event in events[audit_start:]:
             boots.observe_event(event)
         boots.fill(events[audit_start:], incremental=True)
+    # Native host addresses support the same unique-owner mapping that host pivots use. A network
+    # sensor's host.ip names its observer and is never a traffic endpoint.
+    native_hosts = {hit["_id"]: hit for hit in hits if _get(hit.get("_source", {}), "host.ip")}
+    for event in events:
+        if event.family in {"net_alert", "net_flow", "net_session", "dns_query", "http_tx", "tls_session",
+                            "ssh_session", "file_transfer"} or event.normalizer != NORMALIZER_VERSION:
+            continue
+        for ref in event.raw:
+            hit = native_hosts.get(ref.native_id)
+            if hit is not None:
+                event.fields["host.ip"] = fv(_get(hit["_source"], "host.ip"), f"{ref.native_id}:host.ip")
+                break
     for index, event in enumerate(() if surrogate_free else events):
         # text parsed out of a record's own text (a Suricata EVE line, a Zeek line) can hold a lone surrogate its
         # record did not show

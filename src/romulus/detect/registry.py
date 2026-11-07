@@ -14,6 +14,8 @@ from romulus.detect.ics import RULES as ICS_PLAYBOOKS
 from romulus.detect.indicators import INDICATOR_PLAYBOOKS
 from romulus.detect.kernel_files import KERNEL_FILE_PLAYBOOKS
 from romulus.detect.lineage import LINEAGE_PLAYBOOKS
+from romulus.detect.linux_direct import DIRECT_RULES as LINUX_DIRECT_RULES
+from romulus.detect.linux_sequences import SEQUENCE_RULES as LINUX_SEQUENCE_RULES
 from romulus.detect.network import NETWORK_PLAYBOOKS
 from romulus.detect.packets import PACKET_PLAYBOOKS
 from romulus.detect.sessions import SESSION_PLAYBOOKS
@@ -56,7 +58,7 @@ from romulus.detect.zeek_rates import RULES as ZEEK_RATE_PLAYBOOKS
 from romulus.detect.zeek_smb import RULES as ZEEK_SMB_PLAYBOOKS
 from romulus.detect.zeek_transfer import RULES as ZEEK_TRANSFER_PLAYBOOKS
 
-PACK_VERSION = "pack@53"
+PACK_VERSION = "pack@54"
 WINDOWS_PROCESS_PLAYBOOKS = (WINDOWS_LINEAGE_PLAYBOOKS + WINDOWS_PROXY_PLAYBOOKS + WINDOWS_CREDENTIAL_PLAYBOOKS
                              + WINDOWS_DEFENSE_PLAYBOOKS + WINDOWS_REMOTE_PLAYBOOKS)
 WINDOWS_HOST_PLAYBOOKS = list(WINDOWS_MEMORY_PLAYBOOKS + WINDOWS_REGISTRY_PLAYBOOKS
@@ -87,6 +89,7 @@ ALL_PLAYBOOKS = (HOST_PLAYBOOKS + HIJACK_PLAYBOOKS + KERNEL_FILE_PLAYBOOKS + LIN
                  + list(ZEEK_LATERAL_PLAYBOOKS) + list(ZEEK_SMB_PLAYBOOKS) + list(ZEEK_RATE_PLAYBOOKS)
                  + list(ZEEK_CLEARTEXT_PLAYBOOKS) + list(ZEEK_TRANSFER_PLAYBOOKS)
                  + list(ICS_PLAYBOOKS)
+                 + LINUX_DIRECT_RULES + LINUX_SEQUENCE_RULES
                  + BASELINE_PLAYBOOKS)
 _ANCHOR_CLASSES = {playbook.id: playbook.anchor_class for playbook in ALL_PLAYBOOKS}
 
