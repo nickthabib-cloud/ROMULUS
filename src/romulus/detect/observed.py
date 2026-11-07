@@ -159,7 +159,7 @@ def citation(
 def pointer_body(blob: bytes) -> dict | None:
     """Decode a lineage citation pointer; legacy inline citation blobs are not pointers."""
     body = json.loads(zlib.decompress(blob))
-    return body if body.get("v") == 1 and body.get("kind") in {"observed", "exec"} else None
+    return body if body.get("v") == 1 and body.get("kind") in {"observed", "exec", "typed"} else None
 
 
 # ---- one pid's process at an instant ----------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 """One exec store for every rule that reads process ancestry: each exec record is held once, compactly, and every
 rule's view of it answers as its own history did, across pid reuse and reboots."""
 import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 
 from romulus.detect import bounded
@@ -11,7 +12,7 @@ from romulus.detect.hijack import NonRootWriteRootExecutedFile
 from romulus.detect.host import DAEMON, ExecLineage, share_lineage
 from romulus.detect.kernel_files import PersistencePathChange
 from romulus.detect.lineage import ReverseShellByLineage
-from romulus.detect.linux_sequences import LinuxSequence
+from romulus.detect.linux_sequences import CLOCK_BIN, LinuxSequence
 from romulus.detect.registry import fresh_pack
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
 
@@ -50,73 +51,107 @@ def test_the_pack_holds_each_exec_once_in_one_compact_store(monkeypatch, tmp_pat
     for pb in pack:
         pb.spill_dir = tmp_path
     n, per = 12_000, 3_000
-    for b in range(n // per):
-        batch = [benign_exec(b * per + i, T0 + timedelta(minutes=b, milliseconds=i)) for i in range(per)]
-        raw = {event.raw[0].key: {"@timestamp": event.ts.isoformat(), "message": "synthetic exec"}
-               for event in batch}
+    clock_edges = {}
+    try:
+        for b in range(n // per):
+            batch = [benign_exec(b * per + i, T0 + timedelta(minutes=b, milliseconds=i)) for i in range(per)]
+            raw = {event.raw[0].key: {"@timestamp": event.ts.isoformat(), "message": "synthetic exec"}
+                   for event in batch}
+            for event in batch:
+                when = event.ts.timestamp()
+                key = (event.host, event.family, int(when // CLOCK_BIN))
+                edge = (when, event.id)
+                first, last = clock_edges.get(key, (edge, edge))
+                clock_edges[key] = min(first, edge), max(last, edge)
+            for pb in pack:
+                pb.bind_raw(raw, "host-target")
+                pb.consume(batch)
+                if pb.staged:
+                    drained = pb.drain_staged()
+                    if isinstance(pb, LinuxSequence):
+                        assert drained == []
+                        if pb._spill is not None:
+                            assert all(not rows for _sql, rows in pb._spill._buffers.values())
+                        assert pb.retained_events() == [] and pb.pending_count == 0
+        stores = _stores(pack)
+        lineage = [s for s in stores if s.name == "exec_lineage"]
+        records = [s for s in stores if s.name == "exec_records"]
+        linux = [pb for pb in pack if isinstance(pb, LinuxSequence)]
+        witnesses = {id(pb.witnesses): pb.witnesses for pb in linux}
+        original_spills = {id(pb._spill): pb._spill for pb in pack
+                           if pb._spill is not None and not isinstance(pb, LinuxSequence)}
+        spills = {id(pb._spill): pb._spill for pb in pack if pb._spill is not None}
+        for pb in linux:
+            for spill in (pb.witnesses._spill, pb.shared_rows.database if pb.shared_rows is not None else None):
+                if spill is not None:
+                    spills[id(spill)] = spill
+        physical = []
+        for spill in spills.values():
+            spill.flush()
+            pages = spill.db.execute("PRAGMA page_count").fetchone()[0]
+            actual = pages * spill._page
+            assert actual == spill.path.stat().st_size
+            assert spill.budget._physical[("spill", id(spill))][0] == actual
+            assert spill.budget.physical_used <= spill.budget.disk_total
+            tables = [name for (name,) in spill.db.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+            counts = {name: spill.db.execute('SELECT COUNT(*) FROM "' + name.replace('"', '""') + '"').fetchone()[0]
+                      for name in tables}
+            physical.append({"owners": [pb.id for pb in pack if pb._spill is spill],
+                             "original": id(spill) in original_spills, "pages": pages,
+                             "page_size": spill._page, "bytes": actual, "rows": counts})
+        assert {spill.path for spill in spills.values()} == set(tmp_path.rglob("spill.db"))
+        original_bytes = sum(row["bytes"] for row in physical if row["original"])
+        total_bytes = sum(row["bytes"] for row in physical)
+        print(f"\n{n:,} execs; original spill bytes {original_bytes}, new scalar/clock/witness bytes "
+              f"{total_bytes - original_bytes}, total physical bytes {total_bytes}; "
+              f"{total_bytes / n:.3f} B per exec")
+        print(json.dumps({"execs": n, "original_bytes": original_bytes, "total_bytes": total_bytes,
+                          "bytes_per_exec": total_bytes / n, "spills": physical}, sort_keys=True))
+        assert len(lineage) == 1 and not [s for s in stores if s.name in OLD_EXEC_STORES]
+        readers = [pb for pb in pack if any(isinstance(v, ExecLineage) for holder in (pb, *vars(pb).values())
+                                            for v in getattr(holder, "__dict__", {}).values())]
+        assert len(readers) >= 8
+        per_exec = lineage[0].disk_bytes / lineage[0].on_disk
+        assert lineage[0].on_disk >= n - 50 and per_exec <= 300, per_exec
+        assert len(records) == 1 and records[0].on_disk >= n - 50
+        citation_per_exec = records[0].disk_bytes / records[0].on_disk
+        assert citation_per_exec <= 250, citation_per_exec
+        sequence_readers = [pb for pb in linux if hasattr(pb, "execs")]
+        assert {pb.id for pb in sequence_readers} == {
+            "host.download_then_execute", "host.tool_cleanup", "host.web_shell_chain",
+            "host.unbrokered_privilege_transition", "host.discovery_burst", "corr.alert_then_host_execution"}
+        assert len({id(pb.execs) for pb in sequence_readers}) == 1
+        assert all(pb.execs.store is lineage[0] for pb in sequence_readers)
+        assert len(witnesses) == 1
+        [witness] = witnesses.values()
+        assert witness.count() == 0 and not witness.pending  # raw-bound execs reuse lineage citation pointers
+        shared_readers = [pb for pb in linux if pb.shared_rows is not None]
+        assert {pb.id for pb in shared_readers} == {
+            "host.download_then_execute", "host.tool_cleanup", "corr.alert_then_host_execution"}
+        assert len({id(pb.shared_rows) for pb in shared_readers}) == 1
+        shared_spill = shared_readers[0].shared_rows.database
+        assert all(pb.spill() is shared_spill for pb in shared_readers)
+        assert list(shared_spill.db.execute("SELECT role,COUNT(*),COUNT(DISTINCT id) FROM records GROUP BY role")) \
+            == [("execute", n, n)]
+        for pb in linux:
+            if pb not in shared_readers and pb._tables:
+                assert pb.query("SELECT COUNT(*) FROM records").fetchone()[0] == 0
+        [clock] = [pb for pb in linux if pb.id == "host.telemetry_gap_after_tamper"]
+        actual_edges = {}
+        for host, family, bin_id, first_id, first_ts, first_body, last_id, last_ts, last_body in clock.query(
+                "SELECT host,key,bin,first_id,first_ts,first_body,last_id,last_ts,last_body FROM clock"):
+            assert first_body[:1] == last_body[:1] == b"P"
+            actual_edges[(host, family, bin_id)] = ((first_ts, first_id), (last_ts, last_id))
+        assert len(actual_edges) == 2_000 and actual_edges == clock_edges
+        # The full ingest footprint includes the original stores, the one shared execute table and clock edges.
+        # 1,200 B/exec is about 1.5x the prior 773 B/exec pack, with SQLite page rounding at this fixture size.
+        assert total_bytes / n <= 1200, physical
+    finally:
         for pb in pack:
-            pb.bind_raw(raw, "host-target")
-            pb.consume(batch)
-            if pb.staged:
-                drained = pb.drain_staged()
-                if isinstance(pb, LinuxSequence):
-                    assert drained == []
-                    if pb._spill is not None:
-                        assert all(not rows for _sql, rows in pb._spill._buffers.values())
-                    assert pb.retained_events() == [] and pb.pending_count == 0
-    stores = _stores(pack)
-    lineage = [s for s in stores if s.name == "exec_lineage"]
-    assert len(lineage) == 1 and not [s for s in stores if s.name in OLD_EXEC_STORES]
-    readers = [pb for pb in pack if any(isinstance(v, ExecLineage) for holder in (pb, *vars(pb).values())
-                                        for v in getattr(holder, "__dict__", {}).values())]
-    assert len(readers) >= 8                # account, 3 tamper, interpreter, reverse shell, persistence, hijack
-    per_exec = lineage[0].disk_bytes / lineage[0].on_disk
-    assert lineage[0].on_disk >= n - 50 and per_exec <= 300, per_exec          # the pickled record: ~210 B
-    # each exec also keeps one compact source pointer in the same shared lineage, so a claim can re-read and cite it
-    records = [s for s in stores if s.name == "exec_records"]
-    assert len(records) == 1 and records[0].on_disk >= n - 50
-    citation_per_exec = records[0].disk_bytes / records[0].on_disk
-    assert citation_per_exec <= 250, citation_per_exec
-    # Preserve the original physical byte bound for the original rule population, including both key forms,
-    # their indexes and compact source pointers. New temporal join predicates have separate scalar tables.
-    spilled = 0
-    for pb in pack:
-        if pb._spill is not None and not isinstance(pb, LinuxSequence):
-            spilled += pb._spill.db.execute("PRAGMA page_count").fetchone()[0] * pb._spill._page
-    assert spilled / n <= 1200, spilled / n
-    linux = [pb for pb in pack if isinstance(pb, LinuxSequence)]
-    witnesses = {id(pb.witnesses): pb.witnesses for pb in linux}
-    assert len(witnesses) == 1
-    [witness] = witnesses.values()
-    assert witness.count() == n and not witness.pending
-    expected_roles = {
-        "host.download_then_execute": [("execute", n)],
-        "host.tool_cleanup": [("execute", n)],
-        "host.unbrokered_privilege_transition": [("exec", n)],
-        "corr.alert_then_host_execution": [("execution", n)],
-    }
-    new_spills = []
-    for pb in linux:
-        roles = list(pb.query("SELECT role,COUNT(*) FROM records GROUP BY role")) if pb._tables else []
-        assert roles == expected_roles.get(pb.id, [])
-        if pb.id == "host.telemetry_gap_after_tamper":
-            assert pb.query("SELECT COUNT(*) FROM clock").fetchone()[0] == n
-        if pb._spill is not None:
-            new_spills.append(pb._spill)
-    new_spills.append(witness._spill)
-    new_bytes = 0
-    for spill in new_spills:
-        actual = spill.db.execute("PRAGMA page_count").fetchone()[0] * spill._page
-        assert spill.budget._physical[("spill", id(spill))][0] == actual
-        assert spill.budget.physical_used <= spill.budget.disk_total
-        new_bytes += actual
-    print(f"\n{n:,} execs; lineage {per_exec:.0f} B each, citation pointers {citation_per_exec:.0f} B each, "
-          f"original spill databases {spilled / n:.0f} B per exec; new scalar/witness bytes {new_bytes}")
-    for pb in pack:
-        if isinstance(pb, LinuxSequence):
-            pb.release_state()
-        else:
-            pb.close_spill()
+            if isinstance(pb, LinuxSequence):
+                pb.release_state()
+            else:
+                pb.close_spill()
 
 
 def _exec(eid, pid, ppid, exe, ts, *, boot=None, user="root", uid="0", auid=None, host="h1"):
@@ -146,6 +181,7 @@ def test_every_view_reads_the_one_store_and_answers_across_pid_reuse_and_reboots
              _exec("b", 500, 1, "/usr/bin/python3", t1, boot="B"),
              _exec("c", 600, 1, "/usr/sbin/cron", t1, boot="B", auid="1000"),       # a login's root exec
              _exec("d", 700, 1, "/usr/sbin/cron", t1, boot="B")]                    # a daemon's
+    batch[2].fields["process.euid"] = fv("0", "fixture")
     for pb in pack:                         # each rule reads the batch; the store holds each record once
         pb.consume(batch)
     assert len(shared) == 3 and len(shared.entries("h1", 500)) == 2
@@ -165,6 +201,8 @@ def test_every_view_reads_the_one_store_and_answers_across_pid_reuse_and_reboots
     # the root-job daemon view: root, outside any login, with a program identity
     flags = {r.event_id: r.flags & DAEMON for pid in (500, 600, 700) for r in shared.entries("h1", pid)}
     assert flags == {"a": 0, "b": DAEMON, "c": 0, "d": DAEMON}
+    login = shared.entries("h1", 600)[0]
+    assert (login.uid, login.euid, login.auid) == ("0", "0", "1000")
 
 
 def test_a_record_handed_over_again_is_held_once(tmp_path):

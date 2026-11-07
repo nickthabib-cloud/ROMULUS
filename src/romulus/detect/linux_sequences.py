@@ -6,6 +6,7 @@ windows restrict links, never retention: a late batch can still join any earlier
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import posixpath
 import re
@@ -18,14 +19,16 @@ from urllib.parse import urlsplit
 from romulus.detect.base import Match, Playbook, argv_incomplete, pf
 from romulus.detect.bounded import (
     CitationUnavailable,
+    KeyedStore,
     RecentIds,
     Spill,
     StateExhausted,
     register_store,
     store_refuses,
 )
+from romulus.detect.citing import uncited_positive
 from romulus.detect.correlation import canon_ip, external
-from romulus.detect.host import INTERPRETERS
+from romulus.detect.host import INTERPRETERS, ExecLineage
 from romulus.detect.linux_argv import normalize_path, program, write_targets
 from romulus.detect.linux_direct import (
     BASE_PACKAGE_DIRS,
@@ -44,6 +47,7 @@ from romulus.detect.linux_semantics import (
     classify_discovery,
 )
 from romulus.detect.netdef import assume_direction
+from romulus.detect.observed import citation_pointer
 from romulus.detect.site_roles import address_member
 from romulus.evidence.typed import Outcome
 from romulus.hunt.citations import compact_event, expand_event
@@ -63,9 +67,12 @@ N_DISCOVERY, W_DISCOVERY = 5, 600
 W_ALERT_EXEC = 1800
 # An active server normally emits audit records more frequently; this is an index discontinuity, not host silence.
 G_SILENCE = 900
+# Five-minute bins are shorter than one third of the discontinuity threshold. Any later record
+# in the tamper bin disproves an immediate 15-minute gap; other bins retain their exact edges.
+CLOCK_BIN = 300
 LINEAGE_DEPTH = 32
 CITE = 20
-SCRIPT_SUFFIXES = frozenset({".php", ".phtml", ".php5", ".jsp", ".jspx", ".asp", ".aspx", ".cgi", ".pl", ".py"})
+SCRIPT_SUFFIXES = frozenset({".php", ".phtml", ".php5", ".jsp", ".jspx", ".asp", ".aspx", ".cgi", ".pl", ".py", ".sh"})
 DOCUMENT_ROOTS = ("/var/www", "/srv/www", "/srv/http", "/usr/share/nginx/html", "/opt/lampp/htdocs")
 TOMCAT_ROOT = re.compile(r"^/var/lib/tomcat[^/]*/webapps(?:/|$)")
 # A narrow working-path exclusion; a download or key link overrides it.
@@ -94,6 +101,27 @@ def _owner(path, event):
     if path in {"/root/.ssh/authorized_keys", "/root/.ssh/authorized_keys2"}:
         return "root", True
     return None, True
+
+
+# Configuration-management modules are routinely executed and removed from these typed staging paths.
+CONFIG_STAGING = (
+    re.compile(r"^/(?:home/[^/]+|root)/\.ansible/tmp/ansible-tmp-[^/]+/AnsiballZ_[^/]+$"),
+    re.compile(r"^/var/cache/salt/minion(?:/|$)"),
+    re.compile(r"^/var/cache/(?:puppet|puppetlabs|chef)(?:/|$)"),
+    re.compile(r"^/var/lib/(?:puppet|puppetlabs|chef)/cache(?:/|$)"),
+    re.compile(r"^/(?:opt/puppetlabs/puppet|var/chef)/cache(?:/|$)"),
+)
+
+
+def config_staging(path):
+    return any(pattern.match(path) for pattern in CONFIG_STAGING)
+
+
+def cleanup_directory(path):
+    match = next((pattern.match(path) for pattern in CONFIG_STAGING if pattern.match(path)), None)
+    if match:
+        return re.sub(r"/ansible-tmp-[^/]+.*$", "", match[0].rstrip("/"))
+    return posixpath.dirname(path)
 
 
 class _LinuxWitnesses:
@@ -211,74 +239,8 @@ class _LinuxWitnesses:
         return self._spill.db.execute("SELECT COUNT(*) FROM witnesses").fetchone()[0] if self._spill else 0
 
     def _evict_references(self, needed):
-        """After FULL, inspect at most32 admissions and reclaim only otherwise-unused clock bodies."""
-        if self._spill is None:
-            return 0
-        rules = [rule for ref in self._rules if (rule := ref()) is not None and id(rule) in self.members]
-        clock = next((rule for rule in rules if rule.id == "host.telemetry_gap_after_tamper"), None)
-        if clock is None or not getattr(clock, "_clock_tables", False):
-            return 0
-        # If index construction was refused, retain every host conservatively.
-        if clock._tables and not getattr(clock, "_tamper_host_index", False):
-            return 0
-        spill, budget = self._spill, self.owner.state_budget()
-        rows = list(spill.db.execute(
-            "SELECT rowid,id,body FROM witnesses WHERE rowid>? ORDER BY rowid LIMIT 32", (self._reclaim_cursor,)))
-        identities = {identity for _seq, identity, _body in rows}
-        pending = {row[1] for rule in rules if rule._spill is not None
-                   for row in rule._spill._buffers.get("records", ("", []))[1] if row[1] in identities}
-        pending_tamper_hosts = {row[2] for row in clock._spill._buffers.get("records", ("", []))[1]
-                                if row[3] == "tamper"}
-        removed = []
-        for _seq, identity, body in rows:
-            if identity in self.pending or identity in pending:
-                continue
-            prefix = json.dumps([identity], ensure_ascii=True, separators=(",", ":"))[:-1] + ","
-            if any(rule._tables and rule.query(
-                    "SELECT 1 FROM records WHERE uid>=? AND uid<? LIMIT 1",
-                    (prefix, prefix + "\uffff")).fetchone() for rule in rules):
-                continue
-            # Coalescing changes address.id without changing its original uid.
-            event = expand_event(body)
-            addresses = event.get("host.ip") or []
-            addresses = [addresses] if isinstance(addresses, str) else addresses
-            if any(rule.id == "corr.alert_then_host_execution" and getattr(rule, "_address_index", False)
-                   and any(rule.query("SELECT 1 FROM records WHERE role='address' AND host=? AND key=? AND id=? LIMIT 1",
-                                      (event.host or "", ip, identity)).fetchone()
-                           for address in addresses if (ip := canon_ip(address))) for rule in rules):
-                continue
-            row = clock.query("SELECT host FROM clock WHERE id=?", (identity,)).fetchone()
-            if row is None or row[0] in pending_tamper_hosts:
-                continue
-            if clock._tables and clock.query(
-                    "SELECT 1 FROM records WHERE role='tamper' AND host=? LIMIT 1", (row[0],)).fetchone():
-                continue
-            removed.append((identity, len(body) + len(identity) + 64))
-        before = budget.physical_used
-        try:
-            spill.cap()
-            with spill.db:
-                spill.db.executemany("DELETE FROM witnesses WHERE id=?", [(identity,) for identity, _size in removed])
-        except sqlite3.Error as exc:
-            self.owner.note_limit("linux_witness_reclaim", f"clock witness reclamation rolled back: {exc}")
-            spill.grew()
-            return 0
-        if rows:
-            self._reclaim_cursor = rows[-1][0]
-        if removed:
-            budget.charge(self.account(), -sum(size for _identity, size in removed))
-            clock.note_limit("linux_clock_witnesses",
-                f"{len(removed)} clock-only witness body/bodies released after actual disk FULL; exact clock IDs and "
-                "timestamps remain, but some future discontinuity citations may be unresolved")
-        try:
-            # Also drain leftover free pages after the admission cursor is exhausted.
-            spill.db.execute("PRAGMA incremental_vacuum(32)").fetchall()
-        except sqlite3.Error as exc:
-            self.owner.note_limit("linux_witness_reclaim", f"clock witness page reclamation was limited: {exc}")
-        finally:
-            spill.grew()
-        # A scan step is progress even when protected rows or a foreign file's occupied pages prevent shrinking.
-        return max(len(rows), before - budget.physical_used)
+        """Join witnesses remain required; clock bins retain their own bounded source pointers."""
+        return 0
 
     def release(self, member):
         self.members.discard(id(member))
@@ -291,7 +253,28 @@ class _LinuxWitnesses:
                 self._account.evict_references = self._account.reclaim_database = None
 
 
+class _SharedLinuxRows:
+    """The download, cleanup and alert readers share one execution row and one physical database."""
+
+    def __init__(self, members):
+        self.owner, self.members = members[0], {id(rule) for rule in members}
+        self.database = None
+        self.seen = RecentIds()
+
+    def spill(self):
+        if self.database is None:
+            self.database = Playbook.spill(self.owner)
+        return self.database
+
+    def release(self, member):
+        self.members.discard(id(member))
+        if not self.members and self.database is not None:
+            self.database.close()
+            self.database = None
+
+
 class LinuxSequence(Playbook):
+    version = "2"
     kind = "aggregate"
     staged = True
     os_families = ("linux",)
@@ -319,7 +302,35 @@ class LinuxSequence(Playbook):
         self._last_refused = None
         self._rows_blocked_generation = None
         self.persisted_loader = lambda ids: []
+        self.shared_rows = None
+        if self.id in {"host.download_then_execute", "host.tool_cleanup", "host.web_shell_chain",
+                       "host.unbrokered_privilege_transition", "host.discovery_burst", "corr.alert_then_host_execution"}:
+            self.execs = ExecLineage(self, citing=True)
         register_store(self, self)
+
+    def spill(self):
+        if self.shared_rows is not None:
+            self._spill = self.shared_rows.spill()
+            return self._spill
+        return super().spill()
+
+    def execution(self, event):
+        shared = self.shared_rows
+        if shared is not None:
+            if event.id in shared.seen:
+                return
+            shared.seen.add(event.id)
+        p = program(event)
+        strong = temporary(str(event.get("process.executable") or "")) or bool(
+            p and p.name in INTERPRETERS and any(a in {"-c", "-e", "--eval"} for a in p.args))
+        for path in executed_paths(event):
+            self.add(event, "execute", path, lane="high" if temporary(path) or web(event) else "lead",
+                     data={"account": event.get("process.user") or event.get("process.uid"),
+                           **({"web": True} if web(event) else {}), **({"strong": True} if strong else {})})
+
+    def parent_record(self, host, pid, when, boot):
+        record = self.execs.latest(host, pid, when)
+        return record if record is not None and (not boot or not record.boot or boot == record.boot) else None
 
     def account(self):
         if self._account is None:
@@ -333,6 +344,9 @@ class LinuxSequence(Playbook):
     def store(self):
         spill = self.spill()
         if not self._tables:
+            if "records" in spill._buffers:
+                self._tables = True
+                return spill
             spill.table("records", "uid TEXT PRIMARY KEY, id, host, role, key, ts REAL, aux, lane, pid, ppid, boot, data")
             sql, rows = spill._buffers["records"]
             spill._buffers["records"] = (sql.replace("INSERT INTO", "INSERT OR IGNORE INTO"), rows)
@@ -379,7 +393,10 @@ class LinuxSequence(Playbook):
     def add(self, event, role, key="", *, aux="", lane="lead", data=None):
         if not self._row_room(event):
             return False
-        row = (_key(event.id, role, key), event.id, event.host or "", role, str(key), event.ts.timestamp(),
+        identity = _key(event.id, role, key)
+        # An opaque fixed-size execute key avoids repeating long source IDs and paths in both B-tree indexes.
+        uid = hashlib.sha256(identity.encode()).digest() if role == "execute" else identity
+        row = (uid, event.id, event.host or "", role, str(key), event.ts.timestamp(),
                str(aux), lane, event.get("process.pid"), event.get("process.ppid"),
                str(event.get("host.boot.id") or ""), json.dumps(data or {}, sort_keys=True))
         try:
@@ -394,7 +411,10 @@ class LinuxSequence(Playbook):
         self.rows_on_disk += 1
         if self.witnesses is None:
             self.witnesses = _LinuxWitnesses(self, [self])
-        self.witnesses.hold(event)
+        # The existing shared lineage already keeps a verified-source pointer for each exec.
+        # Standalone callers without raw sources retain their complete witness instead.
+        if not (event.family == "process_exec" and hasattr(self, "execs") and self.raw_of(event)):
+            self.witnesses.hold(event)
         return True
 
     def consume(self, events):
@@ -403,6 +423,8 @@ class LinuxSequence(Playbook):
                 self.evaluated -= 1
                 continue
             self._seen.add(event.id)
+            if event.family == "process_exec" and hasattr(self, "execs"):
+                self.execs.observe(event, self.raw_of(event), self.raw_target())
             refused = self.capped
             self.observe(event)
             if self.capped > refused:
@@ -443,20 +465,44 @@ class LinuxSequence(Playbook):
         if len(events) != len(ids):
             loaded = {event.id for event in events}
             events += self.persisted_loader([identity for identity in ids if identity not in loaded])
+        if len(events) != len(ids) and hasattr(self, "execs"):
+            loaded = {event.id for event in events}
+            found, _raw = self.execs.cited([identity for identity in ids if identity not in loaded])
+            events += list(found.values())
         if len(events) != len(ids):
+            missing = sorted(set(ids) - {event.id for event in events})
             self.note_limit("linux_join_citations", "some accepted join evidence could not be loaded for citation")
-            raise CitationUnavailable(f"{self.id}: staged citations unavailable")
+            raise CitationUnavailable(f"{self.id}: citation(s) {', '.join(missing)} unavailable: "
+                                      "not retained, reclaimed, or refused at the disk ceiling")
         return sorted(events, key=lambda event: (event.ts, event.id))
 
-    def finding(self, group, ids, lane, text, count=1, notes=()):
-        events = self.events(ids)
+    def finding(self, group, ids, lane, text, count=1, notes=(), span=None):
+        ids = list(dict.fromkeys(identity for identity in ids if identity))
+        if span is None and self._tables and ids:
+            span = self.query(f"SELECT MIN(ts),MAX(ts) FROM records WHERE id IN ({','.join('?' for _ in ids)})", ids).fetchone()
+        try:
+            events = self.events(ids)
+        except CitationUnavailable as error:
+            match = uncited_positive(self, group, {"ids": ids, "first": span[0] if span else None})
+            match.proposed_lane = lane
+            match.severity = "high" if lane in {"urgent", "high"} else "info" if lane == "context" else "medium"
+            match.claim = text + " Citation coverage is partial: " + str(error) + "."
+            match.notes += [*notes, str(error)]
+            match.revision_reason = "The computed temporal positive remains valid; its citation coverage is now partial."
+            match.aggregate_summary = {"count": count, "peak": count, "episodes": 1,
+                                       "first": span[0] if span and span[0] is not None else 0,
+                                       "last": span[1] if span and span[1] is not None else 0}
+            match.bounded_revision = True
+            return match
         if not events:
             return None
         match = Match(self.id, text, self.claim_type, events,
                       [pf(event, name) for event in events for name in FIELDS if event.has(name)],
                       events[0].ts, "high" if lane in {"urgent", "high"} else "info" if lane == "context" else "medium",
                       lane, "medium", events[0].entities(), list(notes), group_key=group,
-                      bounded_revision=True, aggregate_summary={"count": count})
+                      bounded_revision=True, aggregate_summary={"count": count, "peak": count, "episodes": 1,
+                          "first": span[0] if span and span[0] is not None else events[0].ts.timestamp(),
+                          "last": span[1] if span and span[1] is not None else events[-1].ts.timestamp()})
         return match
 
     def fold(self, sql, params, description, *, inferred=True):
@@ -484,7 +530,11 @@ class LinuxSequence(Playbook):
     def release_state(self):
         self._pending.clear()
         self.load = lambda ids: []
-        self.close_spill()
+        if self.shared_rows is None:
+            self.close_spill()
+        else:
+            self.shared_rows.release(self)
+            self._spill = None
         if self.witnesses is not None:
             self.witnesses.release(self)
 
@@ -505,8 +555,7 @@ class DownloadThenExecute(LinuxSequence):
                          data={"exe": e.get("process.executable"), "log_paths": download_log_paths(e)})
                 for path in paths:
                     self.add(e, "download", path)
-            for path in executed_paths(e):
-                self.add(e, "execute", path, lane="high" if temporary(path) or web(e) else "lead")
+            self.execution(e)
             p = program(e)
             if p and p.name == "chmod" and any("x" in a and a.startswith(("+", "a+", "u+", "g+", "o+")) for a in p.args):
                 for operand in p.args[1:]:
@@ -609,8 +658,7 @@ class ToolCleanup(DownloadThenExecute):
         if e.outcome == Outcome.failure:
             return
         if e.family == "process_exec":
-            for path in executed_paths(e):
-                self.add(e, "execute", path)
+            self.execution(e)
             downloading, paths = output_paths(e)
             if downloading:
                 for path in paths:
@@ -637,10 +685,17 @@ class ToolCleanup(DownloadThenExecute):
                 AND x2.host=d.host AND x2.key=d.key AND x2.ts<d.ts AND x2.ts>=d.ts-?
                 ORDER BY x2.ts DESC,x2.id LIMIT 1)
             WHERE d.role='delete' ORDER BY d.host,d.key,d.ts,d.id"""
+        self.spill().db.create_function("cleanup_directory", 1, cleanup_directory)
+        self.spill().db.create_function("config_staging", 1, config_staging)
+        sql = sql.replace("THEN 'high' ELSE 'lead' END", "THEN 'high' WHEN config_staging(d.key) "
+                          "AND NOT EXISTS(SELECT 1 FROM records l WHERE l.role='linked' AND l.host=d.host "
+                          "AND l.key=d.key) THEN 'context' ELSE 'lead' END")
+        sql = sql.replace("d.host||'|'||d.key", "d.host||'|'||cleanup_directory(d.key)||'|'||COALESCE(json_extract(x.data,'$.account'),'')")
+        sql = sql.replace("ORDER BY d.host,d.key,d.ts,d.id", "ORDER BY 1,d.ts,d.id")
         rows = self.query(sql, (W_CLEANUP, W_CLEANUP, W_CLEANUP))
         def allowed():
             for row in rows:
-                path = row[0].split("|", 1)[1]
+                path = self.query("SELECT key FROM records WHERE role='delete' AND id=? LIMIT 1", (row[2],)).fetchone()[0]
                 excluded = under(path, CLEANUP_EXCLUSIONS) or bool(SYSTEMD_PRIVATE.match(path))
                 if excluded and not self.query("SELECT 1 FROM records WHERE role='linked' AND host=? AND key=? LIMIT 1",
                                                (row[0].split("|", 1)[0], path)).fetchone():
@@ -648,13 +703,13 @@ class ToolCleanup(DownloadThenExecute):
                 yield row
         # The fold helper takes SQL; filter groups here without retaining the complete result.
         for group, hits in groupby(allowed(), key=lambda row: row[0]):
-            ids, last, count, lane = [], [], 0, "lead"
+            ids, last, count, lane = [], [], 0, "context"
             for _key_value, a, b, c, level in hits:
                 count += 1
                 last = [a, b, c]
                 if count <= CITE:
                     ids += last
-                if level == "high":
+                if LANES[level] > LANES[lane]:
                     lane = level
             yield self.finding(group, ids + last, lane,
                 f"An executed path was subsequently deleted on the same host ({count} deletion record(s)). "
@@ -669,43 +724,112 @@ class WebShellChain(LinuxSequence):
     attack = ("T1505.003",)
     anchor_class = "web_shell"
 
+    @staticmethod
+    def docroot(event):
+        for field in ("http.document_root", "apache.document_root", "nginx.document_root", "web.document_root"):
+            value = event.get(field)
+            if value and str(value).startswith("/"):
+                return posixpath.normpath(str(value))
+        return ""
+
     def observe(self, e):
         if e.family == "file_change" and e.outcome != Outcome.failure and e.get("file.change") in {"create", "content"}:
             path = str(e.get("file.path") or "")
-            if (under(path, DOCUMENT_ROOTS) or TOMCAT_ROOT.match(path)) and posixpath.splitext(path)[1].lower() in SCRIPT_SUFFIXES:
-                self.add(e, "script", posixpath.basename(path), aux=path, lane="lead" if web(e) else "context")
+            root = self.docroot(e)
+            if (root and under(path, (root,)) or under(path, DOCUMENT_ROOTS) or TOMCAT_ROOT.match(path)) and posixpath.splitext(path)[1].lower() in SCRIPT_SUFFIXES:
+                self.add(e, "script", posixpath.basename(path), aux=path, lane="lead" if web(e) else "context",
+                         data={"root": root, "created": e.get("file.change") == "create", "web": web(e)})
         elif e.family == "http_access":
             path = e.get("url.path") or e.get("url.original")
-            if path:
-                leaf = posixpath.basename(urlsplit(str(path)).path)
-                status = e.get("http.response.status_code")
-                self.add(e, "request", leaf, lane="lead" if status == 404 else "high")
-            else:
+            if not path:
                 self.missing_required += 1
-        elif e.family == "process_exec" and e.outcome != Outcome.failure and web(e):
+                return
+            path = urlsplit(str(path)).path
+            leaf = posixpath.basename(path)
+            if posixpath.splitext(leaf)[1].lower() not in SCRIPT_SUFFIXES | {""}:
+                return
+            self.add(e, "request", leaf, aux=path,
+                     lane="lead" if e.get("http.response.status_code") == 404 else "high",
+                     data={"root": self.docroot(e)})
+        elif e.family == "process_exec" and e.outcome != Outcome.failure:
             p = program(e)
-            if p and p.name in INTERPRETERS:
+            if p and p.name in INTERPRETERS and web(e):
                 self.add(e, "interpreter")
+            elif p and (p.name in {"httpd", "apache2", "nginx"} or re.fullmatch(r"php-fpm(?:[0-9.]+)?", p.name)) and not self.raw_of(e):
+                if self.witnesses is None:
+                    self.witnesses = _LinuxWitnesses(self, [self])
+                self.witnesses.hold(e)
+
+    def web_ancestor(self, host, pid, when, boot):
+        visited = set()
+        for _ in range(LINEAGE_DEPTH):
+            if not isinstance(pid, int) or pid in visited or pid in (0, 1):
+                return None
+            visited.add(pid)
+            record = self.parent_record(host, pid, when, boot)
+            if record is None:
+                return None
+            name = posixpath.basename(record.exe)
+            if name in {"httpd", "apache2", "nginx"} or re.fullmatch(r"php-fpm(?:[0-9.]+)?", name):
+                return record.event_id
+            pid, when = record.ppid, record.ts
+        return None
 
     def finalize(self):
         if not self.ready():
             return []
-        sql = """SELECT c.host||'|'||c.aux,c.id,r.id,
-            (SELECT x.id FROM records x WHERE x.role='interpreter' AND x.host=c.host
-             AND x.ts>=r.ts AND x.ts<=r.ts+? ORDER BY x.ts,x.id LIMIT 1),
-            CASE WHEN r.id IS NULL THEN 'lead' WHEN r.lane='lead' THEN 'lead'
-                 WHEN EXISTS(SELECT 1 FROM records x WHERE x.role='interpreter' AND x.host=c.host
-                   AND x.ts>=r.ts AND x.ts<=r.ts+?) THEN 'urgent' ELSE 'high' END
-            FROM records c LEFT JOIN records r ON r.uid=(SELECT r2.uid FROM records r2 WHERE r2.role='request'
-                AND r2.host=c.host AND r2.key=c.key AND r2.ts>c.ts AND r2.ts<=c.ts+?
-                ORDER BY CASE WHEN r2.lane='high' AND EXISTS(SELECT 1 FROM records x
-                    WHERE x.role='interpreter' AND x.host=r2.host AND x.ts>=r2.ts AND x.ts<=r2.ts+?)
-                    THEN 0 WHEN r2.lane='high' THEN 1 ELSE 2 END,r2.ts,r2.id LIMIT 1)
-            WHERE c.role='script' AND (r.id IS NOT NULL OR c.lane='lead') ORDER BY c.host,c.aux,c.ts,c.id"""
-        return self.fold(sql, (W_DOWNLOAD_EXEC, W_DOWNLOAD_EXEC, W_SHELL_REQUEST, W_DOWNLOAD_EXEC),
-            "A server-side script write under a default document root, its optional HTTP request, and "
-            "optional web-service interpreter exec share a host. URL-to-file matching uses basename only; "
-            "interpreter evidence is the same typed account/executable evidence as host.web_service_spawns_interpreter.")
+        for host, path in self.query("SELECT DISTINCT host,aux FROM records WHERE role='script' ORDER BY host,aux"):
+            count, ids, lane = 0, [], "context"
+            roots = self.query("SELECT COUNT(DISTINCT json_extract(data,'$.root')) FROM records "
+                               "WHERE role='script' AND host=? AND json_extract(data,'$.root')<>''", (host,)).fetchone()[0]
+            seen_before = False
+            for identity, ts, body, initial in self.query(
+                    "SELECT id,ts,data,lane FROM records WHERE role='script' AND host=? AND aux=? ORDER BY ts,id",
+                    (host, path)):
+                metadata = json.loads(body)
+                root = metadata["root"]
+                newly_created = metadata["created"] and (metadata["web"] or not seen_before)
+                seen_before = True
+                best = None
+                for rid, rts, url, request_body, level in self.query(
+                        "SELECT id,ts,aux,data,lane FROM records WHERE role='request' AND host=? AND key=? "
+                        "AND ts>? AND ts<=? ORDER BY ts,id", (host, posixpath.basename(path), ts, ts + W_SHELL_REQUEST)):
+                    request_root = json.loads(request_body)["root"]
+                    if root and request_root and root != request_root:
+                        continue
+                    relative_match = bool(root and posixpath.normpath("/" + posixpath.relpath(path, root)) == posixpath.normpath(url))
+                    if root and not relative_match:
+                        continue
+                    exact = relative_match and (request_root == root or roots == 1)
+                    current, witnesses = "lead", [identity, rid]
+                    if exact and level == "high":
+                        current = "high" if newly_created else "lead"
+                        for xid, xts, parent, boot in self.query(
+                                "SELECT id,ts,ppid,boot FROM records WHERE role='interpreter' AND host=? AND ts>=? AND ts<=? ORDER BY ts,id",
+                                (host, rts, rts + W_DOWNLOAD_EXEC)):
+                            ancestor = self.web_ancestor(host, parent, xts, boot)
+                            if ancestor:
+                                current, witnesses = "urgent", [identity, rid, xid, ancestor]
+                                break
+                    if best is None or LANES[current] > LANES[best[0]]:
+                        best = current, witnesses
+                if best is None:
+                    if initial != "lead":
+                        continue
+                    best = "lead", [identity]
+                count += 1
+                if count <= CITE:
+                    ids += best[1]
+                elif count > CITE:
+                    ids = [*ids[:CITE * 4], *best[1]]
+                if LANES[best[0]] > LANES[lane]:
+                    lane = best[0]
+            if count:
+                yield self.finding(f"{host}|{path}", ids, lane,
+                    f"A document-root script write and optional later HTTP request form {count} inferred link(s). "
+                    "HIGH requires an exact document-root-relative request for a newly created script; URGENT also "
+                    "requires interpreter ancestry to a recorded web server. Basename-only links and deployment rewrites are leads.",
+                    count)
 
 
 class DiscoveryBurst(LinuxSequence):
@@ -725,10 +849,14 @@ class DiscoveryBurst(LinuxSequence):
         if not found:
             return
         session, auid = e.get("process.session_id"), e.get("process.auid")
-        if session in (None, 4294967295, "4294967295", -1, "-1") or auid in (None, "4294967295", "-1"):
-            self.missing_required += 1
-            return
-        key = _key(e.host, str(auid), str(session), e.get("host.boot.id"))
+        if session in (None, 4294967295, "4294967295", -1, "-1") or auid in (None, 4294967295, "4294967295", -1, "-1"):
+            uid = e.get("process.uid")
+            if uid is None:
+                self.missing_required += 1
+                return
+            key = _key(e.host, str(uid), "service", e.get("process.ppid"), e.get("host.boot.id"))
+        else:
+            key = _key(e.host, str(auid), str(session), e.get("host.boot.id"))
         self.add(e, "discovery", key, aux=found[0], lane="high" if web(e) else "lead")
 
     def finalize(self):
@@ -769,50 +897,80 @@ class UnbrokeredPrivilegeTransition(LinuxSequence):
     title = "A non-root login identity executed with root privileges without an observed sanctioned broker"
     families = ("process_exec",)
     attack = ("T1068", "T1548")
+    ROOT_SERVICE_BROKERS = frozenset({"sshd", "sshd-session", "cron", "crond", "systemd", "polkit", "polkitd"})
 
     def observe(self, e):
-        if e.outcome != Outcome.failure and e.has("process.executable") and e.has("process.pid"):
-            data = {"exe": e.get("process.executable"),
-                    "candidate": _login_user_is_nonroot(e) and str(e.get("process.euid")) == "0"}
-            self.add(e, "exec", str(e.get("process.pid")), data=data)
+        # ExecLineage is populated by consume; no second per-exec table or witness body.
+        if (e.outcome != Outcome.failure and str(e.get("process.euid")) == "0"
+                and _login_user_is_nonroot(e) and not self.raw_of(e)):
+            if self.witnesses is None:
+                self.witnesses = _LinuxWitnesses(self, [self])
+            self.witnesses.hold(e)
+
+    @staticmethod
+    def packaged(record):
+        return posixpath.dirname(record.exe) in BASE_PACKAGE_DIRS | PACKAGE_EXTRA_DIRS.get(record.name, frozenset())
+
+    def transition(self, host, pid, record):
+        helpers = SANCTIONED_BROKERS - self.ROOT_SERVICE_BROKERS
+        if record.name in helpers | {"passwd", "chage", "chsh", "chfn", "newgrp", "sg", "gpasswd"} and self.packaged(record):
+            return None
+        ids, current, current_pid = [record.event_id], record, pid
+        visited = {pid}
+        for _ in range(LINEAGE_DEPTH):
+            parent_pid = current.ppid
+            parent = self.parent_record(host, parent_pid, current.ts, current.boot) if isinstance(parent_pid, int) else None
+            if parent is None or parent_pid in visited:
+                return ("before", parent_pid or current_pid), "lead", ids, "transition before the window; parent lineage is incomplete"
+            visited.add(parent_pid)
+            ids.append(parent.event_id)
+            if (parent.name in SANCTIONED_BROKERS and self.packaged(parent)
+                    and (parent.name not in self.ROOT_SERVICE_BROKERS or parent.uid == "0" or parent.euid == "0")):
+                return None
+            # Only the immediate elevation helper can broker the uid change. A distant sshd is irrelevant.
+            if current.uid != "0" or parent.uid != "0":
+                # Packaged setuid utilities do not establish an unbrokered root shell.
+                if current.uid != "0" and current.name in {"passwd", "chage", "chsh", "chfn", "newgrp", "sg", "gpasswd", "su", "sudo", "pkexec"} and self.packaged(current):
+                    return None
+                suspicious = temporary(parent.exe) or temporary(current.exe) or not self.packaged(parent) or not self.packaged(current)
+                return ("transition", current.event_id), "high" if suspicious else "lead", ids, "an immediate non-root parent precedes this root-privileged exec without a packaged elevation helper"
+            current, current_pid = parent, parent_pid
+        return ("before", current_pid), "lead", ids, "transition before the window; parent walk reached its depth bound"
 
     def finalize(self):
-        if not self.ready():
-            return []
-        for identity, host, when, pid, parent, boot, data in self.query(
-                "SELECT id,host,ts,pid,ppid,boot,data FROM records WHERE role='exec' ORDER BY host,ts,id"):
-            if not json.loads(data)["candidate"]:
-                continue
-            ids, complete, broker = [identity], False, False
-            visited = {pid}
-            for _ in range(LINEAGE_DEPTH):
-                if parent in (0, 1):
-                    complete = True
-                    break
-                if parent is None or parent in visited:
-                    break
-                visited.add(parent)
-                row = self.query("""SELECT id,ts,pid,ppid,data FROM records WHERE role='exec' AND host=?
-                    AND pid=? AND ts<=? AND (boot='' OR ?='' OR boot=?)
-                    ORDER BY ts DESC,id LIMIT 1""", (host, parent, when, boot, boot)).fetchone()
-                if row is None:
-                    break
-                ancestor, when, _pid, parent, body = row
-                exe = str(json.loads(body)["exe"])
-                ids.append(ancestor)
-                name = posixpath.basename(exe)
-                if (name in SANCTIONED_BROKERS
-                        and posixpath.dirname(exe) in BASE_PACKAGE_DIRS | PACKAGE_EXTRA_DIRS.get(name, frozenset())):
-                    broker = True
-                    break
-            if broker:
-                continue
-            lane = "high" if complete else "lead"
-            reason = ("the observed parent chain reaches its root without a sanctioned broker"
-                      if complete else "the parent chain is incomplete (pid table gap or depth bound); whether elevation was brokered is unresolved")
-            yield self.finding(f"{host}|{identity}", ids, lane,
-                f"On {host}, an exec has root uid/euid and a non-root kernel login identity; {reason}. "
-                "Privilege gain is inferred from the recorded credentials and lineage.")
+        groups = KeyedStore(self, "privilege_sessions", self.HOT)
+        for (host, pid), records in self.execs.store.items():
+            for record in records:
+                if record.euid != "0" or record.auid in {None, "0", "4294967295", "-1"}:
+                    continue
+                answer = self.transition(host, pid, record)
+                if answer is None:
+                    continue
+                identity, lane, ids, reason = answer
+                session = record.session if record.session not in {None, -1, 4294967295} else identity[1]
+                key = _key(host, record.boot, session, identity[0], identity[1] if identity[0] == "transition" else "")
+                state = groups.get(key)
+                if state is None:
+                    state = {"count": 0, "ids": [], "first": record.ts, "last": record.ts, "lane": lane, "reason": reason}
+                    if not groups.put(key, state):
+                        self.note_limit("privilege_sessions", "transition folding refused at the disk ceiling")
+                        yield self.finding(key, ids, lane, reason + "; folding state was refused at the disk ceiling",
+                                           span=(record.ts, record.ts))
+                        continue
+                state["count"] += 1
+                state["first"] = min(state["first"], record.ts)
+                state["last"] = max(state["last"], record.ts)
+                state["ids"] = list(dict.fromkeys([*state["ids"][:CITE], *ids[:LINEAGE_DEPTH]]))
+                if LANES[lane] > LANES[state["lane"]]:
+                    state["lane"], state["reason"] = lane, reason
+                groups.trim()
+        for key, state in groups.items():
+            yield self.finding(key, state["ids"], state["lane"],
+                f"Root-privileged execution: {state['reason']}; {state['count']} child exec record(s) in this folded session. "
+                "Privilege gain is inferred from recorded credentials and immediate lineage.", state["count"],
+                span=(state["first"], state["last"]))
+
+
 
 
 class InteractivePrivilegedLogin(LinuxSequence):
@@ -890,7 +1048,8 @@ class AlertThenHostExecution(LinuxSequence):
             if type(severity) is int and severity in (1, 2) and dst:
                 assume_direction(self)
                 if not external(dst):
-                    self.add(e, "alert", dst, aux=str(e.get("destination.port") or ""))
+                    self.add(e, "alert", dst, aux=str(e.get("destination.port") or ""),
+                             data={"signature": e.get("alert.signature") or e.get("alert.signature_id") or "unrecorded"})
             return
         addresses = e.get("host.ip") or []
         addresses = [addresses] if isinstance(addresses, str) else addresses
@@ -913,7 +1072,7 @@ class AlertThenHostExecution(LinuxSequence):
                         self.witnesses = _LinuxWitnesses(self, [self])
                     self.witnesses.hold(e)
         if e.family == "process_exec" and e.outcome != Outcome.failure:
-            self.add(e, "execution", lane="high" if web(e) else "lead")
+            self.execution(e)
         if (e.family == "net_socket" and e.outcome == Outcome.success and e.get("socket.syscall") == "bind"
                 and e.has("socket.local.port") and e.has("process.pid")):
             self.add(e, "listener", str(e.get("socket.local.port")), aux=str(e.get("socket.local.ip") or ""))
@@ -926,24 +1085,58 @@ class AlertThenHostExecution(LinuxSequence):
         if unmapped:
             self.note_coverage("alert_host_unmapped",
                 f"{unmapped} inbound alert destination(s) had no unique observed host.ip mapping; host execution linkage was unresolved.")
-        sql = """SELECT h.host||'|'||a.key,a.id,x.id,
-            (SELECT l.id FROM records l WHERE l.role='listener' AND l.host=x.host AND l.pid=x.ppid
-             AND l.key=a.aux AND l.ts<=x.ts AND (l.aux=a.key OR l.aux IN ('0.0.0.0','::'))
-             AND (l.boot='' OR x.boot='' OR l.boot=x.boot) ORDER BY l.ts DESC,l.id LIMIT 1),'high' FROM records a
-            JOIN records h ON h.uid=(SELECT h2.uid FROM records h2 WHERE h2.role='address' AND h2.key=a.key
-                ORDER BY h2.host,h2.id LIMIT 1)
-            JOIN records x ON x.uid=(SELECT x2.uid FROM records x2 WHERE x2.role='execution'
-                AND x2.host=h.host AND x2.ts>a.ts AND x2.ts<=a.ts+?
-                AND (x2.lane='high' OR EXISTS(SELECT 1 FROM records l WHERE l.role='listener'
-                    AND l.host=x2.host AND l.pid=x2.ppid AND l.key=a.aux AND l.ts<=x2.ts
-                    AND (l.aux=a.key OR l.aux IN ('0.0.0.0','::'))
-                    AND (l.boot='' OR x2.boot='' OR l.boot=x2.boot)))
-                ORDER BY x2.ts,x2.id LIMIT 1)
-            WHERE a.role='alert' AND (SELECT COUNT(DISTINCT h3.host) FROM records h3
-                WHERE h3.role='address' AND h3.key=a.key)=1 ORDER BY h.host,a.key,a.ts,a.id"""
-        return self.fold(sql, (W_ALERT_EXEC,), "An inbound severity 1-2 IDS alert was followed by a "
-            "web-service-account exec or a child of the recorded listening process on the uniquely "
-            "host.ip-mapped destination host; exploit success is inferred.")
+        for host, signature in self.query(
+                "SELECT DISTINCT h.host,json_extract(a.data,'$.signature') FROM records a JOIN records h "
+                "ON h.role='address' AND h.key=a.key WHERE a.role='alert' AND "
+                "(SELECT COUNT(DISTINCT h3.host) FROM records h3 WHERE h3.role='address' AND h3.key=a.key)=1 "
+                "ORDER BY h.host,2"):
+            count, ids, lane = 0, [], "context"
+            for aid, ats, ip, port in self.query(
+                    "SELECT a.id,a.ts,a.key,a.aux FROM records a WHERE a.role='alert' "
+                    "AND json_extract(a.data,'$.signature')=? AND EXISTS(SELECT 1 FROM records h "
+                    "WHERE h.role='address' AND h.key=a.key AND h.host=?) ORDER BY a.ts,a.id", (signature, host)):
+                for xid, xts, pid, parent, boot, data in self.query(
+                        "SELECT id,ts,pid,ppid,boot,data FROM records WHERE role='execute' AND host=? "
+                        "AND ts>? AND ts<=? ORDER BY ts,id", (host, ats, ats + W_ALERT_EXEC)):
+                    metadata = json.loads(data)
+                    linked, chain = None, []
+                    seen, ancestor_pid = set(), parent
+                    for _ in range(LINEAGE_DEPTH):
+                        if ancestor_pid is None or ancestor_pid in seen:
+                            break
+                        seen.add(ancestor_pid)
+                        listener = self.query(
+                            "SELECT id FROM records WHERE role='listener' AND host=? AND pid=? AND key=? "
+                            "AND ts<=? AND (aux=? OR aux IN ('0.0.0.0','::')) "
+                            "AND (boot='' OR ?='' OR boot=?) ORDER BY ts DESC,id LIMIT 1",
+                            (host, ancestor_pid, port, xts, ip, boot, boot)).fetchone()
+                        if listener:
+                            linked = listener[0]
+                            break
+                        record = self.parent_record(host, ancestor_pid, xts, boot)
+                        if record is None:
+                            break
+                        chain.append(record.event_id)
+                        if port in {"80", "443", "8080", "8443"} and (
+                                record.name in {"httpd", "apache2", "nginx"} or re.fullmatch(r"php-fpm(?:[0-9.]+)?", record.name)):
+                            linked = record.event_id
+                            break
+                        ancestor_pid, xts = record.ppid, record.ts
+                    current = "high" if linked or metadata.get("strong") else "lead" if metadata.get("web") else None
+                    if current is None:
+                        continue
+                    count += 1
+                    witnesses = [aid, xid, linked, *chain]
+                    witnesses = [value for value in witnesses if value]
+                    if count <= CITE or LANES[current] > LANES[lane]:
+                        ids += witnesses
+                    if LANES[current] > LANES[lane]:
+                        lane = current
+            if count:
+                yield self.finding(_key(host, signature), ids, lane,
+                    f"An inbound severity 1-2 IDS alert was followed by {count} exec record(s) on its uniquely mapped host. "
+                    "HIGH has listener/web-worker lineage, a writable executable, or an interpreter one-liner; "
+                    "web-account host/time coincidence alone is an inferred LEAD.", count)
 
 
 class TelemetryGapAfterTamper(LinuxSequence):
@@ -973,19 +1166,49 @@ class TelemetryGapAfterTamper(LinuxSequence):
     def observe(self, e):
         if not self._row_room(e, "linux_clock_rows"):
             return
-        host, family = e.host or "", self.series(e)
+        host, family, when = e.host or "", self.series(e), e.ts.timestamp()
         spill = self.spill()
         if not getattr(self, "_clock_tables", False):
-            spill.table("clock", "id TEXT PRIMARY KEY, host, key, ts REAL")
-            sql, rows = spill._buffers["clock"]
-            spill._buffers["clock"] = (sql.replace("INSERT INTO", "INSERT OR IGNORE INTO"), rows)
+            spill.table("clock", "host, key, bin INTEGER, first_id, first_ts REAL, first_body BLOB, "
+                        "last_id, last_ts REAL, last_body BLOB, PRIMARY KEY(host,key,bin)")
+            spill._buffers["clock"] = (
+                ("INSERT INTO clock VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(host,key,bin) DO UPDATE SET "
+                "first_id=CASE WHEN (excluded.first_ts,excluded.first_id)<(first_ts,first_id) THEN excluded.first_id ELSE first_id END,"
+                "first_body=CASE WHEN (excluded.first_ts,excluded.first_id)<(first_ts,first_id) THEN excluded.first_body ELSE first_body END,"
+                "first_ts=MIN(first_ts,excluded.first_ts),"
+                "last_id=CASE WHEN (excluded.last_ts,excluded.last_id)>(last_ts,last_id) THEN excluded.last_id ELSE last_id END,"
+                "last_body=CASE WHEN (excluded.last_ts,excluded.last_id)>(last_ts,last_id) THEN excluded.last_body ELSE last_body END,"
+                "last_ts=MAX(last_ts,excluded.last_ts)"), [])
             self._clock_tables = True
-        self._append_row("clock", (e.id, host, family, e.ts.timestamp()))
-        self.rows_on_disk += 1
-        self.state_budget().charge(self.account(), len(e.id) + len(host) + len(family) + 32)
-        if self.witnesses is None:
-            self.witnesses = _LinuxWitnesses(self, [self])
-        self.witnesses.hold(e)
+        pointer = citation_pointer(e, e.raw, self.raw_of(e), "typed", self.raw_target())
+        body = b"P" + pointer if pointer is not None else b"E" + compact_event(e)
+        self._append_row("clock", (host, family, int(when // CLOCK_BIN), e.id, when, body, e.id, when, body))
+        # Physical SQLite pages, not admission count, enforce this coalescing store's ceiling.
+
+    def clock_event(self, identity):
+        row = self.query("SELECT first_body FROM clock WHERE first_id=? UNION ALL "
+                         "SELECT last_body FROM clock WHERE last_id=? LIMIT 1", (identity, identity)).fetchone()
+        if row is None:
+            return []
+        body = row[0]
+        if body[:1] == b"E":
+            return [expand_event(body[1:])]
+        loader = getattr(self, "_citation_loader", None)
+        if loader is None:
+            return []
+        events, _raw = loader({identity: body[1:]})
+        return list(events.values())
+
+    def events(self, ids):
+        # Hydration is bounded to the chosen gap edges, never the complete clock population.
+        known = {}
+        for identity in dict.fromkeys(ids):
+            if identity:
+                known.update((event.id, event) for event in self.clock_event(identity))
+        missing = [identity for identity in dict.fromkeys(ids) if identity and identity not in known]
+        if missing:
+            known.update((event.id, event) for event in super().events(missing))
+        return sorted(known.values(), key=lambda event: (event.ts, event.id))
 
     def observe_tamper_match(self, match):
         """Accept only findings the existing tamper evaluators actually publish."""
@@ -1030,21 +1253,26 @@ class TelemetryGapAfterTamper(LinuxSequence):
                 self.note_coverage("telemetry_clock_partial",
                     "Some index-time rows were refused; discontinuity intervals were not judged.")
             return []
-        self.spill().write("CREATE INDEX IF NOT EXISTS clock_family_time ON clock(host,key,ts)", [()])
-        self.spill().write("CREATE INDEX IF NOT EXISTS clock_host_time ON clock(host,ts,id)", [()])
+        self.spill().write("CREATE INDEX IF NOT EXISTS clock_first ON clock(first_id)", [()])
+        self.spill().write("CREATE INDEX IF NOT EXISTS clock_last ON clock(last_id)", [()])
         for identity, host, family, start in self.query(
                 "SELECT id,host,key,ts FROM records WHERE role='tamper' ORDER BY host,ts,id"):
-            end_row = self.query("SELECT MIN(ts) FROM clock WHERE host=? AND key=? AND ts>?",
-                                 (host, family, start)).fetchone()
-            resumed = end_row[0]
-            end = resumed
-            if end is None:
-                end = self.query("SELECT MAX(ts) FROM clock WHERE host=?", (host,)).fetchone()[0]
-            if end is None or end - start < G_SILENCE:
+            row = self.query("SELECT first_id,first_ts,last_id,last_ts FROM clock WHERE host=? AND key=? "
+                             "AND last_ts>? ORDER BY bin LIMIT 1", (host, family, start)).fetchone()
+            resumed_id, resumed = (row[0], row[1]) if row and row[1] > start else (row[2], row[3]) if row else (None, None)
+            continued = self.query("SELECT last_id,last_ts FROM clock WHERE host=? AND key<>? AND last_ts>? "
+                                   "ORDER BY last_ts DESC,last_id LIMIT 1", (host, family, start)).fetchone()
+            if continued is None:
                 continue
-            witnesses = list(self.query("""SELECT id,ts,key FROM clock WHERE host=?
-                AND key<>? AND ts>? AND ts<=? ORDER BY ts DESC,id LIMIT 2""", (host, family, start, end)))
-            if not witnesses or witnesses[0][1] - start < G_SILENCE:
+            end = resumed if resumed is not None else continued[1]
+            if resumed is not None:
+                continued = self.query("SELECT id,ts FROM (SELECT first_id AS id,first_ts AS ts FROM clock "
+                                       "WHERE host=? AND key<>? UNION ALL SELECT last_id,last_ts FROM clock "
+                                       "WHERE host=? AND key<>?) WHERE ts>? AND ts<=? ORDER BY ts DESC,id LIMIT 1",
+                                       (host, family, host, family, start, end)).fetchone()
+                if continued is None:
+                    continue
+            if end - start < G_SILENCE or continued[1] - start < G_SILENCE:
                 continue
             until = datetime.fromtimestamp(end, UTC).isoformat()
             began = datetime.fromtimestamp(start, UTC).isoformat()
@@ -1053,7 +1281,7 @@ class TelemetryGapAfterTamper(LinuxSequence):
                     "tampering observation; host activity or its absence is not established.")
             if resumed is None:
                 text += " The observed host window ends inside the gap."
-            yield self.finding(_key(host, family, start), [identity, *(r[0] for r in witnesses)], "lead", text)
+            yield self.finding(_key(host, family, start), [identity, resumed_id, continued[0]], "lead", text)
 
 
 SEQUENCE_RULES = [DownloadThenExecute, AuthorizedKeyThenLogin, ToolCleanup, WebShellChain, DiscoveryBurst,
@@ -1064,6 +1292,12 @@ SEQUENCE_RULES = [DownloadThenExecute, AuthorizedKeyThenLogin, ToolCleanup, WebS
 def share_linux_witnesses(pack):
     """Bind one compact witness store to a hunt's fixed set of Linux sequence evaluators."""
     members = [rule for rule in pack if isinstance(rule, LinuxSequence)]
+    shared = [rule for rule in members if rule.id in {
+        "host.download_then_execute", "host.tool_cleanup", "corr.alert_then_host_execution"}]
+    if shared:
+        rows = _SharedLinuxRows(shared)
+        for rule in shared:
+            rule.shared_rows = rows
     if members:
         witnesses = _LinuxWitnesses(members[0], members)
         for rule in members:

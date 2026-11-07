@@ -237,7 +237,7 @@ def test_refused_baseline_row_is_local_and_other_detection_keeps_growing(tmp_pat
     monkeypatch.setattr(EventStage, "record_baseline_cell", write)
     snapshot = tf.run_stack(tmp_path, docs=tf.build(1))
     from tests.test_throughput_equality import GOLDEN_STACK
-    assert refused and len(snapshot["candidates"]) == 44
+    assert refused and len(snapshot["candidates"]) == 42
     assert tf.digests(snapshot)["candidates"] == GOLDEN_STACK["candidates"]
     partial = [row for row in snapshot["rule_cells"] if "injected baseline-cell" in str(row.get("detail"))]
     assert partial and all(row["rule_id"] == "bl.exec_pair" for row in partial)

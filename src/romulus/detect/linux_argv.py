@@ -15,7 +15,8 @@ from romulus.evidence.shellparse import _Unmodelled as _ShellUnmodelled
 from romulus.evidence.typed import TypedEvent
 
 # Applet multiplexers: the kernel records the multiplexer; argv[0] (or argv[1]) selects the applet.
-MULTIPLEXERS = {"busybox", "toybox"}
+MULTIPLEXERS = {"busybox", "toybox", "kmod"}
+KMOD_APPLETS = frozenset({"insmod", "modprobe", "rmmod", "lsmod", "depmod", "modinfo"})
 
 # Distribution alternatives and versioned names that denote one canonical tool. Positive-only: this only ever
 # adds matches, it never suppresses one.
@@ -60,11 +61,15 @@ def program(event: TypedEvent) -> Program | None:
     args = [str(item) for item in argv] if isinstance(argv, list) else []
     exe_name = basename(str(executable))
     name, rest, from_argv0 = exe_name, args[1:], False
+    if exe_name == "kmod" and args and basename(args[0]) not in KMOD_APPLETS | {"kmod"}:
+        return Program("kmod", args[1:], False)
     if exe_name in MULTIPLEXERS and args:
         applet = basename(args[0])
         if applet in MULTIPLEXERS:
             if len(args) <= 1:
                 return None
+            if exe_name == "kmod" and basename(args[1]) not in KMOD_APPLETS:
+                return Program("kmod", args[1:], False)
             name, rest, from_argv0 = basename(args[1]), args[2:], True
         else:
             name, rest, from_argv0 = applet, args[1:], True
@@ -83,7 +88,11 @@ def program_name_hint(event: TypedEvent) -> str | None:
     if name not in MULTIPLEXERS:
         return canonical(name)
     applet = basename(str(argv[0]))
+    if name == "kmod" and applet not in KMOD_APPLETS | {"kmod"}:
+        return "kmod"
     if applet in MULTIPLEXERS:
+        if name == "kmod" and len(argv) > 1 and basename(str(argv[1])) not in KMOD_APPLETS:
+            return "kmod"
         return canonical(basename(str(argv[1]))) if len(argv) > 1 else None
     return canonical(applet)
 

@@ -246,11 +246,11 @@ def test_native_scale4_releases_use_global_room_without_poisoning_later_findings
     monkeypatch.setattr(sw, "state_budget", lambda settings, stage_dir: budget)
     snapshot = fixture.run_stack(tmp_path, docs=fixture.build(4))
     assert not budget.broken
-    # The prior 51 finding groups/lanes remain; credential access and staging add two.
-    # SSH inputs are explicitly partial at this larger load under the same physical cap.
-    assert len(snapshot["candidates"]) == 53
+    # Shared state retains prior groups and restores SSH/login findings plus alert-linked context.
+    # The alert keeps its computed HIGH lane with explicit partial citation coverage at this physical cap.
+    assert len(snapshot["candidates"]) == 60
     assert fixture.digests(snapshot)["candidates"] == (
-        "87af0182a76dbfd28b34ea9da2b23feeae638a9e48ca36060cc81836158fda31")
+        "83b4f93ffddc037fe26580d39732ec06d92970a74e97ece48c4e73cab778132b")
     assert any(row["rule_id"] == "host.shell_spawned_by_connected_process" and row["event_ids"]
                for row in snapshot["candidates"])
 

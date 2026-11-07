@@ -6,15 +6,17 @@ an inspection of local package signatures or effective directory permissions.
 from __future__ import annotations
 
 import ast
+import json
 import posixpath
 import re
+from dataclasses import dataclass, replace
 from urllib.parse import urlsplit
 
 from romulus.detect.base import Match, Playbook, basename, pf
+from romulus.detect.bounded import HOT_COUNT, KeyedStore, RecentIds
 from romulus.detect.host import INTERPRETERS, WEB_SERVICE_USERS
 from romulus.detect.linux_argv import getopt_long, normalize_path, program, read_operand_paths
 from romulus.detect.linux_semantics import classify_credential
-from romulus.evidence.linux_catalog import WATCH_PLACEHOLDERS
 from romulus.evidence.typed import Outcome
 
 DEBIAN_FILES = "https://packages.debian.org/bookworm/amd64/{}/filelist"
@@ -51,12 +53,52 @@ OWNING_DAEMONS = (
     ("/var/lib/jenkins/", frozenset({"jenkins", "java"}), frozenset({"jenkins"})),
     ("/etc/vault.d/", frozenset({"vault"}), frozenset({"vault"})),
     ("/etc/ssh/ssh_host_", frozenset({"sshd", "sshd-session", "sshd-auth"}), frozenset({"root", "sshd"})),
-    ("/etc/shadow", frozenset({"sshd", "login", "su", "sudo", "passwd", "chpasswd", "unix_chkpwd", "sssd"}),
-     frozenset({"root"})),
     ("/etc/krb5.keytab", frozenset({"sssd", "winbindd", "krb5kdc"}), frozenset({"root", "sssd", "krb5kdc"})),
     ("/etc/ssl/private/", frozenset({"nginx", "apache2", "httpd", "haproxy"}),
      frozenset({"root", "nginx", "www-data", "apache", "httpd", "haproxy"})),
 )
+# Authentication, account management and scheduled root services routinely consult local hashes.
+# Exact names in exact package directories plus a kernel-recorded uid 0 are required. A username
+# alone is insufficient; interpreters and copies in other directories never enter this table.
+SHADOW_DAEMONS = frozenset({
+    "cron", "crond", "anacron", "atd", "sshd", "sshd-session", "sshd-auth", "unix_chkpwd",
+    "polkitd", "polkit-agent-helper-1", "login", "su", "sudo", "sudoedit", "passwd", "chage",
+    "chpasswd", "useradd", "usermod", "userdel", "groupadd", "groupmod", "groupdel", "gpasswd",
+    "newusers", "systemd", "systemd-logind", "systemd-userdbd", "systemd-homed", "systemd-machined",
+    "systemd-sysusers", "nscd", "sssd", "sssd_pam", "sssd_nss", "sssd_be",
+})
+SHADOW_EXTRA_DIRS = {
+    "sshd-session": frozenset({"/usr/lib/openssh", "/usr/libexec/openssh"}),
+    "sshd-auth": frozenset({"/usr/lib/openssh", "/usr/libexec/openssh"}),
+    "unix_chkpwd": frozenset({"/usr/lib/pam", "/usr/libexec"}),
+    "polkitd": frozenset({"/usr/lib/polkit-1", "/usr/lib64/polkit-1", "/usr/lib/policykit-1"}),
+    "polkit-agent-helper-1": frozenset({"/usr/lib/polkit-1", "/usr/lib64/polkit-1", "/usr/lib/policykit-1"}),
+    **{name: frozenset({"/usr/libexec/sssd", "/usr/lib/sssd", "/usr/lib64/sssd"})
+       for name in ("sssd_pam", "sssd_nss", "sssd_be")},
+}
+ROOT_BINARY_DIRS = frozenset({"/usr/bin", "/usr/sbin", "/bin", "/sbin"})
+SHADOW_BACKUP_TOOLS = frozenset({"tar", "rsync", "cmp", "cp"})
+# The watched read does not establish whether a backup also writes outside /etc. These remain
+# folded leads, rather than exclusions, only for uid 0 tools directly in these two package dirs.
+BACKUP_DIRS = frozenset({"/usr/bin", "/bin"})
+PACKAGE_STORE_PATH = re.compile(r"^/(?:nix|gnu)/store/[^/]+-[^/]+/(?P<image>.+)$")
+
+
+def shadow_reader(path, event):
+    executable = normalize_path(str(event.get("process.executable") or ""))
+    name, directory = basename(executable), posixpath.dirname(executable)
+    if path not in {"/etc/shadow", "/etc/gshadow", "/etc/shadow-", "/etc/gshadow-"}:
+        return ""
+    if str(event.get("process.uid")) != "0":
+        return ""
+    dirs = ROOT_BINARY_DIRS | SHADOW_EXTRA_DIRS.get(name, frozenset())
+    if name.startswith("systemd-") or name == "systemd":
+        dirs |= frozenset({"/usr/lib/systemd", "/lib/systemd"})
+    if name in SHADOW_DAEMONS and directory in dirs:
+        return "daemon"
+    return "backup" if name in SHADOW_BACKUP_TOOLS and directory in BACKUP_DIRS else ""
+
+
 CREDENTIAL_SOURCES = (
     "https://man7.org/linux/man-pages/man5/proc_pid_environ.5.html",
     "https://developer.hashicorp.com/vault/docs/commands",
@@ -279,6 +321,80 @@ class LinuxDirect(Playbook):
     argv_prefix_safe = True
 
 
+@dataclass
+class _DirectFold:
+    count: int
+    first: Match
+    last: Match
+    published: bool = False
+
+
+class FoldedLinuxDirect(LinuxDirect):
+    """Immediately publish one bounded first/latest observation per typed shape and lane.
+
+    Keys spill without forgetting; candidate revisions replace the two citation bodies. Direct/pivot
+    callers receive the complete current count from consume and do not need a finalize pass.
+    """
+    HOT = HOT_COUNT
+    state_slice = "strong"
+
+    def __init__(self):
+        super().__init__()
+        self.folds = KeyedStore(self, "linux_direct_folds", self.HOT)
+        self._seen = RecentIds()
+
+    def consume(self, events):
+        pending = {}
+        for event in self.applicable(events):
+            if event.id in self._seen:
+                continue
+            self._seen.add(event.id)
+            for match in self.match(event):
+                key = match.group_key
+                match.raw_copies = self.raw_of(event)
+                state = self.folds.get(key)
+                if state is None:
+                    state = _DirectFold(0, match, match)
+                    if not self.folds.put(key, state):
+                        self.note_limit("direct_folds", "The direct observation fold state was refused at the "
+                                        "disk ceiling; the positive is published, but its group count is unresolved.")
+                        match.notes.append("Fold state was refused at the disk ceiling; the group count is unresolved.")
+                        pending[key] = match
+                        continue
+                state.count += 1
+                if (event.ts, event.id) < (state.first.ts, state.first.events[0].id):
+                    state.first = match
+                if (event.ts, event.id) > (state.last.ts, state.last.events[0].id):
+                    state.last = match
+                self.folds.put(key, state)
+                pending[key] = state
+        out = []
+        for key, state in pending.items():
+            if isinstance(state, Match):
+                out.append(state)
+                continue
+            first, last = state.first, state.last
+            witnesses = list({event.id: event for match in (first, last) for event in match.events}.values())
+            summary = {"count": state.count, "peak": state.count, "episodes": 1,
+                       "first": first.ts.timestamp(), "last": last.ts.timestamp()}
+            claim = (f"First observation: {first.claim} {state.count} matching record(s) from "
+                     f"{first.ts.isoformat()} to {last.ts.isoformat()}; "
+                     f"{len(witnesses)} cited, including the first and last.")
+            out.append(replace(first, claim=claim, events=witnesses,
+                               predicate=[*first.predicate, *([] if first is last else last.predicate)],
+                               entities=list(dict.fromkeys([*first.entities, *last.entities])),
+                               notes=list(first.notes), raw_copies={**first.raw_copies, **last.raw_copies},
+                               revision_reason="Updated the group's count and first/latest witnesses."
+                               if state.published else "", bounded_revision=True, aggregate_summary=summary))
+            state.published = True
+            self.folds.put(key, state)
+        self.folds.trim()
+        return out
+
+    def release_state(self):
+        self.folds.clear()
+
+
 def one_edit(a, b):
     if abs(len(a) - len(b)) > 1 or a == b:
         return False
@@ -289,7 +405,8 @@ def one_edit(a, b):
     return small[i:] == large[i + 1:]
 
 
-class MasqueradingBinary(LinuxDirect):
+class MasqueradingBinary(FoldedLinuxDirect):
+    version = "2"
     id = "host.masquerading_binary"
     title = "System binary names outside packaged locations or userland kernel-thread names"
     families = ("process_exec",)
@@ -304,15 +421,18 @@ class MasqueradingBinary(LinuxDirect):
             if found := pattern.match(path):
                 image = found["image"]
                 break
+        if stored := PACKAGE_STORE_PATH.match(image):
+            image = "/" + stored["image"]
         name = basename(image)
         argv = e.get("process.argv") or []
         thread = any(KERNEL_THREAD.fullmatch(str(v)) for v in (e.get("process.comm"), argv[0] if argv else ""))
         lane = ""
         if thread and path.startswith("/"):
             lane = "high"
-        elif posixpath.dirname(image) not in BASE_PACKAGE_DIRS | PACKAGE_EXTRA_DIRS.get(name, frozenset()):
+        elif not stored and posixpath.dirname(image) not in BASE_PACKAGE_DIRS | PACKAGE_EXTRA_DIRS.get(name, frozenset()):
             if name in SYSTEM_BINARIES:
-                lane = "high"
+                lane = ("lead" if posixpath.dirname(image) in {"/usr/local/bin", "/usr/local/sbin"}
+                        or re.fullmatch(r"/opt/[^/]+/bin", posixpath.dirname(image)) else "high")
             elif name not in PACKAGED_NAMES and any(one_edit(name, known) for known in SYSTEM_BINARIES):
                 lane = "lead"
         if not lane:
@@ -320,13 +440,16 @@ class MasqueradingBinary(LinuxDirect):
         match = observed(self, e, f"On {e.host}, kernel-recorded executable {path!r} has "
                          + ("a kernel-thread argv/comm name; kernel threads do not exec files."
                             if thread else f"a system-binary name or one-edit lookalike outside its packaged directories ({name})."),
-                         lane, names=("process.executable", "process.argv", "process.comm"))
+                         lane, group=json.dumps([e.host, path, lane]),
+                         names=("process.executable", "process.argv", "process.comm"))
         if image != path:
-            match.notes.append("The container storage path was mapped to its inferred in-image path; image packages are unverified.")
+            match.notes.append("The package or container storage path was mapped to its inferred package image "
+                               "path; package ownership is unverified.")
         return [match]
 
 
 class KernelModuleLoad(LinuxDirect):
+    version = "2"
     id = "host.kernel_module_load"
     title = "A kernel module load or an insmod command outside module package trees"
     families = ("kernel_module", "process_exec")
@@ -341,28 +464,44 @@ class KernelModuleLoad(LinuxDirect):
             "No module-load auditing records were present in this partition; unaudited module loading is unresolved."])
 
     def match(self, e):
+        p = program(e)
+        executable = normalize_path(str(e.get("process.executable") or ""))
+        name, directory = basename(executable), posixpath.dirname(executable)
+        # A module name (modprobe ext4) is not a path. Absolute or slash-containing operands
+        # give a positive file-path observation; insmod always takes a file operand.
+        argv_paths = [normalize_path(a, e.get("process.cwd")) for a in p.args
+                      if not a.startswith("-") and (p.name == "insmod" or "/" in a)] if p else []
+        argv_paths = [path for path in argv_paths if path]
+        path = normalize_path(str(e.get("module.path") or ""))
+        outside = next((item for item in [path, *argv_paths] if item and not under(item, MODULE_ROOTS)), "")
+        packaged = bool(p and ((p.name == "modprobe" and name in {"kmod", "modprobe"}
+                               and directory in ROOT_BINARY_DIRS)
+                              or (name in {"systemd-modules-load", "systemd-udevd", "udevd"}
+                                  and directory in ROOT_BINARY_DIRS | {"/usr/lib/systemd", "/lib/systemd",
+                                                                      "/usr/lib/udev", "/lib/udev"})))
         if e.family == "kernel_module":
             if e.get("module.op") != "load":
                 return []
-            path = normalize_path(str(e.get("module.path") or ""))
-            lane = "high" if web(e) or path and not under(path, MODULE_ROOTS) else "context"
-            if e.outcome == Outcome.failure:
+            path = outside or path or next(iter(argv_paths), "")
+            lane = "high" if web(e) or outside else "context" if packaged else "lead"
+            if e.outcome == Outcome.failure and lane == "context":
                 lane = "lead"
             text = "a kernel module load record" if e.outcome == Outcome.success else "a kernel module load attempt"
         else:
-            p = program(e)
-            if not p or p.name != "insmod":
+            if not p or p.name not in {"insmod", "modprobe"}:
                 return []
-            path = next((normalize_path(a, e.get("process.cwd")) for a in p.args if not a.startswith("-")), "")
-            if not path or under(path, MODULE_ROOTS):
+            if p.name == "modprobe" and not outside:
                 return []
-            lane, text = "lead", "an insmod command naming a file outside the packaged module trees (load not proved)"
-        return [observed(self, e, f"On {e.host}, {text}: {path or 'module path unrecorded'}.",
+            path = outside or next(iter(argv_paths), "")
+            lane = "high" if web(e) or outside else "lead"
+            text = f"a {p.name} command (positive-only argv; load not proved)"
+        return [observed(self, e, f"On {e.host}, {text}: {path or 'module file not recorded'}.",
                          lane, names=("module.op", "module.path", "module.name", "process.executable", "process.argv",
                                       "process.user"))]
 
 
-class CredentialMaterialAccess(LinuxDirect):
+class CredentialMaterialAccess(FoldedLinuxDirect):
+    version = "2"
     id = "host.credential_material_access"
     title = "Credential material named by a file-reading tool or a watched kernel open"
     families = ("process_exec", "file_access")
@@ -373,17 +512,16 @@ class CredentialMaterialAccess(LinuxDirect):
         self._watched_in_batch = any(e.family == "file_access" for e in events)
         return super().consume(events)
 
+    positive_only_reason = ("Watched file reads are positive-only: watch inventories are unknown and hard links "
+                            "can escape path classification; unrecorded access remains unresolved. "
+                            "Argv operands cannot prove absence either.")
+
     def partition_coverage_notes(self):
-        return ([] if getattr(self, "_watched_in_batch", False) else [
+        return [self.positive_only_reason] + ([] if getattr(self, "_watched_in_batch", False) else [
             "No watched file-read records were present in this partition; unrecorded credential access is unresolved."])
 
     def assures_negative_for(self, events):
-        """Only explicit watched kernel reads have a complete path predicate; argv never does."""
-        relevant = [event for event in events if event.family in self.families]
-        return bool(relevant) and all(
-            event.family == "file_access" and event.has("file.path") and event.get("file.access") == "read"
-            and event.has("audit.key") and str(event.get("audit.key")).casefold() not in WATCH_PLACEHOLDERS
-            for event in relevant)
+        return False
 
     def match(self, e):
         if e.family == "file_access":
@@ -403,6 +541,9 @@ class CredentialMaterialAccess(LinuxDirect):
                 continue
             p = program(e)
             actor = str(e.get("process.user") or "")
+            reader = shadow_reader(path, e)
+            if reader == "daemon":
+                continue
             if (p and posixpath.dirname(str(e.get("process.executable") or "")) in BASE_PACKAGE_DIRS
                     and any(path.startswith(prefix) and actor in accounts and p.name in daemons
                             for prefix, daemons, accounts in OWNING_DAEMONS)):
@@ -416,13 +557,18 @@ class CredentialMaterialAccess(LinuxDirect):
             shadow = found[0] == "T1003.008"
             private = "private key" in found[2] or "keytab" in found[2]
             lane = "high" if shadow or private and other else "lead"
-            if e.outcome == Outcome.failure:
+            if e.outcome == Outcome.failure or reader == "backup":
                 lane = "lead"
             text = ("a watched kernel open names" if e.family == "file_access"
                     else "a file-reading command names (positive-only argv operand)")
             out.append(observed(self, e, f"On {e.host}, {text} {found[2]}; recorded outcome {e.outcome.value}.",
-                                lane, names=("file.path", "file.owner.id", "file.owner.name", "audit.key",
+                                lane, group=json.dumps([e.host, normalize_path(str(e.get("process.executable") or "")),
+                                                            path, lane]),
+                                names=("file.path", "file.owner.id", "file.owner.name", "audit.key",
                                              "process.executable", "process.argv", "process.uid", "process.user")))
+            if reader == "backup":
+                out[-1].notes.append("A packaged root backup/compare tool read the hash file; paired writes outside /etc "
+                                     "are not known, so this remains a lead rather than an exclusion.")
         return out
 
 

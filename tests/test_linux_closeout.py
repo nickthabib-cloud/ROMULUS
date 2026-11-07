@@ -17,6 +17,18 @@ def staged_run(cls, parts, tmp_path):
     return detector, list(detector.finalize())
 
 
+def web_lineage(events):
+    from romulus.evidence.typed import fv
+    worker = ex(-10, "/usr/sbin/apache2", user="www-data")
+    worker.fields["process.pid"].value = 40
+    for event in events:
+        if event.family in {"file_change", "http_access"}:
+            event.fields["http.document_root"] = fv("/var/www/html", "fixture")
+        elif event.family == "process_exec":
+            event.fields["process.ppid"].value = 40
+    return [worker, *events]
+
+
 def rule(name):
     return next(cls for cls in ALL_PLAYBOOKS if cls.id == name)
 
@@ -61,7 +73,7 @@ def test_kernel_thread_comm():
 
 
 @pytest.mark.parametrize("path,user,lane", [("/tmp/m.ko", "alice", "high"),
-    ("/lib/modules/m.ko", "www-data", "high"), ("/lib/modules/m.ko", "root", "context")])
+    ("/lib/modules/m.ko", "www-data", "high"), ("/lib/modules/m.ko", "root", "lead")])
 def test_module_load_lanes(path, user, lane):
     e = ev("kernel_module", T0, module__op="load", module__path=path, process__user=user)
     assert rule("host.kernel_module_load")().consume([e])[0].proposed_lane == lane
@@ -116,10 +128,10 @@ def test_web_chain(requested, status, execution, lane, tmp_path):
     events = [change(path="/var/www/html/upload.php", user="www-data")]
     if requested:
         events += [ev("http_access", T0 + timedelta(seconds=20), host_name="web1",
-                      url__path="/uploads/upload.php", http__response__status_code=status)]
+                      url__path="/upload.php", http__response__status_code=status)]
     if execution:
         events += [ex(30, "/bin/bash", user="www-data")]
-    _, out = staged_run(rule("host.web_shell_chain"), [[e] for e in reversed(events)], tmp_path)
+    _, out = staged_run(rule("host.web_shell_chain"), [[e] for e in reversed(web_lineage(events))], tmp_path)
     assert len(out) == 1 and out[0].proposed_lane == lane
     if requested:
         assert "inferred" in out[0].claim.lower()
@@ -205,7 +217,7 @@ def test_certificate_exact_name(name, expected):
 
 
 @pytest.mark.parametrize("web_user,listener,host_address,expected", [
-    (True, False, True, "high"), (False, True, True, "high"), (False, False, True, None),
+    (True, False, True, "lead"), (False, True, True, "high"), (False, False, True, None),
     (True, False, False, None)])
 def test_alert_host_execution(web_user, listener, host_address, expected, tmp_path):
     alert = ev("net_alert", T0, host_name="sensor", source__ip="8.8.8.8", destination__ip="10.0.0.9",
@@ -270,11 +282,11 @@ def test_download_order_window_and_path_negatives(before, after, tmp_path):
     assert not out
 
 
-def test_watch_arm_can_assure_only_explicit_watched_read_negatives():
+def test_watch_arm_never_assures_a_complete_negative():
     cls = rule("host.credential_material_access")
     detector = cls()
     watched = ev("file_access", T0, file__path="/etc/ordinary", file__access="read", audit__key="watched")
-    assert detector.assures_negative_for([watched])
+    assert not detector.assures_negative_for([watched])
     assert not detector.assures_negative_for([ex()])
     assert not detector.assures_negative_for([ev("file_access", T0, file__path="/etc/ordinary")])
 
@@ -394,7 +406,11 @@ def test_each_sequence_retains_many_hosts_on_disk_and_streams_exact_groups(name,
     result = detector.finalize()
     assert not isinstance(result, list)
     assert sum(1 for _ in result) == 1000
-    assert detector.rows_on_disk >= 1000 and detector.capped == 0
+    assert detector.capped == 0
+    if name == "host.unbrokered_privilege_transition":
+        assert len(detector.execs) >= 1000
+    else:
+        assert detector.rows_on_disk >= 1000
     assert detector.retained_events() == []
 
 
@@ -433,7 +449,7 @@ def test_documented_downloader_grammars(argv, tmp_path):
 ])
 def test_credential_owning_daemons_are_narrow_typed_exclusions(path, executable, user, expected):
     e = ev("file_access", T0, file__path=path, file__access="read", audit__key="watched",
-           process__executable=executable, process__user=user)
+           process__executable=executable, process__user=user, process__uid="0" if user == "root" else "1000")
     assert bool(rule("host.credential_material_access")().consume([e])) is expected
 
 
@@ -476,7 +492,7 @@ def test_later_web_request_retains_the_strongest_supported_chain(reverse, tmp_pa
     early = ev("http_access", T0 + timedelta(seconds=20), url__path="/a.php", http__response__status_code=200)
     late = ev("http_access", T0 + timedelta(seconds=7200), url__path="/a.php", http__response__status_code=200)
     execution = ex(7210, "/bin/bash", user="www-data")
-    events = [write, early, late, execution]
+    events = web_lineage([write, early, late, execution])
     if reverse:
         events.reverse()
     _, findings = staged_run(rule("host.web_shell_chain"), [[event] for event in events], tmp_path)
@@ -545,6 +561,7 @@ def test_stronger_late_windows_survive_many_hosts_on_disk(name, expected_lane, t
                 ev("http_access", T0 + timedelta(seconds=7200), url__path="/a.php", http__response__status_code=200),
                 ex(7210, "/bin/bash", user="www-data"),
             ]
+            events = web_lineage(events)
         else:
             events = [ex(start + n, "/usr/bin/" + command, user=user,
                          process__auid="1000", process__session_id=9)
@@ -628,17 +645,24 @@ def test_compact_linux_witness_hydrates_native_body_without_changing_any_typed_f
     assert detector.drain_staged() == []
 
 
-def test_telemetry_clock_retains_every_late_timestamp_and_source_id_in_narrow_rows(tmp_path):
+
+def test_telemetry_clock_retains_exact_bin_edges_with_late_timestamps(tmp_path):
+    from romulus.detect.linux_sequences import CLOCK_BIN
     detector = rule("host.telemetry_gap_after_tamper")()
     detector.spill_dir = tmp_path
     events = [ev("process_observed", T0 + timedelta(seconds=i), audit__serial=i) for i in range(1000)]
     for event in reversed(events):
         detector.consume([event])
         assert detector.drain_staged() == []
-    assert detector.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='clock'").fetchone()
-    assert list(detector.query("SELECT id,ts FROM clock ORDER BY ts,id")) == [
-        (event.id, event.ts.timestamp()) for event in events]
-    assert len(list(detector.query("PRAGMA table_info(clock)"))) == 4
+    actual = list(detector.query("SELECT bin,first_id,first_ts,last_id,last_ts FROM clock ORDER BY bin"))
+    expected = {}
+    for event in events:
+        key = int(event.ts.timestamp() // CLOCK_BIN)
+        expected.setdefault(key, [event, event])[1] = event
+    assert actual == [(key, first.id, first.ts.timestamp(), last.id, last.ts.timestamp())
+                      for key, (first, last) in expected.items()]
+    assert len(actual) == 4
+    assert detector.witnesses is None
     assert not detector.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='records'").fetchone()
 
 
@@ -824,22 +848,20 @@ def _reclaim_linux_references(pack):
         return callback(4096)
 
 
-def test_linux_clock_bodies_yield_only_through_reference_protocol_and_keep_nonclock_events(tmp_path):
+
+def test_clock_edges_do_not_spend_join_witness_budget_and_join_bodies_remain(tmp_path):
     pack = _linux_reclaim_pack(tmp_path)
     execution, clock_only = ex(), ev("auth", T0, user__name="alice")
     for detector in pack:
         detector.consume([execution, clock_only])
         detector.drain_staged()
     witness = pack[0].witnesses
-    assert witness._spill.db.execute("PRAGMA auto_vacuum").fetchone()[0] == 2
-    assert witness.account().evict is None
+    assert witness.count() == 1
     pack[0].budget.reclaim_citations(pack[0].budget.disk_total * 2)
-    assert witness.count() == 2
     _reclaim_linux_references(pack)
     assert witness.load([execution.id]) == [execution]
     assert witness.load([clock_only.id]) == []
-    assert pack[-1].query("SELECT COUNT(*) FROM clock").fetchone()[0] == 2
-    assert "linux_clock_witnesses" in pack[-1].limits
+    assert pack[-1].clock_event(clock_only.id) == [clock_only]
     for detector in pack:
         detector.release_state()
 
@@ -857,7 +879,7 @@ def test_linux_reclaimer_protects_pending_rows_and_current_replaced_address_witn
     assert pack[0].add(pending, "pending")
     [address] = list(pack[1].query("SELECT uid,id FROM records WHERE role='address'"))
     assert address[1] == replacement.id and old.id in address[0]
-    assert pack[0].query("SELECT COUNT(*) FROM records").fetchone()[0] == 0
+    assert pack[0].query("SELECT COUNT(*) FROM records WHERE role='pending'").fetchone()[0] == 0
     _reclaim_linux_references(pack)
     witness = pack[0].witnesses
     assert witness.load([replacement.id]) == [replacement]
@@ -885,8 +907,8 @@ def test_linux_reclaimer_protects_actual_tamper_hosts_with_indexed_membership(tm
                                    [tamper], [], tamper.ts, "high", "high", "high"))
     clock.drain_staged()
     _reclaim_linux_references(pack)
-    assert pack[0].witnesses.load([affected.id]) == [affected]
-    assert pack[0].witnesses.load([unrelated.id]) == []
+    assert clock.clock_event(affected.id) == [affected]
+    assert clock.clock_event(unrelated.id) == [unrelated]
     plan = list(clock.query("EXPLAIN QUERY PLAN SELECT 1 FROM records "
                             "WHERE role='tamper' AND host=? LIMIT 1", (affected.host,)))
     assert any("SEARCH" in row[3] and "records_tamper_host" in row[3] for row in plan)
@@ -894,7 +916,8 @@ def test_linux_reclaimer_protects_actual_tamper_hosts_with_indexed_membership(tm
         detector.release_state()
 
 
-def test_linux_reclaimer_scans_admission_order_once_and_accepts_later_low_id_after_emptying(tmp_path):
+
+def test_clock_bins_keep_exact_edges_despite_reversed_source_ids_and_late_data(tmp_path):
     pack = _linux_reclaim_pack(tmp_path)
     clock = pack[-1]
     events = [ev("auth", T0 + timedelta(seconds=i), user__name="alice") for i in range(97)]
@@ -902,42 +925,34 @@ def test_linux_reclaimer_scans_admission_order_once_and_accepts_later_low_id_aft
         event.id = f"clock-{i:04}"
     clock.consume(events)
     clock.drain_staged()
-    witness, queries = pack[0].witnesses, []
-    witness._spill.db.set_trace_callback(queries.append)
-    for _ in range(10):
-        if not _reclaim_linux_references(pack):
-            break
-    else:
-        pytest.fail("bounded reclamation did not exhaust its monotonic scan")
-    assert witness.count() == 0
-    scans = [query for query in queries if query.startswith("SELECT rowid,id,body FROM witnesses WHERE rowid>")]
-    assert len(scans) == 5 and all("LIMIT 32" in query for query in scans)
-    late = ev("auth", T0, user__name="alice")
-    late.id = "000-earlier-than-all-lexical-IDs"
+    assert pack[0].witnesses.count() == 0
+    assert list(clock.query("SELECT first_id,last_id FROM clock")) == [(events[0].id, events[-1].id)]
+    late = ev("auth", T0 - timedelta(seconds=1), user__name="alice")
     clock.consume([late])
     clock.drain_staged()
-    assert witness.count() == 1
-    _reclaim_linux_references(pack)
-    assert witness.count() == 0
-    assert witness._spill.budget.physical_used <= witness._spill.budget.disk_total
+    assert clock.clock_event(late.id) == [late]
+    assert clock.clock_event(events[-1].id) == [events[-1]]
+    assert clock.query("SELECT COUNT(*) FROM clock").fetchone()[0] == 2
+    assert clock._spill.budget.physical_used <= clock._spill.budget.disk_total
     for detector in pack:
         detector.release_state()
 
 
-def test_linux_reclaimer_delete_refusal_rolls_back_rows_accounting_and_scan_cursor(tmp_path):
-    pack = _linux_reclaim_pack(tmp_path)
-    event = ev("auth", T0, user__name="alice")
-    pack[-1].consume([event])
-    pack[-1].drain_staged()
-    witness = pack[0].witnesses
-    charged = witness.account().used
-    witness._spill.write("CREATE TRIGGER no_clock_delete BEFORE DELETE ON witnesses "
-                        "BEGIN SELECT RAISE(ABORT,'test delete refusal'); END", [()])
-    assert _reclaim_linux_references(pack) == 0
-    assert witness.load([event.id]) == [event] and witness.account().used == charged
-    assert not pack[0].budget.broken
-    witness._spill.write("DROP TRIGGER no_clock_delete", [()])
-    _reclaim_linux_references(pack)
-    assert witness.count() == 0
-    for detector in pack:
-        detector.release_state()
+
+def test_clock_actual_disk_refusal_keeps_accepted_edges_and_names_partial(tmp_path):
+    from romulus.detect.bounded import StateBudget
+    clock = rule("host.telemetry_gap_after_tamper")()
+    clock.spill_dir = tmp_path
+    clock.budget = StateBudget(tmp_path, disk_total=64 * 1024, reserve=0)
+    first = ev("auth", T0, user__name="alice")
+    clock.consume([first])
+    clock.drain_staged()
+    for i in range(1, 2000):
+        clock.consume([ev("auth", T0 + timedelta(minutes=i * 5), user__name="alice")])
+        clock.drain_staged()
+        if clock.capped:
+            break
+    assert clock.capped and clock.limit_reasons()
+    assert clock.clock_event(first.id) == [first]
+    assert clock._spill.budget.physical_used <= clock._spill.budget.disk_total
+    clock.release_state()

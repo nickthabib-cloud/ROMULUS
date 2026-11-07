@@ -217,6 +217,11 @@ class LineageCitationFetcher:
                 if body["kind"] == "observed"
                 else _exec_record(hits, body.get("boot"))
             )
+            if body["kind"] == "typed":
+                normalized, _skips, errors = normalize_hits(hits)
+                event = next((candidate for candidate in normalized if candidate.id == event_id), None) if not errors else None
+                if event is not None and body.get("boot") is not None and not event.has("host.boot.id"):
+                    event.fields["host.boot.id"] = fv(*body["boot"])
             if event is None or event.id != event_id:
                 continue
             events[event_id] = event
