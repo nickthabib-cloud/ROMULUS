@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>ATT&amp;CK coverage</h1>{% include "catalog_nav.html" %}
+<p><a href="/catalog/attack?domain=enterprise">Enterprise</a> · <a href="/catalog/attack?domain=ics">ICS</a> · {{ domain }}</p>
+<p>Strength describes the strongest active covering rule; gaps remain visible.</p>
+<table class="grid"><thead><tr><th>Technique</th><th>Tactics</th><th>Strength</th><th>Rules</th></tr></thead><tbody>
+{% for row in rows %}<tr class="coverage-{{ row.strength.value }}"><td><a href="/catalog?technique={{ row.technique.id | urlencode }}">{{ row.technique.id }} {{ row.technique.name }}</a></td><td>{{ row.technique.tactics | join(', ') }}</td><td>{{ row.strength.value }}</td><td>{% for id in row.rule_ids %}<a href="/catalog/rules/{{ id | urlencode }}">{{ id }}</a><br>{% else %}not covered{% endfor %}</td></tr>{% endfor %}
+</tbody></table>
+{% if next_url %}<a href="{{ next_url }}">Next page</a>{% endif %}
+{% for strength, description in legend %}<p><strong>{{ strength.value }}</strong>: {{ description }}</p>{% endfor %}
+{% endblock %}

@@ -83,3 +83,8 @@ svg.timeline .mark { stroke: var(--panel); stroke-width: 1.5; }
 svg.timeline .m-urgent { fill: var(--urgent); } svg.timeline .m-high { fill: var(--high); } svg.timeline .m-lead { fill: var(--lead); }
 .key { padding: 0 6px; border-bottom: 2px solid var(--ink); } .key.k-inferred { border-bottom: 2px dashed var(--muted); }
 .key.k-analyst { border-bottom: 2px dotted var(--warn); }
+/* Coverage strength is also named in text, independently of color. */
+.coverage-full-search { background: #183b2d; }
+.coverage-positive-only { background: #41351d; }
+.coverage-context-only { background: #26364b; }
+.coverage-none { background: #3f2427; }
