@@ -163,3 +163,13 @@ def test_active_sigma_rule_required_for_status_link(tmp_path):
         c.execute(t.sigma_rule.update().where(t.sigma_rule.c.id == sigma_id).values(status='active'))
     updated = store.change_status(row['id'], actor='lead', status='active', rule_id='sigma.' + sigma_id)
     assert updated['rule_id'] == 'sigma.' + sigma_id
+
+
+def test_every_known_family_is_allowed_by_the_store_check():
+    import re
+
+    from romulus.catalog.browser import known_families
+    from romulus.store import schema as t
+    check = next(c for c in t.detection_request.constraints if c.name == 'ck_detection_request_family')
+    allowed = set(re.findall(r"'([^']+)'", str(check.sqltext)))
+    assert {*known_families(), 'unknown'} <= allowed

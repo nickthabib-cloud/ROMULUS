@@ -51,7 +51,9 @@ def test_accepted_family_and_family_specific_fields_are_alternatives(persistent_
     repo, _ = persistent_repo
     matcher = CatalogBrowser(repo).detail('ioc.indicator_match')
     supplied = profile(families=['net_flow'], fields=['source.ip', 'destination.ip'], role='network')
-    assert applicability(matcher, [supplied])[0]['state'] == 'runs'
+    unrecorded = applicability(matcher, [supplied])[0]
+    assert unrecorded['state'] == 'unknown'
+    assert 'required fields are not recorded' in unrecorded['text']
     rule = {'families': ['process_exec', 'auth'], 'required_fields': [],
             'required_by_family': {'process_exec': ['process.executable'], 'auth': ['auth.service']}}
     assert applicability(rule, [profile()])[0]['state'] == 'runs'
@@ -321,3 +323,16 @@ def test_profile_budget_refusal_is_unknown_and_named(persistent_repo, monkeypatc
     rows = browser.CatalogBrowser(repo).detail('host.exec_from_temp_dir')['applicability']
     source = next(row for row in rows if row['source'] == 'source')
     assert source['state'] == 'unknown' and 'byte budget exceeded' in source['text']
+
+
+def test_supplied_family_without_recorded_fields_is_never_runs(persistent_repo):
+    repo, _ = persistent_repo
+    browser = CatalogBrowser(repo)
+    unrecorded = [row for row in browser.base_rules()
+                  if not row['required_fields'] and not any(row['required_by_family'].values()) and not row.get('ast')]
+    assert unrecorded
+    for rule in unrecorded:
+        accepted = sorted(set(rule['families']) - set(rule.get('context_families', ())))
+        thin = profile(families=accepted, fields=['host.name', '@timestamp'],
+                       os_family=(rule.get('os_families') or ['linux'])[0])
+        assert applicability(rule, [thin])[0]['state'] != 'runs', rule['id']

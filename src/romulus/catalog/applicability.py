@@ -139,7 +139,7 @@ def applicability(rule, profiles):
             elif state == 'runs' and not supplied:
                 state, reason = 'not applicable', 'accepted telemetry family missing'
             elif state == 'runs':
-                states, missing = [], set()
+                states, missing, unrecorded = [], set(), False
                 for family in supplied:
                     present = set(profile.get('fields_by_family', {}).get(family, profile.get('fields', ())))
                     required = set(rule['required_fields']) | set(rule['required_by_family'].get(family, ()))
@@ -148,9 +148,13 @@ def applicability(rule, profiles):
                     capability = 'not applicable' if absent else 'runs'
                     if capability == 'runs' and rule.get('ast'):
                         capability = _ast_capability(rule['ast'], profile, family)
+                    elif capability == 'runs' and not required:
+                        # A supplied family alone does not show the predicate's fields are searchable.
+                        capability, unrecorded = 'unknown', True
                     states.append(capability)
                 state = _combine('or', states)
-                reason = ('typed predicate or field capability is not recorded' if state == 'unknown' else
+                reason = ('required fields are not recorded for this rule' if state == 'unknown' and unrecorded else
+                          'typed predicate or field capability is not recorded' if state == 'unknown' else
                           ', '.join(sorted(missing)) + ' missing' if missing else 'predicate fields unavailable')
         text = f'runs on {source}' if state == 'runs' else f'{state}: {reason} in {source}'
         rows.append({'source': source, 'state': state, 'text': text})
