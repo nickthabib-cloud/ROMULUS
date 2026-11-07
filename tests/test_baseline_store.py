@@ -405,7 +405,7 @@ def test_migration_head_leaves_stored_candidates_about_every_record_they_cite(tm
     engine = make_engine(tmp_path / "candidate-context.db")
     with engine.begin() as connection:
         cfg = _alembic_config(connection)
-        assert ScriptDirectory.from_config(cfg).get_heads() == ["0033"]
+        assert ScriptDirectory.from_config(cfg).get_heads() == ["0034"]
         command.upgrade(cfg, "0016")
         connection.exec_driver_sql(
             "INSERT INTO hunt (id, created_at, created_by, manifest, manifest_digest, execution_state) "

@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Detection request</h1>{% include "catalog_nav.html" %}
+<p>{{ item.id }} · {{ item.status }} · requested by {{ item.requester }} at {{ item.created_at }}</p>
+<section class="card"><p class="claim">{{ item.behavior }}</p>
+<p>Telemetry: {{ item.telemetry_family }} · ATT&amp;CK: {{ item.attack_ids | join(', ') or 'not specified' }}</p>
+{% if item.example_candidate_id %}<p>Example finding: {% if example_available %}<a href="/findings/{{ item.example_candidate_id | urlencode }}">{{ item.example_candidate_id }}</a>{% else %}{{ item.example_candidate_id }} (source finding no longer available){% endif %} · cited event: {{ item.example_event_id or 'not specified' }}</p>{% endif %}
+{% if item.rule_id %}<p>Rule: <a href="/catalog/rules/{{ item.rule_id | urlencode }}">{{ item.rule_id }}</a></p>{% endif %}
+{% if item.decline_reason %}<p>Decline reason: {{ item.decline_reason }}</p>{% endif %}
+<p>Updated by {{ item.updated_by }} at {{ item.updated_at }}</p></section>
+{% if item.requester == user.u and item.status == 'requested' %}
+<h2>Edit behavior</h2><form method="post" action="/catalog/requests/{{ item.id }}/edit" class="card">
+<input type="hidden" name="csrf" value="{{ csrf }}"><textarea name="behavior" required maxlength="4000" rows="5">{{ item.behavior }}</textarea><button type="submit">Save text</button></form>{% endif %}
+{% if user.r == 'lead' %}
+<h2>Change status</h2><form method="post" action="/catalog/requests/{{ item.id }}/status" class="card">
+<input type="hidden" name="csrf" value="{{ csrf }}"><label>Status <select name="status">{% for status in statuses if status != item.status %}<option>{{ status }}</option>{% endfor %}</select></label>
+<label>Registered rule ID (required for active) <input name="rule_id" maxlength="256" value="{{ item.rule_id or '' }}"></label>
+<label>Reason (required for declined) <textarea name="reason" maxlength="4000" rows="3"></textarea></label><button type="submit">Record status</button></form>{% endif %}
+<h2>Status history</h2><table class="grid"><thead><tr><th>Time</th><th>Actor</th><th>Old status</th><th>New status</th><th>Reason / rule</th></tr></thead><tbody>
+{% for event in events %}<tr><td>{{ event.at }}</td><td>{{ event.actor }}</td><td>{{ event.old_status or 'created' }}</td><td>{{ event.new_status }}</td><td>{{ event.reason }}{% if event.rule_id %} · {{ event.rule_id }}{% endif %}</td></tr>{% endfor %}
+</tbody></table>{% if next_url %}<a href="{{ next_url }}">More history</a>{% endif %}
+{% endblock %}

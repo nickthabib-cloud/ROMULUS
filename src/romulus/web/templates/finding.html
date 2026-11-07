@@ -5,6 +5,7 @@
 <h1><span class="pill l-{{ c.lane }}">{{ c.lane }}</span> {{ c.rule_id }}</h1>
 <section class="card">
   <p class="claim">{{ c.claim }}</p>
+  <p><a href="/catalog/requests/new?candidate={{ c.id | urlencode }}{% if c.event_ids %}&amp;event={{ c.event_ids[0] | urlencode }}{% endif %}">Flag more like this</a></p>
   <div class="summary">
     <div><span class="label">Severity</span> {{ c.severity }}</div>
     <div><span class="label">Confidence</span> {{ c.confidence }}</div>
@@ -65,6 +66,7 @@
 
 <h2>Cited evidence ({{ events | length }} event(s))</h2>
 {% for e in events %}
+<p><a href="/catalog/requests/new?candidate={{ c.id | urlencode }}&amp;event={{ e.id | urlencode }}">Flag more like this cited event</a></p>
 <details {% if loop.first %}open{% endif %}><summary class="mono">{{ e.family }} · {{ e.ts }} · {{ e.host }} · event {{ e.id }}</summary>
 <table class="grid small"><thead><tr><th>Typed field</th><th>Value</th><th>Origin</th></tr></thead><tbody>
 {% for name, f in e.event.fields.items() %}

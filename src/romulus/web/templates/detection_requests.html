@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Detection requests</h1>{% include "catalog_nav.html" %}
+<p><a href="/catalog/requests/new">Request a detection</a></p>
+<p>Requests are shared with the team. They do not change hunt results, lanes, or rules.</p>
+<form method="get" class="card"><label>Status <select name="status"><option value="">All</option>{% for status in statuses %}<option {% if filters.status == status %}selected{% endif %}>{{ status }}</option>{% endfor %}</select></label>
+<label>Requester <input name="requester" value="{{ filters.requester }}" maxlength="256"></label><button type="submit">Filter</button></form>
+<p><a href="/catalog/requests/export?format=yaml&amp;{{ export_query }}">YAML</a> · <a href="/catalog/requests/export?format=csv&amp;{{ export_query }}">CSV</a></p>
+<table class="grid"><thead><tr><th>Request</th><th>Requester</th><th>Family</th><th>Status</th><th>Created</th></tr></thead><tbody>
+{% for item in rows %}<tr><td><a href="/catalog/requests/{{ item.id }}">{{ item.behavior[:200] }}</a></td><td>{{ item.requester }}</td><td>{{ item.telemetry_family }}</td><td>{{ item.status }}</td><td>{{ item.created_at }}</td></tr>{% else %}<tr><td colspan="5">No requests match these filters.</td></tr>{% endfor %}
+</tbody></table>{% if next_url %}<a href="{{ next_url }}">Next page</a>{% endif %}
+{% endblock %}

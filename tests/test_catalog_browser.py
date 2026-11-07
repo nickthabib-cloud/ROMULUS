@@ -122,7 +122,8 @@ def test_sigma_ast_fields_are_required_for_applicability():
     ast = {'selectors': {'a': {'type': 'exists', 'fields': ['process.command_line'], 'value': True}},
            'condition': {'type': 'selector', 'name': 'a'}}
     document = _document(_rule_metadata(ALL_PLAYBOOKS[0]), source='Sigma', ast=ast)
-    assert 'process.command_line' in document['required_fields']
+    assert 'process.command_line' in document['referenced_fields']
+    assert 'process.command_line' not in document['required_fields']
 
 
 def test_manifest_fallback_without_field_contract_is_unknown():
@@ -141,3 +142,56 @@ def test_known_families_include_normalizer_families():
     from romulus.catalog.browser import known_families
     from romulus.hunt.sweep import DATASET_FAMILIES
     assert set().union(*DATASET_FAMILIES.values()) <= set(known_families())
+
+
+def test_sigma_ast_preserves_alternatives_and_scope():
+    ast = {'selectors': {'s': {'type': 'field', 'fields': ['process.executable'], 'all': True,
+                             'groups': [[{'type': 'literal', 'value': 'a'}, {'type': 'literal', 'value': 'b'}],
+                                        [{'type': 'literal', 'value': 'c'}]]}},
+           'condition': {'type': 'selector', 'name': 's'},
+           'scope': {'families': ['process_exec'], 'os_families': ['windows'], 'event_codes': ['1']}}
+    text = readable_ast(ast)
+    assert "'a' OR 'b'" in text and ') AND (' in text
+    assert 'windows' in text and 'process_exec' in text
+
+
+def test_indicator_overlay_custom_lane_filter_is_bounded():
+    from datetime import UTC, datetime, timedelta
+
+    from romulus.store import schema as t
+    repo, _ = _repo_with_finding()
+    now = datetime.now(UTC)
+    base = {'version': 1, 'source': 'test', 'author': 'test', 'created_at': now,
+            'expires_at': now + timedelta(days=1), 'digest': 'd', 'status': 'active', 'notes': '',
+            'severity': 'medium'}
+    with repo.engine.begin() as c:
+        for lane in ('urgent', 'high', 'lead', 'context'):
+            c.execute(t.indicator_list.insert(), [{**base, 'id': lane + str(n), 'name': 'list',
+                       'lane': lane} for n in range(60)])
+    for lane in ('urgent', 'high', 'lead', 'context'):
+        rows, after = CatalogBrowser(repo).rules({'source': 'indicator list', 'lane': lane})
+        assert len(rows) == 50 and after
+        assert all(row['lane'] == lane and row['source'] == 'indicator list' for row in rows)
+
+
+def test_latest_stored_profile_states_and_missing_target_are_visible():
+    from datetime import UTC, datetime, timedelta
+
+    from romulus.store import schema as t
+    repo, _ = _repo_with_finding()
+    now = datetime.now(UTC)
+    manifest = repo.get_hunt('h1')['manifest']
+    with repo.engine.begin() as c:
+        for target, fields, stamp in [('current', {'process.argv': 'keyword'}, now),
+                                      ('current', {'unrelated': 'keyword'}, now - timedelta(days=1)),
+                                      ('missing', {'unrelated': 'keyword'}, now),
+                                      ('stale', {'process.argv': 'keyword'}, now - timedelta(days=31))]:
+            profile = {'target': target, 'role': 'host', 'os_family': 'linux',
+                       'field_types': fields, 'datasets': {'linux.audit': 1}, 'notes': []}
+            c.execute(t.source_profile.insert().values(id=target + str(stamp), hunt_id='h1',
+                target=target, kind='es_index', profile=profile, captured_at=stamp))
+        manifest['targets'] = ['current', 'missing', 'stale', 'unprofiled']
+        c.execute(t.hunt.update().values(manifest=manifest))
+    rows = CatalogBrowser(repo).detail('host.credential_store_read')['applicability']
+    states = {row['source']: row['state'] for row in rows}
+    assert states == {'current': 'runs', 'missing': 'not applicable', 'stale': 'unknown', 'unprofiled': 'unknown'}

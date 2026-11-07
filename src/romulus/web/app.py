@@ -32,6 +32,7 @@ from romulus.web import site_form
 from romulus.web.auth import RateLimiter, Sessions, csrf_ok, verify
 from romulus.web.catalog_routes import register_catalog_routes
 from romulus.web.indicator_routes import IndicatorBodyLimit, register_indicator_routes
+from romulus.web.request_routes import DetectionRequestBodyLimit, register_request_routes
 
 HERE = Path(__file__).resolve().parent
 COOKIE = "romulus_session"
@@ -51,6 +52,7 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
     limiter = RateLimiter()
     app = FastAPI(title="ROMULUS", docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(IndicatorBodyLimit)
+    app.add_middleware(DetectionRequestBodyLimit)
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
     tpl = Jinja2Templates(directory=HERE / "templates")
     tpl.env.autoescape = True
@@ -78,6 +80,7 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
     # ------------------------------------------------------------------ auth
     register_indicator_routes(app, repo, need, page)
     register_catalog_routes(app, repo, need, page)
+    register_request_routes(app, repo, need, page)
 
     @app.get("/login", response_class=HTMLResponse)
     def login_form(request: Request, error: str = ""):

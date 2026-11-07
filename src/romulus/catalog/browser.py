@@ -3,23 +3,32 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 from datetime import UTC, datetime, timedelta
+from itertools import chain, islice
 from pathlib import Path
 
 import yaml
-from sqlalchemy import func, select
+from sqlalchemy import LargeBinary, cast, func, select, text
 
+from romulus.catalog.applicability import applicability
 from romulus.catalog.build import _rule_metadata, build_catalog, strength_for_rule
 from romulus.catalog.models import COVERAGE_STRENGTH_LEGEND
 from romulus.content.indicator_export import _csv_cell
-from romulus.content.sigma_store import MAX_ACTIVE_RULES
+from romulus.content.sigma_store import MAX_ACTIVE_BYTES, MAX_ACTIVE_RULES
 from romulus.detect.registry import ALL_PLAYBOOKS
 from romulus.store import schema as t
+from romulus.store.db import read_snapshot
 
 TAGS = Path(__file__).resolve().parents[3] / 'content/catalog/rule_tags.yaml'
 PAGE_SIZE = 50
 PROFILE_MAX_AGE = timedelta(days=30)
 PROFILE_LIMIT = 1000
+MAX_PROFILE_BYTES = 8 * 1024 * 1024
+
+
+class CatalogLimitError(ValueError):
+    """Catalog content cannot be materialized within its explicit byte or row budget."""
 
 
 def known_families():
@@ -53,30 +62,6 @@ def load_tags(path=TAGS):
     return document
 
 
-def applicability(rule, profiles):
-    """Only current, complete profiles can establish family and field availability."""
-    rows = []
-    for profile in profiles:
-        source = profile['target']
-        captured = profile.get('captured_at', 'not recorded')
-        state = 'unknown'
-        text = f'unknown: no source profile since {captured} for {source}'
-        if profile.get('fresh') and profile.get('families') is not None:
-            missing_families = set(rule['families']) - set(profile['families'])
-            required = set(rule['required_fields'])
-            for family in rule['families']:
-                required.update(rule['required_by_family'].get(family, ()))
-            missing_fields = required - set(profile.get('fields', ()))
-            if missing_families or missing_fields:
-                state = 'not applicable'
-                missing = ', '.join(sorted(missing_fields or missing_families))
-                text = f'not applicable: {missing} missing in {source}'
-            elif rule['families']:
-                state, text = 'runs', f'runs on {source}'
-        rows.append({'source': source, 'state': state, 'text': text})
-    return rows or [{'source': 'unknown', 'state': 'unknown', 'text': 'unknown: no profile'}]
-
-
 def readable_ast(ast):
     """Render compiled typed Sigma nodes as conditions, never executable syntax."""
     def term(node):
@@ -90,8 +75,9 @@ def readable_ast(ast):
         if kind == 'exists':
             return f"{' or '.join(node['fields'])} {'exists' if node['value'] else 'is missing'}"
         if kind == 'field':
-            groups = [' AND '.join(term(item) for item in group) for group in node.get('groups', ())]
-            return (' or '.join(node['fields']) + ' matches ' +
+            groups = ['(' + ' OR '.join(term(item) for item in group) + ')' for group in node.get('groups', ())]
+            converted = (' after typed conversion ' + str(node['conversion']['type'])) if node.get('conversion') else ''
+            return (' or '.join(node['fields']) + converted + ' matches ' +
                     (' AND ' if node.get('all') else ' OR ').join(groups))
         if kind == 'string':
             pattern = ''.join(token.removeprefix('=') for token in node['pattern'])
@@ -103,7 +89,9 @@ def readable_ast(ast):
         if kind == 'literal':
             return repr(node['value'])
         return 'not recorded'
-    return term(ast.get('condition', {}))
+    scope = ast.get('scope', {})
+    restrictions = [f'{key}: {value}' for key, value in scope.items() if key != 'field_inventory']
+    return ('Scope: ' + '; '.join(restrictions) + '\n' if restrictions else '') + term(ast.get('condition', {}))
 
 
 def _document(rule, metadata=None, *, source='built-in', ast=None):
@@ -127,7 +115,12 @@ def _document(rule, metadata=None, *, source='built-in', ast=None):
     return {
         'id': rule.id, 'title': rule.title, 'version': rule.version, 'families': list(rule.families),
         'attack_ids': list(rule.attack_ids), 'lane': rule.lane, 'severity': rule.severity,
-        'assurance': strength, 'source': source, 'required_fields': sorted(required),
+        'assurance': strength, 'source': source, 'required_fields': list(rule.required_fields),
+        'referenced_fields': sorted(required), 'ast': ast,
+        'os_families': list(getattr(metadata, 'os_families', ())),
+        'windows_event_classes': list(getattr(metadata, 'windows_event_classes', ())),
+        'context_families': list(getattr(metadata, 'context_families', ())),
+        'required_families': list(getattr(metadata, 'required_families', ())), 'datasets': list(rule.datasets),
         'required_by_family': dict(rule.required_by_family), 'behavior': rule.behavior or rule.title,
         'fidelity': rule.fidelity or dict(COVERAGE_STRENGTH_LEGEND)[strength],
         'positive_only_reason': rule.positive_only_reason or 'not recorded',
@@ -153,41 +146,97 @@ class CatalogBrowser:
         self._catalog = {}
         self._rules = None
         self._profiles = None
+        self._sigma = None
 
     def catalog(self, domain='enterprise'):
         if domain not in self._catalog:
-            self._catalog[domain] = build_catalog(playbooks=ALL_PLAYBOOKS, domain=domain)
+            self._catalog[domain] = build_catalog(
+                playbooks=[*ALL_PLAYBOOKS, *(metadata for metadata, _ in self._active_sigma())], domain=domain)
         return self._catalog[domain]
+
+    def _active_sigma(self):
+        if self._sigma is not None:
+            return self._sigma
+        from romulus.detect.sigma import SigmaRule
+        size = sum(func.coalesce(func.length(cast(column, LargeBinary)), 0) for column in t.sigma_rule.c)
+        result, total = [], 0
+        with read_snapshot(self.engine) as c:
+            headers = c.execute(select(t.sigma_rule.c.id, size.label('bytes')).where(
+                t.sigma_rule.c.status == 'active').order_by(t.sigma_rule.c.id).limit(MAX_ACTIVE_RULES + 1))
+            for header in headers:
+                total += header.bytes
+                if len(result) >= MAX_ACTIVE_RULES or total > MAX_ACTIVE_BYTES:
+                    raise CatalogLimitError('Active Sigma catalog exceeds its row or byte memory limit')
+                # The same snapshot makes the byte preflight apply to the AST subsequently decoded.
+                row = dict(c.execute(select(t.sigma_rule).where(
+                    t.sigma_rule.c.id == header.id)).mappings().one())
+                rule = SigmaRule(row)
+                metadata = _rule_metadata(rule)
+                result.append((metadata, _document(metadata, rule, source='Sigma', ast=row['ast'])))
+        self._sigma = result
+        return result
 
     def profiles(self):
         if self._profiles is not None:
             return self._profiles
         from romulus.hunt.sweep import _dataset_families
         from romulus.sources.profile import contract_from_types
-        ranked = select(t.source_profile, func.row_number().over(
-            partition_by=t.source_profile.c.target,
-            order_by=(t.source_profile.c.captured_at.desc(), t.source_profile.c.id.desc())).label('n')).join(
-                t.hunt, t.hunt.c.id == t.source_profile.c.hunt_id).subquery()
-        with self.engine.connect() as c:
-            rows = c.execute(select(ranked).where(ranked.c.n == 1).order_by(
-                ranked.c.target).limit(PROFILE_LIMIT + 1)).mappings().all()
-            latest = c.execute(select(t.hunt.c.manifest, t.hunt.c.created_at).order_by(
-                t.hunt.c.created_at.desc(), t.hunt.c.id.desc()).limit(1)).first()
-        result = []
-        if not rows and latest:
-            rows = [{'target': target, 'profile': profile,
-                     'captured_at': profile.get('captured_at', latest.created_at)}
-                    for target, profile in list(latest.manifest.get('source_profiles', {}).items())[:PROFILE_LIMIT]]
-        for row in rows[:PROFILE_LIMIT]:
-            profile = row['profile']
-            stamp = row['captured_at']
-            if isinstance(stamp, str):
+        # Each recursive step seeks the next distinct target through its leading index.
+        # Millions of old rows for one target cost one latest-row seek, never a rank/sort.
+        query = text("""WITH RECURSIVE targets(target,n) AS (
+            SELECT MIN(target),1 FROM source_profile
+            UNION ALL
+            SELECT (SELECT MIN(target) FROM source_profile WHERE target > targets.target), n+1
+            FROM targets WHERE target IS NOT NULL AND n < :limit)
+            SELECT p.id,p.target,p.captured_at,length(CAST(p.profile AS BLOB)) AS bytes
+            FROM targets JOIN source_profile p ON p.id=(
+                SELECT id FROM source_profile WHERE target=targets.target
+                ORDER BY captured_at DESC,id DESC LIMIT 1)
+            JOIN hunt h ON h.id=p.hunt_id WHERE targets.target IS NOT NULL ORDER BY p.target""")
+        def stamp_of(value):
+            if isinstance(value, str):
                 try:
-                    stamp = datetime.fromisoformat(stamp)
+                    value = datetime.fromisoformat(value)
                 except ValueError:
-                    stamp = None
-            if stamp is not None and stamp.tzinfo is None:
-                stamp = stamp.replace(tzinfo=UTC)
+                    return None
+            return value.replace(tzinfo=UTC) if value is not None and value.tzinfo is None else value
+        with read_snapshot(self.engine) as c:
+            latest = c.execute(select(t.hunt.c.id, t.hunt.c.created_at,
+                func.length(cast(t.hunt.c.manifest, LargeBinary)).label('bytes')).order_by(
+                t.hunt.c.created_at.desc(), t.hunt.c.id.desc()).limit(1)).first()
+            manifest, total = {}, 0
+            if latest and latest.bytes <= MAX_PROFILE_BYTES:
+                total = latest.bytes
+                manifest = c.execute(select(t.hunt.c.manifest).where(t.hunt.c.id == latest.id)).scalar_one()
+            rows = []
+            for header in c.execute(query, {'limit': PROFILE_LIMIT + 1}).mappings():
+                profile = {}
+                unknown_reason = 'profile byte budget exceeded'
+                if total + header['bytes'] <= MAX_PROFILE_BYTES:
+                    total += header['bytes']
+                    profile = c.execute(select(t.source_profile.c.profile).where(
+                        t.source_profile.c.id == header['id'])).scalar_one()
+                    unknown_reason = ''
+                rows.append({'target': header['target'], 'captured_at': header['captured_at'], 'profile': profile,
+                             'unknown_reason': unknown_reason})
+        recorded = {row['target']: index for index, row in enumerate(rows)}
+        manifest_profiles = manifest.get('source_profiles', {})
+        for target in islice(chain(manifest_profiles, manifest.get('targets', ())), PROFILE_LIMIT * 2):
+            profile = manifest_profiles.get(target, {})
+            captured = profile.get('captured_at', latest.created_at if latest else None)
+            if target in recorded:
+                previous = stamp_of(rows[recorded[target]]['captured_at'])
+                current = stamp_of(captured)
+                if profile and current and (previous is None or current > previous):
+                    rows[recorded[target]] = {'target': target, 'captured_at': captured, 'profile': profile}
+                continue
+            rows.append({'target': target, 'captured_at': captured, 'profile': profile})
+            recorded[target] = len(rows) - 1
+            if len(rows) > PROFILE_LIMIT:
+                break
+        result = []
+        for row in rows[:PROFILE_LIMIT]:
+            profile, stamp = row['profile'], stamp_of(row['captured_at'])
             complete = (profile.get('datasets_complete', True) and bool(profile.get('field_types')) and
                         not any('truncat' in str(note).lower() or 'incomplete' in str(note).lower()
                                 for note in profile.get('notes', ())))
@@ -197,26 +246,24 @@ class CatalogBrowser:
             contract = contract_from_types(row['target'], profile.get('field_types', {}),
                                            role=profile.get('role'), os_family=profile.get('os_family'))
             result.append({'target': row['target'], 'captured_at': str(stamp or 'not recorded'),
-                           'families': families, 'fields': sorted(contract.fields),
+                           'families': families, 'fields': sorted(contract.fields), 'datasets': list(datasets),
+                           'unknown_reason': row.get('unknown_reason', ''),
+                           'os_family': profile.get('os_family', 'unknown'), 'role': profile.get('role'),
+                           'event_classes': profile.get('event_classes', profile.get('windows_event_classes')),
+                           'scope_values': profile.get('scope_values', {}),
+                           'absence_fields': profile.get('absence_fields', ()),
+                           'fields_by_family': profile.get('fields_by_family', {}),
                            'fresh': bool(stamp and datetime.now(UTC) - stamp <= PROFILE_MAX_AGE and complete)})
-        if len(rows) > PROFILE_LIMIT:
-            result.append({'target': 'additional sources', 'fresh': False, 'captured_at': 'profile page limit'})
+        if len(rows) > PROFILE_LIMIT or latest and latest.bytes > MAX_PROFILE_BYTES:
+            result.append({'target': 'additional source profiles', 'fresh': False,
+                           'captured_at': 'profile row or byte budget exceeded'})
         self._profiles = result
         return result
 
     def base_rules(self):
         if self._rules is None:
-            metadata = {rule.id: rule for rule in ALL_PLAYBOOKS}
-            rows = [_document(rule, metadata[rule.id]) for rule in self.catalog().rules]
-            from romulus.detect.sigma import SigmaRule
-            with self.engine.connect() as c:
-                sigma = c.execute(select(t.sigma_rule).where(t.sigma_rule.c.status == 'active').order_by(
-                    t.sigma_rule.c.id).limit(MAX_ACTIVE_RULES + 1)).mappings().all()
-            if len(sigma) > MAX_ACTIVE_RULES:
-                raise ValueError('Active Sigma catalog limit exceeded')
-            for row in sigma:
-                rule = SigmaRule(dict(row))
-                rows.append(_document(_rule_metadata(rule), rule, source='Sigma', ast=row['ast']))
+            rows = [_document(_rule_metadata(rule), rule) for rule in ALL_PLAYBOOKS]
+            rows.extend(document for _, document in self._active_sigma())
             self._rules = sorted(rows, key=lambda row: row['id'])
         return self._rules
 
@@ -252,11 +299,12 @@ class CatalogBrowser:
                     t.candidate.c.rule_id.in_(wanted)).group_by(t.candidate.c.rule_id)).mappings()
             for row in totals:
                 result[row['rule_id']].update(hits=row['hits'], recent_hits=row['recent_hits'])
-            ranked = select(t.candidate.c.rule_id, t.candidate.c.hunt_id, t.candidate.c.created_at,
-                func.row_number().over(partition_by=t.candidate.c.rule_id,
-                    order_by=(t.candidate.c.created_at.desc(), t.candidate.c.id.desc())).label('n')).join(
-                    t.hunt, t.hunt.c.id == t.candidate.c.hunt_id).where(t.candidate.c.rule_id.in_(wanted)).subquery()
-            for row in c.execute(select(ranked).where(ranked.c.n == 1)).mappings():
+            wanted_rows = func.json_each(json.dumps(sorted(wanted))).table_valued('value')
+            def last(column):
+                return select(column).where(t.candidate.c.rule_id == wanted_rows.c.value).order_by(
+                    t.candidate.c.created_at.desc(), t.candidate.c.id.desc()).limit(1).scalar_subquery()
+            for row in c.execute(select(wanted_rows.c.value.label('rule_id'),
+                last(t.candidate.c.hunt_id).label('hunt_id'), last(t.candidate.c.created_at).label('created_at'))).mappings():
                 result[row['rule_id']].update(last_hunt=row['hunt_id'], last_at=row['created_at'])
             outcomes = c.execute(select(t.candidate.c.rule_id, t.disposition_event.c.status,
                 func.count().label('n')).join(t.disposition_event, t.disposition_event.c.candidate_id == t.candidate.c.id
@@ -293,8 +341,11 @@ class CatalogBrowser:
                 item['state'] for item in applicability(row, self.profiles())})
         rows = [row for row in self.base_rules() if row['id'] > after and matches(row)]
         if filters.get('never_fired') == '1':
-            stats = self.statistics([row['id'] for row in rows])
-            rows = [row for row in rows if not stats[row['id']]['hits']]
+            wanted_rows = func.json_each(json.dumps([row['id'] for row in rows])).table_valued('value')
+            fired = select(t.candidate.c.id).where(t.candidate.c.rule_id == wanted_rows.c.value).exists()
+            with self.engine.connect() as c:
+                fired_ids = set(c.execute(select(wanted_rows.c.value).where(fired)).scalars())
+            rows = [row for row in rows if row['id'] not in fired_ids]
         if (not technique and not tactic and filters.get('never_fired') != '1'
                 and filters.get('source', '') in {'', 'indicator list'}):
             # Overlay lists do not own candidates: never attribute the matcher's hits to every list.
@@ -308,7 +359,8 @@ class CatalogBrowser:
                     if filters.get(key):
                         query = query.where(getattr(t.indicator_list.c, key) == filters[key])
                 sample = {**next(item for item in self.base_rules() if item['id'] == 'ioc.indicator_match'),
-                          'id': '', 'title': filters.get('q', ''), 'source': 'indicator list'}
+                          'id': '', 'title': filters.get('q', ''), 'source': 'indicator list',
+                          'lane': filters.get('lane') or 'lead'}
                 if matches(sample):
                     for row in c.execute(query.order_by(t.indicator_list.c.id).limit(limit + 1)).mappings():
                         rows.append(self._indicator_document(row))

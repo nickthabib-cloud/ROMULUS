@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Request a detection</h1>{% include "catalog_nav.html" %}
+<p>Describe the behavior to flag. The request stores example references and never copies the underlying record.</p>
+<form method="post" action="/catalog/requests" class="card">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<label>Behavior <textarea name="behavior" required maxlength="4000" rows="6">{{ draft.behavior }}</textarea></label>
+<label>Telemetry family <select name="telemetry_family"><option value="unknown" {% if draft.family == 'unknown' %}selected{% endif %}>unknown</option>{% for family in families %}<option {% if draft.family == family %}selected{% endif %}>{{ family }}</option>{% endfor %}</select></label>
+<label>ATT&amp;CK technique IDs (optional; commas or spaces) <input name="attack_ids" maxlength="2048" value="{{ draft.attack_ids | join(', ') }}"></label>
+<label>Example finding ID (optional) <input name="example_candidate_id" maxlength="256" value="{{ draft.candidate_id }}"></label>
+{% if draft.event_choices %}<label>Chosen cited event <select name="example_event_id"><option value="">No event</option>{% for id in draft.event_choices %}<option value="{{ id }}" {% if id == draft.event_id %}selected{% endif %}>{{ id }}</option>{% endfor %}</select></label>
+{% else %}<label>Example cited event ID (optional) <input name="example_event_id" maxlength="256" value="{{ draft.event_id }}"></label>{% endif %}
+<button type="submit">Create request</button></form>
+{% endblock %}

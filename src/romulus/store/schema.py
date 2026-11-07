@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from sqlalchemy import (
+    DDL,
     JSON,
     CheckConstraint,
     Column,
@@ -17,6 +18,7 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    event,
 )
 
 metadata = MetaData()
@@ -1104,3 +1106,79 @@ sigma_rule = Table(
     Column("activation_reason", String, nullable=False, default="", server_default=""),
     CheckConstraint("status IN ('draft','reference-only','active','retired')", name="ck_sigma_rule_status"),
 )
+
+detection_request = Table(
+    "detection_request", metadata,
+    Column("id", String, primary_key=True),
+    Column("requester", String, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("behavior", Text, nullable=False),
+    Column("telemetry_family", String, nullable=False),
+    Column("attack_ids", JSON, nullable=False),
+    # Durable references deliberately survive deletion of the source hunt, without retaining telemetry.
+    Column("example_candidate_id", String),
+    Column("example_event_id", String),
+    Column("status", String, nullable=False),
+    Column("rule_id", String),
+    Column("decline_reason", Text),
+    Column("status_reason", Text, nullable=False, default="", server_default=""),
+    Column("updated_by", String, nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint("length(trim(behavior)) BETWEEN 1 AND 4000", name="ck_detection_request_behavior"),
+    CheckConstraint("telemetry_family IN ('account_change','address_assignment','app_tx','application_compatibility','asset_observed','audit_config','auth','boot_configuration','database_audit','dcom_access','defender_event','directory_access','directory_change','dns_lookup','dns_query','ese_database','file_change','file_transfer','http_access','http_body','http_tx','ics_tx','image_load','kerberos_tx','ldap_tx','msi_install','net_alert','net_flow','net_session','net_socket','network_filter','ntlm_tx','object_access','pipe_event','privilege_adjustment','privilege_use','process_access','process_exec','process_observed','process_tampering','process_termination','registry_change','remote_access','remote_session','remote_thread','rpc_call','rpc_tx','scheduled_task','script_block','security_enumeration','sensor_health','service_change','share_access','silent_process_exit','smb_tx','ssh_session','system_state','tcp_stream','tls_session','web_error','winsock_catalog','wmi_subscription','x509_certificate','kernel_module','file_access','share_change','unknown')",
+                    name='ck_detection_request_family'),
+    CheckConstraint("status IN ('requested','accepted','in_progress','active','declined')",
+                    name="ck_detection_request_status"),
+    CheckConstraint("status != 'active' OR (rule_id IS NOT NULL AND length(trim(rule_id)) > 0)",
+                    name="ck_detection_request_active"),
+    CheckConstraint("status != 'declined' OR (decline_reason IS NOT NULL AND length(trim(decline_reason)) > 0)",
+                    name="ck_detection_request_decline"),
+    CheckConstraint("example_event_id IS NULL OR example_candidate_id IS NOT NULL",
+                    name="ck_detection_request_example"),
+)
+Index("ix_detection_request_status_id", detection_request.c.status, detection_request.c.id)
+Index("ix_detection_request_requester_id", detection_request.c.requester, detection_request.c.id)
+
+detection_request_event = Table(
+    "detection_request_event", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("request_id", String, ForeignKey("detection_request.id"), nullable=False),
+    Column("actor", String, nullable=False),
+    Column("at", DateTime(timezone=True), nullable=False),
+    Column("old_status", String),
+    Column("new_status", String, nullable=False),
+    Column("reason", Text, nullable=False),
+    Column("rule_id", String),
+)
+Index("ix_detection_request_event_request_id", detection_request_event.c.request_id, detection_request_event.c.id)
+
+for _trigger in (
+    """CREATE TRIGGER detection_request_no_replace BEFORE INSERT ON detection_request
+       WHEN EXISTS(SELECT 1 FROM detection_request WHERE id=NEW.id)
+       BEGIN SELECT RAISE(ABORT,'detection request replacement is forbidden'); END""",
+    """CREATE TRIGGER detection_request_event_no_replace BEFORE INSERT ON detection_request_event
+       WHEN EXISTS(SELECT 1 FROM detection_request_event WHERE id=NEW.id)
+       BEGIN SELECT RAISE(ABORT,'detection request history is append-only'); END""",
+    """CREATE TRIGGER detection_request_created AFTER INSERT ON detection_request
+       BEGIN INSERT INTO detection_request_event(request_id,actor,at,old_status,new_status,reason,rule_id)
+       VALUES(NEW.id,NEW.requester,NEW.created_at,NULL,NEW.status,'',NEW.rule_id); END""",
+    """CREATE TRIGGER detection_request_status_changed
+       AFTER UPDATE OF status ON detection_request WHEN OLD.status != NEW.status
+       BEGIN INSERT INTO detection_request_event(request_id,actor,at,old_status,new_status,reason,rule_id)
+       VALUES(NEW.id,NEW.updated_by,NEW.updated_at,OLD.status,NEW.status,NEW.status_reason,NEW.rule_id); END""",
+    """CREATE TRIGGER detection_request_event_no_update BEFORE UPDATE ON detection_request_event
+       BEGIN SELECT RAISE(ABORT,'detection request history is append-only'); END""",
+    """CREATE TRIGGER detection_request_event_no_delete BEFORE DELETE ON detection_request_event
+       BEGIN SELECT RAISE(ABORT,'detection request history is append-only'); END""",
+):
+    event.listen(detection_request_event, "after_create", DDL(_trigger).execute_if(dialect="sqlite"))
+
+Index("ix_candidate_catalog_rule_time", candidate.c.rule_id, candidate.c.created_at.desc(),
+      candidate.c.id.desc(), candidate.c.hunt_id)
+Index("ix_candidate_catalog_rule_hunt", candidate.c.rule_id, candidate.c.hunt_id)
+Index("ix_disposition_catalog_candidate_status", disposition_event.c.candidate_id, disposition_event.c.status)
+Index("ix_hunt_catalog_created", hunt.c.created_at.desc(), hunt.c.id.desc())
+Index("ix_source_profile_catalog_latest", source_profile.c.target, source_profile.c.captured_at.desc(),
+      source_profile.c.id.desc())
+Index("ix_sigma_catalog_status_id", sigma_rule.c.status, sigma_rule.c.id)
+Index("ix_audit_catalog_action_hunt", audit_event.c.action, audit_event.c.hunt_id)

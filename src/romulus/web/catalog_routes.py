@@ -4,10 +4,16 @@ from __future__ import annotations
 from urllib.parse import urlencode
 
 from fastapi import HTTPException, Request
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
 from sqlalchemy import select
 
-from romulus.catalog.browser import CatalogBrowser, applicability, known_families, load_tags
+from romulus.catalog.browser import (
+    CatalogBrowser,
+    CatalogLimitError,
+    applicability,
+    known_families,
+    load_tags,
+)
 from romulus.catalog.models import COVERAGE_STRENGTH_LEGEND
 from romulus.store import schema as t
 
@@ -24,6 +30,10 @@ def catalog_user(repo, need, request, *, lead=False):
 
 
 def register_catalog_routes(app, repo, need, page):
+    @app.exception_handler(CatalogLimitError)
+    def catalog_limit(_request, exc):
+        return PlainTextResponse(str(exc), status_code=503)
+
     def filters(request):
         result = {key: request.query_params.get(key, '') for key in (
             'q', 'family', 'tactic', 'technique', 'lane', 'assurance', 'applicability', 'source', 'never_fired')}
@@ -63,15 +73,6 @@ def register_catalog_routes(app, repo, need, page):
             raise HTTPException(400, 'Invalid ATT&CK domain or cursor')
         browser = CatalogBrowser(repo)
         catalog = browser.catalog(domain)
-        # Local rules participate in the same strength accounting as shipped rules.
-        from romulus.catalog.build import build_catalog
-        from romulus.detect.registry import ALL_PLAYBOOKS
-        sigma = [row for row in browser.base_rules() if row['source'] == 'Sigma']
-        if sigma:
-            from romulus.content.sigma_store import SigmaRules
-            from romulus.detect.sigma import SigmaRule
-            catalog = build_catalog(domain=domain, playbooks=[
-                *ALL_PLAYBOOKS, *(SigmaRule(row) for row in SigmaRules(repo).iter_rules() if row['status'] == 'active')])
         rows = [row for row in catalog.coverage_by_technique if row.technique.id > after]
         return page(request, 'catalog_attack.html', user, domain=domain, rows=rows[:50],
                     legend=COVERAGE_STRENGTH_LEGEND, tactics=catalog.tactics,
