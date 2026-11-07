@@ -7,6 +7,7 @@ from romulus.agent.ollama import ModelResult
 from romulus.config import Settings
 from romulus.decide.policy import decide
 from romulus.detect.host import CredentialStoreRead
+from romulus.detect.linux_direct import CredentialMaterialAccess
 from romulus.evidence.normalize import normalize_hits
 from romulus.evidence.typed import TypedEvent, fv
 from romulus.hunt import pivot as pivot_module
@@ -114,6 +115,8 @@ def test_attacker_ip_to_auth_host_to_process_finding_has_full_cited_chain(monkey
     process_event = normalize_hits(process_records)[0][0]
     process_match = CredentialStoreRead().consume([process_event])[0]
     process_decision = decide(process_match, "h1")
+    material_match = CredentialMaterialAccess().consume([process_event])[0]
+    material_decision = decide(material_match, "h1")
 
     engine = make_engine(":memory:")
     migrate(engine)
@@ -189,7 +192,11 @@ def test_attacker_ip_to_auth_host_to_process_finding_has_full_cited_chain(monkey
     assert discovered["lane"] == process_decision.lane and discovered["claim"] == process_match.claim
     assert auth_event.id in steps[1]["result_digest"]["event_ids"]
     assert process_event.id in steps[2]["result_digest"]["event_ids"]
-    assert steps[2]["result_digest"]["candidate_ids"] == [process_decision.candidate_id]
+    assert sorted(steps[2]["result_digest"]["candidate_ids"]) == sorted([
+        process_decision.candidate_id, material_decision.candidate_id])
+    material = repo.candidate(material_decision.candidate_id)
+    assert material["source_case_id"] == case["id"]
+    assert material["lane"] == material_decision.lane and material["claim"] == material_match.claim
 
     repo.audit("system", "hunt.agent_summary", "h1", summary)
     repo.set_hunt_state("h1", "completed_within_scope", detection_result="reportable_findings")

@@ -429,3 +429,16 @@ def test_session_absence_contract_is_limited_to_endpoint_tuple(protocol):
     record = arkime(protocol=['tcp', protocol])
     record['_source']['source'].pop('port')
     assert evaluate_ast_detail(endpoint, one(record)) == (True, [], [])
+
+
+@pytest.mark.parametrize('shape', ['winlogbeat_8', 'elastic_agent'])
+@pytest.mark.parametrize('code', [5142, 5143, 5144])
+def test_share_change_actor_fields_are_available_to_security_rules(shape, code):
+    native = LogicalWindowsEvent('Security', SECURITY, code, 'ws01', 1,
+        '2026-01-02T03:04:05Z', {'SubjectUserName': 'share-admin', 'SubjectDomainName': 'EXAMPLE',
+                               'ShareName': r'\\*\Inventory', 'ShareLocalPath': r'C:\Shares\Inventory'})
+    event = one(windows_hit(native, shape))
+    ast = compiled({'product': 'windows', 'service': 'security'},
+                   {'SubjectUserName': 'share-admin', 'SubjectDomainName': 'EXAMPLE'})
+    matched, fields, reasons = evaluate_ast_detail(ast, event)
+    assert matched and set(fields) == {'user.name', 'user.domain'} and reasons == []

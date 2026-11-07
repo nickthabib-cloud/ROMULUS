@@ -5,13 +5,13 @@ from romulus.detect.bounded import StateBudget
 from romulus.hunt import sweep as sw
 from tests import throughput_fixture as tf
 
-# All 35 finding identities and lanes are retained. Three beacons cite Arkime first and retain the equivalent
-# Suricata witnesses; sensor attribution, cited timestamps and versions follow. See test_throughput_equality.
-CANDIDATE_GOLDENS = {
-    4: (35, "6531915996fd5b464b73a18dab49e7cbe2f679eccc4e71ec6618458629b3a4e3"),
-    8: (35, "6531915996fd5b464b73a18dab49e7cbe2f679eccc4e71ec6618458629b3a4e3"),
-    16: (35, "6531915996fd5b464b73a18dab49e7cbe2f679eccc4e71ec6618458629b3a4e3"),
-}
+# All 35 prior findings and lanes remain; nine findings are added. At 4 MiB, seven prior findings
+# explicitly report reduced citation detail under the existing optional-citation headroom policy.
+# The 8/16 MiB cases retain full current details, including both sensors for the three beacons.
+# Producer/version and added-rule changes are explained in test_throughput_equality.
+CANDIDATE_GOLDENS = {4: (44, '96527dfd128beba6fb241208f45c8bd1169ea2009e3156b5fa7cb56de1feac57'),
+ 8: (44, '7feeec34152612d99f26f626457058d6b4dc627289c56914d4985e6863675d37'),
+ 16: (44, '7feeec34152612d99f26f626457058d6b4dc627289c56914d4985e6863675d37')}
 
 
 @pytest.mark.parametrize("mib", CANDIDATE_GOLDENS)

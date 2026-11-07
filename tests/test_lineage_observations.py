@@ -57,7 +57,7 @@ def _syscall(t, serial, *, nr, name, pid, ppid, exe, comm, uid="0", user="root",
 
 
 def observe(t, serial, pid, ppid, exe, comm="x", uid="0", user="root", ses="4294967295"):
-    """A read-only open that failed: no typed event of its own family, so a process_observed record."""
+    """A failed watched read produces a path-unknown file_access and a process_observed view."""
     return [_hit(f"o{serial}", _syscall(t, serial, nr=257, name="openat", pid=pid, ppid=ppid, exe=exe, comm=comm,
                                         uid=uid, user=user, success="no", exit_code="-13", ses=ses), t)]
 
@@ -358,8 +358,8 @@ def test_the_lab_zmc_lineage_reaches_the_service_manager_and_its_lane_is_lowered
     cited = {e.raw[0].native_id for e in m.events if e.family == "process_observed"}
     assert cited == {"s843", "o928", "o972"}
     assert all(r.key in m.raw_copies for e in m.events if e.family == "process_observed" for r in e.raw)
-    rebuilt = next(e for e in m.events if e.raw[0].native_id == "o928")
-    original = next(e for e in events if e.raw[0].native_id == "o928")
+    [rebuilt] = [e for e in m.events if e.family == "process_observed" and e.raw[0].native_id == "o928"]
+    [original] = [e for e in events if e.family == "process_observed" and e.raw[0].native_id == "o928"]
     assert rebuilt.model_dump() == original.model_dump()
 
 
@@ -411,7 +411,7 @@ def test_a_forked_apache_worker_makes_its_childs_ancestry_the_web_server():
     assert m.proposed_lane == "high" and "ancestry includes the web server '/usr/sbin/apache2'" in m.claim
     assert "o20" in {e.raw[0].native_id for e in m.events}             # the worker's record is cited
     # exec records alone stop at the worker
-    execs = [e for e in events if e.family != "process_observed"]
+    execs = [e for e in events if e.family == "process_exec"]
     assert table(execs).ancestry_of(HOST, 502, T + 7, None, 22).verdict == "unknown"
 
 
@@ -758,7 +758,9 @@ def test_an_unreadable_observed_group_is_one_error_and_the_rest_normalize(monkey
     hits = [hit for group in (observe(T, 20, 401, 400, "/usr/bin/perl"), observe(T + 1, 21, 402, 400, "/usr/bin/perl"),
                               observe(T + 2, 22, 403, 400, "/usr/bin/perl")) for hit in group]
     events, _skips, errors = normalize_hits(hits)
-    assert [e.raw[0].native_id for e in events] == ["o20", "o22"]
+    assert [e.raw[0].native_id for e in events if e.family == "process_observed"] == ["o20", "o22"]
+    # The independent watched-read view survives even when its observation view cannot be rebuilt.
+    assert [e.raw[0].native_id for e in events if e.family == "file_access"] == ["o20", "o21", "o22"]
     assert errors == [("o21", "linux.audit.observed: unreadable")]
     assert DATASET_FAMILIES["linux.audit.observed"] == {"process_observed"}
 

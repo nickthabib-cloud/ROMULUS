@@ -25,7 +25,7 @@ from romulus.evidence.windows_catalog import WINDOWS_DATASETS, WindowsEventClass
 if TYPE_CHECKING:
     from romulus.detect.bounded import Account, StateBudget
 
-WINDOWS_NORMALIZER = "windows-ecs@16"
+WINDOWS_NORMALIZER = "windows-ecs@17"
 # This is already far beyond what the 64 MiB assembler can retain at normal 4104 chunk sizes, while bounding every
 # completeness vector even when hostile metadata claims billions of parts.
 SCRIPT_BLOCK_MAX_PARTS = 4_096
@@ -827,6 +827,12 @@ def _ip(value: object) -> str:
 
 def _hostname(value: object) -> str:
     return str(value).strip().rstrip(".").casefold()
+
+
+def _descriptor_text(value: object) -> str:
+    if not isinstance(value, str):
+        raise TypeError("security descriptor must be a native string")
+    return value
 
 
 def _string_list(value: object) -> list[str]:
@@ -2058,6 +2064,9 @@ def _semantic_fields(fields: dict[str, FieldValue], record: WindowsRecord, host:
         return Outcome.success
     if family in {"directory_access", "directory_change"}:
         prefix = "directory.access" if family == "directory_access" else "directory.change"
+        session = _session_id(record, "SubjectLogonId")
+        if session:
+            fields["directory.actor_session_id"] = fv(*session)
         fields[f"{prefix}.action"] = fv({4662: "accessed", 4706: "trust_created", 4716: "trust_modified",
                                          5136: "modified", 5137: "created",
                                          5138: "undeleted", 5139: "moved", 5141: "deleted"}.get(event_id),
@@ -2088,6 +2097,14 @@ def _semantic_fields(fields: dict[str, FieldValue], record: WindowsRecord, host:
                 names = [_DIRECTORY_RIGHT_GUIDS[guid] for guid in guids if guid in _DIRECTORY_RIGHT_GUIDS]
                 if names:
                     fields["directory.rights.names"] = fv(names, properties.origin + "#mapped:ad-schema")
+        return _audit_outcome(record)
+    if family == "share_change":
+        fields["share.change"] = fv({5142: "added", 5143: "modified", 5144: "deleted"}[event_id],
+                                   fields["event.code"].origin)
+        _put(fields, record, "share.name", "ShareName")
+        _put(fields, record, "share.local_path", "ShareLocalPath")
+        _put(fields, record, "share.security_descriptor.old", "OldSD", transform=_descriptor_text)
+        _put(fields, record, "share.security_descriptor.new", "NewSD", transform=_descriptor_text)
         return _audit_outcome(record)
     if family == "share_access":
         fields["share.action"] = fv("accessed" if event_id == 5145 else "connected",

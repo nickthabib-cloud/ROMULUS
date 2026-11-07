@@ -77,7 +77,12 @@ def test_context_lane_cannot_overclaim_negative_capability():
     assert rule.lane == "context"
     assert rule.assures_negative is True
     assert strength_for_rule(rule) is CoverageStrength.CONTEXT_ONLY
-    assert catalog.coverage("T1071.001").strength is CoverageStrength.CONTEXT_ONLY
+    context_catalog = build_catalog(playbooks=[
+        cls for cls in ALL_PLAYBOOKS if cls.id == "net.rare_client_fingerprint"])
+    assert context_catalog.coverage("T1071.001").strength is CoverageStrength.CONTEXT_ONLY
+    # A sourced default certificate adds a separate positive-only arm to the complete catalog.
+    assert strength_for_rule(catalog.rule("net.c2_default_certificate")) is CoverageStrength.POSITIVE_ONLY
+    assert catalog.coverage("T1071.001").strength is CoverageStrength.POSITIVE_ONLY
 
 
 def test_catalog_exposes_only_strengths_supported_by_typed_metadata():

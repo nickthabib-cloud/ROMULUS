@@ -25,7 +25,7 @@ def test_catalog_export_has_the_public_ui_schema_and_round_trips_json():
     }
     assert document["schema_version"] == 1
     assert document["attack_version"] == "20.0"
-    assert document["pack_version"] == "pack@53"
+    assert document["pack_version"] == "pack@54"
     assert json.loads(json.dumps(document)) == document
 
 
@@ -78,8 +78,10 @@ def test_catalog_export_explains_strength_and_labels_each_covering_rule():
         "A covering rule provides investigation context around other findings."
     )
     assert web_protocols["covering_rules"] == [
+        {"rule_id": "net.c2_default_certificate", "strength": "positive-only"},
         {"rule_id": "net.rare_client_fingerprint", "strength": "context-only"}
     ]
+    assert web_protocols["strength"] == "positive-only"
 
 
 def test_catalog_export_marks_every_uncovered_technique_as_a_gap():

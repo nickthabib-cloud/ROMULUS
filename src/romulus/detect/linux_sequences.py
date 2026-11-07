@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import posixpath
 import re
+import sqlite3
+import weakref
 from datetime import UTC, datetime
 from itertools import groupby
 from urllib.parse import urlsplit
@@ -17,6 +19,7 @@ from romulus.detect.base import Match, Playbook, argv_incomplete, pf
 from romulus.detect.bounded import (
     CitationUnavailable,
     RecentIds,
+    Spill,
     StateExhausted,
     register_store,
     store_refuses,
@@ -27,6 +30,7 @@ from romulus.detect.linux_argv import normalize_path, program, write_targets
 from romulus.detect.linux_direct import (
     BASE_PACKAGE_DIRS,
     PACKAGE_EXTRA_DIRS,
+    download_log_paths,
     executed_paths,
     output_paths,
     temporary,
@@ -42,6 +46,7 @@ from romulus.detect.linux_semantics import (
 from romulus.detect.netdef import assume_direction
 from romulus.detect.site_roles import address_member
 from romulus.evidence.typed import Outcome
+from romulus.hunt.citations import compact_event, expand_event
 from romulus.site import absent_site_facts
 
 # Human-driven staging normally follows retrieval within a session; one hour allows interrupted installs.
@@ -91,6 +96,201 @@ def _owner(path, event):
     return None, True
 
 
+class _LinuxWitnesses:
+    """One budgeted, lossless compressed witness per event across Linux sequence rules.
+
+    Raw source bodies remain on their telemetry source; selected citations use the sweep's
+    existing digest-checked source hydration. No partially populated typed event is created.
+    """
+
+    # Only selected citation loading reads these bodies; scalar tables own detection state.
+    yields = True
+
+    def __init__(self, owner, members):
+        self.owner, self.members = owner, {id(member) for member in members}
+        self._rules = tuple(weakref.ref(member) for member in members)
+        self._spill, self._account = None, None
+        self._blocked_generation = None
+        self._next_sequence = self._reclaim_cursor = 0
+        self.pending = set()
+        self.closed = False
+        register_store(owner, self)
+
+    def account(self):
+        if self._account is None:
+            self._account = self.owner.state_budget().account("linux_sequence_witnesses", yields=True)
+            # Compact references yield only after a real FULL, never at optional-copy thresholds.
+            self._account.evict_references = self._evict_references
+            self._account.reclaim_database = lambda: (self._spill.db, self._spill.path) if self._spill else (None, None)
+        return self._account
+
+    def store(self):
+        if self._spill is None:
+            spill = Spill(self.owner.spill_dir, self.owner.state_budget(), owner=self.owner)
+            try:
+                spill.cap()
+                spill.db.execute("PRAGMA auto_vacuum=INCREMENTAL")
+                spill.grew()
+                spill.table("witnesses", "id TEXT PRIMARY KEY, body BLOB")
+            except StateExhausted:
+                spill.close()
+                raise
+            except sqlite3.Error as exc:
+                error = spill.failed(exc, report=False)
+                spill.close()
+                raise error from exc
+            self._spill = spill
+            _sql, rows = spill._buffers["witnesses"]
+            # Explicit rowids never reuse a deleted admission, including after every row was reclaimed.
+            spill._buffers["witnesses"] = ("INSERT OR IGNORE INTO witnesses(rowid,id,body) VALUES(?,?,?)", rows)
+        return self._spill
+
+    def hold(self, event):
+        if event.id in self.pending or self._spill is not None and self._spill.db.execute(
+                "SELECT 1 FROM witnesses WHERE id=?", (event.id,)).fetchone():
+            return
+        if self._blocked_generation is not None and not self.flush(retry=False):
+            return
+        # These are mandatory compact references, like EventStage._insert_compact. Optional
+        # body-cache thresholds must not discard them; Spill enforces the real page ceiling.
+        if self.owner.state_budget().new_key_reason(None):
+            self.owner.note_limit("linux_witnesses", "the compact Linux witness disk budget is spent; some citations are unresolved")
+            return
+        body = compact_event(event)
+        try:
+            spill = self.store()
+        except StateExhausted as exc:
+            self.owner.note_limit("linux_witnesses", f"compact Linux witness storage could not be created: {exc}")
+            return
+        # Spill.add appends before its automatic flush. A failed flush keeps this row too.
+        self.pending.add(event.id)
+        self._next_sequence += 1
+        self.owner.state_budget().charge(self.account(), len(body) + len(event.id) + 64)
+        try:
+            spill.add("witnesses", (self._next_sequence, event.id, body))
+        except StateExhausted as exc:
+            self._blocked_generation = self.owner.state_budget()._capacity_generation
+            self.owner.note_limit("linux_witnesses",
+                f"{len(self.pending)} accepted compact Linux witness(es) remain buffered after disk refusal: {exc}; "
+                "new witness IDs are not retained until the buffer can be written")
+            return
+        if not spill._buffers["witnesses"][1]:
+            self.pending.clear()
+
+    def flush(self, *, retry=True):
+        if self._spill is None:
+            return True
+        budget = self.owner.state_budget()
+        if not retry and self._blocked_generation == budget._capacity_generation:
+            return False
+        try:
+            self._spill.flush()
+        except StateExhausted as exc:
+            self._blocked_generation = budget._capacity_generation
+            self.owner.note_limit("linux_witnesses",
+                f"{len(self.pending)} accepted compact Linux witness(es) remain buffered after disk refusal: {exc}; "
+                "new witness IDs are not retained until the buffer can be written")
+            return False
+        self.pending.clear()
+        self._blocked_generation = None
+        return True
+
+    def load(self, ids):
+        if self._spill is None:
+            return []
+        self.flush(retry=False)
+        out = []
+        for start in range(0, len(ids), 500):
+            batch = ids[start:start + 500]
+            out.extend(expand_event(row[0]) for row in self._spill.db.execute(
+                f"SELECT body FROM witnesses WHERE id IN ({','.join('?' for _ in batch)})", batch))
+        return out
+
+    def count(self):
+        self.flush()
+        return self._spill.db.execute("SELECT COUNT(*) FROM witnesses").fetchone()[0] if self._spill else 0
+
+    def _evict_references(self, needed):
+        """After FULL, inspect at most32 admissions and reclaim only otherwise-unused clock bodies."""
+        if self._spill is None:
+            return 0
+        rules = [rule for ref in self._rules if (rule := ref()) is not None and id(rule) in self.members]
+        clock = next((rule for rule in rules if rule.id == "host.telemetry_gap_after_tamper"), None)
+        if clock is None or not getattr(clock, "_clock_tables", False):
+            return 0
+        # If index construction was refused, retain every host conservatively.
+        if clock._tables and not getattr(clock, "_tamper_host_index", False):
+            return 0
+        spill, budget = self._spill, self.owner.state_budget()
+        rows = list(spill.db.execute(
+            "SELECT rowid,id,body FROM witnesses WHERE rowid>? ORDER BY rowid LIMIT 32", (self._reclaim_cursor,)))
+        identities = {identity for _seq, identity, _body in rows}
+        pending = {row[1] for rule in rules if rule._spill is not None
+                   for row in rule._spill._buffers.get("records", ("", []))[1] if row[1] in identities}
+        pending_tamper_hosts = {row[2] for row in clock._spill._buffers.get("records", ("", []))[1]
+                                if row[3] == "tamper"}
+        removed = []
+        for _seq, identity, body in rows:
+            if identity in self.pending or identity in pending:
+                continue
+            prefix = json.dumps([identity], ensure_ascii=True, separators=(",", ":"))[:-1] + ","
+            if any(rule._tables and rule.query(
+                    "SELECT 1 FROM records WHERE uid>=? AND uid<? LIMIT 1",
+                    (prefix, prefix + "\uffff")).fetchone() for rule in rules):
+                continue
+            # Coalescing changes address.id without changing its original uid.
+            event = expand_event(body)
+            addresses = event.get("host.ip") or []
+            addresses = [addresses] if isinstance(addresses, str) else addresses
+            if any(rule.id == "corr.alert_then_host_execution" and getattr(rule, "_address_index", False)
+                   and any(rule.query("SELECT 1 FROM records WHERE role='address' AND host=? AND key=? AND id=? LIMIT 1",
+                                      (event.host or "", ip, identity)).fetchone()
+                           for address in addresses if (ip := canon_ip(address))) for rule in rules):
+                continue
+            row = clock.query("SELECT host FROM clock WHERE id=?", (identity,)).fetchone()
+            if row is None or row[0] in pending_tamper_hosts:
+                continue
+            if clock._tables and clock.query(
+                    "SELECT 1 FROM records WHERE role='tamper' AND host=? LIMIT 1", (row[0],)).fetchone():
+                continue
+            removed.append((identity, len(body) + len(identity) + 64))
+        before = budget.physical_used
+        try:
+            spill.cap()
+            with spill.db:
+                spill.db.executemany("DELETE FROM witnesses WHERE id=?", [(identity,) for identity, _size in removed])
+        except sqlite3.Error as exc:
+            self.owner.note_limit("linux_witness_reclaim", f"clock witness reclamation rolled back: {exc}")
+            spill.grew()
+            return 0
+        if rows:
+            self._reclaim_cursor = rows[-1][0]
+        if removed:
+            budget.charge(self.account(), -sum(size for _identity, size in removed))
+            clock.note_limit("linux_clock_witnesses",
+                f"{len(removed)} clock-only witness body/bodies released after actual disk FULL; exact clock IDs and "
+                "timestamps remain, but some future discontinuity citations may be unresolved")
+        try:
+            # Also drain leftover free pages after the admission cursor is exhausted.
+            spill.db.execute("PRAGMA incremental_vacuum(32)").fetchall()
+        except sqlite3.Error as exc:
+            self.owner.note_limit("linux_witness_reclaim", f"clock witness page reclamation was limited: {exc}")
+        finally:
+            spill.grew()
+        # A scan step is progress even when protected rows or a foreign file's occupied pages prevent shrinking.
+        return max(len(rows), before - budget.physical_used)
+
+    def release(self, member):
+        self.members.discard(id(member))
+        if not self.members and self._spill is not None:
+            self._spill.close()
+            self._spill = None
+            self.pending.clear()
+            self.closed = True
+            if self._account is not None:
+                self._account.evict_references = self._account.reclaim_database = None
+
+
 class LinuxSequence(Playbook):
     kind = "aggregate"
     staged = True
@@ -112,10 +312,12 @@ class LinuxSequence(Playbook):
         self._account = None
         self._seen = RecentIds()
         self._pending = []
+        self.witnesses = None
         self.load = lambda ids: []
         self.heartbeat = lambda: None
         self.rows_on_disk = 0
         self._last_refused = None
+        self._rows_blocked_generation = None
         self.persisted_loader = lambda ids: []
         register_store(self, self)
 
@@ -137,24 +339,62 @@ class LinuxSequence(Playbook):
             self._tables = True
         return spill
 
-    def add(self, event, role, key="", *, aux="", lane="lead", data=None):
-        if store_refuses(self, self.account):
+    def _row_room(self, event, name="linux_join_rows"):
+        if (self._rows_blocked_generation is not None and not self._flush_rows()
+                or store_refuses(self, self.account)):
             if self._last_refused != event.id:
-                self.refuse("linux_join_rows", "the disk budget for Linux join rows is spent; later records were not joined")
+                self.refuse(name, "the disk budget for Linux join rows is spent; this record was not joined")
                 self._last_refused = event.id
+            return False
+        return True
+
+    def _pending_row_limit(self, exc):
+        self._rows_blocked_generation = self.state_budget()._capacity_generation
+        for table, (_sql, rows) in self._spill._buffers.items():
+            if rows:
+                self.note_limit("linux_clock_rows" if table == "clock" else "linux_join_rows",
+                    f"{len(rows)} accepted Linux {table} row(s) remain buffered after disk refusal: {exc}; "
+                    "new join rows are refused until the buffer can be written")
+
+    def _append_row(self, table, row):
+        try:
+            self._spill.add(table, row)
+        except StateExhausted as exc:
+            # The current row is still in Spill's bounded buffer; it was accepted, not dropped.
+            self._pending_row_limit(exc)
+
+    def _flush_rows(self, *, retry=False):
+        if self._spill is None:
+            return True
+        if not retry and self._rows_blocked_generation == self.state_budget()._capacity_generation:
+            return False
+        try:
+            self._spill.flush()
+        except StateExhausted as exc:
+            self._pending_row_limit(exc)
+            return False
+        self._rows_blocked_generation = None
+        return True
+
+    def add(self, event, role, key="", *, aux="", lane="lead", data=None):
+        if not self._row_room(event):
             return False
         row = (_key(event.id, role, key), event.id, event.host or "", role, str(key), event.ts.timestamp(),
                str(aux), lane, event.get("process.pid"), event.get("process.ppid"),
                str(event.get("host.boot.id") or ""), json.dumps(data or {}, sort_keys=True))
         try:
-            self.store().add("records", row)
+            self.store()
         except StateExhausted as exc:
             if self._last_refused != event.id:
                 self.refuse("linux_join_rows", f"Linux join storage refused a record: {exc}; later links are unresolved")
                 self._last_refused = event.id
             return False
+        self._append_row("records", row)
         self.state_budget().charge(self.account(), self.ROW_BYTES + len(row[-1]))
         self.rows_on_disk += 1
+        if self.witnesses is None:
+            self.witnesses = _LinuxWitnesses(self, [self])
+        self.witnesses.hold(event)
         return True
 
     def consume(self, events):
@@ -163,10 +403,8 @@ class LinuxSequence(Playbook):
                 self.evaluated -= 1
                 continue
             self._seen.add(event.id)
-            before, refused = self.rows_on_disk, self.capped
+            refused = self.capped
             self.observe(event)
-            if self.rows_on_disk > before:
-                self._pending.append(event)
             if self.capped > refused:
                 self.evaluated -= 1
         return []
@@ -175,10 +413,10 @@ class LinuxSequence(Playbook):
         raise NotImplementedError
 
     def drain_staged(self):
-        if self._tables:
-            self.spill().flush()
-        out, self._pending = self._pending, []
-        return out
+        self._flush_rows(retry=True)
+        if self.witnesses is not None:
+            self.witnesses.flush()
+        return []
 
     def retained_events(self):
         return []
@@ -187,7 +425,7 @@ class LinuxSequence(Playbook):
         if not self._tables:
             return False
         spill = self.spill()
-        spill.flush()
+        self._flush_rows(retry=True)
         spill.write("CREATE INDEX IF NOT EXISTS records_join ON records(role,host,key,ts)", [()])
         spill.write("CREATE INDEX IF NOT EXISTS records_cross_host ON records(role,key,ts,host)", [()])
         spill.write("CREATE INDEX IF NOT EXISTS records_pid ON records(host,pid,ts)", [()])
@@ -198,7 +436,10 @@ class LinuxSequence(Playbook):
 
     def events(self, ids):
         ids = list(dict.fromkeys(identity for identity in ids if identity))
-        events = self.load(ids)
+        events = self.witnesses.load(ids) if self.witnesses is not None else []
+        if len(events) != len(ids):
+            loaded = {event.id for event in events}
+            events += self.load([identity for identity in ids if identity not in loaded])
         if len(events) != len(ids):
             loaded = {event.id for event in events}
             events += self.persisted_loader([identity for identity in ids if identity not in loaded])
@@ -244,6 +485,8 @@ class LinuxSequence(Playbook):
         self._pending.clear()
         self.load = lambda ids: []
         self.close_spill()
+        if self.witnesses is not None:
+            self.witnesses.release(self)
 
 
 class DownloadThenExecute(LinuxSequence):
@@ -258,7 +501,8 @@ class DownloadThenExecute(LinuxSequence):
         if e.family == "process_exec":
             downloading, paths = output_paths(e)
             if downloading:
-                self.add(e, "downloader", str(e.get("process.pid") or ""), data={"exe": e.get("process.executable")})
+                self.add(e, "downloader", str(e.get("process.pid") or ""),
+                         data={"exe": e.get("process.executable"), "log_paths": download_log_paths(e)})
                 for path in paths:
                     self.add(e, "download", path)
             for path in executed_paths(e):
@@ -284,6 +528,7 @@ class DownloadThenExecute(LinuxSequence):
             "AND d.key=w.aux AND d.key<>'' AND d.ts<=w.ts AND w.ts<=d.ts+? "
             "AND (w.boot='' OR d.boot='' OR w.boot=d.boot) "
             "AND (json_extract(w.data,'$.exe') IS NULL OR json_extract(w.data,'$.exe')=json_extract(d.data,'$.exe')) "
+            "AND NOT EXISTS(SELECT 1 FROM json_each(d.data,'$.log_paths') log WHERE log.value=w.key) "
             "AND NOT EXISTS(SELECT 1 FROM records z WHERE z.role='execute' AND z.host=w.host "
             "AND z.pid=w.pid AND z.ts>d.ts AND z.ts<=w.ts) WHERE w.role='write'", [(W_DOWNLOAD_EXEC,)])
         sql = """SELECT x.host||'|'||x.key, COALESCE(NULLIF(d.aux,''),d.id), x.id,d.id,
@@ -453,9 +698,11 @@ class WebShellChain(LinuxSequence):
                    AND x.ts>=r.ts AND x.ts<=r.ts+?) THEN 'urgent' ELSE 'high' END
             FROM records c LEFT JOIN records r ON r.uid=(SELECT r2.uid FROM records r2 WHERE r2.role='request'
                 AND r2.host=c.host AND r2.key=c.key AND r2.ts>c.ts AND r2.ts<=c.ts+?
-                ORDER BY CASE r2.lane WHEN 'high' THEN 0 ELSE 1 END,r2.ts,r2.id LIMIT 1)
+                ORDER BY CASE WHEN r2.lane='high' AND EXISTS(SELECT 1 FROM records x
+                    WHERE x.role='interpreter' AND x.host=r2.host AND x.ts>=r2.ts AND x.ts<=r2.ts+?)
+                    THEN 0 WHEN r2.lane='high' THEN 1 ELSE 2 END,r2.ts,r2.id LIMIT 1)
             WHERE c.role='script' AND (r.id IS NOT NULL OR c.lane='lead') ORDER BY c.host,c.aux,c.ts,c.id"""
-        return self.fold(sql, (W_DOWNLOAD_EXEC, W_DOWNLOAD_EXEC, W_SHELL_REQUEST),
+        return self.fold(sql, (W_DOWNLOAD_EXEC, W_DOWNLOAD_EXEC, W_SHELL_REQUEST, W_DOWNLOAD_EXEC),
             "A server-side script write under a default document root, its optional HTTP request, and "
             "optional web-service interpreter exec share a host. URL-to-file matching uses basename only; "
             "interpreter evidence is the same typed account/executable evidence as host.web_service_spawns_interpreter.")
@@ -490,8 +737,10 @@ class DiscoveryBurst(LinuxSequence):
         for (session,) in self.query("SELECT DISTINCT key FROM records WHERE role='discovery' ORDER BY key"):
             start = self.query("""SELECT a.ts FROM records a WHERE a.role='discovery' AND a.key=?
                 AND (SELECT COUNT(DISTINCT b.aux) FROM records b WHERE b.role='discovery' AND b.key=a.key
-                     AND b.ts BETWEEN a.ts AND a.ts+?)>=? ORDER BY a.ts,a.id LIMIT 1""",
-                (session, W_DISCOVERY, N_DISCOVERY)).fetchone()
+                     AND b.ts BETWEEN a.ts AND a.ts+?)>=?
+                ORDER BY CASE WHEN EXISTS(SELECT 1 FROM records h WHERE h.role='discovery' AND h.key=a.key
+                    AND h.ts BETWEEN a.ts AND a.ts+? AND h.lane='high') THEN 0 ELSE 1 END,
+                    a.ts,a.id LIMIT 1""", (session, W_DISCOVERY, N_DISCOVERY, W_DISCOVERY)).fetchone()
             if start is None:
                 continue
             # At most one representative per fixed discovery class plus span bounds.
@@ -502,10 +751,13 @@ class DiscoveryBurst(LinuxSequence):
             for klass, _when, identity, _level in rows:
                 ids.append(identity)
                 classes.append(klass)
-            high = self.query("SELECT 1 FROM records WHERE key=? AND role='discovery' AND ts BETWEEN ? AND ? "
-                              "AND lane='high' LIMIT 1", (session, start[0], start[0] + W_DISCOVERY)).fetchone()
+            high = self.query("SELECT id FROM records WHERE key=? AND role='discovery' AND ts BETWEEN ? AND ? "
+                              "AND lane='high' ORDER BY ts,id LIMIT 1",
+                              (session, start[0], start[0] + W_DISCOVERY)).fetchone()
             if high:
                 lane = "high"
+                if high[0] not in ids:
+                    ids.append(high[0])
             yield self.finding(session, ids, lane,
                 f"One recorded audit login session ran {len(classes)} distinct discovery classes within "
                 f"{W_DISCOVERY} seconds: {', '.join(classes)}. Classes share the expansion classifier; "
@@ -644,7 +896,22 @@ class AlertThenHostExecution(LinuxSequence):
         addresses = [addresses] if isinstance(addresses, str) else addresses
         for address in addresses:
             if ip := canon_ip(address):
-                self.add(e, "address", ip)
+                if not getattr(self, "_address_index", False):
+                    self.store().write("CREATE INDEX IF NOT EXISTS records_address ON records(host,key,id) "
+                                       "WHERE role='address'", [()])
+                    self._address_index = True
+                # Ownership is a set, with exactly the minimum event-id witness selected by the join.
+                prior = self.store().execute(
+                    "SELECT uid,id FROM records WHERE role='address' AND host=? AND key=? ORDER BY id LIMIT 1",
+                    (e.host or "", ip)).fetchone()
+                if prior is None:
+                    self.add(e, "address", ip)
+                elif e.id < prior[1]:
+                    self.spill().write("UPDATE records SET id=?,ts=? WHERE uid=?",
+                                       [(e.id, e.ts.timestamp(), prior[0])])
+                    if self.witnesses is None:
+                        self.witnesses = _LinuxWitnesses(self, [self])
+                    self.witnesses.hold(e)
         if e.family == "process_exec" and e.outcome != Outcome.failure:
             self.add(e, "execution", lane="high" if web(e) else "lead")
         if (e.family == "net_socket" and e.outcome == Outcome.success and e.get("socket.syscall") == "bind"
@@ -684,7 +951,14 @@ class TelemetryGapAfterTamper(LinuxSequence):
     title = "Indexed host telemetry has a discontinuity after an observed logging tamper action"
     families = ("process_exec", "process_observed", "file_change", "file_access", "kernel_module", "net_socket",
                 "auth", "account_change", "service_change", "audit_config", "system_state", "privilege_use", "http_access")
-    attack = ("T1562.001", "T1070")
+    attack = ("T1685", "T1070")
+
+    def store(self):
+        spill = super().store()
+        if not getattr(self, "_tamper_host_index", False):
+            spill.write("CREATE INDEX IF NOT EXISTS records_tamper_host ON records(host) WHERE role='tamper'", [()])
+            self._tamper_host_index = True
+        return spill
 
     @staticmethod
     def series(e):
@@ -697,7 +971,21 @@ class TelemetryGapAfterTamper(LinuxSequence):
         return e.family
 
     def observe(self, e):
-        self.add(e, "clock", self.series(e))
+        if not self._row_room(e, "linux_clock_rows"):
+            return
+        host, family = e.host or "", self.series(e)
+        spill = self.spill()
+        if not getattr(self, "_clock_tables", False):
+            spill.table("clock", "id TEXT PRIMARY KEY, host, key, ts REAL")
+            sql, rows = spill._buffers["clock"]
+            spill._buffers["clock"] = (sql.replace("INSERT INTO", "INSERT OR IGNORE INTO"), rows)
+            self._clock_tables = True
+        self._append_row("clock", (e.id, host, family, e.ts.timestamp()))
+        self.rows_on_disk += 1
+        self.state_budget().charge(self.account(), len(e.id) + len(host) + len(family) + 32)
+        if self.witnesses is None:
+            self.witnesses = _LinuxWitnesses(self, [self])
+        self.witnesses.hold(e)
 
     def observe_tamper_match(self, match):
         """Accept only findings the existing tamper evaluators actually publish."""
@@ -734,22 +1022,27 @@ class TelemetryGapAfterTamper(LinuxSequence):
             self.add(e, "tamper", target)
 
     def finalize(self):
+        # Without a published tamper there is no gap predicate to evaluate or extra index to build.
+        if not self._tables:
+            return []
         if not self.ready() or self.capped:
             if self.capped:
                 self.note_coverage("telemetry_clock_partial",
                     "Some index-time rows were refused; discontinuity intervals were not judged.")
             return []
+        self.spill().write("CREATE INDEX IF NOT EXISTS clock_family_time ON clock(host,key,ts)", [()])
+        self.spill().write("CREATE INDEX IF NOT EXISTS clock_host_time ON clock(host,ts,id)", [()])
         for identity, host, family, start in self.query(
                 "SELECT id,host,key,ts FROM records WHERE role='tamper' ORDER BY host,ts,id"):
-            end_row = self.query("SELECT MIN(ts) FROM records WHERE role='clock' AND host=? AND key=? AND ts>?",
+            end_row = self.query("SELECT MIN(ts) FROM clock WHERE host=? AND key=? AND ts>?",
                                  (host, family, start)).fetchone()
             resumed = end_row[0]
             end = resumed
             if end is None:
-                end = self.query("SELECT MAX(ts) FROM records WHERE role='clock' AND host=?", (host,)).fetchone()[0]
+                end = self.query("SELECT MAX(ts) FROM clock WHERE host=?", (host,)).fetchone()[0]
             if end is None or end - start < G_SILENCE:
                 continue
-            witnesses = list(self.query("""SELECT id,ts,key FROM records WHERE role='clock' AND host=?
+            witnesses = list(self.query("""SELECT id,ts,key FROM clock WHERE host=?
                 AND key<>? AND ts>? AND ts<=? ORDER BY ts DESC,id LIMIT 2""", (host, family, start, end)))
             if not witnesses or witnesses[0][1] - start < G_SILENCE:
                 continue
@@ -766,3 +1059,12 @@ class TelemetryGapAfterTamper(LinuxSequence):
 SEQUENCE_RULES = [DownloadThenExecute, AuthorizedKeyThenLogin, ToolCleanup, WebShellChain, DiscoveryBurst,
                   UnbrokeredPrivilegeTransition, InteractivePrivilegedLogin, OutboundSSHExternal,
                   AlertThenHostExecution, TelemetryGapAfterTamper]
+
+
+def share_linux_witnesses(pack):
+    """Bind one compact witness store to a hunt's fixed set of Linux sequence evaluators."""
+    members = [rule for rule in pack if isinstance(rule, LinuxSequence)]
+    if members:
+        witnesses = _LinuxWitnesses(members[0], members)
+        for rule in members:
+            rule.witnesses = witnesses

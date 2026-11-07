@@ -25,7 +25,8 @@ def _payload(blob: bytes) -> dict:
 
 
 def test_observed_citation_store_keeps_only_a_compact_verified_source_pointer():
-    [event], raw = normalized(observe(T, 10, 400, 1, "/usr/lib/systemd/systemd"))
+    events, raw = normalized(observe(T, 10, 400, 1, "/usr/lib/systemd/systemd"))
+    [event] = [item for item in events if item.family == "process_observed"]
     lineage = ExecLineage(observing=True)
 
     lineage.observe_process(event, raw, "host-target")
@@ -70,7 +71,8 @@ def test_pointer_stores_use_shrunken_caps_that_still_cover_mission_scale():
 
 
 def test_missing_raw_source_never_falls_back_to_an_unverified_inline_citation():
-    [observed_event], _raw = normalized(observe(T, 12, 401, 1, "/usr/lib/systemd/systemd"))
+    events, _raw = normalized(observe(T, 12, 401, 1, "/usr/lib/systemd/systemd"))
+    [observed_event] = [item for item in events if item.family == "process_observed"]
     exec_events, _raw = normalized(execd(T + 1, 13, 402, 1, "/usr/bin/perl", ["/usr/bin/perl", "job.pl"]))
     exec_event = next(event for event in exec_events if event.family == "process_exec")
     lineage = ExecLineage(observing=True, citing=True)
@@ -138,7 +140,8 @@ def test_verified_loader_batches_exact_ids_and_rebuilds_observed_and_exec_views(
 
 def test_throughput_mini_es_serves_plain_exact_id_citation_refetch():
     hits = observe(T, 22, 402, 1, "/usr/lib/systemd/systemd")
-    [event], raw = normalized(hits)
+    events, raw = normalized(hits)
+    [event] = [item for item in events if item.family == "process_observed"]
     lineage = ExecLineage(observing=True)
     lineage.observe_process(event, raw, "host-target")
     [entry] = lineage.observed.peek((HOST, 402))

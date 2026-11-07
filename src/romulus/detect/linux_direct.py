@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 
 from romulus.detect.base import Match, Playbook, basename, pf
 from romulus.detect.host import INTERPRETERS, WEB_SERVICE_USERS
-from romulus.detect.linux_argv import normalize_path, program, read_operand_paths
+from romulus.detect.linux_argv import getopt_long, normalize_path, program, read_operand_paths
 from romulus.detect.linux_semantics import classify_credential
 from romulus.evidence.linux_catalog import WATCH_PLACEHOLDERS
 from romulus.evidence.typed import Outcome
@@ -72,6 +72,20 @@ DOWNLOADER_SOURCES = {
     "python": "https://docs.python.org/3/library/urllib.request.html",
     "perl": "https://metacpan.org/pod/LWP::Simple",
 }
+# GNU Wget distinguishes log output (-o/-a) from document output (-O).
+# https://raw.githubusercontent.com/mirror/wget/master/doc/wget.texi
+WGET_VALUE_OPTIONS = {
+    "--output-document": ("O", True), "--directory-prefix": ("P", True),
+    "--output-file": ("o", True), "--append-output": ("a", True),
+    "--input-file": ("i", True), "--execute": ("e", True),
+    "--user-agent": ("U", True), "--header": ("header", True),
+    "--post-data": ("post-data", True), "--post-file": ("post-file", True),
+    "--tries": ("t", True), "--timeout": ("T", True), "--wait": ("w", True),
+    "--level": ("l", True), "--quota": ("Q", True), "--user": ("user", True),
+    "--password": ("password", True),
+    "--quiet": ("q", False), "--verbose": ("v", False), "--no-verbose": ("nv", False),
+    "--continue": ("c", False), "--recursive": ("r", False), "--no-check-certificate": ("certificate", False),
+}
 
 
 def under(path, roots):
@@ -86,6 +100,36 @@ def web(event):
     return any(event.get(name) in WEB_SERVICE_USERS for name in ("process.user", "process.effective_user", "user.name"))
 
 
+def wget_paths(event, args):
+    """Transfer destinations and explicitly separate log destinations, including GNU attached short values."""
+    parsed = getopt_long(args, "oaOieUPtTwlQ", "VhbqvdNcrpSHkKmn", WGET_VALUE_OPTIONS)
+    output, directory, logs = None, None, []
+    for option, value in parsed.options:
+        if option == "O":
+            output = value
+        elif option == "P":
+            directory = value
+        elif option in {"o", "a"} and value:
+            logs.append(normalize_path(value, event.get("process.cwd")))
+    urls = [operand for operand in parsed.operands if operand.startswith(("http://", "https://", "ftp://"))]
+    paths = []
+    if output and output != "-":
+        paths.append(normalize_path(output, event.get("process.cwd")))
+    elif output is None:
+        for url in urls:
+            leaf = posixpath.basename(urlsplit(url).path)
+            if leaf:
+                paths.append(normalize_path(posixpath.join(directory or "", leaf), event.get("process.cwd")))
+    paths = list(dict.fromkeys(path for path in paths if path))
+    return bool(urls), paths if urls else [], list(dict.fromkeys(path for path in logs if path and path not in paths))
+
+
+def download_log_paths(event):
+    """Only explicitly documented log outputs can exclude a downloader's observed ancillary file writes."""
+    p = program(event)
+    return wget_paths(event, p.args)[2] if p and p.name == "wget" else []
+
+
 def output_paths(event):
     """Downloader identity plus explicitly named destinations; no invisible shell redirection is guessed.
 
@@ -96,6 +140,9 @@ def output_paths(event):
     if p is None:
         return False, []
     name, args = p.name, p.args
+    if name == "wget":
+        transferring, paths, _logs = wget_paths(event, args)
+        return transferring, paths
     paths, output, directory, remote_name, urls = [], None, None, False, []
     if name.startswith("python") and "-c" in args:
         index = args.index("-c")

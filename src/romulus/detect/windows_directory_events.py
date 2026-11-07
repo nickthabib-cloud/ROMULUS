@@ -11,6 +11,7 @@ import re
 from romulus.detect.base import PredicateField
 from romulus.detect.windows_events import WindowsEventRule, integer
 from romulus.detect.windows_events import signal as _signal
+from romulus.detect.windows_replication_source import ReplicationSourceJoin
 from romulus.evidence.typed import Outcome
 from romulus.evidence.windows_catalog import SECURITY
 from romulus.site import SiteFacts, absent_site_facts
@@ -103,12 +104,13 @@ def _listed_actor(event, facts):
     return False
 
 
-class DirectoryReplicationAccess(WindowsEventRule):
+class DirectoryReplicationAccess(ReplicationSourceJoin, WindowsEventRule):
     id = "win.directory_replication_access"
-    version = "7"
+    version = "8"
     title = "A directory access record named replication extended rights"
-    families = ("directory_access",)
-    windows_event_classes = _security(4662)
+    families = ("directory_access", "auth")
+    context_families = ("auth",)
+    windows_event_classes = _security(4662, 4624)
     attack = ("T1003.006",)
     benign = ("domain controller replication, directory synchronization and authorized directory diagnostics",)
     next_checks = ("verify the actor SID and replication authorization independently",
@@ -116,6 +118,10 @@ class DirectoryReplicationAccess(WindowsEventRule):
     research = (_AUDIT + "event-4662", "https://learn.microsoft.com/en-us/windows/win32/adschema/r-ds-replication-get-changes-all",
                 "https://attack.mitre.org/techniques/T1003/006/")
     site_facts: SiteFacts | None = absent_site_facts()
+
+    def sync_actor(self, event):
+        facts = self.site_facts or absent_site_facts()
+        return _actor_keys(event) & {value.casefold() for value in facts.directory_sync_accounts}
 
     def judge(self, event):
         if event.get("event.code") != 4662 or not _replication_rights(event):
@@ -134,18 +140,26 @@ class DirectoryReplicationAccess(WindowsEventRule):
             notes.append("Domain controller or directory-sync account lists are not configured; actor authorization is unresolved.")
             self.note_coverage("site_facts", "Domain controller or directory-sync account lists are not configured.")
         if listed:
-            notes.append("The recorded actor is listed by site identity or DC account name; retain the observation as a lead.")
+            notes.append("The recorded actor is listed by site identity or DC account name.")
         if not positive:
             notes.append("The full successful DS/control-access/actor conjunction is not recorded; this is a lead.")
+        source_status, source_logon, source_raw = self.source_decision(event) if self._sync_sensitive(event) else (None, None, {})
+        if source_status == "undeclared" and positive:
+            high = True
+        if self.sync_actor(event) and not self._sync_sources_declared():
+            notes.append("The sync account source host was not checked because directory-sync hosts or addresses are not declared.")
         prefix = "A failed directory access record" if event.outcome == Outcome.failure else "A directory access record"
         actor = self.describe(event.get("user.entity_id") or event.get("user.name"))
         target = self.describe(event.get("directory.object.dn"))
-        return [signal(event, "directory_replication_rights",
+        hit = signal(event, "directory_replication_rights",
                        f"{prefix} named replication extended rights on {target} by actor {actor}",
                        self.attack, (*_ACTOR, "directory.object.server", "directory.object.dn", "directory.object.type",
                                      "directory.access.action", "directory.access.access_mask", "directory.access.accesses",
                                      "directory.rights.guids", "directory.rights.names", "windows.event_data.Properties"),
-                       lane="high" if high else "lead", severity="high" if high else "medium", notes=tuple(notes))]
+                       lane="high" if high else "lead", severity="high" if high else "medium", notes=tuple(notes))
+        if source_status is not None:
+            hit = self.source_hit(event, hit, source_status if positive else "unresolved", source_logon, source_raw)
+        return [hit]
 
 
 class WeakKerberosTicketEncryption(WindowsEventRule):

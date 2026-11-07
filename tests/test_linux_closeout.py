@@ -435,3 +435,509 @@ def test_credential_owning_daemons_are_narrow_typed_exclusions(path, executable,
     e = ev("file_access", T0, file__path=path, file__access="read", audit__key="watched",
            process__executable=executable, process__user=user)
     assert bool(rule("host.credential_material_access")().consume([e])) is expected
+
+
+@pytest.mark.parametrize("logging", [
+    ["-o", "/tmp/download.log"],
+    ["-o/tmp/download.log"],
+    ["-qo/tmp/download.log"],
+    ["--output-file", "/tmp/download.log"],
+    ["--output-file=/tmp/download.log"],
+    ["-a", "/tmp/download.log"],
+    ["--append-output=/tmp/download.log"],
+])
+@pytest.mark.parametrize("executed,expected", [("/tmp/download.log", False), ("/tmp/payload", True)])
+def test_wget_log_options_are_not_payload_destinations(logging, executed, expected, tmp_path):
+    download = ex(path="/usr/bin/wget", process__cwd="/tmp")
+    download.fields["process.argv"].value = ["wget", *logging, "https://example.test/payload"]
+    execution = ex(20, executed)
+    _, findings = staged_run(rule("host.download_then_execute"), [[execution], [download]], tmp_path)
+    assert bool(findings) is expected
+    if expected:
+        assert {event.id for event in findings[0].events} == {download.id, execution.id}
+
+
+@pytest.mark.parametrize("options,expected_path", [
+    (["-o", "/tmp/download.log", "-O", "/opt/content"], "/opt/content"),
+    (["-qo/tmp/download.log", "-O/opt/content"], "/opt/content"),
+    (["--output-file=/tmp/download.log", "--output-document=/opt/content"], "/opt/content"),
+    (["-o", "/tmp/download.log", "-P", "/opt"], "/opt/payload"),
+])
+def test_wget_content_and_directory_options_keep_their_own_destinations(options, expected_path, tmp_path):
+    download = ex(path="/usr/bin/wget", process__cwd="/tmp")
+    download.fields["process.argv"].value = ["wget", *options, "https://example.test/payload"]
+    _, findings = staged_run(rule("host.download_then_execute"), [[download], [ex(20, expected_path)]], tmp_path)
+    assert len(findings) == 1
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_later_web_request_retains_the_strongest_supported_chain(reverse, tmp_path):
+    write = change(path="/var/www/html/a.php", user="www-data")
+    early = ev("http_access", T0 + timedelta(seconds=20), url__path="/a.php", http__response__status_code=200)
+    late = ev("http_access", T0 + timedelta(seconds=7200), url__path="/a.php", http__response__status_code=200)
+    execution = ex(7210, "/bin/bash", user="www-data")
+    events = [write, early, late, execution]
+    if reverse:
+        events.reverse()
+    _, findings = staged_run(rule("host.web_shell_chain"), [[event] for event in events], tmp_path)
+    [finding] = findings
+    assert finding.proposed_lane == "urgent"
+    assert {write.id, late.id, execution.id} <= {event.id for event in finding.events}
+    assert "inferred" in finding.claim
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_later_service_account_discovery_window_retains_high(reverse, tmp_path):
+    first = [ex(i, "/usr/bin/" + command, process__auid="1000", process__session_id=9)
+             for i, command in enumerate(("whoami", "uname", "ss", "ps", "tree"))]
+    later = [ex(7200 + i, "/usr/bin/" + command, user="www-data",
+                process__auid="1000", process__session_id=9)
+             for i, command in enumerate(("whoami", "uname", "ss", "ps", "tree"))]
+    events = first + later
+    if reverse:
+        events.reverse()
+    _, findings = staged_run(rule("host.discovery_burst"), [[event] for event in events], tmp_path)
+    [finding] = findings
+    assert finding.proposed_lane == "high"
+    assert {event.id for event in later} <= {event.id for event in finding.events}
+    assert not {event.id for event in first} & {event.id for event in finding.events}
+
+
+def test_web_discovery_outside_every_qualifying_window_does_not_raise_lane(tmp_path):
+    events = [ex(i, "/usr/bin/" + command, process__auid="1000", process__session_id=9)
+              for i, command in enumerate(("whoami", "uname", "ss", "ps", "tree"))]
+    events.append(ex(7200, "/usr/bin/whoami", user="www-data",
+                     process__auid="1000", process__session_id=9))
+    _, [finding] = staged_run(rule("host.discovery_burst"), [[event] for event in reversed(events)], tmp_path)
+    assert finding.proposed_lane == "lead"
+
+
+def test_wget_watched_log_write_is_not_downloaded_content(tmp_path):
+    download = ex(path="/usr/bin/wget", process__cwd="/tmp")
+    download.fields["process.argv"].value = ["wget", "-o", "/tmp/download.log", "https://example.test/payload"]
+    logfile = change(10, "/tmp/download.log", process__pid=42)
+    _, findings = staged_run(rule("host.download_then_execute"),
+                            [[ex(20, "/tmp/download.log")], [logfile], [download]], tmp_path)
+    assert not findings
+
+
+def test_discovery_high_lane_cites_the_web_account_even_for_a_repeated_class(tmp_path):
+    events = [ex(i, "/usr/bin/" + command, process__auid="1000", process__session_id=9)
+              for i, command in enumerate(("whoami", "uname", "ss", "ps", "tree"))]
+    web_witness = ex(5, "/usr/bin/whoami", user="www-data", process__auid="1000", process__session_id=9)
+    events.append(web_witness)
+    _, [finding] = staged_run(rule("host.discovery_burst"), [[event] for event in reversed(events)], tmp_path)
+    assert finding.proposed_lane == "high" and web_witness.id in {event.id for event in finding.events}
+    assert len(finding.events) <= 6 and finding.aggregate_summary["count"] == 5
+
+
+@pytest.mark.parametrize("name,expected_lane", [
+    ("host.web_shell_chain", "urgent"), ("host.discovery_burst", "high")])
+def test_stronger_late_windows_survive_many_hosts_on_disk(name, expected_lane, tmp_path):
+    detector, stage = rule(name)(), {}
+    detector.spill_dir = tmp_path
+    for i in range(1000):
+        host = f"late-host{i}"
+        if name == "host.web_shell_chain":
+            events = [
+                change(path="/var/www/html/a.php", user="www-data"),
+                ev("http_access", T0 + timedelta(seconds=20), url__path="/a.php", http__response__status_code=200),
+                ev("http_access", T0 + timedelta(seconds=7200), url__path="/a.php", http__response__status_code=200),
+                ex(7210, "/bin/bash", user="www-data"),
+            ]
+        else:
+            events = [ex(start + n, "/usr/bin/" + command, user=user,
+                         process__auid="1000", process__session_id=9)
+                      for start, user in ((0, "alice"), (7200, "www-data"))
+                      for n, command in enumerate(("whoami", "uname", "ss", "ps", "tree"))]
+        for event in events:
+            event.host = host
+        detector.consume(list(reversed(events)))
+        stage.update({event.id: event for event in detector.drain_staged()})
+        assert detector.pending_count == 0
+    detector.bind_loader(lambda ids: [stage[identity] for identity in ids])
+    output = detector.finalize()
+    assert not isinstance(output, list)
+    count = 0
+    for finding in output:
+        count += 1
+        assert finding.proposed_lane == expected_lane
+        assert len(finding.events) <= 6
+        assert any(event.ts >= T0 + timedelta(seconds=7200) for event in finding.events)
+    assert count == 1000 and detector.capped == 0
+    assert detector.rows_on_disk >= 4000 and detector.retained_events() == []
+
+
+def test_linux_join_witnesses_are_shared_lossless_and_survive_earlier_rule_release(tmp_path):
+    from romulus.detect.linux_sequences import share_linux_witnesses
+    first, second = rule("host.download_then_execute")(), rule("host.tool_cleanup")()
+    for detector in (first, second):
+        detector.spill_dir = tmp_path
+    share_linux_witnesses([first, second])
+    events = [downloader(), ex(20)]
+    for detector in (first, second):
+        detector.consume(events)
+        assert detector.drain_staged() == []
+    assert first.witnesses is second.witnesses
+    assert first.witnesses.count() == len(events)
+    assert first.events([event.id for event in events]) == events
+    first.release_state()
+    assert second.events([event.id for event in events]) == events
+    second.release_state()
+    assert second.witnesses.closed
+
+
+def test_alert_address_rows_coalesce_to_the_existing_minimum_id_witness(tmp_path):
+    detector = rule("corr.alert_then_host_execution")()
+    detector.spill_dir = tmp_path
+    from romulus.evidence.typed import fv
+    events = [ev("auth", T0 + timedelta(seconds=i), user__name="alice") for i in range(2000)]
+    for event in reversed(events):
+        event.fields["host.ip"] = fv(["10.0.0.9"], "native:host.ip")
+        detector.consume([event])
+        detector.drain_staged()
+    rows = list(detector.query("SELECT id FROM records WHERE role='address'"))
+    assert rows == [(min(event.id for event in events),)]
+    plan = list(detector.query("EXPLAIN QUERY PLAN SELECT uid,id FROM records WHERE role='address' "
+                               "AND host=? AND key=? ORDER BY id LIMIT 1", ("web1", "10.0.0.9")))
+    assert any("records_address" in row[3] and "SEARCH" in row[3] for row in plan)
+
+
+def test_compact_linux_witness_hydrates_native_body_without_changing_any_typed_field(tmp_path):
+    from romulus.evidence.normalize import raw_digest
+    from romulus.hunt.citations import COMPACT_CITATION_NOTE
+    from romulus.hunt.publish import SourceCitationFetcher
+    download, execution = downloader(), ex(20)
+    raw = {event.raw[0].key: {"native": event.id, "argv": event.get("process.argv")} for event in (download, execution)}
+    for event in (download, execution):
+        event.raw[0].digest = raw_digest(raw[event.raw[0].key])
+    detector, [finding] = staged_run(rule("host.download_then_execute"), [[execution], [download]], tmp_path)
+    original = {event.id: event.model_dump(mode="json") for event in (download, execution)}
+    for event in finding.events:
+        event.caveats.append(COMPACT_CITATION_NOTE)
+
+    class Source:
+        def search(self, index, body):
+            identities = body["query"]["bool"]["filter"][0]["ids"]["values"]
+            return {"hits": {"hits": [{"_index": index, "_id": identity, "_source": raw[f"{index}/{identity}"]}
+                                     for identity in identities]}}
+
+    SourceCitationFetcher(Source()).hydrate(finding)
+    assert {event.id: event.model_dump(mode="json") for event in finding.events} == original
+    assert finding.raw_copies == raw
+    assert detector.drain_staged() == []
+
+
+def test_telemetry_clock_retains_every_late_timestamp_and_source_id_in_narrow_rows(tmp_path):
+    detector = rule("host.telemetry_gap_after_tamper")()
+    detector.spill_dir = tmp_path
+    events = [ev("process_observed", T0 + timedelta(seconds=i), audit__serial=i) for i in range(1000)]
+    for event in reversed(events):
+        detector.consume([event])
+        assert detector.drain_staged() == []
+    assert detector.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='clock'").fetchone()
+    assert list(detector.query("SELECT id,ts FROM clock ORDER BY ts,id")) == [
+        (event.id, event.ts.timestamp()) for event in events]
+    assert len(list(detector.query("PRAGMA table_info(clock)"))) == 4
+    assert not detector.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='records'").fetchone()
+
+
+def test_linux_witnesses_have_no_detection_floor_and_keep_mandatory_references_under_cache_pressure(tmp_path):
+    from romulus.detect.bounded import StateBudget, live_stores
+    from romulus.detect.linux_sequences import share_linux_witnesses
+    detector = rule("host.download_then_execute")()
+    detector.spill_dir = tmp_path
+    detector.budget = budget = StateBudget(tmp_path, disk_total=4 * 2**20, reserve=0)
+    floors = live_stores([detector])
+    share_linux_witnesses([detector])
+    witness = detector.witnesses
+    assert live_stores([detector]) == floors
+    first, second, refused = downloader(), ex(20), ex(40)
+    witness.hold(first)
+    witness.flush()
+    assert witness.account().yields and witness.account().weight == 0
+    assert budget.pool_used == 0 and budget.yield_used == witness.account().used > 0
+    detection = budget.account("test_detection")
+    budget.charge(detection, budget.disk_total)
+    assert budget.new_key_reason(witness.account())
+    witness.hold(second)
+    assert {event.id: event for event in witness.load([first.id, second.id])} == {
+        event.id: event for event in (first, second)}
+    assert budget.physical_used <= budget.disk_total
+    budget.broken = "test physical volume refusal"
+    witness.hold(refused)
+    assert witness.load([refused.id]) == []
+    assert "linux_witnesses" in detector.limits
+    detector.release_state()
+
+
+def _linux_pressure(detector):
+    from romulus.detect.bounded import Spill
+    pressure = Spill(detector.spill_dir, detector.budget)
+    pressure.table("pressure", "body BLOB")
+    pressure.write("INSERT INTO pressure VALUES (?)", [(b"x" * (3 * 2**18),)])
+    return pressure
+
+
+def _large_linux_witness(t):
+    import hashlib
+
+    from romulus.evidence.typed import fv
+    event = ex(t)
+    event.fields["test.payload"] = fv("".join(
+        hashlib.sha256(f"{t}-{i}".encode()).hexdigest() for i in range(8192)), "fixture:payload")
+    return event
+
+
+def test_scalar_flush_full_retains_accepted_rows_and_recovers_after_real_room_release(tmp_path):
+    from romulus.detect.bounded import StateBudget
+    detector = rule("host.download_then_execute")()
+    detector.spill_dir = tmp_path
+    detector.budget = StateBudget(tmp_path, disk_total=2**20, reserve=0)
+    first, pending, refused = ex(), ex(20), ex(40)
+    assert detector.add(first, "execute", "/tmp/first")
+    detector.drain_staged()
+    assert detector.add(pending, "execute", "/tmp/pending", data={"payload": "x" * (2**19)})
+    pressure = _linux_pressure(detector)
+    buffered = list(detector._spill._buffers["records"][1])
+    try:
+        assert detector.drain_staged() == []
+        assert detector._spill._buffers["records"][1] == buffered
+        assert list(detector.query("SELECT id FROM records")) == [(first.id,)]
+        assert "linux_join_rows" in detector.limits and detector.capped == 0
+        assert not detector.add(refused, "execute", "/tmp/refused")
+        assert detector.capped == 1 and detector.rows_on_disk == 2
+        assert detector._spill._buffers["records"][1] == buffered
+        assert not detector.budget.broken
+        assert detector.budget.physical_used <= detector.budget.disk_total
+    finally:
+        pressure.close()
+    assert detector.drain_staged() == []
+    assert not detector._spill._buffers["records"][1]
+    assert {row[0] for row in detector.query("SELECT id FROM records")} == {first.id, pending.id}
+    assert detector.add(refused, "execute", "/tmp/refused")
+    detector.drain_staged()
+    assert detector.query("SELECT COUNT(*) FROM records").fetchone()[0] == 3
+    detector.release_state()
+
+
+def test_shared_witness_flush_full_keeps_committed_citations_and_recovers_without_duplicates(tmp_path):
+    from romulus.detect.bounded import StateBudget
+    from romulus.detect.linux_sequences import share_linux_witnesses
+    detector = rule("host.download_then_execute")()
+    detector.spill_dir = tmp_path
+    detector.budget = StateBudget(tmp_path, disk_total=2**20, reserve=0)
+    share_linux_witnesses([detector])
+    first, pending, refused = ex(), _large_linux_witness(20), ex(40)
+    witness = detector.witnesses
+    witness.hold(first)
+    detector.drain_staged()
+    witness.hold(pending)
+    pressure = _linux_pressure(detector)
+    buffered = list(witness._spill._buffers["witnesses"][1])
+    charged = witness.account().used
+    try:
+        assert detector.drain_staged() == []
+        assert witness._spill._buffers["witnesses"][1] == buffered
+        assert witness.load([first.id]) == [first]
+        witness.hold(pending)
+        witness.hold(refused)
+        assert witness.account().used == charged
+        assert witness.pending == {pending.id}
+        assert witness._spill._buffers["witnesses"][1] == buffered
+        assert "linux_witnesses" in detector.limits and detector.capped == 0
+        assert not detector.budget.broken
+        assert detector.budget.physical_used <= detector.budget.disk_total
+    finally:
+        pressure.close()
+    detector.drain_staged()
+    assert witness.load([pending.id]) == [pending]
+    assert not witness.pending
+    witness.hold(refused)
+    assert witness.count() == 3
+    detector.release_state()
+
+
+@pytest.mark.parametrize("kind", ["scalar", "witness"])
+def test_linux_failed_auto_flush_retains_the_triggering_row_once_and_bounds_later_admission(kind, tmp_path, monkeypatch):
+    from romulus.detect import bounded
+    from romulus.detect.linux_sequences import share_linux_witnesses
+    detector = rule("host.download_then_execute")()
+    detector.spill_dir = tmp_path
+    detector.budget = bounded.StateBudget(tmp_path, disk_total=2**20, reserve=0)
+    share_linux_witnesses([detector])
+    first, second, third = ((_large_linux_witness if kind == "witness" else ex)(i) for i in (0, 20, 40))
+    pressure = _linux_pressure(detector)
+    monkeypatch.setattr(bounded, "SPILL_BATCH", 2)
+    try:
+        if kind == "scalar":
+            assert detector.add(first, "execute", "/tmp/first", data={"payload": "x" * (2**18)})
+            assert detector.add(second, "execute", "/tmp/second", data={"payload": "x" * (2**18)})
+            assert detector.rows_on_disk == 2 and detector.capped == 0
+            rows = list(detector._spill._buffers["records"][1])
+            assert len(rows) == 2
+            assert not detector.add(third, "execute", "/tmp/third")
+            assert detector._spill._buffers["records"][1] == rows
+            assert detector.capped == 1
+        else:
+            witness = detector.witnesses
+            witness.hold(first)
+            witness.hold(second)
+            assert witness.pending == {first.id, second.id}
+            rows = list(witness._spill._buffers["witnesses"][1])
+            charged = witness.account().used
+            witness.hold(second)
+            witness.hold(third)
+            assert len(rows) == 2 and witness._spill._buffers["witnesses"][1] == rows
+            assert witness.account().used == charged
+        assert detector.budget.physical_used <= detector.budget.disk_total
+        assert not detector.budget.broken
+    finally:
+        pressure.close()
+    detector.drain_staged()
+    if kind == "scalar":
+        assert detector.query("SELECT COUNT(*) FROM records").fetchone()[0] == 2
+    else:
+        assert detector.witnesses.count() == 2
+        assert {e.id: e for e in detector.witnesses.load([first.id, second.id])} == {
+            e.id: e for e in (first, second)}
+    detector.release_state()
+
+
+def _linux_reclaim_pack(tmp_path):
+    from romulus.detect.bounded import StateBudget
+    from romulus.detect.linux_sequences import share_linux_witnesses
+    pack = [rule(name)() for name in ("host.download_then_execute", "corr.alert_then_host_execution",
+                                     "host.telemetry_gap_after_tamper")]
+    budget = StateBudget(tmp_path, disk_total=4 * 2**20, reserve=0)
+    for detector in pack:
+        detector.spill_dir, detector.budget = tmp_path, budget
+    share_linux_witnesses(pack)
+    return pack
+
+
+def _reclaim_linux_references(pack):
+    witness = pack[0].witnesses
+    callback = witness.account().evict_references
+    assert callback is not None
+    with pack[0].budget.reclamation_write():
+        return callback(4096)
+
+
+def test_linux_clock_bodies_yield_only_through_reference_protocol_and_keep_nonclock_events(tmp_path):
+    pack = _linux_reclaim_pack(tmp_path)
+    execution, clock_only = ex(), ev("auth", T0, user__name="alice")
+    for detector in pack:
+        detector.consume([execution, clock_only])
+        detector.drain_staged()
+    witness = pack[0].witnesses
+    assert witness._spill.db.execute("PRAGMA auto_vacuum").fetchone()[0] == 2
+    assert witness.account().evict is None
+    pack[0].budget.reclaim_citations(pack[0].budget.disk_total * 2)
+    assert witness.count() == 2
+    _reclaim_linux_references(pack)
+    assert witness.load([execution.id]) == [execution]
+    assert witness.load([clock_only.id]) == []
+    assert pack[-1].query("SELECT COUNT(*) FROM clock").fetchone()[0] == 2
+    assert "linux_clock_witnesses" in pack[-1].limits
+    for detector in pack:
+        detector.release_state()
+
+
+def test_linux_reclaimer_protects_pending_rows_and_current_replaced_address_witness(tmp_path):
+    from romulus.evidence.typed import fv
+    pack = _linux_reclaim_pack(tmp_path)
+    old, replacement, pending, spare = [ev("auth", T0, user__name="alice") for _ in range(4)]
+    old.id, replacement.id = "z-address", "a-address"
+    for event in (old, replacement):
+        event.fields["host.ip"] = fv(["10.0.0.9"], "fixture:host.ip")
+    for detector in pack:
+        detector.consume([old, replacement, pending, spare])
+        detector.drain_staged()
+    assert pack[0].add(pending, "pending")
+    [address] = list(pack[1].query("SELECT uid,id FROM records WHERE role='address'"))
+    assert address[1] == replacement.id and old.id in address[0]
+    assert pack[0].query("SELECT COUNT(*) FROM records").fetchone()[0] == 0
+    _reclaim_linux_references(pack)
+    witness = pack[0].witnesses
+    assert witness.load([replacement.id]) == [replacement]
+    assert witness.load([pending.id]) == [pending]
+    assert witness.load([spare.id]) == []
+    plan = list(pack[1].query("EXPLAIN QUERY PLAN SELECT 1 FROM records WHERE role='address' "
+                            "AND host=? AND key=? AND id=? LIMIT 1", ("web1", "10.0.0.9", replacement.id)))
+    assert any("SEARCH" in row[3] and "records_address" in row[3] for row in plan)
+    for detector in pack:
+        detector.release_state()
+
+
+def test_linux_reclaimer_protects_actual_tamper_hosts_with_indexed_membership(tmp_path):
+    from romulus.detect.base import Match
+    pack = _linux_reclaim_pack(tmp_path)
+    affected, unrelated = [ev("auth", T0, user__name="alice") for _ in range(2)]
+    unrelated.host = "other-host"
+    tamper = ex(20, "/usr/bin/systemctl")
+    tamper.fields["process.argv"].value = ["systemctl", "stop", "auditd"]
+    for detector in pack:
+        detector.consume([affected, unrelated, tamper])
+        detector.drain_staged()
+    clock = pack[-1]
+    clock.observe_tamper_match(Match("host.security_or_logging_service_stop", "tamper", "observed_action",
+                                   [tamper], [], tamper.ts, "high", "high", "high"))
+    clock.drain_staged()
+    _reclaim_linux_references(pack)
+    assert pack[0].witnesses.load([affected.id]) == [affected]
+    assert pack[0].witnesses.load([unrelated.id]) == []
+    plan = list(clock.query("EXPLAIN QUERY PLAN SELECT 1 FROM records "
+                            "WHERE role='tamper' AND host=? LIMIT 1", (affected.host,)))
+    assert any("SEARCH" in row[3] and "records_tamper_host" in row[3] for row in plan)
+    for detector in pack:
+        detector.release_state()
+
+
+def test_linux_reclaimer_scans_admission_order_once_and_accepts_later_low_id_after_emptying(tmp_path):
+    pack = _linux_reclaim_pack(tmp_path)
+    clock = pack[-1]
+    events = [ev("auth", T0 + timedelta(seconds=i), user__name="alice") for i in range(97)]
+    for event, i in zip(events, reversed(range(len(events))), strict=True):
+        event.id = f"clock-{i:04}"
+    clock.consume(events)
+    clock.drain_staged()
+    witness, queries = pack[0].witnesses, []
+    witness._spill.db.set_trace_callback(queries.append)
+    for _ in range(10):
+        if not _reclaim_linux_references(pack):
+            break
+    else:
+        pytest.fail("bounded reclamation did not exhaust its monotonic scan")
+    assert witness.count() == 0
+    scans = [query for query in queries if query.startswith("SELECT rowid,id,body FROM witnesses WHERE rowid>")]
+    assert len(scans) == 5 and all("LIMIT 32" in query for query in scans)
+    late = ev("auth", T0, user__name="alice")
+    late.id = "000-earlier-than-all-lexical-IDs"
+    clock.consume([late])
+    clock.drain_staged()
+    assert witness.count() == 1
+    _reclaim_linux_references(pack)
+    assert witness.count() == 0
+    assert witness._spill.budget.physical_used <= witness._spill.budget.disk_total
+    for detector in pack:
+        detector.release_state()
+
+
+def test_linux_reclaimer_delete_refusal_rolls_back_rows_accounting_and_scan_cursor(tmp_path):
+    pack = _linux_reclaim_pack(tmp_path)
+    event = ev("auth", T0, user__name="alice")
+    pack[-1].consume([event])
+    pack[-1].drain_staged()
+    witness = pack[0].witnesses
+    charged = witness.account().used
+    witness._spill.write("CREATE TRIGGER no_clock_delete BEFORE DELETE ON witnesses "
+                        "BEGIN SELECT RAISE(ABORT,'test delete refusal'); END", [()])
+    assert _reclaim_linux_references(pack) == 0
+    assert witness.load([event.id]) == [event] and witness.account().used == charged
+    assert not pack[0].budget.broken
+    witness._spill.write("DROP TRIGGER no_clock_delete", [()])
+    _reclaim_linux_references(pack)
+    assert witness.count() == 0
+    for detector in pack:
+        detector.release_state()
