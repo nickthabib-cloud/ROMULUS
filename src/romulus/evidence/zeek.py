@@ -86,7 +86,7 @@ from romulus.evidence.zeek_credentials import (
     strip_uri_userinfo,
 )
 
-ZEEK_NORMALIZER = "zeek-ecs@2"
+ZEEK_NORMALIZER = "zeek-ecs@3"
 ZEEK_DUPLICATE = "duplicate Zeek record copy (sensor/log/uid)"
 ZEEK_INTERIM_SUPERSEDED = "Zeek interim conn record superseded by a later record of the same connection"
 MISSED_BYTES_CAVEAT = ("Zeek missed {n} bytes of this connection in content gaps (missed_bytes): its payload byte "
@@ -1498,6 +1498,15 @@ def _files(f, reader, log, caveats, guard):
             f.pop("network.community_id", None)
         elif _present(uid):
             reader.bad.append("log.id.uid")
+        elif "source.port" not in f and "destination.port" not in f:
+            # zeek.files moves tx_hosts/rx_hosts independently of conn_uids.
+            # A row with no connection identifier or conn_id ports still has
+            # the first native sending/receiving hosts, when they were logged.
+            for side, hosts in (("source", "file.tx_hosts"), ("destination", "file.rx_hosts")):
+                address = f.pop(f"{side}.ip", None)
+                if address is not None:
+                    f[hosts] = fv([address.value], address.origin)
+            f.pop("network.community_id", None)
     if reader.shape in (ELASTIC, SECURITY_ONION) and ("file.tx_hosts" in f or "file.rx_hosts" in f):
         caveats.append(ZEEK_FIRST_HOST_ONLY)
     source = f.get("file.source")
