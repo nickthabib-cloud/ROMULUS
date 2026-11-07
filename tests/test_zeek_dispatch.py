@@ -9,8 +9,12 @@ A producer epoch changes its event ids and producer tags. Those fields are rebas
 native-output comparisons prove every typed value, origin, raw reference, skip and error unchanged.
 The Windows dumps correspond to windows_baseline; the health inputs record unread output from
 health_baseline. Reversing the Zeek identity replacements and removing the added health inputs and
-their batch skips restores the entire previous golden. Credential-bearing raw digests are reconciled
+their batch skips restores the entire previous golden. ICS inputs use the final pre-ICS baseline;
+their shipped rows become transactions while undeclared plain JSON keeps its skip.
+Credential-bearing raw digests are reconciled
 separately with the credential masking boundary below.
+Legacy file rows with one sender and receiver also preserve those existing host facts as source/destination
+address aliases. The producer rebase retains every other typed value, origin, raw reference, skip and error.
 """
 import json
 from pathlib import Path
@@ -20,7 +24,7 @@ import pytest
 from romulus.evidence.normalize import NORMALIZER_VERSION, normalize_hits, raw_digest
 from romulus.evidence.windows import WINDOWS_NORMALIZER
 from romulus.evidence.zeek import ZEEK_DUPLICATE, ZEEK_NORMALIZER, scrub_zeek_source, zeek_record
-from romulus.evidence.zeek_catalog import ANALYZER_LOGS, HEALTH_LOGS, WINDOWS_PROTOCOL_LOGS
+from romulus.evidence.zeek_catalog import ANALYZER_LOGS, HEALTH_LOGS, ICS_LOGS, WINDOWS_PROTOCOL_LOGS
 
 GOLDEN = json.loads((Path(__file__).parent / "data" / "zeek_dispatch_golden.json").read_text(encoding="utf-8"))
 RECORDS = GOLDEN["records"]
@@ -30,7 +34,7 @@ def _now_read(name: str):
     """The newly read protocol or health log recognized for this group; None for other groups."""
     recognized = {zeek_record(h["_source"]) for h in RECORDS[name]["hits"]} - {None}
     logs = {record.log for record in recognized}
-    return next(iter(logs)) if len(logs) == 1 and next(iter(logs)) in (*WINDOWS_PROTOCOL_LOGS, *HEALTH_LOGS) else None
+    return next(iter(logs)) if len(logs) == 1 and next(iter(logs)) in (*WINDOWS_PROTOCOL_LOGS, *HEALTH_LOGS, *ICS_LOGS) else None
 
 
 NEWLY_READ = sorted(name for name in RECORDS if _now_read(name) is not None)
@@ -71,19 +75,21 @@ def dumped(events, skips, errors) -> dict:
 
 def test_the_golden_holds_the_baseline_of_every_shape():
     assert (GOLDEN["baseline"] == "b13fdfe" and GOLDEN["windows_baseline"] == "7dd3fe45728bc3d1ec27b54ba9a2f887d512822c"
-            and GOLDEN["health_baseline"] == "48a6639fda2aa0b4dd57295cfc8530d9b8d566a9")
+            and GOLDEN["health_baseline"] == "48a6639fda2aa0b4dd57295cfc8530d9b8d566a9"
+            and GOLDEN["ics_baseline"] == "d64b5caa37c22d76732bf63c9bf4154baf6d3cb4"
+            and GOLDEN["zeek_producer"] == ZEEK_NORMALIZER)
     producers = {e["normalizer"] for record in RECORDS.values() for e in record["events"]}
     assert producers == {NORMALIZER_VERSION, WINDOWS_NORMALIZER, ZEEK_NORMALIZER}
     assert {"linux-audit-group", "systemd-journal-sshd", "apache-access", "windows-security-elastic_agent",
             "malcolm-suricata-ftp", "eve-fileinfo", "arkime-provider", "zeek-icmp", "zeek-conn-malcolm",
             "zeek-conn-security_onion-bare", "zeek-files-5.0-security_onion"} <= set(RECORDS)
     # every analyzer log in every shape that writes it
-    for log in (*ANALYZER_LOGS, *HEALTH_LOGS):
+    for log in (*ANALYZER_LOGS, *HEALTH_LOGS, *ICS_LOGS):
         for shape in log.names:
             assert f"zeek-{log.name}-{shape}" in RECORDS, (log.name, shape)
     # exactly the Windows-protocol rows a shipper indexes (plain Zeek JSON is read only through a site declaration,
     # never by normalize_hits), their variants, and the conn-shaped rows that named smb_files at the baseline
-    shipped = {f"zeek-{log.name}-{shape}" for log in (*WINDOWS_PROTOCOL_LOGS, *HEALTH_LOGS) for shape in set(log.names) - {"plain"}}
+    shipped = {f"zeek-{log.name}-{shape}" for log in (*WINDOWS_PROTOCOL_LOGS, *HEALTH_LOGS, *ICS_LOGS) for shape in set(log.names) - {"plain"}}
     variants = {"zeek-ldap-6.1-malcolm", "zeek-ldap-6.1-security_onion", "zeek-ldap_search-6.1-malcolm",
                 "zeek-ldap_search-6.1-security_onion", "zeek-smb_cmd-no-file-malcolm", "zeek-smb_cmd-no-file-elastic",
                 "zeek-smb_cmd-malcolm-text"}
@@ -91,8 +97,8 @@ def test_the_golden_holds_the_baseline_of_every_shape():
     assert set(NEWLY_READ) == shipped | variants | renamed
     # the core analyzer logs, conn, and a log still outside the catalog stay as they were
     assert {"zeek-dns-malcolm", "zeek-http-elastic", "zeek-conn-security_onion", "zeek-dns-plain",
-            "zeek-uncatalogued-malcolm-modbus", "zeek-uncatalogued-elastic-modbus",
-            "zeek-uncatalogued-security_onion-modbus", "zeek-uncatalogued-security_onion-files"} <= set(UNCHANGED)
+            "zeek-uncatalogued-malcolm-opcua_binary", "zeek-uncatalogued-elastic-opcua_binary",
+            "zeek-uncatalogued-security_onion-opcua_binary", "zeek-uncatalogued-security_onion-files"} <= set(UNCHANGED)
 
 
 @pytest.mark.parametrize("name", UNCHANGED)

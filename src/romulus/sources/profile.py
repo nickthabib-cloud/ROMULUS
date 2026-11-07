@@ -18,13 +18,13 @@ HOST_INVENTORY_BYTE_BUDGET = 8 * 1024 * 1024
 # `text` fields are analyzed: phrase matching can miss qualifying records (tokenization), so no
 # op is a superset there. Rules needing text content must retrieve by type and evaluate locally.
 OPS_BY_TYPE: dict[str, set[str]] = {
-    "keyword": {"eq", "in", "prefix", "exists", "missing", "contains"},
-    "constant_keyword": {"eq", "in", "exists", "missing"},
-    "wildcard": {"eq", "in", "prefix", "contains", "exists", "missing"},
+    "keyword": {"eq", "in", "not_in", "prefix", "exists", "missing", "contains"},
+    "constant_keyword": {"eq", "in", "not_in", "exists", "missing"},
+    "wildcard": {"eq", "in", "not_in", "prefix", "contains", "exists", "missing"},
     "ip": {"eq", "in", "cidr", "exists", "missing"},
-    "long": {"eq", "in", "gte", "lt", "exists", "missing"},
-    "integer": {"eq", "in", "gte", "lt", "exists", "missing"},
-    "short": {"eq", "in", "gte", "lt", "exists", "missing"},
+    "long": {"eq", "in", "not_in", "gte", "lt", "exists", "missing"},
+    "integer": {"eq", "in", "not_in", "gte", "lt", "exists", "missing"},
+    "short": {"eq", "in", "not_in", "gte", "lt", "exists", "missing"},
     "double": {"gte", "lt", "exists", "missing"},
     "float": {"gte", "lt", "exists", "missing"},
     "date": {"gte", "lt", "exists", "missing"},
@@ -32,7 +32,7 @@ OPS_BY_TYPE: dict[str, set[str]] = {
     "text": {"exists", "missing"},
     # A flattened leaf is indexed like a keyword. Aliases below name the leaf explicitly; the object root itself
     # is never used for a value predicate.
-    "flattened": {"eq", "in", "prefix", "contains", "exists", "missing"},
+    "flattened": {"eq", "in", "not_in", "prefix", "contains", "exists", "missing"},
 }
 AGGREGATABLE = {
     "keyword", "constant_keyword", "ip", "long", "integer", "short", "boolean", "date", "wildcard",

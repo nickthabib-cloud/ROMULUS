@@ -98,7 +98,8 @@ def _canonical_address(value: str) -> str:
 def role_address_warnings(content: dict) -> list[str]:
     """Explain broad role declarations without changing their accepted scope or saved facts."""
     labels = {"domain_controller_addresses": "Domain controller",
-              "directory_sync_addresses": "Directory sync", "management_hosts": "Management"}
+              "directory_sync_addresses": "Directory sync", "management_hosts": "Management",
+              "ics_control_hosts": "ICS control"}
     warnings = []
     for field, label in labels.items():
         entries = content.get(field) or []
@@ -328,6 +329,7 @@ class _SiteDocument(BaseModel):
     internal_networks: tuple[str, ...] = ()
     external_networks: tuple[str, ...] = ()
     management_hosts: tuple[str, ...] = ()
+    ics_control_hosts: tuple[str, ...] = ()
     domain_controller_addresses: tuple[str, ...] = ()
     directory_sync_hosts: tuple[str, ...] = ()
     directory_sync_addresses: tuple[str, ...] = ()
@@ -357,7 +359,8 @@ class _SiteDocument(BaseModel):
             raise ValueError(f"{info.field_name} must not contain duplicates")
         return normalized
 
-    @field_validator("domain_controller_addresses", "directory_sync_addresses", "management_hosts", mode="before")
+    @field_validator("domain_controller_addresses", "directory_sync_addresses", "management_hosts", "ics_control_hosts",
+                     mode="before")
     @classmethod
     def _role_addresses(cls, value, info):
         if not isinstance(value, (list, tuple)) or any(not isinstance(item, str) for item in value):
@@ -428,6 +431,7 @@ class SiteFacts:
     domain_controller_addresses: tuple[str, ...] = ()
     directory_sync_hosts: tuple[str, ...] = ()
     directory_sync_addresses: tuple[str, ...] = ()
+    ics_control_hosts: tuple[str, ...] = ()
 
     @property
     def zeek(self) -> ZeekPolicy:
@@ -517,7 +521,8 @@ def _facts(document: _SiteDocument) -> SiteFacts:
         content.pop("directory_sync_accounts", None)
     if not document.directory_sync_accounts_declared:
         content.pop("directory_sync_accounts_declared", None)
-    for name in ("management_hosts", "domain_controller_addresses", "directory_sync_hosts", "directory_sync_addresses"):
+    for name in ("management_hosts", "domain_controller_addresses", "directory_sync_hosts", "directory_sync_addresses",
+                 "ics_control_hosts"):
         if name not in document.model_fields_set:
             content.pop(name, None)
     return SiteFacts(
@@ -533,6 +538,7 @@ def _facts(document: _SiteDocument) -> SiteFacts:
         document.domain_controller_addresses,
         document.directory_sync_hosts,
         document.directory_sync_addresses,
+        document.ics_control_hosts,
     )
 
 

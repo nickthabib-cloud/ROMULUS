@@ -13,7 +13,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from .attack import load_attack_bundle
+from .attack import ICS_ATTACK_BUNDLE, ICS_PINNED_JSON_SHA256, load_attack_bundle
 from .models import (
     AttackKnowledge,
     Catalog,
@@ -61,6 +61,8 @@ def strength_for_rule(playbook: type) -> CoverageStrength:
 
 
 def _rule_metadata(playbook: type) -> RuleMetadata:
+    if isinstance(playbook, RuleMetadata):
+        return playbook
     card = getattr(playbook, "card", {}) or {}
     if not isinstance(card, dict):
         card = {}
@@ -91,6 +93,7 @@ def _rule_metadata(playbook: type) -> RuleMetadata:
         behavior=str(card.get("behavior", "")),
         fidelity=str(card.get("fidelity", "")),
         provenance=MappingProxyType(dict(card.get('provenance', {}))),
+        attack_domain=str(getattr(playbook, 'attack_domain', 'enterprise')),
     )
 
 
@@ -98,6 +101,7 @@ def _rule_document(rule: RuleMetadata) -> dict[str, Any]:
     return {
         **({'provenance': dict(rule.provenance)} if rule.provenance else {}),
         "id": rule.id,
+        "attack_domain": rule.attack_domain,
         "version": rule.version,
         "title": rule.title,
         "kind": rule.kind,
@@ -131,6 +135,7 @@ def _pack_probe_document() -> dict[str, Any]:
 def _rule_from_document(item: dict[str, Any]) -> RuleMetadata:
     return RuleMetadata(
         id=str(item["id"]),
+        attack_domain=str(item.get('attack_domain', 'enterprise')),
         version=str(item["version"]),
         title=str(item["title"]),
         kind=str(item["kind"]),
@@ -205,21 +210,25 @@ def _public_pack() -> tuple[tuple[RuleMetadata, ...], str]:
 
 def _rule_issues(rules: tuple[RuleMetadata, ...], attack: AttackKnowledge) -> tuple[RuleAttackIssue, ...]:
     ids = {item.id: item for item in attack.techniques}
+    ics = (load_attack_bundle(ICS_ATTACK_BUNDLE, expected_sha256=ICS_PINNED_JSON_SHA256)
+           if any(rule.attack_domain == 'ics' for rule in rules) else None)
     seen: set[str] = set()
     issues: list[RuleAttackIssue] = []
     for rule in rules:
         if rule.id in seen:
             raise ValueError(f"duplicate playbook id: {rule.id}")
         seen.add(rule.id)
+        knowledge = ics if rule.attack_domain == 'ics' else attack
+        rule_ids = {item.id: item for item in knowledge.techniques} if knowledge is not attack else ids
         for attack_id in rule.attack_ids:
-            technique = ids.get(attack_id)
+            technique = rule_ids.get(attack_id)
             if technique is None:
                 reason = _NON_ENTERPRISE_ID_REASONS.get(attack_id, "unknown")
                 issues.append(RuleAttackIssue(rule.id, attack_id, reason))
             elif technique.revoked or technique.deprecated:
                 reason = "revoked" if technique.revoked else "deprecated"
                 issues.append(
-                    RuleAttackIssue(rule.id, attack_id, reason, attack.replacement(attack_id))
+                    RuleAttackIssue(rule.id, attack_id, reason, knowledge.replacement(attack_id))
                 )
     return tuple(sorted(issues, key=lambda item: (item.rule_id, item.attack_id)))
 
@@ -229,11 +238,13 @@ def build_catalog(
     attack: AttackKnowledge | None = None,
     playbooks: Iterable[type] | None = None,
     strict: bool = False,
+    domain: str = 'enterprise',
     repo=None,
 ) -> Catalog:
     """Return a sorted catalog; strict mode makes invalid ATT&CK mappings fail."""
     public_rules, pack_version = _public_pack()
-    attack = attack or load_attack_bundle()
+    attack = attack or (load_attack_bundle(ICS_ATTACK_BUNDLE, expected_sha256=ICS_PINNED_JSON_SHA256)
+                        if domain == 'ics' else load_attack_bundle())
     rules = (
         tuple(sorted((_rule_metadata(playbook) for playbook in playbooks), key=lambda item: item.id))
         if playbooks is not None
@@ -244,6 +255,8 @@ def build_catalog(
         from romulus.detect.sigma import SigmaRule
         rules = tuple(sorted((*rules, *(_rule_metadata(SigmaRule(row))
                                        for row in SigmaRules(repo).iter_rules())), key=lambda item: item.id))
+    if domain == 'ics':
+        rules = tuple(rule for rule in rules if rule.attack_domain == 'ics')
     invalid = _rule_issues(rules, attack)
     if strict and invalid:
         issue = invalid[0]
@@ -254,6 +267,8 @@ def build_catalog(
 
     rule_ids_by_technique: dict[str, list[str]] = {}
     for rule in active_rules:
+        if rule.attack_domain != domain:
+            continue
         invalid_ids = {issue.attack_id for issue in invalid if issue.rule_id == rule.id}
         for attack_id in rule.attack_ids:
             if attack_id in invalid_ids:

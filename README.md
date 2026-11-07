@@ -113,6 +113,8 @@ All settings live in `$ROMULUS_HOME/.env` (template: [`.env.example`](.env.examp
 
 - what each group of Windows hosts collects (Sysmon event ids, audit policy subcategories, command lines in 4688, PowerShell script blocks, event log channels);
 - the domain controllers and directory-sync accounts;
+- ICS control-host addresses: every host that legitimately sends write or control commands, including HMI,
+  SCADA, engineering stations, and PLCs, gateways or data concentrators acting as masters;
 - the site's internal networks. These can be set here or with `ROMULUS_INTERNAL_NETWORKS`/`ROMULUS_EXTERNAL_NETWORKS` in `.env`, but not both.
 
 Tick the sync-account declaration after checking the site's complete list, including when the checked list is empty. An empty list saved without that declaration leaves authorization unresolved.

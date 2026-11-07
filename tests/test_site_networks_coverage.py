@@ -51,7 +51,7 @@ def session(src, dst, *, transport="tcp", seconds=60, **extra):
 def flow(src, dst):
     start = T0 + timedelta(seconds=20)
     return ev("net_flow", ts=start, source__ip=src, destination__ip=dst, source__port=40000, destination__port=22,
-              network__transport="tcp", flow__start=start.isoformat(), flow__pkts_toclient=2,
+              network__transport="tcp", flow__start=start.isoformat(), flow__end=start.isoformat(), flow__pkts_toclient=2,
               suricata__flow_id=_n)
 
 
@@ -63,7 +63,7 @@ def tls_record(src, dst, **extra):
 
 def test_the_direction_dependent_rules_are_exactly_these():
     flagged = {pb.id for pb in ALL_PLAYBOOKS if getattr(pb, "direction_dependent", False)}
-    assert flagged == AFFECTED | {"win.rdp_external_source"}
+    assert flagged == AFFECTED | {"win.rdp_external_source", "net.executable_transfer", "net.cleartext_credentials"}
     # each can write a complete negative, which is what the reason protects
     assert all(pb.assures_negative for pb in ALL_PLAYBOOKS if pb.id in AFFECTED)
     assert all(not pb.assures_negative for pb in ALL_PLAYBOOKS if pb.id == "win.rdp_external_source")
@@ -77,7 +77,7 @@ def test_each_changed_rule_carries_a_new_version():
     # the six direction-dependent rules (coverage semantics) and the four whose claim or reason wording changed (most
     # of them since changed again: lineage read from observed process records, claims that say what they cite)
     versions = {pb.id: pb.version for pb in ALL_PLAYBOOKS if pb.id in AFFECTED | WORDING}
-    assert versions == {"bl.ext_dest": "1", "net.horizontal_sweep": "6", "net.long_external_connection": "4", "net.beaconing": "5",
+    assert versions == {"bl.ext_dest": "1", "net.horizontal_sweep": "6", "net.long_external_connection": "6", "net.beaconing": "7",
                         "net.rare_client_fingerprint": "4", "net.tls_self_signed_certificate_outbound": "4",
                         "net.tls_short_lived_or_new_certificate_outbound": "4",
                         "host.ssh_login_external_source": "6", "host.interpreter_external_connection": "8",

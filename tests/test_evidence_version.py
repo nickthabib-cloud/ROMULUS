@@ -46,7 +46,7 @@ PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf211
                    # identical; only the Zeek producer changes its epoch and adds health records.
                    # Then normalize_hits may skip looking for lone surrogates in a batch whose every response was
                    # proved free of them (sources.es.surrogate_free): output is identical for every input.
-                   14: "58e297746c69d2869d2638b154c09c1753bad61bf29e03feae1128ed1d1ae6c9"}
+                   14: "8d11cab49e970e0840b796080224e11d00b47edf37b78229108fa651f06bc3c3"}
 WINDOWS_EVIDENCE_FILES = ("community.py", "windows.py", "windows_catalog.py", "windows_reassembly.py", "rpc_catalog.py")
 PINNED_WINDOWS = {
     "windows-ecs@16": "1f06783de9c4bcc48be2807bfbf26aa83f35d0c9b6eabf147567f3b3b07191e3",
@@ -66,9 +66,11 @@ PINNED_WINDOWS = {
     "windows-ecs@9": "c7c70f9618344ea9ec418499d03747524e2b187491de32420da96002a35dbddc",
     "windows-ecs@8": "1d6de025af778e584dfc052227555d628b830af0735a61f4b26e61787905cdee",
 }
-ZEEK_EVIDENCE_FILES = ("certificates.py", "community.py", "rpc_catalog.py", "zeek.py", "zeek_catalog.py",
+ZEEK_EVIDENCE_FILES = ("certificates.py", "community.py", "ics_catalog.py", "rpc_catalog.py", "zeek.py", "zeek_catalog.py",
                        "zeek_credentials.py")
 PINNED_ZEEK = {
+    "zeek-ecs@4": "6b6092641e997f293f9e3ca160c77a65769f1106c8027d2941705875545147bc",
+    "zeek-ecs@3": "93c7a682f05558dcfaab69f49444d90bf095fc7652efa1c62d5c9777081b99fa",
     # unreleased: re-pinned when the zeek_record precheck (a record with no Zeek marker skips the full recognition)
     # merged in; every recognition result is unchanged.
     "zeek-ecs@2": "7ade7bb451eb4cfa7b271def32593544c4beae76573676336eee896a6d00fff4",

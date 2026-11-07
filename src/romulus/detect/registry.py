@@ -10,6 +10,7 @@ from romulus.detect.dns import DNS_PLAYBOOKS
 from romulus.detect.flows import FLOW_PLAYBOOKS
 from romulus.detect.hijack import HIJACK_PLAYBOOKS
 from romulus.detect.host import HOST_PLAYBOOKS, share_lineage
+from romulus.detect.ics import RULES as ICS_PLAYBOOKS
 from romulus.detect.indicators import INDICATOR_PLAYBOOKS
 from romulus.detect.kernel_files import KERNEL_FILE_PLAYBOOKS
 from romulus.detect.lineage import LINEAGE_PLAYBOOKS
@@ -49,11 +50,13 @@ from romulus.detect.windows_scripts import WINDOWS_SCRIPT_PLAYBOOKS
 from romulus.detect.windows_sequence_extensions import RULES as WINDOWS_SEQUENCE_RULES
 from romulus.detect.windows_tunnels_w4 import RULES as WINDOWS_TUNNEL_RULES
 from romulus.detect.zeek_alerts import ZEEK_ALERT_PLAYBOOKS
+from romulus.detect.zeek_cleartext import RULES as ZEEK_CLEARTEXT_PLAYBOOKS
 from romulus.detect.zeek_lateral import RULES as ZEEK_LATERAL_PLAYBOOKS
 from romulus.detect.zeek_rates import RULES as ZEEK_RATE_PLAYBOOKS
 from romulus.detect.zeek_smb import RULES as ZEEK_SMB_PLAYBOOKS
+from romulus.detect.zeek_transfer import RULES as ZEEK_TRANSFER_PLAYBOOKS
 
-PACK_VERSION = "pack@51"
+PACK_VERSION = "pack@53"
 WINDOWS_PROCESS_PLAYBOOKS = (WINDOWS_LINEAGE_PLAYBOOKS + WINDOWS_PROXY_PLAYBOOKS + WINDOWS_CREDENTIAL_PLAYBOOKS
                              + WINDOWS_DEFENSE_PLAYBOOKS + WINDOWS_REMOTE_PLAYBOOKS)
 WINDOWS_HOST_PLAYBOOKS = list(WINDOWS_MEMORY_PLAYBOOKS + WINDOWS_REGISTRY_PLAYBOOKS
@@ -82,6 +85,8 @@ ALL_PLAYBOOKS = (HOST_PLAYBOOKS + HIJACK_PLAYBOOKS + KERNEL_FILE_PLAYBOOKS + LIN
                  + WINDOWS_PROCESS_PLAYBOOKS + WINDOWS_HOST_PLAYBOOKS + WINDOWS_DOMAIN_PLAYBOOKS
                  + list(WINDOWS_LINKED_PLAYBOOKS) + list(WINDOWS_SCRIPT_PLAYBOOKS) + ZEEK_ALERT_PLAYBOOKS
                  + list(ZEEK_LATERAL_PLAYBOOKS) + list(ZEEK_SMB_PLAYBOOKS) + list(ZEEK_RATE_PLAYBOOKS)
+                 + list(ZEEK_CLEARTEXT_PLAYBOOKS) + list(ZEEK_TRANSFER_PLAYBOOKS)
+                 + list(ICS_PLAYBOOKS)
                  + BASELINE_PLAYBOOKS)
 _ANCHOR_CLASSES = {playbook.id: playbook.anchor_class for playbook in ALL_PLAYBOOKS}
 

@@ -299,7 +299,8 @@ def test_files_rows_of_zeek_5_1_name_their_connection_and_of_5_0_their_hosts():
         event = normalize(h)
         assert event.get("file.conn_uids") == [zl.UID_HTTP], shape
         assert event.get("file.tx_hosts") == [zl.SERVER] and event.get("file.rx_hosts") == [zl.CLIENT], shape
-        assert not event.has("zeek.uid") and not event.has("source.ip"), shape
+        assert not event.has("zeek.uid"), shape
+        assert event.get("source.ip") == zl.SERVER and event.get("destination.ip") == zl.CLIENT, shape
         assert (ZEEK_FIRST_HOST_ONLY in event.caveats) is (shape in ("elastic", "security_onion")), shape
 
 

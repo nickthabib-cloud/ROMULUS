@@ -195,12 +195,12 @@ class IndicatorMatch(Playbook):
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "ioc.indicator_match"
     anchor_class = "indicator"
-    version = f"8+{_SET.digest}"
+    version = f"9+{_SET.digest}"
     title = "Indicator list match in the field that gives it meaning"
     kind = "aggregate"
     claim_type = "observed_action"
     families = ("process_exec", "net_socket", "net_flow", "net_alert", "net_session", "dns_query", "http_tx",
-                "tls_session", "ssh_session", "file_transfer", "auth", "http_access")
+                "tls_session", "ssh_session", "file_transfer", "auth", "http_access", "ics_tx")
     required_fields = ()
     assures_negative = False           # names, addresses and fingerprints change; a miss proves nothing
     severity, lane = "medium", "lead"

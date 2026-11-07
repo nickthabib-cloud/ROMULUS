@@ -1,21 +1,29 @@
-"""Network-session playbooks over Arkime SPI records (net_session) and Suricata handshake records.
+"""Network-session playbooks over Arkime sessions and bidirectional Suricata and Zeek flows.
 
 Arkime writes a long-lived connection as several session records, one per save interval, sharing the
-5-tuple and community ID. These rules stitch records by community ID so a connection is judged as a
+5-tuple and community ID. The timing rules join records by direction-independent endpoints so a connection is judged as a
 whole. The fingerprint rarity rule also reads Suricata tls/ssh records through the same typed handshake
 fields. Every value comes from typed fields; nothing is matched in text.
 """
 from __future__ import annotations
 
-import itertools
+import heapq
+import sqlite3
 import statistics
-from array import array
-from bisect import bisect_left, bisect_right
+from collections import Counter
 from datetime import UTC, datetime
+from itertools import groupby, pairwise
 from typing import ClassVar
 
 from romulus.detect.base import Match, Playbook, pf
-from romulus.detect.bounded import HOT_COUNT, CitationUnavailable, HeldExamples, KeyedStore, RecentIds
+from romulus.detect.bounded import (
+    HOT_COUNT,
+    CitationUnavailable,
+    HeldExamples,
+    KeyedStore,
+    RecentIds,
+    SpillList,
+)
 from romulus.detect.citing import (
     BoundStage,
     Ends,
@@ -25,11 +33,22 @@ from romulus.detect.citing import (
     cited_phrase,
 )
 from romulus.detect.correlation import canon_ip, external, routable_remote
+from romulus.detect.flows import (
+    ARKIME,
+    SURICATA,
+    ZEEK,
+    ZEEK_NO_DURATION,
+    _per_sensor_cited,
+    _sensor_counts,
+    flow_view,
+    record_kind,
+    sensor_of,
+)
 from romulus.detect.netdef import assume_direction
 from romulus.evidence.typed import TypedEvent
 
 EXAMPLE_LIMIT = 20
-PERIODIC_BY_DESIGN = {"ntp"}      # Arkime parser protocol names whose normal operation is a fixed poll interval
+PERIODIC_BY_DESIGN = {"ntp"}      # parser protocol names whose normal operation is a fixed poll interval
 
 
 def _public(ip) -> bool:
@@ -64,32 +83,26 @@ def _syn(e: TypedEvent) -> bool | None:
     return count > 0
 
 
-def _absorb(parts: list[list], start: float, end: float, seq: int, event_id: str, protocols: frozenset,
-            idle: float) -> bool:
-    """Add one record to a connection's stretches of activity: [start, end, first record's order, its id,
-    protocols], kept sorted and disjoint, each more than `idle` from the next. Stretches the record comes within
-    `idle` of are merged; True when the record opened a new stretch (it was then more than `idle` from every record
-    of the identity read before it)."""
-    lo = bisect_left(parts, start - idle, key=lambda p: p[1])
-    hi = bisect_right(parts, end + idle, key=lambda p: p[0])
-    if lo == hi:
-        parts.insert(lo, [start, end, seq, event_id, protocols])
-        return True
-    touched = parts[lo:hi]
-    lead = min(touched, key=lambda p: p[2])
-    parts[lo:hi] = [[min(start, touched[0][0]), max(end, max(p[1] for p in touched)), lead[2], lead[3],
-                     protocols.union(*(p[4] for p in touched))]]
-    return False
+def _merge_stretch(first: list, other: list) -> list:
+    """Merge overlapping/continuing intervals with one first witness per sensor kind."""
+    lead = min((first, other), key=lambda part: part[2])
+    witnesses = dict(first[5])
+    for sensor, ref in other[5].items():
+        witnesses[sensor] = min(witnesses.get(sensor, ref), ref)
+    return [min(first[0], other[0]), max(first[1], other[1]), lead[2], lead[3],
+            first[4] | other[4], witnesses]
 
 
 class _Stitched(Playbook):
-    """Groups net_session records into connections by community ID (or the 5-tuple when absent). Memory
+    """Groups bidirectional records into connections by the shared FlowView endpoint identity. Memory
     holds per-connection summaries and event ids; the events themselves are staged on disk.
 
     Every connection the rule can report (`wants`) is held for the whole window in a keyed store: the HOT most
     recently used in memory, the rest on the rule's disk spill, read back when the identity is seen again. Nothing
     is closed or forgotten on a time horizon, so a channel that sleeps for hours keeps its whole history. Each
-    connection also keeps its stretches of activity (records more than IDLE apart start a new stretch): Arkime writes
+    connection keeps one open stretch in memory; closed stretches spill and are reconciled in time order at
+    finalize, including late records that bridge earlier stretches. Records more than IDLE apart start a TCP
+    stretch: Arkime writes
     a long session's intermediate record at least every tcpSaveTimeout (720 s by default) and closes a TCP session
     idle for tcpTimeout (480 s), so a gap of an hour is a channel that slept or a 5-tuple used again. Only the
     store's disk budget may refuse a record of a new connection (counted, and said on coverage)."""
@@ -97,9 +110,11 @@ class _Stitched(Playbook):
     anchor_class = "network_observation"
     staged = True
     claim_type = "network_observation"
-    families = ("net_session",)
-    required_fields = ("source.ip", "destination.ip", "flow.start", "flow.end")
+    families = ("net_session", "net_flow")
+    required_fields = ("source.ip", "destination.ip", "flow.start")
     IDLE = 3600.0
+    UDP_GAP = 5.0
+    STRETCH_HOT = 1024
     CONN_IDS = EXAMPLE_LIMIT        # record ids held (and staged) per connection
     HOT = HOT_COUNT  # count cap; sized in bytes by the hunt's memory budget
     BOUNDED = False                 # the rule's claims state each connection's span: stage the records bounding it
@@ -107,6 +122,13 @@ class _Stitched(Playbook):
     def __init__(self):
         super().__init__()
         self.conns = KeyedStore(self, f"conns_{type(self).__name__.lower()}", self.HOT, candidate=self.candidate)
+        # Keep the existing Arkime finding key while joining records by the sensor-neutral endpoint identity.
+        if "net_flow" in self.families:
+            self.identities = KeyedStore(self, "session_identities", self.HOT)
+            self.stretches = SpillList(self, "session_stretches", min(self.HOT, self.STRETCH_HOT))
+        if self.BOUNDED:
+            self.byte_totals = KeyedStore(self, "session_byte_totals", self.HOT)
+            self.report_keys = KeyedStore(self, "session_report_keys", self.HOT)
         self._seen = RecentIds()        # bounded re-read guard
         self._pending: list[TypedEvent] = []
         self.bounds = BoundStage()      # records bounding each connection's span, staged when a batch ends
@@ -119,7 +141,9 @@ class _Stitched(Playbook):
 
     def drain_staged(self) -> list[TypedEvent]:
         out, self._pending = self._pending + self.bounds.drain(), []
-        self.conns.trim()
+        for value in list(vars(self).values()):
+            if isinstance(value, (KeyedStore, SpillList)):
+                value.trim()
         return out
 
     def drain_bounds(self) -> tuple[list[str], list[str]]:
@@ -128,7 +152,7 @@ class _Stitched(Playbook):
     def release_state(self) -> None:
         self.load = lambda ids: []
         for value in list(vars(self).values()):
-            if isinstance(value, (KeyedStore, BoundStage)):
+            if isinstance(value, (KeyedStore, BoundStage, SpillList)):
                 value.clear()
         self.close_spill()
 
@@ -160,58 +184,169 @@ class _Stitched(Playbook):
         return False
 
     def consume(self, events):
-        for e in self.applicable([e for e in events if e.id not in self._seen]):
+        fresh = [e for e in events if e.family in self.families and e.id not in self._seen]
+        flow_observers = {e.host for e in fresh if record_kind(e) == "flow"}
+        selected = []
+        for e in fresh:
+            kind = record_kind(e)
+            if kind == "netflow":
+                self._seen.add(e.id)
+                if e.host not in flow_observers:
+                    self.missing_required += 1
+            elif kind is None:
+                self._seen.add(e.id)
+                self.missing_required += 1
+            else:
+                selected.append(e)
+        for e in self.applicable(selected):
             self._seen.add(e.id)               # re-reading a partition must not count a record twice
-            start, end = _epoch(e.get("flow.start")), _epoch(e.get("flow.end"))
-            if start is None or end is None:
+            view = flow_view(e, record_kind(e))
+            if view is None or not view.timed:
                 self.evaluated -= 1
                 self.missing_required += 1
                 continue
-            key = self._conn_key(e)
+            start, end = view.start, view.end
+            if self.skipped_for_direction(e):
+                assume_direction(self)
+            key = self.identities.get(view.key)
+            if key is None:
+                if not self.wants(e):
+                    continue
+                key = self._conn_key(e)
+                previous = self.conns.get(key)
+                if previous is not None and previous["identity"] != view.key:
+                    key = repr(view.key)
+                if not self.identities.put(view.key, key):
+                    self.evaluated -= 1
+                    self.refuse("disk", "the connection identities' disk budget is spent; a new identity is not evaluated")
+                    continue
             c = self.conns.get(key)
             if c is None:
-                if not self.wants(e):
-                    if self.skipped_for_direction(e):
-                        assume_direction(self)  # judged by a direction the default definition only assumes
-                    continue                  # judged: a connection this rule cannot report
-                # src and dst are the first record's sides as Arkime recorded them; bytes are kept per side
+                # Keep the first record's sides; later opening evidence can orient the connection independently.
                 c = {"start": start, "end": end, "records": 0, "events": [], "sent_src": 0, "sent_dst": 0,
-                     "src": e.get("source.ip"), "sport": e.get("source.port"),
-                     "dst": e.get("destination.ip"), "dport": e.get("destination.port"),
-                     "transport": e.get("network.transport"), "observer": e.host, "protocols": set(),
+                     "src": view.src, "sport": view.sport, "dst": view.dst, "dport": view.dport,
+                     "identity": view.key, "transport": view.transport, "observer": e.host, "protocols": set(),
+                     "report_key": key, "arkime_key": None,
                      "seq": self._seq, "parts": [], "ends": Ends(), "openers": [], "opener_id": None,
-                     "flagged": False}
+                     "opener_field": None, "flagged": False, "sensors": Counter(), "sensor_bytes": {},
+                     "span_known": False, "duration_missing": False, "closed_stretches": False}
                 if not self.conns.put(key, c):
                     self.evaluated -= 1
                     self.refuse("disk", "the connections' disk budget is spent; a record of a new connection is not "
                                         "evaluated")
                     continue
-            protocols = e.get("network.protocols")
-            protocols = frozenset(protocols if isinstance(protocols, list) else [protocols] if protocols else [])
+            protocols = view.protocols or frozenset()
             c["protocols"].update(protocols)
-            c["start"], c["end"] = min(c["start"], start), max(c["end"], end)
+            c["duration_missing"] = c["duration_missing"] or view.duration_missing
+            if not self.BOUNDED or not view.duration_missing:
+                if c["span_known"]:
+                    c["start"], c["end"] = min(c["start"], start), max(c["end"], end)
+                else:
+                    c["start"], c["end"] = start, end
+                    c["span_known"] = True
             c["records"] += 1
-            # each side's bytes are its own counter, whichever side this record names as its source
-            forward = (e.get("source.ip"), e.get("source.port")) == (c["src"], c["sport"])
-            c["sent_src" if forward else "sent_dst"] += int(e.get("source.bytes") or 0)
-            c["sent_dst" if forward else "sent_src"] += int(e.get("destination.bytes") or 0)
-            syn = _syn(e) if e.get("network.transport") == "tcp" else None
-            if syn is not None:
+            c["sensors"][view.sensor] += 1
+            if self.BOUNDED:
+                self._bytes(c, view, e)
+                if view.sensor == ARKIME and e.get("network.community_id"):
+                    cid = str(e.get("network.community_id"))
+                    identity = self.report_keys.setdefault(cid, lambda view=view: view.key)
+                    if identity == view.key:
+                        c["arkime_key"] = min(c["arkime_key"] or cid, cid)
+                        c["report_key"] = c["arkime_key"]
+                    elif identity is None:
+                        self.note_limit("report_keys", "the finding-identity disk budget is spent; the endpoint identity is used")
+                        c["report_key"] = repr(view.key)
+                    elif c["arkime_key"] is None:
+                        c["report_key"] = repr(view.key)
+            if any(e.has(field) for field in ("tcp.flags.syn", "tcp.opened_by_orig", "tcp.tcp_flags_ts", "tcp.syn")):
                 c["flagged"] = True
-            if syn:
-                side = (e.get("source.ip"), e.get("source.port"))
+            if view.opened:
+                side = (view.src, view.sport)
                 if side not in c["openers"]:
                     c["openers"].append(side)
                 if c["opener_id"] is None:
                     c["opener_id"] = e.id
-            if self.BOUNDED:
+                    c["opener_field"] = ("tcp.flags.syn" if view.sensor == ARKIME else
+                                         "tcp.opened_by_orig" if view.sensor == ZEEK else
+                                         "tcp.tcp_flags_ts" if e.has("tcp.tcp_flags_ts") else "tcp.syn")
+            if self.BOUNDED and not view.duration_missing:
                 # staged only once the connection can be reported; its first records are staged by `cite`
                 self.bounds.offer(key, c["ends"], start, end, e, stage=self.candidate(c))
-            opened = _absorb(c["parts"], start, end, self._seq, e.id, protocols, self.IDLE)
+            opened = False
+            if not self.BOUNDED or not view.duration_missing:
+                opened = self._stretch(key, c, view, e, protocols)
+                if opened is None:
+                    self.evaluated -= 1
+                    continue
             self._seq += 1
             if self.cite(c, e, opened):
                 self._pending.append(e)
         return []
+
+    def _closed(self, key, part):
+        if not self.stretches.append((key, part), (key, part[0])):
+            self.refuse("disk", "the closed activity-stretch disk budget is spent; an activity start is not evaluated")
+            return False
+        if len(self.stretches.buffer) >= self.stretches.hot_size:
+            self.stretches.trim(0)
+        return True
+
+    def _stretch(self, key, conn, view, event, protocols):
+        part = [view.start, view.end, self._seq, event.id, protocols,
+                {view.sensor: (view.start, self._seq, event.id)}]
+        if not conn["parts"]:
+            conn["parts"] = [part]
+            return True
+        current = conn["parts"][0]
+        idle = self.UDP_GAP if view.transport == "udp" else self.IDLE
+        if part[0] <= current[1] + idle and part[1] >= current[0] - idle:
+            witness = view.sensor not in current[5] or view.start < current[5][view.sensor][0]
+            conn["parts"] = [_merge_stretch(current, part)]
+            return witness
+        older, newer = (current, part) if current[1] <= part[1] else (part, current)
+        if not self._closed(key, older):
+            return None
+        conn["closed_stretches"] = True
+        conn["parts"] = [newer]
+        return True
+
+    def _merged_stretches(self):
+        """One chronological merge pass over capped history, so late copies and bridges cannot inflate starts."""
+        for key, conn in self.conns.items():
+            for part in conn["parts"]:
+                if conn["closed_stretches"]:
+                    self._closed(key, part)
+                else:
+                    yield key, part
+        held_key, held, idle = None, None, self.IDLE
+        for key, part in self.stretches.ordered():
+            if key == held_key and part[0] <= held[1] + idle:
+                held = _merge_stretch(held, part)
+                continue
+            if held is not None:
+                yield held_key, held
+            held_key, held = key, part
+            idle = self.UDP_GAP if self.conns.peek(key)["transport"] == "udp" else self.IDLE
+        if held is not None:
+            yield held_key, held
+
+    def _bytes(self, conn, view, event):
+        """Keep one observer's directional counters, never a sum of duplicate sensor observations."""
+        forward = (view.src, view.sport) == (conn["src"], conn["sport"])
+        counts = (view.c2s_bytes or 0, view.s2c_bytes or 0)[::1 if forward else -1]
+        totals = self.byte_totals.setdefault((view.key, view.sensor, event.host), lambda: [0, 0])
+        if totals is None:
+            self.evaluated -= 1
+            self.refuse("disk", "the per-sensor byte totals' disk budget is spent; byte totals are incomplete")
+            return
+        # Arkime save intervals are disjoint counters; Zeek interim and Suricata flow counters are cumulative.
+        for side in (0, 1):
+            totals[side] = totals[side] + counts[side] if view.sensor == ARKIME else max(totals[side], counts[side])
+        old = conn["sensor_bytes"].get(view.sensor, (0, 0))
+        conn["sensor_bytes"][view.sensor] = max(old, tuple(totals), key=lambda values: (sum(values), values))
+        chosen = next(sensor for sensor in (ARKIME, ZEEK, SURICATA) if sensor in conn["sensor_bytes"])
+        conn["sent_src"], conn["sent_dst"] = conn["sensor_bytes"][chosen]
 
     def cite(self, conn: dict, e: TypedEvent, opened: bool) -> bool:
         """Whether this record may be cited later (so it goes to the stage): the connection's first CONN_IDS, and
@@ -228,7 +363,7 @@ class _Stitched(Playbook):
 
 class LongExternalConnection(_Stitched):
     id = "net.long_external_connection"
-    version = "4"
+    version = "6"
     direction_dependent = True
     title = "Long-lived TCP connection between an internal and a public address"
     severity, lane = "medium", "lead"
@@ -240,15 +375,15 @@ class LongExternalConnection(_Stitched):
     MIN_SECONDS = 1800
     BOUNDED = True
     card: ClassVar[dict] = {
-        "behavior": "one TCP connection between an address inside the site and one outside it, recorded by Arkime "
-                    "as session records that together span at least 30 minutes",
-        "telemetry": "Arkime 6.x sessions as net_session: source.ip, destination.ip, flow.start, flow.end, "
-                     "network.transport, network.community_id, source.bytes, destination.bytes, tcp.flags.syn "
-                     "(present and normalized in the lab profile)",
+        "behavior": "one TCP connection between an address inside the site and one outside it, whose records "
+                    "together span at least 30 minutes; overlapping observations by several sensors count once",
+        "telemetry": "Arkime sessions as net_session, Suricata flow and Zeek conn as net_flow: source.ip, "
+                     "destination.ip, endpoint ports, flow.start/end, network.transport, directional bytes and "
+                     "the typed opening evidence exposed by FlowView.opened",
         "fidelity": "direct observation of the connection's lifetime by the sensor; says nothing about what it "
                     "carried. Bytes are given per side. A side is named the client only when a record shows the "
-                    "opening (Arkime counted a SYN on it, tcp.flags.syn, and orients such a session by it); a "
-                    "connection Arkime picked up mid-stream or that opened before the hunt window is worded with its "
+                    "opening through the sensor's typed SYN flags or Zeek conn history); a "
+                    "connection picked up mid-stream or that opened before the hunt window is worded with its "
                     "two ends and the opener stated as unknown. The cited records always include the records with "
                     "the earliest start and the latest end, and the claim says how many records it rests on and how "
                     "many are cited",
@@ -259,8 +394,8 @@ class LongExternalConnection(_Stitched):
         "adds": "the only rule that judges a connection's duration across the site boundary",
         "research_basis": "ATT&CK Enterprise 20.0 T1071, T1095 and T1571 (network traffic flow detection); "
                           "reimplemented from the behavior",
-        "retrieval": "the sweep retrieves every record of the Arkime session index in each partition, a superset "
-                     "of what this evaluator reads",
+        "retrieval": "the existing sweep retrieves Arkime sessions and bidirectional flow records, including "
+                     "Zeek overlap lookback and interim records; unidirectional netflow follows flow-rule coverage",
         "direction": "inside and outside are decided by the site's internal-network definition; under the default "
                      "(RFC 1918 and reserved ranges, not configured for the site) a partition holding a TCP record "
                      "between two routable addresses on the same side, skipped for that reason alone, is partial "
@@ -279,7 +414,7 @@ class LongExternalConnection(_Stitched):
         return e.get("network.transport") == "tcp" and _public(e.get("source.ip")) != _public(e.get("destination.ip"))
 
     def candidate(self, conn: dict) -> bool:
-        return conn["end"] - conn["start"] >= self.MIN_SECONDS
+        return conn["span_known"] and conn["end"] - conn["start"] >= self.MIN_SECONDS
 
     @staticmethod
     def _sides(c: dict) -> str:
@@ -297,7 +432,8 @@ class LongExternalConnection(_Stitched):
             unknown = "its records disagree about which side opened it (each side is recorded sending a SYN)"
         elif c["flagged"]:
             unknown = ("no record of it shows a SYN (Arkime picked it up mid-stream, or it opened before the hunt "
-                       "window)")
+                       "window)" if set(c["sensors"]) == {ARKIME} else
+                       "no record shows the opening (the sensors picked it up mid-stream, or it opened before the hunt window)")
         else:
             unknown = "no record of it carries TCP flag counts"
         return (f"one TCP connection between {c['src']}:{c['sport']} and {c['dst']}:{c['dport']} spanning {span}, "
@@ -306,19 +442,29 @@ class LongExternalConnection(_Stitched):
 
     def finalize(self):
         out = []
-        order = sorted((c["seq"], key) for key, c in self.conns.items(candidates=True))
-        for _seq, key in order:
-            with citation_group(self, out, key, self.conns.peek(key)):
-                c = self.conns.peek(key)
-                staged = set(c["events"])
+        for key, parts in groupby(self._merged_stretches(), key=lambda item: item[0]):
+            c = self.conns.peek(key)
+            staged = set(c["events"])
+            count, leads = 0, []
+            for _key, part in parts:
+                count += 1
+                if count > 1 and len(leads) < self.CONN_IDS and part[3] in staged:
+                    leads.append(part[3])
+            if not self.candidate(c):
+                continue
+            with citation_group(self, out, key, c):
                 # the records bounding the span, the record showing the opening, the first record of each later stretch
                 # of activity, then the connection's first records
-                leads = [part[3] for part in c["parts"][1:] if part[3] in staged]
                 ids = ([c["opener_id"]] if c["opener_id"] in staged else []) + leads + c["events"]
                 evs, missing = cite_with_bounds(self.load, self._events, c["ends"], ids, EXAMPLE_LIMIT)
+                arkime_only = set(c["sensors"]) == {ARKIME}
                 claim = (f"Arkime recorded {c['records']} session record(s) for {self._sides(c)} Only the part of the "
-                         f"connection that started inside the hunt window is counted.")
-                gaps = len(c["parts"]) - 1
+                         "connection that started inside the hunt window is counted." if arkime_only else
+                         f"The sensors recorded {_sensor_counts(c['sensors'])} for {self._sides(c)} "
+                         "The span uses the typed connection start and end, including overlapping lookback records. "
+                         "Byte totals use one sensor's counters (Arkime when available, otherwise Zeek, then Suricata); "
+                         "cumulative flow counters are counted once and are a lower bound when the same endpoints are reused.")
+                gaps = count - 1
                 if gaps:
                     # Arkime writes a live connection's record at least every save interval: a long silence is a
                     # channel that slept, or the 5-tuple used again by a separate connection. Either way it is reported.
@@ -326,48 +472,75 @@ class LongExternalConnection(_Stitched):
                               f"record, so this may be one channel that slept between bursts or the same 5-tuple reused "
                               f"by separate connections; the span covers all of them.")
                 claim += cited_phrase(len(evs), c["records"], not missing) + bound_note(missing, c["ends"], "the span")
+                if not arkime_only:
+                    claim += _per_sensor_cited(evs, {sensor: {"records": count} for sensor, count in c["sensors"].items()})
+                if c["duration_missing"]:
+                    claim += f" {ZEEK_NO_DURATION}; those records do not extend the stated span."
                 by_id = {e.id: e for e in evs}
                 opening = by_id.get(c["ends"].first[1]) or evs[0]
                 closing = by_id.get(c["ends"].last[1]) or max(evs, key=lambda e: (_epoch(e.get("flow.end")) or 0, e.id))
-                preds = [pf(opening, "source.ip"), pf(opening, "destination.ip"), pf(opening, "flow.start"),
-                         pf(closing, "flow.end")]
+                preds = [pf(opening, "source.ip"), pf(opening, "destination.ip"), pf(opening, "flow.start")]
+                if closing.has("flow.end"):
+                    preds.append(pf(closing, "flow.end"))
                 if c["opener_id"] in by_id and len(c["openers"]) == 1:
-                    preds.append(pf(by_id[c["opener_id"]], "tcp.flags.syn"))
+                    preds.append(pf(by_id[c["opener_id"]], c["opener_field"]))
                 out.append(Match(self.id, claim, self.claim_type, evs, preds, evs[0].ts, self.severity, self.lane,
-                                 "high", evs[0].entities(), group_key=key))
+                                 "high", evs[0].entities(), group_key=c["report_key"]))
         return out
 
 
 class _Series:
     """One (internal source, public destination, port, transport) series, built at finalize: every connection's
-    start (8 bytes each), the earliest connections' first record ids and the latest connection's, and the protocols
+    count, the earliest connections' first record ids and the latest connection's, and the protocols
     every connection was identified as."""
 
-    __slots__ = ("first", "last", "protocols", "starts")
+    __slots__ = ("count", "duration_missing", "first", "last", "opened", "protocols", "sensors")
 
     def __init__(self):
-        self.starts = array("d")
-        self.first: list[tuple[float, int, str]] = []        # (start, first record's order, its id), earliest
-        self.last: tuple[float, int, str] | None = None      # the latest-starting connection's first record
+        self.count = 0
+        self.first: list[tuple] = []                       # (start, first order, first id, sensor witnesses)
+        self.last: tuple | None = None                     # latest-starting connection's witnesses
         self.protocols: frozenset | None = None
+        self.sensors = Counter()
+        self.opened = True
+        self.duration_missing = False
 
     def add(self, part: list) -> None:
-        start, _end, seq, event_id, protocols = part
-        self.starts.append(start)
-        ref = (start, seq, event_id)
+        start, _end, seq, event_id, protocols, witnesses = part
+        self.count += 1
+        ref = (start, seq, event_id, witnesses)
         if self.last is None or ref > self.last:
             self.last = ref
         if len(self.first) < EXAMPLE_LIMIT or ref < self.first[-1]:
             self.first = sorted([*self.first, ref])[:EXAMPLE_LIMIT]
         self.protocols = protocols if self.protocols is None else self.protocols & protocols
 
+    def citation_ids(self):
+        refs = list({ref[1]: ref for ref in (self.first[0], self.last, *self.first)}.values())
+        sensors = (ARKIME, SURICATA, ZEEK)
+        preferred = lambda ref: next((ref[3][sensor][2] for sensor in sensors if sensor in ref[3]), ref[2])
+        ids = [preferred(refs[0]), preferred(refs[1] if len(refs) > 1 else refs[0])]
+        ids.extend(min(ref[3].values())[2] for ref in refs[:2])       # exact start bounds, even under sensor skew
+        # Keep one example from each observed sensor before filling the remaining bounded slots with Arkime.
+        for sensor in sensors:
+            ids.extend(next(([ref[3][sensor][2]] for ref in refs if sensor in ref[3]), []))
+        for sensor in sensors:
+            ids.extend(ref[3][sensor][2] for ref in refs if sensor in ref[3])
+        ids = list(dict.fromkeys(ids))[:EXAMPLE_LIMIT]
+        cited = set(ids)
+        connections = sum(any(event_id in cited for _start, _seq, event_id in ref[3].values()) for ref in refs)
+        return ids, connections
+
 
 class Beaconing(_Stitched):
     """Many separate connections from one internal address to one public endpoint at regular intervals. A
     connection identity whose records are more than IDLE apart is counted as separate connections (one per stretch
-    of activity), so a 5-tuple reused by a periodic client still shows its period."""
+    of activity), so a 5-tuple reused by a periodic client still shows its period. UDP uses UDP_GAP, half of
+    MIN_INTERVAL. A gap shorter than MIN_INTERVAL can never be a reportable period, so merging inside half of it
+    cannot hide a beacon. It absorbs millisecond truncation, ordinary sensor skew, and Arkime's back-to-back splits
+    of one long UDP session."""
     id = "net.beaconing"
-    version = "5"
+    version = "7"
     direction_dependent = True
     title = "Regular, repeated connections from an internal address to one public endpoint"
     severity, lane = "medium", "lead"
@@ -377,13 +550,14 @@ class Beaconing(_Stitched):
                    "scheduled tasks or cron entries on the internal host", "DNS history for the endpoint")
     MIN_CONNECTIONS = 8
     MIN_INTERVAL = 10.0
+    UDP_GAP = MIN_INTERVAL / 2
     MAX_JITTER = 0.1          # median absolute deviation of the intervals, relative to their median
     card: ClassVar[dict] = {
         "behavior": "at least 8 separate connections from one address inside the site to one address outside it, "
                     "on one port and transport, starting at a regular interval (median at least 10 s, median "
                     "absolute deviation at most a tenth of it)",
-        "telemetry": "Arkime 6.x sessions as net_session: source.ip, destination.ip, destination.port, "
-                     "network.transport, flow.start, flow.end, network.protocols (present in the lab profile)",
+        "telemetry": "Arkime sessions as net_session, Suricata flow and Zeek conn as net_flow: source.ip, "
+                     "destination.ip, endpoint ports, network.transport, flow.start/end and identified protocols",
         "fidelity": "aggregate observation of connection start times; regularity is a deviation, not proof of "
                     "command and control",
         "benign_and_cost": "NTP (context lane when the parser names it), update checks, telemetry and monitoring "
@@ -392,13 +566,13 @@ class Beaconing(_Stitched):
         "next_pivot": "the internal host's process and scheduled jobs for the endpoint",
         "adds": "the only rule that measures the regularity of repeated connections",
         "research_basis": "ATT&CK Enterprise 20.0 T1071, T1029 and T1573; reimplemented from the behavior",
-        "retrieval": "the sweep retrieves every record of the Arkime session index in each partition, a superset "
-                     "of what this evaluator reads",
+        "retrieval": "the existing sweep retrieves Arkime sessions and bidirectional flow records; the shared "
+                     "endpoint identity merges sensors, and unidirectional netflow follows flow-rule coverage",
         "direction": "inside and outside are decided by the site's internal-network definition; under the default "
                      "(RFC 1918 and reserved ranges, not configured for the site) a partition holding a record "
                      "between two routable addresses that is not inside-to-outside, skipped for that reason alone, "
                      "is partial with the reason 'direction assumed', never a complete negative",
-        "lanes": "lead, or context when Arkime's parser identified every connection as a protocol periodic by "
+        "lanes": "lead, or context when a sensor's parser identified every connection as a protocol periodic by "
                  "design; severity medium",
     }
 
@@ -408,9 +582,67 @@ class Beaconing(_Stitched):
         return _both_routable(e) and not (_public(e.get("destination.ip")) and not _public(e.get("source.ip")))
 
     TRIM_EVERY = 10_000
+    TIMING_HOT = 1024             # bounded scratch avoids needing disk for a small, already-held positive
+
+    def __init__(self):
+        super().__init__()
+        self.starts = SpillList(self, "beacon_starts", min(self.HOT, self.TIMING_HOT))
+
+    @staticmethod
+    def _median(rows, count):
+        """Exact median of ordered (value, multiplicity) rows with constant Python state."""
+        low, high = (count - 1) // 2, count // 2
+        seen, first = 0, None
+        for value, copies in rows:
+            seen += copies
+            if first is None and seen > low:
+                first = value
+            if seen > high:
+                return (first + value) / 2
+        raise ValueError("incomplete beacon interval statistics")
+
+    def _timing(self, key, count):
+        """Small populations use bounded scratch; larger populations use the capped spill database."""
+        if not self.starts.on_disk:
+            starts = sorted(order[0] for order, _record in self.starts.buffer if order[1] == key)
+            gaps = [second - first for first, second in pairwise(starts)]
+            median = statistics.median(gaps)
+            return median, statistics.median(abs(gap - median) for gap in gaps)
+        spill = self.spill()
+        if not getattr(self, "_timing_ready", False):
+            spill.table("beacon_gaps", "value REAL PRIMARY KEY, copies INTEGER")
+            spill.cap()
+            try:
+                spill.db.execute("CREATE INDEX beacon_start_order ON beacon_starts(o2, o1)")
+            except sqlite3.Error as exc:
+                raise spill.failed(exc) from exc
+            finally:
+                spill.grew()
+            self._timing_ready = True
+        spill.write("DELETE FROM beacon_gaps", [()])
+        previous, pending = None, Counter()
+        for (start,) in spill.execute("SELECT o1 FROM beacon_starts WHERE o2=? ORDER BY o1", (key,)):
+            if previous is not None:
+                pending[start - previous] += 1
+            previous = start
+            if len(pending) >= self.starts.hot_size:
+                spill.write("INSERT INTO beacon_gaps VALUES (?, ?) ON CONFLICT(value) DO UPDATE SET copies=copies+excluded.copies",
+                            list(pending.items()))
+                pending.clear()
+        if pending:
+            spill.write("INSERT INTO beacon_gaps VALUES (?, ?) ON CONFLICT(value) DO UPDATE SET copies=copies+excluded.copies",
+                        list(pending.items()))
+        median = self._median(spill.execute("SELECT value, copies FROM beacon_gaps ORDER BY value"), count - 1)
+        left = ((median - value, copies) for value, copies in spill.execute(
+            "SELECT value, copies FROM beacon_gaps WHERE value<? ORDER BY value DESC", (median,)))
+        right = ((value - median, copies) for value, copies in spill.execute(
+            "SELECT value, copies FROM beacon_gaps WHERE value>=? ORDER BY value", (median,)))
+        mad = self._median(heapq.merge(left, right), count - 1)
+        return median, mad
 
     def wants(self, e: TypedEvent) -> bool:
-        return _public(e.get("destination.ip")) and not _public(e.get("source.ip"))
+        # Retain either recorded orientation: a later sensor can provide the opening evidence.
+        return _public(e.get("destination.ip")) != _public(e.get("source.ip"))
 
     def cite(self, conn: dict, e: TypedEvent, opened: bool) -> bool:
         # A stretch is cited by its first record read, which opened a stretch when it was read (stretches only merge
@@ -419,47 +651,75 @@ class Beaconing(_Stitched):
 
     def finalize(self):
         series = KeyedStore(self, "beacon_series", self.HOT)
-        for i, (_key, c) in enumerate(self.conns.items()):
-            s = series.setdefault((c["src"], c["dst"], c["dport"], c["transport"]), _Series)
+        previous, c = None, None
+        for i, (key, part) in enumerate(self._merged_stretches()):
+            first = key != previous
+            if first:
+                previous, c = key, self.conns.peek(key)
+            src, sport, dst, dport = c["src"], c["sport"], c["dst"], c["dport"]
+            if len(c["openers"]) == 1 and tuple(c["openers"][0]) != (src, sport):
+                src, sport, dst, dport = dst, dport, src, sport
+            if _public(src) or not _public(dst):
+                continue
+            s = series.setdefault((src, dst, dport, c["transport"]), _Series)
             if s is None:
                 self.refuse("disk", "the series' disk budget is spent; a connection is not evaluated")
                 continue
-            for part in c["parts"]:
-                s.add(part)
+            if first:
+                s.sensors.update(c["sensors"])
+                s.opened = s.opened and len(c["openers"]) == 1
+                s.duration_missing = s.duration_missing or c["duration_missing"]
+            if not self.starts.append(part[0], (part[0], f"{src}|{dst}|{dport}|{c['transport']}")):
+                self.refuse("disk", "the connection-start disk budget is spent; a connection is not evaluated")
+                continue
+            s.add(part)
+            if len(self.starts.buffer) >= self.starts.hot_size:
+                self.starts.trim(0)
             if i % self.TRIM_EVERY == self.TRIM_EVERY - 1:
                 series.trim()
+        if self.starts.on_disk:
+            self.starts.trim(0)
         out = []
         for (src, dst, dport, transport), s in series.items():
             with citation_group(self, out, (src, dst, dport, transport), s):
-                if len(s.starts) < self.MIN_CONNECTIONS:
+                if s.count < self.MIN_CONNECTIONS:
                     continue
-                starts = sorted(s.starts)
-                gaps = [b - a for a, b in itertools.pairwise(starts)]
-                median = statistics.median(gaps)
+                median, mad = self._timing(f"{src}|{dst}|{dport}|{transport}", s.count)
                 if median < self.MIN_INTERVAL:
                     continue
-                mad = statistics.median(abs(g - median) for g in gaps)
                 if mad / median > self.MAX_JITTER:
                     continue
                 # the first and the last connection bound the stated span; the earliest others fill the rest
-                ids = [event_id for _start, _seq, event_id in s.first]
-                evs = self._events(list(dict.fromkeys([ids[0], s.last[2], *ids]))[:EXAMPLE_LIMIT])
+                ids, cited_connections = s.citation_ids()
+                evs = sorted(self._events(ids), key=lambda e: ((ARKIME, SURICATA, ZEEK).index(sensor_of(e)), e.ts, e.id))
                 # Protocols that are periodic by design, identified by Arkime's parser from packet content (not the
                 # port): still reported, in the context lane, never dropped
                 periodic = sorted(s.protocols & PERIODIC_BY_DESIGN)
-                claim = (f"Arkime recorded {len(starts)} separate {transport} connections from {src} to {dst} port {dport} "
-                         f"({_iso(starts[0])} – {_iso(starts[-1])}) starting every {median:.0f} s (median), with a median "
+                arkime_only = set(s.sensors) == {ARKIME}
+                observer = "Arkime" if arkime_only else "The sensors"
+                parser = "Arkime's parser" if arkime_only else "The sensors' parsers"
+                claim = (f"{observer} recorded {s.count} separate {transport} connections from {src} to {dst} port {dport} "
+                         f"({_iso(s.first[0][0])} – {_iso(s.last[0])}) starting every {median:.0f} s (median), with a median "
                          f"deviation of {mad:.1f} s between starts. "
-                         + (f"The first records of all {len(starts)} connections are cited." if len(evs) >= len(starts)
-                            else f"The first records of {len(evs)} of the {len(starts)} connections are cited, including "
+                         + (f"The first records of all {s.count} connections are cited." if cited_connections >= s.count
+                            else f"The first records of {cited_connections} of the {s.count} connections are cited, including "
                                  f"the first and the last.")
-                         + (f" Arkime's parser identified every connection as {', '.join(periodic)}, a protocol that is "
+                         + (f" {parser} identified every connection as {', '.join(periodic)}, a protocol that is "
                             f"periodic by design." if periodic else ""))
-                preds = [pf(evs[0], "source.ip"), pf(evs[0], "destination.ip"), pf(evs[0], "destination.port")]
+                if not arkime_only:
+                    claim += _per_sensor_cited(evs, {sensor: {"records": count} for sensor, count in s.sensors.items()})
+                    if not s.opened:
+                        claim += (" The source and destination are the recorded sides; the records do not show that the "
+                                  "source opened every connection.")
+                if s.duration_missing:
+                    claim += f" {ZEEK_NO_DURATION}; only the recorded starts are used for those records."
+                cited = next((e for e in evs if canon_ip(e.get("source.ip")) == src), evs[0])
+                preds = [pf(cited, "source.ip"), pf(cited, "destination.ip"), pf(cited, "destination.port")]
                 out.append(Match(self.id, claim, self.claim_type, evs, preds, evs[0].ts, self.severity,
                                  "context" if periodic else self.lane, "medium", evs[0].entities(),
                                  group_key=f"{src}|{dst}|{dport}|{transport}"))
         series.clear()
+        self.starts.clear()
         return out
 
 

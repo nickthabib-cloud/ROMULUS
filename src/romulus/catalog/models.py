@@ -134,6 +134,7 @@ class RuleMetadata:
     behavior: str
     fidelity: str
     provenance: Mapping[str, str] = field(default_factory=dict)
+    attack_domain: str = 'enterprise'
 
 
 @dataclass(frozen=True)

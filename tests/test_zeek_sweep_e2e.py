@@ -113,15 +113,15 @@ def test_zeek_rows_give_the_findings_their_suricata_twins_give_through_the_sweep
 
 # ---- one Malcolm index holding every shipper's rows ------------------------------------------------------------------
 
-def _modbus() -> dict:
-    h = zf.malcolm(zf.Conn(uid="CmodbusConn00001", resp_p=502, service="modbus"), "mx-modbus")
-    h["_source"]["event"]["dataset"] = "modbus"
+def _uncatalogued_ics() -> dict:
+    h = zf.malcolm(zf.Conn(uid="CopcuaConn000001", resp_p=4840, service="opcua"), "mx-opcua")
+    h["_source"]["event"]["dataset"] = "opcua_binary"
     return h
 
 
 def _mixed_index() -> list[dict]:
     rows = (zl.DNS, zl.HTTP, zl.SSL, zl.KERBEROS, zl.SMB_FILES, zl.SMB_CMD, zl.DCE_RPC, zl.NOTICE, zl.INTEL)
-    return [*zf.malcolm_mixed_batch(), *(zl.WRITERS["malcolm"](row, f"mx-{row.log}") for row in rows), _modbus(),
+    return [*zf.malcolm_mixed_batch(), *(zl.WRITERS["malcolm"](row, f"mx-{row.log}") for row in rows), _uncatalogued_ics(),
             *zf.previous_shapes()["malcolm-suricata-dns"]]
 
 
@@ -131,7 +131,7 @@ def test_a_mixed_malcolm_index_is_swept_with_honest_coverage(monkeypatch, tmp_pa
     assert run.stats["errors"] == 0
     # every row is an event, a merged copy or a superseded interim row, except the log outside the catalog
     [(reason, count)] = run.stats["not_assessed_by_target"]["net"].items()
-    assert reason == "dataset:modbus is not normalized" and count == 1
+    assert reason == "dataset:opcua_binary is not normalized" and count == 1
     assert not sw.Sweep._unsupported_skips({k: v for k, v in run.stats["skips"].items() if k != reason})
     assert not any("unsupported" in str(item) for item in run.partial_reasons)
     cells = repo.rule_cells("h1")

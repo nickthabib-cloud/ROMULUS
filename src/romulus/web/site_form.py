@@ -20,6 +20,7 @@ MAX_LINES = 5_000         # entries one list field may carry
 _LINES = re.compile(r"[\r\n]+")          # names may contain anything but a line break
 _IDS = re.compile(r"[\r\n,\s]+")
 _OPTIONAL_ROLE_LABELS = {
+    "ics_control_hosts": "ICS control host addresses",
     "management_hosts": "management hosts",
     "domain_controller_addresses": "domain controller addresses",
     "directory_sync_hosts": "directory sync hosts",

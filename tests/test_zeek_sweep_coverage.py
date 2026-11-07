@@ -1,7 +1,7 @@
 """A Zeek record no normalizer reads costs only the rules reading the family it would have fed.
 
 The sweep is called as it is, through its partition runner:
-- rows of a Zeek log outside the catalog (modbus) feed no family a rule reads: a DNS rule beside them is searched in
+- rows of a Zeek log outside the catalog (opcua_binary) feed no family a rule reads: a DNS rule beside them is searched in
   full on the DNS records it read, and one with only those rows has no data in scope; the rows are counted as not
   assessed, by target, and the report lists every skip with its count;
 - rows of a catalogued log whose shipper cannot be told apart (a `zeek.dns` row with neither Security Onion's nor
@@ -45,11 +45,11 @@ def _suricata_dns() -> dict:
 
 
 def _zeek_unread(shape: str) -> dict:
-    """A Zeek row of a log outside the catalog (modbus) as each shipper names it."""
-    h = zf.WRITERS[shape](zf.UDP_DNS, f"zeek-modbus-{shape}")
-    h["_source"]["event"]["dataset"] = "modbus" if shape == "malcolm" else "zeek.modbus"
+    """A Zeek row of a log outside the catalog (opcua_binary) as each shipper names it."""
+    h = zf.WRITERS[shape](zf.UDP_DNS, f"zeek-opcua_binary-{shape}")
+    h["_source"]["event"]["dataset"] = "opcua_binary" if shape == "malcolm" else "zeek.opcua_binary"
     if shape == "elastic":
-        h["_source"]["data_stream"]["dataset"] = "zeek.modbus"
+        h["_source"]["data_stream"]["dataset"] = "zeek.opcua_binary"
     return h
 
 

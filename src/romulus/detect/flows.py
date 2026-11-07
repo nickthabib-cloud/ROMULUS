@@ -219,6 +219,10 @@ PARSERS = {
                      "modbus", "dnp3", "quic"}),
 }
 RECORD_KINDS = {SURICATA: "flow record", ARKIME: "session record", ZEEK: "conn record"}
+ZEEK_NO_DURATION = "Zeek recorded no duration (a single packet or no reply)"
+# The conn catalogue's duration paths; a rejected value is different from an omitted single-packet duration.
+ZEEK_DURATION_FIELDS = frozenset({"duration", "zeek.conn.duration", "zeek.connection.duration",
+                                  "event.duration", "event.duration:ns"})
 
 
 def canonical_protocol(name: str) -> str:
@@ -321,7 +325,7 @@ class FlowView:
     transport: str
     start: float
     end: float
-    timed: bool                         # start and end both come from typed fields
+    timed: bool                         # typed interval, or a Zeek start with no recorded duration
     c2s_bytes: int | None               # headers included, sent by the source side
     s2c_bytes: int | None               # sent by the destination side
     s2c_packets: int | None             # packets the destination side sent
@@ -333,6 +337,7 @@ class FlowView:
     s2c_data: int | None = None         # ... and the destination side; None when the counters are absent
     alternatives: bool = False          # `protocols` are candidates the record names without saying which one
     removed: bool = False               # Zeek removed a service from this record after a protocol violation
+    duration_missing: bool = False      # view-only zero-length interval; never extend a long-connection span
 
     @property
     def key(self) -> tuple:
@@ -433,7 +438,14 @@ def flow_view(event: TypedEvent, kind: str) -> FlowView | None:
     if transport not in PORTED:
         sport = dport = None
     start, end = _epoch(event.get("flow.start")), _epoch(event.get("flow.end"))
-    timed = start is not None and end is not None
+    # Zeek leaves duration unset only for a zero-length (single-packet) final record; a row whose own packet counts
+    # show more, or an interim record, lost the field in the pipeline and stays missing.
+    packets = [n for n in (_int(event.get("flow.pkts_toserver")), _int(event.get("flow.pkts_toclient"))) if n is not None]
+    no_duration = (sensor_of(event) == ZEEK and start is not None and not event.has("flow.end")
+                   and not event.has("session.duration_s")
+                   and not ZEEK_DURATION_FIELDS.intersection(event.get("parse.malformed") or ())
+                   and event.get("conn.interim") is not True and sum(packets) <= 1)
+    timed = start is not None and (end is not None or no_duration)
     start = start if start is not None else event.ts.timestamp()
     end = max(end if end is not None else start, start)
     if kind == "session":
@@ -471,7 +483,8 @@ def flow_view(event: TypedEvent, kind: str) -> FlowView | None:
             # no protocol was identified.
             protocols, removed = _zeek_protocols(event)
             return FlowView(sensor, src, sport, dst, dport, transport, start, end, timed, c2s, s2c, s2c_packets,
-                            payload, protocols, False, zeek_source_opened(event), data_c, data_s, False, removed)
+                            payload, protocols, False, zeek_source_opened(event), data_c, data_s, False, removed,
+                            no_duration)
         # Suricata writes app_proto only once detection concluded; its absence is the record's own statement that
         # no protocol was identified, and 'failed' says detection gave up.
         app = event.get("network.app_proto")
@@ -1813,7 +1826,7 @@ class LongUnidentifiedSession(_FlowRule):
     """A long connection that carried data both ways while no sensor identified its application protocol, on a
     port that is unregistered or registered only for protocols the recording sensor cannot parse."""
     id = "net.long_unidentified_session"
-    version = "7"
+    version = "8"
     title = "Long data-carrying connection with no identified protocol on a port its sensor cannot judge"
     severity, lane = "medium", "lead"
     attack = ("T1095", "T1571", "T1573")
@@ -1869,6 +1882,8 @@ class LongUnidentifiedSession(_FlowRule):
         self.pieces = KeyedStore(self, "lus_pieces", self.HOT, candidate=lambda state: state.reportable)
 
     def take(self, view: FlowView, event: TypedEvent) -> bool:
+        if view.duration_missing:
+            return True                 # an observed start without duration cannot extend a long-lived span
         if view.transport not in ("tcp", "udp"):
             return True
         expected = expected_protocols(view.transport, view.dport)
