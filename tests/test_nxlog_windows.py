@@ -21,9 +21,10 @@ from romulus.detect.registry import fresh_pack
 from romulus.evidence.normalize import normalize_hits
 from romulus.evidence.typed import Outcome
 from romulus.evidence.windows import (
+    NXLOG_CATALOG_CHANNEL_CAVEAT,
+    NXLOG_CHANNEL_SKIP,
     NXLOG_TIME_CAVEAT,
     WindowsInputError,
-    WindowsNotNormalized,
     is_nxlog_windows,
     is_windows_source,
     normalize_windows,
@@ -120,12 +121,17 @@ def test_flat_record_types_the_same_as_its_winlogbeat_twin(event, shape):
     twin = normalize_windows(winlogbeat)
     collided = AMBIGUOUS & _data_names(winlogbeat)
     if collided:
-        # an event-data value under one of NXLog's own names cannot be told from NXLog's: never typed as event data,
-        # and a channel it replaced no longer names the event's class (counted as not normalized, never misread)
         if str(flat["_source"]["Channel"]).casefold() != winlogbeat["_source"]["winlog"]["channel"].casefold():
-            with pytest.raises(WindowsNotNormalized):
-                normalize_windows(flat)
+            # the provider's Channel data replaced NXLog's: the class's own channel is the catalog's, and the value is
+            # typed as event data, with a caveat saying so
+            typed = normalize_windows(flat)
+            assert NXLOG_CATALOG_CHANNEL_CAVEAT in typed.caveats
+            expected = comparable(twin)
+            expected["caveats"] = [*expected["caveats"], NXLOG_CATALOG_CHANNEL_CAVEAT]
+            assert comparable(typed) == expected
+            assert typed.fields["event.channel"].origin.endswith(":SourceName+EventID#catalog-channel")
             return
+        # an event-data value under one of NXLog's own names that NXLog kept cannot be told from NXLog's: not typed
         typed = normalize_windows(flat)
         expected = comparable(twin)
         lost = {name for name, value in twin.fields.items()
@@ -193,6 +199,51 @@ def test_time_never_reads_a_zoneless_event_time_as_utc():
     assert sweep_module.DATASET_FAMILIES["windows.security"]
 
 
+def test_a_zoneless_pipeline_time_is_never_read_as_utc_and_epoch_milliseconds_are():
+    by_key = {(event.provider, event.event_id): event for event in _events()}
+    flat = nxlog_hit(windows_hit(by_key[(SECURITY, 4624)], "winlogbeat_8"))
+    expected = normalize_windows(flat).ts
+    copied = copy.deepcopy(flat)
+    copied["_source"]["@timestamp"] = copied["_source"]["EventTime"]     # a pipeline that copied EventTime unzoned
+    with pytest.raises(WindowsInputError, match="time unresolved"):
+        normalize_windows(copied)
+    events, _skips, errors = normalize_hits([copied])
+    assert events == [] and sweep_module._error_tag(errors[0][1]) == "windows.security"
+    epoch = copy.deepcopy(flat)
+    epoch["_source"]["@timestamp"] = int(expected.timestamp() * 1000)
+    assert normalize_windows(epoch).ts == expected
+
+
+def test_a_log_clear_whose_channel_data_replaced_nxlogs_channel_keeps_its_class():
+    """System 104 carries the cleared log's name as its own Channel data; NXLog may write it over its Channel."""
+    by_key = {(event.provider, event.event_id): event for event in _events()}
+    twin = windows_hit(by_key[("Microsoft-Windows-Eventlog", 104)], "winlogbeat_8")
+    flat = nxlog_hit(twin)
+    assert flat["_source"]["Channel"] == "Security"                    # the cleared log, not the event's channel
+    events, skips, errors = normalize_hits([flat])
+    assert (skips, errors) == ({}, []) and len(events) == 1
+    event = events[0]
+    assert event.get("event.channel") == "System" and event.get("windows.event_data.Channel") == "Security"
+    assert NXLOG_CATALOG_CHANNEL_CAVEAT in event.caveats
+    kept = copy.deepcopy(flat)
+    kept["_source"]["Channel"] = "System"                              # NXLog kept its own: the data value is lost
+    events, skips, errors = normalize_hits([kept])
+    assert len(events) == 1 and events[0].get("event.channel") == "System"
+    assert NXLOG_CATALOG_CHANNEL_CAVEAT not in events[0].caveats
+
+
+def test_a_catalogued_event_under_a_channel_naming_none_of_its_classes_is_counted_against_their_families():
+    by_key = {(event.provider, event.event_id): event for event in _events()}
+    flat = nxlog_hit(windows_hit(by_key[(SECURITY, 4624)], "winlogbeat_8"))
+    flat["_source"]["Channel"] = "Application"
+    fed: dict = {}
+    events, skips, errors = normalize_hits([flat], skip_families=fed)
+    [reason] = skips
+    assert events == [] and errors == [] and reason.startswith(NXLOG_CHANNEL_SKIP)
+    assert fed[reason] == {"auth"}
+    assert sweep_module.Sweep._unsupported_skips(skips) == skips      # it makes the auth rules' search partial
+
+
 def test_the_collector_clock_offset_is_counted_per_shape_and_never_changes_times():
     by_key = {(event.provider, event.event_id): event for event in _events()}
     flats = [nxlog_hit(windows_hit(by_key[key], "winlogbeat_8")) for key in ((SECURITY, 4624), (SYSMON, 1))]
@@ -247,10 +298,12 @@ def test_a_flat_mapping_is_a_windows_host_target_whose_aliases_read_the_flat_nam
     assert host["bool"]["should"][0] == {"wildcard": {"Hostname": {"value": "ws01", "case_insensitive": True}}}
     account = _pred(Predicate(field="user.entity_id", op="eq", value="name:EXAMPLE\\alice"), contract)
     assert {"wildcard": {"User": {"value": "EXAMPLE\\\\alice", "case_insensitive": True}}} in account["bool"]["should"]
-    # a mixed index keeps both layouts' names in one alias
+    # on a mixed index an alias the sweep aggregates keeps Winlogbeat's one name; a data alias gains the flat name
     mixed = contract_from_types("mix", {**FLAT_TYPES, "winlog.channel": "keyword", "winlog.event_id": "keyword",
-                                        "winlog.provider_name": "keyword", "winlog.computer_name": "keyword"})
-    assert mixed.fields["event.channel"].natives == ("winlog.channel", "Channel")
+                                        "winlog.provider_name": "keyword", "winlog.computer_name": "keyword",
+                                        "winlog.event_data.CommandLine": "keyword"})
+    assert mixed.fields["event.channel"].natives == ("winlog.channel",) and mixed.fields["event.channel"].aggregatable
+    assert mixed.fields["process.command_line"].natives == ("winlog.event_data.CommandLine", "CommandLine")
     winlogbeat_only = contract_from_types("wlb", {"@timestamp": "date", "winlog.channel": "keyword"})
     assert "winlog.record_id" not in winlogbeat_only.fields and winlogbeat_only.fields["event.channel"].natives == (
         "winlog.channel",)
@@ -276,6 +329,160 @@ def test_windows_retrieval_selects_the_flat_shape_beside_the_dataset_and_channel
     assert all(group[0].field != "Channel" for group in sweep._any_of_for("wlb", winlogbeat))
     assert sweep.stats["windows_shapes_not_assessed"]["wlb"] == [
         "windows.nxlog: not searchable on this target (Channel and EventID are not both mapped)"]
+
+
+WINLOGBEAT_TYPES = {"@timestamp": "date", "event.dataset": "keyword", "agent.type": "keyword",
+                    "winlog.channel": "keyword", "winlog.provider_name": "keyword", "winlog.event_id": "keyword",
+                    "winlog.computer_name": "keyword", "winlog.record_id": "long",
+                    "winlog.event_data.CommandLine": "keyword"}
+TEXT_FLAT_TYPES = {"Channel": "text", "Channel.keyword": "keyword", "EventID": "long", "SourceName": "text",
+                   "SourceName.keyword": "keyword", "Hostname": "text", "Hostname.keyword": "keyword",
+                   "CommandLine": "text", "CommandLine.keyword": "keyword"}
+WINDOW = Window(start=datetime(2026, 1, 1, tzinfo=UTC), end=datetime(2026, 1, 2, tzinfo=UTC))
+
+
+def _selection(contract, pack=()):
+    sweep = Sweep(_repo(), None, "h1", WINDOW, {contract.target: contract})
+    sweep.pack = list(pack)
+    return sweep, sweep._filters_for(contract.target, contract), sweep._any_of_for(contract.target, contract)
+
+
+@pytest.mark.parametrize("flat_types", [TEXT_FLAT_TYPES, {name: "keyword" if kind == "text" else kind
+                                                          for name, kind in TEXT_FLAT_TYPES.items()}])
+def test_flat_names_never_narrow_a_winlogbeat_alias_on_a_mixed_target(flat_types):
+    winlogbeat = contract_from_types("t", WINLOGBEAT_TYPES, role="host", os_family="windows")
+    mixed = contract_from_types("t", {**WINLOGBEAT_TYPES, **flat_types}, role="host", os_family="windows")
+    for typed in ("event.channel", "event.provider", "event.code", "host.name", "winlog.record_id"):
+        assert mixed.fields[typed] == winlogbeat.fields[typed], typed
+    assert set(mixed.fields["process.command_line"].ops) == set(winlogbeat.fields["process.command_line"].ops)
+    # the Winlogbeat groups exactly, then NXLog's flat shape by its own selector
+    _sweep, _filters, before = _selection(winlogbeat)
+    sweep, _filters, after = _selection(mixed)
+    assert after[:-1] == before and after[-1][0] == Predicate(field="Channel", op="exists")
+    assert sweep.stats["windows_shape_notes"]["t"][0].startswith("windows.nxlog: Channel, SourceName, EventID or")
+    for predicate in (Predicate(field="event.channel", op="in", value=["Security"]),
+                      Predicate(field="host.name", op="eq", value="ws01"),
+                      Predicate(field="event.provider", op="eq", value="Microsoft-Windows-Security-Auditing")):
+        assert _pred(predicate, mixed) == _pred(predicate, winlogbeat)
+    assert _windows_source_groups(mixed)[:-1] == _windows_source_groups(winlogbeat)
+    # the class-selective path (a pack reading Windows families) also adds the flat shape
+    pack = list(fresh_pack())
+    _sweep, _filters, selective_before = _selection(winlogbeat, pack)
+    _sweep, _filters, selective = _selection(mixed, pack)
+    assert selective_before and selective[:-1] == selective_before
+    assert selective[-1][0] == Predicate(field="Channel", op="exists")
+
+
+LINUX_TYPES = {"@timestamp": "date", "event.dataset": "keyword", "event.module": "keyword", "host.name": "keyword",
+               "process.executable": "keyword", "process.command_line": "keyword", "user.name": "keyword",
+               "auditd.data.syscall": "keyword", "input.type": "keyword", "message": "text"}
+
+
+def test_a_linux_target_that_also_holds_nxlog_records_selects_both_shapes():
+    linux = contract_from_types("t", LINUX_TYPES)
+    _sweep, linux_filters, linux_any = _selection(linux)
+    assert linux.os_family == "linux" and not linux.nxlog_mixed and linux_any == []
+    flat = {"Channel": "text", "Channel.keyword": "keyword", "EventID": "long", "SourceName": "text",
+            "Hostname": "text"}
+    mixed = contract_from_types("t", {**LINUX_TYPES, **flat})
+    assert source_os_family({**LINUX_TYPES, **flat}, "host") == "linux"
+    assert mixed.os_family == "linux" and mixed.nxlog_mixed
+    # the Linux contract is unchanged: no Windows alias replaces a Linux name
+    assert all(mixed.fields[name] == linux.fields[name] for name in linux.fields)
+    sweep, filters, any_of = _selection(mixed)
+    assert filters == [] and any_of[0] == linux_filters and any_of[1][0] == Predicate(field="Channel", op="exists")
+    assert sweep.stats["windows_shape_notes"]["t"][0].startswith("windows.nxlog: on this Linux target")
+    query = build_query(SearchIntent(kind="raw", target="t", window=WINDOW, filters=filters, any_of=any_of), mixed)
+    alone = build_query(SearchIntent(kind="raw", target="t", window=WINDOW, filters=linux_filters), linux)
+    assert query["bool"]["should"][0]["bool"]["filter"][0] == alone["bool"]["filter"][1]
+    # a pure Windows target is unchanged by the Linux rule
+    windows = contract_from_types("w", FLAT_TYPES)
+    assert windows.os_family == "windows" and not windows.nxlog_mixed
+    # pivots select the Linux datasets only there, and say so
+    from romulus.agent.models import EntityRef
+    from romulus.agent.tools import EntityTimelineArgs, EntityTimelineRequest
+    from romulus.hunt.pivot import PivotExecutor
+
+    executor = PivotExecutor(None, None, "h1", {"t": mixed})
+    request = EntityTimelineRequest(tool="entity_timeline", arguments=EntityTimelineArgs(
+        entity=EntityRef(kind="host", value="web01"), start=WINDOW.start, end=WINDOW.end))
+    _intents, coverage = executor.plan(request)
+    assert any(row.dataset == "windows.nxlog" and row.status == "partial" for row in coverage)
+    assert not PivotExecutor(None, None, "h1", {"t": linux})._nxlog_mixed_coverage(request)
+
+
+ECS_TEMPLATE_TYPES = {"process.executable": "keyword", "process.pid": "long", "user.name": "keyword",
+                      "user.domain": "keyword", "host.name": "keyword", "message": "text"}
+
+
+def test_linux_is_decided_by_an_inventory_dataset_or_linux_only_fields():
+    nxlog = {"@timestamp": "date", **TEXT_FLAT_TYPES}
+    # Logstash's ECS template maps process.* and user.* on every index: a pure NXLog index stays Windows
+    logstash = contract_from_types("t", {**nxlog, **ECS_TEMPLATE_TYPES})
+    assert logstash.os_family == "windows" and not logstash.nxlog_mixed
+    assert source_os_family({**nxlog, **ECS_TEMPLATE_TYPES}, "host") == "windows"
+    # a Linux shipper dataset in the inventory makes it a Linux target that also holds NXLog records
+    for dataset in ("linux.audit", "auditd.log", "system.auth"):
+        mixed = contract_from_types("t", {**nxlog, **ECS_TEMPLATE_TYPES, "event.dataset": "keyword"},
+                                    datasets={dataset: 10})
+        assert mixed.os_family == "linux" and mixed.nxlog_mixed, dataset
+    assert not contract_from_types("t", {**nxlog, "event.dataset": "keyword"}, datasets={"other.x": 1}).nxlog_mixed
+    # without an inventory, only Linux-only fields decide
+    assert contract_from_types("t", {**nxlog, "journald.custom.x": "keyword"}).nxlog_mixed
+    # a Winlogbeat or Agent mapping is unchanged by NXLog fields or ECS fields beside it
+    for extra in ({}, ECS_TEMPLATE_TYPES, TEXT_FLAT_TYPES):
+        winlogbeat = contract_from_types("w", {**WINLOGBEAT_TYPES, **extra}, datasets={"windows.security": 5})
+        assert winlogbeat.os_family == "windows" and not winlogbeat.nxlog_mixed
+        base = contract_from_types("w", WINLOGBEAT_TYPES)
+        assert all(winlogbeat.fields[name] == base.fields[name] for name in base.fields)
+
+
+def _mixed_cells(hits: list[dict], contract) -> list[dict]:
+    times = [datetime.fromisoformat(hit["_source"]["@timestamp"]) for hit in hits] or [WINDOW.start]
+    window = Window(start=min(times) - timedelta(seconds=1), end=max(times) + timedelta(seconds=1))
+
+    def execute(_client, intent, _contract):
+        return SearchOutcome(target=intent.target, fingerprint="f", started_at=window.start, ended_at=window.start,
+                             completeness=Completeness.complete, total=len(hits), total_relation="eq",
+                             returned=len(hits), records=hits)
+
+    original = sweep_module.execute
+    sweep_module.execute = execute
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _repo()
+            sweep = Sweep(repo, None, "h1", window, {contract.target: contract}, stage_dir=Path(tmp))
+            sweep.pack = [rule for rule in fresh_pack() if rule.id.startswith("win.") and rule.kind != "baseline"]
+            sweep.run_partition(contract.target, contract, [], window, est=len(hits))
+            sweep.finalize()
+            sweep.close_stage()
+            cells = [dict(cell) for cell in repo.rule_cells("h1")]
+            repo.engine.dispose()
+    finally:
+        sweep_module.execute = original
+    return cells
+
+
+def test_no_windows_search_is_complete_on_a_linux_target_holding_nxlog_records():
+    by_key = {(event.provider, event.event_id): event for event in _events()}
+    hits = [nxlog_hit(windows_hit(by_key[(SECURITY, code)], "winlogbeat_8")) for code in (4624, 4625, 4688)]
+    linux = {"event.dataset": "keyword", "event.module": "keyword", "host.name": "keyword",
+             "auditd.data.syscall": "keyword", "process.executable": "keyword", "user.name": "keyword"}
+    mixed = contract_from_types("mixed", {**FLAT_TYPES, **linux}, role="host", hosts=("ws01.example.test",))
+    assert mixed.os_family == "linux" and mixed.nxlog_mixed
+    for records in (hits, []):
+        cells = [cell for cell in _mixed_cells(records, mixed) if cell["rule_id"].startswith("win.")]
+        assert cells
+        assert not [cell for cell in cells if cell["state"] in ("evaluated_complete", "not_applicable_no_events")]
+        # each partition cell names the gate; the whole-window rollups are partial over those partitions
+        partitions = [cell for cell in cells if cell["partition"] != "window"]
+        assert partitions and all(sweep_module.NXLOG_MIXED_GATE in (cell.get("detail") or {}).get("reasons", ())
+                                  for cell in partitions)
+        assert all(cell["state"].endswith("partial") for cell in cells if cell["partition"] == "window")
+    # a Windows target holding the same records keeps its own gates (and no mixed-target reason)
+    windows = contract_from_types("flatwin", FLAT_TYPES, role="host", hosts=("ws01.example.test",))
+    cells = [cell for cell in _mixed_cells(hits, windows) if cell["rule_id"].startswith("win.")]
+    assert all(sweep_module.NXLOG_MIXED_GATE not in (cell.get("detail") or {}).get("reasons", ()) for cell in cells)
 
 
 class _Client:

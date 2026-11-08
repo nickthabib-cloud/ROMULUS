@@ -49,7 +49,12 @@ from romulus.evidence.normalize import (
     normalize_hits,
 )
 from romulus.evidence.typed import TypedEvent
-from romulus.evidence.windows import RecordIdContinuity, windows_record_signature, windows_view
+from romulus.evidence.windows import (
+    NXLOG_CHANNEL_SKIP,
+    RecordIdContinuity,
+    windows_record_signature,
+    windows_view,
+)
 from romulus.evidence.windows_catalog import (
     COLLECTION_CHANGE_EVENTS,
     EVENT_CLASSES,
@@ -148,6 +153,8 @@ DEFAULT_WINDOWS_LIVENESS_TOLERANCE = timedelta(minutes=15)
 MAX_SKIP_REASONS = 256
 SKIP_REASON_OVERFLOW = "additional skip reasons omitted after bounded category limit"
 MAX_WINDOWS_UNCATALOGUED = 256
+NXLOG_MIXED_GATE = ("Windows collection not attested: NXLog flat records on a Linux target; continuity and "
+                    "event-class inventory not assessed")
 
 
 def _error_tag(message: str) -> str:
@@ -504,6 +511,9 @@ class Sweep:
             self.stats.setdefault("dataset_filter", {})[target] = [
                 *plain, *(name for name, _module in with_module if name not in plain)]
             self._note_linux_shapes(target, datasets, unsearchable, contract, undated)
+            if contract.nxlog_mixed:
+                # selected with NXLog's flat Windows records instead (`_any_of_for`): either shape, each as alone
+                return []
             return [Predicate(field="event.dataset", op="in", value=list(datasets))]
         return []
 
@@ -557,6 +567,16 @@ class Sweep:
         """Select only normalized source shapes while preserving each target's other known datasets."""
         if contract is not None and contract.role == "network":
             return self._zeek_catalog_filter(target, contract)
+        if contract is not None and contract.role == "host" and contract.os_family != "windows" and contract.nxlog_mixed:
+            # a Linux target that also holds NXLog's flat Windows records: the Linux datasets or the flat shape
+            flat = self._nxlog_selector(target, contract)
+            linux = [Predicate(field="event.dataset", op="in", value=list(LINUX_HOST_DATASETS))]
+            if flat is None:
+                return [linux]
+            self.stats.setdefault("windows_shape_notes", {})[target] = [(
+                "windows.nxlog: on this Linux target NXLog's flat Windows records are selected by shape; Windows "
+                "record continuity, the event-class inventory and value queries on them are not assessed")]
+            return [linux, flat]
         # Winlogbeat may omit event.dataset, so Windows also selects by native channel.
         if contract is None or contract.role != "host" or contract.os_family != "windows":
             return []
@@ -671,6 +691,10 @@ class Sweep:
                     # contradiction instead of accidentally fetching all telemetry.
                     return [[Predicate(field="event.code", op="exists"),
                              Predicate(field="event.code", op="missing")]]
+                flat = self._nxlog_selector(target, contract)
+                if flat is not None and not self._nxlog_aliased(contract):
+                    # the class predicates read Winlogbeat's names only here: NXLog's flat records by their shape
+                    groups.append(flat)
                 return groups
         if rpc_groups and not any(contract.supports(field, "in") for field in ("event.dataset", "event.channel")):
             # The ordinary Windows fallback was unrestricted; RPC must not narrow it.
@@ -698,12 +722,20 @@ class Sweep:
         if group is None:
             self.stats.setdefault("windows_shapes_not_assessed", {})[target] = [
                 "windows.nxlog: not searchable on this target (Channel and EventID are not both mapped)"]
-        elif not all(contract.supports(field, "eq") for field in ("event.channel", "event.provider", "event.code")):
-            # a text-mapped flat record is selected by its shape; queries on its values cannot be run
+        elif contract.os_family == "windows" and not self._nxlog_aliased(contract):
+            # the Windows aliases do not read the flat names (text-mapped, or a Winlogbeat alias they would narrow)
             self.stats.setdefault("windows_shape_notes", {})[target] = [(
-                "windows.nxlog: Channel, SourceName or EventID is not exact-searchable on this target, so its "
-                "records are selected by shape and value queries on them (event classes, pivots) are unresolved")]
+                "windows.nxlog: Channel, SourceName, EventID or Hostname is not exact-searchable through the Windows "
+                "fields on this target, so its records are selected by shape and value queries on them (event "
+                "classes, pivots) are unresolved")]
         return group
+
+    @staticmethod
+    def _nxlog_aliased(contract: FieldContract) -> bool:
+        """Whether the Windows class and host fields read NXLog's flat names exactly on this target."""
+        return all(flat in ((spec := contract.fields.get(typed)) and spec.natives or ()) and contract.supports(typed, "eq")
+                   for typed, flat in (("event.channel", "Channel"), ("event.provider", "SourceName"),
+                                       ("event.code", "EventID"), ("host.name", "Hostname")))
 
     def _zeek_catalog_filter(self, target: str, contract: FieldContract) -> list[list[Predicate]]:
         """Leave out only the Zeek logs outside the catalog, which no normalizer reads and which feed no family a rule
@@ -1195,6 +1227,10 @@ class Sweep:
         partition: Window | None = None,
         continuity_times: dict[tuple[str, str], tuple[datetime, datetime]] | None = None,
     ) -> list[str]:
+        if (contract is not None and contract.nxlog_mixed and contract.os_family != "windows"
+                and "windows" in playbook.os_families):
+            # NXLog's flat records on a Linux target: no Windows rule's search there is ever complete
+            return [NXLOG_MIXED_GATE]
         if contract is None or contract.os_family != "windows" or "windows" not in playbook.os_families:
             return []
         catalog = event_classes_for_families(set(playbook.families))
@@ -1377,7 +1413,9 @@ class Sweep:
         """Only unmodeled source formats poison rules; cataloged-source event classes are not-assessed data."""
         return {
             reason: count for reason, count in skips.items()
-            if reason.startswith(("dataset:", "suricata event_type"))
+            # an NXLog record of a catalogued provider and event id under a channel naming none of its classes
+            # could be any of them: counted against their families (normalize_hits names them)
+            if reason.startswith(("dataset:", "suricata event_type", NXLOG_CHANNEL_SKIP))
         }
 
     @staticmethod
@@ -1995,6 +2033,8 @@ class Sweep:
         held: list[tuple[str, TypedEvent]] = []          # (playbook, event) holds of interval bounds
         released: list[tuple[str, list[str]]] = []       # (playbook, ids) holds the playbooks let go
         target_os = contract.os_family if contract is not None else "linux"
+        # a Linux target that also holds NXLog's flat Windows records is a Windows source too
+        target_oses = {target_os} | ({"windows"} if contract is not None and contract.nxlog_mixed else set())
         from romulus.detect.sigma import SigmaEventIndex, SigmaRule
         sigma_index = SigmaEventIndex(events) if any(isinstance(pb, SigmaRule) for pb in self.pack) else None
         sigma_reasons = {}
@@ -2010,7 +2050,7 @@ class Sweep:
                 relevant_events = (sigma_events if sigma_events is not None else
                                    [event for event in events if event.family in evaluated_families])
                 target_fallback = not relevant_events and (
-                    target_os == "unknown" or target_os in pb.os_families
+                    target_os == "unknown" or bool(target_oses & set(pb.os_families))
                 )
                 sigma_rule_reasons = []
                 if sigma_events is not None:
