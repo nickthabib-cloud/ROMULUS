@@ -341,14 +341,14 @@ GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe55
  'baseline_window_counts': '7cc0f5555260b0533927f47cfe29e6a543e2d921b0cc79e4b6b89f418d6052f8',
  'baseline_window_event_hours': 'bb58c65144b135443e75a690b7b2f8137ebac6b827f8e8bd8cc7606a01c53e52',
  'baseline_window_scope_hours': '9e290626d76b423e9aed82a63d54fc6c2d6a2feeea3b55297ed76696c9279c80',
- 'candidates': 'fb670a26e57ddfb30d3034a5c6750b0892ae942eccf5a927a4230eaa73726e78',
+ 'candidates': 'de680377a734004dba0f44d5a6f2e3beddc6eed3a8f839de4fd472031bbc81bb',
  'entities': 'f26a3ccda6f16d94a0b0822914a0827ecd57ab81791dec1e39227f76a3529f17',
  'event_citations': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'event_entities': '73eb1a7cb37581de8b25ae6079e62e8f2a58b4e75697820e4ae41ac414064773',
  'events': '731e19f952d06603a6e19d7204fb7c1d53de79ad4207d21c3dc3bfda20787e9d',
  'expansion': 'e7a94c167f9a42d9adb20a9ee7660abd45c407ecf30baf023f31b465f0b845fa',
  'links': '7536ae4fc439eb04b16f94e78de5c5551ef26a4f218c8e5611c43b7777c5d228',
- 'manifest': '62fd4aa57007b391887800faf4ed1185d27e8fbdf11352bcce9a101470167433',
+ 'manifest': '11a7b40009cee786ef4a731d851595509bf23676c3afeb36b8e5a70a7f2b74ac',
  'raw': 'dcc19cada412dc08cd1133ae2a8cb299933501bceac7b2ddf3b8f23c752b6ddf',
  'rule_cells': 'e5119f19824fabb8a4f065be44e4cf65e1b7f171ed0c73fcf3c29fcf2da865ba',
  'stats': '18fcb2f6b78a17228b3a60b50bd103d66b5a07884252c753349b21b12889ced5',
@@ -356,9 +356,9 @@ GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe55
 # Captured directly from the S7 fixture through _non_baseline_semantic_digests. Typed-event-derived hashes and
 # interchangeable predicate origins are normalized, while every decision, claim, lane, raw citation and gate is
 # checked field by field.
-GOLDEN_NON_BASELINE_SEMANTICS = {'candidates': {'all_fields': '758936b583de8689a78863dc231e72a5ec7d31ff896c5c8901cde29594f931e6',
+GOLDEN_NON_BASELINE_SEMANTICS = {'candidates': {'all_fields': 'bead6afd28e5ee71abcd39761f483156f536e0158d2b1a9640afa71b518cc2c6',
                 'benign_alternatives': '39dfe4522634750416c9dd5a7f38a4a76692daeed9ee9d5266a235c7b893643d',
-                'claim': 'd742dae686cec0dfdb93151f4578a282ff93a194a48547ffe17195e83a89f12b',
+                'claim': '2cc209ed14c333fc2ebe3ab4fa70181aeeb1a419b6ef1267205b2a0621542ebf',
                 'claim_type': '62ee830737cd920223bd88ccd391e5074f2e72242803701f1f849e25d1fdf7c2',
                 'confidence': 'fbdbcc65a374c9bad760df608732609bf67565a3af9922898c67e31f78636a01',
                 'context_event_records': '812b2ee0a914612b78ec64e62317ee31cc172d0fe445880a23a7139bb9a8e1f4',

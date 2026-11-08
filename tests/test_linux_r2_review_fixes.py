@@ -146,13 +146,15 @@ def test_web_shell_discovery_under_an_unrecorded_worker_still_groups(tmp_path):
     assert [m.proposed_lane for m in detector("host.discovery_burst", events, tmp_path).finalize()] == ["high"]
 
 
-def test_privilege_finalize_returns_walked_processes_to_disk(tmp_path):
+@pytest.mark.parametrize("n", [2000, 8000])
+def test_privilege_finalize_keeps_walked_processes_within_the_memory_budget(n, tmp_path):
+    from romulus.detect.bounded import StateBudget
     from tests.test_linux_closeout import rule
     r = rule("host.unbrokered_privilege_transition")()
     r.spill_dir = tmp_path
-    r.execs.store.hot_size = 50
+    r.budget = StateBudget(tmp_path, disk_total=2**40, reserve=0, memory_total=2**20)
     events = []
-    for i in range(1000):
+    for i in range(n):
         a, b, c = 10000 + 3 * i, 10001 + 3 * i, 10002 + 3 * i
         events += [execution(i, "/usr/bin/sudo", pid=a, ppid=5, uid="1000", euid="0", process__auid="1000"),
                    execution(i + 0.1, "/bin/bash", pid=b, ppid=a, uid="0", process__auid="1000"),
@@ -161,9 +163,11 @@ def test_privilege_finalize_returns_walked_processes_to_disk(tmp_path):
         r.consume(events[start:start + 300])
         r.execs.trim()
     r.drain_staged()
+    bound = len(r.execs.store.hot) + 3 * 512
     r.bind_loader(lambda ids: [])
     list(r.finalize())
-    assert len(r.execs.store.hot) < 3 * r.execs.store.hot_size
+    # The production hot size is a count cap; the memory budget bounds what parent walks bring back.
+    assert r.execs.store.hot_size >= 10**6 and len(r.execs.store.hot) <= bound
 
 
 def test_root_child_of_a_web_account_process_after_an_alert_stays_high(tmp_path):
@@ -190,3 +194,19 @@ def test_a_later_discovery_burst_under_a_long_lived_web_server_is_counted_and_ci
     [finding] = detector("host.discovery_burst", events, tmp_path).finalize()
     assert finding.proposed_lane == "high" and "2 separate burst" in finding.claim
     assert set(later) & {e.id for e in finding.events}
+
+
+@pytest.mark.parametrize("user", ["tomcat9", "jenkins", "postgres"])
+def test_application_server_account_one_liner_after_an_alert_is_a_lead(user, tmp_path):
+    out = list(detector("corr.alert_then_host_execution", [alert(8080), one_liner(120, "120", user, "id")],
+                        tmp_path).finalize())
+    assert [m.proposed_lane for m in out] == ["lead"]
+
+
+@pytest.mark.parametrize("started,lanes", [(-120, ["high"]), (-3600, [])])
+def test_web_account_ancestor_within_clock_skew_of_the_alert_still_links(started, lanes, tmp_path):
+    shell = execution(started, "/bin/bash", pid=20, ppid=11, uid="33", process__user="www-data")
+    nc = execution(120, "/usr/bin/nc", pid=21, ppid=20, uid="0", process__user="root", host__ip=["10.0.0.9"])
+    nc.fields["process.argv"].value = ["nc", "-z", "203.0.113.8", "4445"]
+    out = list(detector("corr.alert_then_host_execution", [alert(8081), shell, nc], tmp_path).finalize())
+    assert [m.proposed_lane for m in out] == lanes

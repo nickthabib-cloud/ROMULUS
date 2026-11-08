@@ -8,9 +8,9 @@ from tests import throughput_fixture as tf
 # All budgets retain the same 40 candidates and complete citation detail.
 # Discovery and transfer executions already cited by a folded alert are not repeated as context.
 # Shared execution and lineage state keep the 4 MiB candidate result identical to larger budgets.
-CANDIDATE_GOLDENS = {16: (40, 'fb670a26e57ddfb30d3034a5c6750b0892ae942eccf5a927a4230eaa73726e78'),
- 4: (40, 'fb670a26e57ddfb30d3034a5c6750b0892ae942eccf5a927a4230eaa73726e78'),
- 8: (40, 'fb670a26e57ddfb30d3034a5c6750b0892ae942eccf5a927a4230eaa73726e78')}
+CANDIDATE_GOLDENS = {16: (40, 'de680377a734004dba0f44d5a6f2e3beddc6eed3a8f839de4fd472031bbc81bb'),
+ 4: (40, 'de680377a734004dba0f44d5a6f2e3beddc6eed3a8f839de4fd472031bbc81bb'),
+ 8: (40, 'de680377a734004dba0f44d5a6f2e3beddc6eed3a8f839de4fd472031bbc81bb')}
 
 
 @pytest.mark.parametrize("mib", CANDIDATE_GOLDENS)

@@ -72,6 +72,22 @@ G_SILENCE = 900
 CLOCK_BIN = 300
 LINEAGE_DEPTH = 32
 CITE = 20
+# Sensor and host clocks differ, and a shell spawned by the request just before the alerting one is the same
+# intrusion; five minutes covers both while an hours-old record of a reused pid stays out.
+ALERT_SKEW = 300
+# Processes walked between lineage trims: amortizes the trim's sampling while bounding what parent walks bring back.
+TRIM_EVERY = 512
+# Exploitable application-server accounts (Java app servers, CI, search, databases). Their builds and archive
+# commands run one-liners routinely, so after an alert they are leads, not HIGH.
+APPLICATION_ACCOUNTS = frozenset({"tomcat", "jetty", "jboss", "wildfly", "weblogic", "glassfish", "jenkins", "solr",
+                                  "elasticsearch", "opensearch", "confluence", "jira", "bitbucket", "gitlab-www",
+                                  "nexus", "sonar", "activemq", "postgres", "mysql", "redis", "mongodb"})
+TOMCAT_ACCOUNT = re.compile(r"tomcat\d*")
+
+
+def application_account(event):
+    user = str(event.get("process.user") or "")
+    return user in APPLICATION_ACCOUNTS or bool(TOMCAT_ACCOUNT.fullmatch(user))
 SCRIPT_SUFFIXES = frozenset({".php", ".phtml", ".php5", ".jsp", ".jspx", ".asp", ".aspx", ".cgi", ".pl", ".py", ".sh"})
 DOCUMENT_ROOTS = ("/var/www", "/srv/www", "/srv/http", "/usr/share/nginx/html", "/opt/lampp/htdocs")
 TOMCAT_ROOT = re.compile(r"^/var/lib/tomcat[^/]*/webapps(?:/|$)")
@@ -326,13 +342,15 @@ class LinuxSequence(Playbook):
         writable = temporary(str(event.get("process.executable") or ""))
         one_liner = bool(p and p.name in INTERPRETERS and any(a in {"-c", "-e", "--eval"} for a in p.args))
         # Root, login and service accounts run shell one-liners routinely (cron, systemd, monitoring agents such as
-        # NRPE and Zabbix), so only a web account's one-liner or writable executable is strong without lineage.
+        # NRPE and Zabbix), so only a web account's one-liner or writable executable is strong without lineage. An
+        # exploitable application server's account doing the same is a lead (builds and archive commands are routine).
         strong = web(event) and (writable or one_liner)
+        application = (writable or one_liner) and application_account(event)
         for path in executed_paths(event):
             self.add(event, "execute", path, lane="high" if temporary(path) or web(event) else "lead",
                      data={"account": event.get("process.user") or event.get("process.uid"),
                            **({"web": True} if web(event) else {}), **({"writable": True} if writable else {}),
-                           **({"strong": True} if strong else {})})
+                           **({"application": True} if application else {}), **({"strong": True} if strong else {})})
 
     def parent_record(self, host, pid, when, boot):
         record = self.execs.latest(host, pid, when)
@@ -1003,11 +1021,11 @@ class UnbrokeredPrivilegeTransition(LinuxSequence):
 
     def finalize(self):
         groups = KeyedStore(self, "privilege_sessions", self.HOT)
-        store = self.execs.store
-        for (host, pid), records in store.items():
-            # Parent walks bring spilled processes back to memory; return them once they double the hot set. The
-            # walk reads a sorted copy of the disk rows, so writing them back does not disturb it.
-            if len(store.hot) > 2 * store.hot_size:
+        for walked, ((host, pid), records) in enumerate(self.execs.store.items()):
+            # Parent walks bring spilled processes back to memory; return them to the budget's hot limit every
+            # TRIM_EVERY processes. The walk reads a sorted copy of the disk rows, so writing them back does not
+            # disturb it.
+            if walked % TRIM_EVERY == 0:
                 self.execs.trim()
             for record in records:
                 if record.euid != "0" or record.auid in {None, "0", "4294967295", "-1"}:
@@ -1186,9 +1204,9 @@ class AlertThenHostExecution(LinuxSequence):
                         if record is None:
                             break
                         chain.append(record.event_id)
-                        if not metadata.get("web") and record.user in WEB_SERVICE_USERS and record.ts >= ats:
-                            # Another account's exec descending from a web-account process started after the alert
-                            # left the web service. An earlier record may name a reused pid, so it never links.
+                        if not metadata.get("web") and record.user in WEB_SERVICE_USERS and record.ts >= ats - ALERT_SKEW:
+                            # Another account's exec descending from a web-account process started about when the
+                            # alert fired left the web service. An older record may name a reused pid; it never links.
                             linked = record.event_id
                             break
                         if port in {"80", "443", "8080", "8443"} and (
@@ -1197,7 +1215,8 @@ class AlertThenHostExecution(LinuxSequence):
                             break
                         ancestor_pid, xts = record.ppid, record.ts
                     current = ("high" if linked or metadata.get("strong") else
-                               "lead" if metadata.get("web") or metadata.get("writable") else None)
+                               "lead" if metadata.get("web") or metadata.get("writable") or metadata.get("application")
+                               else None)
                     if current is None:
                         continue
                     count += 1
@@ -1211,8 +1230,9 @@ class AlertThenHostExecution(LinuxSequence):
                 yield self.finding(_key(host, signature), ids, lane,
                     f"An inbound severity 1-2 IDS alert was followed by {count} exec record(s) on its uniquely mapped host. "
                     "HIGH has listener/web-worker lineage, a web-account ancestor started after the alert, or a web "
-                    "account's writable executable or interpreter one-liner; another account's writable executable "
-                    "and web-account host/time coincidence alone are inferred LEADs.", count)
+                    "account's writable executable or interpreter one-liner; another account's writable executable, "
+                    "an application-server account's one-liner and web-account host/time coincidence alone are "
+                    "inferred LEADs.", count)
 
 
 class TelemetryGapAfterTamper(LinuxSequence):
