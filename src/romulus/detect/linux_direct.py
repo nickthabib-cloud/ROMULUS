@@ -187,10 +187,13 @@ def packaged_script(path: str) -> bool:
     return False
 
 
+HASH_FILES = frozenset({"/etc/shadow", "/etc/gshadow", "/etc/shadow-", "/etc/gshadow-"})
+
+
 def shadow_reader(path, event):
     executable = normalize_path(str(event.get("process.executable") or ""))
     name, directory = basename(executable), posixpath.dirname(executable)
-    if path not in {"/etc/shadow", "/etc/gshadow", "/etc/shadow-", "/etc/gshadow-"}:
+    if path not in HASH_FILES:
         return ""
     if str(event.get("process.uid")) != "0" and name not in SETUID_SHADOW_HELPERS:
         return ""
@@ -746,56 +749,77 @@ class CredentialMaterialAccess(FoldedLinuxDirect):
             return PROVISIONER_SCRIPTS.get(self._script_of(named.entry.event_id), "")
         return ""
 
+    @staticmethod
+    def routable_shape(e) -> bool:
+        """Whether a record has every fact of the lead route that the record itself carries: a watched read of a
+        hash file by a packaged root Perl or Python with no login marker. Only its lineage (the reader's script and
+        ancestors) can then decide; no other record may ever cost a lineage lookup."""
+        executable = normalize_path(str(e.get("process.executable") or ""))
+        pid = e.get("process.pid")
+        if (e.family != "file_access" or str(e.get("file.path")) not in HASH_FILES or e.outcome == Outcome.failure
+                or not maintenance_interpreter(executable) or str(e.get("process.uid")) != "0"
+                or not isinstance(pid, int) or isinstance(pid, bool) or not e.host):
+            return False
+        # A login session (audit login uid or session id set, or an enriched login name) means an operator ran it.
+        return (e.get("process.auid") is None and e.get("process.session_id") is None
+                and e.get("process.login_user") in (None, "", "unset"))
+
     def maintenance_route(self, e) -> tuple[str, list[str], list[str]] | None:
         """('package' or 'service', the lineage named from the reader up, its exec record ids) when the hash read
         may go to the lead lane; None otherwise (the read stays high)."""
+        return self._route(e)[0]
+
+    def lineage_missing(self, e) -> bool:
+        """Whether a routable read stays high only because its reader's lineage is not held: a missing reader exec
+        or ancestor, never a resolved lineage that shows no provisioner or an unpackaged script."""
+        return self.routable_shape(e) and self._route(e)[1]
+
+    def _route(self, e) -> tuple[tuple[str, list[str], list[str]] | None, bool]:
+        """(route or None, whether the walk stopped because a lineage record was not held)."""
+        if not self.routable_shape(e):
+            return None, False
         executable = normalize_path(str(e.get("process.executable") or ""))
         pid = e.get("process.pid")
-        if (not maintenance_interpreter(executable) or str(e.get("process.uid")) != "0"
-                or not isinstance(pid, int) or isinstance(pid, bool) or not e.host):
-            return None
-        # A login session (audit login uid or session id set, or an enriched login name) means an operator ran it.
-        if (e.get("process.auid") is not None or e.get("process.session_id") is not None
-                or e.get("process.login_user") not in (None, "", "unset")):
-            return None
         if self.lineage.execs.incomplete or self._scripts_refused:
-            return None             # an exec the store refused could be the one that answers: never lower
+            return None, False      # an exec the store refused could be the one that answers: never lower
         boot, serial = boot_of(e), _audit_serial(e)
         view = self._view(e.host, pid, e.ts.timestamp(), serial, boot, inclusive=True)
         if view is None:
-            return None
+            return None, True
         named = view.named
         record = named.entry
-        if named.kind != EXEC or normalize_path(str(named.exe or "")) != executable:
-            return None
+        if named.kind != EXEC:
+            return None, True       # the reader's own exec (its script) is not held
+        if normalize_path(str(named.exe or "")) != executable:
+            return None, False
         if getattr(record, "auid", None) is not None or getattr(record, "uid", None) not in (None, "0"):
-            return None
+            return None, False
         script = self._script_of(record.event_id)
         if not script or not packaged_script(script):
-            return None
+            return None, False
         chain, ids = [f"{basename(executable)} {script}"], [record.event_id]
         first = view.first
         if first.ppid == 1:
-            return "service", [*chain, "pid 1"], ids
+            return ("service", [*chain, "pid 1"], ids), False
         pid, ts, serial = first.ppid, first.ts, first.serial
         boot = boot if boot is not None else first.boot
         for _depth in range(PROVISIONER_DEPTH):
             if not isinstance(pid, int) or pid <= 1:
-                return None         # the lineage reached the service manager with no provisioner on it
+                return None, False  # the lineage reached the service manager with no provisioner on it
             parent = self._view(e.host, pid, ts, serial, boot, inclusive=False)
             if parent is None:
-                return None         # an ancestor is not recorded: unknown, so the read stays high
+                return None, True   # an ancestor is not recorded: unknown, so the read stays high
             step = parent.named
             found = self._provisioner(step)
             chain.append(found or basename(str(step.exe or "")) or f"pid {pid}")
             if step.kind == EXEC:
                 ids.append(step.entry.event_id)
             if found:
-                return "package", chain, ids
+                return ("package", chain, ids), False
             top = parent.first
             pid, ts, serial = top.ppid, top.ts, top.serial
             boot = boot if boot is not None else top.boot
-        return None
+        return None, False
 
     def witness(self, match: Match) -> None:
         """A routed lead cites the exec records of the lineage its note names, as context."""

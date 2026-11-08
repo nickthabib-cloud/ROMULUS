@@ -355,6 +355,11 @@ def _fold_reach(repo: Repo, hunt_id: str, match: Match, decision, existing: dict
     notes = {str(note) for note in gates.get("_notes", [])}
     notes |= {str(note) for note in decision.notes if str(note).startswith(("reached through an inferred ",
                                                                              "reached through an agent-requested "))}
+    # why a reach could not resolve a reader's lineage, for the first few readers (the row stays bounded)
+    for note in decision.notes:
+        if (str(note).startswith("Lineage for the reader ")
+                and sum(item.startswith("Lineage for the reader ") for item in notes) < FOLD_REACHES_LISTED // 4):
+            notes.add(str(note))
     gates["_notes"] = sorted(notes)
     if (published := gates.get("aggregate_summary")) and first is not None and last is not None:
         gates["aggregate_summary"] = {**published, "first": min(published["first"], first),

@@ -80,6 +80,14 @@ SWEPT_COMPLETE = frozenset({"matched", "positive_only", "evaluated_complete", "n
 SWEPT_RULES_HELD = 8
 # Task ids whose kind (a sweep read of this hunt or not) is held while expansion runs.
 SWEEP_TASKS_HELD = 4096
+# Reader-lineage lookups for hash reads whose only open question is their lineage. A provisioning or upgrade run
+# reads the hash files from a handful of debconf, dpkg-preconfigure or service processes; 16 distinct readers per
+# anchor covers such a run with room, while each lookup spends the expansion's shared source-query budget at its
+# two-query floor, so one anchor's lookups never take more than a few links' worth. Past the cap a read stays high.
+LINEAGE_FETCHES_PER_ANCHOR = 16
+LINEAGE_FETCH_QUERY_CAP = 2
+# Reader processes whose fetched lineage is held for the rest of the run (least recently used dropped).
+LINEAGE_CACHE_HELD = 1024
 
 
 def _cell_span(partition: str) -> tuple[datetime, datetime] | None:
@@ -261,6 +269,12 @@ class ExpansionEngine:
         self._sweep_tasks: OrderedDict[str, bool] = OrderedDict()
         # records inside a complete sweep cell that the sweep did not store, so judged here as any unswept record
         self.unproven_swept = 0
+        # Reader-lineage lookups: (host, boot, pid) -> (lineage record ids, why unavailable), the most recent
+        # LINEAGE_CACHE_HELD; lookups made per anchor; queries spent since the run loop last counted them.
+        self._lineage_cache: OrderedDict[tuple, tuple[list[str], str | None]] = OrderedDict()
+        self._lineage_fetches: dict[str, int] = defaultdict(int)
+        self._lineage_spend = 0
+        self._query_count = 0
 
     def _events(self, ids: list[str]) -> list[TypedEvent]:
         """Stored records, with the boot the hunt's map places them in when they carry none (a sweep record read
@@ -963,10 +977,18 @@ class ExpansionEngine:
                 published.append(row)
 
         for playbook in self._direct_pack():
-            matches = playbook.consume(events)
+            rule_events, context, notes = events, frozenset(), {}
+            if hasattr(playbook, "lineage_missing"):
+                # Hash reads whose only open question is their reader's lineage: fetch it and judge them with it.
+                rule_events, context, notes = self._with_reader_lineage(playbook.id, candidate["id"], events)
+                playbook.observe_only = context
+            matches = playbook.consume(rule_events)
             if not matches:
                 continue
-            swept = self._swept_ids(playbook, events)
+            for match in matches:
+                match.notes.extend(notes.get(match.group_key, []))
+            subjects = [event for event in rule_events if event.id not in context]
+            swept = self._swept_ids(playbook, subjects)
             if not swept:
                 for match in matches:
                     publish(playbook, match)
@@ -974,9 +996,12 @@ class ExpansionEngine:
             # The sweep judged some of these records with its whole partition, lineage and fold state: its verdict
             # stands for them. Records it did not evaluate are judged here as before (unknown lineage stays high);
             # the evaluated ones only add this reach to the group the sweep published for them, at its lane.
-            for match in self._judge(playbook.id, events, lambda event, swept=swept: event.id not in swept):
+            for match in self._judge(playbook.id, rule_events,
+                                     lambda event, swept=swept, context=context:
+                                     event.id not in swept and event.id not in context):
+                match.notes.extend(notes.get(match.group_key, []))
                 publish(self._rule(playbook.id), match)
-            for group, match in self._swept_folds(playbook, events, swept):
+            for group, match in self._swept_folds(playbook, rule_events, swept):
                 publish(playbook, match, sweep_group=group)
         published.extend(publish_windows_link_context(self.repo, self.hunt_id, candidate, result, events,
                                                       owner_token=self.owner_token))
@@ -1006,6 +1031,66 @@ class ExpansionEngine:
             return rule.consume(events)
         own = set(rule.families) - set(rule.context_families)
         return rule.consume([event for event in events if event.family not in own or judged(event)])
+
+    def _with_reader_lineage(self, rule_id: str, anchor_id: str, events: list[TypedEvent]):
+        """(the link's records plus fetched reader lineage, the ids of the fetched records (context only), notes per
+        high group key for reads whose lineage stayed unavailable). Only a read the rule says lacks nothing but its
+        lineage (`lineage_missing`: a packaged root Perl or Python, no login marker) is looked up, once per reader
+        process."""
+        probe = self._rule(rule_id)
+        probe.observe_only = frozenset(event.id for event in events)
+        probe.consume(events)                           # lineage only
+        held = {event.id for event in events}
+        added: dict[str, TypedEvent] = {}
+        notes: dict[str, list[str]] = defaultdict(list)
+        readers: dict[tuple, TypedEvent] = {}
+        for event in events:
+            if probe.lineage_missing(event):
+                readers.setdefault((event.host, event.get("host.boot.id"), event.get("process.pid")), event)
+        for key, event in readers.items():
+            ids, why = self._reader_lineage(anchor_id, key, event)
+            if why is not None:
+                group = json.dumps([event.host, str(event.get("process.executable")), str(event.get("file.path")),
+                                    "high"])
+                note = (f"Lineage for the reader (pid {key[2]} on {key[0]}) was not available to expansion: {why}; "
+                        "the read stays high.")
+                if note not in notes[group]:
+                    notes[group].append(note)
+                continue
+            added.update((record.id, record) for record in self._events([i for i in ids if i not in held]))
+        if not added:
+            return events, frozenset(), notes
+        merged = sorted([*events, *added.values()], key=lambda record: (record.ts, record.id))
+        return merged, frozenset(added), notes
+
+    def _reader_lineage(self, anchor_id: str, key: tuple, event: TypedEvent) -> tuple[list[str], str | None]:
+        """(the stored ids of the reader's process-lineage records, why they are unavailable or None)."""
+        cached = self._lineage_cache.get(key)
+        if cached is not None:
+            self._lineage_cache.move_to_end(key)
+            return cached
+        if self._lineage_fetches[anchor_id] >= LINEAGE_FETCHES_PER_ANCHOR:
+            return [], f"this anchor's {LINEAGE_FETCHES_PER_ANCHOR} reader-lineage lookups are spent"
+        if (reason := self._budget_reason(self._query_count + self._lineage_spend)) is not None:
+            return [], reason
+        fetch = getattr(self.fetcher, "fetch", None)
+        if fetch is None:
+            return [], "no lineage fetcher is available"
+        windows = expansion_windows(event.ts, self.window)
+        if not windows:
+            return [], "the read is outside the hunt window"
+        self._lineage_fetches[anchor_id] += 1
+        link_anchor = LinkAnchor(finding_id=anchor_id, ts=event.ts, host=event.host, event_ids=[event.id],
+                                 events=[event])
+        result = fetch(link_anchor, "process_lineage", windows[-1], query_cap=LINEAGE_FETCH_QUERY_CAP)
+        self._lineage_spend += result.query_spend
+        found = ((list(result.event_ids), None) if result.status == "complete" else
+                 ([], f"the lineage lookup was {result.status}"
+                      + (f" ({'; '.join(result.reasons)[:200]})" if result.reasons else "")))
+        self._lineage_cache[key] = found
+        while len(self._lineage_cache) > LINEAGE_CACHE_HELD:
+            self._lineage_cache.popitem(last=False)
+        return found
 
     def _swept_folds(self, playbook, events: list[TypedEvent], swept: set[str]) -> list[tuple[dict, object]]:
         """(the sweep's candidate, one match of the records this reach adds to it) for the records the sweep evaluated.
@@ -1257,7 +1342,13 @@ class ExpansionEngine:
                     actual_queries = getattr(getattr(self.fetcher, "executor", None), "source_queries", None)
                     query_count = (actual_queries if actual_queries is not None
                                    else query_count + result.query_spend)
+                self._query_count = query_count
                 published = self._evaluate(candidate, result)
+                spent, self._lineage_spend = self._lineage_spend, 0
+                if spent:
+                    # reader-lineage lookups made while judging the link spend the same source-query budget
+                    actual_queries = getattr(getattr(self.fetcher, "executor", None), "source_queries", None)
+                    query_count = actual_queries if actual_queries is not None else query_count + spent
                 slot.done, slot.stored = True, None
                 made_progress = True
                 if result.status != "complete":

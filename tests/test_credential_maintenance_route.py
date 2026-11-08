@@ -459,12 +459,32 @@ def _swept_hunt(cell_state="matched", cell_seconds=30, session_read=True):
     return repo, later, session
 
 
-def _reach(repo, events):
+class LineageFetcher:
+    """Stands in for the link fetcher's process_lineage fetch: stores and returns the given lineage records."""
+
+    def __init__(self, repo, lineage, status="complete"):
+        self.repo, self.lineage, self.status, self.calls = repo, lineage, status, []
+
+    def fetch(self, anchor, link_type, window, *, query_cap=None):
+        from romulus.hunt.links import LinkResult
+        self.calls.append((anchor.events[0].get("process.pid"), link_type, query_cap))
+        self.repo.save_evidence("h1", self.lineage, {}, None)
+        return LinkResult(id=f"L-lineage-{len(self.calls)}", anchor_id=anchor.finding_id, link_type=link_type,
+                          window=window, strength="observed", key={}, status=self.status,
+                          event_ids=[e.id for e in self.lineage] if self.status == "complete" else [],
+                          reasons=[] if self.status == "complete" else ["expansion_link_query_cap:2"],
+                          query_spend=2)
+
+
+def _reach(repo, events, fetcher=None, engine_hook=None, **engine_args):
     from romulus.hunt.expansion import ExpansionEngine
     from romulus.hunt.links import LinkResult, LinkWindow
     from romulus.sources.models import Window
     repo.save_evidence("h1", events, {}, None)
-    engine = ExpansionEngine(repo, "h1", Window(start=T0, end=T0 + timedelta(hours=1)), fetcher=object())
+    engine = ExpansionEngine(repo, "h1", Window(start=T0, end=T0 + timedelta(hours=1)),
+                             fetcher=fetcher or object(), **engine_args)
+    if engine_hook is not None:
+        engine_hook(engine)
     result = LinkResult(id="L-reach", anchor_id="F-anchor", link_type="host_after_anchor",
                         window=LinkWindow(label="anchor ±5 min", start=T0, end=T0 + timedelta(minutes=5)),
                         strength="inferred", key={}, status="complete", event_ids=[e.id for e in events])
@@ -556,3 +576,98 @@ def test_a_record_the_sweep_never_stored_is_judged_by_expansion_even_inside_a_co
     rows = _credential_rows(repo)
     assert rows["high"]["event_ids"] == [record.id] and [row["id"] for row in published] == [rows["high"]["id"]]
     assert "_expansion_fold" not in rows["lead"]["gate_results"]
+
+
+# ---- expansion fetches a routable read's missing lineage before judging it ----
+
+def _dpkg_lineage():
+    """apt-get (300) <- sh -c (301) <- perl dpkg-preconfigure (302): the records a process_lineage fetch returns."""
+    return shape_dpkg_preconfigure()[1:4]
+
+
+def _unrouted_lineage():
+    return [exec_(10, 300, 1, ["/usr/sbin/cron", "-f"]),
+            exec_(11, 301, 300, ["/bin/sh", "-c", "job"]),
+            exec_(12, 302, 301, ["/usr/bin/perl", "-w", "/usr/sbin/dpkg-preconfigure", "--apt"])]
+
+
+@pytest.mark.parametrize("sweep_group", [True, False])
+def test_a_reached_read_without_lineage_is_judged_with_its_fetched_lineage(sweep_group):
+    """The read alone cannot be routed; its fetched lineage shows dpkg-preconfigure <- sh <- apt-get, so it joins
+    (or creates) the lead group and no high sibling appears."""
+    repo = _swept_hunt(session_read=False)[0] if sweep_group else _fresh_hunt_without_sweep_groups()
+    record = read(25, 302, 301)
+    fetcher = LineageFetcher(repo, _dpkg_lineage())
+    _reach(repo, [record], fetcher=fetcher)
+    rows = _credential_rows(repo)
+    assert set(rows) == {"lead"} and len(fetcher.calls) == 1
+    assert fetcher.calls[0][1:] == ("process_lineage", 2)
+    assert record.id in rows["lead"]["event_ids"]
+    if sweep_group:
+        assert rows["lead"]["gate_results"]["_expansion_fold"]["reaches_total"] == 1
+
+
+def _fresh_hunt_without_sweep_groups():
+    from romulus.store.db import make_engine, migrate
+    from romulus.store.repo import Repo
+    engine = make_engine(":memory:")
+    migrate(engine)
+    repo = Repo(engine)
+    repo.create_hunt("h1", {"window": {"start": T0.isoformat(), "end": (T0 + timedelta(hours=1)).isoformat()},
+                            "targets": ["host-x"]}, "digest", "test")
+    repo.save_candidate({
+        "id": "F-anchor", "hunt_id": "h1", "rule_id": "host.web_shell", "rule_version": "1", "claim": "an anchor",
+        "claim_type": "observed_action", "event_ids": [], "predicate_fields": [], "entities": [], "ts": T0,
+        "severity": "high", "confidence": "high", "lane": "high", "priority": 50.0, "priority_reasons": [],
+        "gate_results": {}, "benign_alternatives": [], "next_checks": [], "source_case_id": None,
+        "source_anchor_id": None, "source_link_id": None})
+    return repo
+
+
+def test_fetched_lineage_without_a_provisioner_stays_high():
+    repo = _fresh_hunt_without_sweep_groups()
+    fetcher = LineageFetcher(repo, _unrouted_lineage())
+    _reach(repo, [read(25, 302, 301)], fetcher=fetcher)
+    assert set(_credential_rows(repo)) == {"high"} and len(fetcher.calls) == 1
+
+
+@pytest.mark.parametrize("why,setup,status", [
+    ("lookups are spent", lambda engine: engine._lineage_fetches.__setitem__("F-anchor", 16), "complete"),
+    ("budget exhausted", None, "complete"),
+    ("lineage lookup was partial", None, "partial"),
+])
+def test_unavailable_lineage_stays_high_and_says_why(why, setup, status):
+    repo = _fresh_hunt_without_sweep_groups()
+    fetcher = LineageFetcher(repo, _dpkg_lineage(), status=status)
+    _reach(repo, [read(25, 302, 301)], fetcher=fetcher, engine_hook=setup,
+           **({"max_source_queries": 0} if why == "budget exhausted" else {}))
+    rows = _credential_rows(repo)
+    assert set(rows) == {"high"}
+    assert any(note.startswith("Lineage for the reader (pid 302 on deb1) was not available to expansion")
+               and why in note for note in rows["high"]["gate_results"]["_notes"])
+    assert len(fetcher.calls) == (1 if status == "partial" else 0)
+
+
+@pytest.mark.parametrize("record", [
+    read(25, 302, 301, exe="/tmp/perl"),
+    read(25, 302, 301, process__auid="1000"),
+    read(25, 302, 301, process__session_id=4),
+    read(25, 302, 301, uid="1000"),
+    read(25, 302, 301, path="/home/alice/.ssh/id_rsa", file__owner__name="alice", file__owner__id="1000"),
+])
+def test_a_read_without_the_routable_shape_never_costs_a_lineage_lookup(record):
+    repo = _fresh_hunt_without_sweep_groups()
+    fetcher = LineageFetcher(repo, _dpkg_lineage())
+    _reach(repo, [record], fetcher=fetcher)
+    assert fetcher.calls == [] and set(_credential_rows(repo)) == {"high"}
+
+
+def test_one_lookup_per_reader_process_and_a_held_lineage_needs_none():
+    repo = _fresh_hunt_without_sweep_groups()
+    fetcher = LineageFetcher(repo, _dpkg_lineage())
+    _reach(repo, [read(25, 302, 301), read(26, 302, 301)], fetcher=fetcher)
+    assert len(fetcher.calls) == 1
+    repo2 = _fresh_hunt_without_sweep_groups()
+    fetcher2 = LineageFetcher(repo2, _dpkg_lineage())
+    _reach(repo2, [*_dpkg_lineage(), read(25, 302, 301)], fetcher=fetcher2)
+    assert fetcher2.calls == [] and set(_credential_rows(repo2)) == {"lead"}
