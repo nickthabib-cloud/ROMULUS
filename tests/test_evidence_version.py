@@ -20,7 +20,7 @@ from romulus.hunt import packets as packet_stage
 from romulus.sources import packets as packet_sources
 
 # The files that turn ES/OpenSearch records into typed events (not shellparse.py, which only detectors use).
-EVIDENCE_FILES = ("__init__.py", "auditd.py", "certificates.py", "community.py", "normalize.py", "raw_scrub.py",
+EVIDENCE_FILES = ("__init__.py", "auditd.py", "certificates.py", "community.py", "linux_catalog.py", "normalize.py", "raw_scrub.py",
                   "surrogates.py", "typed.py")
 PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf2116524009",
                    10: "e4dffd0944b86200b3c94aa301bead206967c58f565b30d426ee0071bd4f1aa9",
@@ -46,9 +46,11 @@ PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf211
                    # identical; only the Zeek producer changes its epoch and adds health records.
                    # Then normalize_hits may skip looking for lone surrogates in a batch whose every response was
                    # proved free of them (sources.es.surrogate_free): output is identical for every input.
-                   14: "8d11cab49e970e0840b796080224e11d00b47edf37b78229108fa651f06bc3c3"}
+                   14: "8d11cab49e970e0840b796080224e11d00b47edf37b78229108fa651f06bc3c3",
+                   15: "476048cddffe2557e45a3c71a2e1e0a5e8f878bc96d858ff15c095730aa11971"}
 WINDOWS_EVIDENCE_FILES = ("community.py", "windows.py", "windows_catalog.py", "windows_reassembly.py", "rpc_catalog.py")
 PINNED_WINDOWS = {
+    "windows-ecs@17": "c022428db9afea396a8420febde66b10e3d934b2f1472732f22a9e29c60247d6",
     "windows-ecs@16": "1f06783de9c4bcc48be2807bfbf26aa83f35d0c9b6eabf147567f3b3b07191e3",
     "windows-ecs@15": "25b5a842851ea66af4086d63dc5aac56fe8d0ec486396a456ed6330cc8ed721b",
     "windows-ecs@14": "167de2e4eade937df0f30ea8b82da2b81e5c3923e40707190c55240a53480bf5",

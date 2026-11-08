@@ -1532,6 +1532,9 @@ class ExecRecord(NamedTuple):
     serial: int | None = None   # the audit serial: orders execs of one pid at one instant (a #! chain)
     order_domain: object | None = None
     session: int | None = None  # the audit session id (None when unset): it never changes within a process
+    uid: str | None = None
+    euid: str | None = None
+    auid: str | None = None
 
 
 # A real-uid-0 exec outside any login session (no audit login uid), with its executable and argv recorded and a
@@ -1689,7 +1692,9 @@ class ExecLineage:
         return ExecRecord(ancestor.ts, event.id, ancestor.ppid, str(exe) if exe else "", ancestor.name,
                           ancestor.user, ancestor.marker, event.raw[0].native_id if event.raw else "",
                           ancestor.boot, DAEMON if _daemon(event) else 0, ancestor.serial, ancestor.order_domain,
-                          session if isinstance(session, int) and not isinstance(session, bool) else None)
+                          session if isinstance(session, int) and not isinstance(session, bool) else None,
+                          *[str(event.get(name)) if event.has(name) else None
+                            for name in ("process.uid", "process.euid", "process.auid")])
 
     def observe(
         self,
@@ -2134,6 +2139,8 @@ def bind_lineage_citation_loader(pack: list, load) -> None:
     """Give every distinct lineage store the hunt-layer verified pointer loader."""
     seen: set[int] = set()
     for playbook in pack:
+        if playbook.id == "host.telemetry_gap_after_tamper":
+            playbook._citation_loader = load
         for holder in (playbook, getattr(playbook, "lineage", None), getattr(playbook, "pids", None)):
             for value in getattr(holder, "__dict__", {}).values():
                 if isinstance(value, ExecLineage) and id(value) not in seen:

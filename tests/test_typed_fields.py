@@ -79,6 +79,12 @@ def _every_family() -> list[dict]:
              "arch=c000003e syscall=105 success=yes exit=0 a0=0 a1=0 a2=0 a3=0 items=0 ppid=1 pid=700 auid=4294967295 "
              "uid=0 gid=0 euid=0 suid=0 fsuid=0 egid=0 sgid=0 fsgid=0 tty=(none) ses=4294967295 comm=\"cron\" "
              "exe=\"/usr/sbin/cron\" key=(null)", enriched='ARCH=x86_64 SYSCALL=setuid AUID="unset" UID="root"')
+    b._audit("web1", at, 9006, "KERN_MODULE", 'name="demo" op=load')
+    b._audit("web1", at, 9007, "SYSCALL",
+             'arch=c000003e syscall=257 success=yes exit=3 a0=ffffff9c a1=0 a2=0 a3=0 items=1 '
+             'ppid=1 pid=701 uid=1000 euid=1000 auid=1000 ses=5 exe="/usr/bin/cat" key="watched"')
+    b._audit("web1", at, 9007, "PATH",
+             'item=0 name="/etc/shadow" inode=1 mode=0100640 ouid=0 ogid=0 nametype=NORMAL')
     return [record for records in docs.values() for record in records] + b.host
 
 

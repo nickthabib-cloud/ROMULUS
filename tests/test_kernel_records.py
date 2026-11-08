@@ -97,9 +97,9 @@ def test_read_only_open_is_not_a_file_change(flags):
         path(11, 0, "/etc/crontab", "NORMAL"),
         cwd(11),
     ))
-    # not a file change: the record only shows the process that made the call (process lineage reads it)
-    assert errors == [] and skips == {} and [e.family for e in events] == ["process_observed"]
-    assert [r.native_id for r in events[0].raw] == ["r0"] and events[0].get("audit.syscall") == "openat"
+    # This fixture carries an explicit watch key, so the open is also a typed read observation.
+    assert errors == [] and skips == {} and [e.family for e in events] == ["file_access", "process_observed"]
+    assert [r.native_id for r in events[-1].raw] == ["r0"] and events[-1].get("audit.syscall") == "openat"
 
 
 def test_write_open_of_an_existing_file_is_a_content_change():
@@ -259,7 +259,7 @@ def test_duplicate_path_items_are_a_file_family_error():
     assert events == [] and errors and errors[0][1].startswith("linux.audit.file:")
     from romulus.hunt.sweep import DATASET_FAMILIES
     # the group's SYSCALL record would have shown its process to the lineage too
-    assert DATASET_FAMILIES["linux.audit.file"] == {"file_change", "process_observed"}
+    assert DATASET_FAMILIES["linux.audit.file"] == {"file_change", "file_access", "process_observed"}
     assert "file_change" in DATASET_FAMILIES["linux.audit"]
 
 

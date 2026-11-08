@@ -324,103 +324,90 @@ from tests import throughput_fixture as tf
 # Arkime first and retain Suricata witnesses, with unchanged connection counts and interval statistics;
 # the other 32 findings are exact. Added witness rows, entity links and exclusion targets follow those citations.
 # All 639 changed coverage cells differ only by the nine changed rule versions.
-GOLDEN_STACK = {
-    "anchors": "0e89d2b2f2d7ccc701a87b49346c9894c84277b7cf8c725cc05d7d8449b88042",
-    "audit": "23d9b87c75d030df8ff5bcbf07deacc75416c325dd74bcc89243cc1b5488ae93",
-    "baseline_counts": "1a021de3254f91225689f1bdc8ce3e0cfd416c90a4148bcd4f1c93b6db9cb16d",
-    "baseline_hunt_exclusions": "2104a2b641a185061b19a1d1384f3798ff0f3c4161f54d6d6a9a016b0e1aac45",
-    "baseline_observations": "814031e4a439a6faa3218d7b3687d2391534916c44f015b4d7b7993b7d15070f",
-    "baseline_scope_hours": "fe1ef875f82a6cad7d9c7884b1936614584a9f9e0e4c008e4790ee46edf6361d",
-    "baseline_segments": "e2ca9f003a97f77ac300789266c9e646610317f5577318c4b556b464a8a6fc48",
-    "baseline_snapshot": "63b4c8094cb5450b1e707fd7be786e90324528e738b882358cae15cb8d53f776",
-    "baseline_window_counts": "7cc0f5555260b0533927f47cfe29e6a543e2d921b0cc79e4b6b89f418d6052f8",
-    "baseline_window_event_hours": "bb58c65144b135443e75a690b7b2f8137ebac6b827f8e8bd8cc7606a01c53e52",
-    "baseline_window_scope_hours": "07f4081d18fb5be1dfc23c1eecd4e63eef7af093c1a70eaa7f4ea05fc772006f",
-    "candidates": "6531915996fd5b464b73a18dab49e7cbe2f679eccc4e71ec6618458629b3a4e3",
-    "entities": "650d1be309f7d6fa2e86e6c1d2caffd582725898cea93a35d98214b6597be71b",
-    "event_citations": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-    "event_entities": "fd60da944607b1936edea6651adc4cb9e47a7b34edac732ec150d103b8afb110",
-    "events": "f0a94b3be1c5c6e96c190f4979be1c2f56c5692e3a648a6d38de4af03ef67b70",
-    "expansion": "eec090afe70bb0c3e04e465bb014d8064b428e12dd256b3fe6aba14f4551acf6",
-    "links": "0fbedb27ca9a4cb72354178444ee9aabc49f377b2c933074fe03ef29c8fbb08a",
-    # Five zero-evaluation Zeek rate registrations add 355 coverage cells and five manifest rules.
-    # Five Windows contract-version bumps change only rule_version in their 355 existing cells.
-    # Removing those additions, restoring those versions and incidental cell IDs reproduces the
-    # complete preceding snapshot; all 35 candidates and 21 non-coverage sections are identical.
-    "manifest": "351f4b170a899cf19c38d12939380126d107cb595b4c7ab1268296fadbf65561",
-    "raw": "49399de9c6d36b9443ccd2f39a8dcabb827e299b41e49573d6e58f6f623176f7",
-    # Twenty changed Windows/network contracts carry new versions in 71 coverage cells each.
-    # Restoring only those versions reproduces the complete preceding snapshot; all 35 candidates
-    # and the other 22 stack sections are byte-identical.
-    "rule_cells": "f5f5bcea0566338ca8238e5810788513ee6ed51ba1b04b8dbc88b3df49115592",
-    "stats": "bd8ad9ed18ba7ce308b269f12075a9e65cc877f4e023e23b1aa5f2279e571584",
-    "tasks": "c65df4ab88c05661371cf32b49a1d22ef84d6753488bdb946c8e29376d486260",
-}
+# Folded alert findings cite follow-on executions, so their discovery and staging are not repeated as context.
+# The 42 candidates preserve those observations and lanes; credential readers fold by executable and path.
+# Root commands descending from the web account's reverse shell join the folded alert, so two more duplicate
+# context links from that anchor are cited there instead (40 candidates); the direct shadow read and the
+# labelled lateral SSH and staging context items remain.
+# Changed anchor groups, coverage versions and expansion selections account for the related fingerprints.
+GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe554935eb6f87cf',
+ 'audit': '752bceb485d6eccb8bd52165b464a1f3827dfdb3e868480506383504350b8ede',
+ 'baseline_counts': 'be05fabb25336f21341b46eae7d8c2627828f7a7a7e8fdb24f4eb58576099354',
+ 'baseline_hunt_exclusions': 'c91eefda01c512d6d63e892dc9696016b01a71d44e4abcc429d954bd51864852',
+ 'baseline_observations': '2cac5f0f0a1107fa58648643db52a5fe64ff346e0d521e28aef302aca10fd2c3',
+ 'baseline_scope_hours': '0a1ce00b7f354753a35786774c98b43f73c6eecd0ac53c5283b89702968894fb',
+ 'baseline_segments': 'a3e22e8301643a23a9a9fd591a56a8b6baa65f55c31f3cfb9f910a6a639694fa',
+ 'baseline_snapshot': '63b4c8094cb5450b1e707fd7be786e90324528e738b882358cae15cb8d53f776',
+ 'baseline_window_counts': '7cc0f5555260b0533927f47cfe29e6a543e2d921b0cc79e4b6b89f418d6052f8',
+ 'baseline_window_event_hours': 'bb58c65144b135443e75a690b7b2f8137ebac6b827f8e8bd8cc7606a01c53e52',
+ 'baseline_window_scope_hours': '9e290626d76b423e9aed82a63d54fc6c2d6a2feeea3b55297ed76696c9279c80',
+ 'candidates': 'b270718bc7543ffb1b4636a9fb469890acedc77f9a75aea8c519fcf56733a45b',
+ 'entities': 'f26a3ccda6f16d94a0b0822914a0827ecd57ab81791dec1e39227f76a3529f17',
+ 'event_citations': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
+ 'event_entities': '73eb1a7cb37581de8b25ae6079e62e8f2a58b4e75697820e4ae41ac414064773',
+ 'events': '731e19f952d06603a6e19d7204fb7c1d53de79ad4207d21c3dc3bfda20787e9d',
+ 'expansion': 'e7a94c167f9a42d9adb20a9ee7660abd45c407ecf30baf023f31b465f0b845fa',
+ 'links': '7536ae4fc439eb04b16f94e78de5c5551ef26a4f218c8e5611c43b7777c5d228',
+ 'manifest': '59ce6ea7c6525f2a234a5c355c0d683320580b423a5c26ac49d05eb69afc0ca3',
+ 'raw': 'dcc19cada412dc08cd1133ae2a8cb299933501bceac7b2ddf3b8f23c752b6ddf',
+ 'rule_cells': 'e5119f19824fabb8a4f065be44e4cf65e1b7f171ed0c73fcf3c29fcf2da865ba',
+ 'stats': '18fcb2f6b78a17228b3a60b50bd103d66b5a07884252c753349b21b12889ced5',
+ 'tasks': '8ed9224aa3877ac75866903f8f67da698237b02878712dae968c8ed266eea477'}
 # Captured directly from the S7 fixture through _non_baseline_semantic_digests. Typed-event-derived hashes and
 # interchangeable predicate origins are normalized, while every decision, claim, lane, raw citation and gate is
 # checked field by field.
-GOLDEN_NON_BASELINE_SEMANTICS = {
-    "candidates": {
-        "all_fields": "3e5b39b097825afd0ce6f374f84122e6d2134faff9b7f99c5103bea73de53f6f",
-        "benign_alternatives": "8e3c0bf9bd14733cc2b4a049393aded638eaa0e93632c2c69d1428a52a4cc221",
-        "claim": "396958027c8b7993105a3e00423eed2956fac7bac5d04dc2976b218d0f9d1505",
-        "claim_type": "1ccc0da03751218f3bb63463a348cd5519fb63c2eec9e0d2e83259f18bfc6681",
-        "confidence": "307872061aea17d3b0ed62d34865ad350c9b4cb9cc7d2cea041ca39011ee3e7e",
-        "context_event_records": "af444f5420b16faa27b03fe9091a6b2db5006bcc5da813d573f7a01c97490121",
-        "count": 35,
-        "entities": "dfb7f8d1a995807f75365452dae6c80e325d1f2d1ad42f1fd1a2bb1292b98d21",
-        "event_records": "20e2c55161cf3c68215dc4e15722b83b9e25867be1ab77da05ff005892602b4b",
-        "gate_results": "1494f3c1cd4853709e0ccaa599c397076f29a9b8ef2431c339d607cabb57f46e",
-        "group_key": "e568af201841df36a89a8f8cebf9384f4fae5219b5fa742761a17778c24e21db",
-        "lane": "2a992b1fbb25d9d7cddc90e6ada69d30c0eb0e743881c35e567bd8cc08828f3b",
-        "next_checks": "a8069762d98e73840e159485c7fd877c5bc891cb9eab67f139c75af1e1eb979f",
-        "predicate_fields": "578a1d5b70a2fcc8a4cb62c5c02ceb1bdae66cd8c85400a4da6412aa77b70c16",
-        "priority": "aa73edc71e40ea4964645f62817edb7b3e790121d824db413442d99a21c05d5d",
-        "priority_reasons": "b473ae5921bb2f50e3cc347ad18a3a5b6557ecacdaca7568e9f2f10b2fde3a9b",
-        "rule_id": "2ae926e61da026e299be84e4e716e9bd0a33eb9a6ea3c97196c3167fc017a257",
-        "rule_version": "af6ddae9b9eed36ff8ff98a0c73db5be83cd452ea294e3df6b6febe0725b07ed",
-        "severity": "b2e229e267531f35a076f4db58edc48cbea38cce613ae2a6954cb6b1bf5ea20c",
-        "source_presence": "4b20d257ae462d3a6c1af7eeddf340a1558a100d29f517eb7b5c7564fa778d1c",
-        "ts": "d8015c1ff0b135e082a5fef2ab1cb88206470e30beee157a0cfc7790d48b8310",
-    },
-    "rule_cells": {
-        "all_fields": "0df75e9d8a95e1e98608ab5ac5a2907e233a67a9b9a5097fae3549ad8b63a50d",
-        "count": 15758,
-        "rule_id": 'ff9f673cb631d50f91948d268a7342a1a19c25c8b4c099a13e521acaa8807f30',
-        "rule_version": "52e0a2ae2593617b7405e8ae52085fa2f91f255438bbae4f0ff4f8b36864134e",
-        "target": 'ba0cf0a1239380578f0d7f7faf7c5202a80024ef2815838ab1b059e28ef5ca7a',
-        "partition": '08db801c30252039241bb64a0a03dd3a58798babbe62b7aa11db66e83a82bfe9',
-        "state": '2c9ed719c5f13e5cbc727dbdc794cb3029a528304c9a5a788e200622f3c52bac',
-        "matched": 'be37cf703bd2e8fb2bc413665ada0cb0adca7d37dc42eca84934e1bf85e99a11',
-        "evaluated": '0ad307e582c57c39d5680a24f7c3a324e7e5df958eb7aa43ab95c39bf51e7dbd',
-        "detail": '685776ced6cf01199fd8343c6454d0bdd31aa4fbb44a8c7ad9eb4206e96fabeb'
-},
-}
-GOLDEN_NORMALIZED = {
-    "arkime_sessions3-x": "76c065038118637c891297b82047c3ea0fcb2ace74b102729e0fe80275ae33fa",
-    "arkime_sessions3-x+boots": "76c065038118637c891297b82047c3ea0fcb2ace74b102729e0fe80275ae33fa",
-    "romulus-host-x": "5fe0efe8dac7c2dffe71402412ef3f79634364cc52ec7fd3286b9ba0c9fe6443",
-    "romulus-host-x+boots": "e1258e86ff0b5db0e5421836711f85d344b8190844d0a4957d28931c5c5f13b2",
-    "romulus-network-x": "28e79f5b436bae5a0b37351fecd103a5433efac7388ef78496f40d2138843894",
-    "romulus-network-x+boots": "28e79f5b436bae5a0b37351fecd103a5433efac7388ef78496f40d2138843894",
-}
-GOLDEN_PIVOT = {
-    "arkime_sessions3-x:-": "63667fe3f7a1d8a043aeb6f4c90dd81d5b95d9bc09615509d7509930f781b521",
-    "arkime_sessions3-x:process_exec": "63667fe3f7a1d8a043aeb6f4c90dd81d5b95d9bc09615509d7509930f781b521",
-    "arkime_sessions3-x:net_socket": "63667fe3f7a1d8a043aeb6f4c90dd81d5b95d9bc09615509d7509930f781b521",
-    "arkime_sessions3-x:auth,net_socket,process_exec": "63667fe3f7a1d8a043aeb6f4c90dd81d5b95d9bc09615509d7509930f781b521",
-    "arkime_sessions3-x:net_flow": "63667fe3f7a1d8a043aeb6f4c90dd81d5b95d9bc09615509d7509930f781b521",
-    "romulus-host-x:-": "17e03394f575dd068d9e6f86855ddbeb51bb4afadd8847d5607c02d3cba6f5af",
-    "romulus-host-x:process_exec": "d406164da63f1e9b16c179688f7ceeb02c4c32d3951315607e5b6cee439d2b61",
-    "romulus-host-x:net_socket": "6fda3c49eb2e715cddd5b54056fc42b79207fe02cc86232107d248895a9604e7",
-    "romulus-host-x:auth,net_socket,process_exec": "17e03394f575dd068d9e6f86855ddbeb51bb4afadd8847d5607c02d3cba6f5af",
-    "romulus-host-x:net_flow": "17e03394f575dd068d9e6f86855ddbeb51bb4afadd8847d5607c02d3cba6f5af",
-    "romulus-network-x:-": "227b695914720fcbcaf7aa096fbbe8bae060ed5c4d53cf10bb25b64fb446a634",
-    "romulus-network-x:process_exec": "9e505ce98b1b1f339349e89f9e2e58082d9066b316aa4aa97b727de0423759c6",
-    "romulus-network-x:net_socket": "9e505ce98b1b1f339349e89f9e2e58082d9066b316aa4aa97b727de0423759c6",
-    "romulus-network-x:auth,net_socket,process_exec": "9e505ce98b1b1f339349e89f9e2e58082d9066b316aa4aa97b727de0423759c6",
-    "romulus-network-x:net_flow": "6968b431c3b39aa5ac7bcbe63082d96b23caf5ffa859bfcfd73e1db007783917",
-}
+GOLDEN_NON_BASELINE_SEMANTICS = {'candidates': {'all_fields': '66c34da40dc5892252b267b8cc3bb8b424a4c000964ea6a61b671fa26a3987e6',
+                'benign_alternatives': '39dfe4522634750416c9dd5a7f38a4a76692daeed9ee9d5266a235c7b893643d',
+                'claim': '48b20c6ab3a8ede124c538d68c12da476b062d7ecf2a0725b46b317e8af9e1dc',
+                'claim_type': '62ee830737cd920223bd88ccd391e5074f2e72242803701f1f849e25d1fdf7c2',
+                'confidence': 'fbdbcc65a374c9bad760df608732609bf67565a3af9922898c67e31f78636a01',
+                'context_event_records': '812b2ee0a914612b78ec64e62317ee31cc172d0fe445880a23a7139bb9a8e1f4',
+                'count': 40,
+                'entities': 'a46018da750e2c05f29c1f50286e55174d6565c69b30892ce66b33b53c41de23',
+                'event_records': '30bdb797329163379f3be620d3fc42e392e45fc65f4f91bfc66d1516a011b6ae',
+                'gate_results': 'c7a34773f5e6fdd708af438f97f039760a490fc539bfabfe38738138e00135f2',
+                'group_key': 'f188f4672391c7c67237a2e55de7b94c8ae3aaddd5335ce0e82fe9a9b6df2b74',
+                'lane': 'a523c12959469de5628f7ca065677e0e9d7f4c492857dc2d4942b625f3f125ca',
+                'next_checks': '237a3391fc1a3f8312f3395d1a54083374485e9edbed2f23086b3787797bfb5a',
+                'predicate_fields': '68b721cd4b7184f6191b023ca1889a7815d71a7f35d470a882a31cf230a034e6',
+                'priority': '81a856684110a1b2b59396843facb23007b68eaf8c3c031222a8e9c1d5db1e06',
+                'priority_reasons': 'd38e0586d04b87d7f11769084f0368af795f59c692d2debbb4dad2eaaca05150',
+                'rule_id': '50045a80bc2eb3e1c66c58f0a55acfc5e8db0f87e8b18bd8772a1361b20c1313',
+                'rule_version': 'cbcc3c959b93d808ecefbe6280012f12276e9bddd1939a07d784b55bbdb663bb',
+                'severity': 'd8fb260b8a62f9175181cdba1356bfbd3dab9167f0965c5e7586e2202c62bcc3',
+                'source_presence': '31f6a55e225e04f5da96ef7f565969408d500a329be1bf37e463188763a5af16',
+                'ts': 'bfc0e0328d7a2b9fb224bc2791da7a13f533d4b8f03819ad9f65e7609fac08e0'},
+ 'rule_cells': {'all_fields': 'e419ef0c1fef881d5893ae2fb1c602bd02739a68603f221cda606f7571ba3ced',
+                'count': 17256,
+                'detail': '17f2774a79d6aaa4196771517deb5a676512756778762dcaad2b9a2426954a07',
+                'evaluated': 'bc3f5e1263641dd45637654c353c391ae24242d3e37c29f32a5bf8c3297d6455',
+                'matched': 'a2b744e46dc0f9ba411fcf82f14147a988f21302cebb8c85f5b4522b4f614478',
+                'partition': 'a2196f3f82f86ab620f8798fc56b6a7cd94dd492ea061bd11390bda65ae53580',
+                'rule_id': 'ca8ff3e6e7a06b308813bcaf9abb6b2c4f904141fa23dbbe8c0e16d0977857fa',
+                'rule_version': 'f2e704b4ec82ec1088a544966c326dc1eba600d784cacd34c8a8d2ea1e283387',
+                'state': '79492679c375470e7bc0235f6b4335d5ca8329aa0575e774ae0a72392f380220',
+                'target': 'c533333fd26b44f80c85e368bab8980506bfb6ad90f452f8a4e6561d059b40fe'}}
+GOLDEN_NORMALIZED = {'arkime_sessions3-x': '7407ea2345be798c29751a3c9470e3b6988dac5ce7d9f5d5c2ffe3b0bb3f7903',
+ 'arkime_sessions3-x+boots': '7407ea2345be798c29751a3c9470e3b6988dac5ce7d9f5d5c2ffe3b0bb3f7903',
+ 'romulus-host-x': '4e8ce0a9d2d59e3e151dfcbfca4b04554cb4f10a54b1b397a6ea58eec4f5eb07',
+ 'romulus-host-x+boots': '4ab87c943028621abc97523151d5ec6bef2ef830d4e2a7d92e7b47fe3f0ddd58',
+ 'romulus-network-x': 'edf93ea9388d54c1a11c9d70f00c9a4b3983db78c49b932ee329abdd284dd62c',
+ 'romulus-network-x+boots': 'edf93ea9388d54c1a11c9d70f00c9a4b3983db78c49b932ee329abdd284dd62c'}
+GOLDEN_PIVOT = {'arkime_sessions3-x:-': '357d03e5670c22460621706ce9b6785674d8f6d309c2478804a51b1e0e6288db',
+ 'arkime_sessions3-x:process_exec': '357d03e5670c22460621706ce9b6785674d8f6d309c2478804a51b1e0e6288db',
+ 'arkime_sessions3-x:net_socket': '357d03e5670c22460621706ce9b6785674d8f6d309c2478804a51b1e0e6288db',
+ 'arkime_sessions3-x:auth,net_socket,process_exec': '357d03e5670c22460621706ce9b6785674d8f6d309c2478804a51b1e0e6288db',
+ 'arkime_sessions3-x:net_flow': '357d03e5670c22460621706ce9b6785674d8f6d309c2478804a51b1e0e6288db',
+ 'romulus-host-x:-': '663808ac8bf97c61934e034d7f8d6287d5d77c4e3cc017cc8eac661ed367769a',
+ 'romulus-host-x:process_exec': '4de5c5d736e871578fcabb841538920933b5bc6cee5bd3b2315723aa685da491',
+ 'romulus-host-x:net_socket': '60715318e2fff9d65306d497ff6e1144ea6047d57448ccef530912796a884b78',
+ 'romulus-host-x:auth,net_socket,process_exec': '663808ac8bf97c61934e034d7f8d6287d5d77c4e3cc017cc8eac661ed367769a',
+ 'romulus-host-x:net_flow': '663808ac8bf97c61934e034d7f8d6287d5d77c4e3cc017cc8eac661ed367769a',
+ 'romulus-network-x:-': '8b9780ca17a4157880f10de03ff0f9c06d22967ad5cf98f8525009dd31e1c8ab',
+ 'romulus-network-x:process_exec': '9e505ce98b1b1f339349e89f9e2e58082d9066b316aa4aa97b727de0423759c6',
+ 'romulus-network-x:net_socket': '9e505ce98b1b1f339349e89f9e2e58082d9066b316aa4aa97b727de0423759c6',
+ 'romulus-network-x:auth,net_socket,process_exec': '9e505ce98b1b1f339349e89f9e2e58082d9066b316aa4aa97b727de0423759c6',
+ 'romulus-network-x:net_flow': 'c534a2f3f53bd027e7f90efe3e1e05342719bb957407b67cf8a708afb185ca96'}
 PIVOT_FAMILIES = (None, frozenset({"process_exec"}), frozenset({"net_socket"}),
                   frozenset({"process_exec", "net_socket", "auth"}), frozenset({"net_flow"}))
 

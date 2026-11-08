@@ -190,7 +190,7 @@ def _windows_fields(event):
             fields.update({'process.executable', 'process.pid'})
         if event.family in {'auth', 'account_change', 'service_change', 'registry_change',
                             'object_access', 'scheduled_task', 'directory_access', 'directory_change',
-                            'share_access', 'audit_config', 'boot_configuration', 'security_enumeration',
+                            'share_access', 'share_change', 'audit_config', 'boot_configuration', 'security_enumeration',
                             'privilege_adjustment', 'system_state'} or code in {4688, 4689}:
             fields.update({'user.name', 'user.domain'})
         if event.family == 'account_change' or code in {

@@ -324,6 +324,9 @@ EVENT_CLASSES = (
     _security(5139, "directory_change", "directory service object moved"),
     _security(5141, "directory_change", "directory service object deleted"),
     _security(5140, "share_access", "network share accessed"),
+    _security(5142, "share_change", "network share added"),
+    _security(5143, "share_change", "network share modified"),
+    _security(5144, "share_change", "network share deleted"),
     _security(5145, "share_access", "network share object checked"),
     *(
         _operational(DEFENDER_CHANNEL, DEFENDER_PROVIDER, event_id, "defender_event", name, _DEFENDER_DOCS)
@@ -598,7 +601,7 @@ _SECURITY_AUDIT: dict[int, tuple[tuple[str, str], ...]] = {
         event_id: (("Directory Service Changes", "success"),)
         for event_id in (5136, 5137, 5138, 5139, 5141)
     },
-    5140: (("File Share", "success"),),
+    **{event_id: (("File Share", "success"),) for event_id in (5140, 5142, 5143, 5144)},
     5145: (
         ("Detailed File Share", "success"),
         ("Detailed File Share", "failure"),

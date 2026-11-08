@@ -7,6 +7,9 @@ typed events; undeclared plain JSON and uncatalogued logs keep their named skips
 
 A producer epoch changes its event ids and producer tags. Those fields are rebased only after complete
 native-output comparisons prove every typed value, origin, raw reference, skip and error unchanged.
+The shared evidence identity epoch also changes Zeek ids while its producer tag remains unchanged.
+Generic host views additionally retain the exact native host.ip value and its field origin for
+destination ownership joins; removing only those four source-validated fields restores the prior dump.
 The Windows dumps correspond to windows_baseline; the health inputs record unread output from
 health_baseline. Reversing the Zeek identity replacements and removing the added health inputs and
 their batch skips restores the entire previous golden. ICS inputs use the final pre-ICS baseline;
