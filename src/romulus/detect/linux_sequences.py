@@ -86,8 +86,8 @@ TOMCAT_ACCOUNT = re.compile(r"tomcat\d*")
 
 
 def application_account(event):
-    user = str(event.get("process.user") or "")
-    return user in APPLICATION_ACCOUNTS or bool(TOMCAT_ACCOUNT.fullmatch(user))
+    names = (str(event.get(name) or "") for name in ("process.user", "process.effective_user", "user.name"))
+    return any(name in APPLICATION_ACCOUNTS or bool(TOMCAT_ACCOUNT.fullmatch(name)) for name in names)
 SCRIPT_SUFFIXES = frozenset({".php", ".phtml", ".php5", ".jsp", ".jspx", ".asp", ".aspx", ".cgi", ".pl", ".py", ".sh"})
 DOCUMENT_ROOTS = ("/var/www", "/srv/www", "/srv/http", "/usr/share/nginx/html", "/opt/lampp/htdocs")
 TOMCAT_ROOT = re.compile(r"^/var/lib/tomcat[^/]*/webapps(?:/|$)")
@@ -1229,8 +1229,9 @@ class AlertThenHostExecution(LinuxSequence):
             if count:
                 yield self.finding(_key(host, signature), ids, lane,
                     f"An inbound severity 1-2 IDS alert was followed by {count} exec record(s) on its uniquely mapped host. "
-                    "HIGH has listener/web-worker lineage, a web-account ancestor started after the alert, or a web "
-                    "account's writable executable or interpreter one-liner; another account's writable executable, "
+                    "HIGH has listener/web-worker lineage, a web-account ancestor started at most five minutes before "
+                    "the alert, or a web account's writable executable or interpreter one-liner; another account's "
+                    "writable executable, "
                     "an application-server account's one-liner and web-account host/time coincidence alone are "
                     "inferred LEADs.", count)
 

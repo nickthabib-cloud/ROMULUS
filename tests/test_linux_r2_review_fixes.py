@@ -210,3 +210,10 @@ def test_web_account_ancestor_within_clock_skew_of_the_alert_still_links(started
     nc.fields["process.argv"].value = ["nc", "-z", "203.0.113.8", "4445"]
     out = list(detector("corr.alert_then_host_execution", [alert(8081), shell, nc], tmp_path).finalize())
     assert [m.proposed_lane for m in out] == lanes
+
+
+def test_application_server_account_named_only_as_the_effective_user_is_a_lead(tmp_path):
+    e = execution(120, "/usr/bin/dash", uid="120", process__effective_user="tomcat9", host__ip=["10.0.0.9"])
+    e.fields["process.argv"].value = ["/bin/sh", "-c", "id"]
+    out = list(detector("corr.alert_then_host_execution", [alert(8080), e], tmp_path).finalize())
+    assert [m.proposed_lane for m in out] == ["lead"]
