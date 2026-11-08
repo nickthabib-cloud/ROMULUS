@@ -456,11 +456,26 @@ class FoldedLinuxDirect(LinuxDirect):
         super().__init__()
         self.folds = KeyedStore(self, "linux_direct_folds", self.HOT)
         self._seen = RecentIds()
+        # Records a caller hands over for context only (an expansion reach's records another evaluation owns): read
+        # for lineage, never matched.
+        self.observe_only: frozenset[str] = frozenset()
+
+    @staticmethod
+    def sweep_group_keys(match: Match) -> list[str]:
+        """The group keys the same typed shape has in every lane: an evaluation with less context may put a record
+        the sweep judged under another lane's key."""
+        try:
+            parts = json.loads(match.group_key)
+        except (TypeError, ValueError):
+            return []
+        if not isinstance(parts, list) or not parts:
+            return []
+        return [json.dumps([*parts[:-1], lane]) for lane in ("urgent", "high", "lead")]
 
     def consume(self, events):
         pending = {}
         for event in self.applicable(events):
-            if event.id in self._seen:
+            if event.id in self._seen or event.id in self.observe_only:
                 continue
             self._seen.add(event.id)
             for match in self.match(event):
@@ -508,6 +523,19 @@ class FoldedLinuxDirect(LinuxDirect):
             state.published = True
             self.folds.put(key, state)
         self.folds.trim()
+        return out
+
+    def match_each(self, events, judged_ids) -> list[Match]:
+        """Each judged record's own matches, unfolded, after every record was read for context (lineage): for a
+        caller that must place each record in the group another evaluation published for it."""
+        self.observe_only = frozenset(event.id for event in events)
+        self.consume(events)                    # context only: nothing is matched
+        self.observe_only = frozenset()
+        out = []
+        for event in self.applicable([event for event in events if event.id in judged_ids]):
+            for match in self.match(event):
+                match.raw_copies = self.raw_of(event)
+                out.append(match)
         return out
 
     def witness(self, match: Match) -> None:

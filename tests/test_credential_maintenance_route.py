@@ -425,14 +425,117 @@ def test_expansion_reaching_more_records_of_the_same_process_folds_into_the_swee
     assert {later[0].id, later[-1].id} <= set(row["event_ids"])     # each reach cites its first and latest
 
 
-def test_expansion_without_the_lineage_fails_toward_high_in_its_own_group():
-    """A reach that holds the read but not the reader's lineage cannot route it: its group is the high one, folded
-    per (host, executable, path, lane), never lowering the sweep's lead group and never merged into it."""
-    repo = _repo()
-    _publish(repo, CredentialMaterialAccess(), shape_dpkg_preconfigure())
-    _publish(repo, CredentialMaterialAccess(), [read(20, 302, 301), read(21, 302, 301)], anchor="F-one")
-    _publish(repo, CredentialMaterialAccess(), [read(22, 302, 301)], anchor="F-two")
-    rows = sorted((row for row in repo.candidates("h1") if row["rule_id"] == CredentialMaterialAccess.id),
-                  key=lambda row: row["lane"])
-    assert [row["lane"] for row in rows] == ["high", "lead"]
-    assert rows[0]["gate_results"]["_expansion_fold"]["reaches_total"] == 1
+# ---- expansion over records the sweep already evaluated: the sweep's verdict stands ----
+
+def _swept_hunt(cell_state="matched", cell_seconds=30, session_read=True):
+    """A hunt whose sweep read [T0, T0 + cell_seconds) of target host-x with full lineage, published its groups and
+    wrote the rule's partition cell, and an anchor whose reach will carry reads without their lineage."""
+    from romulus.hunt.publish import publish_match
+    from romulus.store.db import make_engine, migrate
+    from romulus.store.repo import Repo
+    engine = make_engine(":memory:")
+    migrate(engine)
+    repo = Repo(engine)
+    end = T0 + timedelta(hours=1)
+    repo.create_hunt("h1", {"window": {"start": T0.isoformat(), "end": end.isoformat()}, "targets": ["host-x"]},
+                     "digest", "test")
+    sweep = CredentialMaterialAccess()
+    lineage = shape_dpkg_preconfigure()
+    later = [read(20, 302, 301), read(21, 302, 301)]
+    session = read(22, 503, 502, process__auid="1000", process__session_id=7)
+    for match in sweep.consume([*lineage, *later, *([session] if session_read else [])]):
+        publish_match(repo, "h1", sweep, match, None, {})
+    partition = f"{T0.isoformat()}/{(T0 + timedelta(seconds=cell_seconds)).isoformat()}"
+    repo.set_rule_cell("h1", sweep.id, sweep.version, "host-x", partition, cell_state, 1, 10)
+    repo.save_candidate({
+        "id": "F-anchor", "hunt_id": "h1", "rule_id": "host.web_shell", "rule_version": "1", "claim": "an anchor",
+        "claim_type": "observed_action", "event_ids": [], "predicate_fields": [], "entities": [], "ts": T0,
+        "severity": "high", "confidence": "high", "lane": "high", "priority": 50.0, "priority_reasons": [],
+        "gate_results": {}, "benign_alternatives": [], "next_checks": [], "source_case_id": None,
+        "source_anchor_id": None, "source_link_id": None})
+    return repo, later, session
+
+
+def _reach(repo, events):
+    from romulus.hunt.expansion import ExpansionEngine
+    from romulus.hunt.links import LinkResult, LinkWindow
+    from romulus.sources.models import Window
+    repo.save_evidence("h1", events, {}, None)
+    engine = ExpansionEngine(repo, "h1", Window(start=T0, end=T0 + timedelta(hours=1)), fetcher=object())
+    result = LinkResult(id="L-reach", anchor_id="F-anchor", link_type="host_after_anchor",
+                        window=LinkWindow(label="anchor ±5 min", start=T0, end=T0 + timedelta(minutes=5)),
+                        strength="inferred", key={}, status="complete", event_ids=[e.id for e in events])
+    engine._persist_link(result)
+    return engine._evaluate(repo.candidate("F-anchor"), result)
+
+
+def _credential_rows(repo):
+    return {row["lane"]: row for row in repo.candidates("h1") if row["rule_id"] == CredentialMaterialAccess.id}
+
+
+def test_a_swept_read_reached_without_its_lineage_folds_into_the_sweeps_lead_group():
+    repo, later, _session = _swept_hunt()
+    before = _credential_rows(repo)
+    assert set(before) == {"lead", "high"}
+    assert _reach(repo, later) == []
+    rows = _credential_rows(repo)
+    assert set(rows) == {"lead", "high"} and rows["high"]["id"] == before["high"]["id"]
+    assert rows["high"]["claim"] == before["high"]["claim"]          # the session read's group is untouched
+    fold = rows["lead"]["gate_results"]["_expansion_fold"]
+    assert fold["reaches_total"] == 1 and rows["lead"]["lane"] == "lead"
+    assert "A reach's own evaluation" not in rows["lead"]["claim"]
+
+
+def test_b_a_record_outside_every_swept_partition_is_judged_by_expansion_and_fails_toward_high():
+    repo, _later, _session = _swept_hunt()
+    outside = [read(40, 302, 301), read(41, 302, 301)]            # after the cell's end: never evaluated by the sweep
+    _reach(repo, outside)
+    high = _credential_rows(repo)["high"]
+    assert {outside[0].id, outside[-1].id} <= set(high["event_ids"])
+    assert "A reach's own evaluation" not in high["claim"] and high["gate_results"]["_expansion_fold"]
+
+
+def test_c_a_partial_sweep_cell_leaves_its_records_to_expansion():
+    repo, later, _session = _swept_hunt(cell_state="match_on_partial")
+    _reach(repo, later)
+    rows = _credential_rows(repo)
+    assert "_expansion_fold" not in rows["lead"]["gate_results"]
+    assert {later[0].id, later[-1].id} <= set(rows["high"]["event_ids"])
+
+
+def test_d_a_different_event_computing_high_still_publishes_high():
+    repo, later, session = _swept_hunt()
+    unswept = read(45, 503, 502, process__auid="1000", process__session_id=7)     # outside the swept partition
+    _reach(repo, [*later, session, unswept])
+    rows = _credential_rows(repo)
+    assert rows["lead"]["lane"] == "lead" and rows["lead"]["gate_results"]["_expansion_fold"]["reaches_total"] == 1
+    assert rows["high"]["lane"] == "high" and unswept.id in rows["high"]["event_ids"]
+
+
+def test_d_without_a_sweep_group_the_new_high_event_publishes_its_own_finding():
+    repo, later, _session = _swept_hunt(session_read=False)
+    assert set(_credential_rows(repo)) == {"lead"}
+    unswept = read(45, 503, 502, process__auid="1000", process__session_id=7)
+    published = _reach(repo, [*later, unswept])
+    rows = _credential_rows(repo)
+    assert rows["high"]["event_ids"] == [unswept.id] and [row["id"] for row in published] == [rows["high"]["id"]]
+    assert rows["lead"]["gate_results"]["_expansion_fold"]["reaches_total"] == 1
+
+
+def test_sweep_targets_and_partitions_are_matched_by_typed_pattern_and_time():
+    from romulus.hunt.expansion import _cell_span, _target_names
+    assert _target_names("host-x", "host-x") and not _target_names("host-x", "host-xy")
+    assert _target_names("logs-*,audit-1", "logs-2024.11.18") and _target_names("logs-*,audit-1", "audit-1")
+    assert not _target_names("logs-*,-logs-old*", "logs-old-1") and not _target_names("alias-name", "backing-index")
+    assert _cell_span("window") is None and _cell_span("anchor:F|link:L") is None
+    start, end = _cell_span(f"{T0.isoformat()}/{(T0 + timedelta(minutes=5)).isoformat()}")
+    assert (start, end) == (T0, T0 + timedelta(minutes=5))
+
+
+def test_a_split_parent_or_unsupported_cell_is_not_a_sweep_evaluation():
+    repo, later, _session = _swept_hunt(cell_state="split")
+    _reach(repo, later)
+    assert {later[0].id, later[-1].id} <= set(_credential_rows(repo)["high"]["event_ids"])
+    repo, later, _session = _swept_hunt(cell_state="not_applicable_no_events")
+    _reach(repo, later)
+    assert "_expansion_fold" not in _credential_rows(repo)["lead"]["gate_results"]

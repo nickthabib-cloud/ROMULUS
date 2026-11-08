@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 
 import httpx
 
@@ -283,14 +284,19 @@ def _strongest(values, rank):
 
 
 def _fold_reach(repo: Repo, hunt_id: str, match: Match, decision, existing: dict, context_reach: dict | None,
-                *, owner_token: str | None = None) -> dict | None:
+                *, owner_token: str | None = None, keep_decision: bool = False) -> dict | None:
     """Fold an expansion reach of an already published group (same hunt, rule and group key) into its one candidate.
 
     The candidate keeps its identity, ownership, citations and claim; the reach adds its anchor and link to the
     candidate's reaches, its matching records to a stated (possibly overlapping) re-read count, and, within
     FOLD_CITATIONS_ADDED, its first and latest records to the citations. The lane, severity, confidence and priority
-    are the strongest of the parts: a fold never lowers them. Revised in place, never retracted. Returns the stored
-    candidate when the fold raised its lane into the expanded lanes (so expansion may anchor on it), else None."""
+    are the strongest of the parts: a fold never lowers them. With `keep_decision` (records the sweep evaluated) they
+    stay the candidate's own. Revised in place, never retracted. Returns the stored candidate when the fold raised
+    its lane into the expanded lanes (so expansion may anchor on it), else None."""
+    if keep_decision:
+        decision = replace(decision, lane=existing["lane"], severity=existing["severity"],
+                           confidence=existing["confidence"], priority=float(existing["priority"] or 0),
+                           priority_reasons=existing["priority_reasons"])
     gates = dict(existing.get("gate_results") or {})
     fold = dict(gates.get("_expansion_fold") or {})
     fold.setdefault("base_claim", existing["claim"])
@@ -398,9 +404,14 @@ def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
                   task_id: str | None, raw_sources: dict[str, dict],
                   source_case_id: str | None = None, source_anchor_id: str | None = None,
                   source_link_id: str | None = None, context_reach: dict | None = None,
-                  *, owner_token: str | None = None, zeek_context=None, zeek_context_ids=()) -> dict | None:
+                  *, owner_token: str | None = None, zeek_context=None, zeek_context_ids=(),
+                  sweep_group: dict | None = None) -> dict | None:
     """Persist cited evidence and publish a machine-decided finding once, with stable script-view revisions.
-    Context findings are published by the post-expansion pass (romulus.hunt.context.finalize_context)."""
+    Context findings are published by the post-expansion pass (romulus.hunt.context.finalize_context).
+
+    `sweep_group`: the candidate the sweep published for these records, which it evaluated with its whole
+    partition. The reach then only folds into that candidate, at the sweep's lane: a re-evaluation with less context
+    never overrides the sweep's verdict."""
     if source_case_id is None and source_anchor_id is None:
         bind_aggregate_history(repo, hunt_id, playbook)
     if zeek_context is not None and any(event.get("observer.product")=="zeek" for event in match.events):
@@ -440,6 +451,9 @@ def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
     event_ids = [event.id for event in match.events]
     context_event_ids = sorted({event.id for event in match.events} & match.context_ids)
     candidate_id = decision.candidate_id
+    if sweep_group is not None:
+        return _fold_reach(repo, hunt_id, match, decision, sweep_group, context_reach, owner_token=owner_token,
+                           keep_decision=True)
     view_field = playbook.evidence_view_field if match.group_key else ""
     existing_view = repo.candidate(candidate_id) if view_field else None
     if source_case_id is None and source_anchor_id is not None and not view_field and match.group_key:

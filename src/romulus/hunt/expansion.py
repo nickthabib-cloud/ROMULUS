@@ -72,6 +72,36 @@ _WINDOWS_TIER_LINKS = {
     (tier, label): links for tier, links, label in WINDOWS_TIER_ADDITIONS
 }
 
+# A sweep partition cell in one of these states evaluated every record of the rule's families in that partition; any
+# other state (partial, failed, planned, split, not applicable, unsupported) leaves its records to expansion's own
+# judgement.
+SWEPT_COMPLETE = frozenset({"matched", "positive_only", "evaluated_complete", "no_match_complete"})
+# Rules whose sweep coverage index is held while expansion runs (the least recently used is dropped and read again).
+SWEPT_RULES_HELD = 8
+
+
+def _cell_span(partition: str) -> tuple[datetime, datetime] | None:
+    """A sweep partition key's (start, end); None for a link, window or other non-time partition."""
+    start, sep, end = str(partition).partition("/")
+    if not sep:
+        return None
+    try:
+        return _utc(datetime.fromisoformat(start)), _utc(datetime.fromisoformat(end))
+    except ValueError:
+        return None
+
+
+def _target_names(target: str, index: str) -> bool:
+    """Whether a record read from `index` belongs to a configured sweep target: the target's own name or one of its
+    comma-separated index patterns, with no exclusion pattern matching it. An alias cannot be resolved here, so its
+    records are not placed (expansion judges them itself)."""
+    from fnmatch import fnmatchcase
+    parts = [part.strip() for part in str(target).split(",") if part.strip()]
+    if any(part.startswith("-") and fnmatchcase(index, part[1:]) for part in parts):
+        return False
+    return any(not part.startswith("-") and fnmatchcase(index, part) for part in parts)
+
+
 def _retain_smallest[T](mapping: dict[str, T], token: str, value: T, limit: int, *, rank=None) -> bool:
     """Keep the lexicographically first unique tokens in fixed space; return whether one fell outside it."""
     if token in mapping:
@@ -224,6 +254,8 @@ class ExpansionEngine:
         # records in all; variants share those event objects.
         self._plans: OrderedDict[str, _AnchorPlan] = OrderedDict()
         self._plan_events = 0
+        # rule id -> its sweep partition cells (target, start, end, complete), for SWEPT_RULES_HELD rules at most
+        self._swept_cells: OrderedDict[str, list[tuple[str, datetime, datetime, bool]]] = OrderedDict()
 
     def _events(self, ids: list[str]) -> list[TypedEvent]:
         """Stored records, with the boot the hunt's map places them in when they carry none (a sweep record read
@@ -908,35 +940,168 @@ class ExpansionEngine:
         # immediately. Context rules are judged once, after expansion ends, by finalize_context.
         events = self._events(result.event_ids)
         published = []
+        reach = {"anchor_id": candidate["id"], "link_id": result.id, "link_type": result.link_type,
+                 "strength": result.strength}
+
+        def publish(playbook, match, sweep_group=None):
+            # The finding stands on its own cited records and keeps its machine lane. Only its relation to the
+            # anchor may be a hypothesis.
+            mark_hypothesis_relation(match, anchor_id=candidate["id"], link_type=result.link_type,
+                                     link_id=result.id, strength=result.strength)
+            row = publish_match(
+                self.repo, self.hunt_id, playbook, match, result.task_ids[0] if result.task_ids else None, {},
+                source_anchor_id=candidate["id"], source_link_id=result.id, owner_token=self.owner_token,
+                zeek_context=events, zeek_context_ids=result.evidence_ids, context_reach=dict(reach),
+                sweep_group=sweep_group,
+            )
+            if row is not None:
+                published.append(row)
+
+        for playbook in self._direct_pack():
+            matches = playbook.consume(events)
+            if not matches:
+                continue
+            swept = self._swept_ids(playbook, events)
+            if not swept:
+                for match in matches:
+                    publish(playbook, match)
+                continue
+            # The sweep judged some of these records with its whole partition, lineage and fold state: its verdict
+            # stands for them. Records it did not evaluate are judged here as before (unknown lineage stays high);
+            # the evaluated ones only add this reach to the group the sweep published for them, at its lane.
+            for match in self._judge(playbook.id, events, lambda event, swept=swept: event.id not in swept):
+                publish(self._rule(playbook.id), match)
+            for group, match in self._swept_folds(playbook, events, swept):
+                publish(playbook, match, sweep_group=group)
+        published.extend(publish_windows_link_context(self.repo, self.hunt_id, candidate, result, events,
+                                                      owner_token=self.owner_token))
+        self.repo.mark_expansion_link_evaluated(result.id, owner_token=self.owner_token)
+        return published
+
+    def _direct_pack(self) -> list:
         pack = bind_windows_site(fresh_direct_pack(), getattr(getattr(self.fetcher, "executor", None), "site_facts", None))
         # The same verified re-read of cited lineage records the sweep's pack has, so a finding found here can rest
         # on its lineage exactly as one found in the sweep can.
         executor = getattr(self.fetcher, "executor", None)
         if getattr(executor, "client", None) is not None and getattr(executor, "contracts", None):
             bind_lineage_citation_loader(pack, LineageCitationFetcher(executor.client, executor.contracts).load)
-        for playbook in pack:
-            for match in playbook.consume(events):
-                # The finding stands on its own cited records and keeps its machine lane. Only its relation to
-                # the anchor may be a hypothesis.
-                mark_hypothesis_relation(
-                    match, anchor_id=candidate["id"], link_type=result.link_type,
-                    link_id=result.id, strength=result.strength,
-                )
-                row = publish_match(
-                    self.repo, self.hunt_id, playbook, match, result.task_ids[0] if result.task_ids else None, {},
-                    source_anchor_id=candidate["id"], source_link_id=result.id, owner_token=self.owner_token,
-                    zeek_context=events, zeek_context_ids=result.evidence_ids,
-                      context_reach={
-                          "anchor_id": candidate["id"], "link_id": result.id,
-                          "link_type": result.link_type, "strength": result.strength,
-                      },
-                )
-                if row is not None:
-                    published.append(row)
-        published.extend(publish_windows_link_context(self.repo, self.hunt_id, candidate, result, events,
-                                                      owner_token=self.owner_token))
-        self.repo.mark_expansion_link_evaluated(result.id, owner_token=self.owner_token)
-        return published
+        return pack
+
+    def _rule(self, rule_id: str):
+        """A fresh evaluator of one rule, set up as the direct pack sets it up."""
+        return next(playbook for playbook in self._direct_pack() if playbook.id == rule_id)
+
+    def _judge(self, rule_id: str, events: list[TypedEvent], judged) -> list:
+        """A fresh evaluator's matches over only the records `judged` accepts. A rule that reads other records as
+        context (`observe_only`) still reads them; otherwise records of its own families it may not judge are left
+        out."""
+        rule = self._rule(rule_id)
+        if hasattr(rule, "observe_only"):
+            rule.observe_only = frozenset(event.id for event in events if not judged(event))
+            return rule.consume(events)
+        own = set(rule.families) - set(rule.context_families)
+        return rule.consume([event for event in events if event.family not in own or judged(event)])
+
+    def _swept_folds(self, playbook, events: list[TypedEvent], swept: set[str]) -> list[tuple[dict, object]]:
+        """(the sweep's candidate, one match of the records this reach adds to it) for the records the sweep evaluated.
+        A rule that can judge records one at a time (`match_each`) places each in the group the sweep published for
+        it, so records the sweep split across lanes are never merged; a record whose group is not decidable, or that
+        the sweep put in no group, adds nothing."""
+        from dataclasses import replace
+        rule = self._rule(playbook.id)
+        if not hasattr(rule, "match_each"):
+            out = []
+            for match in self._judge(playbook.id, events, lambda event: event.id in swept):
+                group = self._sweep_group(playbook, match)
+                if group is not None:
+                    out.append((group, match))
+            return out
+        placed: dict[str, tuple[dict, list]] = {}
+        for match in rule.match_each(events, swept):
+            group = self._sweep_group(playbook, match)
+            if group is not None:
+                placed.setdefault(group["id"], (group, []))[1].append(match)
+        out = []
+        for group, matches in placed.values():
+            matches.sort(key=lambda match: (match.ts, match.events[0].id))
+            records = list({event.id: event for match in matches for event in match.events
+                            if event.id not in match.context_ids}.values())
+            first, last = matches[0], matches[-1]
+            out.append((group, replace(
+                first, events=records, context_ids=set(),
+                predicate=[p for match in matches for p in match.predicate],
+                raw_copies={key: value for match in matches for key, value in match.raw_copies.items()},
+                aggregate_summary={"count": len(records), "peak": len(records), "episodes": 1,
+                                   "first": first.ts.timestamp(), "last": last.ts.timestamp()})))
+        return out
+
+    def _cells(self, rule_id: str) -> dict[str, list[tuple[datetime, datetime, bool]]]:
+        """The rule's sweep partition cells per target, ordered by start, as (start, end, complete). Split, window and
+        link cells are not partitions a record was read in. Held for SWEPT_RULES_HELD rules (the least recently used
+        is dropped and read again when needed)."""
+        cells = self._swept_cells.get(rule_id)
+        if cells is None:
+            cells = defaultdict(list)
+            for row in self.repo.rule_cells(self.hunt_id, rule_id=rule_id):
+                span = _cell_span(row["partition"]) if row["state"] != "split" else None
+                target = str(row["target"])
+                if span is not None and target != "*" and ":" not in target.split(",")[0]:
+                    cells[target].append((span[0], span[1], row["state"] in SWEPT_COMPLETE))
+            cells = {target: sorted(rows) for target, rows in cells.items()}
+            self._swept_cells[rule_id] = cells
+            while len(self._swept_cells) > SWEPT_RULES_HELD:
+                self._swept_cells.popitem(last=False)
+        else:
+            self._swept_cells.move_to_end(rule_id)
+        return cells
+
+    def _swept_ids(self, playbook, events: list[TypedEvent]) -> set[str]:
+        """The records of this link the sweep evaluated completely for this rule: each of its raw records was read
+        from a sweep target, in a partition whose cell for the rule is complete, and no cell covering it is partial.
+        Bounded by the link's own records."""
+        from bisect import bisect_right
+        own = set(playbook.families) - set(playbook.context_families)
+        candidates = [event for event in events if event.family in own and event.raw]
+        if not candidates:
+            return set()
+        cells = self._cells(playbook.id)
+        out = set()
+        for event in candidates:
+            ts = _utc(event.ts)
+            covering = []
+            for ref in event.raw:
+                found = []
+                for target, rows in cells.items():
+                    if not _target_names(target, ref.target):
+                        continue
+                    # leaf partitions of a target do not overlap: the one starting last at or before ts
+                    at = bisect_right(rows, (ts, datetime.max.replace(tzinfo=UTC), True)) - 1
+                    if at >= 0 and rows[at][0] <= ts < rows[at][1]:
+                        found.append(rows[at][2])
+                covering.append(bool(found) and all(found))
+            if covering and all(covering):
+                out.add(event.id)
+        return out
+
+    def _sweep_group(self, playbook, match) -> dict | None:
+        """The candidate the sweep published for these records: the group the rule names (a folded rule may have
+        put them under another lane's key), preferring one that cites them; None when the sweep published none or
+        which one is not decidable (the sweep's verdict then stands with nothing new)."""
+        from romulus.decide.policy import candidate_group_id, candidate_id
+        keys = [match.group_key] if match.group_key else []
+        alternates = getattr(playbook, "sweep_group_keys", None)
+        if match.group_key and alternates is not None:
+            keys += [key for key in alternates(match) if key not in keys]
+        ids = ([candidate_group_id(playbook.id, key, self.hunt_id) for key in keys] if keys
+               else [candidate_id(match, self.hunt_id)])
+        rows = [row for row in (self.repo.candidate(cid) for cid in dict.fromkeys(ids))
+                if row is not None and row.get("source_case_id") is None and row.get("source_anchor_id") is None
+                and row["lane"] != "context"]
+        subjects = {event.id for event in match.events if event.id not in match.context_ids}
+        citing = [row for row in rows if subjects & set(row.get("event_ids") or ())]
+        if len(citing) == 1 or (not citing and len(rows) == 1):
+            return (citing or rows)[0]
+        return None
 
     def _budget_reason(self, query_count: int) -> str | None:
         if query_count >= self.budget:
