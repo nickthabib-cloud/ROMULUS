@@ -288,11 +288,13 @@ def _fold_reach(repo: Repo, hunt_id: str, match: Match, decision, existing: dict
     """Fold an expansion reach of an already published group (same hunt, rule and group key) into its one candidate.
 
     The candidate keeps its identity, ownership, citations and claim; the reach adds its anchor and link to the
-    candidate's reaches, its matching records to a stated (possibly overlapping) re-read count, and, within
-    FOLD_CITATIONS_ADDED, its first and latest records to the citations. The lane, severity, confidence and priority
-    are the strongest of the parts: a fold never lowers them. With `keep_decision` (records the sweep evaluated) they
-    stay the candidate's own. Revised in place, never retracted. Returns the stored candidate when the fold raised
-    its lane into the expanded lanes (so expansion may anchor on it), else None."""
+    candidate's reaches (listed up to FOLD_REACHES_LISTED in `_context_reaches` and the fold's own list, every reach
+    counted in `reaches_total`), its matching records to a stated (possibly overlapping) re-read count, and, within
+    FOLD_CITATIONS_ADDED, its first and latest records to the citations; a reach that raises the lane always cites
+    its first record. The lane, severity, confidence and priority are the strongest of the parts: a fold never lowers
+    them. With `keep_decision` (records the sweep evaluated) they stay the candidate's own. Revised in place, never
+    retracted. Returns the stored candidate when the fold raised its lane into the expanded lanes (so expansion may
+    anchor on it), else None."""
     if keep_decision:
         decision = replace(decision, lane=existing["lane"], severity=existing["severity"],
                            confidence=existing["confidence"], priority=float(existing["priority"] or 0),
@@ -302,21 +304,23 @@ def _fold_reach(repo: Repo, hunt_id: str, match: Match, decision, existing: dict
     fold.setdefault("base_claim", existing["claim"])
     listed = [dict(item) for item in fold.get("reaches", [])]
     reach = dict(context_reach or {})
-    reach_key = (reach.get("anchor_id"), reach.get("link_id"))
     subject = sorted((event for event in match.events if event.id not in match.context_ids),
                      key=lambda event: (event.ts, event.id)) or sorted(match.events, key=lambda e: (e.ts, e.id))
+    # One link can yield several matches of one group: a reach is its anchor, link and the records it is about.
+    records_digest = hashlib.sha256(json.dumps(sorted(event.id for event in subject)).encode()).hexdigest()[:16]
+    reach_key = (reach.get("anchor_id"), reach.get("link_id"), records_digest)
     span = match.aggregate_summary or {}
     first = span.get("first", subject[0].ts.timestamp() if subject else None)
     last = span.get("last", subject[-1].ts.timestamp() if subject else None)
     records = int(span.get("count") or len(subject))
-    if any((item.get("anchor_id"), item.get("link_id")) == reach_key for item in listed):
+    if any((item.get("anchor_id"), item.get("link_id"), item.get("records_digest")) == reach_key for item in listed):
         return None                         # this reach is already folded (a resumed expansion)
     cited = list(existing.get("event_ids") or [])
     # Records of this reach that the finding does not cite yet; a cited one is certainly a repeat.
     beyond = max(0, records - sum(event.id in cited for event in subject))
     fold["reaches_total"] = int(fold.get("reaches_total") or 0) + 1
     if len(listed) < FOLD_REACHES_LISTED:
-        listed.append({**reach, "records": records, "first": first, "last": last})
+        listed.append({**reach, "records": records, "first": first, "last": last, "records_digest": records_digest})
     fold["reaches"] = listed
     fold["records"] = int(fold.get("records") or 0) + beyond
     if beyond:
@@ -327,9 +331,14 @@ def _fold_reach(repo: Repo, hunt_id: str, match: Match, decision, existing: dict
     room = max(0, FOLD_CITATIONS_ADDED - len(added))
     order = {event.id: event for event in [*subject[:1], *subject[-1:], *subject[1:-1]]}
     new = [event for event_id, event in order.items() if event_id not in cited][:room]
+    lane = _strongest([existing["lane"], decision.lane], _LANE_RANK)
+    raises = lane != existing["lane"]
+    if raises and subject and not any(event.id == subject[0].id for event in new) and subject[0].id not in cited:
+        # A reach that raises the lane is always cited by its first record, past the cap: at most one record per
+        # lane step, so the row stays bounded.
+        new.append(subject[0])
     added += [event.id for event in new]
     fold["added"] = added
-    lane = _strongest([existing["lane"], decision.lane], _LANE_RANK)
     severity = _strongest([existing["severity"], decision.severity], _SEVERITY_RANK)
     confidence = _strongest([existing["confidence"], decision.confidence], _CONFIDENCE_RANK)
     inferred = any(item.get("strength") != "observed" for item in listed)
@@ -344,13 +353,24 @@ def _fold_reach(repo: Repo, hunt_id: str, match: Match, decision, existing: dict
     if inferred:
         claim += (" A reach through an inferred link relates this group to its anchor only as a hypothesis; the "
                   "records themselves are observed.")
-    if lane != existing["lane"]:
+    if raises:
         fold["raised_to"] = lane
+        # the raising reach: its own claim and the record it rests on (cited above, with its predicate fields)
+        fold["raised_by"] = [*fold.get("raised_by", []),
+                             {"lane": lane, "anchor_id": reach.get("anchor_id"), "link_id": reach.get("link_id"),
+                              "event_id": subject[0].id if subject else None, "claim": match.claim[:300]}]
     if fold.get("raised_to"):
-        claim += f" A reach's own evaluation of its records put the group in the {fold['raised_to']} lane."
-    reaches = {(item["anchor_id"], item["link_id"], item["link_type"], item["strength"]): item
-               for item in [*gates.get("_context_reaches", []), *([context_reach] if context_reach else [])]}
-    gates["_context_reaches"] = [reaches[key] for key in sorted(reaches)]
+        claim += (f" A reach's own evaluation of its records put the group in the {fold['raised_to']} lane; the "
+                  f"record it rests on is cited, with that reach's predicate fields.")
+    # The finding's reaches are listed up to FOLD_REACHES_LISTED; `reaches_total` counts every one.
+    known = {(item["anchor_id"], item["link_id"], item["link_type"], item["strength"]): item
+             for item in gates.get("_context_reaches", [])}
+    if context_reach:
+        key = (context_reach["anchor_id"], context_reach["link_id"], context_reach["link_type"],
+               context_reach["strength"])
+        if key not in known and len(known) < FOLD_REACHES_LISTED:
+            known[key] = context_reach
+    gates["_context_reaches"] = [known[key] for key in sorted(known)]
     gates["_expansion_fold"] = fold
     notes = {str(note) for note in gates.get("_notes", [])}
     notes |= {str(note) for note in decision.notes if str(note).startswith(("reached through an inferred ",

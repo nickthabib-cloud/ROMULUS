@@ -987,22 +987,41 @@ class ExpansionEngine:
                 continue
             for match in matches:
                 match.notes.extend(notes.get(match.group_key, []))
-            subjects = [event for event in rule_events if event.id not in context]
-            swept = self._swept_ids(playbook, subjects)
-            if not swept:
+            # The rule ran once over every record of the link, as without the sweep check. A match whose every
+            # subject record the sweep is proven to have judged, and for which the sweep published a group, only adds
+            # this reach to that group at the sweep's lane; every other match is published as before (failing toward
+            # high), including one the sweep could not have made because it never saw its records together.
+            per_record = hasattr(playbook, "match_each")
+            if per_record:
+                subjects = [event for event in rule_events if event.id not in context]
+            else:
+                wanted = {event.id for match in matches for event in match.events if event.id not in match.context_ids}
+                subjects = [event for event in rule_events if event.id in wanted]
+            proven = self._swept_ids(playbook, subjects)
+            if not proven:
                 for match in matches:
                     publish(playbook, match)
                 continue
-            # The sweep judged some of these records with its whole partition, lineage and fold state: its verdict
-            # stands for them. Records it did not evaluate are judged here as before (unknown lineage stays high);
-            # the evaluated ones only add this reach to the group the sweep published for them, at its lane.
+            if not per_record:
+                for match in matches:
+                    subject = {event.id for event in match.events if event.id not in match.context_ids}
+                    group = self._sweep_group(playbook, match) if subject and subject <= proven else None
+                    publish(playbook, match, sweep_group=group)
+                continue
+            # A rule that folds records per typed shape places each proven record in the group the sweep published
+            # for it (records the sweep split across lanes are never merged); the rest are judged here as before.
+            folds, folded = self._swept_folds(playbook, rule_events, proven)
+            if not folded:
+                for match in matches:
+                    publish(playbook, match)
+                continue
+            for group, match in folds:
+                publish(playbook, match, sweep_group=group)
             for match in self._judge(playbook.id, rule_events,
-                                     lambda event, swept=swept, context=context:
-                                     event.id not in swept and event.id not in context):
+                                     lambda event, folded=folded, context=context:
+                                     event.id not in folded and event.id not in context):
                 match.notes.extend(notes.get(match.group_key, []))
                 publish(self._rule(playbook.id), match)
-            for group, match in self._swept_folds(playbook, rule_events, swept):
-                publish(playbook, match, sweep_group=group)
         published.extend(publish_windows_link_context(self.repo, self.hunt_id, candidate, result, events,
                                                       owner_token=self.owner_token))
         self.repo.mark_expansion_link_evaluated(result.id, owner_token=self.owner_token)
@@ -1092,25 +1111,23 @@ class ExpansionEngine:
             self._lineage_cache.popitem(last=False)
         return found
 
-    def _swept_folds(self, playbook, events: list[TypedEvent], swept: set[str]) -> list[tuple[dict, object]]:
-        """(the sweep's candidate, one match of the records this reach adds to it) for the records the sweep evaluated.
-        A rule that can judge records one at a time (`match_each`) places each in the group the sweep published for
-        it, so records the sweep split across lanes are never merged; a record whose group is not decidable, or that
-        the sweep put in no group, adds nothing."""
+    def _swept_folds(self, playbook, events: list[TypedEvent], swept: set[str]):
+        """([(the sweep's candidate, one match of the records this reach adds to it)], the ids of those records) for a
+        rule that judges records one at a time (`match_each`): each proven record goes to the group the sweep
+        published for it, so records the sweep split across lanes are never merged. A record whose group is not
+        decidable, or that the sweep put in no group, is not placed (the caller judges it as before)."""
         from dataclasses import replace
         rule = self._rule(playbook.id)
-        if not hasattr(rule, "match_each"):
-            out = []
-            for match in self._judge(playbook.id, events, lambda event: event.id in swept):
-                group = self._sweep_group(playbook, match)
-                if group is not None:
-                    out.append((group, match))
-            return out
+        citing = self._sweep_citing(playbook.id, swept)
         placed: dict[str, tuple[dict, list]] = {}
+        folded: set[str] = set()
         for match in rule.match_each(events, swept):
-            group = self._sweep_group(playbook, match)
-            if group is not None:
+            subject = [event.id for event in match.events if event.id not in match.context_ids]
+            groups = {citing[event_id]["id"]: citing[event_id] for event_id in subject if event_id in citing}
+            if len(groups) == 1 and len(subject) == sum(event_id in citing for event_id in subject):
+                group = next(iter(groups.values()))
                 placed.setdefault(group["id"], (group, []))[1].append(match)
+                folded.update(subject)
         out = []
         for group, matches in placed.values():
             matches.sort(key=lambda match: (match.ts, match.events[0].id))
@@ -1123,7 +1140,7 @@ class ExpansionEngine:
                 raw_copies={key: value for match in matches for key, value in match.raw_copies.items()},
                 aggregate_summary={"count": len(records), "peak": len(records), "episodes": 1,
                                    "first": first.ts.timestamp(), "last": last.ts.timestamp()})))
-        return out
+        return out, folded
 
     def _cells(self, rule_id: str) -> dict[str, list[tuple[datetime, datetime, bool]]]:
         """The rule's sweep partition cells per target, ordered by start, as (start, end, complete). Split, window and
@@ -1208,24 +1225,46 @@ class ExpansionEngine:
         return known
 
     def _sweep_group(self, playbook, match) -> dict | None:
-        """The candidate the sweep published for these records: the group the rule names (a folded rule may have
-        put them under another lane's key), preferring one that cites them; None when the sweep published none or
-        which one is not decidable (the sweep's verdict then stands with nothing new)."""
+        """The candidate the sweep published under this match's own group (or, without a group key, for its exact
+        records); None when the sweep published none, so the match is published as before."""
         from romulus.decide.policy import candidate_group_id, candidate_id
-        keys = [match.group_key] if match.group_key else []
-        alternates = getattr(playbook, "sweep_group_keys", None)
-        if match.group_key and alternates is not None:
-            keys += [key for key in alternates(match) if key not in keys]
-        ids = ([candidate_group_id(playbook.id, key, self.hunt_id) for key in keys] if keys
-               else [candidate_id(match, self.hunt_id)])
-        rows = [row for row in (self.repo.candidate(cid) for cid in dict.fromkeys(ids))
-                if row is not None and row.get("source_case_id") is None and row.get("source_anchor_id") is None
-                and row["lane"] != "context"]
-        subjects = {event.id for event in match.events if event.id not in match.context_ids}
-        citing = [row for row in rows if subjects & set(row.get("event_ids") or ())]
-        if len(citing) == 1 or (not citing and len(rows) == 1):
-            return (citing or rows)[0]
-        return None
+        cid = (candidate_group_id(playbook.id, match.group_key, self.hunt_id) if match.group_key
+               else candidate_id(match, self.hunt_id))
+        row = self.repo.candidate(cid)
+        if (row is None or row.get("source_case_id") is not None or row.get("source_anchor_id") is not None
+                or row["lane"] == "context"):
+            return None
+        return row
+
+    def _sweep_citing(self, rule_id: str, ids: set[str]) -> dict[str, dict]:
+        """record id -> the one sweep-published candidate of this rule that cites it, for the given records (a record
+        two of them cite is left out: its group is not decidable). A read-only scan of the rule's sweep candidates
+        that keeps only the wanted records."""
+        from sqlalchemy import select
+
+        from romulus.store import schema as tables
+        if not ids:
+            return {}
+        query = select(tables.candidate.c.id, tables.candidate.c.event_ids).where(
+            tables.candidate.c.hunt_id == self.hunt_id, tables.candidate.c.rule_id == rule_id,
+            tables.candidate.c.source_case_id.is_(None), tables.candidate.c.source_anchor_id.is_(None),
+            tables.candidate.c.lane != "context")
+        owners: dict[str, set[str]] = defaultdict(set)
+        with self.repo.engine.connect() as connection:
+            for candidate_id, event_ids in connection.execute(query):
+                for event_id in set(event_ids or ()) & ids:
+                    owners[event_id].add(candidate_id)
+        rows: dict[str, dict] = {}
+        out = {}
+        for event_id, candidates in owners.items():
+            if len(candidates) != 1:
+                continue
+            cid = next(iter(candidates))
+            if cid not in rows:
+                rows[cid] = self.repo.candidate(cid)
+            if rows[cid] is not None:
+                out[event_id] = rows[cid]
+        return out
 
     def _budget_reason(self, query_count: int) -> str | None:
         if query_count >= self.budget:

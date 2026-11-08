@@ -250,7 +250,7 @@ def test_native_scale4_releases_use_global_room_without_poisoning_later_findings
     # The alert keeps its computed HIGH lane with explicit partial citation coverage at this physical cap.
     assert len(snapshot["candidates"]) == 60
     assert fixture.digests(snapshot)["candidates"] == (
-        "50e105ebeb7d722d556658472835270657c448df090baf48e44b3121d554fb55")
+        "334df927971c70c2246617d3abb4da692ac77f4ecbc560baedcf24eb1d0af29e")
     assert any(row["rule_id"] == "host.shell_spawned_by_connected_process" and row["event_ids"]
                for row in snapshot["candidates"])
 
