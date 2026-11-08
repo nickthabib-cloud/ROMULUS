@@ -242,7 +242,10 @@ def test_native_scale4_releases_use_global_room_without_poisoning_later_findings
     from tests import throughput_fixture as fixture
 
     fixture.patched_sizes(monkeypatch)
-    budget = StateBudget(tmp_path, disk_total=4*2**20, reserve=0)
+    # SQLite's page use depends on the order of the stored event ids, which the evidence epoch hashes: at exactly
+    # 4 MiB the epoch-16 layout leaves no room for one correlation finding (the epoch-15 layout did). 4.1 MiB holds
+    # the same 60 findings as epoch 15 at 4 MiB, identical apart from id-derived lineage keys.
+    budget = StateBudget(tmp_path, disk_total=int(4.1*2**20), reserve=0)
     monkeypatch.setattr(sw, "state_budget", lambda settings, stage_dir: budget)
     snapshot = fixture.run_stack(tmp_path, docs=fixture.build(4))
     assert not budget.broken
@@ -250,7 +253,22 @@ def test_native_scale4_releases_use_global_room_without_poisoning_later_findings
     # The alert keeps its computed HIGH lane with explicit partial citation coverage at this physical cap.
     assert len(snapshot["candidates"]) == 60
     assert fixture.digests(snapshot)["candidates"] == (
-        "5fc467a32a42d9e11ecd0954acd754cbc082de9b183fa95b765bcacd1ec99377")
+        "0ca2a5a1c825bf9b3d53d1d1c134e7d54664fb4a0fef927811318161b49f2507")
+    assert any(row["rule_id"] == "host.shell_spawned_by_connected_process" and row["event_ids"]
+               for row in snapshot["candidates"])
+
+
+def test_native_scale4_at_a_page_tight_cap_refuses_instead_of_failing(tmp_path, monkeypatch):
+    """At exactly 4 MiB a citation reclaim's delete needs a page the cap no longer allows: the stage rolls the
+    delete back and reports nothing reclaimed, and the hunt finishes (it never fails on that SQLITE_FULL)."""
+    from tests import throughput_fixture as fixture
+
+    fixture.patched_sizes(monkeypatch)
+    budget = StateBudget(tmp_path, disk_total=4*2**20, reserve=0)
+    monkeypatch.setattr(sw, "state_budget", lambda settings, stage_dir: budget)
+    snapshot = fixture.run_stack(tmp_path, docs=fixture.build(4))
+    assert not budget.broken
+    assert len(snapshot["candidates"]) >= 59
     assert any(row["rule_id"] == "host.shell_spawned_by_connected_process" and row["event_ids"]
                for row in snapshot["candidates"])
 
