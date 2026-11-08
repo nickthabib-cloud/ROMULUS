@@ -337,8 +337,10 @@ from tests import throughput_fixture as tf
 # intents, the dataset_filter in stats, audit and manifest, and the new linux_shapes / linux_shipper_inventory /
 # linux_shapes_not_assessed stats change. With the evidence version set back to 15 every other digest is the
 # earlier one, and the non-baseline semantic projection (every decision, claim, lane, gate) is unchanged.
+# Auditbeat documents without a dataset are a shape of their own: this target cannot select them (no
+# event.module), so linux_shapes_not_assessed names it too, moving only stats and the sweep summary audit row.
 GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe554935eb6f87cf',
- 'audit': '6bf00558fa983e6bee6c38f7d2eb4024da4e005dcce884330712132f9873bb3b',
+ 'audit': '792143b259dc5838fcaceb60e2ebc45e831d2f24bb55ed83d630cd96f9feec74',
  'baseline_counts': 'be05fabb25336f21341b46eae7d8c2627828f7a7a7e8fdb24f4eb58576099354',
  'baseline_hunt_exclusions': 'c91eefda01c512d6d63e892dc9696016b01a71d44e4abcc429d954bd51864852',
  'baseline_observations': '5939ca35f697e388d31048bc67c6f2d2fcaa7ae5f01665b3c8c9f8814bf05695',
@@ -358,7 +360,7 @@ GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe55
  'manifest': '499470939cecf3ad01aab2cd54266f78086f6ba98f05979d6be973be667e126f',
  'raw': '3d95193e192f300d2424e9109a5f5267608533e822d4dd5fb479f52a1a6486a6',
  'rule_cells': 'f8be237dc3563efb74e070012a615a8effe789b5a10a4cd2aaec4b148fd71dd2',
- 'stats': 'd051e6ca8848248f7c3a32e8df00b13a04c39a30eab8b62a41a1cdef90110fac',
+ 'stats': '03817e5592ef62f8aecddbb9cae63bf65e5496d5f148fd5d518389275a4ae608',
  'tasks': '820ed1e788f6476853cd0b4a04444927a1771296cc4e1212accf11e27c20f742'}
 # Captured directly from the S7 fixture through _non_baseline_semantic_digests. Typed-event-derived hashes and
 # interchangeable predicate origins are normalized, while every decision, claim, lane, raw citation and gate is

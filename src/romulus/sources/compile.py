@@ -67,7 +67,8 @@ _LINUX_HOST_DATASETS = frozenset({*LINUX_LOGICAL_DATASETS, *shipper_names()})
 def _linux_datasets(p: Predicate, contract: FieldContract, natives: tuple[str, ...]) -> dict | None:
     """A dataset predicate naming logical Linux datasets: any shipper shape of each, on every dataset field the
     target maps (event.dataset and data_stream.dataset). Auditbeat's bare `auditd` also needs its event.module, and
-    a journald document that names no dataset is selected by input.type; a shape whose field the target cannot
+    a document that names no dataset is selected by its input.type (journald) or event.module (Auditbeat); a shape
+    whose field the target cannot
     search is left out (the sweep lists it as not assessed). None when the predicate names no logical dataset."""
     if p.field != "event.dataset" or p.op not in {"eq", "in"}:
         return None
@@ -77,7 +78,7 @@ def _linux_datasets(p: Predicate, contract: FieldContract, natives: tuple[str, .
     direct = contract.fields.get("data_stream.dataset")
     fields = [*natives, *(["data_stream.dataset"] if direct is not None and "in" in direct.ops
                           and "data_stream.dataset" not in natives else [])]
-    plain, with_module, input_types, _unsearchable = dataset_selection(
+    plain, with_module, undated, _unsearchable = dataset_selection(
         values, module_searchable=contract.supports("event.module", "eq"),
         input_type_searchable=contract.supports("input.type", "eq"))
     if len(plain) > 1000:
@@ -88,9 +89,9 @@ def _linux_datasets(p: Predicate, contract: FieldContract, natives: tuple[str, .
         clauses.append({"bool": {"filter": [
             {"bool": {"should": [{"term": {field: dataset}} for field in fields], "minimum_should_match": 1}},
             {"term": {module.native if module is not None else "event.module": name}}]}})
-    input_type = contract.spec("input.type")
-    for kind in input_types:
-        clauses.append({"bool": {"filter": [{"term": {input_type.native if input_type is not None else "input.type": kind}}],
+    for name, value in undated:
+        spec = contract.spec(name)
+        clauses.append({"bool": {"filter": [{"term": {spec.native if spec is not None else name: value}}],
                                  "must_not": [{"exists": {"field": field}} for field in fields]}})
     return clauses[0] if len(clauses) == 1 else {"bool": {"should": clauses, "minimum_should_match": 1}}
 

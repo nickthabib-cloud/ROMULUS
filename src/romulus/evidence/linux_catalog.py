@@ -54,8 +54,15 @@ class ShipperShape:
     def key(self) -> str:
         """The shape's name in counts and reasons: its dataset, qualified when the dataset alone does not decide."""
         if self.dataset is None:
-            return f"input.type:{self.input_type}"
+            return f"input.type:{self.input_type}" if self.input_type else f"event.module:{self.module}"
         return f"{self.dataset}+event.module:{self.module}" if self.module else self.dataset
+
+    @property
+    def undated(self) -> tuple[str, str] | None:
+        """(field, value) that selects this shape's documents, which name no dataset; None for a named dataset."""
+        if self.dataset is not None:
+            return None
+        return ("input.type", self.input_type) if self.input_type else ("event.module", str(self.module))
 
 
 LINUX_SHIPPER_DATASETS: dict[str, tuple[ShipperShape, ...]] = {
@@ -64,6 +71,8 @@ LINUX_SHIPPER_DATASETS: dict[str, tuple[ShipperShape, ...]] = {
         ShipperShape("auditd.log", AUDIT_RECORD, "Filebeat auditd module or Elastic Agent Auditd Logs"),
         ShipperShape("auditd", AUDIT_EVENT, "Auditbeat auditd module", module="auditd"),
         ShipperShape("auditd_manager.auditd", AUDIT_EVENT, "Elastic Agent Auditd Manager"),
+        # Auditbeat's own documents carry event.module and no event.dataset
+        ShipperShape(None, AUDIT_EVENT, "Auditbeat auditd module (no dataset)", module="auditd"),
     ),
     "systemd.journal": (
         ShipperShape("systemd.journal", JOURNAL_JSON, "dev importer (journal JSON)"),
@@ -123,7 +132,8 @@ def match_shape(source: dict) -> tuple[str, ShipperShape] | None:
     for logical, shapes in LINUX_SHIPPER_DATASETS.items():
         for shape in shapes:
             if shape.dataset is None:
-                if not dataset and input_type == shape.input_type:
+                field, value = shape.undated
+                if not dataset and (input_type if field == "input.type" else module) == value:
                     return logical, shape
             elif dataset == shape.dataset and (shape.module is None or module == shape.module):
                 return logical, shape
@@ -173,13 +183,13 @@ def exec_capable_dataset(name) -> bool:
 
 
 def dataset_selection(values, *, module_searchable: bool, input_type_searchable: bool
-                      ) -> tuple[list[str], list[tuple[str, str]], list[str], list[str]]:
+                      ) -> tuple[list[str], list[tuple[str, str]], list[tuple[str, str]], list[str]]:
     """How a dataset predicate over `values` is searched: (plain dataset names, (dataset name, event.module) pairs,
-    input types of documents that name no dataset, shape keys that cannot be searched on this target). A logical
-    Linux id expands to all its shapes; any other value is kept as it is."""
+    (field, value) pairs selecting documents that name no dataset, shape keys that cannot be searched on this
+    target). A logical Linux id expands to all its shapes; any other value is kept as it is."""
     plain: list[str] = []
     with_module: list[tuple[str, str]] = []
-    input_types: list[str] = []
+    input_types: list[tuple[str, str]] = []
     unsearchable: list[str] = []
     for value in values:
         shapes = LINUX_SHIPPER_DATASETS.get(value)
@@ -189,7 +199,9 @@ def dataset_selection(values, *, module_searchable: bool, input_type_searchable:
             continue
         for shape in shapes:
             if shape.dataset is None:
-                target, searchable, item = input_types, input_type_searchable, shape.input_type
+                item = shape.undated
+                searchable = input_type_searchable if item[0] == "input.type" else module_searchable
+                target = input_types
             elif shape.module is not None:
                 target, searchable, item = with_module, module_searchable, (shape.dataset, shape.module)
             else:

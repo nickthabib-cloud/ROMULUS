@@ -494,21 +494,23 @@ class Sweep:
             if contract.os_family == "windows":
                 return []
             datasets = LINUX_HOST_DATASETS
-            plain, with_module, _inputs, unsearchable = dataset_selection(
+            plain, with_module, undated, unsearchable = dataset_selection(
                 datasets, module_searchable=contract.supports("event.module", "eq"),
                 input_type_searchable=contract.supports("input.type", "eq"))
             # recorded so the report can list the target's other datasets as not assessed: every shipper dataset
             # name the query selects on this target (it expands each logical dataset to its shapes when compiled)
             self.stats.setdefault("dataset_filter", {})[target] = [
                 *plain, *(name for name, _module in with_module if name not in plain)]
-            self._note_linux_shapes(target, datasets, unsearchable)
+            self._note_linux_shapes(target, datasets, unsearchable, contract, undated)
             return [Predicate(field="event.dataset", op="in", value=list(datasets))]
         return []
 
-    def _note_linux_shapes(self, target: str, datasets, unsearchable: list[str]) -> None:
+    def _note_linux_shapes(self, target: str, datasets, unsearchable: list[str], contract: FieldContract | None = None,
+                           undated=()) -> None:
         """Record, once per target, which shipper shapes of the Linux datasets the target's inventory holds (with
         their counts) and which shapes it cannot search (a field the shape needs is not searchable): those are not
-        assessed, never read as having no records."""
+        assessed, never read as having no records. Documents that name no dataset (journald, Auditbeat) are not in
+        the dataset inventory: each such searchable shape is counted over the hunt window."""
         if target in self.stats.get("linux_shipper_inventory", {}):
             return
         if getattr(self, "_profiles", None) is None and hasattr(getattr(self, "repo", None), "source_profiles"):
@@ -519,11 +521,35 @@ class Sweep:
             for shape in LINUX_SHIPPER_DATASETS.get(logical, ()):
                 if shape.dataset is not None and shape.dataset in inventory:
                     present.setdefault(logical, {})[shape.dataset] = inventory[shape.dataset]
+        for logical in datasets:
+            for shape in LINUX_SHIPPER_DATASETS.get(logical, ()):
+                if shape.undated is not None and shape.undated in undated:
+                    count = self._undated_shape_count(target, contract, shape.undated)
+                    present.setdefault(logical, {})[shape.key] = count if count is not None else "not counted"
         self.stats.setdefault("linux_shipper_inventory", {})[target] = present
         if unsearchable:
             self.stats.setdefault("linux_shapes_not_assessed", {})[target] = [
                 f"{key}: not searchable on this target (the field this shape is selected by is not mapped)"
                 for key in unsearchable]
+
+    def _undated_shape_count(self, target: str, contract: FieldContract | None, selector: tuple[str, str]) -> int | None:
+        """How many window documents name no dataset and carry `selector` (field, value); None when it cannot be
+        counted exactly (the field is not aggregatable, or the source did not answer in full)."""
+        field, value = selector
+        spec = contract.spec(field) if contract is not None else None
+        if (spec is None or not spec.aggregatable or not contract.supports("event.dataset", "missing")
+                or getattr(self, "client", None) is None):
+            return None
+        try:
+            outcome = execute(self.client, SearchIntent(
+                kind="aggregate", target=target, window=self.window,
+                filters=[Predicate(field="event.dataset", op="missing"), Predicate(field=field, op="eq", value=value)],
+                group_by=[field], purpose="linux dataset-less shape inventory"), contract)
+        except Exception:  # noqa: BLE001 - an inventory count never fails the sweep; it is reported as not counted
+            return None
+        if outcome.completeness != Completeness.complete:
+            return None
+        return sum(int(bucket.get("count") or 0) for bucket in outcome.buckets)
 
     def _any_of_for(self, target: str, contract: FieldContract | None = None) -> list[list[Predicate]]:
         """Select only normalized source shapes while preserving each target's other known datasets."""

@@ -52,7 +52,7 @@ PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf211
                    # journald fields, syslog lines) through linux_catalog's shape table; records rebuilt from a
                    # shipper's parsed fields name their indexed paths and say so. The dev importer's records
                    # normalize exactly as before (tests/test_throughput_equality.py's normalization goldens).
-                   16: "d23e8ae207bcddab2ce95303b88bd575d49387252873ab393de8ec742b9cc8a8"}
+                   16: "6e3812d30f1bb0011172854e2d47d2113cba533a17e857bdf65ee92af39b8935"}
 WINDOWS_EVIDENCE_FILES = ("community.py", "windows.py", "windows_catalog.py", "windows_reassembly.py", "rpc_catalog.py")
 PINNED_WINDOWS = {
     "windows-ecs@17": "c022428db9afea396a8420febde66b10e3d934b2f1472732f22a9e29c60247d6",

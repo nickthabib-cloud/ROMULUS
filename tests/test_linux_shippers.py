@@ -31,8 +31,9 @@ from romulus.sources.models import Predicate, SearchIntent, Window
 from romulus.sources.profile import contract_from_types
 from tests import linux_shipper_fixtures as fx
 
-# what may differ between shapes of one activity: provenance, and the flag and caveats saying a shipper parsed it
-SHAPE_ONLY_FIELDS = {"audit.reconstructed"}
+# what may differ between shapes of one activity: provenance, the flag and caveats saying a shipper parsed it, and
+# the record's own host name a shipper indexed beside host.name
+SHAPE_ONLY_FIELDS = {"audit.reconstructed", "host.hostname", "host.node"}
 
 
 def _events(hits):
@@ -69,7 +70,14 @@ def _audit_shapes(lines, auditbeat_doc):
         "auditbeat raw array": [fx.auditbeat_raw(lines)],
         "auditd manager raw string": [fx.auditbeat_raw(lines, native_id="am-raw", joined=True)],
         "auditbeat fields only": [auditbeat_doc()],
+        "auditbeat fields only, no dataset": [_undated(auditbeat_doc())],
     }
+
+
+def _undated(doc):
+    del doc["_source"]["event"]["dataset"]
+    doc["_id"] += "-undated"
+    return doc
 
 
 @pytest.mark.parametrize("activity", sorted(AUDIT_ACTIVITIES))
@@ -81,7 +89,7 @@ def test_each_audit_shape_gives_the_dev_shape_typed_events(activity):
     for shape, hits in _audit_shapes(lines, auditbeat_doc).items():
         got, _ = _events(hits)
         assert _views(got) == _views(dev), (activity, shape)
-        rebuilt = shape in ("agent fields only", "auditbeat fields only")
+        rebuilt = shape.startswith(("agent fields only", "auditbeat fields only"))
         for event in got:
             assert event.has("audit.reconstructed") is rebuilt, (activity, shape, event.family)
             assert (RECONSTRUCTED_CAVEAT in event.caveats) is rebuilt
@@ -100,6 +108,39 @@ def test_hex_argument_left_hex_by_the_pipeline_is_decoded_and_says_so():
     assert any(c.startswith("Decoded from hex") and "EXECVE.a3" in c for c in exec_event.caveats)
     assert exec_event.fields["audit.time"].origin == "agent-1:@timestamp"
     assert exec_event.fields["process.pid"].origin == "agent-0:process.pid"
+
+
+@pytest.mark.parametrize("arg", ["0000", "4000", "1234", "20", "0755", "00", "deadbeef", "2020", "4142"])
+def test_numeric_and_hex_looking_arguments_stay_literal(arg):
+    hits = fx.agent_audit(fx.exec_lines(argv=["find", "/", "-perm", arg]))
+    exec_event = next(e for e in _events(hits)[0] if e.family == "process_exec")
+    assert exec_event.get("process.argv") == ["find", "/", "-perm", arg]
+    assert not any(c.startswith("Decoded from hex") for c in exec_event.caveats)
+
+
+def test_a_hex_encoded_argument_with_a_space_decodes_and_says_so():
+    hits = fx.agent_audit(fx.exec_lines(argv=["sh", "-c", "echo hi"], exe="/bin/sh"))
+    assert hits[1]["_source"]["process"]["args"][2] == fx.hexs("echo hi")
+    exec_event = next(e for e in _events(hits)[0] if e.family == "process_exec")
+    assert exec_event.get("process.argv") == ["sh", "-c", "echo hi"]
+    assert any(c.startswith("Decoded from hex") and "EXECVE.a2" in c for c in exec_event.caveats)
+
+
+def test_uid_zero_account_creation_keeps_its_lane_in_the_agent_shape(tmp_path):
+    lines = fx.exec_lines(argv=["useradd", "-o", "-u", "0000", "backdoor"], exe="/usr/sbin/useradd", uid="0")
+    dev, _ = _events(fx.dev_audit(lines))
+    agent, _ = _events(fx.agent_audit(lines))
+    want = _run("host.account_or_group_change", dev, tmp_path / "dev")
+    assert want
+    assert _run("host.account_or_group_change", agent, tmp_path / "agent") == want
+
+
+def test_more_elements_than_argc_keep_only_arguments_before_a_possible_chunk():
+    hits = fx.agent_audit(fx.exec_lines())
+    hits[1]["_source"]["process"]["args"] = ["curl", "-o", "/tmp/x", "6162636465", "6667", "tail"]
+    exec_event = next(e for e in normalize_hits(hits)[0] if e.family == "process_exec")
+    assert exec_event.get("process.argv") == ["curl", "-o", "/tmp/x"]
+    assert exec_event.get("process.argv_complete") is False
 
 
 def test_agent_truncated_argument_marker_makes_the_command_line_incomplete():
@@ -341,6 +382,55 @@ def test_syscall_without_a_known_arch_is_unsupported_not_a_negative():
         record_from_agent_fields(hits[0]["_source"])
 
 
+def test_auditbeat_user_space_records_take_no_uid_from_the_audit_user():
+    from romulus.evidence.normalize import auditbeat_records
+    # go-libaudit: user.* is the audit uid (1000), user.effective.* the account tool's uid (0)
+    useradd = fx.auditbeat_useradd()
+    assert useradd["_source"]["user"]["id"] == "1000"
+    event = next(e for e in _events([useradd])[0] if e.family == "account_change")
+    assert (event.get("process.uid"), event.get("process.user")) == ("0", "root")
+    # a login's user.effective is the account: the record's uid is not recorded, never taken from user.*
+    login = fx.auditbeat_login()
+    login["_source"]["user"]["id"] = "1000"
+    main = auditbeat_records(login)[0][1]
+    assert "uid" not in main.fields and "UID" not in main.enriched and "EUID" not in main.enriched
+    assert main.fields["auid"] == "1000"
+
+
+def test_auditbeat_documents_without_a_dataset_are_selected_and_counted(monkeypatch):
+    from romulus.sources.models import Completeness, SearchOutcome
+    contract = _contract(**{"event.module": "keyword", "input.type": "keyword"})
+    clause = _clause(contract, "linux.audit")
+    undated = [c for c in clause["bool"]["should"] if "must_not" in c.get("bool", {})]
+    assert undated == [{"bool": {"filter": [{"term": {"event.module": "auditd"}}],
+                                 "must_not": [{"exists": {"field": "event.dataset"}},
+                                              {"exists": {"field": "data_stream.dataset"}}]}}]
+    seen = []
+
+    def fake_execute(_client, intent, _contract):
+        seen.append(intent)
+        return SearchOutcome(target=intent.target, fingerprint="f", started_at=WINDOW.start, ended_at=WINDOW.start,
+                             completeness=Completeness.complete, buckets=[{"key": {}, "count": 7}])
+
+    monkeypatch.setattr(sw, "execute", fake_execute)
+
+    class Fake:
+        _note_linux_shapes = sw.Sweep._note_linux_shapes
+        _undated_shape_count = sw.Sweep._undated_shape_count
+
+        def __init__(self):
+            self.stats: dict = {}
+            self._profiles = {"linux-x": {"datasets": {}}}
+            self.client, self.window = object(), WINDOW
+
+    fake = Fake()
+    sw.Sweep._filters_for(fake, "linux-x", contract)
+    inventory = fake.stats["linux_shipper_inventory"]["linux-x"]
+    assert inventory["linux.audit"]["event.module:auditd"] == 7
+    assert inventory["systemd.journal"]["input.type:journald"] == 7
+    assert {p.field for intent in seen for p in intent.filters} == {"event.dataset", "event.module", "input.type"}
+
+
 def test_auditbeat_actions_outside_the_table():
     # a call no family models, by a process the record names: the process is observed
     brk = fx.auditbeat_connect(native_id="ab-brk")
@@ -369,13 +459,43 @@ def test_a_cited_observation_rebuilds_from_its_one_record(shape):
     assert again.model_dump() == batch.model_dump()
 
 
-def test_node_names_the_audit_host():
-    line = "node=db7 " + fx.connect_lines()[0]
-    groups, errors = group_audit(fx.dev_audit([line], host="collector"))
-    assert not errors and [key[0] for key in groups] == ["db7"]
-    agent = fx.agent_audit([line], host="collector")
-    groups, _ = group_audit(agent)
-    assert [key[0] for key in groups] == ["db7"]
+@pytest.mark.parametrize("shape", ["dev", "agent"])
+def test_the_indexed_host_name_is_the_host_and_the_node_is_typed(shape):
+    lines = ["node=WEB01 " + line for line in fx.connect_lines()]
+    hits = (fx.dev_audit if shape == "dev" else fx.agent_audit)(lines, host="web01")
+    groups, errors = group_audit(hits)
+    assert not errors and [key[0] for key in groups] == ["web01"]
+    event = next(e for e in _events(hits)[0] if e.family == "net_socket")
+    assert (event.host, event.get("host.node")) == ("web01", "WEB01")
+    assert "auditd.log.node" in event.fields["host.node"].origin or "#auditd:node" in event.fields["host.node"].origin
+    # a forwarded document that names no host.name: the record's node is the host, and the event says so
+    for hit in hits:
+        del hit["_source"]["host"]["name"]
+    event = next(e for e in _events(hits)[0] if e.family == "net_socket")
+    assert event.host == "WEB01" and any(c.startswith("Host from the record's own host name") for c in event.caveats)
+
+
+def test_syslog_host_is_the_indexed_host_name_with_the_line_host_typed():
+    line = fx.syslog("sshd", 2200, fx.sshd_journal()["MESSAGE"])
+    line["_source"]["host"] = {"name": "web01", "hostname": "WEB01-LINE"}
+    event = _events([line])[0][0]
+    assert (event.host, event.get("host.hostname")) == ("web01", "WEB01-LINE")
+    del line["_source"]["host"]["name"]
+    assert _events([line])[0][0].host == "WEB01-LINE"
+
+
+def test_journal_identity_needs_journald_s_own_name():
+    # the System integration's journald stream puts the writer's chosen name in process.name: without journald's
+    # captured _COMM the writer is identified by the header only
+    plain = fx.syslog("sshd", 2200, fx.sshd_journal()["MESSAGE"], from_journal=True)
+    assert SYSLOG_WRITER_CAVEAT in _events([plain])[0][0].caveats
+    captured = fx.syslog("sshd", 2200, fx.sshd_journal()["MESSAGE"], from_journal=True)
+    captured["_source"]["journald"] = {"process": {"name": "sshd"}}
+    assert SYSLOG_WRITER_CAVEAT not in _events([captured])[0][0].caveats
+    forged = fx.syslog("sshd", 2200, fx.sshd_journal()["MESSAGE"], from_journal=True)
+    forged["_source"]["journald"] = {"process": {"name": "python3"}}
+    events, skips = _events([forged])
+    assert not events and skips == {"sshd-identified journal line written by another program": 1}
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -420,7 +540,8 @@ def test_syslog_lines_with_their_message_give_the_journal_events(activity, from_
     assert _views(got) == _views(dev)
     caveats = got[0].caveats
     assert (SYSLOG_TIME_CAVEAT in caveats) is (not from_journal)
-    assert (SYSLOG_WRITER_CAVEAT in caveats) is (not from_journal)
+    # no journald-captured _COMM is indexed here: the writer is the header's (or appname's) word either way
+    assert SYSLOG_WRITER_CAVEAT in caveats
 
 
 def test_systemd_unit_start_from_a_syslog_line():
@@ -593,7 +714,7 @@ def test_shapes_needing_an_unmapped_field_are_left_out_and_listed():
     assert fake.stats["linux_shipper_inventory"]["linux-x"] == {"linux.audit": {"auditd.log": 9},
                                                                 "systemd.journal": {"journald.logs": 3}}
     assert {item.split(":")[0] for item in fake.stats["linux_shapes_not_assessed"]["linux-x"]} == {
-        "auditd+event.module", "input.type"}
+        "auditd+event.module", "input.type", "event.module"}
 
 
 def test_an_auditd_log_only_inventory_delivers_the_audit_families():
@@ -609,6 +730,8 @@ def test_shape_dispatch():
     assert match_shape({"event": {"dataset": "auditd", "module": "auditd"}})[0] == "linux.audit"
     assert match_shape({"event": {"dataset": "auditd", "module": "other"}}) is None
     assert match_shape({"input": {"type": "journald"}})[0] == "systemd.journal"
+    assert match_shape({"event": {"module": "auditd"}})[0] == "linux.audit"
+    assert match_shape({"event": {"module": "system"}}) is None
     assert match_shape({"data_stream": {"dataset": "system.auth"}})[0] == "linux.syslog"
 
 

@@ -391,6 +391,11 @@ AGENT_COPY_TYPES = frozenset({
     "DEL_USER", "GRP_AUTH", "GRP_CHAUTHTOK", "GRP_MGMT", "LOGIN", "USER_ACCT", "USER_AUTH", "USER_CHAUTHTOK",
     "USER_END", "USER_ERR", "USER_LOGIN", "USER_LOGOUT", "USER_MGMT", "USER_START",
 })
+# The copy types whose user.effective comes from uid alone (with the UID enrichment's name): there it is the uid.
+COPY_UID_EFFECTIVE_TYPES = frozenset({
+    "ACCT_LOCK", "ACCT_UNLOCK", "ADD_GROUP", "ADD_USER", "DEL_GROUP", "DEL_USER", "GRP_AUTH", "GRP_CHAUTHTOK",
+    "GRP_MGMT", "USER_CHAUTHTOK", "USER_MGMT",
+})
 # Where the copy put acct, per type: (ECS prefix, keys copied in preference to acct, enrichment key copied over it,
 # whether the AUID enrichment name is copied to user.name, so that acct's rename to user.name failed).
 _AGENT_ACCT_COPIES = {
@@ -454,8 +459,17 @@ def _hex_left(value: str, *, any_reason: bool) -> str | None:
     controls = any(ord(char) < 0x21 or char == '"' or ord(char) == 0x7f for char in text)
     high = any(ord(char) > 0x7e for char in text)
     if any_reason:
-        return text if controls or high else None
+        return text if (controls or high) and _plain_text(text) else None
     return text if high and not controls else None
+
+
+def _plain_text(text: str) -> bool:
+    """Whether decoded text reads as an argument a person or program wrote: printable apart from space, tab and
+    newline, with at least one printable character that is not white space, and no NUL or other control character.
+    Hex digits that decode to anything else ('0000', '4000', '1234', '0755', '20', 'deadbeef') are kept literal: they
+    are far more often numbers than hex-encoded text."""
+    return (any(not char.isspace() for char in text)
+            and all(char.isprintable() or char in " \t\n" for char in text))
 
 
 def syscall_number(name: str, arch: str) -> str | None:
@@ -611,6 +625,15 @@ def _agent_execve(source: dict, raw: dict, fields: dict, origins: dict, guessed:
     elif count is not None and count.isascii() and count.isdigit():
         raw["argc"] = (count, True)
         fields["argc"], origins["argc"] = count, "process.args_count"
+        if len(args) > int(count):
+            # More elements than arguments: a split argument's chunks each became an element, so every position
+            # from the first element that can be a chunk (chunks are always hex) on is unknown. Only the
+            # arguments before it are kept; the command line stays incomplete.
+            cut = next((index for index, arg in enumerate(args)
+                        if arg and len(arg) % 2 == 0 and _HEX.match(arg)), int(count))
+            args = args[:min(cut, int(count))]
+            problem = (f"the shipper recorded more elements than argc={count} (split argument chunks): only the "
+                       f"{len(args)} arguments before the first possible chunk are kept")
     for offset, arg in enumerate(args):
         key = f"a{first + offset}"
         decoded = _hex_left(arg, any_reason=True)

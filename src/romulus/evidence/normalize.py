@@ -16,7 +16,9 @@ from itertools import pairwise
 from romulus.evidence import rpc_catalog, surrogates
 from romulus.evidence.auditd import (
     AGENT_ARCH_TOKENS,
+    AGENT_COPY_TYPES,
     AT_FDCWD,
+    COPY_UID_EFFECTIVE_TYPES,
     O_ACCMODE,
     O_CREAT,
     O_RDWR,
@@ -640,10 +642,57 @@ def group_audit(hits: list[dict], parse: Callable[[dict, str], AuditRecord] | No
 
 
 def audit_host(source: dict, record: AuditRecord) -> str:
-    """The host an audit record names: the header's node= name, else the shipper's parsed node, else the shipper's
-    host name (the empty string when none is recorded)."""
+    """The host an audit record is indexed under: the shipper's host.name, which host pivots, the exec-holder lookup
+    and the journald pairing search by. Only a document without one (forwarded or aggregated) falls back to the
+    record's own node= name (the empty string when neither is recorded)."""
+    indexed = _get(source, "host.name")
+    if isinstance(indexed, str) and indexed:
+        return indexed
+    node = audit_node(source, record)
+    return node or ""
+
+
+def audit_node(source: dict, record: AuditRecord) -> str | None:
+    """The node= name an audit record states (its header's, else the one the shipper parsed), else None."""
     node = record.node or _get(source, "auditd.log.node")
-    return node if isinstance(node, str) and node else (_get(source, "host.name") or "")
+    return node if isinstance(node, str) and node else None
+
+
+HOST_FALLBACK_CAVEAT = ("Host from the record's own host name: the document names no host.name, so host searches "
+                        "by host.name do not find it")
+
+
+def _audit_node_fields(event: TypedEvent, members: list[tuple[dict, AuditRecord]]) -> None:
+    """Name the node= host an event's records state (host.node), and say when it stands in for a missing host.name."""
+    cited = {ref.native_id for ref in event.raw}
+    for hit, record in members:
+        if hit["_id"] not in cited:
+            continue
+        node = audit_node(hit["_source"], record)
+        if node:
+            origin = (f"{hit['_id']}:auditd.log.node" if record.node is None
+                      else f"{hit['_id']}:event.original#auditd:node")
+            event.fields["host.node"] = fv(node, origin)
+            indexed = _get(hit["_source"], "host.name")
+            if not (isinstance(indexed, str) and indexed) and HOST_FALLBACK_CAVEAT not in event.caveats:
+                event.caveats.append(HOST_FALLBACK_CAVEAT)
+            return
+
+
+def _indexed_host(event: TypedEvent, hit: dict) -> TypedEvent:
+    """A journald or syslog event's host: the shipper's host.name, with the record's own host name (host.hostname)
+    as a typed field; that name is the host only when the document names no host.name."""
+    src = hit["_source"]
+    native, indexed = _get(src, "host.hostname"), _get(src, "host.name")
+    if isinstance(native, str) and native:
+        event.fields["host.hostname"] = fv(native, f"{hit['_id']}:host.hostname")
+    if isinstance(indexed, str) and indexed:
+        event.host = indexed
+    elif isinstance(native, str) and native:
+        event.host = native
+        if HOST_FALLBACK_CAVEAT not in event.caveats:
+            event.caveats.append(HOST_FALLBACK_CAVEAT)
+    return event
 
 
 def audit_record_of(hit: dict, parse: Callable[[dict, str], AuditRecord] | None = None) -> AuditRecord | None:
@@ -1584,7 +1633,8 @@ def _indexed_origin(nid: str, paths: dict[str, str]) -> Callable[[str], str]:
 def normalize_journal_fields(hit: dict, boots_seen: list | None = None) -> TypedEvent:
     """One journald record a shipper indexed as fields (Filebeat's journald input, Agent's Custom Journald)."""
     j, paths = journal_from_fields(hit["_source"])
-    return _journal_event(hit, j, _indexed_origin(hit["_id"], paths), boots_seen, copy_reason=JOURNAL_COPY_UNKEYED)
+    return _indexed_host(_journal_event(hit, j, _indexed_origin(hit["_id"], paths), boots_seen,
+                                        copy_reason=JOURNAL_COPY_UNKEYED), hit)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1617,8 +1667,11 @@ def normalize_syslog(hit: dict) -> TypedEvent:
     if isinstance(message, str) and message:
         j = {"SYSLOG_IDENTIFIER": ident, "MESSAGE": message}
         paths = {"SYSLOG_IDENTIFIER": "process.name", "MESSAGE": "message"}
-        if from_journal and ident:
-            j["_COMM"], paths["_COMM"] = ident, "process.name"
+        # the System integration's journald stream renames journald's _COMM, or the writer's own name, to
+        # process.name: the writer is identified only when journald's captured name is still indexed
+        comm = _get(src, "journald.process.name")
+        if from_journal and isinstance(comm, str) and comm:
+            j["_COMM"], paths["_COMM"] = comm, "journald.process.name"
         else:
             caveats.append(SYSLOG_WRITER_CAVEAT)
         if hostname:
@@ -1633,7 +1686,7 @@ def normalize_syslog(hit: dict) -> TypedEvent:
     else:
         event = _shipper_syslog(hit, ident, hostname)
     event.caveats.extend(caveat for caveat in caveats if caveat not in event.caveats)
-    return event
+    return _indexed_host(event, hit)
 
 
 def _syslog_account(hit: dict, ident: str, message: str, host, origin: str) -> TypedEvent:
@@ -1811,10 +1864,15 @@ def auditbeat_records(hit: dict) -> list[tuple[dict, AuditRecord]]:
             pairs["success"] = ("yes" if result.lower() == "success" else "no", "auditd.result")
         else:
             pairs["res"] = (_AUDITBEAT_RESULTS[result.lower()], "auditd.result")
+    # For a user-space record go-libaudit fills user.* with the audit uid and user.effective.* (or user.target.*,
+    # group.*) with the account the record is about, as the Auditd Logs pipeline's copies do (AGENT_COPY_TYPES): the
+    # record's uid is user.effective only where that comes from uid alone, and otherwise is not recorded.
+    user_space = main_type in AGENT_COPY_TYPES
+    identities = ((("uid", "user.effective.id"),) if main_type in COPY_UID_EFFECTIVE_TYPES else ()) if user_space \
+        else (("uid", "user.id"), ("euid", "user.effective.id"), ("suid", "user.saved.id"),
+              ("fsuid", "user.filesystem.id"), ("gid", "user.group.id"), ("egid", "user.effective.group.id"))
     for key, path in (("pid", "process.pid"), ("ppid", "process.parent.pid"), ("exe", "process.executable"),
-                      ("comm", "process.name"), ("uid", "user.id"), ("euid", "user.effective.id"),
-                      ("suid", "user.saved.id"), ("fsuid", "user.filesystem.id"), ("gid", "user.group.id"),
-                      ("egid", "user.effective.group.id"), ("addr", "source.ip")):
+                      ("comm", "process.name"), *identities, ("addr", "source.ip")):
         value = _get(src, path)
         if value is not None and key not in pairs and not (key == "addr" and main_type == "SYSCALL"):
             pairs[key] = (value, path)
@@ -1825,8 +1883,9 @@ def auditbeat_records(hit: dict) -> list[tuple[dict, AuditRecord]]:
     keys = [tag for tag in (_get(src, "tags") or []) if isinstance(tag, str) and tag not in _SHIPPER_TAGS]
     if keys and main_type == "SYSCALL":
         pairs["key"] = ("\x01".join(keys), "tags")
-    enriched = {name: str(_get(src, path)) for name, path in (("UID", "user.name"), ("EUID", "user.effective.name"),
-                                                               ("AUID", "user.audit.name"))
+    names = ((("UID", "user.effective.name"),) if main_type in COPY_UID_EFFECTIVE_TYPES else ()) if user_space \
+        else (("UID", "user.name"), ("EUID", "user.effective.name"))
+    enriched = {name: str(_get(src, path)) for name, path in (*names, ("AUID", "user.audit.name"))
                 if _scalar_text(_get(src, path)) is not None}
     if main_type == "SYSCALL" and arch is None:
         raise AuditParseError("Auditbeat SYSCALL event without an architecture: its call cannot be read")
@@ -2701,6 +2760,7 @@ def observed_record(hit: dict, boot: list | tuple | None = None) -> TypedEvent |
     members = [(hit, record)]
     event = normalize_observed_group(audit_host(source, record), members)
     if event is not None:
+        _audit_node_fields(event, members)
         _rebuilt_provenance(event, members)
     if event is not None and boot is not None and not event.has("host.boot.id"):
         event.fields["host.boot.id"] = fv(boot[0], boot[1])
@@ -3054,6 +3114,7 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
         if boot:
             boot_by_hit.update({hit["_id"]: boot for hit, _record in members})
         start, failed = len(events), len(errors)
+        noded = any(audit_node(hit["_source"], record) for hit, record in members)
         # an Auditbeat action outside the table that gives no event is counted by its action
         unlisted = action is not None and action not in AUDITBEAT_ACTIONS
         group_skips: dict[str, int] = defaultdict(int) if unlisted else skips
@@ -3064,6 +3125,9 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
             else:
                 for reason, count in group_skips.items():
                     skips[reason] += count
+        if noded:
+            for event in events[start:]:
+                _audit_node_fields(event, members)
         if any(record.reconstructed for _hit, record in members):
             for event in events[start:]:
                 _rebuilt_provenance(event, members)

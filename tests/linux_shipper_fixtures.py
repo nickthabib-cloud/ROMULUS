@@ -340,16 +340,23 @@ def agent_source(line: str, *, host=HOST, preserve=False) -> dict:
 # ---------------------------------------------------------------------------------------------------------------
 
 def _ab_base(native_id, ts, serial, message_type, action, *, result="success", pid=4001, ppid=4000,
-             exe="/usr/bin/curl", comm="curl", uid="1000", auid="1000", session="7", tags=(), host=HOST) -> dict:
+             exe="/usr/bin/curl", comm="curl", uid="1000", auid="1000", session="7", tags=(), host=HOST,
+             effective=None) -> dict:
+    """An Auditbeat event document. For a syscall user.* is the process's uid; for a user-space record go-libaudit
+    puts the audit uid in user.* and the record's subject (`effective`: the uid for account tools, the account
+    for logins) in user.effective.*, as its own test outputs show (raw uid=0 auid=1000 -> user.id=1000)."""
     names = {"0": "root", "1000": "alice"}
+    user_space = message_type != "syscall"
+    actor = auid if user_space else uid
+    effective = effective or {"id": uid, "name": names.get(uid, uid)}
     source = {
         "@timestamp": iso(ts), "host": {"name": host}, "tags": list(tags),
         "event": {"module": "auditd", "dataset": "auditd", "action": action, "category": "audit-rule"},
         "auditd": {"message_type": message_type, "sequence": serial, "result": result, "session": session,
                    "data": {}},
         "process": {"pid": pid, "executable": exe, "name": comm},
-        "user": {"id": uid, "name": names.get(uid, uid), "audit": {"id": auid, "name": names.get(auid, auid)},
-                 "effective": {"id": uid, "name": names.get(uid, uid)}},
+        "user": {"id": actor, "name": names.get(actor, actor), "audit": {"id": auid, "name": names.get(auid, auid)},
+                 "effective": effective},
     }
     if ppid is not None:
         source["process"]["parent"] = {"pid": ppid}
@@ -435,7 +442,7 @@ def auditbeat_login(native_id="ab-login", result="success") -> dict:
     _n, _t, epoch, serial, _b = _header(lines[0])
     h = _ab_base(native_id, float(epoch), int(serial), "user_login", "logged-in", pid=2200, ppid=None,
                  exe="/usr/sbin/sshd", comm=None, uid="0", session="9", result="success" if result == "success"
-                 else "fail")
+                 else "fail", effective={"name": "alice"})
     src = h["_source"]
     del src["process"]["name"]
     src["auditd"]["data"] = {"acct": "alice", "op": "login", "terminal": "/dev/pts/1", "hostname": "203.0.113.9"}
@@ -536,7 +543,7 @@ def journald(j: dict, native_id="jd", *, dataset: str | None = "journald.logs", 
 def syslog(ident: str, pid: int | None, message: str, native_id="sl", *, dataset="system.auth", from_journal=False,
            ts=T0 + 10.0, host=HOST) -> dict:
     """A System integration line (from a log file, or from the journal) with its message kept."""
-    source = {"@timestamp": iso(ts), "host": {"name": "collector" if not from_journal else host, "hostname": host},
+    source = {"@timestamp": iso(ts), "host": {"name": host, "hostname": host},
               "message": message, "process": {"name": ident},
               "input": {"type": "journald" if from_journal else "filestream"},
               "event": {"dataset": dataset, "module": "system", "kind": "event"},
@@ -550,7 +557,7 @@ def syslog(ident: str, pid: int | None, message: str, native_id="sl", *, dataset
 
 def parsed_syslog(ident: str, pid: int | None, fields: dict, native_id="ps", *, ts=T0 + 10.0, host=HOST) -> dict:
     """The Filebeat system module after its pattern matched: the message is dropped, the parsed fields stay."""
-    source = {"@timestamp": iso(ts), "host": {"name": "collector", "hostname": host},
+    source = {"@timestamp": iso(ts), "host": {"name": host, "hostname": host},
               "process": {"name": ident}, "input": {"type": "log"}, "event": {"dataset": "system.auth",
                                                                              "module": "system", "timezone": "+00:00"}}
     if pid is not None:
