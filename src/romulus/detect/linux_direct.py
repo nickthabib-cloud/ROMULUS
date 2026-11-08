@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 from romulus.detect.base import Match, Playbook, basename, pf
 from romulus.detect.bounded import HOT_COUNT, KeyedStore, RecentIds
 from romulus.detect.host import INTERPRETERS, WEB_SERVICE_USERS
-from romulus.detect.linux_argv import getopt_long, normalize_path, program, read_operand_paths
+from romulus.detect.linux_argv import getopt_long, normalize_path, program, read_operand_paths, write_targets
 from romulus.detect.linux_semantics import classify_credential
 from romulus.evidence.typed import Outcome
 
@@ -81,6 +81,12 @@ SHADOW_BACKUP_TOOLS = frozenset({"tar", "rsync", "cmp", "cp"})
 # The watched read does not establish whether a backup also writes outside /etc. These remain
 # folded leads, rather than exclusions, only for uid 0 tools directly in these two package dirs.
 BACKUP_DIRS = frozenset({"/usr/bin", "/bin"})
+# A root copy named on the command line is routine only when every destination stays in /etc or the
+# distribution's backup directory (Debian's daily passwd job copies to /var/backups).
+SHADOW_BACKUP_DESTINATIONS = ("/etc", "/var/backups")
+# Packaged setuid/setgid helpers read the hashes with the invoking user's real uid.
+SETUID_SHADOW_HELPERS = frozenset({"su", "sudo", "sudoedit", "passwd", "chage", "gpasswd", "unix_chkpwd",
+                                   "polkit-agent-helper-1"})
 PACKAGE_STORE_PATH = re.compile(r"^/(?:nix|gnu)/store/[^/]+-[^/]+/(?P<image>.+)$")
 
 
@@ -89,7 +95,7 @@ def shadow_reader(path, event):
     name, directory = basename(executable), posixpath.dirname(executable)
     if path not in {"/etc/shadow", "/etc/gshadow", "/etc/shadow-", "/etc/gshadow-"}:
         return ""
-    if str(event.get("process.uid")) != "0":
+    if str(event.get("process.uid")) != "0" and name not in SETUID_SHADOW_HELPERS:
         return ""
     dirs = ROOT_BINARY_DIRS | SHADOW_EXTRA_DIRS.get(name, frozenset())
     if name.startswith("systemd-") or name == "systemd":
@@ -97,6 +103,17 @@ def shadow_reader(path, event):
     if name in SHADOW_DAEMONS and directory in dirs:
         return "daemon"
     return "backup" if name in SHADOW_BACKUP_TOOLS and directory in BACKUP_DIRS else ""
+
+
+def routine_backup_command(p, event):
+    """A root backup tool's command line stays a lead only when argv shows no copy leaving /etc and the backup
+    directory: a compare, or typed write destinations that all stay there. Untyped destinations keep the read HIGH."""
+    if p.name == "cmp":
+        return True
+    argv = event.get("process.argv")
+    argv0 = str(argv[0]) if isinstance(argv, list) and argv else ""
+    targets, unplaced = write_targets(p.name, p.args, event.get("process.cwd"), argv0)
+    return bool(targets) and not unplaced and all(under(t.path, SHADOW_BACKUP_DESTINATIONS) for t in targets)
 
 
 CREDENTIAL_SOURCES = (
@@ -474,7 +491,11 @@ class KernelModuleLoad(LinuxDirect):
         argv_paths = [path for path in argv_paths if path]
         path = normalize_path(str(e.get("module.path") or ""))
         outside = next((item for item in [path, *argv_paths] if item and not under(item, MODULE_ROOTS)), "")
-        packaged = bool(p and ((p.name == "modprobe" and name in {"kmod", "modprobe"}
+        loader = p.name if p else None
+        if e.family == "kernel_module" and loader == "kmod" and not p.args:
+            # A kernel-requested autoload record carries no argv; its kernel-recorded comm names the kmod applet.
+            loader = basename(str(e.get("process.comm") or "")) or loader
+        packaged = bool(p and ((loader == "modprobe" and name in {"kmod", "modprobe"}
                                and directory in ROOT_BINARY_DIRS)
                               or (name in {"systemd-modules-load", "systemd-udevd", "udevd"}
                                   and directory in ROOT_BINARY_DIRS | {"/usr/lib/systemd", "/lib/systemd",
@@ -544,6 +565,8 @@ class CredentialMaterialAccess(FoldedLinuxDirect):
             reader = shadow_reader(path, e)
             if reader == "daemon":
                 continue
+            if reader == "backup" and e.family == "process_exec" and not routine_backup_command(p, e):
+                reader = ""
             if (p and posixpath.dirname(str(e.get("process.executable") or "")) in BASE_PACKAGE_DIRS
                     and any(path.startswith(prefix) and actor in accounts and p.name in daemons
                             for prefix, daemons, accounts in OWNING_DAEMONS)):

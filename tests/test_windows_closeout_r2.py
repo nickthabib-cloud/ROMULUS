@@ -248,3 +248,22 @@ def test_direct_late_logon_revises_the_source_without_finalize(source, lane):
         assert hit.revision_reason
     finally:
         rule.close_spill()
+
+
+@pytest.mark.parametrize("order", ["logon-first", "access-first"])
+def test_one_shot_publication_keeps_an_undeclared_source_high_in_either_batch_order(order):
+    from romulus.hunt.publish import publish_match
+    from tests.test_report import _repo_with_finding
+    hunt = "h-" + order
+    repo, _ = _repo_with_finding(hunt_id=hunt)
+    repo.set_hunt_state(hunt, "running")
+    rule = direct_replication_rule()
+    access, sync = logon("198.51.100.7"), replication()
+    events = [access, sync] if order == "logon-first" else [sync, access]
+    raws = {"windows/" + e.id: {"message": e.id} for e in events}
+    try:
+        for match in rule.consume(events):
+            publish_match(repo, hunt, rule, match, None, raws, source_case_id="case-1")
+        assert [c["lane"] for c in repo.candidates(hunt) if c["rule_id"] == rule.id] == ["high"]
+    finally:
+        rule.close_spill()

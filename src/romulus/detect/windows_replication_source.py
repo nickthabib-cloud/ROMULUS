@@ -120,6 +120,10 @@ class ReplicationSourceJoin:
             yield from self._publish_sync_event(event, final=final)
 
     def _consume_sync(self, events):
+        if self.one_shot:
+            # A one-shot batch publishes each decision as final, and pivot samples are not time ordered: join every
+            # logon of the batch before judging its directory records, so a later-listed logon can still raise one.
+            events = sorted(events, key=lambda event: event.family != "auth")
         for event in events:
             if not self.event_in_os_scope(event) or event.family not in self.families:
                 continue

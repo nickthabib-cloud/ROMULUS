@@ -28,7 +28,7 @@ from romulus.detect.bounded import (
 )
 from romulus.detect.citing import uncited_positive
 from romulus.detect.correlation import canon_ip, external
-from romulus.detect.host import INTERPRETERS, ExecLineage
+from romulus.detect.host import INTERPRETERS, SHELLS, WEB_SERVICE_USERS, ExecLineage
 from romulus.detect.linux_argv import normalize_path, program, write_targets
 from romulus.detect.linux_direct import (
     BASE_PACKAGE_DIRS,
@@ -75,6 +75,8 @@ CITE = 20
 SCRIPT_SUFFIXES = frozenset({".php", ".phtml", ".php5", ".jsp", ".jspx", ".asp", ".aspx", ".cgi", ".pl", ".py", ".sh"})
 DOCUMENT_ROOTS = ("/var/www", "/srv/www", "/srv/http", "/usr/share/nginx/html", "/opt/lampp/htdocs")
 TOMCAT_ROOT = re.compile(r"^/var/lib/tomcat[^/]*/webapps(?:/|$)")
+# Public leaf directories of a per-site tree under a default root (/var/www/<site>/public_html).
+DOCROOT_LEAVES = frozenset({"html", "htdocs", "httpdocs", "public_html", "public", "web", "www", "wwwroot"})
 # A narrow working-path exclusion; a download or key link overrides it.
 CLEANUP_EXCLUSIONS = ("/var/lib/dpkg/tmp.ci", "/var/cache/yum", "/var/cache/dnf")
 SYSTEMD_PRIVATE = re.compile(r"^/tmp/systemd-private-[^/]+(?:/|$)")
@@ -321,12 +323,18 @@ class LinuxSequence(Playbook):
                 return
             shared.seen.add(event.id)
         p = program(event)
-        strong = temporary(str(event.get("process.executable") or "")) or bool(
-            p and p.name in INTERPRETERS and any(a in {"-c", "-e", "--eval"} for a in p.args))
+        writable = temporary(str(event.get("process.executable") or ""))
+        uid = str(event.get("process.uid"))
+        # Root and login accounts run shell one-liners routinely (cron, systemd, logrotate); only a web or service
+        # account's one-liner or writable executable is strong without listener lineage.
+        service = web(event) or uid.isdigit() and 0 < int(uid) < 1000
+        strong = service and (writable or bool(
+            p and p.name in INTERPRETERS and any(a in {"-c", "-e", "--eval"} for a in p.args)))
         for path in executed_paths(event):
             self.add(event, "execute", path, lane="high" if temporary(path) or web(event) else "lead",
                      data={"account": event.get("process.user") or event.get("process.uid"),
-                           **({"web": True} if web(event) else {}), **({"strong": True} if strong else {})})
+                           **({"web": True} if web(event) else {}), **({"writable": True} if writable else {}),
+                           **({"strong": True} if strong else {})})
 
     def parent_record(self, host, pid, when, boot):
         record = self.execs.latest(host, pid, when)
@@ -732,6 +740,26 @@ class WebShellChain(LinuxSequence):
                 return posixpath.normpath(str(value))
         return ""
 
+    @staticmethod
+    def layout_roots(path):
+        """Document roots the packaged server layouts imply for a script path when no root is recorded: the default
+        root, a per-site directory under it, and that site's public leaf; for Tomcat, webapps (whose first component
+        is the context path) and its ROOT context."""
+        found = TOMCAT_ROOT.match(path)
+        if found:
+            base = found.group(0).rstrip("/")
+            return [base, base + "/ROOT"]
+        for root in DOCUMENT_ROOTS:
+            if under(path, (root,)):
+                parts = [part for part in posixpath.relpath(posixpath.dirname(path), root).split("/") if part != "."]
+                roots = [root]
+                if parts:
+                    roots.append(f"{root}/{parts[0]}")
+                    if len(parts) > 1 and parts[1] in DOCROOT_LEAVES:
+                        roots.append(f"{root}/{parts[0]}/{parts[1]}")
+                return roots
+        return []
+
     def observe(self, e):
         if e.family == "file_change" and e.outcome != Outcome.failure and e.get("file.change") in {"create", "content"}:
             path = str(e.get("file.path") or "")
@@ -797,14 +825,17 @@ class WebShellChain(LinuxSequence):
                     request_root = json.loads(request_body)["root"]
                     if root and request_root and root != request_root:
                         continue
-                    relative_match = bool(root and posixpath.normpath("/" + posixpath.relpath(path, root)) == posixpath.normpath(url))
+                    relative_match = any(posixpath.normpath("/" + posixpath.relpath(path, candidate)) == posixpath.normpath(url)
+                                         for candidate in ([root] if root else self.layout_roots(path)))
                     if root and not relative_match:
                         continue
-                    exact = relative_match and (request_root == root or roots == 1)
+                    exact = relative_match and (not root or request_root == root or roots == 1)
                     current, witnesses = "lead", [identity, rid]
-                    if exact and level == "high":
-                        current = "high" if newly_created else "lead"
-                        for xid, xts, parent, boot in self.query(
+                    if exact and level == "high" and newly_created:
+                        current = "high"
+                        # A rewrite or another account's deployment never reaches URGENT through a coincident worker
+                        # interpreter (PHP mail() runs sh -c sendmail); only a script the web account created does.
+                        for xid, xts, parent, boot in () if not metadata["web"] else self.query(
                                 "SELECT id,ts,ppid,boot FROM records WHERE role='interpreter' AND host=? AND ts>=? AND ts<=? ORDER BY ts,id",
                                 (host, rts, rts + W_DOWNLOAD_EXEC)):
                             ancestor = self.web_ancestor(host, parent, xts, boot)
@@ -827,8 +858,9 @@ class WebShellChain(LinuxSequence):
             if count:
                 yield self.finding(f"{host}|{path}", ids, lane,
                     f"A document-root script write and optional later HTTP request form {count} inferred link(s). "
-                    "HIGH requires an exact document-root-relative request for a newly created script; URGENT also "
-                    "requires interpreter ancestry to a recorded web server. Basename-only links and deployment rewrites are leads.",
+                    "HIGH requires an exact document-root-relative request (recorded root, or the packaged layout's) for "
+                    "a newly created script; URGENT also requires that the web account created it and an interpreter "
+                    "with ancestry to a recorded web server. Basename-only links and deployment rewrites are leads.",
                     count)
 
 
@@ -837,6 +869,30 @@ class DiscoveryBurst(LinuxSequence):
     title = "At least five discovery classes ran in one recorded login session within ten minutes"
     families = ("process_exec",)
     attack = ("T1033", "T1082", "T1016", "T1049", "T1057", "T1083")
+
+    def service_anchor(self, e):
+        """Without a login session, commands group under the topmost recorded web-server ancestor (a web shell's
+        commands arrive through separate shells and workers), else the nearest non-shell ancestor, else the last
+        ancestor pid the shell chain reaches."""
+        pid, when, boot = e.get("process.ppid"), e.ts.timestamp(), e.get("host.boot.id")
+        nearest, server, reached, visited = None, None, pid, set()
+        for _ in range(LINEAGE_DEPTH):
+            if not isinstance(pid, int) or pid in visited:
+                break
+            reached = pid
+            if pid in (0, 1):
+                break
+            visited.add(pid)
+            record = self.parent_record(e.host, pid, when, boot)
+            if record is None:
+                break
+            name = posixpath.basename(record.exe)
+            if name in {"httpd", "apache2", "nginx"} or re.fullmatch(r"php-fpm(?:[0-9.]+)?", name):
+                server = pid
+            elif nearest is None and server is None and record.name not in SHELLS:
+                nearest = pid
+            pid, when = record.ppid, record.ts
+        return server or nearest or reached
 
     def observe(self, e):
         p = program(e)
@@ -854,7 +910,7 @@ class DiscoveryBurst(LinuxSequence):
             if uid is None:
                 self.missing_required += 1
                 return
-            key = _key(e.host, str(uid), "service", e.get("process.ppid"), e.get("host.boot.id"))
+            key = _key(e.host, str(uid), "service", self.service_anchor(e), e.get("host.boot.id"))
         else:
             key = _key(e.host, str(auid), str(session), e.get("host.boot.id"))
         self.add(e, "discovery", key, aux=found[0], lane="high" if web(e) else "lead")
@@ -940,6 +996,9 @@ class UnbrokeredPrivilegeTransition(LinuxSequence):
     def finalize(self):
         groups = KeyedStore(self, "privilege_sessions", self.HOT)
         for (host, pid), records in self.execs.store.items():
+            # Parent walks bring spilled processes back to memory; return them. The walk reads a sorted copy of the
+            # disk rows, so writing them back does not disturb it.
+            self.execs.trim()
             for record in records:
                 if record.euid != "0" or record.auid in {None, "0", "4294967295", "-1"}:
                     continue
@@ -1117,12 +1176,17 @@ class AlertThenHostExecution(LinuxSequence):
                         if record is None:
                             break
                         chain.append(record.event_id)
+                        if not metadata.get("web") and record.user in WEB_SERVICE_USERS:
+                            # Another account's exec descending from a web-account process left the web service.
+                            linked = record.event_id
+                            break
                         if port in {"80", "443", "8080", "8443"} and (
                                 record.name in {"httpd", "apache2", "nginx"} or re.fullmatch(r"php-fpm(?:[0-9.]+)?", record.name)):
                             linked = record.event_id
                             break
                         ancestor_pid, xts = record.ppid, record.ts
-                    current = "high" if linked or metadata.get("strong") else "lead" if metadata.get("web") else None
+                    current = ("high" if linked or metadata.get("strong") else
+                               "lead" if metadata.get("web") or metadata.get("writable") else None)
                     if current is None:
                         continue
                     count += 1
@@ -1135,8 +1199,9 @@ class AlertThenHostExecution(LinuxSequence):
             if count:
                 yield self.finding(_key(host, signature), ids, lane,
                     f"An inbound severity 1-2 IDS alert was followed by {count} exec record(s) on its uniquely mapped host. "
-                    "HIGH has listener/web-worker lineage, a writable executable, or an interpreter one-liner; "
-                    "web-account host/time coincidence alone is an inferred LEAD.", count)
+                    "HIGH has listener/web-worker/web-account lineage, or a web or service account's writable executable or "
+                    "interpreter one-liner; another account's writable executable and web-account host/time "
+                    "coincidence alone are inferred LEADs.", count)
 
 
 class TelemetryGapAfterTamper(LinuxSequence):
