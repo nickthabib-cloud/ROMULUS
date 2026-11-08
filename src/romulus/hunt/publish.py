@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 
 import httpx
 
@@ -16,6 +17,15 @@ from romulus.hunt.citations import COMPACT_CITATION_NOTE
 from romulus.store.repo import Repo, raw_id
 
 LINEAGE_CITATION_BATCH = 500
+# A group-keyed finding that expansion reaches again absorbs the reach instead of gaining a sibling. Its reaches are
+# listed up to this many (the rest are counted), and folds together add at most this many subject records to its
+# citations (the first and latest of each reach first): one finding per group stays a bounded row however many
+# anchors reach it.
+FOLD_REACHES_LISTED = 32
+FOLD_CITATIONS_ADDED = 8
+_LANE_RANK = {"suppressed": 0, "context": 1, "lead": 2, "high": 3, "urgent": 4}
+_SEVERITY_RANK = {"info": 0, "informational": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+_CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
 
 
 def bind_aggregate_history(repo: Repo, hunt_id: str, playbook: Playbook) -> None:
@@ -269,6 +279,155 @@ def mark_hypothesis_relation(match: Match, *, anchor_id: str, link_type: str,
     )
 
 
+def _strongest(values, rank):
+    return max(values, key=lambda value: rank.get(str(value), -1))
+
+
+def _fold_reach(repo: Repo, hunt_id: str, match: Match, decision, existing: dict, context_reach: dict | None,
+                *, owner_token: str | None = None, keep_decision: bool = False,
+                context_notes: tuple[str, ...] = ()) -> dict | None:
+    """Fold an expansion reach of an already published group (same hunt, rule and group key) into its one candidate.
+
+    The candidate keeps its identity, ownership, citations and claim; the reach adds its anchor and link to the
+    candidate's reaches (listed up to FOLD_REACHES_LISTED in `_context_reaches` and the fold's own list, every reach
+    counted in `reaches_total`), its matching records to a stated (possibly overlapping) re-read count, and, within
+    FOLD_CITATIONS_ADDED, its first and latest records to the citations; a reach that raises the lane always cites
+    its first record. The lane, severity, confidence and priority are the strongest of the parts: a fold never lowers
+    them. With `keep_decision` (records the sweep evaluated) they stay the candidate's own. Revised in place, never
+    retracted. Returns the stored candidate when the fold raised its lane into the expanded lanes (so expansion may
+    anchor on it), else None."""
+    if keep_decision:
+        decision = replace(decision, lane=existing["lane"], severity=existing["severity"],
+                           confidence=existing["confidence"], priority=float(existing["priority"] or 0),
+                           priority_reasons=existing["priority_reasons"])
+    gates = dict(existing.get("gate_results") or {})
+    fold = dict(gates.get("_expansion_fold") or {})
+    fold.setdefault("base_claim", existing["claim"])
+    listed = [dict(item) for item in fold.get("reaches", [])]
+    reach = dict(context_reach or {})
+    subject = sorted((event for event in match.events if event.id not in match.context_ids),
+                     key=lambda event: (event.ts, event.id)) or sorted(match.events, key=lambda e: (e.ts, e.id))
+    # One link can yield several matches of one group: a reach is its anchor, link and the records it is about.
+    records_digest = hashlib.sha256(json.dumps(sorted(event.id for event in subject)).encode()).hexdigest()[:16]
+    reach_key = (reach.get("anchor_id"), reach.get("link_id"), records_digest)
+    span = match.aggregate_summary or {}
+    first = span.get("first", subject[0].ts.timestamp() if subject else None)
+    last = span.get("last", subject[-1].ts.timestamp() if subject else None)
+    records = int(span.get("count") or len(subject))
+    if any((item.get("anchor_id"), item.get("link_id"), item.get("records_digest")) == reach_key for item in listed):
+        return None                         # this reach is already folded (a resumed expansion)
+    cited = list(existing.get("event_ids") or [])
+    # Records of this reach that the finding does not cite yet; a cited one is certainly a repeat.
+    beyond = max(0, records - sum(event.id in cited for event in subject))
+    fold["reaches_total"] = int(fold.get("reaches_total") or 0) + 1
+    if len(listed) < FOLD_REACHES_LISTED:
+        listed.append({**reach, "records": records, "first": first, "last": last, "records_digest": records_digest})
+    fold["reaches"] = listed
+    fold["records"] = int(fold.get("records") or 0) + beyond
+    if beyond:
+        starts = [value for value in (fold.get("first"), first) if value is not None]
+        ends = [value for value in (fold.get("last"), last) if value is not None]
+        fold["first"], fold["last"] = (min(starts) if starts else None), (max(ends) if ends else None)
+    added = list(fold.get("added") or [])
+    room = max(0, FOLD_CITATIONS_ADDED - len(added))
+    order = {event.id: event for event in [*subject[:1], *subject[-1:], *subject[1:-1]]}
+    new = [event for event_id, event in order.items() if event_id not in cited][:room]
+    lane = _strongest([existing["lane"], decision.lane], _LANE_RANK)
+    raises = lane != existing["lane"]
+    if raises and subject and not any(event.id == subject[0].id for event in new) and subject[0].id not in cited:
+        # A reach that raises the lane is always cited by its first record, past the cap: at most one record per
+        # lane step, so the row stays bounded.
+        new.append(subject[0])
+    added += [event.id for event in new]
+    fold["added"] = added
+    severity = _strongest([existing["severity"], decision.severity], _SEVERITY_RANK)
+    confidence = _strongest([existing["confidence"], decision.confidence], _CONFIDENCE_RANK)
+    inferred = any(item.get("strength") != "observed" for item in listed)
+    # The reached span is kept with the fold (`first`, `last`), not stated: its endpoints need not be cited records.
+    if fold["records"]:
+        claim = (f"{fold['base_claim']} Expansion also reached this group through {fold['reaches_total']} reach(es) "
+                 f"and read {fold['records']} matching record(s) not cited above (they may repeat records already "
+                 f"counted)" + (f"; {len(added)} of the {fold['records']} are now cited" if added else "") + ".")
+    else:
+        claim = (f"{fold['base_claim']} Expansion also reached this group through {fold['reaches_total']} reach(es), "
+                 f"and every record they read is already cited.")
+    if inferred:
+        claim += (" A reach through an inferred link relates this group to its anchor only as a hypothesis; the "
+                  "records themselves are observed.")
+    predicate = list(existing.get("predicate_fields") or [])
+    new_ids = {event.id for event in new}
+    origins = {ref.native_id for event in new for ref in event.raw}
+    added_fields = [{"field": p.field, "value": p.value, "origin": p.origin} for p in match.predicate
+                    if new_ids and p.origin.split(":", 1)[0] in origins]
+    predicate += added_fields
+    if raises:
+        fold["raised_to"] = lane
+        # the raising reach: its own claim and the record it rests on (cited above)
+        raiser = subject[0] if subject else None
+        fold["raised_by"] = [*fold.get("raised_by", []),
+                             {"lane": lane, "anchor_id": reach.get("anchor_id"), "link_id": reach.get("link_id"),
+                              "event_id": raiser.id if raiser else None, "claim": match.claim[:300],
+                              "fields": sum(1 for p in added_fields if raiser is not None and p["origin"].split(
+                                  ":", 1)[0] in {ref.native_id for ref in raiser.raw})}]
+    if fold.get("raised_to"):
+        last_raise = (fold.get("raised_by") or [{}])[-1]
+        claim += (f" A reach's own evaluation of its records put the group in the {fold['raised_to']} lane; the "
+                  f"record it rests on is cited"
+                  + (", with that reach's predicate fields." if last_raise.get("fields") else "."))
+    # The finding's reaches are listed up to FOLD_REACHES_LISTED; `reaches_total` counts every one.
+    known = {(item["anchor_id"], item["link_id"], item["link_type"], item["strength"]): item
+             for item in gates.get("_context_reaches", [])}
+    if context_reach:
+        key = (context_reach["anchor_id"], context_reach["link_id"], context_reach["link_type"],
+               context_reach["strength"])
+        if key not in known and len(known) < FOLD_REACHES_LISTED:
+            known[key] = context_reach
+    gates["_context_reaches"] = [known[key] for key in sorted(known)]
+    gates["_expansion_fold"] = fold
+    notes = {str(note) for note in gates.get("_notes", [])}
+    notes |= {str(note) for note in decision.notes if str(note).startswith(("reached through an inferred ",
+                                                                             "reached through an agent-requested "))}
+    # why a reach could not resolve a reader's lineage, for the first few readers (the row stays bounded)
+    for note in decision.notes:
+        if (str(note).startswith("Lineage for the reader ")
+                and sum(item.startswith("Lineage for the reader ") for item in notes) < FOLD_REACHES_LISTED // 4):
+            notes.add(str(note))
+    if raises and context_notes:
+        # A note stating what the earlier evaluation could not check is stale once a reach with that context raised
+        # the lane: the reach's own note of that kind replaces it.
+        notes = {note for note in notes if not note.startswith(context_notes)}
+        notes |= {str(note) for note in decision.notes if str(note).startswith(context_notes)}
+    gates["_notes"] = sorted(notes)
+    if (published := gates.get("aggregate_summary")) and first is not None and last is not None:
+        gates["aggregate_summary"] = {**published, "first": min(published["first"], first),
+                                      "last": max(published["last"], last)}
+    entities = [list(entity) for entity in dict.fromkeys(
+        [tuple(entity) for entity in existing.get("entities") or []]
+        + ([tuple(entity) for entity in match.entities] if new else []))]
+    row = {
+        "id": existing["id"], "hunt_id": hunt_id, "rule_id": existing["rule_id"],
+        "rule_version": existing["rule_version"], "claim": claim, "claim_type": existing["claim_type"],
+        "event_ids": [*cited, *(event.id for event in new)],
+        "context_event_ids": list(existing.get("context_event_ids") or []),
+        "predicate_fields": predicate, "entities": entities, "ts": existing["ts"],
+        "severity": severity, "confidence": confidence, "lane": lane,
+        "priority": max(float(existing["priority"] or 0), float(decision.priority)),
+        "priority_reasons": (decision.priority_reasons if float(decision.priority) > float(existing["priority"] or 0)
+                             else existing["priority_reasons"]),
+        "gate_results": gates,
+        # The revision keeps the stored ownership; these only mark the row as a direct-rule fold.
+        "source_case_id": None, "source_anchor_id": None, "source_link_id": None,
+    }
+    with repo.candidate_publication():
+        status = repo.revise_candidate(row, f"Expansion reach {reach_key[1]} from {reach_key[0]} folded into the "
+                                            f"group's one finding", owner_token=owner_token, bounded_revision=True)
+        if status and (match.fleet_host_count or match.fleet_hosts_complete):
+            repo.save_candidate_hosts(existing["id"], hunt_id, match.fleet_hosts, owner_token=owner_token,
+                                      replace=False, claim=claim)
+    raised = _LANE_RANK.get(lane, 0) > _LANE_RANK.get(existing["lane"], 0) and lane in {"urgent", "high"}
+    return repo.candidate(existing["id"]) if status and raised else None
+
+
 def _view_preference(predicates, view_field):
     quality = [item["value"] for item in predicates if item["field"] == "script.view_quality"
                and isinstance(item["value"], int) and not isinstance(item["value"], bool)]
@@ -282,9 +441,15 @@ def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
                   task_id: str | None, raw_sources: dict[str, dict],
                   source_case_id: str | None = None, source_anchor_id: str | None = None,
                   source_link_id: str | None = None, context_reach: dict | None = None,
-                  *, owner_token: str | None = None, zeek_context=None, zeek_context_ids=()) -> dict | None:
+                  *, owner_token: str | None = None, zeek_context=None, zeek_context_ids=(),
+                  sweep_group: dict | None = None, defer_to_sweep: bool = True) -> dict | None:
     """Persist cited evidence and publish a machine-decided finding once, with stable script-view revisions.
-    Context findings are published by the post-expansion pass (romulus.hunt.context.finalize_context)."""
+    Context findings are published by the post-expansion pass (romulus.hunt.context.finalize_context).
+
+    `sweep_group`: the candidate the sweep published for these records, which it evaluated with its whole
+    partition. The reach folds into that candidate; with `defer_to_sweep` at the sweep's lane (a re-evaluation with
+    less context never overrides the sweep's verdict), otherwise at the stronger of the two (the reach holds context
+    that raises it)."""
     if source_case_id is None and source_anchor_id is None:
         bind_aggregate_history(repo, hunt_id, playbook)
     if zeek_context is not None and any(event.get("observer.product")=="zeek" for event in match.events):
@@ -324,9 +489,23 @@ def publish_match(repo: Repo, hunt_id: str, playbook: Playbook, match: Match,
     event_ids = [event.id for event in match.events]
     context_event_ids = sorted({event.id for event in match.events} & match.context_ids)
     candidate_id = decision.candidate_id
+    if sweep_group is not None:
+        return _fold_reach(repo, hunt_id, match, decision, sweep_group, context_reach, owner_token=owner_token,
+                           keep_decision=defer_to_sweep,
+                           context_notes=tuple(getattr(playbook, "context_notes", ())))
     view_field = playbook.evidence_view_field if match.group_key else ""
     existing_view = repo.candidate(candidate_id) if view_field else None
-    if source_case_id is None and source_anchor_id is not None and not view_field:
+    if source_case_id is None and source_anchor_id is not None and not view_field and match.group_key:
+        # One finding per (hunt, rule, group key) across the sweep and every expansion reach: a reach of a group
+        # already published folds into it; the first publication of a group takes the group's own id, so a later
+        # reach finds it.
+        existing = repo.candidate(candidate_id)
+        if (existing is not None and existing.get("source_case_id") is None
+                and existing["lane"] != "context" and decision.lane != "context"):
+            return _fold_reach(repo, hunt_id, match, decision, existing, context_reach, owner_token=owner_token)
+        if existing is not None and existing.get("source_case_id") is None:
+            candidate_id = expansion_candidate_id(candidate_id, match)
+    elif source_case_id is None and source_anchor_id is not None and not view_field:
         existing = repo.candidate(candidate_id)
         same_subject = (
             existing is not None

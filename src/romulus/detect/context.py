@@ -14,6 +14,7 @@ raises it. Every matching record is cited; the claim text lists up to a fixed nu
 from __future__ import annotations
 
 import ipaddress
+import itertools
 from collections import defaultdict
 from typing import ClassVar
 
@@ -215,6 +216,28 @@ def _ancestors(index: dict, event: TypedEvent, limit: int = 24) -> tuple[list[Ty
     return out, False                              # the depth limit ran out: the chain is not fully established
 
 
+def _lineage_root(index: dict, event: TypedEvent, limit: int = 24) -> tuple[int | None, list[TypedEvent]]:
+    """(root pid, the exec records between the record and that root): the topmost process the recorded parent chain
+    reaches below the service manager (pid 0 or 1), or the parent pid the chain could not resolve (its exec was not
+    retrieved, as for a forked daemon child that never execs). The chain is bounded by `limit`; past it the last
+    process reached stands as the root."""
+    chain: list[TypedEvent] = []
+    top = event.get("process.pid")
+    pid, ts = event.get("process.ppid"), event.ts
+    for _ in range(limit):
+        if not isinstance(pid, int) or pid in (0, 1):
+            return (top if isinstance(top, int) else None), chain
+        ancestor = _latest_at(index, event.host, pid, ts)
+        if ancestor is None:
+            return pid, chain
+        if ancestor.id == event.id or any(ancestor.id == step.id for step in chain):
+            return pid, chain                       # a cycle in the recorded pids: stop where it repeats
+        chain.append(ancestor)
+        top = pid
+        pid, ts = ancestor.get("process.ppid"), ancestor.ts
+    return (top if isinstance(top, int) else None), chain
+
+
 class _HostContextRule(ContextPlaybook):
     """Shared base for the host-session context rules (exec and socket evidence)."""
 
@@ -241,9 +264,23 @@ class _HostContextRule(ContextPlaybook):
 # ================================================================================================
 
 class PostAccessDiscovery(_HostContextRule):
+    """Discovery commands reached from an anchor, one finding per session or burst.
+
+    Records with an audit session id group by (host, boot, session). Records outside any login session group by the
+    process lineage they ran in, never by the anchor that reached them. In the post-expansion pass (`split_bucket`)
+    two such discovery commands are one burst when one anchor's reaches brought both (its links resolved them into its
+    lineage, so a burst is never split below what one anchor saw), or when their recorded parent chains reach the
+    same root (`_lineage_root`) with no gap over BURST_GAP between them; joined transitively. A burst's identity is
+    (host, boot, the root of its earliest command, its start). Every anchor that reaches it is one of its reaches; the
+    finding cites the lineage records between the root(s) and its commands."""
     id = "context.post_access_discovery"
     argv_prefix_safe = True
-    version = "7"
+    version = "8"
+    # Joins two reaches' commands under one root: a discovery phase, scripted (seconds) or typed by an operator
+    # (minutes between commands), stays one burst, while a long-lived root (a daemon whose forked children never exec)
+    # running discovery hours apart for unrelated reaches gives separate bursts. Thirty minutes is the expansion's
+    # middle window, independent of any one network's activity rate.
+    BURST_GAP = 1800.0
     title = "Discovery commands in an anchored session or process lineage"
     anchor_class = "execution"
     families = ("process_exec",)
@@ -259,9 +296,65 @@ class PostAccessDiscovery(_HostContextRule):
     next_checks = ("privilege probing or credential-file reads by the same session",
                    "network flows the session opens next")
 
-    def match_linked(self, anchor, link, events):
-        boots = _session_boots(events, anchor)
-        groups: dict[tuple, list[tuple[str, str, TypedEvent]]] = defaultdict(list)
+    @staticmethod
+    def bucket_key(event: TypedEvent, anchor: ContextAnchor) -> tuple:
+        """The post-expansion pass's bucket for a reached record: its session's key, or one bucket per (host, boot)
+        for every record outside a login session, which `split_bucket` divides into lineage bursts. No part of either
+        depends on the anchor that reached the record."""
+        if event.get("process.session_id") is not None:
+            return _session_key(event, anchor)
+        return (event.host, boot_of(event), "lin")
+
+    @classmethod
+    def split_bucket(cls, key: tuple, events: list[TypedEvent],
+                     members: dict[str, set] | None = None) -> list[tuple[list[TypedEvent], set[str] | None]]:
+        """(records, the discovery commands among them) per lineage burst of a lineage bucket; a session bucket is
+        judged whole (None: every reach of the bucket reached it). `members`: record id -> the reaches that brought
+        it."""
+        if key[2] != "lin":
+            return [(events, None)]
+        rule = cls()
+        hits = [hit for hit in rule._discovery_hits(events) if hit[2].get("process.session_id") is None]
+        index = _exec_index(events)
+        rooted = [(hit, *_lineage_root(index, hit[2])) for hit in hits]
+        parent = list(range(len(rooted)))
+
+        def find(i):
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        def union(a, b):
+            a, b = find(a), find(b)
+            if a != b:
+                parent[max(a, b)] = min(a, b)
+
+        # Commands one anchor reached are one burst whatever link brought them (the grouping before this rule keyed
+        # lineage records by anchor), so no burst is ever split below one anchor's view.
+        first_of_anchor: dict = {}
+        for i, (hit, _root, _chain) in enumerate(rooted):
+            for anchor_id in sorted({pair[0] for pair in (members or {}).get(hit[2].id, ())}):
+                union(i, first_of_anchor.setdefault(anchor_id, i))
+        by_root: dict = defaultdict(list)
+        for i, (hit, root, _chain) in enumerate(rooted):
+            by_root[root].append(i)
+        for indexes in by_root.values():          # `hits` is in time order, so each list is too
+            for a, b in itertools.pairwise(indexes):
+                if (rooted[b][0][2].ts - rooted[a][0][2].ts).total_seconds() <= cls.BURST_GAP:
+                    union(a, b)
+        parts: dict[int, list[int]] = defaultdict(list)
+        for i in range(len(rooted)):
+            parts[find(i)].append(i)
+        out = []
+        for indexes in parts.values():
+            records = [rooted[i][0][2] for i in indexes] + [step for i in indexes for step in rooted[i][2]]
+            out.append((_dedup_sorted(records), {rooted[i][0][2].id for i in indexes}))
+        return out
+
+    def _discovery_hits(self, events):
+        """(technique, behavior, record) for each eligible discovery command, in time order."""
+        hits = []
         for event in self.eligible_records(events):
             prog = program(event)
             if prog is None:
@@ -270,9 +363,54 @@ class PostAccessDiscovery(_HostContextRule):
                 continue                       # counted as missing: a lost argument may be a change verb
             found = classify_discovery(prog.name, prog.args, event.get("process.cwd"))
             if found is not None:
-                groups[_session_key(event, anchor, boots)].append((found[0], found[1], event))
+                hits.append((found[0], found[1], event))
             elif _operands_unplaced(prog, event):
                 self.missing_required += 1
+        return sorted(hits, key=lambda hit: (hit[2].ts, hit[2].id))
+
+    @staticmethod
+    def _lineage_groups(events, hits) -> dict[tuple, tuple[list, list[TypedEvent], list]]:
+        """(host, boot, ('lin', root of the earliest command, its time)) -> (hits, the lineage records between them and
+        their roots, the roots in order) for discovery commands outside any login session: one group per (host, boot)
+        of the records judged together (one reach, or one burst of the post-expansion pass). A record without a boot
+        id takes the host's only recorded boot among these records (two recorded boots keep it apart)."""
+        index = _exec_index(events)
+        recorded: dict[str, set[str]] = defaultdict(set)
+        for _t, _b, event in hits:
+            if boot_of(event) is not None:
+                recorded[event.host].add(boot_of(event))
+        grouped: dict[tuple, list] = defaultdict(list)
+        for hit in hits:
+            event = hit[2]
+            boot = boot_of(event)
+            if boot is None and len(recorded.get(event.host, ())) == 1:
+                boot = next(iter(recorded[event.host]))
+            grouped[(event.host, boot)].append((hit, *_lineage_root(index, event)))
+        out: dict[tuple, tuple[list, list[TypedEvent], list]] = {}
+        for (host, boot), members in grouped.items():
+            members.sort(key=lambda item: (item[0][2].ts, item[0][2].id))
+            lineage: dict[str, TypedEvent] = {}
+            for _hit, _root, chain in members:
+                lineage.update((step.id, step) for step in chain)
+            roots = list(dict.fromkeys(root for _hit, root, _chain in members))
+            first = members[0][0][2]
+            out[(host, boot, ("lin", members[0][1], first.ts))] = (
+                [hit for hit, _root, _chain in members], _dedup_sorted(list(lineage.values())), roots)
+        return out
+
+    def match_linked(self, anchor, link, events):
+        boots = _session_boots(events, anchor)
+        groups: dict[tuple, list[tuple[str, str, TypedEvent]]] = defaultdict(list)
+        chains: dict[tuple, tuple[list[TypedEvent], list]] = {}
+        lineage_hits = []
+        for hit in self._discovery_hits(events):
+            if hit[2].get("process.session_id") is None:
+                lineage_hits.append(hit)
+            else:
+                groups[_session_key(hit[2], anchor, boots)].append(hit)
+        for key, (hits, chain, roots) in self._lineage_groups(events, lineage_hits).items():
+            groups[key] = hits
+            chains[key] = (chain, roots)
 
         out = []
         for key, hits in groups.items():
@@ -283,13 +421,29 @@ class PostAccessDiscovery(_HostContextRule):
             lane = "high" if len(techniques) >= 3 else "lead"
             burst = "a discovery burst" if lane == "high" else "discovery activity"
             classes = sorted(set(behaviors))
+            chain, roots = chains.get(key, ([], []))
+            lineage = [event for event in chain if event.id not in {e.id for e in cited}]
+            if key in chains:
+                _tag, root, start = key[2]
+                shown = ", ".join(str(item) for item in roots[:CLAIM_DISPLAY])
+                scope = (f"outside any login session, in process lineage whose recorded parent chains reach pid(s) "
+                         f"{shown}{f' and {len(roots) - CLAIM_DISPLAY} more' if len(roots) > CLAIM_DISPLAY else ''} "
+                         f"(the topmost process each chain reaches), from {start.isoformat()}"
+                         + (f"; the {len(lineage)} lineage record(s) between those roots and the commands are cited"
+                            if lineage else "; the commands' own records show those parents"))
+                group_key = f"discovery|{key[0]}|{key[1]}|lin:{root}|{start.isoformat()}"
+            else:
+                scope = _scope(key)
+                group_key = f"discovery|{_group_id(key)}"
             claim = (f"On {key[0]}, {burst}: {len(cited)} command(s) across {len(classes)} distinct discovery "
                      f"class(es) [{_and_more(classes)}], under {len(techniques)} ATT&CK technique(s), ran "
-                     f"{_scope(key)}. {summary}. {_context_suffix(anchor, link)}")
-            match = Match(self.id, claim, self.claim_type, cited,
-                          _predicate_all(cited, "process.executable", "process.argv"), cited[0].ts,
+                     f"{scope}. {summary}. {_context_suffix(anchor, link)}")
+            match = Match(self.id, claim, self.claim_type, _dedup_sorted([*cited, *lineage]),
+                          _predicate_all(cited, "process.executable", "process.argv")
+                          + _predicate_all(lineage, "process.pid", "process.ppid"), cited[0].ts,
                           "high" if lane == "high" else "medium", lane, "medium",
-                          cited[0].entities(), group_key=f"discovery|{_group_id(key)}")
+                          cited[0].entities(), group_key=group_key)
+            match.context_ids = {event.id for event in lineage}
             match.notes.extend(techniques)
             out.append(self._finish(match, cited))
         return out
