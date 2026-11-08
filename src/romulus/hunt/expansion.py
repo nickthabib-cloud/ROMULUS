@@ -967,6 +967,9 @@ class ExpansionEngine:
             # anchor may be a hypothesis.
             mark_hypothesis_relation(match, anchor_id=candidate["id"], link_type=result.link_type,
                                      link_id=result.id, strength=result.strength)
+            if sweep_group is not None:
+                # an earlier fold of this link may have revised the group: fold into what is stored now
+                sweep_group = self.repo.candidate(sweep_group["id"]) or sweep_group
             row = publish_match(
                 self.repo, self.hunt_id, playbook, match, result.task_ids[0] if result.task_ids else None, {},
                 source_anchor_id=candidate["id"], source_link_id=result.id, owner_token=self.owner_token,
@@ -1122,6 +1125,7 @@ class ExpansionEngine:
         rule = self._rule(playbook.id)
         citing = self._sweep_citing(playbook.id, swept)
         by_id = {event.id: event for event in events}
+        missing = getattr(rule, "lineage_missing", None)
         placed: dict[tuple[str, bool], tuple[dict, list]] = {}
         folded: set[str] = set()
         for match in rule.match_each(events, swept):
@@ -1132,7 +1136,8 @@ class ExpansionEngine:
                 # The sweep's lane stands unless this reach's own judgment is higher for a reason other than a
                 # lineage it does not hold (a record it holds and the sweep did not, such as a script rewrite).
                 defer = (not self._higher(match, group)
-                         or any(rule.lineage_missing(by_id[event_id]) for event_id in subject if event_id in by_id))
+                         or (missing is not None
+                             and any(missing(by_id[event_id]) for event_id in subject if event_id in by_id)))
                 placed.setdefault((group["id"], defer), (group, []))[1].append(match)
                 folded.update(subject)
         out = []

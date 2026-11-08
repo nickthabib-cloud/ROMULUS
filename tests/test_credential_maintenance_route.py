@@ -734,6 +734,29 @@ def test_a_reach_holding_the_script_rewrite_raises_the_sweeps_service_lead():
     assert not any("origin was not checked" in n for n in rows["high"]["gate_results"]["_notes"])
 
 
+def test_a_raising_and_a_deferring_fold_of_one_link_both_land_on_the_group():
+    """One reach raises the sweep's lead group with one record and defers for another (lineage missing): the second
+    fold writes from the stored row the first revised, so both reaches are counted and the raise stands."""
+    repo = _fresh_hunt_without_sweep_groups()
+    from romulus.hunt.publish import publish_match
+    exec_a = exec_(1, 600, 1, ["/usr/bin/perl", "-wT", "/usr/bin/zmpkg.pl", "start"])
+    exec_b = exec_(10, 700, 1, ["/usr/bin/perl", "-wT", "/usr/bin/zmpkg.pl", "start"])
+    read_a, read_b, rewrite = read(2, 600, 1), read(11, 700, 1), change(0, "/usr/bin/zmpkg.pl")
+    repo.upsert_task("T-sweep", "h1", "sweep", "sweep", {}, "T-sweep")
+    sweep = CredentialMaterialAccess()
+    for match in sweep.consume([exec_a, read_a, exec_b, read_b]):      # the sweep never saw the rewrite
+        publish_match(repo, "h1", sweep, match, "T-sweep", {e.key: {"doc": e.native_id} for ev in match.events
+                                                            for e in ev.raw})
+    repo.set_rule_cell("h1", sweep.id, sweep.version, "host-x",
+                       f"{T0.isoformat()}/{(T0 + timedelta(seconds=30)).isoformat()}", "matched", 1, 10)
+    _reach(repo, [rewrite, exec_a, read_a, read_b])                # B's exec is not in the reach
+    rows = _credential_rows(repo)
+    assert set(rows) == {"high"}
+    fold = rows["high"]["gate_results"]["_expansion_fold"]
+    assert fold["reaches_total"] == 2 and fold["raised_to"] == "high"
+    assert {read_a.id, read_b.id} <= set(rows["high"]["event_ids"])
+
+
 def test_service_read_whose_parent_differs_from_its_exec_stays_high():
     events = [exec_(0, 600, 1, ["/usr/bin/perl", "-wT", "/usr/bin/zmpkg.pl", "start"]), read(1, 600, 4242)]
     assert lane_of(run(events)[1]) == "high"
