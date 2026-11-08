@@ -113,6 +113,8 @@ def test_dev_lineage_shapes_route_to_lead_with_the_route_stated(shape, kind):
     assert match.proposed_lane == "lead"
     assert kind in match.claim and "←" in match.claim
     assert any(note.endswith("kept as a lead, not excluded.") for note in match.notes)
+    from tests.claim_citations import finding_problems
+    assert finding_problems(match.claim, match.notes, match.events) == []
     _host, exe, path, lane = json.loads(match.group_key)
     assert (exe, path, lane) == ("/usr/bin/perl", "/etc/shadow", "lead")
 
@@ -414,8 +416,12 @@ def test_expansion_reaching_more_records_of_the_same_process_folds_into_the_swee
     # now known repeats, and only its middle record may be new.
     assert fold["reaches_total"] == 2 and fold["records"] == 4
     assert {reach["anchor_id"] for reach in row["gate_results"]["_context_reaches"]} == {"F-one", "F-two"}
-    assert ("Expansion also reached this group through 2 reach(es), which read 4 matching record(s) beyond those "
-            "cited") in row["claim"]
+    assert ("Expansion also reached this group through 2 reach(es) and read 4 matching record(s) not cited "
+            "above") in row["claim"]
+    from romulus.evidence.typed import TypedEvent
+    from tests.claim_citations import finding_problems
+    cited = [TypedEvent.model_validate(item["event"]) for item in repo.citation_events("h1", row["event_ids"])]
+    assert finding_problems(row["claim"], row["gate_results"]["_notes"], cited) == []
     assert {later[0].id, later[-1].id} <= set(row["event_ids"])     # each reach cites its first and latest
 
 

@@ -718,8 +718,8 @@ def test_cross_anchor_same_group_with_distinct_subjects_folds_into_one_finding()
     for row, first, second in ((forward[0], "subject-two", "subject-five"),
                                (reversed_order[0], "subject-five", "subject-two")):
         assert row["claim"].startswith(f"{row['source_anchor_id']} cites {first}")
-        assert ("Expansion also reached this group through 1 reach(es), which read 1 matching record(s) beyond "
-                "those cited") in row["claim"]
+        assert ("Expansion also reached this group through 1 reach(es) and read 1 matching record(s) not cited "
+                "above") in row["claim"]
         assert row["event_ids"] == [first, second]
 
 
@@ -773,9 +773,12 @@ def test_fold_citations_and_reach_list_are_bounded():
     fold = rows[0]["gate_results"]["_expansion_fold"]
     assert fold["reaches_total"] == reaches - 1 and len(fold["reaches"]) == FOLD_REACHES_LISTED
     assert len(rows[0]["event_ids"]) == 1 + FOLD_CITATIONS_ADDED
-    assert (f"through {reaches - 1} reach(es), which read {reaches - 1} matching record(s) beyond those cited"
+    assert (f"through {reaches - 1} reach(es) and read {reaches - 1} matching record(s) not cited above"
             in rows[0]["claim"])
-    assert f"and {FOLD_CITATIONS_ADDED} of them are now cited" in rows[0]["claim"]
+    assert f"; {FOLD_CITATIONS_ADDED} of the {reaches - 1} are now cited" in rows[0]["claim"]
+    from tests.claim_citations import finding_problems
+    cited = [TypedEvent.model_validate(row["event"]) for row in repo.citation_events("h1", rows[0]["event_ids"])]
+    assert finding_problems(rows[0]["claim"], rows[0]["gate_results"]["_notes"], cited) == []
 
 
 def test_expansion_of_the_same_subject_reuses_an_existing_direct_finding():

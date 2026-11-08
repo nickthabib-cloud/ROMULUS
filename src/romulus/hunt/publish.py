@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, datetime
 
 import httpx
 
@@ -283,10 +282,6 @@ def _strongest(values, rank):
     return max(values, key=lambda value: rank.get(str(value), -1))
 
 
-def _iso(ts: float | None) -> str:
-    return datetime.fromtimestamp(ts, UTC).isoformat() if ts is not None else "an unrecorded time"
-
-
 def _fold_reach(repo: Repo, hunt_id: str, match: Match, decision, existing: dict, context_reach: dict | None,
                 *, owner_token: str | None = None) -> dict | None:
     """Fold an expansion reach of an already published group (same hunt, rule and group key) into its one candidate.
@@ -332,14 +327,14 @@ def _fold_reach(repo: Repo, hunt_id: str, match: Match, decision, existing: dict
     severity = _strongest([existing["severity"], decision.severity], _SEVERITY_RANK)
     confidence = _strongest([existing["confidence"], decision.confidence], _CONFIDENCE_RANK)
     inferred = any(item.get("strength") != "observed" for item in listed)
+    # The reached span is kept with the fold (`first`, `last`), not stated: its endpoints need not be cited records.
     if fold["records"]:
-        claim = (f"{fold['base_claim']} Expansion also reached this group through {fold['reaches_total']} reach(es), "
-                 f"which read {fold['records']} matching record(s) beyond those cited, from "
-                 f"{_iso(fold.get('first'))} to {_iso(fold.get('last'))}; they may repeat records already counted"
-                 + (f", and {len(added)} of them are now cited" if added else "") + ".")
+        claim = (f"{fold['base_claim']} Expansion also reached this group through {fold['reaches_total']} reach(es) "
+                 f"and read {fold['records']} matching record(s) not cited above (they may repeat records already "
+                 f"counted)" + (f"; {len(added)} of the {fold['records']} are now cited" if added else "") + ".")
     else:
-        claim = (f"{fold['base_claim']} Expansion also reached this group through {fold['reaches_total']} reach(es); "
-                 f"every record they read is already cited.")
+        claim = (f"{fold['base_claim']} Expansion also reached this group through {fold['reaches_total']} reach(es), "
+                 f"and every record they read is already cited.")
     if inferred:
         claim += (" A reach through an inferred link relates this group to its anchor only as a hypothesis; the "
                   "records themselves are observed.")

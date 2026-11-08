@@ -6,6 +6,7 @@ from romulus.evidence.typed import RawRef, TypedEvent, fv
 from romulus.hunt.context import finalize_context
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
+from tests.claim_citations import finding_problems
 from tests.test_context_playbooks import T0, _seed_anchor, _seed_link
 
 RULE = "context.post_access_discovery"
@@ -44,7 +45,11 @@ def repo_for(anchors):
                      [proc(f"{anchor_id}-event", 0, 930, 912, ["/bin/cat", "/etc/shadow"])])
         _seed_link(repo, "h1", f"L-{anchor_id}", anchor_id, records, link_type="process_lineage", strength=strength)
     finalize_context(repo, "h1")
-    return [c for c in repo.candidates("h1") if c["rule_id"] == RULE and c["lane"] != "context"]
+    found = [c for c in repo.candidates("h1") if c["rule_id"] == RULE and c["lane"] != "context"]
+    for candidate in found:      # every finding cites what it states (counts, pids, times)
+        cited = [TypedEvent.model_validate(row["event"]) for row in repo.citation_events("h1", candidate["event_ids"])]
+        assert finding_problems(candidate["claim"], candidate["gate_results"]["_notes"], cited) == []
+    return found
 
 
 def test_two_anchors_reaching_one_burst_publish_one_finding_with_both_reaches():
