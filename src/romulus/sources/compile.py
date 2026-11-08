@@ -4,6 +4,12 @@ from __future__ import annotations
 import ipaddress
 import re
 
+from romulus.evidence.linux_catalog import (
+    LINUX_LOGICAL_DATASETS,
+    LINUX_SHIPPER_DATASETS,
+    dataset_selection,
+    shipper_names,
+)
 from romulus.sources.models import CompiledQuery, Predicate, SearchIntent
 from romulus.sources.profile import FieldContract
 from romulus.store.db import digest
@@ -55,7 +61,38 @@ def _pred_native(p: Predicate, native: str) -> dict:
     raise CompileError(f"unknown op {p.op}")
 
 
-_LINUX_HOST_DATASETS = frozenset({"linux.audit", "systemd.journal", "apache.access", "apache.error"})
+_LINUX_HOST_DATASETS = frozenset({*LINUX_LOGICAL_DATASETS, *shipper_names()})
+
+
+def _linux_datasets(p: Predicate, contract: FieldContract, natives: tuple[str, ...]) -> dict | None:
+    """A dataset predicate naming logical Linux datasets: any shipper shape of each, on every dataset field the
+    target maps (event.dataset and data_stream.dataset). Auditbeat's bare `auditd` also needs its event.module, and
+    a journald document that names no dataset is selected by input.type; a shape whose field the target cannot
+    search is left out (the sweep lists it as not assessed). None when the predicate names no logical dataset."""
+    if p.field != "event.dataset" or p.op not in {"eq", "in"}:
+        return None
+    values = [str(value) for value in (p.value if isinstance(p.value, list) else [p.value])]
+    if not any(value in LINUX_SHIPPER_DATASETS for value in values):
+        return None
+    direct = contract.fields.get("data_stream.dataset")
+    fields = [*natives, *(["data_stream.dataset"] if direct is not None and "in" in direct.ops
+                          and "data_stream.dataset" not in natives else [])]
+    plain, with_module, input_types, _unsearchable = dataset_selection(
+        values, module_searchable=contract.supports("event.module", "eq"),
+        input_type_searchable=contract.supports("input.type", "eq"))
+    if len(plain) > 1000:
+        raise CompileError("'in' needs a non-empty list of at most 1000 values")
+    clauses = [{"terms": {field: plain}} for field in fields] if plain else []
+    module = contract.spec("event.module")
+    for dataset, name in with_module:
+        clauses.append({"bool": {"filter": [
+            {"bool": {"should": [{"term": {field: dataset}} for field in fields], "minimum_should_match": 1}},
+            {"term": {module.native if module is not None else "event.module": name}}]}})
+    input_type = contract.spec("input.type")
+    for kind in input_types:
+        clauses.append({"bool": {"filter": [{"term": {input_type.native if input_type is not None else "input.type": kind}}],
+                                 "must_not": [{"exists": {"field": field}} for field in fields]}})
+    return clauses[0] if len(clauses) == 1 else {"bool": {"should": clauses, "minimum_should_match": 1}}
 
 
 def _intent_os_family(intent: SearchIntent) -> str | None:
@@ -75,6 +112,9 @@ def _pred(p: Predicate, contract: FieldContract, *, os_family: str | None = None
     if p.op not in spec.ops:
         raise CompileError(f"op {p.op!r} not supported on {p.field} ({spec.type}) with superset guarantee")
     natives = spec.natives or (spec.native,)
+    linux = _linux_datasets(p, contract, natives)
+    if linux is not None:
+        return linux
     if (
         p.op == "eq"
         and p.field in {"event.channel", "event.provider", "object.type"}

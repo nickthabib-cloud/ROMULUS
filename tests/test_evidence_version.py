@@ -47,7 +47,12 @@ PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf211
                    # Then normalize_hits may skip looking for lone surrogates in a batch whose every response was
                    # proved free of them (sources.es.surrogate_free): output is identical for every input.
                    14: "8d11cab49e970e0840b796080224e11d00b47edf37b78229108fa651f06bc3c3",
-                   15: "476048cddffe2557e45a3c71a2e1e0a5e8f878bc96d858ff15c095730aa11971"}
+                   15: "476048cddffe2557e45a3c71a2e1e0a5e8f878bc96d858ff15c095730aa11971",
+                   # Linux host records are read in every shipper's shape (Filebeat, Elastic Agent, Auditbeat,
+                   # journald fields, syslog lines) through linux_catalog's shape table; records rebuilt from a
+                   # shipper's parsed fields name their indexed paths and say so. The dev importer's records
+                   # normalize exactly as before (tests/test_throughput_equality.py's normalization goldens).
+                   16: "d23e8ae207bcddab2ce95303b88bd575d49387252873ab393de8ec742b9cc8a8"}
 WINDOWS_EVIDENCE_FILES = ("community.py", "windows.py", "windows_catalog.py", "windows_reassembly.py", "rpc_catalog.py")
 PINNED_WINDOWS = {
     "windows-ecs@17": "c022428db9afea396a8420febde66b10e3d934b2f1472732f22a9e29c60247d6",

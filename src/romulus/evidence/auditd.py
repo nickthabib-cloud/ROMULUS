@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
-_HEADER = re.compile(r"^(?:node=\S+\s+)?type=(?P<type>[A-Z_]+)\s+msg=audit\((?P<ts>[0-9.]+):(?P<serial>\d+)\):\s?"
+_HEADER = re.compile(r"^(?:node=(?P<node>\S+)\s+)?type=(?P<type>[A-Z_]+)\s+msg=audit\((?P<ts>[0-9.]+):(?P<serial>\d+)\):\s?"
                      r"(?P<body>.*)$", re.DOTALL)
 _HEX = re.compile(r"^[0-9A-Fa-f]+$")
 _ARG = re.compile(r"^a(\d+)(?:\[(\d+)\])?$")
@@ -78,6 +78,17 @@ class AuditRecord:
     fields: dict[str, str]
     raw_fields: dict[str, tuple[str, bool]] = field(default_factory=dict)
     enriched: dict[str, str] = field(default_factory=dict)   # after \x1d: UID="root" etc.
+    node: str | None = None                                  # the header's node= name, when the line has one
+    # For a record rebuilt from fields a shipper parsed (no raw line): the indexed path each key was read from.
+    origins: dict[str, str] | None = None
+    # Why the command line of a rebuilt EXECVE record is incomplete, beyond what its argument keys show.
+    argv_problem: str | None = None
+    # Keys whose value was decoded from hex although the shipper does not record whether it was hex-encoded.
+    hex_guessed: tuple[str, ...] = ()
+
+    @property
+    def reconstructed(self) -> bool:
+        return self.origins is not None
 
 
 def parse_record(line: str) -> AuditRecord:
@@ -94,7 +105,12 @@ def parse_record(line: str) -> AuditRecord:
         fields[k] = decode_value(v, q) if encodable else v
     enriched = {k: v for k, v, _ in _tokenize(enrich.strip())} if enrich else {}
     return AuditRecord(type=m.group("type"), ts=float(m.group("ts")), serial=int(m.group("serial")),
-                       fields=fields, raw_fields=raw, enriched=enriched)
+                       fields=fields, raw_fields=raw, enriched=enriched, node=m.group("node"))
+
+
+def is_audit_line(text) -> bool:
+    """Whether `text` is a raw audit record line (its header parses)."""
+    return isinstance(text, str) and _HEADER.match(text.partition("\x1d")[0].strip()) is not None
 
 
 AF_NAMES = {0: "unspec", 1: "local", 2: "inet", 10: "inet6", 16: "netlink", 17: "packet"}
@@ -314,7 +330,7 @@ def execve_argv(rec: AuditRecord) -> ExecveArgv:
             whole[idx] = decode_value(value, quoted)
         else:
             parts.setdefault(idx, {})[int(m.group(2))] = (value, quoted)
-    problems: list[str] = []
+    problems: list[str] = [rec.argv_problem] if rec.argv_problem else []
     present = set(whole) | set(parts) | set(lengths)
     if argc is None:
         problems.append(f"argc missing or not a number: {argc_text!r}")
@@ -342,3 +358,265 @@ def execve_argv(rec: AuditRecord) -> ExecveArgv:
             problems.append(problem)
             break
     return ExecveArgv(argv, "; ".join(problems) or None)
+
+
+# ---------------------------------------------------------------------------------------------
+# Records rebuilt from the fields a shipper parsed (Elastic Agent Auditd Logs without the raw line)
+# ---------------------------------------------------------------------------------------------
+#
+# The Auditd Logs integration's ingest pipeline (packages/auditd/data_stream/log/elasticsearch/ingest_pipeline/
+# default.yml and raw.yml) parses each record's key=value pairs into auditd.log.<key>, then moves some keys to ECS
+# fields. Fleet's final pipeline removes event.original unless the document is tagged preserve_original_event. A
+# record is rebuilt from auditd.log.* and the reverse of these moves; whatever the pipeline dropped stays absent.
+
+# The pipeline's renames of audit keys to ECS fields, in its order: (ECS path, audit key). A rename onto a field that
+# already holds a value fails and leaves the key in auditd.log, so a key still in auditd.log always wins.
+AGENT_ECS_MOVES = (
+    ("user.name", "acct"), ("user.name", "user"),
+    ("user.id", "uid"), ("user.group.id", "gid"), ("user.audit.group.id", "agid"), ("user.audit.id", "auid"),
+    ("user.filesystem.group.id", "fsgid"), ("user.filesystem.id", "fsuid"), ("user.effective.group.id", "egid"),
+    ("user.effective.id", "euid"), ("user.saved.group.id", "sgid"), ("user.saved.id", "suid"),
+    ("user.owner.group.id", "ogid"), ("user.owner.id", "ouid"),
+    ("process.name", "comm"), ("process.executable", "exe"), ("process.pid", "pid"), ("process.parent.pid", "ppid"),
+    ("process.exit_code", "exit"), ("process.working_directory", "cwd"), ("user.terminal", "terminal"),
+    ("source.address", "addr"), ("destination.address", "dst"),
+)
+# Record types whose acct the pipeline never renames to user.name (it is dropped with the other removed keys).
+AGENT_ACCT_KEPT_TYPES = frozenset({"ACCT_LOCK", "ACCT_UNLOCK", "ADD_USER", "DEL_USER", "USER_CHAUTHTOK", "USER_MGMT"})
+# Before the renames, the pipeline's ECS mapping script (generated from go-libaudit) copies identities for these
+# user-space record types: auid into user.id, acct/id/uid into user.effective, user.target or group, and the
+# enrichment's AUID/UID/ID names over them. For these types user.id and user.effective.* are not renamed keys.
+AGENT_COPY_TYPES = frozenset({
+    "ACCT_LOCK", "ACCT_UNLOCK", "ADD_GROUP", "ADD_USER", "CRED_ACQ", "CRED_DISP", "CRED_REFR", "DEL_GROUP",
+    "DEL_USER", "GRP_AUTH", "GRP_CHAUTHTOK", "GRP_MGMT", "LOGIN", "USER_ACCT", "USER_AUTH", "USER_CHAUTHTOK",
+    "USER_END", "USER_ERR", "USER_LOGIN", "USER_LOGOUT", "USER_MGMT", "USER_START",
+})
+# Where the copy put acct, per type: (ECS prefix, keys copied in preference to acct, enrichment key copied over it,
+# whether the AUID enrichment name is copied to user.name, so that acct's rename to user.name failed).
+_AGENT_ACCT_COPIES = {
+    **{kind: ("user.effective", (), None, False) for kind in (
+        "CRED_ACQ", "CRED_DISP", "CRED_REFR", "USER_ACCT", "USER_AUTH", "USER_END", "USER_ERR", "USER_LOGIN")},
+    **{kind: ("user.effective", (), "UID", True) for kind in ("USER_START", "USER_LOGOUT")},
+    **{kind: ("user.target", ("id",), "ID", True) for kind in ("ADD_USER", "DEL_USER", "ACCT_LOCK", "ACCT_UNLOCK")},
+    "USER_CHAUTHTOK": ("user.target", (), "ID", True), "USER_MGMT": ("user.target", (), None, False),
+    "ADD_GROUP": ("group", ("id",), "ID", True), "DEL_GROUP": ("group", ("id",), "ID", True),
+    "GRP_CHAUTHTOK": ("group", (), None, False),
+}
+_COPY_SKIPPED = {None, "", "?", "unset"}
+# host.architecture back to the audit arch token. The pipeline names only x86_64 and keeps any other arch as the
+# header's hex token; a pre-parsed record (and Auditbeat) uses go-libaudit's names.
+AGENT_ARCH_TOKENS = {"x86_64": "c000003e", "aarch64": "c00000b7", "i386": "40000003", "i686": "40000003",
+                     "arm": "40000028", "armv7l": "40000028", "ppc64le": "c0000015", "ppc64": "80000015",
+                     "s390x": "80000016"}
+_ARCH_TOKEN = re.compile(r"^[0-9a-fA-F]{8}$")
+# The pipeline decodes a hex value of these keys only when the text holds a control character, space or quote; text
+# whose only reason for hex was a byte above 0x7e stays hex.
+_AGENT_HEX_KEYS = {"exe", "cmd", "data", "path", "comm", "file", "name", "watch", "cwd", "acct", "dir", "proctitle",
+                   "grp", "new_group", "root_dir", "sw", "device", "cgroup", "profile", "operation", "info", "vm"}
+_TRUNCATED_ARGS = re.compile(r"^\[\.\.\. (\d+) truncated arguments \.\.\.\]$")
+_SKIPPED_LOG_KEYS = {"record_type", "sequence", "node", "kv", "sub_kv", "sub_kv_enriched", "epoch", "copy",
+                     "original_field"}
+_EXECVE_KEY = re.compile(r"^(?:a\d+.*|argc)$")
+
+
+def _dig(source: dict, path: str):
+    cur = source
+    for part in path.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return None
+        cur = cur[part]
+    return cur
+
+
+def _text(value) -> str | None:
+    """A parsed scalar as the audit record wrote it: booleans as yes/no, numbers as decimal text."""
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list) and len(value) == 1:
+        return _text(value[0])
+    return None
+
+
+def _hex_left(value: str, *, any_reason: bool) -> str | None:
+    """The text of a value the shipper may have left hex-encoded, else None. It is decoded only when auditd would
+    have encoded that text: with `any_reason` for any reason auditd encodes (a control character, space, quote, DEL
+    or a byte above 0x7e), else only for a byte above 0x7e (the pipeline already decoded the others)."""
+    if not value or len(value) % 2 or not _HEX.match(value):
+        return None
+    try:
+        text = bytes.fromhex(value).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return None
+    controls = any(ord(char) < 0x21 or char == '"' or ord(char) == 0x7f for char in text)
+    high = any(ord(char) > 0x7e for char in text)
+    if any_reason:
+        return text if controls or high else None
+    return text if high and not controls else None
+
+
+def syscall_number(name: str, arch: str) -> str | None:
+    """The number of a socket, module or file call named `name` on an audit arch (None when the tables lack it)."""
+    from romulus.evidence.linux_catalog import MODULE_SYSCALLS
+    for table in (SOCKET_SYSCALLS.get(arch) or {}, MODULE_SYSCALLS.get(arch) or {}):
+        for number, call in table.items():
+            if call == name:
+                return str(number)
+    for number, file_call in (FILE_SYSCALLS.get(arch) or {}).items():
+        if file_call.name == name:
+            return str(number)
+    return None
+
+
+def _arch_token(value) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    if _ARCH_TOKEN.match(value):
+        return value.lower()
+    return AGENT_ARCH_TOKENS.get(value.lower())
+
+
+def _epoch(value) -> float:
+    from datetime import UTC, datetime
+    if not isinstance(value, str) or not value:
+        raise AuditParseError("rebuilt audit record without @timestamp")
+    try:
+        when = datetime.fromisoformat(value)
+    except ValueError as e:
+        raise AuditParseError(f"rebuilt audit record @timestamp is not ISO-8601: {value!r}") from e
+    return (when if when.tzinfo else when.replace(tzinfo=UTC)).timestamp()
+
+
+def record_from_agent_fields(source: dict) -> AuditRecord:
+    """Rebuild one audit record from the fields the Elastic Agent Auditd Logs pipeline parsed (see above).
+
+    `type` is auditd.log.record_type (else the lower-case record type in event.action), `ts` the header epoch the
+    pipeline wrote to @timestamp (milliseconds), `serial` auditd.log.sequence. Lower-case auditd.log keys are
+    fields, upper-case ones the enrichment. The ECS moves are reversed; EXECVE arguments come from process.args.
+    `origins` names the indexed path of every key. A SYSCALL record whose arch is not known is refused: its call
+    numbers cannot be read without it. Raises AuditParseError."""
+    log = _dig(source, "auditd.log")
+    if not isinstance(log, dict):
+        raise AuditParseError("no auditd.log fields")
+    rtype = log.get("record_type")
+    action = _dig(source, "event.action")
+    if not (isinstance(rtype, str) and rtype) and isinstance(action, str) and re.fullmatch(r"[a-z_]+", action):
+        rtype = action.upper()
+    if not (isinstance(rtype, str) and re.fullmatch(r"[A-Z_]+", rtype)):
+        raise AuditParseError("rebuilt audit record has no record type")
+    sequence = _text(log.get("sequence"))
+    if sequence is None or not sequence.isascii() or not sequence.isdigit():
+        raise AuditParseError("rebuilt audit record has no sequence number")
+    ts = round(_epoch(_dig(source, "@timestamp")), 3)
+    fields: dict[str, str] = {}
+    enriched: dict[str, str] = {}
+    origins: dict[str, str] = {}
+    guessed: list[str] = []
+    for key, value in log.items():
+        if key in _SKIPPED_LOG_KEYS or (rtype == "EXECVE" and _EXECVE_KEY.match(key)):
+            continue
+        text = _text(value)
+        if text is None:
+            continue
+        if key.isupper():
+            enriched[key] = text
+            continue
+        if key in _AGENT_HEX_KEYS and (decoded := _hex_left(text, any_reason=False)) is not None:
+            text = decoded
+            guessed.append(key)
+        fields[key] = text
+        origins[key] = f"auditd.log.{key}"
+    copied = rtype in AGENT_COPY_TYPES
+    for path, key in AGENT_ECS_MOVES:
+        if key in fields or key in ("acct", "user"):
+            continue        # user.name may hold either, or the enrichment's UID name: acct is read below
+        if copied and path in ("user.id", "user.effective.id") and not (
+                key == "uid" and rtype != "LOGIN" and _dig(source, "user.audit.id") is None):
+            # a copy may have set it; uid is the renamed key only when no auid was there to be copied
+            continue
+        if key == "exe" and rtype == "EXECVE":
+            continue        # the pipeline sets process.executable to the first argument
+        text = _text(_dig(source, path))
+        if text is not None:
+            fields[key] = text
+            origins[key] = path
+    if "acct" not in fields and (acct := _agent_acct(source, log, rtype)) is not None:
+        fields["acct"], origins["acct"] = acct
+    outcome = _dig(source, "event.outcome")
+    if "res" not in fields and outcome in ("success", "failure"):
+        fields["res"] = "success" if outcome == "success" else "failed"
+        origins["res"] = "event.outcome"
+    arch = _arch_token(_dig(source, "host.architecture"))
+    if arch is None and "arch" in fields:
+        arch = _arch_token(fields["arch"])     # a pre-parsed record keeps its arch in auditd.log
+    if arch is not None:
+        fields["arch"] = arch
+        origins.setdefault("arch", "host.architecture")
+    if rtype == "SYSCALL":
+        if arch is None:
+            raise AuditParseError(f"SYSCALL record with an unknown architecture "
+                                  f"({_dig(source, 'host.architecture')!r}): its call cannot be read")
+        number = fields.get("syscall", "")
+        if number and not number.isdigit():
+            mapped = syscall_number(number, arch)
+            if mapped is not None:
+                fields["syscall"] = mapped
+    raw = {key: (value, True) for key, value in fields.items()}
+    argv_problem = _agent_execve(source, raw, fields, origins, guessed) if rtype == "EXECVE" else None
+    return AuditRecord(type=rtype, ts=ts, serial=int(sequence), fields=fields, raw_fields=raw, enriched=enriched,
+                       node=_text(log.get("node")), origins=origins, argv_problem=argv_problem,
+                       hex_guessed=tuple(guessed))
+
+
+def _agent_acct(source: dict, log: dict, rtype: str) -> tuple[str, str] | None:
+    """(acct, the path it was read from) when the pipeline left it recoverable, else None. The identity copy puts
+    acct in user.effective, user.target or group (by type) unless a key it prefers, or the enrichment's name,
+    took that place; otherwise acct was renamed to user.name, unless the enrichment's AUID name was copied there
+    first. user.name equal to the enrichment's UID name may be that name and not acct."""
+    copy = _AGENT_ACCT_COPIES.get(rtype)
+    if copy is not None:
+        prefix, before, override, auid_named = copy
+        name = _text(_dig(source, f"{prefix}.name"))
+        if (name is not None and all(log.get(key) in _COPY_SKIPPED for key in before)
+                and (override is None or log.get(override) in _COPY_SKIPPED)):
+            return name, f"{prefix}.name"
+        if auid_named and log.get("AUID") not in _COPY_SKIPPED:
+            return None
+    if rtype in AGENT_ACCT_KEPT_TYPES:
+        return None
+    name = _text(_dig(source, "user.name"))
+    uid_name = log.get("UID")
+    if name is None or (uid_name not in _COPY_SKIPPED and uid_name == name):
+        return None
+    return name, "user.name"
+
+
+def _agent_execve(source: dict, raw: dict, fields: dict, origins: dict, guessed: list[str]) -> str | None:
+    """EXECVE arguments from process.args: a0.. in order, or aN.. after the pipeline's marker for a record whose
+    head (with argc) was lost. A split argument's chunks become separate elements there, and an argument auditd
+    hex-encoded stays hex; such a value is decoded when auditd would have encoded its text."""
+    args = _dig(source, "process.args")
+    count = _text(_dig(source, "process.args_count"))
+    if isinstance(args, str):
+        args = [args]
+    if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
+        return "process.args missing or not a list of strings"
+    first, problem = 0, None
+    if args and (marker := _TRUNCATED_ARGS.match(args[0])):
+        first, args = int(marker.group(1)), args[1:]
+        problem = f"the shipper recorded only the arguments from a{first} on"
+    elif count is not None and count.isascii() and count.isdigit():
+        raw["argc"] = (count, True)
+        fields["argc"], origins["argc"] = count, "process.args_count"
+    for offset, arg in enumerate(args):
+        key = f"a{first + offset}"
+        decoded = _hex_left(arg, any_reason=True)
+        if decoded is not None:
+            arg = decoded
+            guessed.append(key)
+        raw[key] = (arg, True)
+        fields[key], origins[key] = arg, "process.args"
+    return problem

@@ -33,6 +33,14 @@ from romulus.detect.netdef import DIRECTION_ASSUMED_REASON
 from romulus.detect.observed import observation
 from romulus.detect.registry import bind_windows_site, fresh_pack
 from romulus.errors import SourceError
+from romulus.evidence.linux_catalog import (
+    LINUX_LOGICAL_DATASETS,
+    LINUX_SHIPPER_DATASETS,
+    LOGICAL_FAMILIES,
+    dataset_selection,
+    logical_of,
+    shipper_names,
+)
 from romulus.evidence.normalize import (
     BOOT_FILL_FAMILIES,
     BOOT_INTERVAL_ORIGIN,
@@ -82,7 +90,8 @@ MAX_WINDOWS_CONTINUITY_COLLISION_RECORDS = 1_024
 BASELINE_TOKEN_ROWS_PER_HUNT = 500_000
 # planned cells are written before any partition runs, this many partitions per transaction
 PLANNED_CHUNK = 500
-LINUX_HOST_DATASETS = ("linux.audit", "systemd.journal", "apache.access", "apache.error")
+# The logical Linux datasets (linux_catalog.LINUX_SHIPPER_DATASETS names the shipper datasets each one reads).
+LINUX_HOST_DATASETS = LINUX_LOGICAL_DATASETS
 HOST_DATASETS = [*LINUX_HOST_DATASETS, *WINDOWS_HOST_DATASETS]
 NET_FAMILIES ={"net_alert", "net_flow", "dns_query", "http_tx", "file_transfer", "tls_session", "ssh_session"}
 # linux.audit now also yields `auth` (USER_LOGIN/USER_START), so an unparseable audit group may hide one.
@@ -90,17 +99,17 @@ NET_FAMILIES ={"net_alert", "net_flow", "dns_query", "http_tx", "file_transfer",
 # an exec, socket or file record of that event and carries the whole audit family set.
 _AUDIT_ADMIN = {"account_change", "service_change", "audit_config", "system_state"}
 LINUX_DATASET_FAMILIES = {
-    "linux.audit": {"process_exec", "net_socket", "auth", "file_change", "file_access", "kernel_module", "process_observed"} | _AUDIT_ADMIN,
+    **{logical: set(families) for logical, families in LOGICAL_FAMILIES.items()},
     "linux.audit.socket": {"net_socket", "process_observed"},
     "linux.audit.file": {"file_change", "file_access", "process_observed"},
     "linux.audit.module": {"kernel_module", "process_observed"},
     "linux.audit.observed": {"process_observed"},
     "linux.audit.auth": {"process_exec", "net_socket", "auth", "file_change", "file_access", "kernel_module", "process_observed"} | _AUDIT_ADMIN,
     "linux.audit.admin": _AUDIT_ADMIN,
+    # a shipper's dataset name feeds the families of its logical dataset (a profile's inventory lists these names)
+    **{name: set(LOGICAL_FAMILIES[logical_of(name)]) for name in shipper_names()
+       if name not in LOGICAL_FAMILIES},
     "arkime.session": {"net_session"},
-    "systemd.journal": {"auth", "privilege_use", "service_change"},
-    "apache.access": {"http_access"},
-    "apache.error": {"web_error"},
     **{f"suricata.eve.{event_type}": NET_FAMILIES for event_type in (
         "alert", "flow", "netflow", "dns", "http", "fileinfo", "tls", "ssh",
     )},
@@ -485,10 +494,36 @@ class Sweep:
             if contract.os_family == "windows":
                 return []
             datasets = LINUX_HOST_DATASETS
-            # recorded so the report can list the target's other datasets as not assessed
-            self.stats.setdefault("dataset_filter", {})[target] = list(datasets)
+            plain, with_module, _inputs, unsearchable = dataset_selection(
+                datasets, module_searchable=contract.supports("event.module", "eq"),
+                input_type_searchable=contract.supports("input.type", "eq"))
+            # recorded so the report can list the target's other datasets as not assessed: every shipper dataset
+            # name the query selects on this target (it expands each logical dataset to its shapes when compiled)
+            self.stats.setdefault("dataset_filter", {})[target] = [
+                *plain, *(name for name, _module in with_module if name not in plain)]
+            self._note_linux_shapes(target, datasets, unsearchable)
             return [Predicate(field="event.dataset", op="in", value=list(datasets))]
         return []
+
+    def _note_linux_shapes(self, target: str, datasets, unsearchable: list[str]) -> None:
+        """Record, once per target, which shipper shapes of the Linux datasets the target's inventory holds (with
+        their counts) and which shapes it cannot search (a field the shape needs is not searchable): those are not
+        assessed, never read as having no records."""
+        if target in self.stats.get("linux_shipper_inventory", {}):
+            return
+        if getattr(self, "_profiles", None) is None and hasattr(getattr(self, "repo", None), "source_profiles"):
+            self._profiles = self.repo.source_profiles(self.hunt_id)
+        inventory = ((getattr(self, "_profiles", None) or {}).get(target) or {}).get("datasets") or {}
+        present: dict[str, dict[str, int]] = {}
+        for logical in datasets:
+            for shape in LINUX_SHIPPER_DATASETS.get(logical, ()):
+                if shape.dataset is not None and shape.dataset in inventory:
+                    present.setdefault(logical, {})[shape.dataset] = inventory[shape.dataset]
+        self.stats.setdefault("linux_shipper_inventory", {})[target] = present
+        if unsearchable:
+            self.stats.setdefault("linux_shapes_not_assessed", {})[target] = [
+                f"{key}: not searchable on this target (the field this shape is selected by is not mapped)"
+                for key in unsearchable]
 
     def _any_of_for(self, target: str, contract: FieldContract | None = None) -> list[list[Predicate]]:
         """Select only normalized source shapes while preserving each target's other known datasets."""
@@ -1768,9 +1803,15 @@ class Sweep:
             return
         malformed_text: dict[str, list[str]] = {}
         skip_families: dict[str, frozenset[str] | None] = {}
+        shapes: dict[str, int] = {}
         events, skips, errors = normalize_hits(out.records, self.boots, malformed_text=malformed_text,
                                                skip_families=skip_families, rpc_remote_only=True, contract=contract,
-                                               surrogate_free=out.surrogate_free)
+                                               surrogate_free=out.surrogate_free, shapes=shapes)
+        if shapes:
+            # the Linux shipper shapes read, by target (one count per shape: bounded by the shape table)
+            seen = self.stats.setdefault("linux_shapes", {}).setdefault(target, {})
+            for key, count in shapes.items():
+                seen[key] = seen.get(key, 0) + count
         if errors:
             self._note_zeek_inventory_gap(target,contract,[f"{len(errors)} record normalization failures"])
         if malformed_text:
