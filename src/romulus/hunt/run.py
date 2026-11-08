@@ -247,6 +247,8 @@ def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
         reasons.append(f"baseline stage {baseline_status}: source, staging, or execution failure")
     if expansion_summary and expansion_summary.get("stop_reason"):
         reasons.append(f"expansion: {expansion_summary['stop_reason']}")
+    # Retain the legacy report projection alongside the richer AI-specific summary.
+    repo.audit("system", "hunt.agent_summary", hunt_id, agent_summary, owner_token=owner_token)
     state = "partial" if partial else "completed_within_scope"
     repo.set_hunt_state(
         hunt_id, state, owner_token=owner_token,

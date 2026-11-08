@@ -405,7 +405,7 @@ def test_migration_head_leaves_stored_candidates_about_every_record_they_cite(tm
     engine = make_engine(tmp_path / "candidate-context.db")
     with engine.begin() as connection:
         cfg = _alembic_config(connection)
-        assert ScriptDirectory.from_config(cfg).get_heads() == ["0034"]
+        assert ScriptDirectory.from_config(cfg).get_heads() == ["0035"]
         command.upgrade(cfg, "0016")
         connection.exec_driver_sql(
             "INSERT INTO hunt (id, created_at, created_by, manifest, manifest_digest, execution_state) "
@@ -431,14 +431,13 @@ def test_0010_through_0012_round_trip_agent_link_without_prior_scheduler_anchor(
             id="h1", created_at=T0, created_by="test", manifest={}, manifest_digest="d",
             execution_state="planned",
         ))
-        connection.execute(schema.candidate.insert().values(
-            id="finding-agent", hunt_id="h1", rule_id="host.test", rule_version="1",
-            claim="agent-found direct match", claim_type="observed_action", event_ids=[],
-            predicate_fields=[], entities=[], ts=T0, severity="high", confidence="high",
-            lane="high", priority=80.0, priority_reasons=[], gate_results={},
-            benign_alternatives=[], next_checks=[], group_key="", source_case_id="case-1",
-            source_anchor_id=None, source_link_id="link-agent", created_at=T0,
-        ))
+        connection.exec_driver_sql(
+            "INSERT INTO candidate (id,hunt_id,rule_id,rule_version,claim,claim_type,event_ids,predicate_fields,"
+            "entities,ts,severity,confidence,lane,priority,priority_reasons,gate_results,benign_alternatives,"
+            "next_checks,group_key,source_case_id,source_anchor_id,source_link_id,created_at) VALUES "
+            "('finding-agent','h1','host.test','1','agent-found direct match','observed_action','[]','[]','[]',"
+            "'2026-01-01','high','high','high',80.0,'[]','{}','[]','[]','','case-1',NULL,'link-agent','2026-01-01')",
+        )
         connection.execute(schema.expansion_link.insert().values(
             id="link-agent", hunt_id="h1", anchor_id="finding-agent",
             link_type="agent_process_lineage", window_label="case window",

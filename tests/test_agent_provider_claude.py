@@ -429,11 +429,12 @@ def test_past_the_per_request_strict_limits_tools_go_loose_and_a_response_schema
     many = [Tool(f"t{n}", "x", TOOL.parameters) for n in range(21)]
     ep = Endpoint(reply([text("hi")]))
     p, _ = provider(claude_settings(), ep)
-    assert p.chat(ask(tools=many)).ok and not any(t["strict"] for t in ep.body()["tools"])
+    assert p.chat(ask(tools=many)).ok
+    assert sum(t["strict"] for t in ep.body()["tools"]) == 20
     optional = {"type": "object", "properties": {f"p{n}": {"type": "string"} for n in range(25)}, "required": [],
                 "additionalProperties": False}
     assert p.chat(ask(tools=[Tool("wide", "x", optional), TOOL])).ok
-    assert not any(t["strict"] for t in ep.body()["tools"])
+    assert {t["name"]: t["strict"] for t in ep.body()["tools"]} == {"wide": False, "report_status": True}
     result = p.chat(ask(response_schema=optional))
     assert result.status == "error" and "optional parameters" in result.error and len(ep.calls) == 2
 

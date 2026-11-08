@@ -249,7 +249,7 @@ def test_native_scale4_releases_use_global_room_without_poisoning_later_findings
     # Shared state retains prior groups and restores SSH/login findings plus alert-linked context.
     # The alert keeps its computed HIGH lane with explicit partial citation coverage at this physical cap.
     assert len(snapshot["candidates"]) == 60
-    assert fixture.digests(snapshot)["candidates"] == (
+    assert fixture.m5_golden_digests(snapshot)["candidates"] == (
         "5fc467a32a42d9e11ecd0954acd754cbc082de9b183fa95b765bcacd1ec99377")
     assert any(row["rule_id"] == "host.shell_spawned_by_connected_process" and row["event_ids"]
                for row in snapshot["candidates"])

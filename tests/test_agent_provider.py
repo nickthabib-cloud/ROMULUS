@@ -749,8 +749,8 @@ def test_readiness_errors_never_stop_a_finished_hunt(tmp_path, monkeypatch):
     repo = hunt_run.open_repo(s)
     repo.create_hunt("h1", {"window": {}, "targets": []}, "d", "test")
     assert hunt_run.ai_agent_entry(s)["state"] == "blocked"
-    summary = hunt_run._ai_agent_phase(s, repo, "h1", {"ai_agent": {"requested": True}}, None)
-    assert summary["status"] == "blocked" and "unexpected" in summary["reason"]
+    summary = hunt_run._ai_agent_phase(s, repo, "h1", {"ai_agent": {"requested": True}}, None, None, {})
+    assert summary["status"] == "skipped" and "unexpected" in summary["reason"]
 
 
 def test_environment_proxies_are_never_used(monkeypatch):

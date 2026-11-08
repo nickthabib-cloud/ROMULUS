@@ -221,7 +221,7 @@ def test_later_lead_member_and_fresh_replay_cannot_demote_a_published_high():
     repo = _repo()
     metadata = dict(row(), lane='high', activation_reason='Mission-approved behavior')
     owner = SigmaRule(metadata)
-    replay = SigmaRule(dict(metadata, lane='lead', activation_reason=''))
+    second_owner = SigmaRule(dict(metadata, lane='lead', activation_reason=''))
     try:
         for match in owner.consume([process(0), process(1)]):
             publish_match(repo, 'h1', owner, match, None, {'net/'+event.id: {} for event in match.events})
@@ -229,14 +229,14 @@ def test_later_lead_member_and_fresh_replay_cannot_demote_a_published_high():
         for match in owner.consume([process(2)]):
             assert match.proposed_lane == 'high'
             publish_match(repo, 'h1', owner, match, None, {'net/'+event.id: {} for event in match.events})
-        for match in replay.consume([process(0)]):
-            publish_match(repo, 'h1', replay, match, None, {'net/'+event.id: {} for event in match.events})
+        for match in second_owner.consume([process(0)]):
+            publish_match(repo, 'h1', second_owner, match, None, {'net/'+event.id: {} for event in match.events})
         [candidate] = repo.candidates('h1')
         assert candidate['lane'] == 'high'
         assert candidate['gate_results']['aggregate_summary']['count'] == 3
     finally:
         owner.close_spill()
-        replay.close_spill()
+        second_owner.close_spill()
         repo.engine.dispose()
 
 

@@ -38,6 +38,37 @@ def _table(connection, name, *columns, constraints=()):
     connection.exec_driver_sql(f"CREATE INDEX ix_{name}_hunt_id ON {name} (hunt_id)")
 
 
+def _change_candidate(connection, *, downgrade):
+    guarded = connection.dialect.name == "sqlite" and connection.exec_driver_sql("PRAGMA foreign_keys").scalar()
+    if guarded:
+        # Direct Alembic callers can have FK enforcement enabled. Rebuilding candidate fires ON DELETE CASCADE
+        # on these children, so preserve them across the swap and defer the remaining candidate references.
+        if not connection.connection.driver_connection.in_transaction:
+            connection.exec_driver_sql("BEGIN")
+        deferred = connection.exec_driver_sql("PRAGMA defer_foreign_keys").scalar()
+        connection.exec_driver_sql("PRAGMA defer_foreign_keys=ON")
+        for table in ("candidate_host", "zeek_link_budget"):
+            connection.exec_driver_sql(f"CREATE TEMP TABLE agent_candidate_{table} AS SELECT * FROM {table}")
+    with op.batch_alter_table("candidate", recreate="always") as batch:
+        if downgrade:
+            batch.drop_constraint("ck_candidate_provenance", type_="check")
+            batch.drop_column("agent_hypothesis_id")
+            batch.drop_column("provenance")
+        else:
+            batch.add_column(Column("provenance", String, nullable=False, server_default="deterministic"))
+            batch.add_column(Column("agent_hypothesis_id", String,
+                                    ForeignKey("agent_hypothesis.id", name="fk_candidate_agent_hypothesis")))
+            batch.create_check_constraint("ck_candidate_provenance", "provenance IN ('deterministic','agent')")
+    if guarded:
+        for table in ("candidate_host", "zeek_link_budget"):
+            connection.exec_driver_sql(f"INSERT INTO {table} SELECT * FROM agent_candidate_{table}")
+            connection.exec_driver_sql(f"DROP TABLE agent_candidate_{table}")
+        if connection.exec_driver_sql("PRAGMA foreign_key_check").first() is not None:
+            raise RuntimeError("Agent migration left invalid foreign-key references")
+        if not deferred:
+            connection.exec_driver_sql("PRAGMA defer_foreign_keys=OFF")
+
+
 def upgrade():
     connection = _begin()
     _table(connection, "agent_run",
@@ -83,13 +114,7 @@ def upgrade():
     # SQLite can add a nullable FK column without rebuilding the populated call ledger.
     with op.batch_alter_table("model_call") as batch:
         batch.add_column(Column("session_id", String, ForeignKey("agent_session.id", name="fk_model_call_session")))
-    with op.batch_alter_table("candidate", recreate="always") as batch:
-        batch.add_column(Column("provenance", String, nullable=False, server_default="deterministic"))
-        batch.add_column(Column("agent_hypothesis_id", String,
-                                ForeignKey("agent_hypothesis.id", name="fk_candidate_agent_hypothesis")))
-        batch.create_check_constraint(
-            "ck_candidate_provenance", "provenance IN ('deterministic','agent')",
-        )
+    _change_candidate(connection, downgrade=False)
 
     # SQLite rebuilds this table for its CHECK change. Alembic's batch copy preserves the rows and index.
     with op.batch_alter_table("agent_alias", recreate="always") as batch:
@@ -185,10 +210,7 @@ def downgrade():
         batch.create_check_constraint("ck_agent_alias_kind", "kind IN ('F','I','E','N','L')")
         batch.drop_index("ix_agent_alias_hunt_kind")
     op.create_index("ix_agent_alias_hunt_kind", "agent_alias", ["hunt_id", "kind"])
-    with op.batch_alter_table("candidate", recreate="always") as batch:
-        batch.drop_constraint("ck_candidate_provenance", type_="check")
-        batch.drop_column("agent_hypothesis_id")
-        batch.drop_column("provenance")
+    _change_candidate(connection, downgrade=True)
     with op.batch_alter_table("model_call") as batch:
         batch.drop_column("session_id")
     for name in ("agent_session", "agent_hypothesis", "agent_run"):

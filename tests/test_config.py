@@ -38,7 +38,7 @@ def test_invalid_agent_default_is_rejected():
         Settings(agent_default="invented")
 
 
-def test_leftover_agent_mode_env_is_warned_and_ignored(caplog):
+def test_removed_agent_env_setting_is_warned_and_ignored(caplog):
     settings = load_settings(environ={"AGENT_MODE": "deterministic"})
     assert settings.agent_default == "on"
     assert "AGENT_MODE is deprecated and ignored" in caplog.text

@@ -4,7 +4,7 @@ from zipfile import ZipFile
 
 import pytest
 from alembic import command
-from sqlalchemy import event, inspect
+from sqlalchemy import MetaData, Table, event, inspect
 
 from romulus.detect.bounded import CitationUnavailable
 from romulus.detect.citing import citation_group
@@ -79,9 +79,11 @@ def test_nullable_time_migration_preserves_candidate_dependents(tmp_path):
         command.upgrade(_alembic_config(conn), "0028")
     with source.engine.connect() as src, engine.begin() as dst:
         for table in (t.hunt, t.raw_record, t.typed_event, t.candidate, t.candidate_host, t.expansion_anchor):
-            rows = [dict(row) for row in src.execute(table.select()).mappings()]
+            target_columns = {column["name"] for column in inspect(dst).get_columns(table.name)}
+            rows = [{key: value for key, value in dict(row).items() if key in target_columns}
+                    for row in src.execute(table.select()).mappings()]
             if rows:
-                dst.execute(table.insert(), rows)
+                dst.execute(Table(table.name, MetaData(), autoload_with=dst).insert(), rows)
     migrate(engine)
     with engine.connect() as conn:
         assert conn.exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
@@ -157,7 +159,7 @@ def test_nullable_time_downgrade_refuses_to_drop_untimed_positive(tmp_path, acti
     assert Repo(engine).candidate(candidate["id"])["ts"] is None
     with engine.connect() as conn:
         assert conn.exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
-        assert conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one() == "0034"
+        assert conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one() == "0035"
         assert conn.exec_driver_sql("PRAGMA foreign_key_check").all() == []
 
 
@@ -211,5 +213,5 @@ def test_visibility_migration_successful_downgrade_and_upgrade(tmp_path):
     migrate(engine)
     assert "report_zeek_visibility" in inspect(engine).get_table_names()
     with engine.connect() as conn:
-        assert conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one() == "0034"
+        assert conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one() == "0035"
         assert conn.exec_driver_sql("PRAGMA foreign_key_check").all() == []

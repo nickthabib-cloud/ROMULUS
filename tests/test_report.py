@@ -6,7 +6,13 @@ from datetime import UTC, datetime, timedelta
 from romulus.decide.policy import decide
 from romulus.detect import host
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
-from romulus.report.manifest import _content_candidate_key, canonical_manifest, publish_revision
+from romulus.report.manifest import (
+    LEGACY_AGENT_MODE_KEY,
+    _ai_agent,
+    _content_candidate_key,
+    canonical_manifest,
+    publish_revision,
+)
 from romulus.report.markdown import fence, outcome_sentence, render
 from romulus.store.db import make_engine, migrate
 from romulus.store.repo import Repo
@@ -18,7 +24,7 @@ def _repo_with_finding(claim_suffix="", *, hunt_id="h1"):
     e = make_engine(":memory:")
     migrate(e)
     repo = Repo(e)
-    manifest = {"style": "broad", "agent_mode": "model",
+    manifest = {"style": "broad", "ai_agent": {"requested": True},
                 "window": {"start": "2024-11-18T10:00:00+00:00", "end": "2024-11-18T17:30:00+00:00"},
                 "original_input": {}, "targets": ["idx"], "pack": {"version": "p"}, "normalizer": "n",
                 "policy": "d", "model": {}, "romulus_version": "0"}
@@ -48,6 +54,13 @@ def _repo_with_finding(claim_suffix="", *, hunt_id="h1"):
     return repo, d.candidate_id
 
 
+def test_pre_m6_manifest_remains_readable():
+    repo, _ = _repo_with_finding()
+    legacy = {"window": {}, "targets": [], LEGACY_AGENT_MODE_KEY: "off"}
+    repo.create_hunt("legacy-agent-mode", legacy, "d", "test")
+    assert _ai_agent(repo, "legacy-agent-mode", legacy)["requested"] is False
+
+
 def test_canonical_manifests_are_byte_identical_across_hunt_ids():
     first_repo, first_id = _repo_with_finding(hunt_id="hunt-one")
     second_repo, second_id = _repo_with_finding(hunt_id="hunt-two")
@@ -59,6 +72,56 @@ def test_canonical_manifests_are_byte_identical_across_hunt_ids():
     assert first == second
     assert "hunt-one" not in first
     assert "hunt-two" not in second
+
+
+def test_agent_outputs_change_only_the_separate_canonical_ai_projection():
+    from romulus.store.db import utcnow
+
+    repo, finding_id = _repo_with_finding()
+    before = canonical_manifest(repo, "h1", "test")
+    now = utcnow()
+    repo.save_agent_session({"id": "as-agent", "hunt_id": "h1", "hypothesis_id": None,
+                             "purpose": "investigate", "state": "finished", "tool_calls": 0,
+                             "summary": "Review complete.", "started_at": now, "ended_at": now})
+    repo.create_agent_hypothesis({
+        "id": "hyp-agent", "hunt_id": "h1", "statement": "Review the deterministic finding hypothesis",
+        "techniques": [], "entity_ids": [], "status": "open", "confidence": "low", "questions": [],
+        "created_session_id": "as-agent", "sessions_run": 1, "created_at": now, "updated_at": now,
+    }, {"id": "he-agent", "hunt_id": "h1", "hypothesis_id": "hyp-agent", "session_id": "as-agent",
+        "kind": "opened", "payload": {"by": "test"}, "created_at": now})
+    repo.save_candidate({
+        "id": "agent-candidate", "hunt_id": "h1", "rule_id": "agent.finding", "rule_version": "1",
+        "claim": "An AI proposed a cited process execution hypothesis", "claim_type": "observed_action",
+        "event_ids": ["ev1"], "context_event_ids": [], "predicate_fields": [], "entities": [], "ts": T,
+        "severity": "high", "confidence": "low", "lane": "high", "priority": 1.0,
+        "priority_reasons": ["AI-generated proposal"], "gate_results": {}, "benign_alternatives": [],
+        "next_checks": [], "group_key": "agent", "source_case_id": None, "source_anchor_id": None,
+        "source_link_id": None, "provenance": "agent", "agent_hypothesis_id": "hyp-agent",
+    })
+    repo.save_agent_output("agent_link", {
+        "id": "alink-agent", "hunt_id": "h1", "session_id": "as-agent", "hypothesis_id": "hyp-agent",
+        "from_kind": "finding", "from_id": finding_id, "to_kind": "finding", "to_id": finding_id,
+        "relation": "related", "cites": [{"kind": "E", "id": "ev1"}],
+        "rationale": "A proposed relationship for analyst review.", "created_at": now,
+    })
+    repo.save_agent_output("agent_note", {
+        "id": "an-agent", "hunt_id": "h1", "session_id": "as-agent", "target_kind": "finding",
+        "target_id": finding_id, "text": "A bounded AI note.", "cites": [{"kind": "E", "id": "ev1"}],
+        "suspicious_content": False, "created_at": now,
+    })
+    repo.save_agent_assessment({
+        "id": "aa-agent", "hunt_id": "h1", "revision": 1, "source": "agent",
+        "model": {"provider": "scripted", "model_requested": "scripted-model"},
+        "body": {"overall": [], "key_steps": [], "confidence": {"overall": "low", "reasons": []},
+                 "alternatives": [], "gaps": [], "next_checks": []},
+        "checker": {}, "created_at": now,
+    })
+    after = canonical_manifest(repo, "h1", "test")
+
+    assert {key: value for key, value in before.items() if key != "ai"} == {
+        key: value for key, value in after.items() if key != "ai"}
+    assert before["ai"] != after["ai"]
+    assert any(row.get("provenance") == "agent" for row in after["ai"]["findings"])
 
 
 def _repo_with_observed_incident(hunt_id, suffix):
@@ -169,7 +232,7 @@ def _rare_shape_repo(tmp_path, *, with_context=True):
     e = make_engine(":memory:")
     migrate(e)
     repo = Repo(e)
-    manifest = {"style": "broad", "agent_mode": "model",
+    manifest = {"style": "broad", "ai_agent": {"requested": True},
                 "window": {"start": "2024-11-18T10:00:00+00:00", "end": "2024-11-18T17:30:00+00:00"},
                 "original_input": {}, "targets": ["fx"], "pack": {"version": "p"}, "normalizer": "n",
                 "policy": "d", "model": {}, "romulus_version": "0"}
@@ -423,7 +486,7 @@ def _add_investigation(repo, seed_id, *, hostile=""):
         "action": "pivot", "tool": "process_tree", "evidence_ids": ["ev1"],
         "arguments": {"host": "web01", "process_id": 10},
         "chosen_option": "O1", "option_description": "process_tree for host web01 pid 10, anchor ±5 min",
-        "menu_hidden_count": 3, "agent_mode": "model", "deterministic_fallback": True,
+        "menu_hidden_count": 3, LEGACY_AGENT_MODE_KEY: "model", "deterministic_fallback": True,
         "fallback_note": "model output failed twice; selected top-ranked pivot",
     }, True, task_id="pivot-task", result_digest={
         "status": "partial", "event_ids": ["ev1"], "candidate_ids": ["pivot-candidate"],
@@ -451,7 +514,7 @@ def _add_investigation(repo, seed_id, *, hostile=""):
         "proposed_lane": "high", "reasoning": f"Separate model reasoning. {hostile}",
         "evidence_ids": ["ev1"],
         "chosen_option": "O9", "option_description": "escalate pivot-candidate: Machine claim",
-        "menu_hidden_count": 2, "agent_mode": "model", "deterministic_fallback": False,
+        "menu_hidden_count": 2, LEGACY_AGENT_MODE_KEY: "model", "deterministic_fallback": False,
     }, True, model_call_id="call-1")
     repo.save_model_call({
         "id": "call-1", "hunt_id": "h1", "case_id": case_id, "purpose": "triage", "model": "test",
@@ -534,6 +597,7 @@ def test_investigation_renderers_use_manifest_mode_options_fallbacks_and_menu_ca
     assert r"process\_tree for host web01 pid 10" in markdown
     assert "model output failed twice; selected top-ranked pivot" in markdown
     assert "Menu cap: 5 hidden option(s) across 2 capped step(s)" in markdown
+    assert "## AI assessment" not in markdown
 
 
 def test_investigation_mode_prefers_the_actual_agent_audit_over_manifest_default():

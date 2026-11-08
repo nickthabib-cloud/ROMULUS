@@ -63,12 +63,12 @@ def test_fresh_sweep_replay_keeps_one_publication_and_resolvable_citations(tmp_p
     original.close_stage()
     identities = None
     for _attempt in range(2):
-        replay = sw.Sweep(repo, None, 'h1', window, {}, stage_dir=tmp_path)
-        replay.pack[0].citation_fetcher = SourceCitationFetcher(source)
+        retry_sweep = sw.Sweep(repo, None, 'h1', window, {}, stage_dir=tmp_path)
+        retry_sweep.pack[0].citation_fetcher = SourceCitationFetcher(source)
         try:
             for pair in reversed(pairs):
-                execute(replay, [pair, pair])
-            replay.finalize()
+                execute(retry_sweep, [pair, pair])
+            retry_sweep.finalize()
             findings = repo.candidates('h1')
             assert len(findings) == 1
             current = {row['id'] for row in findings}
@@ -83,4 +83,4 @@ def test_fresh_sweep_replay_keeps_one_publication_and_resolvable_citations(tmp_p
                     if pair[0].id in findings[0]['event_ids']:
                         assert records and records[0]['source'] == pair[1]['_source']
         finally:
-            replay.close_stage()
+            retry_sweep.close_stage()

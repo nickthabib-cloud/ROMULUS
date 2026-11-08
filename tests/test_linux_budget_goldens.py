@@ -26,4 +26,4 @@ def test_linux_stack_candidates_at_physical_byte_budget(mib, tmp_path, monkeypat
             assert sum(path.stat().st_size for path in tmp_path.rglob("*") if path.is_file()) <= total
     monkeypatch.setattr(sw.Sweep, "run_partition", run)
     snapshot = tf.run_stack(tmp_path, docs=tf.build(1))
-    assert (len(snapshot["candidates"]), tf.digests(snapshot)["candidates"]) == CANDIDATE_GOLDENS[mib]
+    assert (len(snapshot["candidates"]), tf.m5_golden_digests(snapshot)["candidates"]) == CANDIDATE_GOLDENS[mib]

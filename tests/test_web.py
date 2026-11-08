@@ -186,7 +186,7 @@ def test_new_hunt_is_deterministic_unless_the_agentic_box_is_checked(client, mon
                                "csrf": _csrf(page), **form}, follow_redirects=False)
     assert r.status_code == 303
     cmd = launched[0]
-    assert cmd[cmd.index("--agent-mode") + 1] == mode
+    assert ("--agent" if mode == "model" else "--no-agent") in cmd
 
 
 def test_unknown_agent_option_is_refused(client):

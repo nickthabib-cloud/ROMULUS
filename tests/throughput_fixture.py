@@ -716,6 +716,32 @@ def digests(snapshot: dict) -> dict[str, str]:
             for name, part in sorted(snapshot.items())}
 
 
+def m5_golden_digests(snapshot: dict) -> dict[str, str]:
+    """Compare M5 detection goldens without M6's additive AI provenance and assessment fields."""
+    projected = json.loads(json.dumps(snapshot))
+    projected["candidates"] = [
+        {key: value for key, value in row.items() if key not in {"provenance", "agent_hypothesis_id"}}
+        for row in projected["candidates"]
+    ]
+    projected["audit"] = [row for row in projected["audit"] if row["action"] != "hunt.ai_agent_summary"]
+    manifest = projected["manifest"]
+    ai_agent = manifest.get("ai_agent") or {}
+    configured = dict(ai_agent.get("configured") or {})
+    configured.pop("requested", None)
+    usage = ai_agent.get("usage") or {}
+    manifest["ai_agent"] = {
+        "configured": configured,
+        "phase": ai_agent.get("phase") or {"status": "unknown"},
+        "usage": {key: usage.get(key) for key in ("calls", "cost_usd", "estimated", "tokens")},
+    }
+    manifest.pop("ai_assessment", None)
+    for finding in manifest.get("findings") or []:
+        finding.pop("provenance", None)
+        finding.pop("agent_hypothesis_id", None)
+    (manifest.get("incident_graph") or {}).pop("agent_links", None)
+    return digests(projected)
+
+
 def patched_sizes(monkeypatch) -> None:
     from romulus.hunt import links, pivot
     from romulus.hunt import sweep as sw
