@@ -710,6 +710,30 @@ def test_service_script_change_after_the_read_does_not_matter():
     assert match.proposed_lane == "lead"
 
 
+def test_a_reach_holding_the_script_rewrite_raises_the_sweeps_service_lead():
+    """The sweep routed a service read to lead without file-change records; a reach that holds the record rewriting
+    the script before the read judges it high: the group is raised, cites the read, and the stale note is gone."""
+    repo = _fresh_hunt_without_sweep_groups()
+    from romulus.hunt.publish import publish_match
+    exec_record = exec_(0, 600, 1, ["/usr/bin/perl", "-wT", "/usr/bin/zmpkg.pl", "start"])
+    service_read, rewrite = read(2, 600, 1), change(1, "/usr/bin/zmpkg.pl")
+    repo.upsert_task("T-sweep", "h1", "sweep", "sweep", {}, "T-sweep")
+    sweep = CredentialMaterialAccess()
+    for match in sweep.consume([exec_record, service_read]):
+        publish_match(repo, "h1", sweep, match, "T-sweep", {e.key: {"doc": e.native_id} for ev in match.events
+                                                            for e in ev.raw})
+    repo.set_rule_cell("h1", sweep.id, sweep.version, "host-x",
+                       f"{T0.isoformat()}/{(T0 + timedelta(seconds=30)).isoformat()}", "matched", 1, 10)
+    before = only(list(_credential_rows(repo).values()))
+    assert before["lane"] == "lead" and any("origin was not checked" in n for n in before["gate_results"]["_notes"])
+    _reach(repo, [rewrite, exec_record, service_read])
+    rows = _credential_rows(repo)
+    assert set(rows) == {"high"} and rows["high"]["id"] == before["id"]
+    fold = rows["high"]["gate_results"]["_expansion_fold"]
+    assert fold["raised_to"] == "high" and service_read.id in rows["high"]["event_ids"]
+    assert not any("origin was not checked" in n for n in rows["high"]["gate_results"]["_notes"])
+
+
 def test_service_read_whose_parent_differs_from_its_exec_stays_high():
     events = [exec_(0, 600, 1, ["/usr/bin/perl", "-wT", "/usr/bin/zmpkg.pl", "start"]), read(1, 600, 4242)]
     assert lane_of(run(events)[1]) == "high"

@@ -157,3 +157,72 @@ def test_the_reach_list_is_bounded_with_a_total_count():
     row = _fold_rows(["lead"] * (FOLD_REACHES_LISTED + 6))
     assert len(row["gate_results"]["_context_reaches"]) == FOLD_REACHES_LISTED
     assert row["gate_results"]["_expansion_fold"]["reaches_total"] == FOLD_REACHES_LISTED + 5
+
+
+# ---- a reach whose own judgment is higher than the sweep's group raises it ----
+
+class Seq(Playbook):
+    """A download, and the shell after it: lead alone, high together, one group key whatever the lane."""
+    id = "probe.seq"
+    version = "1"
+    title = "seq"
+    kind = "direct"
+    families = ("process_exec",)
+    severity, lane = "high", "high"
+
+    def consume(self, events):
+        a = [e for e in events if e.get("process.argv")[0] == "/usr/bin/curl"]
+        b = [e for e in events if e.get("process.argv")[0] == "/bin/bash"]
+        if not a:
+            return []
+        records = [a[0], *b[:1]]
+        lane = "high" if b else "lead"
+        return [Match(self.id, f"download{' then shell' if b else ''}", "observed_action", records,
+                      [pf(e, "process.argv") for e in records], records[0].ts,
+                      "high" if lane == "high" else "medium", lane, "high", records[0].entities(),
+                      group_key="h|/tmp/x")]
+
+
+def _seq_hunt(monkeypatch, reached):
+    monkeypatch.setattr(ex, "fresh_direct_pack", lambda: [Seq()])
+    engine = make_engine(":memory:")
+    migrate(engine)
+    repo = Repo(engine)
+    repo.create_hunt("h1", {"window": {"start": T0.isoformat(), "end": (T0 + timedelta(hours=1)).isoformat()},
+                            "targets": ["host-x"]}, "digest", "test")
+    curl, bash = _exec("curl", 5, ["/usr/bin/curl", "http://x/a"]), _exec("bash", 20, ["/bin/bash"])
+    repo.upsert_task("T-sweep", "h1", "sweep", "sweep", {}, "T-sweep")
+    for match in Seq().consume([curl]):          # the sweep saw the download alone
+        publish_match(repo, "h1", Seq(), match, "T-sweep", {"host-x/curl": {"doc": 1}})
+    repo.save_evidence("h1", [bash], {"host-x/bash": {"doc": 2}}, "T-sweep")      # stored by another finding
+    repo.set_rule_cell("h1", "probe.seq", "1", "host-x",
+                       f"{T0.isoformat()}/{(T0 + timedelta(seconds=30)).isoformat()}", "matched", 1, 10)
+    repo.save_candidate({"id": "F-anchor", "hunt_id": "h1", "rule_id": "host.web_shell", "rule_version": "1",
+                         "claim": "an anchor", "claim_type": "observed_action", "event_ids": [],
+                         "predicate_fields": [], "entities": [], "ts": T0, "severity": "high", "confidence": "high",
+                         "lane": "high", "priority": 50.0, "priority_reasons": [], "gate_results": {},
+                         "benign_alternatives": [], "next_checks": [], "source_case_id": None,
+                         "source_anchor_id": None, "source_link_id": None})
+    records = {"curl": curl, "bash": bash}
+    eng = ex.ExpansionEngine(repo, "h1", Window(start=T0, end=T0 + timedelta(hours=1)), fetcher=object())
+    result = LinkResult(id="L-reach", anchor_id="F-anchor", link_type="host_after_anchor",
+                        window=LinkWindow(label="w", start=T0, end=T0 + timedelta(minutes=5)), strength="inferred",
+                        key={}, status="complete", event_ids=[records[name].id for name in reached])
+    eng._persist_link(result)
+    eng._evaluate(repo.candidate("F-anchor"), result)
+    rows = [row for row in repo.candidates("h1") if row["rule_id"] == Seq.id]
+    assert len(rows) == 1
+    return rows[0]
+
+
+def test_a_reach_judging_the_swept_records_higher_raises_the_sweeps_group(monkeypatch):
+    row = _seq_hunt(monkeypatch, ["curl", "bash"])
+    assert row["lane"] == "high" and "bash" in row["event_ids"]
+    assert row["gate_results"]["_expansion_fold"]["raised_by"][0]["claim"].startswith("download then shell")
+    assert "put the group in the high lane" in row["claim"]
+
+
+def test_a_reach_judging_them_at_the_sweeps_lane_defers(monkeypatch):
+    row = _seq_hunt(monkeypatch, ["curl"])
+    assert row["lane"] == "lead" and "raised_to" not in row["gate_results"]["_expansion_fold"]
+    assert row["gate_results"]["_expansion_fold"]["reaches_total"] == 1

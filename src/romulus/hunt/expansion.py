@@ -962,7 +962,7 @@ class ExpansionEngine:
         reach = {"anchor_id": candidate["id"], "link_id": result.id, "link_type": result.link_type,
                  "strength": result.strength}
 
-        def publish(playbook, match, sweep_group=None):
+        def publish(playbook, match, sweep_group=None, defer=True):
             # The finding stands on its own cited records and keeps its machine lane. Only its relation to the
             # anchor may be a hypothesis.
             mark_hypothesis_relation(match, anchor_id=candidate["id"], link_type=result.link_type,
@@ -971,7 +971,7 @@ class ExpansionEngine:
                 self.repo, self.hunt_id, playbook, match, result.task_ids[0] if result.task_ids else None, {},
                 source_anchor_id=candidate["id"], source_link_id=result.id, owner_token=self.owner_token,
                 zeek_context=events, zeek_context_ids=result.evidence_ids, context_reach=dict(reach),
-                sweep_group=sweep_group,
+                sweep_group=sweep_group, defer_to_sweep=defer,
             )
             if row is not None:
                 published.append(row)
@@ -1006,7 +1006,9 @@ class ExpansionEngine:
                 for match in matches:
                     subject = {event.id for event in match.events if event.id not in match.context_ids}
                     group = self._sweep_group(playbook, match) if subject and subject <= proven else None
-                    publish(playbook, match, sweep_group=group)
+                    # the sweep's lane stands unless the reach's own judgment of these records is higher
+                    publish(playbook, match, sweep_group=group,
+                            defer=group is None or not self._higher(match, group))
                 continue
             # A rule that folds records per typed shape places each proven record in the group the sweep published
             # for it (records the sweep split across lanes are never merged); the rest are judged here as before.
@@ -1015,8 +1017,8 @@ class ExpansionEngine:
                 for match in matches:
                     publish(playbook, match)
                 continue
-            for group, match in folds:
-                publish(playbook, match, sweep_group=group)
+            for group, defer, match in folds:
+                publish(playbook, match, sweep_group=group, defer=defer)
             for match in self._judge(playbook.id, rule_events,
                                      lambda event, folded=folded, context=context:
                                      event.id not in folded and event.id not in context):
@@ -1119,28 +1121,39 @@ class ExpansionEngine:
         from dataclasses import replace
         rule = self._rule(playbook.id)
         citing = self._sweep_citing(playbook.id, swept)
-        placed: dict[str, tuple[dict, list]] = {}
+        by_id = {event.id: event for event in events}
+        placed: dict[tuple[str, bool], tuple[dict, list]] = {}
         folded: set[str] = set()
         for match in rule.match_each(events, swept):
             subject = [event.id for event in match.events if event.id not in match.context_ids]
             groups = {citing[event_id]["id"]: citing[event_id] for event_id in subject if event_id in citing}
             if len(groups) == 1 and len(subject) == sum(event_id in citing for event_id in subject):
                 group = next(iter(groups.values()))
-                placed.setdefault(group["id"], (group, []))[1].append(match)
+                # The sweep's lane stands unless this reach's own judgment is higher for a reason other than a
+                # lineage it does not hold (a record it holds and the sweep did not, such as a script rewrite).
+                defer = (not self._higher(match, group)
+                         or any(rule.lineage_missing(by_id[event_id]) for event_id in subject if event_id in by_id))
+                placed.setdefault((group["id"], defer), (group, []))[1].append(match)
                 folded.update(subject)
         out = []
-        for group, matches in placed.values():
+        for (_group_id, defer), (group, matches) in placed.items():
             matches.sort(key=lambda match: (match.ts, match.events[0].id))
             records = list({event.id: event for match in matches for event in match.events
                             if event.id not in match.context_ids}.values())
             first, last = matches[0], matches[-1]
-            out.append((group, replace(
-                first, events=records, context_ids=set(),
+            base = first if defer else min(matches, key=lambda match: LANE_ORDER.get(match.proposed_lane, 9))
+            out.append((group, defer, replace(
+                base, events=records, context_ids=set(),
                 predicate=[p for match in matches for p in match.predicate],
                 raw_copies={key: value for match in matches for key, value in match.raw_copies.items()},
                 aggregate_summary={"count": len(records), "peak": len(records), "episodes": 1,
                                    "first": first.ts.timestamp(), "last": last.ts.timestamp()})))
         return out, folded
+
+    def _higher(self, match, group: dict) -> bool:
+        """Whether a match's own decided lane is above the lane of the sweep's group."""
+        from romulus.decide.policy import decide
+        return LANE_ORDER.get(decide(match, self.hunt_id).lane, 9) < LANE_ORDER.get(group["lane"], 9)
 
     def _cells(self, rule_id: str) -> dict[str, list[tuple[datetime, datetime, bool]]]:
         """The rule's sweep partition cells per target, ordered by start, as (start, end, complete). Split, window and

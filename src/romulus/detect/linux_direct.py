@@ -673,6 +673,9 @@ class CredentialMaterialAccess(FoldedLinuxDirect):
               "backup and compare jobs that copy the hash files within /etc or the backup directory")
     next_checks = ("the reader's process lineage and login session",
                    "writes or network transfers by the same process after the read")
+    # Notes saying what an evaluation could not check: a reach that holds that context and raises the lane replaces
+    # them (`romulus.hunt.publish`).
+    context_notes = ("the script's origin was not checked",)
 
     def __init__(self):
         super().__init__()
@@ -683,8 +686,9 @@ class CredentialMaterialAccess(FoldedLinuxDirect):
         # locations are kept (one short string per such exec); the hot set in memory, the rest on disk.
         self.scripts = KeyedStore(self, "credential_interpreter_scripts", self.HOT)
         self._scripts_refused = False
-        # (host, packaged script path) -> the times a recorded file change created, wrote, linked or renamed onto
-        # it; and the hosts whose file-change records were read at all (without them a script's origin is unchecked).
+        # (host, packaged script path) -> the earliest time a recorded file change created, wrote, linked or renamed
+        # onto it; and the hosts whose file-change records were read at all (without them a script's origin is
+        # unchecked).
         self.script_changes = KeyedStore(self, "credential_script_changes", self.HOT)
         self.change_hosts = KeyedStore(self, "credential_change_hosts", self.HOT)
         self._changes_refused = False
@@ -716,13 +720,15 @@ class CredentialMaterialAccess(FoldedLinuxDirect):
         path = normalize_path(str(event.get("file.path") or ""))
         if event.get("file.change") not in SCRIPT_CHANGES or not path or not packaged_script(path):
             return
-        times = self.script_changes.setdefault((event.host, path), list)
-        if times is None:
+        # only the earliest change matters: a read after it is not of the packaged script
+        key, ts = (event.host, path), event.ts.timestamp()
+        earliest = self.script_changes.get(key)
+        if earliest is not None and earliest <= ts:
+            return
+        if not self.script_changes.put(key, ts):
             self._changes_refused = True
             self.note_limit("script_changes", "the store of packaged-script changes took no new path; a later "
                                               "service-started hash read is not routed to the lead lane")
-            return
-        times.append(event.ts.timestamp())
 
     def _hold_script(self, event) -> None:
         executable = normalize_path(str(event.get("process.executable") or ""))
@@ -821,8 +827,10 @@ class CredentialMaterialAccess(FoldedLinuxDirect):
             # created or rewritten during the hunt is not the packaged one.
             if e.get("process.ppid") != getattr(record, "ppid", None) or self._changes_refused:
                 return None, False
-            changes = self.script_changes.get((e.host, script)) or self.script_changes.peek((e.host, script), ())
-            if any(ts <= e.ts.timestamp() for ts in changes):
+            earliest = self.script_changes.get((e.host, script))
+            if earliest is None:
+                earliest = self.script_changes.peek((e.host, script), None)
+            if earliest is not None and earliest <= e.ts.timestamp():
                 return None, False
             notes = ([] if e.host in self.change_hosts else
                      ["the script's origin was not checked (no file-change records)"])
