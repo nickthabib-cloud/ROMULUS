@@ -49,7 +49,7 @@ from romulus.evidence.normalize import (
     normalize_hits,
 )
 from romulus.evidence.typed import TypedEvent
-from romulus.evidence.windows import RecordIdContinuity, windows_record_signature
+from romulus.evidence.windows import RecordIdContinuity, windows_record_signature, windows_view
 from romulus.evidence.windows_catalog import (
     COLLECTION_CHANGE_EVENTS,
     EVENT_CLASSES,
@@ -113,6 +113,8 @@ LINUX_DATASET_FAMILIES = {
     **{f"suricata.eve.{event_type}": NET_FAMILIES for event_type in (
         "alert", "flow", "netflow", "dns", "http", "fileinfo", "tls", "ssh",
     )},
+    # Filebeat's suricata module and the Agent's Suricata integration name every EVE event type "suricata.eve"
+    "suricata.eve": NET_FAMILIES,
 }
 # Every catalogued Zeek log by its dispatch token (`zeek:conn`, never the bare name, which other shippers' datasets
 # share): the family its records feed. A normalization error on a Zeek record is tagged with its token.
@@ -679,9 +681,29 @@ class Sweep:
             groups.append([Predicate(field="event.dataset", op="in", value=list(WINDOWS_HOST_DATASETS))])
         if contract.supports("event.channel", "in"):
             groups.append([Predicate(field="event.channel", op="in", value=[channel for channel in WINDOWS_CHANNELS if channel])])
+        flat = self._nxlog_selector(target, contract)
+        if groups and flat is not None:
+            # NXLog's flat records name no dataset and may spell a channel in any case: selected by their shape
+            groups.append(flat)
         self.stats.setdefault("dataset_filter", {})[target] = list(WINDOWS_HOST_DATASETS)
         self.stats.setdefault("channel_filter", {})[target] = list(WINDOWS_CHANNELS)
         return groups
+
+    def _nxlog_selector(self, target: str, contract: FieldContract) -> list[Predicate] | None:
+        """The selector of NXLog's flat Windows records on a Windows target, or None; a target that cannot search
+        their Channel and EventID is listed, once, as not assessing that shape (never as holding none of it)."""
+        from romulus.hunt.windows_filters import nxlog_windows_group
+
+        group = nxlog_windows_group(contract)
+        if group is None:
+            self.stats.setdefault("windows_shapes_not_assessed", {})[target] = [
+                "windows.nxlog: not searchable on this target (Channel and EventID are not both mapped)"]
+        elif not all(contract.supports(field, "eq") for field in ("event.channel", "event.provider", "event.code")):
+            # a text-mapped flat record is selected by its shape; queries on its values cannot be run
+            self.stats.setdefault("windows_shape_notes", {})[target] = [(
+                "windows.nxlog: Channel, SourceName or EventID is not exact-searchable on this target, so its "
+                "records are selected by shape and value queries on them (event classes, pivots) are unresolved")]
+        return group
 
     def _zeek_catalog_filter(self, target: str, contract: FieldContract) -> list[list[Predicate]]:
         """Leave out only the Zeek logs outside the catalog, which no normalizer reads and which feed no family a rule
@@ -897,7 +919,7 @@ class Sweep:
     def _windows_hosts(contract: FieldContract, records: list[dict]) -> tuple[str, ...]:
         hosts = {str(host).strip().rstrip(".").casefold() for host in contract.hosts if host}
         for record in records:
-            winlog = (record.get("_source") or {}).get("winlog") or {}
+            winlog = windows_view(record.get("_source") or {}).get("winlog") or {}
             computer = str(winlog.get("computer_name") or "").strip().rstrip(".").casefold()
             if computer:
                 hosts.add(computer)
@@ -1077,7 +1099,7 @@ class Sweep:
                 key: [] for key in expected
             }
             for record in fetched_records:
-                source = record.get("_source") or {}
+                source = windows_view(record.get("_source") or {})
                 winlog = source.get("winlog") or {}
                 raw_id = winlog.get("record_id")
                 if isinstance(raw_id, bool):
@@ -1143,7 +1165,7 @@ class Sweep:
         records.extend(collision_records)
 
         def continuity_order(record: dict) -> tuple:
-            source = record.get("_source") or {}
+            source = windows_view(record.get("_source") or {})
             winlog = source.get("winlog") or {}
             raw_time = winlog.get("time_created") or source.get("@timestamp")
             return (
@@ -1225,15 +1247,15 @@ class Sweep:
         if continuity_times is None:
             observed_channels = {
                 (
-                    str(((record.get("_source") or {}).get("winlog") or {}).get("computer_name") or "")
+                    str((windows_view(record.get("_source") or {}).get("winlog") or {}).get("computer_name") or "")
                     .strip().rstrip(".").casefold(),
-                    str(((record.get("_source") or {}).get("winlog") or {}).get("channel") or "").casefold(),
+                    str((windows_view(record.get("_source") or {}).get("winlog") or {}).get("channel") or "").casefold(),
                 )
                 for record in records
             }
             observed_times: dict[tuple[str, str], tuple[datetime, datetime]] = {}
             for record in records:
-                source = record.get("_source") or {}
+                source = windows_view(record.get("_source") or {})
                 winlog = source.get("winlog") or {}
                 host = str(winlog.get("computer_name") or "").strip().rstrip(".").casefold()
                 channel = str(winlog.get("channel") or "").casefold()
@@ -1319,7 +1341,7 @@ class Sweep:
         collection_changes: dict[tuple[str, str], set[str]] = {}
         cross_channel_collection_changes: dict[str, set[str]] = {}
         for record in records:
-            source = record.get("_source") or {}
+            source = windows_view(record.get("_source") or {})
             winlog = source.get("winlog") or {}
             host = str(winlog.get("computer_name") or "").strip().rstrip(".").casefold()
             channel = str(winlog.get("channel") or "").casefold()
@@ -1834,9 +1856,13 @@ class Sweep:
                                                skip_families=skip_families, rpc_remote_only=True, contract=contract,
                                                surrogate_free=out.surrogate_free, shapes=shapes)
         if shapes:
-            # the Linux shipper shapes read, by target (one count per shape: bounded by the shape table)
-            seen = self.stats.setdefault("linux_shapes", {}).setdefault(target, {})
+            # the shipper shapes read, by target: Linux host shapes, the EVE event types an Elastic shipper indexed
+            # without their line, and NXLog's flat Windows records with their collector clock offsets (one count
+            # per key: each table is bounded)
             for key, count in shapes.items():
+                stat = ("suricata_shapes" if key.startswith("suricata.") else
+                        "windows_shapes" if key.startswith("windows.") else "linux_shapes")
+                seen = self.stats.setdefault(stat, {}).setdefault(target, {})
                 seen[key] = seen.get(key, 0) + count
         if errors:
             self._note_zeek_inventory_gap(target,contract,[f"{len(errors)} record normalization failures"])

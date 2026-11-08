@@ -5,12 +5,13 @@ from romulus.detect.bounded import StateBudget
 from romulus.hunt import sweep as sw
 from tests import throughput_fixture as tf
 
-# All budgets retain the same 40 candidates and complete citation detail (event ids of evidence epoch 16).
+# All budgets retain the same 40 candidates and complete citation detail (event ids of evidence epoch 17; with the
+# evidence version set back to 16 the digest is the earlier one).
 # Discovery and transfer executions already cited by a folded alert are not repeated as context.
 # Shared execution and lineage state keep the 4 MiB candidate result identical to larger budgets.
-CANDIDATE_GOLDENS = {16: (40, 'f1939fd5894201aab3f650d22336142bc96f2be48e33a64636bb7ff52c25ad80'),
- 4: (40, 'f1939fd5894201aab3f650d22336142bc96f2be48e33a64636bb7ff52c25ad80'),
- 8: (40, 'f1939fd5894201aab3f650d22336142bc96f2be48e33a64636bb7ff52c25ad80')}
+CANDIDATE_GOLDENS = {16: (40, '5172b625ce32193f6abf1310c8c3257728ba485fd343541c2c96b94b62eaa02c'),
+ 4: (40, '5172b625ce32193f6abf1310c8c3257728ba485fd343541c2c96b94b62eaa02c'),
+ 8: (40, '5172b625ce32193f6abf1310c8c3257728ba485fd343541c2c96b94b62eaa02c')}
 
 
 @pytest.mark.parametrize("mib", CANDIDATE_GOLDENS)

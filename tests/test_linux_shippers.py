@@ -763,16 +763,17 @@ EVE_TYPES = {
 
 
 @pytest.mark.parametrize("event_type", sorted(EVE_TYPES))
-def test_suricata_eve_without_its_json_record_is_an_error_not_a_silent_drop(event_type):
+def test_suricata_eve_without_its_json_record_is_rebuilt_from_its_fields(event_type):
     # Filebeat/Agent Suricata documents keep the EVE fields under suricata.eve.* and Fleet removes event.original:
-    # the EVE normalizer reads the JSON record only, so such a document is an error that marks rules partial.
+    # the record is rebuilt from the shipper's fields (tests/test_elastic_suricata.py checks every value), never
+    # dropped.
     doc = fx.hit({"@timestamp": "2024-11-18T14:00:00Z", "event": {"dataset": "suricata.eve", "module": "suricata"},
                   "suricata": {"eve": {"event_type": event_type, "flow_id": 1, **EVE_TYPES[event_type]}},
                   "source": {"ip": "10.0.0.1", "port": 1}, "destination": {"ip": "10.0.0.2", "port": 80},
                   "network": {"transport": "tcp"}}, "s")
     events, skips, errors = normalize_hits([doc])
-    assert not events and not skips and errors
-    assert sw._error_tag(errors[0][1]) == "suricata.eve"
+    assert not skips and not errors and len(events) == 1
+    assert events[0].get("source.ip") == "10.0.0.1" and events[0].fields["source.ip"].origin.endswith(":source.ip")
 
 
 # ---------------------------------------------------------------------------------------------------------------

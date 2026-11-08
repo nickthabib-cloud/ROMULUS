@@ -33,7 +33,14 @@ from romulus.evidence.linux_catalog import (
     logical_of,
     match_shape,
 )
-from romulus.evidence.normalize import AUDIT_LOGIN_TYPES, audit_host, audit_record_of, normalize_hits
+from romulus.evidence.normalize import (
+    AUDIT_LOGIN_TYPES,
+    ELASTIC_DATASET,
+    audit_host,
+    audit_record_of,
+    is_elastic_suricata,
+    normalize_hits,
+)
 from romulus.evidence.typed import TypedEvent
 from romulus.evidence.windows_catalog import (
     WINDOWS_CHANNELS,
@@ -45,6 +52,7 @@ from romulus.evidence.windows_reassembly import ScriptBlockAssembler
 from romulus.evidence.zeek import zeek_record
 from romulus.evidence.zeek_catalog import ELASTIC, MALCOLM, SECURITY_ONION, ZEEK_LOGS
 from romulus.hunt.publish import publish_match
+from romulus.hunt.windows_filters import nxlog_windows_group
 from romulus.site import SiteFacts, absent_site_facts
 from romulus.sources.compile import time_unit
 from romulus.sources.es import ElasticClient, SourceError
@@ -174,6 +182,10 @@ def _windows_source_groups(
         groups.append([Predicate(field="event.dataset", op="in", value=list(datasets))])
     if channels and _supports(contract, "event.channel", "in"):
         groups.append([Predicate(field="event.channel", op="in", value=list(channels))])
+    flat = nxlog_windows_group(contract) if groups else None
+    if flat is not None:
+        # NXLog's flat records name no dataset and may spell a channel in any case: selected by their shape
+        groups.append(flat)
     return groups
 
 
@@ -348,8 +360,11 @@ def _prefilter_raw(records: list[dict], families: set[str], parse: _AuditParses 
             try:
                 event_type = json.loads(raw or "").get("event_type")
             except (json.JSONDecodeError, AttributeError, TypeError):
-                selected.extend(group)
-                continue
+                if not is_elastic_suricata(source):
+                    selected.extend(group)
+                    continue
+                # Filebeat or the Agent indexed the parsed record without its line: its type is a parsed field
+                event_type = _source_value(source, "suricata.eve.event_type")
             family = _SURICATA_FAMILY.get(event_type)
             if family is None or family in families:
                 selected.extend(group)
@@ -681,7 +696,7 @@ class PivotExecutor:
                                     purpose=f"agent:{request.tool}:{dataset}",
                                 ))
                                 continue
-                            if dataset not in NETWORK_TIMELINE_DATASETS:
+                            if dataset not in NETWORK_TIMELINE_DATASETS and dataset != ELASTIC_DATASET:
                                 continue
                             intents.append(SearchIntent(
                                 kind="raw", target=target, window=window,
@@ -915,8 +930,8 @@ class PivotExecutor:
                         unresolved_ranges=[_range(args.start, args.end, reason)],
                     ))
                     continue
-                normalized = set([*NETWORK_TIMELINE_DATASETS, *ZEEK_LOGS_BY_TOKEN] if _is_network(target, contract)
-                                 else _host_datasets(contract))
+                normalized = set([*NETWORK_TIMELINE_DATASETS, ELASTIC_DATASET, *ZEEK_LOGS_BY_TOKEN]
+                                 if _is_network(target, contract) else _host_datasets(contract))
                 for dataset in inventoried:
                     if (target, dataset) in planned:
                         continue

@@ -10,6 +10,7 @@ from romulus.evidence.linux_catalog import (
     dataset_selection,
     shipper_names,
 )
+from romulus.evidence.normalize import ELASTIC_DATASET, ELASTIC_EVENT_TYPES
 from romulus.sources.models import CompiledQuery, Predicate, SearchIntent
 from romulus.sources.profile import FieldContract
 from romulus.store.db import digest
@@ -62,6 +63,11 @@ def _pred_native(p: Predicate, native: str) -> dict:
 
 
 _LINUX_HOST_DATASETS = frozenset({*LINUX_LOGICAL_DATASETS, *shipper_names()})
+# Windows names matched without case (channel, provider, object type), in Winlogbeat's layout and NXLog's flat one
+# (whose channel names keep the source's spelling, "security" for "Security").
+_CASELESS_WINDOWS_NATIVES = frozenset({"winlog.channel", "winlog.provider_name", "winlog.event_data.ObjectType",
+                                       "Channel", "SourceName", "ObjectType"})
+_WINDOWS_COMPUTER_NATIVES = frozenset({"winlog.computer_name", "Hostname"})
 
 
 def _linux_datasets(p: Predicate, contract: FieldContract, natives: tuple[str, ...]) -> dict | None:
@@ -96,6 +102,30 @@ def _linux_datasets(p: Predicate, contract: FieldContract, natives: tuple[str, .
     return clauses[0] if len(clauses) == 1 else {"bool": {"should": clauses, "minimum_should_match": 1}}
 
 
+def _suricata_datasets(p: Predicate, contract: FieldContract, natives: tuple[str, ...]) -> dict | None:
+    """A dataset predicate naming Suricata's per-type datasets (`suricata.eve.alert`, ...) also selects the documents
+    of those types that Filebeat's suricata module and the Agent's Suricata integration index under the one dataset
+    `suricata.eve` (on either dataset field), by their parsed suricata.eve.event_type. Only on a target that maps that
+    field (the shippers' templates do); None otherwise, and for a predicate naming no such dataset."""
+    if p.field != "event.dataset" or p.op not in {"eq", "in"}:
+        return None
+    values = [str(value) for value in (p.value if isinstance(p.value, list) else [p.value])]
+    types = sorted({value.removeprefix(f"{ELASTIC_DATASET}.") for value in values
+                    if value.removeprefix(f"{ELASTIC_DATASET}.") in ELASTIC_EVENT_TYPES
+                    and value.startswith(f"{ELASTIC_DATASET}.")})
+    event_type = contract.fields.get("suricata.eve.event_type")
+    if not types or event_type is None or "in" not in event_type.ops:
+        return None
+    direct = contract.fields.get("data_stream.dataset")
+    fields = [*natives, *(["data_stream.dataset"] if direct is not None and "eq" in direct.ops
+                          and "data_stream.dataset" not in natives else [])]
+    named = [_pred_native(p, native) for native in natives]
+    elastic = {"bool": {"filter": [
+        {"bool": {"should": [{"term": {field: ELASTIC_DATASET}} for field in fields], "minimum_should_match": 1}},
+        {"terms": {event_type.native: types}}]}}
+    return {"bool": {"should": [*named, elastic], "minimum_should_match": 1}}
+
+
 def _intent_os_family(intent: SearchIntent) -> str | None:
     values: set[str] = set()
     for predicate in [*intent.filters, *(item for group in intent.any_of for item in group)]:
@@ -116,10 +146,13 @@ def _pred(p: Predicate, contract: FieldContract, *, os_family: str | None = None
     linux = _linux_datasets(p, contract, natives)
     if linux is not None:
         return linux
+    suricata = _suricata_datasets(p, contract, natives)
+    if suricata is not None:
+        return suricata
     if (
         p.op == "eq"
         and p.field in {"event.channel", "event.provider", "object.type"}
-        and spec.native in {"winlog.channel", "winlog.provider_name", "winlog.event_data.ObjectType"}
+        and any(native in _CASELESS_WINDOWS_NATIVES for native in natives)
     ):
         clauses = [
             {"wildcard": {native: {
@@ -139,7 +172,8 @@ def _pred(p: Predicate, contract: FieldContract, *, os_family: str | None = None
             full_name = value.removeprefix("name:")
             short_name = full_name.rsplit("\\", 1)[-1]
             selected = [
-                (native, full_name if native.casefold().endswith(".user") else short_name)
+                (native, full_name if native.casefold().endswith(".user") or native.casefold() == "user"
+                 else short_name)
                 for native in natives if not native.casefold().endswith("sid")
             ]
         else:
@@ -153,13 +187,13 @@ def _pred(p: Predicate, contract: FieldContract, *, os_family: str | None = None
         return clauses[0] if len(clauses) == 1 else {
             "bool": {"should": clauses, "minimum_should_match": 1}
         }
-    if p.field == "host.name" and p.op == "eq" and spec.native == "winlog.computer_name":
+    if p.field == "host.name" and p.op == "eq" and any(native in _WINDOWS_COMPUTER_NATIVES for native in natives):
         # Normalized Windows hosts use their first DNS label. Query both the native
         # short form and any FQDN regardless of which form the caller supplied.
         value = _escape_wildcard(str(p.value).strip().rstrip(".").split(".", 1)[0])
         clauses = [
-            {"wildcard": {spec.native: {"value": pattern, "case_insensitive": True}}}
-            for pattern in (value, f"{value}.*")
+            {"wildcard": {native: {"value": pattern, "case_insensitive": True}}}
+            for native in natives for pattern in (value, f"{value}.*")
         ]
         return {"bool": {"should": clauses, "minimum_should_match": 1}}
     clauses = [_pred_native(p, native) for native in natives]

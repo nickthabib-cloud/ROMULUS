@@ -59,9 +59,13 @@ from romulus.evidence.linux_catalog import (
 from romulus.evidence.raw_scrub import clean_source, might_be_zeek
 from romulus.evidence.typed import EVIDENCE_VERSION, FieldValue, Outcome, RawRef, TypedEvent, event_id, fv
 from romulus.evidence.windows import (
+    NXLOG_SHAPE,
     WindowsNotNormalized,
+    is_nxlog_windows,
     is_windows_source,
     normalize_windows,
+    nxlog_clock_offset,
+    nxlog_error_tag,
     windows_record_key,
     windows_record_signature,
 )
@@ -2230,6 +2234,9 @@ def _suricata_community_id(eve: dict, o: str):
 
 def normalize_suricata(hit: dict) -> TypedEvent:
     src, nid = hit["_source"], hit["_id"]
+    if is_elastic_suricata(src):
+        # Filebeat or the Agent indexed the parsed record without its EVE line
+        return normalize_elastic_suricata(hit)
     try:
         eve = json.loads(_get(src, "event.original") or src.get("message") or "")
     except json.JSONDecodeError as e:
@@ -2549,6 +2556,345 @@ def _malcolm_eve(src: dict, nid: str) -> tuple[dict, dict[str, str], list[str], 
     if "_missing_timestamp" in tags:
         caveats.append(MALCOLM_MISSING_TIMESTAMP_CAVEAT)
     return eve, origins, caveats, bad, extra
+
+
+# ---------------------------------------------------------------------------------------------
+# Suricata EVE as Filebeat's suricata module and Elastic Agent's Suricata integration index it
+# ---------------------------------------------------------------------------------------------
+# Both decode each EVE line into suricata.eve.* under the dataset "suricata.eve" (event.dataset, and for the Agent
+# data_stream.dataset too), move part of the record to ECS fields, and index it without the line once the shipper
+# drops event.original. The moves were read from these files (nothing is copied from them):
+# - Filebeat, x-pack/filebeat/module/suricata/eve: config/eve.yml (Beats processors, before ingest), ingest/pipeline.yml,
+#   ingest/dns.yml, ingest/dns-answer-v1.yml, ingest/dns-answer-v2.yml, ingest/http.yml and ingest/tls.yml. The files
+#   are identical on the 7.17, 8.19 and main branches, so one table covers 7.17 and 8.x/9.x.
+# - Elastic Agent, elastic/integrations packages/suricata (2.27.1, for Kibana 8.11+ and 9.x):
+#   data_stream/eve/elasticsearch/ingest_pipeline/default.yml, dns.yml, dns-answer-v1.yml, dns-answer-v2.yml and
+#   tls.yml. Where the Agent differs from Filebeat the table says so.
+# Every other EVE key the EVE normalizer reads stays where Suricata wrote it, under suricata.eve.*: the alert's
+# signature, signature_id and category (copied to rule.*, never moved), alert.metadata.signature_severity, flow.state,
+# netflow, tcp, icmp_type/icmp_code, community_id, the dns block (copied to dns.*), the tls block (copied to tls.*),
+# ssh, and http.http_content_type. A value still found in place is read there: a pipeline that skipped a move left it.
+#
+# How each move is read back:
+# - exact: renamed or copied unchanged.
+# - lowercased: renamed and lowercased; the typed value is lowercased in every shape.
+# - millisecond: rewritten as an ISO-8601 time to the millisecond (Beats' @timestamp, the ingest date processor);
+#   the instant is kept below 1 ms, the sensor's zone offset is not. Typed time values compare as instants.
+# - string: converted to a string in place; read back as the integer it spells.
+# - app_proto: lowercased, copied to network.protocol unless "failed", "template" or "template-rust", then removed.
+#   For the event types that carry app_proto (alert, flow, netflow, fileinfo) the event-type table sets no protocol,
+#   so network.protocol is app_proto exactly; its absence means none, or one of the dropped values (caveat).
+# - action: removed after its value was appended to event.type, "blocked" written as "denied". Suricata writes
+#   "allowed" or "blocked", so the value read back from event.type (less the flow-state "start"/"end") is exact.
+# - templated: copied through a Mustache template. Double-brace templates (Filebeat, earlier Agent packages)
+#   HTML-escape the value, so a value holding "&" cannot be told from an escaped one: it is left absent (caveat).
+# - dns_answers: on version-2 answer records only, renamed to dns.answers with rrname, rrtype and rdata renamed to
+#   name, type and data; read back with the names restored.
+# - removed: dns.version and dns.grouped are removed. The version is read back from the record's layout (a query
+#   names none; a version-1 answer keeps its own rrname/rrtype/ttl/rdata, which the version-1 answer pipeline copies
+#   to dns.answers; a version-2 answer's list is renamed; "request"/"response" are version 3's types); grouped
+#   answers are lost (caveat on a version-2 answer that keeps no answer list).
+# - trailing_dot: a trailing "." is removed in place (RFC 6066 server names carry none); the value read is the
+#   shipper's, with a caveat.
+# - distinguished_name: the subject and issuer are copied to tls.server.subject/issuer (templated), then "\," is
+#   removed in place (Filebeat: both; the Agent: the issuer only). The in-place value is exact when the copy holds
+#   no "\,"; else the copy is exact when it holds no "&"; else the name is left absent (caveat).
+ELASTIC_SURICATA_MOVES = (
+    # EVE key, typed field, indexed path(s) in the order read, how
+    ("src_ip", "source.ip", ("source.address", "source.ip"), "exact"),
+    ("dest_ip", "destination.ip", ("destination.address", "destination.ip"), "exact"),
+    ("src_port", "source.port", ("source.port",), "exact"),
+    ("dest_port", "destination.port", ("destination.port",), "exact"),
+    ("proto", "network.transport", ("network.transport",), "lowercased"),
+    ("timestamp", None, ("@timestamp",), "millisecond"),
+    ("flow_id", "suricata.flow_id", ("suricata.eve.flow_id",), "string"),
+    ("app_proto", "network.app_proto", ("network.protocol",), "app_proto"),
+    ("alert.severity", "alert.severity", ("event.severity",), "exact"),
+    ("alert.action", "alert.action", ("event.type",), "action"),
+    ("alert.metadata.mitre_technique_id", "alert.mitre_technique_id", ("threat.technique.id",), "exact"),
+    ("flow.bytes_toserver", "flow.bytes_toserver", ("source.bytes",), "exact"),
+    ("flow.bytes_toclient", "flow.bytes_toclient", ("destination.bytes",), "exact"),
+    ("flow.pkts_toserver", "flow.pkts_toserver", ("source.packets",), "exact"),
+    ("flow.pkts_toclient", "flow.pkts_toclient", ("destination.packets",), "exact"),
+    ("flow.start", "flow.start", ("event.start",), "millisecond"),
+    ("flow.end", "flow.end", ("event.end",), "millisecond"),
+    ("fileinfo.filename", "file.name", ("file.path",), "exact"),
+    ("fileinfo.size", "file.size", ("file.size",), "exact"),
+    # Filebeat renames the hostname; the Agent appends it through a template (and de-duplicates the list)
+    ("http.hostname", "http.hostname", ("destination.domain",), "templated"),
+    ("http.url", "url.original", ("url.original",), "exact"),
+    ("http.http_user_agent", "user_agent.original", ("user_agent.original",), "exact"),
+    # Filebeat sets the method through a template; the Agent copies it
+    ("http.http_method", "http.request.method", ("http.request.method",), "templated"),
+    ("http.status", "http.response.status_code", ("http.response.status_code",), "exact"),
+    ("http.length", "http.response.length", ("http.response.body.bytes",), "exact"),
+    ("http.http_refer", None, ("http.request.referrer",), "exact"),
+    ("dns.answers", "dns.answers", ("dns.answers",), "dns_answers"),
+    ("dns.version", "dns.version", (), "removed"),
+    ("dns.grouped", None, (), "removed"),
+    ("tls.sni", "tls.client.server_name", ("suricata.eve.tls.sni",), "trailing_dot"),
+    ("tls.subject", None, ("suricata.eve.tls.subject", "tls.server.subject"), "distinguished_name"),
+    ("tls.issuerdn", None, ("suricata.eve.tls.issuerdn", "tls.server.issuer"), "distinguished_name"),
+)
+ELASTIC_DATASET = "suricata.eve"
+ELASTIC_RECONSTRUCTED_CAVEAT = "Reconstructed from fields the shipper parsed; the EVE record was not indexed."
+ELASTIC_NO_APP_PROTO_CAVEAT = (
+    "The shipper drops Suricata's app_proto values 'failed', 'template' and 'template-rust': no application protocol "
+    "on this record means Suricata identified none or reported one of those")
+ELASTIC_ESCAPED_CAVEAT = (
+    "The shipper copied these values through a template that may HTML-escape them, and they hold '&': not typed: ")
+ELASTIC_ACTION_CAVEAT = "The alert's action cannot be read back from event.type (several candidate values): not typed"
+ELASTIC_SNI_CAVEAT = "The shipper removes a trailing '.' from the TLS server name; the name is typed as indexed"
+ELASTIC_DN_CAVEAT = ("The shipper removed '\\,' from a certificate name and its templated copy may be HTML-escaped: "
+                     "not typed: ")
+ELASTIC_GROUPED_CAVEAT = ("The shipper removes Suricata's grouped DNS answers: this version-2 answer kept no answer "
+                          "list, so answers logged only in the grouped form are not typed")
+ELASTIC_DNS_VERSION_CAVEAT = "The shipper removes the DNS record's version, and its layout does not tell it: not typed"
+# The event types the sweep reports as seen in this shape; any other is counted as "other" (the table stays bounded).
+ELASTIC_EVENT_TYPES = ("alert", "flow", "netflow", "dns", "http", "fileinfo", "tls", "ssh")
+_ELASTIC_V1_ANSWER = (("name", "rrname"), ("data", "rdata"), ("type", "rrtype"), ("ttl", "ttl"))
+
+
+def _eve_json(raw) -> dict | None:
+    """The EVE record a document still carries as JSON text, else None."""
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        eve = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return eve if isinstance(eve, dict) else None
+
+
+def elastic_suricata_dataset(src: dict) -> bool:
+    """A document of Filebeat's suricata module or the Agent's Suricata integration (dataset "suricata.eve" on either
+    dataset field) that holds the parsed EVE record under suricata.eve with its event type."""
+    if ELASTIC_DATASET not in (_get(src, "event.dataset"), _get(src, "data_stream.dataset")):
+        return False
+    eve = _get(src, "suricata.eve")
+    return isinstance(eve, dict) and "event_type" in eve
+
+
+def is_elastic_suricata(src: dict) -> bool:
+    """An Elastic-shipped Suricata document that no longer carries its EVE line (in event.original or message): it is
+    rebuilt from the fields the shipper parsed. One that still carries the line is read from the line."""
+    return (elastic_suricata_dataset(src) and _eve_json(_get(src, "event.original")) is None
+            and _eve_json(src.get("message")) is None)
+
+
+def _set_path(record: dict, path: str, value) -> bool:
+    """Put `value` at a dotted path of an EVE record, creating objects on the way; False when a step is not one."""
+    parts = path.split(".")
+    current = record
+    for part in parts[:-1]:
+        nxt = current.setdefault(part, {})
+        if not isinstance(nxt, dict):
+            return False
+        current = nxt
+    current[parts[-1]] = value
+    return True
+
+
+def _indexed(src: dict, paths) -> tuple[object, str | None]:
+    """The first indexed value among `paths`, with its path."""
+    for path in paths:
+        value = _get(src, path)
+        if value is not None:
+            return value, path
+    return None, None
+
+
+def _single_string(value) -> str | None:
+    """A string, or a list holding one distinct string (a de-duplicated append), else None."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        distinct = {item for item in value if isinstance(item, str)}
+        if len(distinct) == 1 and all(isinstance(item, str) for item in value):
+            return next(iter(distinct))
+    return None
+
+
+def _elastic_action(src: dict) -> tuple[str | None, bool]:
+    """(alert.action, ambiguous) read back from event.type."""
+    values = _get(src, "event.type")
+    values = values if isinstance(values, list) else [] if values is None else [values]
+    candidates = [value for value in dict.fromkeys(values) if value not in ("start", "end")]
+    if not candidates:
+        return None, False
+    if len(candidates) > 1 or not isinstance(candidates[0], str) or "&" in candidates[0]:
+        return None, True
+    return {"denied": "blocked"}.get(candidates[0], candidates[0]), False
+
+
+def _elastic_dns(src: dict, d: dict, nid: str, origins: dict[str, str], caveats: list[str], bad: list[str]) -> None:
+    """Restore a dns block's version and its version-2 answer list."""
+    kind = d.get("type")
+    version, how = None, None
+    if kind in ("request", "response"):
+        version, how = 3, "request/response type"
+    elif kind == "query":
+        how = "query"                        # Suricata's query records before version 3 name no version
+    elif kind == "answer":
+        renamed = _get(src, "dns.answers")
+        v1 = {key: d[native] for key, native in _ELASTIC_V1_ANSWER if d.get(native) is not None}
+        if "ttl" in d or "rdata" in d or (isinstance(renamed, list) and v1 and renamed == [v1]):
+            how = "version-1 answer"         # one answer, kept in place; dns.answers is the pipeline's copy of it
+        elif "answers" in d:
+            caveats.append(ELASTIC_DNS_VERSION_CAVEAT)
+        elif isinstance(renamed, list):
+            answers = []
+            for item in renamed:
+                if not isinstance(item, dict):
+                    bad.append("dns.answers")
+                    answers = None
+                    break
+                restored = {k: v for k, v in item.items() if k not in ("name", "type", "data")}
+                restored.update({native: item[key] for key, native in (("name", "rrname"), ("type", "rrtype"),
+                                                                        ("data", "rdata")) if key in item})
+                answers.append(restored)
+            if answers is not None:
+                d["answers"] = answers
+                origins["dns.answers"] = f"{nid}:dns.answers"
+            version, how = 2, "version-2 answer"
+        elif d.get("rrname") is not None:
+            version, how = 2, "version-2 answer"
+            caveats.append(ELASTIC_GROUPED_CAVEAT)
+        else:
+            caveats.append(ELASTIC_DNS_VERSION_CAVEAT)
+    elif kind is not None:
+        caveats.append(ELASTIC_DNS_VERSION_CAVEAT)
+    if version is not None:
+        d["version"] = version
+        origins["dns.version"] = f"{nid}:suricata.eve.dns.type#derived:version ({how})"
+
+
+def _elastic_names(src: dict, t: dict, caveats: list[str]) -> None:
+    """Restore the certificate subject and issuer names (see `distinguished_name` above)."""
+    lost = []
+    for key, copy_path in (("subject", "tls.server.subject"), ("issuerdn", "tls.server.issuer")):
+        copied = _get(src, copy_path)
+        if not isinstance(copied, str) or not copied:
+            # the TLS pipeline copies every non-empty name before changing it: without a copy it did not run
+            continue
+        if "\\," not in copied and isinstance(t.get(key), str):
+            continue
+        if "&" not in copied:
+            t[key] = copied
+            continue
+        t.pop(key, None)
+        lost.append(f"tls.{key}")
+    if lost:
+        caveats.append(ELASTIC_DN_CAVEAT + ", ".join(lost))
+
+
+def elastic_suricata_eve(src: dict, nid: str = "") -> tuple[dict, dict[str, str], list[str], list[str]]:
+    """The EVE record of a Filebeat- or Agent-shipped Suricata document, rebuilt from suricata.eve.* and the fields
+    the shipper moved it to (`ELASTIC_SURICATA_MOVES`). Returns (EVE record, origins of typed fields read outside
+    suricata.eve, caveats, malformed native paths). A document the shipper's pipeline failed on is an error: its
+    fields may be incomplete."""
+    s = _get(src, "suricata.eve")
+    if not isinstance(s, dict):
+        raise TypeError("suricata.eve is not an object")
+    failure = _get(src, "error.message")
+    if failure not in (None, "", []):
+        raise ValueError("the shipper's ingest pipeline failed on this record, so its fields may be incomplete")
+    eve = json.loads(json.dumps(s))
+    et = eve.get("event_type")
+    origins: dict[str, str] = {}
+    caveats = [ELASTIC_RECONSTRUCTED_CAVEAT]
+    bad: list[str] = []
+    escaped: list[str] = []
+    has_http = et == "http" or isinstance(eve.get("http"), dict)
+    has_flow = et != "netflow"
+    for key, typed, paths, how in ELASTIC_SURICATA_MOVES:
+        if how in ("removed", "dns_answers", "distinguished_name", "trailing_dot") or key == "timestamp":
+            continue                      # read below with its block; the record's time is @timestamp itself
+        block = key.split(".", 1)[0] if "." in key else None
+        if (block == "http" and not has_http) or (block == "flow" and not has_flow) \
+                or (block == "fileinfo" and et != "fileinfo" and not isinstance(eve.get("fileinfo"), dict)) \
+                or (block == "alert" and et != "alert" and not isinstance(eve.get("alert"), dict)):
+            continue
+        if how == "string":
+            value = eve.get(key)
+            if isinstance(value, str):
+                if re.fullmatch(r"[0-9]+", value):
+                    eve[key] = int(value)
+                    origins[typed] = f"{nid}:{paths[0]}#derived:integer"
+                else:
+                    bad.append(key)
+                    eve.pop(key)
+            continue
+        if _get(eve, key) is not None:
+            continue                      # still in place: the pipeline did not move it
+        if how == "app_proto":
+            if et not in _EVE_APP_PROTO_TYPES:
+                continue
+            value = _get(src, paths[0])
+            if value is None:
+                caveats.append(ELASTIC_NO_APP_PROTO_CAVEAT)
+            elif isinstance(value, str) and value:
+                eve[key] = value
+                origins[typed] = f"{nid}:{paths[0]}"
+            else:
+                bad.append(paths[0])
+            continue
+        if how == "action":
+            value, ambiguous = _elastic_action(src)
+            if ambiguous:
+                caveats.append(ELASTIC_ACTION_CAVEAT)
+            elif value is not None and _set_path(eve, key, value):
+                origins[typed] = f"{nid}:event.type#derived:alert.action"
+            continue
+        value, path = _indexed(src, paths)
+        if value is None:
+            continue
+        if how == "templated":
+            text = _single_string(value)
+            if text is None:
+                bad.append(path)
+                continue
+            if "&" in text:
+                escaped.append(path)
+                continue
+            value = text
+        elif how == "lowercased" and isinstance(value, str):
+            value = value.lower()
+        if not _set_path(eve, key, value):
+            bad.append(key)
+            continue
+        if typed is not None:
+            origins[typed] = f"{nid}:{path}"
+    if escaped:
+        caveats.append(ELASTIC_ESCAPED_CAVEAT + ", ".join(escaped))
+    if "community_id" not in eve or eve.get("community_id") in (None, ""):
+        tuple_paths = [origins.get(name, f"{nid}:suricata.eve.{native}").removeprefix(f"{nid}:") for name, native in (
+            ("source.ip", "src_ip"), ("source.port", "src_port"), ("destination.ip", "dest_ip"),
+            ("destination.port", "dest_port"), ("network.transport", "proto"))]
+        origins["network.community_id"] = f"{nid}:{'+'.join(tuple_paths)}#computed:community_id_v1"
+    d = eve.get("dns")
+    if isinstance(d, dict):
+        _elastic_dns(src, d, nid, origins, caveats, bad)
+    t = eve.get("tls")
+    if isinstance(t, dict):
+        if isinstance(t.get("sni"), str) and t["sni"]:
+            caveats.append(ELASTIC_SNI_CAVEAT)
+        _elastic_names(src, t, caveats)
+    return eve, origins, caveats, bad
+
+
+def normalize_elastic_suricata(hit: dict) -> TypedEvent:
+    """A Filebeat- or Agent-shipped Suricata document without its EVE line, normalized to the typed event of the
+    same EVE record: every typed value read outside suricata.eve.* names its indexed path."""
+    src, nid = hit["_source"], hit["_id"]
+    eve, origins, caveats, malformed = elastic_suricata_eve(src, nid)
+    return _suricata_event(hit, eve, f"{nid}:suricata.eve", origins=origins, caveats=caveats, malformed=malformed)
+
+
+def elastic_event_type_key(src: dict) -> str:
+    """The shape-table key of an Elastic-shipped Suricata document: its EVE event type, or "other"."""
+    et = _get(src, "suricata.eve.event_type")
+    return f"suricata.eve.elastic:{et if et in ELASTIC_EVENT_TYPES else 'other'}"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -2967,7 +3313,9 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
     Linux host records are read by their shipper shape (`linux_catalog.LINUX_SHIPPER_DATASETS`); `shapes`, when
     given, receives the count of records of each shape, and errors name the logical dataset. A record that is plainly
     Linux host telemetry of a module we read but matches no shape is counted not normalized, with the families its
-    logical dataset feeds.
+    logical dataset feeds. `shapes` also counts the EVE event types of Suricata records an Elastic shipper indexed
+    without their line (`suricata.eve.elastic:<type>`), and NXLog's flat Windows records (`windows.nxlog`) with how
+    far each zoneless EventTime is from the pipeline's @timestamp (`windows.nxlog.clock_offset:<zone>`).
 
     `skip_families`, when given, receives for each skip reason of a record no normalizer read the event families
     such records could have fed: the families of the Zeek log(s) a Zeek record names (empty for a log outside the
@@ -3002,6 +3350,13 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
         ds = _get(h["_source"], "event.dataset") or ""
         try:
             if is_windows_source(h["_source"]):
+                if is_nxlog_windows(h["_source"]):
+                    # NXLog's flat record names no dataset: an error is counted under its channel's families
+                    ds = nxlog_error_tag(h["_source"])
+                    if shapes is not None:
+                        for key in (NXLOG_SHAPE, nxlog_clock_offset(h["_source"])):
+                            if key is not None:
+                                shapes[key] = shapes.get(key, 0) + 1
                 windows_event = normalize_windows(h)
                 if rpc_remote_only and windows_event.family == "rpc_call" and (
                         windows_event.get("rpc.protocol") not in {"tcp", "named_pipe"}
@@ -3068,7 +3423,11 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                     events.append(normalize_apache_access(h))
                 elif shape.shape == APACHE_ERROR:
                     events.append(normalize_apache_error(h))
-            elif ds.startswith("suricata.eve"):
+            elif ds.startswith("suricata.eve") or _get(h["_source"], "data_stream.dataset") == ELASTIC_DATASET:
+                ds = ds or ELASTIC_DATASET
+                if shapes is not None and is_elastic_suricata(h["_source"]):
+                    key = elastic_event_type_key(h["_source"])
+                    shapes[key] = shapes.get(key, 0) + 1
                 events.append(normalize_suricata(h))
             elif ds in SINGLE:
                 events.append(SINGLE[ds](h))

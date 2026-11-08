@@ -211,6 +211,36 @@ WINDOWS_FIELD_MAPPINGS: dict[str, tuple[str, ...]] = {
 }
 
 
+# NXLog's flat Windows records (evidence.windows.nxlog_to_winlog) hold the same values at the top level, under
+# NXLog's System names and the providers' own event-data names: on a target that maps them, every Windows alias
+# also reads the flat name.
+NXLOG_MARKERS = ("Channel", "EventID")
+_NXLOG_SYSTEM_NAMES = {"winlog.channel": "Channel", "winlog.provider_name": "SourceName", "winlog.event_id": "EventID",
+                       "winlog.computer_name": "Hostname", "winlog.record_id": "RecordNumber"}
+
+
+def _nxlog_name(native: str) -> str | None:
+    if native.startswith("winlog.event_data."):
+        return native.removeprefix("winlog.event_data.")
+    return _NXLOG_SYSTEM_NAMES.get(native)
+
+
+NXLOG_FIELD_MAPPINGS: dict[str, tuple[str, ...]] = {
+    **{typed: tuple(dict.fromkeys([*natives, *(flat for native in natives if (flat := _nxlog_name(native)))]))
+       for typed, natives in WINDOWS_FIELD_MAPPINGS.items()},
+    "winlog.record_id": ("winlog.record_id", "RecordNumber"),
+}
+
+
+def nxlog_flat(field_types) -> bool:
+    """Whether a mapping holds NXLog's flat Windows record fields."""
+    return all(field in field_types for field in NXLOG_MARKERS)
+
+
+def _windows_mapping(field_types) -> bool:
+    return any(field == "winlog" or field.startswith("winlog.") for field in field_types) or nxlog_flat(field_types)
+
+
 def schema_of(field_types: dict[str, str]) -> str:
     """Which normalizer family a target's mapping belongs to, from its fields (never its name)."""
     if all(f in field_types for f in ARKIME_SESSION_MARKERS):
@@ -230,12 +260,12 @@ def source_role(field_types: dict[str, str], datasets: set[str] | None = None) -
     host_shape = any(
         field == "host.ip" or field.startswith(("process.", "user.", "winlog."))
         for field in field_types
-    )
+    ) or nxlog_flat(field_types)
     return "network" if network_shape and not host_shape else "host"
 
 
 def source_os_family(field_types: dict[str, str], role: str) -> Literal["linux", "windows", "unknown"]:
-    if any(field == "winlog" or field.startswith("winlog.") for field in field_types):
+    if _windows_mapping(field_types):
         return "windows"
     return "linux" if role == "host" else "unknown"
 
@@ -275,8 +305,8 @@ def contract_from_types(
     }
     direct_fields = dict(fields)
     mappings = dict(field_mappings or {})
-    if any(field == "winlog" or field.startswith("winlog.") for field in field_types):
-        mappings = {**WINDOWS_FIELD_MAPPINGS, **mappings}
+    if _windows_mapping(field_types):
+        mappings = {**(NXLOG_FIELD_MAPPINGS if nxlog_flat(field_types) else WINDOWS_FIELD_MAPPINGS), **mappings}
     for typed, candidates in mappings.items():
         native_candidates = (candidates,) if isinstance(candidates, str) else candidates
         available = [
@@ -307,9 +337,7 @@ def contract_from_types(
     resolved_os = os_family or source_os_family(field_types, resolved_role)
     return FieldContract(
         target=target, fields=fields, time_field=time_field, role=resolved_role, os_family=resolved_os,
-        linux_fields=direct_fields if any(
-            field == "winlog" or field.startswith("winlog.") for field in field_types
-        ) else {},
+        linux_fields=direct_fields if _windows_mapping(field_types) else {},
         hosts=hosts, host_inventory_complete=host_inventory_complete,
     )
 
@@ -384,11 +412,12 @@ def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfil
     declaration = site_facts.zeek.plain_sources.get(target) if site_facts is not None else None
     # Arkime sessions: time is the first packet; the "dataset" is the session protocol and the
     # reporting host is the capture node
-    windows = "winlog.computer_name" in field_types
+    windows = "winlog.computer_name" in field_types or (nxlog_flat(field_types) and "Hostname" in field_types)
     dataset_field = "event.dataset" if "event.dataset" in field_types else "data_stream.dataset"
     tf, ds_field, host_field = (("firstPacket", "protocol", "node") if schema == "arkime_sessions"
                                 else ("@timestamp", dataset_field,
-                                      "winlog.computer_name" if windows else "host.name"))
+                                      ("winlog.computer_name" if "winlog.computer_name" in field_types
+                                       else "Hostname") if windows else "host.name"))
     if declaration is not None:
         tf, ds_field, host_field = "ts", "_path", "_romulus_no_observer_field"
     notes = []

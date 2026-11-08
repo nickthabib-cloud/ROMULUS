@@ -52,9 +52,18 @@ PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf211
                    # journald fields, syslog lines) through linux_catalog's shape table; records rebuilt from a
                    # shipper's parsed fields name their indexed paths and say so. The dev importer's records
                    # normalize exactly as before (tests/test_throughput_equality.py's normalization goldens).
-                   16: "6e3812d30f1bb0011172854e2d47d2113cba533a17e857bdf65ee92af39b8935"}
+                   16: "6e3812d30f1bb0011172854e2d47d2113cba533a17e857bdf65ee92af39b8935",
+                   # Suricata records that Filebeat's suricata module or the Agent's Suricata integration indexed
+                   # without their EVE line are rebuilt from the shipper's fields (normalize.ELASTIC_SURICATA_MOVES)
+                   # instead of failing, and NXLog's flat Windows records are dispatched to the Windows producer (an
+                   # error names its channel's dataset); every other record normalizes exactly as before (with the
+                   # version set back to 16 the throughput and dispatch goldens are the earlier ones).
+                   17: "8fdae3b38155ecd84e0a6aae38cb6ba65d4f356b459873c0ad1744368396985b"}
 WINDOWS_EVIDENCE_FILES = ("community.py", "windows.py", "windows_catalog.py", "windows_reassembly.py", "rpc_catalog.py")
 PINNED_WINDOWS = {
+    # NXLog's flat im_msvistalog records are read (windows.nxlog_to_winlog); Winlogbeat and Agent records normalize
+    # exactly as before (the public sample corpus is identical with the versions held at their earlier values).
+    "windows-ecs@18": "173bd3268369b82b5eaf27ed25942ea5f0e895dafc078ab312ec5909b218c16a",
     "windows-ecs@17": "c022428db9afea396a8420febde66b10e3d934b2f1472732f22a9e29c60247d6",
     "windows-ecs@16": "1f06783de9c4bcc48be2807bfbf26aa83f35d0c9b6eabf147567f3b3b07191e3",
     "windows-ecs@15": "25b5a842851ea66af4086d63dc5aac56fe8d0ec486396a456ed6330cc8ed721b",

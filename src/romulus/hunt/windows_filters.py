@@ -108,3 +108,14 @@ def rpc_call_groups(contract):
         out.append([*group, transport, Predicate(field='rpc.interface_uuid', op='missing')])
         out.append([*group, Predicate(field='rpc.protocol', op='missing')])
     return out, True
+
+
+def nxlog_windows_group(contract):
+    """The predicates that select NXLog's flat Windows records (top-level Channel and EventID, no winlog object), or
+    None when the target cannot search both fields: that shape is then not assessed there."""
+    if not all(contract.supports(name, "exists") for name in ("Channel", "EventID")):
+        return None
+    group = [Predicate(field="Channel", op="exists"), Predicate(field="EventID", op="exists")]
+    if contract.supports("winlog.channel", "missing"):
+        group.append(Predicate(field="winlog.channel", op="missing"))
+    return group
