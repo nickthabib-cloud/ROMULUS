@@ -25,10 +25,26 @@ def test_root_cron_one_liner_after_an_alert_is_not_a_finding(tmp_path):
     assert out == []
 
 
-@pytest.mark.parametrize("uid,user,lane", [("33", "www-data", "high"), ("110", "postgres", "high")])
-def test_service_account_one_liner_after_an_alert_stays_high(uid, user, lane, tmp_path):
-    out = list(detector("corr.alert_then_host_execution", [alert(), one_liner(120, uid, user, "id")], tmp_path).finalize())
-    assert [m.proposed_lane for m in out] == [lane]
+def test_web_account_one_liner_after_an_alert_stays_high(tmp_path):
+    out = list(detector("corr.alert_then_host_execution", [alert(), one_liner(120, "33", "www-data", "id")],
+                        tmp_path).finalize())
+    assert [m.proposed_lane for m in out] == ["high"]
+
+
+@pytest.mark.parametrize("uid,user,command", [("110", "nagios", "/usr/lib/nagios/plugins/check_load -w 5 -c 10"),
+                                              ("112", "zabbix", "cat /proc/loadavg")])
+def test_monitoring_agent_one_liners_after_an_alert_are_not_findings(uid, user, command, tmp_path):
+    out = list(detector("corr.alert_then_host_execution", [alert(), one_liner(120, uid, user, command)],
+                        tmp_path).finalize())
+    assert out == []
+
+
+def test_a_reused_web_account_pid_from_before_the_alert_never_links_a_root_job(tmp_path):
+    stale = execution(-7200, "/bin/sh", pid=500, ppid=11, uid="33", process__user="www-data", host__ip=["10.0.0.9"])
+    job = one_liner(120, "0", "root")
+    job.fields["process.ppid"].value = 500
+    out = list(detector("corr.alert_then_host_execution", [alert(22), stale, job], tmp_path).finalize())
+    assert out == []
 
 
 def test_login_account_writable_executable_after_an_alert_is_a_lead(tmp_path):
@@ -147,7 +163,7 @@ def test_privilege_finalize_returns_walked_processes_to_disk(tmp_path):
     r.drain_staged()
     r.bind_loader(lambda ids: [])
     list(r.finalize())
-    assert len(r.execs.store.hot) <= 2 * r.execs.store.hot_size
+    assert len(r.execs.store.hot) < 3 * r.execs.store.hot_size
 
 
 def test_root_child_of_a_web_account_process_after_an_alert_stays_high(tmp_path):
@@ -157,3 +173,20 @@ def test_root_child_of_a_web_account_process_after_an_alert_stays_high(tmp_path)
     out = list(detector("corr.alert_then_host_execution", [alert(80), shell, nc], tmp_path).finalize())
     assert [m.proposed_lane for m in out] == ["high"]
     assert nc.id in {e.id for e in out[0].events}
+
+
+def test_a_later_discovery_burst_under_a_long_lived_web_server_is_counted_and_cited(tmp_path):
+    events = [execution(-10, "/usr/sbin/php-fpm8.2", pid=10, uid="0"),
+              execution(-5, "/usr/sbin/php-fpm8.2", pid=11, ppid=10, uid="33"),
+              execution(-4, "/usr/sbin/php-fpm8.2", pid=12, ppid=10, uid="33")]
+    later = []
+    for burst, (worker, start) in enumerate(((11, 0), (12, 5 * 86400))):
+        for i, name in enumerate(("whoami", "uname", "ss", "ps", "tree", "id")):
+            e = execution(start + i, f"/usr/bin/{name}", pid=1000 * (burst + 1) + i, ppid=worker, uid="33",
+                          process__user="www-data")
+            events.append(e)
+            if burst:
+                later.append(e.id)
+    [finding] = detector("host.discovery_burst", events, tmp_path).finalize()
+    assert finding.proposed_lane == "high" and "2 separate burst" in finding.claim
+    assert set(later) & {e.id for e in finding.events}

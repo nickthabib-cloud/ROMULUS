@@ -515,8 +515,9 @@ def test_later_service_account_discovery_window_retains_high(reverse, tmp_path):
     _, findings = staged_run(rule("host.discovery_burst"), [[event] for event in events], tmp_path)
     [finding] = findings
     assert finding.proposed_lane == "high"
+    # Both disjoint bursts fold into the session's finding; the later web-account burst raises its lane.
     assert {event.id for event in later} <= {event.id for event in finding.events}
-    assert not {event.id for event in first} & {event.id for event in finding.events}
+    assert "2 separate burst" in finding.claim
 
 
 def test_web_discovery_outside_every_qualifying_window_does_not_raise_lane(tmp_path):
@@ -579,7 +580,7 @@ def test_stronger_late_windows_survive_many_hosts_on_disk(name, expected_lane, t
     for finding in output:
         count += 1
         assert finding.proposed_lane == expected_lane
-        assert len(finding.events) <= 6
+        assert len(finding.events) <= 12
         assert any(event.ts >= T0 + timedelta(seconds=7200) for event in finding.events)
     assert count == 1000 and detector.capped == 0
     assert detector.rows_on_disk >= 4000 and detector.retained_events() == []

@@ -324,12 +324,10 @@ class LinuxSequence(Playbook):
             shared.seen.add(event.id)
         p = program(event)
         writable = temporary(str(event.get("process.executable") or ""))
-        uid = str(event.get("process.uid"))
-        # Root and login accounts run shell one-liners routinely (cron, systemd, logrotate); only a web or service
-        # account's one-liner or writable executable is strong without listener lineage.
-        service = web(event) or uid.isdigit() and 0 < int(uid) < 1000
-        strong = service and (writable or bool(
-            p and p.name in INTERPRETERS and any(a in {"-c", "-e", "--eval"} for a in p.args)))
+        one_liner = bool(p and p.name in INTERPRETERS and any(a in {"-c", "-e", "--eval"} for a in p.args))
+        # Root, login and service accounts run shell one-liners routinely (cron, systemd, monitoring agents such as
+        # NRPE and Zabbix), so only a web account's one-liner or writable executable is strong without lineage.
+        strong = web(event) and (writable or one_liner)
         for path in executed_paths(event):
             self.add(event, "execute", path, lane="high" if temporary(path) or web(event) else "lead",
                      data={"account": event.get("process.user") or event.get("process.uid"),
@@ -919,33 +917,43 @@ class DiscoveryBurst(LinuxSequence):
         if not self.ready():
             return []
         for (session,) in self.query("SELECT DISTINCT key FROM records WHERE role='discovery' ORDER BY key"):
-            start = self.query("""SELECT a.ts FROM records a WHERE a.role='discovery' AND a.key=?
-                AND (SELECT COUNT(DISTINCT b.aux) FROM records b WHERE b.role='discovery' AND b.key=a.key
-                     AND b.ts BETWEEN a.ts AND a.ts+?)>=?
-                ORDER BY CASE WHEN EXISTS(SELECT 1 FROM records h WHERE h.role='discovery' AND h.key=a.key
-                    AND h.ts BETWEEN a.ts AND a.ts+? AND h.lane='high') THEN 0 ELSE 1 END,
-                    a.ts,a.id LIMIT 1""", (session, W_DISCOVERY, N_DISCOVERY, W_DISCOVERY)).fetchone()
-            if start is None:
+            # A service anchor (a web server's master) lives for the whole boot: every disjoint qualifying window
+            # folds into one finding, so a later burst is counted and cited instead of hidden behind the first.
+            windows, ids, classes, lane, cursor, last = 0, [], set(), "lead", float("-inf"), []
+            while True:
+                start = self.query("""SELECT a.ts FROM records a WHERE a.role='discovery' AND a.key=? AND a.ts>?
+                    AND (SELECT COUNT(DISTINCT b.aux) FROM records b WHERE b.role='discovery' AND b.key=a.key
+                         AND b.ts BETWEEN a.ts AND a.ts+?)>=?
+                    ORDER BY a.ts,a.id LIMIT 1""", (session, cursor, W_DISCOVERY, N_DISCOVERY)).fetchone()
+                if start is None:
+                    break
+                windows += 1
+                cursor = start[0] + W_DISCOVERY
+                # At most one representative per fixed discovery class plus the first HIGH record.
+                rows = self.query("""SELECT aux,MIN(ts),MIN(id),MAX(lane) FROM records WHERE role='discovery'
+                    AND key=? AND ts BETWEEN ? AND ? GROUP BY aux ORDER BY aux""", (session, start[0], cursor))
+                current = []
+                for klass, _when, identity, _level in rows:
+                    current.append(identity)
+                    classes.add(klass)
+                high = self.query("SELECT id FROM records WHERE key=? AND role='discovery' AND ts BETWEEN ? AND ? "
+                                  "AND lane='high' ORDER BY ts,id LIMIT 1", (session, start[0], cursor)).fetchone()
+                if high:
+                    lane = "high"
+                    if high[0] not in current:
+                        current.append(high[0])
+                if windows <= CITE:
+                    ids += current
+                last = current
+            if not windows:
                 continue
-            # At most one representative per fixed discovery class plus span bounds.
-            rows = self.query("""SELECT aux,MIN(ts),MIN(id),MAX(lane) FROM records WHERE role='discovery'
-                AND key=? AND ts BETWEEN ? AND ? GROUP BY aux ORDER BY aux""",
-                (session, start[0], start[0] + W_DISCOVERY))
-            ids, classes, lane = [], [], "lead"
-            for klass, _when, identity, _level in rows:
-                ids.append(identity)
-                classes.append(klass)
-            high = self.query("SELECT id FROM records WHERE key=? AND role='discovery' AND ts BETWEEN ? AND ? "
-                              "AND lane='high' ORDER BY ts,id LIMIT 1",
-                              (session, start[0], start[0] + W_DISCOVERY)).fetchone()
-            if high:
-                lane = "high"
-                if high[0] not in ids:
-                    ids.append(high[0])
+            if windows > CITE:
+                ids += last
             yield self.finding(session, ids, lane,
-                f"One recorded audit login session ran {len(classes)} distinct discovery classes within "
-                f"{W_DISCOVERY} seconds: {', '.join(classes)}. Classes share the expansion classifier; "
-                "the session identity is recorded, and intent is inferred.", len(classes))
+                f"One recorded audit login session or service ancestor ran {len(classes)} distinct discovery classes "
+                f"in {windows} separate burst(s) of at least {N_DISCOVERY} classes within {W_DISCOVERY} seconds: "
+                f"{', '.join(sorted(classes))}. Classes share the expansion classifier; the first {min(windows, CITE)} "
+                "and the latest bursts are cited; the grouping identity is recorded, and intent is inferred.", len(classes))
 
 
 class UnbrokeredPrivilegeTransition(LinuxSequence):
@@ -995,10 +1003,12 @@ class UnbrokeredPrivilegeTransition(LinuxSequence):
 
     def finalize(self):
         groups = KeyedStore(self, "privilege_sessions", self.HOT)
-        for (host, pid), records in self.execs.store.items():
-            # Parent walks bring spilled processes back to memory; return them. The walk reads a sorted copy of the
-            # disk rows, so writing them back does not disturb it.
-            self.execs.trim()
+        store = self.execs.store
+        for (host, pid), records in store.items():
+            # Parent walks bring spilled processes back to memory; return them once they double the hot set. The
+            # walk reads a sorted copy of the disk rows, so writing them back does not disturb it.
+            if len(store.hot) > 2 * store.hot_size:
+                self.execs.trim()
             for record in records:
                 if record.euid != "0" or record.auid in {None, "0", "4294967295", "-1"}:
                     continue
@@ -1176,8 +1186,9 @@ class AlertThenHostExecution(LinuxSequence):
                         if record is None:
                             break
                         chain.append(record.event_id)
-                        if not metadata.get("web") and record.user in WEB_SERVICE_USERS:
-                            # Another account's exec descending from a web-account process left the web service.
+                        if not metadata.get("web") and record.user in WEB_SERVICE_USERS and record.ts >= ats:
+                            # Another account's exec descending from a web-account process started after the alert
+                            # left the web service. An earlier record may name a reused pid, so it never links.
                             linked = record.event_id
                             break
                         if port in {"80", "443", "8080", "8443"} and (
@@ -1199,9 +1210,9 @@ class AlertThenHostExecution(LinuxSequence):
             if count:
                 yield self.finding(_key(host, signature), ids, lane,
                     f"An inbound severity 1-2 IDS alert was followed by {count} exec record(s) on its uniquely mapped host. "
-                    "HIGH has listener/web-worker/web-account lineage, or a web or service account's writable executable or "
-                    "interpreter one-liner; another account's writable executable and web-account host/time "
-                    "coincidence alone are inferred LEADs.", count)
+                    "HIGH has listener/web-worker lineage, a web-account ancestor started after the alert, or a web "
+                    "account's writable executable or interpreter one-liner; another account's writable executable "
+                    "and web-account host/time coincidence alone are inferred LEADs.", count)
 
 
 class TelemetryGapAfterTamper(LinuxSequence):
