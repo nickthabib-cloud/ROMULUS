@@ -115,8 +115,8 @@ def test_dev_lineage_shapes_route_to_lead_with_the_route_stated(shape, kind):
     assert any(note.endswith("kept as a lead, not excluded.") for note in match.notes)
     from tests.claim_citations import finding_problems
     assert finding_problems(match.claim, match.notes, match.events) == []
-    _host, exe, path, lane = json.loads(match.group_key)
-    assert (exe, path, lane) == ("/usr/bin/perl", "/etc/shadow", "lead")
+    _host, exe, path, script, lane = json.loads(match.group_key)
+    assert (exe, path, lane) == ("/usr/bin/perl", "/etc/shadow", "lead") and script.startswith("/usr/")
 
 
 def test_route_note_names_the_lineage_from_the_reader_up():
@@ -311,7 +311,7 @@ def test_read_without_a_pid_stays_high():
 def test_lead_and_high_reads_of_one_file_are_separate_groups():
     events = [*shape_debconf_set_selections(), *shape_man_db_trigger(True)]
     out = run(events)[1]
-    assert sorted(json.loads(m.group_key)[3] for m in out) == ["high", "lead"]
+    assert sorted(json.loads(m.group_key)[-1] for m in out) == ["high", "lead"]
 
 
 def test_routed_lead_cites_its_lineage_as_context_when_kept():
@@ -369,7 +369,7 @@ def test_ten_thousand_maintenance_reads_on_fifty_hosts_stay_bounded(monkeypatch,
         assert len(rule.lineage.execs.store.hot) <= hot
     assert reads == 10_000
     assert len(published) == 50
-    assert {json.loads(key)[3] for key in published} == {"lead"}
+    assert {json.loads(key)[-1] for key in published} == {"lead"}
     assert all(m.aggregate_summary["count"] == 200 for m in published.values())
     assert rule.folds.on_disk > 0 and rule.lineage.execs.store.on_disk > 0
 
@@ -671,3 +671,45 @@ def test_one_lookup_per_reader_process_and_a_held_lineage_needs_none():
     fetcher2 = LineageFetcher(repo2, _dpkg_lineage())
     _reach(repo2, [*_dpkg_lineage(), read(25, 302, 301)], fetcher=fetcher2)
     assert fetcher2.calls == [] and set(_credential_rows(repo2)) == {"lead"}
+
+
+# ---- the routed group is per script; the service arm checks the script and the parent ----
+
+def change(t, path, kind="content", host="deb1"):
+    return ev("file_change", T0 + timedelta(seconds=t), host_name=host, file__path=path, file__change=kind,
+              process__executable="/usr/bin/cp", process__uid="0", process__pid=990, process__ppid=1)
+
+
+def test_another_packaged_script_under_dpkg_never_shares_the_upgrade_group():
+    events = [exec_(0, 700, 1, ["/usr/bin/dpkg", "--configure", "-a"]),
+              exec_(1, 701, 700, ["/usr/bin/perl", "-w", "/usr/share/debconf/frontend"]), read(2, 701, 700),
+              exec_(3, 702, 700, ["/usr/bin/perl", "/usr/share/evil/x.pl"]), read(4, 702, 700)]
+    out = run(events)[1]
+    assert len(out) == 2 and {m.proposed_lane for m in out} == {"lead"}
+    assert {json.loads(m.group_key)[3] for m in out} == {"/usr/share/debconf/frontend", "/usr/share/evil/x.pl"}
+
+
+def test_service_script_changed_during_the_hunt_stays_high():
+    events = [change(-30, "/usr/bin/zmpkg.pl"), *shape_service_script()]
+    assert lane_of(run(events)[1]) == "high"
+
+
+def test_service_script_with_unrelated_changes_routes_and_was_checked():
+    match = only(run([change(-30, "/usr/bin/other.pl"), *shape_service_script()])[1])
+    assert match.proposed_lane == "lead" and not any("origin was not checked" in n for n in match.notes)
+
+
+def test_service_script_without_file_change_records_routes_with_a_note():
+    match = only(run(shape_service_script())[1])
+    assert match.proposed_lane == "lead"
+    assert "the script's origin was not checked (no file-change records)" in match.notes
+
+
+def test_service_script_change_after_the_read_does_not_matter():
+    match = only(run([*shape_service_script(), change(30, "/usr/bin/zmpkg.pl")])[1])
+    assert match.proposed_lane == "lead"
+
+
+def test_service_read_whose_parent_differs_from_its_exec_stays_high():
+    events = [exec_(0, 600, 1, ["/usr/bin/perl", "-wT", "/usr/bin/zmpkg.pl", "start"]), read(1, 600, 4242)]
+    assert lane_of(run(events)[1]) == "high"

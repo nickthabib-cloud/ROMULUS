@@ -150,6 +150,8 @@ PROVISIONER_SOURCES = (
 # helpers (ucf, invoke-rc.d, a shell) and keeps every walk bounded. A provisioner beyond it is not found, and the
 # read stays high.
 PROVISIONER_DEPTH = 8
+# Recorded file changes that put new content at a path: a service script changed in the hunt is not the packaged one.
+SCRIPT_CHANGES = frozenset({"create", "content", "rename_target", "link"})
 
 
 def maintenance_interpreter(executable: str) -> str:
@@ -463,18 +465,6 @@ class FoldedLinuxDirect(LinuxDirect):
         # for lineage, never matched.
         self.observe_only: frozenset[str] = frozenset()
 
-    @staticmethod
-    def sweep_group_keys(match: Match) -> list[str]:
-        """The group keys the same typed shape has in every lane: an evaluation with less context may put a record
-        the sweep judged under another lane's key."""
-        try:
-            parts = json.loads(match.group_key)
-        except (TypeError, ValueError):
-            return []
-        if not isinstance(parts, list) or not parts:
-            return []
-        return [json.dumps([*parts[:-1], lane]) for lane in ("urgent", "high", "lead")]
-
     def consume(self, events):
         pending = {}
         for event in self.applicable(events):
@@ -547,9 +537,10 @@ class FoldedLinuxDirect(LinuxDirect):
 
     def release_state(self):
         self.folds.clear()
-        scripts = getattr(self, "scripts", None)
-        if scripts is not None:
-            scripts.clear()
+        for name in ("scripts", "script_changes", "change_hosts"):
+            store = getattr(self, name, None)
+            if store is not None:
+                store.clear()
 
 
 def one_edit(a, b):
@@ -673,8 +664,8 @@ class CredentialMaterialAccess(FoldedLinuxDirect):
     version = "3"
     id = "host.credential_material_access"
     title = "Credential material named by a file-reading tool or a watched kernel open"
-    families = ("process_exec", "file_access", "process_observed")
-    context_families = ("process_observed",)       # lineage only
+    families = ("process_exec", "file_access", "process_observed", "file_change")
+    context_families = ("process_observed", "file_change")     # lineage, and changes to packaged scripts
     attack = ("T1552.001", "T1003.008")
     research = CREDENTIAL_SOURCES + PROVISIONER_SOURCES
     benign = ("package maintenance or provisioning reading the hash files via Perl or Python (routed to lead)",
@@ -692,12 +683,20 @@ class CredentialMaterialAccess(FoldedLinuxDirect):
         # locations are kept (one short string per such exec); the hot set in memory, the rest on disk.
         self.scripts = KeyedStore(self, "credential_interpreter_scripts", self.HOT)
         self._scripts_refused = False
+        # (host, packaged script path) -> the times a recorded file change created, wrote, linked or renamed onto
+        # it; and the hosts whose file-change records were read at all (without them a script's origin is unchecked).
+        self.script_changes = KeyedStore(self, "credential_script_changes", self.HOT)
+        self.change_hosts = KeyedStore(self, "credential_change_hosts", self.HOT)
+        self._changes_refused = False
 
     def consume(self, events):
         self._watched_in_batch = any(e.family == "file_access" for e in events)
-        # Lineage first, for the whole batch: a read's exec ancestry is read before the read is judged.
-        for event in sorted((e for e in events if e.family in {"process_exec", "process_observed"}),
+        # Lineage and script changes first, for the whole batch: a read's ancestry is read before it is judged.
+        for event in sorted((e for e in events if e.family in {"process_exec", "process_observed", "file_change"}),
                             key=lambda e: (e.ts, e.id)):
+            if event.family == "file_change":
+                self._hold_change(event)
+                continue
             self.lineage.observe(event, self.raw_of(event), self.raw_target())
             if event.family == "process_exec":
                 self._hold_script(event)
@@ -706,6 +705,24 @@ class CredentialMaterialAccess(FoldedLinuxDirect):
         finally:
             self.lineage.trim()
             self.scripts.trim()
+            self.script_changes.trim()
+            self.change_hosts.trim()
+
+    def _hold_change(self, event) -> None:
+        if not event.host:
+            return
+        if event.host not in self.change_hosts and not self.change_hosts.put(event.host, True):
+            self._changes_refused = True
+        path = normalize_path(str(event.get("file.path") or ""))
+        if event.get("file.change") not in SCRIPT_CHANGES or not path or not packaged_script(path):
+            return
+        times = self.script_changes.setdefault((event.host, path), list)
+        if times is None:
+            self._changes_refused = True
+            self.note_limit("script_changes", "the store of packaged-script changes took no new path; a later "
+                                              "service-started hash read is not routed to the lead lane")
+            return
+        times.append(event.ts.timestamp())
 
     def _hold_script(self, event) -> None:
         executable = normalize_path(str(event.get("process.executable") or ""))
@@ -764,9 +781,9 @@ class CredentialMaterialAccess(FoldedLinuxDirect):
         return (e.get("process.auid") is None and e.get("process.session_id") is None
                 and e.get("process.login_user") in (None, "", "unset"))
 
-    def maintenance_route(self, e) -> tuple[str, list[str], list[str]] | None:
-        """('package' or 'service', the lineage named from the reader up, its exec record ids) when the hash read
-        may go to the lead lane; None otherwise (the read stays high)."""
+    def maintenance_route(self, e) -> tuple[str, list[str], list[str], str, list[str]] | None:
+        """('package' or 'service', the lineage named from the reader up, its exec record ids, the script, notes)
+        when the hash read may go to the lead lane; None otherwise (the read stays high)."""
         return self._route(e)[0]
 
     def lineage_missing(self, e) -> bool:
@@ -800,7 +817,16 @@ class CredentialMaterialAccess(FoldedLinuxDirect):
         chain, ids = [f"{basename(executable)} {script}"], [record.event_id]
         first = view.first
         if first.ppid == 1:
-            return ("service", [*chain, "pid 1"], ids), False
+            # The read's own parent must be the exec's (a different one means the pid was reused), and a script
+            # created or rewritten during the hunt is not the packaged one.
+            if e.get("process.ppid") != getattr(record, "ppid", None) or self._changes_refused:
+                return None, False
+            changes = self.script_changes.get((e.host, script)) or self.script_changes.peek((e.host, script), ())
+            if any(ts <= e.ts.timestamp() for ts in changes):
+                return None, False
+            notes = ([] if e.host in self.change_hosts else
+                     ["the script's origin was not checked (no file-change records)"])
+            return ("service", [*chain, "pid 1"], ids, script, notes), False
         pid, ts, serial = first.ppid, first.ts, first.serial
         boot = boot if boot is not None else first.boot
         for _depth in range(PROVISIONER_DEPTH):
@@ -815,7 +841,7 @@ class CredentialMaterialAccess(FoldedLinuxDirect):
             if step.kind == EXEC:
                 ids.append(step.entry.event_id)
             if found:
-                return ("package", chain, ids), False
+                return ("package", chain, ids, script, []), False
             top = parent.first
             pid, ts, serial = top.ppid, top.ts, top.serial
             boot = boot if boot is not None else top.boot
@@ -896,24 +922,27 @@ class CredentialMaterialAccess(FoldedLinuxDirect):
                     else "a file-reading command names (positive-only argv operand)")
             claim = f"On {e.host}, {text} {found[2]}; recorded outcome {e.outcome.value}."
             if route is not None:
-                kind, chain, _ids = route
+                kind, chain, _ids, _script, _notes = route
                 claim += (f" The reader is a root {'service script started by the service manager'
                           if kind == 'service' else 'interpreter under package maintenance'} "
                           f"({' ← '.join(chain)}) with no login session.")
-            out.append(observed(self, e, claim,
-                                lane, group=json.dumps([e.host, normalize_path(str(e.get("process.executable") or "")),
-                                                            path, lane]),
+            executable = normalize_path(str(e.get("process.executable") or ""))
+            # A routed read is grouped by the script it ran too, so another script never shares its group, claim or
+            # citations. The lane stays the key's last part.
+            group = json.dumps([e.host, executable, path, *([route[3]] if route is not None else []), lane])
+            out.append(observed(self, e, claim, lane, group=group,
                                 names=("file.path", "file.owner.id", "file.owner.name", "audit.key",
                                              "process.executable", "process.argv", "process.uid", "process.user")))
             if reader == "backup":
                 out[-1].notes.append("A packaged root backup/compare tool read the hash file; paired writes outside /etc "
                                      "are not known, so this remains a lead rather than an exclusion.")
             if route is not None:
-                kind, chain, ids = route
+                kind, chain, ids, _script, notes = route
                 what = ("Root service script started by the service manager" if kind == "service"
                         else "Root interpreter under package maintenance")
                 out[-1].notes.append(f"{what} ({' ← '.join(chain)}) read the hash file with no login session; kept as "
                                      "a lead, not excluded.")
+                out[-1].notes.extend(notes)
                 out[-1].route_ids = ids
         return out
 
