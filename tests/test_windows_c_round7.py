@@ -244,7 +244,8 @@ def test_native_scale4_releases_use_global_room_without_poisoning_later_findings
     fixture.patched_sizes(monkeypatch)
     # SQLite's page use depends on the order of the stored event ids, which the evidence epoch hashes: at exactly
     # 4 MiB the epoch-16 layout leaves no room for one correlation finding (the epoch-15 layout did). 4.1 MiB holds
-    # the same 60 findings as epoch 15 at 4 MiB, identical apart from id-derived lineage keys.
+    # the same 60 findings as epoch 15 at 4 MiB, identical apart from id-derived lineage keys. Epoch 17 rehashes the
+    # event ids again: the same 60 findings, and with the evidence version set back to 16 the earlier digest.
     budget = StateBudget(tmp_path, disk_total=int(4.1*2**20), reserve=0)
     monkeypatch.setattr(sw, "state_budget", lambda settings, stage_dir: budget)
     snapshot = fixture.run_stack(tmp_path, docs=fixture.build(4))
@@ -253,7 +254,7 @@ def test_native_scale4_releases_use_global_room_without_poisoning_later_findings
     # The alert keeps its computed HIGH lane with explicit partial citation coverage at this physical cap.
     assert len(snapshot["candidates"]) == 60
     assert fixture.digests(snapshot)["candidates"] == (
-        "0ca2a5a1c825bf9b3d53d1d1c134e7d54664fb4a0fef927811318161b49f2507")
+        "0c9ee81e265463ce6d3e9fb7f96bb5ecaef2cffda97e254fccc0a3b75c6ed1c5")
     assert any(row["rule_id"] == "host.shell_spawned_by_connected_process" and row["event_ids"]
                for row in snapshot["candidates"])
 
