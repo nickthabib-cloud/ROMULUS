@@ -4,6 +4,7 @@ from __future__ import annotations
 from sqlalchemy import (
     DDL,
     JSON,
+    Boolean,
     CheckConstraint,
     Column,
     DateTime,
@@ -147,7 +148,7 @@ agent_alias = Table(
     Column("kind", String, nullable=False),
     Column("target_id", String, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
-    CheckConstraint("kind IN ('F', 'I', 'E', 'N', 'L')", name="ck_agent_alias_kind"),
+    CheckConstraint("kind IN ('F', 'I', 'E', 'N', 'L', 'H', 'A')", name="ck_agent_alias_kind"),
     UniqueConstraint("hunt_id", "alias", name="uq_agent_alias_name"),
     UniqueConstraint("hunt_id", "kind", "target_id", name="uq_agent_alias_target"),
 )
@@ -224,7 +225,11 @@ candidate = Table(
     Column("source_case_id", String),
     Column("source_anchor_id", String),
     Column("source_link_id", String),
+    Column("provenance", String, nullable=False, default="deterministic", server_default="deterministic"),
+    Column("agent_hypothesis_id", String,
+           ForeignKey("agent_hypothesis.id", name="fk_candidate_agent_hypothesis")),
     Column("created_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint("provenance IN ('deterministic', 'agent')", name="ck_candidate_provenance"),
 )
 Index("ix_candidate_hunt_lane", candidate.c.hunt_id, candidate.c.lane, candidate.c.priority)
 
@@ -339,6 +344,7 @@ model_call = Table(
     Column("id", String, primary_key=True),
     Column("hunt_id", String, ForeignKey("hunt.id"), nullable=False),
     Column("case_id", String),
+    Column("session_id", String, ForeignKey("agent_session.id")),
     Column("purpose", String, nullable=False),
     Column("model", String, nullable=False),
     Column("options", JSON, nullable=False),
@@ -375,6 +381,169 @@ case_step = Table(
     Column("at", DateTime(timezone=True), nullable=False),
     UniqueConstraint("case_id", "n", name="uq_case_step_n"),
 )
+
+agent_run = Table(
+    "agent_run", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id"), primary_key=True),
+    Column("state", String, nullable=False),
+    Column("reason", Text),
+    Column("prompt_digests", JSON, nullable=False),
+    Column("provider", JSON, nullable=False),
+    Column("started_at", DateTime(timezone=True)),
+    Column("ended_at", DateTime(timezone=True)),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint("state IN ('pending','running','completed','partial','failed','skipped')",
+                    name="ck_agent_run_state"),
+)
+Index("ix_agent_run_hunt_id", agent_run.c.hunt_id)
+
+agent_hypothesis = Table(
+    "agent_hypothesis", metadata,
+    Column("id", String, primary_key=True),
+    Column("hunt_id", String, ForeignKey("hunt.id"), nullable=False),
+    Column("statement", Text, nullable=False),
+    Column("techniques", JSON, nullable=False),
+    Column("entity_ids", JSON, nullable=False),
+    Column("status", String, nullable=False),
+    Column("confidence", String, nullable=False),
+    Column("questions", JSON, nullable=False),
+    Column("created_session_id", String),
+    Column("sessions_run", Integer, nullable=False, default=0),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint("length(statement) BETWEEN 1 AND 600", name="ck_agent_hypothesis_statement"),
+    CheckConstraint("status IN ('open','supported','weakened','refuted','abandoned')",
+                    name="ck_agent_hypothesis_status"),
+    CheckConstraint("confidence IN ('low','medium','high')", name="ck_agent_hypothesis_confidence"),
+)
+Index("ix_agent_hypothesis_hunt_id", agent_hypothesis.c.hunt_id)
+Index("ix_agent_hypothesis_hunt_status", agent_hypothesis.c.hunt_id, agent_hypothesis.c.status)
+
+agent_hypothesis_event = Table(
+    "agent_hypothesis_event", metadata,
+    Column("id", String, primary_key=True),
+    Column("hunt_id", String, ForeignKey("hunt.id"), nullable=False),
+    Column("hypothesis_id", String, ForeignKey("agent_hypothesis.id"), nullable=False),
+    Column("session_id", String),
+    Column("kind", String, nullable=False),
+    Column("payload", JSON, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint("kind IN ('opened','updated','support_added','contradiction_added','note')",
+                    name="ck_agent_hypothesis_event_kind"),
+)
+Index("ix_agent_hypothesis_event_hunt_id", agent_hypothesis_event.c.hunt_id)
+Index("ix_agent_hypothesis_event_history", agent_hypothesis_event.c.hypothesis_id,
+      agent_hypothesis_event.c.created_at, agent_hypothesis_event.c.id)
+
+agent_hypothesis_cite = Table(
+    "agent_hypothesis_cite", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id"), nullable=False),
+    Column("hypothesis_id", String, ForeignKey("agent_hypothesis.id"), nullable=False),
+    Column("role", String, nullable=False),
+    Column("target_kind", String, nullable=False),
+    Column("target_id", String, nullable=False),
+    CheckConstraint("role IN ('support','contradiction')", name="ck_agent_hypothesis_cite_role"),
+    CheckConstraint("target_kind IN ('finding','evidence','link','agent_link')",
+                    name="ck_agent_hypothesis_cite_target_kind"),
+    UniqueConstraint("hypothesis_id", "role", "target_kind", "target_id",
+                     name="uq_agent_hypothesis_cite"),
+)
+Index("ix_agent_hypothesis_cite_hunt_id", agent_hypothesis_cite.c.hunt_id)
+
+agent_session = Table(
+    "agent_session", metadata,
+    Column("id", String, primary_key=True),
+    Column("hunt_id", String, ForeignKey("hunt.id"), nullable=False),
+    Column("hypothesis_id", String, ForeignKey("agent_hypothesis.id")),
+    Column("purpose", String, nullable=False),
+    Column("state", String, nullable=False),
+    Column("tool_calls", Integer, nullable=False, default=0),
+    Column("summary", Text, nullable=False, default=""),
+    Column("started_at", DateTime(timezone=True), nullable=False),
+    Column("ended_at", DateTime(timezone=True)),
+    CheckConstraint("purpose IN ('orient','investigate','assess')", name="ck_agent_session_purpose"),
+    CheckConstraint("state IN ('running','finished','capped','context_full','refused','failed','interrupted','budget')",
+                    name="ck_agent_session_state"),
+    CheckConstraint("length(summary) <= 2000", name="ck_agent_session_summary"),
+)
+Index("ix_agent_session_hunt_id", agent_session.c.hunt_id)
+Index("ix_agent_session_hypothesis", agent_session.c.hypothesis_id, agent_session.c.started_at)
+
+agent_tool_call = Table(
+    "agent_tool_call", metadata,
+    Column("id", String, primary_key=True),
+    Column("hunt_id", String, ForeignKey("hunt.id"), nullable=False),
+    Column("session_id", String, ForeignKey("agent_session.id"), nullable=False),
+    Column("seq", Integer, nullable=False),
+    Column("name", String, nullable=False),
+    Column("arguments", JSON, nullable=False),
+    Column("arguments_truncated", Boolean, nullable=False, default=False),
+    Column("status", String, nullable=False),
+    Column("result_digest", String, nullable=False),
+    Column("model_call_id", String, ForeignKey("model_call.id")),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("session_id", "seq", name="uq_agent_tool_call_seq"),
+)
+Index("ix_agent_tool_call_hunt_id", agent_tool_call.c.hunt_id)
+
+agent_link = Table(
+    "agent_link", metadata,
+    Column("id", String, primary_key=True),
+    Column("hunt_id", String, ForeignKey("hunt.id"), nullable=False),
+    Column("session_id", String, ForeignKey("agent_session.id"), nullable=False),
+    Column("hypothesis_id", String, ForeignKey("agent_hypothesis.id")),
+    Column("from_kind", String, nullable=False),
+    Column("from_id", String, nullable=False),
+    Column("to_kind", String, nullable=False),
+    Column("to_id", String, nullable=False),
+    Column("relation", String, nullable=False),
+    Column("cites", JSON, nullable=False),
+    Column("rationale", Text, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+Index("ix_agent_link_hunt_id", agent_link.c.hunt_id)
+
+agent_note = Table(
+    "agent_note", metadata,
+    Column("id", String, primary_key=True),
+    Column("hunt_id", String, ForeignKey("hunt.id"), nullable=False),
+    Column("session_id", String, ForeignKey("agent_session.id"), nullable=False),
+    Column("target_kind", String, nullable=False),
+    Column("target_id", String, nullable=False),
+    Column("text", Text, nullable=False),
+    Column("cites", JSON, nullable=False),
+    Column("suspicious_content", Boolean, nullable=False, default=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+Index("ix_agent_note_hunt_id", agent_note.c.hunt_id)
+Index("ix_agent_note_target", agent_note.c.hunt_id, agent_note.c.target_kind, agent_note.c.target_id)
+
+agent_rule_request = Table(
+    "agent_rule_request", metadata,
+    Column("id", String, primary_key=True),
+    Column("hunt_id", String, ForeignKey("hunt.id"), nullable=False),
+    Column("session_id", String, ForeignKey("agent_session.id"), nullable=False),
+    Column("hypothesis_id", String, ForeignKey("agent_hypothesis.id")),
+    Column("pattern_description", Text, nullable=False),
+    Column("cites", JSON, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+Index("ix_agent_rule_request_hunt_id", agent_rule_request.c.hunt_id)
+
+agent_assessment = Table(
+    "agent_assessment", metadata,
+    Column("id", String, primary_key=True),
+    Column("hunt_id", String, ForeignKey("hunt.id"), nullable=False),
+    Column("revision", Integer, nullable=False),
+    Column("source", String, nullable=False),
+    Column("model", JSON, nullable=False),
+    Column("body", JSON, nullable=False),
+    Column("checker", JSON, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint("source IN ('agent','template')", name="ck_agent_assessment_source"),
+    UniqueConstraint("hunt_id", "revision", name="uq_agent_assessment_revision"),
+)
+Index("ix_agent_assessment_hunt_id", agent_assessment.c.hunt_id)
 
 report_manifest = Table(
     "report_manifest", metadata,

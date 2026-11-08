@@ -91,3 +91,43 @@ def test_every_toolbox_tool_can_be_sent_by_every_adapter(tmp_path, adapter):
     calls = [r for r in sent if r.method == "POST"]
     assert len(calls) == 1
     assert sorted(names(json.loads(calls[0].content))) == sorted(t.name for t in tools)
+
+
+def test_hypothesis_and_output_tool_schemas_are_strict_and_anthropic_stays_under_its_union_limit(tmp_path):
+    from romulus.agent.admission import AgentAdmission
+    from romulus.agent.provider.base import parse_tool_arguments
+    from romulus.agent.provider.claude_messages import (
+        MAX_OPTIONAL_PARAMETERS,
+        MAX_STRICT_TOOLS,
+        MAX_UNION_PARAMETERS,
+        strict_schema_problems,
+    )
+    from romulus.hunt.run import open_repo
+
+    repo = open_repo(Settings(home=tmp_path))
+    repo.create_hunt("h1", {"window": {}, "targets": []}, "d", "test")
+    toolbox = Toolbox(repo, "h1")
+    AgentAdmission(Settings(home=tmp_path), repo, "h1", "as-test").register(toolbox)
+    tools = toolbox.provider_tools()
+    assert {"open_hypothesis", "update_hypothesis", "propose_finding", "propose_link", "add_note",
+            "request_rule", "finish_session"} <= {tool.name for tool in tools}
+    assert all(strict_schema_problems(tool.parameters) == [] for tool in tools)
+
+    settings = Settings(agent_provider="anthropic", agent_model="m", agent_api_key=KEY,
+                        model_egress="lab-public-data", agent_context_tokens=1_000_000)
+    provider = build_provider(settings, transport=httpx2.MockTransport(_messages), resolver=lambda _host: REMOTE)
+    strict, problems = provider._strictness(ChatRequest([{"role": "user", "content": "investigate"}], tools=tools))
+    assert not problems
+    counts = {"optional": 0, "union": 0}
+    for tool in tools:
+        if tool.name in strict:
+            assert strict_schema_problems(tool.parameters, counts) == []
+    assert len(strict) <= MAX_STRICT_TOOLS
+    assert counts["optional"] <= MAX_OPTIONAL_PARAMETERS
+    assert counts["union"] <= MAX_UNION_PARAMETERS
+    assert {"propose_finding", "open_hypothesis", "finish_session"} <= strict
+
+    for raw, message in (("[]", "not a JSON object"), ("NaN", "non-finite JSON number"),
+                         ("Infinity", "non-finite JSON number"), ("-Infinity", "non-finite JSON number")):
+        parsed = parse_tool_arguments("call", "propose_finding", raw)
+        assert parsed.arguments is None and message in parsed.error

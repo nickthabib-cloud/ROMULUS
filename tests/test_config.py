@@ -28,11 +28,17 @@ def test_strong_secret_accepted():
     Sessions("K" * 43)
 
 
-def test_agent_mode_defaults_to_off_and_loads_valid_env_value():
-    assert Settings().agent_mode == "off"
-    assert load_settings(environ={"AGENT_MODE": "deterministic"}).agent_mode == "deterministic"
+def test_agent_default_is_on_and_loads_the_per_hunt_default():
+    assert Settings().agent_default == "on"
+    assert load_settings(environ={"AGENT_DEFAULT": "off"}).agent_default == "off"
 
 
-def test_invalid_agent_mode_is_rejected():
-    with pytest.raises(ValueError, match="AGENT_MODE"):
-        Settings(agent_mode="invented")
+def test_invalid_agent_default_is_rejected():
+    with pytest.raises(ValueError, match="agent_default"):
+        Settings(agent_default="invented")
+
+
+def test_leftover_agent_mode_env_is_warned_and_ignored(caplog):
+    settings = load_settings(environ={"AGENT_MODE": "deterministic"})
+    assert settings.agent_default == "on"
+    assert "AGENT_MODE is deprecated and ignored" in caplog.text

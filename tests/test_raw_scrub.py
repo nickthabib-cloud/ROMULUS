@@ -139,7 +139,7 @@ def _file_repo(path):
     repo = Repo(engine)
     repo.create_hunt("h1", {"targets": ["net"], "style": "broad", "original_input": {}, "window": {
         "start": ts.START.isoformat(), "end": (ts.START + timedelta(minutes=5)).isoformat()},
-        "source_profiles": {}, "agent_mode": "off", "expansion": {"enabled": False}, "pack": {"version": "p"},
+        "source_profiles": {}, "ai_agent": {"requested": False}, "expansion": {"enabled": False}, "pack": {"version": "p"},
         "normalizer": "n", "policy": "d", "model": {}, "romulus_version": "t"}, "d", "t")
     return repo, engine
 

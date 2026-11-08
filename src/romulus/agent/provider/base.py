@@ -135,6 +135,7 @@ class ChatRequest:
     strict_schema: bool = True
     max_output_tokens: int | None = None      # defaults to AGENT_MAX_OUTPUT_TOKENS
     temperature: float | None = None          # omitted when None: some models accept only their default
+    attempt_guard: Callable[[dict], bool] | None = field(default=None, repr=False, compare=False)
 
     def prompt_text(self) -> str:
         parts = [json.dumps(self.messages, sort_keys=True, default=str)]
@@ -202,8 +203,9 @@ def parse_tool_arguments(call_id: str, name: str, raw) -> ToolCall:
         return ToolCall(call_id, name, raw, json.dumps(raw, sort_keys=True))
     text = raw if isinstance(raw, str) else json.dumps(raw)
     try:
-        value = json.loads(text) if text.strip() else {}
-    except json.JSONDecodeError as exc:
+        value = json.loads(text, parse_constant=lambda constant: (_ for _ in ()).throw(
+            ValueError(f"non-finite JSON number {constant} is not allowed"))) if text.strip() else {}
+    except (json.JSONDecodeError, ValueError) as exc:
         return ToolCall(call_id, name, None, text, f"arguments are not valid JSON: {exc}")
     if not isinstance(value, dict):
         return ToolCall(call_id, name, None, text, "arguments are not a JSON object")
@@ -273,7 +275,8 @@ class ChatProvider:
                               f"prompt estimate {est} + {max_out} output exceeds the {ctx}-token context")
         return self._chat(request, messages, max_out, est)
 
-    def _retrying(self, attempt_once: Callable[[], T]) -> tuple[T, int, int]:
+    def _retrying(self, attempt_once: Callable[[], T], *, attempt_guard: Callable[[dict], bool] | None = None,
+                  billed=None) -> tuple[T, int, int]:
         """Run `attempt_once`, retrying up to MAX_RETRIES times with backoff while it raises TransientFailure.
         Returns its value, the final attempt's duration in ms, and the number of attempts; raises
         ProviderUnavailable when the retries run out. The one retry policy every adapter uses."""
@@ -284,10 +287,20 @@ class ChatProvider:
             try:
                 value = attempt_once()
             except TransientFailure as failure:
-                if attempt > MAX_RETRIES:
-                    raise ProviderUnavailable(redact_text(
-                        f"{self.decision.host}: {failure.detail} after {attempt} attempts{failure.suffix}",
-                        self.s)) from None
+                billed_parts = list(billed() if callable(billed) else billed or [])
+                retry_allowed = attempt <= MAX_RETRIES
+                guard_allowed = True
+                if attempt_guard is not None:
+                    guard_allowed = bool(attempt_guard({"billed": billed_parts, "retry_available": retry_allowed}))
+                if not retry_allowed or not guard_allowed:
+                    reason = (f"{self.decision.host}: {failure.detail} after {attempt} attempts{failure.suffix}"
+                              if not retry_allowed else
+                              f"{self.decision.host}: retry stopped by the agent budget after {attempt} attempts")
+                    unavailable = ProviderUnavailable(redact_text(
+                        reason, self.s))
+                    unavailable.billed = billed_parts
+                    unavailable.charged_by_guard = attempt_guard is not None
+                    raise unavailable from None
                 self.sleep(self._backoff(failure.retry_after, attempt))
                 continue
             return value, int((time.monotonic() - t0) * 1000), attempt
@@ -300,7 +313,8 @@ class ChatProvider:
         except ValueError:
             return 2.0 ** attempt
 
-    def _post(self, path: str, body: dict) -> tuple[httpx.Response, int, int]:
+    def _post(self, path: str, body: dict, *, attempt_guard: Callable[[dict], bool] | None = None,
+              billed=None) -> tuple[httpx.Response, int, int]:
         """POST with up to MAX_RETRIES retries on transport errors and retryable statuses.
         Returns the final response, its duration in ms, and the number of attempts."""
         def once() -> httpx.Response:
@@ -313,7 +327,7 @@ class ChatProvider:
                                        suffix=f": {error_message(response.text, self.s)}",
                                        retry_after=response.headers.get("retry-after", ""))
             return response
-        return self._retrying(once)
+        return self._retrying(once, attempt_guard=attempt_guard, billed=billed)
 
     def _http_error(self, response: httpx.Response, est: int, ms: int, attempts: int) -> ChatResult:
         body = redact_text(response.text, self.s)

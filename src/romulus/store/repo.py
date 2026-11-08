@@ -461,7 +461,8 @@ class Repo:
             raise RuntimeError(f"hunt {hunt_id} lease ownership lost")
 
     def claim_hunt(self, hunt_id: str, lease_seconds: int, resume: bool = False,
-                   now: datetime | None = None, owner_token: str | None = None) -> dict:
+                   now: datetime | None = None, owner_token: str | None = None,
+                   agent_only: bool = False) -> dict:
         """Claim a planned hunt or safely reclaim a resumable hunt."""
         now = now or utcnow()
         owner_token = owner_token or uuid.uuid4().hex
@@ -481,6 +482,8 @@ class Repo:
                     action = "hunt.resume_stale"
                 elif state in {"partial", "failed"}:
                     action = "hunt.resume"
+                elif state == "completed_within_scope" and agent_only:
+                    action = "hunt.agent_resume"
                 else:
                     raise ValueError(f"hunt {hunt_id} in state {state} cannot be resumed")
             elif state != "planned":
@@ -1555,7 +1558,7 @@ class Repo:
                 _candidate_writer.reset(token)
 
     def save_candidate(self, row: dict, *, canonicalize_agent: bool = False,
-                       owner_token: str | None = None) -> bool:
+                       max_agent_findings: int | None = None, owner_token: str | None = None) -> bool:
         """Insert once, while retaining deterministic provenance for the two supported duplicate cases."""
         with self.candidate_publication() as c:
             self._fence_lease(c, row["hunt_id"], owner_token)
@@ -1735,6 +1738,9 @@ class Repo:
                     },
                 ))
                 return True
+            if (row.get("provenance") == "agent" and max_agent_findings is not None
+                    and self._agent_cap_count(c, "agent_finding", row["hunt_id"]) >= max_agent_findings):
+                raise ValueError("agent finding limit reached")
             c.execute(t.candidate.insert().values(**row, created_at=utcnow()))
             c.execute(t.disposition_event.insert().values(candidate_id=row["id"], actor="romulus", at=utcnow(),
                                                           status="new", note="machine decision"))
@@ -2375,7 +2381,8 @@ class Repo:
 
     def agent_alias_target_hunts(self, kind: str, target_id: str,
                                  *, hunt_id: str | None = None) -> list[str]:
-        table = {"F": t.candidate, "E": t.typed_event, "N": t.entity, "L": t.expansion_link}.get(kind)
+        table = {"F": t.candidate, "E": t.typed_event, "N": t.entity, "L": t.expansion_link,
+                 "H": t.agent_hypothesis, "A": t.agent_link}.get(kind)
         if table is None:
             return []
         with self.engine.connect() as c:
@@ -4957,15 +4964,258 @@ class Repo:
             result = c.execute(insert(t.model_call).values(**values).on_conflict_do_nothing(index_elements=["id"]))
             return result.rowcount == 1
 
-    def model_calls(self, hunt_id: str | None = None, case_id: str | None = None) -> list[dict]:
+    def model_calls(self, hunt_id: str | None = None, case_id: str | None = None,
+                    session_id: str | None = None) -> list[dict]:
         query = select(t.model_call)
         if hunt_id is not None:
             query = query.where(t.model_call.c.hunt_id == hunt_id)
         if case_id is not None:
             query = query.where(t.model_call.c.case_id == case_id)
+        if session_id is not None:
+            query = query.where(t.model_call.c.session_id == session_id)
         query = query.order_by(t.model_call.c.at, t.model_call.c.id)
         with self.engine.connect() as c:
             return [dict(row) for row in c.execute(query).mappings()]
+
+    # ---- hypothesis-driven agent state -----------------------------------------------------
+    def agent_run(self, hunt_id: str) -> dict | None:
+        with self.engine.connect() as connection:
+            row = connection.execute(select(t.agent_run).where(t.agent_run.c.hunt_id == hunt_id)).mappings().first()
+            return dict(row) if row else None
+
+    @staticmethod
+    def _agent_cap_count(connection, table_name: str, hunt_id: str) -> int:
+        if table_name == "agent_finding":
+            query = select(func.count()).select_from(t.candidate).where(
+                t.candidate.c.hunt_id == hunt_id, t.candidate.c.provenance == "agent",
+            )
+        else:
+            table = {
+                "agent_hypothesis": t.agent_hypothesis,
+                "agent_link": t.agent_link,
+                "agent_note": t.agent_note,
+                "agent_rule_request": t.agent_rule_request,
+            }.get(table_name)
+            if table is None:
+                raise ValueError(f"unsupported agent cap table: {table_name}")
+            query = select(func.count()).select_from(table).where(table.c.hunt_id == hunt_id)
+        return int(connection.execute(query).scalar_one())
+
+    def save_agent_run(self, row: dict, *, owner_token: str | None = None) -> None:
+        values = {"updated_at": utcnow(), "prompt_digests": {}, "provider": {}, **row}
+        with write_txn(self.engine) as connection:
+            self._fence_lease(connection, values["hunt_id"], owner_token)
+            connection.execute(insert(t.agent_run).values(**values).on_conflict_do_update(
+                index_elements=["hunt_id"], set_={key: value for key, value in values.items() if key != "hunt_id"},
+            ))
+
+    def agent_hypotheses(self, hunt_id: str) -> list[dict]:
+        with self.engine.connect() as connection:
+            rows = connection.execute(select(t.agent_hypothesis).where(
+                t.agent_hypothesis.c.hunt_id == hunt_id,
+            ).order_by(t.agent_hypothesis.c.created_at, t.agent_hypothesis.c.id)).mappings()
+            return [dict(row) for row in rows]
+
+    def agent_hypothesis(self, hunt_id: str, hypothesis_id: str) -> dict | None:
+        with self.engine.connect() as connection:
+            row = connection.execute(select(t.agent_hypothesis).where(
+                t.agent_hypothesis.c.hunt_id == hunt_id, t.agent_hypothesis.c.id == hypothesis_id,
+            )).mappings().first()
+            return dict(row) if row else None
+
+    def create_agent_hypothesis(self, row: dict, event: dict, cites: list[dict] = (), *,
+                                max_count: int | None = None, owner_token: str | None = None) -> bool:
+        with write_txn(self.engine) as connection:
+            self._fence_lease(connection, row["hunt_id"], owner_token)
+            if (max_count is not None and self._agent_cap_count(connection, "agent_hypothesis", row["hunt_id"])
+                    >= max_count):
+                raise ValueError("hypothesis limit reached; update an existing one")
+            result = connection.execute(insert(t.agent_hypothesis).values(**row).on_conflict_do_nothing(
+                index_elements=["id"],
+            ))
+            if result.rowcount != 1:
+                return False
+            connection.execute(insert(t.agent_hypothesis_event).values(**event))
+            if cites:
+                connection.execute(insert(t.agent_hypothesis_cite).values(cites).on_conflict_do_nothing())
+            return True
+
+    def save_agent_hypothesis(self, row: dict, *, owner_token: str | None = None) -> bool:
+        with write_txn(self.engine) as connection:
+            self._fence_lease(connection, row["hunt_id"], owner_token)
+            result = connection.execute(insert(t.agent_hypothesis).values(**row).on_conflict_do_nothing(
+                index_elements=["id"],
+            ))
+            return result.rowcount == 1
+
+    def update_agent_hypothesis(self, hypothesis_id: str, hunt_id: str, changes: dict, event: dict,
+                                cites: list[dict] = (), *, owner_token: str | None = None) -> None:
+        with write_txn(self.engine) as connection:
+            self._fence_lease(connection, hunt_id, owner_token)
+            changed = connection.execute(t.agent_hypothesis.update().where(
+                t.agent_hypothesis.c.id == hypothesis_id, t.agent_hypothesis.c.hunt_id == hunt_id,
+            ).values(**changes))
+            if changed.rowcount != 1:
+                raise KeyError(hypothesis_id)
+            connection.execute(insert(t.agent_hypothesis_event).values(**event))
+            if cites:
+                connection.execute(insert(t.agent_hypothesis_cite).values(cites).on_conflict_do_nothing())
+
+    def increment_agent_hypothesis_sessions(self, hypothesis_id: str, hunt_id: str,
+                                           *, owner_token: str | None = None) -> None:
+        with write_txn(self.engine) as connection:
+            self._fence_lease(connection, hunt_id, owner_token)
+            changed = connection.execute(t.agent_hypothesis.update().where(
+                t.agent_hypothesis.c.id == hypothesis_id, t.agent_hypothesis.c.hunt_id == hunt_id,
+            ).values(sessions_run=t.agent_hypothesis.c.sessions_run + 1, updated_at=utcnow()))
+            if changed.rowcount != 1:
+                raise KeyError(hypothesis_id)
+
+    def agent_hypothesis_events(self, hypothesis_id: str) -> list[dict]:
+        with self.engine.connect() as connection:
+            rows = connection.execute(select(t.agent_hypothesis_event).where(
+                t.agent_hypothesis_event.c.hypothesis_id == hypothesis_id,
+            ).order_by(t.agent_hypothesis_event.c.created_at, t.agent_hypothesis_event.c.id)).mappings()
+            return [dict(row) for row in rows]
+
+    def agent_hypothesis_cites(self, hypothesis_id: str | None = None, hunt_id: str | None = None) -> list[dict]:
+        query = select(t.agent_hypothesis_cite)
+        if hypothesis_id is not None:
+            query = query.where(t.agent_hypothesis_cite.c.hypothesis_id == hypothesis_id)
+        if hunt_id is not None:
+            query = query.where(t.agent_hypothesis_cite.c.hunt_id == hunt_id)
+        with self.engine.connect() as connection:
+            return [dict(row) for row in connection.execute(query).mappings()]
+
+    def save_agent_session(self, row: dict, *, owner_token: str | None = None) -> bool:
+        with write_txn(self.engine) as connection:
+            self._fence_lease(connection, row["hunt_id"], owner_token)
+            result = connection.execute(insert(t.agent_session).values(**row).on_conflict_do_nothing(
+                index_elements=["id"],
+            ))
+            return result.rowcount == 1
+
+    def update_agent_session(self, session_id: str, hunt_id: str, changes: dict,
+                             *, owner_token: str | None = None) -> None:
+        with write_txn(self.engine) as connection:
+            self._fence_lease(connection, hunt_id, owner_token)
+            result = connection.execute(t.agent_session.update().where(
+                t.agent_session.c.id == session_id, t.agent_session.c.hunt_id == hunt_id,
+            ).values(**changes))
+            if result.rowcount != 1:
+                raise KeyError(session_id)
+
+    def interrupt_running_agent_session(self, session_id: str, hunt_id: str, *, owner_token: str | None = None) -> bool:
+        """Close a crashed session and release its hypothesis slot, preserving its durable outputs and calls."""
+        with write_txn(self.engine) as connection:
+            self._fence_lease(connection, hunt_id, owner_token)
+            row = connection.execute(select(t.agent_session.c.hypothesis_id).where(
+                t.agent_session.c.id == session_id, t.agent_session.c.hunt_id == hunt_id,
+                t.agent_session.c.state == "running",
+            )).first()
+            if row is None:
+                return False
+            connection.execute(t.agent_session.update().where(
+                t.agent_session.c.id == session_id, t.agent_session.c.hunt_id == hunt_id,
+                t.agent_session.c.state == "running",
+            ).values(state="interrupted", ended_at=utcnow(),
+                     summary="Interrupted before session completion."))
+            if row.hypothesis_id is not None:
+                connection.execute(t.agent_hypothesis.update().where(
+                    t.agent_hypothesis.c.id == row.hypothesis_id, t.agent_hypothesis.c.hunt_id == hunt_id,
+                ).values(sessions_run=case((t.agent_hypothesis.c.sessions_run > 0,
+                                             t.agent_hypothesis.c.sessions_run - 1), else_=0),
+                         updated_at=utcnow()))
+            return True
+
+    def agent_sessions(self, hunt_id: str, *, hypothesis_id: str | None = None,
+                       purpose: str | None = None) -> list[dict]:
+        query = select(t.agent_session).where(t.agent_session.c.hunt_id == hunt_id)
+        if hypothesis_id is not None:
+            query = query.where(t.agent_session.c.hypothesis_id == hypothesis_id)
+        if purpose is not None:
+            query = query.where(t.agent_session.c.purpose == purpose)
+        query = query.order_by(t.agent_session.c.started_at, t.agent_session.c.id)
+        with self.engine.connect() as connection:
+            return [dict(row) for row in connection.execute(query).mappings()]
+
+    def save_agent_tool_call(self, row: dict, *, owner_token: str | None = None) -> bool:
+        with write_txn(self.engine) as connection:
+            self._fence_lease(connection, row["hunt_id"], owner_token)
+            result = connection.execute(insert(t.agent_tool_call).values(**row).on_conflict_do_nothing(
+                index_elements=["id"],
+            ))
+            return result.rowcount == 1
+
+    def agent_tool_calls(self, hunt_id: str, *, session_id: str | None = None) -> list[dict]:
+        query = select(t.agent_tool_call).where(t.agent_tool_call.c.hunt_id == hunt_id)
+        if session_id is not None:
+            query = query.where(t.agent_tool_call.c.session_id == session_id)
+        query = query.order_by(t.agent_tool_call.c.session_id, t.agent_tool_call.c.seq)
+        with self.engine.connect() as connection:
+            return [dict(row) for row in connection.execute(query).mappings()]
+
+    def _agent_rows(self, table, hunt_id: str) -> list[dict]:
+        with self.engine.connect() as connection:
+            rows = connection.execute(select(table).where(table.c.hunt_id == hunt_id).order_by(table.c.id)).mappings()
+            return [dict(row) for row in rows]
+
+    def save_agent_output(self, table_name: str, row: dict, *, max_count: int | None = None,
+                          owner_token: str | None = None) -> bool:
+        tables = {"agent_link": t.agent_link, "agent_note": t.agent_note,
+                  "agent_rule_request": t.agent_rule_request}
+        table = tables.get(table_name)
+        if table is None:
+            raise ValueError("unsupported agent output table")
+        with write_txn(self.engine) as connection:
+            self._fence_lease(connection, row["hunt_id"], owner_token)
+            if max_count is not None and self._agent_cap_count(connection, table_name, row["hunt_id"]) >= max_count:
+                label = {"agent_link": "agent link", "agent_note": "agent note",
+                         "agent_rule_request": "agent rule request"}[table_name]
+                raise ValueError(f"{label} limit reached")
+            result = connection.execute(insert(table).values(**row).on_conflict_do_nothing(
+                index_elements=["id"],
+            ))
+            return result.rowcount == 1
+
+    def save_agent_hypothesis_note(self, row: dict, event: dict, *, max_count: int | None = None,
+                                   owner_token: str | None = None) -> bool:
+        """Persist a hypothesis note and its append-only history event together."""
+        with write_txn(self.engine) as connection:
+            self._fence_lease(connection, row["hunt_id"], owner_token)
+            if max_count is not None and self._agent_cap_count(connection, "agent_note", row["hunt_id"]) >= max_count:
+                raise ValueError("agent note limit reached")
+            result = connection.execute(insert(t.agent_note).values(**row).on_conflict_do_nothing(
+                index_elements=["id"],
+            ))
+            if result.rowcount != 1:
+                return False
+            connection.execute(insert(t.agent_hypothesis_event).values(**event))
+            return True
+
+    def agent_links(self, hunt_id: str) -> list[dict]:
+        return self._agent_rows(t.agent_link, hunt_id)
+
+    def agent_notes(self, hunt_id: str) -> list[dict]:
+        return self._agent_rows(t.agent_note, hunt_id)
+
+    def agent_rule_requests(self, hunt_id: str) -> list[dict]:
+        return self._agent_rows(t.agent_rule_request, hunt_id)
+
+    def save_agent_assessment(self, row: dict, *, owner_token: str | None = None) -> bool:
+        with write_txn(self.engine) as connection:
+            self._fence_lease(connection, row["hunt_id"], owner_token)
+            result = connection.execute(insert(t.agent_assessment).values(**row).on_conflict_do_nothing(
+                index_elements=["id"],
+            ))
+            return result.rowcount == 1
+
+    def agent_assessments(self, hunt_id: str) -> list[dict]:
+        with self.engine.connect() as connection:
+            rows = connection.execute(select(t.agent_assessment).where(
+                t.agent_assessment.c.hunt_id == hunt_id,
+            ).order_by(t.agent_assessment.c.revision)).mappings()
+            return [dict(row) for row in rows]
 
     def agent_usage(self, hunt_id: str) -> dict:
         """What the AI agent has spent in a hunt (provider-port calls only), for budgets that survive resume."""

@@ -25,7 +25,14 @@ from romulus.agent.provider.base import (
     Usage,
     endpoint_url,
 )
-from romulus.agent.provider.budget import AgentBudget, BudgetExhausted, BudgetLimits, charge_of
+from romulus.agent.provider.budget import (
+    AgentBudget,
+    BudgetExhausted,
+    BudgetLimits,
+    charge_of,
+    charge_parts,
+    parts_of,
+)
 from romulus.agent.provider.egress import (
     EGRESS_SWITCH_VALUE,
     EgressDecision,
@@ -43,7 +50,7 @@ ANTHROPIC_MODULES = ("anthropic", "httpx2")
 __all__ = [
     "EGRESS_SWITCH_VALUE", "PROVIDER_STATE", "AgentBudget", "AgentNotReady", "AgentReadiness", "BudgetExhausted",
     "BudgetLimits", "ChatProvider", "ChatRequest", "ChatResult", "HistoryError", "ProviderUnavailable", "Tool",
-    "ToolCall", "Usage", "agent_readiness", "build_provider", "egress_banners", "record_call",
+    "ToolCall", "Usage", "agent_readiness", "build_provider", "egress_banners", "record_call", "record_failure",
 ]
 
 
@@ -182,7 +189,8 @@ def build_provider(s: Settings, *, transport=None, resolver: Resolver = system_r
 
 def record_call(repo, provider: ChatProvider, *, hunt_id: str, purpose: str, request: ChatRequest,
                 result: ChatResult, limits: BudgetLimits, call_id: str | None = None, case_id: str | None = None,
-                validation: dict | None = None, owner_token: str | None = None) -> str:
+                session_id: str | None = None, validation: dict | None = None,
+                owner_token: str | None = None) -> str:
     """Store one model call: prompt digest, provider and model (requested and reported), parameters, the raw
     response, finish reason, validation, usage and an estimated cost."""
     call_id = call_id or "mc-" + uuid.uuid4().hex[:20]
@@ -201,7 +209,8 @@ def record_call(repo, provider: ChatProvider, *, hunt_id: str, purpose: str, req
     if result.details:
         options["provider_details"] = dict(result.details)
     repo.save_model_call({
-        "id": call_id, "hunt_id": hunt_id, "case_id": case_id, "purpose": purpose, "model": provider.model,
+        "id": call_id, "hunt_id": hunt_id, "case_id": case_id, "session_id": session_id,
+        "purpose": purpose, "model": provider.model,
         "options": options,
         "prompt_digest": digest({"messages": request.messages, "tools": [t.__dict__ for t in request.tools],
                                  "schema": request.response_schema}),
@@ -216,6 +225,30 @@ def record_call(repo, provider: ChatProvider, *, hunt_id: str, purpose: str, req
         "provider": described["provider"], "endpoint_host": described["endpoint_host"],
         "egress": described["egress"], "model_reported": result.model_reported or None,
         "finish_reason": result.finish_reason or None,
+        "cost_usd_est": limits.charge_cost(charge) if limits.priced else None,
+    }, owner_token=owner_token)
+    return call_id
+
+
+def record_failure(repo, provider: ChatProvider, *, hunt_id: str, purpose: str, request: ChatRequest,
+                   error: BaseException, limits: BudgetLimits, call_id: str | None = None,
+                   session_id: str | None = None, owner_token: str | None = None) -> str:
+    """Persist a provider outage and the attempts it billed even though no ChatResult was returned."""
+    call_id = call_id or "mc-" + uuid.uuid4().hex[:20]
+    charge = charge_parts(parts_of(getattr(error, "billed", None)))
+    described = provider.describe()
+    repo.save_model_call({
+        "id": call_id, "hunt_id": hunt_id, "case_id": None, "session_id": session_id,
+        "purpose": purpose, "model": provider.model,
+        "options": {"attempts": len(charge.parts), "usage_estimated": False,
+                    "billed_failure": type(error).__name__, "billed": [part.__dict__ for part in charge.parts]},
+        "prompt_digest": digest({"messages": request.messages, "tools": [tool.__dict__ for tool in request.tools],
+                                 "schema": request.response_schema}),
+        "prompt_tokens_est": 0, "prompt_eval_count": charge.prompt, "eval_count": charge.completion,
+        "duration_ms": 0, "raw_response": "", "parsed": None,
+        "validation": {"ok": False, "errors": [type(error).__name__, str(error)[:600]]},
+        "status": "error", "provider": described["provider"], "endpoint_host": described["endpoint_host"],
+        "egress": described["egress"], "model_reported": None, "finish_reason": None,
         "cost_usd_est": limits.charge_cost(charge) if limits.priced else None,
     }, owner_token=owner_token)
     return call_id

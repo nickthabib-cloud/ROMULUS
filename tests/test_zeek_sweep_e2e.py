@@ -42,7 +42,7 @@ def _repo(path=None):
     repo = Repo(engine)
     repo.create_hunt("h1", {"targets": ["net"], "style": "broad", "original_input": {}, "window": {
         "start": WINDOW.start.isoformat(), "end": WINDOW.end.isoformat()}, "source_profiles": {},
-        "agent_mode": "off", "expansion": {"enabled": False}, "pack": {"version": "p"}, "normalizer": "n",
+        "ai_agent": {"requested": False}, "expansion": {"enabled": False}, "pack": {"version": "p"}, "normalizer": "n",
         "policy": "d", "model": {}, "romulus_version": "t"}, "d", "t")
     return repo
 

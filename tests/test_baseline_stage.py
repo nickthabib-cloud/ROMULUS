@@ -570,7 +570,7 @@ def test_run_orders_baseline_after_packets_before_expansion_and_resume_retries_a
     manifest = _manifest()
     manifest.update(
         normalizer=NORMALIZER_VERSION, packet_normalizer=PACKET_NORMALIZER,
-        agent_mode="off", ai_agent={"requested": False}, source_profiles={},
+        ai_agent={"requested": False}, source_profiles={},
         expansion={"enabled": True},
         internal_networks=SiteNetworks.from_lists(["10.0.0.0/8"]).record(),
     )

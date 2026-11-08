@@ -222,7 +222,7 @@ class _Client:
 def test_a_new_hunt_records_per_anchor_shares_the_ceiling_and_expansions_own_wall_clock(tmp_path, monkeypatch):
     monkeypatch.setattr(hunt_run, "ElasticClient", _Client)
     monkeypatch.setattr(hunt_run, "build_profile", lambda client, target: (_Profile(target), None))
-    settings = Settings(home=tmp_path, agent_mode="off", es_index_patterns="logs-host",
+    settings = Settings(home=tmp_path, agent_default="off", es_index_patterns="logs-host",
                         expansion_max_source_queries=5_000, expansion_wall_clock_minutes=45)
     hunt_id = hunt_run.create_hunt(settings, T0, T0 + timedelta(hours=1), "test")
 
@@ -244,7 +244,7 @@ def test_expansion_runs_under_the_budget_its_hunt_recorded(tmp_path, monkeypatch
 
     monkeypatch.setattr(hunt_run, "ExpansionEngine", Engine)
     monkeypatch.setattr(hunt_run, "PivotExecutor", lambda *args, **kwargs: seen.setdefault("executor", kwargs))
-    settings = Settings(home=tmp_path, agent_mode="off")
+    settings = Settings(home=tmp_path, agent_default="off")
     repo = hunt_run.open_repo(settings)
     config = ({"enabled": True, "max_depth": 3, "per_anchor_source_queries": 76, "max_source_queries": 5_000,
                "wall_clock_minutes": 45} if recorded == "per_anchor" else

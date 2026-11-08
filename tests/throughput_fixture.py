@@ -622,7 +622,7 @@ def run_stack(stage_dir, *, scale: int = 1, docs: dict | None = None) -> dict:
         "window": {"start": window.start.isoformat(), "end": window.end.isoformat()},
         "style": "broad", "hypothesis": "", "original_input": {}, "targets": targets,
         "pack": {"version": "test", "playbooks": []}, "normalizer": "test", "policy": "test",
-        "model": {}, "romulus_version": "test", "agent_mode": "off", "source_profiles": {},
+        "model": {}, "romulus_version": "test", "ai_agent": {"requested": False}, "source_profiles": {},
         "budgets": {"wall_clock_minutes": 120},
         "baseline": {
             "plan_version": "baseline-plan@1", "site": "throughput-fixture", "history_days": 7,

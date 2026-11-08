@@ -267,7 +267,7 @@ class _Sweep:
 
 
 def _run(tmp_path, monkeypatch, fake, **settings):
-    s = Settings(home=tmp_path, agent_mode="off", **settings)
+    s = Settings(home=tmp_path, agent_default="off", **settings)
     repo = hunt_run.open_repo(s)
     start = datetime(2024, 11, 18, 10, tzinfo=UTC)
     repo.create_hunt("h1", {"window": {"start": start.isoformat(), "end": (start + timedelta(hours=1)).isoformat()},

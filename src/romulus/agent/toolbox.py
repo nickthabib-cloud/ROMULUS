@@ -171,20 +171,31 @@ class InvestigationExecutor(Protocol):
 
 def _strict_schema(model: type[BaseModel]) -> dict:
     schema = model.model_json_schema()
+    strict_keys = {"type", "properties", "required", "additionalProperties", "items", "enum", "const",
+                   "anyOf", "allOf", "$ref", "description", "title", "format", "$defs", "$def", "definitions"}
 
-    def visit(value):
+    def visit(value, top: bool = False):
         if isinstance(value, dict):
+            for key in list(value):
+                if key not in strict_keys or (not top and key in {"$defs", "$def", "definitions"}):
+                    value.pop(key)
             properties = value.get("properties")
             if isinstance(properties, dict):
                 value["additionalProperties"] = False
                 value["required"] = list(properties)
-            for child in value.values():
-                visit(child)
+                for child in properties.values():
+                    visit(child)
+            for key, child in value.items():
+                if key not in {"properties", "$defs", "$def", "definitions"}:
+                    visit(child)
+            for definitions in ("$defs", "$def", "definitions"):
+                for child in value.get(definitions, {}).values():
+                    visit(child)
         elif isinstance(value, list):
             for child in value:
                 visit(child)
 
-    visit(schema)
+    visit(schema, top=True)
     return schema
 
 
@@ -249,13 +260,17 @@ def _result(status: str, *, coverage: dict | None = None, counts: dict | None = 
     flags = injection_flags(result_data, "$.data")
     if flags:
         result_data = {**result_data, "safety_flags": flags}
-    return {
+    result = {
         "status": status,
         "coverage": coverage or {"status": "complete", "gaps": []},
         "counts": counts or {"returned": 0, "total": 0},
         "data": result_data,
         "more": bool(more),
     }
+    if status == "refused":
+        error = result_data.get("error") if isinstance(result_data, dict) else None
+        result["errors"] = [str(error.get("message", "tool action refused"))] if isinstance(error, dict) else ["tool action refused"]
+    return result
 
 
 class Toolbox:

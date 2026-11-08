@@ -141,9 +141,10 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
             raise HTTPException(400, "bad style")
         if agent not in ("", "model"):
             raise HTTPException(400, "bad agent option")
-        mode = "model" if agent == "model" else "off"     # unchecked: deterministic search only
+        requested = agent == "model"
         cmd = [sys.executable, "-m", "romulus.cli"] + (["--env-file", str(env_file)] if env_file else []) + \
-              ["hunt", "start", "--start", start, "--end", end, "--style", style, "--agent-mode", mode]
+              ["hunt", "start", "--start", start, "--end", end, "--style", style,
+               "--agent" if requested else "--no-agent"]
         if hypothesis.strip():
             cmd += ["--hypothesis", hypothesis.strip()[:500]]
         s.logs_dir.mkdir(parents=True, exist_ok=True)
@@ -151,7 +152,7 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         with open(s.logs_dir / f"hunt-{datetime.now():%Y%m%d-%H%M%S}.log", "ab") as log:
             subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env, start_new_session=True)
         repo.audit(f"web:{u['u']}", "web.hunt_start", detail={"start": start, "end": end, "style": style,
-                                                                "agent_mode": mode})
+                                                                "agent_requested": requested})
         return RedirectResponse("/?started=1", status_code=303)
 
     @app.get("/hunts/{hunt_id}", response_class=HTMLResponse)

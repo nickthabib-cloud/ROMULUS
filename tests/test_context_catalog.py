@@ -453,7 +453,7 @@ def test_expansion_engine_publishes_high_lateral_finding():
     repo = _repo()
     repo.create_hunt("he", {"window": {"start": WINDOW.start.isoformat(), "end": WINDOW.end.isoformat()},
                             "style": "broad", "targets": [], "pack": {"version": "test", "playbooks": []},
-                            "agent_mode": "off", "budgets": {"wall_clock_minutes": 120}}, "digest", "test")
+                            "ai_agent": {"requested": False}, "budgets": {"wall_clock_minutes": 120}}, "digest", "test")
     anchor_exec = exec_event("anchor-event", ["/bin/sh"], host="web1", process__pid=10)
     repo.save_evidence("he", [anchor_exec], {}, None)
     repo.save_candidate({

@@ -147,12 +147,12 @@ class OpenAICompatibleProvider(ChatProvider):
 
     def _chat(self, request: ChatRequest, messages: list[dict], max_out: int, est: int) -> ChatResult:
         body = self._body(request, messages, max_out)
-        response, ms, attempts = self._post("/chat/completions", body)
+        response, ms, attempts = self._post("/chat/completions", body, attempt_guard=request.attempt_guard)
         if response.status_code == 400 and self._max_param == "max_completion_tokens" \
                 and "max_completion_tokens" in response.text:
             self._max_param = "max_tokens"
             body[self._max_param] = body.pop("max_completion_tokens")
-            response, more_ms, more = self._post("/chat/completions", body)
+            response, more_ms, more = self._post("/chat/completions", body, attempt_guard=request.attempt_guard)
             ms, attempts = ms + more_ms, attempts + more
         if response.status_code != 200:
             return self._http_error(response, est, ms, attempts)
