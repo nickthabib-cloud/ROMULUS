@@ -110,7 +110,8 @@ def test_hex_argument_left_hex_by_the_pipeline_is_decoded_and_says_so():
     assert exec_event.fields["process.pid"].origin == "agent-0:process.pid"
 
 
-@pytest.mark.parametrize("arg", ["0000", "4000", "1234", "20", "0755", "00", "deadbeef", "2020", "4142"])
+@pytest.mark.parametrize("arg", ["0000", "4000", "1234", "20", "0755", "00", "deadbeef", "2020", "4142",
+                                 "22", "2222", "2024", "2220"])
 def test_numeric_and_hex_looking_arguments_stay_literal(arg):
     hits = fx.agent_audit(fx.exec_lines(argv=["find", "/", "-perm", arg]))
     exec_event = next(e for e in _events(hits)[0] if e.family == "process_exec")
@@ -135,11 +136,16 @@ def test_uid_zero_account_creation_keeps_its_lane_in_the_agent_shape(tmp_path):
     assert _run("host.account_or_group_change", agent, tmp_path / "agent") == want
 
 
-def test_more_elements_than_argc_keep_only_arguments_before_a_possible_chunk():
+@pytest.mark.parametrize("args", [
+    ["curl", "-o", "/tmp/x", "6162636465", "6667", "tail"],      # hex-encoded chunks
+    ["curl", "-o", "CHUNK1of", "CHUNK0of"],                       # quoted plain-text chunks, out of order
+])
+def test_more_elements_than_argc_keep_only_the_program_name(args):
     hits = fx.agent_audit(fx.exec_lines())
-    hits[1]["_source"]["process"]["args"] = ["curl", "-o", "/tmp/x", "6162636465", "6667", "tail"]
+    hits[1]["_source"]["process"]["args"] = args
+    hits[1]["_source"]["process"]["args_count"] = len(args) - 1
     exec_event = next(e for e in normalize_hits(hits)[0] if e.family == "process_exec")
-    assert exec_event.get("process.argv") == ["curl", "-o", "/tmp/x"]
+    assert exec_event.get("process.argv") == ["curl"]
     assert exec_event.get("process.argv_complete") is False
 
 

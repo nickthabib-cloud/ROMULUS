@@ -58,7 +58,7 @@ PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf211
                    # instead of failing, and NXLog's flat Windows records are dispatched to the Windows producer (an
                    # error names its channel's dataset); every other record normalizes exactly as before (with the
                    # version set back to 16 the throughput and dispatch goldens are the earlier ones).
-                   17: "8fdae3b38155ecd84e0a6aae38cb6ba65d4f356b459873c0ad1744368396985b"}
+                   17: "ebe65c0d548f872c02bb91646011f6a4a39f6e41632936738fde1649d2939591"}
 WINDOWS_EVIDENCE_FILES = ("community.py", "windows.py", "windows_catalog.py", "windows_reassembly.py", "rpc_catalog.py")
 PINNED_WINDOWS = {
     # NXLog's flat im_msvistalog records are read (windows.nxlog_to_winlog); Winlogbeat and Agent records normalize

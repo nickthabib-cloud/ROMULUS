@@ -459,6 +459,10 @@ def _hex_left(value: str, *, any_reason: bool) -> str | None:
     controls = any(ord(char) < 0x21 or char == '"' or ord(char) == 0x7f for char in text)
     high = any(ord(char) > 0x7e for char in text)
     if any_reason:
+        # an all-decimal value is a port, count, year or id far more often than hex: decode it only when the text
+        # holds a letter or digit (`22` would otherwise read as '"', `2024` as ' $')
+        if value.isdigit() and not any(char.isalnum() for char in text):
+            return None
         return text if (controls or high) and _plain_text(text) else None
     return text if high and not controls else None
 
@@ -626,14 +630,13 @@ def _agent_execve(source: dict, raw: dict, fields: dict, origins: dict, guessed:
         raw["argc"] = (count, True)
         fields["argc"], origins["argc"] = count, "process.args_count"
         if len(args) > int(count):
-            # More elements than arguments: a split argument's chunks each became an element, so every position
-            # from the first element that can be a chunk (chunks are always hex) on is unknown. Only the
-            # arguments before it are kept; the command line stays incomplete.
-            cut = next((index for index, arg in enumerate(args)
-                        if arg and len(arg) % 2 == 0 and _HEX.match(arg)), int(count))
-            args = args[:min(cut, int(count))]
+            # More elements than arguments: a split argument's chunks each became an element, in no reliable
+            # position. auditd hex-encodes a chunk only when its text needs it (a long plain-text argument is
+            # chunked in quotes), so any element after the program name may be a chunk: only the program name is
+            # kept, and the command line stays incomplete.
+            args = args[:1]
             problem = (f"the shipper recorded more elements than argc={count} (split argument chunks): only the "
-                       f"{len(args)} arguments before the first possible chunk are kept")
+                       "program name is kept")
     for offset, arg in enumerate(args):
         key = f"a{first + offset}"
         decoded = _hex_left(arg, any_reason=True)
