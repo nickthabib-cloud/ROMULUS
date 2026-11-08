@@ -59,11 +59,13 @@ from romulus.evidence.linux_catalog import (
 from romulus.evidence.raw_scrub import clean_source, might_be_zeek
 from romulus.evidence.typed import EVIDENCE_VERSION, FieldValue, Outcome, RawRef, TypedEvent, event_id, fv
 from romulus.evidence.windows import (
+    NXLOG_CHANNEL_SKIP,
     NXLOG_SHAPE,
     WindowsNotNormalized,
     is_nxlog_windows,
     is_windows_source,
     normalize_windows,
+    nxlog_class_families,
     nxlog_clock_offset,
     nxlog_error_tag,
     windows_record_key,
@@ -2585,9 +2587,14 @@ def _malcolm_eve(src: dict, nid: str) -> tuple[dict, dict[str, str], list[str], 
 #   For the event types that carry app_proto (alert, flow, netflow, fileinfo) the event-type table sets no protocol,
 #   so network.protocol is app_proto exactly; its absence means none, or one of the dropped values (caveat).
 # - action: removed after its value was appended to event.type, "blocked" written as "denied". Suricata writes
-#   "allowed" or "blocked", so the value read back from event.type (less the flow-state "start"/"end") is exact.
-# - templated: copied through a Mustache template. Double-brace templates (Filebeat, earlier Agent packages)
-#   HTML-escape the value, so a value holding "&" cannot be told from an escaped one: it is left absent (caveat).
+#   "allowed" or "blocked": exactly one of "allowed"/"denied" in event.type (less the flow-state "start"/"end") reads
+#   back exactly; any other value, or both, leaves the action absent (caveat).
+# - templated: Filebeat copies the value through a double-brace Mustache template, which Elasticsearch's ingest
+#   templates escape as a JSON string body (a quote, a backslash and control characters are backslash-escaped); the
+#   escape is inverted exactly. The Agent copies it (copy_from) or uses a triple-brace template: no escape. A Filebeat
+#   value that is not a valid escaped body is left absent (caveat). Filebeat's main pipeline also removes the method
+#   and user agent of an http block whose record is not the "http" protocol (an http2 alert, say) without copying
+#   them (caveat).
 # - dns_answers: on version-2 answer records only, renamed to dns.answers with rrname, rrtype and rdata renamed to
 #   name, type and data; read back with the names restored.
 # - removed: dns.version and dns.grouped are removed. The version is read back from the record's layout (a query
@@ -2596,9 +2603,9 @@ def _malcolm_eve(src: dict, nid: str) -> tuple[dict, dict[str, str], list[str], 
 #   answers are lost (caveat on a version-2 answer that keeps no answer list).
 # - trailing_dot: a trailing "." is removed in place (RFC 6066 server names carry none); the value read is the
 #   shipper's, with a caveat.
-# - distinguished_name: the subject and issuer are copied to tls.server.subject/issuer (templated), then "\," is
-#   removed in place (Filebeat: both; the Agent: the issuer only). The in-place value is exact when the copy holds
-#   no "\,"; else the copy is exact when it holds no "&"; else the name is left absent (caveat).
+# - distinguished_name: the subject and issuer are copied to tls.server.subject/issuer (templated, so escaped by
+#   Filebeat), then "\," is removed in place (Filebeat: both; the Agent: the issuer only). The copy, unescaped for
+#   Filebeat, is the name exactly; without a copy the TLS pipeline did not run and the in-place value is exact.
 ELASTIC_SURICATA_MOVES = (
     # EVE key, typed field, indexed path(s) in the order read, how
     ("src_ip", "source.ip", ("source.address", "source.ip"), "exact"),
@@ -2620,8 +2627,8 @@ ELASTIC_SURICATA_MOVES = (
     ("flow.end", "flow.end", ("event.end",), "millisecond"),
     ("fileinfo.filename", "file.name", ("file.path",), "exact"),
     ("fileinfo.size", "file.size", ("file.size",), "exact"),
-    # Filebeat renames the hostname; the Agent appends it through a template (and de-duplicates the list)
-    ("http.hostname", "http.hostname", ("destination.domain",), "templated"),
+    # Filebeat renames the hostname; the Agent appends it through a triple-brace template (and de-duplicates the list)
+    ("http.hostname", "http.hostname", ("destination.domain",), "exact"),
     ("http.url", "url.original", ("url.original",), "exact"),
     ("http.http_user_agent", "user_agent.original", ("user_agent.original",), "exact"),
     # Filebeat sets the method through a template; the Agent copies it
@@ -2641,12 +2648,13 @@ ELASTIC_RECONSTRUCTED_CAVEAT = "Reconstructed from fields the shipper parsed; th
 ELASTIC_NO_APP_PROTO_CAVEAT = (
     "The shipper drops Suricata's app_proto values 'failed', 'template' and 'template-rust': no application protocol "
     "on this record means Suricata identified none or reported one of those")
-ELASTIC_ESCAPED_CAVEAT = (
-    "The shipper copied these values through a template that may HTML-escape them, and they hold '&': not typed: ")
-ELASTIC_ACTION_CAVEAT = "The alert's action cannot be read back from event.type (several candidate values): not typed"
+ELASTIC_ESCAPED_CAVEAT = "The shipper's escaped copy of these values is not a valid escaped string: not typed: "
+ELASTIC_ACTION_CAVEAT = ("The alert's action cannot be read back from event.type (not exactly one of 'allowed' and "
+                         "'denied'): not typed")
 ELASTIC_SNI_CAVEAT = "The shipper removes a trailing '.' from the TLS server name; the name is typed as indexed"
-ELASTIC_DN_CAVEAT = ("The shipper removed '\\,' from a certificate name and its templated copy may be HTML-escaped: "
-                     "not typed: ")
+ELASTIC_HTTP_DROPPED_CAVEAT = ("Filebeat removes the HTTP method and user agent of a record whose protocol is not "
+                               "'http' without copying them: not typed")
+_ELASTIC_ACTIONS = {"allowed": "allowed", "denied": "blocked"}
 ELASTIC_GROUPED_CAVEAT = ("The shipper removes Suricata's grouped DNS answers: this version-2 answer kept no answer "
                           "list, so answers logged only in the grouped form are not typed")
 ELASTIC_DNS_VERSION_CAVEAT = "The shipper removes the DNS record's version, and its layout does not tell it: not typed"
@@ -2716,15 +2724,30 @@ def _single_string(value) -> str | None:
 
 
 def _elastic_action(src: dict) -> tuple[str | None, bool]:
-    """(alert.action, ambiguous) read back from event.type."""
+    """(alert.action, unreadable) read back from event.type: exactly one of "allowed"/"denied" beside the flow-state
+    marks; any other value, or both, is unreadable."""
     values = _get(src, "event.type")
     values = values if isinstance(values, list) else [] if values is None else [values]
     candidates = [value for value in dict.fromkeys(values) if value not in ("start", "end")]
     if not candidates:
         return None, False
-    if len(candidates) > 1 or not isinstance(candidates[0], str) or "&" in candidates[0]:
+    if len(candidates) > 1 or candidates[0] not in _ELASTIC_ACTIONS:
         return None, True
-    return {"denied": "blocked"}.get(candidates[0], candidates[0]), False
+    return _ELASTIC_ACTIONS[candidates[0]], False
+
+
+def _filebeat_shipped(src: dict) -> bool:
+    """Filebeat's module (its double-brace templates escape) rather than the Agent's integration (data_stream.*)."""
+    return _get(src, "data_stream.dataset") is None
+
+
+def _unescaped(text: str) -> str | None:
+    """A double-brace ingest template's output read back: the JSON string body unescaped, None when it is not one."""
+    try:
+        value = json.loads(f'"{text}"')
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, str) else None
 
 
 def _elastic_dns(src: dict, d: dict, nid: str, origins: dict[str, str], caveats: list[str], bad: list[str]) -> None:
@@ -2769,23 +2792,20 @@ def _elastic_dns(src: dict, d: dict, nid: str, origins: dict[str, str], caveats:
         origins["dns.version"] = f"{nid}:suricata.eve.dns.type#derived:version ({how})"
 
 
-def _elastic_names(src: dict, t: dict, caveats: list[str]) -> None:
+def _elastic_names(src: dict, t: dict, escaped: list[str]) -> None:
     """Restore the certificate subject and issuer names (see `distinguished_name` above)."""
-    lost = []
+    filebeat = _filebeat_shipped(src)
     for key, copy_path in (("subject", "tls.server.subject"), ("issuerdn", "tls.server.issuer")):
         copied = _get(src, copy_path)
         if not isinstance(copied, str) or not copied:
             # the TLS pipeline copies every non-empty name before changing it: without a copy it did not run
             continue
-        if "\\," not in copied and isinstance(t.get(key), str):
-            continue
-        if "&" not in copied:
-            t[key] = copied
-            continue
-        t.pop(key, None)
-        lost.append(f"tls.{key}")
-    if lost:
-        caveats.append(ELASTIC_DN_CAVEAT + ", ".join(lost))
+        name = _unescaped(copied) if filebeat else copied
+        if name is None:
+            t.pop(key, None)
+            escaped.append(copy_path)
+        else:
+            t[key] = name
 
 
 def elastic_suricata_eve(src: dict, nid: str = "") -> tuple[dict, dict[str, str], list[str], list[str]]:
@@ -2805,7 +2825,11 @@ def elastic_suricata_eve(src: dict, nid: str = "") -> tuple[dict, dict[str, str]
     caveats = [ELASTIC_RECONSTRUCTED_CAVEAT]
     bad: list[str] = []
     escaped: list[str] = []
+    filebeat = _filebeat_shipped(src)
     has_http = et == "http" or isinstance(eve.get("http"), dict)
+    if filebeat and isinstance(eve.get("http"), dict) and _get(src, "network.protocol") != "http" and not any(
+            key in eve["http"] for key in ("http_method", "http_user_agent")):
+        caveats.append(ELASTIC_HTTP_DROPPED_CAVEAT)
     has_flow = et != "netflow"
     for key, typed, paths, how in ELASTIC_SURICATA_MOVES:
         if how in ("removed", "dns_answers", "distinguished_name", "trailing_dot") or key == "timestamp":
@@ -2849,15 +2873,20 @@ def elastic_suricata_eve(src: dict, nid: str = "") -> tuple[dict, dict[str, str]
         value, path = _indexed(src, paths)
         if value is None:
             continue
-        if how == "templated":
-            text = _single_string(value)
-            if text is None:
+        if how in ("templated", "exact") and block == "http" and isinstance(value, list):
+            # the Agent appends the hostname to destination.domain: one distinct value
+            value = _single_string(value)
+            if value is None:
                 bad.append(path)
                 continue
-            if "&" in text:
+        if how == "templated" and filebeat:
+            if not isinstance(value, str):
+                bad.append(path)
+                continue
+            value = _unescaped(value)
+            if value is None:
                 escaped.append(path)
                 continue
-            value = text
         elif how == "lowercased" and isinstance(value, str):
             value = value.lower()
         if not _set_path(eve, key, value):
@@ -2865,8 +2894,6 @@ def elastic_suricata_eve(src: dict, nid: str = "") -> tuple[dict, dict[str, str]
             continue
         if typed is not None:
             origins[typed] = f"{nid}:{path}"
-    if escaped:
-        caveats.append(ELASTIC_ESCAPED_CAVEAT + ", ".join(escaped))
     if "community_id" not in eve or eve.get("community_id") in (None, ""):
         tuple_paths = [origins.get(name, f"{nid}:suricata.eve.{native}").removeprefix(f"{nid}:") for name, native in (
             ("source.ip", "src_ip"), ("source.port", "src_port"), ("destination.ip", "dest_ip"),
@@ -2879,7 +2906,9 @@ def elastic_suricata_eve(src: dict, nid: str = "") -> tuple[dict, dict[str, str]
     if isinstance(t, dict):
         if isinstance(t.get("sni"), str) and t["sni"]:
             caveats.append(ELASTIC_SNI_CAVEAT)
-        _elastic_names(src, t, caveats)
+        _elastic_names(src, t, escaped)
+    if escaped:
+        caveats.append(ELASTIC_ESCAPED_CAVEAT + ", ".join(escaped))
     return eve, origins, caveats, bad
 
 
@@ -3447,6 +3476,10 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                 audit_copies.append((*found, h["_id"]))
         except WindowsNotNormalized as unsupported:
             skips[unsupported.reason] += 1
+            if skip_families is not None and unsupported.reason.startswith(NXLOG_CHANNEL_SKIP):
+                known = skip_families.get(unsupported.reason, frozenset())
+                fed = nxlog_class_families(h["_source"])
+                skip_families[unsupported.reason] = None if known is None else known | fed
         except ZeekNotNormalized as uncatalogued:
             skips[uncatalogued.reason] += 1
             if skip_families is not None:

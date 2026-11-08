@@ -105,8 +105,9 @@ def _linux_datasets(p: Predicate, contract: FieldContract, natives: tuple[str, .
 def _suricata_datasets(p: Predicate, contract: FieldContract, natives: tuple[str, ...]) -> dict | None:
     """A dataset predicate naming Suricata's per-type datasets (`suricata.eve.alert`, ...) also selects the documents
     of those types that Filebeat's suricata module and the Agent's Suricata integration index under the one dataset
-    `suricata.eve` (on either dataset field), by their parsed suricata.eve.event_type. Only on a target that maps that
-    field (the shippers' templates do); None otherwise, and for a predicate naming no such dataset."""
+    `suricata.eve` (on either dataset field), by their parsed suricata.eve.event_type, or every shipped document when
+    that type is not exact-searchable. Only on a target that maps the shippers' suricata.eve.* fields; None
+    otherwise, and for a predicate naming no such dataset."""
     if p.field != "event.dataset" or p.op not in {"eq", "in"}:
         return None
     values = [str(value) for value in (p.value if isinstance(p.value, list) else [p.value])]
@@ -114,16 +115,19 @@ def _suricata_datasets(p: Predicate, contract: FieldContract, natives: tuple[str
                     if value.removeprefix(f"{ELASTIC_DATASET}.") in ELASTIC_EVENT_TYPES
                     and value.startswith(f"{ELASTIC_DATASET}.")})
     event_type = contract.fields.get("suricata.eve.event_type")
-    if not types or event_type is None or "in" not in event_type.ops:
+    if not types or not any(name.startswith(f"{ELASTIC_DATASET}.") for name in contract.fields):
         return None
     direct = contract.fields.get("data_stream.dataset")
     fields = [*natives, *(["data_stream.dataset"] if direct is not None and "eq" in direct.ops
                           and "data_stream.dataset" not in natives else [])]
     named = [_pred_native(p, native) for native in natives]
-    elastic = {"bool": {"filter": [
-        {"bool": {"should": [{"term": {field: ELASTIC_DATASET}} for field in fields], "minimum_should_match": 1}},
-        {"terms": {event_type.native: types}}]}}
-    return {"bool": {"should": [*named, elastic], "minimum_should_match": 1}}
+    shipped = [{"bool": {"should": [{"term": {field: ELASTIC_DATASET}} for field in fields],
+                         "minimum_should_match": 1}}]
+    if event_type is not None and "in" in event_type.ops:
+        shipped.append({"terms": {event_type.native: types}})
+    # else the type cannot be searched exactly (unmapped or text): every shipped document is selected, a superset,
+    # and normalization keeps each record's own type
+    return {"bool": {"should": [*named, {"bool": {"filter": shipped}}], "minimum_should_match": 1}}
 
 
 def _intent_os_family(intent: SearchIntent) -> str | None:

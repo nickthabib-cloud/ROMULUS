@@ -8,7 +8,6 @@ no upstream file is copied. Equality is over everything a rule reads: family, ti
 Origins differ by design; flow times compare as instants (the pipelines rewrite them to the millisecond).
 """
 import copy
-import html
 import json
 from datetime import UTC, datetime
 
@@ -17,9 +16,9 @@ import pytest
 from romulus.evidence.community import community_id
 from romulus.evidence.normalize import (
     ELASTIC_ACTION_CAVEAT,
-    ELASTIC_DN_CAVEAT,
     ELASTIC_ESCAPED_CAVEAT,
     ELASTIC_GROUPED_CAVEAT,
+    ELASTIC_HTTP_DROPPED_CAVEAT,
     ELASTIC_NO_APP_PROTO_CAVEAT,
     ELASTIC_RECONSTRUCTED_CAVEAT,
     ELASTIC_SNI_CAVEAT,
@@ -72,7 +71,8 @@ _PROTOCOL = {"dns": "dns", "ftp": "ftp", "ftp_data": "ftp", "http": "http", "htt
 
 def shipped(eve: dict, shape: str, nid: str = "es-1") -> dict:
     """The document the shipper indexes for one EVE record, without the line."""
-    template = html.escape if shape == FILEBEAT else (lambda text: text)     # double- or triple-brace templates
+    # Filebeat's double-brace ingest templates escape a JSON string body; the Agent's triple-brace ones do not
+    template = (lambda text: json.dumps(text, ensure_ascii=False)[1:-1]) if shape == FILEBEAT else (lambda text: text)
     s = copy.deepcopy(eve)
     doc: dict = {"host": {"name": SENSOR}, "suricata": {"eve": s},
                  "event": {"dataset": "suricata.eve", "module": "suricata", "kind": "event", "category": ["network"]}}
@@ -277,39 +277,49 @@ def test_blocked_alerts_read_back_from_event_type():
     eve["flow"]["state"] = "new"
     event = normalize_suricata(shipped(eve, FILEBEAT))
     assert event.get("alert.action") == "blocked"
-    doc = shipped(EVE["alert"], AGENT)
-    doc["_source"]["event"]["type"] = ["allowed", "denied"]
-    event = normalize_suricata(doc)
-    assert not event.has("alert.action") and ELASTIC_ACTION_CAVEAT in event.caveats
+    for written in (["allowed", "denied"], ["pass"], ["allowed", "pass"]):
+        doc = shipped(EVE["alert"], AGENT)
+        doc["_source"]["event"]["type"] = written
+        event = normalize_suricata(doc)
+        assert not event.has("alert.action") and ELASTIC_ACTION_CAVEAT in event.caveats, written
 
 
-def test_values_a_double_brace_template_may_have_escaped_are_not_guessed():
+def test_filebeat_template_escapes_are_inverted_exactly():
     eve = copy.deepcopy(EVE["http"])
-    eve["http"]["http_method"] = "GET&X"
-    event = normalize_suricata(shipped(eve, FILEBEAT))
+    eve["http"]["http_method"] = 'G"E\\T\t'
+    line = normalize_suricata(filebeat_hit(eve))
+    for shape in SHAPES:
+        event = normalize_suricata(shipped(eve, shape))
+        assert event.get("http.request.method") == line.get("http.request.method") == 'G"E\\T\t', shape
+        assert not any(c.startswith(ELASTIC_ESCAPED_CAVEAT) for c in event.caveats)
+    doc = shipped(EVE["http"], FILEBEAT)
+    doc["_source"]["http"]["request"]["method"] = 'GE"T'          # not a valid escaped body: never guessed
+    event = normalize_suricata(doc)
     assert not event.has("http.request.method")
-    assert any(c.startswith(ELASTIC_ESCAPED_CAVEAT) and "http.request.method" in c for c in event.caveats)
-    # the Agent copies the method: what it indexed is the value, but '&' cannot be told from an escape either way
-    assert event.get("url.original") == "/index.html"
+    assert ELASTIC_ESCAPED_CAVEAT + "http.request.method" in event.caveats
 
 
 @pytest.mark.parametrize("shape", SHAPES)
-def test_certificate_names_with_an_escaped_comma_are_read_exactly_or_not_at_all(shape):
+def test_certificate_names_with_an_escaped_comma_are_read_exactly(shape):
     eve = copy.deepcopy(EVE["tls"])
     eve["tls"]["subject"] = "C=US, O=Acme\\, Inc., CN=www.example.test"
-    eve["tls"]["issuerdn"] = "C=US, O=R&D\\, Ltd., CN=Example CA"
+    eve["tls"]["issuerdn"] = 'C=US, O=R&D\\, "Ltd"., CN=Example CA'
     line = normalize_suricata(filebeat_hit(eve))
     event = normalize_suricata(shipped(eve, shape))
-    assert event.get("tls.server.subject_cn") == line.get("tls.server.subject_cn") == ["www.example.test"]
+    assert comparable(event) == comparable(line)
     certificate = event.get("tls.server.certificates")[0]
-    assert certificate["subject_dn"] == eve["tls"]["subject"]
-    # the issuer lost "\," in place and its copy holds "&", which a double-brace template may have escaped (Filebeat
-    # does; this Agent package does not, but earlier ones did): not typed
-    assert certificate["issuer_dn"] is None
-    assert ELASTIC_DN_CAVEAT + "tls.issuerdn" in event.caveats
-    eve["tls"]["issuerdn"] = "C=US, O=Example\\, Ltd., CN=Example CA"
-    certificate = normalize_suricata(shipped(eve, shape)).get("tls.server.certificates")[0]
-    assert certificate["issuer_dn"] == eve["tls"]["issuerdn"]
+    assert certificate["subject_dn"] == eve["tls"]["subject"] and certificate["issuer_dn"] == eve["tls"]["issuerdn"]
+    assert certificate["subject_on"] == line.get("tls.server.certificates")[0]["subject_on"]
+
+
+def test_filebeat_drops_the_method_and_user_agent_of_a_non_http_protocol_record():
+    eve = {**copy.deepcopy(EVE["alert"]), "app_proto": "http2"}
+    line, event = normalize_suricata(filebeat_hit(eve)), normalize_suricata(shipped(eve, FILEBEAT))
+    assert line.has("http.request.method") and not event.has("http.request.method")
+    assert not event.has("user_agent.original") and ELASTIC_HTTP_DROPPED_CAVEAT in event.caveats
+    assert event.get("http.hostname") == line.get("http.hostname")          # left in place, read there
+    agent = normalize_suricata(shipped(eve, AGENT))
+    assert comparable(agent) == comparable(line) and ELASTIC_HTTP_DROPPED_CAVEAT not in agent.caveats
 
 
 def test_dns_layouts_read_back_their_version():
@@ -388,6 +398,13 @@ def test_per_type_dataset_predicates_also_select_the_elastic_documents_of_those_
             {"terms": {"suricata.eve.event_type": ["alert", "dns"]}}]}}], "minimum_should_match": 1}}
     other = Predicate(field="event.dataset", op="eq", value="zeek.conn")
     assert _pred(other, shipped_contract) == {"term": {"event.dataset": "zeek.conn"}}
+    # a type mapped as text (or not at all) beside the shippers' fields: every shipped document, a superset
+    text_type = contract_from_types("t", {**types, "suricata.eve.event_type": "text",
+                                          "suricata.eve.flow_id": "keyword"}, role="network")
+    assert _pred(predicate, text_type) == {"bool": {"should": [
+        {"terms": {"event.dataset": predicate.value}},
+        {"bool": {"filter": [{"bool": {"should": [{"term": {"event.dataset": "suricata.eve"}}],
+                                       "minimum_should_match": 1}}]}}], "minimum_should_match": 1}}
 
 
 def test_the_network_sweep_reaches_the_shipped_dataset_and_counts_its_families():

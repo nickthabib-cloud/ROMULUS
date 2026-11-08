@@ -58,12 +58,18 @@ PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf211
                    # instead of failing, and NXLog's flat Windows records are dispatched to the Windows producer (an
                    # error names its channel's dataset); every other record normalizes exactly as before (with the
                    # version set back to 16 the throughput and dispatch goldens are the earlier ones).
-                   17: "8fdae3b38155ecd84e0a6aae38cb6ba65d4f356b459873c0ad1744368396985b"}
+                   # Unreleased: re-pinned when Filebeat's template escapes were inverted as JSON, the alert action
+                   # was read only from "allowed"/"denied", and a non-http record's dropped HTTP fields gained a
+                   # caveat; only shipped Suricata records changed.
+                   17: "a793e7950233f887715b81d94b31e73915bdd6ec8cc0aa72ac79003a3ac48fe7"}
 WINDOWS_EVIDENCE_FILES = ("community.py", "windows.py", "windows_catalog.py", "windows_reassembly.py", "rpc_catalog.py")
 PINNED_WINDOWS = {
     # NXLog's flat im_msvistalog records are read (windows.nxlog_to_winlog); Winlogbeat and Agent records normalize
     # exactly as before (the public sample corpus is identical with the versions held at their earlier values).
-    "windows-ecs@18": "173bd3268369b82b5eaf27ed25942ea5f0e895dafc078ab312ec5909b218c16a",
+    # Unreleased: re-pinned when a zoneless @timestamp became an error, an Eventlog record whose Channel data replaced
+    # NXLog's kept its class, and a catalogued event under another channel was counted against its families; only
+    # NXLog records changed.
+    "windows-ecs@18": "9947e9cc0db37f00210965d9485253a9b3282eb5101481184f5da0124a18a51a",
     "windows-ecs@17": "c022428db9afea396a8420febde66b10e3d934b2f1472732f22a9e29c60247d6",
     "windows-ecs@16": "1f06783de9c4bcc48be2807bfbf26aa83f35d0c9b6eabf147567f3b3b07191e3",
     "windows-ecs@15": "25b5a842851ea66af4086d63dc5aac56fe8d0ec486396a456ed6330cc8ed721b",

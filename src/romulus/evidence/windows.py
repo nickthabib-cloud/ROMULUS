@@ -20,7 +20,12 @@ from xml.etree import ElementTree
 from romulus.evidence import rpc_catalog
 from romulus.evidence.community import community_id
 from romulus.evidence.typed import FieldValue, Outcome, RawRef, TypedEvent, event_id, fv
-from romulus.evidence.windows_catalog import WINDOWS_DATASETS, WindowsEventClass, lookup_event_class
+from romulus.evidence.windows_catalog import (
+    EVENT_CLASSES,
+    WINDOWS_DATASETS,
+    WindowsEventClass,
+    lookup_event_class,
+)
 
 if TYPE_CHECKING:
     from romulus.detect.bounded import Account, StateBudget
@@ -588,6 +593,24 @@ _NXLOG_CHANNEL_DATASETS = {
     "microsoft-windows-windows defender/operational": "windows.windows_defender",
 }
 _SCALAR = (str, int, float, bool)
+NXLOG_CATALOG_CHANNEL_CAVEAT = ("NXLog's Channel held the provider's own Channel event data (the log it names); the "
+                                "event's channel is the catalog's for its provider and event id")
+# The skip of an NXLog record whose provider and event id name a catalogued class but whose Channel names none: it is
+# counted against those classes' families (normalize.normalize_hits), never as an unread class.
+NXLOG_CHANNEL_SKIP = "NXLog record's Channel names no catalogued class of its provider and event id"
+# Classes whose own event data carry a "Channel" value (the Eventlog provider's log-cleared and service events).
+_NXLOG_CHANNEL_DATA_CLASSES = frozenset(("microsoft-windows-eventlog", code) for code in (104, 1100, 1102, 1104, 1108))
+
+
+def _by_provider_id() -> dict[tuple[str, int], tuple[WindowsEventClass, ...]]:
+    out: dict[tuple[str, int], tuple[WindowsEventClass, ...]] = {}
+    for event in EVENT_CLASSES:
+        key = (event.provider.casefold(), event.event_id)
+        out[key] = (*out.get(key, ()), event)
+    return out
+
+
+_CLASSES_BY_PROVIDER_ID = _by_provider_id()
 
 
 # NXLog's EventType is one of these severity names; Sysmon's registry events carry an event-data EventType of their own
@@ -700,10 +723,10 @@ def nxlog_to_winlog(source: dict) -> tuple[dict, dict[str, str]]:
         winlog["keywords"] = keywords
         paths["winlog.keywords"] = "Keywords+EventType"
     event_time = source.get("EventTime")
-    pipeline_time = source.get("@timestamp")
+    pipeline_time = _pipeline_time(source.get("@timestamp"))
     adapted: dict[str, object] = {"winlog": winlog, NXLOG_ADAPTED: {
         "channel": source.get("Channel"), "event_time": None if event_time is None else str(event_time),
-        "pipeline_time": False}}
+        "pipeline_time": False, "catalog_channel": False}}
     if _zoned_time(event_time) is not None:
         winlog["time_created"] = event_time
         paths["winlog.time_created"] = "EventTime"
@@ -714,8 +737,42 @@ def nxlog_to_winlog(source: dict) -> tuple[dict, dict[str, str]]:
         paths["@timestamp"] = "@timestamp"
         adapted[NXLOG_ADAPTED]["pipeline_time"] = True
     else:
-        raise WindowsInputError("time unresolved: EventTime names no zone and the record has no @timestamp")
+        raise WindowsInputError("time unresolved: neither EventTime nor @timestamp names its zone")
+    class_key = _nxlog_class_key(source)
+    if (class_key in _NXLOG_CHANNEL_DATA_CLASSES and len(_CLASSES_BY_PROVIDER_ID.get(class_key, ())) == 1
+            and lookup_event_class(winlog["channel"], winlog["provider_name"], winlog["event_id"]) is None):
+        # The provider's own event data names a channel (the log that was cleared), and NXLog wrote it over its own
+        # Channel: the event's channel is the catalog's for this provider and event id, and the value is event data.
+        if not isinstance(event_data.get("Channel"), str):
+            event_data["Channel"] = winlog["channel"]
+            paths["winlog.event_data.Channel"] = "Channel"
+        winlog["channel"] = _CLASSES_BY_PROVIDER_ID[class_key][0].channel
+        paths["winlog.channel"] = "SourceName+EventID#catalog-channel"
+        adapted[NXLOG_ADAPTED]["catalog_channel"] = True
     return adapted, paths
+
+
+def _pipeline_time(value: object) -> str | None:
+    """The pipeline's @timestamp as a zoned ISO-8601 time: a time naming its zone, or Elasticsearch's numeric epoch
+    milliseconds; anything else (a time without a zone) is never read as UTC."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            return datetime.fromtimestamp(value / 1000, UTC).isoformat()
+        except (OverflowError, OSError, ValueError):
+            return None
+    return value.strip() if _zoned_time(value) is not None else None
+
+
+def _nxlog_class_key(source: dict) -> tuple[str, int] | None:
+    try:
+        return str(source.get("SourceName") or "").strip().casefold(), int(source.get("EventID"))
+    except (TypeError, ValueError):
+        return None
+
+
+def nxlog_class_families(source: dict) -> frozenset[str]:
+    """The families of the catalogued classes an NXLog record's provider and event id name (whatever its channel)."""
+    return frozenset(event.family for event in _CLASSES_BY_PROVIDER_ID.get(_nxlog_class_key(source), ()))
 
 
 def windows_view(source: dict) -> dict:
@@ -2454,6 +2511,12 @@ def _normalize_nxlog(hit: dict) -> TypedEvent:
     field, the native channel spelling and EventTime text are kept, and a time taken from the pipeline says so."""
     source, native_id = hit["_source"], hit["_id"]
     adapted, paths = nxlog_to_winlog(source)
+    winlog = adapted["winlog"]
+    named = _CLASSES_BY_PROVIDER_ID.get(_nxlog_class_key(source), ())
+    if named and lookup_event_class(winlog["channel"], winlog["provider_name"], winlog["event_id"]) is None:
+        # a catalogued provider and event id under a channel that names none of their classes: counted against
+        # those classes' families, never as an unread class
+        raise WindowsNotNormalized(f"{NXLOG_CHANNEL_SKIP} ({named[0].provider}|{named[0].event_id})")
     event = _normalize_windows({**hit, "_source": adapted}, hit)
     event.fields = {name: fv(value.value, _native_origin(value.origin, native_id, paths))
                     for name, value in event.fields.items()}
@@ -2463,6 +2526,8 @@ def _normalize_nxlog(hit: dict) -> TypedEvent:
     created = event.fields.get("event.created")
     if adapted[NXLOG_ADAPTED]["pipeline_time"] and (created is None or created.origin == f"{native_id}:@timestamp"):
         event.caveats.append(NXLOG_TIME_CAVEAT)
+    if adapted[NXLOG_ADAPTED]["catalog_channel"]:
+        event.caveats.append(NXLOG_CATALOG_CHANNEL_CAVEAT)
     return event
 
 
