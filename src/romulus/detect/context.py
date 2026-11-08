@@ -268,8 +268,8 @@ class PostAccessDiscovery(_HostContextRule):
 
     Records with an audit session id group by (host, boot, session). Records outside any login session group by the
     process lineage they ran in, never by the anchor that reached them. In the post-expansion pass (`split_bucket`)
-    two such discovery commands are one burst when one process-lineage reach brought both (the link resolved them into
-    one lineage, so a burst is never split below what one reach saw), or when their recorded parent chains reach the
+    two such discovery commands are one burst when one anchor's reaches brought both (its links resolved them into its
+    lineage, so a burst is never split below what one anchor saw), or when their recorded parent chains reach the
     same root (`_lineage_root`) with no gap over BURST_GAP between them; joined transitively. A burst's identity is
     (host, boot, the root of its earliest command, its start). Every anchor that reaches it is one of its reaches; the
     finding cites the lineage records between the root(s) and its commands."""
@@ -330,10 +330,12 @@ class PostAccessDiscovery(_HostContextRule):
             if a != b:
                 parent[max(a, b)] = min(a, b)
 
-        first_of_reach: dict = {}
+        # Commands one anchor reached are one burst whatever link brought them (the grouping before this rule keyed
+        # lineage records by anchor), so no burst is ever split below one anchor's view.
+        first_of_anchor: dict = {}
         for i, (hit, _root, _chain) in enumerate(rooted):
-            for reach in sorted((members or {}).get(hit[2].id, ())):
-                union(i, first_of_reach.setdefault(reach, i))
+            for anchor_id in sorted({pair[0] for pair in (members or {}).get(hit[2].id, ())}):
+                union(i, first_of_anchor.setdefault(anchor_id, i))
         by_root: dict = defaultdict(list)
         for i, (hit, root, _chain) in enumerate(rooted):
             by_root[root].append(i)
