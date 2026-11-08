@@ -234,6 +234,47 @@ def test_delete_keeps_events_another_hunts_expansion_links_cite():
     assert len(kept) == 1 and kept[0]["hunt_id"] == "hB"
     assert repo.raw_records([kept[0]["raw_ids"][0]])
 
+
+def test_delete_a_hunt_owning_more_events_than_sqlite_binds_in_one_statement(tmp_path):
+    """A large hunt owns more events than one statement may bind as parameters. SQLite's limit depends on its
+    build (999, 32,766 or 250,000), so the test pins it low and owns more ids than that on every platform."""
+    import sqlite3
+
+    from sqlalchemy import event
+
+    from romulus.evidence.typed import RawRef, TypedEvent, fv
+    from romulus.store.db import make_engine, migrate
+    from romulus.store.repo import Repo
+    engine = make_engine(tmp_path / "romulus.db")
+    event.listen(engine, "connect",
+                 lambda dbapi_conn, _record: dbapi_conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999))
+    engine.dispose()
+    migrate(engine)
+    repo = Repo(engine)
+    for hunt_id in ("hA", "hB"):
+        repo.create_hunt(hunt_id, {}, "d", "t")
+        repo.set_hunt_state(hunt_id, "running")
+        repo.set_hunt_state(hunt_id, "completed_within_scope", detection_result="leads_only")
+    ts = utcnow()
+    total = 2_500
+    events = [TypedEvent(id=f"ev-{i}", family="process_exec", ts=ts, host="web1",
+                         fields={"process.executable": fv("/bin/true", "x")},
+                         raw=[RawRef(target="idx", native_id=f"doc-{i}", digest="d")], normalizer="test@1")
+              for i in range(total)]
+    repo.save_evidence("hA", events, {f"idx/doc-{i}": {"k": i} for i in range(total)}, None)
+    other = TypedEvent(id="ev-other", family="process_exec", ts=ts, host="web1",
+                       fields={"process.executable": fv("/bin/sh", "x")},
+                       raw=[RawRef(target="idx", native_id="doc-other", digest="d")], normalizer="test@1")
+    repo.save_evidence("hB", [other], {"idx/doc-other": {"k": -1}}, None)
+
+    counts = repo.delete_hunt("hA", "lead")
+
+    assert counts["typed_events"] == total and counts["raw_records"] == total
+    assert _count(repo, t.typed_event) == 1 and _count(repo, t.raw_record) == 1
+    assert repo.events_by_ids(["ev-other"])[0]["hunt_id"] == "hB"
+    with engine.connect() as conn:
+        assert conn.connection.dbapi_connection.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) == 999
+
 # ---------------------------------------------------------------- what a deletion leaves behind
 def test_delete_removes_the_hunts_machine_records_and_keeps_what_people_did(env):
     _c, repo, _s, _pw = env
