@@ -244,7 +244,8 @@ class CatalogBrowser:
             known = bool(datasets) and all(_dataset_families(dataset) for dataset in datasets)
             families = sorted(set().union(*(_dataset_families(dataset) for dataset in datasets))) if known else None
             contract = contract_from_types(row['target'], profile.get('field_types', {}),
-                                           role=profile.get('role'), os_family=profile.get('os_family'))
+                                           role=profile.get('role'), os_family=profile.get('os_family'),
+                                           datasets=datasets)
             result.append({'target': row['target'], 'captured_at': str(stamp or 'not recorded'),
                            'families': families, 'fields': sorted(contract.fields), 'datasets': list(datasets),
                            'unknown_reason': row.get('unknown_reason', ''),

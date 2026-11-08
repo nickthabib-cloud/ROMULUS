@@ -153,6 +153,8 @@ DEFAULT_WINDOWS_LIVENESS_TOLERANCE = timedelta(minutes=15)
 MAX_SKIP_REASONS = 256
 SKIP_REASON_OVERFLOW = "additional skip reasons omitted after bounded category limit"
 MAX_WINDOWS_UNCATALOGUED = 256
+NXLOG_MIXED_GATE = ("Windows collection not attested: NXLog flat records on a Linux target; continuity and "
+                    "event-class inventory not assessed")
 
 
 def _error_tag(message: str) -> str:
@@ -1225,6 +1227,10 @@ class Sweep:
         partition: Window | None = None,
         continuity_times: dict[tuple[str, str], tuple[datetime, datetime]] | None = None,
     ) -> list[str]:
+        if (contract is not None and contract.nxlog_mixed and contract.os_family != "windows"
+                and "windows" in playbook.os_families):
+            # NXLog's flat records on a Linux target: no Windows rule's search there is ever complete
+            return [NXLOG_MIXED_GATE]
         if contract is None or contract.os_family != "windows" or "windows" not in playbook.os_families:
             return []
         catalog = event_classes_for_families(set(playbook.families))
@@ -2027,6 +2033,8 @@ class Sweep:
         held: list[tuple[str, TypedEvent]] = []          # (playbook, event) holds of interval bounds
         released: list[tuple[str, list[str]]] = []       # (playbook, ids) holds the playbooks let go
         target_os = contract.os_family if contract is not None else "linux"
+        # a Linux target that also holds NXLog's flat Windows records is a Windows source too
+        target_oses = {target_os} | ({"windows"} if contract is not None and contract.nxlog_mixed else set())
         from romulus.detect.sigma import SigmaEventIndex, SigmaRule
         sigma_index = SigmaEventIndex(events) if any(isinstance(pb, SigmaRule) for pb in self.pack) else None
         sigma_reasons = {}
@@ -2042,7 +2050,7 @@ class Sweep:
                 relevant_events = (sigma_events if sigma_events is not None else
                                    [event for event in events if event.family in evaluated_families])
                 target_fallback = not relevant_events and (
-                    target_os == "unknown" or target_os in pb.os_families
+                    target_os == "unknown" or bool(target_oses & set(pb.os_families))
                 )
                 sigma_rule_reasons = []
                 if sigma_events is not None:

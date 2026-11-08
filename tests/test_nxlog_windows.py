@@ -411,6 +411,80 @@ def test_a_linux_target_that_also_holds_nxlog_records_selects_both_shapes():
     assert not PivotExecutor(None, None, "h1", {"t": linux})._nxlog_mixed_coverage(request)
 
 
+ECS_TEMPLATE_TYPES = {"process.executable": "keyword", "process.pid": "long", "user.name": "keyword",
+                      "user.domain": "keyword", "host.name": "keyword", "message": "text"}
+
+
+def test_linux_is_decided_by_an_inventory_dataset_or_linux_only_fields():
+    nxlog = {"@timestamp": "date", **TEXT_FLAT_TYPES}
+    # Logstash's ECS template maps process.* and user.* on every index: a pure NXLog index stays Windows
+    logstash = contract_from_types("t", {**nxlog, **ECS_TEMPLATE_TYPES})
+    assert logstash.os_family == "windows" and not logstash.nxlog_mixed
+    assert source_os_family({**nxlog, **ECS_TEMPLATE_TYPES}, "host") == "windows"
+    # a Linux shipper dataset in the inventory makes it a Linux target that also holds NXLog records
+    for dataset in ("linux.audit", "auditd.log", "system.auth"):
+        mixed = contract_from_types("t", {**nxlog, **ECS_TEMPLATE_TYPES, "event.dataset": "keyword"},
+                                    datasets={dataset: 10})
+        assert mixed.os_family == "linux" and mixed.nxlog_mixed, dataset
+    assert not contract_from_types("t", {**nxlog, "event.dataset": "keyword"}, datasets={"other.x": 1}).nxlog_mixed
+    # without an inventory, only Linux-only fields decide
+    assert contract_from_types("t", {**nxlog, "journald.custom.x": "keyword"}).nxlog_mixed
+    # a Winlogbeat or Agent mapping is unchanged by NXLog fields or ECS fields beside it
+    for extra in ({}, ECS_TEMPLATE_TYPES, TEXT_FLAT_TYPES):
+        winlogbeat = contract_from_types("w", {**WINLOGBEAT_TYPES, **extra}, datasets={"windows.security": 5})
+        assert winlogbeat.os_family == "windows" and not winlogbeat.nxlog_mixed
+        base = contract_from_types("w", WINLOGBEAT_TYPES)
+        assert all(winlogbeat.fields[name] == base.fields[name] for name in base.fields)
+
+
+def _mixed_cells(hits: list[dict], contract) -> list[dict]:
+    times = [datetime.fromisoformat(hit["_source"]["@timestamp"]) for hit in hits] or [WINDOW.start]
+    window = Window(start=min(times) - timedelta(seconds=1), end=max(times) + timedelta(seconds=1))
+
+    def execute(_client, intent, _contract):
+        return SearchOutcome(target=intent.target, fingerprint="f", started_at=window.start, ended_at=window.start,
+                             completeness=Completeness.complete, total=len(hits), total_relation="eq",
+                             returned=len(hits), records=hits)
+
+    original = sweep_module.execute
+    sweep_module.execute = execute
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _repo()
+            sweep = Sweep(repo, None, "h1", window, {contract.target: contract}, stage_dir=Path(tmp))
+            sweep.pack = [rule for rule in fresh_pack() if rule.id.startswith("win.") and rule.kind != "baseline"]
+            sweep.run_partition(contract.target, contract, [], window, est=len(hits))
+            sweep.finalize()
+            sweep.close_stage()
+            cells = [dict(cell) for cell in repo.rule_cells("h1")]
+            repo.engine.dispose()
+    finally:
+        sweep_module.execute = original
+    return cells
+
+
+def test_no_windows_search_is_complete_on_a_linux_target_holding_nxlog_records():
+    by_key = {(event.provider, event.event_id): event for event in _events()}
+    hits = [nxlog_hit(windows_hit(by_key[(SECURITY, code)], "winlogbeat_8")) for code in (4624, 4625, 4688)]
+    linux = {"event.dataset": "keyword", "event.module": "keyword", "host.name": "keyword",
+             "auditd.data.syscall": "keyword", "process.executable": "keyword", "user.name": "keyword"}
+    mixed = contract_from_types("mixed", {**FLAT_TYPES, **linux}, role="host", hosts=("ws01.example.test",))
+    assert mixed.os_family == "linux" and mixed.nxlog_mixed
+    for records in (hits, []):
+        cells = [cell for cell in _mixed_cells(records, mixed) if cell["rule_id"].startswith("win.")]
+        assert cells
+        assert not [cell for cell in cells if cell["state"] in ("evaluated_complete", "not_applicable_no_events")]
+        # each partition cell names the gate; the whole-window rollups are partial over those partitions
+        partitions = [cell for cell in cells if cell["partition"] != "window"]
+        assert partitions and all(sweep_module.NXLOG_MIXED_GATE in (cell.get("detail") or {}).get("reasons", ())
+                                  for cell in partitions)
+        assert all(cell["state"].endswith("partial") for cell in cells if cell["partition"] == "window")
+    # a Windows target holding the same records keeps its own gates (and no mixed-target reason)
+    windows = contract_from_types("flatwin", FLAT_TYPES, role="host", hosts=("ws01.example.test",))
+    cells = [cell for cell in _mixed_cells(hits, windows) if cell["rule_id"].startswith("win.")]
+    assert all(sweep_module.NXLOG_MIXED_GATE not in (cell.get("detail") or {}).get("reasons", ()) for cell in cells)
+
+
 class _Client:
     settings = type("S", (), {"es_flavor": "elasticsearch"})()
     version = "8.19.0"

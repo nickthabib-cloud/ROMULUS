@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, model_serializer
 
+from romulus.evidence.linux_catalog import LINUX_LOGICAL_DATASETS, logical_of
 from romulus.evidence.zeek_catalog import MALCOLM, lookup_log
 from romulus.store.db import digest
 
@@ -239,10 +240,10 @@ NXLOG_FLAT_NAMES: dict[str, tuple[str, ...]] = {
 # Aliases the sweep aggregates on (continuity metadata, the event-class inventory): a second native would make them
 # unaggregatable, so on a target that also maps Winlogbeat's names they keep those alone.
 _GROUPED_ALIASES = frozenset({"host.name", "event.channel", "event.provider", "event.code", "winlog.record_id"})
-# Field prefixes only Linux host shippers write (audit, journald, syslog, ECS process/user records): a mapping with
-# NXLog's flat fields and any of these is a Linux target that also holds NXLog records, not a Windows target.
-LINUX_FIELD_PREFIXES = ("auditd.", "auditbeat.", "journald.", "systemd.", "process.", "user.", "system.auth.",
-                        "log.syslog.", "apache.")
+# Field prefixes only Linux host shippers write (audit, journald, syslog): a mapping with NXLog's flat fields and any
+# of these is a Linux target that also holds NXLog records, not a Windows target. ECS process.*/user.* and apache.*
+# are not Linux-only (Logstash's ECS template maps process.* and user.* on every index).
+LINUX_FIELD_PREFIXES = ("auditd.", "auditbeat.", "journald.", "systemd.", "system.auth.", "log.syslog.")
 
 
 def nxlog_flat(field_types) -> bool:
@@ -254,13 +255,17 @@ def _winlog_mapping(field_types) -> bool:
     return any(field == "winlog" or field.startswith("winlog.") for field in field_types)
 
 
-def linux_markers(field_types) -> bool:
-    """Whether a mapping holds fields only Linux host shippers write."""
+def linux_markers(field_types, datasets=None) -> bool:
+    """Whether a target holds Linux host telemetry: a Linux shipper dataset in its inventory (a logical Linux dataset
+    or a shipper's name for one), or a field only Linux host shippers write. Dataset-less Linux shapes (journald,
+    Auditbeat without a dataset) are not in the inventory, so the fields still count."""
+    if any(str(name) in LINUX_LOGICAL_DATASETS or logical_of(str(name)) is not None for name in datasets or ()):
+        return True
     return any(field.startswith(LINUX_FIELD_PREFIXES) for field in field_types)
 
 
-def _windows_mapping(field_types) -> bool:
-    return _winlog_mapping(field_types) or (nxlog_flat(field_types) and not linux_markers(field_types))
+def _windows_mapping(field_types, datasets=None) -> bool:
+    return _winlog_mapping(field_types) or (nxlog_flat(field_types) and not linux_markers(field_types, datasets))
 
 
 def schema_of(field_types: dict[str, str]) -> str:
@@ -286,8 +291,8 @@ def source_role(field_types: dict[str, str], datasets: set[str] | None = None) -
     return "network" if network_shape and not host_shape else "host"
 
 
-def source_os_family(field_types: dict[str, str], role: str) -> Literal["linux", "windows", "unknown"]:
-    if _windows_mapping(field_types):
+def source_os_family(field_types: dict[str, str], role: str, datasets=None) -> Literal["linux", "windows", "unknown"]:
+    if _windows_mapping(field_types, datasets):
         return "windows"
     return "linux" if role == "host" else "unknown"
 
@@ -313,8 +318,11 @@ def contract_from_types(
     field_mappings: dict[str, tuple[str, ...] | str] | None = None,
     hosts: tuple[str, ...] = (),
     host_inventory_complete: bool = True,
+    datasets=None,
 ) -> FieldContract:
-    """Build a typed contract, adding explicit aliases for native schemas such as Windows event data."""
+    """Build a typed contract, adding explicit aliases for native schemas such as Windows event data. `datasets` is
+    the target's dataset inventory, when known: a Linux dataset in it makes a mapping that also holds NXLog's flat
+    fields a Linux target that holds NXLog records too (`nxlog_mixed`)."""
     fields = {
         name: FieldSpec(
             native=name,
@@ -327,7 +335,7 @@ def contract_from_types(
     }
     direct_fields = dict(fields)
     mappings = dict(field_mappings or {})
-    windows = _windows_mapping(field_types)
+    windows = _windows_mapping(field_types, datasets) or (os_family == "windows" and nxlog_flat(field_types))
     flat = windows and nxlog_flat(field_types)
     if windows:
         mappings = {**WINDOWS_FIELD_MAPPINGS, **({"winlog.record_id": ("winlog.record_id",)} if flat else {}),
@@ -372,7 +380,7 @@ def contract_from_types(
         )
     time_field = "firstPacket" if schema_of(field_types) == "arkime_sessions" else "@timestamp"
     resolved_role = role or source_role(field_types)
-    resolved_os = os_family or source_os_family(field_types, resolved_role)
+    resolved_os = os_family or source_os_family(field_types, resolved_role, datasets)
     return FieldContract(
         target=target, fields=fields, time_field=time_field, role=resolved_role, os_family=resolved_os,
         linux_fields=direct_fields if windows else {},
@@ -548,7 +556,10 @@ def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfil
             notes = [note for note in notes if not note.startswith("ds inventory truncated")] + mixed_notes
             kind = MIXED_NETWORK_KIND
     role = source_role(field_types, set(datasets))
-    os_family = source_os_family(field_types, role)
+    os_family = source_os_family(field_types, role, datasets)
+    if host_field == "Hostname" and os_family != "windows":
+        # counted by NXLog's computer name before the inventory showed Linux datasets: their hosts are not counted
+        notes.append("hosts inventory truncated (counted by NXLog's Hostname; the Linux records' hosts are not)")
     prof = {
         "target": target, "kind": kind,
         "role": role, "os_family": os_family,
@@ -584,6 +595,7 @@ def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfil
         role=role, os_family=os_family,
         hosts=tuple(sorted(profile.hosts)),
         host_inventory_complete=not any(note.startswith("hosts inventory truncated") for note in notes),
+        datasets=datasets,
     )
 
     return profile, apply_zeek_declaration(contract, site_facts) if declaration is not None else contract
