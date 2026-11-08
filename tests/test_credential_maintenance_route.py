@@ -443,8 +443,11 @@ def _swept_hunt(cell_state="matched", cell_seconds=30, session_read=True):
     lineage = shape_dpkg_preconfigure()
     later = [read(20, 302, 301), read(21, 302, 301)]
     session = read(22, 503, 502, process__auid="1000", process__session_id=7)
+    repo.upsert_task("T-sweep", "h1", "sweep", "sweep", {}, "T-sweep")
     for match in sweep.consume([*lineage, *later, *([session] if session_read else [])]):
-        publish_match(repo, "h1", sweep, match, None, {})
+        # the sweep stores the records its findings cite (each group's first and latest), under its task
+        publish_match(repo, "h1", sweep, match, "T-sweep", {e.key: {"doc": e.native_id} for ev in match.events
+                                                            for e in ev.raw})
     partition = f"{T0.isoformat()}/{(T0 + timedelta(seconds=cell_seconds)).isoformat()}"
     repo.set_rule_cell("h1", sweep.id, sweep.version, "host-x", partition, cell_state, 1, 10)
     repo.save_candidate({
@@ -477,7 +480,8 @@ def test_a_swept_read_reached_without_its_lineage_folds_into_the_sweeps_lead_gro
     repo, later, _session = _swept_hunt()
     before = _credential_rows(repo)
     assert set(before) == {"lead", "high"}
-    assert _reach(repo, later) == []
+    assert later[-1].id in before["lead"]["event_ids"]               # the sweep stored it: proof it judged it
+    assert _reach(repo, [later[-1]]) == []
     rows = _credential_rows(repo)
     assert set(rows) == {"lead", "high"} and rows["high"]["id"] == before["high"]["id"]
     assert rows["high"]["claim"] == before["high"]["claim"]          # the session read's group is untouched
@@ -516,7 +520,7 @@ def test_d_without_a_sweep_group_the_new_high_event_publishes_its_own_finding():
     repo, later, _session = _swept_hunt(session_read=False)
     assert set(_credential_rows(repo)) == {"lead"}
     unswept = read(45, 503, 502, process__auid="1000", process__session_id=7)
-    published = _reach(repo, [*later, unswept])
+    published = _reach(repo, [later[-1], unswept])      # the sweep stored later[-1]; it never saw the other
     rows = _credential_rows(repo)
     assert rows["high"]["event_ids"] == [unswept.id] and [row["id"] for row in published] == [rows["high"]["id"]]
     assert rows["lead"]["gate_results"]["_expansion_fold"]["reaches_total"] == 1
@@ -539,3 +543,16 @@ def test_a_split_parent_or_unsupported_cell_is_not_a_sweep_evaluation():
     repo, later, _session = _swept_hunt(cell_state="not_applicable_no_events")
     _reach(repo, later)
     assert "_expansion_fold" not in _credential_rows(repo)["lead"]["gate_results"]
+
+
+@pytest.mark.parametrize("late", [True, False])
+def test_a_record_the_sweep_never_stored_is_judged_by_expansion_even_inside_a_complete_cell(late):
+    """Late ingestion: a record inside a complete swept cell that the sweep never stored has no proof the sweep saw
+    it. Expansion judges it and may publish high; a swept but uncited record is judged the same way."""
+    repo, later, _session = _swept_hunt(session_read=False)
+    record = read(25, 302, 301) if late else later[0]
+    assert not repo.citation_events("h1", [record.id])
+    published = _reach(repo, [record])
+    rows = _credential_rows(repo)
+    assert rows["high"]["event_ids"] == [record.id] and [row["id"] for row in published] == [rows["high"]["id"]]
+    assert "_expansion_fold" not in rows["lead"]["gate_results"]

@@ -78,6 +78,8 @@ _WINDOWS_TIER_LINKS = {
 SWEPT_COMPLETE = frozenset({"matched", "positive_only", "evaluated_complete", "no_match_complete"})
 # Rules whose sweep coverage index is held while expansion runs (the least recently used is dropped and read again).
 SWEPT_RULES_HELD = 8
+# Task ids whose kind (a sweep read of this hunt or not) is held while expansion runs.
+SWEEP_TASKS_HELD = 4096
 
 
 def _cell_span(partition: str) -> tuple[datetime, datetime] | None:
@@ -255,7 +257,10 @@ class ExpansionEngine:
         self._plans: OrderedDict[str, _AnchorPlan] = OrderedDict()
         self._plan_events = 0
         # rule id -> its sweep partition cells (target, start, end, complete), for SWEPT_RULES_HELD rules at most
-        self._swept_cells: OrderedDict[str, list[tuple[str, datetime, datetime, bool]]] = OrderedDict()
+        self._swept_cells: OrderedDict[str, dict] = OrderedDict()
+        self._sweep_tasks: OrderedDict[str, bool] = OrderedDict()
+        # records inside a complete sweep cell that the sweep did not store, so judged here as any unswept record
+        self.unproven_swept = 0
 
     def _events(self, ids: list[str]) -> list[TypedEvent]:
         """Stored records, with the boot the hunt's map places them in when they carry none (a sweep record read
@@ -1056,9 +1061,9 @@ class ExpansionEngine:
         return cells
 
     def _swept_ids(self, playbook, events: list[TypedEvent]) -> set[str]:
-        """The records of this link the sweep evaluated completely for this rule: each of its raw records was read
-        from a sweep target, in a partition whose cell for the rule is complete, and no cell covering it is partial.
-        Bounded by the link's own records."""
+        """The records of this link the sweep is proven to have judged for this rule: each of its raw records was read
+        from a sweep target, in a partition whose cell for the rule is complete (no covering cell partial), and was
+        stored in this hunt by a sweep task. Bounded by the link's own records."""
         from bisect import bisect_right
         own = set(playbook.families) - set(playbook.context_families)
         candidates = [event for event in events if event.family in own and event.raw]
@@ -1081,7 +1086,41 @@ class ExpansionEngine:
                 covering.append(bool(found) and all(found))
             if covering and all(covering):
                 out.add(event.id)
+        proven = self._stored_by_sweep([event for event in candidates if event.id in out])
+        # A complete cell does not prove its records were read: a record ingested after the sweep read the partition
+        # sits inside it unseen. Only a record the sweep itself stored is known to have been judged by it.
+        self.unproven_swept += len(out) - len(proven)
+        return proven
+
+    def _stored_by_sweep(self, events: list[TypedEvent]) -> set[str]:
+        """The records whose every raw copy was first stored in this hunt by a sweep task (a sweep stores the records
+        its findings cite, not every record it reads)."""
+        from romulus.store.repo import raw_id
+        wanted = {raw_id(ref.target, ref.native_id) for event in events for ref in event.raw}
+        first_task: dict[str, str | None] = {}
+        ordered = sorted(wanted)
+        for start in range(0, len(ordered), 500):
+            for row in self.repo.raw_records(ordered[start:start + 500]):
+                first_task[row["id"]] = row.get("first_task_id")
+        out = set()
+        for event in events:
+            tasks = [first_task.get(raw_id(ref.target, ref.native_id)) for ref in event.raw]
+            if tasks and all(task is not None and self._sweep_task(task) for task in tasks):
+                out.add(event.id)
         return out
+
+    def _sweep_task(self, task_id: str) -> bool:
+        """Whether a task is one of this hunt's sweep partition reads (held for SWEEP_TASKS_HELD task ids)."""
+        known = self._sweep_tasks.get(task_id)
+        if known is None:
+            row = self.repo.task(task_id)
+            known = bool(row) and row["kind"] == "sweep" and row["hunt_id"] == self.hunt_id
+            self._sweep_tasks[task_id] = known
+            while len(self._sweep_tasks) > SWEEP_TASKS_HELD:
+                self._sweep_tasks.popitem(last=False)
+        else:
+            self._sweep_tasks.move_to_end(task_id)
+        return known
 
     def _sweep_group(self, playbook, match) -> dict | None:
         """The candidate the sweep published for these records: the group the rule names (a folded rule may have
