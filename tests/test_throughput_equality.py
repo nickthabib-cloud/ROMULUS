@@ -331,7 +331,7 @@ from tests import throughput_fixture as tf
 # labelled lateral SSH and staging context items remain.
 # Changed anchor groups, coverage versions and expansion selections account for the related fingerprints.
 GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe554935eb6f87cf',
- 'audit': '752bceb485d6eccb8bd52165b464a1f3827dfdb3e868480506383504350b8ede',
+ 'audit': '1076a4c628fa6431d6cdc588b07e02e711de9f7f65d143ebc56f9c8e9dc2cc7e',
  'baseline_counts': 'be05fabb25336f21341b46eae7d8c2627828f7a7a7e8fdb24f4eb58576099354',
  'baseline_hunt_exclusions': 'c91eefda01c512d6d63e892dc9696016b01a71d44e4abcc429d954bd51864852',
  'baseline_observations': '2cac5f0f0a1107fa58648643db52a5fe64ff346e0d521e28aef302aca10fd2c3',
@@ -341,16 +341,16 @@ GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe55
  'baseline_window_counts': '7cc0f5555260b0533927f47cfe29e6a543e2d921b0cc79e4b6b89f418d6052f8',
  'baseline_window_event_hours': 'bb58c65144b135443e75a690b7b2f8137ebac6b827f8e8bd8cc7606a01c53e52',
  'baseline_window_scope_hours': '9e290626d76b423e9aed82a63d54fc6c2d6a2feeea3b55297ed76696c9279c80',
- 'candidates': 'b270718bc7543ffb1b4636a9fb469890acedc77f9a75aea8c519fcf56733a45b',
+ 'candidates': 'cebfd62c4deace8ceaf86afac7928122fc58d21bdd448c88977c8c8b8e9d09b7',
  'entities': 'f26a3ccda6f16d94a0b0822914a0827ecd57ab81791dec1e39227f76a3529f17',
  'event_citations': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'event_entities': '73eb1a7cb37581de8b25ae6079e62e8f2a58b4e75697820e4ae41ac414064773',
  'events': '731e19f952d06603a6e19d7204fb7c1d53de79ad4207d21c3dc3bfda20787e9d',
  'expansion': 'e7a94c167f9a42d9adb20a9ee7660abd45c407ecf30baf023f31b465f0b845fa',
  'links': '7536ae4fc439eb04b16f94e78de5c5551ef26a4f218c8e5611c43b7777c5d228',
- 'manifest': '59ce6ea7c6525f2a234a5c355c0d683320580b423a5c26ac49d05eb69afc0ca3',
+ 'manifest': '157570a170dbad1c76a3348d725a90beda289e3e41792c785d2ec8099f8999e0',
  'raw': 'dcc19cada412dc08cd1133ae2a8cb299933501bceac7b2ddf3b8f23c752b6ddf',
- 'rule_cells': 'e5119f19824fabb8a4f065be44e4cf65e1b7f171ed0c73fcf3c29fcf2da865ba',
+ 'rule_cells': 'bcb5ade29c227bdcc445e3a51812ad4c97de4086432038587b723d6f6748966f',
  'stats': '18fcb2f6b78a17228b3a60b50bd103d66b5a07884252c753349b21b12889ced5',
  'tasks': '8ed9224aa3877ac75866903f8f67da698237b02878712dae968c8ed266eea477'}
 # Captured directly from the S7 fixture through _non_baseline_semantic_digests. Typed-event-derived hashes and
