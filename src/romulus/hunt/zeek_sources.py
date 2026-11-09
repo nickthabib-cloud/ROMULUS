@@ -13,7 +13,7 @@ from romulus.evidence.zeek_catalog import (
     ZEEK_LOGS,
     lookup_log,
 )
-from romulus.sources.models import Predicate, SearchIntent, Window
+from romulus.sources.models import Predicate, SearchIntent, Window, typed_field_name
 from romulus.sources.profile import native_field as exact_native_field
 
 
@@ -61,20 +61,60 @@ def zeek_capable(contract):
                                                           for name in contract.fields)))
 
 
-def source_groups(contract, log, shape):
-    """Use only exact capabilities actually reported by the source contract."""
-    class Markers:
-        def __getattr__(self, name):
-            return getattr(contract, name)
+class _Markers:
+    """A contract whose `supports` resolves catalog paths to the target's exact-capable fields."""
+    def __init__(self, contract):
+        self._contract = contract
 
-        def supports(self, path, op):
-            return native_field(contract, path, op) is not None
+    def __getattr__(self, name):
+        return getattr(self._contract, name)
 
-    return [[predicate.model_copy(update={'field': native_field(contract, predicate.field, predicate.op)})
-             for predicate in group] for group in _source_groups(Markers(), log, shape)]
+    def supports(self, path, op):
+        return native_field(self._contract, path, op) is not None
 
 
-def _source_groups(contract, log, shape):
+def source_groups(contract, log, shape, *, widened=None):
+    """Use only exact capabilities actually reported by the source contract. `widened`, when a list, receives the
+    exclusion markers the target maps but cannot search as absent (`widened_markers`)."""
+    return [[Predicate(field=native_field(contract, predicate.field, predicate.op), op=predicate.op,
+                       value=predicate.value)
+             for predicate in group] for group in _source_groups(_Markers(contract), log, shape, widened)]
+
+
+def widened_markers(contract, log, shape):
+    """The fields that keep other delivery layouts' rows out of this layout's source groups, which the target maps
+    but cannot search as absent: a name no predicate can carry (`zeek.dns.@proc`), or a mapping type without an
+    absence search. Without them the groups select a superset of the layout's rows. A raw read of that superset
+    stays exact, since each record's layout is recognized from the record itself (evidence.zeek.zeek_record); an
+    aggregate over it is not, since it counts the other layouts' rows as this one's."""
+    widened = []
+    _source_groups(_Markers(contract), log, shape, widened)
+    return list(dict.fromkeys(widened))
+
+
+def widened_reason(target, log, shape, fields):
+    """Why a layout's aggregate for `log` is not run, naming a bounded number of the fields (untrusted names, quoted
+    and clipped)."""
+    def few(names):
+        shown = ', '.join(repr(name[:80]) for name in names[:3])
+        return shown + (f' and {len(names)-3} more' if len(names) > 3 else '')
+    untyped = sorted(name for name in fields if not typed_field_name(name))
+    untyped_set = set(untyped)
+    typed = sorted(name for name in fields if name not in untyped_set)
+    causes = ([f'source field name {few(untyped)} not expressible as a typed predicate'] if untyped else []) + (
+        [f'source field {few(typed)} cannot be searched as absent'] if typed else [])
+    return (f"{target}: Zeek {log.name} {shape} selection cannot exclude other layouts' rows "
+            f"({'; '.join(causes)}); visibility unresolved")
+
+
+def _source_groups(contract, log, shape, widened=None):
+    def exclude(group, field):
+        """Add an absence marker; a mapped marker that cannot be searched as absent is reported as widening."""
+        if typed_field_name(field) and contract.supports(field, 'missing'):
+            group.append(Predicate(field=field, op='missing'))
+        elif widened is not None and field in contract.fields:
+            widened.append(field)
+
     names = sorted(log.names.get(shape, ()))
     if not names:
         return []
@@ -103,8 +143,7 @@ def _source_groups(contract, log, shape):
                 marker=[Predicate(field='event.module',op='eq',value='zeek'),
                         Predicate(field='fileset.name',op='eq',value=name),
                         Predicate(field='event.dataset',op='eq',value=dataset)]
-                if contract.supports('data_stream.dataset','missing'):
-                    marker.append(Predicate(field='data_stream.dataset',op='missing'))
+                exclude(marker,'data_stream.dataset')
                 groups.append(marker)
             if name in _ELASTIC_ONLY and contract.supports('event.dataset','eq'):
                 marker=[Predicate(field='event.dataset',op='eq',value=dataset)]
@@ -122,17 +161,16 @@ def _source_groups(contract, log, shape):
         return groups
     if shape == SECURITY_ONION and contract.supports('event.module', 'eq') and contract.supports('event.dataset', 'in'):
         marker=[Predicate(field='event.module',op='eq',value='zeek')]
-        if contract.supports('event.provider','missing'):
-            marker.append(Predicate(field='event.provider',op='missing'))
+        exclude(marker,'event.provider')
         groups=[]
         if contract.supports('data_stream.dataset','eq'):
             groups.append([*marker,Predicate(field='data_stream.dataset',op='eq',value='zeek'),
                            Predicate(field='event.dataset',op='in',value=names+['zeek.'+name for name in names])])
         bare=[*marker,Predicate(field='event.dataset',op='in',value=names)]
-        for field in ('node','firstPacket',*[name for name in contract.fields
-                    if any(name.startswith('zeek.'+logname+'.') for logname in names)]):
-            if contract.supports(field,'missing'):
-                bare.append(Predicate(field=field,op='missing'))
+        # A source field name is never itself a predicate: only a field the contract supports becomes one (`exclude`).
+        objects=tuple('zeek.'+logname+'.' for logname in names)
+        for field in ('node','firstPacket',*[name for name in contract.fields if name.startswith(objects)]):
+            exclude(bare,field)
         groups.append(bare)
         return groups
     return []
