@@ -186,7 +186,10 @@ def cmd_agent(args) -> int:
     try:
         with _agent_heartbeat(repo, args.hunt_id, owner_token, _lease_seconds(settings)) as heartbeat:
             from romulus.agent.investigate import _budget, _store_template
+            from romulus.store.agent_recovery import recover_for_reassessment
+            recovered = recover_for_reassessment(repo, args.hunt_id, owner_token)
             existing = repo.agent_run(args.hunt_id) or {}
+            interrupted = recovered or str(existing.get("reason") or "").startswith("interrupted_by_reassessment")
             repo.save_agent_run({"hunt_id": args.hunt_id, "state": "running", "reason": "reassessment",
                                  "prompt_digests": existing.get("prompt_digests") or {},
                                  "provider": existing.get("provider") or {}, "ended_at": None},
@@ -211,6 +214,9 @@ def cmd_agent(args) -> int:
             if result is None:
                 _store_template(repo, args.hunt_id, reason, owner_token=owner_token)
             state = "completed" if result is not None else "partial"
+            if interrupted:
+                state = "partial"
+                reason = "interrupted_by_reassessment" + (f"; {reason}" if reason else "")
             repo.finalize_agent_run(args.hunt_id, {"state": state, "reason": reason, "ended_at": utcnow()},
                                     owner_token=owner_token,
                                     summary={"status": state, "reason": reason, "usage": repo.agent_usage(args.hunt_id)})
