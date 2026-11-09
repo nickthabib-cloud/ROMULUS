@@ -1,0 +1,15 @@
+{% extends 'base.html' %}
+{% from 'agent_macros.html' import cites, more as pages %}
+{% block content %}
+<p><a href="/hunts/{{ h.id | urlencode }}">← hunt {{ h.id }}</a></p>
+<h1>AI-generated {{ 'rule requests' if kind == 'requests' else kind }}</h1>
+<p>Not confirmed by an analyst.</p>
+<ul>{% for row in rows %}<li>
+{% if kind == 'findings' %}<b>AI agent · unconfirmed</b> · {{ row.lane }} · <a href="{{ finding_url(row.id) }}">{{ row.shown_text }}</a>
+{% else %}{{ row.shown_text }}{% endif %}
+{% if row.suspicious_content %}<b>suspicious content</b>{% endif %}
+{{ cites(row.shown_cites) }}{% if row.cites_more %} {{ row.cites_more }} more citations · <a href="/hunts/{{ h.id | urlencode }}#reports">Complete report</a>{% endif %}{% if row.endpoints %} {{ cites(row.endpoints) }}{% endif %}
+{% if row.agent_hypothesis_id %} · <a href="/hunts/{{ h.id | urlencode }}/hypotheses/{{ row.agent_hypothesis_id | urlencode }}">Hypothesis</a>{% endif %}
+</li>{% else %}<li>No items recorded.</li>{% endfor %}</ul>
+{{ pages(more, next_url) }}
+{% endblock %}

@@ -821,21 +821,31 @@ def _group_agent_notes(notes: list[dict]) -> list[dict]:
             for (kind, target_id), rows in sorted(grouped.items())]
 
 
-def _ai_assessment(repo: Repo, hunt_id: str) -> dict | None:
-    assessments = repo.agent_assessments(hunt_id)
-    if assessments:
-        row = assessments[-1]
+def _ai_assessment(repo: Repo, hunt_id: str, *, stored_only: bool = False) -> dict | None:
+    # A live view needs only the latest revision, not the accumulated assessment or session history.
+    with repo.engine.connect() as connection:
+        row = connection.execute(select(t.agent_assessment).where(
+            t.agent_assessment.c.hunt_id == hunt_id,
+        ).order_by(t.agent_assessment.c.revision.desc()).limit(1)).mappings().first()
+        stale = False
+        if row and row["source"] == "agent":
+            changed_session = select(t.agent_session.c.id).where(
+                t.agent_session.c.hunt_id == hunt_id,
+                t.agent_session.c.purpose.in_(("orient", "investigate")),
+                t.agent_session.c.ended_at > row["created_at"],
+            ).exists()
+            changed_hypothesis = select(t.agent_hypothesis.c.id).where(
+                t.agent_hypothesis.c.hunt_id == hunt_id,
+                t.agent_hypothesis.c.updated_at > row["created_at"],
+            ).exists()
+            stale = bool(connection.execute(select(changed_session | changed_hypothesis)).scalar_one())
+    if row:
         source = row["source"]
         model = row["model"] or {}
         header = (f"AI-generated hypothesis from the cited evidence. Not confirmed by an analyst. Model: "
                   f"{model.get('provider', 'unknown')}/{model.get('model_reported') or model.get('model_requested') or 'unknown'}."
                   if source == "agent" else
                   f"Template narrative: no AI assessment was produced ({(repo.agent_run(hunt_id) or {}).get('reason') or 'not available'}).")
-        stale = source == "agent" and (
-            any(session.get("ended_at") and _as_utc(session["ended_at"]) > _as_utc(row["created_at"])
-                for session in repo.agent_sessions(hunt_id) if session["purpose"] in {"orient", "investigate"})
-            or any(_as_utc(hypothesis["updated_at"]) > _as_utc(row["created_at"])
-                   for hypothesis in repo.agent_hypotheses(hunt_id)))
         if stale:
             header = ("Prior AI assessment: investigation changed after this assessment; not current. "
                       "The prior body is retained for review.")
@@ -843,7 +853,7 @@ def _ai_assessment(repo: Repo, hunt_id: str) -> dict | None:
                 "checker": row["checker"], "revision": row["revision"], **({"stale": True} if stale else {})}
     # Preserve the byte-for-byte renderer output for hunts that predate the persisted agent phase.
     # New hunts always have an agent_run row and receive their deterministic template in this path.
-    if repo.agent_run(hunt_id) is None:
+    if stored_only or repo.agent_run(hunt_id) is None:
         return None
     from romulus.agent.assessment import template_assessment
     reason = (repo.agent_run(hunt_id) or {}).get("reason") or "assessment not available"

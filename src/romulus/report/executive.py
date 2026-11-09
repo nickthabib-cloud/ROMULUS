@@ -1,4 +1,5 @@
 """Executive Word document rendered from the same immutable report manifest."""
+import json
 import re
 from xml.etree.ElementTree import Element, SubElement, tostring
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -37,6 +38,35 @@ def write(m, path, technical_name):
                       f"See {technical_name}, Fleet host appendix, finding {finding['id']}, for every retained host.")
         for check in finding["next_checks"]:
             paragraph("Recommended check: "+check)
+    if assessment := m.get("ai_assessment"):
+        paragraph("AI assessment", bold=True)
+        paragraph(assessment.get("header") or "Template narrative.")
+        assessment_body = assessment.get("body") or {}
+        confidence = assessment_body.get("confidence") or {}
+        if confidence.get("overall"):
+            paragraph(f"Overall confidence: {confidence['overall']}")
+        steps = []
+        for step in assessment_body.get("key_steps") or []:
+            sentence = dict(step.get("sentence") or {})
+            prefix = " · ".join(str(value) for value in (step.get("time"), step.get("tactic")) if value)
+            if prefix:
+                sentence["text"] = f"{prefix}: {sentence.get('text', '')}"
+            steps.append(sentence)
+        for title, sentences in (
+            ("Overall", assessment_body.get("overall") or []), ("Key steps", steps),
+            ("Confidence", confidence.get("reasons") or []),
+            ("Alternatives", assessment_body.get("alternatives") or []),
+            ("Gaps", assessment_body.get("gaps") or []),
+            ("Next checks", assessment_body.get("next_checks") or []),
+        ):
+            if sentences:
+                paragraph(title, bold=True)
+            for sentence in sentences:
+                cites = ", ".join(str(cite) for cite in sentence.get("cites") or [])
+                suffix = f" [{cites}]" if cites else ""
+                paragraph(f"{sentence.get('kind', 'inferred')}: {sentence.get('text', '')}{suffix}")
+        checker = assessment.get("checker") or {}
+        paragraph(f"Checker changes: {json.dumps(checker, sort_keys=True) if checker else 'none'}.")
     if visibility := m["coverage"].get("zeek_visibility"):
         ref = visibility["snapshot"]
         paragraph("Zeek sensor visibility", bold=True)

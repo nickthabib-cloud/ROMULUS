@@ -5,7 +5,7 @@
 {% if compaction_failed %}<p class="warn">Database compaction failed after deletion. The hunt was deleted; disk space may still need to be reclaimed. Details are recorded in the audit log.</p>{% endif %}
 {% if request.query_params.get('started') %}<p class="ok">Hunt started in the background. It appears below within a few seconds.</p>{% endif %}
 <table class="grid">
-<thead><tr><th>Hunt</th><th>Created</th><th>By</th><th>Execution</th><th>Result</th><th>Urgent</th><th>High</th><th>Leads</th></tr></thead>
+<thead><tr><th>Hunt</th><th>Created</th><th>By</th><th>Execution</th><th>Result</th><th>AI</th><th>Urgent</th><th>High</th><th>Leads</th></tr></thead>
 <tbody>
 {% for h in hunts %}
 <tr>
@@ -13,14 +13,15 @@
   <td>{{ h.created_at.strftime('%Y-%m-%d %H:%M') if h.created_at else '' }}</td>
   <td>{{ h.created_by }}</td>
   <td><span class="state s-{{ h.execution_state }}">{{ h.execution_state }}</span></td>
-  <td>{{ h.detection_result or '—' }}</td>
+  <td>{{ h.detection_result or '—' }}</td><td>{{ h.ai_state or '' }}</td>
   <td class="n urgent">{{ h.lanes.get('urgent', 0) }}</td>
   <td class="n high">{{ h.lanes.get('high', 0) }}</td>
   <td class="n">{{ h.lanes.get('lead', 0) }}</td>
 </tr>
 {% else %}
-<tr><td colspan="8">No hunts yet. <a href="/hunts/new">Start one</a>.</td></tr>
+<tr><td colspan="9">No hunts yet. <a href="/hunts/new">Start one</a>.</td></tr>
 {% endfor %}
 </tbody>
 </table>
+{% if more %}<p>Page limit: 50. {{ more }} more · <a href="{{ next_url }}">Next hunts →</a></p>{% endif %}
 {% endblock %}

@@ -4,11 +4,11 @@
   const live = document.getElementById("live");
   if (!live || !window.EventSource) return;
   const state = document.getElementById("live-state");
-  if (state && !["planned", "running"].includes(state.textContent.trim())) return;
   const feed = document.getElementById("feed");
   const section = document.getElementById("newfeed");
   const known = new Set(Array.from(document.querySelectorAll('a[href^="/findings/"]'))
     .map(a => a.getAttribute("href").split("/").pop()));
+  const initial = new Set(known);
   const shown = new Map();   // id -> feed line, so a finding revised in place updates its line
   // A finding the server rendered with the page: a revision updates that row (its link text, lane pill and row
   // class) instead of adding a second line beside the stale one.
@@ -42,11 +42,32 @@
     a.textContent = (f.revised ? " (revised) " : " ") + f.rule + ": " + f.claim;
     li.append(pill, a);
     if (!shown.has(f.id)) { shown.set(f.id, li); feed.prepend(li); }
+    while (shown.size > 50) {
+      const oldest = feed.lastElementChild;
+      const oldestEntry = Array.from(shown.entries()).find(([, element]) => element === oldest);
+      if (oldestEntry) { shown.delete(oldestEntry[0]); if (!initial.has(oldestEntry[0])) known.delete(oldestEntry[0]); }
+      oldest.remove();
+    }
     section.hidden = false;
   });
+  const activity = document.getElementById("agent-activity");
+  for (const name of ["agent_run", "hypothesis", "session", "tool_call", "agent_finding"]) {
+    es.addEventListener(name, ev => {
+      if (!activity) return;
+      const item = JSON.parse(ev.data);
+      const li = document.createElement("li");
+      li.textContent = name.replaceAll("_", " ") + ": " +
+        [item.id, item.session, item.name, item.purpose, item.state || item.status, item.confidence,
+         item.statement || item.claim, item.reason, item.tool_calls === undefined ? "" : item.tool_calls + " calls"]
+          .filter(value => value !== undefined && value !== null && value !== "").join(" · ");
+      activity.prepend(li);
+      while (activity.children.length > 50) activity.lastElementChild.remove();
+    });
+  }
+  es.addEventListener("end", () => es.close());
   es.addEventListener("state", ev => {
     const s = JSON.parse(ev.data);
     if (state) { state.textContent = s.state; state.className = "state s-" + s.state; }
-    if (!["planned", "running"].includes(s.state)) es.close();
+
   });
 })();

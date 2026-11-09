@@ -1,0 +1,7 @@
+{% macro cites(rows) -%}
+{% for cite in rows %}[{% if cite.url %}<a href="{{ cite.url }}">{{ cite.label }}</a>{% else %}{{ cite.label }}{% endif %}]{% endfor %}
+{%- endmacro %}
+
+{% macro more(count, url, limit=50) -%}
+<p class="help">Page limit: {{ limit }}. {% if count %}{{ count }} more · <a href="{{ url }}">Next page →</a>{% else %}No more items on this page.{% endif %}</p>
+{%- endmacro %}
