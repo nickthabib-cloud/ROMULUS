@@ -336,3 +336,86 @@ def test_hunt_list_and_agent_findings_pages_are_keyset_bounded(setup, monkeypatc
     detail = client.get("/hunts/h1").text
     assert "2 more" in detail and "Next findings" in detail
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("source", ["agent", "template"])
+def test_persisted_assessment_target_ids_resolve_to_scoped_citation_links(setup, source):
+    from romulus.agent.aliases import AliasBook
+    from romulus.agent.assessment import check_assessment, template_assessment
+    from romulus.web.agent_views import assessment_view, resolved_cite
+    client, repo, cid, _, _, _ = setup
+    run_row(repo)
+    aliases = AliasBook(repo, "h1")
+    if source == "agent":
+        body, checker = check_assessment(repo, "h1", {
+            "overall": [{"text": "A cited process warrants review", "kind": "observed", "cites": [
+                aliases.alias_for("F", cid), aliases.alias_for("E", "ev1")]}],
+            "key_steps": [], "confidence": {"overall": "low", "reasons": []},
+            "alternatives": [], "gaps": [], "next_checks": [],
+        })
+        assert body["overall"][0]["cites"] == [cid, "ev1"]
+    else:
+        template = template_assessment(repo, "h1", "not_requested")
+        body, checker = template["body"], {}
+    repo.save_agent_assessment({"id": "checked", "hunt_id": "h1", "revision": 1, "source": source,
+        "model": {}, "body": body, "checker": checker, "created_at": utcnow()})
+    rendered = assessment_view(repo, "h1")
+    links = [cite["url"] for section in rendered["sections"] for sentence in section["sentences"]
+             for cite in sentence["cites"]]
+    assert f"/findings/{cid}" in links
+    if source == "agent":
+        assert any(link and "#evidence-ev1" in link for link in links)
+    assert "unresolved cite" not in client.get("/hunts/h1").text
+    repo.create_hunt("other", {}, "d", "test")
+    other = {**repo.candidate(cid), "id": "foreign", "hunt_id": "other", "event_ids": []}
+    other.pop("created_at")
+    repo.save_candidate(other)
+    for invalid in ("foreign", "javascript:alert(1)", "missing"):
+        assert resolved_cite(repo, "h1", invalid) == {"label": "unresolved cite", "url": None}
+
+
+def test_stream_keeps_running_when_reassessment_starts_during_terminal_backlog(setup, monkeypatch):
+    from romulus.web.agent_views import live_events
+    _, repo, cid, _, _, _ = setup
+    run_row(repo, "completed")
+    original = repo.candidate(cid)
+    original.pop("created_at")
+    for index in range(211):
+        repo.save_candidate({**original, "id": f"backlog{index:03}"})
+    read, pages, sleeps = repo.agent_change_page, [], []
+    def page(*args, **kwargs):
+        rows = read(*args, **kwargs)
+        pages.append(len(rows))
+        if len(pages) == 1:
+            run_row(repo, "running", reason="reassessment")
+        return rows
+    monkeypatch.setattr(repo, "agent_change_page", page)
+    async def sleep(_):
+        sleeps.append(1)
+        assert repo.agent_run("h1")["state"] == "running"
+        repo.save_candidate({**original, "id": "late-agent", "provenance": "agent"})
+        run_row(repo, "completed")
+    async def collect():
+        return [unpack(value) async for value in live_events(repo, Connected(), "h1", sleep)]
+    events = asyncio.run(collect())
+    assert sleeps == [1]
+    assert any(name == "finding" and row["id"] == "late-agent" for name, row in events)
+    assert events[-1][0] == "end" and repo.agent_run("h1")["state"] == "completed"
+
+
+def test_timeline_handles_and_labels_agent_findings_and_hypothesis_edges(setup):
+    client, repo, cid, _, _, _ = setup
+    before = repo.candidate(cid)
+    agent = {**before, "id": "agent-timeline", "provenance": "agent"}
+    agent.pop("created_at")
+    repo.save_candidate(agent)
+    response = client.get("/hunts/h1/timeline")
+    assert response.status_code == 200
+    assert "AI agent · unconfirmed" in response.text
+    assert "AI agent hypothesis, unconfirmed" in response.text
+    assert 'href="/findings/agent-timeline"' in response.text
+    assert repo.candidate(cid) == before
+    with repo.engine.begin() as connection:
+        connection.execute(t.candidate.update().where(t.candidate.c.id == "agent-timeline").values(ts=None))
+    undated = client.get("/hunts/h1/timeline").text.split("Observation time not recorded", 1)[1]
+    assert "AI agent · unconfirmed" in undated.split("</ul>", 1)[0]

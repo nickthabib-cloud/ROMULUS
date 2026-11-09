@@ -78,7 +78,7 @@
   <td>{{ c.severity }}</td><td>{{ c.confidence }}</td>
   <td class="mono">{{ c.ts.strftime('%m-%d %H:%M:%S') if c.ts is not none else 'Not recorded' }}</td>
   <td class="mono">{{ c.rule_id }}</td>
-  <td><a href="/findings/{{ c.id }}">{{ c.claim | truncate(220) }}</a>{% if c.provenance == "agent" %} <b>AI agent · unconfirmed</b>{% if c.agent_hypothesis_id %} · <a href="/hunts/{{ h.id | urlencode }}/hypotheses/{{ c.agent_hypothesis_id | urlencode }}">Hypothesis</a>{% endif %}{% endif %}</td>
+  <td><a href="/findings/{{ c.id }}" data-finding-id="{{ c.id }}">{{ c.claim | truncate(220) }}</a>{% if c.provenance == "agent" %} <b class="agent-provenance">AI agent · unconfirmed</b>{% if c.agent_hypothesis_id %} · <a href="/hunts/{{ h.id | urlencode }}/hypotheses/{{ c.agent_hypothesis_id | urlencode }}">Hypothesis</a>{% endif %}{% endif %}</td>
 </tr>
 {% else %}
 <tr><td colspan="6">No items in this lane.</td></tr>

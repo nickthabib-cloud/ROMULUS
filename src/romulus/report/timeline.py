@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 
 ROW_KINDS = ("host", "account", "ip")
 LANES = ("urgent", "high", "lead")
-LINK_STYLES = ("observed", "inferred", "analyst")
+LINK_STYLES = ("observed", "inferred", "analyst", "agent")
 MAX_ROWS = 60
 WIDTH, LEFT, RIGHT, TOP, ROW_H = 1200, 220, 30, 40, 34
 
@@ -70,13 +70,15 @@ def build_timeline(findings: list[dict], edges: list[dict], analyst_links: list[
             x = _x(_ts(f["observed_at"]), start, end)
             primary.setdefault(f["id"], (x, y))
             items.append({"id": f["id"], "x": x, "y": y, "lane": f["lane"], "ts": f["observed_at"],
-                          "title": titles.get(f["rule_id"], f["rule_id"]), "claim": f["claim"][:300]})
+                          "title": titles.get(f["rule_id"], f["rule_id"]), "claim": f["claim"][:300],
+                          **({"provenance": "agent"} if f.get("provenance") == "agent" else {})})
         rows.append({"kind": kind, "value": value, "y": y, "items": items})
 
     hidden["findings_on_hidden_rows"] = sum(1 for f in shown if _rows_of(f) and f["id"] not in primary)
     links = []
     candidates = [{"from": e["from"], "to": e["to"], "style": e["style"],
-                   "label": e["link_type"].replace("_", " ")} for e in edges]
+                   "label": e["link_type"].replace("_", " ") + (
+                       " (AI agent hypothesis, unconfirmed)" if e["style"] == "agent" else "")} for e in edges]
     candidates += [{"from": a["from_finding"], "to": a["to_finding"], "style": "analyst",
                     "label": f"{a['relation']} (analyst assertion, not proven)"} for a in analyst_links]
     for link in sorted(candidates, key=lambda li: (LINK_STYLES.index(li["style"]), li["from"], li["to"], li["label"])):

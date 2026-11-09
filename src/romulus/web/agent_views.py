@@ -60,19 +60,23 @@ def counts(repo, hunt_id):
 
 
 def resolved_cite(repo, hunt_id, cite):
-    if not isinstance(cite, dict):
+    if isinstance(cite, str):
+        # Assessment bodies persist validated target IDs, whereas notes retain typed references.
+        kind, row_id = None, cite
+    elif isinstance(cite, dict):
+        kind = cite.get("kind") or cite.get("target_kind")
+        row_id = cite.get("id") or cite.get("target_id")
+    else:
         return {"label": "unresolved cite", "url": None}
-    kind = cite.get("kind") or cite.get("target_kind")
-    row_id = cite.get("id") or cite.get("target_id")
     if not isinstance(row_id, str) or len(row_id) > 512:
         return {"label": "unresolved cite", "url": None}
     with repo.engine.connect() as connection:
-        if kind in {"F", "finding"}:
+        if kind in {None, "F", "finding"}:
             found = connection.execute(select(t.candidate.c.id).where(
                 t.candidate.c.hunt_id == hunt_id, t.candidate.c.id == row_id)).scalar_one_or_none()
             if found:
                 return {"label": clip(found, 160), "url": "/findings/" + quote(found, safe="")}
-        elif kind in {"E", "evidence"}:
+        if kind in {None, "E", "evidence"}:
             candidate = connection.execute(select(t.candidate_event.c.candidate_id).where(
                 t.candidate_event.c.hunt_id == hunt_id, t.candidate_event.c.event_id == row_id
             ).order_by(t.candidate_event.c.candidate_id).limit(1)).scalar_one_or_none()
@@ -203,7 +207,9 @@ async def live_events(repo, request, hunt_id, sleep):
                 run = repo.agent_run(hunt_id)
                 terminal = hunt["execution_state"] not in {"planned", "running"} and (
                     not run or run["state"] not in {"pending", "running"})
-                if terminal and end_seq is None:
+                if not terminal:
+                    end_seq = None
+                elif end_seq is None:
                     end_seq = repo.agent_change_max_seq(hunt_id)
                 changes = repo.agent_change_page(hunt_id, after_seq=cursor, limit=200)
                 grouped = defaultdict(list)
@@ -249,10 +255,15 @@ async def live_events(repo, request, hunt_id, sleep):
                     cursor = changes[-1]["seq"]
                     seen.commit()
                 # Deletion may have raced the bounded reads above.
-                if repo.get_hunt(hunt_id) is None:
+                current_hunt = repo.get_hunt(hunt_id)
+                if current_hunt is None:
                     yield _event("end", {})
                     return
-                yield _event("state", {"state": hunt["execution_state"], "lanes": repo.lane_counts(hunt_id)})
+                current_run = repo.agent_run(hunt_id)
+                if current_hunt["execution_state"] in {"planned", "running"} or (
+                        current_run and current_run["state"] in {"pending", "running"}):
+                    end_seq = None
+                yield _event("state", {"state": current_hunt["execution_state"], "lanes": repo.lane_counts(hunt_id)})
                 if end_seq is not None and cursor >= end_seq:
                     yield _event("end", {})
                     return

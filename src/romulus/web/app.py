@@ -246,7 +246,7 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         return [{"id": c["id"], "lane": c["lane"], "rule_id": c["rule_id"], "claim": c["claim"],
                  "observed_at": str(c["ts"]) if c["ts"] is not None else None,
                  "entities": c["entities"], "event_ids": c["event_ids"],
-                 "source_link_id": c.get("source_link_id")}
+                 "source_link_id": c.get("source_link_id"), "provenance": c.get("provenance", "deterministic")}
                 for c in repo.candidates(hunt_id, ["urgent", "high", "lead"])]
 
     @app.get("/hunts/{hunt_id}/timeline", response_class=HTMLResponse)
