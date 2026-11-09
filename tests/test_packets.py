@@ -802,7 +802,7 @@ class _FakeSweep:
 
 
 def _hunt(tmp_path):
-    settings = Settings(agent_mode="off", home=tmp_path)
+    settings = Settings(agent_default="off", home=tmp_path)
     repo = hunt_run.open_repo(settings)
     start = T0
     repo.create_hunt("h1", {"window": {"start": start.isoformat(), "end": (start + timedelta(hours=1)).isoformat()},

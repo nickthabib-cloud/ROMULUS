@@ -590,6 +590,8 @@ class ExpansionEngine:
         depths = {row["id"]: row["depth"] for row in existing_rows}
         added = []
         for candidate in candidates:
+            if candidate.get("provenance") == "agent":
+                continue
             if candidate["id"] in existing or candidate["lane"] not in {"urgent", "high"}:
                 continue
             # Agent-published discoveries remain case contributions. A resume must not silently

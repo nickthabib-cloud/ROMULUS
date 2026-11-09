@@ -596,7 +596,7 @@ class ClaudeMessagesProvider(ChatProvider):
                 if not began:
                     raise
                 broken.extend(self._broken_attempt(began, max_out))
-                if isinstance(exc, TransientFailure) and self.s.agent_max_cost_usd:
+                if isinstance(exc, TransientFailure) and self.s.agent_max_cost_usd and request.attempt_guard is None:
                     # a retry could be billed again in full, past what the budget checked before this call
                     raise _Failed("error", f"the reply broke off after it began and was billed ({exc.detail}); not "
                                            "retried, as a cost budget is set") from None
@@ -604,7 +604,8 @@ class ClaudeMessagesProvider(ChatProvider):
 
         t0 = time.monotonic()
         try:
-            message, ms, n = self._retrying(once)
+            message, ms, n = self._retrying(once, attempt_guard=request.attempt_guard,
+                                            billed=lambda: broken)
         except _Failed as exc:
             result = failed(exc.status, exc.error, int((time.monotonic() - t0) * 1000), attempts[0])
             if broken:
@@ -687,9 +688,11 @@ class ClaudeMessagesProvider(ChatProvider):
 
     # ---- request ----------------------------------------------------------------------------------------------
     def _strictness(self, request: ChatRequest) -> tuple[frozenset[str], list[str]]:
-        """The tools to send strict, and why the response schema cannot be sent (empty when it can). A tool is
-        strict when its schema is inside the subset; when the strict tools and the response schema together pass a
-        per-request limit, every tool goes loose. The response schema has no loose form, so its problems refuse."""
+        """Choose a bounded strict-tool prefix in stable output-first order.
+
+        The response schema has no loose form, so its problems refuse the request. Tools after the provider's
+        per-request union/optional limit remain available with local validation but are sent non-strict.
+        """
         schema_counts = {"optional": 0, "union": 0}
         problems: list[str] = []
         if request.response_schema is not None:
@@ -697,14 +700,23 @@ class ClaudeMessagesProvider(ChatProvider):
                         for p in strict_schema_problems(request.response_schema, schema_counts)]
         counts = dict(schema_counts)
         strict = set()
-        for t in request.tools:
+        preferred = (
+            "propose_finding", "propose_link", "add_note", "request_rule",
+            "open_hypothesis", "update_hypothesis", "finish_session",
+            "get_finding", "get_evidence", "get_incident",
+            "list_findings", "list_coverage", "list_incidents", "entity_profile",
+            "entity_timeline", "auth_activity", "process_tree", "ids_alerts", "follow_link",
+        )
+        order = {name: index for index, name in enumerate(preferred)}
+        for t in sorted(request.tools, key=lambda item: (order.get(item.name, len(order)), item.name)):
             tool_counts = {"optional": 0, "union": 0}
             if not strict_schema_problems(t.parameters, tool_counts):
+                proposed = {key: counts[key] + tool_counts[key] for key in counts}
+                if (len(strict) >= MAX_STRICT_TOOLS or proposed["optional"] > MAX_OPTIONAL_PARAMETERS
+                        or proposed["union"] > MAX_UNION_PARAMETERS):
+                    break
                 strict.add(t.name)
-                counts = {k: counts[k] + tool_counts[k] for k in counts}
-        if (len(strict) > MAX_STRICT_TOOLS or counts["optional"] > MAX_OPTIONAL_PARAMETERS
-                or counts["union"] > MAX_UNION_PARAMETERS):
-            strict = set()
+                counts = proposed
         if schema_counts["optional"] > MAX_OPTIONAL_PARAMETERS:
             problems.append(f"{schema_counts['optional']} optional parameters (at most {MAX_OPTIONAL_PARAMETERS})")
         if schema_counts["union"] > MAX_UNION_PARAMETERS:
@@ -833,7 +845,7 @@ class ClaudeMessagesProvider(ChatProvider):
             if block.type not in BLOCK_KEYS:
                 foreign.append(block.type)      # no server tools are offered: nothing else belongs in a reply
                 continue
-            kept.append({k: v for k, v in block.to_dict().items() if k in BLOCK_KEYS[block.type]})
+            kept.append({k: v for k, v in block.to_dict(warnings=False).items() if k in BLOCK_KEYS[block.type]})
             if block.type == "text":
                 texts.append(block.text)
             elif block.type == "tool_use":

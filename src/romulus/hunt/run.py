@@ -2,10 +2,16 @@
 from __future__ import annotations
 
 import logging
+import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta
+from threading import Event, Thread
+from time import monotonic
 
-from romulus.agent.controller import Investigator
-from romulus.agent.provider import agent_readiness
+from sqlalchemy.exc import OperationalError
+
+from romulus.agent.investigate import recover_agent_finalization, run_agent_phase, skip_agent_phase
+from romulus.agent.provider import agent_readiness, build_provider
 from romulus.config import Settings
 from romulus.detect import netdef
 from romulus.evidence.normalize import NORMALIZER_VERSION
@@ -29,7 +35,7 @@ from romulus.sources.es import ElasticClient
 from romulus.sources.models import Window
 from romulus.sources.profile import build_profile
 from romulus.store.db import digest, make_engine, migrate, utcnow
-from romulus.store.repo import Repo
+from romulus.store.repo import Repo, is_lease_lost
 
 log = logging.getLogger("romulus.hunt")
 HUNT_LEASE_SECONDS = 600
@@ -127,33 +133,102 @@ def _contracts(s: Settings, repo: Repo, hunt: dict, client: ElasticClient,
     return contracts
 
 
-def _ai_agent_phase(s: Settings, repo: Repo, hunt_id: str, manifest: dict, owner_token: str | None,
-                    requested: bool | None = None) -> dict:
-    """Record what the AI agent phase did. It never changes detection results, lanes, coverage or the hunt's
-    execution state: with the agent absent, refused or failing, the deterministic findings stand as they are."""
-    entry = manifest.get("ai_agent") or {}
-    wanted = entry.get("requested", False) if requested is None else requested
+@contextmanager
+def _agent_heartbeat(repo: Repo, hunt_id: str, owner_token: str, lease_seconds: int):
+    """Renew ownership while a source or model call blocks, without holding a database lock."""
+    stopped = Event()
+    failures = []
+    # The caller claimed or renewed the lease just before entering; ownership is certain until this deadline.
+    owned_until = [monotonic() + lease_seconds]
+
+    def heartbeat():
+        if failures:
+            raise RuntimeError(f"hunt {hunt_id} agent lease ownership lost") from failures[0]
+        started = monotonic()
+        try:
+            repo.heartbeat_agent_lease(hunt_id, lease_seconds, owner_token=owner_token)
+        except OperationalError as exc:
+            # A busy or locked database is transient: the lease is still ours while a third of it remains,
+            # so the next renewal retries. Only a fence failure, or running out of margin, is ownership lost.
+            if monotonic() < owned_until[0] - lease_seconds / 3:
+                log.warning("hunt %s agent lease renewal deferred: %s", hunt_id, exc)
+                return
+            failures.append(exc)
+            raise
+        except Exception as exc:
+            failures.append(exc)
+            raise
+        owned_until[0] = started + lease_seconds
+
+    def renew():
+        while not stopped.wait(max(0.01, lease_seconds / 3)):
+            try:
+                heartbeat()
+            except Exception:  # noqa: BLE001 - propagate the renewal failure through the guarded callback.
+                return
+
+    worker = Thread(target=renew, name=f"agent-heartbeat-{hunt_id}", daemon=True)
+    worker.start()
     try:
-        readiness = agent_readiness(s)
-    except Exception as exc:      # never leave a finished deterministic hunt unfinished
-        log.exception("agent readiness failed")
-        summary = {"status": "blocked", "reason": f"agent readiness check failed: {exc}"[:300], "model_calls": 0}
-        repo.audit("system", "hunt.ai_agent_summary", hunt_id, summary, owner_token=owner_token)
+        yield heartbeat
+    finally:
+        stopped.set()
+        worker.join()
+
+
+def _ai_agent_phase(s: Settings, repo: Repo, hunt_id: str, manifest: dict, owner_token: str | None,
+                    client: ElasticClient, contracts: dict, requested: bool | None = None,
+                    *, resuming: bool = False, previous_run: dict | None = None) -> dict:
+    """Keep all agent failures inside its own lease and preserve the completed detection state."""
+    try:
+        existing = previous_run if previous_run is not None else (repo.agent_run(hunt_id) or {})
+        if owner_token is None:
+            owner_token = repo.claim_agent_lease(hunt_id, _lease_seconds(s))["lease_owner"]
+        with _agent_heartbeat(repo, hunt_id, owner_token, _lease_seconds(s)) as heartbeat:
+            heartbeat()
+            wanted = (manifest.get("ai_agent") or {}).get("requested", False) if requested is None else requested
+            if not wanted:
+                return skip_agent_phase(s, repo, hunt_id, "not_requested", owner_token=owner_token).as_dict()
+            readiness = None
+            try:
+                readiness = agent_readiness(s)
+                reason = None if readiness.ready else f"provider_not_ready: {readiness.message()}"
+            except Exception as exc:  # noqa: BLE001 - provider configuration cannot undo detection completion.
+                reason = f"readiness check failed: {type(exc).__name__}: {exc}"[:500]
+            if reason:
+                if resuming and existing:
+                    if (repo.agent_run(hunt_id) or {}).get("state") != existing.get("state"):
+                        repo.save_agent_run({"hunt_id": hunt_id, **{key: existing.get(key) for key in (
+                            "state", "reason", "prompt_digests", "provider", "started_at", "ended_at")}},
+                            owner_token=owner_token)
+                    repo.release_agent_lease(hunt_id, owner_token=owner_token)
+                    return {"status": existing["state"], "reason": reason, "unworked": []}
+                return skip_agent_phase(s, repo, hunt_id, reason,
+                                        provider=readiness.provenance(s) if readiness else {},
+                                        owner_token=owner_token).as_dict()
+            provider = build_provider(s, readiness=readiness)
+            from romulus.hunt.agent_tools import build_agent_toolbox
+            toolbox_factory = lambda session_id: build_agent_toolbox(
+                s, repo, hunt_id, client=client, contracts=contracts, session_id=session_id,
+                owner_token=owner_token, heartbeat=heartbeat,
+            )
+            return run_agent_phase(s, repo, hunt_id, provider=provider, toolbox_factory=toolbox_factory,
+                                   owner_token=owner_token, heartbeat=heartbeat).as_dict()
+    except Exception as exc:
+        if is_lease_lost(exc):
+            return {"status": "partial", "reason": "lease_lost", "unworked": []}
+        log.exception("AI agent phase failed")
+        reason = f"agent_error: {type(exc).__name__}: {exc}"[:500]
+        summary = {"status": "failed", "reason": reason, "unworked": []}
+        if owner_token is None:
+            return summary
+        try:
+            repo.finalize_agent_run(hunt_id, {"state": "failed", "reason": reason,
+                                              "ended_at": utcnow()}, owner_token=owner_token, summary=summary)
+        except Exception:
+            # An unavailable store cannot record its own failure; an expired owner cannot write at all.
+            log.exception("could not persist the agent failure")
         return summary
-    base = {"provider": readiness.provider, "model": readiness.model,
-            "endpoint_host": readiness.decision.host if readiness.decision else None,
-            "egress": readiness.decision.egress if readiness.decision else None, "model_calls": 0}
-    if not wanted:
-        summary = {**base, "status": "disabled", "reason": "the AI agent was not requested for this hunt"}
-    elif readiness.state == "not_configured":
-        summary = {**base, "status": "not_configured", "reason": readiness.message()}
-    elif readiness.state == "blocked":
-        summary = {**base, "status": "blocked", "reason": readiness.message()}
-    else:
-        summary = {**base, "status": "not_run",
-                   "reason": "the AI agent phase is not available in this build; the provider is ready"}
-    repo.audit("system", "hunt.ai_agent_summary", hunt_id, summary, owner_token=owner_token)
-    return summary
 
 
 def _site_network_check(client: ElasticClient, contracts: dict, window: Window, heartbeat) -> dict:
@@ -181,11 +256,12 @@ def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
             *, stats: dict | None = None, partial_reasons: list[str] | None = None,
             expansion_summary: dict | None = None, packet_summary: dict | None = None,
             baseline_summary: dict | None = None, ai_agent_summary: dict | None = None,
-            owner_token: str | None = None, retain_budget_bytes: int | None = None) -> dict:
+            owner_token: str | None = None, retain_budget_bytes: int | None = None,
+            pending_agent_owner_token: str | None = None,
+            pending_agent_lease_seconds: int | None = None) -> dict:
     partial_reasons = list(partial_reasons or sweep_summary.get("partial_reasons") or [])
     sweep_complete = bool(sweep_summary.get("complete"))
     missing_summary = not sweep_summary
-    agent_status = agent_summary.get("status")
     packet_status = (packet_summary or {}).get("status")
     packets_incomplete = packet_status in ("partial", "failed")
     baseline_status = (baseline_summary or {}).get("status")
@@ -196,15 +272,14 @@ def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
         partial_reasons.append(f"baseline_stage:{baseline_status}")
     if packets_incomplete:
         partial_reasons.append(f"packet_stage:{packet_status}")
-    partial = (missing_summary or not sweep_complete or agent_status == "unavailable" or packets_incomplete
-               or baseline_failed
+    partial = (missing_summary or not sweep_complete or packets_incomplete or baseline_failed
                or (expansion_summary or {}).get("status") in {"partial", "failed"})
     try:
         # The writer decides per hour from each hour's own window cells, so a hunt left partial by another stage still
         # writes the hours whose baseline inputs were complete; whether it is partial decides only how long its window
         # material is kept (for a resume).
         segment_summary = run_hunt_segment_writer(
-            repo, hunt_id, hunt_partial=partial or agent_status == "failed",
+            repo, hunt_id, hunt_partial=partial,
             baseline_finished=bool((baseline_summary or {}).get("finished")),
             retain_budget_bytes=(DEFAULT_RETAIN_BYTES if retain_budget_bytes is None else retain_budget_bytes),
         )
@@ -233,17 +308,16 @@ def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
         reasons.append(f"packet stage {packet_status}: {detail}"[:200])
     if baseline_failed:
         reasons.append(f"baseline stage {baseline_status}: source, staging, or execution failure")
-    if agent_summary.get("stop_reason"):
-        reasons.append(f"agent: {agent_summary['stop_reason']}")
     if expansion_summary and expansion_summary.get("stop_reason"):
         reasons.append(f"expansion: {expansion_summary['stop_reason']}")
-    repo.audit(
-        "system", "hunt.agent_summary", hunt_id, agent_summary, owner_token=owner_token,
-    )
-    state = "failed" if agent_status == "failed" else ("partial" if partial else "completed_within_scope")
+    # Retain the legacy report projection alongside the richer AI-specific summary.
+    repo.audit("system", "hunt.agent_summary", hunt_id, agent_summary, owner_token=owner_token)
+    state = "partial" if partial else "completed_within_scope"
     repo.set_hunt_state(
         hunt_id, state, owner_token=owner_token,
         detection_result=result, stop_reason="; ".join(reasons),
+        pending_agent_owner_token=pending_agent_owner_token,
+        pending_agent_lease_seconds=pending_agent_lease_seconds,
     )
     return {
         "hunt_id": hunt_id,
@@ -377,31 +451,7 @@ def _baseline_stage(repo: Repo, client: ElasticClient, hunt: dict, window: Windo
     return summary
 
 
-def _run_investigator(s: Settings, repo: Repo, client: ElasticClient, hunt_id: str,
-                      contracts: dict, window: Window, owner_token: str,
-                      agent_mode: str) -> dict:
-    def heartbeat():
-        repo.heartbeat_hunt(hunt_id, _lease_seconds(s), owner_token=owner_token)
-
-    hunt = repo.get_hunt(hunt_id)
-    executor = PivotExecutor(
-        repo, client, hunt_id, contracts, heartbeat=heartbeat, owner_token=owner_token,
-        dataset_inventory={
-            target: set(profile.get("datasets", {}))
-            for target, profile in hunt["manifest"].get("source_profiles", {}).items()
-            if inventory_usable(profile)
-        },
-        site_facts=ensure_site_unchanged(s.home, hunt["manifest"].get("site")),
-    )
-
-    return Investigator(
-        s, repo, executor, hunt_id, window, heartbeat=heartbeat, owner_token=owner_token,
-        agent_mode=agent_mode,
-    ).run()
-
-
-def run_hunt(s: Settings, hunt_id: str, agent: bool | None = None, on_candidate=None,
-             agent_mode: str | None = None, expand: bool | None = None, ai_agent: bool | None = None,
+def run_hunt(s: Settings, hunt_id: str, on_candidate=None, expand: bool | None = None,
              claimed_owner: str | None = None) -> dict:
     repo = open_repo(s)
     hunt = repo.get_hunt(hunt_id)
@@ -423,7 +473,6 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool | None = None, on_candidate=
     owner_token = claimed["lease_owner"]
     h = repo.get_hunt(hunt_id)
     m = h["manifest"]
-    mode = "off" if agent is False else (agent_mode or m.get("agent_mode") or s.agent_mode)
     window = Window(start=datetime.fromisoformat(m["window"]["start"]), end=datetime.fromisoformat(m["window"]["end"]))
     client = ElasticClient(s)
     try:
@@ -487,36 +536,33 @@ def run_hunt(s: Settings, hunt_id: str, agent: bool | None = None, on_candidate=
     expansion_summary = _run_expansion_safely(
         s, repo, client, repo.get_hunt(hunt_id), contracts, window, owner_token,
     )
-    agent_summary = {
-        "status": "disabled", "mode": "off", "partial": False,
-        "stop_reason": "investigator disabled (agent mode off)",
-        "unworked_count": len(repo.candidates(hunt_id, ["urgent", "high", "lead"])),
-    }
-    if mode != "off":
-        try:
-            agent_summary = _run_investigator(
-                s, repo, client, hunt_id, contracts, window, owner_token, mode,
-            )
-        except Exception as exc:
-            log.exception("investigator failed")
-            agent_summary = {
-                "status": "failed", "mode": mode, "partial": True,
-                "stop_reason": f"investigator error: {exc}",
-                "unworked_count": len(repo.candidates(hunt_id, ["urgent", "high", "lead"])),
-            }
-    ai_agent_summary = _ai_agent_phase(s, repo, hunt_id, m, owner_token, ai_agent)
-    return _finish(
-        repo, hunt_id, agent_summary, sweep_summary,
+    agent_owner = uuid.uuid4().hex
+    result = _finish(
+        repo, hunt_id, {"status": "disabled", "mode": "off"}, sweep_summary,
         stats=sweep.stats, partial_reasons=sweep.partial_reasons,
         expansion_summary=expansion_summary, packet_summary=packet_summary,
         baseline_summary=baseline_summary,
-        ai_agent_summary=ai_agent_summary, owner_token=owner_token,
+        owner_token=owner_token, pending_agent_owner_token=agent_owner,
+        pending_agent_lease_seconds=_lease_seconds(s),
         retain_budget_bytes=int(s.baseline_retain_disk_gb * 1e9),
     )
+    return _with_agent_result(result, repo, _ai_agent_phase(s, repo, hunt_id, m, agent_owner, client, contracts))
 
 
-def resume_hunt(s: Settings, hunt_id: str, agent_mode: str | None = None, ai_agent: bool | None = None) -> dict:
-    """Resume only persisted investigator work; the deterministic sweep is never re-run."""
+def _with_agent_result(result: dict, repo: Repo, summary: dict) -> dict:
+    """Return the result refreshed by the agent's atomic finalization without changing detection completion."""
+    combined = {**result, "ai_agent": summary,
+                "agent": {"status": summary.get("status", "unknown"), "stop_reason": summary.get("reason")}}
+    try:
+        stored = repo.get_hunt(result["hunt_id"])
+        combined.update(lanes=repo.lane_counts(result["hunt_id"]), detection_result=stored["detection_result"])
+    except Exception:
+        log.exception("could not read the refreshed agent result")
+    return combined
+
+
+def resume_hunt(s: Settings, hunt_id: str) -> dict:
+    """Resume persisted agent work without repeating a completed deterministic hunt."""
     repo = open_repo(s)
     hunt = repo.get_hunt(hunt_id)
     if hunt is None:
@@ -543,28 +589,74 @@ def resume_hunt(s: Settings, hunt_id: str, agent_mode: str | None = None, ai_age
         raise RuntimeError("hunt cannot resume agent work because the sweep did not finish")
     if hunt["execution_state"] == "failed" and not sweep_summary.get("finished"):
         raise RuntimeError("failed hunt cannot resume because the sweep did not finish")
-    claimed = repo.claim_hunt(hunt_id, _lease_seconds(s), resume=True)
+    agent_run = repo.agent_run(hunt_id) or {}
+    agent_reason = str(agent_run.get("reason") or "")
+    resumable_agent = (
+        agent_run.get("state") in {"pending", "running"}
+        or (agent_run.get("state") == "partial" and
+            any(reason in agent_reason for reason in ("provider_unavailable", "interrupted")))
+    )
+    agent_only = hunt["execution_state"] == "completed_within_scope" and resumable_agent
+    if hunt["execution_state"] == "completed_within_scope" and not agent_only:
+        raise ValueError(f"hunt {hunt_id} has no resumable agent phase")
+    claimed = (repo.claim_agent_lease(hunt_id, _lease_seconds(s)) if agent_only else
+               repo.claim_hunt(hunt_id, _lease_seconds(s), resume=True))
     owner_token = claimed["lease_owner"]
     hunt = repo.get_hunt(hunt_id)
     manifest = hunt["manifest"]
-    mode = agent_mode or manifest.get("agent_mode") or s.agent_mode
+    if agent_only:
+        base_result = {"hunt_id": hunt_id, "execution_state": hunt["execution_state"],
+                       "stats": sweep_summary.get("stats") or {}, "lanes": repo.lane_counts(hunt_id),
+                       "detection_result": hunt.get("detection_result"), "baseline": {}, "expansion": {}}
+        try:
+            with _agent_heartbeat(repo, hunt_id, owner_token, _lease_seconds(s)):
+                recovered = recover_agent_finalization(repo, hunt_id, owner_token=owner_token)
+            if recovered is not None:
+                return _with_agent_result(base_result, repo, recovered.as_dict())
+        except Exception as exc:  # noqa: BLE001 - recovery errors stay inside the independent agent phase.
+            reason = "lease_lost" if is_lease_lost(exc) else f"agent_error: {type(exc).__name__}"
+            summary = {"status": "partial" if is_lease_lost(exc) else "failed", "reason": reason}
+            if not is_lease_lost(exc):
+                try:
+                    repo.finalize_agent_run(hunt_id, {"state": "failed", "reason": reason},
+                                            owner_token=owner_token, summary=summary)
+                except Exception:
+                    log.exception("could not record local agent recovery failure")
+            return {**base_result, "agent": summary, "ai_agent": summary}
     window = Window(
         start=datetime.fromisoformat(manifest["window"]["start"]),
         end=datetime.fromisoformat(manifest["window"]["end"]),
     )
     client = ElasticClient(s)
     try:
-        contracts = _contracts(s, repo, {**hunt, "_resume_scope_check": True}, client, owner_token)
+        if agent_only:
+            with _agent_heartbeat(repo, hunt_id, owner_token, _lease_seconds(s)):
+                contracts = _contracts(s, repo, {**hunt, "_resume_scope_check": True}, client, owner_token)
+        else:
+            contracts = _contracts(s, repo, {**hunt, "_resume_scope_check": True}, client, owner_token)
     except Exception as exc:
+        if agent_only:
+            reason = "lease_lost" if is_lease_lost(exc) else f"provider_not_ready: source preflight failed: {exc}"[:500]
+            ai_agent_summary = {"status": agent_run.get("state", "partial"), "reason": reason}
+            try:
+                repo.release_agent_lease(hunt_id, owner_token=owner_token)
+            except Exception:
+                log.exception("could not release the unavailable agent's lease")
+            return {"hunt_id": hunt_id, "execution_state": hunt["execution_state"],
+                    "stats": sweep_summary.get("stats") or {}, "lanes": repo.lane_counts(hunt_id),
+                    "detection_result": hunt.get("detection_result"), "agent": ai_agent_summary,
+                    "ai_agent": ai_agent_summary, "baseline": {}, "expansion": {}}
         stop_reason = f"source preflight error: {exc}"
-        repo.audit("system", "hunt.agent_summary", hunt_id, {
-            "status": "failed", "partial": True, "stop_reason": stop_reason,
-            "unworked_count": len(repo.candidates(hunt_id, ["urgent", "high", "lead"])),
-        }, owner_token=owner_token)
         repo.set_hunt_state(
             hunt_id, "failed", owner_token=owner_token, stop_reason=stop_reason,
         )
         raise
+    if agent_only:
+        ai_agent_summary = _ai_agent_phase(s, repo, hunt_id, manifest, owner_token, client, contracts, resuming=True)
+        return _with_agent_result({"hunt_id": hunt_id, "execution_state": hunt["execution_state"],
+                "stats": sweep_summary.get("stats") or {}, "lanes": repo.lane_counts(hunt_id),
+                "detection_result": hunt.get("detection_result"), "agent": ai_agent_summary,
+                "ai_agent": ai_agent_summary, "baseline": {}, "expansion": {}}, repo, ai_agent_summary)
     packet_audit = repo.latest_audit(hunt_id, "hunt.packet_summary")
     packet_summary = dict(packet_audit["detail"]) if packet_audit else {}
     if not packet_summary.get("finished"):
@@ -587,28 +679,14 @@ def resume_hunt(s: Settings, hunt_id: str, agent_mode: str | None = None, ai_age
     expansion_summary = _run_expansion_safely(
         s, repo, client, hunt, contracts, window, owner_token,
     )
-    agent_summary = {
-        "status": "disabled", "mode": "off", "partial": False,
-        "stop_reason": "investigator disabled (agent mode off)",
-        "unworked_count": len(repo.candidates(hunt_id, ["urgent", "high", "lead"])),
-    }
-    if mode != "off":
-        try:
-            agent_summary = _run_investigator(
-                s, repo, client, hunt_id, contracts, window, owner_token, mode,
-            )
-        except Exception as exc:
-            log.exception("resumed investigator failed")
-            agent_summary = {
-                "status": "failed", "mode": mode, "partial": True,
-                "stop_reason": f"investigator error: {exc}",
-                "unworked_count": len(repo.candidates(hunt_id, ["urgent", "high", "lead"])),
-            }
-    ai_agent_summary = _ai_agent_phase(s, repo, hunt_id, manifest, owner_token, ai_agent)
-    return _finish(
-        repo, hunt_id, agent_summary, sweep_summary,
+    agent_owner = uuid.uuid4().hex
+    result = _finish(
+        repo, hunt_id, {"status": "disabled", "mode": "off"}, sweep_summary,
         expansion_summary=expansion_summary, packet_summary=packet_summary,
         baseline_summary=baseline_summary,
-        ai_agent_summary=ai_agent_summary, owner_token=owner_token,
+        owner_token=owner_token, pending_agent_owner_token=agent_owner,
+        pending_agent_lease_seconds=_lease_seconds(s),
         retain_budget_bytes=int(s.baseline_retain_disk_gb * 1e9),
     )
+    return _with_agent_result(result, repo, _ai_agent_phase(
+        s, repo, hunt_id, manifest, agent_owner, client, contracts, resuming=True, previous_run=agent_run))

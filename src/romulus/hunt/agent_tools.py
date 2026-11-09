@@ -187,7 +187,7 @@ class HuntToolExecutor:
 
 
 def build_agent_toolbox(settings: Settings, repo: Repo, hunt_id: str, *, client, contracts: dict,
-                        session_id: str, owner_token: str | None = None) -> Toolbox:
+                        session_id: str, owner_token: str | None = None, heartbeat=None) -> Toolbox:
     """Construct source-capable ports in the hunt layer and inject only their protocol into agent code."""
     hunt = repo.get_hunt(hunt_id)
     if hunt is None:
@@ -202,7 +202,7 @@ def build_agent_toolbox(settings: Settings, repo: Repo, hunt_id: str, *, client,
         if inventory_usable(profile)
     }
     pivot = PivotExecutor(
-        repo, client, hunt_id, contracts, owner_token=owner_token,
+        repo, client, hunt_id, contracts, owner_token=owner_token, heartbeat=heartbeat,
         source_query_budget=settings.agent_max_source_queries, source_query_scope="agent",
         dataset_inventory=inventory,
         site_facts=ensure_site_unchanged(settings.home, manifest.get("site")),
@@ -210,4 +210,4 @@ def build_agent_toolbox(settings: Settings, repo: Repo, hunt_id: str, *, client,
     pivot.source_queries = repo.agent_source_queries(hunt_id)
     fetcher = LinkFetcher(pivot, start, end)
     executor = HuntToolExecutor(repo, hunt_id, pivot, fetcher, start, end, owner_token=owner_token)
-    return Toolbox(repo, hunt_id, executor=executor, session_id=session_id)
+    return Toolbox(repo, hunt_id, executor=executor, session_id=session_id, owner_token=owner_token)

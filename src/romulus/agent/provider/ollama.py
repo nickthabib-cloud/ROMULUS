@@ -66,7 +66,7 @@ class OllamaProvider(ChatProvider):
             }} for t in request.tools]
         if request.response_schema is not None:
             body["format"] = request.response_schema
-        response, ms, attempts = self._post("/api/chat", body)
+        response, ms, attempts = self._post("/api/chat", body, attempt_guard=request.attempt_guard)
         if response.status_code == 400 and "exceed" in response.text and "context" in response.text:
             failed = self._http_error(response, est, ms, attempts)
             failed.status = "too_large"

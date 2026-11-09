@@ -31,9 +31,92 @@ def _anchor(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]+", "-", value)
 
 
+def _agent_note_line(note: dict) -> str:
+    marker = " **Cites content flagged as possible prompt injection.**" if note.get("suspicious_content") else ""
+    cites = ", ".join(str(cite.get("id")) for cite in note.get("cites") or [] if isinstance(cite, dict))
+    suffix = f" (cites: {esc(cites)})" if cites else ""
+    return f"- {esc(note['text'])}{suffix}{marker}"
+
+
+def _assessment_section(m: dict) -> list[str]:
+    assessment = m.get("ai_assessment")
+    if not assessment:
+        return []
+    body = assessment.get("body") or {}
+    out = ["## AI assessment", "", esc(assessment.get("header") or "Template narrative."), ""]
+    confidence = (body.get("confidence") or {}).get("overall")
+    if confidence:
+        out += [f"**Overall confidence: {esc(confidence)}**", ""]
+
+    def sentence(item: dict) -> str:
+        cites = ", ".join(f"`{esc(value)}`" for value in item.get("cites") or [])
+        suffix = f" ({cites})" if cites else ""
+        return f"- *{esc(item.get('kind', 'inferred'))}:* {esc(item.get('text', ''))}{suffix}"
+
+    key_steps = []
+    for step in body.get("key_steps") or []:
+        item = dict(step.get("sentence") or {})
+        prefix = " · ".join(str(value) for value in (step.get("time"), step.get("tactic")) if value)
+        if prefix:
+            item["text"] = f"{prefix}: {item.get('text', '')}"
+        key_steps.append(item)
+    for title, values in (("Overall", body.get("overall") or []),
+                          ("Key steps", key_steps),
+                          ("Confidence", (body.get("confidence") or {}).get("reasons") or []),
+                          ("Alternatives", body.get("alternatives") or []),
+                          ("Gaps", body.get("gaps") or []),
+                          ("Next checks", body.get("next_checks") or [])):
+        if not values:
+            continue
+        out += [f"**{title}**", "", *[sentence(item) for item in values], ""]
+    checker = assessment.get("checker") or {}
+    out += [f"Checker changes: `{esc(json.dumps(checker, sort_keys=True)) if checker else 'none'}`.", ""]
+    return out
+
+
+def _hypotheses_section(m: dict) -> list[str]:
+    ai = m.get("ai_agent") or {}
+    hypotheses = ai.get("hypotheses") or []
+    notes = {(item["target_kind"], item["target_id"]): item.get("notes") or []
+             for item in ai.get("agent_notes") or []}
+    out = ["## Hypotheses", ""]
+    if not hypotheses:
+        out += ["No agent hypotheses were recorded.", ""]
+    for hypothesis in hypotheses:
+        hid = hypothesis["id"]
+        out += [f"### {esc(hid)} · {esc(hypothesis['status'])} · {esc(hypothesis['confidence'])}", "",
+                esc(hypothesis["statement"]), "",
+                f"- Techniques: {esc(', '.join(hypothesis.get('techniques') or []) or 'none')}",
+                f"- Entities: {esc(', '.join(hypothesis.get('entity_ids') or []) or 'none')}",
+                f"- Sessions run: {hypothesis.get('sessions_run', 0)}",
+                f"- Open questions: {esc('; '.join(hypothesis.get('questions') or []) or 'none')}",
+                f"- Cites: {esc(', '.join(cite['id'] for cite in hypothesis.get('cites') or []) or 'none')}"]
+        for note in notes.get(("hypothesis", hid), []):
+            out.append("- AI note: " + _agent_note_line(note)[2:])
+        out.append("")
+    return out
+
+
+def _other_agent_notes_section(m: dict) -> list[str]:
+    visible = {finding["id"] for finding in m.get("findings", [])}
+    notes = [item for item in (m.get("ai_agent") or {}).get("agent_notes") or []
+             if item.get("target_kind") not in {"finding", "hypothesis"}
+             or (item.get("target_kind") == "finding" and item.get("target_id") not in visible)]
+    if not notes:
+        return []
+    out = ["## Other AI notes", ""]
+    for group in notes:
+        out += [f"### {esc(group['target_kind'])} `{esc(group['target_id'])}`", ""]
+        for note in group.get("notes") or []:
+            out.append(_agent_note_line(note))
+        out.append("")
+    return out
+
+
 def outcome_sentence(m: dict) -> str:
-    n = len(m["findings"])
-    urgent_high = sum(1 for f in m["findings"] if f["lane"] in ("urgent", "high"))
+    deterministic = [finding for finding in m["findings"] if finding.get("provenance", "deterministic") != "agent"]
+    n = len(deterministic)
+    urgent_high = sum(1 for f in deterministic if f["lane"] in ("urgent", "high"))
     partial = m["execution_state"] != "completed_within_scope"
     if n:
         s = (f"ROMULUS reports {urgent_high} urgent/high finding(s) and {n - urgent_high} investigative lead(s) "
@@ -41,6 +124,9 @@ def outcome_sentence(m: dict) -> str:
     else:
         s = ("ROMULUS found no qualifying behavior in what it searched, listed below. That does not mean nothing "
              "is there.")
+    agent_count = sum(finding.get("provenance") == "agent" for finding in m["findings"])
+    if agent_count:
+        s += f" The AI agent added {agent_count} unconfirmed finding(s)."
     if partial:
         s += f" The hunt is {m['execution_state']}: some sources, windows or tasks were not fully searched."
     unresolved = {rule for gap in (m.get("coverage") or {}).get("gaps") or [] for rule in gap["rules"]}
@@ -78,7 +164,11 @@ def _render_body(m: dict, banner: str = BANNER) -> str:
     })
     out = [banner, "", f"# ROMULUS technical report: hunt `{h['id']}`", "",
            f"Revision {m['revision']['number']} (`{m['revision']['id']}`)"
-           + (f", supersedes `{m['revision']['supersedes']}`" if m["revision"]["supersedes"] else ""), "",
+           + (f", supersedes `{m['revision']['supersedes']}`" if m["revision"]["supersedes"] else ""), ""]
+    out += _assessment_section(m)
+    out += _hypotheses_section(m) if m.get("ai_assessment") else []
+    out += _other_agent_notes_section(m) if m.get("ai_assessment") else []
+    out += [
            "## Outcome", "", outcome_sentence(m), "",
            "| Item | Value |", "|---|---|",
            f"| Execution state | {esc(m['execution_state'])} |",
@@ -87,7 +177,8 @@ def _render_body(m: dict, banner: str = BANNER) -> str:
            f"| Sources | {esc(', '.join(h['targets']))} |",
            f"| Internal networks | {cell(_internal_networks_cell(m))} |",
            f"| Lane counts | {esc(json.dumps(m['lane_counts'], sort_keys=True))} |",
-           f"| Model investigator | {esc(m['agent'].get('status'))}: {esc(m['agent'].get('stop_reason', ''))} |",
+           *([f"| Model investigator | {esc(m['agent'].get('status'))}: {esc(m['agent'].get('stop_reason', ''))} |"]
+             if m["agent"].get("stop_reason") or m["agent"].get("status") not in (None, "disabled") else []),
            f"| AI agent | {cell(_ai_agent_cell(m))} |",
            f"| Stop reason | {esc(m['stop_reason'])} |",
            f"| Broken citations | {m['integrity']['broken_citations']} |",
@@ -115,9 +206,12 @@ def _render_body(m: dict, banner: str = BANNER) -> str:
                 f"- Observed at: {esc(f['observed_at']) + ' UTC' if f['observed_at'] else 'Not recorded'}",
                 (f"- Severity **{f['severity']}**, confidence **{f['confidence']}**, priority {f['priority']:.0f} "
                  f"({esc('; '.join(f['priority_reasons']))})"),
-                f"- Analyst status: {esc(f['analyst_status'])}",
-                f"- Entities: {esc(', '.join(f'{k}:{v} ({r})' for k, v, r in f['entities']))}", ""]
+                f"- Analyst status: {esc(f['analyst_status'])}"]
+        if f.get("provenance") == "agent":
+            out.append("- Provenance: **Agent finding**, AI-generated and unconfirmed.")
+        out += [f"- Entities: {esc(', '.join(f'{k}:{v} ({r})' for k, v, r in f['entities']))}", ""]
         if f.get("source_case_id"):
+            # Compatibility for discovery origins stored by the earlier case investigator.
             out += [(f"- Investigator chain: [case `{esc(f['source_case_id'])}`]"
                      f"(#case-{_anchor(f['source_case_id'])})"), ""]
         if f.get("source_anchor_id"):
@@ -132,6 +226,12 @@ def _render_body(m: dict, banner: str = BANNER) -> str:
         out += ["", "**Admission gates**", "", ", ".join(f"{esc(k)}: {esc(v)}" for k, v in f["gates"].items()), ""]
         if f["notes"]:
             out += ["**Notes**", ""] + [f"- {esc(n)}" for n in f["notes"]] + [""]
+        for group in (m.get("ai_agent") or {}).get("agent_notes") or []:
+            if group.get("target_kind") == "finding" and group.get("target_id") == f["id"]:
+                out += ["**AI notes**", ""]
+                for note in group.get("notes") or []:
+                    out.append(_agent_note_line(note))
+                out.append("")
         out += ["**Benign alternatives to rule out**", ""] + [f"- {esc(b)}" for b in f["benign_alternatives"]] + [""]
         out += ["**Recommended next checks**", ""] + [f"- {esc(c)}" for c in f["next_checks"]] + [""]
         out += ["**Citations**", "", "| Event | Source | Native ID | Digest | Status |", "|---|---|---|---|---|"]
@@ -195,6 +295,13 @@ def _render_body(m: dict, banner: str = BANNER) -> str:
     if not graph["links"]:
         out.append("| none | none | none | none | none | none | none | none |")
     out.append("")
+    if graph.get("agent_links"):
+        out += ["**Agent hypothesis edges**", "",
+                "These proposed relationships are hypotheses; they never join or alter incidents.", "",
+                "| From | To | Relation | Style | Rationale |", "|---|---|---|---|---|"]
+        out += [f"| `{esc(link['from'])}` | `{esc(link['to'])}` | {esc(link['relation'])} | "
+                f"Agent hypothesis | {cell(link['rationale'])} |" for link in graph["agent_links"]]
+        out.append("")
 
     investigations = m.get("investigations") or {
         "summary": {}, "seed_partition": {}, "cases": [], "unworked_seed_ids": [],

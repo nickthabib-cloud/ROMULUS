@@ -65,7 +65,6 @@ def build_manifest(s: Settings, window: Window, original_input: dict, style: str
         "policy": POLICY_VERSION,
         "model": {"triage": s.ollama_model_triage, "synthesis": s.synthesis_model, "num_ctx": s.ollama_num_ctx,
                   "think": s.ollama_think},
-        "agent_mode": s.agent_mode,
         # which addresses are the site's: the sweep's direction-dependent rules read this definition
         "internal_networks": SiteNetworks.from_settings(s).record(),
         "baseline": {

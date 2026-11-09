@@ -171,20 +171,31 @@ class InvestigationExecutor(Protocol):
 
 def _strict_schema(model: type[BaseModel]) -> dict:
     schema = model.model_json_schema()
+    strict_keys = {"type", "properties", "required", "additionalProperties", "items", "enum", "const",
+                   "anyOf", "allOf", "$ref", "description", "title", "format", "$defs", "$def", "definitions"}
 
-    def visit(value):
+    def visit(value, top: bool = False):
         if isinstance(value, dict):
+            for key in list(value):
+                if key not in strict_keys or (not top and key in {"$defs", "$def", "definitions"}):
+                    value.pop(key)
             properties = value.get("properties")
             if isinstance(properties, dict):
                 value["additionalProperties"] = False
                 value["required"] = list(properties)
-            for child in value.values():
-                visit(child)
+                for child in properties.values():
+                    visit(child)
+            for key, child in value.items():
+                if key not in {"properties", "$defs", "$def", "definitions"}:
+                    visit(child)
+            for definitions in ("$defs", "$def", "definitions"):
+                for child in value.get(definitions, {}).values():
+                    visit(child)
         elif isinstance(value, list):
             for child in value:
                 visit(child)
 
-    visit(schema)
+    visit(schema, top=True)
     return schema
 
 
@@ -249,25 +260,30 @@ def _result(status: str, *, coverage: dict | None = None, counts: dict | None = 
     flags = injection_flags(result_data, "$.data")
     if flags:
         result_data = {**result_data, "safety_flags": flags}
-    return {
+    result = {
         "status": status,
         "coverage": coverage or {"status": "complete", "gaps": []},
         "counts": counts or {"returned": 0, "total": 0},
         "data": result_data,
         "more": bool(more),
     }
+    if status == "refused":
+        error = result_data.get("error") if isinstance(result_data, dict) else None
+        result["errors"] = [str(error.get("message", "tool action refused"))] if isinstance(error, dict) else ["tool action refused"]
+    return result
 
 
 class Toolbox:
     """Registry and exception boundary for all model-facing investigator tools."""
 
     def __init__(self, repo: Repo, hunt_id: str, *, executor: InvestigationExecutor | None = None,
-                 session_id: str | None = None):
+                 session_id: str | None = None, owner_token: str | None = None):
         self.repo = repo
         self.hunt_id = hunt_id
         self.executor = executor
         self.session_id = session_id
-        self.aliases = AliasBook(repo, hunt_id)
+        self.owner_token = owner_token
+        self.aliases = AliasBook(repo, hunt_id, owner_token=owner_token)
         self.registry = {
             item.name: item for item in (
                 RegisteredTool(
@@ -470,7 +486,7 @@ class Toolbox:
             })[:20]
             plan = self.repo.create_agent_page_plan(
                 self.hunt_id, cursor, identity, stored, self._coverage_entries(coverage),
-            )
+             owner_token=self.owner_token)
         total = int(plan["item_count"])
         entries = self.repo.agent_page_items(
             self.hunt_id, cursor, offset=(args.page - 1) * COVERAGE_PAGE_SIZE,
@@ -591,7 +607,7 @@ class Toolbox:
             stored = self.repo.create_candidate_page_plan(
                 self.hunt_id, cursor, identity, {}, lane=args.lane, rule_id=args.rule,
                 entity=entity_key,
-            )
+             owner_token=self.owner_token)
             page = self.repo.candidate_page_plan_rows(
                 self.hunt_id, cursor, offset=0, limit=READ_PAGE_SIZE,
             )
@@ -761,7 +777,7 @@ class Toolbox:
             plan = self.repo.create_agent_page_plan(
                 self.hunt_id, cursor, identity, {"status": "complete"},
                 items,
-            )
+             owner_token=self.owner_token)
         total = int(plan["item_count"])
         rows = self.repo.agent_page_items(
             self.hunt_id, cursor, offset=(args.page - 1) * INCIDENT_PAGE_SIZE,
@@ -841,7 +857,7 @@ class Toolbox:
             cursor = "G" + digest({
                 "identity": identity, "summary": stored, "items": items,
             })[:20]
-            self.repo.create_agent_page_plan(self.hunt_id, cursor, identity, stored, items)
+            self.repo.create_agent_page_plan(self.hunt_id, cursor, identity, stored, items, owner_token=self.owner_token)
         start = (args.page - 1) * INCIDENT_PAGE_SIZE
         page = {kind: [item["value"] for item in self.repo.agent_page_items_by_kind(
             self.hunt_id, cursor, kind, offset=start, limit=INCIDENT_PAGE_SIZE,
@@ -894,7 +910,7 @@ class Toolbox:
             })[:20]
             plan = self.repo.create_entity_event_page_plan(
                 self.hunt_id, cursor, identity, entity_id,
-            )
+             owner_token=self.owner_token)
             total = int(plan["item_count"])
             families = plan["summary"]["families"]
         start = (args.page - 1) * ENTITY_EVENT_LIMIT
@@ -1052,7 +1068,7 @@ class Toolbox:
 
             plan = self.repo.create_agent_page_plan(
                 self.hunt_id, cursor, identity, summary, items(),
-            )
+             owner_token=self.owner_token)
         else:
             plan = self.repo.agent_page_plan(self.hunt_id, cursor)
             if plan is None:

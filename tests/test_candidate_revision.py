@@ -59,7 +59,7 @@ def _reportable_hunt(repo, hunt_id="h2"):
         "window": {"start": T.isoformat(), "end": (T + timedelta(hours=1)).isoformat()},
         "style": "broad", "hypothesis": "", "original_input": {}, "targets": ["win-host"],
         "pack": {"version": "test", "playbooks": []}, "normalizer": "test", "policy": "test",
-        "model": {}, "romulus_version": "test", "agent_mode": "off", "source_profiles": {},
+        "model": {}, "romulus_version": "test", "ai_agent": {"requested": False}, "source_profiles": {},
         "budgets": {"wall_clock_minutes": 60},
     }, f"digest-{hunt_id}", "test")
     return hunt_id

@@ -33,7 +33,7 @@ def setup(monkeypatch, tmp_path):
 
     monkeypatch.setattr(hunt_run, 'create_hunt', create)
     monkeypatch.setattr(hunt_run, 'run_hunt', run)
-    args = SimpleNamespace(action='start', no_agent=True, agent_mode=None, start='2026-01-01T00:00:00Z',
+    args = SimpleNamespace(action='start', agent=False, no_agent=True, start='2026-01-01T00:00:00Z',
                            end='2026-01-02T00:00:00Z', style='broad', hypothesis=None, no_expand=True,
                            env_file=str(tmp_path / '.env'), json=False)
     return repo, args, created, ran

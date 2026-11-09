@@ -570,7 +570,7 @@ def test_run_orders_baseline_after_packets_before_expansion_and_resume_retries_a
     manifest = _manifest()
     manifest.update(
         normalizer=NORMALIZER_VERSION, packet_normalizer=PACKET_NORMALIZER,
-        agent_mode="off", ai_agent={"requested": False}, source_profiles={},
+        ai_agent={"requested": False}, source_profiles={},
         expansion={"enabled": True},
         internal_networks=SiteNetworks.from_lists(["10.0.0.0/8"]).record(),
     )
@@ -610,6 +610,12 @@ def test_run_orders_baseline_after_packets_before_expansion_and_resume_retries_a
         order.append("expansion")
         return {"status": "complete"}
 
+    real_agent_phase = hunt_run._ai_agent_phase
+
+    def agent(*args, **kwargs):
+        assert repo.get_hunt("h1")["execution_state"] in {"partial", "completed_within_scope"}
+        return real_agent_phase(*args, **kwargs)
+
     monkeypatch.setattr(hunt_run, "open_repo", lambda _settings: repo)
     monkeypatch.setattr(hunt_run, "_contracts", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(hunt_run, "Sweep", FakeSweep)
@@ -619,7 +625,7 @@ def test_run_orders_baseline_after_packets_before_expansion_and_resume_retries_a
     monkeypatch.setattr(hunt_run, "_packet_stage", packet)
     monkeypatch.setattr(hunt_run, "run_baseline_stage", baseline)
     monkeypatch.setattr(hunt_run, "_run_expansion_safely", expansion)
-    monkeypatch.setattr(hunt_run, "_ai_agent_phase", lambda *_args, **_kwargs: {"status": "disabled"})
+    monkeypatch.setattr(hunt_run, "_ai_agent_phase", agent)
     settings = Settings(home=tmp_path, internal_networks=["10.0.0.0/8"])
 
     first = hunt_run.run_hunt(settings, "h1")

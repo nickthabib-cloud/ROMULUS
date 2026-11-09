@@ -622,7 +622,7 @@ def run_stack(stage_dir, *, scale: int = 1, docs: dict | None = None) -> dict:
         "window": {"start": window.start.isoformat(), "end": window.end.isoformat()},
         "style": "broad", "hypothesis": "", "original_input": {}, "targets": targets,
         "pack": {"version": "test", "playbooks": []}, "normalizer": "test", "policy": "test",
-        "model": {}, "romulus_version": "test", "agent_mode": "off", "source_profiles": {},
+        "model": {}, "romulus_version": "test", "ai_agent": {"requested": False}, "source_profiles": {},
         "budgets": {"wall_clock_minutes": 120},
         "baseline": {
             "plan_version": "baseline-plan@1", "site": "throughput-fixture", "history_days": 7,
@@ -714,6 +714,32 @@ def run_stack(stage_dir, *, scale: int = 1, docs: dict | None = None) -> dict:
 def digests(snapshot: dict) -> dict[str, str]:
     return {name: hashlib.sha256(json.dumps(part, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
             for name, part in sorted(snapshot.items())}
+
+
+def deterministic_golden_digests(snapshot: dict) -> dict[str, str]:
+    """Compare detection goldens without the additive AI provenance and assessment fields."""
+    projected = json.loads(json.dumps(snapshot))
+    projected["candidates"] = [
+        {key: value for key, value in row.items() if key not in {"provenance", "agent_hypothesis_id"}}
+        for row in projected["candidates"]
+    ]
+    projected["audit"] = [row for row in projected["audit"] if row["action"] != "hunt.ai_agent_summary"]
+    manifest = projected["manifest"]
+    ai_agent = manifest.get("ai_agent") or {}
+    configured = dict(ai_agent.get("configured") or {})
+    configured.pop("requested", None)
+    usage = ai_agent.get("usage") or {}
+    manifest["ai_agent"] = {
+        "configured": configured,
+        "phase": ai_agent.get("phase") or {"status": "unknown"},
+        "usage": {key: usage.get(key) for key in ("calls", "cost_usd", "estimated", "tokens")},
+    }
+    manifest.pop("ai_assessment", None)
+    for finding in manifest.get("findings") or []:
+        finding.pop("provenance", None)
+        finding.pop("agent_hypothesis_id", None)
+    (manifest.get("incident_graph") or {}).pop("agent_links", None)
+    return digests(projected)
 
 
 def patched_sizes(monkeypatch) -> None:

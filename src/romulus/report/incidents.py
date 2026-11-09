@@ -137,9 +137,15 @@ def _entity_id(kind: str, value: str) -> str:
     return "E-" + digest({"kind": kind, "value": value})[:16]
 
 
-def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict:
+def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict], *, include_agent_links: bool = True) -> dict:
     """Observed expansion edges form components; inferred edges remain visible suggestions."""
     rules = hunt_rule_metadata(repo, hunt_id)
+    stored_by_id = {finding["id"]: (repo.candidate(finding["id"]) if hasattr(repo, "candidate") else None)
+                    for finding in findings}
+    agent_findings = [finding for finding in findings
+                      if finding.get("provenance", (stored_by_id[finding["id"]] or {}).get("provenance")) == "agent"]
+    agent_ids = {finding["id"] for finding in agent_findings}
+    findings = [finding for finding in findings if finding["id"] not in agent_ids]
     finding_by_id = {finding["id"]: finding for finding in findings}
     attack_by_finding, tactics_by_finding = {}, {}
     nodes = [{
@@ -160,7 +166,7 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
     for finding in findings:
         if finding.get("source_link_id"):
             children[finding["source_link_id"]].append(finding["id"])
-        stored = repo.candidate(finding["id"]) if hasattr(repo, "candidate") else None
+        stored = stored_by_id[finding["id"]]
         explicit_attack = finding.get('attack') or ((stored or {}).get('gate_results') or {}).get('_attack')
         rule = rules.get(finding['rule_id'])
         attack = tuple(explicit_attack or getattr(rule, 'attack', ()))
@@ -178,7 +184,9 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
             findings_by_event[event_id].add(finding["id"])
     links = []
     edges = []
-    for row in sorted(repo.expansion_links(hunt_id), key=lambda item: (
+    expansion_rows = repo.expansion_links(hunt_id)
+    expansion_by_id = {row["id"]: row for row in expansion_rows}
+    for row in sorted(expansion_rows, key=lambda item: (
             item["anchor_id"], item["link_type"], item["window_start"], item["id"])):
         targets = set(children.get(row["id"], []))
         for event_id in row["event_ids"]:
@@ -201,6 +209,37 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
             "link_id": row["id"], "link_type": row["link_type"], "style": row["strength"],
             "kind": link_kind, "incident_role": incident_role,
         } for target in targets if row["anchor_id"] in finding_by_id and target in finding_by_id)
+
+    agent_links = []
+    if include_agent_links:
+        for row in (repo.agent_links(hunt_id) if hasattr(repo, "agent_links") else []):
+            endpoints = []
+            for side in ("from", "to"):
+                kind, target_id = row[f"{side}_kind"], row[f"{side}_id"]
+                if kind == "finding":
+                    node_id = target_id
+                    if node_id not in finding_by_id:
+                        nodes.append({"id": node_id, "kind": "finding", "lane": None,
+                                      "observed_at": None, "rule_id": None})
+                else:
+                    entity = repo.entity(target_id)
+                    if entity is None:
+                        continue
+                    node_id = _entity_id(entity["kind"], entity["value"])
+                    if node_id not in entity_nodes:
+                        entity_nodes[node_id] = {"id": node_id, "kind": "entity", "entity_kind": entity["kind"],
+                                                 "value": entity["value"]}
+                        nodes.append(entity_nodes[node_id])
+                endpoints.append(node_id)
+            if len(endpoints) != 2:
+                continue
+            agent_links.append({"id": row["id"], "from": endpoints[0], "to": endpoints[1],
+                                "relation": row["relation"], "style": "agent", "incident_role": "hypothesis",
+                                "kind": "agent_hypothesis", "cites": row["cites"],
+                                "rationale": row["rationale"]})
+            edges.append({"id": row["id"], "from": endpoints[0], "to": endpoints[1],
+                          "link_id": row["id"], "link_type": row["relation"], "style": "agent",
+                          "kind": "agent_hypothesis", "incident_role": "hypothesis"})
 
     parent = {finding_id: finding_id for finding_id in finding_by_id}
 
@@ -279,4 +318,22 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict]) -> dict
         incidents.append(incident)
     incidents.sort(key=lambda incident: (finding_by_id[incident["finding_ids"][0]]["observed_at"] is None,
                                         finding_by_id[incident["finding_ids"][0]]["observed_at"] or "", incident["id"]))
-    return {"nodes": nodes, "edges": edges, "links": links, "incidents": incidents}
+    # Add AI-only nodes and citation relationships after deterministic membership and narratives are fixed.
+    if include_agent_links:
+        for finding in agent_findings:
+            stored = stored_by_id[finding["id"]] or finding
+            node = {"id": finding["id"], "kind": "finding", "lane": finding["lane"],
+                    "observed_at": finding["observed_at"], "rule_id": finding["rule_id"],
+                    "provenance": "agent", "style": "agent", "incident_role": "hypothesis"}
+            nodes = [item for item in nodes if item["id"] != finding["id"]]
+            nodes.append(node)
+            event_ids = set(stored.get("event_ids") or [])
+            targets = {item for eid in event_ids for item in findings_by_event.get(eid, ())}
+            targets.update(link["anchor_finding_id"] for link in links
+                           if event_ids.intersection(expansion_by_id[link["id"]]["event_ids"]))
+            for target in sorted(targets & finding_by_id.keys()):
+                edges.append({"id": f"agent-cite:{finding['id']}:{target}", "from": finding["id"], "to": target,
+                              "link_id": None, "link_type": "cited_evidence", "style": "agent",
+                              "kind": "agent_hypothesis", "incident_role": "hypothesis"})
+    return {"nodes": nodes, "edges": edges, "links": links, "agent_links": agent_links,
+            "incidents": incidents}

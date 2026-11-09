@@ -56,7 +56,6 @@ class AgentDecision(BaseModel):
     menu: list[dict[str, Any]] = Field(default_factory=list)
     menu_hidden_count: int = 0
     aliases: dict[str, dict] = Field(default_factory=dict)
-    agent_mode: Literal["model", "deterministic"] | None = None
     deterministic_fallback: bool = False
     fallback_note: str = ""
     text_truncated: list[str] = Field(default_factory=list)

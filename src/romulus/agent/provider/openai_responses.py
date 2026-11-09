@@ -229,7 +229,7 @@ class OpenAIResponsesProvider(ChatProvider):
                 if not began:
                     raise
                 broken.append(self._broken_attempt(began, est, max_out))
-                if isinstance(exc, TransientFailure) and self.s.agent_max_cost_usd:
+                if isinstance(exc, TransientFailure) and self.s.agent_max_cost_usd and request.attempt_guard is None:
                     # a retry could be billed again in full, past what the budget checked before this call
                     raise _Failed("error", f"the reply broke off after it began and was billed ({exc.detail}); not "
                                            "retried, as a cost budget is set") from None
@@ -238,7 +238,8 @@ class OpenAIResponsesProvider(ChatProvider):
         t0 = time.monotonic()
         while True:
             try:
-                data, ms, n = self._retrying(once)
+                data, ms, n = self._retrying(once, attempt_guard=request.attempt_guard,
+                                             billed=lambda: broken)
                 break
             except _SummaryRefused:
                 # the request for a reasoning summary was refused before anything was generated: ask without it

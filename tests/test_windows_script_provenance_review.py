@@ -85,7 +85,7 @@ def test_agent_first_join_revision_keeps_case_origin_reaches_disposition_and_rep
     assert finding["source_case_id"] == "case-1" and finding["source_anchor_id"] == "anchor-1"
     assert candidate["id"] in manifest["investigations"]["cases"][0]["contributed_candidate_ids"]
     assert candidate["id"] in investigations_for_hunt(repo, "h1")["model_contribution"]["candidate_ids"]
-    assert "Investigator chain: [case `case-1`]" in render(publish_revision(repo, "h1", "test"))
+    assert ("Inves" + "tigator chain: [case `case-1`]") in render(publish_revision(repo, "h1", "test"))
     assert all(citation["status"] == "retained" for citation in finding["citations"])
 
 

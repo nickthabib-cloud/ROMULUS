@@ -463,7 +463,8 @@ def _detail_fetch(section: str, item: dict) -> str:
 
 def _large_dossier(repo: Repo, hunt_id: str, manifest: dict, token_budget: int,
                    aliases: AliasBook, *, reportable_count: int, link_count: int,
-                   rule_cell_count: int, entity_count: int, link_payload_bytes: int) -> Dossier:
+                   rule_cell_count: int, entity_count: int, link_payload_bytes: int,
+                   owner_token: str | None = None) -> Dossier:
     """Build a bounded partial dossier without loading hunt-sized correlation inputs."""
     lane_counts = Counter(repo.lane_counts(hunt_id))
     profiles = manifest.get("source_profiles") or {}
@@ -577,7 +578,7 @@ def _large_dossier(repo: Repo, hunt_id: str, manifest: dict, token_budget: int,
             hunt_id, cursor, {"kind": "dossier_large"}, {
                 "finding_count": reportable_count, "dossier_page_size": LARGE_DOSSIER_PAGE_SIZE,
                 "status": "partial_at_materialization_cap",
-            }, lanes=REPORTABLE_LANES,
+            }, lanes=REPORTABLE_LANES, owner_token=owner_token,
         )
     pages = LargeDossierPages(repo, hunt_id, cursor, int(plan["item_count"]), aliases, base)
     payload = pages[0]
@@ -594,7 +595,7 @@ def _large_dossier(repo: Repo, hunt_id: str, manifest: dict, token_budget: int,
     return Dossier(payload=payload, pages=pages)
 
 
-def build_dossier(repo: Repo, hunt_id: str, *, token_budget: int) -> Dossier:
+def build_dossier(repo: Repo, hunt_id: str, *, token_budget: int, owner_token: str | None = None) -> Dossier:
     """Build a canonical JSON dossier without querying a source or calling a model."""
     if token_budget < 1:
         raise ValueError("token_budget must be positive")
@@ -607,7 +608,7 @@ def build_dossier(repo: Repo, hunt_id: str, *, token_budget: int) -> Dossier:
     rule_cell_count = repo.rule_cell_count(hunt_id)
     entity_count = repo.entity_count(hunt_id)
     link_payload_bytes = repo.expansion_link_payload_bytes(hunt_id)
-    aliases = AliasBook(repo, hunt_id)
+    aliases = AliasBook(repo, hunt_id, owner_token=owner_token)
     if (reportable_count > MATERIALIZE_FINDING_LIMIT
             or link_count > MATERIALIZE_LINK_LIMIT
             or rule_cell_count > MATERIALIZE_COVERAGE_LIMIT
@@ -617,7 +618,7 @@ def build_dossier(repo: Repo, hunt_id: str, *, token_budget: int) -> Dossier:
             repo, hunt_id, manifest, token_budget, aliases,
             reportable_count=reportable_count, link_count=link_count,
             rule_cell_count=rule_cell_count, entity_count=entity_count,
-            link_payload_bytes=link_payload_bytes,
+            link_payload_bytes=link_payload_bytes, owner_token=owner_token,
         )
     lane_counts, reportable = _findings(repo, hunt_id)
     context_counts = repo.candidate_rule_counts(hunt_id, lane="context")
@@ -681,6 +682,7 @@ def build_dossier(repo: Repo, hunt_id: str, *, token_budget: int) -> Dossier:
             "finding_count": sum(lane_counts[lane] for lane in REPORTABLE_LANES),
         },
         ({"page": page} for page in _paginate(base, details(), token_budget, cursor)),
+        owner_token=owner_token,
     )
     pages = DossierPages(repo, hunt_id, cursor, int(plan["item_count"]))
     return Dossier(payload=pages[0], pages=pages)

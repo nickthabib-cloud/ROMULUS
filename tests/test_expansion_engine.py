@@ -40,7 +40,7 @@ def repo_with_anchor(*, host="web1", candidate_id="F-anchor"):
         "window": {"start": WINDOW.start.isoformat(), "end": WINDOW.end.isoformat()},
         "style": "broad", "hypothesis": "", "original_input": {}, "targets": [],
         "pack": {"version": "test", "playbooks": []}, "normalizer": "test", "policy": "test",
-        "model": {}, "romulus_version": "test", "agent_mode": "off",
+        "model": {}, "romulus_version": "test", "ai_agent": {"requested": False},
         "budgets": {"wall_clock_minutes": 120},
     }, "digest", "test")
     anchor = event("anchor-event", host=host)
@@ -912,11 +912,11 @@ def test_new_anchor_discovered_in_tier_two_receives_tier_one_links():
 
 
 def test_resume_runs_expansion_before_optional_agent_without_rerunning_sweep(tmp_path, monkeypatch):
-    settings = __import__("romulus.config", fromlist=["Settings"]).Settings(home=tmp_path, agent_mode="model")
+    settings = __import__("romulus.config", fromlist=["Settings"]).Settings(home=tmp_path)
     repo = hunt_run.open_repo(settings)
     repo.create_hunt("h1", {
         "window": {"start": WINDOW.start.isoformat(), "end": WINDOW.end.isoformat()},
-        "targets": [], "source_profiles": {}, "agent_mode": "model", "expansion": {"enabled": True},
+        "targets": [], "source_profiles": {}, "ai_agent": {"requested": True}, "expansion": {"enabled": True},
         "budgets": {"wall_clock_minutes": 120},
     }, "digest", "test")
     repo.claim_hunt("h1", 1, now=T0 - timedelta(hours=2))
@@ -927,8 +927,8 @@ def test_resume_runs_expansion_before_optional_agent_without_rerunning_sweep(tmp
     monkeypatch.setattr(hunt_run, "_run_expansion", lambda *_args, **_kwargs: order.append("expansion") or {
         "status": "completed", "stop_reason": "fixpoint", "unexpanded": [],
     })
-    monkeypatch.setattr(hunt_run, "_run_investigator", lambda *_args, **_kwargs: order.append("agent") or {
-        "status": "completed", "partial": False, "stop_reason": "done", "unworked_count": 0,
+    monkeypatch.setattr(hunt_run, "_ai_agent_phase", lambda *_args, **_kwargs: order.append("agent") or {
+        "status": "completed", "reason": None, "unworked": [],
     })
 
     hunt_run.resume_hunt(settings, "h1")
@@ -969,11 +969,11 @@ def test_budget_stop_makes_the_expansion_summary_partial_with_the_recorded_reaso
 
 
 def test_resumed_hunt_with_recorded_unexpanded_anchor_stays_partial(tmp_path, monkeypatch):
-    settings = __import__("romulus.config", fromlist=["Settings"]).Settings(home=tmp_path, agent_mode="off")
+    settings = __import__("romulus.config", fromlist=["Settings"]).Settings(home=tmp_path, agent_default="off")
     repo = hunt_run.open_repo(settings)
     repo.create_hunt("h1", {
         "window": {"start": WINDOW.start.isoformat(), "end": WINDOW.end.isoformat()},
-        "targets": [], "source_profiles": {}, "agent_mode": "off", "expansion": {"enabled": True},
+        "targets": [], "source_profiles": {}, "ai_agent": {"requested": False}, "expansion": {"enabled": True},
         "budgets": {"wall_clock_minutes": 120},
     }, "digest", "test")
     add_anchor(repo, "F-anchor", "web1")

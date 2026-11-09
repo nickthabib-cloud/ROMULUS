@@ -64,8 +64,7 @@ def cmd_hunt(args) -> int:
     if args.action == "start":
         from romulus.hunt.run import _lease_seconds
         from romulus.store.db import maintenance_lease
-        agent_mode = "off" if args.no_agent else (args.agent_mode or s.agent_mode)
-        s = s.model_copy(update={"agent_mode": agent_mode})
+        requested = True if args.agent else False if args.no_agent else None
         start, end = _parse_time(args.start, s.mission_timezone), _parse_time(args.end, s.mission_timezone)
         user = os.environ.get("USER") or os.environ.get("USERNAME") or "cli"
         hid = None
@@ -77,7 +76,7 @@ def cmd_hunt(args) -> int:
                 hid = create_hunt(s, start, end, created_by=f"cli:{user}", style=args.style,
                                   hypothesis=args.hypothesis or "",
                                   original_input={"start": args.start, "end": args.end, "tz": s.mission_timezone},
-                                  expand=not args.no_expand, ai_agent=False if args.no_agent else None)
+                                  expand=not args.no_expand, ai_agent=requested)
                 owner = repo.claim_hunt(hid, _lease_seconds(s))["lease_owner"]
         except (ValueError, RuntimeError) as e:
             if hid is None:
@@ -89,52 +88,41 @@ def cmd_hunt(args) -> int:
                       file=sys.stderr)
             return EXIT_FAIL
         print(f"hunt {hid} created [{start.isoformat()}, {end.isoformat()})")
-        ai = ai_agent_entry(s, False if args.no_agent else None)
+        ai = ai_agent_entry(s, requested)
         if ai.get("state") == "blocked" and ai.get("requested"):
             print(f"AI agent blocked: {ai.get('reason')}; the hunt runs without it", file=sys.stderr)
 
         def show(c):
             if c["lane"] in ("urgent", "high"):
                 print(f"  [{c['lane'].upper():6}] {c['rule_id']}: {c['claim'][:180]}", flush=True)
-        res = run_hunt(s, hid, agent_mode=agent_mode, on_candidate=show, expand=not args.no_expand,
-                       claimed_owner=owner)
+        res = run_hunt(s, hid, on_candidate=show, expand=not args.no_expand, claimed_owner=owner)
         print(json.dumps(res, indent=2, default=str) if args.json else
               f"done: {res['execution_state']} {res['detection_result']} lanes={res['lanes']} "
               f"stats={ {k: v for k, v in res['stats'].items() if k != 'skips'} }\n" + _ai_agent_line(res))
         return EXIT_OK
     if args.action == "resume":
-        agent_mode = "off" if args.no_agent else args.agent_mode
-        kwargs = {"agent_mode": agent_mode} if agent_mode else {}
-        if args.no_agent:
-            kwargs["ai_agent"] = False
-        result = resume_hunt(s, args.hunt_id, **kwargs)
+        if args.agent or args.no_agent:
+            print("resume uses the agent request recorded on the hunt", file=sys.stderr)
+            return EXIT_FAIL
+        result = resume_hunt(s, args.hunt_id)
         if args.json:
             print(json.dumps(result, indent=2, default=str))
         else:
-            agent = result["agent"]
-            print(f"resumed: {result['execution_state']} agent={agent['status']} "
-                  f"unworked={agent.get('unworked_count', 0)} "
-                  f"analyst_flags={len(agent.get('analyst_flags') or [])}\n" + _ai_agent_line(result))
+            agent = result.get("ai_agent") or result.get("agent") or {}
+            print(f"resumed: {result['execution_state']} agent={agent.get('status', 'unknown')} "
+                  f"unworked={len(agent.get('unworked') or [])}\n" + _ai_agent_line(result))
         return EXIT_OK
     if args.action == "status":
-        from romulus.report.manifest import investigations_for_hunt
         repo = open_repo(s)
         hunts = [repo.get_hunt(args.hunt_id)] if args.hunt_id else repo.list_hunts()
         for h in hunts:
             if h:
-                agent_audit = repo.latest_audit(h["id"], "hunt.agent_summary")
+                agent_audit = repo.latest_audit(h["id"], "hunt.ai_agent_summary")
+                if agent_audit is None:  # Historical hunts kept their original audit record.
+                    agent_audit = repo.latest_audit(h["id"], "hunt.agent_summary")
                 agent = agent_audit["detail"] if agent_audit else {}
-                investigations = investigations_for_hunt(repo, h["id"])
-                inv_summary = investigations["summary"]
                 print(f"{h['id']}  {h['execution_state']:24} {h['detection_result'] or '-':40} "
-                      f"lanes={repo.lane_counts(h['id'])} " + _stage_status(repo, h["id"], agent, inv_summary))
-                for case in investigations["cases"]:
-                    descriptions = [choice["description"] for choice in case["chosen_options"]]
-                    if descriptions:
-                        print(f"  {case['id']} options: " + " -> ".join(descriptions))
-                    for choice in case["chosen_options"]:
-                        if choice["fallback_note"]:
-                            print(f"    fallback: {choice['fallback_note']}")
+                      f"lanes={repo.lane_counts(h['id'])} " + _stage_status(repo, h["id"], agent))
         return EXIT_OK
     return EXIT_USAGE
 
@@ -170,6 +158,78 @@ def cmd_report(args) -> int:
     for path in paths.values():
         print(f"  {path}")
     return EXIT_OK if m["integrity"]["finalizable"] else EXIT_FAIL
+
+
+def cmd_agent(args) -> int:
+    """Create a fresh assessment and report revision for a stored hunt."""
+    from dataclasses import replace
+    from time import monotonic
+
+    from romulus.agent.assessment import run_assessment
+    from romulus.agent.provider import AgentBudget, agent_readiness, build_provider
+    from romulus.hunt.run import _agent_heartbeat, _lease_seconds, open_repo
+    from romulus.report.manifest import publish_revision
+    from romulus.store.db import utcnow
+
+    settings = load_settings(_env_file(args))
+    repo = open_repo(settings)
+    hunt = repo.get_hunt(args.hunt_id)
+    if hunt is None:
+        print(f"unknown hunt: {args.hunt_id}", file=sys.stderr)
+        return EXIT_FAIL
+    try:
+        claimed = repo.claim_agent_lease(args.hunt_id, _lease_seconds(settings))
+    except (RuntimeError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return EXIT_FAIL
+    owner_token = claimed["lease_owner"]
+    try:
+        with _agent_heartbeat(repo, args.hunt_id, owner_token, _lease_seconds(settings)) as heartbeat:
+            from romulus.agent.investigate import _budget, _store_template
+            existing = repo.agent_run(args.hunt_id) or {}
+            repo.save_agent_run({"hunt_id": args.hunt_id, "state": "running", "reason": "reassessment",
+                                 "prompt_digests": existing.get("prompt_digests") or {},
+                                 "provider": existing.get("provider") or {}, "ended_at": None},
+                                owner_token=owner_token)
+            readiness = agent_readiness(settings)
+            provider = build_provider(settings, readiness=readiness) if readiness.ready else None
+            usage = repo.agent_usage(args.hunt_id)
+            budget = _budget(settings, hunt["manifest"], repo, args.hunt_id, monotonic)
+            if args.max_calls is not None or args.max_tokens is not None:
+                limits = replace(budget.limits,
+                                 max_calls=budget.calls + args.max_calls if args.max_calls is not None else budget.limits.max_calls,
+                                 max_tokens=budget.tokens + args.max_tokens if args.max_tokens is not None else budget.limits.max_tokens)
+                budget = AgentBudget.from_usage(limits, usage,
+                                                wall_seconds_before=repo.agent_elapsed_ms(args.hunt_id) / 1000.0,
+                                                clock=monotonic)
+            result = (run_assessment(settings, repo, args.hunt_id, provider, budget,
+                                     owner_token=owner_token, heartbeat=heartbeat) if provider is not None else None)
+            sessions = repo.agent_sessions(args.hunt_id, purpose="assess")
+            latest_summary = (sessions[-1].get("summary") or "") if sessions else ""
+            reason = (None if result is not None else f"provider_not_ready: {readiness.message()}" if provider is None
+                      else latest_summary or "assessment_not_produced")
+            if result is None:
+                _store_template(repo, args.hunt_id, reason, owner_token=owner_token)
+            state = "completed" if result is not None else "partial"
+            repo.finalize_agent_run(args.hunt_id, {"state": state, "reason": reason, "ended_at": utcnow()},
+                                    owner_token=owner_token,
+                                    summary={"status": state, "reason": reason, "usage": repo.agent_usage(args.hunt_id)})
+    except Exception as exc:  # noqa: BLE001 - the agent's failures must not escape into hunt execution.
+        from romulus.store.repo import is_lease_lost
+        if not is_lease_lost(exc):
+            try:
+                repo.finalize_agent_run(args.hunt_id, {"state": "failed", "reason": type(exc).__name__,
+                                                      "ended_at": utcnow()}, owner_token=owner_token)
+            except Exception as failure:  # noqa: BLE001 - an unavailable store cannot record its own failure.
+                print(f"could not persist assessment failure: {type(failure).__name__}", file=sys.stderr)
+        print(f"assessment failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return EXIT_FAIL
+    manifest = publish_revision(repo, args.hunt_id,
+                                actor=f"cli:{os.environ.get('USER') or os.environ.get('USERNAME') or 'cli'}")
+    print(json.dumps({"assessment_revision": (repo.agent_assessments(args.hunt_id)[-1]["revision"]),
+                      "report_revision": manifest["revision"]["number"],
+                      "source": repo.agent_assessments(args.hunt_id)[-1]["source"]}, indent=2))
+    return EXIT_OK
 
 
 def cmd_user(args) -> int:
@@ -327,49 +387,8 @@ def cmd_db(args) -> int:
     return EXIT_OK
 
 
-def cmd_replay(args) -> int:
-    from romulus.replay.export import export_tasks, read_jsonl, readonly_repo, write_jsonl
-    from romulus.replay.runner import run_replay, summarize
-    s = load_settings(_env_file(args))
-    if args.action == "export":
-        variants = read_jsonl(args.variants) if args.variants else None
-        with readonly_repo(s.db_path) as repo:
-            tasks, stats = export_tasks(repo, args.hunt, args.num_ctx or [s.ollama_num_ctx], variants)
-        write_jsonl(args.out, tasks)
-        print(json.dumps(stats, indent=2) if args.json else
-              f"{stats['tasks']} tasks from {stats['model_calls']} model calls "
-              f"(digest match {stats['digest_match']}, mismatch {stats['digest_mismatch']}, "
-              f"variants {stats['variants']}, unfit briefs {stats['unfit_briefs']}) -> {args.out}")
-        return EXIT_OK
-    if args.action == "run":
-        tasks = read_jsonl(args.tasks)
-        if args.task:
-            wanted = set(args.task)
-            tasks = [task for task in tasks if task["task_id"] in wanted]
-        if args.limit:
-            tasks = tasks[:args.limit]
-        think = {"off": [False], "on": [True], "both": [False, True]}[args.think]
-        counts = run_replay(s, tasks, args.model or [s.ollama_model_triage], args.num_ctx or [s.ollama_num_ctx],
-                            think, args.seed or [7], args.out, args.run_id, max_out=args.max_out,
-                            retry=not args.no_retry, progress=None if args.json else print)
-        print(json.dumps(counts) if args.json else f"done: {counts} -> {args.out}")
-        return EXIT_OK
-    rows = summarize(read_jsonl(args.results))
-    if args.json:
-        print(json.dumps(rows, indent=2))
-        return EXIT_OK
-    print(f"{'model':28} {'ctx':>6} {'think':>5} {'n':>4} {'schema':>6} {'valid1':>6} {'valid2':>6} "
-          f"{'trunc':>5} {'limit':>5} {'err':>4} {'p50 ms':>8} {'tok/s':>6}")
-    for row in rows:
-        print(f"{row['model']:28} {row['num_ctx']:>6} {row['think']!s:>5} {row['n']:>4} {row['schema_valid']:>6} "
-              f"{row['valid_first']:>6} {row['valid_with_retry']:>6} {row['truncated']:>5} {row['output_limit']:>5} "
-              f"{row['errors']:>4} {row['median_latency_ms'] or '-':>8} {row['median_decode_tokens_per_s'] or '-':>6}")
-    return EXIT_OK
-
-
-def _stage_status(repo, hunt_id: str, agent: dict, inv_summary: dict) -> str:
-    """One status line per stage. With the investigator off, its 'unworked' count would list every finding;
-    expansion and packet accounting say what the deterministic stages did instead."""
+def _stage_status(repo, hunt_id: str, agent: dict) -> str:
+    """One status line per deterministic stage and the independent agent phase."""
     parts = []
     packet_audit = repo.latest_audit(hunt_id, "hunt.packet_summary")
     if packet_audit:
@@ -382,14 +401,11 @@ def _stage_status(repo, hunt_id: str, agent: dict, inv_summary: dict) -> str:
         parts.append(f"expansion={expansion.get('status', '-')} anchors={expansion.get('anchors', 0)} "
                      f"(complete {expansion.get('expanded_complete', 0)}, partial {expansion.get('expanded_partial', 0)}, "
                      f"unexpanded {len(expansion.get('unexpanded') or [])}) queries={expansion.get('source_queries', '-')}")
-    if agent.get("status") in (None, "disabled"):
-        parts.append("agent=off")
+    if agent.get("status") in (None, "disabled", "skipped"):
+        parts.append("agent=off" if agent.get("status") != "skipped" else "agent=skipped")
     else:
-        parts.append(f"agent={agent.get('status', '-')} mode={inv_summary.get('mode', 'model')} "
-                     f"unworked={agent.get('unworked_count', '-')} partial_pivots={agent.get('partial_pivots', 0)} "
-                     f"fallbacks={inv_summary.get('deterministic_fallbacks', 0)} "
-                     f"menu_hidden={inv_summary.get('menu_hidden_options', 0)} "
-                     f"analyst_flags={len(agent.get('analyst_flags') or [])}")
+        parts.append(f"agent={agent.get('status', '-')} unworked={len(agent.get('unworked') or [])} "
+                     f"limits={len(agent.get('limits_hit') or [])}")
     return " ".join(parts)
 
 
@@ -406,10 +422,16 @@ def main(argv: list[str] | None = None) -> int:
     hp.add_argument("--end")
     hp.add_argument("--style", default="broad", choices=["broad", "directed"])
     hp.add_argument("--hypothesis")
-    hp.add_argument("--no-agent", action="store_true", help="deterministic sweep only (model-off)")
-    hp.add_argument("--agent-mode", choices=["model", "deterministic", "off"],
-                    help="investigator mode (default: AGENT_MODE or off)")
+    agent_switch = hp.add_mutually_exclusive_group()
+    agent_switch.add_argument("--agent", action="store_true", help="request the AI investigating agent")
+    agent_switch.add_argument("--no-agent", action="store_true", help="run the deterministic hunt without the agent")
     hp.add_argument("--no-expand", action="store_true", help=argparse.SUPPRESS)
+    ap = sub.add_parser("agent", help="run an AI assessment for a stored hunt")
+    agent_actions = ap.add_subparsers(dest="action", required=True)
+    reassess = agent_actions.add_parser("reassess", help="store a new assessment and report revision")
+    reassess.add_argument("hunt_id")
+    reassess.add_argument("--max-calls", type=int, help="additional call budget for this reassessment")
+    reassess.add_argument("--max-tokens", type=int, help="additional token budget for this reassessment")
     fp = sub.add_parser("findings", help="list candidates of a hunt, ranked by lane and priority")
     fp.add_argument("hunt_id")
     fp.add_argument("--lane", action="append", choices=["urgent", "high", "lead", "context"])
@@ -463,34 +485,14 @@ def main(argv: list[str] | None = None) -> int:
     sigma_retire.add_argument('--user', help='lead username (default: prompt)')
     dp = sub.add_parser("db", help="database maintenance")
     dp.add_argument("action", choices=["compact"], help="compact: return space freed by deleted hunts to the disk")
-    replay = sub.add_parser("replay", help="export frozen investigator briefs, run them, and summarize results")
-    replay.add_argument("action", choices=["export", "run", "summary"])
-    replay.add_argument("--hunt", help="export: hunt whose investigator calls become tasks")
-    replay.add_argument("--variants", help="export: JSONL of {variant, task_id, mutations[]}")
-    replay.add_argument("--tasks", help="run: task JSONL from replay export")
-    replay.add_argument("--task", action="append", help="run: run only this task id (repeatable)")
-    replay.add_argument("--limit", type=int, help="run: run only the first N tasks")
-    replay.add_argument("--model", action="append", help="run: candidate model (repeatable)")
-    replay.add_argument("--num-ctx", type=int, action="append", help="num_ctx value (repeatable)")
-    replay.add_argument("--think", choices=["off", "on", "both"], default="off")
-    replay.add_argument("--seed", type=int, action="append", help="run: seed (7 = production; repeatable)")
-    replay.add_argument("--max-out", type=int, default=900, help="run: output token budget (production 900)")
-    replay.add_argument("--no-retry", action="store_true", help="run: no second attempt after a rejection")
-    replay.add_argument("--run-id", default="replay", help="run: label recorded on every row")
-    replay.add_argument("--results", help="summary: result JSONL")
-    replay.add_argument("--out", help="output JSONL (run appends and resumes)")
     args = p.parse_args(argv)
-    if args.cmd == "replay":
-        needed = {"export": ("hunt", "out"), "run": ("tasks", "out"), "summary": ("results",)}
-        missing = [name for name in needed[args.action] if not getattr(args, name)]
-        if missing:
-            p.error(f"replay {args.action} needs " + ", ".join(f"--{name}" for name in missing))
     if args.cmd == "hunt" and args.action == "start" and not (args.start and args.end):
         p.error("hunt start needs --start and --end")
     if args.cmd == "hunt" and args.action == "resume" and not args.hunt_id:
         p.error("hunt resume needs a hunt id")
-    handlers = {"doctor": cmd_doctor, "hunt": cmd_hunt, "findings": cmd_findings, "report": cmd_report,
-                "user": cmd_user, "web": cmd_web, "replay": cmd_replay, "db": cmd_db,
+    handlers = {"doctor": cmd_doctor, "hunt": cmd_hunt, "agent": cmd_agent,
+                "findings": cmd_findings, "report": cmd_report,
+                "user": cmd_user, "web": cmd_web, "db": cmd_db,
                 "indicators": cmd_indicators, "sigma": cmd_sigma}
     return handlers[args.cmd](args)
 

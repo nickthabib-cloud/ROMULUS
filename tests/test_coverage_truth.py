@@ -155,7 +155,7 @@ def _repo(*, targets=(HOST_TARGET,), profiles=None) -> Repo:
         "window": {"start": WINDOW.start.isoformat(), "end": WINDOW.end.isoformat()},
         "style": "broad", "hypothesis": "", "original_input": {}, "targets": list(targets),
         "pack": {"version": "test", "playbooks": []}, "normalizer": "test", "policy": "test",
-        "model": {}, "romulus_version": "test", "agent_mode": "off", "source_profiles": profiles or {},
+        "model": {}, "romulus_version": "test", "ai_agent": {"requested": False}, "source_profiles": profiles or {},
         "budgets": {"wall_clock_minutes": 120},
     }, "digest", "test")
     repo.set_hunt_state("h1", "running")

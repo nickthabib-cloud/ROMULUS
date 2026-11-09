@@ -93,7 +93,7 @@ def test_one_native_hunt_visibility_certificate_and_all_renderers_after_reopen(t
     backend=ZeekES({'network':hits},{'network':contract.time_field})
     client=ElasticClient(settings,transport=backend.transport())
     base={'targets':['network'],'style':'broad','original_input':{},'window':window.model_dump(mode='json'),
-          'source_profiles':{},'agent_mode':'off','expansion':{'enabled':True},'pack':{'version':'test'},
+          'source_profiles':{},'ai_agent':{'requested':False},'expansion':{'enabled':True},'pack':{'version':'test'},
           'normalizer':'test','policy':'test','model':{},'romulus_version':'test'}
     repo.create_hunt('zeek',base,'digest','test')
     sweep=Sweep(repo,client,'zeek',window,{'network':contract},stage_dir=tmp_path/'stage')

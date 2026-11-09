@@ -3,7 +3,7 @@ import sqlite3
 
 import pytest
 from alembic import command
-from sqlalchemy import inspect
+from sqlalchemy import MetaData, Table, inspect
 
 from romulus.store.db import make_engine
 from tests.test_indicator_staging_migration import seed
@@ -23,9 +23,11 @@ def test_populated_copy_rehearsal_up_down_up(tmp_path):
     fixture, _ = _repo_with_finding()
     with fixture.engine.connect() as source, engine.begin() as target:
         for table in (t.hunt, t.raw_record, t.typed_event, t.candidate, t.disposition_event):
-            rows = [dict(row) for row in source.execute(table.select()).mappings()]
+            target_columns = {column["name"] for column in inspect(target).get_columns(table.name)}
+            rows = [{key: value for key, value in dict(row).items() if key in target_columns}
+                    for row in source.execute(table.select()).mappings()]
             if rows:
-                target.execute(table.insert(), rows)
+                target.execute(Table(table.name, MetaData(), autoload_with=target).insert(), rows)
     fixture.engine.dispose()
     engine.dispose()
     copy = tmp_path / 'rehearsal-copy.sqlite'

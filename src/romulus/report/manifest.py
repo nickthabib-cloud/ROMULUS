@@ -23,6 +23,7 @@ from romulus.store.repo import Repo, raw_id
 MANIFEST_SCHEMA = "report-manifest@1"
 REPORTABLE_LANES = ("urgent", "high", "lead")
 CONCLUDED_CASE_STATUSES = {"closed", "parked", "escalated"}
+LEGACY_AGENT_MODE_KEY = "agent_mode"
 
 
 def _jsonable(v):
@@ -467,9 +468,13 @@ def _expansion_investigations(repo: Repo, hunt_id: str, audit: dict) -> dict:
 
 
 def _investigations(repo: Repo, hunt_id: str, candidates: list[dict], agent: dict) -> dict:
+    candidates = [row for row in candidates if row.get("provenance", "deterministic") != "agent"]
     hunt = repo.get_hunt(hunt_id) or {}
     hunt_manifest = hunt.get("manifest") or {}
-    agent_mode = agent.get("mode") or hunt_manifest.get("agent_mode") or "model"
+    legacy_mode = agent.get("mode") or _legacy_mode_value(hunt_manifest)
+    if legacy_mode is None:
+        configured_agent = hunt_manifest.get("ai_agent")
+        legacy_mode = "model" if not isinstance(configured_agent, dict) or configured_agent.get("requested", True) else "off"
     cases = repo.cases(hunt_id)
     expansion_audit = repo.latest_audit(hunt_id, "hunt.expansion_summary")
     if expansion_audit and not cases and (agent.get("mode") in (None, "off") or agent.get("status") == "disabled"):
@@ -514,7 +519,8 @@ def _investigations(repo: Repo, hunt_id: str, candidates: list[dict], agent: dic
                 deterministic_fallbacks += int(fallback)
                 chosen_options.append({
                     "n": step["n"], "id": decision["chosen_option"],
-                    "description": description, "agent_mode": decision.get("agent_mode") or agent_mode,
+                    "description": description,
+                    LEGACY_AGENT_MODE_KEY: _legacy_mode_value(decision) or legacy_mode,
                     "deterministic_fallback": fallback,
                     "fallback_note": decision.get("fallback_note") or "",
                 })
@@ -585,7 +591,7 @@ def _investigations(repo: Repo, hunt_id: str, candidates: list[dict], agent: dic
     return {
         "summary": {
             "status": agent.get("status", "unknown"),
-            "mode": agent_mode,
+            "mode": legacy_mode,
             "cases": len(case_rows), "model_calls": total_calls, "pivots": executed_pivots,
             "pivot_proposals": pivot_proposals,
             "partial_pivots": len(pivot_gaps),
@@ -656,6 +662,8 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
             "source_case_id": c.get("source_case_id"),
             "source_anchor_id": c.get("source_anchor_id"),
             "source_link_id": c.get("source_link_id"),
+            "provenance": c.get("provenance", "deterministic"),
+            "agent_hypothesis_id": c.get("agent_hypothesis_id"),
             "analyst_status": disp[-1]["status"] if disp else "new",
             "disposition_history": [{"actor": d["actor"], "at": str(d["at"]), "status": d["status"],
                                      "note": d["note"]} for d in disp],
@@ -665,11 +673,13 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
             findings[-1]['rule_title'] = rule.title
         if attack:
             findings[-1]['attack'] = attack
+        if c.get("provenance") == "agent":
+            findings[-1]["label"] = "Agent finding"
         if "_fleet_host_count" in gates:
             findings[-1]["fleet_hosts"] = repo.snapshot_candidate_hosts(
                 c["id"], hunt_id, expected_count=gates["_fleet_host_count"],
                 complete=gates.get("_fleet_hosts_complete", False), expected_candidate=c)
-    lane_counts = Counter(c["lane"] for c in cands)
+    lane_counts = Counter(c["lane"] for c in cands if c.get("provenance", "deterministic") != "agent")
     with repo.engine.connect() as conn:
         tasks = conn.execute(select(t.task.c.state, func.count()).where(t.task.c.hunt_id == hunt_id)
                              .group_by(t.task.c.state)).all()
@@ -696,6 +706,7 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
         "tasks": {s: n for s, n in tasks},
         "agent": agent or {"status": "unknown"},
         "ai_agent": _ai_agent(repo, hunt_id, hm),
+        "ai_assessment": _ai_assessment(repo, hunt_id),
         "banners": egress_banners(hm.get("ai_agent"), repo.agent_usage(hunt_id)),
         "investigations": _investigations(repo, hunt_id, cands, agent or {"status": "unknown"}),
         "incident_graph": incident_graph,
@@ -747,16 +758,96 @@ def internal_networks_view(repo: Repo, hunt_id: str, hunt_manifest: dict) -> dic
 
 
 def _ai_agent(repo: Repo, hunt_id: str, hunt_manifest: dict) -> dict:
-    """The AI agent's provenance (provider, endpoint host, model, egress class), what its phase did, and which
-    model actually answered its calls next to the one configured (a provider can serve a call with another)."""
+    """The AI agent's provenance, persisted phase and append-only output summary."""
     configured = dict(hunt_manifest.get("ai_agent") or {})
     configured.pop("budgets", None)
     phase = repo.latest_audit(hunt_id, "hunt.ai_agent_summary")
     usage = repo.agent_usage(hunt_id)
+    calls = repo.model_calls(hunt_id)
     shown = {k: usage[k] for k in ("calls", "tokens", "cost_usd", "estimated")}
+    shown["billed_failures"] = sum(bool((row.get("options") or {}).get("billed_failure")) for row in calls)
     if usage["models_reported"]:
         shown["models_reported"] = usage["models_reported"]
-    return {"configured": configured, "phase": phase["detail"] if phase else {"status": "unknown"}, "usage": shown}
+    run = repo.agent_run(hunt_id)
+    hypotheses = []
+    for row in repo.agent_hypotheses(hunt_id):
+        hypotheses.append({
+            "id": row["id"], "status": row["status"], "confidence": row["confidence"],
+            "statement": row["statement"], "techniques": row["techniques"], "entity_ids": row["entity_ids"],
+            "cites": [{"role": cite["role"], "kind": cite["target_kind"], "id": cite["target_id"]}
+                      for cite in repo.agent_hypothesis_cites(hypothesis_id=row["id"])],
+            "sessions_run": row["sessions_run"], "questions": row["questions"],
+        })
+    agent_findings = [row for row in repo.candidates(hunt_id) if row.get("provenance") == "agent"]
+    assessments = repo.agent_assessments(hunt_id)
+    reason = str((run or {}).get("reason") or "")
+    limits_hit = sorted({item.strip() for item in reason.split(";")
+                         if item.strip().startswith(("cap:", "budget:"))})
+    anchors = repo.expansion_anchors(hunt_id)
+    return {
+        "requested": bool(configured.get("requested", _legacy_mode_value(hunt_manifest) != "off")),
+        "configured": configured,
+        "phase": phase["detail"] if phase else {"status": (run or {}).get("state", "unknown")},
+        "run": {"state": (run or {}).get("state", "unknown"), "reason": reason or None,
+                "prompt_digests": (run or {}).get("prompt_digests") or {},
+                "provider": (run or {}).get("provider") or {}},
+        "usage": shown,
+        "hypotheses": hypotheses,
+        "agent_findings": dict(Counter(row["lane"] for row in agent_findings)),
+        "agent_links": repo.agent_links(hunt_id),
+        "agent_notes": _group_agent_notes(repo.agent_notes(hunt_id)),
+        "rule_requests": repo.agent_rule_requests(hunt_id),
+        "limits_hit": limits_hit,
+        "unworked": {"hypotheses": [row["id"] for row in repo.agent_hypotheses(hunt_id)
+                                     if row["status"] == "open" and not row["sessions_run"]],
+                      "anchors": [row["id"] for row in anchors if row["status"] in {"unexpanded", "pending"}]},
+        "assessment_revision": assessments[-1]["revision"] if assessments else None,
+    }
+
+
+def _legacy_mode_value(record: dict) -> str | None:
+    """Read the retired mode field only for hunts and case-step rows stored before the AI agent settings."""
+    return record.get(LEGACY_AGENT_MODE_KEY)
+
+
+def _group_agent_notes(notes: list[dict]) -> list[dict]:
+    grouped: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for row in notes:
+        grouped[(row["target_kind"], row["target_id"])].append(row)
+    return [{"target_kind": kind, "target_id": target_id,
+             "notes": [{"id": row["id"], "text": row["text"], "cites": row["cites"],
+                        "suspicious_content": row["suspicious_content"]}
+                       for row in sorted(rows, key=lambda item: item["id"])]}
+            for (kind, target_id), rows in sorted(grouped.items())]
+
+
+def _ai_assessment(repo: Repo, hunt_id: str) -> dict | None:
+    assessments = repo.agent_assessments(hunt_id)
+    if assessments:
+        row = assessments[-1]
+        source = row["source"]
+        model = row["model"] or {}
+        header = (f"AI-generated hypothesis from the cited evidence. Not confirmed by an analyst. Model: "
+                  f"{model.get('provider', 'unknown')}/{model.get('model_reported') or model.get('model_requested') or 'unknown'}."
+                  if source == "agent" else
+                  f"Template narrative: no AI assessment was produced ({(repo.agent_run(hunt_id) or {}).get('reason') or 'not available'}).")
+        stale = source == "agent" and (
+            any(session.get("ended_at") and _as_utc(session["ended_at"]) > _as_utc(row["created_at"])
+                for session in repo.agent_sessions(hunt_id) if session["purpose"] in {"orient", "investigate"})
+            or any(_as_utc(hypothesis["updated_at"]) > _as_utc(row["created_at"])
+                   for hypothesis in repo.agent_hypotheses(hunt_id)))
+        if stale:
+            header = ("Prior AI assessment: investigation changed after this assessment; not current. "
+                      "The prior body is retained for review.")
+        return {"source": source, "header": header, "model": model, "body": row["body"],
+                "checker": row["checker"], "revision": row["revision"], **({"stale": True} if stale else {})}
+    # Preserve the byte-for-byte renderer output for hunts that predate the persisted agent phase.
+    # New hunts always have an agent_run row and receive their deterministic template in this path.
+    if repo.agent_run(hunt_id) is None:
+        return None
+    from romulus.agent.assessment import template_assessment
+    reason = (repo.agent_run(hunt_id) or {}).get("reason") or "assessment not available"
+    return template_assessment(repo, hunt_id, reason)
 
 
 def _content_candidate_key(repo: Repo, candidate: dict) -> str:
@@ -797,7 +888,7 @@ def _as_utc(value):
 
 
 def canonical_manifest(repo: Repo, hunt_id: str, actor: str = "canonical") -> dict:
-    """Return a cross-hunt deterministic report projection with content-scoped identities."""
+    """Return a cross-hunt deterministic projection; AI-only output lives under ``ai``."""
     manifest = build_manifest(repo, hunt_id, actor)
     candidates = repo.candidates(hunt_id)
     candidate_keys = _unique_candidate_keys(repo, candidates)
@@ -853,16 +944,59 @@ def canonical_manifest(repo: Repo, hunt_id: str, actor: str = "canonical") -> di
         return value
 
     canonical = canonicalize(manifest)
+    agent_findings = [row for row in manifest["findings"] if row.get("provenance") == "agent"]
+    ai_content = {
+        "agent": manifest.get("ai_agent"), "assessment": manifest.get("ai_assessment"),
+        "findings": agent_findings,
+        "links": (manifest.get("incident_graph") or {}).get("agent_links") or [],
+        "hypotheses": ((manifest.get("ai_agent") or {}).get("hypotheses") or []),
+        "notes": ((manifest.get("ai_agent") or {}).get("agent_notes") or []),
+        "rule_requests": ((manifest.get("ai_agent") or {}).get("rule_requests") or []),
+        "banners": manifest.get("banners") or [],
+    }
+    canonical["ai"] = canonicalize(ai_content)
+    deterministic_findings = [row for row in repo.candidates(hunt_id)
+                              if row.get("provenance", "deterministic") != "agent"]
+    deterministic_views = [row for row in manifest["findings"] if row.get("provenance") != "agent"]
+    for row in deterministic_views:
+        row.pop("provenance", None)
+        row.pop("agent_hypothesis_id", None)
+    canonical["findings"] = canonicalize(deterministic_views)
+    canonical["lane_counts"] = dict(Counter(row["lane"] for row in deterministic_findings))
+    canonical["context_items"] = canonical["lane_counts"].get("context", 0)
+    deterministic_graph = build_incident_graph(repo, hunt_id, [
+        {"id": row["id"], "lane": row["lane"], "rule_id": row["rule_id"],
+         "observed_at": str(row["ts"]) if row["ts"] is not None else None,
+         "entities": row.get("entities") or [], "event_ids": row.get("event_ids") or [],
+         "citations": [], "source_link_id": row.get("source_link_id")}
+        for row in deterministic_findings if row["lane"] in REPORTABLE_LANES
+    ], include_agent_links=False)
+    canonical["incident_graph"] = canonicalize(deterministic_graph)
+    canonical["incident_graph"].pop("agent_links", None)
+    # Canonical integrity is part of the deterministic floor, just like graph membership.
+    broken_findings = sum(1 for finding in deterministic_views for citation in finding["citations"]
+                          if citation["status"].startswith("broken"))
+    broken_incidents = _broken_investigation_citations(repo, deterministic_graph)
+    canonical["integrity"].update({
+        "broken_citations": broken_findings, "broken_incident_citations": len(broken_incidents),
+        "broken_incident_event_ids": canonicalize(broken_incidents[:50]),
+        "finalizable": not broken_findings and not broken_incidents
+                       and not canonical["integrity"]["broken_investigation_citations"]
+                       and not canonical["integrity"].get("incomplete_fleet_host_lists", 0),
+    })
+    canonical.pop("ai_agent", None)
+    canonical.pop("ai_assessment", None)
+    canonical.pop("banners", None)
     canonical["schema"] = "canonical-report-manifest@1"
     canonical["hunt"].pop("id", None)
     graph = canonical["incident_graph"]
-    for source, projected in zip(manifest["incident_graph"]["links"], graph["links"], strict=True):
+    for source, projected in zip(deterministic_graph["links"], graph["links"], strict=True):
         projected["window"] = link_windows.get(source["id"], projected.get("window"))
     graph["edges"] = [{
         "pair": [candidate_keys[edge["from"]], candidate_keys[edge["to"]]],
         "link_key": link_keys[edge["link_id"]],
         "link_type": edge["link_type"], "style": edge["style"],
-    } for edge in manifest["incident_graph"]["edges"]]
+    } for edge in deterministic_graph["edges"]]
     # gaps are listed by hunt-scoped target and partition (link ids); order them by content
     canonical["coverage"]["gaps"].sort(key=lambda gap: json.dumps(gap, sort_keys=True, separators=(",", ":")))
     canonical["findings"].sort(key=lambda finding: finding["id"])

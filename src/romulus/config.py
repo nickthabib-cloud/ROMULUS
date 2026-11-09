@@ -120,9 +120,6 @@ class Settings(BaseModel):
     tshark_bin: str = "tshark"
     mission_timezone: str = "UTC"
     allow_privileged_source_account: bool = False
-    # deterministic search is the default; the model is opt-in per hunt
-    agent_mode: Literal["model", "deterministic", "off"] = "off"
-
     # AI investigating agent: any OpenAI-compatible endpoint, Ollama's native API, the OpenAI Responses API
     # (openai_responses), or the Claude Messages API (anthropic, which needs the optional romulus[anthropic]
     # install). Unset means not configured.
@@ -157,6 +154,13 @@ class Settings(BaseModel):
     agent_max_tool_calls_per_session: int = Field(default=25, ge=1, le=500)
     agent_max_source_queries: int = Field(default=200, ge=1, le=100_000)
     agent_concurrency: int = Field(default=2, ge=1, le=16)
+    agent_max_initial_hypotheses: int = Field(default=8, ge=1, le=40)
+    agent_max_hypotheses: int = Field(default=40, ge=1, le=500)
+    agent_max_sessions_per_hypothesis: int = Field(default=4, ge=1, le=20)
+    agent_assess_reserve_fraction: float = Field(default=0.15, ge=0.0, le=0.5)
+    agent_max_findings: int = Field(default=200, ge=1, le=10_000)
+    agent_max_links: int = Field(default=300, ge=1, le=10_000)
+    agent_max_notes: int = Field(default=500, ge=1, le=20_000)
     # Bootstrap-only switch: the one value that lets telemetry excerpts reach a non-local model endpoint.
     model_egress: Literal["", "lab-public-data"] = ""
     # Extra hosts, addresses or CIDR networks treated as local (e.g. a team's model server on an enclave address).
@@ -206,13 +210,6 @@ class Settings(BaseModel):
     def _arkime_auth(cls, v: str) -> str:
         if v not in ("digest", "basic"):
             raise ValueError("ARKIME_AUTH must be digest or basic")
-        return v
-
-    @field_validator("agent_mode", mode="before")
-    @classmethod
-    def _agent_mode(cls, v: str) -> str:
-        if v not in ("model", "deterministic", "off"):
-            raise ValueError("AGENT_MODE must be model, deterministic, or off")
         return v
 
     @field_validator("agent_effort", mode="before")
@@ -311,7 +308,6 @@ ENV_MAP = {
     "ARKIME_VERIFY_TLS": "arkime_verify_tls", "ARKIME_BASE_PATH": "arkime_base_path", "ARKIME_AUTH": "arkime_auth",
     "PCAP_ALLOWED_DIRS": "pcap_allowed_dirs", "TSHARK_BIN": "tshark_bin", "MISSION_TIMEZONE": "mission_timezone",
     "ROMULUS_ALLOW_PRIVILEGED_SOURCE_ACCOUNT": "allow_privileged_source_account",
-    "AGENT_MODE": "agent_mode",
     "AGENT_PROVIDER": "agent_provider", "AGENT_BASE_URL": "agent_base_url", "AGENT_API_KEY": "agent_api_key",
     "AGENT_MODEL": "agent_model", "AGENT_DEFAULT": "agent_default", "AGENT_CONTEXT_TOKENS": "agent_context_tokens",
     "AGENT_MAX_OUTPUT_TOKENS": "agent_max_output_tokens", "AGENT_THINKING_TOKENS": "agent_thinking_tokens",
@@ -329,6 +325,12 @@ ENV_MAP = {
     "AGENT_MAX_TOOL_CALLS_PER_SESSION": "agent_max_tool_calls_per_session",
     "AGENT_MAX_SOURCE_QUERIES": "agent_max_source_queries",
     "AGENT_CONCURRENCY": "agent_concurrency",
+    "AGENT_MAX_INITIAL_HYPOTHESES": "agent_max_initial_hypotheses",
+    "AGENT_MAX_HYPOTHESES": "agent_max_hypotheses",
+    "AGENT_MAX_SESSIONS_PER_HYPOTHESIS": "agent_max_sessions_per_hypothesis",
+    "AGENT_ASSESS_RESERVE_FRACTION": "agent_assess_reserve_fraction",
+    "AGENT_MAX_FINDINGS": "agent_max_findings", "AGENT_MAX_LINKS": "agent_max_links",
+    "AGENT_MAX_NOTES": "agent_max_notes",
     "ROMULUS_MODEL_EGRESS": "model_egress", "MODEL_LOCAL_HOSTS": "model_local_hosts",
     "ROMULUS_INTERNAL_NETWORKS": "internal_networks", "ROMULUS_EXTERNAL_NETWORKS": "external_networks",
 }
@@ -340,6 +342,9 @@ def load_settings(env_file: Path | None = None, environ: dict[str, str] | None =
     if env_file is None:
         env_file = Path(environ.get("ROMULUS_ENV_FILE", ".env"))
     merged = {**parse_env_file(env_file), **{k: v for k, v in environ.items() if k in ENV_MAP}}
+    if "AGENT_MODE" in (dict(environ) | parse_env_file(env_file)):
+        import logging
+        logging.getLogger("romulus.config").warning("AGENT_MODE is deprecated and ignored; use AGENT_DEFAULT and --agent/--no-agent")
     kwargs = {ENV_MAP[k]: v for k, v in merged.items() if k in ENV_MAP and v != ""}
     return Settings(**kwargs)
 

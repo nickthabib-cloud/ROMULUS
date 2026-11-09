@@ -595,7 +595,7 @@ def test_the_sweep_and_expansion_stack_reproduces_the_captured_result(docs, tmp_
     assert sum(link["status"] == "complete" for link in snapshot["links"]) > 10
     assert snapshot["manifest"]["findings"]
     _assert_every_citation_resolves_with_raw(snapshot)
-    assert tf.digests(snapshot) == GOLDEN_STACK
+    assert tf.deterministic_golden_digests(snapshot) == GOLDEN_STACK
     assert _non_baseline_semantic_digests(snapshot) == GOLDEN_NON_BASELINE_SEMANTICS
 
 

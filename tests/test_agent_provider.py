@@ -22,6 +22,7 @@ from romulus.agent.provider import (
     egress_banners,
     record_call,
 )
+from romulus.agent.provider.base import TransientFailure
 from romulus.agent.provider.egress import EndpointError, classify
 from romulus.config import Settings, load_settings
 from romulus.doctor import check_agent
@@ -32,6 +33,12 @@ LOCAL = "http://10.20.30.40:8000/v1"
 TOOL = Tool("report_status", "Report status.", {
     "type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"], "additionalProperties": False,
 })
+
+
+def _detection_finished(repo, hunt_id="h1"):
+    """The agent works only from a finished detection run."""
+    repo.set_hunt_state(hunt_id, "running")
+    repo.set_hunt_state(hunt_id, "completed_within_scope", detection_result="leads_only", stop_reason="scope")
 
 
 def resolver_for(table: dict[str, list[str]]):
@@ -370,6 +377,26 @@ def test_connection_errors_raise_after_three_retries():
     assert len(rec.requests) == 4 and sleeps == [2.0, 4.0, 8.0]
 
 
+def test_attempt_guard_stops_after_one_billed_failure_when_the_next_attempt_would_not_fit():
+    p, _sleeps = provider(local_settings(), Recorder(), resolver_for({}))
+    billed = [{"model": "team-model", "prompt": 100, "completion": 20}]
+    seen = []
+    attempts = 0
+
+    def broken_attempt():
+        nonlocal attempts
+        attempts += 1
+        raise TransientFailure("billed response stream ended early")
+
+    with pytest.raises(ProviderUnavailable) as exc:
+        p._retrying(broken_attempt, attempt_guard=lambda info: seen.append(info) or False,
+                    billed=lambda: billed)
+
+    assert attempts == 1 and len(seen) == 1
+    assert seen[0]["retry_available"] is True and seen[0]["billed"] == billed
+    assert exc.value.billed == billed and exc.value.charged_by_guard is True
+
+
 def test_client_errors_are_not_retried_and_echoed_keys_are_redacted():
     rec = Recorder(httpx.Response(401, json={"error": {"message": f"bad key {KEY}"}}))
     p, sleeps = provider(remote_settings(), rec)
@@ -603,6 +630,7 @@ def test_hunt_results_are_identical_whether_the_agent_is_unconfigured_blocked_or
     from romulus.hunt import run as hunt_run
     from romulus.report.manifest import build_manifest, canonical_manifest
     from romulus.report.markdown import render
+    from tests.agent_scripted import ScriptedProvider, response
 
     start = datetime(2024, 11, 18, 14, 0, tzinfo=UTC)
     shell = TypedEvent(id="shell", family="process_exec", ts=start + timedelta(minutes=5), host="web1",
@@ -631,6 +659,9 @@ def test_hunt_results_are_identical_whether_the_agent_is_unconfigured_blocked_or
             })
 
     monkeypatch.setattr(hunt_run, "Sweep", PublishingSweep)
+    monkeypatch.setattr(hunt_run, "build_provider", lambda *_args, **_kwargs: ScriptedProvider(
+        [response(status="refused", error="scripted refusal")] * 3,
+    ))
     configs = {
         "unconfigured": Settings(home=tmp_path),
         "no_key": remote_settings(home=tmp_path, agent_base_url="https://198.51.100.7/v1", agent_api_key=""),
@@ -642,7 +673,7 @@ def test_hunt_results_are_identical_whether_the_agent_is_unconfigured_blocked_or
     for name, s in configs.items():
         repo = hunt_run.open_repo(s)
         manifest = {"window": {"start": start.isoformat(), "end": (start + timedelta(hours=1)).isoformat()},
-                    "targets": [], "source_profiles": {}, "agent_mode": "off", "expansion": {"enabled": False},
+                    "targets": [], "source_profiles": {}, "expansion": {"enabled": False},
                     "style": "broad", "original_input": {}, "pack": {"version": "p"}, "normalizer": "n",
                     "policy": "d", "model": {}, "romulus_version": "t",
                     "ai_agent": hunt_run.ai_agent_entry(s)}
@@ -652,9 +683,10 @@ def test_hunt_results_are_identical_whether_the_agent_is_unconfigured_blocked_or
         reports[name] = build_manifest(repo, f"h-{name}", "test")
 
     statuses = {name: r["ai_agent"]["status"] for name, r in results.items()}
-    assert statuses == {"unconfigured": "not_configured", "no_key": "not_configured", "blocked": "blocked",
-                        "ready": "not_run", "disabled": "disabled"}
-    assert results["unconfigured"]["ai_agent"]["reason"] == "agent not configured: AGENT_BASE_URL is empty"
+    assert statuses == {"unconfigured": "skipped", "no_key": "skipped", "blocked": "skipped",
+                        "ready": "partial", "disabled": "skipped"}
+    assert results["unconfigured"]["ai_agent"]["reason"] == (
+        "provider_not_ready: agent not configured: AGENT_BASE_URL is empty")
     assert "AGENT_API_KEY is empty" in results["no_key"]["ai_agent"]["reason"]
     for name, r in results.items():
         assert (r["execution_state"], r["detection_result"], r["lanes"]) == (
@@ -668,10 +700,10 @@ def test_hunt_results_are_identical_whether_the_agent_is_unconfigured_blocked_or
         "unconfigured": False, "no_key": True, "blocked": True, "ready": True, "disabled": False}
     assert "no telemetry was sent" in reports["ready"]["banners"][0]
     md = render({**reports["ready"], "revision": {"number": 1, "id": "r1", "supersedes": None}})
-    assert "> **Model egress:**" in md and r"| AI agent | not\_run" in md
+    assert "> **Model egress:**" in md and r"| AI agent | partial" in md
     assert KEY not in json.dumps(reports["ready"], default=str)
     assert cli._ai_agent_line(results["unconfigured"]).startswith(
-        "AI agent: not_configured (agent not configured: AGENT_BASE_URL is empty)")
+        "AI agent: skipped (provider_not_ready: agent not configured: AGENT_BASE_URL is empty)")
 
 
 def test_cli_no_agent_turns_the_ai_agent_off_for_the_hunt(monkeypatch, capsys, tmp_path):
@@ -722,9 +754,10 @@ def test_readiness_errors_never_stop_a_finished_hunt(tmp_path, monkeypatch):
     s = Settings(home=tmp_path)
     repo = hunt_run.open_repo(s)
     repo.create_hunt("h1", {"window": {}, "targets": []}, "d", "test")
+    _detection_finished(repo, "h1")
     assert hunt_run.ai_agent_entry(s)["state"] == "blocked"
-    summary = hunt_run._ai_agent_phase(s, repo, "h1", {"ai_agent": {"requested": True}}, None)
-    assert summary["status"] == "blocked" and "unexpected" in summary["reason"]
+    summary = hunt_run._ai_agent_phase(s, repo, "h1", {"ai_agent": {"requested": True}}, None, None, {})
+    assert summary["status"] == "skipped" and "unexpected" in summary["reason"]
 
 
 def test_environment_proxies_are_never_used(monkeypatch):
