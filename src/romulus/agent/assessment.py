@@ -23,6 +23,7 @@ from romulus.agent.provider import (
     record_call,
 )
 from romulus.agent.provider.base import estimate_tokens
+from romulus.agent.safety import injection_flags
 from romulus.agent.toolbox import _strict_schema
 from romulus.report.incidents import build_incident_graph
 from romulus.report.manifest import coverage_for_hunt
@@ -116,7 +117,8 @@ def _sentence(value: dict) -> dict:
     return {"text": value["text"], "cites": list(value.get("cites") or []), "kind": value["kind"]}
 
 
-def _map_sentence(sentence: dict, aliases: AliasBook, counts: dict, section: str) -> dict | None:
+def _map_sentence(sentence: dict, aliases: AliasBook, counts: dict, section: str,
+                  suspicious_cache: dict[str, bool]) -> dict | None:
     cites = sentence.get("cites") or []
     if not cites:
         counts["removed_uncited"] += 1
@@ -134,10 +136,51 @@ def _map_sentence(sentence: dict, aliases: AliasBook, counts: dict, section: str
                                                           for phrase in ABSENCE_PHRASES):
         counts["removed_absence_claim"] += 1
         return None
+    if all(_suspicious_alias(aliases, row, suspicious_cache) for row in rows):
+        counts["removed_suspicious_only"] += 1
+        return None
     if sentence.get("kind") == "observed" and all(_non_observed_alias(aliases, row) for row in rows):
         sentence = {**sentence, "kind": "inferred"}
         counts["downgraded_observed"] += 1
     return {"text": sentence["text"], "cites": targets, "kind": sentence["kind"]}
+
+
+def _suspicious_alias(aliases: AliasBook, row: dict, cache: dict[str, bool]) -> bool:
+    """Instruction-shaped telemetry alone cannot substantiate assessment prose."""
+    key = row["alias"]
+    if key in cache:
+        return cache[key]
+    if row["kind"] == "E":
+        event_ids = [row["target_id"]]
+    elif row["kind"] == "F":
+        finding = aliases.repo.candidate(row["target_id"])
+        event_ids = (finding or {}).get("event_ids") or []
+    else:
+        cache[key] = False
+        return False
+    if not event_ids:
+        cache[key] = False
+        return False
+    # A finding can cite many events; stop at the first unflagged supporting record.
+    from romulus.store.repo import ID_CHUNK
+    for offset in range(0, len(event_ids), ID_CHUNK):
+        ids = event_ids[offset:offset + ID_CHUNK]
+        events = aliases.repo.citation_events(aliases.hunt_id, ids)
+        if len(events) != len(set(ids)):
+            cache[key] = False
+            return False
+        for event in events:
+            suspicious = bool(injection_flags(event["event"]))
+            raw_ids = event.get("raw_ids") or []
+            for start in range(0, len(raw_ids), ID_CHUNK):
+                if suspicious:
+                    break
+                suspicious = bool(injection_flags(aliases.repo.raw_records(raw_ids[start:start + ID_CHUNK])))
+            if not suspicious:
+                cache[key] = False
+                return False
+    cache[key] = True
+    return True
 
 
 def _non_observed_alias(aliases: AliasBook, alias_row: dict) -> bool:
@@ -158,10 +201,11 @@ def check_assessment(repo, hunt_id: str, body: dict, *, owner_token=None) -> tup
     checked = AssessmentBody.model_validate(body).model_dump(mode="json")
     aliases = AliasBook(repo, hunt_id, owner_token=owner_token)
     counts = {"removed_uncited": 0, "removed_unknown_alias": 0, "downgraded_observed": 0,
-              "removed_absence_claim": 0}
+              "removed_absence_claim": 0, "removed_suspicious_only": 0}
+    suspicious_cache: dict[str, bool] = {}
 
     def check(sentence: dict, section: str) -> dict | None:
-        return _map_sentence(_sentence(sentence), aliases, counts, section)
+        return _map_sentence(_sentence(sentence), aliases, counts, section, suspicious_cache)
 
     checked["overall"] = [value for item in checked["overall"] if (value := check(item, "overall")) is not None]
     checked["key_steps"] = [
@@ -254,7 +298,7 @@ def _assessment_input(repo, hunt_id: str, token_budget: int, *, owner_token=None
             "top_findings": [{"alias": aliases.alias_for("F", row["id"]), "lane": row["lane"],
                               "claim": row["claim"][:240]} for row in top],
             "links": [{"alias": aliases.alias_for("L", link["id"]), "type": link["link_type"],
-                       "strength": link["strength"], "anchor": aliases.alias_for("F", link["anchor_finding_id"]),
+                       "strength": link["style"], "anchor": aliases.alias_for("F", link["anchor_finding_id"]),
                        "targets": [aliases.alias_for("F", item) for item in link["target_finding_ids"]],
                        "status": link["status"]} for link in links],
         }))
