@@ -140,14 +140,45 @@ def _entity_id(kind: str, value: str) -> str:
 def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict], *, include_agent_links: bool = True) -> dict:
     """Observed expansion edges form components; inferred edges remain visible suggestions."""
     rules = hunt_rule_metadata(repo, hunt_id)
-    stored_by_id = {finding["id"]: (repo.candidate(finding["id"]) if hasattr(repo, "candidate") else None)
-                    for finding in findings}
-    agent_findings = [finding for finding in findings
-                      if finding.get("provenance", (stored_by_id[finding["id"]] or {}).get("provenance")) == "agent"]
-    agent_ids = {finding["id"] for finding in agent_findings}
+    finding_by_id = {finding["id"]: finding for finding in findings}
+    agent_ids = set()
+    agent_events: dict[str, set[str]] = {}
+    attack_by_finding, tactics_by_finding = {}, {}
+    findings_by_event: dict[str, set[str]] = defaultdict(set)
+
+    def index_finding(finding, stored):
+        if finding.get("provenance", (stored or {}).get("provenance")) == "agent":
+            agent_ids.add(finding["id"])
+            agent_events[finding["id"]] = set((stored or finding).get("event_ids") or [])
+            return
+        explicit_attack = finding.get("attack") or (stored or {}).get("attack")
+        rule = rules.get(finding["rule_id"])
+        attack = tuple(explicit_attack or getattr(rule, "attack", ()))
+        attack_by_finding[finding["id"]] = attack
+        tactics_by_finding[finding["id"]] = (technique_tactics(attack) if explicit_attack else
+            (getattr(rule, "tactics", ()) or tuple(tactic for technique in attack for tactic in _TACTICS.get(technique, ()))))
+        event_ids = (stored or finding).get("event_ids") or []
+        context_ids = set((stored or finding).get("context_event_ids") or [])
+        cited = set(event_ids) - context_ids
+        if not cited:
+            cited = set(event_ids)
+        if not event_ids:
+            cited.update(citation["event_id"] for citation in finding.get("citations") or [])
+        for event_id in cited:
+            findings_by_event[event_id].add(finding["id"])
+
+    indexed = set()
+    if hasattr(repo, "candidate_graph_inputs"):
+        for stored in repo.candidate_graph_inputs(finding_by_id):
+            index_finding(finding_by_id[stored["id"]], stored)
+            indexed.add(stored["id"])
+    for finding in findings:
+        if finding["id"] not in indexed:
+            index_finding(finding, None)
+    del indexed
+    agent_findings = [finding for finding in findings if finding["id"] in agent_ids]
     findings = [finding for finding in findings if finding["id"] not in agent_ids]
     finding_by_id = {finding["id"]: finding for finding in findings}
-    attack_by_finding, tactics_by_finding = {}, {}
     nodes = [{
         "id": finding["id"], "kind": "finding", "lane": finding["lane"],
         "observed_at": finding["observed_at"], "rule_id": finding["rule_id"],
@@ -162,26 +193,9 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict], *, incl
     nodes.extend(entity_nodes[key] for key in sorted(entity_nodes))
 
     children: dict[str, list[str]] = defaultdict(list)
-    findings_by_event: dict[str, set[str]] = defaultdict(set)
     for finding in findings:
         if finding.get("source_link_id"):
             children[finding["source_link_id"]].append(finding["id"])
-        stored = stored_by_id[finding["id"]]
-        explicit_attack = finding.get('attack') or ((stored or {}).get('gate_results') or {}).get('_attack')
-        rule = rules.get(finding['rule_id'])
-        attack = tuple(explicit_attack or getattr(rule, 'attack', ()))
-        attack_by_finding[finding['id']] = attack
-        tactics_by_finding[finding['id']] = (technique_tactics(attack) if explicit_attack else
-            (getattr(rule, 'tactics', ()) or tuple(tactic for technique in attack for tactic in _TACTICS.get(technique, ()))))
-        event_ids = list((stored or finding).get("event_ids") or [])
-        context_ids = set((stored or finding).get("context_event_ids") or [])
-        cited = set(event_ids) - context_ids
-        if not cited:
-            cited = set(event_ids)
-        if not event_ids:
-            cited.update(citation["event_id"] for citation in finding.get("citations") or [])
-        for event_id in cited:
-            findings_by_event[event_id].add(finding["id"])
     links = []
     edges = []
     expansion_rows = repo.expansion_links(hunt_id)
@@ -321,13 +335,12 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict], *, incl
     # Add AI-only nodes and citation relationships after deterministic membership and narratives are fixed.
     if include_agent_links:
         for finding in agent_findings:
-            stored = stored_by_id[finding["id"]] or finding
             node = {"id": finding["id"], "kind": "finding", "lane": finding["lane"],
                     "observed_at": finding["observed_at"], "rule_id": finding["rule_id"],
                     "provenance": "agent", "style": "agent", "incident_role": "hypothesis"}
             nodes = [item for item in nodes if item["id"] != finding["id"]]
             nodes.append(node)
-            event_ids = set(stored.get("event_ids") or [])
+            event_ids = agent_events[finding["id"]]
             targets = {item for eid in event_ids for item in findings_by_event.get(eid, ())}
             targets.update(link["anchor_finding_id"] for link in links
                            if event_ids.intersection(expansion_by_id[link["id"]]["event_ids"]))

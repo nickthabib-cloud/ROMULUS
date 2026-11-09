@@ -30,6 +30,7 @@ from sqlalchemy import (
     text,
     true,
     tuple_,
+    union_all,
 )
 from sqlalchemy.dialects.sqlite import insert
 
@@ -794,6 +795,16 @@ class Repo:
                           t.agent_hypothesis_cite, t.agent_hypothesis_event, t.agent_assessment,
                           t.agent_session, t.agent_hypothesis, t.agent_run):
                 rm(table.name, table.delete().where(table.c.hunt_id == hunt_id))
+
+            # The journal is disk-backed and may outgrow a bind list; remove one bounded page at a time.
+            while True:
+                seqs = c.execute(select(t.agent_change.c.seq).where(t.agent_change.c.hunt_id == hunt_id)
+                                 .order_by(t.agent_change.c.seq).limit(ID_CHUNK)).scalars().all()
+                if not seqs:
+                    break
+                rm_ids("agent_changes", t.agent_change.c.seq, seqs)
+            # Candidate deletion also cleans this index through its trigger with FK enforcement disabled.
+            rm("candidate_events", t.candidate_event.delete().where(t.candidate_event.c.candidate_id.in_(cand_ids)))
 
             # detach shared rows from this hunt's tasks and children before removing them
             c.execute(t.raw_record.update().where(t.raw_record.c.first_task_id.in_(task_ids))
@@ -2489,6 +2500,19 @@ class Repo:
                 rows.extend(dict(row) for row in connection.execute(query).mappings())
         return rows
 
+    def candidate_graph_inputs(self, ids: Iterable[str]) -> Iterator[dict]:
+        """Stream only stored graph inputs, with bounded binds and no complete candidates."""
+        with self.engine.connect() as c:
+            for chunk in _chunks(ids, ID_CHUNK):
+                query = select(t.candidate.c.id, t.candidate.c.provenance,
+                    func.json_extract(t.candidate.c.gate_results, "$._attack").label("attack_json"),
+                    t.candidate.c.event_ids, t.candidate.c.context_event_ids).where(t.candidate.c.id.in_(chunk))
+                for row in c.execute(query).mappings():
+                    values = dict(row)
+                    raw = values.pop("attack_json")
+                    values["attack"] = json.loads(raw) if isinstance(raw, str) else raw
+                    yield values
+
     def candidate_duplicate_batches(self, hunt_id: str, event_ids: Iterable[str], lanes: Iterable[str],
                                     batch_size: int = 500) -> Iterator[list[dict]]:
         """Stream SQL-filtered, overlapping findings with bounded candidate materialization."""
@@ -2498,45 +2522,45 @@ class Repo:
         lanes = tuple(lanes)
         if not cited or not lanes:
             return
-        if len(cited) <= ID_CHUNK:
-            events = func.json_each(t.candidate.c.event_ids).table_valued("value")
-            overlap = select(1).select_from(events).where(events.c.value.in_(cited)).exists()
-            after = ""
-            while True:
-                query = (select(t.candidate).where(t.candidate.c.hunt_id == hunt_id,
-                         t.candidate.c.lane.in_(lanes), t.candidate.c.id > after, overlap)
-                         .order_by(t.candidate.c.id).limit(batch_size))
-                with self.engine.connect() as c:
-                    rows = [dict(row) for row in c.execute(query).mappings()]
-                if not rows:
-                    return
-                after = rows[-1]["id"]
-                count = len(rows)
-                yield rows
-                del rows
-                if count < batch_size:
-                    return
-        # Retain only one page of ids while merging independently bound cite chunks.
+        def matching_ids(chunk, after):
+            # Limit each event's indexed range before combining it with other cites.
+            # A global IN + ORDER BY can sort the whole overlap again for every page.
+            branches = []
+            for event_id in chunk:
+                page = (select(t.candidate_event.c.candidate_id).join(
+                    t.candidate, t.candidate.c.id == t.candidate_event.c.candidate_id,
+                ).where(t.candidate_event.c.hunt_id == hunt_id,
+                        t.candidate_event.c.event_id == event_id,
+                        t.candidate_event.c.candidate_id > after,
+                        t.candidate.c.lane.in_(lanes))
+                        .order_by(t.candidate_event.c.candidate_id).limit(batch_size).subquery())
+                branches.append(select(page.c.candidate_id))
+            merged = union_all(*branches).subquery()
+            return select(merged.c.candidate_id).distinct().order_by(merged.c.candidate_id).limit(batch_size)
+
+        # Each branch binds its scope, lane filter, cursor and limit independently.
+        # Sixty branches remain below SQLite's conservative 999-variable ceiling.
+        cite_chunk_size = 60
         after = ""
         while True:
-            selected = []
-            for chunk in _chunks(cited, ID_CHUNK):
-                events = func.json_each(t.candidate.c.event_ids).table_valued("value")
-                overlap = select(1).select_from(events).where(events.c.value.in_(chunk)).exists()
-                query = (select(t.candidate.c.id).where(t.candidate.c.hunt_id == hunt_id,
-                         t.candidate.c.lane.in_(lanes), t.candidate.c.id > after, overlap)
-                         .order_by(t.candidate.c.id).limit(batch_size))
+            if len(cited) <= cite_chunk_size:
+                query = select(t.candidate).where(t.candidate.c.id.in_(matching_ids(cited, after)))
                 with self.engine.connect() as c:
-                    ids = c.execute(query).scalars()
-                    selected = sorted(set(selected).union(ids))[:batch_size]
-            if not selected:
+                    rows = [dict(row) for row in c.execute(query.order_by(t.candidate.c.id)).mappings()]
+            else:
+                selected = []
+                with self.engine.connect() as c:
+                    for chunk in _chunks(cited, cite_chunk_size):
+                        selected = sorted(set(selected).union(c.execute(matching_ids(chunk, after)).scalars()))[:batch_size]
+                rows = self.candidates_by_ids(selected, hunt_id=hunt_id)
+                rows.sort(key=lambda row: row["id"])
+            if not rows:
                 return
-            rows = self.candidates_by_ids(selected, hunt_id=hunt_id)
-            rows.sort(key=lambda row: row["id"])
-            after = selected[-1]
+            after = rows[-1]["id"]
+            count = len(rows)
             yield rows
             del rows
-            if len(selected) < batch_size:
+            if count < batch_size:
                 return
 
     # ---- durable per-hunt aliases -----------------------------------------------------------
@@ -2573,14 +2597,9 @@ class Repo:
                         t.entity.c.hunt_id == scoped_hunt,
                         t.event_entity.c.event_id == target_id,
                     ).limit(1)).scalar()
-                    candidate_events = func.json_each(t.candidate.c.event_ids).table_valued(
-                        "key", "value",
-                    ).alias("candidate_events")
-                    cited_candidate = c.execute(select(1).select_from(t.candidate).where(
-                        t.candidate.c.hunt_id == scoped_hunt,
-                        select(1).select_from(candidate_events).where(
-                            candidate_events.c.value == target_id,
-                        ).exists(),
+                    cited_candidate = c.execute(select(1).select_from(t.candidate_event).where(
+                        t.candidate_event.c.hunt_id == scoped_hunt,
+                        t.candidate_event.c.event_id == target_id,
                     ).limit(1)).scalar()
                     link_events = func.json_each(t.expansion_link.c.event_ids).table_valued(
                         "key", "value",
@@ -5161,6 +5180,71 @@ class Repo:
             return [dict(row) for row in c.execute(query).mappings()]
 
     # ---- hypothesis-driven agent state -----------------------------------------------------
+    def agent_lease_live(self, hunt_id: str, *, now: datetime | None = None) -> bool:
+        with self.engine.connect() as c:
+            until = c.execute(select(t.agent_run.c.lease_until).where(t.agent_run.c.hunt_id == hunt_id)).scalar()
+        return _stored_utc(until) is not None and _stored_utc(until) > (now or utcnow())
+
+    def agent_reassessment_refusal(self, hunt_id: str) -> str | None:
+        """Explain the same eligibility and live-lease rules enforced by the claim."""
+        now = utcnow()
+        with self.engine.connect() as c:
+            hunt = c.execute(select(t.hunt.c.execution_state, t.hunt.c.lease_until).where(
+                t.hunt.c.id == hunt_id)).mappings().first()
+            if hunt is None:
+                return "Hunt not found."
+            if hunt["execution_state"] not in AGENT_ELIGIBLE_STATES:
+                return "The agent runs only after detection finishes; resume the hunt first."
+            until = c.execute(select(t.agent_run.c.lease_until).where(t.agent_run.c.hunt_id == hunt_id)).scalar()
+            if any(_stored_utc(value) is not None and _stored_utc(value) > now
+                   for value in (hunt["lease_until"], until)):
+                return "This hunt has an active worker lease; wait for it to finish or expire."
+        return None
+
+    def agent_change_page(self, hunt_id: str, after_seq: int = 0, limit: int = 200) -> list[dict]:
+        """A bounded page in serialized writer order, independent of event timestamps."""
+        if not 1 <= limit <= 200 or after_seq < 0:
+            raise ValueError("change pages require a nonnegative cursor and a limit from 1 to 200")
+        with self.engine.connect() as c:
+            return [dict(row) for row in c.execute(select(t.agent_change).where(
+                t.agent_change.c.hunt_id == hunt_id, t.agent_change.c.seq > after_seq,
+            ).order_by(t.agent_change.c.seq).limit(limit)).mappings()]
+
+    def agent_change_max_seq(self, hunt_id: str) -> int:
+        with self.engine.connect() as c:
+            return int(c.execute(select(func.coalesce(func.max(t.agent_change.c.seq), 0)).where(
+                t.agent_change.c.hunt_id == hunt_id)).scalar_one())
+
+    def agent_change_rows(self, hunt_id: str, kind: str, ids: Iterable[str]) -> dict[str, dict]:
+        """Read only live-view fields for at most one change page; large text is bounded in SQL."""
+        definitions = {
+            "run": (t.agent_run, "hunt_id", (t.agent_run.c.hunt_id, t.agent_run.c.state,
+                        func.substr(t.agent_run.c.reason, 1, 300).label("reason"))),
+            "hypothesis": (t.agent_hypothesis, "id", (t.agent_hypothesis.c.id,
+                t.agent_hypothesis.c.status, t.agent_hypothesis.c.confidence,
+                func.substr(t.agent_hypothesis.c.statement, 1, 300).label("statement"))),
+            "session": (t.agent_session, "id", (t.agent_session.c.id, t.agent_session.c.purpose,
+                t.agent_session.c.state, t.agent_session.c.tool_calls)),
+            "tool_call": (t.agent_tool_call, "id", (t.agent_tool_call.c.id, t.agent_tool_call.c.session_id,
+                t.agent_tool_call.c.seq, func.substr(t.agent_tool_call.c.name, 1, 100).label("name"),
+                t.agent_tool_call.c.status)),
+            "finding": (t.candidate, "id", (t.candidate.c.id, t.candidate.c.lane,
+                t.candidate.c.rule_id, func.substr(t.candidate.c.claim, 1, 300).label("claim"),
+                t.candidate.c.ts, t.candidate.c.provenance)),
+        }
+        if kind not in definitions:
+            raise ValueError("unsupported change kind")
+        bounded = list(islice(iter(ids), 201))
+        if len(bounded) > 200:
+            raise ValueError("at most 200 change references can be read at once")
+        table, key, columns = definitions[kind]
+        rows = {}
+        with self.engine.connect() as c:
+            for chunk in _chunks(sorted(set(bounded)), ID_CHUNK):
+                rows.update((row[key], dict(row)) for row in c.execute(select(*columns).where(
+                    table.c.hunt_id == hunt_id, table.c[key].in_(chunk))).mappings())
+        return rows
+
     def agent_run(self, hunt_id: str) -> dict | None:
         with self.engine.connect() as connection:
             row = connection.execute(select(t.agent_run).where(t.agent_run.c.hunt_id == hunt_id)).mappings().first()
@@ -5442,34 +5526,53 @@ class Repo:
             ).order_by(t.agent_assessment.c.revision)).mappings()
             return [dict(row) for row in rows]
 
-    def agent_usage(self, hunt_id: str) -> dict:
-        """What the AI agent has spent in a hunt (provider-port calls only), for budgets that survive resume."""
+    def agent_usage(self, hunt_id: str, *, group_limit: int | None = None) -> dict:
+        """Persisted spending, streamed in bounded pages; UI model breakdowns may be limited."""
+        if group_limit is not None and not 1 <= group_limit <= 200:
+            raise ValueError("usage group_limit must be between 1 and 200")
+        scope = (t.model_call.c.hunt_id == hunt_id, t.model_call.c.provider.is_not(None))
+        calls, tokens, cost, ms, estimated = 0, 0, 0.0, 0, False
         with self.engine.connect() as c:
-            rows = c.execute(select(
-                t.model_call.c.prompt_tokens_est, t.model_call.c.prompt_eval_count, t.model_call.c.eval_count,
-                t.model_call.c.raw_response, t.model_call.c.cost_usd_est, t.model_call.c.duration_ms,
-                t.model_call.c.egress, t.model_call.c.endpoint_host, t.model_call.c.model,
-                t.model_call.c.model_reported,
-            ).where(t.model_call.c.hunt_id == hunt_id, t.model_call.c.provider.is_not(None))).all()
-        tokens, cost, ms, estimated = 0, 0.0, 0, False
-        remote: dict[tuple[str, str], int] = {}
-        answered: dict[tuple[str, str], int] = {}     # (configured model, the model that answered) -> calls
-        for prompt_est, prompt, completion, raw, row_cost, duration, egress, host, model, reported in rows:
-            if egress != "local":
-                remote[(host or "unknown", model)] = remote.get((host or "unknown", model), 0) + 1
-            if reported:
-                answered[(model, reported)] = answered.get((model, reported), 0) + 1
-            if prompt is None or completion is None:
-                # unreported usage is charged at the prompt estimate plus the whole response text
-                estimated = True
-                prompt, completion = prompt_est or 0, int(len(raw or "") / 3.2) + 8
-            tokens += int(prompt) + int(completion)
-            cost += float(row_cost or 0.0)
-            ms += int(duration or 0)
-        return {"calls": len(rows), "tokens": tokens, "cost_usd": cost, "model_ms": ms, "estimated": estimated,
-                "remote_calls": [{"endpoint_host": h, "model": m, "calls": n} for (h, m), n in sorted(remote.items())],
-                "models_reported": [{"model": m, "model_reported": r, "calls": n}
-                                    for (m, r), n in sorted(answered.items())]}
+            after = ""
+            while True:
+                # Raw text is only needed for unreported usage. SQL's length() stops at a NUL,
+                # so preserve Python's exact fallback by reading that one bounded page as text.
+                rows = c.execute(select(t.model_call.c.id,
+                    t.model_call.c.prompt_tokens_est, t.model_call.c.prompt_eval_count, t.model_call.c.eval_count,
+                    case((or_(t.model_call.c.prompt_eval_count.is_(None), t.model_call.c.eval_count.is_(None)),
+                          t.model_call.c.raw_response), else_=None),
+                    t.model_call.c.cost_usd_est, t.model_call.c.duration_ms,
+                ).where(*scope, t.model_call.c.id > after).order_by(t.model_call.c.id).limit(200)).all()
+                for call_id, prompt_est, prompt, completion, raw, row_cost, duration in rows:
+                    if prompt is None or completion is None:
+                        estimated = True
+                        prompt, completion = prompt_est or 0, int(len(raw or "") / 3.2) + 8
+                    calls += 1
+                    tokens += int(prompt) + int(completion)
+                    cost += float(row_cost or 0.0)
+                    ms += int(duration or 0)
+                if len(rows) < 200:
+                    break
+                after = rows[-1][0]
+
+            def groups(columns, names, condition):
+                query = select(*columns, func.count().label("calls")).where(*scope, condition).group_by(*columns)
+                total = int(c.execute(select(func.count()).select_from(query.subquery())).scalar_one())
+                query = query.order_by(*columns)
+                if group_limit is not None:
+                    query = query.limit(group_limit)
+                values = [dict(zip((*names, "calls"), row, strict=True)) for row in c.execute(query)]
+                return values, total - len(values)
+
+            remote, remote_more = groups((func.coalesce(func.nullif(t.model_call.c.endpoint_host, ""), "unknown"), t.model_call.c.model),
+                ("endpoint_host", "model"), or_(t.model_call.c.egress.is_(None), t.model_call.c.egress != "local"))
+            answered, answered_more = groups((t.model_call.c.model, t.model_call.c.model_reported),
+                ("model", "model_reported"), and_(t.model_call.c.model_reported.is_not(None), t.model_call.c.model_reported != ""))
+        result = {"calls": calls, "tokens": tokens, "cost_usd": cost, "model_ms": ms, "estimated": estimated,
+                  "remote_calls": remote, "models_reported": answered}
+        if group_limit is not None:
+            result.update(remote_calls_more=remote_more, models_reported_more=answered_more)
+        return result
 
     def agent_elapsed_ms(self, hunt_id: str) -> int:
         with self.engine.connect() as c:

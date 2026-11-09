@@ -22,6 +22,8 @@ from sqlalchemy import (
     event,
 )
 
+from romulus.store.change_log import trigger_statements as _change_triggers
+
 metadata = MetaData()
 
 hunt = Table(
@@ -1363,3 +1365,27 @@ for _trigger in (
        BEGIN SELECT RAISE(ABORT,'agent hypothesis history is append-only'); END""",
 ):
     event.listen(agent_hypothesis_event, "after_create", DDL(_trigger).execute_if(dialect="sqlite"))
+
+
+candidate_event = Table(
+    "candidate_event", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id"), nullable=False),
+    Column("candidate_id", String, ForeignKey("candidate.id", ondelete="CASCADE"), primary_key=True),
+    Column("event_id", String, primary_key=True),
+)
+Index("ix_candidate_event_lookup", candidate_event.c.hunt_id, candidate_event.c.event_id, candidate_event.c.candidate_id)
+
+agent_change = Table(
+    "agent_change", metadata,
+    Column("seq", Integer, primary_key=True, autoincrement=True),
+    Column("hunt_id", String, ForeignKey("hunt.id"), nullable=False),
+    Column("kind", String, nullable=False),
+    Column("row_id", String, nullable=False),
+    CheckConstraint("kind IN ('run','hypothesis','session','tool_call','finding')"),
+    sqlite_autoincrement=True,
+)
+Index("ix_agent_change_hunt_seq", agent_change.c.hunt_id, agent_change.c.seq)
+
+# Install only after every source and index table exists, including metadata-only stores.
+for _statement in _change_triggers().values():
+    event.listen(metadata, "after_create", DDL(_statement.replace("CREATE TRIGGER ", "CREATE TRIGGER IF NOT EXISTS ")).execute_if(dialect="sqlite"))
