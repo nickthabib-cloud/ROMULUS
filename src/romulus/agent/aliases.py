@@ -32,12 +32,13 @@ class AliasBook:
     their own kind-specific sequence.
     """
 
-    def __init__(self, repo: Repo, hunt_id: str):
+    def __init__(self, repo: Repo, hunt_id: str, *, owner_token: str | None = None):
         if repo.get_hunt(hunt_id) is None:
             raise KeyError(hunt_id)
         self.repo = repo
         self.hunt_id = hunt_id
-        repo.seed_agent_base_aliases(hunt_id)
+        self.owner_token = owner_token
+        repo.seed_agent_base_aliases(hunt_id, **({"owner_token": owner_token} if owner_token is not None else {}))
 
     @staticmethod
     def _check_kind(kind: str) -> None:
@@ -45,7 +46,9 @@ class AliasBook:
             raise AliasKindMismatch(f"unknown alias kind {kind!r}; expected one of {sorted(ALIAS_KINDS)}")
 
     def _persist(self, kind: str, target_id: str) -> str:
-        return self.repo.get_or_create_agent_alias(self.hunt_id, kind, target_id)["alias"]
+        return self.repo.get_or_create_agent_alias(self.hunt_id, kind, target_id,
+                                                   **({"owner_token": self.owner_token}
+                                                      if self.owner_token is not None else {}))["alias"]
 
     def alias_for(self, kind: str, target_id: str) -> str:
         self._check_kind(kind)

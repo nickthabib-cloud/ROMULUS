@@ -5,7 +5,6 @@ import argparse
 import json
 import os
 import sys
-import uuid
 from pathlib import Path
 
 from romulus.config import load_settings
@@ -166,9 +165,9 @@ def cmd_agent(args) -> int:
     from dataclasses import replace
     from time import monotonic
 
-    from romulus.agent.assessment import run_assessment, template_assessment
+    from romulus.agent.assessment import run_assessment
     from romulus.agent.provider import AgentBudget, agent_readiness, build_provider
-    from romulus.hunt.run import open_repo
+    from romulus.hunt.run import _agent_heartbeat, _lease_seconds, open_repo
     from romulus.report.manifest import publish_revision
     from romulus.store.db import utcnow
 
@@ -178,33 +177,53 @@ def cmd_agent(args) -> int:
     if hunt is None:
         print(f"unknown hunt: {args.hunt_id}", file=sys.stderr)
         return EXIT_FAIL
-    readiness = agent_readiness(settings)
-    provider = build_provider(settings, readiness=readiness) if readiness.ready else None
-    usage = repo.agent_usage(args.hunt_id)
-    from romulus.agent.investigate import _budget
-    budget = _budget(settings, hunt["manifest"], repo, args.hunt_id, monotonic)
-    if args.max_calls is not None or args.max_tokens is not None:
-        limits = replace(budget.limits,
-                         max_calls=budget.calls + args.max_calls if args.max_calls is not None else budget.limits.max_calls,
-                         max_tokens=budget.tokens + args.max_tokens if args.max_tokens is not None else budget.limits.max_tokens)
-        budget = AgentBudget.from_usage(limits, usage,
-                                        wall_seconds_before=repo.agent_elapsed_ms(args.hunt_id) / 1000.0,
-                                        clock=monotonic)
-    if provider is None:
-        result = None
-        reason = f"provider_not_ready: {readiness.message()}"
-    else:
-        result = run_assessment(settings, repo, args.hunt_id, provider, budget)
-        assess_sessions = repo.agent_sessions(args.hunt_id, purpose="assess")
-        latest_summary = (assess_sessions[-1].get("summary") or "") if assess_sessions else ""
-        reason = latest_summary if latest_summary.startswith(("budget:", "provider_unavailable")) else "assessment_not_produced"
-    if result is None:
-        assessments = repo.agent_assessments(args.hunt_id)
-        body = template_assessment(repo, args.hunt_id, reason)["body"]
-        repo.save_agent_assessment({"id": "aa-" + uuid.uuid4().hex[:20],
-                                    "hunt_id": args.hunt_id, "revision": len(assessments) + 1,
-                                    "source": "template", "model": {}, "body": body, "checker": {},
-                                    "created_at": utcnow()})
+    try:
+        claimed = repo.claim_agent_lease(args.hunt_id, _lease_seconds(settings))
+    except (RuntimeError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return EXIT_FAIL
+    owner_token = claimed["lease_owner"]
+    try:
+        with _agent_heartbeat(repo, args.hunt_id, owner_token, _lease_seconds(settings)) as heartbeat:
+            from romulus.agent.investigate import _budget, _store_template
+            existing = repo.agent_run(args.hunt_id) or {}
+            repo.save_agent_run({"hunt_id": args.hunt_id, "state": "running", "reason": "reassessment",
+                                 "prompt_digests": existing.get("prompt_digests") or {},
+                                 "provider": existing.get("provider") or {}, "ended_at": None},
+                                owner_token=owner_token)
+            readiness = agent_readiness(settings)
+            provider = build_provider(settings, readiness=readiness) if readiness.ready else None
+            usage = repo.agent_usage(args.hunt_id)
+            budget = _budget(settings, hunt["manifest"], repo, args.hunt_id, monotonic)
+            if args.max_calls is not None or args.max_tokens is not None:
+                limits = replace(budget.limits,
+                                 max_calls=budget.calls + args.max_calls if args.max_calls is not None else budget.limits.max_calls,
+                                 max_tokens=budget.tokens + args.max_tokens if args.max_tokens is not None else budget.limits.max_tokens)
+                budget = AgentBudget.from_usage(limits, usage,
+                                                wall_seconds_before=repo.agent_elapsed_ms(args.hunt_id) / 1000.0,
+                                                clock=monotonic)
+            result = (run_assessment(settings, repo, args.hunt_id, provider, budget,
+                                     owner_token=owner_token, heartbeat=heartbeat) if provider is not None else None)
+            sessions = repo.agent_sessions(args.hunt_id, purpose="assess")
+            latest_summary = (sessions[-1].get("summary") or "") if sessions else ""
+            reason = (None if result is not None else f"provider_not_ready: {readiness.message()}" if provider is None
+                      else latest_summary or "assessment_not_produced")
+            if result is None:
+                _store_template(repo, args.hunt_id, reason, owner_token=owner_token)
+            state = "completed" if result is not None else "partial"
+            repo.finalize_agent_run(args.hunt_id, {"state": state, "reason": reason, "ended_at": utcnow()},
+                                    owner_token=owner_token,
+                                    summary={"status": state, "reason": reason, "usage": repo.agent_usage(args.hunt_id)})
+    except Exception as exc:  # noqa: BLE001 - the agent's failures must not escape into hunt execution.
+        from romulus.store.repo import is_lease_lost
+        if not is_lease_lost(exc):
+            try:
+                repo.finalize_agent_run(args.hunt_id, {"state": "failed", "reason": type(exc).__name__,
+                                                      "ended_at": utcnow()}, owner_token=owner_token)
+            except Exception as failure:  # noqa: BLE001 - an unavailable store cannot record its own failure.
+                print(f"could not persist assessment failure: {type(failure).__name__}", file=sys.stderr)
+        print(f"assessment failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return EXIT_FAIL
     manifest = publish_revision(repo, args.hunt_id,
                                 actor=f"cli:{os.environ.get('USER') or os.environ.get('USERNAME') or 'cli'}")
     print(json.dumps({"assessment_revision": (repo.agent_assessments(args.hunt_id)[-1]["revision"]),

@@ -99,6 +99,79 @@ def _technique_index() -> dict[str, tuple[object, object]]:
     }
 
 
+_ALIAS_VALUE = re.compile(r"^[FIENLHA][1-9][0-9]*$")
+# These are producer-owned paths, never arbitrary recursively discovered key names.
+_FINDING_PATHS = ("alias", "evidence.*", "entities.*.alias")
+_INCIDENT_PATHS = ("alias", "members.*", "links.*.alias", "links.*.anchor", "links.*.targets.*")
+_PIVOT_PATHS = ("result.evidence.*", "result.candidates.*", "result.entities.*.alias",
+                "result.event_summaries.*.alias")
+_TOOL_ALIAS_PATHS = {
+    "list_findings": tuple("findings.*." + p for p in _FINDING_PATHS),
+    "get_finding": tuple("finding." + p for p in _FINDING_PATHS),
+    "get_evidence": ("evidence.*.alias",),
+    "list_incidents": ("incidents.*.alias",),
+    "get_incident": tuple("incident." + p for p in _INCIDENT_PATHS),
+    "entity_profile": ("entity.alias", "entity.events.*.alias"),
+    "entity_timeline": _PIVOT_PATHS, "auth_activity": _PIVOT_PATHS,
+    "process_tree": _PIVOT_PATHS, "ids_alerts": _PIVOT_PATHS, "follow_link": _PIVOT_PATHS,
+    "open_hypothesis": ("hypothesis",), "update_hypothesis": ("hypothesis",),
+    "propose_finding": ("finding", "duplicate"), "propose_link": ("link",),
+}
+_ARGUMENT_ALIAS_PATHS = {
+    "list_findings": ("entity",), "get_finding": ("finding",), "get_evidence": ("evidence.*",),
+    "get_incident": ("incident",), "entity_profile": ("entity",),
+    "entity_timeline": ("anchor", "entity"), "auth_activity": ("anchor", "entity"),
+    "process_tree": ("anchor", "process"), "ids_alerts": ("anchor", "entity"),
+    "follow_link": ("anchor",), "open_hypothesis": ("entities.*", "supporting.*"),
+    "update_hypothesis": ("hypothesis", "add_support.*", "add_contradiction.*"),
+    "propose_finding": ("cites.*", "hypothesis"), "propose_link": ("from", "to", "cites.*"),
+    "add_note": ("target", "cites.*"), "request_rule": ("cites.*",),
+}
+
+
+def _path_aliases(value: object, paths: tuple[str, ...]) -> set[str]:
+    def at(item, keys):
+        if not keys:
+            if isinstance(item, str) and _ALIAS_VALUE.fullmatch(item):
+                yield item
+        elif keys[0] == "*" and isinstance(item, (list, tuple)):
+            for child in item:
+                yield from at(child, keys[1:])
+        elif isinstance(item, dict) and keys[0] in item:
+            yield from at(item[keys[0]], keys[1:])
+    return {alias for path in paths for alias in at(value, path.split("."))}
+
+
+def typed_alias_arguments(tool_name: str, arguments: object) -> set[str]:
+    """Read only the registered tools' alias argument positions, never their prose."""
+    return _path_aliases(arguments, _ARGUMENT_ALIAS_PATHS.get(tool_name, ()))
+
+
+def collect_issued_aliases(value: object, *, source: str = "tool", tool_name: str | None = None) -> set[str]:
+    """Collect explicitly typed aliases in a prompt or tool payload shown to a session."""
+    if source == "hypothesis":
+        return _path_aliases(value, ("alias", "entities.*", "cites.*.alias"))
+    if source == "dossier":
+        paths = ("findings.*.alias", "entities.*.alias", "expansion.unfinished_anchors.*.anchor",
+                 "expansion.link_tiers_not_reached.*.anchor", "expansion.partial_links.*.alias",
+                 "expansion.partial_links.*.anchor") + tuple("incidents.*." + p for p in _INCIDENT_PATHS)
+        return _path_aliases(value, paths)
+    if source != "tool":
+        raise ValueError(f"unknown alias source {source}")
+    # Direct scalar/root inputs are an explicit controller/test issuance interface.
+    if isinstance(value, str):
+        return {value} if _ALIAS_VALUE.fullmatch(value) else set()
+    if isinstance(value, (list, tuple)):
+        return {alias for alias in value if isinstance(alias, str) and _ALIAS_VALUE.fullmatch(alias)}
+    if not isinstance(value, dict):
+        return set()
+    data = value.get("data", value)
+    if tool_name is not None:
+        return _path_aliases(data, _TOOL_ALIAS_PATHS.get(tool_name, ()))
+    paths = tuple(p for values in _TOOL_ALIAS_PATHS.values() for p in values)
+    return _path_aliases(data, paths + ("finding", "evidence", "entity", "hypothesis", "link", "duplicate"))
+
+
 class AgentAdmission:
     """A session-scoped admission boundary; rejected actions have no persistence side effects."""
 
@@ -113,7 +186,7 @@ class AgentAdmission:
         self.owner_token = owner_token
         self.purpose = purpose
         self.issued_aliases = set(issued_aliases or ())
-        self.aliases = AliasBook(repo, hunt_id)
+        self.aliases = AliasBook(repo, hunt_id, owner_token=owner_token)
         self.limits_hit: set[str] = set()
 
     def register(self, toolbox: Toolbox) -> None:
@@ -163,19 +236,14 @@ class AgentAdmission:
             resolved.append((row["kind"], self.aliases.resolve(alias, {row["kind"]})))
         return resolved
 
-    def issue_aliases(self, value: object) -> None:
-        """Record aliases in a prompt or tool result shown to this model session."""
-        text = value if isinstance(value, str) else str(value)
-        for alias in re.findall(r"\b[FIENLHA][1-9][0-9]*\b", text):
+    def issue_aliases(self, value: object, *, source: str = "tool", tool_name: str | None = None) -> None:
+        """Issue only aliases in trusted producer fields shown to this model session."""
+        for alias in collect_issued_aliases(value, source=source, tool_name=tool_name):
             if self.repo.agent_alias(self.hunt_id, alias) is not None:
                 self.issued_aliases.add(alias)
 
     def _count(self, table: str) -> int:
-        return {"agent_hypothesis": len(self.repo.agent_hypotheses(self.hunt_id)),
-                "agent_link": len(self.repo.agent_links(self.hunt_id)),
-                "agent_note": len(self.repo.agent_notes(self.hunt_id)),
-                "agent_rule_request": len(self.repo.agent_rule_requests(self.hunt_id)),
-                "agent_finding": sum(row.get("provenance") == "agent" for row in self.repo.candidates(self.hunt_id))}[table]
+        return self.repo.agent_cap_count(self.hunt_id, table)
 
     def _hypothesis_id(self, alias: str | None) -> str | None:
         if alias is None:
@@ -296,7 +364,7 @@ class AgentAdmission:
         try:
             if not args.note.strip():
                 raise ValueError("note must contain non-whitespace text")
-            hypothesis_id = self.aliases.resolve(args.hypothesis, {"H"})
+            hypothesis_id = self._hypothesis_id(args.hypothesis)
             current = self.repo.agent_hypothesis(self.hunt_id, hypothesis_id)
             if current is None:
                 raise ValueError("hypothesis is not in this hunt")
@@ -375,24 +443,33 @@ class AgentAdmission:
                 candidate_families = {row["event"].get("family") for row in candidate_rows}
                 return any(supports_claim_kind(family, args.claim_kind) for family in candidate_families)
 
-            duplicate = next((candidate for candidate in self.repo.candidates(self.hunt_id)
-                              if same_claim_kind(candidate)
-                              and citations <= set(candidate.get("event_ids") or [])), None)
-            if duplicate is not None:
-                target_alias = self.aliases.alias_for("F", duplicate["id"])
-                text = f"Agent proposal: {args.claim.strip()}"
-                if args.rationale:
-                    text += f" Rationale: {args.rationale.strip()}"
-                note_cites = [{"kind": "E", "id": item} for item in evidence_ids]
-                note_id = self._save_note("finding", duplicate["id"], text[:1000], note_cites, False)
-                return _ok({"duplicate": target_alias, "note_id": note_id,
-                            "message": "proposal recorded as a note on the existing finding"})
             requested_lane = args.lane
             lane = "high" if requested_lane == "urgent" else requested_lane
             validation_notes = ["agent findings are capped at high"] if requested_lane == "urgent" else []
             if args.claim_kind == "mention" and lane in {"urgent", "high"}:
                 lane = "lead"
                 validation_notes.append("mention claims are capped at lead")
+            ranks = {"urgent": 3, "high": 2, "lead": 1}
+            eligible_lanes = [value for value, rank in ranks.items() if rank >= ranks[lane]]
+            duplicate = None
+            # Keep only one bounded batch alive, including when all candidates overlap one cite.
+            for batch in self.repo.candidate_duplicate_batches(self.hunt_id, evidence_ids, eligible_lanes):
+                duplicate = next((candidate for candidate in batch
+                                  if citations <= set(candidate.get("event_ids") or [])
+                                  and same_claim_kind(candidate)), None)
+                if duplicate is not None:
+                    break
+                del batch  # Release this batch before the generator fetches another one.
+            if duplicate is not None:
+                target_alias = self.aliases.alias_for("F", duplicate["id"])
+                text = f"Agent proposal: {args.claim.strip()}"
+                if args.rationale:
+                    text += f" Rationale: {args.rationale.strip()}"
+                note_cites = [{"kind": "E", "id": item} for item in evidence_ids]
+                suspicious = any(injection_flags({"event": row["event"]}) for row in rows)
+                note_id = self._save_note("finding", duplicate["id"], text[:1000], note_cites, suspicious)
+                return _ok({"duplicate": target_alias, "note_id": note_id,
+                            "message": "proposal recorded as a note on the existing finding"})
             entity_values = sorted({entity for event in events for entity in event.entities()})
             timestamps = [event.ts for event in events]
             candidate_id = "agent-" + digest({"hunt_id": self.hunt_id, "evidence": sorted(citations),
@@ -454,6 +531,10 @@ class AgentAdmission:
             resolved_cites = self._resolve_many(args.cites, {"E", "F", "L", "A", "H"})
             citations = [{"kind": kind, "id": target} for kind, target in resolved_cites]
             evidence_ids = [target for kind, target in resolved_cites if kind == "E"]
+            finding_ids = [target for kind, target in resolved_cites if kind == "F"]
+            for finding in self.repo.candidates_by_ids(self.hunt_id, finding_ids):
+                evidence_ids.extend(finding.get("event_ids") or [])
+            evidence_ids = list(dict.fromkeys(evidence_ids))
             evidence_rows = self.repo.citation_events(self.hunt_id, evidence_ids) if evidence_ids else []
             suspicious = any(injection_flags({"event": row["event"]}) for row in evidence_rows)
             note_id = self._save_note({"F": "finding", "I": "incident", "N": "entity", "H": "hypothesis",

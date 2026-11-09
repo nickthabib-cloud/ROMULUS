@@ -277,12 +277,13 @@ class Toolbox:
     """Registry and exception boundary for all model-facing investigator tools."""
 
     def __init__(self, repo: Repo, hunt_id: str, *, executor: InvestigationExecutor | None = None,
-                 session_id: str | None = None):
+                 session_id: str | None = None, owner_token: str | None = None):
         self.repo = repo
         self.hunt_id = hunt_id
         self.executor = executor
         self.session_id = session_id
-        self.aliases = AliasBook(repo, hunt_id)
+        self.owner_token = owner_token
+        self.aliases = AliasBook(repo, hunt_id, owner_token=owner_token)
         self.registry = {
             item.name: item for item in (
                 RegisteredTool(
@@ -485,7 +486,7 @@ class Toolbox:
             })[:20]
             plan = self.repo.create_agent_page_plan(
                 self.hunt_id, cursor, identity, stored, self._coverage_entries(coverage),
-            )
+             owner_token=self.owner_token)
         total = int(plan["item_count"])
         entries = self.repo.agent_page_items(
             self.hunt_id, cursor, offset=(args.page - 1) * COVERAGE_PAGE_SIZE,
@@ -606,7 +607,7 @@ class Toolbox:
             stored = self.repo.create_candidate_page_plan(
                 self.hunt_id, cursor, identity, {}, lane=args.lane, rule_id=args.rule,
                 entity=entity_key,
-            )
+             owner_token=self.owner_token)
             page = self.repo.candidate_page_plan_rows(
                 self.hunt_id, cursor, offset=0, limit=READ_PAGE_SIZE,
             )
@@ -776,7 +777,7 @@ class Toolbox:
             plan = self.repo.create_agent_page_plan(
                 self.hunt_id, cursor, identity, {"status": "complete"},
                 items,
-            )
+             owner_token=self.owner_token)
         total = int(plan["item_count"])
         rows = self.repo.agent_page_items(
             self.hunt_id, cursor, offset=(args.page - 1) * INCIDENT_PAGE_SIZE,
@@ -856,7 +857,7 @@ class Toolbox:
             cursor = "G" + digest({
                 "identity": identity, "summary": stored, "items": items,
             })[:20]
-            self.repo.create_agent_page_plan(self.hunt_id, cursor, identity, stored, items)
+            self.repo.create_agent_page_plan(self.hunt_id, cursor, identity, stored, items, owner_token=self.owner_token)
         start = (args.page - 1) * INCIDENT_PAGE_SIZE
         page = {kind: [item["value"] for item in self.repo.agent_page_items_by_kind(
             self.hunt_id, cursor, kind, offset=start, limit=INCIDENT_PAGE_SIZE,
@@ -909,7 +910,7 @@ class Toolbox:
             })[:20]
             plan = self.repo.create_entity_event_page_plan(
                 self.hunt_id, cursor, identity, entity_id,
-            )
+             owner_token=self.owner_token)
             total = int(plan["item_count"])
             families = plan["summary"]["families"]
         start = (args.page - 1) * ENTITY_EVENT_LIMIT
@@ -1067,7 +1068,7 @@ class Toolbox:
 
             plan = self.repo.create_agent_page_plan(
                 self.hunt_id, cursor, identity, summary, items(),
-            )
+             owner_token=self.owner_token)
         else:
             plan = self.repo.agent_page_plan(self.hunt_id, cursor)
             if plan is None:

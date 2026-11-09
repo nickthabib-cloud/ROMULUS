@@ -423,6 +423,11 @@ def _chunks(rows: Iterable[dict], size: int) -> Iterator[list[dict]]:
         yield chunk
 
 
+def is_lease_lost(exc: BaseException) -> bool:
+    """Recognize fencing failures without swallowing unrelated repository errors."""
+    return isinstance(exc, RuntimeError) and "lease ownership lost" in str(exc)
+
+
 class Repo:
     def __init__(self, engine: Engine):
         self.engine = engine
@@ -458,16 +463,86 @@ class Repo:
             t.hunt.c.lease_owner == owner_token,
         ).values(lease_owner=t.hunt.c.lease_owner))
         if fenced.rowcount != 1:
-            raise RuntimeError(f"hunt {hunt_id} lease ownership lost")
+            Repo._fence_agent_lease(c, hunt_id, owner_token)
+
+    @staticmethod
+    def _fence_agent_lease(c, hunt_id: str, owner_token: str | None,
+                           now: datetime | None = None) -> None:
+        """Lock the writer while proving ownership of an unexpired agent lease."""
+        if owner_token is None:
+            return
+        fenced = c.execute(t.agent_run.update().where(
+            t.agent_run.c.hunt_id == hunt_id,
+            t.agent_run.c.lease_owner == owner_token,
+            t.agent_run.c.lease_until > (now or utcnow()),
+        ).values(lease_owner=t.agent_run.c.lease_owner))
+        if fenced.rowcount != 1:
+            raise RuntimeError(f"hunt {hunt_id} agent lease ownership lost")
+
+    def claim_agent_lease(self, hunt_id: str, lease_seconds: int, now: datetime | None = None,
+                          owner_token: str | None = None) -> dict:
+        """Claim agent-only work without changing the detection run's state."""
+        if lease_seconds <= 0:
+            raise ValueError("agent lease_seconds must be positive")
+        now = now or utcnow()
+        owner_token = owner_token or uuid.uuid4().hex
+        with maintenance_lease(self.engine), write_txn(self.engine) as c:
+            # Acquire SQLite's writer before the cross-lease check and compare-and-set.
+            c.execute(t.hunt.update().where(t.hunt.c.id == hunt_id).values(id=t.hunt.c.id))
+            hunt = c.execute(select(t.hunt).where(t.hunt.c.id == hunt_id)).mappings().one()
+            if _stored_utc(hunt["lease_until"]) is not None and _stored_utc(hunt["lease_until"]) > now:
+                raise RuntimeError(f"hunt {hunt_id} has an active detection lease")
+            values = {"hunt_id": hunt_id, "state": "pending", "prompt_digests": {}, "provider": {},
+                      "lease_owner": owner_token, "lease_until": now + timedelta(seconds=lease_seconds),
+                      "updated_at": now}
+            claimed = c.execute(insert(t.agent_run).values(**values).on_conflict_do_update(
+                index_elements=["hunt_id"],
+                set_={key: values[key] for key in ("lease_owner", "lease_until", "updated_at")},
+                where=or_(t.agent_run.c.lease_until.is_(None), t.agent_run.c.lease_until <= now),
+            ))
+            if claimed.rowcount != 1:
+                raise RuntimeError(f"hunt {hunt_id} agent phase has an active lease")
+            return dict(c.execute(select(t.agent_run).where(t.agent_run.c.hunt_id == hunt_id)).mappings().one())
+
+    def heartbeat_agent_lease(self, hunt_id: str, lease_seconds: int, now: datetime | None = None,
+                              *, owner_token: str | None = None) -> dict:
+        """Renew only an agent lease that is still owned and live."""
+        if lease_seconds <= 0:
+            raise ValueError("agent lease_seconds must be positive")
+        now = now or utcnow()
+        with write_txn(self.engine) as c:
+            self._fence_agent_lease(c, hunt_id, owner_token, now)
+            result = c.execute(t.agent_run.update().where(t.agent_run.c.hunt_id == hunt_id).values(
+                lease_until=now + timedelta(seconds=lease_seconds), updated_at=now,
+            ))
+            if result.rowcount != 1:
+                raise RuntimeError(f"hunt {hunt_id} agent lease ownership lost")
+            return dict(c.execute(select(t.agent_run).where(t.agent_run.c.hunt_id == hunt_id)).mappings().one())
+
+    def release_agent_lease(self, hunt_id: str, *, owner_token: str | None = None) -> None:
+        """Release a claimed phase while retaining its existing progress and assessment."""
+        with write_txn(self.engine) as c:
+            self._fence_agent_lease(c, hunt_id, owner_token)
+            c.execute(t.agent_run.update().where(t.agent_run.c.hunt_id == hunt_id).values(
+                lease_owner=None, lease_until=None, updated_at=utcnow(),
+            ))
 
     def claim_hunt(self, hunt_id: str, lease_seconds: int, resume: bool = False,
                    now: datetime | None = None, owner_token: str | None = None,
                    agent_only: bool = False) -> dict:
         """Claim a planned hunt or safely reclaim a resumable hunt."""
+        if agent_only:
+            return self.claim_agent_lease(hunt_id, lease_seconds, now=now, owner_token=owner_token)
         now = now or utcnow()
         owner_token = owner_token or uuid.uuid4().hex
         lease_until = now + timedelta(seconds=lease_seconds)
         with maintenance_lease(self.engine), write_txn(self.engine) as c:
+            c.execute(t.hunt.update().where(t.hunt.c.id == hunt_id).values(id=t.hunt.c.id))
+            agent_lease = c.execute(select(t.agent_run.c.lease_until).where(
+                t.agent_run.c.hunt_id == hunt_id,
+            )).scalar_one_or_none()
+            if _stored_utc(agent_lease) is not None and _stored_utc(agent_lease) > now:
+                raise RuntimeError("the AI agent phase is running; wait for it or let its lease expire")
             current = c.execute(select(t.hunt).where(t.hunt.c.id == hunt_id)).mappings().one()
             state = current["execution_state"]
             action = "hunt.claim"
@@ -482,8 +557,6 @@ class Repo:
                     action = "hunt.resume_stale"
                 elif state in {"partial", "failed"}:
                     action = "hunt.resume"
-                elif state == "completed_within_scope" and agent_only:
-                    action = "hunt.agent_resume"
                 else:
                     raise ValueError(f"hunt {hunt_id} in state {state} cannot be resumed")
             elif state != "planned":
@@ -549,8 +622,12 @@ class Repo:
             lease_until = h.get("lease_until")
             if lease_until is not None and lease_until.tzinfo is None:
                 lease_until = lease_until.replace(tzinfo=UTC)
-            live = lease_until is not None and lease_until > now
-            if h["execution_state"] not in self.FINISHED_STATES and live:
+            agent_until = c.execute(select(t.agent_run.c.lease_until).where(
+                t.agent_run.c.hunt_id == hunt_id,
+            )).scalar_one_or_none()
+            live = ((lease_until is not None and lease_until > now)
+                    or (_stored_utc(agent_until) is not None and _stored_utc(agent_until) > now))
+            if live:
                 raise ValueError(f"hunt {hunt_id} is {h['execution_state']} with a live worker lease; "
                                  f"let it finish (or wait for the lease to expire) before deleting")
 
@@ -701,6 +778,14 @@ class Repo:
                     c.execute(table.delete().where(column.in_(chunk))).rowcount or 0
                     for chunk in _chunks(sorted(ids), ID_CHUNK))
 
+            # Break nullable back-references, then remove the agent graph child-first.
+            c.execute(t.model_call.update().where(t.model_call.c.hunt_id == hunt_id).values(session_id=None))
+            c.execute(t.candidate.update().where(t.candidate.c.hunt_id == hunt_id).values(agent_hypothesis_id=None))
+            for table in (t.agent_tool_call, t.agent_note, t.agent_rule_request, t.agent_link,
+                          t.agent_hypothesis_cite, t.agent_hypothesis_event, t.agent_assessment,
+                          t.agent_session, t.agent_hypothesis, t.agent_run):
+                rm(table.name, table.delete().where(table.c.hunt_id == hunt_id))
+
             # detach shared rows from this hunt's tasks and children before removing them
             c.execute(t.raw_record.update().where(t.raw_record.c.first_task_id.in_(task_ids))
                       .values(first_task_id=None))
@@ -762,16 +847,13 @@ class Repo:
             )).rowcount or 0
 
     def hunts_with_live_lease(self, now: datetime | None = None) -> list[str]:
-        """Hunts a worker may still be writing: unfinished, with a lease that has not expired. A hunt left
-        'running' by a killed worker has an expired lease and is not live."""
-        now = (now or utcnow()).replace(tzinfo=None)
-        live = []
-        for h in self.list_hunts():
-            lease = h.get("lease_until")
-            unfinished = h.get("execution_state") not in self.FINISHED_STATES
-            if unfinished and lease is not None and lease.replace(tzinfo=None) > now:
-                live.append(h["id"])
-        return sorted(live)
+        """Hunts with either unexpired worker lease, including completed detection runs."""
+        now = now or utcnow()
+        query = (select(t.hunt.c.id).outerjoin(t.agent_run, t.agent_run.c.hunt_id == t.hunt.c.id)
+                 .where(or_(t.hunt.c.lease_until > now, t.agent_run.c.lease_until > now))
+                 .order_by(t.hunt.c.id))
+        with self.engine.connect() as c:
+            return list(c.execute(query).scalars())
 
     def deletion_preview(self, hunt_id: str) -> dict[str, int]:
         with self.engine.connect() as c:
@@ -791,9 +873,10 @@ class Repo:
             return dict(row) if row else None
 
     def create_agent_page_plan(self, hunt_id: str, cursor: str, identity: dict,
-                               summary: dict, items: Iterable[dict]) -> dict:
+                               summary: dict, items: Iterable[dict], *, owner_token: str | None = None) -> dict:
         """Persist a snapshot as bounded rows; never one hunt-sized JSON value."""
         with write_txn(self.engine) as connection:
+            self._fence_agent_lease(connection, hunt_id, owner_token)
             existing = connection.execute(select(t.agent_page_plan).where(
                 t.agent_page_plan.c.hunt_id == hunt_id,
                 t.agent_page_plan.c.cursor == cursor,
@@ -901,7 +984,8 @@ class Repo:
                                    summary: dict, *, lane: str | None = None,
                                    rule_id: str | None = None,
                                    entity: tuple[str, str] | None = None,
-                                   lanes: tuple[str, ...] | None = None) -> dict:
+                                   lanes: tuple[str, ...] | None = None,
+                                   owner_token: str | None = None) -> dict:
         """Snapshot matching candidate ids with a stable SQL sort and bounded Python batches."""
         where = [t.candidate.c.hunt_id == hunt_id]
         if lane is not None:
@@ -917,6 +1001,7 @@ class Repo:
                 func.json_extract(values.c.value, "$[1]") == entity[1],
             ).exists())
         with write_txn(self.engine) as connection:
+            self._fence_agent_lease(connection, hunt_id, owner_token)
             existing = connection.execute(select(t.agent_page_plan).where(
                 t.agent_page_plan.c.hunt_id == hunt_id,
                 t.agent_page_plan.c.cursor == cursor,
@@ -1040,8 +1125,9 @@ class Repo:
             return [dict(row) for row in connection.execute(query).mappings()]
 
     def create_entity_event_page_plan(self, hunt_id: str, cursor: str, identity: dict,
-                                      entity_id: str) -> dict:
+                                      entity_id: str, *, owner_token: str | None = None) -> dict:
         with write_txn(self.engine) as connection:
+            self._fence_agent_lease(connection, hunt_id, owner_token)
             existing = connection.execute(select(t.agent_page_plan).where(
                 t.agent_page_plan.c.hunt_id == hunt_id,
                 t.agent_page_plan.c.cursor == cursor,
@@ -1115,7 +1201,13 @@ class Repo:
     }
 
     def set_hunt_state(self, hunt_id: str, state: str, actor: str = "system",
-                       owner_token: str | None = None, **extra):
+                       owner_token: str | None = None, *, pending_agent_owner_token: str | None = None,
+                       pending_agent_lease_seconds: int | None = None,
+                       pending_agent_now: datetime | None = None, **extra):
+        if (pending_agent_owner_token is None) != (pending_agent_lease_seconds is None):
+            raise ValueError("pending agent work requires both owner token and lease seconds")
+        if pending_agent_lease_seconds is not None and pending_agent_lease_seconds <= 0:
+            raise ValueError("agent lease_seconds must be positive")
         with write_txn(self.engine) as c:
             self._fence_lease(c, hunt_id, owner_token)
             cur = c.execute(select(t.hunt.c.execution_state).where(t.hunt.c.id == hunt_id)).scalar_one()
@@ -1129,6 +1221,18 @@ class Repo:
                 vals["lease_until"] = None
                 vals["lease_owner"] = None
             c.execute(t.hunt.update().where(t.hunt.c.id == hunt_id).values(**vals))
+            if pending_agent_owner_token is not None:
+                now = pending_agent_now or utcnow()
+                pending = {"hunt_id": hunt_id, "state": "pending", "prompt_digests": {}, "provider": {},
+                           "lease_owner": pending_agent_owner_token,
+                           "lease_until": now + timedelta(seconds=pending_agent_lease_seconds), "updated_at": now}
+                claimed = c.execute(insert(t.agent_run).values(**pending).on_conflict_do_update(
+                    index_elements=["hunt_id"],
+                    set_={key: pending[key] for key in ("state", "lease_owner", "lease_until", "updated_at")},
+                    where=or_(t.agent_run.c.lease_until.is_(None), t.agent_run.c.lease_until <= now),
+                ))
+                if claimed.rowcount != 1:
+                    raise RuntimeError(f"hunt {hunt_id} agent phase has an active lease")
             c.execute(t.audit_event.insert().values(at=utcnow(), actor=actor, action=f"hunt.{state}", hunt_id=hunt_id,
                                                     detail={k: str(v) for k, v in extra.items()}))
 
@@ -1205,7 +1309,7 @@ class Repo:
                                    *, owner_token: str | None = None) -> int | None:
         """Atomically reserve one query under the per-hunt AI-agent cap; return new spend or None."""
         with write_txn(self.engine) as c:
-            self._fence_lease(c, hunt_id, owner_token)
+            self._fence_agent_lease(c, hunt_id, owner_token)
             used = int(c.execute(select(func.count()).select_from(t.audit_event).where(
                 t.audit_event.c.hunt_id == hunt_id,
                 t.audit_event.c.action == "agent.source_query",
@@ -1561,7 +1665,10 @@ class Repo:
                        max_agent_findings: int | None = None, owner_token: str | None = None) -> bool:
         """Insert once, while retaining deterministic provenance for the two supported duplicate cases."""
         with self.candidate_publication() as c:
-            self._fence_lease(c, row["hunt_id"], owner_token)
+            if row.get("provenance") == "agent":
+                self._fence_agent_lease(c, row["hunt_id"], owner_token)
+            else:
+                self._fence_lease(c, row["hunt_id"], owner_token)
             existing = c.execute(select(t.candidate).where(
                 t.candidate.c.id == row["id"],
             )).mappings().first()
@@ -2350,19 +2457,78 @@ class Repo:
             r = c.execute(select(t.candidate).where(t.candidate.c.id == cid)).mappings().first()
             return dict(r) if r else None
 
-    def candidates_by_ids(self, ids: list[str], *, finding_alias: bool = False) -> list[dict]:
+    def candidates_by_ids(self, ids: list[str] | str, candidate_ids: list[str] | None = None, *,
+                          hunt_id: str | None = None, finding_alias: bool = False) -> list[dict]:
+        """Read only requested finding rows; accept the hunt-scoped two-argument form too."""
+        if candidate_ids is not None:
+            hunt_id, ids = ids, candidate_ids
         if not ids:
             return []
-        query = select(t.candidate).where(t.candidate.c.id.in_(ids))
-        if finding_alias:
-            aliases = t.agent_alias.alias("candidate_alias")
-            query = (select(t.candidate, aliases.c.alias.label("_alias"))
-                     .outerjoin(aliases, and_(
-                         aliases.c.hunt_id == t.candidate.c.hunt_id,
-                         aliases.c.kind == "F", aliases.c.target_id == t.candidate.c.id,
-                     )).where(t.candidate.c.id.in_(ids)))
+        rows = []
         with self.engine.connect() as connection:
-            return [dict(row) for row in connection.execute(query).mappings()]
+            for chunk in _chunks(sorted(set(ids)), ID_CHUNK):
+                query = select(t.candidate).where(t.candidate.c.id.in_(chunk))
+                if finding_alias:
+                    aliases = t.agent_alias.alias("candidate_alias")
+                    query = (select(t.candidate, aliases.c.alias.label("_alias"))
+                             .outerjoin(aliases, and_(
+                                 aliases.c.hunt_id == t.candidate.c.hunt_id,
+                                 aliases.c.kind == "F", aliases.c.target_id == t.candidate.c.id,
+                             )).where(t.candidate.c.id.in_(chunk)))
+                if hunt_id is not None:
+                    query = query.where(t.candidate.c.hunt_id == hunt_id)
+                rows.extend(dict(row) for row in connection.execute(query).mappings())
+        return rows
+
+    def candidate_duplicate_batches(self, hunt_id: str, event_ids: Iterable[str], lanes: Iterable[str],
+                                    batch_size: int = 500) -> Iterator[list[dict]]:
+        """Stream SQL-filtered, overlapping findings with bounded candidate materialization."""
+        if not 1 <= batch_size <= 500:
+            raise ValueError("duplicate batch_size must be between 1 and 500")
+        cited = sorted(set(event_ids))
+        lanes = tuple(lanes)
+        if not cited or not lanes:
+            return
+        if len(cited) <= ID_CHUNK:
+            events = func.json_each(t.candidate.c.event_ids).table_valued("value")
+            overlap = select(1).select_from(events).where(events.c.value.in_(cited)).exists()
+            after = ""
+            while True:
+                query = (select(t.candidate).where(t.candidate.c.hunt_id == hunt_id,
+                         t.candidate.c.lane.in_(lanes), t.candidate.c.id > after, overlap)
+                         .order_by(t.candidate.c.id).limit(batch_size))
+                with self.engine.connect() as c:
+                    rows = [dict(row) for row in c.execute(query).mappings()]
+                if not rows:
+                    return
+                after = rows[-1]["id"]
+                count = len(rows)
+                yield rows
+                del rows
+                if count < batch_size:
+                    return
+        # Retain only one page of ids while merging independently bound cite chunks.
+        after = ""
+        while True:
+            selected = []
+            for chunk in _chunks(cited, ID_CHUNK):
+                events = func.json_each(t.candidate.c.event_ids).table_valued("value")
+                overlap = select(1).select_from(events).where(events.c.value.in_(chunk)).exists()
+                query = (select(t.candidate.c.id).where(t.candidate.c.hunt_id == hunt_id,
+                         t.candidate.c.lane.in_(lanes), t.candidate.c.id > after, overlap)
+                         .order_by(t.candidate.c.id).limit(batch_size))
+                with self.engine.connect() as c:
+                    ids = c.execute(query).scalars()
+                    selected = sorted(set(selected).union(ids))[:batch_size]
+            if not selected:
+                return
+            rows = self.candidates_by_ids(selected, hunt_id=hunt_id)
+            rows.sort(key=lambda row: row["id"])
+            after = selected[-1]
+            yield rows
+            del rows
+            if len(selected) < batch_size:
+                return
 
     # ---- durable per-hunt aliases -----------------------------------------------------------
     def agent_aliases(self, hunt_id: str) -> list[dict]:
@@ -2428,9 +2594,11 @@ class Repo:
                         owners.add(scoped_hunt)
             return sorted(owners)
 
-    def get_or_create_agent_alias(self, hunt_id: str, kind: str, target_id: str) -> dict:
+    def get_or_create_agent_alias(self, hunt_id: str, kind: str, target_id: str,
+                                   *, owner_token: str | None = None) -> dict:
         """Allocate the next alias inside the serialized repository writer."""
         with write_txn(self.engine) as c:
+            self._fence_agent_lease(c, hunt_id, owner_token)
             if c.execute(select(t.hunt.c.id).where(t.hunt.c.id == hunt_id)).scalar() is None:
                 raise KeyError(hunt_id)
             existing = c.execute(select(t.agent_alias).where(
@@ -2449,9 +2617,11 @@ class Repo:
             c.execute(t.agent_alias.insert().values(**row))
             return row
 
-    def seed_agent_aliases(self, hunt_id: str, targets: list[tuple[str, str]]) -> list[dict]:
+    def seed_agent_aliases(self, hunt_id: str, targets: list[tuple[str, str]],
+                           *, owner_token: str | None = None) -> list[dict]:
         """Assign an ordered seed set atomically, preserving existing aliases."""
         with write_txn(self.engine) as c:
+            self._fence_agent_lease(c, hunt_id, owner_token)
             if c.execute(select(t.hunt.c.id).where(t.hunt.c.id == hunt_id)).scalar() is None:
                 raise KeyError(hunt_id)
             existing = [dict(row) for row in c.execute(select(t.agent_alias).where(
@@ -2480,7 +2650,7 @@ class Repo:
                 c.execute(t.agent_alias.insert(), created)
             return ordered
 
-    def seed_agent_base_aliases(self, hunt_id: str) -> None:
+    def seed_agent_base_aliases(self, hunt_id: str, *, owner_token: str | None = None) -> None:
         """Seed finding/entity aliases in SQL so opening a toolbox is mission-scale bounded."""
         lane_order = case(
             (t.candidate.c.lane == "urgent", 0), (t.candidate.c.lane == "high", 1),
@@ -2488,6 +2658,7 @@ class Repo:
             (t.candidate.c.lane == "suppressed", 4), else_=99,
         )
         with write_txn(self.engine) as connection:
+            self._fence_agent_lease(connection, hunt_id, owner_token)
             for kind, source, ordering in (
                 ("F", t.candidate, (lane_order, t.candidate.c.priority.desc(),
                                      t.candidate.c.ts, t.candidate.c.id)),
@@ -4960,7 +5131,10 @@ class Repo:
     def save_model_call(self, row: dict, *, owner_token: str | None = None) -> bool:
         values = {"at": utcnow(), **row}
         with write_txn(self.engine) as c:
-            self._fence_lease(c, row["hunt_id"], owner_token)
+            if row.get("session_id") is not None:
+                self._fence_agent_lease(c, row["hunt_id"], owner_token)
+            else:
+                self._fence_lease(c, row["hunt_id"], owner_token)
             result = c.execute(insert(t.model_call).values(**values).on_conflict_do_nothing(index_elements=["id"]))
             return result.rowcount == 1
 
@@ -5001,10 +5175,49 @@ class Repo:
             query = select(func.count()).select_from(table).where(table.c.hunt_id == hunt_id)
         return int(connection.execute(query).scalar_one())
 
+    def agent_cap_count(self, hunt_id: str, table_name: str) -> int:
+        """Count capped agent output without materializing findings or payloads."""
+        with self.engine.connect() as connection:
+            return self._agent_cap_count(connection, table_name, hunt_id)
+
+    def finalize_agent_run(self, hunt_id: str, values: dict, *, owner_token: str | None = None,
+                           now: datetime | None = None, summary: dict | None = None) -> dict:
+        """Commit terminal progress, deterministic results and lease release atomically."""
+        if values.get("state") not in {"completed", "partial", "failed", "skipped"}:
+            raise ValueError("agent finalization requires a terminal state")
+        now = now or utcnow()
+        with write_txn(self.engine) as connection:
+            self._fence_agent_lease(connection, hunt_id, owner_token, now)
+            rows = connection.execute(select(t.candidate.c.lane, func.count()).where(
+                t.candidate.c.hunt_id == hunt_id, t.candidate.c.provenance == "deterministic",
+            ).group_by(t.candidate.c.lane))
+            counts = {lane: n for lane, n in rows}
+            result = ("reportable_findings" if counts.get("urgent", 0) + counts.get("high", 0) else
+                      "leads_only" if counts.get("lead", 0) else
+                      "no_qualifying_observation_in_assessed_scope")
+            connection.execute(t.hunt.update().where(t.hunt.c.id == hunt_id).values(detection_result=result))
+            terminal = {"prompt_digests": {}, "provider": {}, "ended_at": now, **values,
+                        "hunt_id": hunt_id, "updated_at": now, "lease_owner": None, "lease_until": None}
+            updates = {key: value for key, value in terminal.items() if key != "hunt_id"}
+            for key in ("prompt_digests", "provider"):
+                if key not in values:
+                    updates.pop(key)
+            connection.execute(insert(t.agent_run).values(**terminal).on_conflict_do_update(
+                index_elements=["hunt_id"], set_=updates,
+            ))
+            for action, detail in (
+                ("hunt.detection_refresh", {"detection_result": result, "lanes": counts}),
+                ("hunt.ai_agent_summary", summary or {"state": values["state"], "reason": values.get("reason")}),
+            ):
+                connection.execute(t.audit_event.insert().values(
+                    at=now, actor="system", action=action, hunt_id=hunt_id, detail=detail,
+                ))
+            return {"detection_result": result, "lane_counts": counts}
+
     def save_agent_run(self, row: dict, *, owner_token: str | None = None) -> None:
         values = {"updated_at": utcnow(), "prompt_digests": {}, "provider": {}, **row}
         with write_txn(self.engine) as connection:
-            self._fence_lease(connection, values["hunt_id"], owner_token)
+            self._fence_agent_lease(connection, values["hunt_id"], owner_token)
             connection.execute(insert(t.agent_run).values(**values).on_conflict_do_update(
                 index_elements=["hunt_id"], set_={key: value for key, value in values.items() if key != "hunt_id"},
             ))
@@ -5026,7 +5239,7 @@ class Repo:
     def create_agent_hypothesis(self, row: dict, event: dict, cites: list[dict] = (), *,
                                 max_count: int | None = None, owner_token: str | None = None) -> bool:
         with write_txn(self.engine) as connection:
-            self._fence_lease(connection, row["hunt_id"], owner_token)
+            self._fence_agent_lease(connection, row["hunt_id"], owner_token)
             if (max_count is not None and self._agent_cap_count(connection, "agent_hypothesis", row["hunt_id"])
                     >= max_count):
                 raise ValueError("hypothesis limit reached; update an existing one")
@@ -5042,7 +5255,7 @@ class Repo:
 
     def save_agent_hypothesis(self, row: dict, *, owner_token: str | None = None) -> bool:
         with write_txn(self.engine) as connection:
-            self._fence_lease(connection, row["hunt_id"], owner_token)
+            self._fence_agent_lease(connection, row["hunt_id"], owner_token)
             result = connection.execute(insert(t.agent_hypothesis).values(**row).on_conflict_do_nothing(
                 index_elements=["id"],
             ))
@@ -5051,7 +5264,7 @@ class Repo:
     def update_agent_hypothesis(self, hypothesis_id: str, hunt_id: str, changes: dict, event: dict,
                                 cites: list[dict] = (), *, owner_token: str | None = None) -> None:
         with write_txn(self.engine) as connection:
-            self._fence_lease(connection, hunt_id, owner_token)
+            self._fence_agent_lease(connection, hunt_id, owner_token)
             changed = connection.execute(t.agent_hypothesis.update().where(
                 t.agent_hypothesis.c.id == hypothesis_id, t.agent_hypothesis.c.hunt_id == hunt_id,
             ).values(**changes))
@@ -5064,7 +5277,7 @@ class Repo:
     def increment_agent_hypothesis_sessions(self, hypothesis_id: str, hunt_id: str,
                                            *, owner_token: str | None = None) -> None:
         with write_txn(self.engine) as connection:
-            self._fence_lease(connection, hunt_id, owner_token)
+            self._fence_agent_lease(connection, hunt_id, owner_token)
             changed = connection.execute(t.agent_hypothesis.update().where(
                 t.agent_hypothesis.c.id == hypothesis_id, t.agent_hypothesis.c.hunt_id == hunt_id,
             ).values(sessions_run=t.agent_hypothesis.c.sessions_run + 1, updated_at=utcnow()))
@@ -5089,7 +5302,7 @@ class Repo:
 
     def save_agent_session(self, row: dict, *, owner_token: str | None = None) -> bool:
         with write_txn(self.engine) as connection:
-            self._fence_lease(connection, row["hunt_id"], owner_token)
+            self._fence_agent_lease(connection, row["hunt_id"], owner_token)
             result = connection.execute(insert(t.agent_session).values(**row).on_conflict_do_nothing(
                 index_elements=["id"],
             ))
@@ -5098,7 +5311,7 @@ class Repo:
     def update_agent_session(self, session_id: str, hunt_id: str, changes: dict,
                              *, owner_token: str | None = None) -> None:
         with write_txn(self.engine) as connection:
-            self._fence_lease(connection, hunt_id, owner_token)
+            self._fence_agent_lease(connection, hunt_id, owner_token)
             result = connection.execute(t.agent_session.update().where(
                 t.agent_session.c.id == session_id, t.agent_session.c.hunt_id == hunt_id,
             ).values(**changes))
@@ -5108,7 +5321,7 @@ class Repo:
     def interrupt_running_agent_session(self, session_id: str, hunt_id: str, *, owner_token: str | None = None) -> bool:
         """Close a crashed session and release its hypothesis slot, preserving its durable outputs and calls."""
         with write_txn(self.engine) as connection:
-            self._fence_lease(connection, hunt_id, owner_token)
+            self._fence_agent_lease(connection, hunt_id, owner_token)
             row = connection.execute(select(t.agent_session.c.hypothesis_id).where(
                 t.agent_session.c.id == session_id, t.agent_session.c.hunt_id == hunt_id,
                 t.agent_session.c.state == "running",
@@ -5141,7 +5354,7 @@ class Repo:
 
     def save_agent_tool_call(self, row: dict, *, owner_token: str | None = None) -> bool:
         with write_txn(self.engine) as connection:
-            self._fence_lease(connection, row["hunt_id"], owner_token)
+            self._fence_agent_lease(connection, row["hunt_id"], owner_token)
             result = connection.execute(insert(t.agent_tool_call).values(**row).on_conflict_do_nothing(
                 index_elements=["id"],
             ))
@@ -5168,7 +5381,7 @@ class Repo:
         if table is None:
             raise ValueError("unsupported agent output table")
         with write_txn(self.engine) as connection:
-            self._fence_lease(connection, row["hunt_id"], owner_token)
+            self._fence_agent_lease(connection, row["hunt_id"], owner_token)
             if max_count is not None and self._agent_cap_count(connection, table_name, row["hunt_id"]) >= max_count:
                 label = {"agent_link": "agent link", "agent_note": "agent note",
                          "agent_rule_request": "agent rule request"}[table_name]
@@ -5182,7 +5395,7 @@ class Repo:
                                    owner_token: str | None = None) -> bool:
         """Persist a hypothesis note and its append-only history event together."""
         with write_txn(self.engine) as connection:
-            self._fence_lease(connection, row["hunt_id"], owner_token)
+            self._fence_agent_lease(connection, row["hunt_id"], owner_token)
             if max_count is not None and self._agent_cap_count(connection, "agent_note", row["hunt_id"]) >= max_count:
                 raise ValueError("agent note limit reached")
             result = connection.execute(insert(t.agent_note).values(**row).on_conflict_do_nothing(
@@ -5204,7 +5417,7 @@ class Repo:
 
     def save_agent_assessment(self, row: dict, *, owner_token: str | None = None) -> bool:
         with write_txn(self.engine) as connection:
-            self._fence_lease(connection, row["hunt_id"], owner_token)
+            self._fence_agent_lease(connection, row["hunt_id"], owner_token)
             result = connection.execute(insert(t.agent_assessment).values(**row).on_conflict_do_nothing(
                 index_elements=["id"],
             ))
@@ -5338,10 +5551,12 @@ class Repo:
                 fingerprint.update(b"\n")
         return fingerprint.hexdigest()
 
-    def lane_counts(self, hunt_id: str) -> dict[str, int]:
+    def lane_counts(self, hunt_id: str, *, provenance: str | None = "deterministic") -> dict[str, int]:
+        query = select(t.candidate.c.lane, func.count()).where(t.candidate.c.hunt_id == hunt_id)
+        if provenance is not None:
+            query = query.where(t.candidate.c.provenance == provenance)
         with self.engine.connect() as c:
-            rows = c.execute(select(t.candidate.c.lane, func.count()).where(t.candidate.c.hunt_id == hunt_id)
-                             .group_by(t.candidate.c.lane)).all()
+            rows = c.execute(query.group_by(t.candidate.c.lane))
             return {lane: n for lane, n in rows}
 
     def audit(self, actor: str, action: str, hunt_id: str | None = None, detail: dict | None = None,

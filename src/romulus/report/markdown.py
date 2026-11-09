@@ -98,8 +98,10 @@ def _hypotheses_section(m: dict) -> list[str]:
 
 
 def _other_agent_notes_section(m: dict) -> list[str]:
+    visible = {finding["id"] for finding in m.get("findings", [])}
     notes = [item for item in (m.get("ai_agent") or {}).get("agent_notes") or []
-             if item.get("target_kind") not in {"finding", "hypothesis"}]
+             if item.get("target_kind") not in {"finding", "hypothesis"}
+             or (item.get("target_kind") == "finding" and item.get("target_id") not in visible)]
     if not notes:
         return []
     out = ["## Other AI notes", ""]
@@ -112,8 +114,9 @@ def _other_agent_notes_section(m: dict) -> list[str]:
 
 
 def outcome_sentence(m: dict) -> str:
-    n = len(m["findings"])
-    urgent_high = sum(1 for f in m["findings"] if f["lane"] in ("urgent", "high"))
+    deterministic = [finding for finding in m["findings"] if finding.get("provenance", "deterministic") != "agent"]
+    n = len(deterministic)
+    urgent_high = sum(1 for f in deterministic if f["lane"] in ("urgent", "high"))
     partial = m["execution_state"] != "completed_within_scope"
     if n:
         s = (f"ROMULUS reports {urgent_high} urgent/high finding(s) and {n - urgent_high} investigative lead(s) "
@@ -121,6 +124,9 @@ def outcome_sentence(m: dict) -> str:
     else:
         s = ("ROMULUS found no qualifying behavior in what it searched, listed below. That does not mean nothing "
              "is there.")
+    agent_count = sum(finding.get("provenance") == "agent" for finding in m["findings"])
+    if agent_count:
+        s += f" plus {agent_count} agent findings, unconfirmed."
     if partial:
         s += f" The hunt is {m['execution_state']}: some sources, windows or tasks were not fully searched."
     unresolved = {rule for gap in (m.get("coverage") or {}).get("gaps") or [] for rule in gap["rules"]}
@@ -204,7 +210,8 @@ def _render_body(m: dict, banner: str = BANNER) -> str:
             out.append("- Provenance: **Agent finding**, AI-generated and unconfirmed.")
         out += [f"- Entities: {esc(', '.join(f'{k}:{v} ({r})' for k, v, r in f['entities']))}", ""]
         if f.get("source_case_id"):
-            out += [("- Inves" + f"tigator chain: [case `{esc(f['source_case_id'])}`]"
+            # Compatibility for stored pre-M6 discovery origins.
+            out += [(f"- Investigator chain: [case `{esc(f['source_case_id'])}`]"
                      f"(#case-{_anchor(f['source_case_id'])})"), ""]
         if f.get("source_anchor_id"):
             strength = link_strength.get(f.get("source_link_id"), "unknown-strength")

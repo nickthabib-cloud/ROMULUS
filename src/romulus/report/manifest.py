@@ -679,7 +679,7 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
             findings[-1]["fleet_hosts"] = repo.snapshot_candidate_hosts(
                 c["id"], hunt_id, expected_count=gates["_fleet_host_count"],
                 complete=gates.get("_fleet_hosts_complete", False), expected_candidate=c)
-    lane_counts = Counter(c["lane"] for c in cands)
+    lane_counts = Counter(c["lane"] for c in cands if c.get("provenance", "deterministic") != "agent")
     with repo.engine.connect() as conn:
         tasks = conn.execute(select(t.task.c.state, func.count()).where(t.task.c.hunt_id == hunt_id)
                              .group_by(t.task.c.state)).all()
@@ -793,7 +793,7 @@ def _ai_agent(repo: Repo, hunt_id: str, hunt_manifest: dict) -> dict:
                 "provider": (run or {}).get("provider") or {}},
         "usage": shown,
         "hypotheses": hypotheses,
-        "agent_findings": len(agent_findings),
+        "agent_findings": dict(Counter(row["lane"] for row in agent_findings)),
         "agent_links": repo.agent_links(hunt_id),
         "agent_notes": _group_agent_notes(repo.agent_notes(hunt_id)),
         "rule_requests": repo.agent_rule_requests(hunt_id),
@@ -831,8 +831,16 @@ def _ai_assessment(repo: Repo, hunt_id: str) -> dict | None:
                   f"{model.get('provider', 'unknown')}/{model.get('model_reported') or model.get('model_requested') or 'unknown'}."
                   if source == "agent" else
                   f"Template narrative: no AI assessment was produced ({(repo.agent_run(hunt_id) or {}).get('reason') or 'not available'}).")
+        stale = source == "agent" and (
+            any(session.get("ended_at") and _as_utc(session["ended_at"]) > _as_utc(row["created_at"])
+                for session in repo.agent_sessions(hunt_id) if session["purpose"] in {"orient", "investigate"})
+            or any(_as_utc(hypothesis["updated_at"]) > _as_utc(row["created_at"])
+                   for hypothesis in repo.agent_hypotheses(hunt_id)))
+        if stale:
+            header = ("Prior AI assessment: investigation changed after this assessment; not current. "
+                      "The prior body is retained for review.")
         return {"source": source, "header": header, "model": model, "body": row["body"],
-                "checker": row["checker"], "revision": row["revision"]}
+                "checker": row["checker"], "revision": row["revision"], **({"stale": True} if stale else {})}
     # Preserve the byte-for-byte renderer output for hunts that predate the persisted agent phase.
     # New hunts always have an agent_run row and receive their deterministic template in this path.
     if repo.agent_run(hunt_id) is None:
@@ -965,6 +973,17 @@ def canonical_manifest(repo: Repo, hunt_id: str, actor: str = "canonical") -> di
     ], include_agent_links=False)
     canonical["incident_graph"] = canonicalize(deterministic_graph)
     canonical["incident_graph"].pop("agent_links", None)
+    # Canonical integrity is part of the deterministic floor, just like graph membership.
+    broken_findings = sum(1 for finding in deterministic_views for citation in finding["citations"]
+                          if citation["status"].startswith("broken"))
+    broken_incidents = _broken_investigation_citations(repo, deterministic_graph)
+    canonical["integrity"].update({
+        "broken_citations": broken_findings, "broken_incident_citations": len(broken_incidents),
+        "broken_incident_event_ids": canonicalize(broken_incidents[:50]),
+        "finalizable": not broken_findings and not broken_incidents
+                       and not canonical["integrity"]["broken_investigation_citations"]
+                       and not canonical["integrity"].get("incomplete_fleet_host_lists", 0),
+    })
     canonical.pop("ai_agent", None)
     canonical.pop("ai_assessment", None)
     canonical.pop("banners", None)

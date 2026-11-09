@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from time import monotonic
 
-from romulus.agent.admission import AgentAdmission
+from romulus.agent.admission import AgentAdmission, typed_alias_arguments
 from romulus.agent.assessment import run_assessment, template_assessment
 from romulus.agent.dossier import build_dossier
 from romulus.agent.provider import (
@@ -29,7 +29,7 @@ from romulus.agent.toolbox import Toolbox
 from romulus.config import Settings
 from romulus.report.incidents import build_incident_graph
 from romulus.store.db import digest, utcnow
-from romulus.store.repo import Repo
+from romulus.store.repo import Repo, is_lease_lost
 
 
 @dataclass
@@ -149,7 +149,7 @@ def _store_template(repo: Repo, hunt_id: str, reason: str, *, owner_token=None) 
     existing = repo.agent_assessments(hunt_id)
     if existing:
         latest = existing[-1]
-        if latest.get("source") == "template":
+        if latest.get("source") in {"template", "agent"}:
             return latest
     template = template_assessment(repo, hunt_id, reason)
     revision = len(existing) + 1
@@ -159,27 +159,42 @@ def _store_template(repo: Repo, hunt_id: str, reason: str, *, owner_token=None) 
     return row
 
 
+def _finalize(repo: Repo, hunt_id: str, result: AgentPhaseResult, *, started_at=None,
+              owner_token=None) -> AgentPhaseResult:
+    repo.finalize_agent_run(hunt_id, {
+        "state": result.state, "reason": result.reason, "prompt_digests": result.prompt_digests,
+        "provider": result.provider, "started_at": started_at, "ended_at": utcnow(),
+    }, owner_token=owner_token, summary=result.as_dict())
+    return result
+
+
 def skip_agent_phase(settings: Settings, repo: Repo, hunt_id: str, reason: str, *, provider: dict | None = None,
                      prompt_digests: dict | None = None, owner_token=None) -> AgentPhaseResult:
     """Record an off or unavailable phase without touching deterministic hunt state."""
-    repo.save_agent_run({"hunt_id": hunt_id, "state": "skipped", "reason": reason[:500],
-                         "prompt_digests": prompt_digests or {}, "provider": provider or {},
-                         "started_at": None, "ended_at": utcnow()}, owner_token=owner_token)
     _store_template(repo, hunt_id, reason, owner_token=owner_token)
-    return AgentPhaseResult("skipped", reason, prompt_digests or {}, provider or {},
-                            usage=repo.agent_usage(hunt_id))
+    result = AgentPhaseResult("skipped", reason[:500], prompt_digests or {}, provider or {},
+                              usage=repo.agent_usage(hunt_id))
+    return _finalize(repo, hunt_id, result, owner_token=owner_token)
 
 
 def fail_agent_phase(repo: Repo, hunt_id: str, reason: str, *, owner_token=None) -> dict:
     existing = repo.agent_run(hunt_id) or {}
-    repo.save_agent_run({"hunt_id": hunt_id, "state": "failed", "reason": reason[:500],
-                         "prompt_digests": existing.get("prompt_digests") or {},
-                         "provider": existing.get("provider") or {},
-                         "started_at": existing.get("started_at") or utcnow(), "ended_at": utcnow()},
-                        owner_token=owner_token)
-    _store_template(repo, hunt_id, reason, owner_token=owner_token)
-    return AgentPhaseResult("failed", reason, existing.get("prompt_digests") or {},
-                            existing.get("provider") or {}, usage=repo.agent_usage(hunt_id)).as_dict()
+    try:
+        _store_template(repo, hunt_id, reason, owner_token=owner_token)
+    except Exception as exc:  # noqa: BLE001 - fallback persistence must never fail the detection run.
+        if is_lease_lost(exc):
+            return AgentPhaseResult("partial", "lease_lost", {}, {}).as_dict()
+        reason = f"{reason}; template_error:{type(exc).__name__}"[:500]
+    result = AgentPhaseResult("failed", reason[:500], existing.get("prompt_digests") or {},
+                              existing.get("provider") or {}, usage=repo.agent_usage(hunt_id))
+    try:
+        return _finalize(repo, hunt_id, result, started_at=existing.get("started_at") or utcnow(),
+                         owner_token=owner_token).as_dict()
+    except Exception as exc:  # noqa: BLE001 - fallback persistence must never fail the detection run.
+        if is_lease_lost(exc):
+            return AgentPhaseResult("partial", "lease_lost", {}, {}).as_dict()
+        # An unavailable store cannot persist its own failure. Never bypass ownership to report it.
+        return result.as_dict()
 
 
 def _id(prefix: str) -> str:
@@ -228,9 +243,10 @@ def _controller_open_hypotheses(settings, repo, hunt_id: str, session_id: str, a
         existing_support.add(top["id"])
 
 
-def _hypothesis_context(repo: Repo, hunt_id: str, hypothesis: dict, summaries: list[dict]) -> dict:
+def _hypothesis_context(repo: Repo, hunt_id: str, hypothesis: dict, summaries: list[dict],
+                        *, owner_token=None) -> dict:
     from romulus.agent.aliases import AliasBook
-    aliases = AliasBook(repo, hunt_id)
+    aliases = AliasBook(repo, hunt_id, owner_token=owner_token)
     cites = repo.agent_hypothesis_cites(hypothesis_id=hypothesis["id"])
     mapped_cites = []
     kind_map = {"finding": "F", "evidence": "E", "link": "L", "agent_link": "A"}
@@ -259,14 +275,19 @@ def _summaries(repo: Repo, hunt_id: str, hypothesis_id: str) -> list[dict]:
 
 
 def _touched_entities(repo: Repo, hunt_id: str) -> set[str]:
-    alias_to_id = {row["alias"]: row["target_id"] for row in repo.agent_aliases(hunt_id) if row["kind"] == "N"}
     touched = set()
+    resolved: dict[str, str | None] = {}
     for call in repo.agent_tool_calls(hunt_id):
-        arguments = call.get("arguments")
-        serialized = json.dumps(arguments, sort_keys=True, default=str)
-        for alias, target_id in alias_to_id.items():
-            if alias in serialized:
-                touched.add(target_id)
+        if call.get("status") == "refused":
+            continue
+        for alias in typed_alias_arguments(call["name"], call.get("arguments")):
+            if not alias.startswith("N"):
+                continue
+            if alias not in resolved:
+                row = repo.agent_alias(hunt_id, alias)
+                resolved[alias] = row["target_id"] if row and row["kind"] == "N" else None
+            if resolved[alias] is not None:
+                touched.add(resolved[alias])
     return touched
 
 
@@ -274,7 +295,7 @@ def _priority(repo: Repo, hunt_id: str, hypothesis: dict, touched: set[str]) -> 
     supports = [row for row in repo.agent_hypothesis_cites(hypothesis_id=hypothesis["id"])
                 if row["role"] == "support" and row["target_kind"] == "finding"]
     finding_ids = [row["target_id"] for row in supports]
-    candidates = {row["id"]: row for row in repo.candidates(hunt_id) if row["id"] in finding_ids}
+    candidates = {row["id"]: row for row in repo.candidates_by_ids(finding_ids, hunt_id=hunt_id)}
     lane = max(({"urgent": 3, "high": 2, "lead": 1}.get(row["lane"], 0) for row in candidates.values()), default=0)
     untouched = sum(item not in touched for item in hypothesis.get("entity_ids") or [])
     return (-lane, -len(hypothesis.get("questions") or []), -untouched,
@@ -294,38 +315,14 @@ def _deterministic_tool_summary(calls: list[tuple[str, str]], changes: list[dict
 
 def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_gate: _BudgetGate,
                  toolbox_factory: Callable[[str], Toolbox], prompts: dict[str, str],
-                 *, purpose: str, hypothesis: dict | None = None, owner_token=None) -> dict:
+                 *, purpose: str, hypothesis: dict | None = None, owner_token=None,
+                 heartbeat: Callable[[], None] | None = None) -> dict:
     session_id = _id("as")
     now = utcnow()
     hypothesis_id = hypothesis["id"] if hypothesis else None
-    repo.save_agent_session({"id": session_id, "hunt_id": hunt_id, "hypothesis_id": hypothesis_id,
-                             "purpose": purpose, "state": "running", "tool_calls": 0, "summary": "",
-                             "started_at": now, "ended_at": None}, owner_token=owner_token)
-    if hypothesis_id:
-        repo.increment_agent_hypothesis_sessions(hypothesis_id, hunt_id, owner_token=owner_token)
-    toolbox = toolbox_factory(session_id)
-    admission = AgentAdmission(settings, repo, hunt_id, session_id, hypothesis_id=hypothesis_id,
-                               owner_token=owner_token, purpose=purpose)
-    admission.register(toolbox)
-    tools = _session_tools(toolbox)
-    system_text = prompts["system.md"]
-    if purpose == "orient":
-        orientation = prompts["orient.md"]
-        room = max(1, provider.context_tokens() - estimate_tokens(system_text + orientation) -
-                   provider.output_limit(ChatRequest(messages=[])) - 512) if provider.context_tokens() else 24_000
-        dossier = build_dossier(repo, hunt_id, token_budget=room)
-        user = {"message": "Dossier index page 1 of " + str(len(dossier.pages)) +
-                "; call list_findings for the rest.", "page": dossier.page(1)}
-        messages = [{"role": "system", "content": system_text + "\n\n" + orientation},
-                    {"role": "user", "content": json.dumps(user, sort_keys=True, ensure_ascii=False, default=str)}]
-    else:
-        context = _hypothesis_context(repo, hunt_id, hypothesis, _summaries(repo, hunt_id, hypothesis_id))
-        dossier = build_dossier(repo, hunt_id, token_budget=1000)
-        messages = [{"role": "system", "content": system_text + "\n\n" + prompts["investigate.md"]},
-                    {"role": "user", "content": json.dumps({"dossier_header": {
-                        "header": dossier.payload.get("header"), "scope": dossier.payload.get("scope")},
-                        "hypothesis": context}, sort_keys=True, ensure_ascii=False, default=str)}]
-    admission.issue_aliases("\n".join(str(message.get("content", "")) for message in messages))
+    heartbeat = heartbeat or (lambda: None)
+    session_saved = False
+    admission = None
     tool_history: list[tuple[str, str]] = []
     hypothesis_changes: list[dict] = []
     tool_count = 0
@@ -336,14 +333,70 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
     provider_unavailable = False
 
     def finish(state: str, final_summary: str, reason: str | None = None) -> dict:
-        repo.update_agent_session(session_id, hunt_id, {"state": state, "summary": final_summary[:2000],
-                                                         "tool_calls": tool_count, "ended_at": utcnow()},
-                                  owner_token=owner_token)
-        return {"id": session_id, "hypothesis_id": hypothesis_id, "purpose": purpose, "state": state,
-                "summary": final_summary[:2000], "reason": reason,
-                "provider_unavailable": provider_unavailable, "limits_hit": sorted(admission.limits_hit)}
+        outcome = {"id": session_id, "hypothesis_id": hypothesis_id, "purpose": purpose, "state": state,
+                   "summary": final_summary[:2000], "reason": reason,
+                   "provider_unavailable": provider_unavailable,
+                   "limits_hit": sorted(admission.limits_hit) if admission is not None else []}
+        if session_saved:
+            try:
+                repo.update_agent_session(session_id, hunt_id, {
+                    "state": state, "summary": final_summary[:2000], "tool_calls": tool_count, "ended_at": utcnow(),
+                }, owner_token=owner_token)
+            except Exception as exc:
+                if is_lease_lost(exc):
+                    raise
+                outcome.update(state="failed", reason="controller_error",
+                               summary=f"Controller error: {type(exc).__name__}: {exc}"[:2000])
+        return outcome
 
     try:
+        heartbeat()
+        repo.save_agent_session({"id": session_id, "hunt_id": hunt_id, "hypothesis_id": hypothesis_id,
+                                 "purpose": purpose, "state": "running", "tool_calls": 0, "summary": "",
+                                 "started_at": now, "ended_at": None}, owner_token=owner_token)
+        session_saved = True
+        if hypothesis_id:
+            repo.increment_agent_hypothesis_sessions(hypothesis_id, hunt_id, owner_token=owner_token)
+        toolbox = toolbox_factory(session_id)
+        admission = AgentAdmission(settings, repo, hunt_id, session_id, hypothesis_id=hypothesis_id,
+                                   owner_token=owner_token, purpose=purpose)
+        admission.register(toolbox)
+        tools = _session_tools(toolbox)
+        system_text = prompts["system.md"]
+        if purpose == "orient":
+            orientation = prompts["orient.md"]
+            shell = ChatRequest(messages=[{"role": "system", "content": system_text + "\n\n" + orientation},
+                                          {"role": "user", "content": ""}], tools=tools, tool_choice="auto")
+            context_limit = provider.context_tokens() or settings.agent_context_tokens
+            room = (max(1, int(context_limit * 0.85) - estimate_tokens(shell.prompt_text()) -
+                        provider.output_limit(shell) - 512) if context_limit else 24_000)
+            # Pagination estimates canonical data; measure the actual request envelope too.
+            for _ in range(4):
+                dossier = build_dossier(repo, hunt_id, token_budget=room, owner_token=owner_token)
+                page = dossier.page(1)
+                user = {"message": "Dossier index page 1 of " + str(len(dossier.pages)) +
+                        "; call list_findings for the rest.", "page": page}
+                messages = [{"role": "system", "content": system_text + "\n\n" + orientation},
+                            {"role": "user", "content": json.dumps(user, sort_keys=True, ensure_ascii=False,
+                                                                  default=str, separators=(",", ":"))}]
+                request = ChatRequest(messages=messages, tools=tools, tool_choice="auto")
+                excess = (estimate_tokens(request.prompt_text()) + provider.output_limit(request)
+                          - int(context_limit * 0.85)) if context_limit else 0
+                if excess <= 0:
+                    break
+                room = max(1, room - excess - 128)
+            if excess > 0:
+                return finish("context_full", "Orient input exceeds the available context budget.", "context_full")
+            admission.issue_aliases(page, source="dossier")
+        else:
+            context = _hypothesis_context(repo, hunt_id, hypothesis, _summaries(repo, hunt_id, hypothesis_id),
+                                          owner_token=owner_token)
+            dossier = build_dossier(repo, hunt_id, token_budget=1000, owner_token=owner_token)
+            admission.issue_aliases(context, source="hypothesis")
+            messages = [{"role": "system", "content": system_text + "\n\n" + prompts["investigate.md"]},
+                        {"role": "user", "content": json.dumps({"dossier_header": {
+                            "header": dossier.payload.get("header"), "scope": dossier.payload.get("scope")},
+                            "hypothesis": context}, sort_keys=True, ensure_ascii=False, default=str)}]
         while True:
             request = ChatRequest(messages=messages, tools=tools, tool_choice="auto")
             prompt_est = estimate_tokens(request.prompt_text())
@@ -369,9 +422,13 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                 return finish("budget", _deterministic_tool_summary(tool_history, hypothesis_changes),
                               f"budget:{exc.budget}")
             request.attempt_guard = lambda info, reservation=reservation: budget_gate.attempt_guard(reservation, info)
+            heartbeat()
+            started = monotonic()
             try:
                 result = provider.chat(request)
             except ProviderUnavailable as exc:
+                exc.duration_ms = max(int(getattr(exc, "duration_ms", 0) or 0),
+                                      int((monotonic() - started) * 1000))
                 budget_gate.settle(reservation, error=exc)
                 record_failure(repo, provider, hunt_id=hunt_id, purpose=purpose, request=request, error=exc,
                                limits=budget_gate.budget.limits, session_id=session_id, owner_token=owner_token)
@@ -379,11 +436,14 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                 return finish("failed", _deterministic_tool_summary(tool_history, hypothesis_changes),
                               f"budget:{reservation.retry_budget}" if reservation.retry_budget else
                               "provider_unavailable")
-            except Exception as exc:  # noqa: BLE001 - provider failures must end only this agent session.
+            except Exception as exc:
+                if is_lease_lost(exc):
+                    raise
                 budget_gate.settle(reservation)
                 return finish("failed", f"Provider call failed: {type(exc).__name__}: {exc}"[:2000],
                               "provider_error")
             budget_gate.settle(reservation, result=result)
+            heartbeat()
             model_call_id = record_call(repo, provider, hunt_id=hunt_id, purpose=purpose, request=request,
                                         result=result, limits=budget_gate.budget.limits, session_id=session_id,
                                         owner_token=owner_token)
@@ -444,6 +504,7 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                     if call.error:
                         tool_result = {"status": "refused", "errors": [call.error]}
                     else:
+                        heartbeat()
                         tool_result = toolbox.execute(call.name, call.arguments)
                 raw_args = call.raw_arguments.encode("utf-8")
                 if call.arguments is not None:
@@ -453,7 +514,7 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
                     stored_args = raw_args[:8192].decode("utf-8", errors="replace")
                     truncated = len(raw_args) > 8192
                 status = tool_result.get("status", "failed")
-                admission.issue_aliases(tool_result)
+                admission.issue_aliases(tool_result, tool_name=call.name)
                 repo.save_agent_tool_call({"id": _id("atc"), "hunt_id": hunt_id, "session_id": session_id,
                                            "seq": call_seq, "name": call.name, "arguments": stored_args,
                                            "arguments_truncated": truncated, "status": status,
@@ -476,7 +537,9 @@ def _run_session(settings: Settings, repo: Repo, hunt_id: str, provider, budget_
             if wrap_up_sent:
                 return finish("capped", _deterministic_tool_summary(tool_history, hypothesis_changes),
                               "wrap_up_not_finished")
-    except Exception as exc:  # noqa: BLE001 - controller faults must leave deterministic hunt results intact.
+    except Exception as exc:
+        if is_lease_lost(exc):
+            raise
         return finish("failed", f"Controller error: {type(exc).__name__}: {exc}"[:2000], "controller_error")
 
 
@@ -521,13 +584,58 @@ def _budget(settings: Settings, manifest: dict, repo: Repo, hunt_id: str, clock)
                                   wall_seconds_before=repo.agent_elapsed_ms(hunt_id) / 1000.0, clock=clock)
 
 
+def recover_agent_finalization(repo: Repo, hunt_id: str, *, owner_token=None) -> AgentPhaseResult | None:
+    """Finalize persisted finished work without a provider, prompts, or source preflight."""
+    existing = repo.agent_run(hunt_id)
+    sessions = repo.agent_sessions(hunt_id)
+    assessments = repo.agent_assessments(hunt_id)
+    if (existing and existing.get("state") == "running" and sessions and assessments
+            and not any(row["state"] == "running" for row in sessions)
+            and sessions[-1]["purpose"] == "assess"
+            and str(assessments[-1]["created_at"]) >= str(sessions[-1]["started_at"])
+            and all(str(row.get("ended_at") or row["started_at"]) <= str(assessments[-1]["created_at"])
+                    for row in sessions if row["purpose"] != "assess")):
+        # Session rows cannot prove that no admission cap was reached before the crash.
+        summary = str(sessions[-1].get("summary") or "")
+        reason = summary if summary.startswith("budget:") else "recovered_finished_sessions"
+        session_views = [{key: row.get(key) for key in
+                          ("id", "hypothesis_id", "purpose", "state", "summary", "tool_calls")} for row in sessions]
+        recovered = AgentPhaseResult("partial", reason,
+                                     existing.get("prompt_digests") or {},
+                                     existing.get("provider") or {}, session_views,
+                                     usage=repo.agent_usage(hunt_id))
+        return _finalize(repo, hunt_id, recovered, started_at=existing.get("started_at"),
+                         owner_token=owner_token)
+    return None
+
+
 def run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
                     toolbox_factory: Callable[[str], Toolbox], owner_token: str | None = None,
-                    clock: Callable[[], float] = monotonic) -> AgentPhaseResult:
-    """Run the persisted orient, investigate and assess phases without changing detection results."""
+                    clock: Callable[[], float] = monotonic,
+                    heartbeat: Callable[[], None] | None = None) -> AgentPhaseResult:
+    """Run bounded agent work; losing ownership never triggers another fenced write."""
+    try:
+        return _run_agent_phase(settings, repo, hunt_id, provider=provider, toolbox_factory=toolbox_factory,
+                                owner_token=owner_token, clock=clock, heartbeat=heartbeat)
+    except Exception as exc:
+        if not is_lease_lost(exc):
+            raise
+        return AgentPhaseResult("partial", "lease_lost", {}, {})
+
+
+def _run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
+                    toolbox_factory: Callable[[str], Toolbox], owner_token: str | None = None,
+                    clock: Callable[[], float] = monotonic,
+                    heartbeat: Callable[[], None] | None = None) -> AgentPhaseResult:
+    """Run persisted sessions before atomically finalizing their deterministic result projection."""
+    heartbeat = heartbeat or (lambda: None)
+    heartbeat()
     hunt = repo.get_hunt(hunt_id)
     if hunt is None:
         raise KeyError(hunt_id)
+    recovered = recover_agent_finalization(repo, hunt_id, owner_token=owner_token)
+    if recovered is not None:
+        return recovered
     prompts = _prompt_set()
     prompt_digests = {name: digest(text) for name, text in prompts.items()}
     provider_data = provider.describe()
@@ -547,43 +655,49 @@ def run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
     limits_hit: set[str] = set()
     reasons: list[str] = []
     assessment_stale = False
+    assessment_fault = False
+    orient = {}
     reportable_count = repo.candidate_count_lanes(hunt_id, ("urgent", "high", "lead"))
     orient_finished = any(row["purpose"] == "orient" and row["state"] == "finished"
                           for row in repo.agent_sessions(hunt_id))
     if reportable_count and not orient_finished:
         assessment_stale = True
         orient = _run_session(settings, repo, hunt_id, provider, gate, toolbox_factory, prompts,
-                              purpose="orient", owner_token=owner_token)
+                              purpose="orient", owner_token=owner_token, heartbeat=heartbeat)
         all_sessions.append(orient)
         limits_hit.update(orient.get("limits_hit") or [])
         if orient.get("reason"):
             reasons.append(orient["reason"])
         orient_rows = repo.agent_sessions(hunt_id, purpose="orient")
         latest_orient = orient_rows[-1] if orient_rows else None
-        if latest_orient:
+        if latest_orient and not str(orient.get("reason") or "").startswith("controller_error"):
             admission = AgentAdmission(settings, repo, hunt_id, latest_orient["id"], owner_token=owner_token,
                                        purpose="orient")
             _controller_open_hypotheses(settings, repo, hunt_id, latest_orient["id"], admission)
             limits_hit.update(admission.limits_hit)
 
     consecutive_outages = 1 if reportable_count and not orient_finished and orient.get("provider_unavailable") else 0
-    stop_scheduling = False
+    stop_scheduling = str(orient.get("reason") or "").startswith("controller_error")
     while not stop_scheduling:
         batch = _next_hypotheses(settings, repo, hunt_id)
         if not batch:
             break
         room = batch[:settings.agent_concurrency]
         assessment_stale = True
+        before = {row["id"]: int(row.get("sessions_run") or 0) for row in room}
         # Breadth-first round selection in _next_hypotheses means every selected hypothesis is distinct.
         completed = []
         with ThreadPoolExecutor(max_workers=len(room), thread_name_prefix="romulus-agent") as pool:
             futures = {pool.submit(_run_session, settings, repo, hunt_id, provider, gate, toolbox_factory, prompts,
-                                   purpose="investigate", hypothesis=hypothesis, owner_token=owner_token): hypothesis
+                                   purpose="investigate", hypothesis=hypothesis, owner_token=owner_token,
+                                   heartbeat=heartbeat): hypothesis
                        for hypothesis in room}
             for future in as_completed(futures):
                 try:
                     outcome = future.result()
-                except Exception as exc:  # noqa: BLE001 - isolate one session's controller fault.
+                except Exception as exc:
+                    if is_lease_lost(exc):
+                        raise
                     outcome = {"state": "failed", "reason": f"controller_error: {type(exc).__name__}: {exc}"}
                 completed.append(outcome)
                 all_sessions.append(outcome)
@@ -598,8 +712,14 @@ def run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
                     reasons.append(outcome["reason"])
         if stop_scheduling:
             reasons.append("provider_unavailable")
-        if any(row["reason"] and row["reason"].startswith("budget:") for row in completed):
-            reasons.extend(row["reason"] for row in completed if row.get("reason", "").startswith("budget:"))
+        if any(str(row.get("reason") or "").startswith("controller_error") for row in completed):
+            break
+        after = {row["id"]: int(row.get("sessions_run") or 0) for row in repo.agent_hypotheses(hunt_id)}
+        if not any(after.get(key, count) > count for key, count in before.items()):
+            reasons.append("no_progress")
+            break
+        if any(str(row.get("reason") or "").startswith("budget:") for row in completed):
+            reasons.extend(row["reason"] for row in completed if str(row.get("reason") or "").startswith("budget:"))
             break
         if _investigation_done(repo, hunt_id):
             break
@@ -609,8 +729,12 @@ def run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
         assessment = {"revision": existing_assessments[-1]["revision"], "body": existing_assessments[-1]["body"]}
     else:
         try:
-            assessment = run_assessment(settings, repo, hunt_id, provider, budget, owner_token=owner_token, clock=clock)
-        except Exception as exc:  # noqa: BLE001 - assessment errors use the deterministic template.
+            assessment = run_assessment(settings, repo, hunt_id, provider, budget, owner_token=owner_token,
+                                        clock=clock, heartbeat=heartbeat)
+        except Exception as exc:
+            if is_lease_lost(exc):
+                raise
+            assessment_fault = True
             assessment = None
             reasons.append(f"assessment_error:{type(exc).__name__}")
     if assessment is None:
@@ -624,17 +748,22 @@ def run_agent_phase(settings: Settings, repo: Repo, hunt_id: str, *, provider,
         if reason is None:
             reason = ("provider_unavailable" if "provider_unavailable" in reasons else
                       "context_full" if "context_full" in reasons else "assessment_not_produced")
-        _store_template(repo, hunt_id, reason, owner_token=owner_token)
+        try:
+            _store_template(repo, hunt_id, reason, owner_token=owner_token)
+        except Exception as exc:
+            if is_lease_lost(exc):
+                raise
+            assessment_fault = True
+            reasons.append(f"template_error:{type(exc).__name__}")
         reasons.append(reason)
     limits_hit.update(item for session in all_sessions for item in session.get("limits_hit", []))
-    state = "partial" if limits_hit or reasons or assessment is None else "completed"
-    if consecutive_outages >= 2:
+    state = "failed" if assessment_fault else "partial" if limits_hit or reasons or assessment is None else "completed"
+    if consecutive_outages >= 2 and not assessment_fault:
         state = "partial"
     reason = "; ".join(dict.fromkeys([*sorted(limits_hit), *reasons])) or None
     usage = repo.agent_usage(hunt_id)
     provider_data = {**provider_data, "models_reported": usage.get("models_reported", [])}
-    repo.save_agent_run({"hunt_id": hunt_id, "state": state, "reason": reason,
-                         "prompt_digests": prompt_digests, "provider": provider_data,
-                         "started_at": start, "ended_at": utcnow()}, owner_token=owner_token)
-    return AgentPhaseResult(state, reason, prompt_digests, provider_data, all_sessions,
-                            sorted(limits_hit), _unworked(repo, hunt_id), usage)
+    heartbeat()
+    result = AgentPhaseResult(state, reason, prompt_digests, provider_data, all_sessions,
+                              sorted(limits_hit), _unworked(repo, hunt_id), usage)
+    return _finalize(repo, hunt_id, result, started_at=start, owner_token=owner_token)

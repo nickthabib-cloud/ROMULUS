@@ -200,7 +200,12 @@ def redact_messages(messages: list[dict], settings: Settings) -> list[dict]:
 
 def parse_tool_arguments(call_id: str, name: str, raw) -> ToolCall:
     if isinstance(raw, dict):
-        return ToolCall(call_id, name, raw, json.dumps(raw, sort_keys=True))
+        try:
+            text = json.dumps(raw, sort_keys=True, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            return ToolCall(call_id, name, None, json.dumps(raw, sort_keys=True, default=str),
+                            f"arguments are not valid JSON: {exc}")
+        return ToolCall(call_id, name, raw, text)
     text = raw if isinstance(raw, str) else json.dumps(raw)
     try:
         value = json.loads(text, parse_constant=lambda constant: (_ for _ in ()).throw(
@@ -281,6 +286,7 @@ class ChatProvider:
         Returns its value, the final attempt's duration in ms, and the number of attempts; raises
         ProviderUnavailable when the retries run out. The one retry policy every adapter uses."""
         attempt = 0
+        started = time.monotonic()
         while True:
             attempt += 1
             t0 = time.monotonic()
@@ -299,6 +305,7 @@ class ChatProvider:
                     unavailable = ProviderUnavailable(redact_text(
                         reason, self.s))
                     unavailable.billed = billed_parts
+                    unavailable.duration_ms = int((time.monotonic() - started) * 1000)
                     unavailable.charged_by_guard = attempt_guard is not None
                     raise unavailable from None
                 self.sleep(self._backoff(failure.retry_after, attempt))

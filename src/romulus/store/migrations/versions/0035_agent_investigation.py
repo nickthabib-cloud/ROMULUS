@@ -75,6 +75,7 @@ def upgrade():
            Column("hunt_id", String, ForeignKey("hunt.id"), primary_key=True),
            Column("state", String, nullable=False), Column("reason", Text),
            Column("prompt_digests", JSON, nullable=False), Column("provider", JSON, nullable=False),
+           Column("lease_owner", String), Column("lease_until", DateTime(timezone=True)),
            Column("started_at", DateTime(timezone=True)), Column("ended_at", DateTime(timezone=True)),
            Column("updated_at", DateTime(timezone=True), nullable=False),
            constraints=(CheckConstraint("state IN ('pending','running','completed','partial','failed','skipped')",
@@ -190,15 +191,12 @@ def upgrade():
     connection.exec_driver_sql("""CREATE TRIGGER agent_hypothesis_event_no_update
         BEFORE UPDATE ON agent_hypothesis_event
         BEGIN SELECT RAISE(ABORT,'agent hypothesis history is append-only'); END""")
-    connection.exec_driver_sql("""CREATE TRIGGER agent_hypothesis_event_no_delete
-        BEFORE DELETE ON agent_hypothesis_event
-        BEGIN SELECT RAISE(ABORT,'agent hypothesis history is append-only'); END""")
+    # Whole-hunt deletion removes history child-first; replacement and mutation remain forbidden.
 
 
 def downgrade():
     connection = _begin()
-    for name in ("agent_hypothesis_event_no_replace", "agent_hypothesis_event_no_update",
-                 "agent_hypothesis_event_no_delete"):
+    for name in ("agent_hypothesis_event_no_replace", "agent_hypothesis_event_no_update"):
         connection.exec_driver_sql(f"DROP TRIGGER {name}")
     for name in ("agent_assessment", "agent_rule_request", "agent_note", "agent_link", "agent_tool_call",
                  "agent_hypothesis_cite", "agent_hypothesis_event"):
@@ -210,6 +208,14 @@ def downgrade():
         batch.create_check_constraint("ck_agent_alias_kind", "kind IN ('F','I','E','N','L')")
         batch.drop_index("ix_agent_alias_hunt_kind")
     op.create_index("ix_agent_alias_hunt_kind", "agent_alias", ["hunt_id", "kind"])
+    # AI findings must never reappear as deterministic findings after provenance is removed.
+    agent_candidates = "SELECT id FROM candidate WHERE provenance='agent'"
+    for table, column in (("disposition_event", "candidate_id"), ("expansion_link", "anchor_id"),
+                          ("expansion_anchor", "candidate_id"), ("candidate_host", "candidate_id"),
+                          ("zeek_link_budget", "anchor_id")):
+        connection.exec_driver_sql(f"DELETE FROM {table} WHERE {column} IN ({agent_candidates})")
+    connection.exec_driver_sql(f"DELETE FROM agent_alias WHERE kind='F' AND target_id IN ({agent_candidates})")
+    connection.exec_driver_sql("DELETE FROM candidate WHERE provenance='agent'")
     _change_candidate(connection, downgrade=True)
     with op.batch_alter_table("model_call") as batch:
         batch.drop_column("session_id")

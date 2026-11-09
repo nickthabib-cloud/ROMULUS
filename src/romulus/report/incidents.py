@@ -140,6 +140,12 @@ def _entity_id(kind: str, value: str) -> str:
 def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict], *, include_agent_links: bool = True) -> dict:
     """Observed expansion edges form components; inferred edges remain visible suggestions."""
     rules = hunt_rule_metadata(repo, hunt_id)
+    stored_by_id = {finding["id"]: (repo.candidate(finding["id"]) if hasattr(repo, "candidate") else None)
+                    for finding in findings}
+    agent_findings = [finding for finding in findings
+                      if finding.get("provenance", (stored_by_id[finding["id"]] or {}).get("provenance")) == "agent"]
+    agent_ids = {finding["id"] for finding in agent_findings}
+    findings = [finding for finding in findings if finding["id"] not in agent_ids]
     finding_by_id = {finding["id"]: finding for finding in findings}
     attack_by_finding, tactics_by_finding = {}, {}
     nodes = [{
@@ -160,7 +166,7 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict], *, incl
     for finding in findings:
         if finding.get("source_link_id"):
             children[finding["source_link_id"]].append(finding["id"])
-        stored = repo.candidate(finding["id"]) if hasattr(repo, "candidate") else None
+        stored = stored_by_id[finding["id"]]
         explicit_attack = finding.get('attack') or ((stored or {}).get('gate_results') or {}).get('_attack')
         rule = rules.get(finding['rule_id'])
         attack = tuple(explicit_attack or getattr(rule, 'attack', ()))
@@ -178,7 +184,9 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict], *, incl
             findings_by_event[event_id].add(finding["id"])
     links = []
     edges = []
-    for row in sorted(repo.expansion_links(hunt_id), key=lambda item: (
+    expansion_rows = repo.expansion_links(hunt_id)
+    expansion_by_id = {row["id"]: row for row in expansion_rows}
+    for row in sorted(expansion_rows, key=lambda item: (
             item["anchor_id"], item["link_type"], item["window_start"], item["id"])):
         targets = set(children.get(row["id"], []))
         for event_id in row["event_ids"]:
@@ -310,5 +318,22 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict], *, incl
         incidents.append(incident)
     incidents.sort(key=lambda incident: (finding_by_id[incident["finding_ids"][0]]["observed_at"] is None,
                                         finding_by_id[incident["finding_ids"][0]]["observed_at"] or "", incident["id"]))
+    # Add AI-only nodes and citation relationships after deterministic membership and narratives are fixed.
+    if include_agent_links:
+        for finding in agent_findings:
+            stored = stored_by_id[finding["id"]] or finding
+            node = {"id": finding["id"], "kind": "finding", "lane": finding["lane"],
+                    "observed_at": finding["observed_at"], "rule_id": finding["rule_id"],
+                    "provenance": "agent", "style": "agent", "incident_role": "hypothesis"}
+            nodes = [item for item in nodes if item["id"] != finding["id"]]
+            nodes.append(node)
+            event_ids = set(stored.get("event_ids") or [])
+            targets = {item for eid in event_ids for item in findings_by_event.get(eid, ())}
+            targets.update(link["anchor_finding_id"] for link in links
+                           if event_ids.intersection(expansion_by_id[link["id"]]["event_ids"]))
+            for target in sorted(targets & finding_by_id.keys()):
+                edges.append({"id": f"agent-cite:{finding['id']}:{target}", "from": finding["id"], "to": target,
+                              "link_id": None, "link_type": "cited_evidence", "style": "agent",
+                              "kind": "agent_hypothesis", "incident_role": "hypothesis"})
     return {"nodes": nodes, "edges": edges, "links": links, "agent_links": agent_links,
             "incidents": incidents}

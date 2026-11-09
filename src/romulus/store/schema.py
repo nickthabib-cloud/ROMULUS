@@ -389,6 +389,8 @@ agent_run = Table(
     Column("reason", Text),
     Column("prompt_digests", JSON, nullable=False),
     Column("provider", JSON, nullable=False),
+    Column("lease_owner", String),
+    Column("lease_until", DateTime(timezone=True)),
     Column("started_at", DateTime(timezone=True)),
     Column("ended_at", DateTime(timezone=True)),
     Column("updated_at", DateTime(timezone=True), nullable=False),
@@ -1351,3 +1353,13 @@ Index("ix_source_profile_catalog_latest", source_profile.c.target, source_profil
       source_profile.c.id.desc())
 Index("ix_sigma_catalog_status_id", sigma_rule.c.status, sigma_rule.c.id)
 Index("ix_audit_catalog_action_hunt", audit_event.c.action, audit_event.c.hunt_id)
+
+# History can be removed with its hunt, but cannot be overwritten or changed in place.
+for _trigger in (
+    """CREATE TRIGGER agent_hypothesis_event_no_replace BEFORE INSERT ON agent_hypothesis_event
+       WHEN EXISTS(SELECT 1 FROM agent_hypothesis_event WHERE id=NEW.id)
+       BEGIN SELECT RAISE(ABORT,'agent hypothesis history is append-only'); END""",
+    """CREATE TRIGGER agent_hypothesis_event_no_update BEFORE UPDATE ON agent_hypothesis_event
+       BEGIN SELECT RAISE(ABORT,'agent hypothesis history is append-only'); END""",
+):
+    event.listen(agent_hypothesis_event, "after_create", DDL(_trigger).execute_if(dialect="sqlite"))
