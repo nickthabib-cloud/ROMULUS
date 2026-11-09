@@ -72,6 +72,46 @@ _WINDOWS_TIER_LINKS = {
     (tier, label): links for tier, links, label in WINDOWS_TIER_ADDITIONS
 }
 
+# A sweep partition cell in one of these states evaluated every record of the rule's families in that partition; any
+# other state (partial, failed, planned, split, not applicable, unsupported) leaves its records to expansion's own
+# judgement.
+SWEPT_COMPLETE = frozenset({"matched", "positive_only", "evaluated_complete", "no_match_complete"})
+# Rules whose sweep coverage index is held while expansion runs (the least recently used is dropped and read again).
+SWEPT_RULES_HELD = 8
+# Task ids whose kind (a sweep read of this hunt or not) is held while expansion runs.
+SWEEP_TASKS_HELD = 4096
+# Reader-lineage lookups for hash reads whose only open question is their lineage. A provisioning or upgrade run
+# reads the hash files from a handful of debconf, dpkg-preconfigure or service processes; 16 distinct readers per
+# anchor covers such a run with room, while each lookup spends the expansion's shared source-query budget at its
+# two-query floor, so one anchor's lookups never take more than a few links' worth. Past the cap a read stays high.
+LINEAGE_FETCHES_PER_ANCHOR = 16
+LINEAGE_FETCH_QUERY_CAP = 2
+# Reader processes whose fetched lineage is held for the rest of the run (least recently used dropped).
+LINEAGE_CACHE_HELD = 1024
+
+
+def _cell_span(partition: str) -> tuple[datetime, datetime] | None:
+    """A sweep partition key's (start, end); None for a link, window or other non-time partition."""
+    start, sep, end = str(partition).partition("/")
+    if not sep:
+        return None
+    try:
+        return _utc(datetime.fromisoformat(start)), _utc(datetime.fromisoformat(end))
+    except ValueError:
+        return None
+
+
+def _target_names(target: str, index: str) -> bool:
+    """Whether a record read from `index` belongs to a configured sweep target: the target's own name or one of its
+    comma-separated index patterns, with no exclusion pattern matching it. An alias cannot be resolved here, so its
+    records are not placed (expansion judges them itself)."""
+    from fnmatch import fnmatchcase
+    parts = [part.strip() for part in str(target).split(",") if part.strip()]
+    if any(part.startswith("-") and fnmatchcase(index, part[1:]) for part in parts):
+        return False
+    return any(not part.startswith("-") and fnmatchcase(index, part) for part in parts)
+
+
 def _retain_smallest[T](mapping: dict[str, T], token: str, value: T, limit: int, *, rank=None) -> bool:
     """Keep the lexicographically first unique tokens in fixed space; return whether one fell outside it."""
     if token in mapping:
@@ -224,6 +264,17 @@ class ExpansionEngine:
         # records in all; variants share those event objects.
         self._plans: OrderedDict[str, _AnchorPlan] = OrderedDict()
         self._plan_events = 0
+        # rule id -> its sweep partition cells (target, start, end, complete), for SWEPT_RULES_HELD rules at most
+        self._swept_cells: OrderedDict[str, dict] = OrderedDict()
+        self._sweep_tasks: OrderedDict[str, bool] = OrderedDict()
+        # records inside a complete sweep cell that the sweep did not store, so judged here as any unswept record
+        self.unproven_swept = 0
+        # Reader-lineage lookups: (host, boot, pid) -> (lineage record ids, why unavailable), the most recent
+        # LINEAGE_CACHE_HELD; lookups made per anchor; queries spent since the run loop last counted them.
+        self._lineage_cache: OrderedDict[tuple, tuple[list[str], str | None]] = OrderedDict()
+        self._lineage_fetches: dict[str, int] = defaultdict(int)
+        self._lineage_spend = 0
+        self._query_count = 0
 
     def _events(self, ids: list[str]) -> list[TypedEvent]:
         """Stored records, with the boot the hunt's map places them in when they carry none (a sweep record read
@@ -908,35 +959,330 @@ class ExpansionEngine:
         # immediately. Context rules are judged once, after expansion ends, by finalize_context.
         events = self._events(result.event_ids)
         published = []
+        reach = {"anchor_id": candidate["id"], "link_id": result.id, "link_type": result.link_type,
+                 "strength": result.strength}
+
+        def publish(playbook, match, sweep_group=None, defer=True):
+            # The finding stands on its own cited records and keeps its machine lane. Only its relation to the
+            # anchor may be a hypothesis.
+            mark_hypothesis_relation(match, anchor_id=candidate["id"], link_type=result.link_type,
+                                     link_id=result.id, strength=result.strength)
+            if sweep_group is not None:
+                # an earlier fold of this link may have revised the group: fold into what is stored now
+                sweep_group = self.repo.candidate(sweep_group["id"]) or sweep_group
+            row = publish_match(
+                self.repo, self.hunt_id, playbook, match, result.task_ids[0] if result.task_ids else None, {},
+                source_anchor_id=candidate["id"], source_link_id=result.id, owner_token=self.owner_token,
+                zeek_context=events, zeek_context_ids=result.evidence_ids, context_reach=dict(reach),
+                sweep_group=sweep_group, defer_to_sweep=defer,
+            )
+            if row is not None:
+                published.append(row)
+
+        for playbook in self._direct_pack():
+            rule_events, context, notes = events, frozenset(), {}
+            if hasattr(playbook, "lineage_missing"):
+                # Hash reads whose only open question is their reader's lineage: fetch it and judge them with it.
+                rule_events, context, notes = self._with_reader_lineage(playbook.id, candidate["id"], events)
+                playbook.observe_only = context
+            matches = playbook.consume(rule_events)
+            if not matches:
+                continue
+            for match in matches:
+                match.notes.extend(notes.get(match.group_key, []))
+            # The rule ran once over every record of the link, as without the sweep check. A match whose every
+            # subject record the sweep is proven to have judged, and for which the sweep published a group, only adds
+            # this reach to that group at the sweep's lane; every other match is published as before (failing toward
+            # high), including one the sweep could not have made because it never saw its records together.
+            per_record = hasattr(playbook, "match_each")
+            if per_record:
+                subjects = [event for event in rule_events if event.id not in context]
+            else:
+                wanted = {event.id for match in matches for event in match.events if event.id not in match.context_ids}
+                subjects = [event for event in rule_events if event.id in wanted]
+            proven = self._swept_ids(playbook, subjects)
+            if not proven:
+                for match in matches:
+                    publish(playbook, match)
+                continue
+            if not per_record:
+                for match in matches:
+                    subject = {event.id for event in match.events if event.id not in match.context_ids}
+                    group = self._sweep_group(playbook, match) if subject and subject <= proven else None
+                    # the sweep's lane stands unless the reach's own judgment of these records is higher
+                    publish(playbook, match, sweep_group=group,
+                            defer=group is None or not self._higher(match, group))
+                continue
+            # A rule that folds records per typed shape places each proven record in the group the sweep published
+            # for it (records the sweep split across lanes are never merged); the rest are judged here as before.
+            folds, folded = self._swept_folds(playbook, rule_events, proven)
+            if not folded:
+                for match in matches:
+                    publish(playbook, match)
+                continue
+            for group, defer, match in folds:
+                publish(playbook, match, sweep_group=group, defer=defer)
+            for match in self._judge(playbook.id, rule_events,
+                                     lambda event, folded=folded, context=context:
+                                     event.id not in folded and event.id not in context):
+                match.notes.extend(notes.get(match.group_key, []))
+                publish(self._rule(playbook.id), match)
+        published.extend(publish_windows_link_context(self.repo, self.hunt_id, candidate, result, events,
+                                                      owner_token=self.owner_token))
+        self.repo.mark_expansion_link_evaluated(result.id, owner_token=self.owner_token)
+        return published
+
+    def _direct_pack(self) -> list:
         pack = bind_windows_site(fresh_direct_pack(), getattr(getattr(self.fetcher, "executor", None), "site_facts", None))
         # The same verified re-read of cited lineage records the sweep's pack has, so a finding found here can rest
         # on its lineage exactly as one found in the sweep can.
         executor = getattr(self.fetcher, "executor", None)
         if getattr(executor, "client", None) is not None and getattr(executor, "contracts", None):
             bind_lineage_citation_loader(pack, LineageCitationFetcher(executor.client, executor.contracts).load)
-        for playbook in pack:
-            for match in playbook.consume(events):
-                # The finding stands on its own cited records and keeps its machine lane. Only its relation to
-                # the anchor may be a hypothesis.
-                mark_hypothesis_relation(
-                    match, anchor_id=candidate["id"], link_type=result.link_type,
-                    link_id=result.id, strength=result.strength,
-                )
-                row = publish_match(
-                    self.repo, self.hunt_id, playbook, match, result.task_ids[0] if result.task_ids else None, {},
-                    source_anchor_id=candidate["id"], source_link_id=result.id, owner_token=self.owner_token,
-                    zeek_context=events, zeek_context_ids=result.evidence_ids,
-                      context_reach={
-                          "anchor_id": candidate["id"], "link_id": result.id,
-                          "link_type": result.link_type, "strength": result.strength,
-                      },
-                )
-                if row is not None:
-                    published.append(row)
-        published.extend(publish_windows_link_context(self.repo, self.hunt_id, candidate, result, events,
-                                                      owner_token=self.owner_token))
-        self.repo.mark_expansion_link_evaluated(result.id, owner_token=self.owner_token)
-        return published
+        return pack
+
+    def _rule(self, rule_id: str):
+        """A fresh evaluator of one rule, set up as the direct pack sets it up."""
+        return next(playbook for playbook in self._direct_pack() if playbook.id == rule_id)
+
+    def _judge(self, rule_id: str, events: list[TypedEvent], judged) -> list:
+        """A fresh evaluator's matches over only the records `judged` accepts. A rule that reads other records as
+        context (`observe_only`) still reads them; otherwise records of its own families it may not judge are left
+        out."""
+        rule = self._rule(rule_id)
+        if hasattr(rule, "observe_only"):
+            rule.observe_only = frozenset(event.id for event in events if not judged(event))
+            return rule.consume(events)
+        own = set(rule.families) - set(rule.context_families)
+        return rule.consume([event for event in events if event.family not in own or judged(event)])
+
+    def _with_reader_lineage(self, rule_id: str, anchor_id: str, events: list[TypedEvent]):
+        """(the link's records plus fetched reader lineage, the ids of the fetched records (context only), notes per
+        high group key for reads whose lineage stayed unavailable). Only a read the rule says lacks nothing but its
+        lineage (`lineage_missing`: a packaged root Perl or Python, no login marker) is looked up, once per reader
+        process."""
+        probe = self._rule(rule_id)
+        probe.observe_only = frozenset(event.id for event in events)
+        probe.consume(events)                           # lineage only
+        held = {event.id for event in events}
+        added: dict[str, TypedEvent] = {}
+        notes: dict[str, list[str]] = defaultdict(list)
+        readers: dict[tuple, TypedEvent] = {}
+        for event in events:
+            if probe.lineage_missing(event):
+                readers.setdefault((event.host, event.get("host.boot.id"), event.get("process.pid")), event)
+        for key, event in readers.items():
+            ids, why = self._reader_lineage(anchor_id, key, event)
+            if why is not None:
+                group = json.dumps([event.host, str(event.get("process.executable")), str(event.get("file.path")),
+                                    "high"])
+                note = (f"Lineage for the reader (pid {key[2]} on {key[0]}) was not available to expansion: {why}; "
+                        "the read stays high.")
+                if note not in notes[group]:
+                    notes[group].append(note)
+                continue
+            added.update((record.id, record) for record in self._events([i for i in ids if i not in held]))
+        if not added:
+            return events, frozenset(), notes
+        merged = sorted([*events, *added.values()], key=lambda record: (record.ts, record.id))
+        return merged, frozenset(added), notes
+
+    def _reader_lineage(self, anchor_id: str, key: tuple, event: TypedEvent) -> tuple[list[str], str | None]:
+        """(the stored ids of the reader's process-lineage records, why they are unavailable or None)."""
+        cached = self._lineage_cache.get(key)
+        if cached is not None:
+            self._lineage_cache.move_to_end(key)
+            return cached
+        if self._lineage_fetches[anchor_id] >= LINEAGE_FETCHES_PER_ANCHOR:
+            return [], f"this anchor's {LINEAGE_FETCHES_PER_ANCHOR} reader-lineage lookups are spent"
+        if (reason := self._budget_reason(self._query_count + self._lineage_spend)) is not None:
+            return [], reason
+        fetch = getattr(self.fetcher, "fetch", None)
+        if fetch is None:
+            return [], "no lineage fetcher is available"
+        windows = expansion_windows(event.ts, self.window)
+        if not windows:
+            return [], "the read is outside the hunt window"
+        self._lineage_fetches[anchor_id] += 1
+        link_anchor = LinkAnchor(finding_id=anchor_id, ts=event.ts, host=event.host, event_ids=[event.id],
+                                 events=[event])
+        result = fetch(link_anchor, "process_lineage", windows[-1], query_cap=LINEAGE_FETCH_QUERY_CAP)
+        self._lineage_spend += result.query_spend
+        found = ((list(result.event_ids), None) if result.status == "complete" else
+                 ([], f"the lineage lookup was {result.status}"
+                      + (f" ({'; '.join(result.reasons)[:200]})" if result.reasons else "")))
+        self._lineage_cache[key] = found
+        while len(self._lineage_cache) > LINEAGE_CACHE_HELD:
+            self._lineage_cache.popitem(last=False)
+        return found
+
+    def _swept_folds(self, playbook, events: list[TypedEvent], swept: set[str]):
+        """([(the sweep's candidate, one match of the records this reach adds to it)], the ids of those records) for a
+        rule that judges records one at a time (`match_each`): each proven record goes to the group the sweep
+        published for it, so records the sweep split across lanes are never merged. A record whose group is not
+        decidable, or that the sweep put in no group, is not placed (the caller judges it as before)."""
+        from dataclasses import replace
+        rule = self._rule(playbook.id)
+        citing = self._sweep_citing(playbook.id, swept)
+        by_id = {event.id: event for event in events}
+        missing = getattr(rule, "lineage_missing", None)
+        placed: dict[tuple[str, bool], tuple[dict, list]] = {}
+        folded: set[str] = set()
+        for match in rule.match_each(events, swept):
+            subject = [event.id for event in match.events if event.id not in match.context_ids]
+            groups = {citing[event_id]["id"]: citing[event_id] for event_id in subject if event_id in citing}
+            if len(groups) == 1 and len(subject) == sum(event_id in citing for event_id in subject):
+                group = next(iter(groups.values()))
+                # The sweep's lane stands unless this reach's own judgment is higher for a reason other than a
+                # lineage it does not hold (a record it holds and the sweep did not, such as a script rewrite).
+                defer = (not self._higher(match, group)
+                         or (missing is not None
+                             and any(missing(by_id[event_id]) for event_id in subject if event_id in by_id)))
+                placed.setdefault((group["id"], defer), (group, []))[1].append(match)
+                folded.update(subject)
+        out = []
+        for (_group_id, defer), (group, matches) in placed.items():
+            matches.sort(key=lambda match: (match.ts, match.events[0].id))
+            records = list({event.id: event for match in matches for event in match.events
+                            if event.id not in match.context_ids}.values())
+            first, last = matches[0], matches[-1]
+            base = first if defer else min(matches, key=lambda match: LANE_ORDER.get(match.proposed_lane, 9))
+            out.append((group, defer, replace(
+                base, events=records, context_ids=set(),
+                predicate=[p for match in matches for p in match.predicate],
+                raw_copies={key: value for match in matches for key, value in match.raw_copies.items()},
+                aggregate_summary={"count": len(records), "peak": len(records), "episodes": 1,
+                                   "first": first.ts.timestamp(), "last": last.ts.timestamp()})))
+        return out, folded
+
+    def _higher(self, match, group: dict) -> bool:
+        """Whether a match's own decided lane is above the lane of the sweep's group."""
+        from romulus.decide.policy import decide
+        return LANE_ORDER.get(decide(match, self.hunt_id).lane, 9) < LANE_ORDER.get(group["lane"], 9)
+
+    def _cells(self, rule_id: str) -> dict[str, list[tuple[datetime, datetime, bool]]]:
+        """The rule's sweep partition cells per target, ordered by start, as (start, end, complete). Split, window and
+        link cells are not partitions a record was read in. Held for SWEPT_RULES_HELD rules (the least recently used
+        is dropped and read again when needed)."""
+        cells = self._swept_cells.get(rule_id)
+        if cells is None:
+            cells = defaultdict(list)
+            for row in self.repo.rule_cells(self.hunt_id, rule_id=rule_id):
+                span = _cell_span(row["partition"]) if row["state"] != "split" else None
+                target = str(row["target"])
+                if span is not None and target != "*" and ":" not in target.split(",")[0]:
+                    cells[target].append((span[0], span[1], row["state"] in SWEPT_COMPLETE))
+            cells = {target: sorted(rows) for target, rows in cells.items()}
+            self._swept_cells[rule_id] = cells
+            while len(self._swept_cells) > SWEPT_RULES_HELD:
+                self._swept_cells.popitem(last=False)
+        else:
+            self._swept_cells.move_to_end(rule_id)
+        return cells
+
+    def _swept_ids(self, playbook, events: list[TypedEvent]) -> set[str]:
+        """The records of this link the sweep is proven to have judged for this rule: each of its raw records was read
+        from a sweep target, in a partition whose cell for the rule is complete (no covering cell partial), and was
+        stored in this hunt by a sweep task. Bounded by the link's own records."""
+        from bisect import bisect_right
+        own = set(playbook.families) - set(playbook.context_families)
+        candidates = [event for event in events if event.family in own and event.raw]
+        if not candidates:
+            return set()
+        cells = self._cells(playbook.id)
+        out = set()
+        for event in candidates:
+            ts = _utc(event.ts)
+            covering = []
+            for ref in event.raw:
+                found = []
+                for target, rows in cells.items():
+                    if not _target_names(target, ref.target):
+                        continue
+                    # leaf partitions of a target do not overlap: the one starting last at or before ts
+                    at = bisect_right(rows, (ts, datetime.max.replace(tzinfo=UTC), True)) - 1
+                    if at >= 0 and rows[at][0] <= ts < rows[at][1]:
+                        found.append(rows[at][2])
+                covering.append(bool(found) and all(found))
+            if covering and all(covering):
+                out.add(event.id)
+        proven = self._stored_by_sweep([event for event in candidates if event.id in out])
+        # A complete cell does not prove its records were read: a record ingested after the sweep read the partition
+        # sits inside it unseen. Only a record the sweep itself stored is known to have been judged by it.
+        self.unproven_swept += len(out) - len(proven)
+        return proven
+
+    def _stored_by_sweep(self, events: list[TypedEvent]) -> set[str]:
+        """The records whose every raw copy was first stored in this hunt by a sweep task (a sweep stores the records
+        its findings cite, not every record it reads)."""
+        from romulus.store.repo import raw_id
+        wanted = {raw_id(ref.target, ref.native_id) for event in events for ref in event.raw}
+        first_task: dict[str, str | None] = {}
+        ordered = sorted(wanted)
+        for start in range(0, len(ordered), 500):
+            for row in self.repo.raw_records(ordered[start:start + 500]):
+                first_task[row["id"]] = row.get("first_task_id")
+        out = set()
+        for event in events:
+            tasks = [first_task.get(raw_id(ref.target, ref.native_id)) for ref in event.raw]
+            if tasks and all(task is not None and self._sweep_task(task) for task in tasks):
+                out.add(event.id)
+        return out
+
+    def _sweep_task(self, task_id: str) -> bool:
+        """Whether a task is one of this hunt's sweep partition reads (held for SWEEP_TASKS_HELD task ids)."""
+        known = self._sweep_tasks.get(task_id)
+        if known is None:
+            row = self.repo.task(task_id)
+            known = bool(row) and row["kind"] == "sweep" and row["hunt_id"] == self.hunt_id
+            self._sweep_tasks[task_id] = known
+            while len(self._sweep_tasks) > SWEEP_TASKS_HELD:
+                self._sweep_tasks.popitem(last=False)
+        else:
+            self._sweep_tasks.move_to_end(task_id)
+        return known
+
+    def _sweep_group(self, playbook, match) -> dict | None:
+        """The candidate the sweep published under this match's own group (or, without a group key, for its exact
+        records); None when the sweep published none, so the match is published as before."""
+        from romulus.decide.policy import candidate_group_id, candidate_id
+        cid = (candidate_group_id(playbook.id, match.group_key, self.hunt_id) if match.group_key
+               else candidate_id(match, self.hunt_id))
+        row = self.repo.candidate(cid)
+        if (row is None or row.get("source_case_id") is not None or row.get("source_anchor_id") is not None
+                or row["lane"] == "context"):
+            return None
+        return row
+
+    def _sweep_citing(self, rule_id: str, ids: set[str]) -> dict[str, dict]:
+        """record id -> the one sweep-published candidate of this rule that cites it, for the given records (a record
+        two of them cite is left out: its group is not decidable). A read-only scan of the rule's sweep candidates
+        that keeps only the wanted records."""
+        from sqlalchemy import select
+
+        from romulus.store import schema as tables
+        if not ids:
+            return {}
+        query = select(tables.candidate.c.id, tables.candidate.c.event_ids).where(
+            tables.candidate.c.hunt_id == self.hunt_id, tables.candidate.c.rule_id == rule_id,
+            tables.candidate.c.source_case_id.is_(None), tables.candidate.c.source_anchor_id.is_(None),
+            tables.candidate.c.lane != "context")
+        owners: dict[str, set[str]] = defaultdict(set)
+        with self.repo.engine.connect() as connection:
+            for candidate_id, event_ids in connection.execute(query):
+                for event_id in set(event_ids or ()) & ids:
+                    owners[event_id].add(candidate_id)
+        rows: dict[str, dict] = {}
+        out = {}
+        for event_id, candidates in owners.items():
+            if len(candidates) != 1:
+                continue
+            cid = next(iter(candidates))
+            if cid not in rows:
+                rows[cid] = self.repo.candidate(cid)
+            if rows[cid] is not None:
+                out[event_id] = rows[cid]
+        return out
 
     def _budget_reason(self, query_count: int) -> str | None:
         if query_count >= self.budget:
@@ -1053,7 +1399,13 @@ class ExpansionEngine:
                     actual_queries = getattr(getattr(self.fetcher, "executor", None), "source_queries", None)
                     query_count = (actual_queries if actual_queries is not None
                                    else query_count + result.query_spend)
+                self._query_count = query_count
                 published = self._evaluate(candidate, result)
+                spent, self._lineage_spend = self._lineage_spend, 0
+                if spent:
+                    # reader-lineage lookups made while judging the link spend the same source-query budget
+                    actual_queries = getattr(getattr(self.fetcher, "executor", None), "source_queries", None)
+                    query_count = actual_queries if actual_queries is not None else query_count + spent
                 slot.done, slot.stored = True, None
                 made_progress = True
                 if result.status != "complete":

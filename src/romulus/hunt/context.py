@@ -111,10 +111,12 @@ def _merge_boot_buckets(sessions: dict[tuple, dict]) -> dict[tuple, dict]:
     bucket."""
     merged: dict[tuple, dict] = {}
     for key, olds in merge_unknown_boot({key: [key] for key in sessions}, 1).items():
-        bucket = merged.setdefault(key, {"events": {}, "pairs": {}})
+        bucket = merged.setdefault(key, {"events": {}, "pairs": {}, "members": {}})
         for old in olds:
             bucket["events"].update(sessions[old]["events"])
             bucket["pairs"].update(sessions[old]["pairs"])
+            for event_id, pairs in sessions[old].get("members", {}).items():
+                bucket["members"].setdefault(event_id, set()).update(pairs)
     return merged
 
 
@@ -217,12 +219,17 @@ class _RuleReaches:
         if applicable:
             judged.consume_linked(anchor, link, link_events)
         self.coverage.append((anchor.id, _CellLink.of(link), judged.evaluated, judged.missing_required, applicable))
+        # A rule that divides a bucket itself (`split_bucket`) keys records without the anchor (`bucket_key`) and
+        # needs which reaches brought each record, so each part names only the reaches that reached it.
+        bucket_key = getattr(self.playbook_cls, "bucket_key", None)
         for event in eligible:
             event = held.setdefault(event.id, event)
-            skey = _session_of(event, anchor, link)
-            bucket = self.sessions.setdefault(skey, {"events": {}, "pairs": {}})
+            skey = bucket_key(event, anchor) if bucket_key else _session_of(event, anchor, link)
+            bucket = self.sessions.setdefault(skey, {"events": {}, "pairs": {}, "members": {}})
             bucket["events"][event.id] = event
             bucket["pairs"][(anchor.id, link.id)] = (anchor, link)
+            if bucket_key:
+                bucket["members"].setdefault(event.id, set()).add((anchor.id, link.id))
 
 
 def _finalize_rule(repo: Repo, hunt_id: str, reaches: _RuleReaches,
@@ -233,25 +240,38 @@ def _finalize_rule(repo: Repo, hunt_id: str, reaches: _RuleReaches,
     # One run per session over the union of its records; collect the admitted matches and which reaches fed them.
     admitted: dict[str, tuple] = {}                 # group key -> (match, decision, contributing pairs)
     contributing_reaches: set[tuple] = set()        # (anchor.id, link.id) that fed an admitted match
+    split = getattr(playbook_cls, "split_bucket", None)
     for skey in sorted(sessions, key=lambda key: tuple(str(part) for part in key)):
         bucket = sessions[skey]
-        pairs = [bucket["pairs"][key] for key in sorted(bucket["pairs"])]
-        rep_anchor, rep_link = _representative(pairs)
         union_events = sorted(bucket["events"].values(), key=lambda event: (event.ts, event.id))
-        session_admitted = False
-        for match in playbook_cls().consume_linked(rep_anchor, rep_link, union_events):
-            if any(event.get("observer.product")=="zeek" for event in match.events):
-                from itertools import chain, islice
+        # A rule may divide a bucket into parts (lineage bursts); each part is judged once, under the reaches that
+        # brought its own records.
+        for part_events, subject in (split(skey, union_events, bucket["members"]) if split
+                                     else [(union_events, None)]):
+            keys = (sorted(bucket["pairs"]) if subject is None
+                    else sorted({pair for event_id in subject for pair in bucket["members"].get(event_id, ())}))
+            if not keys:
+                continue
+            pairs = [bucket["pairs"][key] for key in keys]
+            rep_anchor, rep_link = _representative(pairs)
+            part_admitted = False
+            for match in playbook_cls().consume_linked(rep_anchor, rep_link, part_events):
+                if any(event.get("observer.product")=="zeek" for event in match.events):
+                    from itertools import chain, islice
 
-                from romulus.hunt.zeek_context import MAX_ROWS, attach
-                witnesses=chain(union_events,*(link.evidence_events for _anchor,link in pairs))
-                attach(match,list(islice(witnesses,MAX_ROWS+1)),limited=True)
-            decision = decide(match, hunt_id)
-            if decision.admitted:
-                admitted[match.group_key] = (match, decision, pairs)
-                session_admitted = True
-        if session_admitted:
-            contributing_reaches.update(bucket["pairs"])
+                    from romulus.hunt.zeek_context import MAX_ROWS, attach
+                    witnesses=chain(union_events,*(link.evidence_events for _anchor,link in pairs))
+                    attach(match,list(islice(witnesses,MAX_ROWS+1)),limited=True)
+                anchors = {anchor.id for anchor, _link in pairs}
+                if split and len(anchors) > 1:
+                    match.claim += (f" {len(anchors)} anchors reached these records ({len(pairs)} reaches); each "
+                                    "anchor and link is listed with the finding.")
+                decision = decide(match, hunt_id)
+                if decision.admitted:
+                    admitted[match.group_key] = (match, decision, pairs)
+                    part_admitted = True
+            if part_admitted:
+                contributing_reaches.update(keys)
 
     produced_ids = set()
     for _group_key, (match, decision, pairs) in sorted(admitted.items()):

@@ -26,7 +26,21 @@ from romulus.detect.bounded import StateBudget
 from romulus.detect.host import ExecLineage
 from romulus.detect.registry import bind_windows_site, fresh_direct_pack
 from romulus.evidence.auditd import AuditParseError, AuditRecord, parse_record
-from romulus.evidence.normalize import AUDIT_LOGIN_TYPES, normalize_hits
+from romulus.evidence.linux_catalog import (
+    AUDIT_RECORD,
+    LINUX_LOGICAL_DATASETS,
+    LOGICAL_FAMILIES,
+    logical_of,
+    match_shape,
+)
+from romulus.evidence.normalize import (
+    AUDIT_LOGIN_TYPES,
+    ELASTIC_DATASET,
+    audit_host,
+    audit_record_of,
+    is_elastic_suricata,
+    normalize_hits,
+)
 from romulus.evidence.typed import TypedEvent
 from romulus.evidence.windows_catalog import (
     WINDOWS_CHANNELS,
@@ -38,6 +52,7 @@ from romulus.evidence.windows_reassembly import ScriptBlockAssembler
 from romulus.evidence.zeek import zeek_record
 from romulus.evidence.zeek_catalog import ELASTIC, MALCOLM, SECURITY_ONION, ZEEK_LOGS
 from romulus.hunt.publish import publish_match
+from romulus.hunt.windows_filters import nxlog_windows_group
 from romulus.site import SiteFacts, absent_site_facts
 from romulus.sources.compile import time_unit
 from romulus.sources.es import ElasticClient, SourceError
@@ -52,7 +67,8 @@ MAX_EVENT_SUMMARIES = 50
 MAX_SUMMARY_FIELDS = 16
 MAX_PIVOT_PARTITIONS = 16
 MIN_PIVOT_SPLIT = timedelta(seconds=5)
-HOST_TIMELINE_DATASETS = ["linux.audit", "systemd.journal", "apache.access", "apache.error"]
+# The logical Linux datasets: a source query names them, and the compiler selects each one's shipper shapes.
+HOST_TIMELINE_DATASETS = list(LINUX_LOGICAL_DATASETS)
 SURICATA_TIMELINE_DATASETS = [
     "suricata.eve.alert", "suricata.eve.flow", "suricata.eve.netflow", "suricata.eve.dns",
     "suricata.eve.http", "suricata.eve.fileinfo", "suricata.eve.tls", "suricata.eve.ssh",
@@ -146,25 +162,8 @@ def _host_datasets(
     if family == "windows":
         return datasets_for_families(families) if families else WINDOWS_HOST_DATASETS
     if families:
-        by_family = {
-            "process_exec": ("linux.audit",),
-            "net_socket": ("linux.audit",),
-            "auth": ("linux.audit", "systemd.journal"),
-            "privilege_use": ("systemd.journal",),
-            "service_change": ("linux.audit", "systemd.journal"),
-            "account_change": ("linux.audit",),
-            "audit_config": ("linux.audit",),
-            "system_state": ("linux.audit",),
-            "file_change": ("linux.audit",),
-            "file_access": ("linux.audit",),
-            "kernel_module": ("linux.audit",),
-            "process_observed": ("linux.audit",),
-            "http_access": ("apache.access",),
-            "web_error": ("apache.error",),
-        }
-        selected = {
-            dataset for family in families for dataset in by_family.get(family, ())
-        }
+        # every logical dataset whose records can give one of the families
+        selected = {dataset for dataset, fed in LOGICAL_FAMILIES.items() if fed & set(families)}
         return tuple(dataset for dataset in HOST_TIMELINE_DATASETS if dataset in selected)
     return tuple(HOST_TIMELINE_DATASETS)
 
@@ -183,6 +182,10 @@ def _windows_source_groups(
         groups.append([Predicate(field="event.dataset", op="in", value=list(datasets))])
     if channels and _supports(contract, "event.channel", "in"):
         groups.append([Predicate(field="event.channel", op="in", value=list(channels))])
+    flat = nxlog_windows_group(contract) if groups else None
+    if flat is not None:
+        # NXLog's flat records name no dataset and may spell a channel in any case: selected by their shape
+        groups.append(flat)
     return groups
 
 
@@ -290,23 +293,22 @@ class _AuditParses:
         return found
 
 
-def _parse_once(parse: _AuditParses | None, record: dict, raw: str) -> AuditRecord:
-    return parse_record(raw) if parse is None else parse(record, raw)
+def _logical_inventory(datasets) -> set[str]:
+    """An inventory's dataset names, each Linux shipper name replaced by its logical dataset."""
+    return {logical_of(str(name)) or str(name) for name in datasets}
 
 
 def _audit_identity(record: dict, parse: _AuditParses | None = None) -> tuple | None:
-    """Return an audit event identity only when its authoritative record parses."""
+    """Return an audit event identity only when its authoritative record parses (a raw line, or a record a shipper
+    parsed into fields). An Auditbeat event document is an event by itself and has none."""
     source = record.get("_source") or {}
-    if _source_value(source, "event.dataset") != "linux.audit":
-        return None
-    raw = _source_value(source, "event.original") or source.get("message")
-    if not raw:
-        return None
     try:
-        parsed = _parse_once(parse, record, raw)
+        parsed = audit_record_of(record, parse)
     except AuditParseError:
         return None
-    return (_source_value(source, "host.name") or "", parsed.ts, parsed.serial)
+    if parsed is None:
+        return None
+    return (audit_host(source, parsed), parsed.ts, parsed.serial)
 
 
 def _normalization_groups(records: list[dict], parse: _AuditParses | None = None) -> list[list[dict]]:
@@ -326,14 +328,13 @@ def _normalization_groups(records: list[dict], parse: _AuditParses | None = None
 def _audit_types(records: list[dict], parse: _AuditParses | None = None) -> set[str] | None:
     types: set[str] = set()
     for record in records:
-        source = record.get("_source") or {}
-        raw = _source_value(source, "event.original") or source.get("message")
-        if not raw:
-            return None
         try:
-            types.add(_parse_once(parse, record, raw).type)
+            parsed = audit_record_of(record, parse)
         except AuditParseError:
             return None
+        if parsed is None:
+            return None
+        types.add(parsed.type)
     return types
 
 
@@ -343,7 +344,8 @@ def _prefilter_raw(records: list[dict], families: set[str], parse: _AuditParses 
     for group in _normalization_groups(records, parse):
         source = group[0].get("_source") or {}
         dataset = _source_value(source, "event.dataset") or ""
-        if dataset == "linux.audit":
+        linux = match_shape(source)
+        if linux is not None and linux[1].shape == AUDIT_RECORD:
             types = _audit_types(group, parse)
             if types is None:
                 selected.extend(group)
@@ -358,8 +360,11 @@ def _prefilter_raw(records: list[dict], families: set[str], parse: _AuditParses 
             try:
                 event_type = json.loads(raw or "").get("event_type")
             except (json.JSONDecodeError, AttributeError, TypeError):
-                selected.extend(group)
-                continue
+                if not is_elastic_suricata(source):
+                    selected.extend(group)
+                    continue
+                # Filebeat or the Agent indexed the parsed record without its line: its type is a parsed field
+                event_type = _source_value(source, "suricata.eve.event_type")
             family = _SURICATA_FAMILY.get(event_type)
             if family is None or family in families:
                 selected.extend(group)
@@ -542,6 +547,19 @@ NO_HOST_RECORD = "no host record carries host.ip"      # a complete lookup: no h
 HOST_AMBIGUOUS = "victim host ambiguous"               # a complete lookup: several hosts claim the address
 
 
+def _nxlog_mixed_coverage(contracts: dict[str, FieldContract], request: ToolRequest) -> list[PivotCoverage]:
+    """A Linux target that also holds NXLog's flat Windows records: pivots select its Linux datasets only (its
+    contract carries no Windows names for the flat records' values), so that shape is listed as not searched."""
+    args = request.arguments
+    reason = ("shape_not_searched:windows.nxlog:NXLog flat Windows records on a Linux target are not selected by "
+              "pivots")
+    return [PivotCoverage(target=target, dataset="windows.nxlog", start=args.start, end=args.end,
+                          status="partial", reasons=[reason], returned=0, total=None,
+                          unresolved_ranges=[_range(args.start, args.end, reason)])
+            for target, contract in contracts.items()
+            if contract.nxlog_mixed and not _is_network(target, contract)]
+
+
 def _link_task_kind(executor) -> str:
     """Keep borrowed executor methods compatible while separating agent link work."""
     return "agent_follow_link" if getattr(executor, "source_query_scope", None) == "agent" else "expansion_link"
@@ -565,8 +583,10 @@ class PivotExecutor:
         self.source_query_budget = source_query_budget
         self.source_query_scope = source_query_scope
         self.source_queries = 0
+        # a Linux shipper's dataset names are inventoried under the logical dataset that reads them
         self.dataset_inventory = {
-            target: tuple(sorted(datasets)) for target, datasets in (dataset_inventory or {}).items()
+            target: tuple(sorted(_logical_inventory(datasets)))
+            for target, datasets in (dataset_inventory or {}).items()
         }
         self.optimize_normalization = optimize_normalization
         self.raw_family_prefilter = optimize_normalization
@@ -689,7 +709,7 @@ class PivotExecutor:
                                     purpose=f"agent:{request.tool}:{dataset}",
                                 ))
                                 continue
-                            if dataset not in NETWORK_TIMELINE_DATASETS:
+                            if dataset not in NETWORK_TIMELINE_DATASETS and dataset != ELASTIC_DATASET:
                                 continue
                             intents.append(SearchIntent(
                                 kind="raw", target=target, window=window,
@@ -781,7 +801,9 @@ class PivotExecutor:
                     continue
                 if not _supports(contract, "event.dataset"):
                     continue
-                auth_datasets = ("systemd.journal",)
+                # the logical datasets other than the audit records that carry login lines (journal, syslog)
+                auth_datasets = tuple(dataset for dataset in LINUX_LOGICAL_DATASETS
+                                      if dataset != "linux.audit" and "auth" in LOGICAL_FAMILIES[dataset])
                 for dataset in auth_datasets:
                     auth_filters = [Predicate(field="event.dataset", op="eq", value=dataset)]
                     if args.entity.kind == "host":
@@ -847,7 +869,8 @@ class PivotExecutor:
     def plan(self, request: ToolRequest) -> tuple[list[SearchIntent], list[PivotCoverage]]:
         """Plan executable intents and every known unresolved dataset cell together."""
         intents = self._intents(request)
-        return intents, self._unsearchable_ip_coverage(request, intents)
+        return intents, [*self._unsearchable_ip_coverage(request, intents),
+                         *_nxlog_mixed_coverage(self.contracts, request)]
 
     @staticmethod
     def _intent_dataset(intent: SearchIntent) -> str | None:
@@ -879,12 +902,11 @@ class PivotExecutor:
             return []
         reasons = set()
         for record in records:
-            raw = _source_value(record.get("_source") or {}, "event.original")
-            if not raw:
-                continue
             try:
-                audit = parse_record(raw)
+                audit = audit_record_of(record)
             except AuditParseError:
+                continue
+            if audit is None:
                 continue
             address = audit.fields.get("addr")
             if (audit.type.startswith(("USER_", "CRED_"))
@@ -922,8 +944,8 @@ class PivotExecutor:
                         unresolved_ranges=[_range(args.start, args.end, reason)],
                     ))
                     continue
-                normalized = set([*NETWORK_TIMELINE_DATASETS, *ZEEK_LOGS_BY_TOKEN] if _is_network(target, contract)
-                                 else _host_datasets(contract))
+                normalized = set([*NETWORK_TIMELINE_DATASETS, ELASTIC_DATASET, *ZEEK_LOGS_BY_TOKEN]
+                                 if _is_network(target, contract) else _host_datasets(contract))
                 for dataset in inventoried:
                     if (target, dataset) in planned:
                         continue

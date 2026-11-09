@@ -1,6 +1,8 @@
 """Conservative source capability checks without expanding Sigma boolean expressions."""
 from __future__ import annotations
 
+from romulus.evidence.linux_catalog import with_logical
+
 
 def _combine(kind, states):
     if kind == 'or':
@@ -21,7 +23,8 @@ def _scope(rule, profile):
         if allowed and actual == 'unknown' and set(allowed) != {'linux', 'windows'} and 'unknown' not in allowed:
             return 'unknown', 'source OS scope is not recorded'
     if rule.get('datasets'):
-        delivered = set(profile.get('datasets', ()))
+        # a Linux shipper's dataset delivers the logical dataset rules name
+        delivered = with_logical(profile.get('datasets', ()))
         if not delivered:
             return 'unknown', 'native dataset inventory is not recorded'
         if not delivered.intersection(rule['datasets']):

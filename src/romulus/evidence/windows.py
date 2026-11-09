@@ -20,12 +20,17 @@ from xml.etree import ElementTree
 from romulus.evidence import rpc_catalog
 from romulus.evidence.community import community_id
 from romulus.evidence.typed import FieldValue, Outcome, RawRef, TypedEvent, event_id, fv
-from romulus.evidence.windows_catalog import WINDOWS_DATASETS, WindowsEventClass, lookup_event_class
+from romulus.evidence.windows_catalog import (
+    EVENT_CLASSES,
+    WINDOWS_DATASETS,
+    WindowsEventClass,
+    lookup_event_class,
+)
 
 if TYPE_CHECKING:
     from romulus.detect.bounded import Account, StateBudget
 
-WINDOWS_NORMALIZER = "windows-ecs@17"
+WINDOWS_NORMALIZER = "windows-ecs@18"
 # This is already far beyond what the 64 MiB assembler can retain at normal 4104 chunk sizes, while bounding every
 # completeness vector even when hostile metadata claims billions of parts.
 SCRIPT_BLOCK_MAX_PARTS = 4_096
@@ -334,7 +339,7 @@ class RecordIdContinuity:
         new_rows = 0
         self._cap()
         for record in records:
-            source = record.get("_source") or {}
+            source = windows_view(record.get("_source") or {})
             if not is_windows_source(source):
                 continue
             winlog = source.get("winlog") or {}
@@ -538,17 +543,303 @@ def _get(source: dict, path: str):
 
 
 def is_windows_source(source: dict) -> bool:
-    """Require an Elastic Agent Windows dataset or Winlogbeat's own agent marker."""
+    """Require an Elastic Agent Windows dataset, Winlogbeat's own agent marker, or NXLog's flat record shape."""
     datasets = (_get(source, "data_stream.dataset"), _get(source, "event.dataset"))
     winlogbeat = str(_get(source, "agent.type") or "").casefold() == "winlogbeat"
     return any(isinstance(dataset, str) and dataset.casefold() in WINDOWS_DATASETS for dataset in datasets) or (
-        winlogbeat and isinstance(source.get("winlog"), dict)
-    )
+        (winlogbeat or isinstance(source.get(NXLOG_ADAPTED), dict)) and isinstance(source.get("winlog"), dict)
+    ) or is_nxlog_windows(source)
+
+
+# ---------------------------------------------------------------------------------------------
+# NXLog im_msvistalog records (to_json(), shipped directly or through Logstash or Beats)
+# ---------------------------------------------------------------------------------------------
+# One flat JSON object per event: the event's System values under NXLog's names, and every EventData/UserData value
+# at the top level under the provider's own name (under EventData.<Name> or UserData.<Name> when NXLog's AddPrefix is
+# set). There is no winlog object and often no dataset; channel names keep the source's spelling ("security").
+# nxlog_to_winlog adapts such a record to the Winlogbeat layout this module reads; every typed value then cites the
+# record's own field.
+#
+# NXLog's own fields (the im_msvistalog reference's field list, with the fields its documented output also shows):
+# never event data. A provider's event-data name equal to one of these cannot be told from it and is read as NXLog's.
+NXLOG_ENVELOPE = frozenset({
+    "AccountName", "AccountType", "ActivityID", "Category", "Channel", "Domain", "ERROR_EVT_UNRESOLVED", "EventID",
+    "EventReceivedTime", "EventTime", "EventType", "EventXML", "ExecutionProcessID", "ExecutionThreadID", "Hostname",
+    "Keywords", "Level", "LevelValue", "Message", "Opcode", "OpcodeValue", "ProviderGuid", "RecordNumber",
+    "RelatedActivityID", "Severity", "SeverityValue", "SourceModuleName", "SourceModuleType", "SourceName", "Task",
+    "TaskValue", "ThreadID", "UserID", "Version", "raw_event",
+    # a computer-name spelling some pipelines write in place of Hostname
+    "Computer",
+})
+# What a shipping pipeline adds around the record (Logstash, Beats, NXLog's output modules): never event data.
+NXLOG_PIPELINE_FIELDS = frozenset({
+    "@timestamp", "@version", "@metadata", "agent", "beat", "data_stream", "ecs", "event", "fields", "host", "input",
+    "log", "message", "observer", "offset", "path", "port", "related", "tags", "type",
+    # a creation time some pipelines add beside EventTime; its zone is not stated, so it is never read as a time
+    "TimeCreated",
+})
+# The key an adapted record carries: the NXLog values the adapted layout has no place for.
+NXLOG_ADAPTED = "_nxlog"
+NXLOG_TIME_CAVEAT = "Time from the shipping pipeline; the event's own time was recorded without a zone."
+NXLOG_SHAPE = "windows.nxlog"
+NXLOG_OFFSET = "windows.nxlog.clock_offset:"
+# A Windows channel's dataset name, for tagging an NXLog record that cannot be read with the families it could hold;
+# any other channel could hold any Windows family.
+_NXLOG_CHANNEL_DATASETS = {
+    "security": "windows.security", "system": "windows.system",
+    "microsoft-windows-sysmon/operational": "windows.sysmon_operational",
+    "microsoft-windows-powershell/operational": "windows.powershell_operational",
+    "windows powershell": "windows.powershell",
+    "microsoft-windows-windows defender/operational": "windows.windows_defender",
+}
+_SCALAR = (str, int, float, bool)
+NXLOG_CATALOG_CHANNEL_CAVEAT = ("NXLog's Channel held the provider's own Channel event data (the log it names); the "
+                                "event's channel is the catalog's for its provider and event id")
+# The skip of an NXLog record whose provider and event id name a catalogued class but whose Channel names none: it is
+# counted against those classes' families (normalize.normalize_hits), never as an unread class.
+NXLOG_CHANNEL_SKIP = "NXLog record's Channel names no catalogued class of its provider and event id"
+# Classes whose own event data carry a "Channel" value (the Eventlog provider's log-cleared and service events).
+_NXLOG_CHANNEL_DATA_CLASSES = frozenset(("microsoft-windows-eventlog", code) for code in (104, 1100, 1102, 1104, 1108))
+
+
+def _by_provider_id() -> dict[tuple[str, int], tuple[WindowsEventClass, ...]]:
+    out: dict[tuple[str, int], tuple[WindowsEventClass, ...]] = {}
+    for event in EVENT_CLASSES:
+        key = (event.provider.casefold(), event.event_id)
+        out[key] = (*out.get(key, ()), event)
+    return out
+
+
+_CLASSES_BY_PROVIDER_ID = _by_provider_id()
+
+
+# NXLog's EventType is one of these severity names; Sysmon's registry events carry an event-data EventType of their own
+# ("SetValue", "CreateKey", ...), never one of them.
+NXLOG_EVENT_TYPES = frozenset({"CRITICAL", "ERROR", "AUDIT_FAILURE", "AUDIT_SUCCESS", "INFO", "WARNING", "VERBOSE"})
+
+
+def _nxlog_event_data_value(name: str, value: object) -> bool:
+    """Whether a value under one of NXLog's own names can only be a provider's event data, by NXLog's documented
+    value domain: an EventType outside NXLog's names, a Version that is text and not NXLog's integer (Sysmon's
+    "15.15"). Any other collision is read as NXLog's: the record does not say which value it kept."""
+    if name == "EventType":
+        return isinstance(value, str) and value not in NXLOG_EVENT_TYPES
+    if name == "Version":
+        return isinstance(value, str) and not value.strip().isdigit()
+    return False
+
+
+_NXLOG_AUDIT_TYPES = {"AUDIT_SUCCESS": "Audit Success", "AUDIT_FAILURE": "Audit Failure"}
+
+
+def _nxlog_keywords(keywords: object, event_type: object) -> list[str]:
+    """Winlogbeat's winlog.keywords from NXLog's: the 64-bit keyword mask (NXLog writes it as a signed decimal) in
+    the hexadecimal form Windows renders, and the audit result NXLog's EventType names. Both are exact; a record
+    whose two markers disagree is left to the normalizer, which then types its outcome as unknown."""
+    out = []
+    mask = None
+    if isinstance(keywords, int) and not isinstance(keywords, bool):
+        mask = keywords
+    elif isinstance(keywords, str):
+        text = keywords.strip()
+        with contextlib.suppress(ValueError):
+            mask = int(text, 16) if text.casefold().startswith("0x") else int(text)
+    if mask is not None and -(1 << 63) <= mask < (1 << 64):
+        out.append(f"0x{mask & ((1 << 64) - 1):016x}")
+    if isinstance(event_type, str) and event_type in _NXLOG_AUDIT_TYPES:
+        out.append(_NXLOG_AUDIT_TYPES[event_type])
+    return out
+
+
+def is_nxlog_windows(source: dict) -> bool:
+    """NXLog's flat Windows record: EventID, Channel, a computer name and a provider at the top level, no winlog."""
+    return (not isinstance(source.get("winlog"), dict) and source.get("EventID") is not None
+            and source.get("Channel") is not None and source.get("SourceName") is not None
+            and (source.get("Hostname") is not None or source.get("Computer") is not None))
+
+
+def _zoned_time(value: object) -> datetime | None:
+    """A time that names its zone, else None (a time without one is never read as UTC)."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def nxlog_to_winlog(source: dict) -> tuple[dict, dict[str, str]]:
+    """The Winlogbeat layout of an NXLog flat record, and the record's own field for each adapted path.
+
+    The channel keeps its spelling (the catalog matches channels without case, so "security" and "Security" are one
+    channel). Time: an EventTime that names its zone is the event's own time; one that does not is never read as UTC,
+    so the pipeline's @timestamp is used; with neither, the record cannot be placed in time and is an error."""
+    event_data: dict[str, object] = {}
+    paths: dict[str, str] = {}
+
+    def put(name: str, value: object, native: str) -> None:
+        if name in event_data and event_data[name] != value:
+            raise WindowsInputError(f"NXLog record holds two values for event-data field {name!r}")
+        event_data[name] = value
+        paths[f"winlog.event_data.{name}"] = native
+
+    for name, value in source.items():
+        if name in ("EventData", "UserData") and isinstance(value, dict):
+            for inner, item in value.items():
+                if isinstance(item, _SCALAR):
+                    put(str(inner), item, f"{name}.{inner}")
+            continue
+        if name in NXLOG_PIPELINE_FIELDS or name.startswith("@") or name == NXLOG_ADAPTED or (
+                name in NXLOG_ENVELOPE and not _nxlog_event_data_value(name, value)):
+            continue
+        if not isinstance(value, _SCALAR):
+            continue                    # an object or list is a pipeline's, never a Windows event-data value
+        prefix, dot, inner = name.partition(".")
+        put(inner if dot and prefix in ("EventData", "UserData") else name, value, name)
+    computer_path = "Hostname" if source.get("Hostname") is not None else "Computer"
+    winlog: dict[str, object] = {
+        "channel": source.get("Channel"), "event_id": source.get("EventID"), "provider_name": source.get("SourceName"),
+        "computer_name": source.get(computer_path), "event_data": event_data,
+    }
+    paths.update({"winlog.channel": "Channel", "winlog.event_id": "EventID", "winlog.provider_name": "SourceName",
+                  "winlog.computer_name": computer_path})
+    if source.get("RecordNumber") is not None:
+        winlog["record_id"] = source["RecordNumber"]
+        paths["winlog.record_id"] = "RecordNumber"
+    # System values Winlogbeat keeps under winlog.* that this module reads: the writing process, the user SID, the
+    # activity id, and the audit keywords
+    for native, path in (("ExecutionProcessID", "process.pid"), ("UserID", "user.identifier"),
+                         ("ActivityID", "activity_id")):
+        if isinstance(source.get(native), _SCALAR) and source[native] != "":
+            parts = path.split(".")
+            target = winlog
+            for part in parts[:-1]:
+                target = target.setdefault(part, {})
+            target[parts[-1]] = source[native]
+            paths[f"winlog.{path}"] = native
+    keywords = _nxlog_keywords(source.get("Keywords"), source.get("EventType"))
+    if keywords:
+        winlog["keywords"] = keywords
+        paths["winlog.keywords"] = "Keywords+EventType"
+    event_time = source.get("EventTime")
+    pipeline_time = _pipeline_time(source.get("@timestamp"))
+    adapted: dict[str, object] = {"winlog": winlog, NXLOG_ADAPTED: {
+        "channel": source.get("Channel"), "event_time": None if event_time is None else str(event_time),
+        "pipeline_time": False, "catalog_channel": False}}
+    if _zoned_time(event_time) is not None:
+        winlog["time_created"] = event_time
+        paths["winlog.time_created"] = "EventTime"
+        adapted["@timestamp"] = pipeline_time if pipeline_time is not None else event_time
+        paths["@timestamp"] = "@timestamp" if pipeline_time is not None else "EventTime"
+    elif pipeline_time is not None:
+        adapted["@timestamp"] = pipeline_time
+        paths["@timestamp"] = "@timestamp"
+        adapted[NXLOG_ADAPTED]["pipeline_time"] = True
+    else:
+        raise WindowsInputError("time unresolved: neither EventTime nor @timestamp names its zone")
+    class_key = _nxlog_class_key(source)
+    if (class_key in _NXLOG_CHANNEL_DATA_CLASSES and len(_CLASSES_BY_PROVIDER_ID.get(class_key, ())) == 1
+            and lookup_event_class(winlog["channel"], winlog["provider_name"], winlog["event_id"]) is None):
+        # The provider's own event data names a channel (the log that was cleared), and NXLog wrote it over its own
+        # Channel: the event's channel is the catalog's for this provider and event id, and the value is event data.
+        if not isinstance(event_data.get("Channel"), str):
+            event_data["Channel"] = winlog["channel"]
+            paths["winlog.event_data.Channel"] = "Channel"
+        winlog["channel"] = _CLASSES_BY_PROVIDER_ID[class_key][0].channel
+        paths["winlog.channel"] = "SourceName+EventID#catalog-channel"
+        adapted[NXLOG_ADAPTED]["catalog_channel"] = True
+    return adapted, paths
+
+
+def _pipeline_time(value: object) -> str | None:
+    """The pipeline's @timestamp as a zoned ISO-8601 time: a time naming its zone, or Elasticsearch's numeric epoch
+    milliseconds; anything else (a time without a zone) is never read as UTC."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            return datetime.fromtimestamp(value / 1000, UTC).isoformat()
+        except (OverflowError, OSError, ValueError):
+            return None
+    return value.strip() if _zoned_time(value) is not None else None
+
+
+def _nxlog_class_key(source: dict) -> tuple[str, int] | None:
+    try:
+        return str(source.get("SourceName") or "").strip().casefold(), int(source.get("EventID"))
+    except (TypeError, ValueError):
+        return None
+
+
+def nxlog_class_families(source: dict) -> frozenset[str]:
+    """The families of the catalogued classes an NXLog record's provider and event id name (whatever its channel)."""
+    return frozenset(event.family for event in _CLASSES_BY_PROVIDER_ID.get(_nxlog_class_key(source), ()))
+
+
+def windows_view(source: dict) -> dict:
+    """The record in the Winlogbeat layout: itself, or an NXLog flat record adapted ({} when it cannot be)."""
+    if not is_nxlog_windows(source):
+        return source
+    try:
+        return nxlog_to_winlog(source)[0]
+    except WindowsInputError:
+        return {}
+
+
+def _windows_hit(hit: dict) -> dict:
+    source = hit.get("_source") or {}
+    view = windows_view(source)
+    return hit if view is source else {**hit, "_source": view}
+
+
+def nxlog_error_tag(source: dict) -> str:
+    """The dataset an NXLog record's normalization error is counted under: its channel's, else every Windows family."""
+    return _NXLOG_CHANNEL_DATASETS.get(str(source.get("Channel") or "").strip().casefold(), "winlog.winlog")
+
+
+def nxlog_clock_offset(source: dict) -> str | None:
+    """The shape-table key of how far an NXLog record's zoneless EventTime is from its pipeline's @timestamp: the
+    offset as a zone ("UTC-05:00") when it is a whole number of quarter hours within a day's zones, else "other";
+    None when the record has no zoneless EventTime or no readable @timestamp. Times are never changed by it."""
+    event_time, pipeline_time = source.get("EventTime"), source.get("@timestamp")
+    if not isinstance(event_time, str) or _zoned_time(event_time) is not None or not isinstance(pipeline_time, str):
+        return None
+    try:
+        local = datetime.fromisoformat(event_time.strip()).replace(microsecond=0)
+        utc = datetime.fromisoformat(pipeline_time.strip())
+    except ValueError:
+        return None
+    if utc.tzinfo is None:
+        return None
+    seconds = int((local - utc.astimezone(UTC).replace(tzinfo=None, microsecond=0)).total_seconds())
+    if seconds % 900 or abs(seconds) > 14 * 3600:
+        return f"{NXLOG_OFFSET}other"
+    sign = "-" if seconds < 0 else "+"
+    hours, minutes = divmod(abs(seconds) // 60, 60)
+    return f"{NXLOG_OFFSET}UTC{sign}{hours:02d}:{minutes:02d}"
+
+
+def _native_origin(origin: str, native_id: str, paths: dict[str, str]) -> str:
+    """An adapted record's origin (one path, or several joined by "+"), naming the NXLog record's own fields."""
+    prefix = f"{native_id}:"
+    ordered = sorted(paths, key=len, reverse=True)
+    out, start = [], 0
+    while (found := origin.find(prefix, start)) >= 0:
+        rest = found + len(prefix)
+        out.append(origin[start:rest])
+        start = rest
+        for adapted in ordered:
+            end = rest + len(adapted)
+            if origin.startswith(adapted, rest) and origin[end:end + 1] in ("", "#", "+", ":"):
+                out.append(paths[adapted])
+                start = end
+                break
+    out.append(origin[start:])
+    return "".join(out)
 
 
 def windows_record_key(hit: dict) -> tuple[str, str, str] | None:
     """Logical shipper identity used to deduplicate copies without trusting index or document ids."""
-    source = hit.get("_source") or {}
+    source = windows_view(hit.get("_source") or {})
     winlog = source.get("winlog") or {}
     computer = str(winlog.get("computer_name") or "").strip().rstrip(".").casefold()
     channel = str(winlog.get("channel") or "").strip().casefold()
@@ -568,7 +859,7 @@ def windows_record_signature(hit: dict) -> str:
     excluded. Native event time and a digest of the structured Windows payload are always included, so exact
     copies merge while same-instant native records with different content do not.
     """
-    source = hit.get("_source") or {}
+    source = windows_view(hit.get("_source") or {})
     winlog = source.get("winlog") or {}
     native_event_id = winlog.get("event_id")
     try:
@@ -2210,9 +2501,41 @@ def _semantic_fields(fields: dict[str, FieldValue], record: WindowsRecord, host:
 
 def normalize_windows(hit: dict) -> TypedEvent:
     """Normalize one cataloged Windows event from structured shipper fields only."""
+    if is_nxlog_windows(hit.get("_source") or {}):
+        return _normalize_nxlog(hit)
+    return _normalize_windows(hit, hit)
+
+
+def _normalize_nxlog(hit: dict) -> TypedEvent:
+    """An NXLog flat record, normalized as its Winlogbeat-layout twin: every typed value cites the record's own
+    field, the native channel spelling and EventTime text are kept, and a time taken from the pipeline says so."""
+    source, native_id = hit["_source"], hit["_id"]
+    adapted, paths = nxlog_to_winlog(source)
+    winlog = adapted["winlog"]
+    named = _CLASSES_BY_PROVIDER_ID.get(_nxlog_class_key(source), ())
+    if named and lookup_event_class(winlog["channel"], winlog["provider_name"], winlog["event_id"]) is None:
+        # a catalogued provider and event id under a channel that names none of their classes: counted against
+        # those classes' families, never as an unread class
+        raise WindowsNotNormalized(f"{NXLOG_CHANNEL_SKIP} ({named[0].provider}|{named[0].event_id})")
+    event = _normalize_windows({**hit, "_source": adapted}, hit)
+    event.fields = {name: fv(value.value, _native_origin(value.origin, native_id, paths))
+                    for name, value in event.fields.items()}
+    event.fields["nxlog.channel"] = fv(source.get("Channel"), f"{native_id}:Channel")
+    if source.get("EventTime") is not None:
+        event.fields["nxlog.event_time"] = fv(str(source["EventTime"]), f"{native_id}:EventTime")
+    created = event.fields.get("event.created")
+    if adapted[NXLOG_ADAPTED]["pipeline_time"] and (created is None or created.origin == f"{native_id}:@timestamp"):
+        event.caveats.append(NXLOG_TIME_CAVEAT)
+    if adapted[NXLOG_ADAPTED]["catalog_channel"]:
+        event.caveats.append(NXLOG_CATALOG_CHANNEL_CAVEAT)
+    return event
+
+
+def _normalize_windows(hit: dict, raw_hit: dict) -> TypedEvent:
+    """Normalize `hit` (Winlogbeat or Agent layout); `raw_hit` is the record as indexed, which the event cites."""
     record = read_windows_event(hit)
     source, winlog = hit["_source"], hit["_source"]["winlog"]
-    ref = _raw_ref(hit)
+    ref = _raw_ref(raw_hit)
     computer = str(winlog.get("computer_name") or "").strip().rstrip(".").casefold()
     if not computer:
         raise WindowsInputError("Windows record is missing winlog.computer_name")

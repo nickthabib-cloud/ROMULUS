@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import posixpath
 import re
@@ -14,7 +15,10 @@ from itertools import pairwise
 
 from romulus.evidence import rpc_catalog, surrogates
 from romulus.evidence.auditd import (
+    AGENT_ARCH_TOKENS,
+    AGENT_COPY_TYPES,
     AT_FDCWD,
+    COPY_UID_EFFECTIVE_TYPES,
     O_ACCMODE,
     O_CREAT,
     O_RDWR,
@@ -27,21 +31,43 @@ from romulus.evidence.auditd import (
     FileCall,
     execve_argv,
     file_syscall,
+    is_audit_line,
     parse_record,
     parse_sockaddr,
+    record_from_agent_fields,
     socket_syscall,
     syscall_arg,
+    syscall_number,
 )
 from romulus.evidence.certificates import certificate_fields as _certificate_fields
 from romulus.evidence.certificates import dn_parts as _dn_parts
 from romulus.evidence.community import community_id
-from romulus.evidence.linux_catalog import WATCH_PLACEHOLDERS, module_syscall
+from romulus.evidence.linux_catalog import (
+    APACHE_ACCESS,
+    APACHE_ERROR,
+    AUDIT_EVENT,
+    AUDIT_RECORD,
+    JOURNAL_FIELDS,
+    JOURNAL_JSON,
+    SYSLOG_LINE,
+    WATCH_PLACEHOLDERS,
+    document_dataset,
+    match_shape,
+    module_syscall,
+    unmatched_families,
+)
 from romulus.evidence.raw_scrub import clean_source, might_be_zeek
 from romulus.evidence.typed import EVIDENCE_VERSION, FieldValue, Outcome, RawRef, TypedEvent, event_id, fv
 from romulus.evidence.windows import (
+    NXLOG_CHANNEL_SKIP,
+    NXLOG_SHAPE,
     WindowsNotNormalized,
+    is_nxlog_windows,
     is_windows_source,
     normalize_windows,
+    nxlog_class_families,
+    nxlog_clock_offset,
+    nxlog_error_tag,
     windows_record_key,
     windows_record_signature,
 )
@@ -75,8 +101,8 @@ class Skip(Exception):
 class AuditCopy(Skip):
     """A journald copy of an audit record: a duplicate, but its journald fields name the boot it was written in."""
 
-    def __init__(self, record: dict):
-        super().__init__("journal copy of an audit record (normalized from linux.audit)")
+    def __init__(self, record: dict, reason: str = "journal copy of an audit record (normalized from linux.audit)"):
+        super().__init__(reason)
         self.record = record
 
 
@@ -600,6 +626,15 @@ def group_audit(hits: list[dict], parse: Callable[[dict, str], AuditRecord] | No
     for h in hits:
         src = h["_source"]
         raw = _get(src, "event.original") or src.get("message")
+        if document_dataset(src) != "linux.audit" and not is_audit_line(raw):
+            # a shipper that indexed the fields it parsed and not the raw line: rebuild the record from them
+            try:
+                rec = record_from_agent_fields(src)
+            except AuditParseError as e:
+                errors.append((h["_id"], f"linux.audit: record cannot be rebuilt from the shipper's fields: {e}"))
+                continue
+            groups[(audit_host(src, rec), rec.ts, rec.serial)].append((h, rec))
+            continue
         if not raw:
             errors.append((h["_id"], "linux.audit: missing authoritative event.original/message"))
             continue
@@ -608,8 +643,77 @@ def group_audit(hits: list[dict], parse: Callable[[dict, str], AuditRecord] | No
         except AuditParseError as e:
             errors.append((h["_id"], f"linux.audit: unparseable record: {e}"))
             continue
-        groups[(_get(src, "host.name") or "", rec.ts, rec.serial)].append((h, rec))
+        groups[(audit_host(src, rec), rec.ts, rec.serial)].append((h, rec))
     return groups, errors
+
+
+def audit_host(source: dict, record: AuditRecord) -> str:
+    """The host an audit record is indexed under: the shipper's host.name, which host pivots, the exec-holder lookup
+    and the journald pairing search by. Only a document without one (forwarded or aggregated) falls back to the
+    record's own node= name (the empty string when neither is recorded)."""
+    indexed = _get(source, "host.name")
+    if isinstance(indexed, str) and indexed:
+        return indexed
+    node = audit_node(source, record)
+    return node or ""
+
+
+def audit_node(source: dict, record: AuditRecord) -> str | None:
+    """The node= name an audit record states (its header's, else the one the shipper parsed), else None."""
+    node = record.node or _get(source, "auditd.log.node")
+    return node if isinstance(node, str) and node else None
+
+
+HOST_FALLBACK_CAVEAT = ("Host from the record's own host name: the document names no host.name, so host searches "
+                        "by host.name do not find it")
+
+
+def _audit_node_fields(event: TypedEvent, members: list[tuple[dict, AuditRecord]]) -> None:
+    """Name the node= host an event's records state (host.node), and say when it stands in for a missing host.name."""
+    cited = {ref.native_id for ref in event.raw}
+    for hit, record in members:
+        if hit["_id"] not in cited:
+            continue
+        node = audit_node(hit["_source"], record)
+        if node:
+            origin = (f"{hit['_id']}:auditd.log.node" if record.node is None
+                      else f"{hit['_id']}:event.original#auditd:node")
+            event.fields["host.node"] = fv(node, origin)
+            indexed = _get(hit["_source"], "host.name")
+            if not (isinstance(indexed, str) and indexed) and HOST_FALLBACK_CAVEAT not in event.caveats:
+                event.caveats.append(HOST_FALLBACK_CAVEAT)
+            return
+
+
+def _indexed_host(event: TypedEvent, hit: dict) -> TypedEvent:
+    """A journald or syslog event's host: the shipper's host.name, with the record's own host name (host.hostname)
+    as a typed field; that name is the host only when the document names no host.name."""
+    src = hit["_source"]
+    native, indexed = _get(src, "host.hostname"), _get(src, "host.name")
+    if isinstance(native, str) and native:
+        event.fields["host.hostname"] = fv(native, f"{hit['_id']}:host.hostname")
+    if isinstance(indexed, str) and indexed:
+        event.host = indexed
+    elif isinstance(native, str) and native:
+        event.host = native
+        if HOST_FALLBACK_CAVEAT not in event.caveats:
+            event.caveats.append(HOST_FALLBACK_CAVEAT)
+    return event
+
+
+def audit_record_of(hit: dict, parse: Callable[[dict, str], AuditRecord] | None = None) -> AuditRecord | None:
+    """The one audit record a hit of a record shape holds (a raw line, or a shipper's parsed fields), else None
+    (not such a hit). Raises AuditParseError when it is one but cannot be read."""
+    source = hit.get("_source") or {}
+    found = match_shape(source)
+    if found is None or found[1].shape != AUDIT_RECORD:
+        return None
+    raw = _get(source, "event.original") or source.get("message")
+    if document_dataset(source) != "linux.audit" and not is_audit_line(raw):
+        return record_from_agent_fields(source)
+    if not raw:
+        raise AuditParseError("missing authoritative event.original/message")
+    return parse_record(raw) if parse is None else parse(hit, raw)
 
 
 def merge_execve(execs: list[tuple[dict, AuditRecord]]) -> tuple[dict, AuditRecord]:
@@ -619,6 +723,16 @@ def merge_execve(execs: list[tuple[dict, AuditRecord]]) -> tuple[dict, AuditReco
     carrying argc was lost the continuations are still merged; execve_argv reports the command line incomplete."""
     if len(execs) == 1:
         return execs[0]
+    if any(r.reconstructed for _h, r in execs):
+        # a shipper that parsed the records lost each split argument's chunk numbers: never splice them
+        h_head, r_head = next(((h, r) for h, r in execs if "argc" in r.raw_fields), execs[0])
+        problem = (f"the command line spans {len(execs)} EXECVE records and the shipper kept no chunk numbers of "
+                   "split arguments")
+        return h_head, AuditRecord(type="EXECVE", ts=r_head.ts, serial=r_head.serial, fields=r_head.fields,
+                                   raw_fields=r_head.raw_fields, enriched=r_head.enriched, node=r_head.node,
+                                   origins=r_head.origins or {},
+                                   argv_problem="; ".join(p for p in (r_head.argv_problem, problem) if p),
+                                   hex_guessed=r_head.hex_guessed)
     heads = [(h, r) for h, r in execs if "argc" in r.raw_fields]
     if len(heads) > 1:
         raise AuditParseError(f"ambiguous exec event: {len(heads)} EXECVE records carry argc")
@@ -1338,19 +1452,29 @@ def normalize_journal(hit: dict, boots_seen: list | None = None) -> TypedEvent:
         raise ValueError(f"journal event.original is not JSON: {e}") from e
     if not isinstance(j, dict):
         raise TypeError("journal event.original is not a JSON object")
+    prefix = f"{hit['_id']}:event.original#journal:"
+    return _journal_event(hit, j, lambda spec: prefix + spec, boots_seen)
+
+
+def _journal_event(hit: dict, j: dict, o: Callable[[str], str], boots_seen: list | None = None, *,
+                   copy_reason: str | None = None, kind: str = "journal") -> TypedEvent:
+    """The typed event of one journal record `j` (journal field names), whatever shape carried it. `o(spec)` is the
+    origin of a journal field spec ("MESSAGE~sshd", "JOB_TYPE+JOB_RESULT"). A copy of an audit record raises
+    AuditCopy (with `copy_reason` when given); a line of an identifier no rule reads is skipped, counted by `kind`
+    and identifier."""
+    src = hit["_source"]
     if boots_seen is not None:
         boots_seen.extend(_journal_observations(hit, j))
     if j.get("_TRANSPORT") == "audit" or j.get("SYSLOG_IDENTIFIER") == "audit":
-        raise AuditCopy(j)
+        raise AuditCopy(j) if copy_reason is None else AuditCopy(j, copy_reason)
     ident = j.get("SYSLOG_IDENTIFIER") or j.get("_COMM")
     msg = j.get("MESSAGE") or src.get("message") or ""
-    nid = hit["_id"]
     ref = _ref(hit)
     host = j.get("_HOSTNAME") or _get(src, "host.name")
-    base = {"journal.identifier": fv(ident, f"{nid}:event.original#journal:SYSLOG_IDENTIFIER"),
-            "journal.unit": fv(j.get("_SYSTEMD_UNIT"), f"{nid}:event.original#journal:_SYSTEMD_UNIT")}
+    base = {"journal.identifier": fv(ident, o("SYSLOG_IDENTIFIER")),
+            "journal.unit": fv(j.get("_SYSTEMD_UNIT"), o("_SYSTEMD_UNIT"))}
     if _journal_boot(j):
-        base["host.boot.id"] = fv(_journal_boot(j), f"{nid}:event.original#journal:_BOOT_ID")
+        base["host.boot.id"] = fv(_journal_boot(j), o("_BOOT_ID"))
     if ident == "sshd":
         # SYSLOG_IDENTIFIER is chosen by the writer; journald's own _COMM/_EXE/_SYSTEMD_UNIT are not. When any of
         # them is recorded, one must name sshd, or the line came from another program.
@@ -1362,9 +1486,9 @@ def normalize_journal(hit: dict, boots_seen: list | None = None) -> TypedEvent:
             m = rx.match(msg)
             if m:
                 g = m.groupdict()
-                origin = f"{nid}:event.original#journal:MESSAGE~sshd"
+                origin = o("MESSAGE~sshd")
                 f = {**base,
-                     "auth.service": fv("sshd", f"{nid}:event.original#journal:SYSLOG_IDENTIFIER"),
+                     "auth.service": fv("sshd", o("SYSLOG_IDENTIFIER")),
                      "auth.method": fv(g.get("method"), origin),
                      "auth.phase": fv(phase, origin),
                      "auth.user_valid": fv(not (g.get("invalid") or g.get("kind") == "invalid"
@@ -1378,63 +1502,61 @@ def normalize_journal(hit: dict, boots_seen: list | None = None) -> TypedEvent:
                                   outcome=outcome, fields=f, raw=[ref], normalizer=NORMALIZER_VERSION)
         raise Skip("sshd message without an authentication outcome")
     if ident == "systemd":
-        return _unit_job(hit, j, msg, base, host)
+        return _unit_job(hit, j, msg, base, host, o)
     if ident == "sudo":
         m = _SUDO.match(msg)
         if m:
             g = m.groupdict()
             f = {**base,
-                 "auth.service": fv("sudo", f"{nid}:event.original#journal:SYSLOG_IDENTIFIER"),
-                 "user.name": fv(g["user"], f"{nid}:event.original#journal:MESSAGE~sudo"),
-                 "auth.target_user": fv(g["target"], f"{nid}:event.original#journal:MESSAGE~sudo"),
-                 "sudo.command": fv(g.get("cmd"), f"{nid}:event.original#journal:MESSAGE~sudo"),
-                 "process.cwd": fv(g.get("pwd"), f"{nid}:event.original#journal:MESSAGE~sudo")}
+                 "auth.service": fv("sudo", o("SYSLOG_IDENTIFIER")),
+                 "user.name": fv(g["user"], o("MESSAGE~sudo")),
+                 "auth.target_user": fv(g["target"], o("MESSAGE~sudo")),
+                 "sudo.command": fv(g.get("cmd"), o("MESSAGE~sudo")),
+                 "process.cwd": fv(g.get("pwd"), o("MESSAGE~sudo"))}
             outcome = Outcome.failure if g.get("fail") else Outcome.success
             return TypedEvent(id=event_id("privilege_use", [ref]), family="privilege_use", ts=_ts(src["@timestamp"]),
                               host=host, outcome=outcome, fields=f, raw=[ref], normalizer=NORMALIZER_VERSION)
         raise Skip("sudo message not a command record")
-    raise Skip(f"journal identifier {ident!r} is not normalized")
+    raise Skip(f"{kind} identifier {ident!r} is not normalized")
 
 
 def basename_of(path) -> str:
     return str(path).rsplit("/", 1)[-1] if path else ""
 
 
-def _unit_job(hit: dict, j: dict, msg: str, base: dict, host: str | None) -> TypedEvent:
+def _unit_job(hit: dict, j: dict, msg: str, base: dict, host: str | None, o: Callable[[str], str]) -> TypedEvent:
     """A service manager's unit job message: which unit, which job (stop/start/...) and its phase (begun, done or
     another job result). The unit comes from the structured UNIT/USER_UNIT field, or from newer systemd's message
     that names it; the job from JOB_TYPE/JOB_RESULT, the catalog MESSAGE_ID, or that message's verb. A message
     that names no unit or no job (a description-only "Stopped ...", a resource summary) is not typed."""
-    nid = hit["_id"]
-    o = f"{nid}:event.original#journal"
-    unit, scope, unit_origin = j.get("UNIT"), "system", f"{o}:UNIT"
+    unit, scope, unit_origin = j.get("UNIT"), "system", o("UNIT")
     if not unit and j.get("USER_UNIT"):
-        unit, scope, unit_origin = j["USER_UNIT"], "user", f"{o}:USER_UNIT"
+        unit, scope, unit_origin = j["USER_UNIT"], "user", o("USER_UNIT")
     text = _UNIT_JOB_TEXT.match(msg)
     if not unit and text:
-        unit, unit_origin = text.group("unit"), f"{o}:MESSAGE~systemd"
+        unit, unit_origin = text.group("unit"), o("MESSAGE~systemd")
     job = phase = None
     if j.get("JOB_TYPE"):
-        job, phase, job_origin = j["JOB_TYPE"], j.get("JOB_RESULT") or "begun", f"{o}:JOB_TYPE+JOB_RESULT"
+        job, phase, job_origin = j["JOB_TYPE"], j.get("JOB_RESULT") or "begun", o("JOB_TYPE+JOB_RESULT")
     elif j.get("MESSAGE_ID") in _UNIT_JOB_IDS:
-        (job, phase), job_origin = _UNIT_JOB_IDS[j["MESSAGE_ID"]], f"{o}:MESSAGE_ID"
+        (job, phase), job_origin = _UNIT_JOB_IDS[j["MESSAGE_ID"]], o("MESSAGE_ID")
     elif text and unit == text.group("unit"):
-        (job, phase), job_origin = _UNIT_JOB_VERBS[text.group("verb")], f"{o}:MESSAGE~systemd"
+        (job, phase), job_origin = _UNIT_JOB_VERBS[text.group("verb")], o("MESSAGE~systemd")
     else:
         # The service manager's record of a unit's main process ending by signal or core dump (no job involved).
         exited = _UNIT_EXIT.match(msg)
         if unit and exited and exited.group("unit") == unit:
             job, phase = "exit", exited.group("code") or exited.group("result")
-            job_origin = f"{o}:MESSAGE~systemd"
+            job_origin = o("MESSAGE~systemd")
     if not unit or not job:
         raise Skip("systemd message is not a unit job record")
     fields = {**base,
               "service.unit": fv(unit, unit_origin), "service.name": fv(service_name(unit), unit_origin),
               "service.job": fv(job, job_origin), "service.job_phase": fv(phase, job_origin),
-              "service.scope": fv(scope, unit_origin), "service.source": fv("journal", f"{o}:SYSLOG_IDENTIFIER")}
+              "service.scope": fv(scope, unit_origin), "service.source": fv("journal", o("SYSLOG_IDENTIFIER"))}
     pid = j.get("_PID")
     if isinstance(pid, str) and pid.isdigit():
-        fields["process.pid"] = fv(int(pid), f"{o}:_PID")
+        fields["process.pid"] = fv(int(pid), o("_PID"))
     outcome = (Outcome.success if phase == "done" else Outcome.unknown if phase in {"begun", "skipped"}
                else Outcome.failure)
     ref = _ref(hit)
@@ -1443,10 +1565,369 @@ def _unit_job(hit: dict, j: dict, msg: str, base: dict, host: str | None) -> Typ
 
 
 # ---------------------------------------------------------------------------------------------
+# journald records as shippers index their fields (no JSON journal record)
+# ---------------------------------------------------------------------------------------------
+
+# Journal fields as the Filebeat journald input and Elastic Agent's Custom Journald integration index them: each
+# journal field's indexed paths in preference order (releases 7.17-9.0 write syslog.*, 8.19 and 9.1+ log.syslog.*).
+# Any other journal field is under journald.custom, lower case without its leading underscores.
+JOURNAL_FIELD_PATHS = (
+    ("MESSAGE", ("message",)),
+    ("_BOOT_ID", ("journald.host.boot_id",)),
+    ("_HOSTNAME", ("host.hostname",)),
+    ("_COMM", ("journald.process.name",)),
+    ("_EXE", ("journald.process.executable",)),
+    ("_CMDLINE", ("journald.process.command_line",)),
+    ("_PID", ("journald.pid", "process.pid")),
+    ("_SYSTEMD_UNIT", ("systemd.unit",)),
+    ("_SYSTEMD_USER_UNIT", ("systemd.user_unit",)),
+    ("_TRANSPORT", ("systemd.transport",)),
+    ("UNIT", ("journald.unit",)),
+    ("SYSLOG_IDENTIFIER", ("syslog.identifier", "log.syslog.appname")),
+    ("SYSLOG_PID", ("syslog.pid", "log.syslog.procid")),
+    ("SYSLOG_FACILITY", ("syslog.facility", "log.syslog.facility.code")),
+)
+# The input drops _SOURCE_REALTIME_TIMESTAMP, so a journald copy of an audit record names no audit time: it cannot
+# be paired with its audit record for the boot id (the audit record itself comes from the audit source).
+JOURNAL_COPY_UNKEYED = "journald audit copy without source timestamp"
+
+
+def _scalar_text(value) -> str | None:
+    if isinstance(value, bool) or value is None or isinstance(value, (dict, list)):
+        return None
+    text = value if isinstance(value, str) else str(value)
+    return text or None
+
+
+def journal_from_fields(source: dict) -> tuple[dict, dict[str, str]]:
+    """(journal record, indexed path of each journal field) from a journald document's ECS fields. journald's
+    receive time (__REALTIME_TIMESTAMP) is @timestamp, which the input writes from it (milliseconds)."""
+    j: dict[str, str] = {}
+    paths: dict[str, str] = {}
+    for key, candidates in JOURNAL_FIELD_PATHS:
+        for path in candidates:
+            text = _scalar_text(_get(source, path))
+            if text is not None:
+                j[key], paths[key] = text, path
+                break
+    custom = _get(source, "journald.custom")
+    for name, value in (custom.items() if isinstance(custom, dict) else ()):
+        key, text = str(name).upper(), _scalar_text(value)
+        if text is not None and key not in j:
+            j[key], paths[key] = text, f"journald.custom.{name}"
+    when = _get(source, "@timestamp")
+    if isinstance(when, str):
+        try:
+            j["__REALTIME_TIMESTAMP"] = str(_micros(datetime.fromisoformat(when)))
+            paths["__REALTIME_TIMESTAMP"] = "@timestamp"
+        except ValueError:
+            pass
+    return j, paths
+
+
+def _indexed_origin(nid: str, paths: dict[str, str]) -> Callable[[str], str]:
+    """The origin function of a record whose journal fields were read from indexed paths."""
+    def origin(spec: str) -> str:
+        parts = []
+        for part in spec.split("+"):
+            key, sep, suffix = part.partition("~")
+            parts.append(paths.get(key, f"journald.custom.{key.lstrip('_').lower()}") + sep + suffix)
+        return f"{nid}:" + "+".join(parts)
+    return origin
+
+
+def normalize_journal_fields(hit: dict, boots_seen: list | None = None) -> TypedEvent:
+    """One journald record a shipper indexed as fields (Filebeat's journald input, Agent's Custom Journald)."""
+    j, paths = journal_from_fields(hit["_source"])
+    return _indexed_host(_journal_event(hit, j, _indexed_origin(hit["_id"], paths), boots_seen,
+                                        copy_reason=JOURNAL_COPY_UNKEYED), hit)
+
+
+# ---------------------------------------------------------------------------------------------
+# linux.syslog: auth and syslog lines (System integration, Filebeat system module)
+# ---------------------------------------------------------------------------------------------
+
+SYSLOG_TIME_CAVEAT = "Time from a syslog line with no year or zone: the shipper supplied them."
+SYSLOG_WRITER_CAVEAT = "Writer identity from the syslog header only."
+SHIPPER_SSH_CAVEAT = "Parsed by the shipper; a user name containing ' from ' can move the recorded source address."
+SHIPPER_PARSED_CAVEAT = "Parsed by the shipper; the line's text was not indexed."
+# shadow-utils' own log lines (account names cannot hold a comma)
+_USERADD = re.compile(r"^new user: name=(?P<name>[^,]+), UID=(?P<id>\d+), GID=(?P<gid>\d+)(?:, .*)?$")
+_GROUPADD = re.compile(r"^new group: name=(?P<name>[^,]+), GID=(?P<id>\d+)$")
+_SHIPPER_SSH = {"Accepted": (Outcome.success, "authentication", True),
+                "Failed": (Outcome.failure, "authentication", None),
+                "Invalid": (Outcome.failure, "user_lookup", False)}
+
+
+def normalize_syslog(hit: dict) -> TypedEvent:
+    """One auth or syslog line. With its message, the journal rules run on it (identifier: the syslog header's
+    program); without it (the Filebeat system module drops the message when its own pattern matched), the fields
+    the shipper parsed for sshd, sudo and useradd/groupadd are read, with a caveat saying so."""
+    src, nid = hit["_source"], hit["_id"]
+    ident = _get(src, "process.name")
+    hostname = _get(src, "host.hostname")
+    from_journal = _get(src, "input.type") == "journald"
+    # a line read from the journal carries journald's own time and _COMM (the System integration's journald stream)
+    caveats = [] if from_journal else [SYSLOG_TIME_CAVEAT]
+    message = src.get("message")
+    if isinstance(message, str) and message:
+        j = {"SYSLOG_IDENTIFIER": ident, "MESSAGE": message}
+        paths = {"SYSLOG_IDENTIFIER": "process.name", "MESSAGE": "message"}
+        # the System integration's journald stream renames journald's _COMM, or the writer's own name, to
+        # process.name: the writer is identified only when journald's captured name is still indexed
+        comm = _get(src, "journald.process.name")
+        if from_journal and isinstance(comm, str) and comm:
+            j["_COMM"], paths["_COMM"] = comm, "journald.process.name"
+        else:
+            caveats.append(SYSLOG_WRITER_CAVEAT)
+        if hostname:
+            j["_HOSTNAME"], paths["_HOSTNAME"] = hostname, "host.hostname"
+        if (pid := _scalar_text(_get(src, "process.pid"))) is not None:
+            j["_PID"], paths["_PID"] = pid, "process.pid"
+        if ident in ("useradd", "groupadd"):
+            event = _syslog_account(hit, ident, message, hostname, f"{nid}:message~{ident}")
+        else:
+            event = _journal_event(hit, j, _indexed_origin(nid, paths), None, kind="syslog",
+                                   copy_reason="syslog copy of an audit record (normalized from linux.audit)")
+    else:
+        event = _shipper_syslog(hit, ident, hostname)
+    event.caveats.extend(caveat for caveat in caveats if caveat not in event.caveats)
+    return _indexed_host(event, hit)
+
+
+def _syslog_account(hit: dict, ident: str, message: str, host, origin: str) -> TypedEvent:
+    rx, action = (_USERADD, "create_user") if ident == "useradd" else (_GROUPADD, "create_group")
+    m = rx.match(message)
+    if not m:
+        raise Skip(f"{ident} line is not an account creation record")
+    return _account_event(hit, host, action, m["name"], m["id"], origin, origin, [])
+
+
+def _account_event(hit: dict, host, action: str, name, number, name_origin: str, id_origin: str,
+                   caveats: list[str]) -> TypedEvent:
+    src, nid, ref = hit["_source"], hit["_id"], _ref(hit)
+    fields = {"account.action": fv(action, f"{nid}:process.name")}
+    if name:
+        fields["account.name"] = fv(str(name), name_origin)
+    if number not in (None, ""):
+        fields["account.id"] = fv(str(number), id_origin)
+    pid = _get(src, "process.pid")
+    if isinstance(pid, int) or isinstance(pid, str) and pid.isdigit():
+        fields["process.pid"] = fv(int(pid), f"{nid}:process.pid")
+    return TypedEvent(id=event_id("account_change", [ref]), family="account_change", ts=_ts(src["@timestamp"]),
+                      host=host or _get(src, "host.name"), outcome=Outcome.success, fields=fields, raw=[ref],
+                      normalizer=NORMALIZER_VERSION, caveats=list(caveats))
+
+
+def _shipper_syslog(hit: dict, ident, hostname) -> TypedEvent:
+    """The typed event of a syslog line whose message the shipper dropped, from the fields its pattern parsed."""
+    src, nid, ref = hit["_source"], hit["_id"], _ref(hit)
+    host = hostname or _get(src, "host.name")
+    base = {"journal.identifier": fv(ident, f"{nid}:process.name"),
+            "journal.unit": fv(None, f"{nid}:process.name")}
+    ssh_event = _get(src, "system.auth.ssh.event")
+    if ident == "sshd" and ssh_event in _SHIPPER_SSH:
+        outcome, phase, valid = _SHIPPER_SSH[ssh_event]
+        o = f"{nid}:system.auth.ssh.event"
+        f = {**base, "auth.service": fv("sshd", f"{nid}:process.name"),
+             "auth.method": fv(_get(src, "system.auth.ssh.method"), f"{nid}:system.auth.ssh.method"),
+             "auth.phase": fv(phase, o)}
+        if valid is not None:
+            f["auth.user_valid"] = fv(valid, o)
+        if _get(src, "source.ip"):
+            f["source.ip"] = fv(_get(src, "source.ip"), f"{nid}:source.ip")
+        if _get(src, "user.name"):
+            f["user.name"] = fv(_get(src, "user.name"), f"{nid}:user.name")
+        port = _get(src, "source.port")
+        if isinstance(port, int) or isinstance(port, str) and port.isdigit():
+            f["source.port"] = fv(int(port), f"{nid}:source.port")
+        return TypedEvent(id=event_id("auth", [ref]), family="auth", ts=_ts(src["@timestamp"]), host=host,
+                          outcome=outcome, fields=f, raw=[ref], normalizer=NORMALIZER_VERSION,
+                          caveats=[SHIPPER_SSH_CAVEAT])
+    sudo = _get(src, "system.auth.sudo")
+    if ident == "sudo" and isinstance(sudo, dict) and sudo.get("command") is not None:
+        o = f"{nid}:system.auth.sudo"
+        f = {**base, "auth.service": fv("sudo", f"{nid}:process.name"),
+             "user.name": fv(_get(src, "user.name"), f"{nid}:user.name"),
+             "auth.target_user": fv(sudo.get("user"), f"{o}.user"),
+             "sudo.command": fv(sudo.get("command"), f"{o}.command"),
+             "process.cwd": fv(sudo.get("pwd"), f"{o}.pwd")}
+        outcome = Outcome.failure if sudo.get("error") else Outcome.success
+        return TypedEvent(id=event_id("privilege_use", [ref]), family="privilege_use", ts=_ts(src["@timestamp"]),
+                          host=host, outcome=outcome, fields=f, raw=[ref], normalizer=NORMALIZER_VERSION,
+                          caveats=[SHIPPER_PARSED_CAVEAT])
+    if ident == "useradd" and (_get(src, "user.target.name") or _get(src, "user.name")):
+        prefix = "user.target" if _get(src, "user.target.name") else "user"
+        return _account_event(hit, host, "create_user", _get(src, f"{prefix}.name"), _get(src, f"{prefix}.id"),
+                              f"{nid}:{prefix}.name", f"{nid}:{prefix}.id", [SHIPPER_PARSED_CAVEAT])
+    if ident == "groupadd" and _get(src, "group.name"):
+        return _account_event(hit, host, "create_group", _get(src, "group.name"), _get(src, "group.id"),
+                              f"{nid}:group.name", f"{nid}:group.id", [SHIPPER_PARSED_CAVEAT])
+    raise Skip(f"syslog identifier {ident!r} is not normalized")
+
+
+# ---------------------------------------------------------------------------------------------
+# Auditbeat / Auditd Manager: one document per audit event, records merged by the shipper
+# ---------------------------------------------------------------------------------------------
+
+# event.action (go-libaudit's normalization) -> the family the event is expected to give. The document's records are
+# rebuilt from its fields and normalized exactly as raw records of one event are; an action outside this table gives
+# whatever its records give (a process_observed view of its SYSCALL), else it is counted as not normalized.
+AUDITBEAT_ACTIONS = {
+    "executed": "process_exec",
+    "connected-to": "net_socket", "accepted-connection-from": "net_socket",
+    "opened-file": "file_change", "changed-file-attributes-of": "file_change",
+    "changed-file-permissions-of": "file_change", "changed-file-ownership-of": "file_change",
+    "changed-timestamp-of": "file_change", "renamed": "file_change", "deleted": "file_change",
+    "created-directory": "file_change", "created-file": "file_change", "linked": "file_change",
+    "loaded-kernel-module": "kernel_module", "unloaded-kernel-module": "kernel_module",
+    "logged-in": "auth", "started-session": "auth",
+    "added-user-account": "account_change", "modified-user-account": "account_change",
+    "changed-password": "account_change", "added-group-account-to": "account_change",
+    "deleted-user-account": "account_change", "modified-group-account": "account_change",
+    "deleted-group-account-from": "account_change", "changed-group": "account_change",
+    "locked-account": "account_change", "unlocked-account": "account_change",
+    "started-service": "service_change", "stopped-service": "service_change",
+    "changed-audit-configuration": "audit_config",
+    "booted-system": "system_state", "shutdown-system": "system_state", "changed-to-runlevel": "system_state",
+}
+_AUDITBEAT_RESULTS = {"success": "success", "fail": "failed", "failed": "failed", "failure": "failed"}
+_UNSET = {"unset", "4294967295", "-1"}
+# Tags a shipper adds that are not audit rule keys.
+_SHIPPER_TAGS = frozenset({"preserve_original_event", "forwarded", "beats_input_codec_plain_applied",
+                           "beats_input_raw_event", "_grokparsefailure", "_jsonparsefailure"})
+
+
+def auditbeat_lines(source: dict) -> list[str]:
+    """The raw audit lines an Auditbeat (event.original array) or Auditd Manager (one newline-joined string)
+    document carries, or [] when it carries none."""
+    original = _get(source, "event.original")
+    lines = original if isinstance(original, list) else (original.split("\n") if isinstance(original, str) else [])
+    return [line for line in lines if isinstance(line, str) and line.strip()]
+
+
+def _sockaddr_hex(family, address, port) -> str | None:
+    """The shipper's parsed socket address in the hex form auditd logs it (what parse_sockaddr reads)."""
+    try:
+        number = int(port) if port not in (None, "") else 0
+        if family in ("ipv4", "inet"):
+            return (b"\x02\x00" + number.to_bytes(2, "big") + ipaddress.IPv4Address(address).packed
+                    + bytes(8)).hex()
+        if family in ("ipv6", "inet6"):
+            return (b"\x0a\x00" + number.to_bytes(2, "big") + bytes(4) + ipaddress.IPv6Address(address).packed
+                    + bytes(4)).hex()
+    except (ValueError, TypeError, OverflowError):
+        return None
+    if family in ("unix", "local"):
+        return "0100"
+    return None
+
+
+def auditbeat_records(hit: dict) -> list[tuple[dict, AuditRecord]]:
+    """The audit records of one Auditbeat event document, rebuilt from its fields: the event's main record (its
+    message type), and the PATH, CWD, EXECVE, SOCKADDR and KERN_MODULE records whose content the shipper merged
+    into it. Each record names the indexed path of each key."""
+    src = hit["_source"]
+    message_type = _get(src, "auditd.message_type")
+    if not isinstance(message_type, str) or not re.fullmatch(r"[a-z_]+", message_type):
+        raise AuditParseError("Auditbeat event without a message type")
+    sequence = _scalar_text(_get(src, "auditd.sequence"))
+    if sequence is None or not sequence.isdigit():
+        raise AuditParseError("Auditbeat event without a sequence number")
+    when = _get(src, "@timestamp")
+    if not isinstance(when, str):
+        raise AuditParseError("Auditbeat event without @timestamp")
+    ts, serial = round(datetime.fromisoformat(when).timestamp(), 3), int(sequence)
+    data = _get(src, "auditd.data") if isinstance(_get(src, "auditd.data"), dict) else {}
+    action = _get(src, "event.action")
+
+    def record(kind: str, pairs: dict[str, tuple[object, str]], enriched: dict[str, str] | None = None
+               ) -> AuditRecord:
+        fields, origins = {}, {}
+        for key, (value, path) in pairs.items():
+            text = _scalar_text(value)
+            if text is not None:
+                fields[key], origins[key] = text, path
+        return AuditRecord(type=kind, ts=ts, serial=serial, fields=fields,
+                           raw_fields={key: (value, True) for key, value in fields.items()},
+                           enriched=enriched or {}, origins=origins)
+
+    main_type = message_type.upper()
+    pairs: dict[str, tuple[object, str]] = {
+        key: (value, f"auditd.data.{key}") for key, value in data.items() if key not in ("socket", "arch", "syscall")}
+    arch_name = data.get("arch")
+    # go-libaudit names the arch; an arch without a token here stays named (its calls are then not decoded)
+    arch = AGENT_ARCH_TOKENS.get(arch_name.lower(), arch_name) if isinstance(arch_name, str) and arch_name else None
+    if arch is not None:
+        pairs["arch"] = (arch, "auditd.data.arch")
+    call = data.get("syscall")
+    if isinstance(call, str) and call:
+        pairs["syscall"] = (call if call.isdigit() else (syscall_number(call, arch or "") or call),
+                            "auditd.data.syscall")
+    result = _get(src, "auditd.result")
+    if isinstance(result, str) and result.lower() in _AUDITBEAT_RESULTS:
+        if main_type == "SYSCALL":
+            pairs["success"] = ("yes" if result.lower() == "success" else "no", "auditd.result")
+        else:
+            pairs["res"] = (_AUDITBEAT_RESULTS[result.lower()], "auditd.result")
+    # For a user-space record go-libaudit fills user.* with the audit uid and user.effective.* (or user.target.*,
+    # group.*) with the account the record is about, as the Auditd Logs pipeline's copies do (AGENT_COPY_TYPES): the
+    # record's uid is user.effective only where that comes from uid alone, and otherwise is not recorded.
+    user_space = main_type in AGENT_COPY_TYPES
+    identities = ((("uid", "user.effective.id"),) if main_type in COPY_UID_EFFECTIVE_TYPES else ()) if user_space \
+        else (("uid", "user.id"), ("euid", "user.effective.id"), ("suid", "user.saved.id"),
+              ("fsuid", "user.filesystem.id"), ("gid", "user.group.id"), ("egid", "user.effective.group.id"))
+    for key, path in (("pid", "process.pid"), ("ppid", "process.parent.pid"), ("exe", "process.executable"),
+                      ("comm", "process.name"), *identities, ("addr", "source.ip")):
+        value = _get(src, path)
+        if value is not None and key not in pairs and not (key == "addr" and main_type == "SYSCALL"):
+            pairs[key] = (value, path)
+    for key, path in (("auid", "user.audit.id"), ("ses", "auditd.session")):
+        value = _scalar_text(_get(src, path))
+        if value is not None and key not in pairs:
+            pairs[key] = ("4294967295" if value == "unset" else value, path)
+    keys = [tag for tag in (_get(src, "tags") or []) if isinstance(tag, str) and tag not in _SHIPPER_TAGS]
+    if keys and main_type == "SYSCALL":
+        pairs["key"] = ("\x01".join(keys), "tags")
+    names = ((("UID", "user.effective.name"),) if main_type in COPY_UID_EFFECTIVE_TYPES else ()) if user_space \
+        else (("UID", "user.name"), ("EUID", "user.effective.name"))
+    enriched = {name: str(_get(src, path)) for name, path in (*names, ("AUID", "user.audit.name"))
+                if _scalar_text(_get(src, path)) is not None}
+    if main_type == "SYSCALL" and arch is None:
+        raise AuditParseError("Auditbeat SYSCALL event without an architecture: its call cannot be read")
+    records = [record(main_type, pairs, enriched)]
+    paths = _get(src, "auditd.paths")
+    for item in paths if isinstance(paths, list) else []:
+        if isinstance(item, dict):
+            records.append(record("PATH", {key: (value, f"auditd.paths.{key}") for key, value in item.items()}))
+    if (cwd := _get(src, "process.working_directory")) is not None:
+        records.append(record("CWD", {"cwd": (cwd, "process.working_directory")}))
+    if action == "executed" or main_type == "EXECVE":
+        args = _get(src, "process.args")
+        if isinstance(args, list) and all(isinstance(arg, str) for arg in args):
+            argv = {f"a{index}": (arg, "process.args") for index, arg in enumerate(args)}
+            count = data.get("argc", len(args))
+            records.append(record("EXECVE", {"argc": (count, "auditd.data.argc" if "argc" in data
+                                                      else "process.args"), **argv}))
+    socket = data.get("socket") if isinstance(data.get("socket"), dict) else None
+    if socket is not None and (saddr := _sockaddr_hex(socket.get("family"), socket.get("addr"),
+                                                      socket.get("port"))) is not None:
+        records.append(record("SOCKADDR", {"saddr": (saddr, "auditd.data.socket")}))
+    if action in ("loaded-kernel-module", "unloaded-kernel-module") and data.get("name"):
+        records.append(record("KERN_MODULE", {"name": (data["name"], "auditd.data.name")}))
+    return [(hit, item) for item in records]
+
+
+# ---------------------------------------------------------------------------------------------
 # apache
 # ---------------------------------------------------------------------------------------------
 
+APACHE_ZONE_CAVEAT = "Zone from the shipper's locale"
+
+
 def normalize_apache_access(hit: dict) -> TypedEvent:
+    """One access-log line. A client logged by host name (the shipper's source.domain) has no source.ip: the event
+    is kept without it, and rules that need it count it as missing."""
     src, nid, ref = hit["_source"], hit["_id"], _ref(hit)
     f = {}
     for typed, native in (("source.ip", "source.ip"), ("http.request.method", "http.request.method"),
@@ -1466,7 +1947,10 @@ def normalize_apache_error(hit: dict) -> TypedEvent:
     f = {"web.error_message": fv(src.get("message"), f"{nid}:message")}
     if _get(src, "source.ip"):
         f["source.ip"] = fv(_get(src, "source.ip"), f"{nid}:source.ip")
-    caveats = ["timestamp timezone assumed UTC by importer"] if _get(src, "event.timezone") == "assumed_utc" else []
+    zone = _get(src, "event.timezone")
+    # an error-log line names no zone: the importer assumed UTC, a shipper used its own locale's zone
+    caveats = (["timestamp timezone assumed UTC by importer"] if zone == "assumed_utc"
+               else [APACHE_ZONE_CAVEAT] if zone not in (None, "") else [])
     return TypedEvent(id=event_id("web_error", [ref]), family="web_error", ts=_ts(src["@timestamp"]),
                       host=_get(src, "host.name"), fields=f, raw=[ref], normalizer=NORMALIZER_VERSION, caveats=caveats)
 
@@ -1752,6 +2236,9 @@ def _suricata_community_id(eve: dict, o: str):
 
 def normalize_suricata(hit: dict) -> TypedEvent:
     src, nid = hit["_source"], hit["_id"]
+    if is_elastic_suricata(src):
+        # Filebeat or the Agent indexed the parsed record without its EVE line
+        return normalize_elastic_suricata(hit)
     try:
         eve = json.loads(_get(src, "event.original") or src.get("message") or "")
     except json.JSONDecodeError as e:
@@ -2074,6 +2561,372 @@ def _malcolm_eve(src: dict, nid: str) -> tuple[dict, dict[str, str], list[str], 
 
 
 # ---------------------------------------------------------------------------------------------
+# Suricata EVE as Filebeat's suricata module and Elastic Agent's Suricata integration index it
+# ---------------------------------------------------------------------------------------------
+# Both decode each EVE line into suricata.eve.* under the dataset "suricata.eve" (event.dataset, and for the Agent
+# data_stream.dataset too), move part of the record to ECS fields, and index it without the line once the shipper
+# drops event.original. The moves were read from these files (nothing is copied from them):
+# - Filebeat, x-pack/filebeat/module/suricata/eve: config/eve.yml (Beats processors, before ingest), ingest/pipeline.yml,
+#   ingest/dns.yml, ingest/dns-answer-v1.yml, ingest/dns-answer-v2.yml, ingest/http.yml and ingest/tls.yml. The files
+#   are identical on the 7.17, 8.19 and main branches, so one table covers 7.17 and 8.x/9.x.
+# - Elastic Agent, elastic/integrations packages/suricata (2.27.1, for Kibana 8.11+ and 9.x):
+#   data_stream/eve/elasticsearch/ingest_pipeline/default.yml, dns.yml, dns-answer-v1.yml, dns-answer-v2.yml and
+#   tls.yml. Where the Agent differs from Filebeat the table says so.
+# Every other EVE key the EVE normalizer reads stays where Suricata wrote it, under suricata.eve.*: the alert's
+# signature, signature_id and category (copied to rule.*, never moved), alert.metadata.signature_severity, flow.state,
+# netflow, tcp, icmp_type/icmp_code, community_id, the dns block (copied to dns.*), the tls block (copied to tls.*),
+# ssh, and http.http_content_type. A value still found in place is read there: a pipeline that skipped a move left it.
+#
+# How each move is read back:
+# - exact: renamed or copied unchanged.
+# - lowercased: renamed and lowercased; the typed value is lowercased in every shape.
+# - millisecond: rewritten as an ISO-8601 time to the millisecond (Beats' @timestamp, the ingest date processor);
+#   the instant is kept below 1 ms, the sensor's zone offset is not. Typed time values compare as instants.
+# - string: converted to a string in place; read back as the integer it spells.
+# - app_proto: lowercased, copied to network.protocol unless "failed", "template" or "template-rust", then removed.
+#   For the event types that carry app_proto (alert, flow, netflow, fileinfo) the event-type table sets no protocol,
+#   so network.protocol is app_proto exactly; its absence means none, or one of the dropped values (caveat).
+# - action: removed after its value was appended to event.type, "blocked" written as "denied". Suricata writes
+#   "allowed" or "blocked": exactly one of "allowed"/"denied" in event.type (less the flow-state "start"/"end") reads
+#   back exactly; any other value, or both, leaves the action absent (caveat).
+# - templated: Filebeat copies the value through a double-brace Mustache template, which Elasticsearch's ingest
+#   templates escape as a JSON string body (a quote, a backslash and control characters are backslash-escaped); the
+#   escape is inverted exactly. The Agent copies it (copy_from) or uses a triple-brace template: no escape. A Filebeat
+#   value that is not a valid escaped body is left absent (caveat). Filebeat's main pipeline also removes the method
+#   and user agent of an http block whose record is not the "http" protocol (an http2 alert, say) without copying
+#   them (caveat).
+# - dns_answers: on version-2 answer records only, renamed to dns.answers with rrname, rrtype and rdata renamed to
+#   name, type and data; read back with the names restored.
+# - removed: dns.version and dns.grouped are removed. The version is read back from the record's layout (a query
+#   names none; a version-1 answer keeps its own rrname/rrtype/ttl/rdata, which the version-1 answer pipeline copies
+#   to dns.answers; a version-2 answer's list is renamed; "request"/"response" are version 3's types); grouped
+#   answers are lost (caveat on a version-2 answer that keeps no answer list).
+# - trailing_dot: a trailing "." is removed in place (RFC 6066 server names carry none); the value read is the
+#   shipper's, with a caveat.
+# - distinguished_name: the subject and issuer are copied to tls.server.subject/issuer (templated, so escaped by
+#   Filebeat), then "\," is removed in place (Filebeat: both; the Agent: the issuer only). The copy, unescaped for
+#   Filebeat, is the name exactly; without a copy the TLS pipeline did not run and the in-place value is exact.
+ELASTIC_SURICATA_MOVES = (
+    # EVE key, typed field, indexed path(s) in the order read, how
+    ("src_ip", "source.ip", ("source.address", "source.ip"), "exact"),
+    ("dest_ip", "destination.ip", ("destination.address", "destination.ip"), "exact"),
+    ("src_port", "source.port", ("source.port",), "exact"),
+    ("dest_port", "destination.port", ("destination.port",), "exact"),
+    ("proto", "network.transport", ("network.transport",), "lowercased"),
+    ("timestamp", None, ("@timestamp",), "millisecond"),
+    ("flow_id", "suricata.flow_id", ("suricata.eve.flow_id",), "string"),
+    ("app_proto", "network.app_proto", ("network.protocol",), "app_proto"),
+    ("alert.severity", "alert.severity", ("event.severity",), "exact"),
+    ("alert.action", "alert.action", ("event.type",), "action"),
+    ("alert.metadata.mitre_technique_id", "alert.mitre_technique_id", ("threat.technique.id",), "exact"),
+    ("flow.bytes_toserver", "flow.bytes_toserver", ("source.bytes",), "exact"),
+    ("flow.bytes_toclient", "flow.bytes_toclient", ("destination.bytes",), "exact"),
+    ("flow.pkts_toserver", "flow.pkts_toserver", ("source.packets",), "exact"),
+    ("flow.pkts_toclient", "flow.pkts_toclient", ("destination.packets",), "exact"),
+    ("flow.start", "flow.start", ("event.start",), "millisecond"),
+    ("flow.end", "flow.end", ("event.end",), "millisecond"),
+    ("fileinfo.filename", "file.name", ("file.path",), "exact"),
+    ("fileinfo.size", "file.size", ("file.size",), "exact"),
+    # Filebeat renames the hostname; the Agent appends it through a triple-brace template (and de-duplicates the list)
+    ("http.hostname", "http.hostname", ("destination.domain",), "exact"),
+    ("http.url", "url.original", ("url.original",), "exact"),
+    ("http.http_user_agent", "user_agent.original", ("user_agent.original",), "exact"),
+    # Filebeat sets the method through a template; the Agent copies it
+    ("http.http_method", "http.request.method", ("http.request.method",), "templated"),
+    ("http.status", "http.response.status_code", ("http.response.status_code",), "exact"),
+    ("http.length", "http.response.length", ("http.response.body.bytes",), "exact"),
+    ("http.http_refer", None, ("http.request.referrer",), "exact"),
+    ("dns.answers", "dns.answers", ("dns.answers",), "dns_answers"),
+    ("dns.version", "dns.version", (), "removed"),
+    ("dns.grouped", None, (), "removed"),
+    ("tls.sni", "tls.client.server_name", ("suricata.eve.tls.sni",), "trailing_dot"),
+    ("tls.subject", None, ("suricata.eve.tls.subject", "tls.server.subject"), "distinguished_name"),
+    ("tls.issuerdn", None, ("suricata.eve.tls.issuerdn", "tls.server.issuer"), "distinguished_name"),
+)
+ELASTIC_DATASET = "suricata.eve"
+ELASTIC_RECONSTRUCTED_CAVEAT = "Reconstructed from fields the shipper parsed; the EVE record was not indexed."
+ELASTIC_NO_APP_PROTO_CAVEAT = (
+    "The shipper drops Suricata's app_proto values 'failed', 'template' and 'template-rust': no application protocol "
+    "on this record means Suricata identified none or reported one of those")
+ELASTIC_ESCAPED_CAVEAT = "The shipper's escaped copy of these values is not a valid escaped string: not typed: "
+ELASTIC_ACTION_CAVEAT = ("The alert's action cannot be read back from event.type (not exactly one of 'allowed' and "
+                         "'denied'): not typed")
+ELASTIC_SNI_CAVEAT = "The shipper removes a trailing '.' from the TLS server name; the name is typed as indexed"
+ELASTIC_HTTP_DROPPED_CAVEAT = ("Filebeat removes the HTTP method and user agent of a record whose protocol is not "
+                               "'http' without copying them: not typed")
+_ELASTIC_ACTIONS = {"allowed": "allowed", "denied": "blocked"}
+ELASTIC_GROUPED_CAVEAT = ("The shipper removes Suricata's grouped DNS answers: this version-2 answer kept no answer "
+                          "list, so answers logged only in the grouped form are not typed")
+ELASTIC_DNS_VERSION_CAVEAT = "The shipper removes the DNS record's version, and its layout does not tell it: not typed"
+# The event types the sweep reports as seen in this shape; any other is counted as "other" (the table stays bounded).
+ELASTIC_EVENT_TYPES = ("alert", "flow", "netflow", "dns", "http", "fileinfo", "tls", "ssh")
+_ELASTIC_V1_ANSWER = (("name", "rrname"), ("data", "rdata"), ("type", "rrtype"), ("ttl", "ttl"))
+
+
+def _eve_json(raw) -> dict | None:
+    """The EVE record a document still carries as JSON text, else None."""
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        eve = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return eve if isinstance(eve, dict) else None
+
+
+def elastic_suricata_dataset(src: dict) -> bool:
+    """A document of Filebeat's suricata module or the Agent's Suricata integration (dataset "suricata.eve" on either
+    dataset field) that holds the parsed EVE record under suricata.eve with its event type."""
+    if ELASTIC_DATASET not in (_get(src, "event.dataset"), _get(src, "data_stream.dataset")):
+        return False
+    eve = _get(src, "suricata.eve")
+    return isinstance(eve, dict) and "event_type" in eve
+
+
+def is_elastic_suricata(src: dict) -> bool:
+    """An Elastic-shipped Suricata document that no longer carries its EVE line (in event.original or message): it is
+    rebuilt from the fields the shipper parsed. One that still carries the line is read from the line."""
+    return (elastic_suricata_dataset(src) and _eve_json(_get(src, "event.original")) is None
+            and _eve_json(src.get("message")) is None)
+
+
+def _set_path(record: dict, path: str, value) -> bool:
+    """Put `value` at a dotted path of an EVE record, creating objects on the way; False when a step is not one."""
+    parts = path.split(".")
+    current = record
+    for part in parts[:-1]:
+        nxt = current.setdefault(part, {})
+        if not isinstance(nxt, dict):
+            return False
+        current = nxt
+    current[parts[-1]] = value
+    return True
+
+
+def _indexed(src: dict, paths) -> tuple[object, str | None]:
+    """The first indexed value among `paths`, with its path."""
+    for path in paths:
+        value = _get(src, path)
+        if value is not None:
+            return value, path
+    return None, None
+
+
+def _single_string(value) -> str | None:
+    """A string, or a list holding one distinct string (a de-duplicated append), else None."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        distinct = {item for item in value if isinstance(item, str)}
+        if len(distinct) == 1 and all(isinstance(item, str) for item in value):
+            return next(iter(distinct))
+    return None
+
+
+def _elastic_action(src: dict) -> tuple[str | None, bool]:
+    """(alert.action, unreadable) read back from event.type: exactly one of "allowed"/"denied" beside the flow-state
+    marks; any other value, or both, is unreadable."""
+    values = _get(src, "event.type")
+    values = values if isinstance(values, list) else [] if values is None else [values]
+    candidates = [value for value in dict.fromkeys(values) if value not in ("start", "end")]
+    if not candidates:
+        return None, False
+    if len(candidates) > 1 or candidates[0] not in _ELASTIC_ACTIONS:
+        return None, True
+    return _ELASTIC_ACTIONS[candidates[0]], False
+
+
+def _filebeat_shipped(src: dict) -> bool:
+    """Filebeat's module (its double-brace templates escape) rather than the Agent's integration (data_stream.*)."""
+    return _get(src, "data_stream.dataset") is None
+
+
+def _unescaped(text: str) -> str | None:
+    """A double-brace ingest template's output read back: the JSON string body unescaped, None when it is not one."""
+    try:
+        value = json.loads(f'"{text}"')
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, str) else None
+
+
+def _elastic_dns(src: dict, d: dict, nid: str, origins: dict[str, str], caveats: list[str], bad: list[str]) -> None:
+    """Restore a dns block's version and its version-2 answer list."""
+    kind = d.get("type")
+    version, how = None, None
+    if kind in ("request", "response"):
+        version, how = 3, "request/response type"
+    elif kind == "query":
+        how = "query"                        # Suricata's query records before version 3 name no version
+    elif kind == "answer":
+        renamed = _get(src, "dns.answers")
+        v1 = {key: d[native] for key, native in _ELASTIC_V1_ANSWER if d.get(native) is not None}
+        if "ttl" in d or "rdata" in d or (isinstance(renamed, list) and v1 and renamed == [v1]):
+            how = "version-1 answer"         # one answer, kept in place; dns.answers is the pipeline's copy of it
+        elif "answers" in d:
+            caveats.append(ELASTIC_DNS_VERSION_CAVEAT)
+        elif isinstance(renamed, list):
+            answers = []
+            for item in renamed:
+                if not isinstance(item, dict):
+                    bad.append("dns.answers")
+                    answers = None
+                    break
+                restored = {k: v for k, v in item.items() if k not in ("name", "type", "data")}
+                restored.update({native: item[key] for key, native in (("name", "rrname"), ("type", "rrtype"),
+                                                                        ("data", "rdata")) if key in item})
+                answers.append(restored)
+            if answers is not None:
+                d["answers"] = answers
+                origins["dns.answers"] = f"{nid}:dns.answers"
+            version, how = 2, "version-2 answer"
+        elif d.get("rrname") is not None:
+            version, how = 2, "version-2 answer"
+            caveats.append(ELASTIC_GROUPED_CAVEAT)
+        else:
+            caveats.append(ELASTIC_DNS_VERSION_CAVEAT)
+    elif kind is not None:
+        caveats.append(ELASTIC_DNS_VERSION_CAVEAT)
+    if version is not None:
+        d["version"] = version
+        origins["dns.version"] = f"{nid}:suricata.eve.dns.type#derived:version ({how})"
+
+
+def _elastic_names(src: dict, t: dict, escaped: list[str]) -> None:
+    """Restore the certificate subject and issuer names (see `distinguished_name` above)."""
+    filebeat = _filebeat_shipped(src)
+    for key, copy_path in (("subject", "tls.server.subject"), ("issuerdn", "tls.server.issuer")):
+        copied = _get(src, copy_path)
+        if not isinstance(copied, str) or not copied:
+            # the TLS pipeline copies every non-empty name before changing it: without a copy it did not run
+            continue
+        name = _unescaped(copied) if filebeat else copied
+        if name is None:
+            t.pop(key, None)
+            escaped.append(copy_path)
+        else:
+            t[key] = name
+
+
+def elastic_suricata_eve(src: dict, nid: str = "") -> tuple[dict, dict[str, str], list[str], list[str]]:
+    """The EVE record of a Filebeat- or Agent-shipped Suricata document, rebuilt from suricata.eve.* and the fields
+    the shipper moved it to (`ELASTIC_SURICATA_MOVES`). Returns (EVE record, origins of typed fields read outside
+    suricata.eve, caveats, malformed native paths). A document the shipper's pipeline failed on is an error: its
+    fields may be incomplete."""
+    s = _get(src, "suricata.eve")
+    if not isinstance(s, dict):
+        raise TypeError("suricata.eve is not an object")
+    failure = _get(src, "error.message")
+    if failure not in (None, "", []):
+        raise ValueError("the shipper's ingest pipeline failed on this record, so its fields may be incomplete")
+    eve = json.loads(json.dumps(s))
+    et = eve.get("event_type")
+    origins: dict[str, str] = {}
+    caveats = [ELASTIC_RECONSTRUCTED_CAVEAT]
+    bad: list[str] = []
+    escaped: list[str] = []
+    filebeat = _filebeat_shipped(src)
+    has_http = et == "http" or isinstance(eve.get("http"), dict)
+    if filebeat and isinstance(eve.get("http"), dict) and _get(src, "network.protocol") != "http" and not any(
+            key in eve["http"] for key in ("http_method", "http_user_agent")):
+        caveats.append(ELASTIC_HTTP_DROPPED_CAVEAT)
+    has_flow = et != "netflow"
+    for key, typed, paths, how in ELASTIC_SURICATA_MOVES:
+        if how in ("removed", "dns_answers", "distinguished_name", "trailing_dot") or key == "timestamp":
+            continue                      # read below with its block; the record's time is @timestamp itself
+        block = key.split(".", 1)[0] if "." in key else None
+        if (block == "http" and not has_http) or (block == "flow" and not has_flow) \
+                or (block == "fileinfo" and et != "fileinfo" and not isinstance(eve.get("fileinfo"), dict)) \
+                or (block == "alert" and et != "alert" and not isinstance(eve.get("alert"), dict)):
+            continue
+        if how == "string":
+            value = eve.get(key)
+            if isinstance(value, str):
+                if re.fullmatch(r"[0-9]+", value):
+                    eve[key] = int(value)
+                    origins[typed] = f"{nid}:{paths[0]}#derived:integer"
+                else:
+                    bad.append(key)
+                    eve.pop(key)
+            continue
+        if _get(eve, key) is not None:
+            continue                      # still in place: the pipeline did not move it
+        if how == "app_proto":
+            if et not in _EVE_APP_PROTO_TYPES:
+                continue
+            value = _get(src, paths[0])
+            if value is None:
+                caveats.append(ELASTIC_NO_APP_PROTO_CAVEAT)
+            elif isinstance(value, str) and value:
+                eve[key] = value
+                origins[typed] = f"{nid}:{paths[0]}"
+            else:
+                bad.append(paths[0])
+            continue
+        if how == "action":
+            value, ambiguous = _elastic_action(src)
+            if ambiguous:
+                caveats.append(ELASTIC_ACTION_CAVEAT)
+            elif value is not None and _set_path(eve, key, value):
+                origins[typed] = f"{nid}:event.type#derived:alert.action"
+            continue
+        value, path = _indexed(src, paths)
+        if value is None:
+            continue
+        if how in ("templated", "exact") and block == "http" and isinstance(value, list):
+            # the Agent appends the hostname to destination.domain: one distinct value
+            value = _single_string(value)
+            if value is None:
+                bad.append(path)
+                continue
+        if how == "templated" and filebeat:
+            if not isinstance(value, str):
+                bad.append(path)
+                continue
+            value = _unescaped(value)
+            if value is None:
+                escaped.append(path)
+                continue
+        elif how == "lowercased" and isinstance(value, str):
+            value = value.lower()
+        if not _set_path(eve, key, value):
+            bad.append(key)
+            continue
+        if typed is not None:
+            origins[typed] = f"{nid}:{path}"
+    if "community_id" not in eve or eve.get("community_id") in (None, ""):
+        tuple_paths = [origins.get(name, f"{nid}:suricata.eve.{native}").removeprefix(f"{nid}:") for name, native in (
+            ("source.ip", "src_ip"), ("source.port", "src_port"), ("destination.ip", "dest_ip"),
+            ("destination.port", "dest_port"), ("network.transport", "proto"))]
+        origins["network.community_id"] = f"{nid}:{'+'.join(tuple_paths)}#computed:community_id_v1"
+    d = eve.get("dns")
+    if isinstance(d, dict):
+        _elastic_dns(src, d, nid, origins, caveats, bad)
+    t = eve.get("tls")
+    if isinstance(t, dict):
+        if isinstance(t.get("sni"), str) and t["sni"]:
+            caveats.append(ELASTIC_SNI_CAVEAT)
+        _elastic_names(src, t, escaped)
+    if escaped:
+        caveats.append(ELASTIC_ESCAPED_CAVEAT + ", ".join(escaped))
+    return eve, origins, caveats, bad
+
+
+def normalize_elastic_suricata(hit: dict) -> TypedEvent:
+    """A Filebeat- or Agent-shipped Suricata document without its EVE line, normalized to the typed event of the
+    same EVE record: every typed value read outside suricata.eve.* names its indexed path."""
+    src, nid = hit["_source"], hit["_id"]
+    eve, origins, caveats, malformed = elastic_suricata_eve(src, nid)
+    return _suricata_event(hit, eve, f"{nid}:suricata.eve", origins=origins, caveats=caveats, malformed=malformed)
+
+
+def elastic_event_type_key(src: dict) -> str:
+    """The shape-table key of an Elastic-shipped Suricata document: its EVE event type, or "other"."""
+    et = _get(src, "suricata.eve.event_type")
+    return f"suricata.eve.elastic:{et if et in ELASTIC_EVENT_TYPES else 'other'}"
+
+
+# ---------------------------------------------------------------------------------------------
 # Arkime SPI session records (read from the session indices)
 # ---------------------------------------------------------------------------------------------
 # Arkime 6.x stores `cert` and `dns` as arrays of objects, and its string fields (ja3, hassh, versions, tags) as
@@ -2266,15 +3119,206 @@ def observed_record(hit: dict, boot: list | tuple | None = None) -> TypedEvent |
     came from another record (a journald copy, the boot-interval map). None when it is not such a record."""
     source = hit["_source"]
     raw = _get(source, "event.original") or source.get("message")
-    if not raw:
+    found = match_shape(source)
+    if found is not None and found[1].shape == AUDIT_EVENT:
+        # one Auditbeat event document: its SYSCALL record among the records it holds
+        members = [(h, r) for h, r in _auditbeat_group(hit, []) if r.type == "SYSCALL"]
+        record = members[0][1] if members else None
+    elif found is not None and found[1].shape == AUDIT_RECORD:
+        record = audit_record_of(hit)
+    elif not raw:
         return None
-    record = parse_record(raw)
-    if record.type != "SYSCALL":
+    else:
+        record = parse_record(raw)
+    if record is None or record.type != "SYSCALL":
         return None
-    event = normalize_observed_group(_get(source, "host.name") or "", [(hit, record)])
+    members = [(hit, record)]
+    event = normalize_observed_group(audit_host(source, record), members)
+    if event is not None:
+        _audit_node_fields(event, members)
+        _rebuilt_provenance(event, members)
     if event is not None and boot is not None and not event.has("host.boot.id"):
         event.fields["host.boot.id"] = fv(boot[0], boot[1])
     return event
+
+
+# ---------------------------------------------------------------------------------------------
+# Provenance of events built from rebuilt audit records
+# ---------------------------------------------------------------------------------------------
+
+RECONSTRUCTED_CAVEAT = "Reconstructed from fields the shipper parsed; the raw audit record was not indexed."
+HEX_GUESS_CAVEAT = ("Decoded from hex: the shipper does not record whether these values were hex-encoded, and "
+                    "auditd would have encoded their text")
+_RAW_AUDIT_ORIGIN = re.compile(r"^(?P<id>.+?):event\.original#auditd:(?P<spec>.*)$")
+_RECORD_TYPE = re.compile(r"^[A-Z_]+(?:\([A-Z]+\))?$")
+
+
+_ORIGIN_PATHS = {"msg.serial": "auditd.log.sequence", "msg.timestamp": "@timestamp", "type": "auditd.log.record_type"}
+_ARG_KEY = re.compile(r"^a(?:\d+|\*)$")
+
+
+def _spec_path(spec: str, record: AuditRecord | None, by_type: dict[str, AuditRecord]
+               ) -> tuple[str, AuditRecord | None]:
+    """(the indexed path, the record) a raw-record origin spec ("SYSCALL.pid", "msg.serial",
+    "USER_START:enriched.UID", a part of "SYSCALL.arch+syscall") names among rebuilt records. A spec naming a record
+    type reads that record (the given one when it is of that type); a bare key reads the given record."""
+    head, colon, tail = spec.partition(":")
+    if colon:                                   # "<TYPE>:enriched.<KEY>"
+        spec = tail
+    else:
+        head, _dot, rest = spec.partition(".")
+        if rest and _RECORD_TYPE.match(head):
+            spec = rest
+        else:
+            head = ""
+    kind = head.split("(", 1)[0]
+    if kind and _RECORD_TYPE.match(kind) and (record is None or record.type != kind):
+        record = by_type.get(kind, record)
+    if spec.startswith("enriched."):
+        return f"auditd.log.{spec[len('enriched.'):]}", record
+    if spec in _ORIGIN_PATHS:
+        return _ORIGIN_PATHS[spec], record
+    if _ARG_KEY.match(spec):
+        return "process.args", record
+    return ((record.origins or {}) if record is not None else {}).get(spec) or f"auditd.log.{spec}", record
+
+
+def _rebuilt_origin(origin: str, rebuilt: dict[str, AuditRecord], by_type: dict[str, AuditRecord]) -> str:
+    """An origin naming rebuilt records' indexed paths in place of their (absent) raw text."""
+    parts, current, changed = [], None, False
+    for part in origin.split("+"):
+        m = _RAW_AUDIT_ORIGIN.match(part)
+        if m is not None:
+            current = rebuilt.get(m["id"])
+            if current is not None:
+                path, current = _spec_path(m["spec"], current, by_type)
+                part, changed = f"{m['id']}:{path}", True
+        elif current is not None:
+            part, current = _spec_path(part, current, by_type)
+        parts.append(part)
+    return "+".join(parts) if changed else origin
+
+
+def _rebuilt_provenance(event: TypedEvent, members: list[tuple[dict, AuditRecord]]) -> None:
+    """For an event viewing a rebuilt record: origins name the indexed paths, the event says it was rebuilt, and
+    any value decoded from hex on a guess is named."""
+    rebuilt = {hit["_id"]: record for hit, record in members if record.reconstructed}
+    cited = {ref.native_id for ref in event.raw}
+    if not rebuilt or not cited & set(rebuilt):
+        return
+    by_type: dict[str, AuditRecord] = {}
+    for _hit, record in members:
+        if record.reconstructed:
+            by_type.setdefault(record.type, record)
+    for name, value in list(event.fields.items()):
+        origin = _rebuilt_origin(value.origin, rebuilt, by_type)
+        if origin != value.origin:
+            event.fields[name] = fv(value.value, origin)
+    first = min(cited & set(rebuilt))
+    event.fields["audit.reconstructed"] = fv(True, f"{first}:auditd.log.record_type")
+    if RECONSTRUCTED_CAVEAT not in event.caveats:
+        event.caveats.append(RECONSTRUCTED_CAVEAT)
+    guessed = sorted({f"{record.type}.{key}" for native_id, record in rebuilt.items() if native_id in cited
+                      for key in record.hex_guessed})
+    if guessed:
+        event.caveats.append(f"{HEX_GUESS_CAVEAT}: {', '.join(guessed)}")
+
+
+def _audit_group(host: str, members: list[tuple[dict, AuditRecord]], events: list[TypedEvent],
+                 skips: dict[str, int], errors: list[tuple[str, str]]) -> None:
+    """The typed events of one audit event's records (one group), appended to `events`."""
+    counts = Counter(r.type for _, r in members)
+    types = set(counts)
+    # EXECVE may legitimately repeat (long-argv continuation records; merged in normalize_exec_group)
+    dup = sorted(t for t, n in counts.items() if n > 1 and t in _SINGLE_COMPANIONS)
+    if dup:
+        errors.append((members[0][0]["_id"], f"linux.audit: ambiguous event group, duplicate {dup} records"))
+        return
+    if types & AUDIT_LOGIN_TYPES:
+        try:
+            events.append(normalize_audit_auth_group(host, members))
+        except (ValueError, KeyError, TypeError) as e:
+            errors.append((members[0][0]["_id"], f"linux.audit.auth: {e}"))
+        return
+    if types & AUDIT_ADMIN_TYPES:
+        try:
+            events.extend(normalize_audit_admin_group(host, members))
+        except (ValueError, KeyError, TypeError) as e:
+            errors.append((members[0][0]["_id"], f"linux.audit.admin: {e}"))
+        return
+    if "EXECVE" not in types:
+        sys_rec = next((r for _, r in members if r.type == "SYSCALL"), None)
+        module_call = module_syscall(sys_rec)
+        if module_call is not None or "KERN_MODULE" in types:
+            try:
+                events.append(normalize_module_group(host, members, module_call))
+                _observed_or_skip(events, skips, errors, host, members, None)
+            except (AuditParseError, ValueError, KeyError) as e:
+                errors.append((members[0][0]["_id"], f"linux.audit.module: {e}"))
+            return
+        syscall = socket_syscall(sys_rec) if sys_rec is not None else None
+        file_call = file_syscall(sys_rec) if sys_rec is not None and syscall is None else None
+        if file_call is not None:
+            try:
+                files = normalize_file_group(host, members, file_call)
+                events.extend(files)
+                if any(event.family == "file_access" for event in files):
+                    _observed_or_skip(events, skips, errors, host, members, None)
+            except Skip as s:
+                _observed_or_skip(events, skips, errors, host, members, s.reason)
+            except (AuditParseError, ValueError, KeyError) as e:
+                # tagged by family so the sweep marks only file-change rules partial
+                errors.append((members[0][0]["_id"], f"linux.audit.file: {e}"))
+            return
+        if syscall is None:
+            arch = sys_rec.fields.get("arch", "") if sys_rec is not None else ""
+            if not arch or arch in SOCKET_SYSCALLS:
+                _observed_or_skip(events, skips, errors, host, members,
+                                  "audit group without EXECVE, socket or file-change syscall")
+            else:
+                # the process is still observed; what its socket calls did is not decoded, and the skip says so
+                _observed_or_skip(events, skips, errors, host, members, None)
+                skips[f"audit syscall on an arch whose socket calls are not decoded ({arch})"] += 1
+            return
+        try:
+            events.append(normalize_socket_group(host, members, syscall))
+        except Skip as s:
+            _observed_or_skip(events, skips, errors, host, members, s.reason)
+        except (AuditParseError, ValueError, KeyError) as e:
+            # tagged by family so the sweep marks only socket rules partial
+            errors.append((members[0][0]["_id"], f"linux.audit.socket: {e}"))
+        return
+    try:
+        event = normalize_exec_group(host, members)
+        events.append(event)
+        # the event is kept, but its command line is incomplete: the partition cannot assure a negative
+        errors += [(members[0][0]["_id"], f"linux.audit: {c}") for c in event.caveats
+                   if c.startswith(INCOMPLETE_ARGV_CAVEAT)]
+    except Skip as s:
+        skips[s.reason] += 1
+    except (AuditParseError, ValueError, KeyError) as e:
+        errors.append((members[0][0]["_id"], f"linux.audit: {e}"))
+
+
+def _auditbeat_group(h: dict, errors: list[tuple[str, str]]) -> list[tuple[dict, AuditRecord]]:
+    """The records of one Auditbeat / Auditd Manager event document: its raw lines when it carries them, else the
+    records rebuilt from its fields. A line that cannot be parsed is an error; the others still form the event."""
+    lines = auditbeat_lines(h["_source"])
+    parsed = [line for line in lines if is_audit_line(line)]
+    if not parsed:
+        try:
+            return auditbeat_records(h)
+        except (AuditParseError, ValueError, TypeError) as e:
+            errors.append((h["_id"], f"linux.audit: event cannot be rebuilt from the shipper's fields: {e}"))
+            return []
+    members = []
+    for line in lines:
+        try:
+            # never the batch's parse cache: it holds one parse per hit, and this hit holds several records
+            members.append((h, parse_record(line)))
+        except AuditParseError as e:
+            errors.append((h["_id"], f"linux.audit: unparseable record: {e}"))
+    return members
 
 
 def zeek_skip_families(names) -> frozenset[str]:
@@ -2290,9 +3334,17 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                    malformed_text: dict[str, list[str]] | None = None,
                    skip_families: dict[str, frozenset[str] | None] | None = None,
                    surrogate_free: bool = False,
+                   shapes: dict[str, int] | None = None,
                    ) -> tuple[list[TypedEvent], dict[str, int], list[tuple[str, str]]]:
     """Normalize a batch. Returns (events, skip_counts, errors[(raw_id, error)]). `audit_parse` is passed to
     `group_audit`.
+
+    Linux host records are read by their shipper shape (`linux_catalog.LINUX_SHIPPER_DATASETS`); `shapes`, when
+    given, receives the count of records of each shape, and errors name the logical dataset. A record that is plainly
+    Linux host telemetry of a module we read but matches no shape is counted not normalized, with the families its
+    logical dataset feeds. `shapes` also counts the EVE event types of Suricata records an Elastic shipper indexed
+    without their line (`suricata.eve.elastic:<type>`), and NXLog's flat Windows records (`windows.nxlog`) with how
+    far each zoneless EventTime is from the pipeline's @timestamp (`windows.nxlog.clock_offset:<zone>`).
 
     `skip_families`, when given, receives for each skip reason of a record no normalizer read the event families
     such records could have fed: the families of the Zeek log(s) a Zeek record names (empty for a log outside the
@@ -2314,6 +3366,8 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
     windows_signatures: dict[tuple[str, str, str], set[str]] = defaultdict(set)
     zeek_events: dict[str, TypedEvent] = {}           # by event id: a Zeek record's logical identity
     audit_hits = []
+    # an Auditbeat document's records, with its event.action when they were rebuilt from its fields
+    event_groups: list[tuple[tuple[str, float, int], list[tuple[dict, AuditRecord]], str | None]] = []
     audit_copies: list[tuple[tuple[str, int, int], str, str, str]] = []
     journal_boots: list[tuple[str, str, int | None, str, bool]] = []
     unclean: dict[str, list[str]] = {}
@@ -2325,6 +3379,13 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
         ds = _get(h["_source"], "event.dataset") or ""
         try:
             if is_windows_source(h["_source"]):
+                if is_nxlog_windows(h["_source"]):
+                    # NXLog's flat record names no dataset: an error is counted under its channel's families
+                    ds = nxlog_error_tag(h["_source"])
+                    if shapes is not None:
+                        for key in (NXLOG_SHAPE, nxlog_clock_offset(h["_source"])):
+                            if key is not None:
+                                shapes[key] = shapes.get(key, 0) + 1
                 windows_event = normalize_windows(h)
                 if rpc_remote_only and windows_event.family == "rpc_call" and (
                         windows_event.get("rpc.protocol") not in {"tcp", "named_pipe"}
@@ -2368,18 +3429,46 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
             elif not ds and is_arkime_session(h["_source"]):
                 ds = "arkime.session"
                 events.append(normalize_arkime_session(h))
-            elif ds == "linux.audit":
-                audit_hits.append(h)
-            elif ds.startswith("suricata.eve"):
+            elif (linux := match_shape(h["_source"])) is not None:
+                ds, shape = linux[0], linux[1]
+                if shapes is not None:
+                    shapes[shape.key] = shapes.get(shape.key, 0) + 1
+                if shape.shape == AUDIT_RECORD:
+                    audit_hits.append(h)
+                elif shape.shape == AUDIT_EVENT:
+                    members = _auditbeat_group(h, errors)
+                    if members:
+                        first = members[0][1]
+                        action = _get(h["_source"], "event.action") if first.reconstructed else None
+                        event_groups.append(((audit_host(h["_source"], first), first.ts, first.serial), members,
+                                             str(action) if first.reconstructed else None))
+                elif shape.shape == JOURNAL_JSON:
+                    events.append(normalize_journal(h, journal_boots))
+                elif shape.shape == JOURNAL_FIELDS:
+                    events.append(normalize_journal_fields(h, journal_boots))
+                elif shape.shape == SYSLOG_LINE:
+                    events.append(normalize_syslog(h))
+                elif shape.shape == APACHE_ACCESS:
+                    events.append(normalize_apache_access(h))
+                elif shape.shape == APACHE_ERROR:
+                    events.append(normalize_apache_error(h))
+            elif ds.startswith("suricata.eve") or _get(h["_source"], "data_stream.dataset") == ELASTIC_DATASET:
+                ds = ds or ELASTIC_DATASET
+                if shapes is not None and is_elastic_suricata(h["_source"]):
+                    key = elastic_event_type_key(h["_source"])
+                    shapes[key] = shapes.get(key, 0) + 1
                 events.append(normalize_suricata(h))
-            elif ds == "systemd.journal":
-                events.append(normalize_journal(h, journal_boots))
             elif ds in SINGLE:
                 events.append(SINGLE[ds](h))
             else:
-                skips[f"dataset:{ds} is not normalized"] += 1
+                reason = f"dataset:{ds or document_dataset(h['_source'])} is not normalized"
+                skips[reason] += 1
                 if skip_families is not None:
-                    skip_families[f"dataset:{ds} is not normalized"] = None
+                    # Linux host telemetry of a module we read hides only its dataset's families; anything else
+                    # could hold any behavior
+                    fed = unmatched_families(h["_source"])
+                    known = skip_families.get(reason, frozenset())
+                    skip_families[reason] = None if fed is None or known is None else known | fed
         except AuditCopy as copy:
             skips[copy.reason] += 1
             found = _audit_copy_key(h, copy.record)
@@ -2387,6 +3476,10 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                 audit_copies.append((*found, h["_id"]))
         except WindowsNotNormalized as unsupported:
             skips[unsupported.reason] += 1
+            if skip_families is not None and unsupported.reason.startswith(NXLOG_CHANNEL_SKIP):
+                known = skip_families.get(unsupported.reason, frozenset())
+                fed = nxlog_class_families(h["_source"])
+                skip_families[unsupported.reason] = None if known is None else known | fed
         except ZeekNotNormalized as uncatalogued:
             skips[uncatalogued.reason] += 1
             if skip_families is not None:
@@ -2406,81 +3499,34 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
     errors.extend(audit_errors)
     partners = _boot_partners(audit_copies)
     audit_start, boot_by_hit = len(events), {}
-    for (host, ts, serial), members in groups.items():
+    # an Auditbeat document is one event of its own: never merged with another document's records
+    for (host, ts, serial), members, action in [*((key, members, None) for key, members in groups.items()),
+                                                *event_groups]:
         boot = _partner_boot(partners, host, ts, serial, members) if partners else {}
         if boot:
             boot_by_hit.update({hit["_id"]: boot for hit, _record in members})
-        counts = Counter(r.type for _, r in members)
-        types = set(counts)
-        # EXECVE may legitimately repeat (long-argv continuation records; merged in normalize_exec_group)
-        dup = sorted(t for t, n in counts.items() if n > 1 and t in _SINGLE_COMPANIONS)
-        if dup:
-            errors.append((members[0][0]["_id"], f"linux.audit: ambiguous event group, duplicate {dup} records"))
-            continue
-        if types & AUDIT_LOGIN_TYPES:
-            try:
-                events.append(normalize_audit_auth_group(host, members))
-            except (ValueError, KeyError, TypeError) as e:
-                errors.append((members[0][0]["_id"], f"linux.audit.auth: {e}"))
-            continue
-        if types & AUDIT_ADMIN_TYPES:
-            try:
-                events.extend(normalize_audit_admin_group(host, members))
-            except (ValueError, KeyError, TypeError) as e:
-                errors.append((members[0][0]["_id"], f"linux.audit.admin: {e}"))
-            continue
-        if "EXECVE" not in types:
-            sys_rec = next((r for _, r in members if r.type == "SYSCALL"), None)
-            module_call = module_syscall(sys_rec)
-            if module_call is not None or "KERN_MODULE" in types:
-                try:
-                    events.append(normalize_module_group(host, members, module_call))
-                    _observed_or_skip(events, skips, errors, host, members, None)
-                except (AuditParseError, ValueError, KeyError) as e:
-                    errors.append((members[0][0]["_id"], f"linux.audit.module: {e}"))
-                continue
-            syscall = socket_syscall(sys_rec) if sys_rec is not None else None
-            file_call = file_syscall(sys_rec) if sys_rec is not None and syscall is None else None
-            if file_call is not None:
-                try:
-                    files = normalize_file_group(host, members, file_call)
-                    events.extend(files)
-                    if any(event.family == "file_access" for event in files):
-                        _observed_or_skip(events, skips, errors, host, members, None)
-                except Skip as s:
-                    _observed_or_skip(events, skips, errors, host, members, s.reason)
-                except (AuditParseError, ValueError, KeyError) as e:
-                    # tagged by family so the sweep marks only file-change rules partial
-                    errors.append((members[0][0]["_id"], f"linux.audit.file: {e}"))
-                continue
-            if syscall is None:
-                arch = sys_rec.fields.get("arch", "") if sys_rec is not None else ""
-                if not arch or arch in SOCKET_SYSCALLS:
-                    _observed_or_skip(events, skips, errors, host, members,
-                                      "audit group without EXECVE, socket or file-change syscall")
-                else:
-                    # the process is still observed; what its socket calls did is not decoded, and the skip says so
-                    _observed_or_skip(events, skips, errors, host, members, None)
-                    skips[f"audit syscall on an arch whose socket calls are not decoded ({arch})"] += 1
-                continue
-            try:
-                events.append(normalize_socket_group(host, members, syscall))
-            except Skip as s:
-                _observed_or_skip(events, skips, errors, host, members, s.reason)
-            except (AuditParseError, ValueError, KeyError) as e:
-                # tagged by family so the sweep marks only socket rules partial
-                errors.append((members[0][0]["_id"], f"linux.audit.socket: {e}"))
-            continue
-        try:
-            event = normalize_exec_group(host, members)
-            events.append(event)
-            # the event is kept, but its command line is incomplete: the partition cannot assure a negative
-            errors += [(members[0][0]["_id"], f"linux.audit: {c}") for c in event.caveats
-                       if c.startswith(INCOMPLETE_ARGV_CAVEAT)]
-        except Skip as s:
-            skips[s.reason] += 1
-        except (AuditParseError, ValueError, KeyError) as e:
-            errors.append((members[0][0]["_id"], f"linux.audit: {e}"))
+        start, failed = len(events), len(errors)
+        noded = any(audit_node(hit["_source"], record) for hit, record in members)
+        # an Auditbeat action outside the table that gives no event is counted by its action
+        unlisted = action is not None and action not in AUDITBEAT_ACTIONS
+        group_skips: dict[str, int] = defaultdict(int) if unlisted else skips
+        _audit_group(host, members, events, group_skips, errors)
+        if unlisted:
+            if len(events) == start and len(errors) == failed:
+                skips[f"auditbeat action {action} is not normalized"] += 1
+            else:
+                for reason, count in group_skips.items():
+                    skips[reason] += count
+        if noded:
+            for event in events[start:]:
+                _audit_node_fields(event, members)
+        if any(record.reconstructed for _hit, record in members):
+            for event in events[start:]:
+                _rebuilt_provenance(event, members)
+        if len({hit["_id"] for hit, _record in members}) < len(members):
+            for event in events[start:]:
+                # one document held several of the event's records: cite it once
+                event.raw[:] = list({ref.key: ref for ref in event.raw}.values())
     # Every audit event cites records of its own group only, so its first record names the group.
     for event in events[audit_start:]:
         boot = boot_by_hit.get(event.raw[0].native_id) if event.raw else None
