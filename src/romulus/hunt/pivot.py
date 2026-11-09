@@ -547,6 +547,19 @@ NO_HOST_RECORD = "no host record carries host.ip"      # a complete lookup: no h
 HOST_AMBIGUOUS = "victim host ambiguous"               # a complete lookup: several hosts claim the address
 
 
+def _nxlog_mixed_coverage(contracts: dict[str, FieldContract], request: ToolRequest) -> list[PivotCoverage]:
+    """A Linux target that also holds NXLog's flat Windows records: pivots select its Linux datasets only (its
+    contract carries no Windows names for the flat records' values), so that shape is listed as not searched."""
+    args = request.arguments
+    reason = ("shape_not_searched:windows.nxlog:NXLog flat Windows records on a Linux target are not selected by "
+              "pivots")
+    return [PivotCoverage(target=target, dataset="windows.nxlog", start=args.start, end=args.end,
+                          status="partial", reasons=[reason], returned=0, total=None,
+                          unresolved_ranges=[_range(args.start, args.end, reason)])
+            for target, contract in contracts.items()
+            if contract.nxlog_mixed and not _is_network(target, contract)]
+
+
 def _link_task_kind(executor) -> str:
     """Keep borrowed executor methods compatible while separating agent link work."""
     return "agent_follow_link" if getattr(executor, "source_query_scope", None) == "agent" else "expansion_link"
@@ -856,19 +869,8 @@ class PivotExecutor:
     def plan(self, request: ToolRequest) -> tuple[list[SearchIntent], list[PivotCoverage]]:
         """Plan executable intents and every known unresolved dataset cell together."""
         intents = self._intents(request)
-        return intents, [*self._unsearchable_ip_coverage(request, intents), *self._nxlog_mixed_coverage(request)]
-
-    def _nxlog_mixed_coverage(self, request: ToolRequest) -> list[PivotCoverage]:
-        """A Linux target that also holds NXLog's flat Windows records: pivots select its Linux datasets only (its
-        contract carries no Windows names for the flat records' values), so that shape is listed as not searched."""
-        args = request.arguments
-        reason = ("shape_not_searched:windows.nxlog:NXLog flat Windows records on a Linux target are not selected by "
-                  "pivots")
-        return [PivotCoverage(target=target, dataset="windows.nxlog", start=args.start, end=args.end,
-                              status="partial", reasons=[reason], returned=0, total=None,
-                              unresolved_ranges=[_range(args.start, args.end, reason)])
-                for target, contract in self.contracts.items()
-                if contract.nxlog_mixed and not _is_network(target, contract)]
+        return intents, [*self._unsearchable_ip_coverage(request, intents),
+                         *_nxlog_mixed_coverage(self.contracts, request)]
 
     @staticmethod
     def _intent_dataset(intent: SearchIntent) -> str | None:

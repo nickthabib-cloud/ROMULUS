@@ -35,7 +35,7 @@ from romulus.evidence.windows import (
 )
 from romulus.evidence.windows_catalog import SECURITY, SYSMON
 from romulus.hunt import sweep as sweep_module
-from romulus.hunt.pivot import _windows_source_groups
+from romulus.hunt.pivot import _nxlog_mixed_coverage, _windows_source_groups
 from romulus.hunt.sweep import Sweep
 from romulus.sources.compile import _pred, build_query
 from romulus.sources.models import Completeness, Predicate, SearchIntent, SearchOutcome, Window
@@ -408,7 +408,7 @@ def test_a_linux_target_that_also_holds_nxlog_records_selects_both_shapes():
         entity=EntityRef(kind="host", value="web01"), start=WINDOW.start, end=WINDOW.end))
     _intents, coverage = executor.plan(request)
     assert any(row.dataset == "windows.nxlog" and row.status == "partial" for row in coverage)
-    assert not PivotExecutor(None, None, "h1", {"t": linux})._nxlog_mixed_coverage(request)
+    assert not _nxlog_mixed_coverage({"t": linux}, request)
 
 
 ECS_TEMPLATE_TYPES = {"process.executable": "keyword", "process.pid": "long", "user.name": "keyword",
@@ -429,6 +429,12 @@ def test_linux_is_decided_by_an_inventory_dataset_or_linux_only_fields():
     assert not contract_from_types("t", {**nxlog, "event.dataset": "keyword"}, datasets={"other.x": 1}).nxlog_mixed
     # without an inventory, only Linux-only fields decide
     assert contract_from_types("t", {**nxlog, "journald.custom.x": "keyword"}).nxlog_mixed
+    # ECS log.syslog.* is written by any syslog transport, Windows events forwarded over syslog included
+    syslog_forwarded = {**nxlog, "log.syslog.facility.code": "long", "log.syslog.appname": "keyword",
+                        "event.dataset": "keyword"}
+    forwarded = contract_from_types("t", syslog_forwarded, datasets={"windows.security": 5})
+    assert forwarded.os_family == "windows" and not forwarded.nxlog_mixed
+    assert contract_from_types("t", syslog_forwarded, datasets={"system.syslog": 5}).nxlog_mixed
     # a Winlogbeat or Agent mapping is unchanged by NXLog fields or ECS fields beside it
     for extra in ({}, ECS_TEMPLATE_TYPES, TEXT_FLAT_TYPES):
         winlogbeat = contract_from_types("w", {**WINLOGBEAT_TYPES, **extra}, datasets={"windows.security": 5})

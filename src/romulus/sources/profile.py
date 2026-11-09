@@ -240,10 +240,12 @@ NXLOG_FLAT_NAMES: dict[str, tuple[str, ...]] = {
 # Aliases the sweep aggregates on (continuity metadata, the event-class inventory): a second native would make them
 # unaggregatable, so on a target that also maps Winlogbeat's names they keep those alone.
 _GROUPED_ALIASES = frozenset({"host.name", "event.channel", "event.provider", "event.code", "winlog.record_id"})
-# Field prefixes only Linux host shippers write (audit, journald, syslog): a mapping with NXLog's flat fields and any
-# of these is a Linux target that also holds NXLog records, not a Windows target. ECS process.*/user.* and apache.*
-# are not Linux-only (Logstash's ECS template maps process.* and user.* on every index).
-LINUX_FIELD_PREFIXES = ("auditd.", "auditbeat.", "journald.", "systemd.", "system.auth.", "log.syslog.")
+# Field prefixes only Linux host shippers write (audit, journald, system auth): a mapping with NXLog's flat fields and
+# any of these is a Linux target that also holds NXLog records, not a Windows target. ECS process.*/user.* and
+# apache.* are not Linux-only (Logstash's ECS template maps process.* and user.* on every index), and neither is ECS
+# log.syslog.*: any syslog transport writes it, Windows events forwarded over syslog included. Syslog-carried Linux
+# data still counts through its Linux dataset in the inventory.
+LINUX_FIELD_PREFIXES = ("auditd.", "auditbeat.", "journald.", "systemd.", "system.auth.")
 
 
 def nxlog_flat(field_types) -> bool:
