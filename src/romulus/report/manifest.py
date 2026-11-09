@@ -806,7 +806,7 @@ def _ai_agent(repo: Repo, hunt_id: str, hunt_manifest: dict) -> dict:
 
 
 def _legacy_mode_value(record: dict) -> str | None:
-    """Read the retired mode field only for stored pre-M6 hunts and case-step rows."""
+    """Read the retired mode field only for hunts and case-step rows stored before the AI agent settings."""
     return record.get(LEGACY_AGENT_MODE_KEY)
 
 

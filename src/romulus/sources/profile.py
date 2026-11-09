@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, model_serializer
 
+from romulus.evidence.linux_catalog import LINUX_LOGICAL_DATASETS, logical_of
 from romulus.evidence.zeek_catalog import MALCOLM, lookup_log
 from romulus.store.db import digest
 
@@ -60,6 +61,9 @@ class FieldContract(BaseModel):
 
     zeek_sensor: str | None = None
     zeek_log: str | None = None
+    # A Linux target whose mapping also holds NXLog's flat Windows records: both shapes are selected, each as it
+    # would be alone (sources.profile.nxlog_mixed).
+    nxlog_mixed: bool = False
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler):
@@ -68,6 +72,8 @@ class FieldContract(BaseModel):
             data.pop("zeek_sensor", None)
         if self.zeek_log is None:
             data.pop("zeek_log", None)
+        if not self.nxlog_mixed:
+            data.pop("nxlog_mixed", None)
         return data
 
     def spec(self, typed: str, *, os_family: str | None = None) -> FieldSpec | None:
@@ -211,6 +217,59 @@ WINDOWS_FIELD_MAPPINGS: dict[str, tuple[str, ...]] = {
 }
 
 
+# NXLog's flat Windows records (evidence.windows.nxlog_to_winlog) hold the same values at the top level, under
+# NXLog's System names and the providers' own event-data names: on a target that maps them, every Windows alias
+# also reads the flat name.
+NXLOG_MARKERS = ("Channel", "EventID")
+_NXLOG_SYSTEM_NAMES = {"winlog.channel": "Channel", "winlog.provider_name": "SourceName", "winlog.event_id": "EventID",
+                       "winlog.computer_name": "Hostname", "winlog.record_id": "RecordNumber"}
+
+
+def _nxlog_name(native: str) -> str | None:
+    if native.startswith("winlog.event_data."):
+        return native.removeprefix("winlog.event_data.")
+    return _NXLOG_SYSTEM_NAMES.get(native)
+
+
+# Each Windows alias's flat names (beside its Winlogbeat names in WINDOWS_FIELD_MAPPINGS).
+NXLOG_FLAT_NAMES: dict[str, tuple[str, ...]] = {
+    **{typed: names for typed, natives in WINDOWS_FIELD_MAPPINGS.items()
+       if (names := tuple(dict.fromkeys(flat for native in natives if (flat := _nxlog_name(native)))))},
+    "winlog.record_id": ("RecordNumber",),
+}
+# Aliases the sweep aggregates on (continuity metadata, the event-class inventory): a second native would make them
+# unaggregatable, so on a target that also maps Winlogbeat's names they keep those alone.
+_GROUPED_ALIASES = frozenset({"host.name", "event.channel", "event.provider", "event.code", "winlog.record_id"})
+# Field prefixes only Linux host shippers write (audit, journald, system auth): a mapping with NXLog's flat fields and
+# any of these is a Linux target that also holds NXLog records, not a Windows target. ECS process.*/user.* and
+# apache.* are not Linux-only (Logstash's ECS template maps process.* and user.* on every index), and neither is ECS
+# log.syslog.*: any syslog transport writes it, Windows events forwarded over syslog included. Syslog-carried Linux
+# data still counts through its Linux dataset in the inventory.
+LINUX_FIELD_PREFIXES = ("auditd.", "auditbeat.", "journald.", "systemd.", "system.auth.")
+
+
+def nxlog_flat(field_types) -> bool:
+    """Whether a mapping holds NXLog's flat Windows record fields."""
+    return all(field in field_types for field in NXLOG_MARKERS)
+
+
+def _winlog_mapping(field_types) -> bool:
+    return any(field == "winlog" or field.startswith("winlog.") for field in field_types)
+
+
+def linux_markers(field_types, datasets=None) -> bool:
+    """Whether a target holds Linux host telemetry: a Linux shipper dataset in its inventory (a logical Linux dataset
+    or a shipper's name for one), or a field only Linux host shippers write. Dataset-less Linux shapes (journald,
+    Auditbeat without a dataset) are not in the inventory, so the fields still count."""
+    if any(str(name) in LINUX_LOGICAL_DATASETS or logical_of(str(name)) is not None for name in datasets or ()):
+        return True
+    return any(field.startswith(LINUX_FIELD_PREFIXES) for field in field_types)
+
+
+def _windows_mapping(field_types, datasets=None) -> bool:
+    return _winlog_mapping(field_types) or (nxlog_flat(field_types) and not linux_markers(field_types, datasets))
+
+
 def schema_of(field_types: dict[str, str]) -> str:
     """Which normalizer family a target's mapping belongs to, from its fields (never its name)."""
     if all(f in field_types for f in ARKIME_SESSION_MARKERS):
@@ -230,12 +289,12 @@ def source_role(field_types: dict[str, str], datasets: set[str] | None = None) -
     host_shape = any(
         field == "host.ip" or field.startswith(("process.", "user.", "winlog."))
         for field in field_types
-    )
+    ) or nxlog_flat(field_types)
     return "network" if network_shape and not host_shape else "host"
 
 
-def source_os_family(field_types: dict[str, str], role: str) -> Literal["linux", "windows", "unknown"]:
-    if any(field == "winlog" or field.startswith("winlog.") for field in field_types):
+def source_os_family(field_types: dict[str, str], role: str, datasets=None) -> Literal["linux", "windows", "unknown"]:
+    if _windows_mapping(field_types, datasets):
         return "windows"
     return "linux" if role == "host" else "unknown"
 
@@ -261,8 +320,11 @@ def contract_from_types(
     field_mappings: dict[str, tuple[str, ...] | str] | None = None,
     hosts: tuple[str, ...] = (),
     host_inventory_complete: bool = True,
+    datasets=None,
 ) -> FieldContract:
-    """Build a typed contract, adding explicit aliases for native schemas such as Windows event data."""
+    """Build a typed contract, adding explicit aliases for native schemas such as Windows event data. `datasets` is
+    the target's dataset inventory, when known: a Linux dataset in it makes a mapping that also holds NXLog's flat
+    fields a Linux target that holds NXLog records too (`nxlog_mixed`)."""
     fields = {
         name: FieldSpec(
             native=name,
@@ -275,8 +337,11 @@ def contract_from_types(
     }
     direct_fields = dict(fields)
     mappings = dict(field_mappings or {})
-    if any(field == "winlog" or field.startswith("winlog.") for field in field_types):
-        mappings = {**WINDOWS_FIELD_MAPPINGS, **mappings}
+    windows = _windows_mapping(field_types, datasets) or (os_family == "windows" and nxlog_flat(field_types))
+    flat = windows and nxlog_flat(field_types)
+    if windows:
+        mappings = {**WINDOWS_FIELD_MAPPINGS, **({"winlog.record_id": ("winlog.record_id",)} if flat else {}),
+                    **mappings}
     for typed, candidates in mappings.items():
         native_candidates = (candidates,) if isinstance(candidates, str) else candidates
         available = [
@@ -284,6 +349,19 @@ def contract_from_types(
             for native in native_candidates
             if (native_type := _native_type(field_types, native)) is not None
         ]
+        flat_available = [(native, native_type) for native in (NXLOG_FLAT_NAMES.get(typed, ()) if flat else ())
+                          if (native_type := _native_type(field_types, native)) is not None]
+        if not available:
+            available = flat_available            # NXLog's flat records alone name this value
+        elif flat_available:
+            # An NXLog name joins a Winlogbeat alias only when it never narrows it: its ops cover the alias's,
+            # and an alias the sweep aggregates keeps one native. Otherwise the flat records stay selected by
+            # their shape, and value queries on them are listed as unresolved (hunt.sweep._nxlog_selector).
+            base_ops = set.intersection(*(OPS_BY_TYPE.get(kind, set()) for _, kind in available))
+            grouped = typed in _GROUPED_ALIASES and len(available) == 1 and available[0][1] in AGGREGATABLE
+            if not grouped:
+                available += [(native, kind) for native, kind in flat_available
+                              if OPS_BY_TYPE.get(kind, set()) >= base_ops]
         if not available:
             continue
         common_ops = set.intersection(*(OPS_BY_TYPE.get(native_type, set()) for _, native_type in available))
@@ -304,14 +382,21 @@ def contract_from_types(
         )
     time_field = "firstPacket" if schema_of(field_types) == "arkime_sessions" else "@timestamp"
     resolved_role = role or source_role(field_types)
-    resolved_os = os_family or source_os_family(field_types, resolved_role)
+    resolved_os = os_family or source_os_family(field_types, resolved_role, datasets)
     return FieldContract(
         target=target, fields=fields, time_field=time_field, role=resolved_role, os_family=resolved_os,
-        linux_fields=direct_fields if any(
-            field == "winlog" or field.startswith("winlog.") for field in field_types
-        ) else {},
+        linux_fields=direct_fields if windows else {},
         hosts=hosts, host_inventory_complete=host_inventory_complete,
+        nxlog_mixed=nxlog_mixed(field_types, resolved_role, resolved_os),
     )
+
+
+def nxlog_mixed(field_types, role: str, os_family: str) -> bool:
+    """A Linux host target whose mapping also holds NXLog's flat Windows records: the sweep selects its Linux
+    datasets and the flat Windows shape together, each exactly as it would alone. Its contract keeps the Linux names
+    (no Windows alias is added), so value queries on the flat records are listed as unresolved."""
+    return (role == "host" and os_family != "windows" and nxlog_flat(field_types)
+            and not _winlog_mapping(field_types))
 
 
 MIXED_NETWORK_KIND = "mixed_network"
@@ -384,11 +469,13 @@ def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfil
     declaration = site_facts.zeek.plain_sources.get(target) if site_facts is not None else None
     # Arkime sessions: time is the first packet; the "dataset" is the session protocol and the
     # reporting host is the capture node
-    windows = "winlog.computer_name" in field_types
+    windows = "winlog.computer_name" in field_types or (
+        _windows_mapping(field_types) and nxlog_flat(field_types) and "Hostname" in field_types)
     dataset_field = "event.dataset" if "event.dataset" in field_types else "data_stream.dataset"
     tf, ds_field, host_field = (("firstPacket", "protocol", "node") if schema == "arkime_sessions"
                                 else ("@timestamp", dataset_field,
-                                      "winlog.computer_name" if windows else "host.name"))
+                                      ("winlog.computer_name" if "winlog.computer_name" in field_types
+                                       else "Hostname") if windows else "host.name"))
     if declaration is not None:
         tf, ds_field, host_field = "ts", "_path", "_romulus_no_observer_field"
     notes = []
@@ -471,7 +558,10 @@ def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfil
             notes = [note for note in notes if not note.startswith("ds inventory truncated")] + mixed_notes
             kind = MIXED_NETWORK_KIND
     role = source_role(field_types, set(datasets))
-    os_family = source_os_family(field_types, role)
+    os_family = source_os_family(field_types, role, datasets)
+    if host_field == "Hostname" and os_family != "windows":
+        # counted by NXLog's computer name before the inventory showed Linux datasets: their hosts are not counted
+        notes.append("hosts inventory truncated (counted by NXLog's Hostname; the Linux records' hosts are not)")
     prof = {
         "target": target, "kind": kind,
         "role": role, "os_family": os_family,
@@ -507,6 +597,7 @@ def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfil
         role=role, os_family=os_family,
         hosts=tuple(sorted(profile.hosts)),
         host_inventory_complete=not any(note.startswith("hosts inventory truncated") for note in notes),
+        datasets=datasets,
     )
 
     return profile, apply_zeek_declaration(contract, site_facts) if declaration is not None else contract

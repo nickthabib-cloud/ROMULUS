@@ -54,7 +54,7 @@ def _repo_with_finding(claim_suffix="", *, hunt_id="h1"):
     return repo, d.candidate_id
 
 
-def test_pre_m6_manifest_remains_readable():
+def test_manifest_from_before_the_ai_agent_settings_remains_readable():
     repo, _ = _repo_with_finding()
     legacy = {"window": {}, "targets": [], LEGACY_AGENT_MODE_KEY: "off"}
     repo.create_hunt("legacy-agent-mode", legacy, "d", "test")

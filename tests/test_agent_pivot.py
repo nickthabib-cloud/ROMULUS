@@ -478,7 +478,7 @@ def test_ip_timeline_searches_each_host_dataset_and_reports_dataset_coverage(mon
     host_intents = [intent for intent in seen if "host" in intent.target]
     assert [next(p.value for p in intent.filters if p.field == "event.dataset")
             for intent in host_intents] == [
-        "linux.audit", "systemd.journal", "apache.access", "apache.error",
+        "linux.audit", "systemd.journal", "linux.syslog", "apache.access", "apache.error",
     ]
     apache = next(intent for intent in host_intents
                   if any(p.value == "apache.access" for p in intent.filters))
@@ -498,6 +498,7 @@ def test_ip_timeline_searches_each_host_dataset_and_reports_dataset_coverage(mon
         ("romulus-network-x", None, "complete"),
         ("romulus-host-x", "linux.audit", "complete"),
         ("romulus-host-x", "systemd.journal", "complete"),
+        ("romulus-host-x", "linux.syslog", "complete"),
         ("romulus-host-x", "apache.access", "complete"),
         ("romulus-host-x", "apache.error", "complete"),
     }
@@ -523,7 +524,7 @@ def test_ip_timeline_marks_unsearchable_host_datasets_unresolved(monkeypatch):
     assert result.status == "partial"
     unresolved = [cell for cell in result.coverage if cell.target == "romulus-host-x"]
     assert {cell.dataset for cell in unresolved} == {
-        "linux.audit", "systemd.journal", "apache.access", "apache.error",
+        "linux.audit", "systemd.journal", "linux.syslog", "apache.access", "apache.error",
     }
     assert all(cell.status == "partial" and cell.unresolved_ranges for cell in unresolved)
 
@@ -650,21 +651,25 @@ def test_each_tool_compiles_source_filters_for_only_the_families_it_summarizes()
 
     by_tool = {request.tool: executor._intents(request) for request in requests}
 
+    # A logical Linux dataset compiles to every shipper dataset name that delivers it (this contract maps neither
+    # event.module nor input.type, so Auditbeat's bare `auditd` and dataset-less journald are not selectable here).
     expected = {
-        "entity_timeline": ["linux.audit", "systemd.journal", "apache.access", "apache.error"],
-        "auth_activity": "systemd.journal",
-        "process_tree": "linux.audit",
-        "ids_alerts": "suricata.eve.alert",
+        "entity_timeline": [["linux.audit", "auditd.log", "auditd_manager.auditd", "systemd.journal",
+                             "journald.logs", "system.auth", "system.syslog", "apache.access", "apache.error"]],
+        "auth_activity": [["systemd.journal", "journald.logs"], ["system.auth", "system.syslog"]],
+        "process_tree": [["linux.audit", "auditd.log", "auditd_manager.auditd"]],
+        "ids_alerts": ["suricata.eve.alert"],
     }
     for tool, intents in by_tool.items():
-        assert len(intents) == 1
-        compiled = compile_es(intents[0], contracts[intents[0].target])
-        filters = compiled.body["query"]["bool"]["filter"]
-        family_clause = filters[1]
-        if isinstance(expected[tool], list):
-            assert family_clause == {"terms": {"event.dataset": expected[tool]}}
-        else:
-            assert family_clause == {"term": {"event.dataset": expected[tool]}}
+        assert len(intents) == len(expected[tool])
+        for intent, names in zip(intents, expected[tool], strict=True):
+            compiled = compile_es(intent, contracts[intent.target])
+            filters = compiled.body["query"]["bool"]["filter"]
+            family_clause = filters[1]
+            if isinstance(names, list):
+                assert family_clause == {"terms": {"event.dataset": names}}
+            else:
+                assert family_clause == {"term": {"event.dataset": names}}
 
 
 def test_family_filter_is_required_instead_of_falling_back_to_broad_entity_query(monkeypatch):

@@ -35,8 +35,8 @@
      }
     },
     "host": "web1",
-    "id": "201c31810444bab108c8fc5e",
-    "normalizer": "lab-ecs@15",
+    "id": "bd191056a96134aa03bb9131",
+    "normalizer": "lab-ecs@17",
     "outcome": "success",
     "raw": [
      {
@@ -67,8 +67,8 @@
      }
     },
     "host": "web1",
-    "id": "963fa4d2fad2159e32cef007",
-    "normalizer": "lab-ecs@15",
+    "id": "de3f0cf993b9d2727b98e064",
+    "normalizer": "lab-ecs@17",
     "outcome": "unknown",
     "raw": [
      {
@@ -168,8 +168,8 @@
      }
     },
     "host": "capture-01",
-    "id": "16a1f5cd6ff0885303bba204",
-    "normalizer": "lab-ecs@15",
+    "id": "1d7c35f0740a28f22c03d0ee",
+    "normalizer": "lab-ecs@17",
     "outcome": "unknown",
     "raw": [
      {
@@ -277,8 +277,8 @@
      }
     },
     "host": "capture-01",
-    "id": "7dcc6f389b7087d6b662bd86",
-    "normalizer": "lab-ecs@15",
+    "id": "bf3b6b88d7ab86d5cdc0a900",
+    "normalizer": "lab-ecs@17",
     "outcome": "unknown",
     "raw": [
      {
@@ -378,8 +378,8 @@
      }
     },
     "host": "capture-01",
-    "id": "bd7bddd0b8b41f9958cfedcc",
-    "normalizer": "lab-ecs@15",
+    "id": "82eb959e8c88572244cc0698",
+    "normalizer": "lab-ecs@17",
     "outcome": "unknown",
     "raw": [
      {
@@ -450,8 +450,8 @@
      }
     },
     "host": "inetfw",
-    "id": "45de196c4b050fd3bd278775",
-    "normalizer": "lab-ecs@15",
+    "id": "ea09707b5108dc5cc892cbd9",
+    "normalizer": "lab-ecs@17",
     "outcome": "unknown",
     "raw": [
      {
@@ -549,8 +549,8 @@
      }
     },
     "host": "inetfw",
-    "id": "05e52bd81f672b22d1cf6068",
-    "normalizer": "lab-ecs@15",
+    "id": "24fda48caf8daa112c6d56ce",
+    "normalizer": "lab-ecs@17",
     "outcome": "unknown",
     "raw": [
      {
@@ -631,8 +631,8 @@
      }
     },
     "host": "inetfw",
-    "id": "d3e5e80904d1f1ce12bd12ce",
-    "normalizer": "lab-ecs@15",
+    "id": "ffd49533d46258ad1a483620",
+    "normalizer": "lab-ecs@17",
     "outcome": "unknown",
     "raw": [
      {
@@ -725,8 +725,8 @@
      }
     },
     "host": "inetfw",
-    "id": "5cce7da8dbe94f774b87a668",
-    "normalizer": "lab-ecs@15",
+    "id": "cba5a5674b9f6e5560354535",
+    "normalizer": "lab-ecs@17",
     "outcome": "unknown",
     "raw": [
      {
@@ -799,8 +799,8 @@
      }
     },
     "host": "inetfw",
-    "id": "9673946cf87027f4c427c0bc",
-    "normalizer": "lab-ecs@15",
+    "id": "c273d1fc18a6f8f6f18c5985",
+    "normalizer": "lab-ecs@17",
     "outcome": "unknown",
     "raw": [
      {
@@ -869,8 +869,8 @@
      }
     },
     "host": "inetfw",
-    "id": "f1994d88e997e992011de916",
-    "normalizer": "lab-ecs@15",
+    "id": "02898176a30b9df863fccf83",
+    "normalizer": "lab-ecs@17",
     "outcome": "unknown",
     "raw": [
      {
@@ -923,8 +923,8 @@
      }
     },
     "host": "inetfw",
-    "id": "519c8c7881296acf12403c5f",
-    "normalizer": "lab-ecs@15",
+    "id": "694a2d4eaca7e7fd65bb9498",
+    "normalizer": "lab-ecs@17",
     "outcome": "unknown",
     "raw": [
      {
@@ -991,8 +991,8 @@
      }
     },
     "host": "inetfw",
-    "id": "850f4d00d7a866dd1be30abc",
-    "normalizer": "lab-ecs@15",
+    "id": "3af6cb28818f36a516e563ae",
+    "normalizer": "lab-ecs@17",
     "outcome": "unknown",
     "raw": [
      {
@@ -1091,8 +1091,8 @@
      }
     },
     "host": "inetfw",
-    "id": "8247f326efe1a49b3ef65c1e",
-    "normalizer": "lab-ecs@15",
+    "id": "7fc467352f5a8e8c73f99e85",
+    "normalizer": "lab-ecs@17",
     "outcome": "unknown",
     "raw": [
      {
@@ -1167,8 +1167,8 @@
      }
     },
     "host": "sensor-01",
-    "id": "88e2297ce0f029f479470f79",
-    "normalizer": "lab-ecs@15",
+    "id": "2c625972eaedf00aef3e88ab",
+    "normalizer": "lab-ecs@17",
     "outcome": "unknown",
     "raw": [
      {
@@ -1266,8 +1266,8 @@
      }
     },
     "host": "sensor-01",
-    "id": "95a77422aa8995446bce6824",
-    "normalizer": "lab-ecs@15",
+    "id": "3acf504d4df79551647c24ea",
+    "normalizer": "lab-ecs@17",
     "outcome": "unknown",
     "raw": [
      {
@@ -1352,8 +1352,8 @@
      }
     },
     "host": "sensor-01",
-    "id": "a897729048644aa47d74b82e",
-    "normalizer": "lab-ecs@15",
+    "id": "6e950cbd2b349b90563d07c9",
+    "normalizer": "lab-ecs@17",
     "outcome": "unknown",
     "raw": [
      {
@@ -1442,8 +1442,8 @@
      }
     },
     "host": "sensor-01",
-    "id": "289b13c8b598a367c4903b9e",
-    "normalizer": "lab-ecs@15",
+    "id": "3a362a99d45d4559a3252874",
+    "normalizer": "lab-ecs@17",
     "outcome": "unknown",
     "raw": [
      {
@@ -1525,8 +1525,8 @@
      }
     },
     "host": "sensor-01",
-    "id": "bd6709c6cd147d01df528a13",
-    "normalizer": "lab-ecs@15",
+    "id": "3a8e1993fe059fd75419bd6f",
+    "normalizer": "lab-ecs@17",
     "outcome": "unknown",
     "raw": [
      {
@@ -1599,8 +1599,8 @@
      }
     },
     "host": "sensor-01",
-    "id": "266a47a1daf63f5e937c8160",
-    "normalizer": "lab-ecs@15",
+    "id": "6710ff10e2e6a6b73d88f780",
+    "normalizer": "lab-ecs@17",
     "outcome": "unknown",
     "raw": [
      {
@@ -1665,8 +1665,8 @@
      }
     },
     "host": "sensor-01",
-    "id": "b3496b1c0fbda305652435d0",
-    "normalizer": "lab-ecs@15",
+    "id": "0fb318ebcb2fbd6238157f03",
+    "normalizer": "lab-ecs@17",
     "outcome": "unknown",
     "raw": [
      {
@@ -1733,8 +1733,8 @@
      }
     },
     "host": "sensor-01",
-    "id": "3eb4ec52d0e5147c9de88574",
-    "normalizer": "lab-ecs@15",
+    "id": "5b3c68873bd7698dcccd5d87",
+    "normalizer": "lab-ecs@17",
     "outcome": "unknown",
     "raw": [
      {
@@ -1841,8 +1841,8 @@
      }
     },
     "host": "sensor-01",
-    "id": "629dd69f19e9ee64a54c4012",
-    "normalizer": "lab-ecs@15",
+    "id": "b0ab46c300bf8fb7823f0137",
+    "normalizer": "lab-ecs@17",
     "outcome": "unknown",
     "raw": [
      {
@@ -1905,8 +1905,8 @@
      }
     },
     "host": "db1",
-    "id": "fe3d084de037871cd3d6c6b3",
-    "normalizer": "lab-ecs@15",
+    "id": "4a823a5a6f40159b4d9fa4a4",
+    "normalizer": "lab-ecs@17",
     "outcome": "success",
     "raw": [
      {
@@ -2115,8 +2115,8 @@
      }
     },
     "host": "ws01",
-    "id": "f4830377b273ad002aea6148",
-    "normalizer": "windows-ecs@17",
+    "id": "d8c422f51628620c4a3c5c2d",
+    "normalizer": "windows-ecs@18",
     "outcome": "success",
     "raw": [
      {
@@ -2329,8 +2329,8 @@
      }
     },
     "host": "ws01",
-    "id": "5b12e9af949fea3c3e488da6",
-    "normalizer": "windows-ecs@17",
+    "id": "1be96839a359f4c4e7c42301",
+    "normalizer": "windows-ecs@18",
     "outcome": "success",
     "raw": [
      {
@@ -2503,7 +2503,7 @@
      }
     },
     "host": "sensor-elastic-conn",
-    "id": "976e6755fce4d6797ffd5554",
+    "id": "70344da8905f20dc52088ee1",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -2677,7 +2677,7 @@
      }
     },
     "host": "sensor-malcolm-conn",
-    "id": "93cf6152fb0067611b3ccd4b",
+    "id": "2b18949898c43bb6010e624a",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -2835,7 +2835,7 @@
      }
     },
     "host": "sensor-security_onion-conn",
-    "id": "f0a3d310f098a5cb4fd520a2",
+    "id": "61cc199eb9f8c6d644d3d38d",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -2993,7 +2993,7 @@
      }
     },
     "host": "sensor-security_onion-bare",
-    "id": "0f0c1501ad00370161143cc6",
+    "id": "e7fde2d0924ecec96e8e9026",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -3132,7 +3132,7 @@
      }
     },
     "host": "sensor-elastic-dns",
-    "id": "7940e5be1e6a76b201f439cc",
+    "id": "1aa7afb275cfb89e6d917857",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -3271,7 +3271,7 @@
      }
     },
     "host": "sensor-malcolm-dns",
-    "id": "65f375165686b032e2ebe358",
+    "id": "17dd6e8124a7778cc2e819c6",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -3410,7 +3410,7 @@
      }
     },
     "host": "sensor-security_onion-dns",
-    "id": "6e30e1c82a2698716d0b99b6",
+    "id": "66f0bfafa4a755979f311aff",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -3557,7 +3557,7 @@
      }
     },
     "host": "sensor-elastic-files-5.0",
-    "id": "1bfafd594a2cf394a2cfb12c",
+    "id": "b64c1313f227e20fab9bc02d",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -3702,7 +3702,7 @@
      }
     },
     "host": "sensor-malcolm-files-5.0",
-    "id": "860134071f3c45c757f73733",
+    "id": "4a459ca0f55f729f7d64040f",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -3845,7 +3845,7 @@
      }
     },
     "host": "sensor-security_onion-files-5.0",
-    "id": "ed2df713b7dee93754f80bbc",
+    "id": "834c94013c523176e07d1332",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -3984,7 +3984,7 @@
      }
     },
     "host": "sensor-elastic-files",
-    "id": "c7e2331b1a1299e9f3ca8c13",
+    "id": "ff55e70323fcf81bc4083f4b",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -4123,7 +4123,7 @@
      }
     },
     "host": "sensor-malcolm-files",
-    "id": "4fb810a107f5ce98a7073a45",
+    "id": "87894b5db50a97d0542ab5b4",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -4258,7 +4258,7 @@
      }
     },
     "host": "sensor-security_onion-files",
-    "id": "a632b277765365fa84474d04",
+    "id": "aa7f250db6ea5eebc194a547",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -4372,7 +4372,7 @@
      }
     },
     "host": "sensor-elastic-ftp",
-    "id": "2c41cd34333fdca779c36ddd",
+    "id": "3658b700df67e4b2470cddd1",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -4486,7 +4486,7 @@
      }
     },
     "host": "sensor-malcolm-ftp",
-    "id": "b4cb4611b84e28f89ef25d7e",
+    "id": "2f42702071392a21be6c9b57",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -4600,7 +4600,7 @@
      }
     },
     "host": "sensor-security_onion-ftp",
-    "id": "085cc6e7ec735fbc47e52ff6",
+    "id": "097a1983b6b437a3b7d2baf9",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -4728,7 +4728,7 @@
      }
     },
     "host": "sensor-elastic-http",
-    "id": "dc1571a34edbd59765e38714",
+    "id": "478606a24b2c8f90881b8948",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -4856,7 +4856,7 @@
      }
     },
     "host": "sensor-malcolm-http",
-    "id": "c9d90ab41b683f6a8432dfdd",
+    "id": "a63abcb132e63ed0697a21be",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -4984,7 +4984,7 @@
      }
     },
     "host": "sensor-security_onion-http",
-    "id": "98de9aa2cc899bd7d94f7d5c",
+    "id": "0fc3abedefe66de99477da6c",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -5070,7 +5070,7 @@
      }
     },
     "host": "zeek1",
-    "id": "f4ae4c7963156d3d28b5044b",
+    "id": "c7512a80d4f62a1f897e118f",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -5144,7 +5144,7 @@
      }
     },
     "host": "zeek1",
-    "id": "1e7fdcfba9a3624c526192f1",
+    "id": "192e4651075d62570fd2700b",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -5214,7 +5214,7 @@
      }
     },
     "host": "zeek1",
-    "id": "68e8bceb93d71f1b6ccabeac",
+    "id": "e800194a2aa6d248aac1354e",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -5296,7 +5296,7 @@
      }
     },
     "host": "zeek1",
-    "id": "5599c4afa66fdc454e091aef",
+    "id": "7f4dc620093a61a624adec65",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -5382,7 +5382,7 @@
      }
     },
     "host": "zeek1",
-    "id": "9e694fa0a764f33ee24e3b0b",
+    "id": "0dad3c5bf878e8e14cb2d0da",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -5468,7 +5468,7 @@
      }
     },
     "host": "zeek1",
-    "id": "60592624763c7512027b9617",
+    "id": "386c47ead5408e9fd32eb574",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -5558,7 +5558,7 @@
      }
     },
     "host": "sensor-elastic-intel",
-    "id": "58952969d9409b8587cadbb1",
+    "id": "9d4a94710f69797f140c5443",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -5632,7 +5632,7 @@
      }
     },
     "host": "sensor-malcolm-intel",
-    "id": "e8b87673e5e8a8917965e87e",
+    "id": "b910211b413c2b072421cdea",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -5722,7 +5722,7 @@
      }
     },
     "host": "sensor-security_onion-intel",
-    "id": "6c58ad7866f0660f65c56e6c",
+    "id": "7cb3bc3f22db733ea61fbe17",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -5808,7 +5808,7 @@
      }
     },
     "host": "sensor-elastic-irc",
-    "id": "d861c8649f0ddd3203a384d0",
+    "id": "a6f24f23009ca6e21fed12a8",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -5894,7 +5894,7 @@
      }
     },
     "host": "sensor-malcolm-irc",
-    "id": "951473e32e6f7a0606f1a2f4",
+    "id": "37fd4f7232d154bfe3449725",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -5980,7 +5980,7 @@
      }
     },
     "host": "sensor-security_onion-irc",
-    "id": "c2845ef3e0411f31925a6916",
+    "id": "920d5d160be7512b55be348b",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -6034,8 +6034,8 @@
      }
     },
     "host": null,
-    "id": "18bd216061ae40d893e9ebaa",
-    "normalizer": "lab-ecs@15",
+    "id": "23ca4884c7da15c2e6ff7ad2",
+    "normalizer": "lab-ecs@17",
     "outcome": "unknown",
     "raw": [
      {
@@ -6120,7 +6120,7 @@
      }
     },
     "host": "sensor-elastic-mysql",
-    "id": "29a2c550af12e465c0bf1f51",
+    "id": "3a12f1d0484bdf06d43726f8",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -6206,7 +6206,7 @@
      }
     },
     "host": "sensor-malcolm-mysql",
-    "id": "60938fe0c9f409b1e8dc9daf",
+    "id": "a53ddb653a12c1260867ac03",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -6292,7 +6292,7 @@
      }
     },
     "host": "sensor-security_onion-mysql",
-    "id": "09f8dec2b4139ee28ee265ad",
+    "id": "fdb80af8321ab24d78ad7994",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -6380,7 +6380,7 @@
      }
     },
     "host": "sensor-elastic-notice",
-    "id": "be8113063c257ec8497015c1",
+    "id": "f05dc654efc225dd71b93b5e",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -6468,7 +6468,7 @@
      }
     },
     "host": "sensor-malcolm-notice",
-    "id": "60ed811c0309b93d12c97a7c",
+    "id": "6687577197d4ae090f8b9162",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -6556,7 +6556,7 @@
      }
     },
     "host": "sensor-security_onion-notice",
-    "id": "103267ba66978b19a24becf4",
+    "id": "5e5c5f4766d4ddb4fc0740af",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -6661,7 +6661,7 @@
      }
     },
     "host": "sensor-elastic-pe",
-    "id": "6a594c1f2015b456877c4b15",
+    "id": "c66fb84773933c54ebb09d63",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -6766,7 +6766,7 @@
      }
     },
     "host": "sensor-malcolm-pe",
-    "id": "16cd2cfb76ee3243bc8261e3",
+    "id": "2426c0475c3b8ef3ec82ad10",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -6871,7 +6871,7 @@
      }
     },
     "host": "sensor-security_onion-pe",
-    "id": "11c15e78a1663106320f5252",
+    "id": "bbc09b39662e3ed1eebad2e9",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -6973,7 +6973,7 @@
      }
     },
     "host": "sensor-malcolm-postgresql",
-    "id": "f20891719fde3f4b7d54322a",
+    "id": "7d22684dd26cf293e8288d67",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -7067,7 +7067,7 @@
      }
     },
     "host": "sensor-elastic-radius",
-    "id": "4478aed36faa8349e8f9f20a",
+    "id": "eb49e8ef0d55b40732bc026f",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -7161,7 +7161,7 @@
      }
     },
     "host": "sensor-malcolm-radius",
-    "id": "b0f7f65209ef3291ed3f0906",
+    "id": "2f726024cdaeb20e212ccd66",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -7251,7 +7251,7 @@
      }
     },
     "host": "sensor-security_onion-radius",
-    "id": "113263bbf308aaa92d6c5c40",
+    "id": "4e0274f565278f0ffd85cc79",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -7333,7 +7333,7 @@
      }
     },
     "host": "sensor-malcolm-redis",
-    "id": "f007135156221b0ffc5182e6",
+    "id": "2fa5c9aa32d32ad3b0f659af",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -7411,7 +7411,7 @@
      }
     },
     "host": "sensor-elastic-signatures",
-    "id": "cdb6806d587b55168ef22470",
+    "id": "965d159f926e1e942ef8d255",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -7489,7 +7489,7 @@
      }
     },
     "host": "sensor-malcolm-signatures",
-    "id": "c84e6e05d0ce6fa2ebb5dd3f",
+    "id": "20efcab8ffe85aec103439e3",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -7551,7 +7551,7 @@
      }
     },
     "host": "sensor-security_onion-signatures",
-    "id": "f538ebb01736893d35662439",
+    "id": "b155e4645dfa0228561ebfc3",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -7649,7 +7649,7 @@
      }
     },
     "host": "sensor-elastic-sip",
-    "id": "bd3194056bd33616d8dbb45a",
+    "id": "2b19a47f0cfbce72aafdac18",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -7743,7 +7743,7 @@
      }
     },
     "host": "sensor-malcolm-sip",
-    "id": "77b45c499d1be6f6a1e1d1fa",
+    "id": "e8b80a253a91d9ebde2c55d8",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -7837,7 +7837,7 @@
      }
     },
     "host": "sensor-security_onion-sip",
-    "id": "c078476af9ec33af948003f0",
+    "id": "019710364413278b4933cd19",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -7978,7 +7978,7 @@
      }
     },
     "host": "sensor-elastic-smtp",
-    "id": "60408cd5aa1dd31c39da4c2c",
+    "id": "7b544f4653686ce1bf74e082",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -8119,7 +8119,7 @@
      }
     },
     "host": "sensor-malcolm-smtp",
-    "id": "378e70a320ef57fbdbbb8804",
+    "id": "a11c35d09ba3a6054e1b6961",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -8260,7 +8260,7 @@
      }
     },
     "host": "sensor-security_onion-smtp",
-    "id": "e2b26e5f342ff55939464b01",
+    "id": "2e2c8951a66df627c3c112ac",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -8362,7 +8362,7 @@
      }
     },
     "host": "sensor-elastic-snmp",
-    "id": "85b2e21e48dd8a3b94d107d8",
+    "id": "27dcbced038096f914f2909b",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -8464,7 +8464,7 @@
      }
     },
     "host": "sensor-malcolm-snmp",
-    "id": "d615c396aeeb8c2e66c99871",
+    "id": "be7d4736e9abace671239dc5",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -8566,7 +8566,7 @@
      }
     },
     "host": "sensor-security_onion-snmp",
-    "id": "4259bc53e79f9d99bdeebee9",
+    "id": "5ce08b19d871d13e967274cf",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -8656,7 +8656,7 @@
      }
     },
     "host": "sensor-elastic-socks",
-    "id": "bb9ca84f1ab7db9ce42c2c8b",
+    "id": "549bebf4cb17125ca07ed22e",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -8746,7 +8746,7 @@
      }
     },
     "host": "sensor-malcolm-socks",
-    "id": "df480853cd27d4b5fbb8f7df",
+    "id": "74038830836d11ebcab1182b",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -8832,7 +8832,7 @@
      }
     },
     "host": "sensor-security_onion-socks",
-    "id": "bd50e7b00614ff01df5beb56",
+    "id": "b0783200d51582c008db6e54",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -8970,7 +8970,7 @@
      }
     },
     "host": "sensor-elastic-ssh",
-    "id": "7e1f24acf5f116c8448eab41",
+    "id": "f0ba9cfea4b0cd3ec01e8b95",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -9108,7 +9108,7 @@
      }
     },
     "host": "sensor-malcolm-ssh",
-    "id": "cb1adb66184752a2a2cfd075",
+    "id": "d1ea408a2fbc5fc04854946c",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -9246,7 +9246,7 @@
      }
     },
     "host": "sensor-security_onion-ssh",
-    "id": "5d8c68b47419ce66c659edff",
+    "id": "b21d03fdb2a00e74ab122203",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -9423,7 +9423,7 @@
      }
     },
     "host": "sensor-elastic-ssl",
-    "id": "b491c00ad39017b7a3f92855",
+    "id": "eeb509c2ba2f7bb6fc977fcf",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -9600,7 +9600,7 @@
      }
     },
     "host": "sensor-malcolm-ssl",
-    "id": "aa3a9919a10f9b5f4c1afe40",
+    "id": "c5c812302185dbea012d1aac",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -9765,7 +9765,7 @@
      }
     },
     "host": "sensor-security_onion-ssl",
-    "id": "20d2cf59b91798996c027ca8",
+    "id": "fc1c1a608a27173fe509a747",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -9835,7 +9835,7 @@
      }
     },
     "host": "sensor-malcolm-tds",
-    "id": "09eb9661954981370789cae7",
+    "id": "9c8ccbd15e688fbbede20648",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -9905,7 +9905,7 @@
      }
     },
     "host": "sensor-security_onion-tds",
-    "id": "20baf33391f2c416bbe3e1b0",
+    "id": "a5bbd97a533b46531c628f73",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -9971,7 +9971,7 @@
      }
     },
     "host": "sensor-elastic-tunnel",
-    "id": "549fd589d61d6b1c0516d359",
+    "id": "d7f0a152dc6e31373769fd6b",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -10037,7 +10037,7 @@
      }
     },
     "host": "sensor-malcolm-tunnel",
-    "id": "849f25121c7e25f7265c2331",
+    "id": "551aee95bbc3bec03020dc70",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -10103,7 +10103,7 @@
      }
     },
     "host": "sensor-security_onion-tunnel",
-    "id": "374ca2261ddb71b60c3c0323",
+    "id": "ff43eed23c8decd59311d356",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -10165,7 +10165,7 @@
      }
     },
     "host": "sensor-zeek-01",
-    "id": "b5ce32332bcd5e89a5f6e696",
+    "id": "8b1fe105b924aaad2eadfbcf",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -10224,7 +10224,7 @@
      }
     },
     "host": "sensor-zeek-01",
-    "id": "b18387338d8f05830ce8e73b",
+    "id": "6707ec00296e3102b852a838",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -10286,7 +10286,7 @@
      }
     },
     "host": "sensor-zeek-01",
-    "id": "d7f4fbc23c61ef420400f4e5",
+    "id": "edfc6c03a6d231920309ce77",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -10366,7 +10366,7 @@
      }
     },
     "host": "sensor-zeek-01",
-    "id": "d5f2f2a14bd8f863748a7b99",
+    "id": "baf5bd81a6909f564f6cad78",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -10433,7 +10433,7 @@
      }
     },
     "host": "sensor-zeek-01",
-    "id": "542db9fd92c2364c1b520467",
+    "id": "dad6ecacf825e4f2d36e135a",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -10501,7 +10501,7 @@
      }
     },
     "host": "sensor-zeek-01",
-    "id": "9b537a33c5c88dc25095fe66",
+    "id": "3730158176f0e856937e3fd8",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -10577,7 +10577,7 @@
      }
     },
     "host": "sensor-zeek-01",
-    "id": "e3c9522317934b42adc61948",
+    "id": "510ed78df5db9678ce4fa59a",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -10625,7 +10625,7 @@
      }
     },
     "host": "sensor-zeek-01",
-    "id": "1ff327cb41d902b6ceb97a31",
+    "id": "3fa56cad88738de7c02bebec",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -10683,7 +10683,7 @@
      }
     },
     "host": "sensor-zeek-01",
-    "id": "28eb36989321b40346842826",
+    "id": "dba37f8031991ecee202836f",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -10745,7 +10745,7 @@
      }
     },
     "host": "sensor-zeek-01",
-    "id": "ae0e13d7733a8705e67f4496",
+    "id": "3801633af2085bee0aaf76cf",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -10779,7 +10779,7 @@
      }
     },
     "host": "sensor-zeek-01",
-    "id": "c70f1a217bc661b316e6c7c7",
+    "id": "092e2f43f8aa3f817dbc2a23",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -10845,7 +10845,7 @@
      }
     },
     "host": "sensor-zeek-01",
-    "id": "5bc69761bb5d86b75f6d7d67",
+    "id": "55a0be94c1ab2fc497f083df",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -10879,7 +10879,7 @@
      }
     },
     "host": "sensor-zeek-01",
-    "id": "ad0b63a3a200f5d2948d84c7",
+    "id": "cee0c2f3beb33282dc618e04",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -10961,7 +10961,7 @@
      }
     },
     "host": "sensor-elastic-weird",
-    "id": "d67ba8a038f08e6ec9a6d344",
+    "id": "85bab1d042be8006f47e40cc",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -11039,7 +11039,7 @@
      }
     },
     "host": "sensor-malcolm-weird",
-    "id": "e64db029698bff15cb0474de",
+    "id": "df58847eba74754217803624",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -11117,7 +11117,7 @@
      }
     },
     "host": "sensor-security_onion-weird",
-    "id": "f4f2b37111e6533e7ea53bdc",
+    "id": "e5f680a8929f0775a2282802",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -11263,7 +11263,7 @@
      }
     },
     "host": "sensor-elastic-x509",
-    "id": "9bef40a7b822e7f1f6c2380a",
+    "id": "a76e9a0b432fdc8ab18e892b",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -11409,7 +11409,7 @@
      }
     },
     "host": "sensor-malcolm-x509",
-    "id": "1de8b2a973736fd65a68c465",
+    "id": "577ccebfb07efae67a6f2af2",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -11543,7 +11543,7 @@
      }
     },
     "host": "sensor-security_onion-x509",
-    "id": "41d24141e0f32f09019119b0",
+    "id": "5b5183af9a3a5142d358c07c",
     "normalizer": "zeek-ecs@4",
     "outcome": "unknown",
     "raw": [
@@ -11676,8 +11676,8 @@
      }
     },
     "host": "web1",
-    "id": "6a2a9976723da4d8123344fb",
-    "normalizer": "lab-ecs@15",
+    "id": "5802c012ea9596624716f269",
+    "normalizer": "lab-ecs@17",
     "outcome": "success",
     "raw": [
      {
@@ -11817,8 +11817,8 @@
       }
      },
      "host": "web1",
-     "id": "201c31810444bab108c8fc5e",
-     "normalizer": "lab-ecs@15",
+     "id": "bd191056a96134aa03bb9131",
+     "normalizer": "lab-ecs@17",
      "outcome": "success",
      "raw": [
       {
@@ -11890,8 +11890,8 @@
       }
      },
      "host": "web1",
-     "id": "963fa4d2fad2159e32cef007",
-     "normalizer": "lab-ecs@15",
+     "id": "de3f0cf993b9d2727b98e064",
+     "normalizer": "lab-ecs@17",
      "outcome": "unknown",
      "raw": [
       {
@@ -12019,8 +12019,8 @@
       }
      },
      "host": "capture-01",
-     "id": "16a1f5cd6ff0885303bba204",
-     "normalizer": "lab-ecs@15",
+     "id": "1d7c35f0740a28f22c03d0ee",
+     "normalizer": "lab-ecs@17",
      "outcome": "unknown",
      "raw": [
       {
@@ -12176,8 +12176,8 @@
       }
      },
      "host": "capture-01",
-     "id": "7dcc6f389b7087d6b662bd86",
-     "normalizer": "lab-ecs@15",
+     "id": "bf3b6b88d7ab86d5cdc0a900",
+     "normalizer": "lab-ecs@17",
      "outcome": "unknown",
      "raw": [
       {
@@ -12329,8 +12329,8 @@
       }
      },
      "host": "capture-01",
-     "id": "bd7bddd0b8b41f9958cfedcc",
-     "normalizer": "lab-ecs@15",
+     "id": "82eb959e8c88572244cc0698",
+     "normalizer": "lab-ecs@17",
      "outcome": "unknown",
      "raw": [
       {
@@ -12452,8 +12452,8 @@
       }
      },
      "host": "inetfw",
-     "id": "45de196c4b050fd3bd278775",
-     "normalizer": "lab-ecs@15",
+     "id": "ea09707b5108dc5cc892cbd9",
+     "normalizer": "lab-ecs@17",
      "outcome": "unknown",
      "raw": [
       {
@@ -12573,8 +12573,8 @@
       }
      },
      "host": "inetfw",
-     "id": "05e52bd81f672b22d1cf6068",
-     "normalizer": "lab-ecs@15",
+     "id": "24fda48caf8daa112c6d56ce",
+     "normalizer": "lab-ecs@17",
      "outcome": "unknown",
      "raw": [
       {
@@ -12677,8 +12677,8 @@
       }
      },
      "host": "inetfw",
-     "id": "d3e5e80904d1f1ce12bd12ce",
-     "normalizer": "lab-ecs@15",
+     "id": "ffd49533d46258ad1a483620",
+     "normalizer": "lab-ecs@17",
      "outcome": "unknown",
      "raw": [
       {
@@ -12793,8 +12793,8 @@
       }
      },
      "host": "inetfw",
-     "id": "5cce7da8dbe94f774b87a668",
-     "normalizer": "lab-ecs@15",
+     "id": "cba5a5674b9f6e5560354535",
+     "normalizer": "lab-ecs@17",
      "outcome": "unknown",
      "raw": [
       {
@@ -12889,8 +12889,8 @@
       }
      },
      "host": "inetfw",
-     "id": "9673946cf87027f4c427c0bc",
-     "normalizer": "lab-ecs@15",
+     "id": "c273d1fc18a6f8f6f18c5985",
+     "normalizer": "lab-ecs@17",
      "outcome": "unknown",
      "raw": [
       {
@@ -12981,8 +12981,8 @@
       }
      },
      "host": "inetfw",
-     "id": "f1994d88e997e992011de916",
-     "normalizer": "lab-ecs@15",
+     "id": "02898176a30b9df863fccf83",
+     "normalizer": "lab-ecs@17",
      "outcome": "unknown",
      "raw": [
       {
@@ -13057,8 +13057,8 @@
       }
      },
      "host": "inetfw",
-     "id": "519c8c7881296acf12403c5f",
-     "normalizer": "lab-ecs@15",
+     "id": "694a2d4eaca7e7fd65bb9498",
+     "normalizer": "lab-ecs@17",
      "outcome": "unknown",
      "raw": [
       {
@@ -13147,8 +13147,8 @@
       }
      },
      "host": "inetfw",
-     "id": "850f4d00d7a866dd1be30abc",
-     "normalizer": "lab-ecs@15",
+     "id": "3af6cb28818f36a516e563ae",
+     "normalizer": "lab-ecs@17",
      "outcome": "unknown",
      "raw": [
       {
@@ -13292,8 +13292,8 @@
       }
      },
      "host": "inetfw",
-     "id": "8247f326efe1a49b3ef65c1e",
-     "normalizer": "lab-ecs@15",
+     "id": "7fc467352f5a8e8c73f99e85",
+     "normalizer": "lab-ecs@17",
      "outcome": "unknown",
      "raw": [
       {
@@ -13447,8 +13447,8 @@
       }
      },
      "host": "web1",
-     "id": "6a2a9976723da4d8123344fb",
-     "normalizer": "lab-ecs@15",
+     "id": "5802c012ea9596624716f269",
+     "normalizer": "lab-ecs@17",
      "outcome": "success",
      "raw": [
       {
@@ -13641,8 +13641,8 @@
       }
      },
      "host": "sensor-01",
-     "id": "88e2297ce0f029f479470f79",
-     "normalizer": "lab-ecs@15",
+     "id": "2c625972eaedf00aef3e88ab",
+     "normalizer": "lab-ecs@17",
      "outcome": "unknown",
      "raw": [
       {
@@ -13799,8 +13799,8 @@
       }
      },
      "host": "sensor-01",
-     "id": "95a77422aa8995446bce6824",
-     "normalizer": "lab-ecs@15",
+     "id": "3acf504d4df79551647c24ea",
+     "normalizer": "lab-ecs@17",
      "outcome": "unknown",
      "raw": [
       {
@@ -13944,8 +13944,8 @@
       }
      },
      "host": "sensor-01",
-     "id": "a897729048644aa47d74b82e",
-     "normalizer": "lab-ecs@15",
+     "id": "6e950cbd2b349b90563d07c9",
+     "normalizer": "lab-ecs@17",
      "outcome": "unknown",
      "raw": [
       {
@@ -14092,8 +14092,8 @@
       }
      },
      "host": "sensor-01",
-     "id": "289b13c8b598a367c4903b9e",
-     "normalizer": "lab-ecs@15",
+     "id": "3a362a99d45d4559a3252874",
+     "normalizer": "lab-ecs@17",
      "outcome": "unknown",
      "raw": [
       {
@@ -14234,8 +14234,8 @@
       }
      },
      "host": "sensor-01",
-     "id": "bd6709c6cd147d01df528a13",
-     "normalizer": "lab-ecs@15",
+     "id": "3a8e1993fe059fd75419bd6f",
+     "normalizer": "lab-ecs@17",
      "outcome": "unknown",
      "raw": [
       {
@@ -14360,8 +14360,8 @@
       }
      },
      "host": "sensor-01",
-     "id": "266a47a1daf63f5e937c8160",
-     "normalizer": "lab-ecs@15",
+     "id": "6710ff10e2e6a6b73d88f780",
+     "normalizer": "lab-ecs@17",
      "outcome": "unknown",
      "raw": [
       {
@@ -14480,8 +14480,8 @@
       }
      },
      "host": "sensor-01",
-     "id": "b3496b1c0fbda305652435d0",
-     "normalizer": "lab-ecs@15",
+     "id": "0fb318ebcb2fbd6238157f03",
+     "normalizer": "lab-ecs@17",
      "outcome": "unknown",
      "raw": [
       {
@@ -14597,8 +14597,8 @@
       }
      },
      "host": "sensor-01",
-     "id": "3eb4ec52d0e5147c9de88574",
-     "normalizer": "lab-ecs@15",
+     "id": "5b3c68873bd7698dcccd5d87",
+     "normalizer": "lab-ecs@17",
      "outcome": "unknown",
      "raw": [
       {
@@ -14761,8 +14761,8 @@
       }
      },
      "host": "sensor-01",
-     "id": "629dd69f19e9ee64a54c4012",
-     "normalizer": "lab-ecs@15",
+     "id": "b0ab46c300bf8fb7823f0137",
+     "normalizer": "lab-ecs@17",
      "outcome": "unknown",
      "raw": [
       {
@@ -14907,8 +14907,8 @@
       }
      },
      "host": "db1",
-     "id": "fe3d084de037871cd3d6c6b3",
-     "normalizer": "lab-ecs@15",
+     "id": "4a823a5a6f40159b4d9fa4a4",
+     "normalizer": "lab-ecs@17",
      "outcome": "success",
      "raw": [
       {
@@ -15161,8 +15161,8 @@
       }
      },
      "host": "ws01",
-     "id": "f4830377b273ad002aea6148",
-     "normalizer": "windows-ecs@17",
+     "id": "d8c422f51628620c4a3c5c2d",
+     "normalizer": "windows-ecs@18",
      "outcome": "success",
      "raw": [
       {
@@ -15426,8 +15426,8 @@
       }
      },
      "host": "ws01",
-     "id": "f4830377b273ad002aea6148",
-     "normalizer": "windows-ecs@17",
+     "id": "d8c422f51628620c4a3c5c2d",
+     "normalizer": "windows-ecs@18",
      "outcome": "success",
      "raw": [
       {
@@ -15684,8 +15684,8 @@
       }
      },
      "host": "ws01",
-     "id": "5b12e9af949fea3c3e488da6",
-     "normalizer": "windows-ecs@17",
+     "id": "1be96839a359f4c4e7c42301",
+     "normalizer": "windows-ecs@18",
      "outcome": "success",
      "raw": [
       {
@@ -15951,8 +15951,8 @@
       }
      },
      "host": "ws01",
-     "id": "5b12e9af949fea3c3e488da6",
-     "normalizer": "windows-ecs@17",
+     "id": "1be96839a359f4c4e7c42301",
+     "normalizer": "windows-ecs@18",
      "outcome": "success",
      "raw": [
       {
@@ -16793,7 +16793,7 @@
       }
      },
      "host": "sensor-elastic-conn",
-     "id": "976e6755fce4d6797ffd5554",
+     "id": "70344da8905f20dc52088ee1",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -17045,7 +17045,7 @@
       }
      },
      "host": "sensor-malcolm-conn",
-     "id": "93cf6152fb0067611b3ccd4b",
+     "id": "2b18949898c43bb6010e624a",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -17339,7 +17339,7 @@
       }
      },
      "host": "sensor-security_onion-conn",
-     "id": "f0a3d310f098a5cb4fd520a2",
+     "id": "61cc199eb9f8c6d644d3d38d",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -17584,7 +17584,7 @@
       }
      },
      "host": "sensor-security_onion-bare",
-     "id": "0f0c1501ad00370161143cc6",
+     "id": "e7fde2d0924ecec96e8e9026",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -18677,7 +18677,7 @@
       }
      },
      "host": "sensor-elastic-dns",
-     "id": "7940e5be1e6a76b201f439cc",
+     "id": "1aa7afb275cfb89e6d917857",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -18905,7 +18905,7 @@
       }
      },
      "host": "sensor-malcolm-dns",
-     "id": "65f375165686b032e2ebe358",
+     "id": "17dd6e8124a7778cc2e819c6",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -19166,7 +19166,7 @@
       }
      },
      "host": "sensor-security_onion-dns",
-     "id": "6e30e1c82a2698716d0b99b6",
+     "id": "66f0bfafa4a755979f311aff",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -19476,7 +19476,7 @@
       }
      },
      "host": "sensor-elastic-files-5.0",
-     "id": "1bfafd594a2cf394a2cfb12c",
+     "id": "b64c1313f227e20fab9bc02d",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -19706,7 +19706,7 @@
       }
      },
      "host": "sensor-malcolm-files-5.0",
-     "id": "860134071f3c45c757f73733",
+     "id": "4a459ca0f55f729f7d64040f",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -19971,7 +19971,7 @@
       }
      },
      "host": "sensor-security_onion-files-5.0",
-     "id": "ed2df713b7dee93754f80bbc",
+     "id": "834c94013c523176e07d1332",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -20192,7 +20192,7 @@
       }
      },
      "host": "sensor-elastic-files",
-     "id": "c7e2331b1a1299e9f3ca8c13",
+     "id": "ff55e70323fcf81bc4083f4b",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -20408,7 +20408,7 @@
       }
      },
      "host": "sensor-malcolm-files",
-     "id": "4fb810a107f5ce98a7073a45",
+     "id": "87894b5db50a97d0542ab5b4",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -20665,7 +20665,7 @@
       }
      },
      "host": "sensor-security_onion-files",
-     "id": "a632b277765365fa84474d04",
+     "id": "aa7f250db6ea5eebc194a547",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -20863,7 +20863,7 @@
       }
      },
      "host": "sensor-elastic-ftp",
-     "id": "2c41cd34333fdca779c36ddd",
+     "id": "3658b700df67e4b2470cddd1",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -21055,7 +21055,7 @@
       }
      },
      "host": "sensor-malcolm-ftp",
-     "id": "b4cb4611b84e28f89ef25d7e",
+     "id": "2f42702071392a21be6c9b57",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -21270,7 +21270,7 @@
       }
      },
      "host": "sensor-security_onion-ftp",
-     "id": "085cc6e7ec735fbc47e52ff6",
+     "id": "097a1983b6b437a3b7d2baf9",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -21470,7 +21470,7 @@
       }
      },
      "host": "sensor-elastic-http",
-     "id": "dc1571a34edbd59765e38714",
+     "id": "478606a24b2c8f90881b8948",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -21689,7 +21689,7 @@
       }
      },
      "host": "sensor-malcolm-http",
-     "id": "c9d90ab41b683f6a8432dfdd",
+     "id": "a63abcb132e63ed0697a21be",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -21939,7 +21939,7 @@
       }
      },
      "host": "sensor-security_onion-http",
-     "id": "98de9aa2cc899bd7d94f7d5c",
+     "id": "0fc3abedefe66de99477da6c",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -22116,7 +22116,7 @@
       }
      },
      "host": "zeek1",
-     "id": "f4ae4c7963156d3d28b5044b",
+     "id": "c7512a80d4f62a1f897e118f",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -22231,7 +22231,7 @@
       }
      },
      "host": "zeek1",
-     "id": "1e7fdcfba9a3624c526192f1",
+     "id": "192e4651075d62570fd2700b",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -22342,7 +22342,7 @@
       }
      },
      "host": "zeek1",
-     "id": "68e8bceb93d71f1b6ccabeac",
+     "id": "e800194a2aa6d248aac1354e",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -22463,7 +22463,7 @@
       }
      },
      "host": "zeek1",
-     "id": "5599c4afa66fdc454e091aef",
+     "id": "7f4dc620093a61a624adec65",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -22591,7 +22591,7 @@
       }
      },
      "host": "zeek1",
-     "id": "9e694fa0a764f33ee24e3b0b",
+     "id": "0dad3c5bf878e8e14cb2d0da",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -22718,7 +22718,7 @@
       }
      },
      "host": "zeek1",
-     "id": "60592624763c7512027b9617",
+     "id": "386c47ead5408e9fd32eb574",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -22849,7 +22849,7 @@
       }
      },
      "host": "sensor-elastic-intel",
-     "id": "58952969d9409b8587cadbb1",
+     "id": "9d4a94710f69797f140c5443",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -22991,7 +22991,7 @@
       }
      },
      "host": "sensor-malcolm-intel",
-     "id": "e8b87673e5e8a8917965e87e",
+     "id": "b910211b413c2b072421cdea",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -23169,7 +23169,7 @@
       }
      },
      "host": "sensor-security_onion-intel",
-     "id": "6c58ad7866f0660f65c56e6c",
+     "id": "7cb3bc3f22db733ea61fbe17",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -23319,7 +23319,7 @@
       }
      },
      "host": "sensor-elastic-irc",
-     "id": "d861c8649f0ddd3203a384d0",
+     "id": "a6f24f23009ca6e21fed12a8",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -23467,7 +23467,7 @@
       }
      },
      "host": "sensor-malcolm-irc",
-     "id": "951473e32e6f7a0606f1a2f4",
+     "id": "37fd4f7232d154bfe3449725",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -23640,7 +23640,7 @@
       }
      },
      "host": "sensor-security_onion-irc",
-     "id": "c2845ef3e0411f31925a6916",
+     "id": "920d5d160be7512b55be348b",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -25504,8 +25504,8 @@
       }
      },
      "host": null,
-     "id": "18bd216061ae40d893e9ebaa",
-     "normalizer": "lab-ecs@15",
+     "id": "23ca4884c7da15c2e6ff7ad2",
+     "normalizer": "lab-ecs@17",
      "outcome": "unknown",
      "raw": [
       {
@@ -25610,7 +25610,7 @@
       }
      },
      "host": "sensor-elastic-mysql",
-     "id": "29a2c550af12e465c0bf1f51",
+     "id": "3a12f1d0484bdf06d43726f8",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -25756,7 +25756,7 @@
       }
      },
      "host": "sensor-malcolm-mysql",
-     "id": "60938fe0c9f409b1e8dc9daf",
+     "id": "a53ddb653a12c1260867ac03",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -25925,7 +25925,7 @@
       }
      },
      "host": "sensor-security_onion-mysql",
-     "id": "09f8dec2b4139ee28ee265ad",
+     "id": "fdb80af8321ab24d78ad7994",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -26072,7 +26072,7 @@
       }
      },
      "host": "sensor-elastic-notice",
-     "id": "be8113063c257ec8497015c1",
+     "id": "f05dc654efc225dd71b93b5e",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -26227,7 +26227,7 @@
       }
      },
      "host": "sensor-malcolm-notice",
-     "id": "60ed811c0309b93d12c97a7c",
+     "id": "6687577197d4ae090f8b9162",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -26412,7 +26412,7 @@
       }
      },
      "host": "sensor-security_onion-notice",
-     "id": "103267ba66978b19a24becf4",
+     "id": "5e5c5f4766d4ddb4fc0740af",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -26820,7 +26820,7 @@
       }
      },
      "host": "sensor-elastic-pe",
-     "id": "6a594c1f2015b456877c4b15",
+     "id": "c66fb84773933c54ebb09d63",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -26987,7 +26987,7 @@
       }
      },
      "host": "sensor-malcolm-pe",
-     "id": "16cd2cfb76ee3243bc8261e3",
+     "id": "2426c0475c3b8ef3ec82ad10",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -27188,7 +27188,7 @@
       }
      },
      "host": "sensor-security_onion-pe",
-     "id": "11c15e78a1663106320f5252",
+     "id": "bbc09b39662e3ed1eebad2e9",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -27352,7 +27352,7 @@
       }
      },
      "host": "sensor-malcolm-postgresql",
-     "id": "f20891719fde3f4b7d54322a",
+     "id": "7d22684dd26cf293e8288d67",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -27541,7 +27541,7 @@
       }
      },
      "host": "sensor-elastic-radius",
-     "id": "4478aed36faa8349e8f9f20a",
+     "id": "eb49e8ef0d55b40732bc026f",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -27699,7 +27699,7 @@
       }
      },
      "host": "sensor-malcolm-radius",
-     "id": "b0f7f65209ef3291ed3f0906",
+     "id": "2f726024cdaeb20e212ccd66",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -27876,7 +27876,7 @@
       }
      },
      "host": "sensor-security_onion-radius",
-     "id": "113263bbf308aaa92d6c5c40",
+     "id": "4e0274f565278f0ffd85cc79",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -28300,7 +28300,7 @@
       }
      },
      "host": "sensor-malcolm-redis",
-     "id": "f007135156221b0ffc5182e6",
+     "id": "2fa5c9aa32d32ad3b0f659af",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -29001,7 +29001,7 @@
       }
      },
      "host": "sensor-elastic-signatures",
-     "id": "cdb6806d587b55168ef22470",
+     "id": "965d159f926e1e942ef8d255",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -29136,7 +29136,7 @@
       }
      },
      "host": "sensor-malcolm-signatures",
-     "id": "c84e6e05d0ce6fa2ebb5dd3f",
+     "id": "20efcab8ffe85aec103439e3",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -29279,7 +29279,7 @@
       }
      },
      "host": "sensor-security_onion-signatures",
-     "id": "f538ebb01736893d35662439",
+     "id": "b155e4645dfa0228561ebfc3",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -29417,7 +29417,7 @@
       }
      },
      "host": "sensor-elastic-sip",
-     "id": "bd3194056bd33616d8dbb45a",
+     "id": "2b19a47f0cfbce72aafdac18",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -29584,7 +29584,7 @@
       }
      },
      "host": "sensor-malcolm-sip",
-     "id": "77b45c499d1be6f6a1e1d1fa",
+     "id": "e8b80a253a91d9ebde2c55d8",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -29771,7 +29771,7 @@
       }
      },
      "host": "sensor-security_onion-sip",
-     "id": "c078476af9ec33af948003f0",
+     "id": "019710364413278b4933cd19",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -30838,7 +30838,7 @@
       }
      },
      "host": "sensor-elastic-smtp",
-     "id": "60408cd5aa1dd31c39da4c2c",
+     "id": "7b544f4653686ce1bf74e082",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -31065,7 +31065,7 @@
       }
      },
      "host": "sensor-malcolm-smtp",
-     "id": "378e70a320ef57fbdbbb8804",
+     "id": "a11c35d09ba3a6054e1b6961",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -31337,7 +31337,7 @@
       }
      },
      "host": "sensor-security_onion-smtp",
-     "id": "e2b26e5f342ff55939464b01",
+     "id": "2e2c8951a66df627c3c112ac",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -31525,7 +31525,7 @@
       }
      },
      "host": "sensor-elastic-snmp",
-     "id": "85b2e21e48dd8a3b94d107d8",
+     "id": "27dcbced038096f914f2909b",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -31695,7 +31695,7 @@
       }
      },
      "host": "sensor-malcolm-snmp",
-     "id": "d615c396aeeb8c2e66c99871",
+     "id": "be7d4736e9abace671239dc5",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -31890,7 +31890,7 @@
       }
      },
      "host": "sensor-security_onion-snmp",
-     "id": "4259bc53e79f9d99bdeebee9",
+     "id": "5ce08b19d871d13e967274cf",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -32047,7 +32047,7 @@
       }
      },
      "host": "sensor-elastic-socks",
-     "id": "bb9ca84f1ab7db9ce42c2c8b",
+     "id": "549bebf4cb17125ca07ed22e",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -32202,7 +32202,7 @@
       }
      },
      "host": "sensor-malcolm-socks",
-     "id": "df480853cd27d4b5fbb8f7df",
+     "id": "74038830836d11ebcab1182b",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -32373,7 +32373,7 @@
       }
      },
      "host": "sensor-security_onion-socks",
-     "id": "bd50e7b00614ff01df5beb56",
+     "id": "b0783200d51582c008db6e54",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -32756,7 +32756,7 @@
       }
      },
      "host": "sensor-elastic-ssh",
-     "id": "7e1f24acf5f116c8448eab41",
+     "id": "f0ba9cfea4b0cd3ec01e8b95",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -32967,7 +32967,7 @@
       }
      },
      "host": "sensor-malcolm-ssh",
-     "id": "cb1adb66184752a2a2cfd075",
+     "id": "d1ea408a2fbc5fc04854946c",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -33208,7 +33208,7 @@
       }
      },
      "host": "sensor-security_onion-ssh",
-     "id": "5d8c68b47419ce66c659edff",
+     "id": "b21d03fdb2a00e74ab122203",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -33457,7 +33457,7 @@
       }
      },
      "host": "sensor-elastic-ssl",
-     "id": "b491c00ad39017b7a3f92855",
+     "id": "eeb509c2ba2f7bb6fc977fcf",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -33756,7 +33756,7 @@
       }
      },
      "host": "sensor-malcolm-ssl",
-     "id": "aa3a9919a10f9b5f4c1afe40",
+     "id": "c5c812302185dbea012d1aac",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -34056,7 +34056,7 @@
       }
      },
      "host": "sensor-security_onion-ssl",
-     "id": "20d2cf59b91798996c027ca8",
+     "id": "fc1c1a608a27173fe509a747",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -34309,7 +34309,7 @@
       }
      },
      "host": "sensor-malcolm-tds",
-     "id": "09eb9661954981370789cae7",
+     "id": "9c8ccbd15e688fbbede20648",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -34456,7 +34456,7 @@
       }
      },
      "host": "sensor-security_onion-tds",
-     "id": "20baf33391f2c416bbe3e1b0",
+     "id": "a5bbd97a533b46531c628f73",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -34577,7 +34577,7 @@
       }
      },
      "host": "sensor-elastic-tunnel",
-     "id": "549fd589d61d6b1c0516d359",
+     "id": "d7f0a152dc6e31373769fd6b",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -34697,7 +34697,7 @@
       }
      },
      "host": "sensor-malcolm-tunnel",
-     "id": "849f25121c7e25f7265c2331",
+     "id": "551aee95bbc3bec03020dc70",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -34835,7 +34835,7 @@
       }
      },
      "host": "sensor-security_onion-tunnel",
-     "id": "374ca2261ddb71b60c3c0323",
+     "id": "ff43eed23c8decd59311d356",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -34953,7 +34953,7 @@
       }
      },
      "host": "sensor-zeek-01",
-     "id": "b5ce32332bcd5e89a5f6e696",
+     "id": "8b1fe105b924aaad2eadfbcf",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -35079,7 +35079,7 @@
       }
      },
      "host": "sensor-zeek-01",
-     "id": "b18387338d8f05830ce8e73b",
+     "id": "6707ec00296e3102b852a838",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -35213,7 +35213,7 @@
       }
      },
      "host": "sensor-zeek-01",
-     "id": "d7f4fbc23c61ef420400f4e5",
+     "id": "edfc6c03a6d231920309ce77",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -35355,7 +35355,7 @@
       }
      },
      "host": "sensor-zeek-01",
-     "id": "d5f2f2a14bd8f863748a7b99",
+     "id": "baf5bd81a6909f564f6cad78",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -35635,7 +35635,7 @@
       }
      },
      "host": "sensor-zeek-01",
-     "id": "542db9fd92c2364c1b520467",
+     "id": "dad6ecacf825e4f2d36e135a",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -35765,7 +35765,7 @@
       }
      },
      "host": "sensor-zeek-01",
-     "id": "9b537a33c5c88dc25095fe66",
+     "id": "3730158176f0e856937e3fd8",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -35903,7 +35903,7 @@
       }
      },
      "host": "sensor-zeek-01",
-     "id": "e3c9522317934b42adc61948",
+     "id": "510ed78df5db9678ce4fa59a",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -36013,7 +36013,7 @@
       }
      },
      "host": "sensor-zeek-01",
-     "id": "1ff327cb41d902b6ceb97a31",
+     "id": "3fa56cad88738de7c02bebec",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -36147,7 +36147,7 @@
       }
      },
      "host": "sensor-zeek-01",
-     "id": "b5ce32332bcd5e89a5f6e696",
+     "id": "8b1fe105b924aaad2eadfbcf",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -36283,7 +36283,7 @@
       }
      },
      "host": "sensor-zeek-01",
-     "id": "28eb36989321b40346842826",
+     "id": "dba37f8031991ecee202836f",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -36423,7 +36423,7 @@
       }
      },
      "host": "sensor-zeek-01",
-     "id": "d7f4fbc23c61ef420400f4e5",
+     "id": "edfc6c03a6d231920309ce77",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -36563,7 +36563,7 @@
       }
      },
      "host": "sensor-zeek-01",
-     "id": "ae0e13d7733a8705e67f4496",
+     "id": "3801633af2085bee0aaf76cf",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -36861,7 +36861,7 @@
       }
      },
      "host": "sensor-zeek-01",
-     "id": "542db9fd92c2364c1b520467",
+     "id": "dad6ecacf825e4f2d36e135a",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -36997,7 +36997,7 @@
       }
      },
      "host": "sensor-zeek-01",
-     "id": "9b537a33c5c88dc25095fe66",
+     "id": "3730158176f0e856937e3fd8",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -37141,7 +37141,7 @@
       }
      },
      "host": "sensor-zeek-01",
-     "id": "e3c9522317934b42adc61948",
+     "id": "510ed78df5db9678ce4fa59a",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -37253,7 +37253,7 @@
       }
      },
      "host": "sensor-zeek-01",
-     "id": "c70f1a217bc661b316e6c7c7",
+     "id": "092e2f43f8aa3f817dbc2a23",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -37397,7 +37397,7 @@
       }
      },
      "host": "sensor-zeek-01",
-     "id": "5bc69761bb5d86b75f6d7d67",
+     "id": "55a0be94c1ab2fc497f083df",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -37610,7 +37610,7 @@
       }
      },
      "host": "sensor-zeek-01",
-     "id": "d7f4fbc23c61ef420400f4e5",
+     "id": "edfc6c03a6d231920309ce77",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -37755,7 +37755,7 @@
       }
      },
      "host": "sensor-zeek-01",
-     "id": "d5f2f2a14bd8f863748a7b99",
+     "id": "baf5bd81a6909f564f6cad78",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -38044,7 +38044,7 @@
       }
      },
      "host": "sensor-zeek-01",
-     "id": "542db9fd92c2364c1b520467",
+     "id": "dad6ecacf825e4f2d36e135a",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -38177,7 +38177,7 @@
       }
      },
      "host": "sensor-zeek-01",
-     "id": "9b537a33c5c88dc25095fe66",
+     "id": "3730158176f0e856937e3fd8",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -38318,7 +38318,7 @@
       }
      },
      "host": "sensor-zeek-01",
-     "id": "e3c9522317934b42adc61948",
+     "id": "510ed78df5db9678ce4fa59a",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -38427,7 +38427,7 @@
       }
      },
      "host": "sensor-zeek-01",
-     "id": "ad0b63a3a200f5d2948d84c7",
+     "id": "cee0c2f3beb33282dc618e04",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -38584,7 +38584,7 @@
       }
      },
      "host": "sensor-elastic-weird",
-     "id": "d67ba8a038f08e6ec9a6d344",
+     "id": "85bab1d042be8006f47e40cc",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -38718,7 +38718,7 @@
       }
      },
      "host": "sensor-malcolm-weird",
-     "id": "e64db029698bff15cb0474de",
+     "id": "df58847eba74754217803624",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -38877,7 +38877,7 @@
       }
      },
      "host": "sensor-security_onion-weird",
-     "id": "f4f2b37111e6533e7ea53bdc",
+     "id": "e5f680a8929f0775a2282802",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -39081,7 +39081,7 @@
       }
      },
      "host": "sensor-elastic-x509",
-     "id": "9bef40a7b822e7f1f6c2380a",
+     "id": "a76e9a0b432fdc8ab18e892b",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -39337,7 +39337,7 @@
       }
      },
      "host": "sensor-malcolm-x509",
-     "id": "1de8b2a973736fd65a68c465",
+     "id": "577ccebfb07efae67a6f2af2",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [
@@ -39582,7 +39582,7 @@
       }
      },
      "host": "sensor-security_onion-x509",
-     "id": "41d24141e0f32f09019119b0",
+     "id": "5b5183af9a3a5142d358c07c",
      "normalizer": "zeek-ecs@4",
      "outcome": "unknown",
      "raw": [

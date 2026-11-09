@@ -330,84 +330,98 @@ from tests import throughput_fixture as tf
 # context links from that anchor are cited there instead (40 candidates); the direct shadow read and the
 # labelled lateral SSH and staging context items remain.
 # Changed anchor groups, coverage versions and expansion selections account for the related fingerprints.
+# The evidence epoch moved (Linux shipper shapes, lab-ecs@16): every typed event id is rehashed, which moves
+# every digest over event ids (events, candidates, citations' event lists, links, raw first-task ids through
+# the query plan, and the normalization and pivot goldens). The sweep's Linux query names each logical dataset
+# (the new linux.syslog among them) and the compiler expands it to its shipper names, so task fingerprints and
+# intents, the dataset_filter in stats, audit and manifest, and the new linux_shapes / linux_shipper_inventory /
+# linux_shapes_not_assessed stats change. With the evidence version set back to 15 every other digest is the
+# earlier one, and the non-baseline semantic projection (every decision, claim, lane, gate) is unchanged.
+# Auditbeat documents without a dataset are a shape of their own: this target cannot select them (no
+# event.module), so linux_shapes_not_assessed names it too, moving only stats and the sweep summary audit row.
+# The evidence epoch moved again (lab-ecs@17: Elastic-shipped Suricata and NXLog flat Windows records are read):
+# every typed event id is rehashed, which moves the digests over event ids (events, candidates, event entities,
+# links, audit, manifest, rule cells, the baseline observations and scope hours, and the normalization and pivot
+# goldens). With the evidence version set back to 16 every digest here is the earlier one, and the non-baseline
+# semantic projection is unchanged.
 GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe554935eb6f87cf',
- 'audit': '752bceb485d6eccb8bd52165b464a1f3827dfdb3e868480506383504350b8ede',
+ 'audit': '93e7e798b20a8a186ea1fc8204ebd1cc2768f9faaa3d678841b86f4b9b12e06c',
  'baseline_counts': 'be05fabb25336f21341b46eae7d8c2627828f7a7a7e8fdb24f4eb58576099354',
  'baseline_hunt_exclusions': 'c91eefda01c512d6d63e892dc9696016b01a71d44e4abcc429d954bd51864852',
- 'baseline_observations': '2cac5f0f0a1107fa58648643db52a5fe64ff346e0d521e28aef302aca10fd2c3',
+ 'baseline_observations': '6753ce92f6247b473508e1e35f73339cb3843dabfb5a87c23b4339a749df13e5',
  'baseline_scope_hours': '0a1ce00b7f354753a35786774c98b43f73c6eecd0ac53c5283b89702968894fb',
  'baseline_segments': 'a3e22e8301643a23a9a9fd591a56a8b6baa65f55c31f3cfb9f910a6a639694fa',
  'baseline_snapshot': '63b4c8094cb5450b1e707fd7be786e90324528e738b882358cae15cb8d53f776',
  'baseline_window_counts': '7cc0f5555260b0533927f47cfe29e6a543e2d921b0cc79e4b6b89f418d6052f8',
  'baseline_window_event_hours': 'bb58c65144b135443e75a690b7b2f8137ebac6b827f8e8bd8cc7606a01c53e52',
- 'baseline_window_scope_hours': '9e290626d76b423e9aed82a63d54fc6c2d6a2feeea3b55297ed76696c9279c80',
- 'candidates': 'b270718bc7543ffb1b4636a9fb469890acedc77f9a75aea8c519fcf56733a45b',
+ 'baseline_window_scope_hours': '9f977913af60b464aae55a2fa1c263ebdefd644ca53fccc58ea616b47900d90a',
+ 'candidates': '819d72ca4130a7d6bb0880ce317287c9c4afe69b183d931e86d63b93e91bd18c',
  'entities': 'f26a3ccda6f16d94a0b0822914a0827ecd57ab81791dec1e39227f76a3529f17',
  'event_citations': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
- 'event_entities': '73eb1a7cb37581de8b25ae6079e62e8f2a58b4e75697820e4ae41ac414064773',
- 'events': '731e19f952d06603a6e19d7204fb7c1d53de79ad4207d21c3dc3bfda20787e9d',
+ 'event_entities': '41e5f3b21c1124968b40d3e2af117d6f6e5d1a4a1e575933464baf34995ad86d',
+ 'events': '9d1656ca22aeb9eb4b5dfa18f98fd9db3231baea2266d72a484bdc0a252d6fcc',
  'expansion': 'e7a94c167f9a42d9adb20a9ee7660abd45c407ecf30baf023f31b465f0b845fa',
- 'links': '7536ae4fc439eb04b16f94e78de5c5551ef26a4f218c8e5611c43b7777c5d228',
- 'manifest': '59ce6ea7c6525f2a234a5c355c0d683320580b423a5c26ac49d05eb69afc0ca3',
- 'raw': 'dcc19cada412dc08cd1133ae2a8cb299933501bceac7b2ddf3b8f23c752b6ddf',
- 'rule_cells': 'e5119f19824fabb8a4f065be44e4cf65e1b7f171ed0c73fcf3c29fcf2da865ba',
- 'stats': '18fcb2f6b78a17228b3a60b50bd103d66b5a07884252c753349b21b12889ced5',
- 'tasks': '8ed9224aa3877ac75866903f8f67da698237b02878712dae968c8ed266eea477'}
+ 'links': '5df971a7f0d797f9181f6ed038480cc189101da00d3dcd7a81dac834b35b13c6',
+ 'manifest': 'f878ac56a388599dce6bc1cb8abb00cc2ea89b4923f08d8b48411da07d4aaf7b',
+ 'raw': '3d95193e192f300d2424e9109a5f5267608533e822d4dd5fb479f52a1a6486a6',
+ 'rule_cells': 'a3be759f41c94a81120c1a23ea136572ee48a7228dcb6b22155661d300a14dd0',
+ 'stats': '03817e5592ef62f8aecddbb9cae63bf65e5496d5f148fd5d518389275a4ae608',
+ 'tasks': '820ed1e788f6476853cd0b4a04444927a1771296cc4e1212accf11e27c20f742'}
 # Captured directly from the S7 fixture through _non_baseline_semantic_digests. Typed-event-derived hashes and
 # interchangeable predicate origins are normalized, while every decision, claim, lane, raw citation and gate is
 # checked field by field.
-GOLDEN_NON_BASELINE_SEMANTICS = {'candidates': {'all_fields': '66c34da40dc5892252b267b8cc3bb8b424a4c000964ea6a61b671fa26a3987e6',
-                'benign_alternatives': '39dfe4522634750416c9dd5a7f38a4a76692daeed9ee9d5266a235c7b893643d',
-                'claim': '48b20c6ab3a8ede124c538d68c12da476b062d7ecf2a0725b46b317e8af9e1dc',
+GOLDEN_NON_BASELINE_SEMANTICS = {'candidates': {'all_fields': '4cf242cede6c404a9cec581aa7f10aac3a898b1c67a25dd1bb8e3ad838e139ea',
+                'benign_alternatives': 'b6a6498000e772cfa17ad8ec0de6611835534dbd7262543e97e6e413b75304aa',
+                'claim': 'b9376dc415ee7a3f7cd11e025171c6aa7bcb0eb58af69169ddf7c8f0fa84653d',
                 'claim_type': '62ee830737cd920223bd88ccd391e5074f2e72242803701f1f849e25d1fdf7c2',
                 'confidence': 'fbdbcc65a374c9bad760df608732609bf67565a3af9922898c67e31f78636a01',
                 'context_event_records': '812b2ee0a914612b78ec64e62317ee31cc172d0fe445880a23a7139bb9a8e1f4',
                 'count': 40,
                 'entities': 'a46018da750e2c05f29c1f50286e55174d6565c69b30892ce66b33b53c41de23',
                 'event_records': '30bdb797329163379f3be620d3fc42e392e45fc65f4f91bfc66d1516a011b6ae',
-                'gate_results': 'c7a34773f5e6fdd708af438f97f039760a490fc539bfabfe38738138e00135f2',
+                'gate_results': '75dd1fce3265b9168fd131769c53dcde25b795d172ffd83169ab73db7619ca00',
                 'group_key': 'f188f4672391c7c67237a2e55de7b94c8ae3aaddd5335ce0e82fe9a9b6df2b74',
                 'lane': 'a523c12959469de5628f7ca065677e0e9d7f4c492857dc2d4942b625f3f125ca',
-                'next_checks': '237a3391fc1a3f8312f3395d1a54083374485e9edbed2f23086b3787797bfb5a',
+                'next_checks': '1af15e5ad4e85fe763b5475d34aff89c61ecdf6730648475909fcbcb64ff2e4b',
                 'predicate_fields': '68b721cd4b7184f6191b023ca1889a7815d71a7f35d470a882a31cf230a034e6',
                 'priority': '81a856684110a1b2b59396843facb23007b68eaf8c3c031222a8e9c1d5db1e06',
                 'priority_reasons': 'd38e0586d04b87d7f11769084f0368af795f59c692d2debbb4dad2eaaca05150',
                 'rule_id': '50045a80bc2eb3e1c66c58f0a55acfc5e8db0f87e8b18bd8772a1361b20c1313',
-                'rule_version': 'cbcc3c959b93d808ecefbe6280012f12276e9bddd1939a07d784b55bbdb663bb',
+                'rule_version': '3b20f4e7ecaac386f33f18a1d488e2b80486199c943b4fe997565d63e6abfe5d',
                 'severity': 'd8fb260b8a62f9175181cdba1356bfbd3dab9167f0965c5e7586e2202c62bcc3',
                 'source_presence': '31f6a55e225e04f5da96ef7f565969408d500a329be1bf37e463188763a5af16',
                 'ts': 'bfc0e0328d7a2b9fb224bc2791da7a13f533d4b8f03819ad9f65e7609fac08e0'},
- 'rule_cells': {'all_fields': 'e419ef0c1fef881d5893ae2fb1c602bd02739a68603f221cda606f7571ba3ced',
+ 'rule_cells': {'all_fields': '15ce51e6e291f698c40d113d9dd59af9043f2c85118df1a4ab52c6b242f39ab4',
                 'count': 17256,
                 'detail': '17f2774a79d6aaa4196771517deb5a676512756778762dcaad2b9a2426954a07',
                 'evaluated': 'bc3f5e1263641dd45637654c353c391ae24242d3e37c29f32a5bf8c3297d6455',
                 'matched': 'a2b744e46dc0f9ba411fcf82f14147a988f21302cebb8c85f5b4522b4f614478',
                 'partition': 'a2196f3f82f86ab620f8798fc56b6a7cd94dd492ea061bd11390bda65ae53580',
                 'rule_id': 'ca8ff3e6e7a06b308813bcaf9abb6b2c4f904141fa23dbbe8c0e16d0977857fa',
-                'rule_version': 'f2e704b4ec82ec1088a544966c326dc1eba600d784cacd34c8a8d2ea1e283387',
+                'rule_version': '6e06616da6f73ed294b1b7dc633b6a0890e7f521857d680563573c81be4ba338',
                 'state': '79492679c375470e7bc0235f6b4335d5ca8329aa0575e774ae0a72392f380220',
                 'target': 'c533333fd26b44f80c85e368bab8980506bfb6ad90f452f8a4e6561d059b40fe'}}
-GOLDEN_NORMALIZED = {'arkime_sessions3-x': '7407ea2345be798c29751a3c9470e3b6988dac5ce7d9f5d5c2ffe3b0bb3f7903',
- 'arkime_sessions3-x+boots': '7407ea2345be798c29751a3c9470e3b6988dac5ce7d9f5d5c2ffe3b0bb3f7903',
- 'romulus-host-x': '4e8ce0a9d2d59e3e151dfcbfca4b04554cb4f10a54b1b397a6ea58eec4f5eb07',
- 'romulus-host-x+boots': '4ab87c943028621abc97523151d5ec6bef2ef830d4e2a7d92e7b47fe3f0ddd58',
- 'romulus-network-x': 'edf93ea9388d54c1a11c9d70f00c9a4b3983db78c49b932ee329abdd284dd62c',
- 'romulus-network-x+boots': 'edf93ea9388d54c1a11c9d70f00c9a4b3983db78c49b932ee329abdd284dd62c'}
-GOLDEN_PIVOT = {'arkime_sessions3-x:-': '357d03e5670c22460621706ce9b6785674d8f6d309c2478804a51b1e0e6288db',
- 'arkime_sessions3-x:process_exec': '357d03e5670c22460621706ce9b6785674d8f6d309c2478804a51b1e0e6288db',
- 'arkime_sessions3-x:net_socket': '357d03e5670c22460621706ce9b6785674d8f6d309c2478804a51b1e0e6288db',
- 'arkime_sessions3-x:auth,net_socket,process_exec': '357d03e5670c22460621706ce9b6785674d8f6d309c2478804a51b1e0e6288db',
- 'arkime_sessions3-x:net_flow': '357d03e5670c22460621706ce9b6785674d8f6d309c2478804a51b1e0e6288db',
- 'romulus-host-x:-': '663808ac8bf97c61934e034d7f8d6287d5d77c4e3cc017cc8eac661ed367769a',
- 'romulus-host-x:process_exec': '4de5c5d736e871578fcabb841538920933b5bc6cee5bd3b2315723aa685da491',
- 'romulus-host-x:net_socket': '60715318e2fff9d65306d497ff6e1144ea6047d57448ccef530912796a884b78',
- 'romulus-host-x:auth,net_socket,process_exec': '663808ac8bf97c61934e034d7f8d6287d5d77c4e3cc017cc8eac661ed367769a',
- 'romulus-host-x:net_flow': '663808ac8bf97c61934e034d7f8d6287d5d77c4e3cc017cc8eac661ed367769a',
- 'romulus-network-x:-': '8b9780ca17a4157880f10de03ff0f9c06d22967ad5cf98f8525009dd31e1c8ab',
+GOLDEN_NORMALIZED = {'arkime_sessions3-x': '1c08ef8ffd802ef67c6b6df2f8c5ba27bbf40ef5439c07a677c17044030f9ae9',
+ 'arkime_sessions3-x+boots': '1c08ef8ffd802ef67c6b6df2f8c5ba27bbf40ef5439c07a677c17044030f9ae9',
+ 'romulus-host-x': 'b46c4bfa21a9d32e8f11e18df9e79e32b92bca70fdf767d3aba4192416176433',
+ 'romulus-host-x+boots': '5f5ffbf920cf7bc84028f9773f9245267b9806601fab800a7a1018b32371fafe',
+ 'romulus-network-x': '7f34bcdad958422813332a4b96da5f2a0117f30c11b4885eb067dfb2910be914',
+ 'romulus-network-x+boots': '7f34bcdad958422813332a4b96da5f2a0117f30c11b4885eb067dfb2910be914'}
+GOLDEN_PIVOT = {'arkime_sessions3-x:-': 'bcce2aa930352c3ddde352c1f98cfac2077ecd8460dda40a0e0de5b309234028',
+ 'arkime_sessions3-x:process_exec': 'bcce2aa930352c3ddde352c1f98cfac2077ecd8460dda40a0e0de5b309234028',
+ 'arkime_sessions3-x:net_socket': 'bcce2aa930352c3ddde352c1f98cfac2077ecd8460dda40a0e0de5b309234028',
+ 'arkime_sessions3-x:auth,net_socket,process_exec': 'bcce2aa930352c3ddde352c1f98cfac2077ecd8460dda40a0e0de5b309234028',
+ 'arkime_sessions3-x:net_flow': 'bcce2aa930352c3ddde352c1f98cfac2077ecd8460dda40a0e0de5b309234028',
+ 'romulus-host-x:-': '67a59256803f05e0df04dbb1b407832e7eebd6b0624bf995116f7589b2543a5e',
+ 'romulus-host-x:process_exec': 'cbcc288780680a3af690e4eb074bdfe1c296a003206ceae6462993c870262df4',
+ 'romulus-host-x:net_socket': '74ea24fd2d0172a5d0241da6258cf22db1566dff38005023b752f09a55c56145',
+ 'romulus-host-x:auth,net_socket,process_exec': '67a59256803f05e0df04dbb1b407832e7eebd6b0624bf995116f7589b2543a5e',
+ 'romulus-host-x:net_flow': '67a59256803f05e0df04dbb1b407832e7eebd6b0624bf995116f7589b2543a5e',
+ 'romulus-network-x:-': '02875c52343701e5f0daac334513f1e26ce974ed712a402e5781bfd83c97a61c',
  'romulus-network-x:process_exec': '9e505ce98b1b1f339349e89f9e2e58082d9066b316aa4aa97b727de0423759c6',
  'romulus-network-x:net_socket': '9e505ce98b1b1f339349e89f9e2e58082d9066b316aa4aa97b727de0423759c6',
  'romulus-network-x:auth,net_socket,process_exec': '9e505ce98b1b1f339349e89f9e2e58082d9066b316aa4aa97b727de0423759c6',
- 'romulus-network-x:net_flow': 'c534a2f3f53bd027e7f90efe3e1e05342719bb957407b67cf8a708afb185ca96'}
+ 'romulus-network-x:net_flow': '8fd9c9c6ae3b6f1a9e280464ac93cd0af3fa9e336b7595e46eefbeb90678d0de'}
 PIVOT_FAMILIES = (None, frozenset({"process_exec"}), frozenset({"net_socket"}),
                   frozenset({"process_exec", "net_socket", "auth"}), frozenset({"net_flow"}))
 
@@ -581,7 +595,7 @@ def test_the_sweep_and_expansion_stack_reproduces_the_captured_result(docs, tmp_
     assert sum(link["status"] == "complete" for link in snapshot["links"]) > 10
     assert snapshot["manifest"]["findings"]
     _assert_every_citation_resolves_with_raw(snapshot)
-    assert tf.m5_golden_digests(snapshot) == GOLDEN_STACK
+    assert tf.deterministic_golden_digests(snapshot) == GOLDEN_STACK
     assert _non_baseline_semantic_digests(snapshot) == GOLDEN_NON_BASELINE_SEMANTICS
 
 

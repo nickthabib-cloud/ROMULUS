@@ -716,8 +716,8 @@ def digests(snapshot: dict) -> dict[str, str]:
             for name, part in sorted(snapshot.items())}
 
 
-def m5_golden_digests(snapshot: dict) -> dict[str, str]:
-    """Compare M5 detection goldens without M6's additive AI provenance and assessment fields."""
+def deterministic_golden_digests(snapshot: dict) -> dict[str, str]:
+    """Compare detection goldens without the additive AI provenance and assessment fields."""
     projected = json.loads(json.dumps(snapshot))
     projected["candidates"] = [
         {key: value for key, value in row.items() if key not in {"provenance", "agent_hypothesis_id"}}

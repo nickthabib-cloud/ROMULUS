@@ -14,9 +14,10 @@ from urllib.parse import urlsplit
 
 from romulus.detect.base import Match, Playbook, basename, pf
 from romulus.detect.bounded import HOT_COUNT, KeyedStore, RecentIds
-from romulus.detect.host import INTERPRETERS, WEB_SERVICE_USERS
+from romulus.detect.host import INTERPRETERS, WEB_SERVICE_USERS, ProcessLineage, _audit_serial, boot_of
 from romulus.detect.linux_argv import getopt_long, normalize_path, program, read_operand_paths, write_targets
 from romulus.detect.linux_semantics import classify_credential
+from romulus.detect.observed import EXEC
 from romulus.evidence.typed import Outcome
 
 DEBIAN_FILES = "https://packages.debian.org/bookworm/amd64/{}/filelist"
@@ -89,11 +90,112 @@ SETUID_SHADOW_HELPERS = frozenset({"su", "sudo", "sudoedit", "passwd", "chage", 
                                    "polkit-agent-helper-1"})
 PACKAGE_STORE_PATH = re.compile(r"^/(?:nix|gnu)/store/[^/]+-[^/]+/(?P<image>.+)$")
 
+# ---- Hash-file reads by package maintenance and provisioning (kept as leads, never excluded) ----
+# Perl's and Python's built-in account lookups (getpwnam, getspnam, pwd/spwd) open the shadow file when they run as
+# root. Debian and Ubuntu package tooling is largely Perl and Python (debconf, dpkg-preconfigure, cloud-init,
+# unattended-upgrades), so every provisioning run, upgrade and some service starts produce these reads. A read is
+# routed to the lead lane only when every typed fact below holds; anything unresolved stays high.
+# Interpreters, by kernel-recorded executable, only in the package directories they ship in.
+MAINTENANCE_INTERPRETER = re.compile(r"^(?:perl|perl5(?:\.\d+)+|python|python3(?:\.\d+)*)$")
+MAINTENANCE_INTERPRETER_DIRS = frozenset({"/usr/bin", "/bin"})
+# Switch clusters a `#!` line passes as the one argument before the script (`#!/usr/bin/perl -w`,
+# `#!/usr/bin/python3 -Es`). Only switches that take no value are accepted, so the next token is the script; any
+# other leading option leaves the script unidentified (and the read high).
+SHEBANG_SWITCHES = {"perl": frozenset("wTtWX"), "python": frozenset("EsSuBIOqR")}
+# Script locations a package installs: the binary directories exactly, or a package's own tree under /usr/share or
+# /usr/lib (at least /usr/share/<pkg>/<file>). Relative, temporary and home paths never match.
+SCRIPT_BINARY_DIRS = frozenset({"/usr/bin", "/usr/sbin", "/bin", "/sbin"})
+SCRIPT_PACKAGE_TREES = ("/usr/share/", "/usr/lib/")
+# Package managers and provisioners whose descendants legitimately read the hash files as root. One table: compiled
+# programs by name in their packaged directories, interpreter-hosted tools by the exact script path the
+# interpreter runs. Each entry names its source (the distribution's file list for that package).
+PROVISIONER_BINARIES = {
+    # Debian/Ubuntu: dpkg, apt, aptitude (https://packages.debian.org/bookworm/amd64/{dpkg,apt,aptitude}/filelist)
+    "dpkg": SCRIPT_BINARY_DIRS, "apt": SCRIPT_BINARY_DIRS, "apt-get": SCRIPT_BINARY_DIRS,
+    "aptitude": SCRIPT_BINARY_DIRS,
+    # RPM family: rpm, dnf5, zypper (https://packages.fedoraproject.org/pkgs/rpm/rpm/,
+    # https://packages.fedoraproject.org/pkgs/dnf5/dnf5/, https://software.opensuse.org/package/zypper)
+    "rpm": SCRIPT_BINARY_DIRS, "dnf5": SCRIPT_BINARY_DIRS, "zypper": SCRIPT_BINARY_DIRS,
+    # PackageKit's daemon (https://packages.debian.org/bookworm/amd64/packagekit/filelist; Fedora /usr/libexec)
+    "packagekitd": frozenset({"/usr/libexec", "/usr/lib/packagekit", "/usr/libexec/packagekit"}),
+    # snapd (https://packages.debian.org/bookworm/amd64/snapd/filelist)
+    "snapd": frozenset({"/usr/lib/snapd", "/usr/libexec/snapd"}),
+}
+PROVISIONER_SCRIPTS = {
+    # unattended-upgrades (https://packages.debian.org/bookworm/all/unattended-upgrades/filelist)
+    "/usr/bin/unattended-upgrade": "unattended-upgrade",
+    # cloud-init (https://packages.debian.org/bookworm/all/cloud-init/filelist)
+    "/usr/bin/cloud-init": "cloud-init",
+    # debconf frontends and tools (https://packages.debian.org/bookworm/all/debconf/filelist)
+    "/usr/share/debconf/frontend": "debconf frontend",
+    "/usr/bin/debconf-set-selections": "debconf-set-selections",
+    "/usr/bin/debconf-apt-progress": "debconf-apt-progress",
+    "/usr/bin/debconf-communicate": "debconf-communicate",
+    "/usr/sbin/dpkg-preconfigure": "dpkg-preconfigure",
+    "/usr/sbin/dpkg-reconfigure": "dpkg-reconfigure",
+    # dnf 4 and yum are Python programs (https://packages.fedoraproject.org/pkgs/dnf/dnf/,
+    # https://packages.fedoraproject.org/pkgs/dnf/yum/)
+    "/usr/bin/dnf": "dnf", "/usr/bin/dnf-3": "dnf", "/usr/bin/yum": "yum",
+}
+PROVISIONER_SOURCES = (
+    "https://packages.debian.org/bookworm/amd64/dpkg/filelist",
+    "https://packages.debian.org/bookworm/amd64/apt/filelist",
+    "https://packages.debian.org/bookworm/all/debconf/filelist",
+    "https://packages.debian.org/bookworm/all/cloud-init/filelist",
+    "https://packages.debian.org/bookworm/all/unattended-upgrades/filelist",
+    "https://perldoc.perl.org/functions/getpwnam",
+)
+# Ancestors walked above the reader. Debian's deepest routine chain is the debconf frontend under a maintainer
+# script under dpkg under apt under a provisioner (four or five steps); eight leaves room for nested maintainer
+# helpers (ucf, invoke-rc.d, a shell) and keeps every walk bounded. A provisioner beyond it is not found, and the
+# read stays high.
+PROVISIONER_DEPTH = 8
+# Recorded file changes that put new content at a path: a service script changed in the hunt is not the packaged one.
+SCRIPT_CHANGES = frozenset({"create", "content", "rename_target", "link"})
+
+
+def maintenance_interpreter(executable: str) -> str:
+    """The interpreter family ('perl' or 'python') of a kernel-recorded executable in a package directory, else ''."""
+    name = basename(executable)
+    if posixpath.dirname(executable) not in MAINTENANCE_INTERPRETER_DIRS or not MAINTENANCE_INTERPRETER.match(name):
+        return ""
+    return "perl" if name.startswith("perl") else "python"
+
+
+def interpreter_script(family: str, argv) -> str:
+    """The script an interpreter was given: argv[1], or argv[2] after one `#!`-style cluster of value-free switches.
+    '' when the operand is inline code, a module, standard input or not an absolute path."""
+    if not isinstance(argv, list) or len(argv) < 2:
+        return ""
+    operand = str(argv[1])
+    if operand.startswith("-"):
+        cluster = operand[1:]
+        if not cluster or not set(cluster) <= SHEBANG_SWITCHES[family] or len(argv) < 3:
+            return ""
+        operand = str(argv[2])
+    if not operand.startswith("/"):
+        return ""
+    return normalize_path(operand)
+
+
+def packaged_script(path: str) -> bool:
+    """Whether a script path lies where a package installs scripts (see SCRIPT_BINARY_DIRS)."""
+    if posixpath.dirname(path) in SCRIPT_BINARY_DIRS:
+        return True
+    for tree in SCRIPT_PACKAGE_TREES:
+        rest = path[len(tree):] if path.startswith(tree) else ""
+        if "/" in rest and rest.split("/", 1)[0] and rest.split("/", 1)[1]:
+            return True
+    return False
+
+
+HASH_FILES = frozenset({"/etc/shadow", "/etc/gshadow", "/etc/shadow-", "/etc/gshadow-"})
+
 
 def shadow_reader(path, event):
     executable = normalize_path(str(event.get("process.executable") or ""))
     name, directory = basename(executable), posixpath.dirname(executable)
-    if path not in {"/etc/shadow", "/etc/gshadow", "/etc/shadow-", "/etc/gshadow-"}:
+    if path not in HASH_FILES:
         return ""
     if str(event.get("process.uid")) != "0" and name not in SETUID_SHADOW_HELPERS:
         return ""
@@ -359,11 +461,14 @@ class FoldedLinuxDirect(LinuxDirect):
         super().__init__()
         self.folds = KeyedStore(self, "linux_direct_folds", self.HOT)
         self._seen = RecentIds()
+        # Records a caller hands over for context only (an expansion reach's records another evaluation owns): read
+        # for lineage, never matched.
+        self.observe_only: frozenset[str] = frozenset()
 
     def consume(self, events):
         pending = {}
         for event in self.applicable(events):
-            if event.id in self._seen:
+            if event.id in self._seen or event.id in self.observe_only:
                 continue
             self._seen.add(event.id)
             for match in self.match(event):
@@ -371,6 +476,7 @@ class FoldedLinuxDirect(LinuxDirect):
                 match.raw_copies = self.raw_of(event)
                 state = self.folds.get(key)
                 if state is None:
+                    self.witness(match)
                     state = _DirectFold(0, match, match)
                     if not self.folds.put(key, state):
                         self.note_limit("direct_folds", "The direct observation fold state was refused at the "
@@ -380,6 +486,7 @@ class FoldedLinuxDirect(LinuxDirect):
                         continue
                 state.count += 1
                 if (event.ts, event.id) < (state.first.ts, state.first.events[0].id):
+                    self.witness(match)
                     state.first = match
                 if (event.ts, event.id) > (state.last.ts, state.last.events[0].id):
                     state.last = match
@@ -392,14 +499,17 @@ class FoldedLinuxDirect(LinuxDirect):
                 continue
             first, last = state.first, state.last
             witnesses = list({event.id: event for match in (first, last) for event in match.events}.values())
+            context = set(first.context_ids) | set(last.context_ids)
+            subjects = [event for event in witnesses if event.id not in context]
             summary = {"count": state.count, "peak": state.count, "episodes": 1,
                        "first": first.ts.timestamp(), "last": last.ts.timestamp()}
             claim = (f"First observation: {first.claim} {state.count} matching record(s) from "
                      f"{first.ts.isoformat()} to {last.ts.isoformat()}; "
-                     f"{len(witnesses)} cited, including the first and last.")
+                     f"{len(subjects)} cited, including the first and last.")
             out.append(replace(first, claim=claim, events=witnesses,
                                predicate=[*first.predicate, *([] if first is last else last.predicate)],
                                entities=list(dict.fromkeys([*first.entities, *last.entities])),
+                               context_ids=context,
                                notes=list(first.notes), raw_copies={**first.raw_copies, **last.raw_copies},
                                revision_reason="Updated the group's count and first/latest witnesses."
                                if state.published else "", bounded_revision=True, aggregate_summary=summary))
@@ -408,8 +518,29 @@ class FoldedLinuxDirect(LinuxDirect):
         self.folds.trim()
         return out
 
+    def match_each(self, events, judged_ids) -> list[Match]:
+        """Each judged record's own matches, unfolded, after every record was read for context (lineage): for a
+        caller that must place each record in the group another evaluation published for it."""
+        self.observe_only = frozenset(event.id for event in events)
+        self.consume(events)                    # context only: nothing is matched
+        self.observe_only = frozenset()
+        out = []
+        for event in self.applicable([event for event in events if event.id in judged_ids]):
+            for match in self.match(event):
+                match.raw_copies = self.raw_of(event)
+                out.append(match)
+        return out
+
+    def witness(self, match: Match) -> None:
+        """A match about to become its group's first cited observation: a rule may add the records its claim rests on
+        (called once per new first witness, never per record)."""
+
     def release_state(self):
         self.folds.clear()
+        for name in ("scripts", "script_changes", "change_hosts"):
+            store = getattr(self, name, None)
+            if store is not None:
+                store.clear()
 
 
 def one_edit(a, b):
@@ -522,16 +653,222 @@ class KernelModuleLoad(LinuxDirect):
 
 
 class CredentialMaterialAccess(FoldedLinuxDirect):
-    version = "2"
+    """Credential material named by a reading command, or a watched kernel open of it.
+
+    A watched read of the local hash files is high, except one narrow, typed route to the lead lane (never an
+    exclusion): a root interpreter in a package directory running a packaged script, outside any login session, whose
+    recorded lineage shows package maintenance or provisioning (`PROVISIONER_BINARIES`, `PROVISIONER_SCRIPTS`) within
+    `PROVISIONER_DEPTH` ancestors, or which the service manager (pid 1) started. The lineage is the hunt's shared exec
+    lineage (held on disk when cold, never forgotten). A lineage that cannot be resolved (a missing exec record, an
+    exec store that refused a process, an unordered instant) leaves the read high."""
+    version = "3"
     id = "host.credential_material_access"
     title = "Credential material named by a file-reading tool or a watched kernel open"
-    families = ("process_exec", "file_access")
+    families = ("process_exec", "file_access", "process_observed", "file_change")
+    context_families = ("process_observed", "file_change")     # lineage, and changes to packaged scripts
     attack = ("T1552.001", "T1003.008")
-    research = CREDENTIAL_SOURCES
+    research = CREDENTIAL_SOURCES + PROVISIONER_SOURCES
+    benign = ("package maintenance or provisioning reading the hash files via Perl or Python (routed to lead)",
+              "packaged root service scripts started by the service manager",
+              "backup and compare jobs that copy the hash files within /etc or the backup directory")
+    next_checks = ("the reader's process lineage and login session",
+                   "writes or network transfers by the same process after the read")
+    # Notes saying what an evaluation could not check: a reach that holds that context and raises the lane replaces
+    # them (`romulus.hunt.publish`).
+    context_notes = ("the script's origin was not checked",)
+
+    def __init__(self):
+        super().__init__()
+        # The hunt's one exec lineage (`share_lineage`): exec and observed records, the hot set in memory, the rest
+        # on disk.
+        self.lineage = ProcessLineage(self)
+        # Exec record id -> the packaged script a packaged root-capable interpreter ran. Only scripts in package
+        # locations are kept (one short string per such exec); the hot set in memory, the rest on disk.
+        self.scripts = KeyedStore(self, "credential_interpreter_scripts", self.HOT)
+        self._scripts_refused = False
+        # (host, packaged script path) -> the earliest time a recorded file change created, wrote, linked or renamed
+        # onto it; and the hosts whose file-change records were read at all (without them a script's origin is
+        # unchecked).
+        self.script_changes = KeyedStore(self, "credential_script_changes", self.HOT)
+        self.change_hosts = KeyedStore(self, "credential_change_hosts", self.HOT)
+        self._changes_refused = False
 
     def consume(self, events):
         self._watched_in_batch = any(e.family == "file_access" for e in events)
-        return super().consume(events)
+        # Lineage and script changes first, for the whole batch: a read's ancestry is read before it is judged.
+        for event in sorted((e for e in events if e.family in {"process_exec", "process_observed", "file_change"}),
+                            key=lambda e: (e.ts, e.id)):
+            if event.family == "file_change":
+                self._hold_change(event)
+                continue
+            self.lineage.observe(event, self.raw_of(event), self.raw_target())
+            if event.family == "process_exec":
+                self._hold_script(event)
+        try:
+            return super().consume([e for e in events if e.family not in self.context_families])
+        finally:
+            self.lineage.trim()
+            self.scripts.trim()
+            self.script_changes.trim()
+            self.change_hosts.trim()
+
+    def _hold_change(self, event) -> None:
+        if not event.host:
+            return
+        if event.host not in self.change_hosts and not self.change_hosts.put(event.host, True):
+            self._changes_refused = True
+        path = normalize_path(str(event.get("file.path") or ""))
+        if event.get("file.change") not in SCRIPT_CHANGES or not path or not packaged_script(path):
+            return
+        # only the earliest change matters: a read after it is not of the packaged script
+        key, ts = (event.host, path), event.ts.timestamp()
+        earliest = self.script_changes.get(key)
+        if earliest is not None and earliest <= ts:
+            return
+        if not self.script_changes.put(key, ts):
+            self._changes_refused = True
+            self.note_limit("script_changes", "the store of packaged-script changes took no new path; a later "
+                                              "service-started hash read is not routed to the lead lane")
+
+    def _hold_script(self, event) -> None:
+        executable = normalize_path(str(event.get("process.executable") or ""))
+        family = maintenance_interpreter(executable)
+        if not family:
+            return
+        script = interpreter_script(family, event.get("process.argv"))
+        if not script or not (packaged_script(script) or script in PROVISIONER_SCRIPTS):
+            return
+        if event.id in self.scripts or self.scripts.put(event.id, script):
+            return
+        self._scripts_refused = True
+        self.note_limit("interpreter_scripts", "the store of packaged interpreter scripts took no new record; a hash "
+                                               "read by a later interpreter cannot be routed to the lead lane and "
+                                               "stays high")
+
+    def _script_of(self, event_id: str) -> str:
+        found = self.scripts.get(event_id)
+        return found if found is not None else self.scripts.peek(event_id, "") or ""
+
+    def _view(self, host, pid, ts, serial, boot, *, inclusive):
+        """The process holding `pid` then, or None when it cannot be relied on: unknown, inferred only from a later
+        record, or resting on an observation that is uncited or may be missing."""
+        execs = self.lineage.execs
+        view = execs.view(host, pid, ts, serial, boot, inclusive=inclusive,
+                          order_domain="audit" if serial is not None else None)
+        if view.image is None or not view.prior:
+            return None
+        if view.used and (execs.observed_incomplete or any(not item.cited for item in view.used)):
+            return None
+        return view
+
+    def _provisioner(self, named) -> str:
+        """The provisioner a lineage step names, or ''. Compiled tools by kernel path; interpreter-hosted tools only
+        from an exec record (an observation carries no argv)."""
+        executable = normalize_path(str(named.exe or ""))
+        name = basename(executable)
+        if posixpath.dirname(executable) in PROVISIONER_BINARIES.get(name, ()):
+            return name
+        if named.kind == EXEC and maintenance_interpreter(executable):
+            return PROVISIONER_SCRIPTS.get(self._script_of(named.entry.event_id), "")
+        return ""
+
+    @staticmethod
+    def routable_shape(e) -> bool:
+        """Whether a record has every fact of the lead route that the record itself carries: a watched read of a
+        hash file by a packaged root Perl or Python with no login marker. Only its lineage (the reader's script and
+        ancestors) can then decide; no other record may ever cost a lineage lookup."""
+        executable = normalize_path(str(e.get("process.executable") or ""))
+        pid = e.get("process.pid")
+        if (e.family != "file_access" or str(e.get("file.path")) not in HASH_FILES or e.outcome == Outcome.failure
+                or not maintenance_interpreter(executable) or str(e.get("process.uid")) != "0"
+                or not isinstance(pid, int) or isinstance(pid, bool) or not e.host):
+            return False
+        # A login session (audit login uid or session id set, or an enriched login name) means an operator ran it.
+        return (e.get("process.auid") is None and e.get("process.session_id") is None
+                and e.get("process.login_user") in (None, "", "unset"))
+
+    def maintenance_route(self, e) -> tuple[str, list[str], list[str], str, list[str]] | None:
+        """('package' or 'service', the lineage named from the reader up, its exec record ids, the script, notes)
+        when the hash read may go to the lead lane; None otherwise (the read stays high)."""
+        return self._route(e)[0]
+
+    def lineage_missing(self, e) -> bool:
+        """Whether a routable read stays high only because its reader's lineage is not held: a missing reader exec
+        or ancestor, never a resolved lineage that shows no provisioner or an unpackaged script."""
+        return self.routable_shape(e) and self._route(e)[1]
+
+    def _route(self, e) -> tuple[tuple[str, list[str], list[str]] | None, bool]:
+        """(route or None, whether the walk stopped because a lineage record was not held)."""
+        if not self.routable_shape(e):
+            return None, False
+        executable = normalize_path(str(e.get("process.executable") or ""))
+        pid = e.get("process.pid")
+        if self.lineage.execs.incomplete or self._scripts_refused:
+            return None, False      # an exec the store refused could be the one that answers: never lower
+        boot, serial = boot_of(e), _audit_serial(e)
+        view = self._view(e.host, pid, e.ts.timestamp(), serial, boot, inclusive=True)
+        if view is None:
+            return None, True
+        named = view.named
+        record = named.entry
+        if named.kind != EXEC:
+            return None, True       # the reader's own exec (its script) is not held
+        if normalize_path(str(named.exe or "")) != executable:
+            return None, False
+        if getattr(record, "auid", None) is not None or getattr(record, "uid", None) not in (None, "0"):
+            return None, False
+        script = self._script_of(record.event_id)
+        if not script or not packaged_script(script):
+            return None, False
+        chain, ids = [f"{basename(executable)} {script}"], [record.event_id]
+        first = view.first
+        if first.ppid == 1:
+            # The read's own parent must be the exec's (a different one means the pid was reused), and a script
+            # created or rewritten during the hunt is not the packaged one.
+            if e.get("process.ppid") != getattr(record, "ppid", None) or self._changes_refused:
+                return None, False
+            earliest = self.script_changes.get((e.host, script))
+            if earliest is None:
+                earliest = self.script_changes.peek((e.host, script), None)
+            if earliest is not None and earliest <= e.ts.timestamp():
+                return None, False
+            notes = ([] if e.host in self.change_hosts else
+                     ["the script's origin was not checked (no file-change records)"])
+            return ("service", [*chain, "pid 1"], ids, script, notes), False
+        pid, ts, serial = first.ppid, first.ts, first.serial
+        boot = boot if boot is not None else first.boot
+        for _depth in range(PROVISIONER_DEPTH):
+            if not isinstance(pid, int) or pid <= 1:
+                return None, False  # the lineage reached the service manager with no provisioner on it
+            parent = self._view(e.host, pid, ts, serial, boot, inclusive=False)
+            if parent is None:
+                return None, True   # an ancestor is not recorded: unknown, so the read stays high
+            step = parent.named
+            found = self._provisioner(step)
+            chain.append(found or basename(str(step.exe or "")) or f"pid {pid}")
+            if step.kind == EXEC:
+                ids.append(step.entry.event_id)
+            if found:
+                return ("package", chain, ids, script, []), False
+            top = parent.first
+            pid, ts, serial = top.ppid, top.ts, top.serial
+            boot = boot if boot is not None else top.boot
+        return None, False
+
+    def witness(self, match: Match) -> None:
+        """A routed lead cites the exec records of the lineage its note names, as context."""
+        route = getattr(match, "route_ids", None)
+        if not route:
+            return
+        found, raw = self.lineage.execs.cited(list(route))
+        if not found:
+            match.notes.append("The lineage's exec records were not kept for citation; the route is stated from the "
+                               "hunt's exec lineage.")
+            return
+        cited = [found[event_id] for event_id in route if event_id in found]
+        match.events = [*match.events, *[event for event in cited if event.id not in {e.id for e in match.events}]]
+        match.context_ids = set(match.context_ids) | {event.id for event in cited}
+        match.raw_copies = {**match.raw_copies, **raw}
 
     positive_only_reason = ("Watched file reads are positive-only: watch inventories are unknown and hard links "
                             "can escape path classification; unrecorded access remains unresolved. "
@@ -545,6 +882,8 @@ class CredentialMaterialAccess(FoldedLinuxDirect):
         return False
 
     def match(self, e):
+        if e.family == "process_observed":
+            return []                   # lineage only
         if e.family == "file_access":
             paths = [str(e.get("file.path"))] if e.has("file.path") else []
             if not paths:
@@ -582,16 +921,37 @@ class CredentialMaterialAccess(FoldedLinuxDirect):
             lane = "high" if shadow or private and other else "lead"
             if e.outcome == Outcome.failure or reader == "backup":
                 lane = "lead"
+            # The only other route to the lead lane: a watched hash read whose sole raise is the hash file itself.
+            route = (self.maintenance_route(e) if lane == "high" and shadow and not private
+                     and e.family == "file_access" else None)
+            if route is not None:
+                lane = "lead"
             text = ("a watched kernel open names" if e.family == "file_access"
                     else "a file-reading command names (positive-only argv operand)")
-            out.append(observed(self, e, f"On {e.host}, {text} {found[2]}; recorded outcome {e.outcome.value}.",
-                                lane, group=json.dumps([e.host, normalize_path(str(e.get("process.executable") or "")),
-                                                            path, lane]),
+            claim = f"On {e.host}, {text} {found[2]}; recorded outcome {e.outcome.value}."
+            if route is not None:
+                kind, chain, _ids, _script, _notes = route
+                claim += (f" The reader is a root {'service script started by the service manager'
+                          if kind == 'service' else 'interpreter under package maintenance'} "
+                          f"({' ← '.join(chain)}) with no login session.")
+            executable = normalize_path(str(e.get("process.executable") or ""))
+            # A routed read is grouped by the script it ran too, so another script never shares its group, claim or
+            # citations. The lane stays the key's last part.
+            group = json.dumps([e.host, executable, path, *([route[3]] if route is not None else []), lane])
+            out.append(observed(self, e, claim, lane, group=group,
                                 names=("file.path", "file.owner.id", "file.owner.name", "audit.key",
                                              "process.executable", "process.argv", "process.uid", "process.user")))
             if reader == "backup":
                 out[-1].notes.append("A packaged root backup/compare tool read the hash file; paired writes outside /etc "
                                      "are not known, so this remains a lead rather than an exclusion.")
+            if route is not None:
+                kind, chain, ids, _script, notes = route
+                what = ("Root service script started by the service manager" if kind == "service"
+                        else "Root interpreter under package maintenance")
+                out[-1].notes.append(f"{what} ({' ← '.join(chain)}) read the hash file with no login session; kept as "
+                                     "a lead, not excluded.")
+                out[-1].notes.extend(notes)
+                out[-1].route_ids = ids
         return out
 
 

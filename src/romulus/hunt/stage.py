@@ -564,9 +564,17 @@ class EventStage:
         # The protected bit was computed across every group before any deletion; a combined batch cannot
         # remove both witnesses of a shared group, even when their times fall in different cursor pages.
         ids = [identity for _stamp, identity in rows]
-        with self.db:
-            for table in ("event_raw", "hold", "citation_owner", "event"):
-                self.db.executemany(f"DELETE FROM {table} WHERE id=?", [(identity,) for identity in ids])
+        try:
+            with self.db:
+                for table in ("event_raw", "hold", "citation_owner", "event"):
+                    self.db.executemany(f"DELETE FROM {table} WHERE id=?", [(identity,) for identity in ids])
+        except sqlite3.OperationalError as exc:
+            if "full" not in str(exc).lower():
+                raise
+            # A delete can need a page (a b-tree rebalance) that the page cap no longer allows: the transaction
+            # rolled back, those rows stay stored and cited, and nothing was reclaimed, so the caller refuses.
+            self.charge_growth()
+            return 0
         self.db.execute("PRAGMA incremental_vacuum").fetchall()
         self.charge_growth()
         return max(len(ids), before-self._size)

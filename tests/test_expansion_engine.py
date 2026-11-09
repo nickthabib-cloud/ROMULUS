@@ -531,7 +531,10 @@ def test_inferred_link_keeps_a_direct_finding_lane_and_labels_only_the_relation_
     )
     # strong indicators are reported on their own: the inferred link never lowers the lane
     assert finding["lane"] in ("urgent", "high")
-    assert "relation to f-anchor" in finding["claim"].lower() and "hypothesis" in finding["claim"].lower()
+    # The same record is reached from the root anchor and from the group finding it seeds; the merged row keeps one
+    # reach's wording, and every reach is listed with the finding.
+    assert "its relation to " in finding["claim"].lower() and "hypothesis" in finding["claim"].lower()
+    assert "F-anchor" in {reach["anchor_id"] for reach in finding["gate_results"]["_context_reaches"]}
     assert any("relation to the anchor is a hypothesis" in note
                for note in finding["gate_results"]["_notes"])
 
@@ -703,14 +706,79 @@ def _publish_distinct_subjects(anchor_order):
     )
 
 
-def test_cross_anchor_same_group_with_distinct_subjects_stays_separate_and_deterministic():
+def test_cross_anchor_same_group_with_distinct_subjects_folds_into_one_finding():
     forward = _publish_distinct_subjects(["F-one", "F-two"])
     reversed_order = _publish_distinct_subjects(["F-two", "F-one"])
 
-    assert forward == reversed_order
-    assert len(forward) == 2
-    assert all(len(row["event_ids"]) == 1 and row["event_ids"][0] in row["claim"] for row in forward)
-    assert len({row["id"] for row in forward}) == 2
+    # One finding per (hunt, rule, group key): the second reach folds into the first, never a sibling.
+    assert len(forward) == len(reversed_order) == 1
+    assert forward[0]["id"] == reversed_order[0]["id"]
+    assert set(forward[0]["event_ids"]) == set(reversed_order[0]["event_ids"]) == {"subject-two", "subject-five"}
+    assert forward[0]["lane"] == reversed_order[0]["lane"] == "high"
+    for row, first, second in ((forward[0], "subject-two", "subject-five"),
+                               (reversed_order[0], "subject-five", "subject-two")):
+        assert row["claim"].startswith(f"{row['source_anchor_id']} cites {first}")
+        assert ("Expansion also reached this group through 1 reach(es) and read 1 matching record(s) not cited "
+                "above") in row["claim"]
+        assert row["event_ids"] == [first, second]
+
+
+def test_fold_keeps_the_strongest_lane_and_lists_every_reach():
+    repo = repo_with_anchor(candidate_id="F-one")
+    rule = _SameGroupDirect()
+    events = [event(f"part-{n}", ts=T0 + timedelta(minutes=n + 1), argv=["/bin/sh", "-c", str(n)]) for n in range(3)]
+    lanes = [("lead", "medium", "medium"), ("high", "high", "high"), ("lead", "low", "low")]
+    for n, (subject, (lane, severity, confidence)) in enumerate(zip(events, lanes, strict=True)):
+        match = Match(rule.id, f"part {n}", "observed_action", [subject], [pf(subject, "process.executable")],
+                      subject.ts, severity, lane, confidence, subject.entities(), group_key="g")
+        reach = {"anchor_id": f"F-{n}", "link_id": f"L-{n}", "link_type": "host_after_anchor",
+                 "strength": "inferred" if n else "observed"}
+        returned = publish_match(repo, "h1", rule, match, None, {}, source_anchor_id=f"F-{n}",
+                                 source_link_id=f"L-{n}", context_reach=reach)
+        if n == 1:
+            # the fold raised the group into an expanded lane: expansion receives it to anchor on
+            assert returned is not None and returned["lane"] == "high"
+    rows = [row for row in repo.candidates("h1") if row["rule_id"] == rule.id]
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row["lane"], row["severity"], row["confidence"]) == ("high", "high", "high")
+    assert {reach["anchor_id"] for reach in row["gate_results"]["_context_reaches"]} == {"F-0", "F-1", "F-2"}
+    fold = row["gate_results"]["_expansion_fold"]
+    assert fold["reaches_total"] == 2 and fold["records"] == 2
+    assert row["event_ids"] == [e.id for e in events]
+    assert "put the group in the high lane" in row["claim"] and "only as a hypothesis" in row["claim"]
+    # A resumed expansion re-evaluating the same link changes nothing.
+    again = Match(rule.id, "part 1", "observed_action", [events[1]], [pf(events[1], "process.executable")],
+                  events[1].ts, "high", "high", "high", events[1].entities(), group_key="g")
+    assert publish_match(repo, "h1", rule, again, None, {}, source_anchor_id="F-1", source_link_id="L-1",
+                         context_reach={"anchor_id": "F-1", "link_id": "L-1", "link_type": "host_after_anchor",
+                                        "strength": "inferred"}) is None
+    assert repo.candidate(row["id"])["gate_results"]["_expansion_fold"]["reaches_total"] == 2
+
+
+def test_fold_citations_and_reach_list_are_bounded():
+    from romulus.hunt.publish import FOLD_CITATIONS_ADDED, FOLD_REACHES_LISTED
+    repo = repo_with_anchor(candidate_id="F-one")
+    rule = _SameGroupDirect()
+    reaches = FOLD_REACHES_LISTED + 10
+    for n in range(reaches):
+        subject = event(f"bulk-{n}", ts=T0 + timedelta(seconds=n + 1), argv=["/bin/sh", "-c", str(n)])
+        match = Match(rule.id, f"bulk {n}", "observed_action", [subject], [pf(subject, "process.executable")],
+                      subject.ts, "high", "high", "high", subject.entities(), group_key="bulk")
+        publish_match(repo, "h1", rule, match, None, {}, source_anchor_id=f"F-{n}", source_link_id=f"L-{n}",
+                      context_reach={"anchor_id": f"F-{n}", "link_id": f"L-{n}", "link_type": "host_after_anchor",
+                                     "strength": "observed"})
+    rows = [row for row in repo.candidates("h1") if row["rule_id"] == rule.id]
+    assert len(rows) == 1
+    fold = rows[0]["gate_results"]["_expansion_fold"]
+    assert fold["reaches_total"] == reaches - 1 and len(fold["reaches"]) == FOLD_REACHES_LISTED
+    assert len(rows[0]["event_ids"]) == 1 + FOLD_CITATIONS_ADDED
+    assert (f"through {reaches - 1} reach(es) and read {reaches - 1} matching record(s) not cited above"
+            in rows[0]["claim"])
+    assert f"; {FOLD_CITATIONS_ADDED} of the {reaches - 1} are now cited" in rows[0]["claim"]
+    from tests.claim_citations import finding_problems
+    cited = [TypedEvent.model_validate(row["event"]) for row in repo.citation_events("h1", rows[0]["event_ids"])]
+    assert finding_problems(rows[0]["claim"], rows[0]["gate_results"]["_notes"], cited) == []
 
 
 def test_expansion_of_the_same_subject_reuses_an_existing_direct_finding():

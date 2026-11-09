@@ -33,6 +33,14 @@ from romulus.detect.netdef import DIRECTION_ASSUMED_REASON
 from romulus.detect.observed import observation
 from romulus.detect.registry import bind_windows_site, fresh_pack
 from romulus.errors import SourceError
+from romulus.evidence.linux_catalog import (
+    LINUX_LOGICAL_DATASETS,
+    LINUX_SHIPPER_DATASETS,
+    LOGICAL_FAMILIES,
+    dataset_selection,
+    logical_of,
+    shipper_names,
+)
 from romulus.evidence.normalize import (
     BOOT_FILL_FAMILIES,
     BOOT_INTERVAL_ORIGIN,
@@ -41,7 +49,12 @@ from romulus.evidence.normalize import (
     normalize_hits,
 )
 from romulus.evidence.typed import TypedEvent
-from romulus.evidence.windows import RecordIdContinuity, windows_record_signature
+from romulus.evidence.windows import (
+    NXLOG_CHANNEL_SKIP,
+    RecordIdContinuity,
+    windows_record_signature,
+    windows_view,
+)
 from romulus.evidence.windows_catalog import (
     COLLECTION_CHANGE_EVENTS,
     EVENT_CLASSES,
@@ -82,7 +95,8 @@ MAX_WINDOWS_CONTINUITY_COLLISION_RECORDS = 1_024
 BASELINE_TOKEN_ROWS_PER_HUNT = 500_000
 # planned cells are written before any partition runs, this many partitions per transaction
 PLANNED_CHUNK = 500
-LINUX_HOST_DATASETS = ("linux.audit", "systemd.journal", "apache.access", "apache.error")
+# The logical Linux datasets (linux_catalog.LINUX_SHIPPER_DATASETS names the shipper datasets each one reads).
+LINUX_HOST_DATASETS = LINUX_LOGICAL_DATASETS
 HOST_DATASETS = [*LINUX_HOST_DATASETS, *WINDOWS_HOST_DATASETS]
 NET_FAMILIES ={"net_alert", "net_flow", "dns_query", "http_tx", "file_transfer", "tls_session", "ssh_session"}
 # linux.audit now also yields `auth` (USER_LOGIN/USER_START), so an unparseable audit group may hide one.
@@ -90,20 +104,22 @@ NET_FAMILIES ={"net_alert", "net_flow", "dns_query", "http_tx", "file_transfer",
 # an exec, socket or file record of that event and carries the whole audit family set.
 _AUDIT_ADMIN = {"account_change", "service_change", "audit_config", "system_state"}
 LINUX_DATASET_FAMILIES = {
-    "linux.audit": {"process_exec", "net_socket", "auth", "file_change", "file_access", "kernel_module", "process_observed"} | _AUDIT_ADMIN,
+    **{logical: set(families) for logical, families in LOGICAL_FAMILIES.items()},
     "linux.audit.socket": {"net_socket", "process_observed"},
     "linux.audit.file": {"file_change", "file_access", "process_observed"},
     "linux.audit.module": {"kernel_module", "process_observed"},
     "linux.audit.observed": {"process_observed"},
     "linux.audit.auth": {"process_exec", "net_socket", "auth", "file_change", "file_access", "kernel_module", "process_observed"} | _AUDIT_ADMIN,
     "linux.audit.admin": _AUDIT_ADMIN,
+    # a shipper's dataset name feeds the families of its logical dataset (a profile's inventory lists these names)
+    **{name: set(LOGICAL_FAMILIES[logical_of(name)]) for name in shipper_names()
+       if name not in LOGICAL_FAMILIES},
     "arkime.session": {"net_session"},
-    "systemd.journal": {"auth", "privilege_use", "service_change"},
-    "apache.access": {"http_access"},
-    "apache.error": {"web_error"},
     **{f"suricata.eve.{event_type}": NET_FAMILIES for event_type in (
         "alert", "flow", "netflow", "dns", "http", "fileinfo", "tls", "ssh",
     )},
+    # Filebeat's suricata module and the Agent's Suricata integration name every EVE event type "suricata.eve"
+    "suricata.eve": NET_FAMILIES,
 }
 # Every catalogued Zeek log by its dispatch token (`zeek:conn`, never the bare name, which other shippers' datasets
 # share): the family its records feed. A normalization error on a Zeek record is tagged with its token.
@@ -137,6 +153,8 @@ DEFAULT_WINDOWS_LIVENESS_TOLERANCE = timedelta(minutes=15)
 MAX_SKIP_REASONS = 256
 SKIP_REASON_OVERFLOW = "additional skip reasons omitted after bounded category limit"
 MAX_WINDOWS_UNCATALOGUED = 256
+NXLOG_MIXED_GATE = ("Windows collection not attested: NXLog flat records on a Linux target; continuity and "
+                    "event-class inventory not assessed")
 
 
 def _error_tag(message: str) -> str:
@@ -485,15 +503,80 @@ class Sweep:
             if contract.os_family == "windows":
                 return []
             datasets = LINUX_HOST_DATASETS
-            # recorded so the report can list the target's other datasets as not assessed
-            self.stats.setdefault("dataset_filter", {})[target] = list(datasets)
+            plain, with_module, undated, unsearchable = dataset_selection(
+                datasets, module_searchable=contract.supports("event.module", "eq"),
+                input_type_searchable=contract.supports("input.type", "eq"))
+            # recorded so the report can list the target's other datasets as not assessed: every shipper dataset
+            # name the query selects on this target (it expands each logical dataset to its shapes when compiled)
+            self.stats.setdefault("dataset_filter", {})[target] = [
+                *plain, *(name for name, _module in with_module if name not in plain)]
+            self._note_linux_shapes(target, datasets, unsearchable, contract, undated)
+            if contract.nxlog_mixed:
+                # selected with NXLog's flat Windows records instead (`_any_of_for`): either shape, each as alone
+                return []
             return [Predicate(field="event.dataset", op="in", value=list(datasets))]
         return []
+
+    def _note_linux_shapes(self, target: str, datasets, unsearchable: list[str], contract: FieldContract | None = None,
+                           undated=()) -> None:
+        """Record, once per target, which shipper shapes of the Linux datasets the target's inventory holds (with
+        their counts) and which shapes it cannot search (a field the shape needs is not searchable): those are not
+        assessed, never read as having no records. Documents that name no dataset (journald, Auditbeat) are not in
+        the dataset inventory: each such searchable shape is counted over the hunt window."""
+        if target in self.stats.get("linux_shipper_inventory", {}):
+            return
+        if getattr(self, "_profiles", None) is None and hasattr(getattr(self, "repo", None), "source_profiles"):
+            self._profiles = self.repo.source_profiles(self.hunt_id)
+        inventory = ((getattr(self, "_profiles", None) or {}).get(target) or {}).get("datasets") or {}
+        present: dict[str, dict[str, int]] = {}
+        for logical in datasets:
+            for shape in LINUX_SHIPPER_DATASETS.get(logical, ()):
+                if shape.dataset is not None and shape.dataset in inventory:
+                    present.setdefault(logical, {})[shape.dataset] = inventory[shape.dataset]
+        for logical in datasets:
+            for shape in LINUX_SHIPPER_DATASETS.get(logical, ()):
+                if shape.undated is not None and shape.undated in undated:
+                    count = self._undated_shape_count(target, contract, shape.undated)
+                    present.setdefault(logical, {})[shape.key] = count if count is not None else "not counted"
+        self.stats.setdefault("linux_shipper_inventory", {})[target] = present
+        if unsearchable:
+            self.stats.setdefault("linux_shapes_not_assessed", {})[target] = [
+                f"{key}: not searchable on this target (the field this shape is selected by is not mapped)"
+                for key in unsearchable]
+
+    def _undated_shape_count(self, target: str, contract: FieldContract | None, selector: tuple[str, str]) -> int | None:
+        """How many window documents name no dataset and carry `selector` (field, value); None when it cannot be
+        counted exactly (the field is not aggregatable, or the source did not answer in full)."""
+        field, value = selector
+        spec = contract.spec(field) if contract is not None else None
+        if (spec is None or not spec.aggregatable or not contract.supports("event.dataset", "missing")
+                or getattr(self, "client", None) is None):
+            return None
+        try:
+            outcome = execute(self.client, SearchIntent(
+                kind="aggregate", target=target, window=self.window,
+                filters=[Predicate(field="event.dataset", op="missing"), Predicate(field=field, op="eq", value=value)],
+                group_by=[field], purpose="linux dataset-less shape inventory"), contract)
+        except Exception:  # noqa: BLE001 - an inventory count never fails the sweep; it is reported as not counted
+            return None
+        if outcome.completeness != Completeness.complete:
+            return None
+        return sum(int(bucket.get("count") or 0) for bucket in outcome.buckets)
 
     def _any_of_for(self, target: str, contract: FieldContract | None = None) -> list[list[Predicate]]:
         """Select only normalized source shapes while preserving each target's other known datasets."""
         if contract is not None and contract.role == "network":
             return self._zeek_catalog_filter(target, contract)
+        if contract is not None and contract.role == "host" and contract.os_family != "windows" and contract.nxlog_mixed:
+            # a Linux target that also holds NXLog's flat Windows records: the Linux datasets or the flat shape
+            flat = self._nxlog_selector(target, contract)
+            linux = [Predicate(field="event.dataset", op="in", value=list(LINUX_HOST_DATASETS))]
+            if flat is None:
+                return [linux]
+            self.stats.setdefault("windows_shape_notes", {})[target] = [(
+                "windows.nxlog: on this Linux target NXLog's flat Windows records are selected by shape; Windows "
+                "record continuity, the event-class inventory and value queries on them are not assessed")]
+            return [linux, flat]
         # Winlogbeat may omit event.dataset, so Windows also selects by native channel.
         if contract is None or contract.role != "host" or contract.os_family != "windows":
             return []
@@ -608,6 +691,10 @@ class Sweep:
                     # contradiction instead of accidentally fetching all telemetry.
                     return [[Predicate(field="event.code", op="exists"),
                              Predicate(field="event.code", op="missing")]]
+                flat = self._nxlog_selector(target, contract)
+                if flat is not None and not self._nxlog_aliased(contract):
+                    # the class predicates read Winlogbeat's names only here: NXLog's flat records by their shape
+                    groups.append(flat)
                 return groups
         if rpc_groups and not any(contract.supports(field, "in") for field in ("event.dataset", "event.channel")):
             # The ordinary Windows fallback was unrestricted; RPC must not narrow it.
@@ -618,9 +705,37 @@ class Sweep:
             groups.append([Predicate(field="event.dataset", op="in", value=list(WINDOWS_HOST_DATASETS))])
         if contract.supports("event.channel", "in"):
             groups.append([Predicate(field="event.channel", op="in", value=[channel for channel in WINDOWS_CHANNELS if channel])])
+        flat = self._nxlog_selector(target, contract)
+        if groups and flat is not None:
+            # NXLog's flat records name no dataset and may spell a channel in any case: selected by their shape
+            groups.append(flat)
         self.stats.setdefault("dataset_filter", {})[target] = list(WINDOWS_HOST_DATASETS)
         self.stats.setdefault("channel_filter", {})[target] = list(WINDOWS_CHANNELS)
         return groups
+
+    def _nxlog_selector(self, target: str, contract: FieldContract) -> list[Predicate] | None:
+        """The selector of NXLog's flat Windows records on a Windows target, or None; a target that cannot search
+        their Channel and EventID is listed, once, as not assessing that shape (never as holding none of it)."""
+        from romulus.hunt.windows_filters import nxlog_windows_group
+
+        group = nxlog_windows_group(contract)
+        if group is None:
+            self.stats.setdefault("windows_shapes_not_assessed", {})[target] = [
+                "windows.nxlog: not searchable on this target (Channel and EventID are not both mapped)"]
+        elif contract.os_family == "windows" and not self._nxlog_aliased(contract):
+            # the Windows aliases do not read the flat names (text-mapped, or a Winlogbeat alias they would narrow)
+            self.stats.setdefault("windows_shape_notes", {})[target] = [(
+                "windows.nxlog: Channel, SourceName, EventID or Hostname is not exact-searchable through the Windows "
+                "fields on this target, so its records are selected by shape and value queries on them (event "
+                "classes, pivots) are unresolved")]
+        return group
+
+    @staticmethod
+    def _nxlog_aliased(contract: FieldContract) -> bool:
+        """Whether the Windows class and host fields read NXLog's flat names exactly on this target."""
+        return all(flat in ((spec := contract.fields.get(typed)) and spec.natives or ()) and contract.supports(typed, "eq")
+                   for typed, flat in (("event.channel", "Channel"), ("event.provider", "SourceName"),
+                                       ("event.code", "EventID"), ("host.name", "Hostname")))
 
     def _zeek_catalog_filter(self, target: str, contract: FieldContract) -> list[list[Predicate]]:
         """Leave out only the Zeek logs outside the catalog, which no normalizer reads and which feed no family a rule
@@ -836,7 +951,7 @@ class Sweep:
     def _windows_hosts(contract: FieldContract, records: list[dict]) -> tuple[str, ...]:
         hosts = {str(host).strip().rstrip(".").casefold() for host in contract.hosts if host}
         for record in records:
-            winlog = (record.get("_source") or {}).get("winlog") or {}
+            winlog = windows_view(record.get("_source") or {}).get("winlog") or {}
             computer = str(winlog.get("computer_name") or "").strip().rstrip(".").casefold()
             if computer:
                 hosts.add(computer)
@@ -1016,7 +1131,7 @@ class Sweep:
                 key: [] for key in expected
             }
             for record in fetched_records:
-                source = record.get("_source") or {}
+                source = windows_view(record.get("_source") or {})
                 winlog = source.get("winlog") or {}
                 raw_id = winlog.get("record_id")
                 if isinstance(raw_id, bool):
@@ -1082,7 +1197,7 @@ class Sweep:
         records.extend(collision_records)
 
         def continuity_order(record: dict) -> tuple:
-            source = record.get("_source") or {}
+            source = windows_view(record.get("_source") or {})
             winlog = source.get("winlog") or {}
             raw_time = winlog.get("time_created") or source.get("@timestamp")
             return (
@@ -1112,6 +1227,10 @@ class Sweep:
         partition: Window | None = None,
         continuity_times: dict[tuple[str, str], tuple[datetime, datetime]] | None = None,
     ) -> list[str]:
+        if (contract is not None and contract.nxlog_mixed and contract.os_family != "windows"
+                and "windows" in playbook.os_families):
+            # NXLog's flat records on a Linux target: no Windows rule's search there is ever complete
+            return [NXLOG_MIXED_GATE]
         if contract is None or contract.os_family != "windows" or "windows" not in playbook.os_families:
             return []
         catalog = event_classes_for_families(set(playbook.families))
@@ -1164,15 +1283,15 @@ class Sweep:
         if continuity_times is None:
             observed_channels = {
                 (
-                    str(((record.get("_source") or {}).get("winlog") or {}).get("computer_name") or "")
+                    str((windows_view(record.get("_source") or {}).get("winlog") or {}).get("computer_name") or "")
                     .strip().rstrip(".").casefold(),
-                    str(((record.get("_source") or {}).get("winlog") or {}).get("channel") or "").casefold(),
+                    str((windows_view(record.get("_source") or {}).get("winlog") or {}).get("channel") or "").casefold(),
                 )
                 for record in records
             }
             observed_times: dict[tuple[str, str], tuple[datetime, datetime]] = {}
             for record in records:
-                source = record.get("_source") or {}
+                source = windows_view(record.get("_source") or {})
                 winlog = source.get("winlog") or {}
                 host = str(winlog.get("computer_name") or "").strip().rstrip(".").casefold()
                 channel = str(winlog.get("channel") or "").casefold()
@@ -1258,7 +1377,7 @@ class Sweep:
         collection_changes: dict[tuple[str, str], set[str]] = {}
         cross_channel_collection_changes: dict[str, set[str]] = {}
         for record in records:
-            source = record.get("_source") or {}
+            source = windows_view(record.get("_source") or {})
             winlog = source.get("winlog") or {}
             host = str(winlog.get("computer_name") or "").strip().rstrip(".").casefold()
             channel = str(winlog.get("channel") or "").casefold()
@@ -1294,7 +1413,9 @@ class Sweep:
         """Only unmodeled source formats poison rules; cataloged-source event classes are not-assessed data."""
         return {
             reason: count for reason, count in skips.items()
-            if reason.startswith(("dataset:", "suricata event_type"))
+            # an NXLog record of a catalogued provider and event id under a channel naming none of its classes
+            # could be any of them: counted against their families (normalize_hits names them)
+            if reason.startswith(("dataset:", "suricata event_type", NXLOG_CHANNEL_SKIP))
         }
 
     @staticmethod
@@ -1768,9 +1889,19 @@ class Sweep:
             return
         malformed_text: dict[str, list[str]] = {}
         skip_families: dict[str, frozenset[str] | None] = {}
+        shapes: dict[str, int] = {}
         events, skips, errors = normalize_hits(out.records, self.boots, malformed_text=malformed_text,
                                                skip_families=skip_families, rpc_remote_only=True, contract=contract,
-                                               surrogate_free=out.surrogate_free)
+                                               surrogate_free=out.surrogate_free, shapes=shapes)
+        if shapes:
+            # the shipper shapes read, by target: Linux host shapes, the EVE event types an Elastic shipper indexed
+            # without their line, and NXLog's flat Windows records with their collector clock offsets (one count
+            # per key: each table is bounded)
+            for key, count in shapes.items():
+                stat = ("suricata_shapes" if key.startswith("suricata.") else
+                        "windows_shapes" if key.startswith("windows.") else "linux_shapes")
+                seen = self.stats.setdefault(stat, {}).setdefault(target, {})
+                seen[key] = seen.get(key, 0) + count
         if errors:
             self._note_zeek_inventory_gap(target,contract,[f"{len(errors)} record normalization failures"])
         if malformed_text:
@@ -1902,6 +2033,8 @@ class Sweep:
         held: list[tuple[str, TypedEvent]] = []          # (playbook, event) holds of interval bounds
         released: list[tuple[str, list[str]]] = []       # (playbook, ids) holds the playbooks let go
         target_os = contract.os_family if contract is not None else "linux"
+        # a Linux target that also holds NXLog's flat Windows records is a Windows source too
+        target_oses = {target_os} | ({"windows"} if contract is not None and contract.nxlog_mixed else set())
         from romulus.detect.sigma import SigmaEventIndex, SigmaRule
         sigma_index = SigmaEventIndex(events) if any(isinstance(pb, SigmaRule) for pb in self.pack) else None
         sigma_reasons = {}
@@ -1917,7 +2050,7 @@ class Sweep:
                 relevant_events = (sigma_events if sigma_events is not None else
                                    [event for event in events if event.family in evaluated_families])
                 target_fallback = not relevant_events and (
-                    target_os == "unknown" or target_os in pb.os_families
+                    target_os == "unknown" or bool(target_oses & set(pb.os_families))
                 )
                 sigma_rule_reasons = []
                 if sigma_events is not None:
