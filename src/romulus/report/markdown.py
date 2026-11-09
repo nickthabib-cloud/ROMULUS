@@ -126,7 +126,7 @@ def outcome_sentence(m: dict) -> str:
              "is there.")
     agent_count = sum(finding.get("provenance") == "agent" for finding in m["findings"])
     if agent_count:
-        s += f" plus {agent_count} agent findings, unconfirmed."
+        s += f" The AI agent added {agent_count} unconfirmed finding(s)."
     if partial:
         s += f" The hunt is {m['execution_state']}: some sources, windows or tasks were not fully searched."
     unresolved = {rule for gap in (m.get("coverage") or {}).get("gaps") or [] for rule in gap["rules"]}
@@ -177,7 +177,8 @@ def _render_body(m: dict, banner: str = BANNER) -> str:
            f"| Sources | {esc(', '.join(h['targets']))} |",
            f"| Internal networks | {cell(_internal_networks_cell(m))} |",
            f"| Lane counts | {esc(json.dumps(m['lane_counts'], sort_keys=True))} |",
-           f"| Model investigator | {esc(m['agent'].get('status'))}: {esc(m['agent'].get('stop_reason', ''))} |",
+           *([f"| Model investigator | {esc(m['agent'].get('status'))}: {esc(m['agent'].get('stop_reason', ''))} |"]
+             if m["agent"].get("status") not in (None, "disabled") else []),
            f"| AI agent | {cell(_ai_agent_cell(m))} |",
            f"| Stop reason | {esc(m['stop_reason'])} |",
            f"| Broken citations | {m['integrity']['broken_citations']} |",
@@ -210,7 +211,7 @@ def _render_body(m: dict, banner: str = BANNER) -> str:
             out.append("- Provenance: **Agent finding**, AI-generated and unconfirmed.")
         out += [f"- Entities: {esc(', '.join(f'{k}:{v} ({r})' for k, v, r in f['entities']))}", ""]
         if f.get("source_case_id"):
-            # Compatibility for stored pre-M6 discovery origins.
+            # Compatibility for discovery origins stored by the earlier case investigator.
             out += [(f"- Investigator chain: [case `{esc(f['source_case_id'])}`]"
                      f"(#case-{_anchor(f['source_case_id'])})"), ""]
         if f.get("source_anchor_id"):

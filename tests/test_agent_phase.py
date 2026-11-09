@@ -26,6 +26,12 @@ from tests.agent_scripted import ScriptedProvider, response
 from tests.test_local_content_migration import config
 
 
+def _detection_finished(repo, hunt_id="h1"):
+    """The agent works only from a finished detection run."""
+    repo.set_hunt_state(hunt_id, "running")
+    repo.set_hunt_state(hunt_id, "completed_within_scope", detection_result="leads_only", stop_reason="scope")
+
+
 def test_claim_family_table_covers_every_registered_event_family():
     registered = ({row.family for row in EVENT_CLASSES} | {row.family for row in ZEEK_LOGS}
                   | NETWORK_OBSERVER_FAMILIES | BOOT_FILL_FAMILIES)
@@ -111,6 +117,7 @@ def test_scripted_orient_investigate_and_assess_keeps_deterministic_rows(tmp_pat
     migrate(engine)
     repo = Repo(engine)
     repo.create_hunt("h1", {"window": {}, "targets": [], "ai_agent": {"requested": True}}, "d", "test")
+    _detection_finished(repo, "h1")
     repo.save_candidate({
         "id": "c1", "hunt_id": "h1", "rule_id": "host.test", "rule_version": "1",
         "claim": "a deterministic process execution finding", "claim_type": "observed_action",
@@ -222,6 +229,7 @@ def test_interrupted_investigation_is_retried_without_repeating_deterministic_wo
     migrate(engine)
     repo = Repo(engine)
     repo.create_hunt("h1", {"window": {}, "targets": [], "ai_agent": {"requested": True}}, "d", "test")
+    _detection_finished(repo, "h1")
     started = datetime.now(UTC) - timedelta(minutes=1)
     repo.save_agent_hypothesis({
         "id": "hyp-1", "hunt_id": "h1", "statement": "Review the interrupted investigation hypothesis",
@@ -257,6 +265,7 @@ def test_resume_after_new_investigation_replaces_a_stale_agent_assessment(tmp_pa
     migrate(engine)
     repo = Repo(engine)
     repo.create_hunt("h1", {"window": {}, "targets": [], "ai_agent": {"requested": True}}, "d", "test")
+    _detection_finished(repo, "h1")
     now = datetime.now(UTC)
     repo.save_agent_session({"id": "as-orient", "hunt_id": "h1", "hypothesis_id": None, "purpose": "orient",
                              "state": "finished", "tool_calls": 1, "summary": "Initial review finished.",
@@ -305,6 +314,7 @@ def test_two_consecutive_provider_outages_are_billed_then_assess_runs(tmp_path):
     migrate(engine)
     repo = Repo(engine)
     repo.create_hunt("h1", {"window": {}, "targets": [], "ai_agent": {"requested": True}}, "d", "test")
+    _detection_finished(repo, "h1")
     repo.save_candidate({
         "id": "c1", "hunt_id": "h1", "rule_id": "host.test", "rule_version": "1",
         "claim": "A deterministic finding for controller-generated investigation", "claim_type": "observed_action",
@@ -339,6 +349,7 @@ def test_assessment_schema_failure_gets_one_retry_then_a_template(tmp_path):
     migrate(engine)
     repo = Repo(engine)
     repo.create_hunt("h1", {"window": {}, "targets": [], "ai_agent": {"requested": True}}, "d", "test")
+    _detection_finished(repo, "h1")
     invalid = response(parsed={"overall": "not a list"})
     provider = ScriptedProvider([invalid, invalid])
     result = run_agent_phase(Settings(home=tmp_path), repo, "h1", provider=provider,
@@ -362,6 +373,7 @@ def test_session_stop_conditions_are_persisted_and_do_not_skip_assessment(tmp_pa
     migrate(engine)
     repo = Repo(engine)
     repo.create_hunt("h1", {"window": {}, "targets": [], "ai_agent": {"requested": True}}, "d", "test")
+    _detection_finished(repo, "h1")
     repo.save_candidate({
         "id": "c1", "hunt_id": "h1", "rule_id": "host.test", "rule_version": "1",
         "claim": "A deterministic finding for the session stop test", "claim_type": "observed_action",
@@ -408,6 +420,7 @@ def test_invalid_tool_arguments_consume_the_per_session_call_budget(tmp_path):
     migrate(engine)
     repo = Repo(engine)
     repo.create_hunt("h1", {"window": {}, "targets": [], "ai_agent": {"requested": True}}, "d", "test")
+    _detection_finished(repo, "h1")
     settings = Settings(home=tmp_path, agent_max_tool_calls_per_session=1)
     invalid = ToolCall("bad", "open_hypothesis", None, "{", error="tool arguments were not valid JSON")
     second = ToolCall("again", "open_hypothesis", {"statement": "A bounded hypothesis after the cap"}, "{}")
@@ -432,6 +445,7 @@ def test_investigation_reserve_exhaustion_goes_to_assess_with_budget_reason(tmp_
     migrate(engine)
     repo = Repo(engine)
     repo.create_hunt("h1", {"window": {}, "targets": [], "ai_agent": {"requested": True}}, "d", "test")
+    _detection_finished(repo, "h1")
     repo.save_candidate({
         "id": "c1", "hunt_id": "h1", "rule_id": "host.test", "rule_version": "1",
         "claim": "A deterministic finding for an investigation budget test", "claim_type": "observed_action",
@@ -463,6 +477,7 @@ def test_assessment_budget_exhaustion_stores_a_reasoned_template(tmp_path):
     migrate(engine)
     repo = Repo(engine)
     repo.create_hunt("h1", {"window": {}, "targets": [], "ai_agent": {"requested": True}}, "d", "test")
+    _detection_finished(repo, "h1")
     provider = ScriptedProvider([response(parsed={"overall": "invalid"})])
 
     result = run_agent_phase(Settings(home=tmp_path, agent_max_calls=1), repo, "h1", provider=provider,
@@ -483,6 +498,7 @@ def test_assessment_input_trims_all_sections_and_refuses_an_oversized_prompt(tmp
     migrate(engine)
     repo = Repo(engine)
     repo.create_hunt("h1", {"window": {}, "targets": [], "ai_agent": {"requested": True}}, "d", "test")
+    _detection_finished(repo, "h1")
     now = datetime.now(UTC)
     for index in range(20):
         repo.save_agent_hypothesis({
@@ -517,6 +533,7 @@ def test_mission_scale_40_hypotheses_four_sessions_and_25_tools_stays_within_cap
     migrate(engine)
     repo = Repo(engine)
     repo.create_hunt("h1", {"window": {}, "targets": [], "ai_agent": {"requested": True}}, "d", "test")
+    _detection_finished(repo, "h1")
     now = datetime.now(UTC)
     for index in range(40):
         repo.save_agent_hypothesis({
@@ -596,6 +613,7 @@ def test_agent_reassess_cli_publishes_a_new_report_revision(tmp_path, monkeypatc
     settings = Settings(home=tmp_path)
     repo = hunt_run.open_repo(settings)
     repo.create_hunt("h1", {"window": {}, "targets": [], "ai_agent": {"requested": False}}, "d", "test")
+    _detection_finished(repo, "h1")
     body = {"overall": [], "key_steps": [], "confidence": {"overall": "low", "reasons": []},
             "alternatives": [], "gaps": [], "next_checks": []}
     repo.save_agent_assessment({"id": "aa-first", "hunt_id": "h1", "revision": 1, "source": "template",

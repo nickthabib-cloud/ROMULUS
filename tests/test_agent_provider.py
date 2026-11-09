@@ -35,6 +35,12 @@ TOOL = Tool("report_status", "Report status.", {
 })
 
 
+def _detection_finished(repo, hunt_id="h1"):
+    """The agent works only from a finished detection run."""
+    repo.set_hunt_state(hunt_id, "running")
+    repo.set_hunt_state(hunt_id, "completed_within_scope", detection_result="leads_only", stop_reason="scope")
+
+
 def resolver_for(table: dict[str, list[str]]):
     def resolve(host: str) -> list[str]:
         if host not in table:
@@ -748,6 +754,7 @@ def test_readiness_errors_never_stop_a_finished_hunt(tmp_path, monkeypatch):
     s = Settings(home=tmp_path)
     repo = hunt_run.open_repo(s)
     repo.create_hunt("h1", {"window": {}, "targets": []}, "d", "test")
+    _detection_finished(repo, "h1")
     assert hunt_run.ai_agent_entry(s)["state"] == "blocked"
     summary = hunt_run._ai_agent_phase(s, repo, "h1", {"ai_agent": {"requested": True}}, None, None, {})
     assert summary["status"] == "skipped" and "unexpected" in summary["reason"]

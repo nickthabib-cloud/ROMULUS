@@ -6,6 +6,9 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from threading import Event, Thread
+from time import monotonic
+
+from sqlalchemy.exc import OperationalError
 
 from romulus.agent.investigate import recover_agent_finalization, run_agent_phase, skip_agent_phase
 from romulus.agent.provider import agent_readiness, build_provider
@@ -135,15 +138,27 @@ def _agent_heartbeat(repo: Repo, hunt_id: str, owner_token: str, lease_seconds: 
     """Renew ownership while a source or model call blocks, without holding a database lock."""
     stopped = Event()
     failures = []
+    # The caller claimed or renewed the lease just before entering; ownership is certain until this deadline.
+    owned_until = [monotonic() + lease_seconds]
 
     def heartbeat():
         if failures:
             raise RuntimeError(f"hunt {hunt_id} agent lease ownership lost") from failures[0]
+        started = monotonic()
         try:
             repo.heartbeat_agent_lease(hunt_id, lease_seconds, owner_token=owner_token)
+        except OperationalError as exc:
+            # A busy or locked database is transient: the lease is still ours while a third of it remains,
+            # so the next renewal retries. Only a fence failure, or running out of margin, is ownership lost.
+            if monotonic() < owned_until[0] - lease_seconds / 3:
+                log.warning("hunt %s agent lease renewal deferred: %s", hunt_id, exc)
+                return
+            failures.append(exc)
+            raise
         except Exception as exc:
             failures.append(exc)
             raise
+        owned_until[0] = started + lease_seconds
 
     def renew():
         while not stopped.wait(max(0.01, lease_seconds / 3)):

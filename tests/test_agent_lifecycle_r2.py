@@ -289,3 +289,91 @@ def test_stored_finalization_recovers_without_source_or_provider_access(tmp_path
     assert result["detection_result"] == "reportable_findings"
     assert repo.agent_run("h1")["state"] == "partial"
     assert repo.agent_run("h1")["reason"] == "recovered_finished_sessions"
+
+
+@pytest.mark.parametrize("state", ["planned", "running", "failed"])
+def test_reassessment_never_publishes_a_result_for_unfinished_detection(tmp_path, monkeypatch, capsys, state):
+    from romulus import cli
+    from romulus.agent import provider as provider_port
+    from romulus.report import manifest as report_manifest
+    from romulus.store import repo as repo_module
+    settings, repo, token = _hunt(tmp_path)
+    if state == "planned":
+        repo.create_hunt("h2", {"window": repo.get_hunt("h1")["manifest"]["window"], "targets": [],
+                                "ai_agent": {"requested": True}}, "d", "test")
+        hunt_id = "h2"
+    else:
+        hunt_id = "h1"
+        if state == "failed":
+            repo.set_hunt_state("h1", "failed", owner_token=token, stop_reason="sweep error: source offline")
+        else:
+            # A crashed sweep: the detection lease lapsed with the hunt still running.
+            later = datetime.now(UTC) + timedelta(seconds=601)
+            monkeypatch.setattr(repo_module, "utcnow", lambda: later)
+    monkeypatch.setattr(cli, "load_settings", lambda *_args: settings)
+    monkeypatch.setattr(provider_port, "agent_readiness", lambda *_args:
+                        SimpleNamespace(ready=False, message=lambda: "offline"))
+    published = []
+    monkeypatch.setattr(report_manifest, "publish_revision",
+                        lambda _repo, hid, *_a, **_kw: published.append(hid) or {"revision": {"number": 1}})
+    assert cli.main(["agent", "reassess", hunt_id]) == cli.EXIT_FAIL
+    assert "detection finishes" in capsys.readouterr().err
+    hunt = repo.get_hunt(hunt_id)
+    assert hunt["execution_state"] == state and hunt["detection_result"] is None
+    assert published == [] and repo.agent_run(hunt_id) is None
+
+
+def test_finalization_refuses_to_write_a_result_over_unfinished_detection(tmp_path):
+    _settings, repo, token = _hunt(tmp_path)
+    repo.set_hunt_state("h1", "completed_within_scope", owner_token=token, detection_result="leads_only")
+    owner = repo.claim_agent_lease("h1", 600)["lease_owner"]
+    # Detection is resumed underneath the agent's (lapsed) claim; the stale worker must not finalize.
+    with repo.engine.begin() as connection:
+        from romulus.store import schema as t
+        connection.execute(t.hunt.update().where(t.hunt.c.id == "h1").values(execution_state="running",
+                                                                               detection_result=None))
+    with pytest.raises(RuntimeError, match="no detection result"):
+        repo.finalize_agent_run("h1", {"state": "partial", "reason": "provider_not_ready"}, owner_token=owner)
+    assert repo.get_hunt("h1")["detection_result"] is None
+
+
+def test_heartbeat_rides_out_a_busy_database_but_not_a_lost_fence(tmp_path, monkeypatch):
+    from sqlalchemy.exc import OperationalError
+    _settings, repo, token = _hunt(tmp_path)
+    repo.set_hunt_state("h1", "completed_within_scope", owner_token=token)
+    owner = repo.claim_agent_lease("h1", 600)["lease_owner"]
+    original = repo.heartbeat_agent_lease
+    outcomes = ["busy", "ok", "lost"]
+    def heartbeat(*args, **kwargs):
+        outcome = outcomes.pop(0)
+        if outcome == "busy":
+            raise OperationalError("UPDATE agent_run", {}, Exception("database is locked"))
+        if outcome == "lost":
+            raise RuntimeError("hunt h1 agent lease ownership lost")
+        return original(*args, **kwargs)
+    monkeypatch.setattr(repo, "heartbeat_agent_lease", heartbeat)
+    with hunt_run._agent_heartbeat(repo, "h1", owner, 600) as guard:
+        guard()  # busy with most of the lease left: deferred, still owned
+        guard()  # renewed
+        with pytest.raises(RuntimeError, match="ownership lost"):
+            guard()
+        with pytest.raises(RuntimeError, match="ownership lost"):
+            guard()  # a lost fence stays lost
+
+
+def test_heartbeat_treats_a_busy_database_without_margin_as_lost(tmp_path, monkeypatch):
+    from sqlalchemy.exc import OperationalError
+    _settings, repo, token = _hunt(tmp_path)
+    repo.set_hunt_state("h1", "completed_within_scope", owner_token=token)
+    owner = repo.claim_agent_lease("h1", 600)["lease_owner"]
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(hunt_run, "monotonic", lambda: clock["now"])
+    def busy(*_args, **_kwargs):
+        raise OperationalError("UPDATE agent_run", {}, Exception("database is locked"))
+    monkeypatch.setattr(repo, "heartbeat_agent_lease", busy)
+    with hunt_run._agent_heartbeat(repo, "h1", owner, 600) as guard:
+        clock["now"] += 401  # less than a third of the lease is left
+        with pytest.raises(OperationalError):
+            guard()
+        with pytest.raises(RuntimeError, match="ownership lost"):
+            guard()

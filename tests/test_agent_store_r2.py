@@ -22,6 +22,12 @@ AGENT_TABLES = ("agent_tool_call", "agent_note", "agent_rule_request", "agent_li
                 "agent_session", "agent_hypothesis", "agent_run")
 
 
+def _detection_finished(repo, hunt_id="h1"):
+    """The agent works only from a finished detection run."""
+    repo.set_hunt_state(hunt_id, "running")
+    repo.set_hunt_state(hunt_id, "completed_within_scope", detection_result="leads_only", stop_reason="scope")
+
+
 def _repo():
     engine = make_engine(":memory:")
     migrate(engine)
@@ -258,6 +264,7 @@ def test_agent_source_query_reservation_is_shared_at_concurrent_limit(tmp_path):
     migrate(engine)
     repo = Repo(engine)
     repo.create_hunt("h1", {}, "d", "test")
+    _detection_finished(repo, "h1")
     repo.claim_agent_lease("h1", 60, owner_token="agent")
     barrier = Barrier(2)
     def reserve():

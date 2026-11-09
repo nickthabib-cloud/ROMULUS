@@ -22,6 +22,12 @@ from tests.test_agent_admission import _fixture
 T = datetime(2024, 11, 18, 15, tzinfo=UTC)
 
 
+def _detection_finished(repo, hunt_id="h1"):
+    """The agent works only from a finished detection run."""
+    repo.set_hunt_state(hunt_id, "running")
+    repo.set_hunt_state(hunt_id, "completed_within_scope", detection_result="leads_only", stop_reason="scope")
+
+
 def _candidate(cid, events, **kw):
     row = {"id": cid, "hunt_id": "h1", "rule_id": "host.test", "rule_version": "1",
            "claim": "Recorded process execution " + cid, "claim_type": "observed_action",
@@ -41,6 +47,7 @@ def test_probe_merge_keeps_incidents_and_canonical_integrity_outside_ai(tmp_path
                           "window": {"start": T.isoformat(), "end": T.isoformat()},
                           "original_input": {}, "targets": ["idx"], "pack": {"version": "p"},
                           "normalizer": "n", "policy": "d", "model": {}, "romulus_version": "0"}, "d", "test")
+    _detection_finished(repo, "h1")
     for cid, eid in (("one", "ea"), ("two", "eb")):
         repo.save_candidate(_candidate(cid, [eid]))
     with repo.engine.begin() as c:
@@ -64,7 +71,7 @@ def test_probe_merge_keeps_incidents_and_canonical_integrity_outside_ai(tmp_path
         k: v for k, v in canonical_after.items() if k != "ai"}
     assert after["lane_counts"] == {"high": 2}
     assert after["ai_agent"]["agent_findings"] == {"high": 1}
-    assert "plus 1 agent finding" in outcome_sentence(after)
+    assert "The AI agent added 1 unconfirmed finding(s)." in outcome_sentence(after)
     repo.engine.dispose()
 
 

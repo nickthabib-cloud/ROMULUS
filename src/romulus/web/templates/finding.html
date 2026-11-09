@@ -23,7 +23,7 @@
 {% if origin_case or origin_anchor or origin_link %}
 <h2>Discovery origin</h2>
 <ul>
-  {# Compatibility: stored pre-M6 case discovery origins remain visible. #}
+  {# Compatibility: case discovery origins stored by the earlier investigator remain visible. #}
   {% if origin_case %}<li>Investigator case: <span class="mono">{{ origin_case }}</span></li>{% endif %}
   {% if origin_anchor %}<li>Expansion anchor: <span class="mono">{{ origin_anchor }}</span></li>{% endif %}
   {% if origin_link %}<li>Discovery link: <span class="mono">{{ origin_link }}</span></li>{% endif %}

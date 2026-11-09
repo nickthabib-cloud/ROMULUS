@@ -16,11 +16,18 @@ from romulus.store.repo import Repo
 T = datetime(2024, 11, 18, 14, 0, tzinfo=UTC)
 
 
+def _detection_finished(repo, hunt_id="h1"):
+    """The agent works only from a finished detection run."""
+    repo.set_hunt_state(hunt_id, "running")
+    repo.set_hunt_state(hunt_id, "completed_within_scope", detection_result="leads_only", stop_reason="scope")
+
+
 def _fixture(tmp_path, *, settings: Settings | None = None):
     repo = Repo(make_engine(tmp_path / "admission.sqlite"))
     migrate(repo.engine)
     repo.create_hunt("h1", {"window": {"start": T.isoformat(), "end": (T + timedelta(hours=1)).isoformat()},
                               "targets": ["host-index"], "ai_agent": {"requested": True}}, "d", "test")
+    _detection_finished(repo, "h1")
     event = TypedEvent(id="ev1", family="process_exec", ts=T, host="web01", outcome=Outcome.success,
                        fields={"process.argv": fv(["id"], "fixture")}, raw=[], normalizer="test@1")
     repo.save_evidence("h1", [event], {}, None)

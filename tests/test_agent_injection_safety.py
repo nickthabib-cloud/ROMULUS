@@ -21,6 +21,12 @@ HOSTILE = [
 ]
 
 
+def _detection_finished(repo, hunt_id="h1"):
+    """The agent works only from a finished detection run."""
+    repo.set_hunt_state(hunt_id, "running")
+    repo.set_hunt_state(hunt_id, "completed_within_scope", detection_result="leads_only", stop_reason="scope")
+
+
 def _repo(hostile: bool, path=":memory:") -> Repo:
     repo = Repo(make_engine(path))
     migrate(repo.engine)
@@ -28,6 +34,7 @@ def _repo(hostile: bool, path=":memory:") -> Repo:
         "window": {"start": T.isoformat(), "end": (T + timedelta(hours=1)).isoformat()},
         "targets": ["host-index"], "pack": {"playbooks": [{"id": RULE}]},
     }, "digest", "test")
+    _detection_finished(repo, "h1")
     repo.set_rule_cell("h1", RULE, "1", "host-index", "p0", "no_match_complete", 0, len(HOSTILE), {})
     repo.audit("system", "hunt.sweep_summary", "h1", {"finished": True})
     values = HOSTILE if hostile else [f"ordinary event {index}" for index in range(len(HOSTILE))]

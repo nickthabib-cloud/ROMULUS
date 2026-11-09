@@ -423,6 +423,10 @@ def _chunks(rows: Iterable[dict], size: int) -> Iterator[list[dict]]:
         yield chunk
 
 
+# Execution states with a finished detection result, the only ones the agent may work from.
+AGENT_ELIGIBLE_STATES = ("completed_within_scope", "partial")
+
+
 def is_lease_lost(exc: BaseException) -> bool:
     """Recognize fencing failures without swallowing unrelated repository errors."""
     return isinstance(exc, RuntimeError) and "lease ownership lost" in str(exc)
@@ -492,6 +496,11 @@ class Repo:
             hunt = c.execute(select(t.hunt).where(t.hunt.c.id == hunt_id)).mappings().one()
             if _stored_utc(hunt["lease_until"]) is not None and _stored_utc(hunt["lease_until"]) > now:
                 raise RuntimeError(f"hunt {hunt_id} has an active detection lease")
+            if hunt["execution_state"] not in AGENT_ELIGIBLE_STATES:
+                # The agent works from a finished detection result; finalizing over a planned, running or
+                # failed hunt would publish a negative for scope that was never assessed.
+                raise RuntimeError(f"hunt {hunt_id} is {hunt['execution_state']}: the agent runs only after "
+                                   "detection finishes; resume the hunt first")
             values = {"hunt_id": hunt_id, "state": "pending", "prompt_digests": {}, "provider": {},
                       "lease_owner": owner_token, "lease_until": now + timedelta(seconds=lease_seconds),
                       "updated_at": now}
@@ -5188,6 +5197,9 @@ class Repo:
         now = now or utcnow()
         with write_txn(self.engine) as connection:
             self._fence_agent_lease(connection, hunt_id, owner_token, now)
+            state = connection.execute(select(t.hunt.c.execution_state).where(t.hunt.c.id == hunt_id)).scalar_one()
+            if state not in AGENT_ELIGIBLE_STATES:
+                raise RuntimeError(f"hunt {hunt_id} is {state}: no detection result to refresh")
             rows = connection.execute(select(t.candidate.c.lane, func.count()).where(
                 t.candidate.c.hunt_id == hunt_id, t.candidate.c.provenance == "deterministic",
             ).group_by(t.candidate.c.lane))
