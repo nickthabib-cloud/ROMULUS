@@ -283,3 +283,24 @@ def test_assessment_checker_cannot_seed_new_aliases_after_lease_loss(tmp_path, m
 
 def test_absence_guard_does_not_exempt_a_claim_formatted_as_code():
     assert any(_contains_phrase("Host A is `clean`.", phrase) for phrase in ABSENCE_PHRASES)
+
+
+@pytest.mark.parametrize("summary, row", [
+    ({"status": "disabled", "mode": "off", "partial": False,
+      "stop_reason": "investigator disabled (agent mode off)", "unworked_count": 1},
+     "| Model investigator | disabled: investigator disabled (agent mode off) |"),
+    ({"status": "disabled", "mode": "off"}, None),
+])
+def test_legacy_investigator_row_stays_on_stored_hunts_and_is_omitted_when_it_never_ran(summary, row):
+    from romulus.report.manifest import publish_revision
+    from romulus.report.markdown import render
+    from tests.test_report import _repo_with_finding
+
+    repo, _ = _repo_with_finding()
+    repo.audit("system", "hunt.agent_summary", "h1", summary)
+    rendered = render(publish_revision(repo, "h1", actor="test"))
+    text = rendered[0] if isinstance(rendered, tuple) else rendered
+    if row:
+        assert row in text
+    else:
+        assert "Model investigator" not in text

@@ -178,7 +178,7 @@ def _render_body(m: dict, banner: str = BANNER) -> str:
            f"| Internal networks | {cell(_internal_networks_cell(m))} |",
            f"| Lane counts | {esc(json.dumps(m['lane_counts'], sort_keys=True))} |",
            *([f"| Model investigator | {esc(m['agent'].get('status'))}: {esc(m['agent'].get('stop_reason', ''))} |"]
-             if m["agent"].get("status") not in (None, "disabled") else []),
+             if m["agent"].get("stop_reason") or m["agent"].get("status") not in (None, "disabled") else []),
            f"| AI agent | {cell(_ai_agent_cell(m))} |",
            f"| Stop reason | {esc(m['stop_reason'])} |",
            f"| Broken citations | {m['integrity']['broken_citations']} |",
