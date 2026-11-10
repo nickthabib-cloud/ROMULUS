@@ -574,6 +574,32 @@ def test_extra_pages_that_spend_nothing_never_stop_the_next_page_while_queries_r
     assert "reported_seeds_not_anchored" not in summary
 
 
+def test_only_entities_with_a_confirmed_finding_give_extra_seeds():
+    """An entity Reported for its tactic breadth alone (a busy server's benign activity) seeds no extra anchor and is
+    not counted as left unanchored; the leads on an entity with a confirmed finding are anchored."""
+    from types import SimpleNamespace
+
+    from romulus.hunt.expansion import ExpansionEngine
+    from romulus.sources.models import Window
+
+    repo = _repo()
+    rows = [_row("u-victim", "r.confirmed", lane="urgent", host="victim", ts=None),
+            _row("l-victim", "r.exec", host="victim", attack=["T1059"], ts=None)]
+    # 300 busy servers, each Reported through two tactics, none confirmed
+    for index in range(300):
+        rows += [_row(f"s{index:03d}-a", "r.exec", host=f"srv{index}", attack=["T1059"], ts=None),
+                 _row(f"s{index:03d}-b", "r.cred", host=f"srv{index}", attack=["T1003"], ts=None)]
+    _insert(repo, rows)
+    compute_rank_pass(repo, "h1", PASS_BEFORE_EXPANSION)
+    ranks = _ranks(repo, PASS_BEFORE_EXPANSION)[0]
+    assert ranks["s000-a"]["reported"] and ranks["l-victim"]["reported"]
+    summary = ExpansionEngine(repo, "h1", Window(start=START, end=END), SimpleNamespace(boots={}),
+                              max_source_queries=40, wall_clock_seconds=60).run()
+    leads = {row["candidate_id"] for row in repo.expansion_anchors("h1") if row["lane"] == "lead"}
+    assert leads == {"l-victim"}
+    assert "reported_seeds_not_anchored" not in summary
+
+
 def test_a_failed_pass_is_recorded_and_leaves_no_stale_ranks(monkeypatch):
     repo = _repo()
     _insert(repo, [_row("c1", "r.a", host="h")])
