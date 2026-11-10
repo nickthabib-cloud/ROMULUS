@@ -177,4 +177,74 @@ class NtlmPasswordGuessing(NtlmPasswordSpray):
                         f'for {_account(event)} in ten minutes.'), _ATTEMPT_NOTES
 
 
-RULES = (ZerologonRate, Rc4TgsFanout, KerberosPrincipalEnumeration, NtlmPasswordSpray, NtlmPasswordGuessing)
+# Calls that list a remote host's sessions, shares, open connections, logged-on users or local group members: what a
+# host-by-host collector (session and local-admin collection, share finders, `net view`) sends to every computer it
+# visits. Single-object reads a client makes while mapping a share (NetrShareGetInfo) or reading server facts are left
+# out.
+HOST_ENUMERATION = frozenset({'NetrShareEnum', 'NetrShareEnumSticky', 'NetrSessionEnum', 'NetrConnectionEnum',
+                              'NetrFileEnum', 'NetrWkstaUserEnum', 'SamrEnumerateAliasesInDomain',
+                              'SamrGetMembersInAlias'})
+# SAM operations that list the directory in bulk. Name and SID translation, logon-time membership reads and password
+# policy reads are what every member makes routinely and are left out.
+DIRECTORY_LISTING = frozenset({'SamrEnumerateDomainsInSamServer', 'SamrEnumerateUsersInDomain',
+                               'SamrQueryDisplayInformation', 'SamrQueryDisplayInformation2',
+                               'SamrQueryDisplayInformation3', 'SamrEnumerateGroupsInDomain', 'SamrGetMembersInGroup',
+                               'SamrEnumerateAliasesInDomain', 'SamrGetMembersInAlias'})
+
+
+def _operation(event, names):
+    peers, call = _peers(event), _call(event)
+    if not peers or call.op_class != 'enumeration' or call.operation is None or call.operation.name not in names:
+        return None
+    return peers, call.operation.name
+
+
+class RpcHostEnumerationFanout(_Rate):
+    id, title = 'net.rpc_host_enumeration_fanout', 'One source enumerated sessions, shares or local groups on many hosts'
+    families = ('rpc_tx',)
+    required_fields = ('source.ip', 'destination.ip')
+    # A client lists sessions or shares only on the few servers it uses; ten distinct hosts in fifteen minutes is the
+    # host-by-host sweep of a collector, at any fleet size.
+    seconds, threshold, distinct = 900, 10, True
+    attack = ('T1049', 'T1033', 'T1135', 'T1069.001')
+    benign = ('Inventory, monitoring and vulnerability-scanning servers enumerate hosts on a schedule.',)
+
+    def select(self, event):
+        found = _operation(event, HOST_ENUMERATION)
+        return None if found is None else ((found[0][0],), found[0][1], 'attempt')
+
+    def describe(self, event, total_refs, distinct_members, role):
+        return 'lead', (f'Source {event.get("source.ip")} called session, share, connection, user or local-group '
+                        f'enumeration on at least {distinct_members} distinct hosts in fifteen minutes '
+                        f'({total_refs} raw references).'), (
+            ('A host-by-host sweep is the collection pattern of session and local-administrator mapping and share '
+             'discovery; inventory and scanning servers can explain it.'),
+            'The calls are observed; what each host returned is not.',
+        )
+
+
+class RpcDirectoryListing(_Rate):
+    id, title = 'net.rpc_directory_listing', 'One source listed users, groups or group members in bulk over SAM RPC'
+    families = ('rpc_tx',)
+    required_fields = ('source.ip', 'destination.ip')
+    # One administrative command lists one kind of object; three distinct bulk listings against one server within ten
+    # minutes is a collector walking the directory.
+    seconds, threshold, distinct = 600, 3, True
+    attack = ('T1087.002', 'T1069.002', 'T1069.001')
+    benign = ('Identity-management and auditing tools read the directory in bulk on a schedule.',)
+
+    def select(self, event):
+        found = _operation(event, DIRECTORY_LISTING)
+        return None if found is None else (found[0], found[1], 'attempt')
+
+    def describe(self, event, total_refs, distinct_members, role):
+        return 'lead', (f'Source {event.get("source.ip")} made at least {distinct_members} distinct bulk SAM listing '
+                        f'calls (users, groups, aliases or members) to {event.get("destination.ip")} in ten minutes '
+                        f'({total_refs} raw references).'), (
+            'Name and SID translation and logon-time membership reads are not counted.',
+            'The calls are observed; what the server returned is not.',
+        )
+
+
+RULES = (ZerologonRate, Rc4TgsFanout, KerberosPrincipalEnumeration, NtlmPasswordSpray, NtlmPasswordGuessing,
+         RpcHostEnumerationFanout, RpcDirectoryListing)

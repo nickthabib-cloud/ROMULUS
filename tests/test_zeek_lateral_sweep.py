@@ -26,6 +26,9 @@ def test_registered_pack_publishes_the_complete_lateral_slice_with_resolvable_so
                                  ('KerberosPrincipalEnumeration', 20, True), ('NtlmPasswordSpray', 10, True),
                                  ('NtlmPasswordGuessing', 20, False)]:
         rows.extend(rows_for(name, count, distinct=distinct, success=name == 'NtlmPasswordSpray'))
+    rows.extend(zl.DCE_RPC.with_(uid=f'Csessenum{n:08d}', endpoint='srvsvc', operation='NetrSessionEnum', **{'id.resp_h': f'10.0.7.{n}'}) for n in range(10))
+    rows.extend(zl.DCE_RPC.with_(uid=f'Csamlist{n:08d}', endpoint='samr', operation=operation)
+                for n, operation in enumerate(['SamrEnumerateUsersInDomain', 'SamrEnumerateGroupsInDomain', 'SamrGetMembersInGroup']))
     hits = [zl.malcolm(row, f'row{n}') for n, row in enumerate(rows)]
     monkeypatch.setattr(sw, 'execute', lambda client, intent, contract: ts._complete(intent, hits))
     class NativeSource:

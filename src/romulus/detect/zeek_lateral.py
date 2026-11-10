@@ -168,8 +168,8 @@ class WireCoercionCall(ZeekBehaviorRule):
     families = ('rpc_tx',)
     required_fields = ('source.ip', 'destination.ip')
     attack = ('T1187',)
-    benign = ('Remote EFS file operations and DFS namespace administration use coercion-class interfaces; print '
-              'servers on domain controllers receive notification requests from their clients.',)
+    benign = ('Remote EFS file operations and DFS namespace administration use coercion-class interfaces.',
+              'Print servers on domain controllers receive notification requests from their clients.')
 
     def judge(self, event):
         if not _zeek(event) or event.family != 'rpc_tx' or not (peers := _peers(event)):
