@@ -458,6 +458,17 @@ def test_the_stored_detection_result_survives_the_agent_phase_finalization(ranke
     assert repo.get_hunt("h1")["detection_result"] == ("reportable_findings" if "high" in lanes else "leads_only")
 
 
+def test_an_urgent_rule_match_found_by_a_pivot_still_makes_the_hunt_reportable():
+    from romulus.hunt.run import _detection_result
+
+    repo = _repo()
+    case = _row("k1", "r.cred", lane="urgent", host="h", attack=["T1003"])
+    case["source_case_id"] = "case-1"
+    _insert(repo, [case])
+    compute_rank_pass(repo, "h1", PASS_FINAL)
+    assert _detection_result(repo, "h1")[1] == "reportable_findings"
+
+
 def test_detection_result_follows_the_final_ranking_both_ways():
     from romulus.hunt.run import _detection_result
 

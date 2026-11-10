@@ -434,7 +434,9 @@ FINAL_RANK_PASS = 2
 def _detection_result_on(connection, hunt_id: str) -> tuple[dict[str, int], str]:
     """The hunt's deterministic lane counts and headline result. With a complete final ranking the result follows
     the report's headline: reportable when any confirmed or Reported finding exists, leads only when the ranked pool
-    has findings but none is reported. Without one (failed, or a hunt stored before ranking) it follows the lanes."""
+    has findings but none is reported. Without one (failed, or a hunt stored before ranking) it follows the lanes.
+    A rule match an investigator pivot found is a deterministic finding like any other here (as in the lane rule);
+    it is kept out of entity evidence only, not out of the hunt's result."""
     counts = {lane: int(n) for lane, n in connection.execute(select(t.candidate.c.lane, func.count()).where(
         t.candidate.c.hunt_id == hunt_id, t.candidate.c.provenance == "deterministic",
     ).group_by(t.candidate.c.lane))}
@@ -448,7 +450,7 @@ def _detection_result_on(connection, hunt_id: str) -> tuple[dict[str, int], str]
             select(func.count(), func.coalesce(func.sum(case((t.finding_rank.c.reported.is_(True), 1), else_=0)), 0))
             .select_from(t.finding_rank.join(t.candidate, t.candidate.c.id == t.finding_rank.c.candidate_id))
             .where(t.finding_rank.c.hunt_id == hunt_id, t.finding_rank.c["pass"] == FINAL_RANK_PASS,
-                   t.candidate.c.provenance == "deterministic", t.candidate.c.source_case_id.is_(None))).one()
+                   t.candidate.c.provenance == "deterministic")).one()
         return counts, ("reportable_findings" if reported else "leads_only" if ranked else
                         "no_qualifying_observation_in_assessed_scope")
     return counts, ("reportable_findings" if counts.get("urgent", 0) + counts.get("high", 0) else
