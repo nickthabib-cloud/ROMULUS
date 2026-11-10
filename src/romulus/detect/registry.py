@@ -17,11 +17,14 @@ from romulus.detect.lineage import LINEAGE_PLAYBOOKS
 from romulus.detect.linux_direct import DIRECT_RULES as LINUX_DIRECT_RULES
 from romulus.detect.linux_sequences import SEQUENCE_RULES as LINUX_SEQUENCE_RULES
 from romulus.detect.linux_sequences import share_linux_witnesses
+from romulus.detect.mail import MAIL_PLAYBOOKS
 from romulus.detect.network import NETWORK_PLAYBOOKS
 from romulus.detect.packets import PACKET_PLAYBOOKS
+from romulus.detect.service_auth import SERVICE_AUTH_PLAYBOOKS
 from romulus.detect.sessions import SESSION_PLAYBOOKS
 from romulus.detect.tamper import TAMPER_PLAYBOOKS
 from romulus.detect.tls import TLS_PLAYBOOKS
+from romulus.detect.vpn import VPN_PLAYBOOKS
 from romulus.detect.windows_account_events import WINDOWS_ACCOUNT_PLAYBOOKS
 from romulus.detect.windows_auth_events import WINDOWS_AUTH_EVENT_PLAYBOOKS
 from romulus.detect.windows_catalog_events import CATALOG_EVENT_RULES
@@ -92,7 +95,7 @@ ALL_PLAYBOOKS = (HOST_PLAYBOOKS + HIJACK_PLAYBOOKS + KERNEL_FILE_PLAYBOOKS + LIN
                  + list(ZEEK_CLEARTEXT_PLAYBOOKS) + list(ZEEK_TRANSFER_PLAYBOOKS)
                  + list(ICS_PLAYBOOKS)
                  + LINUX_DIRECT_RULES + LINUX_SEQUENCE_RULES
-                 + BASELINE_PLAYBOOKS)
+                 + SERVICE_AUTH_PLAYBOOKS + MAIL_PLAYBOOKS + VPN_PLAYBOOKS + BASELINE_PLAYBOOKS)
 _ANCHOR_CLASSES = {playbook.id: playbook.anchor_class for playbook in ALL_PLAYBOOKS}
 
 

@@ -375,6 +375,24 @@ def _ssh_tuple(event: TypedEvent, _context: KeyContext, spec: BaselineSpec) -> K
     ]
 
 
+def _vpn_source(event: TypedEvent, _context: KeyContext, spec: BaselineSpec) -> KeyResult:
+    service = event.get("auth.service")
+    if isinstance(service, str) and service and service not in {"openvpn", "charon", "strongswan", "pppd", "xl2tpd"}:
+        return NotApplicable(f"service {service} is not a VPN service")
+    phase = event.get("auth.phase")
+    if isinstance(phase, str) and phase and phase != "authentication":
+        return NotApplicable("the record is not an authentication decision")
+    if (outcome := _outcome_success(event, "VPN authentication")) is not None:
+        return outcome
+    host, account, address = _host(event), _text(event, "user.name"), _ip(event, "source.ip")
+    service, phase = _text(event, "auth.service"), _text(event, "auth.phase")
+    for value in (host, account, address, service, phase):
+        if isinstance(value, Missing):
+            return value
+    return [_key(spec, _scope("host_account", host=host, account=account, service=service),
+                 {"service": service, "source_ip": str(address)})]
+
+
 def _exec_path(event: TypedEvent, _context: KeyContext, spec: BaselineSpec) -> KeyResult:
     if (outcome := _outcome_success(event, "exec")) is not None:
         return outcome
@@ -735,6 +753,13 @@ BASELINE_SPECS = (
         required_fields={"auth": ("auth.service", "source.ip", "user.name")},
         optional_fields={"auth": ()},
         _extract=_ssh_tuple,
+    ),
+    BaselineSpec(
+        id="vpn.login_from_new_source_ip_for_user", version="1", key_version="1", families=("auth",),
+        datasets=("linux.text", "systemd.journal", "system.syslog", "system.auth"),
+        scope="host_account", measure="presence", bucket="day",
+        required_fields={"auth": ("auth.service", "auth.phase", "source.ip", "user.name")},
+        optional_fields={"auth": ()}, _extract=_vpn_source,
     ),
     BaselineSpec(
         id="bl.exec_path", version="1", key_version="1", families=("process_exec",),

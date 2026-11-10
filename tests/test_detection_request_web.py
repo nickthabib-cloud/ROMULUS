@@ -96,3 +96,42 @@ def test_request_body_limit_and_repeated_fields(request_client):
                   headers={'content-type': 'application/x-www-form-urlencoded'}).status_code == 400
     assert c.post('/catalog/requests', content=iter([b'behavior=' + b'x' * 40000]),
                   headers={'content-type': 'application/x-www-form-urlencoded'}).status_code == 413
+
+
+@pytest.mark.parametrize('family,diagnostic', [
+    ('mail_message', 'CHECK constraint failed: ck_detection_request_family private-database-detail'),
+    ('vpn_session', 'UNIQUE constraint failed: private-table.private-column'),
+])
+def test_request_creation_integrity_error_is_fixed_conflict_and_keeps_access_checks(
+        request_client, monkeypatch, family, diagnostic):
+    import sqlite3
+
+    from fastapi.testclient import TestClient
+    from sqlalchemy.exc import IntegrityError
+
+    from romulus.catalog.requests import DetectionRequests
+
+    fixture_client, password, _ = request_client
+
+    def rejected_create(self, **values):
+        # SQLAlchemy wraps the DBAPI exception with statement and submitted
+        # parameters. None of those details belongs in the HTTP response.
+        raise IntegrityError('INSERT INTO private-table (...)', values, sqlite3.IntegrityError(diagnostic))
+
+    with TestClient(fixture_client.app, raise_server_exceptions=False) as c:
+        with monkeypatch.context() as patch:
+            patch.setattr(DetectionRequests, 'create', rejected_create)
+            fields = {'behavior': '<script>private operator text</script>', 'telemetry_family': family}
+            anonymous = c.post('/catalog/requests', data=fields, follow_redirects=False)
+            assert anonymous.status_code == 303 and anonymous.headers['location'] == '/login'
+            _login(c, password)
+            assert c.post('/catalog/requests', data={**fields, 'csrf': 'forged'}).status_code == 403
+            token = _csrf(c.get('/catalog/requests/new').text)
+            response = c.post('/catalog/requests', data={**fields, 'csrf': token}, follow_redirects=False)
+            assert response.status_code == 409
+            assert response.text == 'Detection request could not be saved.'
+            assert all(value not in response.text for value in (diagnostic, fields['behavior'], 'INSERT', 'private-'))
+        # A rejected creation must not change the ordinary analyst creation path.
+        location = _create(c, 'valid request after a conflict')
+        assert c.get(location).status_code == 200
+        assert 'valid request after a conflict' in c.get(location).text

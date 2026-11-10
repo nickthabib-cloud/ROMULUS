@@ -683,7 +683,7 @@ def test_the_sweep_records_the_map_and_a_resumed_hunt_reads_the_same_one(monkeyp
     sweep.finalize()
     # the exec 10 s before its batch's last journald record waits for the whole map
     edge = "between boots or near a boot's first or last record"
-    assert sweep.stats["boot"] == {"recorded": 0, "from_interval": 2, "unknown": 1, "unknown_reasons": {edge: 1},
+    assert sweep.stats["boot"] == {"recorded": 4, "from_interval": 2, "unknown": 1, "unknown_reasons": {edge: 1},
                                    "sweep_conflicts": [], "sweep_conflicts_total": 0,
                                    "hosts": [{"host": "host01", "unplaced": {edge: 1}, "blind": [], "blind_total": 0,
                                               "nameless_boundaries": 0, "unclocked_records": 0,

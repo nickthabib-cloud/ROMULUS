@@ -28,7 +28,7 @@ from romulus.sources.es import (
     SourceError,
 )
 from romulus.sources.packets import PacketError, arkime_client, check_arkime_endpoint
-from romulus.sources.profile import contract_from_types, flatten_mapping
+from romulus.sources.profile import build_profile, contract_from_types, flatten_mapping
 from romulus.store.db import integrity_check, make_engine, migrate, space_report
 
 
@@ -470,8 +470,50 @@ def check_site(s: Settings) -> Check:
     )
 
 
+def check_linux_text_sources(s: Settings, client: ElasticClient | None = None) -> list[Check]:
+    """List potential text sources and bounded format samples, separately from typed coverage."""
+    client = client or ElasticClient(s)
+    out = []
+    try:
+        site_facts = load_site_facts(s.home) if s.home is not None else None
+        targets = sorted({target for pattern in s.es_index_patterns for target in client.resolve(pattern)})
+    except (SourceError, SiteValidationError) as error:
+        return [Check("es.text_inventory", "warn", f"text source inventory unavailable: {error}")]
+    for target in targets:
+        try:
+            profile, _contract = build_profile(client, target, site_facts=site_facts)
+        except SourceError as error:
+            out.append(Check(f"es.text_inventory[{target}]", "warn", f"text source inventory unavailable: {error}"))
+            continue
+        detail = profile.model_dump().get("linux_text")
+        inventory_notes = [note for note in profile.notes
+                           if note.startswith("ds inventory truncated (data_stream.dataset")]
+        if not detail:
+            if inventory_notes:
+                out.append(Check(f"es.text_inventory[{target}]", "warn", "; ".join(inventory_notes)))
+            continue
+        parts = list(inventory_notes)
+        complete = not inventory_notes
+        samples = [(name, detail["inventory"][name], sample) for name, sample in detail["samples"].items()]
+        if "datasetless" in detail:
+            sample = detail["datasetless"]
+            samples.append(("no dataset value", sample["records"], sample))
+        for name, records, sample in samples:
+            formats = ", ".join(f"{key}={value}" for key, value in sample["formats"].items()) or "none"
+            programs = ", ".join(f"{key}={value}" for key, value in sample["programs"].items()) or "none"
+            parts.append(f"{name}: {records if records is not None else 'unknown'} potential source records; "
+                         f"sampled {sample['sampled']}; formats {formats}; programs {programs}"
+                         + ("; " + "; ".join(sample["notes"]) if sample["notes"] else ""))
+            complete = complete and sample["complete"] and not any(
+                sample["formats"].get(name) for name in ("unknown", "too_long", "no_text_payload")
+            )
+        out.append(Check(f"es.text_inventory[{target}]", "ok" if complete else "warn", "; ".join(parts), detail))
+    return out
+
+
 def run_all(s: Settings, env_file: Path | None = None) -> list[Check]:
     checks = check_es(s)
+    checks += check_linux_text_sources(s)
     checks.append(check_site_networks(s))
     checks.append(check_arkime(s))
     auth = check_arkime_auth(s)

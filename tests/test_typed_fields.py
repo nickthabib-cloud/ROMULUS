@@ -63,7 +63,7 @@ def test_a_field_with_a_non_text_origin_is_validated_as_before(origin):
 
 
 def _every_family() -> list[dict]:
-    """The fixture's records plus audit admin records the fixture's story does not write."""
+    """Fixture records plus synthetic audit admin and Linux service records."""
     docs = tf.build(1)
     b = tf.Builder(3)
     at = tf.T0 + timedelta(minutes=50)
@@ -85,6 +85,15 @@ def _every_family() -> list[dict]:
              'ppid=1 pid=701 uid=1000 euid=1000 auid=1000 ses=5 exe="/usr/bin/cat" key="watched"')
     b._audit("web1", at, 9007, "PATH",
              'item=0 name="/etc/shadow" inode=1 mode=0100640 ouid=0 ogid=0 nametype=NORMAL')
+    # Public log statements; local supplements leave the shared throughput fixture unchanged.
+    # https://github.com/vdukhovni/postfix/blob/master/postfix/src/global/log_adhoc.c
+    # https://github.com/OpenVPN/openvpn/blob/release/2.6/src/openvpn/socket.c#L2394
+    b._doc("web1", at, "linux.text", None,
+           message="Nov 18 14:50:00 web1 postfix/smtp[42]: ABC123: to=<b@example.test>, "
+                   "relay=mx.example.test[192.0.2.4]:25, delay=1, dsn=2.0.0, status=sent (250 ok)")
+    b._doc("web1", at, "linux.text", None,
+           message="Nov 18 14:50:00 web1 openvpn[43]: [alice] Peer Connection Initiated with "
+                   "[AF_INET]192.0.2.2:51234")
     return [record for records in docs.values() for record in records] + b.host
 
 

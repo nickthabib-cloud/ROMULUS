@@ -20,7 +20,9 @@ from romulus.hunt import packets as packet_stage
 from romulus.sources import packets as packet_sources
 
 # The files that turn ES/OpenSearch records into typed events (not shellparse.py, which only detectors use).
-EVIDENCE_FILES = ("__init__.py", "auditd.py", "certificates.py", "community.py", "linux_catalog.py", "normalize.py", "raw_scrub.py",
+EVIDENCE_FILES = ("__init__.py", "auditd.py", "certificates.py", "community.py", "linux_catalog.py",
+                  "linux_text.py", "linux_auth_text.py", "linux_service_text.py", "linux_text_types.py",
+                  "normalize.py", "raw_scrub.py",
                   "surrogates.py", "typed.py")
 PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf2116524009",
                    10: "e4dffd0944b86200b3c94aa301bead206967c58f565b30d426ee0071bd4f1aa9",
@@ -61,7 +63,15 @@ PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf211
                    # Unreleased: re-pinned when Filebeat's template escapes were inverted as JSON, the alert action
                    # was read only from "allowed"/"denied", and a non-http record's dropped HTTP fields gained a
                    # caveat; only shipped Suricata records changed.
-                   17: "7371e27837df2e31f0b02e0a29d427184dc72855d9b9efb0c32b0254a289e9d7"}
+                   # Re-pinned 2026-11-10 when unsupported Linux text gained bounded daemon parsers, writer
+                   # checks and honest skip accounting. The four new parser modules now join this pin.
+                   # Previously typed records retain identical output and identities (normalization/pivot
+                   # goldens); the added text records were previously unsupported, so the epoch stays 17.
+                   # Re-pinned again when a writer that disagrees with its identifier kept its event with a caveat
+                   # (only an SSH claim is refused), a unit stopped counting against user-invoked tools, and PAM
+                   # failures of natively logging daemons were typed on their own channel; again only records
+                   # that were unsupported before change.
+                   17: "baa63f719e26813a9e8a1d8f1bcce8c505ba46cb4cb5b36a7b2c052e0e0384b7"}
 WINDOWS_EVIDENCE_FILES = ("community.py", "windows.py", "windows_catalog.py", "windows_reassembly.py", "rpc_catalog.py")
 PINNED_WINDOWS = {
     # NXLog's flat im_msvistalog records are read (windows.nxlog_to_winlog); Winlogbeat and Agent records normalize

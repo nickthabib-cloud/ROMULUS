@@ -8,13 +8,13 @@ REGISTERED_EVENT_FAMILIES = frozenset({
     "audit_config", "auth", "boot_configuration", "database_audit", "dcom_access", "defender_event",
     "directory_access", "directory_change", "dns_lookup", "dns_query", "ese_database", "file_access",
     "file_change", "file_transfer", "http_access", "http_body", "http_tx", "ics_tx", "image_load",
-    "kernel_module", "kerberos_tx", "ldap_tx", "msi_install", "net_alert", "net_flow", "net_session",
+    "kernel_module", "kerberos_tx", "ldap_tx", "mail_message", "msi_install", "net_alert", "net_flow", "net_session",
     "net_socket", "network_filter", "ntlm_tx", "object_access", "pipe_event", "privilege_adjustment",
     "privilege_use", "process_access", "process_exec", "process_observed", "process_tampering",
     "process_termination", "registry_change", "remote_access", "remote_session", "remote_thread", "rpc_call",
     "rpc_tx", "scheduled_task", "script_block", "security_enumeration", "sensor_health", "service_change",
     "share_access", "share_change", "silent_process_exit", "smb_tx", "ssh_session", "system_state",
-    "tcp_stream", "tls_session", "web_error", "winsock_catalog", "wmi_subscription", "x509_certificate",
+    "tcp_stream", "tls_session", "vpn_session", "web_error", "winsock_catalog", "wmi_subscription", "x509_certificate",
 })
 
 _EXECUTION = frozenset({

@@ -40,6 +40,7 @@ from romulus.evidence.linux_catalog import (
     dataset_selection,
     logical_of,
     shipper_names,
+    text_dataset_inventory,
 )
 from romulus.evidence.normalize import (
     BOOT_FILL_FAMILIES,
@@ -527,8 +528,29 @@ class Sweep:
             return
         if getattr(self, "_profiles", None) is None and hasattr(getattr(self, "repo", None), "source_profiles"):
             self._profiles = self.repo.source_profiles(self.hunt_id)
-        inventory = ((getattr(self, "_profiles", None) or {}).get(target) or {}).get("datasets") or {}
+        profile = (getattr(self, "_profiles", None) or {}).get(target) or {}
+        inventory = profile.get("datasets") or {}
         present: dict[str, dict[str, int]] = {}
+        if "linux.text" in datasets:
+            if contract is None or any(contract.supports(name, "exists") for name in ("message", "event.original")):
+                text_inventory = text_dataset_inventory(inventory)
+                present["linux.text"] = text_inventory
+                selected = self.stats.get("dataset_filter", {}).get(target)
+                samples = (profile.get("linux_text") or {}).get("samples") or {}
+                for name in text_inventory:
+                    sample = samples.get(name) or {}
+                    has_payload = any(count > 0 for form, count in (sample.get("formats") or {}).items()
+                                      if form != "no_text_payload")
+                    if has_payload:
+                        if selected is not None and name not in selected:
+                            selected.append(name)
+                    else:
+                        decided = sample.get("sampled", 0) > 0 and sample.get(
+                            "sample_complete", sample.get("complete", False))
+                        reason = "no text payload in sample" if decided else "sample incomplete"
+                        self.stats.setdefault("linux_text_not_retrieved", {}).setdefault(target, {})[name] = reason
+            else:
+                unsearchable = [*unsearchable, "linux.text"]
         for logical in datasets:
             for shape in LINUX_SHIPPER_DATASETS.get(logical, ()):
                 if shape.dataset is not None and shape.dataset in inventory:
@@ -1415,7 +1437,8 @@ class Sweep:
             reason: count for reason, count in skips.items()
             # an NXLog record of a catalogued provider and event id under a channel naming none of its classes
             # could be any of them: counted against their families (normalize_hits names them)
-            if reason.startswith(("dataset:", "suricata event_type", NXLOG_CHANNEL_SKIP))
+            if reason.startswith(("dataset:", "suricata event_type", NXLOG_CHANNEL_SKIP,
+                                  "text line in no recognized format:", "text line too long:"))
         }
 
     @staticmethod

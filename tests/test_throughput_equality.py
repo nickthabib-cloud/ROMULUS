@@ -375,56 +375,78 @@ from tests import throughput_fixture as tf
 # reported state moves). The audit moves with the expansion summary and the pass summaries' statement counts.
 # Run with expansion seeded by the rule estimate (`run_stack(rank=False)`), every digest is the earlier one except the
 # manifest's (those incident tactics alone), and the non-baseline semantic projection is the earlier one.
+# Re-pinned 2026-11-10 for Linux text support, with each movement compared against the prior snapshot:
+# - events, event entities, entity rows, citation rows, anchors and expansion are byte-identical. All 40
+#   candidates retain their ids, decisions, claims and evidence; one persistence candidate changes only its
+#   rule_version from 8 to 9, identifying its expanded cron contract. No candidate is added or removed.
+# - rule_cells: seven rules add 499 cells; later numeric row ids shift. Twenty-seven existing journal-error
+#   cells narrow to partial because malformed journal records can hide DNS, firewall or proxy events. The
+#   persistence rule's 71 cells change version only: all evaluated/matched/state/detail values equal the prior
+#   snapshot, so unrelated service starts no longer inflate the 22 affected evaluation cells. Existing baseline
+#   cells also reference the new snapshot digest; bl.ext_dest records its journal-error window partial.
+# - baseline_snapshot: adds the VPN source-history specification and its three unresolved target coverages.
+#   baseline_segments adds three empty complete segments, while baseline_window_event_hours adds one VPN
+#   specification row (four auth-family input events, zero VPN observations). Other baseline tables are unchanged.
+# - tasks: Linux raw-selection intents include linux.text and the baseline plan includes the VPN spec, changing
+#   fingerprints/ids and the baseline outcome. The same 175 tasks and 135 queries return the same selected data.
+# - raw and links: only first_task_id / task_ids references change; all 436 raw payloads and 156 link results match.
+# - stats: adds the explicit linux.text-not-searchable note for this fixture's unmapped text payload fields.
+# - audit: mirrors that note, baseline snapshot/spec/partial changes, three added segments and material bytes.
+# - manifest: mirrors new rule/baseline coverage, honest partials, the persistence version and its expanded title
+#   in one incident narrative. Findings otherwise match; attachment coverage explicitly states no MTA producer.
+# The separate text-stack fixture pins actual content retrieval, auth/mail/VPN findings and unknown-line coverage.
+# The ranked stack moves in the same eleven digests: its 54 candidates differ only in that one rule_version and
+# its rule cells gain the same 499, so ranking and Linux text support are independent of each other.
 GOLDEN_STACK = {'anchors': '30068f8445c084098c1481d42b0543bff8729d9a4a0fbafefee71c19b5a6ce75',
- 'audit': '50c30e56a6516a512a3e7b9330959758cd784b28c7531123143b72b776fa322c',
+ 'audit': '806733c612d6a768944c0a354e84bc295067568ac449cd7a39bcbfce9008231e',
  'baseline_counts': '748129268ef043d23f91ca3a357a5adfff57e4cf0a380709aeb729b93294021f',
  'baseline_hunt_exclusions': '66d8a3bf089749ff997d501f23f4d1c27c4bc7ba72ec71194789405548ed3ddc',
  'baseline_observations': '6753ce92f6247b473508e1e35f73339cb3843dabfb5a87c23b4339a749df13e5',
  'baseline_scope_hours': 'e6c1b1e01cd07466c3e4abe291c36d5420259ed7142585ca50efddb88e1af9c4',
- 'baseline_segments': 'e7a92b3d8bc6488ee87f39e1be1301cbd3e68ee8461fb43e7853601912d3186c',
- 'baseline_snapshot': '63b4c8094cb5450b1e707fd7be786e90324528e738b882358cae15cb8d53f776',
+ 'baseline_segments': 'c067f10c62846d9aa5f478464df3799bf2b0baa6f77bc644784c61ec333b6a7a',
+ 'baseline_snapshot': 'c4d83cc473697b70a3d6d02e3b4fd86ff6f624e0c80a41e4ddacbc54fb663353',
  'baseline_window_counts': '7cc0f5555260b0533927f47cfe29e6a543e2d921b0cc79e4b6b89f418d6052f8',
- 'baseline_window_event_hours': 'bb58c65144b135443e75a690b7b2f8137ebac6b827f8e8bd8cc7606a01c53e52',
+ 'baseline_window_event_hours': '073d2b603455282038d461b6a111095c59b3a3116f5e0d7e95c78f2e5cec4122',
  'baseline_window_scope_hours': '9f977913af60b464aae55a2fa1c263ebdefd644ca53fccc58ea616b47900d90a',
- 'candidates': '9950c06c868f9b57dd68ab69c9001dd0de7408b63805899288056afe06a18242',
+ 'candidates': '366f8cf3b66c2f55c021c4a4c0d246e87bc64e8a0caf29e2cac37ddc6830b89a',
  'entities': 'f26a3ccda6f16d94a0b0822914a0827ecd57ab81791dec1e39227f76a3529f17',
  'event_citations': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'event_entities': 'e3b969f22244ac772447a8a3ba4145fa4bf3a9bf5b61b0cf4be660a2513269d2',
  'events': '396924ad3310abcee56c94c420c6bd460c1c78c6129899b40c41cb1cd2777e4a',
  'expansion': '55c49a3426e21a0a4591feea9996f346ac089862a6fe95ad16a3f5aaeda7b46b',
- 'links': 'b3e785c0d7ffb591b92816e35511caa72486542bbda892651c4fb0fa51e22bb5',
- 'manifest': 'ed4506920e6977681fcf1b685c0ff12506fa08b4db4b0af39165078c986c66c4',
- 'raw': '37a200c3ad1aeefe056452f68ba2180760be3849745269d44f4016ee397d019d',
- 'rule_cells': '421a848aa9551e978655d23dec3215acf6d4f0b09132ee170b04d99891d9bb2e',
- 'stats': '03817e5592ef62f8aecddbb9cae63bf65e5496d5f148fd5d518389275a4ae608',
- 'tasks': '6481d38c57327f916e0d26f8f1f621d34640fa7e5ce49c23cbaec8990d494e25'}
+ 'links': '2f74dfdbb6b5c22b67a2729f9b28af55dc8a012b1538cc23cd7e11b90bf03831',
+ 'manifest': '0fa7120f21551897dd15b040c17366129c3ab6dcb26d3be622ce1f02e460fa27',
+ 'raw': '824a1d6132f8120f3d473669610beba7f935fc315c2bb08611b63c14ea16e495',
+ 'rule_cells': 'a134ac3b761c304e9b8937336a7c3855228d07eda0c128bf605cd8cfbe1b5afc',
+ 'stats': 'be588e34e14e570c11a47fc9b3953e564d8f6026d909d9ae7f9c7ef561c99c5a',
+ 'tasks': 'fae7263ba4be220d6649f94a16ff43c805b8fa5139582b468dff752f658d4a7a'}
 # The rule-estimate stack's digests (expansion seeded by the urgent and high lanes, as before evidence ranking;
 # the manifest's moved only with the incident tactics above).
 GOLDEN_STACK_BY_RULE_ESTIMATE = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe554935eb6f87cf',
- 'audit': '93e7e798b20a8a186ea1fc8204ebd1cc2768f9faaa3d678841b86f4b9b12e06c',
+ 'audit': '288c1587ed033b627012dbb15f5802685631c3ec44ebb2cce1bff14afbdd3d84',
  'baseline_counts': 'be05fabb25336f21341b46eae7d8c2627828f7a7a7e8fdb24f4eb58576099354',
  'baseline_hunt_exclusions': 'c91eefda01c512d6d63e892dc9696016b01a71d44e4abcc429d954bd51864852',
  'baseline_observations': '6753ce92f6247b473508e1e35f73339cb3843dabfb5a87c23b4339a749df13e5',
  'baseline_scope_hours': '0a1ce00b7f354753a35786774c98b43f73c6eecd0ac53c5283b89702968894fb',
- 'baseline_segments': 'a3e22e8301643a23a9a9fd591a56a8b6baa65f55c31f3cfb9f910a6a639694fa',
- 'baseline_snapshot': '63b4c8094cb5450b1e707fd7be786e90324528e738b882358cae15cb8d53f776',
+ 'baseline_segments': '48b1a281c368bcd572e5e8d624d40030a9f4bec575ab0195fc6659b4410feafe',
+ 'baseline_snapshot': 'c4d83cc473697b70a3d6d02e3b4fd86ff6f624e0c80a41e4ddacbc54fb663353',
  'baseline_window_counts': '7cc0f5555260b0533927f47cfe29e6a543e2d921b0cc79e4b6b89f418d6052f8',
- 'baseline_window_event_hours': 'bb58c65144b135443e75a690b7b2f8137ebac6b827f8e8bd8cc7606a01c53e52',
+ 'baseline_window_event_hours': '073d2b603455282038d461b6a111095c59b3a3116f5e0d7e95c78f2e5cec4122',
  'baseline_window_scope_hours': '9f977913af60b464aae55a2fa1c263ebdefd644ca53fccc58ea616b47900d90a',
- 'candidates': '819d72ca4130a7d6bb0880ce317287c9c4afe69b183d931e86d63b93e91bd18c',
+ 'candidates': 'f1369183116616ff3f61e31190673edbcbabfe58efb44e567770e16ce097ebed',
  'entities': 'f26a3ccda6f16d94a0b0822914a0827ecd57ab81791dec1e39227f76a3529f17',
  'event_citations': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'event_entities': '41e5f3b21c1124968b40d3e2af117d6f6e5d1a4a1e575933464baf34995ad86d',
  'events': '9d1656ca22aeb9eb4b5dfa18f98fd9db3231baea2266d72a484bdc0a252d6fcc',
  'expansion': 'e7a94c167f9a42d9adb20a9ee7660abd45c407ecf30baf023f31b465f0b845fa',
- 'links': '5df971a7f0d797f9181f6ed038480cc189101da00d3dcd7a81dac834b35b13c6',
- 'manifest': '070b7f548cb3f64a00284597d55a730b5e9d0fa213d5e07c050cbb692aa82611',
- 'raw': '3d95193e192f300d2424e9109a5f5267608533e822d4dd5fb479f52a1a6486a6',
- 'rule_cells': 'a3be759f41c94a81120c1a23ea136572ee48a7228dcb6b22155661d300a14dd0',
- 'stats': '03817e5592ef62f8aecddbb9cae63bf65e5496d5f148fd5d518389275a4ae608',
- 'tasks': '820ed1e788f6476853cd0b4a04444927a1771296cc4e1212accf11e27c20f742'}
+ 'links': '6d920d55a2bea6c7e395ff193cd1b97452a676c8aad8c842a482cd52690997cf',
+ 'manifest': '6cd7437b6a6e0e38088dd109a3dfd869d1df0dd7dc83dda5523e4c54eed968b7',
+ 'raw': 'd924f62eebd5ee88c8142c690333924450c3344b18210ddfe87b8e486127dd35',
+ 'rule_cells': '7d6af59bb5cc54ba9ba9489a2a8179ed18be4513e22b1c20f839bbee99a1a8c8',
+ 'stats': 'be588e34e14e570c11a47fc9b3953e564d8f6026d909d9ae7f9c7ef561c99c5a',
+ 'tasks': 'bafebe65e787ccfaf77d643cc10a1aa59b0f8ec5faa84078d23656eeafb6e0b6'}
 GOLDEN_CANDIDATES_BY_RULE_ESTIMATE = GOLDEN_STACK_BY_RULE_ESTIMATE['candidates']
-GOLDEN_NON_BASELINE_SEMANTICS_BY_RULE_ESTIMATE = {'candidates': {'all_fields': '4cf242cede6c404a9cec581aa7f10aac3a898b1c67a25dd1bb8e3ad838e139ea',
+GOLDEN_NON_BASELINE_SEMANTICS_BY_RULE_ESTIMATE = {'candidates': {'all_fields': 'c0fe7a44da5cc06756e49c909dec18def44f0211cb96ba4613343efdddc30ae5',
                 'benign_alternatives': 'b6a6498000e772cfa17ad8ec0de6611835534dbd7262543e97e6e413b75304aa',
                 'claim': 'b9376dc415ee7a3f7cd11e025171c6aa7bcb0eb58af69169ddf7c8f0fa84653d',
                 'claim_type': '62ee830737cd920223bd88ccd391e5074f2e72242803701f1f849e25d1fdf7c2',
@@ -441,25 +463,24 @@ GOLDEN_NON_BASELINE_SEMANTICS_BY_RULE_ESTIMATE = {'candidates': {'all_fields': '
                 'priority': '81a856684110a1b2b59396843facb23007b68eaf8c3c031222a8e9c1d5db1e06',
                 'priority_reasons': 'd38e0586d04b87d7f11769084f0368af795f59c692d2debbb4dad2eaaca05150',
                 'rule_id': '50045a80bc2eb3e1c66c58f0a55acfc5e8db0f87e8b18bd8772a1361b20c1313',
-                'rule_version': '3b20f4e7ecaac386f33f18a1d488e2b80486199c943b4fe997565d63e6abfe5d',
+                'rule_version': 'dd76cdeb132e36c2787c6222cc90ee642c944f19ffac89d6f242ffe444a2e5ef',
                 'severity': 'd8fb260b8a62f9175181cdba1356bfbd3dab9167f0965c5e7586e2202c62bcc3',
                 'source_presence': '31f6a55e225e04f5da96ef7f565969408d500a329be1bf37e463188763a5af16',
                 'ts': 'bfc0e0328d7a2b9fb224bc2791da7a13f533d4b8f03819ad9f65e7609fac08e0'},
- 'rule_cells': {'all_fields': '15ce51e6e291f698c40d113d9dd59af9043f2c85118df1a4ab52c6b242f39ab4',
-                'count': 17256,
-                'detail': '17f2774a79d6aaa4196771517deb5a676512756778762dcaad2b9a2426954a07',
-                'evaluated': 'bc3f5e1263641dd45637654c353c391ae24242d3e37c29f32a5bf8c3297d6455',
-                'matched': 'a2b744e46dc0f9ba411fcf82f14147a988f21302cebb8c85f5b4522b4f614478',
-                'partition': 'a2196f3f82f86ab620f8798fc56b6a7cd94dd492ea061bd11390bda65ae53580',
-                'rule_id': 'ca8ff3e6e7a06b308813bcaf9abb6b2c4f904141fa23dbbe8c0e16d0977857fa',
-                'rule_version': '6e06616da6f73ed294b1b7dc633b6a0890e7f521857d680563573c81be4ba338',
-                'state': '79492679c375470e7bc0235f6b4335d5ca8329aa0575e774ae0a72392f380220',
-                'target': 'c533333fd26b44f80c85e368bab8980506bfb6ad90f452f8a4e6561d059b40fe'}}
-
+ 'rule_cells': {'all_fields': 'a7734aeb16ea7775269c7acaf57e5efd33b3ac44a5aa7f6658384e1580ed3ff8',
+                'count': 17755,
+                'detail': '844d2c924528f7de78c7bc4016bbc0751365720f0bbdf01c4ec8c2e3571385fb',
+                'evaluated': 'b5786c3a962d79567fd7d46f43a288895b145f8c1fdeef9835367a7c4aa2d978',
+                'matched': '7f5ecbbc0bf324dd18717d31b48bba29a569554d1631632446412bfe792d8d4e',
+                'partition': 'a67c5d4164deb2fda389e75c485e458af0b3028efb7a3e38a324a52e18831799',
+                'rule_id': '0275aa160ce77f12b5a825cde72dd95625dd78a8ae4fb62f807e737029c171ac',
+                'rule_version': '6f07be2ef828c80aaef052c8ec917d060ef8a3fa7c1bc9e3abad495f5cbb1cd6',
+                'state': 'cca15e967e01059245f83cfa009a83c5e21a35856d7f3ff84b6e3f46c16425f7',
+                'target': '68b4b698269b65e8f3922016cdaaeb92fd492b6c4c6c1a5c9d1d3e83866cbb38'}}
 # Captured directly from the S7 fixture through _non_baseline_semantic_digests. Typed-event-derived hashes and
 # interchangeable predicate origins are normalized, while every decision, claim, lane, raw citation and gate is
 # checked field by field.
-GOLDEN_NON_BASELINE_SEMANTICS = {'candidates': {'all_fields': 'eabe3b90407d230a7a0d1e5d01da1bb74e895a925f7a51f3141b188cd9db4ffb',
+GOLDEN_NON_BASELINE_SEMANTICS = {'candidates': {'all_fields': '5cba79d97055a0de0f294ef4b0097510b2a0f4cfb196ca15f4f55750fdb3f73f',
                 'benign_alternatives': '7ce7cd9787349e1cd28008f4262cdd4783cdc2e9cb68cfb1cb9b6b76dd5635dc',
                 'claim': '3f66c1241e93ede4913bcb55281dc7ae347b88535714360e0710dd5fdfa88555',
                 'claim_type': 'b04e5a2f324691d80a54e0a2ec6a2da2f755f30294ddea5faaea2f7c73fb66cb',
@@ -476,20 +497,20 @@ GOLDEN_NON_BASELINE_SEMANTICS = {'candidates': {'all_fields': 'eabe3b90407d230a7
                 'priority': 'a45083d668a7a32e5fd7069ef387db9213a665019bf25413da24756eadf071ac',
                 'priority_reasons': 'd8e5f7512822a20bc9cdc360f4d7e0988011fae30ea2fc6957e93f45773dfbf8',
                 'rule_id': 'eb76f2b67bd295d910cadd3d8da7ed9d62f8876ecee8ad233d80a677bc9f572f',
-                'rule_version': 'a41fdd6ae62c642457d93be7c19b96dfa5b161d7c2f64cf46cf63fa5baaa514a',
+                'rule_version': '9f1569efe3326fac3215812fba0064f13bc71b199c1ed73b81ea13b0a133d69a',
                 'severity': '807d269c2f4b655931696871a41e0eb6b364ec8c8ebb8eff4dc8456ddbc4e64b',
                 'source_presence': 'f7dd27fce0c2093865dff4e5d7e7b23a0677790af53a5dcb92ef73fbc8e1934d',
                 'ts': 'f137161c5bf0d610fff1a18e4080f1c4d60892c93b91351d7d96393f7abc9edf'},
- 'rule_cells': {'all_fields': '1b6eed8d87bf103ba501c056dd396b1f2a3986ca773753502d1c6a29b31d17b0',
-                'count': 17472,
-                'detail': '05152bb6e6f17b19828b8c2951946ae46fa06f45a16db3772083b19812b1718f',
-                'evaluated': '7c6ba12f71540935a7908b139bede050023d28ada402368a21da4a76031ba1ac',
-                'matched': 'a5973482a801232a3e25e9f376936345d2a6d717e01df40987af1e5d6bd59622',
-                'partition': '040423cfcb13b6b6e07609b537c53a4331b08cc5f65aea1745cc1eb9323d10b4',
-                'rule_id': '818c87cdb438db4f3e358bc1f4f7c6bd32888c5454d8294faa1080065bcdde08',
-                'rule_version': '7af1236c72847f123988efcee5c12d7602ed1acac33bed68b3edfcfe3d35ee14',
-                'state': '60a700255d6da632988d2e562f49e020d184dd5c362acea95e4e7c5c84340a02',
-                'target': 'a6bef91f4270166a3fc59e9f2948f24cd60b800735ea6c6a70f059bec236a886'}}
+ 'rule_cells': {'all_fields': '70b72221ca486857bd5ca030209ce64a5bba729bdf43d30758ddc2fd25eacc79',
+                'count': 17971,
+                'detail': 'b5a60ad9851bb938b0132b4c25bda5e21703f9cef1049a05a3031cbd71e71637',
+                'evaluated': '5a090bebf6fc361d5262c1875bfbd63c3ebe2a9f330f2f6d3f48b42b803e34e4',
+                'matched': 'd30045e9acea990735200dca904bed832414245f266de517b3f2af8a412fc2f6',
+                'partition': '2252cbbeb3e2306f4db3134607da78aea9c6d0ea0941ce06d35314a3a958503f',
+                'rule_id': '4a08c5dad5ea8242a33c6a48710c3c1fce71cea10a3ccbafbad9e8a56034dba8',
+                'rule_version': '8319921351012c585c8ef260507f12ae94797e3c53c1200f98f55a135d8937dd',
+                'state': 'fcde653fc6bcff70c5c2f0e02b443c123099b21f793933031c5ccc4a0665157d',
+                'target': '04861317b456689454b099aa203fb771e4cf0f71482dda4b960e544afa348bda'}}
 GOLDEN_NORMALIZED = {'arkime_sessions3-x': '1c08ef8ffd802ef67c6b6df2f8c5ba27bbf40ef5439c07a677c17044030f9ae9',
  'arkime_sessions3-x+boots': '1c08ef8ffd802ef67c6b6df2f8c5ba27bbf40ef5439c07a677c17044030f9ae9',
  'romulus-host-x': 'b46c4bfa21a9d32e8f11e18df9e79e32b92bca70fdf767d3aba4192416176433',

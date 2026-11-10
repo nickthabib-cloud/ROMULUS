@@ -163,7 +163,15 @@ def _host_datasets(
         return datasets_for_families(families) if families else WINDOWS_HOST_DATASETS
     if families:
         # every logical dataset whose records can give one of the families
-        selected = {dataset for dataset, fed in LOGICAL_FAMILIES.items() if fed & set(families)}
+        selected = set()
+        for dataset, fed in LOGICAL_FAMILIES.items():
+            requested = families
+            # Lineage needs process identity. Text scheduler observations have no PID/PPID;
+            # preserve these datasets when another requested family can contribute.
+            if "process_exec" in families and dataset in {"systemd.journal", "linux.syslog", "linux.text"}:
+                requested = families - {"process_observed"}
+            if fed & requested:
+                selected.add(dataset)
         return tuple(dataset for dataset in HOST_TIMELINE_DATASETS if dataset in selected)
     return tuple(HOST_TIMELINE_DATASETS)
 

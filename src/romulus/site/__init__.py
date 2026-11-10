@@ -333,6 +333,32 @@ class _SiteDocument(BaseModel):
     domain_controller_addresses: tuple[str, ...] = ()
     directory_sync_hosts: tuple[str, ...] = ()
     directory_sync_addresses: tuple[str, ...] = ()
+    mail_domains: tuple[str, ...] = ()
+
+    @field_validator("mail_domains", mode="before")
+    @classmethod
+    def _mail_domains(cls, value):
+        if not isinstance(value, (list, tuple)) or len(value) > 1000:
+            raise ValueError("mail_domains must be a list of at most 1000 DNS domain names")
+        normalized = []
+        for item in value:
+            if not isinstance(item, str):
+                raise ValueError("mail_domains entries must be DNS domain names")  # noqa: TRY004 - Pydantic validation
+            domain = item.strip().rstrip(".").lower()
+            labels = domain.split(".")
+            if (not domain or len(domain) > 253 or len(labels) < 2
+                    or any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in labels)):
+                raise ValueError(f"invalid mail domain {item!r}")
+            try:
+                ipaddress.ip_address(domain)
+            except ValueError:
+                pass
+            else:
+                raise ValueError("mail_domains must name DNS domains, not IP addresses")
+            normalized.append(domain)
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("mail_domains must not contain duplicates")
+        return tuple(sorted(normalized))
 
     @field_validator("internal_networks", "external_networks", mode="before")
     @classmethod
@@ -432,6 +458,7 @@ class SiteFacts:
     directory_sync_hosts: tuple[str, ...] = ()
     directory_sync_addresses: tuple[str, ...] = ()
     ics_control_hosts: tuple[str, ...] = ()
+    mail_domains: tuple[str, ...] = ()
 
     @property
     def zeek(self) -> ZeekPolicy:
@@ -522,7 +549,7 @@ def _facts(document: _SiteDocument) -> SiteFacts:
     if not document.directory_sync_accounts_declared:
         content.pop("directory_sync_accounts_declared", None)
     for name in ("management_hosts", "domain_controller_addresses", "directory_sync_hosts", "directory_sync_addresses",
-                 "ics_control_hosts"):
+                 "ics_control_hosts", "mail_domains"):
         if name not in document.model_fields_set:
             content.pop(name, None)
     return SiteFacts(
@@ -539,6 +566,7 @@ def _facts(document: _SiteDocument) -> SiteFacts:
         document.directory_sync_hosts,
         document.directory_sync_addresses,
         document.ics_control_hosts,
+        document.mail_domains,
     )
 
 

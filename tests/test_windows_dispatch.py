@@ -83,6 +83,27 @@ def test_unmarked_lookalike_and_unknown_triple_are_counted_not_guessed():
     assert skips[reason] == 1
 
 
+@pytest.mark.parametrize("payload_field", ["message", "event.original"])
+def test_unmarked_windows_structure_never_becomes_linux_from_rendered_text(payload_field):
+    line = "Nov 18 14:50:00 origin sshd[42]: Accepted password for alice from 192.0.2.5 port 51234 ssh2"
+    hit = _hit(dataset="custom.application", agent_type="filebeat",
+               message=line if payload_field == "message" else "",
+               original=line if payload_field == "event.original" else None)
+    fed = {}
+    events, skips, errors = normalize_hits([hit], skip_families=fed)
+
+    assert events == [] and errors == []
+    assert skips == {"dataset:custom.application is not normalized": 1}
+    assert fed == {"dataset:custom.application is not normalized": None}
+
+    # The same independently shipped text without Windows structure still reaches the Linux fallback.
+    del hit["_source"]["winlog"]
+    events, skips, errors = normalize_hits([hit])
+    assert len(events) == 1 and events[0].family == "auth"
+    assert events[0].get("user.name") == "alice"
+    assert skips == {} and errors == []
+
+
 def test_windows_shipper_marker_wins_over_a_conflicting_linux_dataset_label():
     hit = _hit(dataset="linux.audit", agent_type="winlogbeat")
 
