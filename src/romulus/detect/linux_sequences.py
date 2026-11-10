@@ -475,6 +475,8 @@ class LinuxSequence(Playbook):
         spill.write("CREATE INDEX IF NOT EXISTS records_join ON records(role,host,key,ts)", [()])
         spill.write("CREATE INDEX IF NOT EXISTS records_cross_host ON records(role,key,ts,host)", [()])
         spill.write("CREATE INDEX IF NOT EXISTS records_pid ON records(host,pid,ts)", [()])
+        # a finding reads its records' time span by record id; without this each finding scans the table
+        spill.write("CREATE INDEX IF NOT EXISTS records_id ON records(id)", [()])
         return True
 
     def query(self, sql, params=()):
