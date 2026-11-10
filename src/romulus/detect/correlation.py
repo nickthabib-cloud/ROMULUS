@@ -20,7 +20,7 @@ from functools import lru_cache
 from typing import ClassVar, NamedTuple
 
 from romulus.detect import netdef
-from romulus.detect.alert_lanes import alert_stack_lane
+from romulus.detect.alert_lanes import alert_stack_lane, attack_tagged
 from romulus.detect.base import Match, Playbook, basename, pf
 from romulus.detect.bounded import (
     HOT_COUNT,
@@ -921,7 +921,7 @@ class Net:
     alert_sig: str | None
     conn: str = ""              # the connection's identity: transport and both endpoints, in either direction
     staged: int = 0             # kept on the stage for citation
-    alert_tech: bool = False    # the alert's signature metadata names an ATT&CK technique
+    alert_tech: bool = False    # the alert's signature metadata ties it to an attack (alert_lanes.attack_tagged)
 
     def local_side(self, ip: str, port: int) -> str | None:
         """The non-remote endpoint, if this record is one direction of a connection to ip:port."""
@@ -1278,7 +1278,7 @@ class ProcessNetworkLink(Playbook):
                scalar(e.get("network.community_id")) or None, sev if isinstance(sev, int) else None,
                category, signature, seq,
                connection_identity(e.get("network.transport"), src, sport, dst, dport), staged,
-               1 if e.family == "net_alert" and e.get("alert.mitre_technique_id") else 0)
+               1 if e.family == "net_alert" and attack_tagged(e) else 0)
         self._net_seq = seq
         store = self._store()
         try:

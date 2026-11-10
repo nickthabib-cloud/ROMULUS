@@ -6,11 +6,12 @@ from __future__ import annotations
 import pytest
 
 from romulus.detect import network
-from romulus.detect.alert_lanes import alert_stack_lane
+from romulus.detect.alert_lanes import alert_stack_lane, attack_tagged
 from tests import test_network_correlation as corr
 from tests.fixtures import zeek_logs as zl
 from tests.test_playbooks import T0, _alert, ev, run
-from tests.test_zeek_transfer import PE
+from tests.test_zeek_alerts import run as zeek_alerts
+from tests.test_zeek_transfer import HTTP, PE
 from tests.test_zeek_transfer import run as transfer
 
 
@@ -25,15 +26,18 @@ from tests.test_zeek_transfer import run as transfer
     ("A suspicious string was detected", 3, False, "lead"),
     ("Web Application Attack", 1, False, "high"),
     ("Potentially Bad Traffic", 2, False, "lead"),
-    ("Misc activity", 4, False, "lead"),
+    ("A TCP connection was detected", 4, False, "context"),
+    ("A TCP connection was detected", 4, True, "lead"),
 ])
 def test_alert_lane(category, severity, tagged, lane):
     assert alert_stack_lane(category, severity, tagged)[0] == lane
 
 
-def _low(cat, src, techniques=None):
-    """A priority-3 alert; `techniques` is its signature's ATT&CK metadata."""
+def _low(cat, src, techniques=None, signature_severity=None):
+    """A priority-3 alert; `techniques` and `signature_severity` are its signature's metadata."""
     extra = {"alert__mitre_technique_id": techniques} if techniques else {}
+    if signature_severity:
+        extra["alert__signature_severity"] = signature_severity
     return ev(family="net_alert", ts=T0, alert__signature="ET TEST sig", alert__signature_id=1, alert__severity=3,
               alert__category=cat, source__ip=src, destination__ip="192.0.2.10", **extra)
 
@@ -49,7 +53,7 @@ def test_low_priority_attack_alerts_are_leads_and_say_why():
         "198.51.100.7": "lead", "198.51.100.8": "lead", "198.51.100.9": "context", "198.51.100.6": "context"}
     assert all(m.severity == "low" for m in found.values())
     assert any("classtype names attack activity" in note for note in found["198.51.100.7"].notes)
-    assert any("names an ATT&CK technique" in note for note in found["198.51.100.8"].notes)
+    assert any("ties it to an attack" in note for note in found["198.51.100.8"].notes)
 
 
 def test_one_tagged_alert_keeps_its_whole_group_a_lead():
@@ -109,3 +113,40 @@ def test_a_positive_with_incomplete_admission_stays_a_lead_saying_what_is_missin
 
 def test_a_positive_with_nothing_citable_is_context():
     assert _decided(raw=False).lane == "context"
+
+
+@pytest.mark.parametrize(("metadata", "tagged"), [
+    ({"alert__signature_severity": "Major"}, True),
+    ({"alert__signature_severity": ["Informational", "critical"]}, True),
+    ({"alert__signature_severity": "Minor"}, False),
+    ({"alert__signature_severity": "Informational"}, False),
+    ({"alert__mitre_technique_id": ["T1046"]}, True),
+    ({"alert__mitre_technique_id": []}, False),
+    ({}, False),
+])
+def test_signature_metadata_that_ties_an_alert_to_an_attack(metadata, tagged):
+    event = ev(family="net_alert", ts=T0, alert__signature="ET TEST sig", alert__severity=3,
+               alert__category="Misc activity", source__ip="198.51.100.7", destination__ip="192.0.2.10", **metadata)
+    assert attack_tagged(event) is tagged
+
+
+def test_a_major_signature_severity_keeps_a_low_priority_alert_a_lead():
+    [match] = run(network.SuricataAlertStack, [_low("Misc activity", "198.51.100.8", signature_severity="Major")])
+    assert match.proposed_lane == "lead"
+
+
+@pytest.mark.parametrize(("host", "lane"), [("10.0.0.9", "lead"), ("files.corp.test", "context")])
+def test_internal_http_executable_transfer_from_an_ip_addressed_server_is_lateral(host, lane):
+    internal = {"id.resp_h": "10.0.0.9"}
+    [match] = transfer([PE.with_(**internal), HTTP.with_(host=host, **internal)])
+    assert match.proposed_lane == lane
+    if lane == "lead":
+        assert "; lateral)" in match.claim and "T1570" in " ".join(match.notes)
+
+
+@pytest.mark.parametrize(("name", "lane"), [("fragment_overlap", "lead"), ("TCP_Christmas", "lead"),
+                                            ("bad_TCP_checksum", "context")])
+def test_evasion_shaped_weirds_are_leads(name, lane):
+    _rule, [match] = zeek_alerts([zl.WEIRD.with_(name=name)])
+    assert match.proposed_lane == lane
+    assert ("shape of IDS evasion" in match.claim) is (lane == "lead")

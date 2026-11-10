@@ -6,14 +6,26 @@ from __future__ import annotations
 # Suricata classtypes of the lowest priority that still name attack activity (reconnaissance, a planted string), as
 # opposed to protocol decode anomalies, generic events and traffic its author marked not suspicious.
 LOW_PRIORITY_ATTACK_CATEGORIES = frozenset({"Detection of a Network Scan", "A suspicious string was detected"})
+# Signature-severity metadata (Emerging Threats' signature_severity) its authors give signatures of real attack activity.
+ATTACK_SIGNATURE_SEVERITIES = frozenset({"major", "critical"})
+
+
+def attack_tagged(event) -> bool:
+    """The alert's signature metadata ties it to an attack: an ATT&CK technique, or a Major/Critical signature
+    severity."""
+    severity = event.get("alert.signature_severity")
+    severities = severity if isinstance(severity, list) else [severity]
+    return bool(event.get("alert.mitre_technique_id")) or any(
+        isinstance(value, str) and value.strip().casefold() in ATTACK_SIGNATURE_SEVERITIES for value in severities)
 
 
 def alert_stack_lane(category, severity, attack_tagged: bool) -> tuple[str, str]:
     """(lane, severity) of IDS alerts of one category and priority. Traffic the signature author marked not suspicious
-    is context. A priority-3 alert is context unless its classtype names attack activity or its signature's metadata
-    names an ATT&CK technique: what a signature's author tied to an attack stays visible as a lead."""
+    is context. An alert of priority 3 or lower (4 is the tcp-connection classtype) is context unless its classtype
+    names attack activity or its signature's metadata ties it to an attack: what a signature's author tied to an
+    attack stays visible as a lead."""
     if category == "Not Suspicious Traffic":
         return "context", "low"
-    if severity == 3:
+    if isinstance(severity, int) and severity >= 3:
         return ("lead", "low") if attack_tagged or category in LOW_PRIORITY_ATTACK_CATEGORIES else ("context", "low")
     return ("high", "high") if severity == 1 else ("lead", "medium")

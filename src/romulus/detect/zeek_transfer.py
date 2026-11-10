@@ -180,7 +180,9 @@ class ExecutableTransfer(Playbook):
         'fidelity': 'Sniffed content and typed sender/receiver; completion and execution unknown.',
         'benign_and_cost': benign[0], 'query_cost': 'Disk-backed sensor/FUID/UID/peer joins and folded counts.',
         'next_pivot': next_checks[0], 'adds': title, 'research_basis': '; '.join(research),
-        'lanes': 'Masquerade and uncovered administrative-share writes high; unusual ingress, SMB writes and FTP transfers between internal hosts lead; routine SMB reads and HTTP downloads from named hosts context.',
+        'lanes': 'Masquerade and uncovered administrative-share writes high; unusual ingress, SMB writes, FTP transfers between internal '
+                 'hosts and internal HTTP from an IP-addressed server lead; routine SMB reads and HTTP downloads from '
+                 'named hosts context.',
         'retrieval': _LOGGING,
     }
 
@@ -352,6 +354,11 @@ class ExecutableTransfer(Playbook):
                   and (_literal_host(meta.get('http.hostname')) or
                        (meta.get('destination.port') is not None and meta.get('destination.port') != 80))):
                 lane, category = 'lead', 'ingress'
+            elif (protocol == 'HTTP' and internal_sender and internal_receiver
+                  and _literal_host(meta.get('http.hostname'))):
+                # An ad hoc web server addressed by IP (a one-line Python or PowerShell server) handing a tool to
+                # another internal host; managed software distribution is addressed by name.
+                lane, category = 'lead', 'lateral'
             elif protocol == 'HTTP' and (not _text(meta.get('http.hostname')) or meta.get('destination.port') is None):
                 continue
             else:
