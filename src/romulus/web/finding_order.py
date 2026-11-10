@@ -103,11 +103,17 @@ def _encode_cursor(row):
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
-def finding_page(repo, hunt_id, *, after="", limit=50, predicates=(), columns=None):
-    """Fetch one importance-ordered page and count its remaining indexed range."""
+def finding_page(repo, hunt_id, *, after="", limit=50, predicates=(), columns=None, lane=None):
+    """Fetch one importance-ordered page and count its remaining indexed range. With `lane`, the page is bounded to
+    that lane's rank in the order's own index, so a sparse lane reads only its rows rather than the whole hunt."""
     if type(limit) is not int or not 1 <= limit <= 200:
         raise ValueError("invalid findings page limit")
     order = finding_order()[0]
+    if lane is not None:
+        rank = {"urgent": 0, "high": 1, "lead": 2}.get(lane)
+        if rank is None:
+            raise ValueError("invalid findings lane")
+        predicates = (*predicates, order[0] == rank)
     cursor = _decode_cursor(after) if after else None
     where = (t.candidate.c.hunt_id == hunt_id, *predicates)
     projection = list(columns or (t.candidate,))
@@ -119,6 +125,9 @@ def finding_page(repo, hunt_id, *, after="", limit=50, predicates=(), columns=No
         # Separate ranges let SQLite use every equal prefix of the expression
         # index; a row-value comparison would rescan the hunt's earlier pages.
         ranges = finding_order(cursor=cursor)[2] if cursor is not None else [(0, True)]
+        if lane is not None and cursor is not None:
+            # the last range is "a later rank"; a page bounded to one lane has none
+            ranges = ranges[:-1]
         for start, remaining_range in ranges:
             rows.extend(dict(row) for row in connection.execute(select(*projection).where(
                 *where, remaining_range).order_by(*order[start:]).limit(limit - len(rows))).mappings())
@@ -127,6 +136,8 @@ def finding_page(repo, hunt_id, *, after="", limit=50, predicates=(), columns=No
         if not rows:
             return rows, 0, None
         through_ranges = finding_order(rows[-1])[2]
+        if lane is not None:
+            through_ranges = through_ranges[:-1]
         remaining = sum(int(connection.execute(select(func.count()).select_from(t.candidate).where(
             t.candidate.c.hunt_id == hunt_id, *predicates, remaining_range
         )).scalar_one()) for _, remaining_range in through_ranges)

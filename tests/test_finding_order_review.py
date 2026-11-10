@@ -189,3 +189,34 @@ def test_migration_order_indexes_upgrade_downgrade_reupgrade(tmp_path, foreign_k
         if version == "0036":
             assert [row["id"] for row in finding_page(repo, "h1")[0]] == ["z", "a"]
     engine.dispose()
+
+
+def test_a_lane_filter_reads_only_that_lane_in_the_order_index():
+    repo = _repo()
+    _seed(repo, [_candidate(f"lead-{i:04}") for i in range(300)] + [_candidate("u-1", lane="urgent")])
+    statements = []
+    event.listen(repo.engine, "before_cursor_execute", lambda _c, _x, sql, params, *_: statements.append((sql, params)))
+    rows, remaining, cursor = finding_page(repo, "h1", lane="urgent")
+    assert [row["id"] for row in rows] == ["u-1"] and remaining == 0 and cursor is None
+    with repo.engine.connect() as connection:
+        plans = [" ".join(str(row) for row in connection.exec_driver_sql("EXPLAIN QUERY PLAN " + sql, params))
+                 for sql, params in list(statements)]
+    # the lane's rank is an equality on the index's first expression, not a scan of the hunt's whole range
+    assert plans and all("ix_candidate_finding_order (hunt_id=? AND <expr>=?" in plan for plan in plans)
+    with pytest.raises(ValueError):
+        finding_page(repo, "h1", lane="context")
+
+
+def test_a_lane_bound_page_walks_its_whole_lane_and_nothing_else():
+    repo = _repo()
+    leads = [f"lead-{i:04}" for i in range(130)]
+    _seed(repo, [_candidate(cid) for cid in reversed(leads)] + [
+        _candidate(f"u-{i}", lane="urgent") for i in range(3)] + [_candidate(f"h-{i}", lane="high") for i in range(4)])
+    seen, cursor = [], ""
+    while True:
+        rows, remaining, cursor = finding_page(repo, "h1", lane="lead", after=cursor)
+        seen.extend(row["id"] for row in rows)
+        assert remaining == len(leads) - len(seen)
+        if not cursor:
+            break
+    assert seen == leads

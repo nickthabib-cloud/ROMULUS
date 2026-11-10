@@ -195,10 +195,13 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
             from urllib.parse import urlencode
 
             from romulus.store import schema as tables
-            predicates = (tables.candidate.c.lane == lane,) if lane in LANE_ORDER else (tables.candidate.c.lane != "context",)
+            ranked_lane = lane if lane in ("urgent", "high", "lead") else None
+            # a ranked lane is selected by its rank in the order index (the same rows as lane == it)
+            predicates = (() if ranked_lane else (tables.candidate.c.lane == lane,) if lane in LANE_ORDER
+                          else (tables.candidate.c.lane != "context",))
             try:
                 cands, cands_more, cursor = finding_page(repo, hunt_id, after=after,
-                    predicates=predicates, columns=tuple(getattr(tables.candidate.c, key) for key in (
+                    predicates=predicates, lane=ranked_lane, columns=tuple(getattr(tables.candidate.c, key) for key in (
                         "id", "lane", "severity", "confidence", "priority", "ts", "rule_id", "claim", "provenance",
                         "agent_hypothesis_id")))
             except ValueError as error:
