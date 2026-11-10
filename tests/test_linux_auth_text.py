@@ -231,7 +231,6 @@ def test_parser_rejects_multiline_and_oversized_records():
 @pytest.mark.parametrize("line,program", [
     ('Mon Nov  9 10:20:30 2026 [pid 7] [alice] OK LOGIN: Client "192.0.2.1"', "vsftpd"),
     ('Nov 09 10:20:30 imap-login: Info: Login: user=<alice>, method=PLAIN, rip=192.0.2.1', "dovecot"),
-    ('2026-11-09 10:20:30 AUTH: Received control message: AUTH_FAILED', "openvpn"),
     ('Mon Nov  9 10:20:30 2026 AUTH: Received control message: AUTH_FAILED', "openvpn"),
 ])
 def test_fixed_application_envelopes(line, program):
@@ -242,6 +241,7 @@ def test_fixed_application_envelopes(line, program):
 
 
 def test_no_sniffing_of_arbitrary_embedded_auth_text():
+    assert identify_auth('2026-11-09 10:20:30 AUTH: Received control message: AUTH_FAILED') is None
     assert identify_auth("an arbitrary application says AUTH_FAILED") is None
     assert identify_auth('note: [pid 7] [alice] OK LOGIN: Client "192.0.2.1"') is None
 

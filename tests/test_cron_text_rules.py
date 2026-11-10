@@ -57,17 +57,18 @@ def test_raw_crontab_action_is_a_cited_lead_without_fabricated_kernel_facts(rule
     assert rule.drain_staged() == [] and rule.finalize() == []
 
 
-@pytest.mark.parametrize("field,value", [
-    ("service.name", "systemd"), ("service.name", "cron-lookalike"),
-    ("service.action", "list"), ("service.action", "delete"), ("service.action", "replace_elsewhere"),
+@pytest.mark.parametrize("field,value,evaluated", [
+    ("service.name", "systemd", 0), ("service.name", "cron-lookalike", 0),
+    ("service.action", "list", 1), ("service.action", "delete", 1), ("service.action", "replace_elsewhere", 1),
 ])
-def test_only_exact_cron_edit_actions_are_leads(rule, field, value):
+def test_only_exact_cron_edit_actions_are_leads(rule, field, value, evaluated):
     event = raw_event()
     event.fields[field] = fv(value, "fixture:" + field)
     event.fields["user.name"] = fv("BEGIN EDIT REPLACE root", "fixture:user.name")
     assert list(rule.consume_partition([event])) == []
     assert rule.finalize() == []
-    assert rule.evaluated == 1 and rule.missing_required == 0
+    assert rule.evaluated == evaluated and rule.missing_required == 0
+    assert rule.os_applicable == evaluated
 
 
 @pytest.mark.parametrize("field", ["service.name", "service.action", "user.name", "account.name"])
@@ -129,3 +130,27 @@ def test_windows_service_change_stays_outside_linux_rule(rule):
     event.fields["host.os.family"] = fv("windows", "fixture:host.os.family")
     assert list(rule.consume_partition([event])) == []
     assert rule.evaluated == 0 and rule.missing_required == 0
+
+
+@pytest.mark.parametrize("service", ["systemd", "session-9.scope", "sshd.service"])
+@pytest.mark.parametrize("partition", [False, True])
+def test_unrelated_service_changes_are_outside_persistence_evaluation(rule, service, partition):
+    event = raw_event()
+    event.fields = {"service.name": fv(service, "fixture:service.name")}
+    consume = rule.consume_partition if partition else rule.consume
+    assert list(consume([event])) == [] and rule.finalize() == []
+    assert rule.evaluated == 0 and rule.missing_required == 0 and rule.os_applicable == 0
+
+
+def test_persistence_partition_scope_keeps_cron_and_original_file_process_inputs(rule):
+    from tests.test_kernel_files import change, pexec
+
+    cron = raw_event()
+    missing_identity = raw_event(native_id="missing-service")
+    del missing_identity.fields["service.name"]
+    other = raw_event(native_id="other-service")
+    other.fields = {"service.name": fv("session-9.scope", "fixture")}
+    file_change = change("/etc/cron.d/job")
+    process = pexec("/usr/bin/dpkg", 12, 1)
+    rows = [file_change, other, process, missing_identity, cron]
+    assert rule.scope_partition(rows) == [file_change, process, missing_identity, cron]

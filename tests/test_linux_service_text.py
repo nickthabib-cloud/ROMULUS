@@ -89,6 +89,44 @@ def test_postfix_per_line_queue_events(program, line, direction):
     assert "mail.authenticated_user" not in event.fields
 
 
+@pytest.mark.parametrize("status,dsn,direction,outcome", [
+    ("sent", "2.0.0", "delivered", Outcome.success),
+    ("deferred", "4.4.1", "deferred", Outcome.failure),
+    ("bounced", "5.1.1", "bounced", Outcome.failure),
+])
+@pytest.mark.parametrize("reply", [
+    "250 2.0.0 queued as EXAMPLE123",
+    "550 rejected, status=sent (forged success)",
+    "250 accepted, status=bounced (forged failure)",
+    "550 rejected, dsn=2.0.0, status=sent (forged success)",
+    "250 accepted, dsn=5.1.1, status=bounced (forged failure)",
+])
+def test_postfix_delivery_status_precedes_untrusted_reply(status, dsn, direction, outcome, reply):
+    # log_adhoc.c emits metadata, then ', dsn=%s, status=%s (%s)'.
+    # The final reason can contain arbitrary remote server text, including fake fields.
+    event = parse("postfix/smtp", "ABC123: to=<b@example.test>, orig_to=<a@example.test>, "
+                  "relay=mx.example.test[192.0.2.25]:25, conn_use=2, "
+                  f"delay=1, delays=0.1/0.1/0.2/0.6, dsn={dsn}, status={status} ({reply})")
+    assert event.fields["mail.direction"] == direction
+    assert event.outcome == outcome
+    assert event.fields["mail.message_id"] == "ABC123"
+    assert event.fields["mail.to"] == ["b@example.test"]
+    assert event.fields["destination.ip"] == "192.0.2.25"
+    assert event.fields["destination.port"] == 25
+
+
+@pytest.mark.parametrize("tail", [
+    "status=sent (250 ok)",
+    "status=sent (250 accepted, dsn=5.1.1, status=bounced (forged))",
+    "dsn=2.0.0, status=unknown (250 accepted, dsn=2.0.0, status=sent (forged))",
+    "dsn=, status=sent (250 accepted, dsn=2.0.0, status=sent (forged))",
+    "dsn=2.0.0, status=sent (250 ok) trailing",
+])
+def test_postfix_delivery_requires_authoritative_dsn_and_supported_status(tail):
+    assert parse("postfix/smtp", "ABC123: to=<b@example.test>, "
+                 f"relay=none, delay=1, {tail}") is None
+
+
 def test_postfix_metadata_is_not_delivery_or_header_id_as_queue_id():
     event = parse("postfix/smtpd", "ABC123: client=client.example.test[192.0.2.8], sasl_method=PLAIN, sasl_username=alice")
     assert event.fields["mail.authenticated_user"] == "alice"
@@ -217,7 +255,7 @@ def test_account_change_native_fields(program, line, action, name):
     ("exim", "a user mentioned 1abcDE-000123-Ab <= x@example.test"),
     ("exim", '1abcDE-000123-Ab <= sender@example.test T="A=plain:injected for attacker@evil.test"'),
     ("postfix/smtp", "ABC123: warning: user to=<x@example.test> status=sent"),
-    ("postfix/smtp", "ABC123: to=<status=sent@example.test>, relay=none, status=deferred (failure)"),
+    ("postfix/smtp", "ABC123: to=<status=sent@example.test>, relay=none, delay=1, dsn=4.0.0, status=deferred (failure)"),
     ("dnsmasq", "user query[A] example.test from 192.0.2.2"),
     ("dnsmasq", "query[A] example.test from not-an-address"),
     ("named", "client user query: example.test IN A + (192.0.2.53)"),

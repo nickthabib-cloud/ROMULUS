@@ -634,7 +634,7 @@ class PersistencePathChange(Playbook):
     os_families = ("linux",)
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.persistence_path_change"
-    version = "8"
+    version = "9"
     title = "Persistence-location file changes and crontab manager activity"
     anchor_class = "persistence"
     kind = "aggregate"
@@ -726,6 +726,16 @@ class PersistencePathChange(Playbook):
     def retained_events(self) -> list[TypedEvent]:
         return []
 
+    def scope_partition(self, events):
+        scoped = []
+        for event in super().scope_partition(events):
+            if event.family == "service_change":
+                service = event.get("service.name")
+                if isinstance(service, str) and service.strip() and service != "cron":
+                    continue
+            scoped.append(event)
+        return scoped
+
     def consume(self, events):
         fresh = [e for e in events if e.family in self.families + self.context_families and e.id not in self._seen]
         self._batch = events
@@ -755,7 +765,6 @@ class PersistencePathChange(Playbook):
             self.missing_required += 1
             return
         if service != "cron":
-            self.evaluated += 1
             return
         if not isinstance(action, str) or not action.strip():
             self.missing_required += 1

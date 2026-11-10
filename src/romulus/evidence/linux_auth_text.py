@@ -175,13 +175,28 @@ def _postfix(message: str) -> ParsedLine | None:
 def _exim(message: str) -> ParsedLine | None:
     match = re.fullmatch(r"(?P<method>\S+) authenticator failed for (?P<detail>.*)", message)
     if match:
-        peer, sep, error = match["detail"].partition(": ")
-        if not sep:
-            return None
-        address = re.search(r"\[([^\]]+)\](?::(\d+))?$", peer)
+        # host_and_ident puts the peer after the optional hostname/HELO and
+        # before interface/ident metadata. Neither HELO nor the error is a peer.
+        peer_tail = (r"\[[^\[\]\r\n]+\](?::\d+)?(?: I=\[[^\[\]]+\](?::\d+)?)?"
+                     r"(?: U=\S+)?(?: Ci=\S+)?: [45]\d{2} ")
+        boundaries = re.finditer(peer_tail, match["detail"])
+        if next(boundaries, None) is None or next(boundaries, None) is not None:
+            # Permissive HELO and account text can contain complete fake framing.
+            # No first/last delimiter choice can authenticate an ambiguous peer.
+            return _event("exim", Outcome.failure, method=match["method"], caveats=(_PARTIAL,))
+        address = re.fullmatch(
+            r"(?:H=)?(?:[^\s()[\]]+ )?(?:\([^()\r\n]*\) )?"
+            r"\[(?P<ip>[^\[\]]+)\](?::(?P<port>\d+))?"
+            r"(?: I=\[[^\[\]]+\](?::\d+)?)?(?: U=\S+)?(?: Ci=\S+)?"
+            r": (?P<error>[45]\d{2} .*)", match["detail"])
+        if address is None:
+            # The failure decision is explicit, but an unsupported peer envelope
+            # cannot establish an address or account for a guessing claim.
+            return _event("exim", Outcome.failure, method=match["method"])
+        error = address["error"]
         _, user_sep, user = error.partition(" (set_id=")
         return _event("exim", Outcome.failure, method=match["method"],
-                      ip=address[1] if address else None, port=address[2] if address else None,
+                      ip=address["ip"], port=address["port"],
                       user=user[:-1] if user_sep and user.endswith(")") else None)
     # Only message arrival metadata can assert an authenticated sender. A
     # subject or another free-text field containing A= is never inspected.
@@ -465,12 +480,13 @@ def identify_auth(line: str) -> tuple[str, str] | None:
     """Recognize fixed native-file envelopes; syslog envelopes belong upstream."""
     if not _bounded(line):
         return None
-    date = _CTIME.fullmatch(line) or _DATE.fullmatch(line)
+    ctime = _CTIME.fullmatch(line)
+    date = ctime or _DATE.fullmatch(line)
     if date:
         body = date["body"]
         if body.startswith("[pid ") and parse_auth("vsftpd", body):
             return "vsftpd", body
-        if parse_auth("openvpn", body):
+        if ctime and parse_auth("openvpn", body):
             return "openvpn", body
     dovecot = re.fullmatch(r"[A-Z][a-z]{2} +\d{1,2} \d{2}:\d{2}:\d{2} (?P<body>.*)", line)
     if dovecot and parse_auth("dovecot", dovecot["body"]):

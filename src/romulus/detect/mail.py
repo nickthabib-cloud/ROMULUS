@@ -207,7 +207,9 @@ class MailExecutableAttachment(Playbook):
     severity = "high"
     attack = ("T1566.001",)
     assures_negative = False
-    positive_only_reason = "MTA logs often omit attachment names; absence of names cannot exclude executable attachments."
+    positive_only_reason = (
+        "No parsed MTA log currently supplies attachment names; this rule only evaluates explicitly supplied typed "
+        "attachment names, so absence cannot exclude executable attachments.")
     state_slice = "strong"
     benign = ("Authorized software distribution can include executable attachments; a filename does not prove execution.",)
     next_checks = ("Inspect the preserved message and attachment safely and verify sender authorization.",)

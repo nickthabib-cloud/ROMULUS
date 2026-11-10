@@ -172,11 +172,15 @@ def _postfix(program: str, message: str) -> ParsedLine | None:
         fields.update({"mail.direction": "received", "mail.from": part[1],
                        "mail.size": int(part[2]), "mail.to_count": int(part[3])})
     elif component in ("smtp", "lmtp", "local", "virtual"):
-        part = re.fullmatch(r"to=<([^>]*)>, (.*), status=(sent|deferred|bounced)(?: \(.*\))?", body)
-        if not part:
+        # Postfix's status follows its DSN; the final reason is untrusted reply text.
+        # Split once so a fake DSN/status inside that reason cannot replace either field.
+        delivery, _, response = body.partition(", status=")
+        part = re.fullmatch(r"to=<([^>]*)>, (.*), dsn=\S+", delivery)
+        status = re.fullmatch(r"(sent|deferred|bounced)(?: \(.*\))?", response)
+        if not part or not status:
             return None
         _recipients(fields, (part[1],))
-        fields["mail.direction"] = {"sent": "delivered", "deferred": "deferred", "bounced": "bounced"}[part[3]]
+        fields["mail.direction"] = {"sent": "delivered", "deferred": "deferred", "bounced": "bounced"}[status[1]]
         relay = re.search(r"(?:^|, )relay=([^,\s]+)", part[2])
         if relay:
             peer = re.fullmatch(r"([^\[]+)\[([^\]]+)\](?::(\d+))?", relay[1])

@@ -157,3 +157,23 @@ def test_malformed_recipient_domain_cannot_be_counted_as_external():
     pb = burst()
     assert run(pb, [mail(i, recipients=[f"r{i}@internal.test>"]) for i in range(50)]) == []
     assert pb.missing_required == 50
+
+
+@pytest.mark.parametrize("state", ["positive_only", "no_match_complete"])
+def test_attachment_coverage_and_catalog_name_the_missing_mta_producer(state):
+    from romulus.catalog import CoverageStrength, build_catalog, strength_for_rule
+    from romulus.detect.mail import MailExecutableAttachment
+    from romulus.report.manifest import _coverage
+
+    pb = MailExecutableAttachment()
+    assert run(pb, [mail(1)]) == [] and pb.missing_required == 1
+    metadata = build_catalog(playbooks=[MailExecutableAttachment]).rule(pb.id)
+    assert strength_for_rule(metadata) is CoverageStrength.POSITIVE_ONLY
+    reason = "No parsed MTA log currently supplies attachment names"
+    assert reason in metadata.positive_only_reason
+    cells = [{"rule_id": pb.id, "target": "mail-logs", "partition": "part", "state": state,
+              "evaluated": 0, "matched": 0, "detail": {}}]
+    coverage = _coverage(cells, targets=["mail-logs"], rule_ids=[pb.id])
+    result = coverage["rules"][0]["search_result"]
+    assert "positive-only" in result and reason in result
+    assert "searched in full" not in result

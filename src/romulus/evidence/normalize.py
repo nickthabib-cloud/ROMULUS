@@ -3479,9 +3479,9 @@ def normalize_text(hit: dict) -> list[TypedEvent]:
         parsed = TextLine("syslog", program, line)
     dataset = document_dataset(src) or "(no dataset)"
     if parsed.format == "too_long":
-        raise TextSkip(f"text line too long: {dataset}")
+        raise TextSkip(f"text line too long: {dataset}"[:256])
     if parsed.format == "unknown":
-        raise TextSkip(f"text line in no recognized format: {dataset}")
+        raise TextSkip(f"text line in no recognized format: {dataset}"[:256])
     origin = f"{hit['_id']}:{path}~{parsed.format}"
     if parsed.format == "http_access":
         event = normalize_apache_access(hit, parsed_fields=parsed.fields, line_origin=origin)
@@ -3501,7 +3501,8 @@ def normalize_text(hit: dict) -> list[TypedEvent]:
         except Skip as error:
             records = _program_events(hit, parsed.program, parsed.message, origin, journal=journal)
             if not records:
-                raise Skip(f"text format {parsed.format}, program {parsed.program!r} is not normalized: {dataset}") from error
+                reason = f"text format {parsed.format}, program {parsed.program!r} is not normalized: {dataset}"
+                raise Skip(reason[:256]) from error
             for record in records:
                 _text_provenance(record, parsed, origin)
             return records
@@ -3671,7 +3672,7 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                 ds = "linux.text"
                 events.extend(normalize_text(h))
                 if shapes is not None:
-                    key = "linux.text:" + (document_dataset(h["_source"]) or "(no dataset)")
+                    key = ("linux.text:" + (document_dataset(h["_source"]) or "(no dataset)"))[:256]
                     shapes[key] = shapes.get(key, 0) + 1
             else:
                 reason = f"dataset:{ds or document_dataset(h['_source'])} is not normalized"
