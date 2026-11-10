@@ -599,7 +599,9 @@ def test_groupadd_line_is_a_group_creation_record():
 def test_other_syslog_identifiers_are_counted_by_identifier():
     events, skips = _events([fx.syslog("cron", 77, "(root) CMD (run-parts /etc/cron.hourly)",
                                        dataset="system.syslog")])
-    assert not events and skips == {"syslog identifier 'cron' is not normalized": 1}
+    assert not skips and len(events) == 1
+    assert events[0].family == "process_observed"
+    assert events[0].get("process.command_line") == "run-parts /etc/cron.hourly"
 
 
 def test_journald_audit_copy_without_source_time_is_counted_not_paired():

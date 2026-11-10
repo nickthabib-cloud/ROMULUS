@@ -86,6 +86,11 @@ class TypedEvent(BaseModel):
             entity = ("domain", str(v).lower(), "subject")
             if v and entity not in out:
                 out.append(entity)
+        if self.family == "vpn_session":
+            for name in ("vpn.assigned_ip", "vpn.assigned_ipv6"):
+                value = self.get(name)
+                if value:
+                    out.append(("ip", str(value), "assigned"))
         return out
 
 

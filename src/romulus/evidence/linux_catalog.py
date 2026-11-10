@@ -92,15 +92,16 @@ LINUX_LOGICAL_DATASETS: tuple[str, ...] = tuple(LINUX_SHIPPER_DATASETS)
 # The event families each logical dataset can feed. An audit group's records can be any of its families; journal
 # and syslog lines feed sshd/sudo/useradd/systemd records.
 _AUDIT_ADMIN = frozenset({"account_change", "service_change", "audit_config", "system_state"})
+TEXT_FAMILIES = frozenset({"auth", "mail_message", "vpn_session", "dns_query", "http_access", "web_error",
+                           "net_flow", "process_observed", "service_change", "account_change"})
 LOGICAL_FAMILIES: dict[str, frozenset[str]] = {
     "linux.audit": frozenset({"process_exec", "net_socket", "auth", "file_change", "file_access", "kernel_module",
                               "process_observed"}) | _AUDIT_ADMIN,
-    "systemd.journal": frozenset({"auth", "privilege_use", "service_change"}),
-    "linux.syslog": frozenset({"auth", "privilege_use", "account_change", "service_change"}),
+    "systemd.journal": TEXT_FAMILIES | {"privilege_use"},
+    "linux.syslog": TEXT_FAMILIES | {"privilege_use"},
     "apache.access": frozenset({"http_access"}),
     "apache.error": frozenset({"web_error"}),
-    "linux.text": frozenset({"auth", "mail_message", "vpn_session", "dns_query", "http_access", "web_error",
-                              "net_flow", "process_observed", "service_change", "account_change"}),
+    "linux.text": TEXT_FAMILIES,
 }
 FAMILY_DATASETS = {name: ("linux.audit",) for name in FAMILY_FIELDS}
 # event.module values (and the journald input type) whose documents are Linux host telemetry of one logical dataset:

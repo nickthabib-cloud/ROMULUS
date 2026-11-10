@@ -9,7 +9,10 @@ from __future__ import annotations
 import ipaddress
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
+
+from romulus.evidence.linux_auth_text import identify_auth
+from romulus.evidence.linux_service_text import identify_service
 
 MAX_LINE_BYTES = 65_536
 _BSD = re.compile(r"^(?:<\d{1,3}>)?(?P<time>[A-Z][a-z]{2} +\d{1,2} \d{2}:\d{2}:\d{2}|"
@@ -71,6 +74,14 @@ def classify(line: str) -> TextLine:
         return TextLine("unknown")
     if len(line) > MAX_LINE_BYTES or len(line.encode("utf-8", errors="replace")) > MAX_LINE_BYTES:
         return TextLine("too_long")
+    # Fixed native envelopes precede BSD headers: Dovecot's native file has a
+    # timestamp followed directly by imap-login, without a syslog hostname.
+    native = identify_auth(line) or identify_service(line)
+    if native is not None:
+        stamp = re.match(r"^(?:\[)?(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?(?: [+-]\d{4})?|"
+                         r"[A-Z][a-z]{2} [A-Z][a-z]{2} +\d{1,2} \d{2}:\d{2}:\d{2} \d{4}|"
+                         r"[A-Z][a-z]{2} +\d{1,2} \d{2}:\d{2}:\d{2}|\d{9,19}(?:\.\d{1,9})?)(?: |\])", line)
+        return TextLine("application", native[0], native[1], timestamp=stamp[1] if stamp else None)
     if match := _RFC.fullmatch(line):
         body = _structured_body(match["rest"])
         if body is not None:
@@ -103,6 +114,11 @@ def inline_time(value: str | None, pipeline: datetime) -> datetime | None:
     """Parse diagnostic inline time only. A missing year/zone uses the pipeline's year/zone."""
     if not value or value == "-":
         return None
+    if re.fullmatch(r"\d{9,19}(?:\.\d{1,9})?", value):
+        try:
+            return datetime.fromtimestamp(float(value), UTC)
+        except (OverflowError, OSError, ValueError):
+            return None
     try:
         result = datetime.fromisoformat(value)
     except ValueError:

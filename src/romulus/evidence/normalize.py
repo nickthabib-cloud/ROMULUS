@@ -42,6 +42,7 @@ from romulus.evidence.auditd import (
 from romulus.evidence.certificates import certificate_fields as _certificate_fields
 from romulus.evidence.certificates import dn_parts as _dn_parts
 from romulus.evidence.community import community_id
+from romulus.evidence.linux_auth_text import parse_auth
 from romulus.evidence.linux_catalog import (
     APACHE_ACCESS,
     APACHE_ERROR,
@@ -58,7 +59,8 @@ from romulus.evidence.linux_catalog import (
     text_payload,
     unmatched_families,
 )
-from romulus.evidence.linux_text import classify, inline_time
+from romulus.evidence.linux_service_text import parse_service
+from romulus.evidence.linux_text import TextLine, classify, inline_time
 from romulus.evidence.raw_scrub import clean_source, might_be_zeek
 from romulus.evidence.typed import EVIDENCE_VERSION, FieldValue, Outcome, RawRef, TypedEvent, event_id, fv
 from romulus.evidence.windows import (
@@ -3330,10 +3332,45 @@ def _auditbeat_group(h: dict, errors: list[tuple[str, str]]) -> list[tuple[dict,
     return members
 
 
+def _program_events(hit: dict, program: str, message: str, origin: str) -> list[TypedEvent]:
+    ref = _ref(hit)
+    return [TypedEvent(id=event_id(parsed.family, [ref]), family=parsed.family,
+                       ts=_ts(hit["_source"]["@timestamp"]), host=_get(hit["_source"], "host.name"),
+                       fields={key: fv(value, origin) for key, value in parsed.fields.items()},
+                       outcome=parsed.outcome, caveats=list(parsed.caveats), raw=[ref], normalizer=NORMALIZER_VERSION)
+            for parsed in (parse_auth(program, message), parse_service(program, message)) if parsed is not None]
+
+
+def _linux_events(hit: dict, normalizer, *args) -> list[TypedEvent]:
+    """Keep every existing successful normalization unchanged; extend only unsupported messages."""
+    try:
+        return [normalizer(hit, *args)]
+    except AuditCopy:
+        raise
+    except Skip:
+        src = hit["_source"]
+        message = src.get("message")
+        program = (_get(src, "syslog.identifier") or _get(src, "log.syslog.appname")
+                   or _get(src, "process.name") or _get(src, "journald.process.name"))
+        path = "message"
+        if normalizer is normalize_journal:
+            journal = json.loads(_get(src, "event.original"))
+            message = journal.get("MESSAGE") or message
+            program = journal.get("SYSLOG_IDENTIFIER") or journal.get("_COMM")
+            path = "event.original#journal:MESSAGE"
+        if isinstance(program, str) and isinstance(message, str):
+            events = _program_events(hit, program, message, f"{hit['_id']}:{path}~{program}")
+            if events:
+                return events
+        raise
+
+
 def normalize_text(hit: dict) -> list[TypedEvent]:
     src = hit["_source"]
     path, line = text_payload(src)
     parsed = classify(line)
+    if parsed.format == "unknown" and isinstance(program := _get(src, "process.name"), str):
+        parsed = TextLine("syslog", program, line)
     dataset = document_dataset(src) or "(no dataset)"
     if parsed.format == "too_long":
         raise TextSkip(f"text line too long: {dataset}")
@@ -3354,8 +3391,18 @@ def normalize_text(hit: dict) -> list[TypedEvent]:
             else:
                 event = _journal_event(hit, journal, lambda _: origin, kind="text")
         except Skip as error:
-            raise TextSkip(f"text format {parsed.format}, program {parsed.program!r} is not normalized: {dataset}") from error
+            records = _program_events(hit, parsed.program, parsed.message, origin)
+            if not records:
+                raise TextSkip(f"text format {parsed.format}, program {parsed.program!r} is not normalized: {dataset}") from error
+            for record in records:
+                _text_provenance(record, parsed, origin)
+            return records
         event.caveats.append(SYSLOG_WRITER_CAVEAT)
+    _text_provenance(event, parsed, origin)
+    return [event]
+
+
+def _text_provenance(event: TypedEvent, parsed: TextLine, origin: str) -> None:
     if parsed.hostname not in (None, "-"):
         event.fields["log.syslog.hostname"] = fv(parsed.hostname, origin)
     event.fields["log.format"] = fv(parsed.format, origin)
@@ -3368,7 +3415,6 @@ def normalize_text(hit: dict) -> list[TypedEvent]:
             if seconds:
                 event.caveats.append("Clock offset: inline log time differs from the pipeline timestamp; "
                                      "the pipeline timestamp is retained.")
-    return [event]
 
 
 def zeek_skip_families(names) -> frozenset[str]:
@@ -3493,11 +3539,11 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                         event_groups.append(((audit_host(h["_source"], first), first.ts, first.serial), members,
                                              str(action) if first.reconstructed else None))
                 elif shape.shape == JOURNAL_JSON:
-                    events.append(normalize_journal(h, journal_boots))
+                    events.extend(_linux_events(h, normalize_journal, journal_boots))
                 elif shape.shape == JOURNAL_FIELDS:
-                    events.append(normalize_journal_fields(h, journal_boots))
+                    events.extend(_linux_events(h, normalize_journal_fields, journal_boots))
                 elif shape.shape == SYSLOG_LINE:
-                    events.append(normalize_syslog(h))
+                    events.extend(_linux_events(h, normalize_syslog))
                 elif shape.shape == APACHE_ACCESS:
                     events.append(normalize_apache_access(h))
                 elif shape.shape == APACHE_ERROR:
