@@ -3534,6 +3534,23 @@ def normalize_text(hit: dict) -> list[TypedEvent]:
 def _text_provenance(event: TypedEvent, parsed: TextLine, origin: str) -> None:
     if parsed.hostname not in (None, "-"):
         event.fields["log.syslog.hostname"] = fv(parsed.hostname, origin)
+    if not (isinstance(event.host, str) and event.host.strip()):
+        event.host = None
+        header = (parsed.hostname or "").lower().rstrip(".")
+        host_origin = origin.rsplit("~", 1)[0] + "#syslog-header"
+        if header and header != "-" and header.split(".", 1)[0] != "localhost":
+            try:
+                address = str(ipaddress.ip_address(header))
+            except ValueError:
+                short_name = header.split(".", 1)[0]
+                if short_name:
+                    event.host = short_name
+                    event.fields["host.name"] = fv(short_name, host_origin)
+                    event.caveats.append("Host comes from the log line's own header; the collector did not name it.")
+            else:
+                if not event.has("host.ip"):
+                    event.fields["host.ip"] = fv(address, host_origin)
+                    event.caveats.append("Host IP comes from the log line's own header; no host name was recorded.")
     event.fields["log.format"] = fv(parsed.format, origin)
     if parsed.timestamp not in (None, "-"):
         event.fields["log.inline_timestamp"] = fv(parsed.timestamp, origin)
