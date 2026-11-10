@@ -490,7 +490,8 @@ def _text_sample(client, target: str, query: dict, records: int | None, *, count
     """One bounded source sample; format counts describe this sample, never the whole index."""
     from romulus.evidence.linux_text import classify
 
-    result = {"sampled": 0, "formats": {}, "programs": {}, "complete": False, "notes": []}
+    result = {"sampled": 0, "formats": {}, "programs": {}, "complete": False,
+              "sample_complete": False, "notes": []}
     if count:
         result["records"] = None
     try:
@@ -503,6 +504,7 @@ def _text_sample(client, target: str, query: dict, records: int | None, *, count
         return result
     partial = bool(response.get("timed_out") or response.get("terminated_early")
                    or (response.get("_shards") or {}).get("failed"))
+    result["sample_complete"] = not partial
     if partial:
         result["notes"].append("text sample incomplete: source timeout, early termination, or failed shards")
     if count:

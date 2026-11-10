@@ -205,10 +205,12 @@ def _not_assessed(hunt_manifest: dict, sweep_detail: dict) -> list[dict]:
             continue
         for dataset, count in sorted(inventory.items()):
             if dataset not in retrieved:
+                text_reason = (stats.get("linux_text_not_retrieved") or {}).get(target, {}).get(dataset)
                 out.append({"target": target, "dataset": dataset, "records": count,
                             "count_scope": "whole index at source preflight, not only the hunt window",
-                            "reason": "not retrieved by the sweep: no normalizer reads this dataset, so no rule "
-                                      "evaluates it"})
+                            "reason": ("not retrieved: " + text_reason if text_reason else
+                                       "not retrieved by the sweep: no normalizer reads this dataset, so no rule "
+                                       "evaluates it")})
         if not (profiles.get(target) or {}).get("datasets_complete", True):
             out.append({"target": target, "dataset": f"any dataset other than {', '.join(retrieved)}",
                         "records": None,

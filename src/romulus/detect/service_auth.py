@@ -238,6 +238,8 @@ class ServicePasswordSpraying(ServicePasswordGuessing):
 class ServiceSuccessAfterFailures(ServicePasswordGuessing):
     """First observed login after a source or account failure burst; no historical novelty claim."""
     id = "auth.success_new_source_after_failures"
+    version = "2"
+    SPRAY_NAMES = 3
     title = "First recorded service login from a source after repeated failures"
     lane = "high"
     severity = "high"
@@ -270,15 +272,27 @@ class ServiceSuccessAfterFailures(ServicePasswordGuessing):
                   and source_ip(row.event) != key[3]]
         # If fewer than N failures came from this source, the latest 2N-1 account
         # failures retain N from other sources whenever they exist in the window.
-        failures, lane = (own, "high") if len(own) >= self.threshold else (others, "lead")
+        same_source = len(own) >= self.threshold
+        failures, lane = (own, "high") if same_source else (others, "lead")
         if len(failures) >= self.threshold:
-            relation = "failures from that source" if lane == "high" else "failures against that account from other sources"
+            caution = ""
+            accounts = {row.event.get("user.name") for row in own}
+            spraying = len(accounts) >= self.SPRAY_NAMES or any(
+                row.event.get("auth.user_valid") is False for row in own)
+            if same_source and key[2] not in accounts and not spraying:
+                lane = "lead"
+                caution = (f"None of the failures named '{key[2]}', and they show neither several names nor "
+                           "invalid users, so they need not belong to this login. ")
+            relation = ("failures from that source" if same_source
+                        else "failures against that account from other sources")
             state.match = observation(self, failures[-self.threshold:] + [record], key,
                                       f"Service {key[1]} on {key[0]} recorded the first successful authentication "
                                       f"in the supplied window for '{key[2]}' from {key[3]}, after at least "
                                       f"{self.threshold} {relation} within {self.seconds} seconds. "
-                                      "Earlier source history and credential compromise are not established.",
-                                      lane, AUTH_FIELDS)
+                                      f"{caution}Earlier source history and credential compromise are not established.",
+                                      lane, AUTH_FIELDS + ("auth.user_valid",))
+            if caution:
+                state.match.confidence = "medium"
 
 
 SERVICE_AUTH_PLAYBOOKS = [ServicePasswordGuessing, ServicePasswordSpraying, ServiceSuccessAfterFailures]

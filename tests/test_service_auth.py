@@ -186,3 +186,34 @@ def test_simultaneous_failure_cannot_hide_ten_strictly_earlier_failures():
     rows += [event(10, seconds=20), event(20, outcome=Outcome.success)]
     out = run(rule("auth.success_new_source_after_failures"), rows)
     assert len(out) == 1 and out[0].proposed_lane == "high"
+
+
+@pytest.mark.parametrize("ip,failed_users,login_user,validity,wanted_lane", [
+    ("203.0.113.9", ("alice",), "bob", None, "lead"),
+    ("127.0.0.1", ("alice",), "bob", None, "lead"),
+    ("::1", ("alice",), "bob", None, "lead"),
+    ("203.0.113.9", ("alice",), "alice", None, "high"),
+    ("127.0.0.1", ("alice",), "alice", None, "high"),
+    ("203.0.113.9", ("alice", "carol"), "bob", None, "lead"),
+    ("203.0.113.9", ("alice", "carol", "dave"), "bob", None, "high"),
+    ("203.0.113.9", ("missing",), "bob", False, "high"),
+    ("203.0.113.9", ("alice",), "bob", True, "lead"),
+    ("203.0.113.9", ("alice",), "bob", "false", "lead"),
+    ("203.0.113.9", ("alice",), "bob", 0, "lead"),
+])
+def test_success_source_guard_requires_account_spray_or_explicit_invalid_user(
+        ip, failed_users, login_user, validity, wanted_lane):
+    extra = {} if validity is None else {"auth.user_valid": validity}
+    rows = [event(i, ip=ip, user=failed_users[i % len(failed_users)], extra=extra) for i in range(10)]
+    success = event(20, ip=ip, user=login_user, outcome=Outcome.success)
+    out = run(rule("auth.success_new_source_after_failures"), rows[:5], rows[5:], [success])
+    assert len(out) == 1
+    match = out[0]
+    assert match.proposed_lane == wanted_lane
+    assert {row.id for row in match.events} == {row.id for row in rows + [success]}
+    assert "failures from that source" in match.claim and "other sources" not in match.claim
+    if wanted_lane == "lead":
+        assert match.confidence == "medium" and match.severity == "medium"
+        assert "need not belong to this login" in match.claim
+    if validity is False:
+        assert any(field.field == "auth.user_valid" and field.value is False for field in match.predicate)

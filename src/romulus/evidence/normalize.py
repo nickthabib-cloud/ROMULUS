@@ -51,6 +51,7 @@ from romulus.evidence.linux_catalog import (
     JOURNAL_FIELDS,
     JOURNAL_JSON,
     SYSLOG_LINE,
+    TEXT_FAMILIES,
     WATCH_PLACEHOLDERS,
     document_dataset,
     match_shape,
@@ -104,7 +105,7 @@ class Skip(Exception):
 
 
 class TextSkip(Skip):
-    """Unrecognized text can hide any family: the coverage cell must stay unresolved."""
+    """Unrecognized Linux host text can hide any text-family event."""
 
 
 class AuditCopy(Skip):
@@ -3411,7 +3412,7 @@ def normalize_text(hit: dict) -> list[TypedEvent]:
         except Skip as error:
             records = _program_events(hit, parsed.program, parsed.message, origin)
             if not records:
-                raise TextSkip(f"text format {parsed.format}, program {parsed.program!r} is not normalized: {dataset}") from error
+                raise Skip(f"text format {parsed.format}, program {parsed.program!r} is not normalized: {dataset}") from error
             for record in records:
                 _text_provenance(record, parsed, origin)
             return records
@@ -3574,7 +3575,9 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                 events.append(normalize_suricata(h))
             elif ds in SINGLE:
                 events.append(SINGLE[ds](h))
-            elif text_candidate(h["_source"]) and not is_arkime_session(h["_source"]):
+            elif ((contract is None or (contract.role == "host" and contract.os_family == "linux"))
+                  and unmatched_families(h["_source"]) is None
+                  and text_candidate(h["_source"]) and not is_arkime_session(h["_source"])):
                 ds = "linux.text"
                 events.extend(normalize_text(h))
                 if shapes is not None:
@@ -3609,7 +3612,8 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
         except Skip as s:
             skips[s.reason] += 1
             if isinstance(s, TextSkip) and skip_families is not None:
-                skip_families[s.reason] = None
+                fed = TEXT_FAMILIES | (unmatched_families(h["_source"]) or frozenset())
+                skip_families[s.reason] = (skip_families.get(s.reason) or frozenset()) | fed
         except (ValueError, KeyError, TypeError, AttributeError, OverflowError) as e:   # malformed: an error, not a crash
             errors.append((h["_id"], f"{ds}: {e}"))
     superseded = superseded_interim(list(zeek_events.values())) if zeek_events else []
