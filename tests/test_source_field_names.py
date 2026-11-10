@@ -113,10 +113,10 @@ def test_windows_direct_names_are_classified_too():
     assert contract.supports('process.pid', 'eq')         # an alias over a typed native still works
 
 
-def test_regression_unclassified_contract_crashed_the_security_onion_bare_group():
-    """The source-reported name reached `Predicate(field=..., op='missing')` and raised ValueError, crashing the
-    hunt. A contract built without classification (as before) must not crash it either: a source name is never
-    itself a predicate."""
+def test_unclassified_contract_never_puts_a_source_name_in_the_security_onion_bare_group():
+    """A source-reported name in `Predicate(field=..., op='missing')` raises ValueError, which would end the hunt.
+    A contract built without classification must not reach it either: a source name is never itself a
+    predicate."""
     with pytest.raises(ValueError, match="invalid field name: 'zeek.dns.@proc'"):
         Predicate(field='zeek.dns.@proc', op='missing')
     types = _elastic_types()
@@ -289,8 +289,8 @@ def _filebeat_hunt(tmp_path, name, *, artefacts):
 
 
 def test_filebeat_hunt_with_artefact_fields_finalizes_with_unchanged_visibility(tmp_path):
-    """The reported crash: a Filebeat zeek module index whose rows carry `zeek.dns.@proc` and similar names. The
-    sweep's finalize now completes, and its visibility is exactly the visibility of the same rows without them."""
+    """A Filebeat zeek module index whose rows carry `zeek.dns.@proc` and similar names: the sweep's finalize
+    completes, and its visibility is exactly the visibility of the same rows without them."""
     contract, audit, rows = _filebeat_hunt(tmp_path, 'artefacts', artefacts=True)
     assert 'zeek.dns.@proc' in contract.fields and not contract.supports('zeek.dns.@proc', 'missing')
     assert sorted(widened_markers(contract, DNS, SECURITY_ONION)) == [
