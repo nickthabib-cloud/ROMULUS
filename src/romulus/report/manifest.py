@@ -192,6 +192,12 @@ def _not_assessed(hunt_manifest: dict, sweep_detail: dict) -> list[dict]:
         return f"retrieved but not turned into a typed event: {reason}"
     for target, retrieved in sorted((stats.get("dataset_filter") or {}).items()):
         inventory = (profiles.get(target) or {}).get("datasets")
+        text_detail = (profiles.get(target) or {}).get("linux_text") or {}
+        if isinstance(inventory, dict) and (text_detail.get("rollup") or {}).get("non_additive"):
+            # The logical capability roll-up overlaps the preserved real dataset
+            # inventory. It is never another dataset or another set of records.
+            inventory = {name: count for name, count in inventory.items() if name != "linux.text"}
+            inventory.update(text_detail.get("inventory") or {})
         if not isinstance(inventory, dict):
             out.append({"target": target, "dataset": f"any dataset other than {', '.join(retrieved)}",
                         "records": None, "count_scope": "unknown: the hunt manifest has no dataset inventory",
@@ -261,6 +267,24 @@ def _not_assessed(hunt_manifest: dict, sweep_detail: dict) -> list[dict]:
             out.append({"target": "all sweep targets", "dataset": None, "records": count,
                         "count_scope": "records retrieved in the hunt window",
                         "reason": skip_explanation(reason)})
+    unknown_total = 0
+    unknown_datasets = set()
+    unknown_prefix = "retrieved but not turned into a typed event: text line in no recognized format: "
+    untyped_prefix = "retrieved but not turned into a typed event: text format "
+    for row in out:
+        reason = row["reason"]
+        if reason.startswith(unknown_prefix):
+            row["dataset"] = reason[len(unknown_prefix):] or "(no dataset)"
+            unknown_total += row["records"] or 0
+            unknown_datasets.add(row["dataset"])
+        elif reason.startswith(untyped_prefix):
+            _description, separator, dataset = reason.rpartition(" is not normalized: ")
+            if separator:
+                row["dataset"] = dataset or "(no dataset)"
+    if unknown_total:
+        out.append({"target": "all sweep targets", "dataset": None, "records": None,
+                    "count_scope": "summary of the per-dataset rows above; not additional records",
+                    "reason": f"{unknown_total:,} lines in {len(unknown_datasets)} datasets in no recognized format"})
     return out
 
 

@@ -2,12 +2,20 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, model_serializer, model_validator
 
-from romulus.evidence.linux_catalog import LINUX_LOGICAL_DATASETS, logical_of
+from romulus.errors import SourceError
+from romulus.evidence.linux_catalog import (
+    LINUX_LOGICAL_DATASETS,
+    TEXT_INPUT_TYPES,
+    logical_of,
+    text_dataset_inventory,
+    text_payload,
+)
 from romulus.evidence.zeek_catalog import MALCOLM, lookup_log
 from romulus.sources.models import typed_field_name
 from romulus.store.db import digest
@@ -15,6 +23,7 @@ from romulus.store.db import digest
 HOST_INVENTORY_PAGE_SIZE = 500
 HOST_INVENTORY_PAGE_LIMIT = 100
 HOST_INVENTORY_BYTE_BUDGET = 8 * 1024 * 1024
+TEXT_SAMPLE_LIMIT = 1000
 
 # Which predicate ops each native mapping type supports *with a retrieval-superset guarantee*.
 # `text` fields are analyzed: phrase matching can miss qualifying records (tokenization), so no
@@ -477,6 +486,174 @@ def provider_inventory(client, target: str, *, provider_field='event.provider', 
     return buckets, dict(sorted(datasets.items())), notes
 
 
+def _text_sample(client, target: str, query: dict, records: int | None, *, count=False) -> dict:
+    """One bounded source sample; format counts describe this sample, never the whole index."""
+    from romulus.evidence.linux_text import classify
+
+    result = {"sampled": 0, "formats": {}, "programs": {}, "complete": False, "notes": []}
+    if count:
+        result["records"] = None
+    try:
+        response = client.search(target, {
+            "size": TEXT_SAMPLE_LIMIT, "track_total_hits": count, "query": query,
+            "_source": ["message", "event.original", "event.dataset", "data_stream.dataset"],
+        })
+    except SourceError as error:
+        result["notes"].append(f"text sample unavailable: {error}")
+        return result
+    partial = bool(response.get("timed_out") or response.get("terminated_early")
+                   or (response.get("_shards") or {}).get("failed"))
+    if partial:
+        result["notes"].append("text sample incomplete: source timeout, early termination, or failed shards")
+    if count:
+        total = (response.get("hits") or {}).get("total")
+        if isinstance(total, dict) and total.get("relation") == "eq" and not partial:
+            records = int(total["value"])
+            result["records"] = records
+        else:
+            result["notes"].append("potential source record count unknown: no complete exact source total")
+    hits = (response.get("hits") or {}).get("hits") or []
+    formats: Counter = Counter()
+    programs: Counter = Counter()
+    for hit in hits[:TEXT_SAMPLE_LIMIT]:
+        payload = text_payload(hit.get("_source") or {})
+        if payload is None:
+            formats["no_text_payload"] += 1
+            continue
+        parsed = classify(payload[1])
+        formats[parsed.format] += 1
+        if parsed.program:
+            # The sample has at most 1000 keys; bound each untrusted log identifier too.
+            program = parsed.program if len(parsed.program) <= 256 else parsed.program[:256] + "..."
+            programs[program] += 1
+            if len(parsed.program) > 256 and "program names shortened to 256 characters" not in result["notes"]:
+                result["notes"].append("program names shortened to 256 characters")
+    result.update(sampled=min(len(hits), TEXT_SAMPLE_LIMIT), formats=dict(sorted(formats.items())),
+                  programs=dict(sorted(programs.items())))
+    result["complete"] = not partial and records is not None and result["sampled"] == records
+    if records is not None and records > TEXT_SAMPLE_LIMIT:
+        result["notes"].append(f"format sample capped at {TEXT_SAMPLE_LIMIT} of {records} potential source records")
+    elif not result["complete"] and not result["notes"]:
+        result["notes"].append("format sample does not cover every potential source record")
+    return result
+
+
+def _missing_dataset(field_types: dict, name: str) -> dict:
+    """Match an absent/null or empty dataset, as document_dataset falls through to the next native field."""
+    absent = {"bool": {"must_not": [{"exists": {"field": name}}]}}
+    exact = _aggregation_field(field_types, name) if name in field_types else None
+    if exact is None:
+        return absent
+    return {"bool": {"should": [absent, {"term": {exact: ""}}], "minimum_should_match": 1}}
+
+
+def _fallback_text_inventory(client, target: str, field_types: dict, notes: list[str]) -> tuple[dict, str | None]:
+    """Bound the second native dataset inventory to records where event.dataset does not name a dataset."""
+    if not all(name in field_types for name in ("event.dataset", "data_stream.dataset")):
+        return {}, None
+    field = _aggregation_field(field_types, "data_stream.dataset")
+    if field is None:
+        notes.append("ds inventory truncated (data_stream.dataset has no exact-searchable aggregation field)")
+        return {}, None
+    query = {"bool": {"filter": [_missing_dataset(field_types, "event.dataset"),
+                                  {"exists": {"field": "data_stream.dataset"}}],
+                       "must_not": [{"term": {field: ""}}]}}
+    try:
+        response = client.search(target, {"size": 0, "track_total_hits": True, "query": query,
+                                          "aggs": {"ds": {"terms": {"field": field, "size": 200}}}})
+    except SourceError as error:
+        notes.append(f"ds inventory truncated (data_stream.dataset fallback unavailable: {error})")
+        return {}, field
+    agg = (response.get("aggregations") or {}).get("ds") or {}
+    buckets = agg.get("buckets") or []
+    inventory = {bucket["key"]: int(bucket["doc_count"]) for bucket in buckets if bucket["key"]}
+    total = (response.get("hits") or {}).get("total") or {}
+    if (response.get("timed_out") or response.get("terminated_early")
+            or (response.get("_shards") or {}).get("failed") or "buckets" not in agg
+            or agg.get("sum_other_doc_count") or agg.get("doc_count_error_upper_bound")
+            or not isinstance(total, dict) or total.get("relation") != "eq"
+            or total.get("value") != sum(inventory.values())):
+        notes.append("ds inventory truncated (data_stream.dataset fallback did not return a complete exact inventory)")
+    return inventory, field
+
+
+def _text_profile(client, target: str, field_types: dict, datasets: dict, dataset_field: str | None,
+                  role: str, os_family: str, notes: list[str]) -> dict | None:
+    """Preserve raw inventory and add an explicitly non-additive logical capability roll-up."""
+    if role != "host" or os_family != "linux" or not any(
+        name in field_types for name in ("message", "event.original")
+    ):
+        return None
+    secondary, secondary_field = _fallback_text_inventory(client, target, field_types, notes)
+    # Empty native values are not dataset names; the record is selected through the next native field or as
+    # datasetless. Keeping the empty bucket here would count those same records twice in the logical roll-up.
+    datasets.pop("", None)
+    for name, records in secondary.items():
+        datasets[name] = datasets.get(name, 0) + records
+    inventory = text_dataset_inventory(datasets)
+    if "linux.text" in datasets:
+        inventory["linux.text"] = datasets["linux.text"]
+    datasetless = any(name in field_types for name in ("input.type", "log.file.path"))
+    if not inventory and not datasetless:
+        return None
+    detail = {
+        "logical_dataset": "linux.text", "inventory": dict(sorted(inventory.items())),
+        "count_scope": "whole index at source preflight; potential source records, not typed events; "
+                       "the logical roll-up is non-additive",
+        "samples": {},
+    }
+    for name, records in sorted(inventory.items()):
+        if dataset_field is None:
+            detail["samples"][name] = {"sampled": 0, "formats": {}, "programs": {}, "complete": False,
+                                       "notes": ["dataset has no exact-searchable field for sampling"]}
+        else:
+            query = {"term": {dataset_field: name}}
+            if name in secondary:
+                query = {"bool": {"should": [query, {"bool": {"filter": [
+                    _missing_dataset(field_types, "event.dataset"), {"term": {secondary_field: name}},
+                ]}}], "minimum_should_match": 1}}
+            detail["samples"][name] = _text_sample(client, target, query, records)
+    rollup_count = sum(inventory.values())
+    if datasetless:
+        sources = []
+        input_field = _aggregation_field(field_types, "input.type") if "input.type" in field_types else None
+        if input_field:
+            sources.append({"terms": {input_field: list(TEXT_INPUT_TYPES)}})
+        if "log.file.path" in field_types:
+            sources.append({"exists": {"field": "log.file.path"}})
+        if sources:
+            query = {"bool": {"filter": [
+                *[_missing_dataset(field_types, name) for name in ("event.dataset", "data_stream.dataset")],
+                {"bool": {"should": [{"exists": {"field": name}} for name in ("message", "event.original")
+                                       if name in field_types], "minimum_should_match": 1}},
+                {"bool": {"should": sources, "minimum_should_match": 1}},
+            ]}}
+            module = _aggregation_field(field_types, "event.module") if "event.module" in field_types else None
+            if module:
+                query["bool"]["must_not"] = [{"terms": {module: ["auditd", "system", "apache"]}}]
+            sample = _text_sample(client, target, query, None, count=True)
+        else:
+            sample = {"records": None, "sampled": 0, "formats": {}, "programs": {}, "complete": False,
+                      "notes": ["datasetless input has no exact-searchable source selector"]}
+        if sample["records"] == 0:
+            datasetless = False
+        else:
+            detail["datasetless"] = sample
+        if sample["records"] is None:
+            rollup_count = None
+            notes.append("ds inventory truncated (linux.text potential source count is unknown)")
+        else:
+            rollup_count += sample["records"]
+        if rollup_count == 0:
+            return None
+    detail["rollup"] = {"records": rollup_count, "non_additive": True,
+                        "members": sorted(inventory), "includes_datasetless": bool(datasetless)}
+    if rollup_count is not None:
+        datasets["linux.text"] = rollup_count
+    notes.append("linux.text is a non-additive roll-up of potential source records; format counts are a bounded sample")
+    return detail
+
+
 def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfile, FieldContract]:
     """Read-only preflight of one concrete index."""
     field_types = flatten_mapping(client.mapping(target))
@@ -602,6 +779,10 @@ def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfil
                         if aggs.get("tmax", {}).get("value") is not None else None)
     if inventory is not None:
         prof["inventory"] = inventory
+    if declaration is None:
+        text_detail = _text_profile(client, target, field_types, datasets, ds_field, role, os_family, notes)
+        if text_detail is not None:
+            prof["linux_text"] = text_detail
     # Role and OS are source semantics, so they intentionally participate in the profile id. Adding them changes
     # ids made by older builds; the manifest also records both values explicitly for resume validation.
     pid = digest({k: v for k, v in prof.items() if k != "captured_at"})[:16]

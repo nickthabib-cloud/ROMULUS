@@ -61,6 +61,41 @@ Coverage cells are written at every stage that can lose information (compile, ex
 
 Other top-level directories: `content/` (indicator lists, vendored ATT&CK), `tests/`, `scripts/`, `docs/`.
 
+## Linux text logs
+
+Known shipper shapes retain their existing normalization. The last host-log route, `linux.text`, identifies
+otherwise unclaimed text by its content, including operator-named datasets and file or stream inputs without a
+dataset value. A stateless classifier accepts at most 64 KiB per line and recognizes syslog envelopes, common
+web access/error formats and documented native application formats. It separates the envelope from the daemon's
+anchored message grammar; text that merely mentions an action is not an event. Structured fields retain their
+source paths, while fields parsed from a line identify that line and parser in their provenance.
+
+The indexed `@timestamp` remains the event time. Inline timestamps and clock differences are diagnostic fields;
+timestamps without a year or zone use the indexed timestamp's year or zone for that comparison. A syslog header's
+hostname is provenance, distinct from the shipper's host identity. Unrecognized and oversized lines are counted
+skips, and unknown formats leave potentially affected detection families unresolved.
+
+Service authentication, resolver requests, proxy requests, firewall packets, scheduler observations and account
+changes use the existing `auth`, `dns_query`, `http_access`, `net_flow`, `process_observed`, `service_change` and
+`account_change` families. Authentication sessions are distinguished from authentication decisions. Firewall
+log records do not invent connection counters, and a cron command log does not claim a kernel-observed exec.
+Two additional families preserve information that those contracts cannot express:
+
+| Family | Typed fields and limits |
+|---|---|
+| `mail_message` | `mail.service`, queue `mail.message_id`, explicit `mail.direction`, sender, recipients, size, relay, TLS and authenticated user where logged. `mail.to` retains at most 32 recipients with the full `mail.to_count` and a truncation caveat. Subject and attachment names exist only when logged. Each line remains a separate event; rules join queue metadata with disk-backed state. |
+| `vpn_session` | `vpn.service`, `vpn.action`, logged identity, peer address/port, assigned virtual addresses and native session ID where available. Assigned addresses are entity links. Connection overlap requires matching explicit start/end boundaries; a common name is not asserted to be an authenticated username. |
+
+Generic authentication rules isolate each concrete service and preserve the separate SSH rules. Mail burst
+analysis requires explicitly configured `mail_domains` to identify external recipients. VPN source novelty
+requires sufficient historical baseline coverage. Aggregate evaluators spill state to disk; refused records
+and incomplete fields remain visible as coverage gaps.
+
+Source profiles preserve actual dataset names and counts, with a non-additive `linux.text` capability summary.
+Doctor describes format and program counts from samples of at most 1,000 records per dataset; samples are not
+extrapolated to whole-source typing claims. Reports name unrecognized datasets and unsupported programs with
+the counts observed during the hunt.
+
 ## Dependency rules (enforced by `archmap.py --check`)
 
 - `web` and `cli` may import anything below them, but nothing imports `web` or `cli`.
