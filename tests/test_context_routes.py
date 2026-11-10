@@ -150,3 +150,59 @@ def test_evasion_shaped_weirds_are_leads(name, lane):
     _rule, [match] = zeek_alerts([zl.WEIRD.with_(name=name)])
     assert match.proposed_lane == lane
     assert ("shape of IDS evasion" in match.claim) is (lane == "lead")
+
+
+def _tagged_eve(metadata):
+    import json
+
+    hit = corr.alert(severity=3, category="Misc activity")
+    eve = json.loads(hit["_source"]["event"]["original"])
+    eve["alert"]["metadata"] = metadata
+    hit["_source"]["event"]["original"] = json.dumps(eve)
+    return hit
+
+
+@pytest.mark.parametrize(("metadata", "lane"), [({"mitre_technique_id": ["T1046"]}, "lead"),
+                                                ({"signature_severity": ["Major"]}, "lead"),
+                                                ({"mitre_technique_id": [""]}, "context"),
+                                                ({"mitre_technique_id": []}, "context"),
+                                                ({}, "context")])
+def test_the_process_network_link_reads_the_alerts_own_tag(metadata, lane):
+    m = corr.link([corr._sock(**corr.SSHD)] + corr._network(corr.flow(), _tagged_eve(metadata)))[0]
+    assert m.proposed_lane == lane
+
+
+@pytest.mark.parametrize("techniques", [[""], [None], ["not-a-technique"]])
+def test_empty_or_malformed_technique_metadata_is_not_a_tag(techniques):
+    event = ev(family="net_alert", ts=T0, alert__signature="ET TEST sig", alert__severity=3,
+               alert__category="Misc activity", source__ip="198.51.100.7", destination__ip="192.0.2.10",
+               alert__mitre_technique_id=techniques)
+    assert not attack_tagged(event)
+
+
+def test_the_alert_that_raised_a_group_is_cited_and_its_technique_named():
+    untagged = []
+    for index in range(30):
+        alert = _low("Misc activity", "198.51.100.8")
+        alert.fields["alert.signature_id"].value = index % 11
+        alert.fields["alert.signature"].value = f"ET INFO sig {index % 11}"
+        untagged.append(alert)
+    tagged = _low("Misc activity", "198.51.100.8", ["T1046"])
+    tagged.fields["alert.signature_id"].value = 99
+    tagged.fields["alert.signature"].value = "ET SCAN tagged sig"
+    [match] = run(network.SuricataAlertStack, [*untagged, tagged])
+    assert match.proposed_lane == "lead"
+    assert tagged.id in {event.id for event in match.events}
+    assert any("T1046" in note for note in match.notes)
+
+
+def test_an_entity_only_admission_gap_is_a_medium_lead_and_publishable():
+    from romulus.decide.policy import decide, publishable
+
+    [match] = run(network.SuricataAlertStack, [_alert(1)])
+    match.entities = []
+    match.events = [event.model_copy(update={"host": None}) for event in match.events]
+    decision = decide(match, "h1")
+    assert not decision.admitted and decision.lane == "lead" and decision.severity == "medium"
+    assert publishable(decision) and any("entity_time" in note for note in decision.notes)
+    assert not publishable(_decided(raw=False))

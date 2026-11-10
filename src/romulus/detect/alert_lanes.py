@@ -3,20 +3,25 @@ its signature's author tied it to an ATT&CK technique. The alert rule and the pr
 alert keeps one lane wherever it is reported."""
 from __future__ import annotations
 
+import re
+
 # Suricata classtypes of the lowest priority that still name attack activity (reconnaissance, a planted string), as
 # opposed to protocol decode anomalies, generic events and traffic its author marked not suspicious.
 LOW_PRIORITY_ATTACK_CATEGORIES = frozenset({"Detection of a Network Scan", "A suspicious string was detected"})
 # Signature-severity metadata (Emerging Threats' signature_severity) its authors give signatures of real attack activity.
 ATTACK_SIGNATURE_SEVERITIES = frozenset({"major", "critical"})
+TECHNIQUE_ID = re.compile(r"T\d{4}(?:\.\d{3})?")
 
 
 def attack_tagged(event) -> bool:
     """The alert's signature metadata ties it to an attack: an ATT&CK technique, or a Major/Critical signature
     severity."""
+    techniques = event.get("alert.mitre_technique_id")
     severity = event.get("alert.signature_severity")
-    severities = severity if isinstance(severity, list) else [severity]
-    return bool(event.get("alert.mitre_technique_id")) or any(
-        isinstance(value, str) and value.strip().casefold() in ATTACK_SIGNATURE_SEVERITIES for value in severities)
+    return any(isinstance(value, str) and TECHNIQUE_ID.fullmatch(value.strip())
+               for value in (techniques if isinstance(techniques, list) else [techniques])) or any(
+        isinstance(value, str) and value.strip().casefold() in ATTACK_SIGNATURE_SEVERITIES
+        for value in (severity if isinstance(severity, list) else [severity]))
 
 
 def alert_stack_lane(category, severity, attack_tagged: bool) -> tuple[str, str]:

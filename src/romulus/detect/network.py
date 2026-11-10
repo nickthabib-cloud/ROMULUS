@@ -251,6 +251,8 @@ class SuricataAlertStack(_Grouped):
                 state.bag("tech").update(tech if isinstance(tech, list) else [tech])
             if attack_tagged(e):
                 state.extra["tagged"] = True
+                # the first tagged alert is cited, so the record that raised the lane is shown
+                self.name(state, "tagged", sig, e, 1)
         return []
 
     def finalize(self):

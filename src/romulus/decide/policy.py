@@ -42,6 +42,12 @@ def candidate_id(m: Match, hunt_id: str) -> str:
     return candidate_group_id(m.playbook_id, ident, hunt_id)
 
 
+def publishable(decision: Decision) -> bool:
+    """Whether a decided match is stored as a finding: admitted, or a cited positive whose admission is incomplete
+    and is kept as a lead for review. A match with nothing citable is not."""
+    return decision.admitted or decision.lane != "context"
+
+
 def decide(m: Match, hunt_id: str) -> Decision:
     gates: dict[str, str] = {}
     notes: list[str] = []
@@ -99,6 +105,8 @@ def decide(m: Match, hunt_id: str) -> Decision:
             # stays visible for review, never above lead, saying what is missing.
             if lane in ("urgent", "high"):
                 lane = "lead"
+            if severity in ("critical", "high"):
+                severity = "medium"
             notes.append("Admission is incomplete: " + ", ".join(failed) + "; kept as a lead for review.")
     elif m.citation_unavailable:
         coverage = "a surviving reference is retained" if m.events else "no citation could be retained"

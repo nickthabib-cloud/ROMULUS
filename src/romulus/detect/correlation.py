@@ -1016,8 +1016,9 @@ def _alert_words(counts: dict[str, int]) -> str:
 
 
 def alert_lane(n: Net) -> str | None:
-    """Exactly the lane SuricataAlertStack gives the same alert on its own; None when the alert lacks the
-    severity that stack requires (it would not publish it either)."""
+    """The lane SuricataAlertStack gives an alert of this category and priority on its own, judged from this alert's
+    own metadata (the stack judges its whole group, so a group another tagged alert raised can be a lead there while
+    this record stays context here); None when the alert lacks the severity that stack requires."""
     if n.alert_sev is None and n.alert_cat != "Not Suspicious Traffic":
         return None
     return alert_stack_lane(n.alert_cat, n.alert_sev, n.alert_tech)[0]
