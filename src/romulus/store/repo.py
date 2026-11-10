@@ -432,6 +432,92 @@ AGENT_ELIGIBLE_STATES = ("completed_within_scope", "partial")
 FINAL_RANK_PASS = 2
 
 
+# -- report order over candidate snapshots ----------------------------------------------------------------------------
+# The final pass's audit summary; every publication (or failure) of the pass writes a new one.
+FINAL_RANK_SUMMARY = "hunt.rank_pass_2_summary"
+# A snapshot taken while the hunt has its final ranking lists findings in report order, as segments: ranked confirmed
+# (section 0), confirmed findings stored after the pass (lane urgent, no rank row), ranked reported (1), ranked not
+# reported (2), then every other member. Ranked members are ordered by position (`ix_finding_rank_section`), the
+# others by id. The pass's state (its latest summary and row count) is kept with the snapshot, and a pass published
+# again while it is paged is reported, never silently reordered.
+_SEGMENT_SECTIONS = (0, None, 1, 2)
+
+
+def _rank_state(connection, hunt_id: str) -> list[int]:
+    summary = connection.execute(select(func.max(t.audit_event.c.id)).where(
+        t.audit_event.c.action == FINAL_RANK_SUMMARY, t.audit_event.c.hunt_id == hunt_id)).scalar()
+    rows = int(connection.execute(select(func.count()).select_from(t.finding_rank).where(
+        t.finding_rank.c.hunt_id == hunt_id, t.finding_rank.c["pass"] == FINAL_RANK_PASS)).scalar_one())
+    return [int(summary or 0), rows]
+
+
+def _rank_on(hunt_id: str):
+    return and_(t.finding_rank.c.hunt_id == hunt_id, t.finding_rank.c["pass"] == FINAL_RANK_PASS,
+                t.finding_rank.c.candidate_id == t.candidate.c.id)
+
+
+def _ranked_candidates(hunt_id: str):
+    return t.finding_rank.join(t.candidate, _rank_on(hunt_id))
+
+
+def _unranked(hunt_id: str):
+    return ~select(1).where(_rank_on(hunt_id)).exists()
+
+
+def _report_order(query, hunt_id: str):
+    rank = t.finding_rank
+    segment = case((rank.c.section == 0, 0), (and_(rank.c.section.is_(None), t.candidate.c.lane == "urgent"), 1),
+                   (rank.c.section == 1, 2), (rank.c.section == 2, 3), else_=4)
+    return query.select_from(t.candidate.outerjoin(rank, _rank_on(hunt_id))).order_by(
+        segment, rank.c.position, t.candidate.c.id)
+
+
+def _with_rank_section(query, hunt_id: str):
+    return query.outerjoin(t.finding_rank, _rank_on(hunt_id)).add_columns(
+        t.finding_rank.c.section.label("_rank_section"))
+
+
+def _segment_sizes(connection, hunt_id: str, where: list) -> list[int]:
+    """Members in each segment before the last (the last is the rest of the snapshot)."""
+    sections = dict(connection.execute(select(t.finding_rank.c.section, func.count()).select_from(
+        _ranked_candidates(hunt_id)).where(*where).group_by(t.finding_rank.c.section)).all())
+    late_confirmed = int(connection.execute(select(func.count()).select_from(t.candidate).where(
+        *where, t.candidate.c.lane == "urgent", _unranked(hunt_id))).scalar_one())
+    return [late_confirmed if section is None else int(sections.get(section, 0)) for section in _SEGMENT_SECTIONS]
+
+
+def _report_order_page(connection, hunt_id: str, snapshot: dict, where: list, *, offset: int, limit: int,
+                       total: int) -> list[dict]:
+    """Rows [offset, offset + limit) of a live snapshot in report order (`_SEGMENT_SECTIONS`, then the rest)."""
+    if _rank_state(connection, hunt_id) != list(snapshot["rank_state"]):
+        raise ValueError("candidate snapshot order changed during paging")
+    aliases = t.agent_alias.alias("candidate_page_alias")
+    alias_on = and_(aliases.c.hunt_id == t.candidate.c.hunt_id, aliases.c.kind == "F",
+                    aliases.c.target_id == t.candidate.c.id)
+    sizes = [int(size) for size in snapshot["segments"]]
+    sizes.append(max(0, total - sum(sizes)))
+    rows, first = [], 0
+    for index, size in enumerate(sizes):
+        begin = max(0, offset - first)
+        first += size
+        if begin >= size or len(rows) >= limit:
+            continue
+        section = _SEGMENT_SECTIONS[index] if index < len(_SEGMENT_SECTIONS) else None
+        if section is not None:
+            query = (select(t.candidate, aliases.c.alias.label("_alias"),
+                            t.finding_rank.c.section.label("_rank_section"))
+                     .select_from(_ranked_candidates(hunt_id).outerjoin(aliases, alias_on))
+                     .where(*where, t.finding_rank.c.section == section).order_by(t.finding_rank.c.position))
+        else:
+            lanes = (t.candidate.c.lane == "urgent",) if index < len(_SEGMENT_SECTIONS) else (
+                t.candidate.c.lane != "urgent",)
+            query = (select(t.candidate, aliases.c.alias.label("_alias"), literal(None).label("_rank_section"))
+                     .outerjoin(aliases, alias_on).where(*where, *lanes, _unranked(hunt_id))
+                     .order_by(t.candidate.c.id))
+        rows.extend(dict(row) for row in connection.execute(query.offset(begin).limit(limit - len(rows))).mappings())
+    return rows
+
+
 def _detection_result_on(connection, hunt_id: str) -> tuple[dict[str, int], str]:
     """The hunt's deterministic lane counts and headline result. With a complete final ranking the result follows
     the report's headline: reportable when any confirmed or Reported finding exists, leads only when the ranked pool
@@ -1072,6 +1158,10 @@ class Repo:
                 *where,
             )).scalar_one())
             stored_membership = lane is not None or rule_id is not None or entity is not None
+            # With the hunt's final ranking the snapshot lists its findings in report order (`_report_order`).
+            rank_state = _rank_state(connection, hunt_id)
+            ranked = rank_state[1] > 0
+            segments = _segment_sizes(connection, hunt_id, where) if ranked and not stored_membership else None
             if stored_membership and count > CANDIDATE_FILTER_SNAPSHOT_LIMIT:
                 raise ValueError(
                     "filtered candidate snapshot exceeds its bounded membership cap; "
@@ -1085,6 +1175,7 @@ class Repo:
                 "lane": lane, "rule_id": rule_id, "entity": list(entity) if entity else None,
                 "lanes": list(lanes) if lanes else None,
                 "membership": "persisted" if stored_membership else "live_keyset",
+                **({"order": "rank", "rank_state": rank_state, "segments": segments} if ranked else {}),
             }}
             connection.execute(t.agent_page_plan.insert().values(
                 hunt_id=hunt_id, cursor=cursor, identity=identity, summary=stored_summary,
@@ -1092,9 +1183,9 @@ class Repo:
             ))
             if stored_membership:
                 batch = []
-                for ordinal, candidate_id in enumerate(connection.execute(
-                    select(t.candidate.c.id).where(*where).order_by(t.candidate.c.id),
-                ).scalars()):
+                members = (_report_order(select(t.candidate.c.id), hunt_id).where(*where) if ranked
+                           else select(t.candidate.c.id).where(*where).order_by(t.candidate.c.id))
+                for ordinal, candidate_id in enumerate(connection.execute(members).scalars()):
                     batch.append({
                         "hunt_id": hunt_id, "cursor": cursor, "ordinal": ordinal,
                         "payload": {"kind": "candidate_member", "id": candidate_id},
@@ -1127,6 +1218,8 @@ class Repo:
             ).where(
                 t.candidate.c.hunt_id == hunt_id, t.candidate.c.id.in_(ids),
             ))
+            if snapshot.get("order") == "rank":
+                query = _with_rank_section(query, hunt_id)
             with self.engine.connect() as connection:
                 by_id = {str(row["id"]): dict(row) for row in connection.execute(query).mappings()}
             if len(by_id) != len(ids):
@@ -1159,6 +1252,9 @@ class Repo:
             ).scalar_one())
             if current_count != int(plan["item_count"]):
                 raise ValueError("candidate snapshot membership changed during paging")
+            if snapshot.get("order") == "rank":
+                return _report_order_page(connection, hunt_id, snapshot, where, offset=offset, limit=limit,
+                                          total=current_count)
             if offset:
                 boundary = connection.execute(
                     select(t.candidate.c.id).where(*where).order_by(t.candidate.c.id)
@@ -2552,6 +2648,12 @@ class Repo:
         """Staging tables for computing one ranking pass; its `publish` replaces the pass atomically."""
         from romulus.store.ranks import rank_workspace
         return rank_workspace(self.engine, hunt_id, pass_no, self._fence_lease)
+
+    def rank_state(self, hunt_id: str) -> list[int]:
+        """The final ranking's identity (latest summary, row count): part of every agent page cursor, so a pass
+        published again gives new snapshots rather than reordering old ones."""
+        with self.engine.connect() as connection:
+            return _rank_state(connection, hunt_id)
 
     def has_rank_pass(self, hunt_id: str, pass_no: int) -> bool:
         query = select(t.finding_rank.c.candidate_id).where(

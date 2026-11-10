@@ -17,13 +17,13 @@ from romulus.decide import rank as model
 from romulus.detect.metadata import finding_attack, hunt_rule_metadata
 from romulus.detect.netdef import SiteNetworks
 from romulus.store.ranks import parse_time, stored_time
-from romulus.store.repo import Repo, is_lease_lost
+from romulus.store.repo import FINAL_RANK_SUMMARY, Repo, is_lease_lost
 
 log = logging.getLogger("romulus.rank")
 
 PASS_BEFORE_EXPANSION = 1
 PASS_FINAL = 2
-SUMMARY_ACTIONS = {PASS_BEFORE_EXPANSION: "hunt.rank_pass_1_summary", PASS_FINAL: "hunt.rank_pass_2_summary"}
+SUMMARY_ACTIONS = {PASS_BEFORE_EXPANSION: "hunt.rank_pass_1_summary", PASS_FINAL: FINAL_RANK_SUMMARY}
 # Rows a pass holds in Python at once (one keyset page). A few thousand rows of a few hundred bytes are a few MB on
 # any host; a larger page only saves round trips, and per-entity state lives in the store's staging tables.
 RANK_BATCH = 2000

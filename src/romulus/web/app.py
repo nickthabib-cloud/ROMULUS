@@ -29,11 +29,18 @@ from romulus.report.bundle import write_reports
 from romulus.report.manifest import internal_networks_view, investigations_for_hunt, publish_revision
 from romulus.site import SiteChangedError, SiteValidationError, load_site_facts, save_site_facts
 from romulus.store.db import compact, maintenance_lease
+from romulus.store.repo import FINAL_RANK_PASS
 from romulus.web import agent_views, site_form
 from romulus.web.agent_routes import register_agent_routes
 from romulus.web.auth import RateLimiter, Sessions, csrf_ok, verify
 from romulus.web.catalog_routes import register_catalog_routes
-from romulus.web.finding_order import finding_page
+from romulus.web.finding_order import (
+    RANKED_LANES,
+    SEGMENT_TITLES,
+    finding_order,
+    finding_page,
+    ranked_finding_page,
+)
 from romulus.web.indicator_routes import IndicatorBodyLimit, register_indicator_routes
 from romulus.web.request_routes import DetectionRequestBodyLimit, register_request_routes
 
@@ -190,31 +197,33 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         stream_cursor = repo.agent_change_max_seq(hunt_id)
         agent_run = repo.agent_run(hunt_id)
         live = agent_views.stream_live(repo, h, agent_run)
-        cands_more, cands_next = 0, None
-        if agent_run:
-            from urllib.parse import urlencode
+        from urllib.parse import urlencode
 
-            from romulus.store import schema as tables
-            ranked_lane = lane if lane in ("urgent", "high", "lead") else None
-            # a ranked lane is selected by its rank in the order index (the same rows as lane == it)
-            predicates = (() if ranked_lane else (tables.candidate.c.lane == lane,) if lane in LANE_ORDER
-                          else (tables.candidate.c.lane != "context",))
-            try:
-                cands, cands_more, cursor = finding_page(repo, hunt_id, after=after,
-                    predicates=predicates, lane=ranked_lane, columns=tuple(getattr(tables.candidate.c, key) for key in (
-                        "id", "lane", "severity", "confidence", "priority", "ts", "rule_id", "claim", "provenance",
-                        "agent_hypothesis_id")))
-            except ValueError as error:
-                raise HTTPException(400, "Invalid page cursor") from error
+        from romulus.store import schema as tables
+        columns = tuple(getattr(tables.candidate.c, key) for key in (
+            "id", "lane", "severity", "confidence", "priority", "ts", "rule_id", "claim", "provenance",
+            "agent_hypothesis_id"))
+        lane = lane if lane in LANE_ORDER else ""
+        # Without a lane the page lists the reportable findings in report order when the hunt has its final ranking,
+        # else in the rule estimate's order; a lane lists that lane in the rule estimate's order.
+        ranked = not lane and repo.has_rank_pass(hunt_id, FINAL_RANK_PASS)
+        try:
+            if ranked:
+                cands, cands_more, cursor = ranked_finding_page(repo, hunt_id, pass_no=FINAL_RANK_PASS, after=after,
+                                                                columns=columns)
+            elif lane in RANKED_LANES or not lane:
+                # a ranked lane is selected by its rank in the order index (the same rows as lane == it)
+                cands, cands_more, cursor = finding_page(
+                    repo, hunt_id, after=after, columns=columns, lane=lane or None,
+                    predicates=() if lane else (finding_order()[0][0] < len(RANKED_LANES),))
+            else:
+                cands, cands_more, cursor = finding_page(repo, hunt_id, after=after, columns=columns,
+                                                         predicates=(tables.candidate.c.lane == lane,))
+        except ValueError as error:
+            raise HTTPException(400, "Invalid page cursor") from error
+        if agent_run:
             agent_views.validate_hypothesis_links(repo, hunt_id, cands)
-            cands_next = "?" + urlencode({"lane": lane, "after": cursor}) if cursor else None
-        else:
-            if after:
-                raise HTTPException(400, "This hunt does not use a findings cursor")
-            cands = repo.candidates(hunt_id, [lane] if lane in LANE_ORDER else None)
-            cands.sort(key=lambda c: (LANE_ORDER.get(c["lane"], 9), -c["priority"], str(c["ts"])))
-            if not lane:
-                cands = [c for c in cands if c["lane"] != "context"]
+        cands_next = "?" + urlencode({"lane": lane, "after": cursor}) if cursor else None
         from romulus.report.manifest import coverage_for_hunt
         cov = coverage_for_hunt(repo, hunt_id)
         zeek_visibility = cov.get("zeek_visibility")
@@ -246,6 +255,7 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
                         "model_reported": agent_views.clip(r["model_reported"], 300)}
                        for r in agent_usage["models_reported"] if r["model_reported"] != r["model"]]
         return page(request, "hunt.html", u, h=h, cands=cands, lanes=repo.lane_counts(hunt_id), lane=lane,
+                    ranked=ranked, segment_titles=SEGMENT_TITLES,
                     coverage=cov["rules"], zeek_visibility=zeek_visibility, zeek_visibility_bundled=zeek_visibility_bundled,
                     tasks=repo.tasks(hunt_id), reports=reports, agent=agent_summary,
                     investigations=investigations, ai_agent=ai_audit["detail"] if ai_audit else None,

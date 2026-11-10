@@ -60,15 +60,40 @@
 {% endif %}
 
 <div class="lanes">
-  {% for ln in ['urgent', 'high', 'lead', 'context'] %}
+  {% for ln in ['urgent', 'high', 'lead', 'context', 'suppressed'] %}
   <a class="lane l-{{ ln }} {% if lane == ln %}sel{% endif %}" href="?lane={{ ln }}">{{ ln }} <b>{{ lanes.get(ln, 0) }}</b></a>
   {% endfor %}
-  <a class="lane {% if not lane %}sel{% endif %}" href="?">all reportable</a>
+  <a class="lane {% if not lane %}sel{% endif %}" href="?">{% if ranked %}report order{% else %}all reportable{% endif %}</a>
 </div>
 
 <section id="newfeed" class="feed" hidden><h2>New since this page loaded</h2><ul id="feed"></ul></section>
 
 <h2>Findings and leads</h2>
+{% if ranked %}
+<p class="help">In report order: confirmed findings, then findings on entities that meet the evidence bar, then the other ranked findings, each by rank. The rule estimate is each rule's own lane. Findings stored after the last ranking pass (an AI agent's pivots and proposals) are not ranked: a confirmed one is listed with the confirmed findings, the others after every ranked finding, in the rule estimate's order.</p>
+<table class="grid">
+<thead><tr><th>Rank</th><th>Rule estimate</th><th>Sev</th><th>Conf</th><th>Time (UTC)</th><th>Entity</th><th>Rule</th><th>Claim</th></tr></thead>
+<tbody>
+{% set ns = namespace(title="") %}
+{% for c in cands %}
+{% if segment_titles[c.segment] != ns.title %}{% set ns.title = segment_titles[c.segment] %}
+<tr class="section-head"><th colspan="8">{{ ns.title }}</th></tr>
+{% endif %}
+<tr class="row-{{ c.lane }}">
+  <td class="mono">{% if c.score is not none %}{{ '%g' | format(c.score) }}{% else %}not ranked{% endif %}</td>
+  <td><span class="pill l-{{ c.lane }}">{{ c.lane }}</span></td>
+  <td>{{ c.severity }}</td><td>{{ c.confidence }}</td>
+  <td class="mono">{{ c.ts.strftime('%m-%d %H:%M:%S') if c.ts is not none else 'Not recorded' }}</td>
+  <td class="mono">{% if c.entity is not none %}{{ c.entity_kind }}:{{ c.entity }}{% elif c.section is not none %}unattributed{% endif %}</td>
+  <td class="mono">{{ c.rule_id }}</td>
+  <td><a href="/findings/{{ c.id }}" data-finding-id="{{ c.id }}">{{ c.claim | truncate(220) }}</a>{% if c.provenance == "agent" %} <b class="agent-provenance">AI agent · unconfirmed</b>{% if c.agent_hypothesis_id %} · <a href="/hunts/{{ h.id | urlencode }}/hypotheses/{{ c.agent_hypothesis_id | urlencode }}">Hypothesis</a>{% endif %}{% endif %}</td>
+</tr>
+{% else %}
+<tr><td colspan="8">No reportable findings.</td></tr>
+{% endfor %}
+</tbody>
+</table>
+{% else %}
 <table class="grid">
 <thead><tr><th>Lane</th><th>Sev</th><th>Conf</th><th>Time (UTC)</th><th>Rule</th><th>Claim</th></tr></thead>
 <tbody>
@@ -85,6 +110,8 @@
 {% endfor %}
 </tbody>
 </table>
+
+{% endif %}
 
 {% if cands_next %}<p>Page limit: 50. {{ cands_more }} more · <a href="{{ cands_next }}">Next findings →</a></p>{% endif %}
 
