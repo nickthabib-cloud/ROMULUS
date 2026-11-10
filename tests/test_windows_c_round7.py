@@ -245,7 +245,9 @@ def test_native_scale4_releases_use_global_room_without_poisoning_later_findings
     # SQLite's page use depends on the order of the stored event ids, which the evidence epoch hashes: at exactly
     # 4 MiB the epoch-16 layout leaves no room for one correlation finding (the epoch-15 layout did). 4.1 MiB holds
     # the same 60 findings as epoch 15 at 4 MiB, identical apart from id-derived lineage keys. Epoch 17 rehashes the
-    # event ids again: the same 60 findings, and with the evidence version set back to 16 the earlier digest.
+    # event ids again. Epoch 18 keeps the same 60 findings; restoring epoch 17 reproduces its complete snapshot.
+    # Rehashed ids alter SQLite page layout: two discovery cells retain more evaluations and become complete.
+    # The alert still reports the same missing citation by its new id; no finding changes lane or severity.
     budget = StateBudget(tmp_path, disk_total=int(4.1*2**20), reserve=0)
     monkeypatch.setattr(sw, "state_budget", lambda settings, stage_dir: budget)
     # expansion seeded by the rule estimate, so the pinned digest isolates the sweep's shared state
@@ -254,8 +256,8 @@ def test_native_scale4_releases_use_global_room_without_poisoning_later_findings
     # Shared state retains prior groups and restores SSH/login findings plus alert-linked context.
     # The alert keeps its computed HIGH lane with explicit partial citation coverage at this physical cap.
     assert len(snapshot["candidates"]) == 60
-    # 2026-11-10: re-pin only persistence rule_version 8->9. Under this exact physical
-    # budget, restoring that field must reproduce the prior decisions and citations digest.
+    # At this evidence epoch, changing only persistence contract metadata keeps its
+    # separately captured decisions and citations under the same physical budget.
     persistence = [row for row in snapshot["candidates"] if row["rule_id"] == "host.persistence_path_change"]
     assert persistence and {row["rule_version"] for row in persistence} == {"9"}
     previous = dict(snapshot, candidates=[
@@ -263,9 +265,9 @@ def test_native_scale4_releases_use_global_room_without_poisoning_later_findings
         for row in snapshot["candidates"]
     ])
     assert fixture.deterministic_golden_digests(previous)["candidates"] == (
-        "2e8c8520cc4f4028537257bc5272ff3a741b4a0ef181419a9355b32861cd88c3")
+        "8959b6b6a1dcb78d4cded5a853488337937da407bb179818e875955ec7fc9255")
     assert fixture.deterministic_golden_digests(snapshot)["candidates"] == (
-        "482f67259f29b085d96d5efa6f75c1ae442455ac1d62c942f0988715d870e13e")
+        "6d67794516bf8f8df3e30faa93e2f13c50397728935613d0d34104e0af2dba06")
     assert any(row["rule_id"] == "host.shell_spawned_by_connected_process" and row["event_ids"]
                for row in snapshot["candidates"])
 

@@ -12,6 +12,7 @@ from pathlib import Path
 
 from romulus.detect import packets as packet_rules
 from romulus.evidence import typed
+from romulus.evidence.ecar import ECAR_NORMALIZER
 from romulus.evidence.normalize import NORMALIZER_VERSION
 from romulus.evidence.typed import EVIDENCE_VERSION, RawRef, event_id
 from romulus.evidence.windows import WINDOWS_NORMALIZER
@@ -71,9 +72,13 @@ PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf211
                    # (only an SSH claim is refused), a unit stopped counting against user-invoked tools, and PAM
                    # failures of natively logging daemons were typed on their own channel; again only records
                    # that were unsupported before change.
-                   17: "baa63f719e26813a9e8a1d8f1bcce8c505ba46cb4cb5b36a7b2c052e0e0384b7"}
+                   17: "baa63f719e26813a9e8a1d8f1bcce8c505ba46cb4cb5b36a7b2c052e0e0384b7",
+                   # Hostless text records gain their syslog header host; all event identities use this epoch.
+                   18: "461960d9faa8960651fd9e6c2d3cae7501264a15861392ddf26ce9166017f99d"}
 WINDOWS_EVIDENCE_FILES = ("community.py", "windows.py", "windows_catalog.py", "windows_reassembly.py", "rpc_catalog.py")
 PINNED_WINDOWS = {
+    # Native EVTX JSON records gain typed normalization with their original field paths.
+    "windows-ecs@19": "38b3631781b9192adf2a8657f7b677174b4327da0191efffbe3c785fc7731af5",
     # NXLog's flat im_msvistalog records are read (windows.nxlog_to_winlog); Winlogbeat and Agent records normalize
     # exactly as before (the public sample corpus is identical with the versions held at their earlier values).
     # Unreleased: re-pinned when a zoneless @timestamp became an error, an Eventlog record whose Channel data replaced
@@ -98,6 +103,9 @@ PINNED_WINDOWS = {
     "windows-ecs@9": "c7c70f9618344ea9ec418499d03747524e2b187491de32420da96002a35dbddc",
     "windows-ecs@8": "1d6de025af778e584dfc052227555d628b830af0735a61f4b26e61787905cdee",
 }
+# Shared path, credential and scalar cleaners are part of the eCAR producer contract.
+ECAR_EVIDENCE_FILES = ('community.py', 'ecar.py', 'ecar_catalog.py', 'raw_scrub.py', 'surrogates.py', 'windows.py')
+PINNED_ECAR = {"ecar@1": "539a0832b610df1dca02729b594756bb1a0ae70a9c825beec154611b0cde56cd"}
 ZEEK_EVIDENCE_FILES = ("certificates.py", "community.py", "ics_catalog.py", "rpc_catalog.py", "zeek.py", "zeek_catalog.py",
                        "zeek_credentials.py")
 PINNED_ZEEK = {
@@ -150,6 +158,14 @@ def _windows_files_digest() -> str:
     return h.hexdigest()
 
 
+def _ecar_files_digest() -> str:
+    h = hashlib.sha256()
+    for name in ECAR_EVIDENCE_FILES:
+        path = Path(typed.__file__).parent / name
+        h.update(name.encode() + b"\0" + path.read_bytes().replace(b"\r\n", b"\n") + b"\0")
+    return h.hexdigest()
+
+
 def _zeek_files_digest() -> str:
     h = hashlib.sha256()
     for name in ZEEK_EVIDENCE_FILES:
@@ -179,6 +195,13 @@ def test_windows_normalization_matches_the_pinned_producer_version():
     )
 
 
+def test_ecar_normalization_matches_the_pinned_producer_version():
+    assert PINNED_ECAR.get(ECAR_NORMALIZER) == _ecar_files_digest(), (
+        "eCAR evidence normalization changed: bump ECAR_NORMALIZER, then record "
+        f"{_ecar_files_digest()} for {ECAR_NORMALIZER} in tests/test_evidence_version.py"
+    )
+
+
 def test_zeek_normalization_matches_the_pinned_producer_version():
     assert PINNED_ZEEK.get(ZEEK_NORMALIZER) == _zeek_files_digest(), (
         "Zeek evidence normalization changed: bump ZEEK_NORMALIZER, then record "
@@ -199,6 +222,7 @@ def test_event_ids_carry_the_producer_and_version():
     legacy = hashlib.sha256(b"process_exec|" + ref.key.encode()).hexdigest()[:24]
     assert event_id("process_exec", [ref]) != legacy                    # never collides with pre-versioned rows
     assert event_id("process_exec", [ref], WINDOWS_NORMALIZER) != event_id("process_exec", [ref])
+    assert event_id("process_exec", [ref], ECAR_NORMALIZER) != event_id("process_exec", [ref], WINDOWS_NORMALIZER)
     assert event_id("net_flow", [ref], ZEEK_NORMALIZER) != event_id("net_flow", [ref])
     assert event_id("http_body", [ref], "tshark-http@3") != event_id("http_body", [ref], "tshark-http@4")
     assert event_id("http_body", [ref], "tshark-http@4") != event_id("http_body", [ref], "tshark-packets@5")

@@ -25,6 +25,8 @@ UNKNOWN_REASON = "text line in no recognized format: custom.unknown"
 # and rule cells: the unknown line also leaves host.telemetry_gap_after_tamper partial. Evidence ranking then
 # anchors the rest of the Reported set, which moves anchors, expansion, links, tasks, audit, manifest and the
 # context rule cells of the added links. Events, candidates, raw records and citations are unchanged.
+# Evidence epoch 18 and Windows producer 19 rehash typed-event identities and dependent citations.
+# Restoring the preceding versions reproduces the complete synthetic snapshots and normalization.
 GOLDEN_TEXT_STACK = {'anchors': '76d49f847a278436656be95a1a5b505f49981a042385f70276de06b1360278ed',
  'audit': '00b16a0384533f0438b5e5cfc0e04105e17b32a19d5edd896dd47f6f0ac08862',
  'baseline_counts': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
@@ -36,14 +38,14 @@ GOLDEN_TEXT_STACK = {'anchors': '76d49f847a278436656be95a1a5b505f49981a042385f70
  'baseline_window_counts': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'baseline_window_event_hours': 'dbbcb75b0e5ad202089e3eeaf84801202f5f1b8b3fcfb214f42edbdd7e007f47',
  'baseline_window_scope_hours': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
- 'candidates': '75b419972178bacfa911559c0b72bdc96abe84b235220e4ef0066b30c52cec05',
+ 'candidates': '975714d3f71dbd53ffbd9fdb49239e35640e03e9288f67e9d9cbcb9ed6f7730a',
  'entities': '9e629528fba70d33c17e231aabf743f914b553fe3bc737669e3b8c0e33da6183',
  'event_citations': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
- 'event_entities': 'aab2777b9cfdddf515ae9a452a34fc924d04660c82cf1c019a244758d034c630',
- 'events': '30c0dcf4f38cac97f4c778cf415f65e180f134153426316f1085b7cbbf3f9f1d',
+ 'event_entities': '7a95b1d7330214dbac1d0d91bfb7978e1410bbe325214fd950401b0d08fac22d',
+ 'events': '77987c6e9f03b2c3039d20372a03424166749f5feb9bf82d99496deefed0e8e2',
  'expansion': '44f9f8720063e4d8ba33bffd67ea1532b81ae9678d1ec746d96fc59cee298012',
- 'links': '6d6470343a27027c549c214e10c4b05a80cea85fface21a22dbb169c16aab191',
- 'manifest': '2384dc7e26f7d2664ad513a5f5233fb0d2a6c7a6d52858e3692310b75dbb60a4',
+ 'links': '1d7b2d597f99070ba03fa543b65ffe3960bac1fd3a965249d92ae3a2e86ba2c1',
+ 'manifest': '8b51221693333bc50a92752ec1cc648201c6461a0c0776838146adad874d13a8',
  'raw': '64be31e697a32f93b1a71657560af514b2d430469cb3be19f44b8827985a7775',
  'rule_cells': '78d1c59175dad8ef4ee87c6559fd17703ccbbcd1f707e045021c764f8e6d024a',
  'stats': '94249143f689b419b183019aec955234793e932e6edb0348cb5df3c50d425189',
