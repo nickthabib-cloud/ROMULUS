@@ -34,7 +34,7 @@ def _exec(event_id: str = "exec-1") -> TypedEvent:
 def test_baseline_pack_registers_all_built_specs_and_never_enters_direct_pivots():
     expected = {
         "bl.ssh_tuple", "bl.exec_path", "bl.exec_pair", "bl.cmd_shape", "bl.ext_dest",
-        "bl.svc_exec_rate",
+        "bl.svc_exec_rate", "vpn.login_from_new_source_ip_for_user",
     }
 
     assert {playbook.spec.id for playbook in BASELINE_PLAYBOOKS} == expected

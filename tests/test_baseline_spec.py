@@ -54,9 +54,10 @@ def _ctx(table: PidTable | None = None, service_accounts: frozenset[str] | None 
     return KeyContext(**args)
 
 
-def test_registry_has_the_six_accepted_specs_and_metadata():
+def test_registry_has_the_accepted_specs_and_metadata():
     assert [spec.id for spec in BASELINE_SPECS] == [
-        "bl.ssh_tuple", "bl.exec_path", "bl.exec_pair", "bl.cmd_shape", "bl.ext_dest", "bl.svc_exec_rate",
+        "bl.ssh_tuple", "vpn.login_from_new_source_ip_for_user",
+        "bl.exec_path", "bl.exec_pair", "bl.cmd_shape", "bl.ext_dest", "bl.svc_exec_rate",
     ]
     assert SPEC_BY_ID["bl.ssh_tuple"].families == ("auth",)
     assert SPEC_BY_ID["bl.exec_path"].scope == ("host", "account")
@@ -68,12 +69,14 @@ def test_registry_has_the_six_accepted_specs_and_metadata():
     )
     assert SPEC_BY_ID["bl.svc_exec_rate"].bucket == "hour"
     assert {spec.id: spec.measure for spec in BASELINE_SPECS} == {
-        "bl.ssh_tuple": "presence", "bl.exec_path": "prevalence", "bl.exec_pair": "prevalence",
+        "bl.ssh_tuple": "presence", "vpn.login_from_new_source_ip_for_user": "presence",
+        "bl.exec_path": "prevalence", "bl.exec_pair": "prevalence",
         "bl.cmd_shape": "prevalence", "bl.ext_dest": "prevalence", "bl.svc_exec_rate": "rate",
     }
     # The fourth external-destination key version also distinguishes v1 answer-name recovery from v2/v3 records.
     assert {spec.id: (spec.version, spec.key_version) for spec in BASELINE_SPECS} == {
-        "bl.ssh_tuple": ("1", "1"), "bl.exec_path": ("1", "1"), "bl.exec_pair": ("2", "2"),
+        "bl.ssh_tuple": ("1", "1"), "vpn.login_from_new_source_ip_for_user": ("1", "1"),
+        "bl.exec_path": ("1", "1"), "bl.exec_pair": ("2", "2"),
         "bl.cmd_shape": ("4", "4"), "bl.ext_dest": ("4", "4"), "bl.svc_exec_rate": ("1", "2"),
     }
 
@@ -784,6 +787,9 @@ def test_service_exec_rate_absent_or_malformed_identity_is_typed_missing(host, f
 
 _COMPLETE = {
     ("bl.ssh_tuple", "auth"): (Outcome.success, SSH),
+    ("vpn.login_from_new_source_ip_for_user", "auth"): (Outcome.success, {
+        "auth.service": "openvpn", "auth.phase": "authentication", "user.name": "alice", "source.ip": "192.0.2.1",
+    }),
     ("bl.exec_path", "process_exec"): (Outcome.success, EXEC),
     ("bl.exec_pair", "process_exec"): (Outcome.success, {"process.ppid": 100, "process.executable": "/bin/sh"}),
     ("bl.cmd_shape", "process_exec"): (Outcome.success, {"process.executable": "/bin/sh", "process.argv": ["sh"]}),

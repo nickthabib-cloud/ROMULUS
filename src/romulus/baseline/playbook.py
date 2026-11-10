@@ -136,6 +136,22 @@ class SshTupleBaseline(BaselinePlaybook):
     os_families = ("linux",)
 
 
+class VpnSourceBaseline(BaselinePlaybook):
+    """A new successful VPN source needs a complete historical baseline, not a single hunt."""
+    id = "vpn.login_from_new_source_ip_for_user"
+    title = "New source IP for a VPN identity"
+    spec = SPEC_BY_ID[id]
+    families = spec.families
+    datasets = spec.datasets
+    required_fields = ("auth.service", "auth.phase", "source.ip", "user.name")
+    os_families = ("linux",)
+    attack = ("T1078", "T1133")
+    assures_negative = False
+    positive_only_reason = "A new VPN source can only be judged against sufficiently complete prior history."
+    card: ClassVar[dict] = {"behavior": title, "telemetry": "Successful typed VPN authentication with source and account",
+            "fidelity": "Historical presence baseline; a single observation does not establish a new source."}
+
+
 class ExecPathBaseline(BaselinePlaybook):
     id = "bl.exec_path"
     title = "Executable path baseline"
@@ -182,6 +198,7 @@ class ServiceExecRateBaseline(BaselinePlaybook):
 
 BASELINE_PLAYBOOKS = [
     SshTupleBaseline,
+    VpnSourceBaseline,
     ExecPathBaseline,
     ExecPairBaseline,
     CommandShapeBaseline,

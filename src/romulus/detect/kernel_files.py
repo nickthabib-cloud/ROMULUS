@@ -3,6 +3,7 @@
 Both rules read what the kernel recorded at the system call: the owner, group and mode of the file an exec named,
 and the path, change kind and actor of a file change. Neither knows which files and calls the host's audit rules
 cover (that inventory is not in the telemetry), so both are positive-only: absence proves nothing.
+The persistence rule also reports explicit crontab-manager edit/replacement logs as scheduler observations.
 """
 from __future__ import annotations
 
@@ -634,18 +635,22 @@ class PersistencePathChange(Playbook):
     state_slice = "strong"           # a strong-indicator rule (see Playbook.state_slice)
     id = "host.persistence_path_change"
     version = "8"
-    title = "Kernel-recorded change to a file that a scheduler, init, the login path or the loader acts on"
+    title = "Persistence-location file changes and crontab manager activity"
     anchor_class = "persistence"
     kind = "aggregate"
     staged = True
     claim_type = "aggregate_observation"
-    families = ("file_change", "process_exec")
+    families = ("file_change", "process_exec", "service_change")
     context_families = ("process_observed",)
-    required_fields = ("file.path", "process.uid")
+    required_fields = ()
+    required_by_family: ClassVar[dict] = {
+        "file_change": ("file.path", "process.uid"),
+        "service_change": ("service.name", "service.action", "user.name", "account.name"),
+    }
     assures_negative = False
     positive_only_reason = (
         "which files and directories the audit rules watch is not visible in telemetry, so a missing change record "
-        "for a location proves nothing")
+        "for a location proves nothing; crontab manager logs also do not cover every way a schedule can change")
     severity, lane = "high", "high"
     attack = ("T1053.002", "T1053.003", "T1037", "T1037.004", "T1543.002", "T1546.004", "T1546.017", "T1556.003",
               "T1574.006", "T1548.003", "T1098.004", "T1547.006", "T1547.013")
@@ -663,19 +668,23 @@ class PersistencePathChange(Playbook):
                     "scripts, system and user systemd units and generators, shell startup files, PAM "
                     "configuration and modules, the dynamic linker preload and search path, authorized_keys, "
                     "sudoers, login message scripts, udev rules, module load lists, autostart entries, sshd "
-                    "configuration",
+                    "configuration; or an explicit crontab manager REPLACE or BEGIN EDIT log",
         "telemetry": "Linux auditd SYSCALL+PATH(+CWD) of file-changing calls as file_change, plus process_exec "
                      "and process_observed records for package lineage: file.path, "
                      "file.change, file.nametype, process.uid, process.user, process.auid, process.tty, "
                      "process.pid, process.ppid, process.executable; process_exec for the package-manager "
                      "lineage. Coverage is watch-scoped: only locations the host's audit rules watch produce "
-                     "records, and the lab profile watches some of these locations, not all",
+                     "records, and the lab profile watches some of these locations, not all. Crontab manager "
+                     "logs supply service_change with service.name, service.action, user.name and account.name",
         "fidelity": "direct kernel record of the call on the file and its outcome; a write-intent open shows the "
-                    "file was opened for writing, not what was written",
+                    "file was opened for writing, not what was written. Crontab manager logs are scheduler "
+                    "observations, not kernel-confirmed writes: REPLACE reports replacement without the content, "
+                    "and BEGIN EDIT only reports the start of editing, not a saved change",
         "benign_and_cost": "package activity (one grouped lead per host, manager and location), root editors and "
                            "agents (lead per host, location and account), an account's own crontab, at jobs, keys "
                            "or startup files and setuid-root helpers acting for an account (lead). Other non-root "
-                           "changes, and every web-service account change, are rare and high",
+                           "changes, and every web-service account change, are rare and high. Explicit crontab "
+                           "manager edits/replacements are leads regardless of account name",
         "query_cost": "none beyond the sweep: it reads the host partitions every host rule reads",
         "next_pivot": "the file's content and the next run or read of it; the writer's session and lineage",
         "adds": "the argv rules see only commands that name the file; this sees the kernel's record of the change "
@@ -683,7 +692,7 @@ class PersistencePathChange(Playbook):
         "research_basis": "ATT&CK Enterprise 20.0 persistence techniques listed in `attack`; SigmaHQ "
                           "rules/linux/auditd file-event rules (cron, systemd, ld.so.preload, sudoers, "
                           "authorized_keys, pam) as the location corpus, reimplemented; the Linux audit PATH "
-                          "nametype semantics",
+                          "nametype semantics; Cronie src/crontab.c log_it REPLACE and BEGIN EDIT call sites",
         "retrieval": "the sweep retrieves every record of the host datasets in each partition (dataset filter "
                      "only), a superset of what this evaluator reads",
     }
@@ -724,6 +733,8 @@ class PersistencePathChange(Playbook):
             self._seen.add(event.id)
             if event.family in {"process_exec", "process_observed"}:
                 self._exec(event)
+            elif event.family == "service_change":
+                self._cron(event)
             else:
                 self.lineage.observe(event, self.raw_of(event), self.raw_target())
                 self._change(event)
@@ -736,6 +747,47 @@ class PersistencePathChange(Playbook):
     def _exec(self, event: TypedEvent) -> None:
         """Process lineage only: hold an exec or other audit observation once in the shared lineage store."""
         self.lineage.observe(event, self.raw_of(event), self.raw_target())
+
+    def _cron(self, event: TypedEvent) -> None:
+        """Report the manager's explicit action without inventing a file, UID or completed write."""
+        service, action = event.get("service.name"), event.get("service.action")
+        if not isinstance(service, str) or not service.strip():
+            self.missing_required += 1
+            return
+        if service != "cron":
+            self.evaluated += 1
+            return
+        if not isinstance(action, str) or not action.strip():
+            self.missing_required += 1
+            return
+        if action not in {"replace", "begin_edit"}:
+            self.evaluated += 1
+            return
+        actor, account = event.get("user.name"), event.get("account.name")
+        if any(not isinstance(value, str) or not value.strip() for value in (actor, account)):
+            self.missing_required += 1
+            return
+        self.evaluated += 1
+        if action == "replace":
+            logged = "REPLACE"
+            limit = ("This reports a crontab replacement; it does not establish the resulting commands "
+                     "or a kernel-confirmed file write.")
+        else:
+            logged = "BEGIN EDIT"
+            limit = "This is the start of editing; it does not establish that changes were saved."
+        match = Match(
+            playbook_id=self.id,
+            claim=(f"On {event.host or 'an unrecorded host'}, the crontab manager logged {logged} "
+                   f"by account {actor!r} for account {account!r} at {event.ts.isoformat()}. {limit}"),
+            claim_type="observed_action", events=[event],
+            predicate=[pf(event, name) for name in self.required_by_family["service_change"]], ts=event.ts,
+            severity="medium", proposed_lane="lead", confidence="medium",
+            entities=event.entities() + [("account", account, "subject")],
+            notes=["T1053.003", "Scheduler manager log; numeric user ID and spool path are not recorded"],
+            group_key="cron-log|" + event.id, attack=("T1053.003",),
+            raw_copies=self.raw_of(event),
+        )
+        self._alone.append(match)
 
     def _change(self, event: TypedEvent) -> None:
         path, uid = event.get("file.path"), _str(event.get("process.uid"))
