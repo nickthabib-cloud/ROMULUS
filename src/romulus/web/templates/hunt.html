@@ -2,18 +2,21 @@
 {% block title %}{{ h.id }} · ROMULUS{% endblock %}
 {% block content %}
 <h1>Hunt {{ h.id }}</h1>
-<div class="summary" data-stream="/hunts/{{ h.id }}/stream" id="live">
+<div class="summary" data-stream-cursor="{{ stream_cursor }}"{% if live %} data-live="true" data-stream="/hunts/{{ h.id }}/stream?after_seq={{ stream_cursor }}" id="live"{% endif %}>
   <div><span class="label">Execution</span> <span class="state s-{{ h.execution_state }}" id="live-state">{{ h.execution_state }}</span></div>
   <div><span class="label">Result</span> {{ h.detection_result or '—' }}</div>
   <div><span class="label">Window (UTC)</span> {{ h.manifest.window.start }} → {{ h.manifest.window.end }}</div>
   <div><span class="label">Sources</span> {{ h.manifest.targets | join(', ') }}</div>
   <div class="wide"><span class="label">Internal networks</span> {{ (internal_networks.line or internal_networks.summary) | replace('Internal networks: ', '', 1) }}</div>
   {% if h.stop_reason %}<div class="wide"><span class="label">Stop reason</span> {{ h.stop_reason }}</div>{% endif %}
-  {% if ai_agent %}<div class="wide"><span class="label">AI agent</span> {{ ai_agent.status }}{% if ai_agent.reason %}: {{ ai_agent.reason }}{% endif %}</div>{% endif %}
+  {% if ai_agent and not ai_panel %}<div class="wide"><span class="label">AI agent</span> {{ ai_agent.status }}{% if ai_agent.reason %}: {{ ai_agent.reason }}{% endif %}</div>{% endif %}
   {% if answered_by %}<div class="wide"><span class="label">Answered by</span> {% for r in answered_by %}{{ r.model_reported }} ({{ r.calls }} calls; configured {{ r.model }}){% if not loop.last %}, {% endif %}{% endfor %}</div>{% endif %}
 </div>
 {% if internal_networks.warning %}<p class="warn"><b>Internal networks:</b> {{ internal_networks.warning }}</p>{% endif %}
 {% for egress in egress_banners %}<p class="warn"><b>Model egress:</b> {{ egress }}</p>{% endfor %}
+
+{% if agent_message %}<p class="warn">{{ agent_message }}</p>{% endif %}
+{% if ai_panel %}{% include "agent_panel.html" %}{% endif %}
 
 <p><a href="/hunts/{{ h.id }}/timeline">Attack-path timeline →</a></p>
 
@@ -75,13 +78,15 @@
   <td>{{ c.severity }}</td><td>{{ c.confidence }}</td>
   <td class="mono">{{ c.ts.strftime('%m-%d %H:%M:%S') if c.ts is not none else 'Not recorded' }}</td>
   <td class="mono">{{ c.rule_id }}</td>
-  <td><a href="/findings/{{ c.id }}">{{ c.claim | truncate(220) }}</a></td>
+  <td><a href="/findings/{{ c.id }}" data-finding-id="{{ c.id }}">{{ c.claim | truncate(220) }}</a>{% if c.provenance == "agent" %} <b class="agent-provenance">AI agent · unconfirmed</b>{% if c.agent_hypothesis_id %} · <a href="/hunts/{{ h.id | urlencode }}/hypotheses/{{ c.agent_hypothesis_id | urlencode }}">Hypothesis</a>{% endif %}{% endif %}</td>
 </tr>
 {% else %}
 <tr><td colspan="6">No items in this lane.</td></tr>
 {% endfor %}
 </tbody>
 </table>
+
+{% if cands_next %}<p>Page limit: 50. {{ cands_more }} more · <a href="{{ cands_next }}">Next findings →</a></p>{% endif %}
 
 <h2>Coverage</h2>
 <p class="help">What each rule searched. ROMULUS reports what it finds; it never claims that nothing is there. <b>Searched in full</b> means every partition in scope was evaluated and none matched: a statement about the search, not about the network. <b>Searched in part</b> means some partitions were partial, failed, or had records missing required fields: those are blind spots, listed with their reasons. <b>No data in scope</b> means the rule had nothing to read.</p>

@@ -19,8 +19,9 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.concurrency import run_in_threadpool
 
-from romulus.agent.provider import egress_banners
+from romulus.agent.provider import agent_readiness, egress_banners
 from romulus.config import Settings
 from romulus.decide.policy import LANE_ORDER
 from romulus.hunt.run import open_repo
@@ -28,9 +29,11 @@ from romulus.report.bundle import write_reports
 from romulus.report.manifest import internal_networks_view, investigations_for_hunt, publish_revision
 from romulus.site import SiteChangedError, SiteValidationError, load_site_facts, save_site_facts
 from romulus.store.db import compact, maintenance_lease
-from romulus.web import site_form
+from romulus.web import agent_views, site_form
+from romulus.web.agent_routes import register_agent_routes
 from romulus.web.auth import RateLimiter, Sessions, csrf_ok, verify
 from romulus.web.catalog_routes import register_catalog_routes
+from romulus.web.finding_order import finding_page
 from romulus.web.indicator_routes import IndicatorBodyLimit, register_indicator_routes
 from romulus.web.request_routes import DetectionRequestBodyLimit, register_request_routes
 
@@ -81,6 +84,7 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
     register_indicator_routes(app, repo, need, page)
     register_catalog_routes(app, repo, need, page)
     register_request_routes(app, repo, need, page)
+    register_agent_routes(app, repo, need, page)
 
     @app.get("/login", response_class=HTMLResponse)
     def login_form(request: Request, error: str = ""):
@@ -111,20 +115,40 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
 
     # ------------------------------------------------------------------ hunts
     @app.get("/", response_class=HTMLResponse)
-    def hunts(request: Request):
+    def hunts(request: Request, after: str = ""):
+        from urllib.parse import urlencode
+
+        from sqlalchemy import func, select
+
+        from romulus.store import schema as tables
         u = need(request)
-        rows = [{**h, "lanes": repo.lane_counts(h["id"])} for h in repo.list_hunts()]
+        if len(after) > 512:
+            raise HTTPException(400, "Invalid page cursor")
+        with repo.engine.connect() as connection:
+            where = (tables.hunt.c.id < after,) if after else ()
+            rows = [dict(row) for row in connection.execute(select(tables.hunt,
+                tables.agent_run.c.state.label("ai_state")).select_from(tables.hunt.outerjoin(
+                tables.agent_run, tables.agent_run.c.hunt_id == tables.hunt.c.id)).where(*where)
+                .order_by(tables.hunt.c.id.desc()).limit(50)).mappings()]
+            more = int(connection.execute(select(func.count()).select_from(tables.hunt).where(
+                tables.hunt.c.id < rows[-1]["id"])).scalar_one()) if rows else 0
+        for row in rows:
+            row["lanes"] = repo.lane_counts(row["id"])
+        next_url = "?" + urlencode({"after": rows[-1]["id"]}) if more else None
         deleted = request.query_params.get("deleted", "")
         # only confirm a deletion that the audit log actually records (the query string is spoofable)
         confirmed = deleted if deleted and repo.latest_audit(deleted, "hunt.delete") else ""
-        return page(request, "hunts.html", u, hunts=rows, deleted=confirmed,
+        return page(request, "hunts.html", u, hunts=rows, deleted=confirmed, more=more, next_url=next_url,
                     compaction_failed=bool(confirmed and repo.latest_audit(confirmed, "hunt.compaction_failed")))
 
     @app.get("/hunts/new", response_class=HTMLResponse)
     def new_hunt_form(request: Request):
         u = need(request)
+        readiness = agent_readiness(s)
+        provenance = {**readiness.provenance(s), "requested": True}
         return page(request, "new_hunt.html", u, tz=s.mission_timezone, sources=s.es_index_patterns,
-                    model=s.ollama_model_triage)
+                    readiness=readiness, agent_checked=s.agent_default == "on" and readiness.ready,
+                    egress_banners=egress_banners(provenance, {}))
 
     @app.post("/hunts")
     def start_hunt(request: Request, start: str = Form(...), end: str = Form(...), style: str = Form("broad"),
@@ -156,15 +180,38 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         return RedirectResponse("/?started=1", status_code=303)
 
     @app.get("/hunts/{hunt_id}", response_class=HTMLResponse)
-    def hunt_detail(request: Request, hunt_id: str, lane: str = ""):
+    def hunt_detail(request: Request, hunt_id: str, lane: str = "", after: str = ""):
         u = need(request)
+        if len(after) > 512:
+            raise HTTPException(400, "Invalid page cursor")
         h = repo.get_hunt(hunt_id)
         if h is None:
             raise HTTPException(404)
-        cands = repo.candidates(hunt_id, [lane] if lane in LANE_ORDER else None)
-        cands.sort(key=lambda c: (LANE_ORDER.get(c["lane"], 9), -c["priority"], str(c["ts"])))
-        if not lane:
-            cands = [c for c in cands if c["lane"] != "context"]
+        stream_cursor = repo.agent_change_max_seq(hunt_id)
+        agent_run = repo.agent_run(hunt_id)
+        live = agent_views.stream_live(repo, h, agent_run)
+        cands_more, cands_next = 0, None
+        if agent_run:
+            from urllib.parse import urlencode
+
+            from romulus.store import schema as tables
+            predicates = (tables.candidate.c.lane == lane,) if lane in LANE_ORDER else (tables.candidate.c.lane != "context",)
+            try:
+                cands, cands_more, cursor = finding_page(repo, hunt_id, after=after,
+                    predicates=predicates, columns=tuple(getattr(tables.candidate.c, key) for key in (
+                        "id", "lane", "severity", "confidence", "priority", "ts", "rule_id", "claim", "provenance",
+                        "agent_hypothesis_id")))
+            except ValueError as error:
+                raise HTTPException(400, "Invalid page cursor") from error
+            agent_views.validate_hypothesis_links(repo, hunt_id, cands)
+            cands_next = "?" + urlencode({"lane": lane, "after": cursor}) if cursor else None
+        else:
+            if after:
+                raise HTTPException(400, "This hunt does not use a findings cursor")
+            cands = repo.candidates(hunt_id, [lane] if lane in LANE_ORDER else None)
+            cands.sort(key=lambda c: (LANE_ORDER.get(c["lane"], 9), -c["priority"], str(c["ts"])))
+            if not lane:
+                cands = [c for c in cands if c["lane"] != "context"]
         from romulus.report.manifest import coverage_for_hunt
         cov = coverage_for_hunt(repo, hunt_id)
         zeek_visibility = cov.get("zeek_visibility")
@@ -189,22 +236,27 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         agent_summary = agent_audit["detail"] if agent_audit else None
         investigations = investigations_for_hunt(repo, hunt_id)
         ai_audit = repo.latest_audit(hunt_id, "hunt.ai_agent_summary")
-        agent_usage = repo.agent_usage(hunt_id)
-        banners = egress_banners(h["manifest"].get("ai_agent"), agent_usage)
+        agent_usage = repo.agent_usage(hunt_id, group_limit=50)
+        banners = [agent_views.clip(banner, 1000) for banner in egress_banners(h["manifest"].get("ai_agent"), agent_usage)]
         # calls a model other than the configured one answered (a provider's refusal fallback)
-        answered_by = [r for r in agent_usage["models_reported"] if r["model_reported"] != r["model"]]
+        answered_by = [{**r, "model": agent_views.clip(r["model"], 300),
+                        "model_reported": agent_views.clip(r["model_reported"], 300)}
+                       for r in agent_usage["models_reported"] if r["model_reported"] != r["model"]]
         return page(request, "hunt.html", u, h=h, cands=cands, lanes=repo.lane_counts(hunt_id), lane=lane,
                     coverage=cov["rules"], zeek_visibility=zeek_visibility, zeek_visibility_bundled=zeek_visibility_bundled,
                     tasks=repo.tasks(hunt_id), reports=reports, agent=agent_summary,
                     investigations=investigations, ai_agent=ai_audit["detail"] if ai_audit else None,
                     egress_banners=banners, answered_by=answered_by,
+                    ai_panel=agent_views.panel(repo, h, agent_usage), cands_more=cands_more, cands_next=cands_next,
+                    live=live, stream_cursor=stream_cursor,
+                    agent_message=agent_views.REASSESS_MESSAGES.get(request.query_params.get("agent_message"), ""),
                     internal_networks=internal_networks_view(repo, hunt_id, h["manifest"]))
 
     def _timeline_findings(hunt_id: str) -> list[dict]:
         return [{"id": c["id"], "lane": c["lane"], "rule_id": c["rule_id"], "claim": c["claim"],
                  "observed_at": str(c["ts"]) if c["ts"] is not None else None,
                  "entities": c["entities"], "event_ids": c["event_ids"],
-                 "source_link_id": c.get("source_link_id")}
+                 "source_link_id": c.get("source_link_id"), "provenance": c.get("provenance", "deterministic")}
                 for c in repo.candidates(hunt_id, ["urgent", "high", "lead"])]
 
     @app.get("/hunts/{hunt_id}/timeline", response_class=HTMLResponse)
@@ -247,52 +299,58 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         return RedirectResponse(f"/hunts/{hunt_id}/timeline", status_code=303)
 
     @app.get("/hunts/{hunt_id}/stream")
-    async def stream(request: Request, hunt_id: str):
+    async def stream(request: Request, hunt_id: str, after_seq: str = "0"):
         need(request)
-        if repo.get_hunt(hunt_id) is None:
+        if (not after_seq.isascii() or not after_seq.isdigit() or len(after_seq) > 19
+                or int(after_seq) > 9223372036854775807):
+            raise HTTPException(400, "Invalid stream cursor")
+        if await run_in_threadpool(repo.get_hunt, hunt_id) is None:
             raise HTTPException(404)
 
-        async def gen():
-            # A finding revised in place keeps its id; its revision digest tells a client what it saw is stale.
-            sent: dict[str, str] = {}
-
-            def revision(c: dict) -> str:
-                return str(((c.get("gate_results") or {}).get("_revision") or {}).get("digest") or "")
-
-            while not await request.is_disconnected():
-                h = repo.get_hunt(hunt_id)
-                fresh = [c for c in repo.candidates(hunt_id, ["urgent", "high", "lead"])
-                         if sent.get(c["id"]) != revision(c)]
-                for c in sorted(fresh, key=lambda c: str(c["ts"])):
-                    revised = c["id"] in sent
-                    sent[c["id"]] = revision(c)
-                    yield "event: finding\ndata: " + json.dumps({"id": c["id"], "lane": c["lane"],
-                                                                 "rule": c["rule_id"], "claim": c["claim"][:300],
-                                                                 "ts": str(c["ts"]), "revised": revised}) + "\n\n"
-                yield "event: state\ndata: " + json.dumps({"state": h["execution_state"],
-                                                           "lanes": repo.lane_counts(hunt_id)}) + "\n\n"
-                if h["execution_state"] not in ("planned", "running"):
-                    break
-                await asyncio.sleep(2)
-        return StreamingResponse(gen(), media_type="text/event-stream")
+        return StreamingResponse(agent_views.live_events(repo, request, hunt_id, asyncio.sleep, after_seq=int(after_seq)),
+                                 media_type="text/event-stream")
 
     # ------------------------------------------------------------------ findings
     @app.get("/findings/{cid}", response_class=HTMLResponse)
-    def finding(request: Request, cid: str, host_after: str = ""):
+    def finding(request: Request, cid: str, host_after: str = "", event: str = "", notes_after: str = ""):
         u = need(request)
         c = repo.candidate(cid)
         if c is None:
             raise HTTPException(404)
-        events = repo.citation_events(c["hunt_id"], c["event_ids"][:20])
+        event_ids = c["event_ids"][:20]
+        if event:
+            from sqlalchemy import select
+
+            from romulus.store import schema as tables
+            with repo.engine.connect() as connection:
+                exists = connection.execute(select(tables.candidate_event.c.event_id).where(
+                    tables.candidate_event.c.candidate_id == cid, tables.candidate_event.c.hunt_id == c["hunt_id"],
+                    tables.candidate_event.c.event_id == event)).scalar_one_or_none()
+            if exists is None:
+                raise HTTPException(404)
+            event_ids = [event]
+        events = repo.citation_events(c["hunt_id"], event_ids)
         raw_ids = [rid for e in events for rid in e["raw_ids"]]
         raws = repo.raw_records(raw_ids[:40])
         gates = dict(c["gate_results"])
         notes = gates.pop("_notes", [])
         pred_fields = {p["field"] for p in c["predicate_fields"]}
         fleet_hosts, fleet_next = repo.candidate_hosts(cid, after=host_after)
+        from romulus.store import schema as tables
+        agent_notes, notes_more, notes_cursor = agent_views.page_rows(repo, tables.agent_note, c["hunt_id"],
+            after=notes_after, predicates=(tables.agent_note.c.target_kind == "finding", tables.agent_note.c.target_id == cid))
+        for note in agent_notes:
+            note["shown_text"] = agent_views.clip(note["text"], 2000)
+            note["shown_cites"] = agent_views.cites_view(repo, c["hunt_id"], note["cites"])
+            note["cites_more"] = max(0, len(note["cites"]) - 20)
+        linked_hypothesis = repo.agent_hypothesis(c["hunt_id"], c["agent_hypothesis_id"]) if c.get("agent_hypothesis_id") else None
+        if linked_hypothesis and linked_hypothesis["hunt_id"] != c["hunt_id"]:
+            linked_hypothesis = None
         return page(request, "finding.html", u, c=c, gates=gates, notes=notes, events=events, raws=raws,
                     fleet_hosts=fleet_hosts, fleet_next=fleet_next, fleet_after=host_after,
                     pred_fields=pred_fields, dispositions=repo.dispositions(cid), statuses=STATUSES,
+                    agent_notes=agent_notes, agent_notes_more=notes_more, agent_notes_cursor=notes_cursor,
+                    linked_hypothesis=linked_hypothesis,
                     pretty=lambda v: json.dumps(v, indent=2, ensure_ascii=False, sort_keys=True, default=str))
 
     @app.post("/findings/{cid}/disposition")
@@ -320,6 +378,27 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         if u.get("r") != "lead" or row is None or row.disabled or row.role != "lead":
             raise HTTPException(403, "only an active lead account can do this")
         return u
+
+    @app.post("/hunts/{hunt_id}/agent/reassess")
+    def reassess(request: Request, hunt_id: str, csrf: str = Form("")):
+        from urllib.parse import urlencode
+        u = need_lead(request)
+        if not csrf_ok(u, csrf):
+            raise HTTPException(403, "bad CSRF token")
+        if repo.get_hunt(hunt_id) is None:
+            raise HTTPException(404)
+        refusal = repo.agent_reassessment_refusal(hunt_id)
+        if refusal:
+            return RedirectResponse(agent_views.href(hunt_id) + "?" + urlencode({"agent_message": agent_views.reassess_code(refusal)}),
+                                    status_code=303)
+        cmd = [sys.executable, "-m", "romulus.cli"] + (["--env-file", str(env_file)] if env_file else []) + [
+            "agent", "reassess", hunt_id]
+        s.logs_dir.mkdir(parents=True, exist_ok=True)
+        env = {**os.environ, "USER": f"web:{u['u']}"}
+        with open(s.logs_dir / f"agent-reassess-{datetime.now():%Y%m%d-%H%M%S}.log", "ab") as log:
+            subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env, start_new_session=True)
+        repo.audit(f"web:{u['u']}", "web.agent_reassess", hunt_id=hunt_id)
+        return RedirectResponse(agent_views.href(hunt_id), status_code=303)
 
     @app.get("/hunts/{hunt_id}/delete", response_class=HTMLResponse)
     def delete_confirm(request: Request, hunt_id: str):

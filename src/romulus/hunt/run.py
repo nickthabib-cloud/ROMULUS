@@ -11,7 +11,7 @@ from time import monotonic
 from sqlalchemy.exc import OperationalError
 
 from romulus.agent.investigate import recover_agent_finalization, run_agent_phase, skip_agent_phase
-from romulus.agent.provider import agent_readiness, build_provider
+from romulus.agent.provider import AgentReadiness, agent_readiness, build_provider
 from romulus.config import Settings
 from romulus.detect import netdef
 from romulus.evidence.normalize import NORMALIZER_VERSION
@@ -178,7 +178,7 @@ def _agent_heartbeat(repo: Repo, hunt_id: str, owner_token: str, lease_seconds: 
 
 def _ai_agent_phase(s: Settings, repo: Repo, hunt_id: str, manifest: dict, owner_token: str | None,
                     client: ElasticClient, contracts: dict, requested: bool | None = None,
-                    *, resuming: bool = False, previous_run: dict | None = None) -> dict:
+                    *, resuming: bool = False, previous_run: dict | None = None, readiness_snapshot=None) -> dict:
     """Keep all agent failures inside its own lease and preserve the completed detection state."""
     try:
         existing = previous_run if previous_run is not None else (repo.agent_run(hunt_id) or {})
@@ -191,7 +191,7 @@ def _ai_agent_phase(s: Settings, repo: Repo, hunt_id: str, manifest: dict, owner
                 return skip_agent_phase(s, repo, hunt_id, "not_requested", owner_token=owner_token).as_dict()
             readiness = None
             try:
-                readiness = agent_readiness(s)
+                readiness = readiness_snapshot if readiness_snapshot is not None else agent_readiness(s)
                 reason = None if readiness.ready else f"provider_not_ready: {readiness.message()}"
             except Exception as exc:  # noqa: BLE001 - provider configuration cannot undo detection completion.
                 reason = f"readiness check failed: {type(exc).__name__}: {exc}"[:500]
@@ -638,6 +638,19 @@ def resume_hunt(s: Settings, hunt_id: str) -> dict:
                 except Exception:
                     log.exception("could not record local agent recovery failure")
             return {**base_result, "agent": summary, "ai_agent": summary}
+    # A pending template handoff is local work. Keep existing partial investigation recovery on its
+    # original path, and resolve readiness once so a changing configuration cannot open a source path.
+    if agent_only and agent_run.get("state") == "pending":
+        wanted = (manifest.get("ai_agent") or {}).get("requested", False)
+        try:
+            readiness = agent_readiness(s) if wanted else None
+        except Exception as exc:  # noqa: BLE001 - configuration failure still leaves only local template work.
+            readiness = AgentReadiness("blocked", f"readiness_error:{type(exc).__name__}",
+                                       s.agent_provider, s.agent_model)
+        if not wanted or not readiness.ready:
+            summary = _ai_agent_phase(s, repo, hunt_id, manifest, owner_token, None, {},
+                                      readiness_snapshot=readiness)
+            return _with_agent_result(base_result, repo, summary)
     window = Window(
         start=datetime.fromisoformat(manifest["window"]["start"]),
         end=datetime.fromisoformat(manifest["window"]["end"]),

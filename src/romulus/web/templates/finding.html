@@ -3,6 +3,7 @@
 {% block content %}
 <p><a href="/hunts/{{ c.hunt_id }}">← hunt {{ c.hunt_id }}</a></p>
 <h1><span class="pill l-{{ c.lane }}">{{ c.lane }}</span> {{ c.rule_id }}</h1>
+{% if c.provenance == "agent" %}<p><b>AI agent · unconfirmed</b>{% if linked_hypothesis %} · <a href="/hunts/{{ c.hunt_id | urlencode }}/hypotheses/{{ linked_hypothesis.id | urlencode }}">Hypothesis ({{ linked_hypothesis.status }})</a>{% endif %}</p>{% endif %}
 <section class="card">
   <p class="claim">{{ c.claim }}</p>
   <p><a href="/catalog/requests/new?candidate={{ c.id | urlencode }}{% if c.event_ids %}&amp;event={{ c.event_ids[0] | urlencode }}{% endif %}">Flag more like this</a></p>
@@ -55,6 +56,11 @@
 <div><h2>Recommended next checks</h2><ul>{% for n in c.next_checks %}<li>{{ n }}</li>{% endfor %}</ul></div>
 </div>
 
+{% if agent_notes %}
+{% from 'agent_macros.html' import cites %}
+<h2>AI-generated notes</h2><ul>{% for note in agent_notes %}<li>{{ note.shown_text }} {{ cites(note.shown_cites) }}{% if note.cites_more %} {{ note.cites_more }} more citations · <a href="/hunts/{{ c.hunt_id | urlencode }}#reports">Complete report</a>{% endif %}{% if note.suspicious_content %} <b>suspicious content</b>{% endif %}</li>{% endfor %}</ul>
+{% if agent_notes_more %}<p>Page limit: 50. {{ agent_notes_more }} more · <a href="?notes_after={{ agent_notes_cursor | urlencode }}">Next notes →</a></p>{% endif %}
+{% endif %}
 <h2>Triage</h2>
 <form method="post" action="/findings/{{ c.id }}/disposition" class="inline">
   <input type="hidden" name="csrf" value="{{ csrf }}">
@@ -68,7 +74,7 @@
 <h2>Cited evidence ({{ events | length }} event(s))</h2>
 {% for e in events %}
 <p><a href="/catalog/requests/new?candidate={{ c.id | urlencode }}&amp;event={{ e.id | urlencode }}">Flag more like this cited event</a></p>
-<details {% if loop.first %}open{% endif %}><summary class="mono">{{ e.family }} · {{ e.ts }} · {{ e.host }} · event {{ e.id }}</summary>
+<details id="evidence-{{ e.id | urlencode }}" {% if loop.first %}open{% endif %}><summary class="mono">{{ e.family }} · {{ e.ts }} · {{ e.host }} · event {{ e.id }}</summary>
 <table class="grid small"><thead><tr><th>Typed field</th><th>Value</th><th>Origin</th></tr></thead><tbody>
 {% for name, f in e.event.fields.items() %}
 <tr class="{% if name in pred_fields %}hl{% endif %}"><td class="mono">{{ name }}</td><td><pre class="val">{{ pretty(f.value) }}</pre></td><td class="mono small">{{ f.origin }}</td></tr>

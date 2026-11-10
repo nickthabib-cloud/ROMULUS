@@ -2,18 +2,24 @@
 // All telemetry-derived text is inserted with textContent (never innerHTML).
 (function () {
   const live = document.getElementById("live");
-  if (!live || !window.EventSource) return;
+  if (!live || live.dataset.live !== "true" || !window.EventSource) return;
   const state = document.getElementById("live-state");
-  if (state && !["planned", "running"].includes(state.textContent.trim())) return;
   const feed = document.getElementById("feed");
   const section = document.getElementById("newfeed");
-  const known = new Set(Array.from(document.querySelectorAll('a[href^="/findings/"]'))
-    .map(a => a.getAttribute("href").split("/").pop()));
+  const known = new Set(Array.from(document.querySelectorAll('a[data-finding-id]'))
+    .map(a => a.dataset.findingId));
+  const initial = new Set(known);
   const shown = new Map();   // id -> feed line, so a finding revised in place updates its line
   // A finding the server rendered with the page: a revision updates that row (its link text, lane pill and row
   // class) instead of adding a second line beside the stale one.
-  const rendered = id => Array.from(document.querySelectorAll('a[href^="/findings/"]'))
-    .find(a => !feed.contains(a) && a.getAttribute("href").split("/").pop() === id);
+  const rendered = id => Array.from(document.querySelectorAll('a[data-finding-id]'))
+    .find(a => !feed.contains(a) && a.dataset.findingId === id);
+  const agentBadge = () => {
+    const badge = document.createElement("b");
+    badge.className = "agent-provenance";
+    badge.textContent = " AI agent · unconfirmed ";
+    return badge;
+  };
   const updateRendered = (a, f) => {
     const claim = f.claim.length > 220 ? f.claim.slice(0, 217) + "..." : f.claim;
     a.textContent = "(revised) " + claim;
@@ -21,6 +27,7 @@
     if (!row) return;
     const pill = row.querySelector(".pill");
     if (pill) { pill.className = "pill l-" + f.lane; pill.textContent = f.lane; }
+    if (f.provenance === "agent" && !row.querySelector(".agent-provenance")) a.parentElement.append(agentBadge());
     if (row.tagName === "TR") row.className = "row-" + f.lane;
   };
   const es = new EventSource(live.dataset.stream);
@@ -40,13 +47,36 @@
     const a = document.createElement("a");
     a.href = "/findings/" + encodeURIComponent(f.id);
     a.textContent = (f.revised ? " (revised) " : " ") + f.rule + ": " + f.claim;
-    li.append(pill, a);
+    li.append(pill);
+    if (f.provenance === "agent") li.append(agentBadge());
+    li.append(a);
     if (!shown.has(f.id)) { shown.set(f.id, li); feed.prepend(li); }
+    while (shown.size > 50) {
+      const oldest = feed.lastElementChild;
+      const oldestEntry = Array.from(shown.entries()).find(([, element]) => element === oldest);
+      if (oldestEntry) { shown.delete(oldestEntry[0]); if (!initial.has(oldestEntry[0])) known.delete(oldestEntry[0]); }
+      oldest.remove();
+    }
     section.hidden = false;
   });
+  const activity = document.getElementById("agent-activity");
+  for (const name of ["agent_run", "hypothesis", "session", "tool_call", "agent_finding"]) {
+    es.addEventListener(name, ev => {
+      if (!activity) return;
+      const item = JSON.parse(ev.data);
+      const li = document.createElement("li");
+      li.textContent = (name === "agent_finding" ? "AI agent · unconfirmed" : name.replaceAll("_", " ")) + ": " +
+        [item.id, item.session, item.name, item.purpose, item.state || item.status, item.confidence,
+         item.statement || item.claim, item.reason, item.tool_calls === undefined ? "" : item.tool_calls + " calls"]
+          .filter(value => value !== undefined && value !== null && value !== "").join(" · ");
+      activity.prepend(li);
+      while (activity.children.length > 50) activity.lastElementChild.remove();
+    });
+  }
+  es.addEventListener("end", () => es.close());
   es.addEventListener("state", ev => {
     const s = JSON.parse(ev.data);
     if (state) { state.textContent = s.state; state.className = "state s-" + s.state; }
-    if (!["planned", "running"].includes(s.state)) es.close();
+
   });
 })();

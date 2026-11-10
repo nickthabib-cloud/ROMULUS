@@ -1,0 +1,15 @@
+{% extends 'base.html' %}
+{% from 'agent_macros.html' import more as pages %}
+{% block content %}
+<p><a href="/hunts/{{ h.id | urlencode }}">← hunt {{ h.id }}</a></p>
+<h1>AI-generated hypotheses: not confirmed by an analyst.</h1>
+<table class="grid"><thead><tr><th>Statement</th><th>Status / confidence</th><th>Techniques</th><th>Entities</th><th>Sessions</th><th>Cites</th><th>Updated</th></tr></thead><tbody>
+{% for row in rows %}<tr>
+<td><a href="/hunts/{{ h.id | urlencode }}/hypotheses/{{ row.id | urlencode }}">{{ row.statement }}</a></td>
+<td>{{ row.status }} / {{ row.confidence }}</td>
+<td>{% for technique in row.techniques[:50] %}{% if technique in techniques %}<a href="/catalog?technique={{ technique | urlencode }}">{{ technique }}</a>{% else %}{{ technique | truncate(100) }}{% endif %} {% endfor %}{% if row.techniques | length > 50 %}{{ row.techniques | length - 50 }} more · <a href="/hunts/{{ h.id | urlencode }}#reports">Complete report</a>{% endif %}</td>
+<td>{{ row.entity_names | join(', ') }}{% if row.entities_more %} · {{ row.entities_more }} more entity references · <a href="/hunts/{{ h.id | urlencode }}#reports">Complete report</a>{% endif %}</td>
+<td>{{ row.sessions_run }}</td><td>support {{ row.cite_counts.get('support', 0) }} / contradiction {{ row.cite_counts.get('contradiction', 0) }}</td><td>{{ row.updated_at }}</td>
+</tr>{% else %}<tr><td colspan="7">No hypotheses have been recorded.</td></tr>{% endfor %}
+</tbody></table>{{ pages(more, next_url) }}
+{% endblock %}

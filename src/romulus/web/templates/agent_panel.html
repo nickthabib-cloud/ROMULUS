@@ -1,0 +1,35 @@
+{% from 'agent_macros.html' import cites %}
+<section id="ai-agent">
+<h2>AI agent</h2>
+<p><b>{{ ai_panel.state }}</b>{% if ai_panel.reason %}: {{ ai_panel.reason }}{% endif %}</p>
+<p>Requested provider/model: {{ ai_panel.provider }}/{{ ai_panel.model }}.
+Started: {{ ai_panel.run.started_at or 'not started' }} · Ended: {{ ai_panel.run.ended_at or 'not recorded' }}.</p>
+<p>Calls {{ ai_panel.usage.calls }} / {{ ai_panel.budgets.max_calls or 'not recorded' }};
+tokens {{ ai_panel.usage.tokens }} / {{ ai_panel.budgets.max_tokens or 'not recorded' }}{% if ai_panel.usage.estimated %} (estimated){% endif %};
+wall time {{ ai_panel.wall_seconds }} s / {{ ai_panel.budgets.max_wall_seconds or 'not recorded' }} s;
+source queries {{ ai_panel.source_queries }} / {{ ai_panel.budgets.max_source_queries or 'not recorded' }}.
+{% if ai_panel.budgets.price_input_per_mtok or ai_panel.budgets.max_cost_usd %}
+Estimated cost {{ ai_panel.usage.cost_usd }} USD / {{ ai_panel.budgets.max_cost_usd or 'no cost budget' }}.
+{% endif %}</p>
+{% if ai_panel.limits %}<h3>Limits reached</h3><ul>{% for limit in ai_panel.limits %}<li>{{ limit }}</li>{% endfor %}</ul>{% endif %}
+<p><a href="/hunts/{{ h.id | urlencode }}/hypotheses">{{ ai_panel.counts.hypotheses }} hypotheses</a>
+{% for name in ['findings', 'links', 'notes', 'requests'] %} · <a href="/hunts/{{ h.id | urlencode }}/agent/{{ name }}">{{ ai_panel.counts[name] }} agent {{ 'rule requests' if name == 'requests' else name }}</a>{% endfor %}</p>
+{% if ai_panel.usage.models_reported_more %}<p>{{ ai_panel.usage.models_reported_more }} more reported model groups; <a href="#reports">complete usage in the report</a>.</p>{% endif %}
+{% if ai_panel.usage.remote_calls_more %}<p>{{ ai_panel.usage.remote_calls_more }} more remote model groups; <a href="#reports">complete usage in the report</a>.</p>{% endif %}
+<h3>AI assessment</h3>
+{% if ai_panel.assessment %}
+<p><b>{{ ai_panel.assessment.header }}</b></p>
+{% for section in ai_panel.assessment.sections %}<h4>{{ section.name }}</h4><ul>
+{% for sentence in section.sentences %}<li>{{ sentence.text }} {{ cites(sentence.cites) }} <span class="help">({{ sentence.kind }})</span>{% if sentence.suspicious_content %} <b>Cites only content flagged as possible prompt injection.</b>{% endif %}{% if sentence.cites_more %} {{ sentence.cites_more }} more citations · <a href="#reports">Complete report</a>{% endif %}</li>{% endfor %}
+</ul>{% if section.more %}<p>{{ section.more }} more sentences · <a href="#reports">Complete report</a></p>{% endif %}{% endfor %}
+{% if ai_panel.assessment.confidence %}<p>Confidence: {{ ai_panel.assessment.confidence }}</p>{% endif %}
+<p>Checker changes and labels: <code>{{ ai_panel.assessment.checker_text }}</code> · <a href="#reports">Complete report</a></p>
+{% else %}<p>The assessment has not been stored yet.</p>{% endif %}
+{% if user.r == 'lead' %}
+{% if ai_panel.refusal %}<p class="help">Re-run assessment unavailable: {{ ai_panel.refusal }}</p>{% else %}
+<form method="post" action="/hunts/{{ h.id | urlencode }}/agent/reassess"><input type="hidden" name="csrf" value="{{ csrf }}">
+<button type="submit">Re-run assessment</button></form>{% endif %}
+{% endif %}
+<h3>AI agent activity</h3><p class="help">Newest 50 live updates. Complete history is retained in the <a href="/hunts/{{ h.id | urlencode }}/hypotheses">hypothesis pages</a>.</p>
+<ul id="agent-activity"></ul>
+</section>

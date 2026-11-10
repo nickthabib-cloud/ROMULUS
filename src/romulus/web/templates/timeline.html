@@ -7,6 +7,7 @@
   <span class="key k-observed">observed link</span> joins records by a typed key;
   <span class="key k-inferred">inferred link</span> is a hypothesis, not proof of the same actor;
   <span class="key k-analyst">analyst assertion</span> is an analyst's judgement and is never shown as proven.</p>
+{% if pick | selectattr('provenance', 'equalto', 'agent') | list %}<p class="help">AI marks mean <b>AI agent · unconfirmed</b>; agent links are hypotheses.</p>{% endif %}
 
 <form method="get" class="filters">
   <fieldset><legend>Lanes</legend>
@@ -32,7 +33,7 @@
 {% if tl.undated %}
 <h2>Observation time not recorded</h2>
 <p>These findings have no recorded observation time and cannot be placed on the timeline.</p>
-<ul>{% for f in tl.undated %}<li><a href="/findings/{{ f.id }}">{{ f.lane }} · {{ f.claim }}</a></li>{% endfor %}</ul>
+<ul>{% for f in tl.undated %}<li><a href="/findings/{{ f.id }}">{{ f.lane }} · {{ f.claim }}</a>{% if f.provenance == 'agent' %} <b>AI agent · unconfirmed</b>{% endif %}</li>{% endfor %}</ul>
 {% endif %}
 <div class="timeline-wrap">
 <svg class="timeline" viewBox="0 0 {{ tl.width }} {{ tl.height }}" width="{{ tl.width }}" height="{{ tl.height }}" role="img" aria-label="Attack-path timeline">
@@ -45,10 +46,10 @@
   <line class="row-line" x1="{{ tl.left }}" y1="{{ row.y }}" x2="{{ tl.width - 30 }}" y2="{{ row.y }}"></line>
   {% endfor %}
   {% for link in tl.links %}
-  <line class="link link-{{ link.style }}" x1="{{ link.x1 }}" y1="{{ link.y1 }}" x2="{{ link.x2 }}" y2="{{ link.y2 }}"><title>{{ link.style }}: {{ link.label }} ({{ link.from }} → {{ link.to }})</title></line>
+  <line class="link link-{{ link.style }}{% if link.style == 'agent' %} link-inferred{% endif %}" x1="{{ link.x1 }}" y1="{{ link.y1 }}" x2="{{ link.x2 }}" y2="{{ link.y2 }}"><title>{{ link.style }}: {{ link.label }} ({{ link.from }} → {{ link.to }})</title></line>
   {% endfor %}
   {% for row in tl.rows %}{% for item in row["items"] %}
-  <a href="/findings/{{ item.id }}"><circle class="mark m-{{ item.lane }}" cx="{{ item.x }}" cy="{{ item.y }}" r="6"><title>{{ item.lane }} · {{ item.ts }} · {{ item.title }}: {{ item.claim }}</title></circle></a>
+  <a href="/findings/{{ item.id }}"><circle class="mark m-{{ item.lane }}" cx="{{ item.x }}" cy="{{ item.y }}" r="6"><title>{% if item.provenance == 'agent' %}AI agent · unconfirmed · {% endif %}{{ item.lane }} · {{ item.ts }} · {{ item.title }}: {{ item.claim }}</title></circle>{% if item.provenance == 'agent' %}<text x="{{ item.x + 8 }}" y="{{ item.y + 4 }}">AI</text>{% endif %}</a>
   {% endfor %}{% endfor %}
 </svg>
 </div>
@@ -57,8 +58,8 @@
 <p class="help">Record a relation you judge exists between two findings. It is stored with your name, drawn in its own style, and labelled as an assertion: it never joins incidents and never reads as proven.</p>
 <form method="post" action="/hunts/{{ h.id }}/links" class="card">
   <input type="hidden" name="csrf" value="{{ csrf }}">
-  <label>From <select name="from_finding">{% for f in pick %}<option value="{{ f.id }}">{{ f.lane }} · {{ f.observed_at or 'Time not recorded' }} · {{ f.title }}</option>{% endfor %}</select></label>
-  <label>To <select name="to_finding">{% for f in pick %}<option value="{{ f.id }}">{{ f.lane }} · {{ f.observed_at or 'Time not recorded' }} · {{ f.title }}</option>{% endfor %}</select></label>
+  <label>From <select name="from_finding">{% for f in pick %}<option value="{{ f.id }}">{% if f.provenance == 'agent' %}AI agent · unconfirmed · {% endif %}{{ f.lane }} · {{ f.observed_at or 'Time not recorded' }} · {{ f.title }}</option>{% endfor %}</select></label>
+  <label>To <select name="to_finding">{% for f in pick %}<option value="{{ f.id }}">{% if f.provenance == 'agent' %}AI agent · unconfirmed · {% endif %}{{ f.lane }} · {{ f.observed_at or 'Time not recorded' }} · {{ f.title }}</option>{% endfor %}</select></label>
   <label>Relation <input name="relation" maxlength="200" required placeholder="e.g. same operator, follow-on step"></label>
   <label>Note <textarea name="note" rows="2" maxlength="2000"></textarea></label>
   <button type="submit">Add analyst link</button>

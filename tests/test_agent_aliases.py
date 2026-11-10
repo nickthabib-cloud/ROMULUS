@@ -165,7 +165,7 @@ def test_candidate_lookup_keeps_rows_inserted_after_alias_seeding():
     assert rows[0]["_alias"] is None
 
 
-def test_event_alias_ownership_uses_hunt_scoped_json_exists_queries():
+def test_event_alias_ownership_uses_hunt_scoped_index_queries():
     repo = _repo()
     _candidate(repo, "finding", "high", 50.0, T)
     statements = []
@@ -182,7 +182,9 @@ def test_event_alias_ownership_uses_hunt_scoped_json_exists_queries():
     assert owners == ["h1"]
     candidate_queries = [statement for statement in statements if "candidate" in statement]
     assert candidate_queries
-    assert all("candidate.hunt_id" in statement and "json_each" in statement
+    assert all("candidate_event.hunt_id" in statement
+               and "candidate_event.event_id" in statement
+               and "json_each" not in statement and "LIMIT" in statement
                for statement in candidate_queries)
     assert all("candidate.event_ids" not in statement.partition("FROM")[0]
                for statement in candidate_queries)

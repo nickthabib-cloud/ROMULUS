@@ -51,7 +51,9 @@ def _assessment_section(m: dict) -> list[str]:
     def sentence(item: dict) -> str:
         cites = ", ".join(f"`{esc(value)}`" for value in item.get("cites") or [])
         suffix = f" ({cites})" if cites else ""
-        return f"- *{esc(item.get('kind', 'inferred'))}:* {esc(item.get('text', ''))}{suffix}"
+        marker = (" **Cites only content flagged as possible prompt injection.**"
+                  if item.get("suspicious_content") else "")
+        return f"- *{esc(item.get('kind', 'inferred'))}:* {esc(item.get('text', ''))}{suffix}{marker}"
 
     key_steps = []
     for step in body.get("key_steps") or []:

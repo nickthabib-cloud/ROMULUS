@@ -1,0 +1,22 @@
+{% extends 'base.html' %}
+{% from 'agent_macros.html' import cites as render_cites, more %}
+{% block content %}
+<p><a href="/hunts/{{ h.id | urlencode }}/hypotheses">← hypotheses</a></p>
+<h1>AI-generated hypothesis</h1>
+<p>{{ hypothesis.statement }}</p><p>{{ hypothesis.status }} · {{ hypothesis.confidence }} confidence · {{ hypothesis.sessions_run }} sessions</p>
+<h2>Questions</h2><ul>{% for question in questions %}<li>{{ question }}</li>{% endfor %}</ul>
+{% if questions_more %}<p>{{ questions_more }} more question entries · <a href="/hunts/{{ h.id | urlencode }}#reports">Complete report</a>.</p>{% endif %}
+<h2>Supporting and contradicting citations</h2><ul>{% for cite in cites %}<li>{{ cite.role }}: {{ render_cites([cite.resolved]) }}</li>{% endfor %}</ul>
+{{ more(cites_more, cites_next) }}
+<h2>History</h2><table class="grid"><thead><tr><th>Time</th><th>Kind</th><th>Session</th><th>Validated payload</th></tr></thead><tbody>
+{% for event in history %}<tr><td>{{ event.created_at }}</td><td>{{ event.kind }}</td><td>{{ event.session_id or '—' }}</td><td><pre>{{ event.shown_payload }}</pre></td></tr>{% endfor %}
+</tbody></table>{{ more(history_more, history_next) }}
+<h2>Sessions</h2><table class="grid"><thead><tr><th>Session</th><th>Purpose / state</th><th>Started / ended</th><th>Calls</th><th>Summary</th></tr></thead><tbody>
+{% for session in sessions %}<tr><td><a href="?session={{ session.id | urlencode }}">{{ session.id }}</a></td><td>{{ session.purpose }} / {{ session.state }}</td><td>{{ session.started_at }} / {{ session.ended_at or '—' }}</td><td>{{ session.tool_calls }}</td><td>{{ clip(session.summary, 600) }}</td></tr>{% endfor %}
+</tbody></table>{{ more(sessions_more, sessions_next, 25) }}
+{% if chosen %}<h3>Tool calls for {{ chosen.id }}</h3>
+<p class="help">Arguments are shown as escaped JSON, limited to 2 KiB of text.</p>
+<table class="grid"><thead><tr><th>Seq</th><th>Name / status</th><th>Arguments</th><th>Result digest</th><th>Model call</th></tr></thead><tbody>
+{% for call in calls %}<tr><td>{{ call.seq }}</td><td>{{ clip(call.name, 100) }} / {{ clip(call.status, 100) }}</td><td><pre>{{ call.shown_arguments }}{% if call.arguments_truncated %} [truncated when stored]{% endif %}</pre></td><td>{{ clip(call.result_digest, 200) }}</td><td>{{ clip(call.model_call_id, 200) }}</td></tr>{% endfor %}
+</tbody></table>{{ more(calls_more, calls_next, 100) }}{% endif %}
+{% endblock %}
