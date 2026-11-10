@@ -85,19 +85,23 @@ LINUX_SHIPPER_DATASETS: dict[str, tuple[ShipperShape, ...]] = {
     ),
     "apache.access": (ShipperShape("apache.access", APACHE_ACCESS, "Apache integration or Filebeat module"),),
     "apache.error": (ShipperShape("apache.error", APACHE_ERROR, "Apache integration or Filebeat module"),),
+    "linux.text": (),  # content-selected last, never a competing named shipper shape
 }
 LINUX_LOGICAL_DATASETS: tuple[str, ...] = tuple(LINUX_SHIPPER_DATASETS)
 
 # The event families each logical dataset can feed. An audit group's records can be any of its families; journal
-# and syslog lines feed sshd/sudo/useradd/systemd records.
+# and syslog lines feed sshd/sudo/useradd/systemd records; plain text lines feed the same, sudo included.
 _AUDIT_ADMIN = frozenset({"account_change", "service_change", "audit_config", "system_state"})
+TEXT_FAMILIES = frozenset({"auth", "mail_message", "vpn_session", "dns_query", "http_access", "web_error",
+                           "net_flow", "process_observed", "service_change", "account_change", "privilege_use"})
 LOGICAL_FAMILIES: dict[str, frozenset[str]] = {
     "linux.audit": frozenset({"process_exec", "net_socket", "auth", "file_change", "file_access", "kernel_module",
                               "process_observed"}) | _AUDIT_ADMIN,
-    "systemd.journal": frozenset({"auth", "privilege_use", "service_change"}),
-    "linux.syslog": frozenset({"auth", "privilege_use", "account_change", "service_change"}),
+    "systemd.journal": TEXT_FAMILIES,
+    "linux.syslog": TEXT_FAMILIES,
     "apache.access": frozenset({"http_access"}),
     "apache.error": frozenset({"web_error"}),
+    "linux.text": TEXT_FAMILIES,
 }
 FAMILY_DATASETS = {name: ("linux.audit",) for name in FAMILY_FIELDS}
 # event.module values (and the journald input type) whose documents are Linux host telemetry of one logical dataset:
@@ -138,6 +142,34 @@ def match_shape(source: dict) -> tuple[str, ShipperShape] | None:
             elif dataset == shape.dataset and (shape.module is None or module == shape.module):
                 return logical, shape
     return None
+
+
+TEXT_INPUT_TYPES = ("filestream", "log", "syslog", "tcp", "udp")
+
+
+def text_payload(source: dict) -> tuple[str, str] | None:
+    for path in ("message", "event.original"):
+        value = _value(source, path)
+        if isinstance(value, str) and value:
+            return path, value
+    return None
+
+
+def text_dataset_inventory(inventory: dict) -> dict:
+    """Potential text datasets, using their actual inventory names, without claiming a parsed format."""
+    known = set(shipper_names()) | set(LINUX_LOGICAL_DATASETS)
+    return {name: count for name, count in inventory.items() if name not in known
+            and not name.startswith(("zeek.", "zeek:", "suricata.", "arkime.", "winlog.", "windows."))}
+
+
+def text_candidate(source: dict) -> bool:
+    """A text-bearing, otherwise unclaimed host document. Call after authoritative shape dispatch."""
+    # Unmarked Windows structure is not authoritative, and its rendered text is not a Linux record.
+    if isinstance(source.get("winlog"), dict):
+        return False
+    return bool(text_payload(source) and match_shape(source) is None and (
+        document_dataset(source) or _value(source, "input.type") in TEXT_INPUT_TYPES
+        or isinstance(_value(source, "log.file.path"), str)))
 
 
 def unmatched_families(source: dict) -> frozenset[str] | None:

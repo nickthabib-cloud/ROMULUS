@@ -42,6 +42,7 @@ from romulus.evidence.auditd import (
 from romulus.evidence.certificates import certificate_fields as _certificate_fields
 from romulus.evidence.certificates import dn_parts as _dn_parts
 from romulus.evidence.community import community_id
+from romulus.evidence.linux_auth_text import parse_auth
 from romulus.evidence.linux_catalog import (
     APACHE_ACCESS,
     APACHE_ERROR,
@@ -50,12 +51,18 @@ from romulus.evidence.linux_catalog import (
     JOURNAL_FIELDS,
     JOURNAL_JSON,
     SYSLOG_LINE,
+    TEXT_FAMILIES,
     WATCH_PLACEHOLDERS,
     document_dataset,
     match_shape,
     module_syscall,
+    text_candidate,
+    text_payload,
     unmatched_families,
 )
+from romulus.evidence.linux_service_text import parse_service
+from romulus.evidence.linux_text import TextLine, classify, inline_time
+from romulus.evidence.linux_text_types import WRITER_MISMATCH_CAVEAT
 from romulus.evidence.raw_scrub import clean_source, might_be_zeek
 from romulus.evidence.typed import EVIDENCE_VERSION, FieldValue, Outcome, RawRef, TypedEvent, event_id, fv
 from romulus.evidence.windows import (
@@ -96,6 +103,10 @@ class Skip(Exception):
     def __init__(self, reason: str):
         super().__init__(reason)
         self.reason = reason
+
+
+class TextSkip(Skip):
+    """Unrecognized Linux host text can hide any text-family event."""
 
 
 class AuditCopy(Skip):
@@ -1925,7 +1936,7 @@ def auditbeat_records(hit: dict) -> list[tuple[dict, AuditRecord]]:
 APACHE_ZONE_CAVEAT = "Zone from the shipper's locale"
 
 
-def normalize_apache_access(hit: dict) -> TypedEvent:
+def normalize_apache_access(hit: dict, *, parsed_fields=None, line_origin=None) -> TypedEvent:
     """One access-log line. A client logged by host name (the shipper's source.domain) has no source.ip: the event
     is kept without it, and rules that need it count it as missing."""
     src, nid, ref = hit["_source"], hit["_id"], _ref(hit)
@@ -1936,6 +1947,8 @@ def normalize_apache_access(hit: dict) -> TypedEvent:
         v = _get(src, native)
         if v is not None:
             f[typed] = fv(v, f"{nid}:{native}")
+    if parsed_fields is not None:
+        f = {key: fv(value, line_origin) for key, value in parsed_fields.items()}
     status = f.get("http.response.status_code")
     outcome = Outcome.unknown if status is None else (Outcome.success if int(status.value) < 400 else Outcome.failure)
     return TypedEvent(id=event_id("http_access", [ref]), family="http_access", ts=_ts(src["@timestamp"]),
@@ -3321,6 +3334,218 @@ def _auditbeat_group(h: dict, errors: list[tuple[str, str]]) -> list[tuple[dict,
     return members
 
 
+NEW_WRITER_CAVEAT = "Writer identity not verifiable"
+_COMM_LENGTH = 15
+_SSH_WRITERS = frozenset({"sshd", "sshd-session", "sshd-auth"})
+_WRITER_ALIASES = (
+    frozenset({"sshd", "sshd-session", "sshd-auth"}),
+    frozenset({"cron", "crond"}),
+    frozenset({"dovecot", "imap-login", "pop3-login", "submission-login", "managesieve-login", "auth", "auth-worker"}),
+    frozenset({"exim", "exim4"}),
+    frozenset({"cyrus", "cyrus/imap", "cyrus/pop3", "imapd", "pop3d"}),
+    frozenset({"charon", "charon-systemd", "strongswan"}),
+    frozenset({"mysql", "mysqld", "mariadb", "mariadbd"}),
+    frozenset({"postgres", "postgresql"}),
+    frozenset({"smbd", "samba"}),
+    frozenset({"named", "bind9"}),
+    frozenset({"squid", "squid3"}),
+    frozenset({"roundcube", "roundcubemail"}),
+)
+_TRUSTED_WRITER_PATHS = {"_COMM": "journald.process.name", "_EXE": "journald.process.executable",
+                         "_SYSTEMD_UNIT": "systemd.unit"}
+
+
+def _indexed_writer_fields(source: dict) -> dict:
+    """Keep malformed trusted fields visible to validation instead of scalar coercion or omission."""
+    trusted = {}
+    for field, path in _TRUSTED_WRITER_PATHS.items():
+        value = source
+        for part in path.split("."):
+            if not isinstance(value, dict) or part not in value:
+                break
+            value = value[part]
+        else:
+            trusted[field] = value
+    return trusted
+
+
+def _new_writer_identity(program: str, journal: dict | None) -> tuple[str, list[str]]:
+    """Validate new fallback events only; one matching field cannot excuse another field's disagreement.
+
+    The kernel's comm and the executable identify the writing process. A systemd unit names only the
+    service that started the process tree: user-invoked tools run in a session scope or in their parent's
+    unit (crontab run from a web shell sits in apache2.service), so a unit that names the claimed service
+    confirms the writer and any other unit says nothing either way. A writer that disagrees with its
+    identifier keeps its event with a caveat; only a claim to be the SSH daemon is refused, because that
+    stream feeds the SSH rules.
+    """
+    name = re.sub(r"\[\d+\]$", "", program).lower()
+    names = next((group for group in _WRITER_ALIASES if name in group), frozenset({name}))
+    units = names
+    if name in _SSH_WRITERS:
+        units = names | {"ssh"}
+    elif name == "smtpd" or name.startswith("postfix/"):
+        names, units = frozenset({name, name.rsplit("/", 1)[-1]}), frozenset({"postfix"})
+    elif name == "openvpn" or name.startswith("openvpn-"):
+        names, units = frozenset({name, "openvpn"}), frozenset({name, "openvpn", "openvpn-server", "openvpn-client"})
+    journal = journal or {}
+    present = [field for field in _TRUSTED_WRITER_PATHS if field in journal]
+    verified, disagreeing = False, []
+    for field in present:
+        value = journal[field]
+        if (not isinstance(value, str) or not value or len(value) > 4096
+                or any(char in value for char in "\r\n\x00")):
+            raise Skip(f"Writer identity mismatch: malformed trusted {field}")
+        if field == "_SYSTEMD_UNIT":
+            unit = value[:-len(".service")].split("@", 1)[0] if value.endswith(".service") else None
+            verified = verified or (unit is not None and unit.lower() in units)
+            continue
+        if field == "_EXE":
+            expected, value = names, basename_of(value)
+        else:
+            # The kernel truncates comm to 15 bytes (TASK_COMM_LEN 16, with its terminator).
+            expected = {candidate[:_COMM_LENGTH] for candidate in names}
+        if value.lower() in expected:
+            verified = True
+        else:
+            disagreeing.append(field)
+    if disagreeing and name in _SSH_WRITERS:
+        raise Skip(f"Writer identity mismatch: identifier disagrees with trusted {disagreeing[0]}")
+    caveats = [WRITER_MISMATCH_CAVEAT] if disagreeing else [] if verified else [NEW_WRITER_CAVEAT]
+    # A split helper must never be promoted into the legacy sshd stream. Prefer
+    # captured comm, then executable, and preserve unverified identifier spelling.
+    writer = program
+    if name in _SSH_WRITERS:
+        identities = [value.lower() for value in (journal.get("_COMM"), basename_of(journal.get("_EXE")))
+                      if isinstance(value, str) and value.lower() in _SSH_WRITERS]
+        helpers = [value for value in [*identities, program] if value in {"sshd-session", "sshd-auth"}]
+        writer = next(iter(helpers or identities), program)
+    return writer, caveats
+
+
+def _program_events(hit: dict, program: str, message: str, origin: str, *,
+                    journal: dict | None = None) -> list[TypedEvent]:
+    # Preserve existing untyped-message skip reasons; validate a recognized
+    # fallback action or a PAM message claiming the privileged SSH service.
+    parsed_records = [parsed for parsed in (parse_auth(program, message), parse_service(program, message))
+                      if parsed is not None]
+    ssh_pam = message.startswith("pam_unix(sshd:")
+    if not parsed_records and not ssh_pam:
+        return []
+    writer, caveats = _new_writer_identity(program, journal)
+    if ssh_pam and writer not in _SSH_WRITERS:
+        raise Skip("Writer identity mismatch: PAM sshd service requires an SSH writer")
+    # Use the validated writer, not an earlier parse of its chosen identifier.
+    parsed_records = [parsed for parsed in (parse_auth(writer, message), parse_service(program, message))
+                      if parsed is not None]
+    ref = _ref(hit)
+    return [TypedEvent(id=event_id(parsed.family, [ref]), family=parsed.family,
+                       ts=_ts(hit["_source"]["@timestamp"]), host=_get(hit["_source"], "host.name"),
+                       fields={key: fv(value, origin) for key, value in parsed.fields.items()},
+                       outcome=parsed.outcome, caveats=[*parsed.caveats, *caveats], raw=[ref], normalizer=NORMALIZER_VERSION)
+            for parsed in parsed_records]
+
+
+def _linux_events(hit: dict, normalizer, *args) -> list[TypedEvent]:
+    """Keep every existing successful normalization unchanged; extend only unsupported messages."""
+    try:
+        return [normalizer(hit, *args)]
+    except AuditCopy:
+        raise
+    except Skip:
+        src = hit["_source"]
+        message = src.get("message")
+        program = (_get(src, "syslog.identifier") or _get(src, "log.syslog.appname")
+                   or _get(src, "process.name") or _get(src, "journald.process.name"))
+        path = "message"
+        boot_origin = None
+        journal = _indexed_writer_fields(src)
+        if normalizer is normalize_journal:
+            journal = json.loads(_get(src, "event.original"))
+            message = journal.get("MESSAGE") or message
+            program = journal.get("SYSLOG_IDENTIFIER") or journal.get("_COMM")
+            path = "event.original#journal:MESSAGE"
+            boot_origin = f"{hit['_id']}:event.original#journal:_BOOT_ID"
+        elif normalizer is normalize_journal_fields:
+            journal, paths = journal_from_fields(src)
+            journal.update(_indexed_writer_fields(src))
+            message = journal.get("MESSAGE")
+            program = journal.get("SYSLOG_IDENTIFIER") or journal.get("_COMM")
+            path = paths.get("MESSAGE", "message")
+            boot_origin = _indexed_origin(hit["_id"], paths)("_BOOT_ID")
+        if isinstance(program, str) and isinstance(message, str):
+            events = _program_events(hit, program, message, f"{hit['_id']}:{path}~{program}", journal=journal)
+            if events:
+                if boot_origin is not None and (boot := _journal_boot(journal)) is not None:
+                    for event in events:
+                        event.fields["host.boot.id"] = fv(boot, boot_origin)
+                return events
+        if normalizer is normalize_syslog and not program and text_payload(src) is not None:
+            # A custom syslog pipeline may retain the complete envelope instead of
+            # indexed program/body fields. Only previously unsupported records reach here.
+            try:
+                return normalize_text(hit)
+            except Skip:
+                pass
+        raise
+
+
+def normalize_text(hit: dict) -> list[TypedEvent]:
+    src = hit["_source"]
+    path, line = text_payload(src)
+    parsed = classify(line)
+    if parsed.format == "unknown" and isinstance(program := _get(src, "process.name"), str):
+        parsed = TextLine("syslog", program, line)
+    dataset = document_dataset(src) or "(no dataset)"
+    if parsed.format == "too_long":
+        raise TextSkip(f"text line too long: {dataset}"[:256])
+    if parsed.format == "unknown":
+        raise TextSkip(f"text line in no recognized format: {dataset}"[:256])
+    origin = f"{hit['_id']}:{path}~{parsed.format}"
+    if parsed.format == "http_access":
+        event = normalize_apache_access(hit, parsed_fields=parsed.fields, line_origin=origin)
+    elif parsed.format == "web_error":
+        event = normalize_apache_error(hit)
+        event.fields["web.error_message"] = fv(parsed.message, origin)
+    else:
+        journal = {"SYSLOG_IDENTIFIER": parsed.program, "MESSAGE": parsed.message,
+                   "_HOSTNAME": _get(src, "host.name"), **_indexed_writer_fields(src)}
+        writer, writer_caveats = _new_writer_identity(parsed.program, journal)
+        journal["SYSLOG_IDENTIFIER"] = writer
+        try:
+            if parsed.program in {"useradd", "groupadd"}:
+                event = _syslog_account(hit, parsed.program, parsed.message, _get(src, "host.name"), origin)
+            else:
+                event = _journal_event(hit, journal, lambda _: origin, kind="text")
+        except Skip as error:
+            records = _program_events(hit, parsed.program, parsed.message, origin, journal=journal)
+            if not records:
+                reason = f"text format {parsed.format}, program {parsed.program!r} is not normalized: {dataset}"
+                raise Skip(reason[:256]) from error
+            for record in records:
+                _text_provenance(record, parsed, origin)
+            return records
+        event.caveats.append(SYSLOG_WRITER_CAVEAT)
+        event.caveats.extend(writer_caveats)
+    _text_provenance(event, parsed, origin)
+    return [event]
+
+
+def _text_provenance(event: TypedEvent, parsed: TextLine, origin: str) -> None:
+    if parsed.hostname not in (None, "-"):
+        event.fields["log.syslog.hostname"] = fv(parsed.hostname, origin)
+    event.fields["log.format"] = fv(parsed.format, origin)
+    if parsed.timestamp not in (None, "-"):
+        event.fields["log.inline_timestamp"] = fv(parsed.timestamp, origin)
+        clock = inline_time(parsed.timestamp, event.ts)
+        if clock is not None:
+            seconds = int((clock.replace(microsecond=0) - event.ts.replace(microsecond=0)).total_seconds())
+            event.fields["log.clock_offset_seconds"] = fv(seconds, origin + "+@timestamp")
+            if seconds:
+                event.caveats.append("Clock offset: inline log time differs from the pipeline timestamp; "
+                                     "the pipeline timestamp is retained.")
+
+
 def zeek_skip_families(names) -> frozenset[str]:
     """The event families the Zeek logs a skipped Zeek record names would feed, in any shipper's naming: empty for
     logs outside the catalog (their records are not assessed, and could hide no family a rule reads)."""
@@ -3443,11 +3668,11 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                         event_groups.append(((audit_host(h["_source"], first), first.ts, first.serial), members,
                                              str(action) if first.reconstructed else None))
                 elif shape.shape == JOURNAL_JSON:
-                    events.append(normalize_journal(h, journal_boots))
+                    events.extend(_linux_events(h, normalize_journal, journal_boots))
                 elif shape.shape == JOURNAL_FIELDS:
-                    events.append(normalize_journal_fields(h, journal_boots))
+                    events.extend(_linux_events(h, normalize_journal_fields, journal_boots))
                 elif shape.shape == SYSLOG_LINE:
-                    events.append(normalize_syslog(h))
+                    events.extend(_linux_events(h, normalize_syslog))
                 elif shape.shape == APACHE_ACCESS:
                     events.append(normalize_apache_access(h))
                 elif shape.shape == APACHE_ERROR:
@@ -3460,6 +3685,14 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                 events.append(normalize_suricata(h))
             elif ds in SINGLE:
                 events.append(SINGLE[ds](h))
+            elif ((contract is None or (contract.role == "host" and contract.os_family == "linux"))
+                  and unmatched_families(h["_source"]) is None
+                  and text_candidate(h["_source"]) and not is_arkime_session(h["_source"])):
+                ds = "linux.text"
+                events.extend(normalize_text(h))
+                if shapes is not None:
+                    key = ("linux.text:" + (document_dataset(h["_source"]) or "(no dataset)"))[:256]
+                    shapes[key] = shapes.get(key, 0) + 1
             else:
                 reason = f"dataset:{ds or document_dataset(h['_source'])} is not normalized"
                 skips[reason] += 1
@@ -3488,6 +3721,9 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                 skip_families[uncatalogued.reason] = None if known is None else known | fed
         except Skip as s:
             skips[s.reason] += 1
+            if isinstance(s, TextSkip) and skip_families is not None:
+                fed = TEXT_FAMILIES | (unmatched_families(h["_source"]) or frozenset())
+                skip_families[s.reason] = (skip_families.get(s.reason) or frozenset()) | fed
         except (ValueError, KeyError, TypeError, AttributeError, OverflowError) as e:   # malformed: an error, not a crash
             errors.append((h["_id"], f"{ds}: {e}"))
     superseded = superseded_interim(list(zeek_events.values())) if zeek_events else []

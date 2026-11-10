@@ -193,6 +193,12 @@ def _not_assessed(hunt_manifest: dict, sweep_detail: dict) -> list[dict]:
         return f"retrieved but not turned into a typed event: {reason}"
     for target, retrieved in sorted((stats.get("dataset_filter") or {}).items()):
         inventory = (profiles.get(target) or {}).get("datasets")
+        text_detail = (profiles.get(target) or {}).get("linux_text") or {}
+        if isinstance(inventory, dict) and (text_detail.get("rollup") or {}).get("non_additive"):
+            # The logical capability roll-up overlaps the preserved real dataset
+            # inventory. It is never another dataset or another set of records.
+            inventory = {name: count for name, count in inventory.items() if name != "linux.text"}
+            inventory.update(text_detail.get("inventory") or {})
         if not isinstance(inventory, dict):
             out.append({"target": target, "dataset": f"any dataset other than {', '.join(retrieved)}",
                         "records": None, "count_scope": "unknown: the hunt manifest has no dataset inventory",
@@ -200,10 +206,12 @@ def _not_assessed(hunt_manifest: dict, sweep_detail: dict) -> list[dict]:
             continue
         for dataset, count in sorted(inventory.items()):
             if dataset not in retrieved:
+                text_reason = (stats.get("linux_text_not_retrieved") or {}).get(target, {}).get(dataset)
                 out.append({"target": target, "dataset": dataset, "records": count,
                             "count_scope": "whole index at source preflight, not only the hunt window",
-                            "reason": "not retrieved by the sweep: no normalizer reads this dataset, so no rule "
-                                      "evaluates it"})
+                            "reason": ("not retrieved: " + text_reason if text_reason else
+                                       "not retrieved by the sweep: no normalizer reads this dataset, so no rule "
+                                       "evaluates it")})
         if not (profiles.get(target) or {}).get("datasets_complete", True):
             out.append({"target": target, "dataset": f"any dataset other than {', '.join(retrieved)}",
                         "records": None,
@@ -262,6 +270,24 @@ def _not_assessed(hunt_manifest: dict, sweep_detail: dict) -> list[dict]:
             out.append({"target": "all sweep targets", "dataset": None, "records": count,
                         "count_scope": "records retrieved in the hunt window",
                         "reason": skip_explanation(reason)})
+    unknown_total = 0
+    unknown_datasets = set()
+    unknown_prefix = "retrieved but not turned into a typed event: text line in no recognized format: "
+    untyped_prefix = "retrieved but not turned into a typed event: text format "
+    for row in out:
+        reason = row["reason"]
+        if reason.startswith(unknown_prefix):
+            row["dataset"] = reason[len(unknown_prefix):] or "(no dataset)"
+            unknown_total += row["records"] or 0
+            unknown_datasets.add(row["dataset"])
+        elif reason.startswith(untyped_prefix):
+            _description, separator, dataset = reason.rpartition(" is not normalized: ")
+            if separator:
+                row["dataset"] = dataset or "(no dataset)"
+    if unknown_total:
+        out.append({"target": "all sweep targets", "dataset": None, "records": None,
+                    "count_scope": "summary of the per-dataset rows above; not additional records",
+                    "reason": f"{unknown_total:,} lines in {len(unknown_datasets)} datasets in no recognized format"})
     return out
 
 

@@ -6,6 +6,7 @@ from urllib.parse import urlencode
 
 from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from sqlalchemy.exc import IntegrityError
 from starlette.concurrency import run_in_threadpool
 
 from romulus.catalog.browser import known_families
@@ -125,6 +126,8 @@ def register_request_routes(app, repo, need, page):
                 behavior=field(form, 'behavior', BEHAVIOR_MAX),
                 family=field(form, 'telemetry_family', 128, 'unknown'), attack_ids=attack_ids,
                 candidate_id=field(form, 'example_candidate_id', 256), event_id=field(form, 'example_event_id', 256))
+        except IntegrityError:
+            raise HTTPException(409, 'Detection request could not be saved.') from None
         except (ValueError, PermissionError, KeyError) as exc:
             error(exc)
         return RedirectResponse('/catalog/requests/' + row['id'], status_code=303)

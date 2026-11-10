@@ -97,6 +97,8 @@ def build_manifest(s: Settings, window: Window, original_input: dict, style: str
         "config_digest": digest(safe_cfg),
     }
     for target, profile in profiles.items():
+        if profile.get("linux_text") is not None:
+            manifest["source_profiles"][target]["linux_text"] = profile["linux_text"]
         if profile.get("zeek_sensor"):
             manifest["source_profiles"][target].update({key: profile.get(key)
                 for key in ("kind", "zeek_sensor", "zeek_log")})
