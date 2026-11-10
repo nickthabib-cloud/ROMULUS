@@ -28,6 +28,13 @@ class Window(BaseModel):
 PredicateOp = Literal["eq", "in", "not_in", "exists", "missing", "prefix", "contains", "gte", "lt", "cidr"]
 
 
+def typed_field_name(name) -> bool:
+    """Whether `name` can be a predicate's field: dot-separated parts, each of letters, digits and underscores.
+    Source mappings can hold other names (`zeek.dns.@proc`, `a-b`, `a b`); a field contract keeps those as
+    record fields that no predicate searches (sources.profile.FieldContract)."""
+    return isinstance(name, str) and bool(name) and all(part.replace("_", "").isalnum() for part in name.split("."))
+
+
 class Predicate(BaseModel):
     """One typed condition. `contains` is only legal on fields whose contract allows it, and
     it is a retrieval aid: evaluators must still apply exact typed logic locally. Its value is
@@ -39,7 +46,7 @@ class Predicate(BaseModel):
     @field_validator("field")
     @classmethod
     def _field(cls, v: str) -> str:
-        if not v or not all(part.replace("_", "").isalnum() for part in v.split(".")):
+        if not typed_field_name(v):
             raise ValueError(f"invalid field name: {v!r}")
         return v
 

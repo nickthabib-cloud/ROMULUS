@@ -5,10 +5,11 @@ import json
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, model_serializer
+from pydantic import BaseModel, ConfigDict, model_serializer, model_validator
 
 from romulus.evidence.linux_catalog import LINUX_LOGICAL_DATASETS, logical_of
 from romulus.evidence.zeek_catalog import MALCOLM, lookup_log
+from romulus.sources.models import typed_field_name
 from romulus.store.db import digest
 
 HOST_INVENTORY_PAGE_SIZE = 500
@@ -64,6 +65,20 @@ class FieldContract(BaseModel):
     # A Linux target whose mapping also holds NXLog's flat Windows records: both shapes are selected, each as it
     # would be alone (sources.profile.nxlog_mixed).
     nxlog_mixed: bool = False
+
+    @model_validator(mode="after")
+    def _untyped_names(self):
+        """A source field whose name no predicate can carry (`typed_field_name`: `zeek.dns.@proc`, `a-b`, `a b`)
+        stays in the contract, so consumers still see that the source has it, but it supports no predicate op:
+        `supports` and `native_field` refuse it, so no predicate is ever built on it. Normalization still reads its
+        values from the records. Aggregation is unchanged: aggregated fields are named by code (`@timestamp` among
+        them) and compiled to the native name, which the backend takes as written. One pass over the names, each
+        checked once."""
+        for table in (self.fields, self.linux_fields):
+            for name, spec in table.items():
+                if spec.ops and not typed_field_name(name):
+                    table[name] = spec.model_copy(update={"ops": []})
+        return self
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler):

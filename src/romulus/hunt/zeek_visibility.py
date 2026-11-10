@@ -373,7 +373,7 @@ def collect_visibility(client, contracts, window, store, policy, *, heartbeat=No
     from datetime import timedelta
 
     from romulus.evidence.zeek_catalog import HEALTH_LOGS, PLAIN, SHAPES, ZEEK_LOGS, lookup_log
-    from romulus.hunt.zeek_sources import native_field, source_groups
+    from romulus.hunt.zeek_sources import native_field, source_groups, widened_reason
     from romulus.sources.compile import build_query
     from romulus.sources.models import SearchIntent, Window
 
@@ -387,9 +387,23 @@ def collect_visibility(client, contracts, window, store, policy, *, heartbeat=No
 
     for target, contract in sorted(contracts.items()):
         for shape in SHAPES:
-            logs = [log for log in ZEEK_LOGS if source_groups(contract, log, shape)]
+            logs, widened = [], {}
+            for log in ZEEK_LOGS:
+                markers = []
+                if source_groups(contract, log, shape, widened=markers):
+                    logs.append(log)
+                    if markers:
+                        widened[log] = list(dict.fromkeys(markers))
             if not logs:
                 continue
+            def exact(log, target=target, shape=shape, widened=widened):
+                # An aggregate counts every record its groups select, with no record-level layout check: groups wider
+                # than their layout (widened_markers) would count other layouts' rows as this one's, so the log is
+                # not counted and visibility says why.
+                if log not in widened:
+                    return True
+                store.reasons.append(widened_reason(target, log, shape, widened[log]))
+                return False
             plain = shape == PLAIN
             sensor_fields = list(dict.fromkeys(native_field(contract, path, 'exists')
                                  for path in logs[0].sensor_paths.get(shape, ())
@@ -425,8 +439,9 @@ def collect_visibility(client, contracts, window, store, policy, *, heartbeat=No
                 return result
             clock = {'histogram':{'field':contract.time_field,'interval':900}} if plain else {
                 'date_histogram':{'field':contract.time_field,'fixed_interval':'900s'}}
-            data_logs=[log for log in logs if log.family!='sensor_health']
-            if activity and data_logs and (declared or dataset_fields):
+            reads_activity = activity and bool(declared or dataset_fields)
+            data_logs=[log for log in logs if log.family!='sensor_health' and (not reads_activity or exact(log))]
+            if reads_activity and data_logs:
                 sources=[] if declared else [key(name,contract.fields[field].native)
                     for name,field in zip(log_keys,dataset_fields,strict=True)]
                 sources.append({'time':clock})
@@ -446,7 +461,7 @@ def collect_visibility(client, contracts, window, store, policy, *, heartbeat=No
                                    min(window.end.timestamp(),start+900),bucket['doc_count'])
                     if log.name != 'conn':
                         store.analyzer(who,log.name,bucket['doc_count'])
-            for log in [item for item in logs if item in HEALTH_LOGS]:
+            for log in [item for item in logs if item in HEALTH_LOGS and exact(item)]:
                 paths={spec.typed:next((native_field(contract,path,'exists') for path in spec.paths.get(shape,())
                                        if native_field(contract,path,'exists')),None) for spec in log.fields}
                 required = (('health.interval_s','health.capture_loss_pct') if log.name=='capture_loss' else
