@@ -160,6 +160,7 @@ FALLBACK_CAP_REASON = "fallback lookup cap reached"
 # share of the default budget.
 EXTRA_SEED_PAGE = 100
 EXTRA_SEEDS_NOT_ANCHORED_REASON = "Reported-set seeds not anchored: budget"
+EXTRA_SEEDS_NOT_ANCHORED_WALL_CLOCK = "Reported-set seeds not anchored: wall-clock budget"
 
 
 # Cited records the planning cache may hold across all its anchors' plans. Beyond it the least recently planned anchor
@@ -275,7 +276,7 @@ class ExpansionEngine:
         self._extras_open = False
         self._extras_done = False
         self._extra_after = 0               # rank position of the last Reported finding looked at
-        self._extra_queries: int | None = None  # source queries spent when the last extra page was anchored
+        self._extras_stopped = EXTRA_SEEDS_NOT_ANCHORED_REASON   # why the remaining extra seeds were not anchored
         hunt = repo.get_hunt(hunt_id) if hasattr(repo, 'get_hunt') else None
         self._imported_rule_ids = {'sigma.' + row['id'] for row in ((hunt or {}).get('manifest', {}).get(
             'sigma_rules') or {}).get('applied', [])}
@@ -660,19 +661,28 @@ class ExpansionEngine:
         for candidate_id, rank in self.repo.finding_ranks_for(self.hunt_id, RANK_PASS_SEEDS, earlier).items():
             self._extra_scores[candidate_id] = float(rank["score"])
 
-    def _anchor_extra_seeds(self, query_count: int) -> bool:
+    def _anchor_extra_seeds(self, query_count: int, all_rows: list[dict], blocked: dict) -> bool:
         """When every rule-estimate anchor is finished or stopped: anchor the next page of extra seeds, as many as
-        the source queries left could start (each fetch takes at least two), while queries and wall-clock time
-        remain and the previous page spent some. True when the run loop has new work."""
+        the source queries a root may still spend could start (each fetch takes at least two), while such queries
+        and wall-clock time remain. A page whose anchors had nothing to fetch spends nothing; the next page follows
+        while queries remain, so the extras never reached are those the budget could not reach. True when the run
+        loop has new work."""
         if not self._ranked or self._extras_done:
             return False
         opened, self._extras_open = not self._extras_open, True
         deferred = opened and any(self._is_extra(row) and row["status"] == "pending"
                                   for row in self.repo.expansion_anchors(self.hunt_id))
-        ceiling = self.max_source_queries if self.per_anchor_source_queries is not None else self.budget
-        remaining = ceiling - query_count
-        if (remaining < 2 or self.clock() - self.started >= self.wall_clock_seconds
-                or (self._extra_queries is not None and query_count <= self._extra_queries)):
+        if self.clock() - self.started >= self.wall_clock_seconds:
+            self._extras_stopped = EXTRA_SEEDS_NOT_ANCHORED_WALL_CLOCK
+            return deferred
+        # With per-anchor shares each anchored extra brings its own share, up to the ceiling; with a fixed total the
+        # extras are roots, so they may spend only what the root cap (the reserve for discovered anchors kept back)
+        # still allows.
+        cap = (self.max_source_queries if self.per_anchor_source_queries is not None
+               else self._root_cap(all_rows, set(blocked), LANE_ORDER["lead"]))
+        remaining = cap - query_count
+        if remaining < 2:
+            self._extras_stopped = EXTRA_SEEDS_NOT_ANCHORED_REASON
             return deferred
         want = min(EXTRA_SEED_PAGE, remaining // 2)
         rows = self.repo.expansion_anchors(self.hunt_id)
@@ -697,7 +707,6 @@ class ExpansionEngine:
                     anchored += 1
                 if anchored >= want:
                     break
-        self._extra_queries = query_count
         return anchored > 0 or deferred
 
     def _extras_not_anchored(self) -> int:
@@ -1421,7 +1430,7 @@ class ExpansionEngine:
                        for anchor_row in self._ordered_anchors(
                            [row for row in eligible if LANE_ORDER.get(row["lane"], 9) == rank])]
             if not ranks:
-                if self._anchor_extra_seeds(query_count):
+                if self._anchor_extra_seeds(query_count, all_rows, blocked_anchors):
                     all_rows = self.repo.expansion_anchors(self.hunt_id)
                     continue
                 break               # every pending anchor is stopped, and only a newly found anchor grows the budget
@@ -1439,7 +1448,7 @@ class ExpansionEngine:
                 continue
             slots = self._tier_slots(ordered, anchor_reasons, root_cap)
             if not slots:
-                if self._anchor_extra_seeds(query_count):
+                if self._anchor_extra_seeds(query_count, all_rows, blocked_anchors):
                     all_rows = self.repo.expansion_anchors(self.hunt_id)
                     continue
                 break
@@ -1581,7 +1590,7 @@ class ExpansionEngine:
             stop_reason = accounting if stop_reason == "fixpoint" else f"{stop_reason}; {accounting}"
         not_anchored = self._extras_not_anchored()
         if not_anchored:
-            stop_reason = f"{stop_reason}; {not_anchored} {EXTRA_SEEDS_NOT_ANCHORED_REASON}"
+            stop_reason = f"{stop_reason}; {not_anchored} {self._extras_stopped}"
         summary = {
             "status": status,
             "stop_reason": stop_reason, "anchors": len(anchors),
@@ -1589,7 +1598,7 @@ class ExpansionEngine:
             "expanded_partial": sum(row["status"] == "expanded_partial" for row in anchors),
             "unexpanded": [row["id"] for row in anchors if row["status"] == "unexpanded"],
             "source_queries": query_count,
-            **({"reported_seeds_not_anchored": {"count": not_anchored, "reason": EXTRA_SEEDS_NOT_ANCHORED_REASON}}
+            **({"reported_seeds_not_anchored": {"count": not_anchored, "reason": self._extras_stopped}}
                if not_anchored else {}),
             # the budget the expansion ran under, so a reader can tell a cut by the ceiling from one by the shares
             "budget": {

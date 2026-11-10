@@ -31,6 +31,7 @@ import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from itertools import combinations
 
 RANK_VERSION = "rank@1"
 
@@ -39,6 +40,8 @@ CONFIRMED_LANE = "urgent"
 POOL_LANES = ("high", "lead")
 RANKED_LANES = (CONFIRMED_LANE, *POOL_LANES)
 AGENT_PROVENANCE = "agent"
+# A deterministic finding an investigator case's pivot discovered (it has a source case): ranked, never counted.
+CASE_PROVENANCE = "case"
 
 # Entity kinds, as candidates type them.
 HOST = "host"
@@ -241,18 +244,34 @@ def fleet_reason(rule_id: str, rule_hosts: int, hunt_hosts: int, span_seconds: f
 
 def tactic_breadth(rule_tactics: Mapping[str, set[str] | tuple[str, ...]]) -> tuple[str, ...]:
     """The tactics of a maximum matching between rules and the tactics each maps to (T is its length): each rule
-    contributes at most one tactic and each tactic is counted once. Augmenting paths over rules in id order, so the
-    result is deterministic.
+    contributes at most one tactic and each tactic is counted once. Its size does not depend on rule order; the
+    tactics shown are chosen deterministically (rules in id order).
 
     A tactic group (`a|b`, a legacy tactic tag whose stage the current release splits in two) is one choice whose
-    stage is unknown, so it never adds breadth beside either of its tactics: it is counted, as itself, only when no
-    rule's definite tactic already covers one of them and no definite tactic was left for that rule."""
-    definite = {rule: {tactic for tactic in tactics if TACTIC_GROUP_SEPARATOR not in tactic}
-                for rule, tactics in rule_tactics.items()}
+    stage is unknown, so it may never count beside either of its tactics. Each group is either left out, or made one
+    node that its alternatives' rules cannot use separately; T is the largest matching over those choices (one group
+    in practice, so two matchings)."""
+    groups = sorted({tactic for tactics in rule_tactics.values() for tactic in tactics
+                     if TACTIC_GROUP_SEPARATOR in tactic})
+    best: tuple[str, ...] = ()
+    for size in range(len(groups) + 1):
+        for chosen in combinations(groups, size):
+            hidden = {member for group in chosen for member in group.split(TACTIC_GROUP_SEPARATOR)}
+            edges = {rule: {tactic for tactic in tactics
+                            if (tactic in chosen) or (TACTIC_GROUP_SEPARATOR not in tactic and tactic not in hidden)}
+                     for rule, tactics in rule_tactics.items()}
+            matched = _maximum_matching(edges)
+            if len(matched) > len(best):
+                best = matched
+    return best
+
+
+def _maximum_matching(edges: Mapping[str, set[str]]) -> tuple[str, ...]:
+    """The tactics of a maximum bipartite matching (augmenting paths, Kuhn's algorithm)."""
     matched: dict[str, str] = {}                     # tactic -> rule
 
     def augment(rule: str, seen: set[str]) -> bool:
-        for tactic in sorted(definite[rule]):
+        for tactic in sorted(edges[rule]):
             if tactic in seen:
                 continue
             seen.add(tactic)
@@ -261,14 +280,8 @@ def tactic_breadth(rule_tactics: Mapping[str, set[str] | tuple[str, ...]]) -> tu
                 return True
         return False
 
-    for rule in sorted(definite):
+    for rule in sorted(edges):
         augment(rule, set())
-    used = set(matched.values())
-    groups = {tactic for rule, tactics in rule_tactics.items() if rule not in used
-              for tactic in tactics if TACTIC_GROUP_SEPARATOR in tactic}
-    for group in sorted(groups):
-        if not set(group.split(TACTIC_GROUP_SEPARATOR)) & set(matched):
-            matched[group] = "group"
     return tuple(sorted(matched))
 
 
@@ -346,6 +359,8 @@ def finding_rank(*, lane: str, prior: float, provenance: str, entities: list[Ent
         reasons.append(fleet)
     if provenance == AGENT_PROVENANCE:
         reasons.append("AI agent finding: ranked, never counted toward any entity's evidence")
+    elif provenance == CASE_PROVENANCE:
+        reasons.append("found by an investigator pivot; not counted toward entity evidence")
     reporting = [item for item in entities if item.reported]
     listed = max(reporting, key=lambda item: (item.score, item.kind == HOST, item.kind, item.value),
                  default=best)

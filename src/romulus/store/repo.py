@@ -427,6 +427,34 @@ def _chunks(rows: Iterable[dict], size: int) -> Iterator[list[dict]]:
 AGENT_ELIGIBLE_STATES = ("completed_within_scope", "partial")
 
 
+# The ranking pass reports read (pass 2, after expansion); the hunt layer names it PASS_FINAL.
+FINAL_RANK_PASS = 2
+
+
+def _detection_result_on(connection, hunt_id: str) -> tuple[dict[str, int], str]:
+    """The hunt's deterministic lane counts and headline result. With a complete final ranking the result follows
+    the report's headline: reportable when any confirmed or Reported finding exists, leads only when the ranked pool
+    has findings but none is reported. Without one (failed, or a hunt stored before ranking) it follows the lanes."""
+    counts = {lane: int(n) for lane, n in connection.execute(select(t.candidate.c.lane, func.count()).where(
+        t.candidate.c.hunt_id == hunt_id, t.candidate.c.provenance == "deterministic",
+    ).group_by(t.candidate.c.lane))}
+    ranked_pass = connection.execute(select(t.finding_rank.c.candidate_id).where(
+        t.finding_rank.c.hunt_id == hunt_id, t.finding_rank.c["pass"] == FINAL_RANK_PASS).limit(1)).first()
+    if ranked_pass is None:
+        ranked_pass = connection.execute(select(t.entity_rank.c.entity).where(
+            t.entity_rank.c.hunt_id == hunt_id, t.entity_rank.c["pass"] == FINAL_RANK_PASS).limit(1)).first()
+    if ranked_pass is not None:
+        ranked, reported = connection.execute(
+            select(func.count(), func.coalesce(func.sum(case((t.finding_rank.c.reported.is_(True), 1), else_=0)), 0))
+            .select_from(t.finding_rank.join(t.candidate, t.candidate.c.id == t.finding_rank.c.candidate_id))
+            .where(t.finding_rank.c.hunt_id == hunt_id, t.finding_rank.c["pass"] == FINAL_RANK_PASS,
+                   t.candidate.c.provenance == "deterministic", t.candidate.c.source_case_id.is_(None))).one()
+        return counts, ("reportable_findings" if reported else "leads_only" if ranked else
+                        "no_qualifying_observation_in_assessed_scope")
+    return counts, ("reportable_findings" if counts.get("urgent", 0) + counts.get("high", 0) else
+                    "leads_only" if counts.get("lead", 0) else "no_qualifying_observation_in_assessed_scope")
+
+
 def is_lease_lost(exc: BaseException) -> bool:
     """Recognize fencing failures without swallowing unrelated repository errors."""
     return isinstance(exc, RuntimeError) and "lease ownership lost" in str(exc)
@@ -2495,6 +2523,11 @@ class Repo:
         with self.engine.connect() as connection:
             return [dict(row) for row in connection.execute(
                 query.order_by(t.finding_rank.c.position).limit(limit)).mappings()]
+
+    def detection_result(self, hunt_id: str) -> tuple[dict[str, int], str]:
+        """The hunt's deterministic lane counts and headline result (see `_detection_result_on`)."""
+        with self.engine.connect() as connection:
+            return _detection_result_on(connection, hunt_id)
 
     def finding_rank_counts(self, hunt_id: str, pass_no: int, *, after_position: int = 0,
                             reported: bool | None = None, exclude_lanes: tuple[str, ...] = ()) -> dict[str, int]:
@@ -5284,13 +5317,7 @@ class Repo:
             state = connection.execute(select(t.hunt.c.execution_state).where(t.hunt.c.id == hunt_id)).scalar_one()
             if state not in AGENT_ELIGIBLE_STATES:
                 raise RuntimeError(f"hunt {hunt_id} is {state}: no detection result to refresh")
-            rows = connection.execute(select(t.candidate.c.lane, func.count()).where(
-                t.candidate.c.hunt_id == hunt_id, t.candidate.c.provenance == "deterministic",
-            ).group_by(t.candidate.c.lane))
-            counts = {lane: n for lane, n in rows}
-            result = ("reportable_findings" if counts.get("urgent", 0) + counts.get("high", 0) else
-                      "leads_only" if counts.get("lead", 0) else
-                      "no_qualifying_observation_in_assessed_scope")
+            counts, result = _detection_result_on(connection, hunt_id)
             connection.execute(t.hunt.update().where(t.hunt.c.id == hunt_id).values(detection_result=result))
             terminal = {"prompt_digests": {}, "provider": {}, "ended_at": now, **values,
                         "hunt_id": hunt_id, "updated_at": now, "lease_owner": None, "lease_until": None}

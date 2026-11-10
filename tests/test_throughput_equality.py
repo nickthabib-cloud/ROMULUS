@@ -347,15 +347,14 @@ from tests import throughput_fixture as tf
 # Evidence ranking now runs before and after expansion. Expansion first seeds what the rule estimate seeds (urgent and
 # high) with the budget share and order it always had, then anchors the rest of the ranking's Reported set in rank
 # order with the budget left. In this fixture 53 of the 54 ranked findings sit on entities that meet the evidence bar,
-# so 23 lead findings are anchored after the 7 rule-estimate anchors (anchors 7 -> 30). The 7 earlier anchors fetch
-# exactly the 156 links they fetched before, with the same status and reasons (test below); the 23 extra anchors fetch
-# 56 more links with the 45 queries left (source queries 135 -> 162 of 180), and those the budget stops keep the
-# budget reason. The extra anchors reach 14 context findings (4 high, 10 lead; context.credential_access,
+# so 23 lead findings are extra seeds after the 7 rule-estimate anchors. The 7 earlier anchors fetch exactly the 156
+# links they fetched before, with the same status and reasons (test below); the extra seeds spend only the queries
+# left (source queries 135 -> 162 of 180; see the paging below). The extra anchors reach 14 context findings (4 high, 10 lead; context.credential_access,
 # .lateral_movement, .staging_and_transfer and .post_access_discovery, all re-observations on web1 of activity
 # already found). No earlier candidate is removed or changes lane; two (host.credential_material_access and
 # host.credential_store_read) change only their claim's reach text and gate reach metadata, as the extra anchors'
 # links reach them too. Events (195 -> 197), raw records, tasks (175 -> 202), event entities, rule cells
-# (17700 -> 18036, the new links' context evaluations) and the hunt-derived baseline segments, counts, scope hours and
+# (the new links' context evaluations) and the hunt-derived baseline segments, counts, scope hours and
 # exclusions (keys of the new findings) move with them; the audit adds the two ranking pass summaries (which record
 # their page and statement counts); the manifest
 # adds each finding's rank fields, the ranking summary and the ranked entities.
@@ -365,17 +364,19 @@ from tests import throughput_fixture as tf
 # exfiltration, collection, impact, privilege-escalation and command-and-control where the table had fewer or none
 # (I-1e61a68c9c35, I-bda21460664c, I-dbb6b7f023dd, I-2d9388d67b6f, I-35a2807ebb9c, I-64996482cb56, I-5c6b5f2d653a,
 # I-9bf75eb45f37, I-b7971accd14a, I-fb7b4afcec47). Incident membership, techniques and everything else are unchanged.
-# Extra seeds are then anchored a page at a time, only while queries and wall-clock time remain and the previous page
-# spent some (here a first page of 22, as many as the 45 queries left could start, then the 23rd): the 23rd extra
-# anchor (7ef0891fb06802e49eaf) is now unexpanded with the reserve reason instead of partial with two zero-query
-# unsupported links, which moves the anchors, links (212 -> 210), rule cells (18036 -> 18024), the expansion summary
-# (1 unexpanded, 29 partial) and the audit. Bare local accounts are now qualified by their host, so the manifest's
-# entities name web1\www-data and db1\alice instead of www-data and alice (9 entities, not 10; no finding's
-# reported state moves). Candidates, events, tasks, raw records and incidents are unchanged.
+# Extra seeds are then anchored a page at a time, while queries and wall-clock time remain: as many as the queries a
+# root may still spend could start. With the fixed budget the extras are roots, so the reserve for discovered anchors
+# bounds them: 27 queries remain under the root cap after the rule estimate's anchors spend 135, so 13 extras are
+# anchored and spend them (source queries still 162), and the other 10 Reported-set seeds are counted in the
+# expansion summary ("10 Reported-set seeds not anchored: budget") instead of being anchored without budget to
+# expand (anchors 30 -> 20, all 20 partial; links 192, rule cells 17916). Candidates, events, tasks and raw records
+# are unchanged: the 13 extras reach all 14 context findings. Bare local accounts are qualified by their host, so the
+# manifest's entities name web1\www-data and db1\alice instead of www-data and alice (9 entities; no finding's
+# reported state moves). The audit moves with the expansion summary and the pass summaries' statement counts.
 # Run with expansion seeded by the rule estimate (`run_stack(rank=False)`), every digest is the earlier one except the
 # manifest's (those incident tactics alone), and the non-baseline semantic projection is the earlier one.
-GOLDEN_STACK = {'anchors': '6316a2ee4a4067410dbb2023299bf3e3367fc5ba780688ebe9ae38de9cd80b50',
- 'audit': '3b3079487e1f194c8fffc1b8cd996e10c2588c1aa8480d04c242301d4aabd214',
+GOLDEN_STACK = {'anchors': '30068f8445c084098c1481d42b0543bff8729d9a4a0fbafefee71c19b5a6ce75',
+ 'audit': '50c30e56a6516a512a3e7b9330959758cd784b28c7531123143b72b776fa322c',
  'baseline_counts': '748129268ef043d23f91ca3a357a5adfff57e4cf0a380709aeb729b93294021f',
  'baseline_hunt_exclusions': '66d8a3bf089749ff997d501f23f4d1c27c4bc7ba72ec71194789405548ed3ddc',
  'baseline_observations': '6753ce92f6247b473508e1e35f73339cb3843dabfb5a87c23b4339a749df13e5',
@@ -390,11 +391,11 @@ GOLDEN_STACK = {'anchors': '6316a2ee4a4067410dbb2023299bf3e3367fc5ba780688ebe9ae
  'event_citations': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'event_entities': 'e3b969f22244ac772447a8a3ba4145fa4bf3a9bf5b61b0cf4be660a2513269d2',
  'events': '396924ad3310abcee56c94c420c6bd460c1c78c6129899b40c41cb1cd2777e4a',
- 'expansion': 'ef8e5291a1be83fe37e3c2090266f79433854a4887083e5ef4eb87f5e604bfb5',
- 'links': 'b3400f0f61b8fa0d7a80fb7e2c3b0808a96fecb77cdb3ec1944cf7e823e16655',
- 'manifest': '755e997334733fa58f099643f8e8be6ae252b45b95cd3b3ab0bfaccfbef17e00',
+ 'expansion': '55c49a3426e21a0a4591feea9996f346ac089862a6fe95ad16a3f5aaeda7b46b',
+ 'links': 'b3e785c0d7ffb591b92816e35511caa72486542bbda892651c4fb0fa51e22bb5',
+ 'manifest': 'ed4506920e6977681fcf1b685c0ff12506fa08b4db4b0af39165078c986c66c4',
  'raw': '37a200c3ad1aeefe056452f68ba2180760be3849745269d44f4016ee397d019d',
- 'rule_cells': '244a3c49186c1b2a5e3c012f6fdbe7545baa2f6d3170e10e4ab10edf6b3577c7',
+ 'rule_cells': '421a848aa9551e978655d23dec3215acf6d4f0b09132ee170b04d99891d9bb2e',
  'stats': '03817e5592ef62f8aecddbb9cae63bf65e5496d5f148fd5d518389275a4ae608',
  'tasks': '6481d38c57327f916e0d26f8f1f621d34640fa7e5ce49c23cbaec8990d494e25'}
 # The rule-estimate stack's digests (expansion seeded by the urgent and high lanes, as before evidence ranking;
@@ -479,16 +480,16 @@ GOLDEN_NON_BASELINE_SEMANTICS = {'candidates': {'all_fields': 'eabe3b90407d230a7
                 'severity': '807d269c2f4b655931696871a41e0eb6b364ec8c8ebb8eff4dc8456ddbc4e64b',
                 'source_presence': 'f7dd27fce0c2093865dff4e5d7e7b23a0677790af53a5dcb92ef73fbc8e1934d',
                 'ts': 'f137161c5bf0d610fff1a18e4080f1c4d60892c93b91351d7d96393f7abc9edf'},
- 'rule_cells': {'all_fields': '6d8167e6c930bf0a045922f4fd5b0502aaed43985b15594089985933f29e25b3',
-                'count': 17580,
-                'detail': '323c478cda5d54472c8b17e42a5cfb4fedbb4ad532753762d328a253e8623ac1',
-                'evaluated': '9538f958839b2958a65e1289900b4b1295a28eb4f8119307fdbc2d57654374b6',
-                'matched': '03fff8a9efb9430c53e195076f138e6936ef07946affee246f062fec3d9267c2',
-                'partition': '58031bf1c295d02c9303c9b56d83c53b6b0119f06f2ea5dd5de30be02ce02901',
-                'rule_id': 'b8b8daf112bb7d5f1f716d9f83c27fee7c2ade90ed1e0b9259951bfa5387bb75',
-                'rule_version': 'c2762ad8d14b8efa6f273b5457cd0fa10f8042291da6c2ecacd5659bc9a23247',
-                'state': '877c8607027c0a6d8c8267202069802c8a8538e0edba348ea053bac372778abe',
-                'target': 'ad620497f754a337ba1b83b4173ddbcfa31af00e9e3194e1a1f2da8045c15246'}}
+ 'rule_cells': {'all_fields': '1b6eed8d87bf103ba501c056dd396b1f2a3986ca773753502d1c6a29b31d17b0',
+                'count': 17472,
+                'detail': '05152bb6e6f17b19828b8c2951946ae46fa06f45a16db3772083b19812b1718f',
+                'evaluated': '7c6ba12f71540935a7908b139bede050023d28ada402368a21da4a76031ba1ac',
+                'matched': 'a5973482a801232a3e25e9f376936345d2a6d717e01df40987af1e5d6bd59622',
+                'partition': '040423cfcb13b6b6e07609b537c53a4331b08cc5f65aea1745cc1eb9323d10b4',
+                'rule_id': '818c87cdb438db4f3e358bc1f4f7c6bd32888c5454d8294faa1080065bcdde08',
+                'rule_version': '7af1236c72847f123988efcee5c12d7602ed1acac33bed68b3edfcfe3d35ee14',
+                'state': '60a700255d6da632988d2e562f49e020d184dd5c362acea95e4e7c5c84340a02',
+                'target': 'a6bef91f4270166a3fc59e9f2948f24cd60b800735ea6c6a70f059bec236a886'}}
 GOLDEN_NORMALIZED = {'arkime_sessions3-x': '1c08ef8ffd802ef67c6b6df2f8c5ba27bbf40ef5439c07a677c17044030f9ae9',
  'arkime_sessions3-x+boots': '1c08ef8ffd802ef67c6b6df2f8c5ba27bbf40ef5439c07a677c17044030f9ae9',
  'romulus-host-x': 'b46c4bfa21a9d32e8f11e18df9e79e32b92bca70fdf767d3aba4192416176433',

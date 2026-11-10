@@ -48,8 +48,8 @@ def finding_attack(explicit_attack, rule, *, groups: bool = False) -> tuple[tupl
     rule's (an imported rule's technique tags included), each resolved through the vendored ATT&CK release
     (Enterprise and ICS), with RULE_TECHNIQUE_TACTICS only for an id the release lacks. A rule that names tactics
     but no technique (an imported rule tagged only with a tactic) keeps its tactic names; a legacy name the release
-    split (LEGACY_TACTIC_ALTERNATIVES) becomes its alternatives, or with `groups` one `a|b` group, which tactic
-    breadth counts as a single choice. Every consumer (incident graph, ranking) reads tactics through this mapping."""
+    split (LEGACY_TACTIC_ALTERNATIVES) is one tactic naming its alternatives (`a or b`), or with `groups` one `a|b`
+    group, which tactic breadth counts as a single choice. Every consumer (incident graph, ranking) reads tactics through this mapping."""
     from romulus.content.attack_tags import technique_tactics
 
     attack = tuple(explicit_attack or getattr(rule, "attack", ()))
@@ -59,10 +59,8 @@ def finding_attack(explicit_attack, rule, *, groups: bool = False) -> tuple[tupl
             alternatives = LEGACY_TACTIC_ALTERNATIVES.get(tactic)
             if alternatives is None:
                 named.add(tactic)
-            elif groups:
-                named.add("|".join(alternatives))
             else:
-                named.update(alternatives)
+                named.add(("|" if groups else " or ").join(alternatives))
         return attack, tuple(sorted(named))
     tactics = {tactic for technique in attack
                for tactic in (technique_tactics((technique,)) or RULE_TECHNIQUE_TACTICS.get(technique, ()))}

@@ -412,6 +412,50 @@ def test_case_discoveries_never_count_toward_entities_on_a_resumed_pass():
     for field in ("confirmed", "tactics", "rules", "cooccur", "score", "reported"):
         assert after[field] == before[field]
     assert "k1" in findings and findings["k1"]["reported"]
+    assert any("investigator pivot" in reason for reason in findings["k1"]["reasons"])
+    assert not any("AI agent" in reason for reason in findings["k1"]["reasons"])
+
+
+def test_tactic_breadth_is_a_true_maximum_whatever_the_rule_ids():
+    group = "defense-impairment|stealth"
+    for first, second in (("a", "b"), ("b", "a"), ("z", "b")):
+        assert len(model.tactic_breadth({first: {"execution", group}, second: {"execution"}})) == 2
+
+
+def test_incidents_show_a_tactic_only_legacy_tag_as_one_tactic():
+    from types import SimpleNamespace
+
+    from romulus.detect.metadata import finding_attack
+    rule = SimpleNamespace(attack=(), tactics=("defense-evasion",))
+    assert finding_attack(None, rule)[1] == ("defense-impairment or stealth",)
+    assert finding_attack(None, rule, groups=True)[1] == ("defense-impairment|stealth",)
+
+
+@pytest.mark.parametrize("ranked_rows, expected", [
+    # the rule estimate says high, but no entity meets the bar: leads only
+    ([("h1", "r.high", "high", "a", None, 0)], "leads_only"),
+    # only leads by lane, but their entity meets the bar: reportable
+    ([("l1", "r.exec", "lead", "a", "T1059", 0), ("l2", "r.cred", "lead", "a", "T1003", 240)], "reportable_findings"),
+])
+def test_the_stored_detection_result_survives_the_agent_phase_finalization(ranked_rows, expected):
+    from romulus.hunt.run import _finish
+
+    repo = _repo()
+    _insert(repo, [_row(cid, rule, lane=lane, host=host, attack=[attack] if attack else None,
+                        ts=START + timedelta(minutes=offset)) for cid, rule, lane, host, attack, offset in ranked_rows])
+    repo.set_hunt_state("h1", "running")
+    compute_rank_pass(repo, "h1", PASS_FINAL)
+    _finish(repo, "h1", {"status": "disabled"}, {"finished": True, "complete": True, "partial_reasons": [],
+                                                 "stats": {}})
+    assert repo.get_hunt("h1")["detection_result"] == expected
+    # the agent phase, even when not requested, finalizes and refreshes the result: it must keep the ranking's
+    repo.finalize_agent_run("h1", {"state": "skipped", "reason": "not_requested"})
+    assert repo.get_hunt("h1")["detection_result"] == expected
+    # without a final ranking both fall back to the lanes
+    repo.delete_rank_pass("h1", PASS_FINAL)
+    repo.finalize_agent_run("h1", {"state": "skipped", "reason": "not_requested"})
+    lanes = {row[2] for row in ranked_rows}
+    assert repo.get_hunt("h1")["detection_result"] == ("reportable_findings" if "high" in lanes else "leads_only")
 
 
 def test_detection_result_follows_the_final_ranking_both_ways():
@@ -496,6 +540,27 @@ def test_extra_seeds_with_an_exhausted_budget_are_counted_never_anchored():
     assert summary["reported_seeds_not_anchored"] == {"count": 5000, "reason": EXTRA_SEEDS_NOT_ANCHORED_REASON}
     assert f"5000 {EXTRA_SEEDS_NOT_ANCHORED_REASON}" in summary["stop_reason"]
     assert not engine._extra_scores
+
+
+def test_extra_pages_that_spend_nothing_never_stop_the_next_page_while_queries_remain():
+    from types import SimpleNamespace
+
+    from romulus.hunt.expansion import ExpansionEngine
+    from romulus.sources.models import Window
+
+    repo = _repo()
+    rows = []
+    for index in range(100):
+        rows.append(_row(f"u{index:03d}", "r.confirmed", lane="urgent", host=f"h{index}", ts=None))
+        # untimed extras: anchored as unexpanded, they spend no query
+        rows += [_row(f"l{index:03d}-{n}", f"r.lead{n}", host=f"h{index}", ts=None) for n in range(2)]
+    _insert(repo, rows)
+    compute_rank_pass(repo, "h1", PASS_BEFORE_EXPANSION)
+    summary = ExpansionEngine(repo, "h1", Window(start=START, end=END), SimpleNamespace(boots={}),
+                              max_source_queries=40, wall_clock_seconds=60).run()
+    anchors = repo.expansion_anchors("h1")
+    assert sum(row["lane"] == "lead" for row in anchors) == 200
+    assert "reported_seeds_not_anchored" not in summary
 
 
 def test_a_failed_pass_is_recorded_and_leaves_no_stale_ranks(monkeypatch):

@@ -117,7 +117,9 @@ def _stage_population(ws, batch_size: int, heartbeat, is_internal, tactics) -> i
             ts = stored_time(row["ts"])
             findings.append({"candidate_id": row["id"], "rule_id": row["rule_id"], "ts": ts, "lane": row["lane"],
                              "prior": float(row["priority"]),
-                             "provenance": row["provenance"] if deterministic else model.AGENT_PROVENANCE})
+                             "provenance": (row["provenance"] if row["source_case_id"] is None
+                                            or row["provenance"] == model.AGENT_PROVENANCE
+                                            else model.CASE_PROVENANCE)})
             counted = tactics(row["rule_id"], row["attack"]) if deterministic else ()
             for kind, value in entities:
                 members.append({"entity_kind": kind, "entity": value, "candidate_id": row["id"],
@@ -292,7 +294,10 @@ def rank_unranked(repo: Repo, hunt_id: str, candidates: list[dict], *, pass_no: 
         if row["rule_id"] in fleet:
             reason = f"recurring fleet-wide rule {row['rule_id']} (-{model.FLEET_PENALTY})"
         score, best, reported, reasons = model.finding_rank(
-            lane=row["lane"], prior=float(row["priority"]), provenance=row.get("provenance", "deterministic"),
+            lane=row["lane"], prior=float(row["priority"]),
+            provenance=(model.CASE_PROVENANCE if row.get("source_case_id") is not None
+                        and row.get("provenance") != model.AGENT_PROVENANCE
+                        else row.get("provenance", "deterministic")),
             entities=entities, fleet=reason)
         out[row["id"]] = {"score": score, "position": None, "reported": reported,
                           "entity_kind": best.kind if best else model.UNATTRIBUTED,
