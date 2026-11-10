@@ -20,7 +20,9 @@ from romulus.hunt import packets as packet_stage
 from romulus.sources import packets as packet_sources
 
 # The files that turn ES/OpenSearch records into typed events (not shellparse.py, which only detectors use).
-EVIDENCE_FILES = ("__init__.py", "auditd.py", "certificates.py", "community.py", "linux_catalog.py", "normalize.py", "raw_scrub.py",
+EVIDENCE_FILES = ("__init__.py", "auditd.py", "certificates.py", "community.py", "linux_catalog.py",
+                  "linux_text.py", "linux_auth_text.py", "linux_service_text.py", "linux_text_types.py",
+                  "normalize.py", "raw_scrub.py",
                   "surrogates.py", "typed.py")
 PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf2116524009",
                    10: "e4dffd0944b86200b3c94aa301bead206967c58f565b30d426ee0071bd4f1aa9",

@@ -14,6 +14,17 @@ from romulus.evidence.typed import Outcome
 
 _PARTIAL = "Authentication identity fields are ambiguous in the application log."
 _PAM = re.compile(r"pam_unix\((?P<service>[^():\s]+):(?P<phase>auth|session)\): (?P<body>.*)")
+# These services have native authentication decisions below. Counting their
+# PAM backend failure too would turn one attempt into two. Match exact service
+# names (including documented PAM aliases), leaving custom/PAM-only services
+# and session lifecycle records intact; SSH remains owned by the legacy path.
+_NATIVE_AUTH_PAM_SERVICES = frozenset({
+    "dovecot", "imap", "pop3", "postfix", "postfix/smtpd", "smtpd", "smtp",
+    "exim", "exim4", "cyrus", "cyrus/imap", "cyrus/pop3", "imapd", "pop3d", "saslauthd",
+    "openvpn", "charon", "charon-systemd", "strongswan", "pppd", "xl2tpd",
+    "vsftpd", "proftpd", "ftp", "smbd", "samba", "mysql", "mysqld", "mariadbd",
+    "postgres", "postgresql", "roundcube", "roundcubemail", "horde",
+})
 _DOVECOT = re.compile(r"(?:imap|pop3|submission|managesieve)-login: (?:Info: )?(?P<body>.*)")
 _CTIME = re.compile(
     r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
@@ -56,12 +67,24 @@ def _event(service: str, outcome: Outcome, *, method: str | None = None,
     return ParsedLine("auth", values, outcome, caveats)
 
 
-def _pam(message: str) -> ParsedLine | None:
+def _pam(program: str, message: str) -> ParsedLine | None:
     match = _PAM.fullmatch(message)
     if not match:
         return None
     service, phase, body = match.group("service", "phase", "body")
+    if service == "sshd":
+        if program not in {"sshd", "sshd-session", "sshd-auth"}:
+            return None
+        if program == "sshd" and phase == "auth":
+            # Native SSH decisions already own these attempts. A PAM failure
+            # has no connection port and would be counted as another attempt.
+            return None
+        # Split SSH helpers feed only the generic authentication rules. The
+        # caller uses journald's captured comm when it is available.
+        service = program
     if phase == "auth":
+        if service in _NATIVE_AUTH_PAM_SERVICES:
+            return None
         if not body.startswith("authentication failure;"):
             return None
         # The user is last in PAM's statement; a user containing rhost= cannot
@@ -403,11 +426,12 @@ def parse_auth(program: str, message: str) -> ParsedLine | None:
     """Parse a program's authentication record without changing legacy SSH."""
     if not _bounded(message) or len(program) > 256:
         return None
-    program = re.sub(r"\[\d+\]$", "", program).lower()
+    program = re.sub(r"\[\d+\]$", "", program)
+    if message.startswith("pam_unix("):
+        return _pam(program, message)
+    program = program.lower()
     if program == "sshd":
         return None
-    if message.startswith("pam_unix("):
-        return _pam(message)
     if program == "systemd-logind":
         return _logind(message)
     if program == "dovecot":

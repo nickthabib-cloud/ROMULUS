@@ -410,3 +410,44 @@ def test_service_entry_points_enforce_utf8_byte_limit():
     assert len(message) < 65536 < len(message.encode("utf-8"))
     assert parse("exim", message) is None
     assert _module().identify_service("2026-11-09 12:00:00 " + message) is None
+
+
+@pytest.mark.parametrize("prefix,user", [("192.0.2.2:51234", "client1"),
+                                         ("client1/192.0.2.2:51234", "client1")])
+def test_openvpn_real_context_prefix_precedes_peer_connection(prefix, user):
+    # multi.c multi_instance_string + error.c x_msg_va prefix socket.c's connection message.
+    event = parse("openvpn", prefix + " [client1] Peer Connection Initiated with [AF_INET]192.0.2.2:51234")
+    assert event is not None and event.family == "vpn_session"
+    assert event.fields == {"vpn.service": "openvpn", "vpn.action": "connect", "user.name": user,
+                            "source.ip": "192.0.2.2", "source.port": 51234}
+    assert "common name" in event.caveats[0]
+
+
+@pytest.mark.parametrize("prefix,user", [("192.0.2.2:51234", None),
+                                         ("client1/192.0.2.2:51234", "client1")])
+def test_openvpn_context_without_body_common_name_does_not_invent_an_account(prefix, user):
+    event = parse("openvpn", prefix + " Peer Connection Initiated with [AF_INET]192.0.2.2:51234")
+    assert event is not None
+    assert event.fields.get("user.name") == user
+    assert event.fields["source.ip"] == "192.0.2.2" and event.fields["source.port"] == 51234
+
+
+def test_openvpn_connect_peer_comes_from_statement_not_stale_context():
+    event = parse("openvpn", "old/192.0.2.9:11111 [client1] Peer Connection Initiated with [AF_INET]192.0.2.2:51234")
+    assert event is not None
+    assert event.fields["user.name"] == "client1"
+    assert event.fields["source.ip"] == "192.0.2.2" and event.fields["source.port"] == 51234
+    partial = parse("openvpn", "client1/192.0.2.9:11111 [client1] Peer Connection Initiated with 192.0.2.2")
+    assert partial is not None and partial.fields["source.ip"] == "192.0.2.2"
+    assert "source.port" not in partial.fields
+
+
+@pytest.mark.parametrize("line", [
+    "message: 192.0.2.2:51234 [client1] Peer Connection Initiated with [AF_INET]192.0.2.2:51234",
+    "client1/not-an-ip:51234 [client1] Peer Connection Initiated with [AF_INET]192.0.2.2:51234",
+    "client1/192.0.2.2:99999 [client1] Peer Connection Initiated with [AF_INET]192.0.2.2:51234",
+    "192.0.2.2:51234 [client1] Peer Connection Initiated with [AF_INET]192.0.2.2:51234 trailing text",
+    "192.0.2.2:51234 notice: [client1] Peer Connection Initiated with [AF_INET]192.0.2.2:51234",
+])
+def test_openvpn_context_does_not_unanchor_connection_grammar(line):
+    assert parse("openvpn", line) is None

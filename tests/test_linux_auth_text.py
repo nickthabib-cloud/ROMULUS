@@ -338,3 +338,106 @@ def test_incomplete_record_never_guesses_a_missing_peer(program, message, outcom
         message = message.replace(address, "")
     event = parse_auth(program, message)
     assert event is None or "source.ip" not in event.fields
+
+
+# A supported daemon owns the authentication decision; PAM may report the same
+# attempt from a helper. Aliases here are explicit, not read from parser constants.
+# Additional PAM aliases: Dovecot pam.html (dovecot, imap, pop3), Postfix
+# SASL_README.html (smtp), ProFTPD modules/mod_auth_pam.c:68 (ftp).
+PAM_DAEMON_PAIRS = [
+    ("dovecot", ("dovecot", "imap", "pop3"),
+     "imap-login: Disconnected (auth failed, 1 attempts): user=<alice>, method=PLAIN, rip=192.0.2.1"),
+    ("postfix/smtpd", ("postfix", "postfix/smtpd", "smtpd", "smtp"),
+     "warning: unknown[192.0.2.1]: SASL PLAIN authentication failed: failure, sasl_username=alice"),
+    ("exim", ("exim", "exim4"),
+     "plain authenticator failed for peer [192.0.2.1]: 535 Incorrect authentication data (set_id=alice)"),
+    ("cyrus/imap", ("cyrus", "cyrus/imap", "cyrus/pop3", "imapd", "pop3d"),
+     "badlogin: peer [192.0.2.1] plaintext alice SASL(-13): authentication failure"),
+    ("saslauthd", ("saslauthd",),
+     "do_auth : auth failure: [user=alice] [service=imap] [realm=] [remote=192.0.2.1] [mech=pam]"),
+    ("openvpn", ("openvpn",),
+     "192.0.2.1:45001 TLS Auth Error: Auth Username/Password verification failed for peer"),
+    ("charon", ("charon", "charon-systemd", "strongswan"),
+     "07[IKE] received EAP_FAILURE, EAP authentication failed"),
+    ("pppd", ("pppd", "xl2tpd"), "PAP peer authentication failed for alice"),
+    ("vsftpd", ("vsftpd",), '[pid 7] [alice] FAIL LOGIN: Client "192.0.2.1"'),
+    ("proftpd", ("proftpd", "ftp"), "USER alice (Login failed): Incorrect password"),
+    ("smbd", ("smbd", "samba"),
+     "check_ntlm_password: Authentication for user [alice] -> [alice] FAILED with error NT_STATUS_LOGON_FAILURE"),
+    ("mysqld", ("mysql", "mysqld", "mariadbd"),
+     "Access denied for user 'alice'@'192.0.2.1' (using password: YES)"),
+    ("postgres", ("postgres", "postgresql"), 'password authentication failed for user "alice"'),
+    ("roundcube", ("roundcube", "roundcubemail"),
+     "Failed login for alice from 192.0.2.1 in session s (error: 0)"),
+    ("horde", ("horde",), "FAILED LOGIN for alice to horde (192.0.2.1)"),
+]
+
+
+def _pam_failure(service, user="alice"):
+    return (f"pam_unix({service}:auth): authentication failure; logname= uid=0 euid=0 "
+            f"tty= ruser= rhost=192.0.2.1  user={user}")
+
+
+@pytest.mark.parametrize("program,service,message", [
+    (program, service, message) for program, services, message in PAM_DAEMON_PAIRS for service in services
+])
+def test_pam_and_native_daemon_pair_yields_one_authentication_failure(program, service, message):
+    records = [parse_auth("pam-helper", _pam_failure(service)), parse_auth(program, message)]
+    failures = [record for record in records if record is not None and record.outcome == Outcome.failure]
+    assert len(failures) == 1
+    assert failures[0].fields["auth.phase"] == "authentication"
+    assert failures[0].fields.get("auth.method") != "pam_unix"
+
+
+@pytest.mark.parametrize("service", [service for _, services, _ in PAM_DAEMON_PAIRS for service in services])
+def test_native_auth_preference_keeps_both_pam_session_phases(service):
+    opened = parse_auth("pam-helper", f"pam_unix({service}:session): session opened for user alice by root(uid=0)")
+    closed = parse_auth("pam-helper", f"pam_unix({service}:session): session closed for user alice")
+    assert opened is not None and closed is not None
+    assert [opened.fields["auth.phase"], closed.fields["auth.phase"]] == ["session_open", "session_close"]
+    assert all(event.fields["auth.service"] == service and event.fields["user.name"] == "alice"
+               and event.outcome == Outcome.success for event in (opened, closed))
+
+
+@pytest.mark.parametrize("service", ["login", "su", "sudo", "cron", "crond", "myapp", "custom.dovecot", "vsftpd2"])
+def test_pam_only_services_and_unrecognized_aliases_keep_their_failure(service):
+    record = parse_auth("pam-helper", _pam_failure(service, "dovecot FAIL LOGIN: alice"))
+    assert record is not None and record.outcome == Outcome.failure
+    assert record.fields["auth.service"] == service
+    assert record.fields["user.name"] == "dovecot FAIL LOGIN: alice"
+
+
+@pytest.mark.parametrize("program,message", [
+    ("dovecot", "imap-login: Disconnected (auth failed, 1 attempts): user=<alice>, method=PLAIN, rip=192.0.2.1"),
+    ("vsftpd", '[pid 7] [alice] FAIL LOGIN: Client "192.0.2.1"'),
+])
+def test_normalized_daemon_pam_pair_counts_once_and_keeps_sessions(program, message):
+    from romulus.evidence.normalize import normalize_hits
+
+    messages = [_pam_failure(program), message,
+                f"pam_unix({program}:session): session opened for user alice by root(uid=0)",
+                f"pam_unix({program}:session): session closed for user alice"]
+    hits = [{"_index": "host-logs", "_id": str(index), "_source": {
+        "@timestamp": "2026-11-10T12:00:00Z", "host": {"name": "server"},
+        "event": {"dataset": "custom.auth"},
+        "message": f"Nov 10 12:00:00 server {program}: {body}",
+    }} for index, body in enumerate(messages)]
+    events, skips, errors = normalize_hits(hits)
+    assert not errors
+    assert sum(event.outcome == Outcome.failure for event in events) == 1
+    assert sorted(event.get("auth.phase") for event in events) == ["authentication", "session_close", "session_open"]
+    assert sum(skips.values()) == 1
+
+
+def test_two_native_attempts_with_identical_values_are_not_time_deduplicated():
+    from romulus.evidence.normalize import normalize_hits
+
+    hits = [{"_index": "host-logs", "_id": str(index), "_source": {
+        "@timestamp": "2026-11-10T12:00:00Z", "host": {"name": "server"},
+        "event": {"dataset": "custom.auth"},
+        "message": 'Nov 10 12:00:00 server vsftpd: [pid 7] [alice] FAIL LOGIN: Client "192.0.2.1"',
+    }} for index in range(2)]
+    events, skips, errors = normalize_hits(hits)
+    assert not errors and not skips
+    assert len(events) == 2 and all(event.outcome == Outcome.failure for event in events)
+    assert len({event.id for event in events}) == 2

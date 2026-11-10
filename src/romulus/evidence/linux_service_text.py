@@ -259,7 +259,9 @@ def _unbound(message: str) -> ParsedLine | None:
 
 def _openvpn(message: str) -> ParsedLine | None:
     fields: dict[str, object] = {"vpn.service": "openvpn"}
-    prefix = re.match(r"^(?:([^\s/]+)/)?(\S+) (MULTI_sva:.*|MULTI: Learn:.*|SIG(?:TERM|USR1|INT)\[.*)$", message)
+    # multi.c's client context prefixes every lifecycle message, including socket.c's connect line.
+    prefix = re.fullmatch(r"(?:([^\s/]+)/)?(\S+) ((?:\[[^\]]+\] )?Peer Connection Initiated with \S+|"
+                          r"MULTI_sva:.*|MULTI: Learn:.*|SIG(?:TERM|USR1|INT)\[.*)", message)
     if prefix and (endpoint := _endpoint(prefix[2])):
         if prefix[1]:
             fields["user.name"] = prefix[1]
@@ -287,6 +289,7 @@ def _openvpn(message: str) -> ParsedLine | None:
             return None
         fields["vpn.action"] = "connect"
         fields["source.ip"] = endpoint[0]
+        fields.pop("source.port", None)  # the explicit peer must not inherit a context endpoint's port
         if endpoint[1] is not None:
             fields["source.port"] = endpoint[1]
         if connection[1]:
