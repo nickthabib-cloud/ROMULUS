@@ -778,7 +778,7 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 <a id="rule-auth-success-new-source-after-failures"></a>
 ### `auth.success_new_source_after_failures` — First recorded service login from a source after repeated failures
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1078`](https://attack.mitre.org/techniques/T1078/), [`T1110`](https://attack.mitre.org/techniques/T1110/)
@@ -1132,7 +1132,7 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 <a id="rule-host-persistence-path-change"></a>
 ### `host.persistence_path_change` — Persistence-location file changes and crontab manager activity
 
-- Version: `8`; status: `active`
+- Version: `9`; status: `active`
 - Kind: `aggregate`; lane: `high`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1037`](https://attack.mitre.org/techniques/T1037/), [`T1037.004`](https://attack.mitre.org/techniques/T1037/004/), [`T1053.002`](https://attack.mitre.org/techniques/T1053/002/), [`T1053.003`](https://attack.mitre.org/techniques/T1053/003/), [`T1098.004`](https://attack.mitre.org/techniques/T1098/004/), [`T1543.002`](https://attack.mitre.org/techniques/T1543/002/), [`T1546.004`](https://attack.mitre.org/techniques/T1546/004/), [`T1546.017`](https://attack.mitre.org/techniques/T1546/017/), [`T1547.006`](https://attack.mitre.org/techniques/T1547/006/), [`T1547.013`](https://attack.mitre.org/techniques/T1547/013/), [`T1548.003`](https://attack.mitre.org/techniques/T1548/003/), [`T1556.003`](https://attack.mitre.org/techniques/T1556/003/), [`T1574.006`](https://attack.mitre.org/techniques/T1574/006/)
@@ -1398,7 +1398,7 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 - Telemetry families: mail_message
 - Required typed fields: mail.attachment_names<br>mail.message_id<br>mail.service
 - Behavior: Executable or script name logged as a mail attachment
-- Positive-only reason: MTA logs often omit attachment names; absence of names cannot exclude executable attachments.
+- Positive-only reason: No parsed MTA log currently supplies attachment names; this rule only evaluates explicitly supplied typed attachment names, so absence cannot exclude executable attachments.
 
 <a id="rule-mail-outbound-burst"></a>
 ### `mail.outbound_burst` — Many distinct external mail recipients from one sender or host

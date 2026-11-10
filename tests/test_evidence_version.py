@@ -63,7 +63,11 @@ PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf211
                    # Unreleased: re-pinned when Filebeat's template escapes were inverted as JSON, the alert action
                    # was read only from "allowed"/"denied", and a non-http record's dropped HTTP fields gained a
                    # caveat; only shipped Suricata records changed.
-                   17: "7371e27837df2e31f0b02e0a29d427184dc72855d9b9efb0c32b0254a289e9d7"}
+                   # Re-pinned 2026-11-10 when unsupported Linux text gained bounded daemon parsers, writer
+                   # checks and honest skip accounting. The four new parser modules now join this pin.
+                   # Previously typed records retain identical output and identities (normalization/pivot
+                   # goldens); the added text records were previously unsupported, so the epoch stays 17.
+                   17: "caac4dabc01e3aec887b504b7b715eb7641bc2bec3d245dce5c338fa15ad9f00"}
 WINDOWS_EVIDENCE_FILES = ("community.py", "windows.py", "windows_catalog.py", "windows_reassembly.py", "rpc_catalog.py")
 PINNED_WINDOWS = {
     # NXLog's flat im_msvistalog records are read (windows.nxlog_to_winlog); Winlogbeat and Agent records normalize

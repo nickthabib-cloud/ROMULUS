@@ -73,7 +73,15 @@ source paths, while fields parsed from a line identify that line and parser in t
 The indexed `@timestamp` remains the event time. Inline timestamps and clock differences are diagnostic fields;
 timestamps without a year or zone use the indexed timestamp's year or zone for that comparison. A syslog header's
 hostname is provenance, distinct from the shipper's host identity. Unrecognized and oversized lines are counted
-skips, and unknown formats leave potentially affected detection families unresolved.
+skips, and unknown formats leave potentially affected text detection families unresolved. Recognized envelopes
+from unsupported programs are counted without making those families partial. Module-owned unsupported records
+retain their module's coverage scope; Windows and network targets do not use the Linux text fallback.
+
+New daemon parsing checks every available trusted journal writer field against the program identity. A mismatch
+is a named skip; missing writer evidence adds a caveat. Plain syslog cannot authenticate its program name.
+PAM authentication records for services with a native decision grammar are skipped to avoid counting the same
+attempt twice; their session records remain typed. OpenSSH helper PAM records use the helper's service name and
+feed only the generic rules, while the existing SSH normalization keeps its original behavior.
 
 Service authentication, resolver requests, proxy requests, firewall packets, scheduler observations and account
 changes use the existing `auth`, `dns_query`, `http_access`, `net_flow`, `process_observed`, `service_change` and
@@ -83,7 +91,7 @@ Two additional families preserve information that those contracts cannot express
 
 | Family | Typed fields and limits |
 |---|---|
-| `mail_message` | `mail.service`, queue `mail.message_id`, explicit `mail.direction`, sender, recipients, size, relay, TLS and authenticated user where logged. `mail.to` retains at most 32 recipients with the full `mail.to_count` and a truncation caveat. Subject and attachment names exist only when logged. Each line remains a separate event; rules join queue metadata with disk-backed state. |
+| `mail_message` | `mail.service`, queue `mail.message_id`, explicit `mail.direction`, sender, recipients, size, relay, TLS and authenticated user where logged. `mail.to` retains at most 32 recipients with the full `mail.to_count` and a truncation caveat. Current MTA parsers supply no attachment names, so attachment detection is positive-only with that coverage limitation. Each line remains a separate event; rules join queue metadata with disk-backed state. |
 | `vpn_session` | `vpn.service`, `vpn.action`, logged identity, peer address/port, assigned virtual addresses and native session ID where available. Assigned addresses are entity links. Connection overlap requires matching explicit start/end boundaries; a common name is not asserted to be an authenticated username. |
 
 Generic authentication rules isolate each concrete service and preserve the separate SSH rules. Mail burst
@@ -93,8 +101,10 @@ and incomplete fields remain visible as coverage gaps.
 
 Source profiles preserve actual dataset names and counts, with a non-additive `linux.text` capability summary.
 Doctor describes format and program counts from samples of at most 1,000 records per dataset; samples are not
-extrapolated to whole-source typing claims. Reports name unrecognized datasets and unsupported programs with
-the counts observed during the hunt.
+extrapolated to whole-source typing claims. A dataset enters the text retrieval inventory only when its sample
+contains a text payload; otherwise the report names the absent payload or incomplete sample. Reports name
+unrecognized datasets and unsupported programs with the counts observed during the hunt. Text shape and skip
+labels are bounded to 256 characters.
 
 ## Dependency rules (enforced by `archmap.py --check`)
 

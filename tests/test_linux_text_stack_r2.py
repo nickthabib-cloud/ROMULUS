@@ -19,6 +19,31 @@ FINDING_RULES = {"auth.password_guessing", "auth.success_new_source_after_failur
                  "vpn.concurrent_sessions_same_user_distinct_sources"}
 UNKNOWN_REASON = "text line in no recognized format: custom.unknown"
 
+# Fixed reference includes real text selection, scoped unknown-line coverage and writer caveats.
+GOLDEN_TEXT_STACK = {'anchors': 'e23919dbbe190daf61b3494b7b21e344022b803a564803a6dadaa59988bdf81e',
+ 'audit': 'f33e9e15d78cb0073c6c7e02cba28dff78c41499ffcfc5bd24a443d204492c8a',
+ 'baseline_counts': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
+ 'baseline_hunt_exclusions': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
+ 'baseline_observations': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
+ 'baseline_scope_hours': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
+ 'baseline_segments': '1b81635a62e727fcb94ea06feaee1010eeb2cd33ddf87629208179d6e1f9aa69',
+ 'baseline_snapshot': 'c4d83cc473697b70a3d6d02e3b4fd86ff6f624e0c80a41e4ddacbc54fb663353',
+ 'baseline_window_counts': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
+ 'baseline_window_event_hours': 'dbbcb75b0e5ad202089e3eeaf84801202f5f1b8b3fcfb214f42edbdd7e007f47',
+ 'baseline_window_scope_hours': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
+ 'candidates': '75b419972178bacfa911559c0b72bdc96abe84b235220e4ef0066b30c52cec05',
+ 'entities': '9e629528fba70d33c17e231aabf743f914b553fe3bc737669e3b8c0e33da6183',
+ 'event_citations': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
+ 'event_entities': 'aab2777b9cfdddf515ae9a452a34fc924d04660c82cf1c019a244758d034c630',
+ 'events': '30c0dcf4f38cac97f4c778cf415f65e180f134153426316f1085b7cbbf3f9f1d',
+ 'expansion': 'dae7cbd7929a4cb94bb232a7343d4d70f62885a979b52714b87bd3641a92169b',
+ 'links': '1d9034491bfb6c4c55a0896c9a1d8f7f7158291270207776815b68eddede7007',
+ 'manifest': 'b684bcc5020981c55b73c773a613e156795b9c7c398ac888bfbba7b08fe52823',
+ 'raw': '64be31e697a32f93b1a71657560af514b2d430469cb3be19f44b8827985a7775',
+ 'rule_cells': 'fa3fd37e53f1f1157314e2f1129b9005d13ed8706c2a521017d9b1ec733403cb',
+ 'stats': '94249143f689b419b183019aec955234793e932e6edb0348cb5df3c50d425189',
+ 'tasks': 'a287691a5843ccb9f7b3d279364567cefb3dc6eb49f9d4753eaed993593437c4'}
+
 
 def text_documents():
     """All source documents are invented; only two tests below consume this fixture."""
@@ -132,6 +157,7 @@ def _assert_text_result(snapshot, trace, docs):
 def test_linux_text_whole_stack_retrieval_findings_and_partial_coverage(tmp_path, monkeypatch):
     snapshot, trace, docs = run_text_stack(tmp_path / "forward", monkeypatch)
     _assert_text_result(snapshot, trace, docs)
+    assert tf.deterministic_golden_digests(snapshot) == GOLDEN_TEXT_STACK
 
 
 def test_linux_text_whole_stack_snapshot_is_deterministic(tmp_path, monkeypatch):
