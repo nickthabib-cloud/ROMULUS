@@ -814,6 +814,8 @@ class Repo:
                 t.baseline_segment.c.source_hunt_id == hunt_id,
                 t.baseline_segment.c.built_by_hunt_id == hunt_id,
             )).values(status="revoked"))
+            rm("finding_ranks", t.finding_rank.delete().where(t.finding_rank.c.hunt_id == hunt_id))
+            rm("entity_ranks", t.entity_rank.delete().where(t.entity_rank.c.hunt_id == hunt_id))
             rm("disposition_events", t.disposition_event.delete().where(t.disposition_event.c.candidate_id.in_(cand_ids)))
             rm("candidate_hosts", t.candidate_host.delete().where(t.candidate_host.c.candidate_id.in_(cand_ids)))
             rm("candidates", t.candidate.delete().where(t.candidate.c.hunt_id == hunt_id))
@@ -2465,6 +2467,84 @@ class Repo:
         with self.engine.connect() as c:
             r = c.execute(select(t.candidate).where(t.candidate.c.id == cid)).mappings().first()
             return dict(r) if r else None
+
+    # -- evidence ranks ---------------------------------------------------------------------------------------------
+    def rank_workspace(self, hunt_id: str, pass_no: int):
+        """Staging tables for computing one ranking pass; its `publish` replaces the pass atomically."""
+        from romulus.store.ranks import rank_workspace
+        return rank_workspace(self.engine, hunt_id, pass_no, self._fence_lease)
+
+    def has_rank_pass(self, hunt_id: str, pass_no: int) -> bool:
+        query = select(t.finding_rank.c.candidate_id).where(
+            t.finding_rank.c.hunt_id == hunt_id, t.finding_rank.c["pass"] == pass_no).limit(1)
+        with self.engine.connect() as connection:
+            if connection.execute(query).first() is not None:
+                return True
+            return connection.execute(select(t.entity_rank.c.entity).where(
+                t.entity_rank.c.hunt_id == hunt_id, t.entity_rank.c["pass"] == pass_no).limit(1)).first() is not None
+
+    def finding_ranks_page(self, hunt_id: str, pass_no: int, *, after_position: int = 0, limit: int = 500,
+                           reported: bool | None = None) -> list[dict]:
+        """One page of a pass's finding ranks in rank order (keyset on position), with each finding's lane."""
+        query = (select(t.finding_rank, t.candidate.c.lane, t.candidate.c.rule_id, t.candidate.c.ts)
+                 .join(t.candidate, t.candidate.c.id == t.finding_rank.c.candidate_id, isouter=True)
+                 .where(t.finding_rank.c.hunt_id == hunt_id, t.finding_rank.c["pass"] == pass_no,
+                        t.finding_rank.c.position > after_position))
+        if reported is not None:
+            query = query.where(t.finding_rank.c.reported == reported)
+        with self.engine.connect() as connection:
+            return [dict(row) for row in connection.execute(
+                query.order_by(t.finding_rank.c.position).limit(limit)).mappings()]
+
+    def finding_rank_lane_counts(self, hunt_id: str, pass_no: int) -> dict:
+        """Of a pass's ranked findings: how many reported ones are not confirmed, and the `high` ones per rule."""
+        joined = t.finding_rank.join(t.candidate, t.candidate.c.id == t.finding_rank.c.candidate_id)
+        scope = and_(t.finding_rank.c.hunt_id == hunt_id, t.finding_rank.c["pass"] == pass_no)
+        with self.engine.connect() as connection:
+            reported_pool = connection.execute(select(func.count()).select_from(joined).where(
+                scope, t.finding_rank.c.reported.is_(True), t.candidate.c.lane != "urgent")).scalar_one()
+            high = dict(connection.execute(select(t.candidate.c.rule_id, func.count()).select_from(joined).where(
+                scope, t.candidate.c.lane == "high").group_by(t.candidate.c.rule_id)).all())
+        return {"reported_pool": int(reported_pool), "high_by_rule": {str(k): int(v) for k, v in high.items()}}
+
+    def finding_ranks_for(self, hunt_id: str, pass_no: int, candidate_ids) -> dict[str, dict]:
+        out: dict[str, dict] = {}
+        ids = sorted(set(candidate_ids))
+        with self.engine.connect() as connection:
+            for offset in range(0, len(ids), ID_CHUNK):
+                out.update((row["candidate_id"], dict(row)) for row in connection.execute(
+                    select(t.finding_rank).where(
+                        t.finding_rank.c.hunt_id == hunt_id, t.finding_rank.c["pass"] == pass_no,
+                        t.finding_rank.c.candidate_id.in_(ids[offset:offset + ID_CHUNK]))).mappings())
+        return out
+
+    def entity_ranks_page(self, hunt_id: str, pass_no: int, *, after_position: int = 0,
+                          limit: int = 500) -> list[dict]:
+        """One page of a pass's entity ranks in rank order (keyset on position)."""
+        query = (select(t.entity_rank).where(
+            t.entity_rank.c.hunt_id == hunt_id, t.entity_rank.c["pass"] == pass_no,
+            t.entity_rank.c.position > after_position).order_by(t.entity_rank.c.position).limit(limit))
+        with self.engine.connect() as connection:
+            return [dict(row) for row in connection.execute(query).mappings()]
+
+    def entity_ranks_for(self, hunt_id: str, pass_no: int, keys) -> dict[tuple[str, str], dict]:
+        """The stored ranks of the given (kind, value) entities of one pass."""
+        out: dict[tuple[str, str], dict] = {}
+        ordered = sorted(set(keys))
+        with self.engine.connect() as connection:
+            for offset in range(0, len(ordered), 250):
+                for row in connection.execute(select(t.entity_rank).where(
+                        t.entity_rank.c.hunt_id == hunt_id, t.entity_rank.c["pass"] == pass_no,
+                        tuple_(t.entity_rank.c.entity_kind, t.entity_rank.c.entity).in_(
+                            ordered[offset:offset + 250]))).mappings():
+                    out[(row["entity_kind"], row["entity"])] = dict(row)
+        return out
+
+    def delete_rank_pass(self, hunt_id: str, pass_no: int, *, owner_token: str | None = None) -> None:
+        with write_txn(self.engine) as connection:
+            self._fence_lease(connection, hunt_id, owner_token)
+            for table in (t.finding_rank, t.entity_rank):
+                connection.execute(table.delete().where(table.c.hunt_id == hunt_id, table.c["pass"] == pass_no))
 
     def candidates_by_ids(self, ids: list[str] | str, candidate_ids: list[str] | None = None, *,
                           hunt_id: str | None = None, finding_alias: bool = False) -> list[dict]:

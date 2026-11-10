@@ -45,6 +45,7 @@ from romulus.hunt.publish import (
     publish_match,
     subject_event_ids,
 )
+from romulus.hunt.rank import expansion_seeds
 from romulus.hunt.sweep import stored_boot_intervals
 from romulus.hunt.windows_context import publish_windows_link_context
 from romulus.hunt.zeek_links import FETCH_QUERIES as ZEEK_FETCH_QUERIES
@@ -257,6 +258,9 @@ class ExpansionEngine:
         self._fallback_queries = 0
         # anchor id -> its hunt-independent identity, the last tie-break of the anchor order
         self._identities: dict[str, str] = {}
+        # root anchor id -> its pass-1 evidence rank, when the hunt was ranked before expansion; empty otherwise, and
+        # anchors are then ordered by the rule estimate (lane) alone
+        self._rank_scores: dict[str, float] = {}
         hunt = repo.get_hunt(hunt_id) if hasattr(repo, 'get_hunt') else None
         self._imported_rule_ids = {'sigma.' + row['id'] for row in ((hunt or {}).get('manifest', {}).get(
             'sigma_rules') or {}).get('applied', [])}
@@ -585,14 +589,16 @@ class ExpansionEngine:
             self._plan_events -= len(dropped.events)
         return plan
 
-    def _seed_candidates(self, candidates: list[dict], existing_rows: list[dict]) -> list[dict]:
+    def _seed_candidates(self, candidates, existing_rows: list[dict], *, ranked: bool = False) -> list[dict]:
+        """Anchor the given candidates. Ranked seeds were chosen by the evidence ranking (any pool lane); others are
+        seeded when the rule estimate is urgent or high."""
         existing = {row["candidate_id"] for row in existing_rows}
         depths = {row["id"]: row["depth"] for row in existing_rows}
         added = []
         for candidate in candidates:
             if candidate.get("provenance") == "agent":
                 continue
-            if candidate["id"] in existing or candidate["lane"] not in {"urgent", "high"}:
+            if candidate["id"] in existing or (not ranked and candidate["lane"] not in {"urgent", "high"}):
                 continue
             # Agent-published discoveries remain case contributions. A resume must not silently
             # promote them into deterministic expansion roots with a different reach contract.
@@ -624,7 +630,28 @@ class ExpansionEngine:
 
     def _seed_anchors(self) -> list[dict]:
         rows = self.repo.expansion_anchors(self.hunt_id)
-        return self._seed_candidates(self.repo.candidates(self.hunt_id, ["urgent", "high"]), rows)
+        ranked = expansion_seeds(self.repo, self.hunt_id)
+        if ranked is None:
+            return self._seed_candidates(self.repo.candidates(self.hunt_id, ["urgent", "high"]), rows)
+
+        def scored():
+            for candidate, score in ranked:
+                self._rank_scores[candidate["id"]] = score
+                yield candidate
+
+        # The roots are the evidence ranking's Reported set, in rank order. Findings expansion itself discovers are
+        # not in the ranking taken before it, so they are anchored by their rule estimate as they are found.
+        added = self._seed_candidates(scored(), rows, ranked=True)
+        discovered = [candidate for candidate in self.repo.candidates(self.hunt_id, ["urgent", "high"])
+                      if candidate.get("source_anchor_id") or candidate.get("source_link_id")]
+        return added + self._seed_candidates(discovered, [*rows, *added])
+
+    def _lane_rank(self, row: dict) -> int:
+        """The severity tier an anchor is scheduled in. A ranked root is in the confirmed tier when confirmed and in
+        the next tier otherwise, where its rank orders it; every other anchor is tiered by its rule estimate."""
+        if row["id"] in self._rank_scores and row["depth"] == 0:
+            return LANE_ORDER["urgent"] if row["lane"] == "urgent" else LANE_ORDER["high"]
+        return LANE_ORDER.get(row["lane"], 9)
 
     def _identity(self, row: dict) -> str:
         """The anchor's rule and evidence, which are the same in every hunt over the same records. A candidate id also
@@ -640,8 +667,9 @@ class ExpansionEngine:
         return self._identities[row["id"]]
 
     def _anchor_priority(self, row: dict) -> tuple:
+        score = self._rank_scores.get(row["id"]) if row["depth"] == 0 else None
         return (
-            LANE_ORDER.get(row["lane"], 9), SEVERITY_ORDER.get(row["severity"], 9),
+            self._lane_rank(row), score is None, -(score or 0.0), SEVERITY_ORDER.get(row["severity"], 9),
             row["ts"] is None, _utc(row["ts"]) if row["ts"] is not None else None,
             self._identity(row), row["id"],
         )
@@ -665,7 +693,7 @@ class ExpansionEngine:
                 if by_host[host]:
                     ordered.append(by_host[host].popleft())
         if self._imported_rule_ids:
-            ordered = _curated_first(ordered, lambda row: row['lane'], self._is_imported)
+            ordered = _curated_first(ordered, self._lane_rank, self._is_imported)
         return ordered
 
     def _budget_for(self, all_rows: list[dict]) -> int:
@@ -714,7 +742,7 @@ class ExpansionEngine:
             return budget
         children = [row for row in all_rows if 0 < row["depth"] < self.max_depth and row["status"] == "pending"
                     and row["id"] not in blocked]
-        if any(LANE_ORDER.get(row["lane"], 9) <= lane_rank for row in children):
+        if any(self._lane_rank(row) <= lane_rank for row in children):
             return min(budget, root_budget)
         if children:
             return budget
@@ -919,7 +947,7 @@ class ExpansionEngine:
                     )
             if tier_slots:
                 if self._imported_rule_ids:
-                    tier_slots = _curated_first(tier_slots, lambda slot: slot.row['lane'],
+                    tier_slots = _curated_first(tier_slots, lambda slot: self._lane_rank(slot.row),
                         lambda slot: slot.candidate['rule_id'] in self._imported_rule_ids)
                 return tier_slots
         return []
@@ -1330,10 +1358,10 @@ class ExpansionEngine:
             # Always choose the globally lowest unfinished tier, so every anchor, and a newly discovered one, gets its
             # narrow links before any anchor widens its window. Within the tier the most severe lane goes first, so
             # when the budget runs out inside a tier it is the less severe anchors' links that wait.
-            ranks = sorted({LANE_ORDER.get(row["lane"], 9) for row in eligible})
+            ranks = sorted({self._lane_rank(row) for row in eligible})
             ordered = [anchor_row for rank in ranks
                        for anchor_row in self._ordered_anchors(
-                           [row for row in eligible if LANE_ORDER.get(row["lane"], 9) == rank])]
+                           [row for row in eligible if self._lane_rank(row) == rank])]
             if not ranks:
                 break               # every pending anchor is stopped, and only a newly found anchor grows the budget
             root_cap = self._root_cap(all_rows, blocked_anchors, ranks[0])
@@ -1368,7 +1396,7 @@ class ExpansionEngine:
                     stop_reason = "budget"
                     added = [budget_reason]
                     if budget_reason == "source query budget exhausted" and any(
-                            LANE_ORDER.get(row["lane"], 9) < LANE_ORDER.get(anchor_row["lane"], 9)
+                            self._lane_rank(row) < self._lane_rank(anchor_row)
                             for row in all_rows):
                         added.append(BUDGET_TO_SEVERE_REASON)
                     anchor_reasons[anchor_row["id"]].extend(added)

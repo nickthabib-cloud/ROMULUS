@@ -17,6 +17,40 @@ _TACTICS = frozenset({'reconnaissance', 'resource-development', 'initial-access'
                      'inhibit-response-function', 'impair-process-control'})
 
 
+# Tactics for the techniques a rule class names, used when neither the finding nor the rule carries its own tactic
+# list. A finding's explicit technique list is resolved through the vendored ATT&CK release instead.
+RULE_TECHNIQUE_TACTICS = {
+    "T1190": ("initial-access",),
+    "T1078": ("initial-access", "persistence", "privilege-escalation", "defense-evasion"),
+    "T1059": ("execution",), "T1059.004": ("execution",), "T1059.006": ("execution",),
+    "T1505.003": ("persistence",), "T1098.004": ("persistence",),
+    "T1003.008": ("credential-access",), "T1021.004": ("lateral-movement",),
+    "T1033": ("discovery",), "T1082": ("discovery",), "T1016": ("discovery",),
+    "T1087": ("discovery",), "T1069": ("discovery",), "T1046": ("discovery",),
+    "T1036.005": ("defense-evasion",), "T1562.004": ("defense-evasion",),
+    "T1105": ("command-and-control",), "T1071": ("command-and-control",),
+    "T1071.001": ("command-and-control",), "T1095": ("command-and-control",),
+    "T1571": ("command-and-control",), "T1029": ("command-and-control",),
+    "T1573": ("command-and-control",), "T1498": ("impact",),
+    "T1590.002": ("reconnaissance",), "T1595.001": ("reconnaissance",),
+    "T1595.002": ("reconnaissance",), "T1595.003": ("reconnaissance",),
+}
+
+
+def finding_attack(explicit_attack, rule) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """One finding's ATT&CK techniques and tactics: the techniques stored with the finding when it has them
+    (resolved to tactics through the vendored ATT&CK release), else its rule's techniques and tactics. Every
+    consumer (incident graph, ranking) reads tactics through this one mapping."""
+    from romulus.content.attack_tags import technique_tactics
+
+    attack = tuple(explicit_attack or getattr(rule, "attack", ()))
+    if explicit_attack:
+        return attack, technique_tactics(attack)
+    tactics = getattr(rule, "tactics", ()) or tuple(
+        tactic for technique in attack for tactic in RULE_TECHNIQUE_TACTICS.get(technique, ()))
+    return attack, tuple(tactics)
+
+
 def is_sigma_id(rule_id):
     return isinstance(rule_id, str) and _SIGMA_ID.fullmatch(rule_id) is not None
 

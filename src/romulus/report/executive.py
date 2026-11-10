@@ -3,7 +3,7 @@ import re
 from xml.etree.ElementTree import Element, SubElement, tostring
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from romulus.report.markdown import BANNER, outcome_sentence
+from romulus.report.markdown import BANNER, is_ranked, outcome_sentence, ranked_sections
 
 _WORD = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 _XML_INVALID = re.compile(r"[^\x09\x0a\x0d\x20-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
@@ -28,8 +28,28 @@ def write(m, path, technical_name):
     if not m["integrity"]["finalizable"]:
         paragraph("Degraded report: incomplete evidence or host lists are identified in the technical report.")
     paragraph(f"Technical report: {technical_name}. This contains the full findings, citations and coverage gaps.")
-    for finding in m["findings"]:
-        paragraph(f"{finding['rule_id']} — {finding['lane']}", bold=True)
+    if is_ranked(m):
+        confirmed, reported, pool = ranked_sections(m)
+        sections = (("Confirmed", "Confirmed findings, reported on their own.", confirmed),
+                    ("Reported entities", "Findings on entities that meet the evidence bar, in rank order.", reported),
+                    ("Ranked findings (not reported)", "Leads below the evidence bar, in rank order.", pool))
+        ordered = []
+        for title, intro, rows in sections:
+            ordered.append((title, intro, None))
+            ordered.extend((None, None, finding) for finding in rows)
+    else:
+        ordered = [(None, None, finding) for finding in m["findings"]]
+    for title, intro, finding in ordered:
+        if finding is None:
+            paragraph(title, bold=True)
+            paragraph(intro)
+            continue
+        if is_ranked(m):
+            entity = finding.get("entity") or {}
+            where = f"{entity.get('kind')}:{entity.get('value')}" if entity.get("value") is not None else "unattributed"
+            paragraph(f"{finding['rule_id']} — {where} (rule estimate: {finding['lane']})", bold=True)
+        else:
+            paragraph(f"{finding['rule_id']} — {finding['lane']}", bold=True)
         paragraph(finding["claim"])
         if ref := finding.get("fleet_hosts"):
             amount = str(ref["count"]) if ref["complete"] else f"{ref['count']} of {ref['expected_count']}"

@@ -344,7 +344,45 @@ from tests import throughput_fixture as tf
 # links, audit, manifest, rule cells, the baseline observations and scope hours, and the normalization and pivot
 # goldens). With the evidence version set back to 16 every digest here is the earlier one, and the non-baseline
 # semantic projection is unchanged.
-GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe554935eb6f87cf',
+# Evidence ranking now runs before and after expansion, and expansion seeds from the ranking's Reported set instead of
+# the urgent and high lanes. In this fixture 53 of the 54 ranked findings sit on entities that meet the evidence bar,
+# so 23 lead findings join the 7 high findings as root anchors (anchors 7 -> 30); the fixed 180-query budget is shared
+# by all 30, so the 7 earlier anchors fetch fewer links (117 links removed, 145 added; the earlier anchors' reasons
+# now name the reserve for discovered anchors) and the expansion stop reason adds "budget". The new anchors reach 14
+# context findings (4 high, 10 lead; context.credential_access, .lateral_movement, .staging_and_transfer and
+# .post_access_discovery, all re-observations on web1 of activity already found). No earlier candidate is removed or
+# changes lane; 11 change only their reach claim text, `_context_reaches`, finalize digest and source link (they are
+# now reached through other link ids). The fetched events, raw records, tasks, entities, rule cells (168 added for
+# the new links' context evaluations, 936 link partitions re-keyed; none outside link partitions) and the
+# hunt-derived baseline segments, counts, scope hours and exclusions (keys of the new findings) move with them; the
+# audit adds the two ranking pass summaries; the manifest adds each finding's rank fields, the ranking summary and
+# the ranked entities. Run with expansion seeded by the rule estimate (`run_stack(rank=False)`), every digest is the
+# earlier one below, and the non-baseline semantic projection is the earlier one too.
+GOLDEN_STACK = {'anchors': '4971a5c963d04bc4743cc31a40d92a284160f47d7c2f5280ad28d0588bf33ed2',
+ 'audit': '7fe2327f2e186c276675245957824119072b6e769241c7a1a8e1c6255d7be1dc',
+ 'baseline_counts': '748129268ef043d23f91ca3a357a5adfff57e4cf0a380709aeb729b93294021f',
+ 'baseline_hunt_exclusions': '66d8a3bf089749ff997d501f23f4d1c27c4bc7ba72ec71194789405548ed3ddc',
+ 'baseline_observations': '6753ce92f6247b473508e1e35f73339cb3843dabfb5a87c23b4339a749df13e5',
+ 'baseline_scope_hours': 'e6c1b1e01cd07466c3e4abe291c36d5420259ed7142585ca50efddb88e1af9c4',
+ 'baseline_segments': 'e7a92b3d8bc6488ee87f39e1be1301cbd3e68ee8461fb43e7853601912d3186c',
+ 'baseline_snapshot': '63b4c8094cb5450b1e707fd7be786e90324528e738b882358cae15cb8d53f776',
+ 'baseline_window_counts': '7cc0f5555260b0533927f47cfe29e6a543e2d921b0cc79e4b6b89f418d6052f8',
+ 'baseline_window_event_hours': 'bb58c65144b135443e75a690b7b2f8137ebac6b827f8e8bd8cc7606a01c53e52',
+ 'baseline_window_scope_hours': '9f977913af60b464aae55a2fa1c263ebdefd644ca53fccc58ea616b47900d90a',
+ 'candidates': '72b020b519c61ae43956e35f369e9aa3419dffb79ac48ea9ae83ae7ac165e713',
+ 'entities': 'c497a8478d292a421c485580b15bbb2086112cc20c11e22add3122f7f71c32b1',
+ 'event_citations': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
+ 'event_entities': 'e7030ffdc22f20ae2917962584ddd47d11d469e7336d28ae9608af2a163bbeb2',
+ 'events': '1e3b3d1e1bc167fc4953f61a9a22d47b50725c698382b7b85ec7a5709d73b277',
+ 'expansion': '4a094c5024f3d32ad2c43f2d1fb94e6b342b9803bcf92e467d9121cde94c9cad',
+ 'links': '0e8fb56431051f0f4ae838b0c974da9038c44f57c3bb573c884bce0b9031f2a1',
+ 'manifest': 'b4a6c52813d8df56a0d764dd65c24cca290308a5c4586e0a31af2f2ca40a4fb8',
+ 'raw': '8843cae4556d60afa7493633139da87240a9295d90a89e5792dbbd0bbf1359c5',
+ 'rule_cells': '1b819756df7a42bd48da17a04a0ddb1913b6ea6e3fc9eb7b40939dcae02f4942',
+ 'stats': '03817e5592ef62f8aecddbb9cae63bf65e5496d5f148fd5d518389275a4ae608',
+ 'tasks': 'c2cd7e14a88a73eccbb3a663a6c51f85529ee68074f9a22676ea655ea437a953'}
+# The rule-estimate stack's digests (expansion seeded by the urgent and high lanes, as before evidence ranking).
+GOLDEN_STACK_BY_RULE_ESTIMATE = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe554935eb6f87cf',
  'audit': '93e7e798b20a8a186ea1fc8204ebd1cc2768f9faaa3d678841b86f4b9b12e06c',
  'baseline_counts': 'be05fabb25336f21341b46eae7d8c2627828f7a7a7e8fdb24f4eb58576099354',
  'baseline_hunt_exclusions': 'c91eefda01c512d6d63e892dc9696016b01a71d44e4abcc429d954bd51864852',
@@ -367,10 +405,8 @@ GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe55
  'rule_cells': 'a3be759f41c94a81120c1a23ea136572ee48a7228dcb6b22155661d300a14dd0',
  'stats': '03817e5592ef62f8aecddbb9cae63bf65e5496d5f148fd5d518389275a4ae608',
  'tasks': '820ed1e788f6476853cd0b4a04444927a1771296cc4e1212accf11e27c20f742'}
-# Captured directly from the S7 fixture through _non_baseline_semantic_digests. Typed-event-derived hashes and
-# interchangeable predicate origins are normalized, while every decision, claim, lane, raw citation and gate is
-# checked field by field.
-GOLDEN_NON_BASELINE_SEMANTICS = {'candidates': {'all_fields': '4cf242cede6c404a9cec581aa7f10aac3a898b1c67a25dd1bb8e3ad838e139ea',
+GOLDEN_CANDIDATES_BY_RULE_ESTIMATE = GOLDEN_STACK_BY_RULE_ESTIMATE['candidates']
+GOLDEN_NON_BASELINE_SEMANTICS_BY_RULE_ESTIMATE = {'candidates': {'all_fields': '4cf242cede6c404a9cec581aa7f10aac3a898b1c67a25dd1bb8e3ad838e139ea',
                 'benign_alternatives': 'b6a6498000e772cfa17ad8ec0de6611835534dbd7262543e97e6e413b75304aa',
                 'claim': 'b9376dc415ee7a3f7cd11e025171c6aa7bcb0eb58af69169ddf7c8f0fa84653d',
                 'claim_type': '62ee830737cd920223bd88ccd391e5074f2e72242803701f1f849e25d1fdf7c2',
@@ -401,6 +437,41 @@ GOLDEN_NON_BASELINE_SEMANTICS = {'candidates': {'all_fields': '4cf242cede6c404a9
                 'rule_version': '6e06616da6f73ed294b1b7dc633b6a0890e7f521857d680563573c81be4ba338',
                 'state': '79492679c375470e7bc0235f6b4335d5ca8329aa0575e774ae0a72392f380220',
                 'target': 'c533333fd26b44f80c85e368bab8980506bfb6ad90f452f8a4e6561d059b40fe'}}
+
+# Captured directly from the S7 fixture through _non_baseline_semantic_digests. Typed-event-derived hashes and
+# interchangeable predicate origins are normalized, while every decision, claim, lane, raw citation and gate is
+# checked field by field.
+GOLDEN_NON_BASELINE_SEMANTICS = {'candidates': {'all_fields': '548786c35a7842a502601d1a37ef9e5e00c6f15a5b0f957116c41766213daf76',
+                'benign_alternatives': '7ce7cd9787349e1cd28008f4262cdd4783cdc2e9cb68cfb1cb9b6b76dd5635dc',
+                'claim': 'dacdc1d24680afe99e4cfcb29e83b4354759ea9be49997b09ba7f3a09b9f18d9',
+                'claim_type': 'b04e5a2f324691d80a54e0a2ec6a2da2f755f30294ddea5faaea2f7c73fb66cb',
+                'confidence': 'fa5e80446bf326b315eaee790d2ff6e345e460a6c086c573b71390ac5311d89b',
+                'context_event_records': '802bfc50038c8f92c7631953da9a1413da7bb0b3469a56e590069e3ebc4c19b0',
+                'count': 54,
+                'entities': '5decb0076f62e41a54bb88e58b726b91caadec5302976cf501b575425a565cc2',
+                'event_records': 'c4c51b668353b79a55922e6b2fccab9abcd82c33f9765a6610c6c9d25c3881b9',
+                'gate_results': 'af854203cb3bf9fe7ef88bc6cea8b63e8f076408aa8c0c86c9a78dc493034729',
+                'group_key': 'cb1bd5c9307f82a7d10c906b633f17164ddb9d2107eeb6de6ab5d605eb82fe0c',
+                'lane': '320f804b0a6f760c5b77c532b9c5e6c708bca250794f1e2aec8f87aeeeef8061',
+                'next_checks': '0a9009a8bb889988a3ce45ff60eb3978b609cf4e535f09f27b8b7c633173297d',
+                'predicate_fields': '37ac627488f27134b6dee812657010a8075bca3a76edd0ac98415569399421a4',
+                'priority': 'a45083d668a7a32e5fd7069ef387db9213a665019bf25413da24756eadf071ac',
+                'priority_reasons': 'd8e5f7512822a20bc9cdc360f4d7e0988011fae30ea2fc6957e93f45773dfbf8',
+                'rule_id': 'eb76f2b67bd295d910cadd3d8da7ed9d62f8876ecee8ad233d80a677bc9f572f',
+                'rule_version': 'a41fdd6ae62c642457d93be7c19b96dfa5b161d7c2f64cf46cf63fa5baaa514a',
+                'severity': '807d269c2f4b655931696871a41e0eb6b364ec8c8ebb8eff4dc8456ddbc4e64b',
+                'source_presence': 'f7dd27fce0c2093865dff4e5d7e7b23a0677790af53a5dcb92ef73fbc8e1934d',
+                'ts': 'f137161c5bf0d610fff1a18e4080f1c4d60892c93b91351d7d96393f7abc9edf'},
+ 'rule_cells': {'all_fields': '9ebb052c336df15e95beb790290793834ab51517469d8f2b58d8777b14fbcca5',
+                'count': 17424,
+                'detail': '2f2d3174e273f6af64f11ee0b03cb62dc905e553bb2c29cb4bb87d07b40a93e1',
+                'evaluated': 'a720d3379eb205014ef9b2cf75dfd0f2c2efc1f2c3af239768fbd7c4689554a0',
+                'matched': '76643d94bf6bfa4d10a44d9e5aa3bc19afa20ce97bff407bfe3d022d04f0293f',
+                'partition': 'bad8bdb1445779ee018230ddfb503fdf8f0b3c96912afd31b22aea40767e2c07',
+                'rule_id': '1e191e0b137147142d129c195b02eecc2d4abe7a9c91958827b9e48e97d9b71b',
+                'rule_version': 'b8299750f9e4028af0c21963e22b0a184291fd13aaaa2d83e261b19013238ad4',
+                'state': '123b059b7e5bdf1468b8476a85582d8ef2fb2fc957f9272293b8ea7db7da6dc2',
+                'target': '50c504b8e881b9722a48178248c75125e4310681cadd65e4d0e4ebcc0d26b330'}}
 GOLDEN_NORMALIZED = {'arkime_sessions3-x': '1c08ef8ffd802ef67c6b6df2f8c5ba27bbf40ef5439c07a677c17044030f9ae9',
  'arkime_sessions3-x+boots': '1c08ef8ffd802ef67c6b6df2f8c5ba27bbf40ef5439c07a677c17044030f9ae9',
  'romulus-host-x': 'b46c4bfa21a9d32e8f11e18df9e79e32b92bca70fdf767d3aba4192416176433',
@@ -597,6 +668,17 @@ def test_the_sweep_and_expansion_stack_reproduces_the_captured_result(docs, tmp_
     _assert_every_citation_resolves_with_raw(snapshot)
     assert tf.deterministic_golden_digests(snapshot) == GOLDEN_STACK
     assert _non_baseline_semantic_digests(snapshot) == GOLDEN_NON_BASELINE_SEMANTICS
+    # every finding is ranked, and every finding the rule estimate's expansion found is still found
+    assert all(finding.get("rank") is not None for finding in snapshot["manifest"]["findings"])
+    assert snapshot["manifest"]["ranking"]["status"] == "complete"
+
+
+def test_the_stack_seeded_by_the_rule_estimate_is_unchanged_by_ranking(docs, tmp_path, monkeypatch):
+    """Without the ranking passes, the stack reproduces the result captured before evidence ranking existed."""
+    tf.patched_sizes(monkeypatch)
+    snapshot = tf.run_stack(tmp_path, docs=docs, rank=False)
+    assert tf.deterministic_golden_digests(snapshot) == GOLDEN_STACK_BY_RULE_ESTIMATE
+    assert _non_baseline_semantic_digests(snapshot) == GOLDEN_NON_BASELINE_SEMANTICS_BY_RULE_ESTIMATE
 
 
 def test_normalization_of_every_target_reproduces_the_captured_events(docs):

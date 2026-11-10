@@ -3,8 +3,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 
-from romulus.content.attack_tags import technique_tactics
-from romulus.detect.metadata import hunt_rule_metadata
+from romulus.detect.metadata import finding_attack, hunt_rule_metadata
 from romulus.detect.registry import ALL_PLAYBOOKS
 from romulus.store.db import digest
 from romulus.store.repo import Repo
@@ -27,24 +26,6 @@ def _incident_role(row: dict, _finding_by_id: dict[str, dict]) -> str:
     labelled hypothesis between incidents regardless of how narrow its query window is.
     """
     return "evidence" if row["strength"] == "observed" else "hypothesis"
-
-
-_TACTICS = {
-    "T1190": ("initial-access",),
-    "T1078": ("initial-access", "persistence", "privilege-escalation", "defense-evasion"),
-    "T1059": ("execution",), "T1059.004": ("execution",), "T1059.006": ("execution",),
-    "T1505.003": ("persistence",), "T1098.004": ("persistence",),
-    "T1003.008": ("credential-access",), "T1021.004": ("lateral-movement",),
-    "T1033": ("discovery",), "T1082": ("discovery",), "T1016": ("discovery",),
-    "T1087": ("discovery",), "T1069": ("discovery",), "T1046": ("discovery",),
-    "T1036.005": ("defense-evasion",), "T1562.004": ("defense-evasion",),
-    "T1105": ("command-and-control",), "T1071": ("command-and-control",),
-    "T1071.001": ("command-and-control",), "T1095": ("command-and-control",),
-    "T1571": ("command-and-control",), "T1029": ("command-and-control",),
-    "T1573": ("command-and-control",), "T1498": ("impact",),
-    "T1590.002": ("reconnaissance",), "T1595.001": ("reconnaissance",),
-    "T1595.002": ("reconnaissance",), "T1595.003": ("reconnaissance",),
-}
 
 
 def _title(rule_id: str, rules=None) -> str:
@@ -168,11 +149,8 @@ def build_incident_graph(repo: Repo, hunt_id: str, findings: list[dict], *, incl
             children[finding["source_link_id"]].append(finding["id"])
         stored = stored_by_id[finding["id"]]
         explicit_attack = finding.get('attack') or ((stored or {}).get('gate_results') or {}).get('_attack')
-        rule = rules.get(finding['rule_id'])
-        attack = tuple(explicit_attack or getattr(rule, 'attack', ()))
-        attack_by_finding[finding['id']] = attack
-        tactics_by_finding[finding['id']] = (technique_tactics(attack) if explicit_attack else
-            (getattr(rule, 'tactics', ()) or tuple(tactic for technique in attack for tactic in _TACTICS.get(technique, ()))))
+        attack_by_finding[finding['id']], tactics_by_finding[finding['id']] = finding_attack(
+            explicit_attack, rules.get(finding['rule_id']))
         event_ids = list((stored or finding).get("event_ids") or [])
         context_ids = set((stored or finding).get("context_event_ids") or [])
         cited = set(event_ids) - context_ids

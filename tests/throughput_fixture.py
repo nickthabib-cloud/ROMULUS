@@ -582,10 +582,11 @@ def _strip(value):
     return value
 
 
-def run_stack(stage_dir, *, scale: int = 1, docs: dict | None = None) -> dict:
-    """Sweep every target, finalize, expand from the findings and build the report manifest. Returns a canonical
-    snapshot of everything a hunt stores or reports, without wall-clock fields. Callers patch the partition and
-    pivot sizes first (`patched_sizes`)."""
+def run_stack(stage_dir, *, scale: int = 1, docs: dict | None = None, rank: bool = True) -> dict:
+    """Sweep every target, finalize, rank, expand from the ranked seeds, rank again and build the report manifest, as
+    a hunt runs. Returns a canonical snapshot of everything a hunt stores or reports, without wall-clock fields.
+    Callers patch the partition and pivot sizes first (`patched_sizes`). `rank=False` runs the stack as it ran before
+    evidence ranking (seeds by the rule estimate), for comparisons."""
     from sqlalchemy import select
 
     from romulus.baseline.lookback import HistoryGap
@@ -655,9 +656,14 @@ def run_stack(stage_dir, *, scale: int = 1, docs: dict | None = None) -> dict:
     executor = PivotExecutor(repo, client, "h1", contracts, source_query_budget=180,
                              dataset_inventory={HOST_TARGET: {"linux.audit", "systemd.journal", "apache.access",
                                                               "apache.error"}})
+    from romulus.hunt.rank import PASS_BEFORE_EXPANSION, PASS_FINAL, run_rank_pass
+    if rank:
+        run_rank_pass(repo, "h1", PASS_BEFORE_EXPANSION)
     expansion = ExpansionEngine(repo, "h1", window, LinkFetcher(executor, window.start, window.end),
                                 max_depth=3, max_source_queries=180, wall_clock_seconds=10**9).run()
     repo.audit("system", "hunt.expansion_summary", "h1", expansion)
+    if rank:
+        run_rank_pass(repo, "h1", PASS_FINAL)
     hunt_run._finish(repo, "h1", {"status": "disabled", "stop_reason": ""}, sweep_summary,
                      partial_reasons=sweep.partial_reasons, expansion_summary=expansion, baseline_summary=baseline)
     manifest = build_manifest(repo, "h1", "test")

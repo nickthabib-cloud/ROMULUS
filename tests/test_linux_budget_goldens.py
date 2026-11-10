@@ -26,5 +26,6 @@ def test_linux_stack_candidates_at_physical_byte_budget(mib, tmp_path, monkeypat
         finally:
             assert sum(path.stat().st_size for path in tmp_path.rglob("*") if path.is_file()) <= total
     monkeypatch.setattr(sw.Sweep, "run_partition", run)
-    snapshot = tf.run_stack(tmp_path, docs=tf.build(1))
+    # Sweep-state budgets only: expansion seeds by the rule estimate, so the candidate golden isolates the sweep.
+    snapshot = tf.run_stack(tmp_path, docs=tf.build(1), rank=False)
     assert (len(snapshot["candidates"]), tf.deterministic_golden_digests(snapshot)["candidates"]) == CANDIDATE_GOLDENS[mib]

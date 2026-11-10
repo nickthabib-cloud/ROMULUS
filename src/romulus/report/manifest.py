@@ -15,6 +15,7 @@ from romulus.detect.metadata import hunt_rule_metadata, is_sigma_id, pinned_rule
 from romulus.detect.netdef import recorded_view
 from romulus.detect.registry import ALL_PLAYBOOKS
 from romulus.hunt.publish import subject_event_ids
+from romulus.hunt.rank import PASS_FINAL, rank_summary, rank_unranked
 from romulus.report.incidents import build_incident_graph, incident_narrative
 from romulus.store import schema as t
 from romulus.store.db import digest, utcnow, write_txn
@@ -679,6 +680,7 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
             findings[-1]["fleet_hosts"] = repo.snapshot_candidate_hosts(
                 c["id"], hunt_id, expected_count=gates["_fleet_host_count"],
                 complete=gates.get("_fleet_hosts_complete", False), expected_candidate=c)
+    ranking = _apply_ranking(repo, hunt_id, findings, cands)
     lane_counts = Counter(c["lane"] for c in cands if c.get("provenance", "deterministic") != "agent")
     with repo.engine.connect() as conn:
         tasks = conn.execute(select(t.task.c.state, func.count()).where(t.task.c.hunt_id == hunt_id)
@@ -719,6 +721,8 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
                      "model": hm["model"], "romulus": hm["romulus_version"]},
         "generated_by": actor,
     }
+    if ranking is not None:
+        m["ranking"], m["entities"] = ranking
     lists = hm.get('indicator_lists') or {}
     if lists.get('applied') or lists.get('excluded'):
         m['versions']['indicator_lists'] = {
@@ -745,6 +749,61 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
         m["integrity"]["incomplete_fleet_host_lists"] = fleet_gaps
         m["integrity"]["finalizable"] = False
     return _jsonable(m)
+
+
+def _apply_ranking(repo: Repo, hunt_id: str, findings: list[dict], candidates: list[dict]):
+    """Annotate each finding with its evidence rank and return the ranking summary and ranked entities; None for a
+    hunt stored before ranking existed (its report is unchanged). Every finding keeps its stored lane, shown as the
+    rule's own estimate; ranking only orders and groups them, and nothing is left out."""
+    summary = rank_summary(repo, hunt_id, PASS_FINAL)
+    if not repo.has_rank_pass(hunt_id, PASS_FINAL):
+        if summary is None:
+            return None
+        return {key: summary.get(key) for key in ("pass", "version", "status", "reason")}, []
+    stored = repo.finding_ranks_for(hunt_id, PASS_FINAL, [finding["id"] for finding in findings])
+    by_id = {row["id"]: row for row in candidates}
+    late = rank_unranked(repo, hunt_id, [by_id[finding["id"]] for finding in findings
+                                         if finding["id"] not in stored and finding["id"] in by_id])
+    listed: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for finding in findings:
+        rank = stored.get(finding["id"]) or late.get(finding["id"])
+        if rank is None:
+            finding.update(rank=None, rank_position=None, entity=None, reported=False,
+                           rank_reasons=["not ranked: stored after the last ranking pass"])
+            continue
+        finding.update(rank=rank["score"], rank_position=rank["position"],
+                       entity={"kind": rank["entity_kind"], "value": rank["entity"]},
+                       reported=bool(rank["reported"]), rank_reasons=list(rank["reasons"]))
+        if rank["entity"] is not None:
+            listed[(rank["entity_kind"], rank["entity"])].append(finding)
+    entities = []
+    after = 0
+    while True:
+        page = repo.entity_ranks_page(hunt_id, PASS_FINAL, after_position=after)
+        if not page:
+            break
+        for row in page:
+            members = sorted(listed.get((row["entity_kind"], row["entity"]), []), key=_rank_order)
+            entities.append({
+                "kind": row["entity_kind"], "value": row["entity"], "position": row["position"],
+                "score": row["score"], "reported": bool(row["reported"]), "confirmed": row["confirmed"],
+                "tactics": row["tactics"], "rules": row["rules"], "cooccurrence": row["cooccur"],
+                "findings": row["findings"], "reasons": row["reasons"],
+                "finding_ids": [finding["id"] for finding in members],
+            })
+        after = page[-1]["position"]
+    view = {key: summary.get(key) for key in (
+        "pass", "version", "status", "hunt_hosts", "window_seconds", "fleet_recurring_rules", "ranked_findings",
+        "reported_findings", "entities", "reported_entities")} if summary else {"pass": PASS_FINAL}
+    view["status"] = "complete"         # a pass's rows exist only once it was published whole
+    return view, entities
+
+
+def _rank_order(finding: dict) -> tuple:
+    """Rank order: score descending, then observation time, then id (the stored position's order)."""
+    rank = finding.get("rank")
+    return (rank is None, -(rank or 0.0), finding["observed_at"] is None, finding["observed_at"] or "",
+            finding["id"])
 
 
 def internal_networks_view(repo: Repo, hunt_id: str, hunt_manifest: dict) -> dict:
@@ -962,6 +1021,15 @@ def canonical_manifest(repo: Repo, hunt_id: str, actor: str = "canonical") -> di
         row.pop("provenance", None)
         row.pop("agent_hypothesis_id", None)
     canonical["findings"] = canonicalize(deterministic_views)
+    for row in canonical["findings"]:
+        # positions break exact ties by hunt-scoped ids; the score and content order carry the rank across hunts
+        row.pop("rank_position", None)
+    if "entities" in manifest:
+        agent_ids = {row["id"] for row in agent_findings}
+        canonical["entities"] = [
+            {**entity, "finding_ids": sorted(canonicalize([item for item in entity["finding_ids"]
+                                                          if item not in agent_ids]))}
+            for entity in canonical["entities"]]
     canonical["lane_counts"] = dict(Counter(row["lane"] for row in deterministic_findings))
     canonical["context_items"] = canonical["lane_counts"].get("context", 0)
     deterministic_graph = build_incident_graph(repo, hunt_id, [
