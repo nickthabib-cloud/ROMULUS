@@ -2655,6 +2655,13 @@ class Repo:
         with self.engine.connect() as connection:
             return _rank_state(connection, hunt_id)
 
+    def unranked_findings(self, hunt_id: str) -> int:
+        """Reportable findings with no row in the final pass: those stored after it ran (an AI agent's proposals)."""
+        query = select(func.count()).select_from(t.candidate).where(
+            t.candidate.c.hunt_id == hunt_id, t.candidate.c.lane.in_(REPORTABLE_LANES), _unranked(hunt_id))
+        with self.engine.connect() as connection:
+            return int(connection.execute(query).scalar_one())
+
     def has_rank_pass(self, hunt_id: str, pass_no: int) -> bool:
         query = select(t.finding_rank.c.candidate_id).where(
             t.finding_rank.c.hunt_id == hunt_id, t.finding_rank.c["pass"] == pass_no).limit(1)

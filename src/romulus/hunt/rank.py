@@ -1,7 +1,8 @@
 """Evidence-ranking passes over a hunt's stored candidates, and the expansion seeds they choose.
 
 Pass 1 runs after the sweep, packet and baseline stages and chooses expansion's seeds. Pass 2 runs after expansion
-and its context pass; reports, the web and the agent dossier read it. Each pass is computed in bounded keyset pages
+and its context pass; reports, the web and the agent dossier read it, and it runs again when the AI agent's run ends
+if the agent stored findings after it (`refresh_final_pass`). Each pass is computed in bounded keyset pages
 over the store (`romulus.store.ranks`) and replaces the hunt's previous rows for that pass atomically, so running a
 pass again over the same stored candidates (a resumed hunt) gives the same ranks.
 """
@@ -24,6 +25,7 @@ log = logging.getLogger("romulus.rank")
 PASS_BEFORE_EXPANSION = 1
 PASS_FINAL = 2
 SUMMARY_ACTIONS = {PASS_BEFORE_EXPANSION: "hunt.rank_pass_1_summary", PASS_FINAL: FINAL_RANK_SUMMARY}
+REFRESH_FAILED_ACTION = "hunt.rank_pass_2_refresh_failed"
 # Rows a pass holds in Python at once (one keyset page). A few thousand rows of a few hundred bytes are a few MB on
 # any host; a larger page only saves round trips, and per-entity state lives in the store's staging tables.
 RANK_BATCH = 2000
@@ -265,6 +267,33 @@ def run_rank_pass(repo: Repo, hunt_id: str, pass_no: int, *, owner_token: str | 
 def rank_summary(repo: Repo, hunt_id: str, pass_no: int = PASS_FINAL) -> dict | None:
     audit = repo.latest_audit(hunt_id, SUMMARY_ACTIONS[pass_no])
     return dict(audit["detail"]) if audit else None
+
+
+def refresh_final_pass(repo: Repo, hunt_id: str, *, owner_token: str | None = None,
+                       heartbeat: Callable[[], None] = lambda: None) -> dict | None:
+    """Run the final pass again when findings were stored after it (an AI agent's proposals), so every view and the
+    report place them by the same stored rank. Such findings never count toward an entity's evidence, so the earlier
+    findings keep their scores; positions move only to make room. Nothing to do (no final pass, or no finding stored
+    after it) returns None. A failed refresh keeps the published pass, whose late findings stay labelled "not ranked",
+    and records why under its own audit action."""
+    if not repo.has_rank_pass(hunt_id, PASS_FINAL):
+        return None
+    late = repo.unranked_findings(hunt_id)
+    if not late:
+        return None
+    try:
+        summary = compute_rank_pass(repo, hunt_id, PASS_FINAL, owner_token=owner_token, heartbeat=heartbeat)
+    except Exception as exc:
+        if is_lease_lost(exc):
+            raise
+        log.exception("refreshing the final ranking pass failed")
+        detail = {"pass": PASS_FINAL, "version": model.RANK_VERSION, "status": "failed", "late_findings": late,
+                  "reason": f"ranking error: {type(exc).__name__}: {exc}"[:300]}
+        repo.audit("system", REFRESH_FAILED_ACTION, hunt_id, detail, owner_token=owner_token)
+        return detail
+    summary["late_findings"] = late
+    repo.audit("system", SUMMARY_ACTIONS[PASS_FINAL], hunt_id, summary, owner_token=owner_token)
+    return summary
 
 
 # Expansion reads the pass-1 Reported set (repo.finding_ranks_page, reported only) to choose its extra seeds.
