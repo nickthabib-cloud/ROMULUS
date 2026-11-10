@@ -106,9 +106,14 @@ class EventStage:
         self.db.execute("PRAGMA synchronous=OFF")
         # kept = 1: staged to be kept to the end; 0: present only while a playbook holds it (table hold)
         self.db.create_function("citation_epoch", 1, _citation_epoch, deterministic=True)
+        # A rowid table, not WITHOUT ROWID: a typed-event body is often larger than an index b-tree cell keeps on its
+        # page (about a quarter page). In a WITHOUT ROWID table every interior cell then carries a whole row, the
+        # fan-out falls to a few children per page, and each lookup by id walks a tree many levels deep plus an
+        # overflow page; the page reads per record grow with the stage. Here the id index holds only short keys and
+        # the table b-tree's interior cells only rowids, so a lookup reads a few pages however large the stage is.
         self.db.execute("CREATE TABLE event (id TEXT PRIMARY KEY, body TEXT NOT NULL, kept INTEGER NOT NULL, "
                         f"reclaim INTEGER NOT NULL DEFAULT {REFERENCE_FLAGS_BASE}, "
-                        "seq INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID")
+                        "seq INTEGER NOT NULL DEFAULT 0)")
         self.db.execute("CREATE INDEX event_time ON event(seq,id)")
         self.db.execute("CREATE TABLE raw (key TEXT PRIMARY KEY, body TEXT NOT NULL, kept INTEGER NOT NULL)")
         self._raw_table = True
