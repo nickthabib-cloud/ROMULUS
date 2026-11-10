@@ -89,3 +89,36 @@ def test_narrowing_is_bounded_per_statement(tmp_path):
     repo.set_hunt_state("h1", "failed", owner_token=owner)
     states = {c["state"] for c in repo.rule_cells("h1") if c["rule_id"].startswith("bulk.")}
     assert states == {"evaluated_partial"}
+
+
+def _stale_hunt(tmp_path, monkeypatch, lease_seconds):
+    from romulus.config import Settings
+    from romulus.hunt import run as hunt_run
+    settings = Settings(home=tmp_path)
+    repo = hunt_run.open_repo(settings)
+    repo.create_hunt("h1", {"window": {"start": T.isoformat(), "end": (T + timedelta(hours=1)).isoformat()},
+                            "targets": ["t"]}, "digest", "test")
+    owner = repo.claim_hunt("h1", lease_seconds, now=datetime.now(UTC) - timedelta(seconds=3600))["lease_owner"] \
+        if lease_seconds < 3600 else repo.claim_hunt("h1", lease_seconds)["lease_owner"]
+    repo.set_rule_cell("h1", "r.none", "1", "*", "window", "no_match_complete", 0, 3, {}, owner_token=owner)
+    monkeypatch.setattr(hunt_run, "ensure_site_unchanged", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hunt_run, "install_for_hunt", lambda *_args, **_kwargs: None)
+    return settings, repo, hunt_run
+
+
+def test_a_killed_worker_leaves_a_failed_hunt_without_complete_windows(tmp_path, monkeypatch):
+    # the worker stopped in finalize without any end transition and its lease has expired
+    settings, repo, hunt_run = _stale_hunt(tmp_path, monkeypatch, 60)
+    with pytest.raises(RuntimeError, match="now marked failed"):
+        hunt_run.resume_hunt(settings, "h1")
+    assert repo.get_hunt("h1")["execution_state"] == "failed"
+    assert _states(repo)[("r.none", "*")][0] == "evaluated_partial"
+    assert repo.latest_audit("h1", "hunt.sweep_summary")["detail"]["finished"] is False
+
+
+def test_a_live_worker_is_left_alone(tmp_path, monkeypatch):
+    settings, repo, hunt_run = _stale_hunt(tmp_path, monkeypatch, 3600)
+    with pytest.raises(RuntimeError, match="active lease"):
+        hunt_run.resume_hunt(settings, "h1")
+    assert repo.get_hunt("h1")["execution_state"] == "running"
+    assert _states(repo)[("r.none", "*")][0] == "no_match_complete"

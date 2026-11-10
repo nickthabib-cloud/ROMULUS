@@ -1263,25 +1263,25 @@ class Repo:
         summary = c.execute(select(t.audit_event.c.detail).where(
             t.audit_event.c.hunt_id == hunt_id, t.audit_event.c.action == "hunt.sweep_summary",
         ).order_by(t.audit_event.c.id.desc()).limit(1)).scalar()
-        if isinstance(summary, dict) and summary.get("finished"):
+        # an older summary without "finished" is read as the report reads it
+        if isinstance(summary, dict) and summary.get("finished", summary.get("complete")):
             return 0
         reason = f"the hunt ended {state} before its sweep finished: no whole-window answer is complete"
-        changed = 0
-        last_id = 0
-        while True:
-            rows = c.execute(select(t.rule_run.c.id, t.rule_run.c.state, t.rule_run.c.detail).where(
-                t.rule_run.c.hunt_id == hunt_id, t.rule_run.c.target == "*", t.rule_run.c.partition == "window",
-                t.rule_run.c.state.in_(sorted(self.UNFINISHED_WINDOW_STATE)), t.rule_run.c.id > last_id,
-            ).order_by(t.rule_run.c.id).limit(500)).all()
-            if not rows:
-                return changed
-            for row_id, cell_state, detail in rows:
-                detail = dict(detail or {})
-                detail["reasons"] = list(dict.fromkeys([*(detail.get("reasons") or []), reason]))
-                c.execute(t.rule_run.update().where(t.rule_run.c.id == row_id).values(
-                    state=self.UNFINISHED_WINDOW_STATE[cell_state], detail=detail))
-                changed += 1
-            last_id = rows[-1][0]
+        # one pass over the hunt's index range (the write lock is held throughout, so batching would only repeat
+        # the scan); window cells are one per rule, so the selected rows are bounded by the pack
+        rows = c.execute(select(t.rule_run.c.id, t.rule_run.c.state, t.rule_run.c.detail).where(
+            t.rule_run.c.hunt_id == hunt_id, t.rule_run.c.target == "*", t.rule_run.c.partition == "window",
+            t.rule_run.c.state.in_(sorted(self.UNFINISHED_WINDOW_STATE)),
+        )).all()
+        for row_id, cell_state, detail in rows:
+            detail = dict(detail or {})
+            detail["reasons"] = list(dict.fromkeys([*(detail.get("reasons") or []), reason]))
+            c.execute(t.rule_run.update().where(t.rule_run.c.id == row_id).values(
+                state=self.UNFINISHED_WINDOW_STATE[cell_state], detail=detail))
+        if rows:
+            c.execute(t.audit_event.insert().values(at=utcnow(), actor="system", action="hunt.windows_narrowed",
+                                                    hunt_id=hunt_id, detail={"cells": len(rows), "reason": reason}))
+        return len(rows)
 
     def save_profile(self, hunt_id: str, profile: dict):
         with write_txn(self.engine) as c:
