@@ -54,8 +54,11 @@ from romulus.evidence.linux_catalog import (
     document_dataset,
     match_shape,
     module_syscall,
+    text_candidate,
+    text_payload,
     unmatched_families,
 )
+from romulus.evidence.linux_text import classify, inline_time
 from romulus.evidence.raw_scrub import clean_source, might_be_zeek
 from romulus.evidence.typed import EVIDENCE_VERSION, FieldValue, Outcome, RawRef, TypedEvent, event_id, fv
 from romulus.evidence.windows import (
@@ -96,6 +99,10 @@ class Skip(Exception):
     def __init__(self, reason: str):
         super().__init__(reason)
         self.reason = reason
+
+
+class TextSkip(Skip):
+    """Unrecognized text can hide any family: the coverage cell must stay unresolved."""
 
 
 class AuditCopy(Skip):
@@ -1925,7 +1932,7 @@ def auditbeat_records(hit: dict) -> list[tuple[dict, AuditRecord]]:
 APACHE_ZONE_CAVEAT = "Zone from the shipper's locale"
 
 
-def normalize_apache_access(hit: dict) -> TypedEvent:
+def normalize_apache_access(hit: dict, *, parsed_fields=None, line_origin=None) -> TypedEvent:
     """One access-log line. A client logged by host name (the shipper's source.domain) has no source.ip: the event
     is kept without it, and rules that need it count it as missing."""
     src, nid, ref = hit["_source"], hit["_id"], _ref(hit)
@@ -1936,6 +1943,8 @@ def normalize_apache_access(hit: dict) -> TypedEvent:
         v = _get(src, native)
         if v is not None:
             f[typed] = fv(v, f"{nid}:{native}")
+    if parsed_fields is not None:
+        f = {key: fv(value, line_origin) for key, value in parsed_fields.items()}
     status = f.get("http.response.status_code")
     outcome = Outcome.unknown if status is None else (Outcome.success if int(status.value) < 400 else Outcome.failure)
     return TypedEvent(id=event_id("http_access", [ref]), family="http_access", ts=_ts(src["@timestamp"]),
@@ -3321,6 +3330,47 @@ def _auditbeat_group(h: dict, errors: list[tuple[str, str]]) -> list[tuple[dict,
     return members
 
 
+def normalize_text(hit: dict) -> list[TypedEvent]:
+    src = hit["_source"]
+    path, line = text_payload(src)
+    parsed = classify(line)
+    dataset = document_dataset(src) or "(no dataset)"
+    if parsed.format == "too_long":
+        raise TextSkip(f"text line too long: {dataset}")
+    if parsed.format == "unknown":
+        raise TextSkip(f"text line in no recognized format: {dataset}")
+    origin = f"{hit['_id']}:{path}~{parsed.format}"
+    if parsed.format == "http_access":
+        event = normalize_apache_access(hit, parsed_fields=parsed.fields, line_origin=origin)
+    elif parsed.format == "web_error":
+        event = normalize_apache_error(hit)
+        event.fields["web.error_message"] = fv(parsed.message, origin)
+    else:
+        journal = {"SYSLOG_IDENTIFIER": parsed.program, "MESSAGE": parsed.message,
+                   "_HOSTNAME": _get(src, "host.name")}
+        try:
+            if parsed.program in {"useradd", "groupadd"}:
+                event = _syslog_account(hit, parsed.program, parsed.message, _get(src, "host.name"), origin)
+            else:
+                event = _journal_event(hit, journal, lambda _: origin, kind="text")
+        except Skip as error:
+            raise TextSkip(f"text format {parsed.format}, program {parsed.program!r} is not normalized: {dataset}") from error
+        event.caveats.append(SYSLOG_WRITER_CAVEAT)
+    if parsed.hostname not in (None, "-"):
+        event.fields["log.syslog.hostname"] = fv(parsed.hostname, origin)
+    event.fields["log.format"] = fv(parsed.format, origin)
+    if parsed.timestamp not in (None, "-"):
+        event.fields["log.inline_timestamp"] = fv(parsed.timestamp, origin)
+        clock = inline_time(parsed.timestamp, event.ts)
+        if clock is not None:
+            seconds = int((clock.replace(microsecond=0) - event.ts.replace(microsecond=0)).total_seconds())
+            event.fields["log.clock_offset_seconds"] = fv(seconds, origin + "+@timestamp")
+            if seconds:
+                event.caveats.append("Clock offset: inline log time differs from the pipeline timestamp; "
+                                     "the pipeline timestamp is retained.")
+    return [event]
+
+
 def zeek_skip_families(names) -> frozenset[str]:
     """The event families the Zeek logs a skipped Zeek record names would feed, in any shipper's naming: empty for
     logs outside the catalog (their records are not assessed, and could hide no family a rule reads)."""
@@ -3460,6 +3510,12 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                 events.append(normalize_suricata(h))
             elif ds in SINGLE:
                 events.append(SINGLE[ds](h))
+            elif text_candidate(h["_source"]) and not is_arkime_session(h["_source"]):
+                ds = "linux.text"
+                events.extend(normalize_text(h))
+                if shapes is not None:
+                    key = "linux.text:" + (document_dataset(h["_source"]) or "(no dataset)")
+                    shapes[key] = shapes.get(key, 0) + 1
             else:
                 reason = f"dataset:{ds or document_dataset(h['_source'])} is not normalized"
                 skips[reason] += 1
@@ -3488,6 +3544,8 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                 skip_families[uncatalogued.reason] = None if known is None else known | fed
         except Skip as s:
             skips[s.reason] += 1
+            if isinstance(s, TextSkip) and skip_families is not None:
+                skip_families[s.reason] = None
         except (ValueError, KeyError, TypeError, AttributeError, OverflowError) as e:   # malformed: an error, not a crash
             errors.append((h["_id"], f"{ds}: {e}"))
     superseded = superseded_interim(list(zeek_events.values())) if zeek_events else []

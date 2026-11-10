@@ -748,8 +748,8 @@ def test_unlisted_linux_dataset_is_counted_not_normalized_with_its_families():
     fed: dict = {}
     events, skips, errors = normalize_hits([weird], skip_families=fed)
     assert not events and not errors
-    assert skips == {"dataset:auditd.weird is not normalized": 1}
-    assert fed["dataset:auditd.weird is not normalized"] == sw.DATASET_FAMILIES["linux.audit"]
+    assert skips == {"text line in no recognized format: auditd.weird": 1}
+    assert fed["text line in no recognized format: auditd.weird"] is None
     fed = {}
     normalize_hits([other], skip_families=fed)
     assert fed == {"dataset:nginx.access is not normalized": None}

@@ -7,6 +7,7 @@ import re
 from romulus.evidence.linux_catalog import (
     LINUX_LOGICAL_DATASETS,
     LINUX_SHIPPER_DATASETS,
+    TEXT_INPUT_TYPES,
     dataset_selection,
     shipper_names,
 )
@@ -70,6 +71,26 @@ _CASELESS_WINDOWS_NATIVES = frozenset({"winlog.channel", "winlog.provider_name",
 _WINDOWS_COMPUTER_NATIVES = frozenset({"winlog.computer_name", "Hostname"})
 
 
+def _linux_text_clause(contract: FieldContract, fields: list[str]) -> dict | None:
+    """Compile content-selected text using only existing typed predicate operations."""
+    def clause(name, op, value=None):
+        spec = contract.spec(name, os_family="linux")
+        if spec is None or op not in spec.ops:
+            return None
+        return _pred_native(Predicate(field=name, op=op, value=value), spec.native)
+
+    payload = [query for name in ("message", "event.original") if (query := clause(name, "exists"))]
+    if not payload:
+        return None
+    sources = [{"exists": {"field": name}} for name in fields]
+    sources.extend(query for query in (clause("input.type", "in", list(TEXT_INPUT_TYPES)),
+                                      clause("log.file.path", "exists")) if query is not None)
+    return {"bool": {"filter": [
+        {"bool": {"should": payload, "minimum_should_match": 1}},
+        {"bool": {"should": sources, "minimum_should_match": 1}}],
+        "must_not": [{"terms": {name: list(shipper_names())}} for name in fields]}}
+
+
 def _linux_datasets(p: Predicate, contract: FieldContract, natives: tuple[str, ...]) -> dict | None:
     """A dataset predicate naming logical Linux datasets: any shipper shape of each, on every dataset field the
     target maps (event.dataset and data_stream.dataset). Auditbeat's bare `auditd` also needs its event.module, and
@@ -90,6 +111,8 @@ def _linux_datasets(p: Predicate, contract: FieldContract, natives: tuple[str, .
     if len(plain) > 1000:
         raise CompileError("'in' needs a non-empty list of at most 1000 values")
     clauses = [{"terms": {field: plain}} for field in fields] if plain else []
+    if "linux.text" in values and (text_clause := _linux_text_clause(contract, fields)) is not None:
+        clauses.append(text_clause)
     module = contract.spec("event.module")
     for dataset, name in with_module:
         clauses.append({"bool": {"filter": [
@@ -143,6 +166,9 @@ def _intent_os_family(intent: SearchIntent) -> str | None:
 def _pred(p: Predicate, contract: FieldContract, *, os_family: str | None = None) -> dict:
     spec = contract.spec(p.field, os_family=os_family)
     if spec is None:
+        values = p.value if isinstance(p.value, list) else [p.value]
+        if p.field == "event.dataset" and p.op in {"eq", "in"} and "linux.text" in values:
+            return _linux_datasets(p, contract, ())
         raise CompileError(f"field {p.field!r} not in field contract for {contract.target}")
     if p.op not in spec.ops:
         raise CompileError(f"op {p.op!r} not supported on {p.field} ({spec.type}) with superset guarantee")

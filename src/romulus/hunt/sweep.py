@@ -40,6 +40,7 @@ from romulus.evidence.linux_catalog import (
     dataset_selection,
     logical_of,
     shipper_names,
+    text_dataset_inventory,
 )
 from romulus.evidence.normalize import (
     BOOT_FILL_FAMILIES,
@@ -529,6 +530,15 @@ class Sweep:
             self._profiles = self.repo.source_profiles(self.hunt_id)
         inventory = ((getattr(self, "_profiles", None) or {}).get(target) or {}).get("datasets") or {}
         present: dict[str, dict[str, int]] = {}
+        if "linux.text" in datasets:
+            if contract is None or any(contract.supports(name, "exists") for name in ("message", "event.original")):
+                text_inventory = text_dataset_inventory(inventory)
+                present["linux.text"] = text_inventory
+                selected = self.stats.get("dataset_filter", {}).get(target)
+                if selected is not None:
+                    selected.extend(name for name in text_inventory if name not in selected)
+            else:
+                unsearchable = [*unsearchable, "linux.text"]
         for logical in datasets:
             for shape in LINUX_SHIPPER_DATASETS.get(logical, ()):
                 if shape.dataset is not None and shape.dataset in inventory:
