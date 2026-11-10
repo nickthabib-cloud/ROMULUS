@@ -567,16 +567,18 @@ def resume_hunt(s: Settings, hunt_id: str) -> dict:
     hunt = repo.get_hunt(hunt_id)
     if hunt is None:
         raise KeyError(hunt_id)
-    sweep_audit = repo.latest_audit(hunt_id, "hunt.sweep_summary")
-    sweep_summary = dict(sweep_audit["detail"]) if sweep_audit else {}
-    if hunt["execution_state"] == "running" and not sweep_summary.get("finished", sweep_summary.get("complete")):
+    stale_summary = {}
+    if hunt["execution_state"] == "running":
+        stale_audit = repo.latest_audit(hunt_id, "hunt.sweep_summary")
+        stale_summary = dict(stale_audit["detail"]) if stale_audit else {}
+    if hunt["execution_state"] == "running" and not stale_summary.get("finished", stale_summary.get("complete")):
         # The worker stopped without reaching any end transition (killed, out of memory, host reboot). Once its
         # lease has expired, end the hunt as failed so its whole-window cells stop claiming a complete answer;
         # a live lease refuses the claim and nothing changes. Ending it needs no source, site or normalizer, so
         # this comes before the checks that a resumed sweep would need.
         stale = repo.claim_hunt(hunt_id, _lease_seconds(s), resume=True)
         repo.audit("system", "hunt.sweep_summary", hunt_id, {
-            "finished": False, "complete": False, "partial_reasons": [], "stats": sweep_summary.get("stats") or {},
+            "finished": False, "complete": False, "partial_reasons": [], "stats": stale_summary.get("stats") or {},
             "error": "the hunt's worker stopped before its sweep finished",
         }, owner_token=stale["lease_owner"])
         repo.set_hunt_state(hunt_id, "failed", owner_token=stale["lease_owner"],
@@ -596,6 +598,8 @@ def resume_hunt(s: Settings, hunt_id: str) -> dict:
                            "Start a new hunt over the same window instead of resuming.")
     # expansion and the investigator read the definition the sweep used; a changed one is refused here
     install_for_hunt(s, hunt_id, recorded_manifest)
+    sweep_audit = repo.latest_audit(hunt_id, "hunt.sweep_summary")
+    sweep_summary = dict(sweep_audit["detail"]) if sweep_audit else {}
     if sweep_summary and not sweep_summary.get("finished"):
         raise RuntimeError("hunt cannot resume agent work because the sweep did not finish")
     if hunt["execution_state"] == "failed" and not sweep_summary.get("finished"):
