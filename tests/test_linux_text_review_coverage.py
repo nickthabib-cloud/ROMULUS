@@ -26,7 +26,7 @@ def _hit(message="unrecognized application text", dataset="myapp", module=None):
 
 def _contract(role="host", os_family="linux"):
     return contract_from_types("logs", {"@timestamp": "date", "event.dataset": "keyword", "message": "text",
-                                        "host.name": "keyword"}, role=role, os_family=os_family)
+                                        "host.name": "keyword"}, role=role, os_family=os_family, linux_text_mixed=False)
 
 
 @pytest.mark.parametrize("contract", [None, _contract()])

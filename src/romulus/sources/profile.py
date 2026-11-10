@@ -94,6 +94,8 @@ class FieldContract(BaseModel):
     # would be alone (sources.profile.nxlog_mixed).
     nxlog_mixed: bool = False
     windows_shapes: tuple[str, ...] = ()
+    # None means the bounded text-source count was unavailable, never a complete negative.
+    linux_text_mixed: bool | None = False
 
     @model_validator(mode="after")
     def _untyped_names(self):
@@ -120,6 +122,8 @@ class FieldContract(BaseModel):
             data.pop("nxlog_mixed", None)
         if not self.windows_shapes:
             data.pop("windows_shapes", None)
+        if self.linux_text_mixed is False:
+            data.pop("linux_text_mixed", None)
         return data
 
     def spec(self, typed: str, *, os_family: str | None = None) -> FieldSpec | None:
@@ -487,6 +491,7 @@ def contract_from_types(
     host_inventory_complete: bool = True,
     datasets=None,
     keyword_limits: dict[str, int | None] | None = None,
+    linux_text_mixed: bool | None | Literal["mapping"] = "mapping",
 ) -> FieldContract:
     """Build a typed contract, adding explicit aliases for native schemas such as Windows event data. `datasets` is
     the target's dataset inventory, when known: a Linux dataset in it makes a mapping that also holds NXLog's flat
@@ -581,6 +586,11 @@ def contract_from_types(
         hosts=hosts, host_inventory_complete=host_inventory_complete,
         nxlog_mixed=nxlog_mixed(field_types, resolved_role, resolved_os),
         windows_shapes=evtx_json_shapes(field_types) if evtx else (),
+        linux_text_mixed=(resolved_role == "host" and resolved_os == "windows"
+                          and any(name in field_types for name in ("message", "event.original"))
+                          and any(name in field_types for name in ("event.dataset", "data_stream.dataset",
+                                                                  "input.type", "log.file.path")))
+                         if linux_text_mixed == "mapping" else linux_text_mixed,
     )
 
 
@@ -825,6 +835,36 @@ def _text_profile(client, target: str, field_types: dict, datasets: dict, datase
     return detail
 
 
+def mixed_text_query(fields) -> dict:
+    """Bounded native shape selector shared by preflight and retrieval.
+
+    Object exists queries inspect their indexed children. Empty/unindexed Windows objects may pass this source
+    superset; record-level dispatch still rejects them as text rather than guessing their source.
+    """
+    return {"bool": {"filter": [{"bool": {"should": [
+        {"exists": {"field": name}} for name in ("message", "event.original") if name in fields
+    ], "minimum_should_match": 1}}], "must_not": [
+        {"exists": {"field": name}} for name in ("winlog", "Event.System", "Channel", "EventID", "SourceName")
+    ]}}
+
+
+def _mixed_text_profile(client, target, field_types, datasets, notes):
+    """One bounded sample and exact source total; failures remain unknown and zero changes no inventory."""
+    sample = _text_sample(client, target, mixed_text_query(field_types), None, count=True)
+    count = sample.get("records")
+    if count == 0:
+        return False, None
+    if count is None:
+        notes.append("mixed Linux text count unavailable; text families unresolved")
+    else:
+        datasets["linux.text"] = count
+    return (None if count is None else True), {
+        "logical_dataset": "linux.text", "inventory": {}, "samples": {}, "datasetless": sample,
+        "count_scope": "whole index at source preflight; text payload without indexed Windows markers",
+        "rollup": {"records": count, "non_additive": True, "members": [], "includes_datasetless": True},
+    }
+
+
 def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfile, FieldContract]:
     """Read-only preflight of one concrete index."""
     mapping = client.mapping(target)
@@ -956,7 +996,14 @@ def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfil
         prof["inventory"] = inventory
     if evtx_shapes:
         prof["windows_shapes"] = _evtx_shape_inventory(client, target, evtx_shapes)
-    if declaration is None:
+    mixed_text = False
+    if declaration is None and role == "host" and os_family == "windows" and any(
+        name in field_types for name in ("message", "event.original")
+    ):
+        mixed_text, text_detail = _mixed_text_profile(client, target, field_types, datasets, notes)
+        if mixed_text is not False:
+            prof.update(linux_text_mixed=mixed_text, linux_text=text_detail)
+    elif declaration is None:
         text_detail = _text_profile(client, target, field_types, datasets, ds_field, role, os_family, notes)
         if text_detail is not None:
             prof["linux_text"] = text_detail
@@ -972,6 +1019,7 @@ def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfil
         host_inventory_complete=not any(note.startswith("hosts inventory truncated") for note in notes),
         datasets=datasets,
         keyword_limits=keyword_subfield_limits(mapping),
+        linux_text_mixed=mixed_text,
     )
 
     return profile, apply_zeek_declaration(contract, site_facts) if declaration is not None else contract

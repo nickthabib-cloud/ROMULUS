@@ -3553,6 +3553,12 @@ def zeek_skip_families(names) -> frozenset[str]:
                      if (log := lookup_log(shape, name)) is not None)
 
 
+def _has_windows_text_marker(source: dict) -> bool:
+    """An incomplete Windows envelope must not be reinterpreted as an unrelated Linux log line."""
+    return (isinstance(source.get("winlog"), dict) or isinstance(_get(source, "Event.System"), dict)
+            or any(name in source for name in ("Channel", "EventID", "SourceName")))
+
+
 def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                    audit_parse: Callable[[dict, str], AuditRecord] | None = None,
                    rpc_remote_only: bool = False, contract=None,
@@ -3685,7 +3691,9 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                 events.append(normalize_suricata(h))
             elif ds in SINGLE:
                 events.append(SINGLE[ds](h))
-            elif ((contract is None or (contract.role == "host" and contract.os_family == "linux"))
+            elif ((contract is None or (contract.role == "host" and (contract.os_family == "linux"
+                   or contract.os_family == "windows" and getattr(contract, "linux_text_mixed", False) is not False)))
+                  and not _has_windows_text_marker(h["_source"])
                   and unmatched_families(h["_source"]) is None
                   and text_candidate(h["_source"]) and not is_arkime_session(h["_source"])):
                 ds = "linux.text"

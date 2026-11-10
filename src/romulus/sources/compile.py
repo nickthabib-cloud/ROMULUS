@@ -13,7 +13,7 @@ from romulus.evidence.linux_catalog import (
 )
 from romulus.evidence.normalize import ELASTIC_DATASET, ELASTIC_EVENT_TYPES
 from romulus.sources.models import CompiledQuery, Predicate, SearchIntent
-from romulus.sources.profile import FieldContract
+from romulus.sources.profile import FieldContract, mixed_text_query
 from romulus.store.db import digest
 
 
@@ -79,6 +79,8 @@ _WINDOWS_COMPUTER_NATIVES = frozenset({"winlog.computer_name", "Hostname", "Even
 
 def _linux_text_clause(contract: FieldContract, fields: list[str]) -> dict | None:
     """Compile content-selected text using only existing typed predicate operations."""
+    if contract.linux_text_mixed is not False:
+        return mixed_text_query(contract.linux_fields or contract.fields)
     def clause(name, op, value=None):
         spec = contract.spec(name, os_family="linux")
         if spec is None or op not in spec.ops:
@@ -110,24 +112,25 @@ def _linux_datasets(p: Predicate, contract: FieldContract, natives: tuple[str, .
     values = [str(value) for value in (p.value if isinstance(p.value, list) else [p.value])]
     if not any(value in LINUX_SHIPPER_DATASETS for value in values):
         return None
-    direct = contract.fields.get("data_stream.dataset")
+    direct = contract.spec("data_stream.dataset", os_family="linux")
     fields = [*natives, *(["data_stream.dataset"] if direct is not None and "in" in direct.ops
                           and "data_stream.dataset" not in natives else [])]
     plain, with_module, undated, _unsearchable = dataset_selection(
-        values, module_searchable=contract.supports("event.module", "eq"),
-        input_type_searchable=contract.supports("input.type", "eq"))
+        values, module_searchable=(module := contract.spec("event.module", os_family="linux")) is not None
+        and "eq" in module.ops, input_type_searchable=(input_type := contract.spec("input.type", os_family="linux"))
+        is not None and "eq" in input_type.ops)
     if len(plain) > 1000:
         raise CompileError("'in' needs a non-empty list of at most 1000 values")
     clauses = [{"terms": {field: plain}} for field in fields] if plain else []
     if "linux.text" in values and (text_clause := _linux_text_clause(contract, fields)) is not None:
         clauses.append(text_clause)
-    module = contract.spec("event.module")
+    module = contract.spec("event.module", os_family="linux")
     for dataset, name in with_module:
         clauses.append({"bool": {"filter": [
             {"bool": {"should": [{"term": {field: dataset}} for field in fields], "minimum_should_match": 1}},
             {"term": {module.native if module is not None else "event.module": name}}]}})
     for name, value in undated:
-        spec = contract.spec(name)
+        spec = contract.spec(name, os_family="linux")
         clauses.append({"bool": {"filter": [{"term": {spec.native if spec is not None else name: value}}],
                                  "must_not": [{"exists": {"field": field}} for field in fields]}})
     if not clauses and "linux.text" in values:
@@ -312,9 +315,10 @@ def build_query(intent: SearchIntent, contract: FieldContract) -> dict:
     must += [_pred(p, contract, os_family=os_family) for p in intent.filters]
     query: dict = {"bool": {"filter": must}}
     if intent.any_of:
-        groups = [{"bool": {"filter": [
-            _pred(p, contract, os_family=os_family) for p in g
-        ]}} for g in intent.any_of]
+        groups = []
+        for group in intent.any_of:
+            group_os = _intent_os_family(intent.model_copy(update={"any_of": [group]}))
+            groups.append({"bool": {"filter": [_pred(p, contract, os_family=group_os) for p in group]}})
         query["bool"]["should"] = groups
         query["bool"]["minimum_should_match"] = 1
     return query

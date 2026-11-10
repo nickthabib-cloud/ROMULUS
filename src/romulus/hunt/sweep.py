@@ -37,6 +37,7 @@ from romulus.evidence.linux_catalog import (
     LINUX_LOGICAL_DATASETS,
     LINUX_SHIPPER_DATASETS,
     LOGICAL_FAMILIES,
+    TEXT_FAMILIES,
     dataset_selection,
     logical_of,
     shipper_names,
@@ -221,6 +222,8 @@ def delivered_families(profile: dict | None, contract: FieldContract | None) -> 
     if windows and (not datasets or any(dataset not in DATASET_FAMILIES for dataset in datasets)):
         # Any Windows-shaped record is normalized, whatever dataset name the shipper gave it.
         families |= _WINDOWS_FAMILIES
+    if contract is not None and contract.linux_text_mixed is not False:
+        families |= TEXT_FAMILIES
     return frozenset(families)
 
 
@@ -502,6 +505,8 @@ class Sweep:
     def _filters_for(self, target: str, contract: FieldContract | None = None) -> list[Predicate]:
         if contract is not None and contract.role == "host":
             if contract.os_family == "windows":
+                if contract.linux_text_mixed is not False:
+                    self._note_linux_shapes(target, ("linux.text",), [], contract)
                 return []
             datasets = LINUX_HOST_DATASETS
             plain, with_module, undated, unsearchable = dataset_selection(
@@ -535,6 +540,9 @@ class Sweep:
             if contract is None or any(contract.supports(name, "exists") for name in ("message", "event.original")):
                 text_inventory = text_dataset_inventory(inventory)
                 present["linux.text"] = text_inventory
+                if contract is not None and contract.linux_text_mixed is not False:
+                    count = ((profile.get("linux_text") or {}).get("rollup") or {}).get("records")
+                    present["linux.text"] = {"without Windows markers": count if count is not None else "not counted"}
                 selected = self.stats.get("dataset_filter", {}).get(target)
                 samples = (profile.get("linux_text") or {}).get("samples") or {}
                 for name in text_inventory:
@@ -586,6 +594,13 @@ class Sweep:
         return sum(int(bucket.get("count") or 0) for bucket in outcome.buckets)
 
     def _any_of_for(self, target: str, contract: FieldContract | None = None) -> list[list[Predicate]]:
+        groups = self._source_any_of_for(target, contract)
+        if contract is not None and contract.linux_text_mixed is not False and groups:
+            # A single OR query returns each raw document once, even if source alternatives overlap.
+            groups.append([Predicate(field="event.dataset", op="eq", value="linux.text")])
+        return groups
+
+    def _source_any_of_for(self, target: str, contract: FieldContract | None = None) -> list[list[Predicate]]:
         """Select only normalized source shapes while preserving each target's other known datasets."""
         if contract is not None and contract.role == "network":
             return self._zeek_catalog_filter(target, contract)
@@ -841,6 +856,9 @@ class Sweep:
             for field in (*required, "host.name", "winlog.record_id")
             if contract.supports(field, "exists")
         ]
+        if contract.linux_text_mixed is not False:
+            # A shipper's host.name on a text row does not make it a Windows class.
+            marker_groups = [group for group in marker_groups if group[0].field != "host.name"]
         if contract.supports("event.dataset", "in"):
             marker_groups.append([
                 Predicate(field="event.dataset", op="in", value=list(WINDOWS_HOST_DATASETS))
@@ -851,18 +869,43 @@ class Sweep:
                 "event class inventory unavailable: channel/provider/event id fields are not searchable"
             ]
             return
+        inventory_contract = contract
+        inventory_filters = []
+        raw_contract = self._raw_evtx_contract(contract)
+        mixed_evtx = raw_contract is not None
+        if mixed_evtx:
+            from romulus.sources.profile import FieldSpec
+
+            inventory_contract = contract.model_copy(update={"fields": {**contract.fields,
+                "winlog": FieldSpec(native="winlog", type="object", ops=["exists", "missing"], aggregatable=False)}})
+            inventory_filters = [Predicate(field="winlog", op="exists")]
         outcome = execute(
             self.client,
             SearchIntent(
                 kind="aggregate",
                 target=target,
                 window=self.window,
+                filters=inventory_filters,
                 any_of=marker_groups,
                 group_by=list(required),
                 purpose="windows event class inventory",
             ),
-            contract,
+            inventory_contract,
         )
+        shape_reasons = []
+        if mixed_evtx:
+            if all((spec := raw_contract.spec(name)) is not None and spec.aggregatable for name in required):
+                raw_outcome = execute(self.client, SearchIntent(kind="aggregate", target=target, window=self.window,
+                    filters=[Predicate(field="winlog", op="missing")],
+                    any_of=[self._evtx_selector(raw_contract)], group_by=list(required),
+                    purpose="windows raw EVTX event class inventory"), raw_contract)
+                outcome = outcome.model_copy(update={"buckets": [*outcome.buckets, *raw_outcome.buckets]})
+                if raw_outcome.completeness != Completeness.complete:
+                    shape_reasons.append("raw EVTX event class inventory incomplete: " + ", ".join(
+                        raw_outcome.reasons or [raw_outcome.error or "unknown"]))
+            else:
+                shape_reasons.append("raw EVTX event class inventory unavailable: channel/provider/event id fields "
+                                     "are not searchable")
         inventory = set()
         counts: dict[str, int] = {}
         classes_by_token = {}
@@ -920,7 +963,7 @@ class Sweep:
                 "records": count,
                 "uncatalogued": True,
             })
-        reasons = []
+        reasons = list(shape_reasons)
         if malformed_identity_records:
             reasons.append(
                 "event class inventory incomplete: "
@@ -998,6 +1041,20 @@ class Sweep:
                 hosts.add(computer)
         return tuple(sorted(hosts))
 
+    @staticmethod
+    def _raw_evtx_contract(contract: FieldContract) -> FieldContract | None:
+        """A separate raw-layout aggregate view when Winlogbeat owns the target's grouped aliases."""
+        if not (contract.windows_shapes and any(name.startswith("winlog.") for name in contract.linux_fields)):
+            return None
+        from romulus.sources.profile import FieldSpec, contract_from_types
+
+        raw_types = {name: spec.type for name, spec in contract.linux_fields.items()
+                     if name.startswith("Event.") or name == contract.time_field}
+        raw = contract_from_types(contract.target, raw_types, os_family="windows",
+                                  keyword_limits={name: None for name, kind in raw_types.items() if kind == "keyword"})
+        raw.fields["winlog"] = FieldSpec(native="winlog", type="object", ops=["exists", "missing"], aggregatable=False)
+        return raw
+
     def _selective_windows_continuity(
         self,
         target: str,
@@ -1013,25 +1070,44 @@ class Sweep:
         if unavailable or not contract.supports("event.channel", "exists"):
             missing = ", ".join(unavailable or ["event.channel exists query"])
             return {}, [f"shipper gaps unresolved: continuity metadata unavailable for {missing}"]
+        raw_contract = self._raw_evtx_contract(contract)
+        primary = contract
+        filters = [Predicate(field="event.channel", op="exists")]
+        if raw_contract is not None:
+            primary = contract.model_copy(update={"fields": {**contract.fields, "winlog": raw_contract.fields["winlog"]}})
+            filters.append(Predicate(field="winlog", op="exists"))
         outcome = execute(
             self.client,
             SearchIntent(
                 kind="aggregate",
                 target=target,
                 window=partition,
-                filters=[Predicate(field="event.channel", op="exists")],
+                filters=filters,
                 group_by=list(group_by),
                 max_records=PARTITION_MAX_DOCS,
                 purpose="windows continuity metadata",
             ),
-            contract,
+            primary,
         )
+        raw_reasons = []
+        if raw_contract is not None:
+            if all((spec := raw_contract.spec(name)) is not None and spec.aggregatable for name in group_by):
+                raw_outcome = execute(self.client, SearchIntent(kind="aggregate", target=target, window=partition,
+                    filters=[Predicate(field="winlog", op="missing"), Predicate(field="event.channel", op="exists")],
+                    group_by=list(group_by), max_records=PARTITION_MAX_DOCS,
+                    purpose="windows raw EVTX continuity metadata"), raw_contract)
+                outcome = outcome.model_copy(update={"buckets": [*outcome.buckets, *raw_outcome.buckets]})
+                if raw_outcome.completeness != Completeness.complete:
+                    raw_reasons.append("shipper gaps unresolved: raw EVTX continuity metadata incomplete: " + ", ".join(
+                        raw_outcome.reasons or [raw_outcome.error or "unknown"]))
+            else:
+                raw_reasons.append("shipper gaps unresolved: raw EVTX continuity metadata unavailable")
         stats = self.stats.setdefault("windows_continuity", {}).setdefault(target, {
             "mode": "metadata_aggregate", "partitions": 0, "buckets": 0, "partial_partitions": 0,
         })
         stats["partitions"] += 1
         stats["buckets"] += len(outcome.buckets)
-        reasons: list[str] = []
+        reasons: list[str] = list(raw_reasons)
         if outcome.completeness != Completeness.complete:
             stats["partial_partitions"] += 1
             detail = ", ".join(outcome.reasons or [outcome.error or "unknown source failure"])
@@ -2077,6 +2153,8 @@ class Sweep:
         target_os = contract.os_family if contract is not None else "linux"
         # a Linux target that also holds NXLog's flat Windows records is a Windows source too
         target_oses = {target_os} | ({"windows"} if contract is not None and contract.nxlog_mixed else set())
+        if contract is not None and contract.linux_text_mixed is not False:
+            target_oses.add("linux")
         from romulus.detect.sigma import SigmaEventIndex, SigmaRule
         sigma_index = SigmaEventIndex(events) if any(isinstance(pb, SigmaRule) for pb in self.pack) else None
         sigma_reasons = {}
@@ -2118,10 +2196,28 @@ class Sweep:
                     windows_reasons.extend(script_reassembly_reasons)
                 # Zeek dedup and interim state: only rules reading the families of the records it concerns
                 windows_reasons.extend(reason for reason, fed in zeek_state_reasons if set(pb.families) & fed)
-                if unsupported_reason and set(pb.families) & unsupported_affected:
+                rule_affected = affected
+                rule_unsupported = unsupported_affected
+                rule_error_affected = error_affected
+                if (contract is not None and contract.linux_text_mixed is not False
+                        and "linux" not in pb.os_families and out.completeness == Completeness.complete):
+                    # Text failures feed Linux families only, even when a Windows rule also reads `auth`.
+                    nontext = {reason: count for reason, count in unsupported.items()
+                               if not reason.startswith(("text line in no recognized format", "text line too long"))}
+                    rule_unsupported, _ = self._unsupported_families(nontext, skip_families)
+                    other_tags = [tag for tag in tags if tag != "linux.text"]
+                    rule_errors = (ALL_FAMILIES if any(tag not in DATASET_FAMILIES for tag in other_tags)
+                                   else set().union(*(DATASET_FAMILIES[tag] for tag in other_tags)))
+                    rule_error_affected = rule_errors
+                    rule_affected = (ALL_FAMILIES if rule_errors is ALL_FAMILIES or rule_unsupported is ALL_FAMILIES
+                                     else set(rule_errors) | set(rule_unsupported))
+                if (contract is not None and contract.linux_text_mixed is None
+                        and "linux" in pb.os_families and set(pb.families) & TEXT_FAMILIES):
+                    windows_reasons.append("mixed Linux text count unavailable; text families unresolved")
+                if unsupported_reason and set(pb.families) & rule_unsupported:
                     windows_reasons.append(unsupported_reason)
                 windows_gate_reasons.update(windows_reasons)
-                rule_partial = (affected is ALL_FAMILIES or bool(set(pb.families) & affected)
+                rule_partial = (rule_affected is ALL_FAMILIES or bool(set(pb.families) & rule_affected)
                                 or bool(windows_reasons) or bool(sigma_rule_reasons))
                 input_events = events if sigma_events is None else sigma_events
                 unaggregated_events = []
@@ -2148,12 +2244,12 @@ class Sweep:
                     # carry the uncertainty through retrieval_complete instead.
                     target_applicable = (
                         bool(ordered)
-                        or error_affected is ALL_FAMILIES
+                        or rule_error_affected is ALL_FAMILIES
                         or self._baseline_target_applicable(target, pb)
                     )
                     reasons = list(base_reasons)
                     reasons.extend(windows_reasons)
-                    if error_reason and (error_affected is ALL_FAMILIES or set(pb.families) & error_affected):
+                    if error_reason and (rule_error_affected is ALL_FAMILIES or set(pb.families) & rule_error_affected):
                         reasons.append(error_reason)
                     if pb.id == "bl.exec_pair":
                         carry_events = sorted(
@@ -2335,7 +2431,7 @@ class Sweep:
                     reasons.extend(windows_reasons)
                 if consume_failure:
                     reasons.append(consume_failure)
-                if error_reason and (error_affected is ALL_FAMILIES or set(pb.families) & error_affected):
+                if error_reason and (rule_error_affected is ALL_FAMILIES or set(pb.families) & rule_error_affected):
                     reasons.append(error_reason)
                 if missing:
                     reasons.append(f"missing_required={missing}: records lacked a field this rule needs")
