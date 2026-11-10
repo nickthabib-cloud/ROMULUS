@@ -2,7 +2,7 @@
 // All telemetry-derived text is inserted with textContent (never innerHTML).
 (function () {
   const live = document.getElementById("live");
-  if (!live || !window.EventSource) return;
+  if (!live || live.dataset.live !== "true" || !window.EventSource) return;
   const state = document.getElementById("live-state");
   const feed = document.getElementById("feed");
   const section = document.getElementById("newfeed");

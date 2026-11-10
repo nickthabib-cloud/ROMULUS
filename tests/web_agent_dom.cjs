@@ -34,7 +34,8 @@ class Element {
 function fixture() {
   const document = new Element('document');
   const ids = Object.fromEntries(['live', 'live-state', 'feed', 'newfeed', 'agent-activity'].map(id => [id, new Element('div')]));
-  ids.live.dataset.stream = '/hunts/h1/stream';
+  ids.live.dataset.stream = '/hunts/h1/stream?after_seq=15';
+  ids.live.dataset.live = 'true';
   document.append(...Object.values(ids));
   document.getElementById = id => ids[id];
   document.createElement = tag => new Element(tag);
@@ -92,4 +93,11 @@ test('assessment citations neither swallow findings nor receive row revisions', 
   source.emit('finding', finding('off-page'));
   assert.equal(ids.feed.children.length, 1);
   assert.equal(offPage.textContent, 'Other cite');
+});
+
+
+test('terminal view never opens an EventSource', () => {
+  const {ids, start} = fixture();
+  ids.live.dataset.live = 'false';
+  assert.equal(start(), undefined);
 });

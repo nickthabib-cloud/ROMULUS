@@ -4,16 +4,27 @@ from __future__ import annotations
 import json
 import sqlite3
 import tempfile
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from urllib.parse import quote, urlencode
 
+import anyio
 from sqlalchemy import func, select, tuple_
+from starlette.concurrency import run_in_threadpool
 
 from romulus.report.manifest import _ai_assessment
 from romulus.store import schema as t
 
 PAGE_SIZE = 50
+REASSESS_MESSAGES = {
+    "not_ready": "The agent runs only after detection finishes; resume the hunt first.",
+    "busy": "This hunt has an active worker lease; wait for it to finish or expire.",
+    "refused": "Reassessment is not available for this hunt.",
+}
+
+
+def reassess_code(reason):
+    return next((code for code, message in REASSESS_MESSAGES.items() if message == reason), "refused")
 
 
 def clip(value, limit=600):
@@ -192,83 +203,118 @@ def _event(name, payload):
     return "event: " + name + "\ndata: " + json.dumps(payload, default=str) + "\n\n"
 
 
-async def live_events(repo, request, hunt_id, sleep):
-    # Finding IDs outlive every memory bound: retain connection-local revision state on disk.
+def stream_live(repo, hunt, run=None):
+    """Stream eligibility only: an abandoned agent does not keep a page polling."""
+    return hunt["execution_state"] in {"planned", "running"} or bool(
+        run and run["state"] in {"pending", "running"} and repo.agent_lease_live(hunt["id"]))
+
+
+def _stream_snapshot(repo, hunt_id):
+    hunt = repo.get_hunt(hunt_id)
+    return hunt, bool(hunt and stream_live(repo, hunt, repo.agent_run(hunt_id)))
+
+
+def _open_seen(path):
+    seen = sqlite3.connect(path, check_same_thread=False)
+    seen.execute("PRAGMA cache_size=-256")
+    seen.execute("CREATE TABLE seen (id TEXT PRIMARY KEY)")
+    return seen
+
+
+def _stream_messages(repo, seen, hunt_id, changes, start_seq, last_run):
+    grouped = defaultdict(list)
+    for change in changes:
+        grouped[change["kind"]].append(change["row_id"])
+    rows = {kind: repo.agent_change_rows(hunt_id, kind, list(dict.fromkeys(ids)))
+            for kind, ids in grouped.items()}
+    finding_changes = Counter(grouped.get("finding", ()))
+    previous = set()
+    if start_seq and grouped.get("finding"):
+        with repo.engine.connect() as connection:
+            previous = set(connection.execute(select(t.agent_change.c.row_id).where(
+                t.agent_change.c.hunt_id == hunt_id, t.agent_change.c.kind == "finding",
+                t.agent_change.c.row_id.in_(grouped["finding"]), t.agent_change.c.seq <= start_seq,
+            ).distinct()).scalars())
+    messages, emitted = [], set()
+    for change in changes:
+        kind, row_id = change["kind"], change["row_id"]
+        if (kind, row_id) in emitted:
+            continue
+        emitted.add((kind, row_id))
+        row = rows[kind].get(row_id)
+        if not row:
+            continue
+        if kind == "finding":
+            if row["lane"] not in {"urgent", "high", "lead"}:
+                continue
+            # A row inserted during page rendering may already be in the browser.
+            # Coalescing its insert and update must still deliver the revision.
+            revised = finding_changes[row_id] > 1 or row_id in previous or seen.execute(
+                "SELECT 1 FROM seen WHERE id=?", (row_id,)).fetchone() is not None
+            seen.execute("INSERT OR IGNORE INTO seen VALUES (?)", (row_id,))
+            payload = {"id": row_id, "lane": row["lane"], "rule": row["rule_id"],
+                       "claim": row["claim"][:300], "ts": str(row["ts"]), "revised": revised}
+            if row.get("provenance") == "agent":
+                payload["provenance"] = "agent"
+            messages.append(_event("finding", payload))
+            if row.get("provenance") == "agent":
+                messages.append(_event("agent_finding", payload))
+        elif kind == "run":
+            current_run = (row["state"], clip(row.get("reason"), 600))
+            if current_run != last_run:
+                last_run = current_run
+                messages.append(_event("agent_run", {"state": current_run[0], "reason": current_run[1]}))
+        elif kind == "hypothesis":
+            messages.append(_event("hypothesis", {"id": row_id, "status": row["status"],
+                "confidence": row["confidence"], "statement": row["statement"][:300]}))
+        elif kind == "session":
+            messages.append(_event("session", {key: row[key] for key in ("id", "purpose", "state", "tool_calls")}))
+        elif kind == "tool_call":
+            messages.append(_event("tool_call", {"session": row["session_id"], "seq": row["seq"],
+                                                "name": clip(row["name"], 100), "status": row["status"]}))
+    seen.commit()
+    return messages, last_run
+
+
+async def live_events(repo, request, hunt_id, sleep, *, after_seq=0):
+    # Every database operation, including the disk-backed revision set, runs off the event loop.
     with tempfile.TemporaryDirectory(prefix="romulus-stream-") as scratch:
-        seen = sqlite3.connect(Path(scratch) / "seen.sqlite")
-        seen.execute("PRAGMA cache_size=-256")
-        seen.execute("CREATE TABLE seen (id TEXT PRIMARY KEY)")
-        cursor, end_seq, last_run = 0, None, None
+        seen = await run_in_threadpool(_open_seen, Path(scratch) / "seen.sqlite")
+        cursor, end_seq, last_run = after_seq, None, None
         try:
             while not await request.is_disconnected():
-                hunt = repo.get_hunt(hunt_id)
+                hunt, active = await run_in_threadpool(_stream_snapshot, repo, hunt_id)
                 if hunt is None:
                     yield _event("end", {})
                     return
-                run = repo.agent_run(hunt_id)
-                terminal = hunt["execution_state"] not in {"planned", "running"} and (
-                    not run or run["state"] not in {"pending", "running"})
-                if not terminal:
+                if active:
                     end_seq = None
                 elif end_seq is None:
-                    end_seq = repo.agent_change_max_seq(hunt_id)
-                changes = repo.agent_change_page(hunt_id, after_seq=cursor, limit=200)
-                grouped = defaultdict(list)
-                for change in changes:
-                    grouped[change["kind"]].append(change["row_id"])
-                rows = {kind: repo.agent_change_rows(hunt_id, kind, list(dict.fromkeys(ids)))
-                        for kind, ids in grouped.items()}
-                emitted = set()
-                for change in changes:
-                    kind, row_id = change["kind"], change["row_id"]
-                    if (kind, row_id) in emitted:
-                        continue
-                    emitted.add((kind, row_id))
-                    row = rows[kind].get(row_id)
-                    if not row:
-                        continue
-                    if kind == "finding":
-                        if row["lane"] not in {"urgent", "high", "lead"}:
-                            continue
-                        revised = seen.execute("SELECT 1 FROM seen WHERE id=?", (row_id,)).fetchone() is not None
-                        seen.execute("INSERT OR IGNORE INTO seen VALUES (?)", (row_id,))
-                        payload = {"id": row_id, "lane": row["lane"], "rule": row["rule_id"],
-                                   "claim": row["claim"][:300], "ts": str(row["ts"]), "revised": revised}
-                        if row.get("provenance") == "agent":
-                            payload["provenance"] = "agent"
-                        yield _event("finding", payload)
-                        if row.get("provenance") == "agent":
-                            yield _event("agent_finding", payload)
-                    elif kind == "run":
-                        current_run = (row["state"], clip(row.get("reason"), 600))
-                        if current_run != last_run:
-                            last_run = current_run
-                            yield _event("agent_run", {"state": current_run[0], "reason": current_run[1]})
-                    elif kind == "hypothesis":
-                        yield _event("hypothesis", {"id": row_id, "status": row["status"],
-                            "confidence": row["confidence"], "statement": row["statement"][:300]})
-                    elif kind == "session":
-                        yield _event("session", {key: row[key] for key in ("id", "purpose", "state", "tool_calls")})
-                    elif kind == "tool_call":
-                        yield _event("tool_call", {"session": row["session_id"], "seq": row["seq"],
-                                                   "name": clip(row["name"], 100), "status": row["status"]})
+                    end_seq = await run_in_threadpool(repo.agent_change_max_seq, hunt_id)
+                changes = await run_in_threadpool(repo.agent_change_page, hunt_id, after_seq=cursor, limit=200)
+                messages, last_run = await run_in_threadpool(
+                    _stream_messages, repo, seen, hunt_id, changes, after_seq, last_run)
+                for message in messages:
+                    yield message
                 if changes:
                     cursor = changes[-1]["seq"]
-                    seen.commit()
-                # Deletion may have raced the bounded reads above.
-                current_hunt = repo.get_hunt(hunt_id)
+                current_hunt, active = await run_in_threadpool(_stream_snapshot, repo, hunt_id)
                 if current_hunt is None:
                     yield _event("end", {})
                     return
-                current_run = repo.agent_run(hunt_id)
-                if current_hunt["execution_state"] in {"planned", "running"} or (
-                        current_run and current_run["state"] in {"pending", "running"}):
+                if active:
                     end_seq = None
-                yield _event("state", {"state": current_hunt["execution_state"], "lanes": repo.lane_counts(hunt_id)})
-                if end_seq is not None and cursor >= end_seq:
+                elif end_seq is None:
+                    end_seq = await run_in_threadpool(repo.agent_change_max_seq, hunt_id)
+                drained = end_seq is not None and cursor >= end_seq
+                if len(changes) < 200 or drained:
+                    lanes = await run_in_threadpool(repo.lane_counts, hunt_id)
+                    yield _event("state", {"state": current_hunt["execution_state"], "lanes": lanes})
+                if drained:
                     yield _event("end", {})
                     return
                 if len(changes) < 200:
                     await sleep(2)
         finally:
-            seen.close()
+            with anyio.CancelScope(shield=True):
+                await run_in_threadpool(seen.close)

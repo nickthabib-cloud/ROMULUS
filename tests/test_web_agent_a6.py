@@ -48,7 +48,9 @@ def csrf(client):
 def run_row(repo, state="completed", **changes):
     row = {"hunt_id": "h1", "state": state, "reason": None, "prompt_digests": {},
            "provider": {"provider": "scripted", "model": "requested-model"}, "started_at": utcnow(),
-           "ended_at": None, "updated_at": utcnow(), **changes}
+           "ended_at": None, "updated_at": utcnow(),
+           "lease_until": utcnow() + timedelta(minutes=10) if state in {"pending", "running"} else None,
+           **changes}
     repo.save_agent_run(row)
 
 

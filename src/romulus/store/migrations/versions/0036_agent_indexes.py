@@ -21,10 +21,10 @@ INDEX_TRIGGERS = {
         DELETE FROM candidate_event WHERE candidate_id=OLD.id; END""",
 }
 
-# Explicit fields keep lease fences (UPDATE x SET x=x) from generating duplicate
-# notifications, while every actual mutation remains visible in commit order.
+# Stream-visible fields omit lease/heartbeat housekeeping and no-op ownership
+# fences; substantive changes remain visible in commit order.
 CHANGE_COLUMNS = {
-    "agent_run": ("run", "hunt_id", "hunt_id state reason prompt_digests provider lease_owner lease_until started_at ended_at updated_at"),
+    "agent_run": ("run", "hunt_id", "hunt_id state reason prompt_digests provider started_at ended_at"),
     "agent_hypothesis": ("hypothesis", "id", "id hunt_id statement techniques entity_ids status confidence questions created_session_id sessions_run created_at updated_at"),
     "agent_session": ("session", "id", "id hunt_id hypothesis_id purpose state tool_calls summary started_at ended_at"),
     "agent_tool_call": ("tool_call", "id", "id hunt_id session_id seq name arguments arguments_truncated status result_digest model_call_id created_at"),

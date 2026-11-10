@@ -2,7 +2,7 @@
 {% block title %}{{ h.id }} · ROMULUS{% endblock %}
 {% block content %}
 <h1>Hunt {{ h.id }}</h1>
-<div class="summary" data-stream="/hunts/{{ h.id }}/stream" id="live">
+<div class="summary" data-stream-cursor="{{ stream_cursor }}"{% if live %} data-live="true" data-stream="/hunts/{{ h.id }}/stream?after_seq={{ stream_cursor }}" id="live"{% endif %}>
   <div><span class="label">Execution</span> <span class="state s-{{ h.execution_state }}" id="live-state">{{ h.execution_state }}</span></div>
   <div><span class="label">Result</span> {{ h.detection_result or '—' }}</div>
   <div><span class="label">Window (UTC)</span> {{ h.manifest.window.start }} → {{ h.manifest.window.end }}</div>

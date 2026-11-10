@@ -19,6 +19,7 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.concurrency import run_in_threadpool
 
 from romulus.agent.provider import agent_readiness, egress_banners
 from romulus.config import Settings
@@ -186,7 +187,9 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         h = repo.get_hunt(hunt_id)
         if h is None:
             raise HTTPException(404)
+        stream_cursor = repo.agent_change_max_seq(hunt_id)
         agent_run = repo.agent_run(hunt_id)
+        live = agent_views.stream_live(repo, h, agent_run)
         cands_more, cands_next = 0, None
         if agent_run:
             from urllib.parse import urlencode
@@ -245,7 +248,8 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
                     investigations=investigations, ai_agent=ai_audit["detail"] if ai_audit else None,
                     egress_banners=banners, answered_by=answered_by,
                     ai_panel=agent_views.panel(repo, h, agent_usage), cands_more=cands_more, cands_next=cands_next,
-                    agent_message=request.query_params.get("agent_message", "")[:1000],
+                    live=live, stream_cursor=stream_cursor,
+                    agent_message=agent_views.REASSESS_MESSAGES.get(request.query_params.get("agent_message"), ""),
                     internal_networks=internal_networks_view(repo, hunt_id, h["manifest"]))
 
     def _timeline_findings(hunt_id: str) -> list[dict]:
@@ -295,12 +299,15 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
         return RedirectResponse(f"/hunts/{hunt_id}/timeline", status_code=303)
 
     @app.get("/hunts/{hunt_id}/stream")
-    async def stream(request: Request, hunt_id: str):
+    async def stream(request: Request, hunt_id: str, after_seq: str = "0"):
         need(request)
-        if repo.get_hunt(hunt_id) is None:
+        if (not after_seq.isascii() or not after_seq.isdigit() or len(after_seq) > 19
+                or int(after_seq) > 9223372036854775807):
+            raise HTTPException(400, "Invalid stream cursor")
+        if await run_in_threadpool(repo.get_hunt, hunt_id) is None:
             raise HTTPException(404)
 
-        return StreamingResponse(agent_views.live_events(repo, request, hunt_id, asyncio.sleep),
+        return StreamingResponse(agent_views.live_events(repo, request, hunt_id, asyncio.sleep, after_seq=int(after_seq)),
                                  media_type="text/event-stream")
 
     # ------------------------------------------------------------------ findings
@@ -382,7 +389,7 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
             raise HTTPException(404)
         refusal = repo.agent_reassessment_refusal(hunt_id)
         if refusal:
-            return RedirectResponse(agent_views.href(hunt_id) + "?" + urlencode({"agent_message": refusal}),
+            return RedirectResponse(agent_views.href(hunt_id) + "?" + urlencode({"agent_message": agent_views.reassess_code(refusal)}),
                                     status_code=303)
         cmd = [sys.executable, "-m", "romulus.cli"] + (["--env-file", str(env_file)] if env_file else []) + [
             "agent", "reassess", hunt_id]
