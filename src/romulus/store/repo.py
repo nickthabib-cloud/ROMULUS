@@ -464,6 +464,10 @@ def _unranked(hunt_id: str):
     return ~select(1).where(_rank_on(hunt_id)).exists()
 
 
+def _unranked_reportable(hunt_id: str) -> tuple:
+    return t.candidate.c.hunt_id == hunt_id, t.candidate.c.lane.in_(REPORTABLE_LANES), _unranked(hunt_id)
+
+
 def _report_order(query, hunt_id: str):
     rank = t.finding_rank
     segment = case((rank.c.section == 0, 0), (and_(rank.c.section.is_(None), t.candidate.c.lane == "urgent"), 1),
@@ -2656,11 +2660,51 @@ class Repo:
             return _rank_state(connection, hunt_id)
 
     def unranked_findings(self, hunt_id: str) -> int:
-        """Reportable findings with no row in the final pass: those stored after it ran (an AI agent's proposals)."""
-        query = select(func.count()).select_from(t.candidate).where(
-            t.candidate.c.hunt_id == hunt_id, t.candidate.c.lane.in_(REPORTABLE_LANES), _unranked(hunt_id))
+        """How many reportable findings have no row in the final pass: those stored after it ran (an AI agent's
+        proposals and its pivots' rule matches)."""
         with self.engine.connect() as connection:
-            return int(connection.execute(query).scalar_one())
+            return int(connection.execute(select(func.count()).select_from(t.candidate).where(
+                *_unranked_reportable(hunt_id))).scalar_one())
+
+    def unranked_findings_page(self, hunt_id: str, limit: int) -> list[dict]:
+        """The first `limit` of those findings, by id."""
+        query = select(t.candidate).where(*_unranked_reportable(hunt_id)).order_by(t.candidate.c.id).limit(limit)
+        with self.engine.connect() as connection:
+            return [dict(row) for row in connection.execute(query).mappings()]
+
+    def place_late_ranks(self, hunt_id: str, rows: list[dict], summary: dict, *,
+                         owner_token: str | None = None) -> dict:
+        """Add final-pass rows for findings stored after the pass ran, with the pass's new summary (its finding counts
+        read from the stored rows), in one transaction; return that summary. Every existing row keeps its score,
+        reported flag and section, and every entity row is untouched; positions are renumbered in the pass's own order
+        (score, then time, then id) so the new rows sit among the others."""
+        rank = t.finding_rank
+        with write_txn(self.engine) as c:
+            self._fence_lease(c, hunt_id, owner_token)
+            base = c.execute(select(func.coalesce(func.max(rank.c.position), 0)).where(
+                rank.c.hunt_id == hunt_id, rank.c["pass"] == FINAL_RANK_PASS)).scalar_one()
+            c.execute(insert(rank).on_conflict_do_nothing(), [
+                {**row, "hunt_id": hunt_id, "pass": FINAL_RANK_PASS, "position": base + index}
+                for index, row in enumerate(rows, start=1)])
+            params = {"hunt": hunt_id, "pass": FINAL_RANK_PASS}
+            # Two steps keep clear of the unique position index: every row is first moved to a negative position.
+            c.execute(text('UPDATE finding_rank SET position = -position WHERE hunt_id = :hunt AND "pass" = :pass'),
+                      params)
+            c.execute(text("""
+                UPDATE finding_rank SET position = ordered.pos FROM (
+                    SELECT r.candidate_id,
+                           ROW_NUMBER() OVER (ORDER BY r.score DESC, c.ts IS NULL, c.ts, r.candidate_id) AS pos
+                    FROM finding_rank r JOIN candidate c ON c.hunt_id = r.hunt_id AND c.id = r.candidate_id
+                    WHERE r.hunt_id = :hunt AND r."pass" = :pass) AS ordered
+                WHERE finding_rank.hunt_id = :hunt AND finding_rank."pass" = :pass
+                  AND finding_rank.candidate_id = ordered.candidate_id"""), params)
+            ranked, reported = c.execute(select(
+                func.count(), func.coalesce(func.sum(case((rank.c.reported.is_(True), 1), else_=0)), 0)).where(
+                rank.c.hunt_id == hunt_id, rank.c["pass"] == FINAL_RANK_PASS)).one()
+            summary = {**summary, "ranked_findings": int(ranked), "reported_findings": int(reported)}
+            c.execute(t.audit_event.insert().values(at=utcnow(), actor="system", action=FINAL_RANK_SUMMARY,
+                                                    hunt_id=hunt_id, detail=summary))
+            return summary
 
     def has_rank_pass(self, hunt_id: str, pass_no: int) -> bool:
         query = select(t.finding_rank.c.candidate_id).where(

@@ -28,7 +28,7 @@ from romulus.agent.provider import (
 from romulus.agent.provider.base import estimate_tokens
 from romulus.agent.toolbox import Toolbox
 from romulus.config import Settings
-from romulus.hunt.rank import refresh_final_pass
+from romulus.hunt.rank import place_late_findings
 from romulus.report.incidents import build_incident_graph
 from romulus.store.db import digest, utcnow
 from romulus.store.repo import Repo, is_lease_lost
@@ -163,11 +163,11 @@ def _store_template(repo: Repo, hunt_id: str, reason: str, *, owner_token=None) 
     return row
 
 
-def _refresh_ranks(repo: Repo, hunt_id: str, *, owner_token=None) -> None:
-    """Rank the findings this run stored after the final ranking pass. It runs before the run is final, so a crash in
-    between is repeated by recovery. Ranking only orders findings: its failure never fails the agent run."""
+def _place_late_ranks(repo: Repo, hunt_id: str, *, owner_token=None) -> None:
+    """Place the findings this run stored after the final ranking pass into it. It runs before the run is final, so a
+    crash in between is repeated by recovery. Ranking only orders findings: its failure never fails the agent run."""
     try:
-        refresh_final_pass(repo, hunt_id, owner_token=owner_token)
+        place_late_findings(repo, hunt_id, owner_token=owner_token)
     except Exception as exc:  # ordering cannot undo the agent's stored work
         if is_lease_lost(exc):
             raise
@@ -176,7 +176,7 @@ def _refresh_ranks(repo: Repo, hunt_id: str, *, owner_token=None) -> None:
 
 def _finalize(repo: Repo, hunt_id: str, result: AgentPhaseResult, *, started_at=None,
               owner_token=None) -> AgentPhaseResult:
-    _refresh_ranks(repo, hunt_id, owner_token=owner_token)
+    _place_late_ranks(repo, hunt_id, owner_token=owner_token)
     repo.finalize_agent_run(hunt_id, {
         "state": result.state, "reason": result.reason, "prompt_digests": result.prompt_digests,
         "provider": result.provider, "started_at": started_at, "ended_at": utcnow(),
