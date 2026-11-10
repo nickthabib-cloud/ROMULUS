@@ -41,7 +41,7 @@ from romulus.evidence.typed import TypedEvent
 from romulus.report.incidents import build_incident_graph
 from romulus.report.manifest import coverage_for_rules
 from romulus.store.db import digest
-from romulus.store.repo import Repo
+from romulus.store.repo import FINAL_RANK_PASS, Repo
 
 READ_PAGE_SIZE = 25
 ENTITY_EVENT_LIMIT = 50
@@ -562,6 +562,10 @@ class Toolbox:
                     candidate = self.repo.candidate(target)
                     if candidate is not None:
                         page.append(candidate)
+                if self.repo.has_rank_pass(self.hunt_id, FINAL_RANK_PASS):
+                    ranks = self.repo.finding_ranks_for(self.hunt_id, FINAL_RANK_PASS, [row["id"] for row in page])
+                    page = [{**row, "_rank_section": (ranks[row["id"]]["section"] if row["id"] in ranks else None)}
+                            for row in page]
                 total = int(stored["summary"]["finding_count"])
                 more = args.page < int(stored["item_count"])
                 cursor = args.cursor
@@ -604,6 +608,7 @@ class Toolbox:
                 entity_key = (str(entity["kind"]), str(entity["value"]))
             cursor = "D" + digest({
                 "identity": identity, "snapshot": self.repo.candidate_fingerprint(self.hunt_id),
+                "rank_state": self.repo.rank_state(self.hunt_id),
             })[:16]
             stored = self.repo.create_candidate_page_plan(
                 self.hunt_id, cursor, identity, {}, lane=args.lane, rule_id=args.rule,

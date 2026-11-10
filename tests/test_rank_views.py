@@ -158,7 +158,8 @@ def test_a_hunt_whose_findings_are_all_unranked_still_lists_every_one():
     with repo.engine.begin() as connection:
         connection.execute(t.finding_rank.delete().where(t.finding_rank.c.candidate_id != "p-lead"))
     seen, remaining = _walk(repo, 2)
-    assert [row["id"] for row in seen] == ["p-lead", "c-urgent", "p-single", "t-cred", "t-exec"]
+    # the unranked confirmed finding comes before the ranked unreported one, the other unranked ones after it
+    assert [row["id"] for row in seen] == ["c-urgent", "p-lead", "p-single", "t-cred", "t-exec"]
     assert remaining == [3, 1, 0]
 
 
@@ -337,3 +338,64 @@ def test_the_agent_finding_index_follows_report_order_filtered_or_not():
     high_ids = [dossier_alias_target(repo, item["alias"]) for item in high]
     assert high_ids == [cid for cid in report if repo.candidate(cid)["lane"] == "high"][:len(high_ids)]
     assert all(item["rank"] in {"reported", "ranked_not_reported"} for item in high)
+
+
+# -- findings stored after the final pass ---------------------------------------------------------------------------
+def _late_urgent_repo(filler=30):
+    repo = _ranked_repo(filler=filler)
+    # an AI pivot's rule match stored after the pass, in the confirmed lane
+    _insert(repo, [_row("zz-late-urgent", "r.dump", lane="urgent", host="second",
+                        ts=START + timedelta(hours=6))])
+    return repo
+
+
+def test_a_confirmed_finding_stored_after_the_pass_stays_with_the_confirmed_findings_everywhere():
+    repo = _late_urgent_repo()
+    report = _report_order(repo)
+    assert report[:2] == ["c-urgent", "zz-late-urgent"]
+    # web
+    seen, remaining = _walk(repo, 1)
+    ids = [row["id"] for row in seen]
+    assert ids[:2] == ["c-urgent", "zz-late-urgent"] and ids[-1] == "z-agent"
+    assert ids[:-1] == [cid for cid in report if cid != "z-agent"]
+    assert remaining == [len(ids) - page - 1 for page in range(len(ids))]
+    # small dossier
+    findings = [item for page in build_dossier(repo, "h1", token_budget=200_000).pages
+                for item in page.get("findings", [])]
+    assert [dossier_alias_target(repo, item["alias"]) for item in findings[:2]] == ["c-urgent", "zz-late-urgent"]
+    assert [item["rank"] for item in findings[:2]] == ["confirmed", "confirmed"]
+    # the agent's finding index, unfiltered and by lane
+    toolbox = Toolbox(repo, "h1")
+    listed = toolbox.execute("list_findings", {"page": 1})["data"]["findings"]
+    assert [dossier_alias_target(repo, item["alias"]) for item in listed[:2]] == ["c-urgent", "zz-late-urgent"]
+    urgent = toolbox.execute("list_findings", {"page": 1, "lane": "urgent"})["data"]["findings"]
+    assert [item["rank"] for item in urgent] == ["confirmed", "confirmed"]
+
+
+def test_the_large_dossier_keeps_a_late_confirmed_finding_with_the_confirmed_ones(monkeypatch):
+    monkeypatch.setattr(dossier_module, "MATERIALIZE_FINDING_LIMIT", 10)
+    repo = _late_urgent_repo(filler=60)
+    dossier = build_dossier(repo, "h1", token_budget=8_000)
+    order = [dossier_alias_target(repo, item["alias"]) for page in dossier.pages for item in page["findings"]]
+    assert order[:2] == ["c-urgent", "zz-late-urgent"]
+    assert order[:-1] == [cid for cid in _report_order(repo) if cid != "z-agent"] and order[-1] == "z-agent"
+
+
+def test_the_web_page_lists_a_late_confirmed_finding_under_confirmed(web_setup):
+    client, web_repo, _, _, _, _ = web_setup
+    _copy_into(web_repo, _late_urgent_repo())
+    text, ids = _visible(client)
+    assert ids[:2] == ["c-urgent", "zz-late-urgent"]
+    assert text.count(">confirmed<") == 1 and text.index("zz-late-urgent") < text.index(">reported<")
+
+
+def test_a_pass_published_again_gives_the_agent_new_snapshots():
+    repo = _ranked_repo(filler=30)
+    toolbox = Toolbox(repo, "h1")
+    first = toolbox.execute("list_findings", {"page": 1})["data"]["cursor"]
+    compute_rank_pass(repo, "h1", PASS_FINAL)
+    repo.audit("system", "hunt.rank_pass_2_summary", "h1", {"pass": 2, "status": "complete"})
+    second = toolbox.execute("list_findings", {"page": 1})
+    assert second["status"] in {"complete", "partial"} and second["data"]["cursor"] != first
+    assert toolbox.execute("list_findings", {"page": 2, "cursor": second["data"]["cursor"]})["status"] in {
+        "complete", "partial"}

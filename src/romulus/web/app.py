@@ -36,8 +36,7 @@ from romulus.web.auth import RateLimiter, Sessions, csrf_ok, verify
 from romulus.web.catalog_routes import register_catalog_routes
 from romulus.web.finding_order import (
     RANKED_LANES,
-    SECTIONS,
-    UNRANKED_SECTION,
+    SEGMENT_TITLES,
     finding_order,
     finding_page,
     ranked_finding_page,
@@ -256,7 +255,7 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
                         "model_reported": agent_views.clip(r["model_reported"], 300)}
                        for r in agent_usage["models_reported"] if r["model_reported"] != r["model"]]
         return page(request, "hunt.html", u, h=h, cands=cands, lanes=repo.lane_counts(hunt_id), lane=lane,
-                    ranked=ranked, sections=SECTIONS, unranked_section=UNRANKED_SECTION,
+                    ranked=ranked, segment_titles=SEGMENT_TITLES,
                     coverage=cov["rules"], zeek_visibility=zeek_visibility, zeek_visibility_bundled=zeek_visibility_bundled,
                     tasks=repo.tasks(hunt_id), reports=reports, agent=agent_summary,
                     investigations=investigations, ai_agent=ai_audit["detail"] if ai_audit else None,

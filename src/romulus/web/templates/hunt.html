@@ -70,15 +70,14 @@
 
 <h2>Findings and leads</h2>
 {% if ranked %}
-<p class="help">In report order: confirmed findings, then findings on entities that meet the evidence bar, then the other ranked findings, each by rank. The rule estimate is each rule's own lane. Findings stored after the last ranking pass (such as an AI agent's proposals) follow, in the rule estimate's order.</p>
+<p class="help">In report order: confirmed findings, then findings on entities that meet the evidence bar, then the other ranked findings, each by rank. The rule estimate is each rule's own lane. Findings stored after the last ranking pass (an AI agent's pivots and proposals) are not ranked: a confirmed one is listed with the confirmed findings, the others after every ranked finding, in the rule estimate's order.</p>
 <table class="grid">
 <thead><tr><th>Rank</th><th>Rule estimate</th><th>Sev</th><th>Conf</th><th>Time (UTC)</th><th>Entity</th><th>Rule</th><th>Claim</th></tr></thead>
 <tbody>
-{% set ns = namespace(section=-1) %}
+{% set ns = namespace(title="") %}
 {% for c in cands %}
-{% set section = c.section if c.section is not none else sections | length %}
-{% if section != ns.section %}{% set ns.section = section %}
-<tr class="section-head"><th colspan="8">{{ sections[section] if section < sections | length else unranked_section }}</th></tr>
+{% if segment_titles[c.segment] != ns.title %}{% set ns.title = segment_titles[c.segment] %}
+<tr class="section-head"><th colspan="8">{{ ns.title }}</th></tr>
 {% endif %}
 <tr class="row-{{ c.lane }}">
   <td class="mono">{% if c.score is not none %}{{ '%g' | format(c.score) }}{% else %}not ranked{% endif %}</td>

@@ -189,11 +189,15 @@ def _candidate_key(row: dict) -> tuple:
             row["ts"] is None, row["ts"], row["id"])
 
 
+# Report order as segments (as the web page lists it): ranked confirmed, confirmed findings stored after the pass,
+# ranked reported, ranked not reported, then every other finding stored after the pass.
+_SECTION_SEGMENT = {0: 0, 1: 2, 2: 3}
+
+
 def _report_key(row: dict, rank: dict | None) -> tuple:
-    """Report order: ranked findings by (section, position), then any finding stored after the pass by lane."""
     if rank is None:
-        return (1, 0, 0, _candidate_key(row))
-    return (0, int(rank["section"]), int(rank["position"]), ())
+        return (1 if row["lane"] == "urgent" else 4, 0, _candidate_key(row))
+    return (_SECTION_SEGMENT[int(rank["section"])], int(rank["position"]), ())
 
 
 def _entity_value(entities: list, kind: str) -> str | None:
@@ -234,8 +238,12 @@ def rank_label(row: dict) -> dict:
     did not rank is "not_ranked". Nothing for other rows (context and suppressed records are never ranked)."""
     if "_rank_section" not in row:
         return {}
-    if row["_rank_section"] is not None:
-        return {"rank": RANK_SECTIONS[row["_rank_section"]]}
+    section = row["_rank_section"]
+    if section is not None:
+        return {"rank": RANK_SECTIONS[section] if 0 <= section < len(RANK_SECTIONS) else NOT_RANKED}
+    # a confirmed finding stored after the pass is confirmed like any other
+    if row.get("lane") == "urgent":
+        return {"rank": RANK_SECTIONS[0]}
     return {"rank": NOT_RANKED} if row.get("lane") in REPORTABLE_LANES else {}
 
 
@@ -597,7 +605,7 @@ def _large_dossier(repo: Repo, hunt_id: str, manifest: dict, token_budget: int,
         "hunt_id": hunt_id, "token_budget": token_budget, "reportable_count": reportable_count,
         "link_count": link_count, "rule_cell_count": rule_cell_count,
         "entity_count": entity_count, "link_payload_bytes": link_payload_bytes,
-        "candidate_fingerprint": repo.candidate_fingerprint(hunt_id),
+        "candidate_fingerprint": repo.candidate_fingerprint(hunt_id), "rank_state": repo.rank_state(hunt_id),
     })[:16]
     plan = repo.agent_page_plan(hunt_id, cursor)
     if plan is None:
@@ -700,7 +708,7 @@ def build_dossier(repo: Repo, hunt_id: str, *, token_budget: int, owner_token: s
         yield from (("safety_flags", item) for item in safety_flags)
     cursor = "D" + digest({
         "hunt_id": hunt_id, "token_budget": token_budget, "context": base,
-        "candidate_fingerprint": repo.candidate_fingerprint(hunt_id),
+        "candidate_fingerprint": repo.candidate_fingerprint(hunt_id), "rank_state": repo.rank_state(hunt_id),
         "coverage": coverage, "incidents": incidents, "expansion": expansion,
     })[:16]
     plan = repo.create_agent_page_plan(

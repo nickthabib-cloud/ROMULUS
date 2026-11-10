@@ -271,6 +271,7 @@ finding_rank = Table(
     Column("section", Integer, nullable=False, server_default="2"),
     PrimaryKeyConstraint("hunt_id", "pass", "candidate_id", name="pk_finding_rank"),
     CheckConstraint('"pass" IN (1, 2)', name="ck_finding_rank_pass"),
+    CheckConstraint("section IN (0, 1, 2)", name="ck_finding_rank_section"),
 )
 Index("ix_finding_rank_score", finding_rank.c.hunt_id, finding_rank.c["pass"], finding_rank.c.score.desc())
 Index("ix_finding_rank_position", finding_rank.c.hunt_id, finding_rank.c["pass"], finding_rank.c.position,

@@ -19,7 +19,8 @@ def upgrade():
     c = op.get_bind()
     if c.dialect.name == "sqlite" and not c.connection.driver_connection.in_transaction:
         c.exec_driver_sql("BEGIN")
-    c.exec_driver_sql("ALTER TABLE finding_rank ADD COLUMN section INTEGER NOT NULL DEFAULT 2")
+    c.exec_driver_sql("ALTER TABLE finding_rank ADD COLUMN section INTEGER NOT NULL DEFAULT 2 "
+                      "CONSTRAINT ck_finding_rank_section CHECK (section IN (0, 1, 2))")
     c.exec_driver_sql(SECTION_BACKFILL)
     c.exec_driver_sql('CREATE INDEX ix_finding_rank_section ON finding_rank(hunt_id, "pass", section, position)')
     c.exec_driver_sql("""CREATE INDEX ix_candidate_provenance_order ON candidate(
