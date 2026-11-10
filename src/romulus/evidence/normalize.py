@@ -3627,6 +3627,12 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
         ds = _get(h["_source"], "event.dataset") or ""
         try:
             if is_windows_source(h["_source"]):
+                if contract is not None and contract.role == "network":
+                    reason = "Windows event records on a network target: not evaluated"
+                    skips[reason] += 1
+                    if skip_families is not None:
+                        skip_families[reason] = frozenset()
+                    continue
                 if is_nxlog_windows(h["_source"]):
                     # NXLog's flat record names no dataset: an error is counted under its channel's families
                     ds = nxlog_error_tag(h["_source"])

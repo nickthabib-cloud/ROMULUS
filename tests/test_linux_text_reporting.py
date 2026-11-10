@@ -147,7 +147,8 @@ def test_uncounted_datasetless_sources_use_unknown_and_conservative_coverage():
 def test_existing_profile_shape_and_hash_material_have_no_new_empty_fields(inventory, extra):
     # The Windows mapping's message field needs the new bounded non-Windows-text source check. Zero keeps the
     # original profile material unchanged; this fixture is intentionally a pure Windows source.
-    samples = [{"hits": {"total": {"value": 0, "relation": "eq"}, "hits": []}}] if "winlog.channel" in extra else []
+    samples = [{"hits": {"total": {"value": count, "relation": "eq"}, "hits": []}} for count in (7, 0)] \
+        if "winlog.channel" in extra else []
     profile, _ = build_profile(ProfileClient(inventory, samples=samples, fields={**FIELDS, **extra}), "logs")
     assert profile.datasets == inventory
     assert "linux_text" not in profile.model_dump()

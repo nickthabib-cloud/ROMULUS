@@ -236,6 +236,14 @@ def _pred(p: Predicate, contract: FieldContract, *, os_family: str | None = None
         raise CompileError(f"field {p.field!r} not in field contract for {contract.target}")
     if p.op not in spec.ops:
         raise CompileError(f"op {p.op!r} not supported on {p.field} ({spec.type}) with superset guarantee")
+    if spec.alternatives:
+        clauses = [_pred_spec(p, contract, variant) for variant in (spec, *spec.alternatives)]
+        return {"bool": {"filter": clauses}} if p.op in {"missing", "not_in"} else {
+            "bool": {"should": clauses, "minimum_should_match": 1}}
+    return _pred_spec(p, contract, spec)
+
+
+def _pred_spec(p: Predicate, contract: FieldContract, spec) -> dict:
     natives = spec.natives or (spec.native,)
     if spec.exact and p.op in {"eq", "in"}:
         return _on_subfields(p, contract, spec, natives)

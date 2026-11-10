@@ -486,6 +486,10 @@ def check_linux_text_sources(s: Settings, client: ElasticClient | None = None) -
             out.append(Check(f"es.text_inventory[{target}]", "warn", f"text source inventory unavailable: {error}"))
             continue
         shapes = profile.model_dump().get("windows_shapes") or {}
+        classification = [note for note in profile.notes if note.startswith((
+            "Windows classification unverified", "Windows event records on a network target"))]
+        if classification:
+            out.append(Check(f"es.windows_classification[{target}]", "warn", "; ".join(classification)))
         if shapes:
             parts = [f"{shape}: {detail['records'] if detail['records'] is not None else 'unknown'} source records"
                      + (f"; {detail['reason']}" if detail.get("reason") else "")

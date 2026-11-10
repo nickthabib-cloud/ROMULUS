@@ -844,7 +844,7 @@ class Sweep:
         return groups
 
     def _prepare_windows_inventory(self, target: str, contract: FieldContract | None) -> None:
-        if contract is None or contract.os_family != "windows" or target in self._windows_inventory:
+        if contract is None or contract.role != "host" or contract.os_family != "windows" or target in self._windows_inventory:
             return
         required = ("event.channel", "event.provider", "event.code")
         unavailable = [
@@ -1348,7 +1348,7 @@ class Sweep:
                 and "windows" in playbook.os_families):
             # NXLog's flat records on a Linux target: no Windows rule's search there is ever complete
             return [NXLOG_MIXED_GATE]
-        if contract is None or contract.os_family != "windows" or "windows" not in playbook.os_families:
+        if contract is None or contract.role != "host" or contract.os_family != "windows" or "windows" not in playbook.os_families:
             return []
         catalog = event_classes_for_families(set(playbook.families))
         if not catalog:
@@ -2094,7 +2094,7 @@ class Sweep:
             unsupported = {reason: count for reason, count in unsupported.items() if reason not in not_assessed}
         gap_reasons = list(windows_state_reasons)
         continuity_times = None
-        if contract is not None and contract.os_family == "windows":
+        if contract is not None and contract.role == "host" and contract.os_family == "windows":
             record_id = contract.spec("winlog.record_id")
             if record_id is None or record_id.type not in {"long", "integer", "short"}:
                 gap_reasons.append("shipper gaps unresolved: winlog.record_id mapping is not numeric")
