@@ -47,6 +47,21 @@ class FieldSpec(BaseModel):
     type: str
     ops: list[str]
     aggregatable: bool
+    # For an alias whose natives are all analyzed text: each native's keyword subfield, in the same order. Equality
+    # ('eq', 'in') is compiled against these (sources.compile); every other op still reads the text natives.
+    exact: tuple[str, ...] = ()
+    # The smallest ignore_above among those subfields, in UTF-16 code units: a longer value is in none of them.
+    # None when every subfield keeps values of any length.
+    exact_limit: int | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        data = handler(self)
+        if not self.exact:
+            data.pop("exact", None)
+        if self.exact_limit is None:
+            data.pop("exact_limit", None)
+        return data
 
 
 class FieldContract(BaseModel):
@@ -175,6 +190,30 @@ def flatten_mapping(mapping: dict) -> dict[str, str]:
     for body in mapping.values():
         walk("", body.get("mappings", {}).get("properties", {}))
     return out
+
+
+def keyword_subfield_limits(mapping: dict) -> dict[str, int | None]:
+    """Each keyword subfield of a text field (`Hostname.keyword`) with its ignore_above: the longest value it indexes,
+    or None when it indexes values of any length. Across the indices of a pattern target, the smallest limit any of
+    them sets. Kept apart from the field types, which identify the profile."""
+    limits: dict[str, list[int | None]] = {}
+
+    def walk(prefix: str, props: dict[str, Any]):
+        for name, spec in props.items():
+            full = f"{prefix}{name}"
+            if "properties" in spec:
+                walk(full + ".", spec["properties"])
+            if spec.get("type") != "text":
+                continue
+            for sub, sspec in spec.get("fields", {}).items():
+                if sspec.get("type") == "keyword":
+                    limit = sspec.get("ignore_above")
+                    limits.setdefault(f"{full}.{sub}", []).append(int(limit) if limit is not None else None)
+
+    for body in mapping.values():
+        walk("", body.get("mappings", {}).get("properties", {}))
+    return {path: min((value for value in values if value is not None), default=None)
+            for path, values in limits.items()}
 
 
 ARKIME_SESSION_MARKERS = ("firstPacket", "lastPacket", "network.community_id")
@@ -326,6 +365,41 @@ def _native_type(field_types: dict[str, str], native: str) -> str | None:
     return None
 
 
+# The ops a text alias gains through its natives' keyword subfields. A keyword subfield holds each value whole, so
+# equality on it is exact; it leaves out values longer than its ignore_above (FieldSpec.exact_limit), which the
+# compiler covers by also matching such a value as a phrase on the text field (sources.compile). Prefix and substring matching on it would
+# silently miss those long values (command lines, script text), so they stay unavailable.
+SUBFIELD_EQUALITY_OPS = frozenset({"eq", "in"})
+# Aliases that select event classes rather than name an entity. On a text-mapped target they stay without equality:
+# a provider's own Channel data can overwrite NXLog's Channel, so its flat records are selected by their shape there
+# (hunt.windows_filters.nxlog_windows_group) and never by a class predicate that would miss such a record.
+_CLASS_SELECTORS = frozenset({"event.dataset", "event.channel", "event.provider", "object.type", "remote.channel_name",
+                              "rpc.interface_uuid", "rpc.protocol"})
+
+
+def _keyword_subfields(available: list[tuple[str, str]],
+                       limits: dict[str, int | None]) -> tuple[tuple[str, ...], int | None]:
+    """(each text native's keyword subfield, the smallest ignore_above among them) for an alias whose natives are all
+    text with a keyword subfield whose limit the mapping reported (`limits`, from keyword_subfield_limits): a
+    dynamically mapped string's `<name>.keyword`, else any keyword subfield. Empty otherwise. Equality on a Windows
+    alias then reads the exact value, as it does on a Winlogbeat keyword or flattened field, instead of being
+    unavailable."""
+    if not available or any(kind != "text" for _native, kind in available):
+        return (), None
+    subfields = []
+    for native, _kind in available:
+        preferred = f"{native}.keyword"
+        if preferred in limits:
+            subfields.append(preferred)
+            continue
+        found = next((name for name in sorted(limits)
+                      if name.startswith(native + ".") and "." not in name[len(native) + 1:]), None)
+        if found is None:
+            return (), None
+        subfields.append(found)
+    return tuple(subfields), min((limit for name in subfields if (limit := limits[name]) is not None), default=None)
+
+
 def contract_from_types(
     target: str,
     field_types: dict[str, str],
@@ -336,10 +410,13 @@ def contract_from_types(
     hosts: tuple[str, ...] = (),
     host_inventory_complete: bool = True,
     datasets=None,
+    keyword_limits: dict[str, int | None] | None = None,
 ) -> FieldContract:
     """Build a typed contract, adding explicit aliases for native schemas such as Windows event data. `datasets` is
     the target's dataset inventory, when known: a Linux dataset in it makes a mapping that also holds NXLog's flat
-    fields a Linux target that holds NXLog records too (`nxlog_mixed`)."""
+    fields a Linux target that holds NXLog records too (`nxlog_mixed`). `keyword_limits` are the mapping's keyword
+    subfields of text fields with their ignore_above (keyword_subfield_limits); without them no text alias gains
+    equality, since what its subfields keep is unknown."""
     fields = {
         name: FieldSpec(
             native=name,
@@ -387,6 +464,10 @@ def contract_from_types(
         # https://www.elastic.co/guide/en/elasticsearch/reference/8.19/flattened.html#supported-operations
         if typed == "object.type" and any(kind == "flattened" for _, kind in available):
             common_ops.discard("eq")
+        exact, exact_limit = (_keyword_subfields(available, keyword_limits or {})
+                              if windows and typed not in _CLASS_SELECTORS else ((), None))
+        if exact:
+            common_ops |= SUBFIELD_EQUALITY_OPS
         native, native_type = available[0]
         fields[typed] = FieldSpec(
             native=native,
@@ -394,6 +475,8 @@ def contract_from_types(
             type=native_type,
             ops=sorted(common_ops),
             aggregatable=len(available) == 1 and native_type in AGGREGATABLE,
+            exact=exact,
+            exact_limit=exact_limit,
         )
     time_field = "firstPacket" if schema_of(field_types) == "arkime_sessions" else "@timestamp"
     resolved_role = role or source_role(field_types)
@@ -479,7 +562,8 @@ def provider_inventory(client, target: str, *, provider_field='event.provider', 
 
 def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfile, FieldContract]:
     """Read-only preflight of one concrete index."""
-    field_types = flatten_mapping(client.mapping(target))
+    mapping = client.mapping(target)
+    field_types = flatten_mapping(mapping)
     schema = schema_of(field_types)
     declaration = site_facts.zeek.plain_sources.get(target) if site_facts is not None else None
     # Arkime sessions: time is the first packet; the "dataset" is the session protocol and the
@@ -613,6 +697,7 @@ def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfil
         hosts=tuple(sorted(profile.hosts)),
         host_inventory_complete=not any(note.startswith("hosts inventory truncated") for note in notes),
         datasets=datasets,
+        keyword_limits=keyword_subfield_limits(mapping),
     )
 
     return profile, apply_zeek_declaration(contract, site_facts) if declaration is not None else contract

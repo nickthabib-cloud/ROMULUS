@@ -140,6 +140,57 @@ def _intent_os_family(intent: SearchIntent) -> str | None:
     return "linux" if values and values <= _LINUX_HOST_DATASETS else None
 
 
+def utf16_length(value) -> int:
+    """A value's length as ignore_above counts it: UTF-16 code units (an astral character counts two)."""
+    return len(str(value).encode("utf-16-le")) // 2
+
+
+def _to_subfields(clause: dict, subfields: dict[str, str]) -> dict:
+    """A compiled equality clause with each text native's field name replaced by its keyword subfield."""
+    (kind, body), = clause.items()
+    if kind == "bool":
+        return {"bool": {key: [_to_subfields(item, subfields) for item in value] if isinstance(value, list) else value
+                         for key, value in body.items()}}
+    if kind in {"term", "terms", "wildcard"}:
+        return {kind: {subfields.get(name, name): value for name, value in body.items()}}
+    if kind == "exists":
+        return clause                   # presence reads the text native itself, which holds every value
+    raise CompileError(f"equality clause {kind!r} has no keyword-subfield form")
+
+
+def _phrase_value(p: Predicate, value) -> str:
+    """The stored text a long equality value stands for (a canonical account value without its kind prefix)."""
+    text = str(value)
+    if p.field in {"user.entity_id", "auth.target_account"} and text.startswith(("sid:", "name:")):
+        return text.split(":", 1)[1]
+    return text
+
+
+def _on_subfields(p: Predicate, contract: FieldContract, spec, natives: tuple[str, ...]) -> dict:
+    """Equality on an alias whose text natives each have a keyword subfield (`spec.exact`): compiled exactly as on
+    keyword natives, against the subfields. A value longer than the subfields' ignore_above (`spec.exact_limit`) is in
+    no subfield term, so it is matched as a phrase on each text native instead: the analyzer reads the query value as
+    it read the stored one, so an equal value always matches its own phrase, and extra phrase matches are judged on
+    the typed record."""
+    values = p.value if p.op == "in" else [p.value]
+    if p.op == "in" and (not isinstance(values, list) or not values or len(values) > 1000):
+        raise CompileError("'in' needs a non-empty list of at most 1000 values")
+    limit = spec.exact_limit
+
+    def kept(value) -> bool:
+        return limit is None or utf16_length(value) <= limit
+
+    short = [value for value in values if kept(value)]
+    long = [value for value in values if not kept(value)]
+    clauses = []
+    if short:
+        exact = p.model_copy(update={"value": short if p.op == "in" else short[0]})
+        clauses.append(_to_subfields(_pred_exact(exact, contract, natives), dict(zip(natives, spec.exact,
+                                                                                         strict=True))))
+    clauses.extend({"match_phrase": {native: _phrase_value(p, value)}} for value in long for native in natives)
+    return clauses[0] if len(clauses) == 1 else {"bool": {"should": clauses, "minimum_should_match": 1}}
+
+
 def _pred(p: Predicate, contract: FieldContract, *, os_family: str | None = None) -> dict:
     spec = contract.spec(p.field, os_family=os_family)
     if spec is None:
@@ -147,6 +198,13 @@ def _pred(p: Predicate, contract: FieldContract, *, os_family: str | None = None
     if p.op not in spec.ops:
         raise CompileError(f"op {p.op!r} not supported on {p.field} ({spec.type}) with superset guarantee")
     natives = spec.natives or (spec.native,)
+    if spec.exact and p.op in {"eq", "in"}:
+        return _on_subfields(p, contract, spec, natives)
+    return _pred_exact(p, contract, natives)
+
+
+def _pred_exact(p: Predicate, contract: FieldContract, natives: tuple[str, ...]) -> dict:
+    """`p` on native fields that hold each value whole."""
     linux = _linux_datasets(p, contract, natives)
     if linux is not None:
         return linux

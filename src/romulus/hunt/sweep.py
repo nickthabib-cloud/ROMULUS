@@ -727,7 +727,7 @@ class Sweep:
             self.stats.setdefault("windows_shape_notes", {})[target] = [(
                 "windows.nxlog: Channel, SourceName, EventID or Hostname is not exact-searchable through the Windows "
                 "fields on this target, so its records are selected by shape and value queries on them (event "
-                "classes, pivots) are unresolved")]
+                "classes) are unresolved")]
         return group
 
     @staticmethod
