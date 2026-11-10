@@ -238,6 +238,9 @@ Index("ix_candidate_hunt_lane", candidate.c.hunt_id, candidate.c.lane, candidate
 Index("ix_candidate_finding_order", candidate.c.hunt_id,
       literal_column("CASE lane WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'lead' THEN 2 ELSE 3 END"),
       candidate.c.priority.desc(), literal_column("coalesce(ts, '~')"), candidate.c.id)
+Index("ix_candidate_provenance_order", candidate.c.hunt_id, candidate.c.provenance,
+      literal_column("CASE lane WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'lead' THEN 2 ELSE 3 END"),
+      candidate.c.priority.desc(), literal_column("coalesce(ts, '~')"), candidate.c.id)
 
 candidate_host = Table(
     "candidate_host", metadata,
@@ -263,12 +266,17 @@ finding_rank = Table(
     Column("entity_kind", String),
     Column("entity", String),
     Column("reasons", JSON, nullable=False),
+    # The report section the finding is listed in: 0 confirmed, 1 reported, 2 ranked but not reported. Report order
+    # is (section, position).
+    Column("section", Integer, nullable=False, server_default="2"),
     PrimaryKeyConstraint("hunt_id", "pass", "candidate_id", name="pk_finding_rank"),
     CheckConstraint('"pass" IN (1, 2)', name="ck_finding_rank_pass"),
 )
 Index("ix_finding_rank_score", finding_rank.c.hunt_id, finding_rank.c["pass"], finding_rank.c.score.desc())
 Index("ix_finding_rank_position", finding_rank.c.hunt_id, finding_rank.c["pass"], finding_rank.c.position,
       unique=True)
+Index("ix_finding_rank_section", finding_rank.c.hunt_id, finding_rank.c["pass"], finding_rank.c.section,
+      finding_rank.c.position)
 
 entity_rank = Table(
     "entity_rank", metadata,

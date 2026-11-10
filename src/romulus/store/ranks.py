@@ -329,10 +329,11 @@ class RankWorkspace:
                 self._run('DELETE FROM entity_rank WHERE hunt_id = :hunt AND "pass" = :pass', params)
                 self._run("""
                     INSERT INTO finding_rank (hunt_id, "pass", candidate_id, position, score, reported, entity_kind,
-                                              entity, reasons)
+                                              entity, reasons, section)
                     SELECT :hunt, :pass, candidate_id,
                            ROW_NUMBER() OVER (ORDER BY score DESC, ts IS NULL, ts, candidate_id),
-                           score, reported, entity_kind, entity, reasons
+                           score, reported, entity_kind, entity, reasons,
+                           CASE WHEN lane = 'urgent' THEN 0 WHEN reported THEN 1 ELSE 2 END
                     FROM rk_finding""", params)
                 self._run("""
                     INSERT INTO entity_rank (hunt_id, "pass", entity_kind, entity, position, score, tactics, rules,

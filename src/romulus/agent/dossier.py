@@ -16,7 +16,7 @@ from romulus.hunt.expansion_plan import TIER_PLAN
 from romulus.report.incidents import build_incident_graph
 from romulus.report.manifest import coverage_for_hunt
 from romulus.store.db import digest
-from romulus.store.repo import Repo
+from romulus.store.repo import FINAL_RANK_PASS, Repo
 
 DOSSIER_SCHEMA = "agent-dossier@1"
 REPORTABLE_LANES = ("urgent", "high", "lead")
@@ -32,6 +32,9 @@ MATERIALIZE_COVERAGE_LIMIT = 10_000
 MATERIALIZE_ENTITY_LIMIT = 10_000
 MATERIALIZE_LINK_BYTES_LIMIT = 16_000_000
 LARGE_DOSSIER_PAGE_SIZE = 25
+# A finding's place in the report (from the hunt's final ranking); its stored lane stays the rule's own estimate.
+RANK_SECTIONS = ("confirmed", "reported", "ranked_not_reported")
+NOT_RANKED = "not_ranked"
 
 
 def _bounded_text(value: Any, limit: int = DATA_TEXT_LIMIT) -> str:
@@ -186,6 +189,13 @@ def _candidate_key(row: dict) -> tuple:
             row["ts"] is None, row["ts"], row["id"])
 
 
+def _report_key(row: dict, rank: dict | None) -> tuple:
+    """Report order: ranked findings by (section, position), then any finding stored after the pass by lane."""
+    if rank is None:
+        return (1, 0, 0, _candidate_key(row))
+    return (0, int(rank["section"]), int(rank["position"]), ())
+
+
 def _entity_value(entities: list, kind: str) -> str | None:
     for item in entities or []:
         if isinstance(item, dict):
@@ -215,15 +225,32 @@ def _finding_row(row: dict, aliases: AliasBook) -> dict:
         "host": _entity_value(row.get("entities") or [], "host"),
         "account": _entity_value(row.get("entities") or [], "account"),
         "time": str(row["ts"]) if row["ts"] is not None else None,
+        **rank_label(row),
     }
+
+
+def rank_label(row: dict) -> dict:
+    """{"rank": section} for a row read with its final rank section (`_rank_section`); a reportable finding the pass
+    did not rank is "not_ranked". Nothing for other rows (context and suppressed records are never ranked)."""
+    if "_rank_section" not in row:
+        return {}
+    if row["_rank_section"] is not None:
+        return {"rank": RANK_SECTIONS[row["_rank_section"]]}
+    return {"rank": NOT_RANKED} if row.get("lane") in REPORTABLE_LANES else {}
 
 
 def _findings(repo: Repo, hunt_id: str) -> tuple[Counter, list[dict]]:
     counts = Counter(repo.lane_counts(hunt_id))
-    rows = sorted(repo.candidates_with_finding_aliases(
-        hunt_id, list(REPORTABLE_LANES),
-    ), key=_candidate_key)
-    return counts, rows
+    rows = repo.candidates_with_finding_aliases(hunt_id, list(REPORTABLE_LANES))
+    if not repo.has_rank_pass(hunt_id, FINAL_RANK_PASS):
+        return counts, sorted(rows, key=_candidate_key)
+    ranks = repo.finding_ranks_for(hunt_id, FINAL_RANK_PASS, [row["id"] for row in rows])
+    keys = {}
+    for row in rows:
+        rank = ranks.get(row["id"])
+        row["_rank_section"] = rank["section"] if rank is not None else None
+        keys[row["id"]] = _report_key(row, rank)
+    return counts, sorted(rows, key=lambda row: keys[row["id"]])
 
 
 def _coverage(repo: Repo, hunt_id: str) -> dict:

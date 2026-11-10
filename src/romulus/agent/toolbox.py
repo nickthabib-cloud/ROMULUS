@@ -29,6 +29,7 @@ from romulus.agent.dossier import (
     MATERIALIZE_LINK_BYTES_LIMIT,
     MATERIALIZE_LINK_LIMIT,
     REPORTABLE_LANES,
+    rank_label,
 )
 from romulus.agent.models import EntityRef, PivotResult
 from romulus.agent.provider.base import Tool
@@ -536,7 +537,7 @@ class Toolbox:
         return {
             "alias": alias, "lane": candidate["lane"], "rule_id": candidate["rule_id"],
             "claim": claim, "time": str(candidate["ts"]) if candidate["ts"] is not None else None,
-            "entities": self._candidate_entities(candidate),
+            "entities": self._candidate_entities(candidate), **rank_label(candidate),
         }
 
     def _list_findings(self, args: ListFindingsArgs) -> dict:
