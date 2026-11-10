@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+from romulus.detect.alert_lanes import LOW_PRIORITY_ATTACK_CATEGORIES, alert_stack_lane
 from romulus.detect.base import Match, Playbook, pf
 from romulus.detect.bounded import HOT_COUNT, CitationUnavailable, KeyedStore
 from romulus.detect.citing import (
@@ -217,7 +218,7 @@ class SuricataAlertStack(_Grouped):
     next_checks = ("ip_sessions for the source", "http_requests to the destination in the same minutes",
                    "entity_timeline of the destination host after the first alert")
 
-    version = "4"
+    version = "5"
     SIGNATURES_NAMED = 10
     SIGNATURES_HELD = 2000      # distinct signatures held per group; beyond it the count is "at least"
 
@@ -259,12 +260,7 @@ class SuricataAlertStack(_Grouped):
                 n = state.count
                 sigs = sorted(state.bag("sigs"), key=lambda s: (str(s[1]), str(s[0])))
                 named = sorted(state.names("sigs", self.SIGNATURES_NAMED).values(), key=lambda s: (str(s[1]), str(s[0])))
-                if cat == "Not Suspicious Traffic" or sev == 3:
-                    lane, severity = "context", "low"
-                elif sev == 1:
-                    lane, severity = "high", "high"
-                else:
-                    lane, severity = "lead", "medium"
+                lane, severity = alert_stack_lane(cat, sev, bool(state.extra.get("tech")))
                 names = "; ".join(f"'{s[1]}' (sid {s[0]})" for s in named[:3])
                 # the signatures of the cited alerts, ordered as the claim names signatures: by name, then id
                 cited_sigs = [sid for sid, _name in sorted(
@@ -287,6 +283,10 @@ class SuricataAlertStack(_Grouped):
                                                                 pf(e0, "source.ip"), pf(e0, "destination.ip")],
                           e0.ts, severity, lane, "medium", e0.entities(), group_key=f"{src}|{dst}|{cat}|{sev}",
                           context_ids=context)
+                if sev == 3 and lane == "lead":
+                    m.notes.append("priority 3, kept as a lead: " + (
+                        f"the '{cat}' classtype names attack activity" if cat in LOW_PRIORITY_ATTACK_CATEGORIES
+                        else "the signature metadata names an ATT&CK technique"))
                 techs = sorted({t for e in evs for t in _values(e.get("alert.mitre_technique_id")) if t})
                 if techs:
                     others = len(state.bag("tech")) - len(techs)
@@ -303,8 +303,7 @@ class SuricataAlertStack(_Grouped):
 
     def uncited_finding(self, key, state, match):
         _src, _dst, category, severity = key
-        match.proposed_lane, match.severity = (("context", "low") if category == "Not Suspicious Traffic" or severity == 3
-                                               else ("high", "high") if severity == 1 else ("lead", "medium"))
+        match.proposed_lane, match.severity = alert_stack_lane(category, severity, bool(state.extra.get("tech")))
         return match
 
 

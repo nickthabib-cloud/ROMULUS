@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from romulus.detect.base import Match
 from romulus.evidence.typed import Outcome
 
-POLICY_VERSION = "decide@1"
+POLICY_VERSION = "decide@2"
 LANE_ORDER = {"urgent": 0, "high": 1, "lead": 2, "context": 3, "suppressed": 4}
 SEV_WEIGHT = {"critical": 40, "high": 30, "medium": 20, "low": 10, "info": 0}
 CONF_WEIGHT = {"high": 20, "medium": 10, "low": 0}
@@ -91,7 +91,15 @@ def decide(m: Match, hunt_id: str) -> Decision:
             break
     admitted = all(not v.startswith("fail") for v in gates.values())
     if not admitted and not m.citation_unavailable:
-        lane = "context"
+        failed = [f"{gate} ({verdict[5:]})" for gate, verdict in gates.items() if verdict.startswith("fail")]
+        if gates["observation"].startswith("fail") or gates["provenance"].startswith("fail") or lane == "context":
+            lane = "context"            # nothing citable: no record, or a record without its raw reference
+        else:
+            # The rule's positive cites its records but a predicate field or the affected entity is incomplete: it
+            # stays visible for review, never above lead, saying what is missing.
+            if lane in ("urgent", "high"):
+                lane = "lead"
+            notes.append("Admission is incomplete: " + ", ".join(failed) + "; kept as a lead for review.")
     elif m.citation_unavailable:
         coverage = "a surviving reference is retained" if m.events else "no citation could be retained"
         notes.append(f"Citation coverage is partial: {coverage}; lane reflects the computed positive.")
