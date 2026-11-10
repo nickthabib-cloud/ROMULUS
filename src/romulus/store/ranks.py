@@ -19,7 +19,8 @@ from sqlalchemy import Connection, Engine, text
 
 from romulus.store.db import _write_lock
 
-_TEMP_TABLES = ("rk_finding", "rk_member", "rk_tactic", "rk_entity", "rk_rule_host", "rk_address", "rk_fleet")
+_TEMP_TABLES = ("rk_finding", "rk_member", "rk_tactic", "rk_pair", "rk_entity", "rk_rule_host", "rk_address",
+                "rk_fleet")
 _CREATE = (
     # one row per ranked finding (confirmed and pool, agent findings included)
     """CREATE TEMP TABLE rk_finding (
@@ -36,6 +37,10 @@ _CREATE = (
     "CREATE INDEX temp.rk_member_rule ON rk_member (rule_id)",
     # the tactics each counted finding gives its entities, by rule (a recurring fleet-wide rule's are dropped later)
     """CREATE TEMP TABLE rk_tactic (
+        entity_kind TEXT NOT NULL, entity TEXT NOT NULL, rule_id TEXT NOT NULL, tactic TEXT NOT NULL,
+        PRIMARY KEY (entity_kind, entity, rule_id, tactic)) WITHOUT ROWID""",
+    # the bounded input of each entity's tactic matching
+    """CREATE TEMP TABLE rk_pair (
         entity_kind TEXT NOT NULL, entity TEXT NOT NULL, rule_id TEXT NOT NULL, tactic TEXT NOT NULL,
         PRIMARY KEY (entity_kind, entity, rule_id, tactic)) WITHOUT ROWID""",
     """CREATE TEMP TABLE rk_entity (
@@ -249,8 +254,30 @@ class RankWorkspace:
             out.append(item)
         return self._page(out)
 
+    def stage_matching_pairs(self, per_tactic: int) -> None:
+        """The counted (rule, tactic) pairs each entity's tactic matching reads: recurring fleet-wide rules dropped,
+        and at most `per_tactic` rules per tactic of each entity (the lowest rule ids)."""
+        self._run("""
+            INSERT INTO rk_pair (entity_kind, entity, rule_id, tactic)
+            SELECT entity_kind, entity, rule_id, tactic FROM (
+                SELECT entity_kind, entity, rule_id, tactic,
+                       ROW_NUMBER() OVER (PARTITION BY entity_kind, entity, tactic ORDER BY rule_id) AS n
+                FROM rk_tactic WHERE rule_id NOT IN (SELECT rule_id FROM rk_fleet))
+            WHERE n <= :per_tactic""", {"per_tactic": per_tactic})
+
+    def pair_page(self, after: tuple | None, limit: int) -> list[dict]:
+        """The next page of matching pairs in entity order (keyset)."""
+        where, params = "1 = 1", {"limit": limit}
+        if after is not None:
+            where = "(entity_kind, entity, rule_id, tactic) > (:kind, :entity, :rule, :tactic)"
+            params.update(kind=after[0], entity=after[1], rule=after[2], tactic=after[3])
+        rows = self._run(
+            f"SELECT entity_kind, entity, rule_id, tactic FROM rk_pair WHERE {where} "
+            f"ORDER BY entity_kind, entity, rule_id, tactic LIMIT :limit", params).mappings().all()
+        return self._page([dict(row) for row in rows])
+
     def set_entity_scores(self, rows: list[dict]) -> None:
-        self._many("UPDATE rk_entity SET score = :score, reported = :reported, reasons = :reasons "
+        self._many("UPDATE rk_entity SET score = :score, reported = :reported, reasons = :reasons, tactics = :tactics "
                    "WHERE entity_kind = :entity_kind AND entity = :entity", rows)
 
     def finding_page(self, after: str, limit: int) -> list[dict]:

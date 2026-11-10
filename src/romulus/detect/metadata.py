@@ -17,8 +17,8 @@ _TACTICS = frozenset({'reconnaissance', 'resource-development', 'initial-access'
                      'inhibit-response-function', 'impair-process-control'})
 
 
-# Tactics for the techniques a rule class names, used when neither the finding nor the rule carries its own tactic
-# list. A finding's explicit technique list is resolved through the vendored ATT&CK release instead.
+# Tactics for techniques the vendored ATT&CK release (Enterprise and ICS) does not define. Every technique is
+# resolved through the vendored release first; this table is only the fallback for an id it lacks.
 RULE_TECHNIQUE_TACTICS = {
     "T1190": ("initial-access",),
     "T1078": ("initial-access", "persistence", "privilege-escalation", "defense-evasion"),
@@ -38,17 +38,18 @@ RULE_TECHNIQUE_TACTICS = {
 
 
 def finding_attack(explicit_attack, rule) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """One finding's ATT&CK techniques and tactics: the techniques stored with the finding when it has them
-    (resolved to tactics through the vendored ATT&CK release), else its rule's techniques and tactics. Every
-    consumer (incident graph, ranking) reads tactics through this one mapping."""
+    """One finding's ATT&CK techniques and tactics: the techniques stored with the finding when it has them, else its
+    rule's. A rule that names its own tactics (an imported rule's tags) keeps them; otherwise each technique is
+    resolved through the vendored ATT&CK release (Enterprise and ICS), with RULE_TECHNIQUE_TACTICS only for an id
+    the release lacks. Every consumer (incident graph, ranking) reads tactics through this one mapping."""
     from romulus.content.attack_tags import technique_tactics
 
     attack = tuple(explicit_attack or getattr(rule, "attack", ()))
-    if explicit_attack:
-        return attack, technique_tactics(attack)
-    tactics = getattr(rule, "tactics", ()) or tuple(
-        tactic for technique in attack for tactic in RULE_TECHNIQUE_TACTICS.get(technique, ()))
-    return attack, tuple(tactics)
+    if not explicit_attack and getattr(rule, "tactics", ()):
+        return attack, tuple(rule.tactics)
+    tactics = {tactic for technique in attack
+               for tactic in (technique_tactics((technique,)) or RULE_TECHNIQUE_TACTICS.get(technique, ()))}
+    return attack, tuple(sorted(tactics))
 
 
 def is_sigma_id(rule_id):

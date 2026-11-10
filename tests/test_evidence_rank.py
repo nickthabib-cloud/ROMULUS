@@ -343,17 +343,51 @@ def test_seeds_are_the_reported_set_in_rank_order():
     assert seeds == ["c1", "p1"]
 
 
-def test_seed_floor_when_no_pool_finding_is_reported():
+def test_with_no_reported_pool_finding_the_ranked_seeds_are_the_confirmed_ones():
+    # expansion seeds the rule estimate's urgent and high findings anyway; the ranking adds nothing beyond them here
     repo = _repo()
     _insert(repo, [
         _row("c1", "r.confirmed", lane="urgent", entities=[]),
-        _row("h1", "r.h1", lane="high", host="b"), _row("h2", "r.h2", lane="high", host="c"),
-        _row("l1", "r.l1", host="d", priority=70.0), _row("l2", "r.l2", host="e", priority=10.0),
+        _row("h1", "r.h1", lane="high", host="b"), _row("l1", "r.l1", host="d", priority=70.0),
     ])
     compute_rank_pass(repo, "h1", PASS_BEFORE_EXPANSION)
-    seeds = [candidate["id"] for candidate, _score in expansion_seeds(repo, "h1")]
-    # the confirmed finding plus the two top-ranked pool findings: as many as the high lane would have seeded
-    assert seeds == ["c1", "l1", "h1"]
+    assert [candidate["id"] for candidate, _score in expansion_seeds(repo, "h1")] == ["c1"]
+
+
+# -- tactic breadth: a maximum matching of rules to tactics ---------------------------------------------------------
+def test_one_multi_tactic_rule_counts_one_tactic():
+    assert len(model.tactic_breadth({"r.valid_accounts": {"initial-access", "persistence",
+                                                          "privilege-escalation", "defense-evasion"}})) == 1
+
+
+def test_two_rules_on_one_tactic_count_one():
+    assert model.tactic_breadth({"r.a": {"execution"}, "r.b": {"execution"}}) == ("execution",)
+
+
+def test_two_rules_on_different_tactics_count_two():
+    assert model.tactic_breadth({"r.a": {"execution"}, "r.b": {"credential-access"}}) == (
+        "credential-access", "execution")
+
+
+def test_matching_finds_the_maximum_not_the_greedy_assignment():
+    # greedy would give r.a "execution" and leave r.b nothing; the maximum gives each rule its own tactic
+    assert len(model.tactic_breadth({"r.a": {"execution", "persistence"}, "r.b": {"execution"}})) == 2
+
+
+def test_a_multi_tactic_technique_alone_never_meets_the_bar_through_a_pass():
+    _findings, entities = _bar_hunt([_row("v1", "r.valid", host="h-v", attack=["T1078"])])
+    assert len(entities[("host", "h-v")]["tactics"]) == 1 and not entities[("host", "h-v")]["reported"]
+    assert any("tactics seen on the entity" in reason for reason in entities[("host", "h-v")]["reasons"])
+
+
+def test_rule_tactics_resolve_through_the_vendored_attack_data():
+    from types import SimpleNamespace
+
+    from romulus.detect.metadata import finding_attack
+    # T1003 is not in the fallback table; the vendored release maps it to credential access
+    assert finding_attack(None, SimpleNamespace(attack=("T1003",)))[1] == ("credential-access",)
+    # an id the release lacks falls back to the table, and an unknown one maps to nothing
+    assert finding_attack(None, SimpleNamespace(attack=("T9999",)))[1] == ()
 
 
 def test_no_ranking_means_no_ranked_seeds():

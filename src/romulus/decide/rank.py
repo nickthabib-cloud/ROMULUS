@@ -83,6 +83,8 @@ COOCCURRENCE_CAP = 10
 # enclave to a hundred-thousand-host fleet. The time condition keeps a burst (a mass deployment, a worm, ransomware
 # staging) from being penalized: an attack that reaches half the fleet does so in a short span. Below three hosts
 # prevalence says nothing, so the penalty is off.
+# The hosts counted are those with any deterministic candidate in the pass (any lane); findings the AI agent proposed
+# never count, so the model can neither raise nor lower a rule's prevalence.
 FLEET_MIN_HOSTS = 3
 FLEET_HOST_SHARE = 0.5
 FLEET_SPAN_SHARE = 0.5
@@ -97,8 +99,20 @@ BAR_TACTICS = 2
 BAR_RULES = 3
 BAR_COOCCURRENCE = 1
 
-# Accounts that are the same principal on every host. Values are compared casefolded, as the normalizers type them
-# (`sid:<sid>`, `name:<domain>\\<name>`, or a bare name).
+# Tactic breadth T is the size of a maximum matching between an entity's counted rules and the tactics each maps
+# to: every rule contributes at most one tactic, so one rule whose technique spans several tactics (T1078 Valid
+# Accounts spans four) counts once, and only distinct rules in distinct stages add breadth. A maximum matching never
+# needs more rules per tactic than there are tactics, and ATT&CK Enterprise and ICS together define 26, so keeping
+# this many rules per tactic (the lowest rule ids) leaves T exact while bounding the matching's input. Were a tactic
+# list ever longer, the entity's reasons say T may be understated.
+MATCHING_RULES_PER_TACTIC = 32
+
+# Accounts that are the same principal on every host, and so are not entities of their own: an action by one of them
+# says nothing beyond the host it ran on (the host entity carries that evidence), and one name shared by the whole
+# fleet would join unrelated hosts' evidence into one entity. They are the Windows local system and service accounts
+# and anonymous logon (by SID and by name), the builtin-group, per-service, window-manager and font-driver SID
+# families with their pseudo-domains, the null SID, and the Unix superuser. Values are compared casefolded, as the
+# normalizers type them (`sid:<sid>`, `name:<domain>\\<name>`, or a bare name).
 SHARED_PRINCIPALS = frozenset({
     "root", "system", "local service", "network service", "anonymous logon",
     "name:root", "name:system", "name:local service", "name:network service", "name:anonymous logon",
@@ -204,15 +218,37 @@ def fleet_reason(rule_id: str, rule_hosts: int, hunt_hosts: int, span_seconds: f
             f"window (-{FLEET_PENALTY})")
 
 
+def tactic_breadth(rule_tactics: Mapping[str, set[str] | tuple[str, ...]]) -> tuple[str, ...]:
+    """The tactics of a maximum matching between rules and the tactics each maps to (T is its length): each rule
+    contributes at most one tactic and each tactic is counted once. Augmenting paths over rules in id order, so the
+    result is deterministic."""
+    matched: dict[str, str] = {}                     # tactic -> rule
+
+    def augment(rule: str, seen: set[str]) -> bool:
+        for tactic in sorted(rule_tactics[rule]):
+            if tactic in seen:
+                continue
+            seen.add(tactic)
+            if tactic not in matched or augment(matched[tactic], seen):
+                matched[tactic] = rule
+                return True
+        return False
+
+    for rule in sorted(rule_tactics):
+        augment(rule, set())
+    return tuple(sorted(matched))
+
+
 @dataclass(frozen=True)
 class EntityEvidence:
     """One entity's evidence from the hunt's deterministic findings, recurring fleet-wide rules excluded."""
     confirmed: int                    # U
-    tactics: tuple[str, ...]          # T is its length
+    tactics: tuple[str, ...]          # the matched tactics; T is its length
     rules: int                        # R
     cooccurrence: int                 # C, already capped
     max_prior: float | None           # the strongest rule prior among the entity's deterministic findings
     fleet_rules: tuple[str, ...] = ()  # recurring fleet-wide rules seen on the entity, not counted
+    notes: tuple[str, ...] = ()        # limits that may understate a factor
 
 
 def evidence_bar(evidence: EntityEvidence) -> str | None:
@@ -235,8 +271,8 @@ def entity_score(evidence: EntityEvidence) -> tuple[float, bool, list[str]]:
                   + WEIGHT_RULE * evidence.rules + WEIGHT_COOCCURRENCE * evidence.cooccurrence + prior)
     reasons = [
         f"confirmed findings U={evidence.confirmed} (+{WEIGHT_CONFIRMED * evidence.confirmed})",
-        (f"ATT&CK tactics T={tactic_count}" + (f" ({', '.join(evidence.tactics)})" if evidence.tactics else "")
-         + f" (+{WEIGHT_TACTIC * tactic_count})"),
+        (f"ATT&CK tactics T={tactic_count}, at most one per rule"
+         + (f" ({', '.join(evidence.tactics)})" if evidence.tactics else "") + f" (+{WEIGHT_TACTIC * tactic_count})"),
         f"distinct rules R={evidence.rules} (+{WEIGHT_RULE * evidence.rules})",
         (f"co-occurring rule pairs within {int(COOCCURRENCE_WINDOW.total_seconds() // 60)} min "
          f"C={evidence.cooccurrence} (+{WEIGHT_COOCCURRENCE * evidence.cooccurrence})"),
@@ -244,6 +280,7 @@ def entity_score(evidence: EntityEvidence) -> tuple[float, bool, list[str]]:
     ]
     if evidence.fleet_rules:
         reasons.append("recurring fleet-wide rules not counted: " + ", ".join(evidence.fleet_rules))
+    reasons.extend(evidence.notes)
     met = evidence_bar(evidence)
     reasons.append(f"evidence bar met: {met}" if met else
                    f"evidence bar not met (needs U>={BAR_CONFIRMED}, or T>={BAR_TACTICS}, "

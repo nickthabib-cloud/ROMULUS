@@ -258,9 +258,12 @@ class ExpansionEngine:
         self._fallback_queries = 0
         # anchor id -> its hunt-independent identity, the last tie-break of the anchor order
         self._identities: dict[str, str] = {}
-        # root anchor id -> its pass-1 evidence rank, when the hunt was ranked before expansion; empty otherwise, and
-        # anchors are then ordered by the rule estimate (lane) alone
-        self._rank_scores: dict[str, float] = {}
+        # The evidence ranking's extra seeds: findings in its Reported set that the rule estimate (urgent and high)
+        # would not have seeded, in rank order, with their pass-1 rank. They are anchored and scheduled only once
+        # every anchor the rule estimate seeds is finished or stopped, so those keep the budget share and order they
+        # always had and the extra seeds spend only what is left. Empty for a hunt without a pass-1 ranking.
+        self._extra_scores: dict[str, float] = {}
+        self._extras_open = False
         hunt = repo.get_hunt(hunt_id) if hasattr(repo, 'get_hunt') else None
         self._imported_rule_ids = {'sigma.' + row['id'] for row in ((hunt or {}).get('manifest', {}).get(
             'sigma_rules') or {}).get('applied', [])}
@@ -590,8 +593,8 @@ class ExpansionEngine:
         return plan
 
     def _seed_candidates(self, candidates, existing_rows: list[dict], *, ranked: bool = False) -> list[dict]:
-        """Anchor the given candidates. Ranked seeds were chosen by the evidence ranking (any pool lane); others are
-        seeded when the rule estimate is urgent or high."""
+        """Anchor the given candidates: those the rule estimate seeds (urgent or high), or with `ranked` the evidence
+        ranking's extra seeds whatever their lane."""
         existing = {row["candidate_id"] for row in existing_rows}
         depths = {row["id"]: row["depth"] for row in existing_rows}
         added = []
@@ -630,28 +633,36 @@ class ExpansionEngine:
 
     def _seed_anchors(self) -> list[dict]:
         rows = self.repo.expansion_anchors(self.hunt_id)
+        added = self._seed_candidates(self.repo.candidates(self.hunt_id, ["urgent", "high"]), rows)
+        if self._extras_open and self._extra_scores:
+            added += self._seed_candidates(self._extra_candidates(), [*rows, *added], ranked=True)
+        return added
+
+    def _load_extra_seeds(self) -> None:
+        """The pass-1 Reported set's findings beyond the rule estimate's seeds, in rank order."""
+        if not hasattr(self.repo, "has_rank_pass"):
+            return          # a store without ranks: the rule estimate's seeds alone
         ranked = expansion_seeds(self.repo, self.hunt_id)
-        if ranked is None:
-            return self._seed_candidates(self.repo.candidates(self.hunt_id, ["urgent", "high"]), rows)
+        for candidate, score in ranked or ():
+            if candidate["lane"] not in {"urgent", "high"}:
+                self._extra_scores[candidate["id"]] = score
 
-        def scored():
-            for candidate, score in ranked:
-                self._rank_scores[candidate["id"]] = score
-                yield candidate
+    def _extra_candidates(self):
+        ids = list(self._extra_scores)
+        for offset in range(0, len(ids), 500):
+            chunk = ids[offset:offset + 500]
+            rows = {row["id"]: row for row in self.repo.candidates_by_ids(self.hunt_id, chunk)}
+            yield from (rows[item] for item in chunk if item in rows)
 
-        # The roots are the evidence ranking's Reported set, in rank order. Findings expansion itself discovers are
-        # not in the ranking taken before it, so they are anchored by their rule estimate as they are found.
-        added = self._seed_candidates(scored(), rows, ranked=True)
-        discovered = [candidate for candidate in self.repo.candidates(self.hunt_id, ["urgent", "high"])
-                      if candidate.get("source_anchor_id") or candidate.get("source_link_id")]
-        return added + self._seed_candidates(discovered, [*rows, *added])
-
-    def _lane_rank(self, row: dict) -> int:
-        """The severity tier an anchor is scheduled in. A ranked root is in the confirmed tier when confirmed and in
-        the next tier otherwise, where its rank orders it; every other anchor is tiered by its rule estimate."""
-        if row["id"] in self._rank_scores and row["depth"] == 0:
-            return LANE_ORDER["urgent"] if row["lane"] == "urgent" else LANE_ORDER["high"]
-        return LANE_ORDER.get(row["lane"], 9)
+    def _open_extra_seeds(self) -> bool:
+        """Once every rule-estimate anchor is finished or stopped, anchor the extra seeds. True when that happened now
+        (the run loop then continues with what budget is left)."""
+        if self._extras_open or not self._extra_scores:
+            return False
+        self._extras_open = True
+        rows = self.repo.expansion_anchors(self.hunt_id)
+        self._seed_candidates(self._extra_candidates(), rows, ranked=True)
+        return True
 
     def _identity(self, row: dict) -> str:
         """The anchor's rule and evidence, which are the same in every hunt over the same records. A candidate id also
@@ -667,9 +678,9 @@ class ExpansionEngine:
         return self._identities[row["id"]]
 
     def _anchor_priority(self, row: dict) -> tuple:
-        score = self._rank_scores.get(row["id"]) if row["depth"] == 0 else None
         return (
-            self._lane_rank(row), score is None, -(score or 0.0), SEVERITY_ORDER.get(row["severity"], 9),
+            LANE_ORDER.get(row["lane"], 9), -self._extra_scores.get(row["id"], 0.0),
+            SEVERITY_ORDER.get(row["severity"], 9),
             row["ts"] is None, _utc(row["ts"]) if row["ts"] is not None else None,
             self._identity(row), row["id"],
         )
@@ -693,7 +704,7 @@ class ExpansionEngine:
                 if by_host[host]:
                     ordered.append(by_host[host].popleft())
         if self._imported_rule_ids:
-            ordered = _curated_first(ordered, self._lane_rank, self._is_imported)
+            ordered = _curated_first(ordered, lambda row: row['lane'], self._is_imported)
         return ordered
 
     def _budget_for(self, all_rows: list[dict]) -> int:
@@ -742,7 +753,7 @@ class ExpansionEngine:
             return budget
         children = [row for row in all_rows if 0 < row["depth"] < self.max_depth and row["status"] == "pending"
                     and row["id"] not in blocked]
-        if any(self._lane_rank(row) <= lane_rank for row in children):
+        if any(LANE_ORDER.get(row["lane"], 9) <= lane_rank for row in children):
             return min(budget, root_budget)
         if children:
             return budget
@@ -947,7 +958,7 @@ class ExpansionEngine:
                     )
             if tier_slots:
                 if self._imported_rule_ids:
-                    tier_slots = _curated_first(tier_slots, lambda slot: self._lane_rank(slot.row),
+                    tier_slots = _curated_first(tier_slots, lambda slot: slot.row['lane'],
                         lambda slot: slot.candidate['rule_id'] in self._imported_rule_ids)
                 return tier_slots
         return []
@@ -1322,6 +1333,7 @@ class ExpansionEngine:
         return None
 
     def run(self) -> dict:
+        self._load_extra_seeds()
         self._seed_anchors()
         all_rows = self.repo.expansion_anchors(self.hunt_id)
         query_count = self.repo.expansion_source_queries(self.hunt_id)
@@ -1342,6 +1354,8 @@ class ExpansionEngine:
             for row in all_rows:
                 if row["status"] != "pending" or row["id"] in blocked_anchors:
                     continue
+                if not self._extras_open and row["id"] in self._extra_scores:
+                    continue        # an extra seed anchored by an earlier run waits for the rule estimate's anchors
                 if row["depth"] >= self.max_depth:
                     reason = f"maximum expansion depth {self.max_depth} reached"
                     anchor_reasons[row["id"]].append(reason)
@@ -1358,11 +1372,14 @@ class ExpansionEngine:
             # Always choose the globally lowest unfinished tier, so every anchor, and a newly discovered one, gets its
             # narrow links before any anchor widens its window. Within the tier the most severe lane goes first, so
             # when the budget runs out inside a tier it is the less severe anchors' links that wait.
-            ranks = sorted({self._lane_rank(row) for row in eligible})
+            ranks = sorted({LANE_ORDER.get(row["lane"], 9) for row in eligible})
             ordered = [anchor_row for rank in ranks
                        for anchor_row in self._ordered_anchors(
-                           [row for row in eligible if self._lane_rank(row) == rank])]
+                           [row for row in eligible if LANE_ORDER.get(row["lane"], 9) == rank])]
             if not ranks:
+                if self._open_extra_seeds():
+                    all_rows = self.repo.expansion_anchors(self.hunt_id)
+                    continue
                 break               # every pending anchor is stopped, and only a newly found anchor grows the budget
             root_cap = self._root_cap(all_rows, blocked_anchors, ranks[0])
             depths = {row["id"]: row["depth"] for row in all_rows}
@@ -1378,6 +1395,9 @@ class ExpansionEngine:
                 continue
             slots = self._tier_slots(ordered, anchor_reasons, root_cap)
             if not slots:
+                if self._open_extra_seeds():
+                    all_rows = self.repo.expansion_anchors(self.hunt_id)
+                    continue
                 break
             spent = getattr(getattr(self.fetcher, "executor", None), "source_queries", None)
             if isinstance(spent, int):
@@ -1396,7 +1416,7 @@ class ExpansionEngine:
                     stop_reason = "budget"
                     added = [budget_reason]
                     if budget_reason == "source query budget exhausted" and any(
-                            self._lane_rank(row) < self._lane_rank(anchor_row)
+                            LANE_ORDER.get(row["lane"], 9) < LANE_ORDER.get(anchor_row["lane"], 9)
                             for row in all_rows):
                         added.append(BUDGET_TO_SEVERE_REASON)
                     anchor_reasons[anchor_row["id"]].extend(added)

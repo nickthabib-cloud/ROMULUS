@@ -2496,17 +2496,6 @@ class Repo:
             return [dict(row) for row in connection.execute(
                 query.order_by(t.finding_rank.c.position).limit(limit)).mappings()]
 
-    def finding_rank_lane_counts(self, hunt_id: str, pass_no: int) -> dict:
-        """Of a pass's ranked findings: how many reported ones are not confirmed, and the `high` ones per rule."""
-        joined = t.finding_rank.join(t.candidate, t.candidate.c.id == t.finding_rank.c.candidate_id)
-        scope = and_(t.finding_rank.c.hunt_id == hunt_id, t.finding_rank.c["pass"] == pass_no)
-        with self.engine.connect() as connection:
-            reported_pool = connection.execute(select(func.count()).select_from(joined).where(
-                scope, t.finding_rank.c.reported.is_(True), t.candidate.c.lane != "urgent")).scalar_one()
-            high = dict(connection.execute(select(t.candidate.c.rule_id, func.count()).select_from(joined).where(
-                scope, t.candidate.c.lane == "high").group_by(t.candidate.c.rule_id)).all())
-        return {"reported_pool": int(reported_pool), "high_by_rule": {str(k): int(v) for k, v in high.items()}}
-
     def finding_ranks_for(self, hunt_id: str, pass_no: int, candidate_ids) -> dict[str, dict]:
         out: dict[str, dict] = {}
         ids = sorted(set(candidate_ids))

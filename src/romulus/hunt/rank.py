@@ -16,7 +16,6 @@ from datetime import datetime
 from romulus.decide import rank as model
 from romulus.detect.metadata import finding_attack, hunt_rule_metadata
 from romulus.detect.netdef import SiteNetworks
-from romulus.detect.registry import rule_kind
 from romulus.store.ranks import parse_time, stored_time
 from romulus.store.repo import Repo, is_lease_lost
 
@@ -155,7 +154,25 @@ def _cooccurrence(ws, batch_size: int, heartbeat) -> None:
     ws.commit()
 
 
+def _pairs(ws, batch_size: int):
+    """Every entity's matching pairs, in entity order, one keyset page at a time."""
+    after = None
+    while True:
+        page = ws.pair_page(after, batch_size)
+        if not page:
+            return
+        yield from page
+        last = page[-1]
+        after = (last["entity_kind"], last["entity"], last["rule_id"], last["tactic"])
+
+
 def _score_entities(ws, batch_size: int, heartbeat) -> None:
+    """Score entities in pages, merging the matching pairs stream (same entity order) so that only one entity's
+    pairs (at most MATCHING_RULES_PER_TACTIC per tactic) are held besides the two pages."""
+    ws.stage_matching_pairs(model.MATCHING_RULES_PER_TACTIC)
+    ws.commit()
+    pairs = _pairs(ws, batch_size)
+    pending = next(pairs, None)
     after = None
     while True:
         page = ws.entity_page(after, batch_size)
@@ -164,11 +181,26 @@ def _score_entities(ws, batch_size: int, heartbeat) -> None:
         heartbeat()
         rows = []
         for item in page:
+            key = (item["entity_kind"], item["entity"])
+            rule_tactics: dict[str, set[str]] = defaultdict(set)
+            while pending is not None and (pending["entity_kind"], pending["entity"]) <= key:
+                if (pending["entity_kind"], pending["entity"]) == key:
+                    rule_tactics[pending["rule_id"]].add(pending["tactic"])
+                pending = next(pairs, None)
+            seen = {tactic for tactics in rule_tactics.values() for tactic in tactics}
+            notes = (() if len(seen) <= model.MATCHING_RULES_PER_TACTIC else (
+                (f"tactic breadth may be understated: {len(seen)} tactics exceed the "
+                 f"{model.MATCHING_RULES_PER_TACTIC} rules kept per tactic"),))
+            matched = model.tactic_breadth(rule_tactics)
             score, reported, reasons = model.entity_score(model.EntityEvidence(
-                confirmed=int(item["confirmed"]), tactics=item["tactics"], rules=int(item["rules"]),
-                cooccurrence=int(item["cooccur"]), max_prior=item["max_prior"], fleet_rules=item["fleet_rules"]))
+                confirmed=int(item["confirmed"]), tactics=matched, rules=int(item["rules"]),
+                cooccurrence=int(item["cooccur"]), max_prior=item["max_prior"], fleet_rules=item["fleet_rules"],
+                notes=notes))
+            if len(seen) > len(matched):
+                reasons.insert(2, "tactics seen on the entity: " + ", ".join(sorted(seen)))
             rows.append({"entity_kind": item["entity_kind"], "entity": item["entity"], "score": score,
-                         "reported": int(reported), "reasons": _json_list(reasons)})
+                         "reported": int(reported), "reasons": _json_list(reasons),
+                         "tactics": _json_list(matched)})
         ws.set_entity_scores(rows)
         ws.commit()
         after = (page[-1]["entity_kind"], page[-1]["entity"])
@@ -226,17 +258,22 @@ def rank_summary(repo: Repo, hunt_id: str, pass_no: int = PASS_FINAL) -> dict | 
 
 
 # -- expansion seeds ------------------------------------------------------------------------------------------------
-def _seed_eligible(candidate: dict) -> bool:
-    """The candidates expansion can anchor on at all (its own filters say why the rest cannot)."""
-    return (candidate.get("provenance") != model.AGENT_PROVENANCE and candidate.get("source_case_id") is None
-            and rule_kind(candidate["rule_id"]) != "context")
+def expansion_seeds(repo: Repo, hunt_id: str, *, page_size: int = RANK_BATCH
+                    ) -> Iterator[tuple[dict, float]] | None:
+    """The pass-1 Reported set in rank order, with each finding's pass-1 score; None when the hunt has no pass-1
+    ranking. Expansion seeds the rule estimate's findings (urgent and high) first, with the budget share and order
+    they always had, and then these, so it never does less than it did by the rule estimate alone: its roots are the
+    union of the two sets, at least max(the rule estimate's seeds, confirmed + Reported)."""
+    if not repo.has_rank_pass(hunt_id, PASS_BEFORE_EXPANSION):
+        return None
+    return _reported(repo, hunt_id, page_size)
 
 
-def _ranked(repo: Repo, hunt_id: str, *, reported: bool | None, page_size: int) -> Iterator[tuple[dict, float]]:
+def _reported(repo: Repo, hunt_id: str, page_size: int) -> Iterator[tuple[dict, float]]:
     after = 0
     while True:
         page = repo.finding_ranks_page(hunt_id, PASS_BEFORE_EXPANSION, after_position=after, limit=page_size,
-                                       reported=reported)
+                                       reported=True)
         if not page:
             return
         rows = {row["id"]: row for row in repo.candidates_by_ids(
@@ -246,36 +283,6 @@ def _ranked(repo: Repo, hunt_id: str, *, reported: bool | None, page_size: int) 
             if candidate is not None:
                 yield candidate, float(item["score"])
         after = page[-1]["position"]
-
-
-def expansion_seeds(repo: Repo, hunt_id: str, *, page_size: int = RANK_BATCH
-                    ) -> Iterator[tuple[dict, float]] | None:
-    """Expansion's root seeds in rank order, with their pass-1 scores; None when the hunt has no pass-1 ranking (the
-    caller then seeds by the rule estimate, as before ranking existed).
-
-    The seeds are the Reported set: every confirmed finding and every pool finding on an entity that meets the
-    evidence bar. When no pool finding is reported, the seeds are the confirmed findings plus the top-ranked eligible
-    pool findings, as many as the rule estimate's `high` lane would have seeded: expansion never does less than it
-    did before ranking on a hunt where `high` findings existed."""
-    if not repo.has_rank_pass(hunt_id, PASS_BEFORE_EXPANSION):
-        return None
-    return _seed_stream(repo, hunt_id, page_size)
-
-
-def _seed_stream(repo: Repo, hunt_id: str, page_size: int) -> Iterator[tuple[dict, float]]:
-    counts = repo.finding_rank_lane_counts(hunt_id, PASS_BEFORE_EXPANSION)
-    yield from _ranked(repo, hunt_id, reported=True, page_size=page_size)
-    if counts["reported_pool"]:
-        return
-    floor = sum(count for rule_id, count in counts["high_by_rule"].items() if rule_kind(rule_id) != "context")
-    if floor <= 0:
-        return
-    for candidate, score in _ranked(repo, hunt_id, reported=False, page_size=page_size):
-        if _seed_eligible(candidate):
-            yield candidate, score
-            floor -= 1
-            if floor <= 0:
-                return
 
 
 # -- findings added after the last pass ------------------------------------------------------------------------------
