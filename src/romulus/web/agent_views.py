@@ -105,7 +105,8 @@ def assessment_view(repo, hunt_id):
             sentence = item.get("sentence", item)
             sentences.append({"text": clip(sentence.get("text"), 2000), "kind": clip(sentence.get("kind"), 50),
                               "cites": cites_view(repo, hunt_id, sentence.get("cites")),
-                              "cites_more": max(0, len(sentence.get("cites") or []) - 20)})
+                              "cites_more": max(0, len(sentence.get("cites") or []) - 20),
+                              "suspicious_content": bool(sentence.get("suspicious_content"))})
         if sentences:
             result["sections"].append({"name": name.replace("_", " "), "sentences": sentences,
                                        "more": max(0, len(items) - 30)})

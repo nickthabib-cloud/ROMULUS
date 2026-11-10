@@ -182,7 +182,7 @@ def test_assessment_panel_validates_cites_and_crashed_run(setup):
     assert "Re-run assessment" in body and "AI-generated hypothesis" in body
     assert f'/findings/{cid}' in body and '#evidence-ev1' in body and "unresolved cite" in body
     assert "javascript:bad" not in body and "<script>" not in body
-    assert "sentences removed" in body and "no cites" in body
+    assert "Checker changes and labels" in body and "no cites" in body
     assert client.get(f"/findings/{cid}?event=ev1").status_code == 200
     assert client.get(f"/findings/{cid}?event=not-cited").status_code == 404
     with repo.engine.begin() as connection:

@@ -136,17 +136,18 @@ def _map_sentence(sentence: dict, aliases: AliasBook, counts: dict, section: str
                                                           for phrase in ABSENCE_PHRASES):
         counts["removed_absence_claim"] += 1
         return None
-    if all(_suspicious_alias(aliases, row, suspicious_cache) for row in rows):
-        counts["removed_suspicious_only"] += 1
-        return None
+    suspicious_only = all(_suspicious_alias(aliases, row, suspicious_cache) for row in rows)
+    if suspicious_only:
+        counts["labelled_suspicious_only"] += 1
     if sentence.get("kind") == "observed" and all(_non_observed_alias(aliases, row) for row in rows):
         sentence = {**sentence, "kind": "inferred"}
         counts["downgraded_observed"] += 1
-    return {"text": sentence["text"], "cites": targets, "kind": sentence["kind"]}
+    return {"text": sentence["text"], "cites": targets, "kind": sentence["kind"],
+            **({"suspicious_content": True} if suspicious_only else {})}
 
 
 def _suspicious_alias(aliases: AliasBook, row: dict, cache: dict[str, bool]) -> bool:
-    """Instruction-shaped telemetry alone cannot substantiate assessment prose."""
+    """Whether every supporting record carries an advisory injection flag."""
     key = row["alias"]
     if key in cache:
         return cache[key]
@@ -197,11 +198,11 @@ def _non_observed_alias(aliases: AliasBook, alias_row: dict) -> bool:
 
 
 def check_assessment(repo, hunt_id: str, body: dict, *, owner_token=None) -> tuple[dict, dict]:
-    """Drop unsafe sentences, downgrade weak citations, and replace aliases with real IDs."""
+    """Check support, label flagged-only citations, and replace aliases with real IDs."""
     checked = AssessmentBody.model_validate(body).model_dump(mode="json")
     aliases = AliasBook(repo, hunt_id, owner_token=owner_token)
     counts = {"removed_uncited": 0, "removed_unknown_alias": 0, "downgraded_observed": 0,
-              "removed_absence_claim": 0, "removed_suspicious_only": 0}
+              "removed_absence_claim": 0, "labelled_suspicious_only": 0}
     suspicious_cache: dict[str, bool] = {}
 
     def check(sentence: dict, section: str) -> dict | None:

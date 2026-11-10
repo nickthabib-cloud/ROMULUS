@@ -64,7 +64,9 @@ def write(m, path, technical_name):
             for sentence in sentences:
                 cites = ", ".join(str(cite) for cite in sentence.get("cites") or [])
                 suffix = f" [{cites}]" if cites else ""
-                paragraph(f"{sentence.get('kind', 'inferred')}: {sentence.get('text', '')}{suffix}")
+                marker = (" Cites only content flagged as possible prompt injection."
+                          if sentence.get("suspicious_content") else "")
+                paragraph(f"{sentence.get('kind', 'inferred')}: {sentence.get('text', '')}{suffix}{marker}")
         checker = assessment.get("checker") or {}
         paragraph(f"Checker changes: {json.dumps(checker, sort_keys=True) if checker else 'none'}.")
     if visibility := m["coverage"].get("zeek_visibility"):
