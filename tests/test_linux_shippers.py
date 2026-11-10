@@ -690,7 +690,7 @@ def _clause(contract, logical):
     return compile_es(intent, contract).body["query"]["bool"]["filter"][1]
 
 
-@pytest.mark.parametrize("logical", sorted(LINUX_SHIPPER_DATASETS))
+@pytest.mark.parametrize("logical", sorted(name for name, shapes in LINUX_SHIPPER_DATASETS.items() if shapes))
 def test_a_logical_dataset_query_names_every_shipper_name_on_both_dataset_fields(logical):
     clause = json.dumps(_clause(_contract(**{"event.module": "keyword", "input.type": "keyword"}), logical))
     for name in shipper_names([logical]):
@@ -722,7 +722,7 @@ def test_shapes_needing_an_unmapped_field_are_left_out_and_listed():
     assert fake.stats["linux_shipper_inventory"]["linux-x"] == {"linux.audit": {"auditd.log": 9},
                                                                 "systemd.journal": {"journald.logs": 3}}
     assert {item.split(":")[0] for item in fake.stats["linux_shapes_not_assessed"]["linux-x"]} == {
-        "auditd+event.module", "input.type", "event.module"}
+        "auditd+event.module", "input.type", "event.module", "linux.text"}
 
 
 def test_an_auditd_log_only_inventory_delivers_the_audit_families():

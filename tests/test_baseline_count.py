@@ -170,6 +170,10 @@ def test_every_accepted_spec_runs_through_the_counter():
         "bl.ssh_tuple": _event("auth", "ssh", outcome=Outcome.success, **{
             "auth.service": "sshd", "source.ip": "192.0.2.10", "user.name": "alice",
         }),
+        "vpn.login_from_new_source_ip_for_user": _event("auth", "vpn", outcome=Outcome.success, **{
+            "auth.service": "openvpn", "auth.phase": "authentication",
+            "source.ip": "192.0.2.10", "user.name": "alice",
+        }),
         "bl.exec_path": _event("process_exec", "path", outcome=Outcome.success, **{
             "process.executable": "/bin/id", "process.exec_file.path": "/bin/id", "process.user": "svc",
         }),

@@ -8,7 +8,7 @@ from romulus.evidence.normalize import normalize_hits
 from romulus.evidence.zeek import normalize_plain_zeek
 from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkWindow, is_agent_reach
 from romulus.hunt.pivot import PivotEventBatch
-from romulus.sources.compile import build_query
+from romulus.sources.compile import UnsupportedSelection, build_query
 from romulus.sources.profile import contract_from_types
 from tests.fixtures import zeek_factory as zf
 from tests.fixtures import zeek_logs as zl
@@ -48,15 +48,21 @@ class NativePivot:
     def fetch_intents(self, owner, fetch_key, intents, retain, **options):
         events = {}
         returned = 0
+        reasons = []
         for intent in intents:
-            build_query(intent, self.contracts[intent.target])
+            try:
+                build_query(intent, self.contracts[intent.target])
+            except UnsupportedSelection as error:
+                reasons.append(str(error))
+                continue
             self.calls.append(intent)
             self.source_queries += 1
             for event in self.events:
                 if intent.window.start <= event.ts < intent.window.end and retain(event):
                     events[event.id] = event
                     returned += 1
-        return PivotEventBatch('complete', ['task'], list(events.values()), {}, [], [], 1)
+        return PivotEventBatch('partial' if reasons else 'complete', ['task'],
+                               list(events.values()), {}, [], reasons, 1)
 
     def save_batch_selection(self, batch, events):
         self.saved.extend(events)

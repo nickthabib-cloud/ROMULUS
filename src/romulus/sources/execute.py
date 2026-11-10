@@ -1,11 +1,12 @@
 """Execute compiled intents against a source and produce complete-or-explicitly-partial outcomes."""
 from __future__ import annotations
 
+import hashlib
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 
-from romulus.sources.compile import compile_es
+from romulus.sources.compile import UnsupportedSelection, compile_es
 from romulus.sources.es import ElasticClient, SourceBudgetExhausted, SourceError
 from romulus.sources.models import Completeness, SearchIntent, SearchOutcome
 from romulus.sources.profile import FieldContract
@@ -26,7 +27,16 @@ def _record(hit: dict) -> dict:
 def execute(client: ElasticClient, intent: SearchIntent, contract: FieldContract, *, pit=None,
             on_query: Callable[[], bool] | None = None, deadline: float | None = None,
             clock: Callable[[], float] = time.monotonic) -> SearchOutcome:
-    q = compile_es(intent, contract, client.settings.es_flavor)
+    try:
+        q = compile_es(intent, contract, client.settings.es_flavor)
+    except UnsupportedSelection as error:
+        now = datetime.now(UTC)
+        reason = str(error)
+        return SearchOutcome(
+            target=intent.target, fingerprint=hashlib.sha256(intent.model_dump_json().encode()).hexdigest(),
+            started_at=now, ended_at=now, completeness=Completeness.failed,
+            reasons=[reason], error=reason, total=None, total_relation="unknown",
+        )
     started = datetime.now(UTC)
 
     def outcome(**kw) -> SearchOutcome:

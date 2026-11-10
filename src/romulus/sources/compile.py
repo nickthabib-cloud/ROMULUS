@@ -21,6 +21,10 @@ class CompileError(ValueError):
     """The intent cannot be compiled exactly; never silently loosened."""
 
 
+class UnsupportedSelection(CompileError):
+    """The source lacks fields required for a supported logical dataset selector."""
+
+
 _WILDCARD_META = re.compile(r"([*?\\])")
 
 
@@ -85,6 +89,8 @@ def _linux_text_clause(contract: FieldContract, fields: list[str]) -> dict | Non
     sources = [{"exists": {"field": name}} for name in fields]
     sources.extend(query for query in (clause("input.type", "in", list(TEXT_INPUT_TYPES)),
                                       clause("log.file.path", "exists")) if query is not None)
+    if not sources:
+        return None
     return {"bool": {"filter": [
         {"bool": {"should": payload, "minimum_should_match": 1}},
         {"bool": {"should": sources, "minimum_should_match": 1}}],
@@ -122,6 +128,8 @@ def _linux_datasets(p: Predicate, contract: FieldContract, natives: tuple[str, .
         spec = contract.spec(name)
         clauses.append({"bool": {"filter": [{"term": {spec.native if spec is not None else name: value}}],
                                  "must_not": [{"exists": {"field": field}} for field in fields]}})
+    if not clauses and "linux.text" in values:
+        raise UnsupportedSelection("linux.text is not searchable: mapped text and source selector fields are required")
     return clauses[0] if len(clauses) == 1 else {"bool": {"should": clauses, "minimum_should_match": 1}}
 
 

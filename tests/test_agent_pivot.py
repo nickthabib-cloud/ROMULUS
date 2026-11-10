@@ -22,7 +22,7 @@ from romulus.evidence.typed import Outcome, RawRef, TypedEvent, fv
 from romulus.hunt import pivot as pivot_module
 from romulus.hunt.pivot import PivotExecutor
 from romulus.hunt.publish import publish_match
-from romulus.sources.compile import compile_es
+from romulus.sources.compile import CompileError, compile_es
 from romulus.sources.models import Completeness, SearchIntent, SearchOutcome, Window
 from romulus.sources.profile import contract_from_types
 from romulus.store.db import make_engine, migrate
@@ -478,7 +478,7 @@ def test_ip_timeline_searches_each_host_dataset_and_reports_dataset_coverage(mon
     host_intents = [intent for intent in seen if "host" in intent.target]
     assert [next(p.value for p in intent.filters if p.field == "event.dataset")
             for intent in host_intents] == [
-        "linux.audit", "systemd.journal", "linux.syslog", "apache.access", "apache.error",
+        "linux.audit", "systemd.journal", "linux.syslog", "apache.access", "apache.error", "linux.text",
     ]
     apache = next(intent for intent in host_intents
                   if any(p.value == "apache.access" for p in intent.filters))
@@ -501,6 +501,7 @@ def test_ip_timeline_searches_each_host_dataset_and_reports_dataset_coverage(mon
         ("romulus-host-x", "linux.syslog", "complete"),
         ("romulus-host-x", "apache.access", "complete"),
         ("romulus-host-x", "apache.error", "complete"),
+        ("romulus-host-x", "linux.text", "complete"),
     }
 
 
@@ -524,7 +525,7 @@ def test_ip_timeline_marks_unsearchable_host_datasets_unresolved(monkeypatch):
     assert result.status == "partial"
     unresolved = [cell for cell in result.coverage if cell.target == "romulus-host-x"]
     assert {cell.dataset for cell in unresolved} == {
-        "linux.audit", "systemd.journal", "linux.syslog", "apache.access", "apache.error",
+        "linux.audit", "systemd.journal", "linux.syslog", "apache.access", "apache.error", "linux.text",
     }
     assert all(cell.status == "partial" and cell.unresolved_ranges for cell in unresolved)
 
@@ -656,13 +657,18 @@ def test_each_tool_compiles_source_filters_for_only_the_families_it_summarizes()
     expected = {
         "entity_timeline": [["linux.audit", "auditd.log", "auditd_manager.auditd", "systemd.journal",
                              "journald.logs", "system.auth", "system.syslog", "apache.access", "apache.error"]],
-        "auth_activity": [["systemd.journal", "journald.logs"], ["system.auth", "system.syslog"]],
+        "auth_activity": [["systemd.journal", "journald.logs"], ["system.auth", "system.syslog"], None],
         "process_tree": [["linux.audit", "auditd.log", "auditd_manager.auditd"]],
         "ids_alerts": ["suricata.eve.alert"],
     }
     for tool, intents in by_tool.items():
         assert len(intents) == len(expected[tool])
         for intent, names in zip(intents, expected[tool], strict=True):
+            if names is None:
+                # A text-only selector without a mapped payload is unresolved, never a broad query.
+                with pytest.raises(CompileError, match="linux.text"):
+                    compile_es(intent, contracts[intent.target])
+                continue
             compiled = compile_es(intent, contracts[intent.target])
             filters = compiled.body["query"]["bool"]["filter"]
             family_clause = filters[1]

@@ -164,6 +164,9 @@ def text_dataset_inventory(inventory: dict) -> dict:
 
 def text_candidate(source: dict) -> bool:
     """A text-bearing, otherwise unclaimed host document. Call after authoritative shape dispatch."""
+    # Unmarked Windows structure is not authoritative, and its rendered text is not a Linux record.
+    if isinstance(source.get("winlog"), dict):
+        return False
     return bool(text_payload(source) and match_shape(source) is None and (
         document_dataset(source) or _value(source, "input.type") in TEXT_INPUT_TYPES
         or isinstance(_value(source, "log.file.path"), str)))

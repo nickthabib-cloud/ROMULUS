@@ -4,6 +4,8 @@ https://www.rfc-editor.org/rfc/rfc3164#section-4.1
 https://www.rfc-editor.org/rfc/rfc5424#section-6
 https://httpd.apache.org/docs/2.4/logs.html
 https://nginx.org/en/docs/http/ngx_http_log_module.html
+https://github.com/nginx/nginx/blob/release-1.28.0/src/core/ngx_log.c#L117-L149
+https://github.com/nginx/nginx/blob/release-1.28.0/src/core/ngx_times.c#L150-L155
 """
 import tracemalloc
 from collections import Counter
@@ -112,6 +114,18 @@ def test_datasetless_file_input_is_selected_by_its_mapped_fields():
     assert "filestream" in str(query) and "event.dataset" not in str(query)
     event = normalize_hits([hit(SSH, "", input={"type": "filestream"})])[0][0]
     assert event.family == "auth"
+
+
+@pytest.mark.parametrize("fields", [{"event.dataset": "keyword"}, {"message": "text"}])
+def test_unsearchable_text_selector_is_unsupported_not_an_empty_boolean_query(fields):
+    from romulus.sources.compile import CompileError
+
+    contract = contract_from_types("host-logs", {"@timestamp": "date", **fields})
+    intent = SearchIntent(kind="raw", target="host-logs", window=Window(
+        start=datetime(2026, 11, 9, tzinfo=UTC), end=datetime(2026, 11, 10, tzinfo=UTC)),
+        filters=[Predicate(field="event.dataset", op="eq", value="linux.text")])
+    with pytest.raises(CompileError, match="linux.text"):
+        compile_es(intent, contract)
 
 
 def test_inventory_names_arbitrary_text_datasets_without_guessing_network_sources():

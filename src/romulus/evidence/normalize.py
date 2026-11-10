@@ -3353,15 +3353,33 @@ def _linux_events(hit: dict, normalizer, *args) -> list[TypedEvent]:
         program = (_get(src, "syslog.identifier") or _get(src, "log.syslog.appname")
                    or _get(src, "process.name") or _get(src, "journald.process.name"))
         path = "message"
+        boot_origin = None
         if normalizer is normalize_journal:
             journal = json.loads(_get(src, "event.original"))
             message = journal.get("MESSAGE") or message
             program = journal.get("SYSLOG_IDENTIFIER") or journal.get("_COMM")
             path = "event.original#journal:MESSAGE"
+            boot_origin = f"{hit['_id']}:event.original#journal:_BOOT_ID"
+        elif normalizer is normalize_journal_fields:
+            journal, paths = journal_from_fields(src)
+            message = journal.get("MESSAGE")
+            program = journal.get("SYSLOG_IDENTIFIER") or journal.get("_COMM")
+            path = paths.get("MESSAGE", "message")
+            boot_origin = _indexed_origin(hit["_id"], paths)("_BOOT_ID")
         if isinstance(program, str) and isinstance(message, str):
             events = _program_events(hit, program, message, f"{hit['_id']}:{path}~{program}")
             if events:
+                if boot_origin is not None and (boot := _journal_boot(journal)) is not None:
+                    for event in events:
+                        event.fields["host.boot.id"] = fv(boot, boot_origin)
                 return events
+        if normalizer is normalize_syslog and not program and text_payload(src) is not None:
+            # A custom syslog pipeline may retain the complete envelope instead of
+            # indexed program/body fields. Only previously unsupported records reach here.
+            try:
+                return normalize_text(hit)
+            except Skip:
+                pass
         raise
 
 
