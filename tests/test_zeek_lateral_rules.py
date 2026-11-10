@@ -267,3 +267,54 @@ def test_long_ticket_claim_identifies_requested_validity_without_inventing_a_gra
     assert any('benign clients can request' in note.lower() for note in match.notes)
     assert 'ticket validity beyond' not in match.claim.lower()
     owner.release_state()
+
+
+@pytest.mark.parametrize('endpoint,operation', [('efsrpc','EfsRpcOpenFileRaw'),('efsrpc2','EfsRpcEncryptFileSrv')])
+def test_wire_coercion_is_high_in_all_shapes_and_not_an_admin_call(endpoint,operation):
+    row=zl.DCE_RPC.with_(endpoint=endpoint,operation=operation)
+    check_shapes('WireCoercionCall',row,'high',attack=('T1187',))
+    check_shapes('RpcRemoteAdminCall',row,None)
+
+
+def test_print_notification_counts_only_toward_a_declared_domain_controller():
+    row=zl.DCE_RPC.with_(endpoint='spoolss',operation='RpcRemoteFindFirstPrinterChangeNotificationEx')
+    check_shapes('WireCoercionCall',row,None)                                    # no controller declared
+    check_shapes('WireCoercionCall',row,None,facts(domain_controller_addresses=(zl.CLIENT,)))
+    check_shapes('WireCoercionCall',row,'high',facts(domain_controller_addresses=(zl.DC,)),
+                 note='the destination is a declared domain controller (the PrinterBug target)')
+
+
+def test_wire_coercion_ignores_other_rpc_classes():
+    check_shapes('WireCoercionCall',zl.DCE_RPC,None)
+    check_shapes('WireCoercionCall',zl.DCE_RPC.with_(endpoint='drsuapi',operation='DRSGetNCChanges'),None)
+
+
+def test_rdp_from_inside_the_site_is_a_lead_and_from_outside_belongs_to_the_external_rule():
+    inside=facts(internal_networks=('10.0.0.0/8',))
+    check_shapes('InternalRdpSession',zl.RDP,'lead',inside,attack=('T1021.001',))
+    check_shapes('RdpRemoteSession',zl.RDP,None,inside)
+    outbound=zl.RDP.with_(**{'id.resp_h':'203.0.113.40'})
+    check_shapes('InternalRdpSession',outbound,'lead',inside)
+    outside=facts(internal_networks=('192.0.2.0/24',))
+    check_shapes('InternalRdpSession',zl.RDP,None,outside)
+    check_shapes('RdpRemoteSession',zl.RDP,'high',outside)
+    # a source the site's ranges cannot place is the external rule's caveated lead, never counted twice
+    v6=zl.RDP.with_(**{'id.orig_h':'fd00:10::5','id.resp_h':'fd00:10::20'})
+    check_shapes('InternalRdpSession',v6,None,inside)
+    check_shapes('InternalRdpSession',zl.RFB,None,inside)
+    # undeclared networks: the default definition decides, with the assumed-direction note
+    check_shapes('InternalRdpSession',zl.RDP,'lead',note=DIRECTION_ASSUMED_REASON)
+
+
+def test_internal_rdp_folds_one_lead_per_pair():
+    rows=[zl.RDP.with_(uid=f'CrdpConn{i:09d}') for i in range(50)]
+    owner=rule('InternalRdpSession',facts(internal_networks=('10.0.0.0/8',)))
+    found={}
+    for row in rows:
+        for match in owner.consume([every_shape(row)['plain']]):
+            found[match.group_key]=match
+    for match in owner.finalize():
+        found[match.group_key]=match
+    assert len(found)==1
+    [match]=found.values()
+    assert match.proposed_lane=='lead' and '50 raw reference(s)' in match.claim

@@ -306,7 +306,7 @@ A technique is covered only by a rule that explicitly declares that ATT&CK id.
 | [`T1110.001`](https://attack.mitre.org/techniques/T1110/001/) | Password Guessing | sub-technique of [`T1110`](https://attack.mitre.org/techniques/T1110/) | positive-only | [auth.password_guessing](#rule-auth-password-guessing) (positive-only)<br>[host.ssh_password_guessing](#rule-host-ssh-password-guessing) (positive-only)<br>[net.ntlm_password_guessing](#rule-net-ntlm-password-guessing) (positive-only)<br>[net.zeek_alert](#rule-net-zeek-alert) (positive-only)<br>[win.brute_force](#rule-win-brute-force) (positive-only)<br>[win.distributed_auth_failures](#rule-win-distributed-auth-failures) (positive-only)<br>[win.mssql_login_bruteforce](#rule-win-mssql-login-bruteforce) (positive-only) | auth<br>database_audit<br>net_alert<br>ntlm_tx |
 | [`T1110.003`](https://attack.mitre.org/techniques/T1110/003/) | Password Spraying | sub-technique of [`T1110`](https://attack.mitre.org/techniques/T1110/) | positive-only | [auth.password_spraying](#rule-auth-password-spraying) (positive-only)<br>[host.ssh_password_spraying](#rule-host-ssh-password-spraying) (positive-only)<br>[net.ntlm_password_spray](#rule-net-ntlm-password-spray) (positive-only)<br>[win.mssql_login_bruteforce](#rule-win-mssql-login-bruteforce) (positive-only)<br>[win.password_spray](#rule-win-password-spray) (positive-only) | auth<br>database_audit<br>ntlm_tx |
 | [`T1111`](https://attack.mitre.org/techniques/T1111/) | Multi-Factor Authentication Interception | — | none | — | — |
-| [`T1187`](https://attack.mitre.org/techniques/T1187/) | Forced Authentication | — | positive-only | [win.remote_management_pipe](#rule-win-remote-management-pipe) (positive-only)<br>[win.rpc_coercion_call](#rule-win-rpc-coercion-call) (positive-only) | rpc_call<br>share_access |
+| [`T1187`](https://attack.mitre.org/techniques/T1187/) | Forced Authentication | — | positive-only | [net.rpc_coercion_call](#rule-net-rpc-coercion-call) (positive-only)<br>[win.remote_management_pipe](#rule-win-remote-management-pipe) (positive-only)<br>[win.rpc_coercion_call](#rule-win-rpc-coercion-call) (positive-only) | rpc_call<br>rpc_tx<br>share_access |
 | [`T1212`](https://attack.mitre.org/techniques/T1212/) | Exploitation for Credential Access | — | none | — | — |
 | [`T1528`](https://attack.mitre.org/techniques/T1528/) | Steal Application Access Token | — | none | — | — |
 | [`T1539`](https://attack.mitre.org/techniques/T1539/) | Steal Web Session Cookie | — | none | — | — |
@@ -377,7 +377,7 @@ A technique is covered only by a rule that explicitly declares that ATT&CK id.
 | Technique | Name | Sub-techniques | Strength | Covering rules | Telemetry families |
 |---|---|---|---|---|---|
 | [`T1021`](https://attack.mitre.org/techniques/T1021/) | Remote Services | [`T1021.007`](https://attack.mitre.org/techniques/T1021/007/) Cloud Services — not covered<br>[`T1021.008`](https://attack.mitre.org/techniques/T1021/008/) Direct Cloud VM Connections — not covered<br>6 covered sub-technique(s) listed separately: [`T1021.001`](https://attack.mitre.org/techniques/T1021/001/), [`T1021.002`](https://attack.mitre.org/techniques/T1021/002/), [`T1021.003`](https://attack.mitre.org/techniques/T1021/003/), [`T1021.004`](https://attack.mitre.org/techniques/T1021/004/), [`T1021.005`](https://attack.mitre.org/techniques/T1021/005/), [`T1021.006`](https://attack.mitre.org/techniques/T1021/006/) | context-only | [context.lateral_movement](#rule-context-lateral-movement) (context-only) | net_socket<br>process_exec |
-| [`T1021.001`](https://attack.mitre.org/techniques/T1021/001/) | Remote Desktop Protocol | sub-technique of [`T1021`](https://attack.mitre.org/techniques/T1021/) | positive-only | [context.lateral_movement](#rule-context-lateral-movement) (context-only)<br>[net.external_rdp](#rule-net-external-rdp) (positive-only)<br>[win.client_drive_process](#rule-win-client-drive-process) (positive-only)<br>[win.rdp_external_source](#rule-win-rdp-external-source) (positive-only)<br>[win.rdp_headless_client](#rule-win-rdp-headless-client) (positive-only)<br>[win.rdp_runmru_write](#rule-win-rdp-runmru-write) (positive-only)<br>[win.registry_rdp](#rule-win-registry-rdp) (positive-only) | auth<br>net_socket<br>process_exec<br>registry_change<br>remote_access<br>remote_session |
+| [`T1021.001`](https://attack.mitre.org/techniques/T1021/001/) | Remote Desktop Protocol | sub-technique of [`T1021`](https://attack.mitre.org/techniques/T1021/) | positive-only | [context.lateral_movement](#rule-context-lateral-movement) (context-only)<br>[net.external_rdp](#rule-net-external-rdp) (positive-only)<br>[net.internal_rdp](#rule-net-internal-rdp) (positive-only)<br>[win.client_drive_process](#rule-win-client-drive-process) (positive-only)<br>[win.rdp_external_source](#rule-win-rdp-external-source) (positive-only)<br>[win.rdp_headless_client](#rule-win-rdp-headless-client) (positive-only)<br>[win.rdp_runmru_write](#rule-win-rdp-runmru-write) (positive-only)<br>[win.registry_rdp](#rule-win-registry-rdp) (positive-only) | auth<br>net_socket<br>process_exec<br>registry_change<br>remote_access<br>remote_session |
 | [`T1021.002`](https://attack.mitre.org/techniques/T1021/002/) | SMB/Windows Admin Shares | sub-technique of [`T1021`](https://attack.mitre.org/techniques/T1021/) | positive-only | [context.lateral_movement](#rule-context-lateral-movement) (context-only)<br>[net.smb_admin_share_pe](#rule-net-smb-admin-share-pe) (positive-only)<br>[net.zeek_alert](#rule-net-zeek-alert) (positive-only)<br>[win.admin_share_access](#rule-win-admin-share-access) (positive-only)<br>[win.admin_share_transfer](#rule-win-admin-share-transfer) (positive-only)<br>[win.remote_management_pipe](#rule-win-remote-management-pipe) (positive-only)<br>[win.service_child_output_to_admin_share](#rule-win-service-child-output-to-admin-share) (positive-only)<br>[win.share_created](#rule-win-share-created) (positive-only)<br>[win.tool_named_pipe](#rule-win-tool-named-pipe) (positive-only) | file_transfer<br>net_alert<br>net_socket<br>pipe_event<br>process_exec<br>process_termination<br>share_access<br>share_change<br>smb_tx<br>system_state |
 | [`T1021.003`](https://attack.mitre.org/techniques/T1021/003/) | Distributed Component Object Model | sub-technique of [`T1021`](https://attack.mitre.org/techniques/T1021/) | positive-only | [net.rpc_remote_admin_call](#rule-net-rpc-remote-admin-call) (positive-only)<br>[win.dcom_activated_child](#rule-win-dcom-activated-child) (positive-only)<br>[win.rpc_remote_admin_call](#rule-win-rpc-remote-admin-call) (positive-only) | process_exec<br>process_termination<br>rpc_call<br>rpc_tx<br>system_state |
 | [`T1021.004`](https://attack.mitre.org/techniques/T1021/004/) | SSH | sub-technique of [`T1021`](https://attack.mitre.org/techniques/T1021/) | positive-only | [context.entry_point_promotion](#rule-context-entry-point-promotion) (context-only)<br>[context.lateral_movement](#rule-context-lateral-movement) (context-only)<br>[context.staging_and_transfer](#rule-context-staging-and-transfer) (context-only)<br>[host.interactive_privileged_login](#rule-host-interactive-privileged-login) (positive-only)<br>[host.ssh_login_external_source](#rule-host-ssh-login-external-source) (positive-only)<br>[host.ssh_success_after_failures](#rule-host-ssh-success-after-failures) (positive-only)<br>[net.arkime_ssh_reverse_shell_tag](#rule-net-arkime-ssh-reverse-shell-tag) (positive-only)<br>[net.outbound_ssh_external](#rule-net-outbound-ssh-external) (positive-only)<br>[net.rare_client_fingerprint](#rule-net-rare-client-fingerprint) (context-only)<br>[net.zeek_alert](#rule-net-zeek-alert) (positive-only) | auth<br>net_alert<br>net_flow<br>net_session<br>net_socket<br>process_exec<br>ssh_session<br>tls_session |
@@ -1573,6 +1573,18 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 - Behavior: one endpoint pair exchanged bulk ICMP echo payload, materially asymmetric request/reply payload, nonstandard echo codes, or echo traffic sustained for at least 30 minutes at one request/reply exchange per second with payload above normal operating-system defaults
 - Positive-only reason: only typed echo type/code (with code optional where the sensor does not record it) plus complete byte/packet counters are evaluated; flow telemetry does not expose payload bytes, so packet-size and volume shape cannot establish payload entropy or prove a tunnel
 
+<a id="rule-net-internal-rdp"></a>
+### `net.internal_rdp` — RDP session negotiation from a host inside the site
+
+- Version: `1`; status: `active`
+- Kind: `aggregate`; lane: `lead`; severity: `medium`
+- Coverage strength: **positive-only**
+- ATT&CK: [`T1021.001`](https://attack.mitre.org/techniques/T1021/001/)
+- Telemetry families: remote_session
+- Required typed fields: destination.ip<br>remote.protocol<br>source.ip
+- Behavior: RDP session negotiation from a host inside the site
+- Positive-only reason: Zeek network observations report typed positive evidence; absence and successful action are not established.
+
 <a id="rule-net-kerberos-principal-enumeration"></a>
 ### `net.kerberos_principal_enumeration` — KDC unknown-principal errors for many distinct principals
 
@@ -1711,6 +1723,18 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 - Telemetry families: net_session<br>ssh_session<br>tls_session
 - Required typed fields: destination.ip<br>source.ip
 - Behavior: a JA3, JA4, JA3S or HASSH value, or an SSH client software string, appears only on connections from one internal address to public endpoints in the window
+
+<a id="rule-net-rpc-coercion-call"></a>
+### `net.rpc_coercion_call` — A remote authentication-coercion RPC call was observed
+
+- Version: `1`; status: `active`
+- Kind: `aggregate`; lane: `lead`; severity: `medium`
+- Coverage strength: **positive-only**
+- ATT&CK: [`T1187`](https://attack.mitre.org/techniques/T1187/)
+- Telemetry families: rpc_tx
+- Required typed fields: destination.ip<br>source.ip
+- Behavior: A remote authentication-coercion RPC call was observed
+- Positive-only reason: Zeek network observations report typed positive evidence; absence and successful action are not established.
 
 <a id="rule-net-rpc-remote-admin-call"></a>
 ### `net.rpc_remote_admin_call` — A classified remote administration RPC call was observed

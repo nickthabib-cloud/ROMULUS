@@ -159,6 +159,36 @@ class RpcRemoteAdminCall(ZeekBehaviorRule):
             common=text, content=json.dumps([*peers, call.interface.uuid, call.op_class]))]
 
 
+class WireCoercionCall(ZeekBehaviorRule):
+    """A remote authentication-coercion call (EFSRPC, DFSNM, FSRVP and similar) seen on the wire, and a print-spooler
+    change-notification request sent to a declared domain controller. Ordinary print clients make notification
+    requests to their print servers all day, so that call counts only toward a controller, the PrinterBug target."""
+    id = 'net.rpc_coercion_call'
+    title = 'A remote authentication-coercion RPC call was observed'
+    families = ('rpc_tx',)
+    required_fields = ('source.ip', 'destination.ip')
+    attack = ('T1187',)
+    benign = ('Remote EFS file operations and DFS namespace administration use coercion-class interfaces; print '
+              'servers on domain controllers receive notification requests from their clients.',)
+
+    def judge(self, event):
+        if not _zeek(event) or event.family != 'rpc_tx' or not (peers := _peers(event)):
+            return []
+        call = _call(event)
+        if call.interface is None or call.op_class not in {'coercion', 'print_notification'}:
+            return []
+        if call.op_class == 'print_notification':
+            controllers = getattr(getattr(self, 'site_facts', None), 'domain_controller_addresses', ())
+            if not address_member(peers[1], controllers):
+                return []
+            lane, notes = 'high', ('the destination is a declared domain controller (the PrinterBug target)',)
+        else:
+            lane, notes = 'high', ()
+        text = f'RPC {call.op_class} call observed from {peers[0]} to {peers[1]} on interface {call.interface.uuid}'
+        return [signal(event, self.id, text, call.attack or self.attack, _RPC_FIELDS, lane=lane, severity='high',
+            notes=notes, common=text, content=json.dumps([*peers, call.interface.uuid, call.op_class]))]
+
+
 class WireReplicationCall(ZeekBehaviorRule):
     id = 'net.rpc_replication_call'
     title = 'A directory replication RPC call was observed'
@@ -200,6 +230,7 @@ class _RemoteSession(ZeekBehaviorRule):
     research = (_REMOTE_DOC,)
     protocol = ''
     inside_lane = None
+    outside = True          # this rule judges sessions from outside the site (and those it cannot place)
 
     def judge(self, event):
         if (not _zeek(event) or event.family != 'remote_session'
@@ -210,11 +241,15 @@ class _RemoteSession(ZeekBehaviorRule):
         networks = _site_networks(tuple(internal), tuple(getattr(site, 'external_networks', ()))) if internal else current()
         source = ip_address(peers[0])
         if not any(network.version == source.version for network in networks.internal):
+            if not self.outside:
+                return []
             # e.g. IPv4-only ranges on a dual-stack site: an IPv6 source cannot be placed inside or outside
             lane, notes = 'lead', (
                 f'internal networks name no IPv{source.version} range; source direction is unresolved',)
         elif networks.is_internal(source):
             lane, notes = self.inside_lane, ()
+        elif not self.outside:
+            return []
         else:
             # outside the site: high only under a declared definition; an assumed one (RFC 1918 defaults) cannot
             # carry "from outside the declared site" for networks that use public addresses internally
@@ -234,6 +269,16 @@ class RdpRemoteSession(_RemoteSession):
     id, title = 'net.external_rdp', 'RDP session negotiation from outside the declared site'
     protocol = 'rdp'
     attack = ('T1133', 'T1021.001')
+
+
+class InternalRdpSession(_RemoteSession):
+    """RDP from a host inside the site: to another inside host, the most common interactive lateral movement; to an
+    outside one, an interactive session leaving the site. One lead per source and destination pair; administrators'
+    sessions to servers look the same on the wire, which the host's logon records and the pair's history settle."""
+    id, title = 'net.internal_rdp', 'RDP session negotiation from a host inside the site'
+    protocol, inside_lane, outside = 'rdp', 'lead', False
+    attack = ('T1021.001',)
+    benign = ('Administrators and help desks connecting to servers and workstations; jump hosts.',)
 
 
 class VncRemoteSession(_RemoteSession):
@@ -295,4 +340,5 @@ class TgsLongLifetime(ZeekBehaviorRule):
 
 # TgsLongLifetime is not registered: Windows clients request till 2037-09-13 (no expiry) on ordinary TGS requests,
 # so the requested validity marks nearly every ticket; it needs the granted lifetime, which Zeek does not log.
-RULES = (RpcRemoteAdminCall, WireReplicationCall, RdpRemoteSession, VncRemoteSession, HttpWinrm)
+RULES = (RpcRemoteAdminCall, WireCoercionCall, WireReplicationCall, RdpRemoteSession, InternalRdpSession,
+         VncRemoteSession, HttpWinrm)

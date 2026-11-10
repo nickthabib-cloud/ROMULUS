@@ -18,7 +18,8 @@ from tests.test_zeek_sweep_e2e import _repo
 
 def test_registered_pack_publishes_the_complete_lateral_slice_with_resolvable_sources(tmp_path, monkeypatch):
     rows = [zl.DCE_RPC, zl.DCE_RPC.with_(uid='Creplication000001', endpoint='drsuapi', operation='DRSGetNCChanges'),
-            zl.RDP.with_(**{'id.orig_h': '203.0.113.25'}), zl.RFB,
+            zl.DCE_RPC.with_(uid='Ccoercion00000001', endpoint='efsrpc', operation='EfsRpcOpenFileRaw'),
+            zl.RDP.with_(**{'id.orig_h': '203.0.113.25'}), zl.RDP.with_(uid='CrdpInside0000001'), zl.RFB,
             zl.HTTP.with_(uid='Cwinrm00000001', uri='/wsman', **{'id.resp_p': 5985, 'id.resp_h': zl.DC}),
             zl.KERBEROS, SHARE, FILES, PE]
     for name, count, distinct in [('ZerologonRate', 50, True), ('Rc4TgsFanout', 10, True),
