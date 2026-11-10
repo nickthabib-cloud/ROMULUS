@@ -32,6 +32,7 @@ from romulus.web import agent_views, site_form
 from romulus.web.agent_routes import register_agent_routes
 from romulus.web.auth import RateLimiter, Sessions, csrf_ok, verify
 from romulus.web.catalog_routes import register_catalog_routes
+from romulus.web.finding_order import finding_page
 from romulus.web.indicator_routes import IndicatorBodyLimit, register_indicator_routes
 from romulus.web.request_routes import DetectionRequestBodyLimit, register_request_routes
 
@@ -192,13 +193,18 @@ def create_app(s: Settings, env_file: Path | None = None) -> FastAPI:
 
             from romulus.store import schema as tables
             predicates = (tables.candidate.c.lane == lane,) if lane in LANE_ORDER else (tables.candidate.c.lane != "context",)
-            cands, cands_more, cursor = agent_views.page_rows(repo, tables.candidate, hunt_id, after=after,
-                predicates=predicates, columns=tuple(getattr(tables.candidate.c, key) for key in (
-                    "id", "lane", "severity", "confidence", "priority", "ts", "rule_id", "claim", "provenance",
-                    "agent_hypothesis_id")))
+            try:
+                cands, cands_more, cursor = finding_page(repo, hunt_id, after=after,
+                    predicates=predicates, columns=tuple(getattr(tables.candidate.c, key) for key in (
+                        "id", "lane", "severity", "confidence", "priority", "ts", "rule_id", "claim", "provenance",
+                        "agent_hypothesis_id")))
+            except ValueError as error:
+                raise HTTPException(400, "Invalid page cursor") from error
             agent_views.validate_hypothesis_links(repo, hunt_id, cands)
             cands_next = "?" + urlencode({"lane": lane, "after": cursor}) if cursor else None
         else:
+            if after:
+                raise HTTPException(400, "This hunt does not use a findings cursor")
             cands = repo.candidates(hunt_id, [lane] if lane in LANE_ORDER else None)
             cands.sort(key=lambda c: (LANE_ORDER.get(c["lane"], 9), -c["priority"], str(c["ts"])))
             if not lane:

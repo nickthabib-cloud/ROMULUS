@@ -10,6 +10,7 @@ from sqlalchemy import select
 from romulus.catalog.browser import CatalogBrowser
 from romulus.store import schema as t
 from romulus.web import agent_views as view
+from romulus.web.finding_order import finding_page
 
 
 def register_agent_routes(app, repo, need, page):
@@ -98,8 +99,14 @@ def register_agent_routes(app, repo, need, page):
             raise HTTPException(404)
         table = tables[kind]
         columns = (table.c.id, table.c.claim, table.c.lane, table.c.agent_hypothesis_id) if kind == "findings" else None
-        rows, more, cursor = view.page_rows(repo, table, hunt_id, after=after, columns=columns,
-            predicates=(table.c.provenance == "agent",) if kind == "findings" else ())
+        if kind == "findings":
+            try:
+                rows, more, cursor = finding_page(repo, hunt_id, after=after, columns=columns,
+                    predicates=(table.c.provenance == "agent",))
+            except ValueError as error:
+                raise HTTPException(400, "Invalid page cursor") from error
+        else:
+            rows, more, cursor = view.page_rows(repo, table, hunt_id, after=after, columns=columns)
         if kind == "findings":
             view.validate_hypothesis_links(repo, hunt_id, rows)
         for row in rows:

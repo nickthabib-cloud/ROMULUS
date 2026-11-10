@@ -20,6 +20,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     event,
+    literal_column,
 )
 
 from romulus.store.change_log import trigger_statements as _change_triggers
@@ -234,6 +235,9 @@ candidate = Table(
     CheckConstraint("provenance IN ('deterministic', 'agent')", name="ck_candidate_provenance"),
 )
 Index("ix_candidate_hunt_lane", candidate.c.hunt_id, candidate.c.lane, candidate.c.priority)
+Index("ix_candidate_finding_order", candidate.c.hunt_id,
+      literal_column("CASE lane WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'lead' THEN 2 ELSE 3 END"),
+      candidate.c.priority.desc(), literal_column("coalesce(ts, '~')"), candidate.c.id)
 
 candidate_host = Table(
     "candidate_host", metadata,
@@ -1385,6 +1389,8 @@ agent_change = Table(
     sqlite_autoincrement=True,
 )
 Index("ix_agent_change_hunt_seq", agent_change.c.hunt_id, agent_change.c.seq)
+Index("ix_agent_change_row_seq", agent_change.c.hunt_id, agent_change.c.kind,
+      agent_change.c.row_id, agent_change.c.seq)
 
 # Install only after every source and index table exists, including metadata-only stores.
 for _statement in _change_triggers().values():

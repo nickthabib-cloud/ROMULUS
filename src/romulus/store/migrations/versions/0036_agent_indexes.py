@@ -62,11 +62,15 @@ def upgrade():
         candidate_id VARCHAR NOT NULL REFERENCES candidate(id) ON DELETE CASCADE,
         event_id VARCHAR NOT NULL, PRIMARY KEY(candidate_id,event_id))""")
     c.exec_driver_sql("CREATE INDEX ix_candidate_event_lookup ON candidate_event(hunt_id,event_id,candidate_id)")
+    c.exec_driver_sql("""CREATE INDEX ix_candidate_finding_order ON candidate(
+        hunt_id, CASE lane WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'lead' THEN 2 ELSE 3 END,
+        priority DESC, coalesce(ts, '~'), id)""")
     c.exec_driver_sql("""CREATE TABLE agent_change (
         seq INTEGER PRIMARY KEY AUTOINCREMENT, hunt_id VARCHAR NOT NULL REFERENCES hunt(id),
         kind VARCHAR NOT NULL CHECK(kind IN ('run','hypothesis','session','tool_call','finding')),
         row_id VARCHAR NOT NULL)""")
     c.exec_driver_sql("CREATE INDEX ix_agent_change_hunt_seq ON agent_change(hunt_id,seq)")
+    c.exec_driver_sql("CREATE INDEX ix_agent_change_row_seq ON agent_change(hunt_id,kind,row_id,seq)")
     for table, (kind, key, _) in CHANGE_COLUMNS.items():
         after = ""
         while True:
@@ -93,5 +97,6 @@ def downgrade():
         c.exec_driver_sql("BEGIN")
     for name in trigger_statements():
         c.exec_driver_sql(f"DROP TRIGGER {name}")
+    c.exec_driver_sql("DROP INDEX ix_candidate_finding_order")
     c.exec_driver_sql("DROP TABLE agent_change")
     c.exec_driver_sql("DROP TABLE candidate_event")
