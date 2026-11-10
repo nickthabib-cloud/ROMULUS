@@ -107,6 +107,9 @@ class ProfileClient:
 
     def search(self, target, body):
         self.bodies.append(body)
+        if body.get("query", {}).get("bool", {}).get("must_not") == [{"exists": {"field": "@timestamp"}}]:
+            # Every synthetic record in this profile fixture has its pipeline time.
+            return {"hits": {"total": {"value": 0, "relation": "eq"}}}
         hosts = body.get("aggs", {}).get("hosts", {}).get("composite", {})
         after = hosts.get("after")
         page = {"buckets": [{"key": {"host": "ws02.example.test" if after else "ws01.example.test"},

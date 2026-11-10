@@ -69,7 +69,8 @@ def integer(value: object) -> int | None:
 def signal(event: TypedEvent, behavior: str, text: str, attack: tuple[str, ...], fields: tuple[str, ...],
            *, lane: str = "lead", severity: str = "medium", notes: tuple[str, ...] = (), content: str = "",
            common: str = "") -> Hit:
-    names = tuple(dict.fromkeys(("event.code", "event.channel", *fields)))
+    identity = ("ecar.object", "ecar.action") if event.normalizer.partition("@")[0] == "ecar" else ("event.code", "event.channel")
+    names = tuple(dict.fromkeys((*identity, *fields)))
     predicate = [pf(event, name) for name in names if event.has(name)]
     return Hit(behavior, text, lane, severity, attack, predicate, content=content, common=common or text, notes=notes)
 
@@ -79,6 +80,7 @@ class WindowsEventRule(WindowsProcessRule):
 
     families: ClassVar[tuple[str, ...]] = ()
     windows_event_classes = ()
+    ecar_compatible = False
     reads_command_line = False
     kind = "aggregate"
     direct_eligible = True

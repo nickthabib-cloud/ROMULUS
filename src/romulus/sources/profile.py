@@ -9,6 +9,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, model_serializer, model_validator
 
 from romulus.errors import SourceError
+from romulus.evidence.ecar_catalog import ECAR_ROWS
 from romulus.evidence.linux_catalog import (
     LINUX_LOGICAL_DATASETS,
     TEXT_INPUT_TYPES,
@@ -101,6 +102,8 @@ class FieldContract(BaseModel):
     windows_shapes: tuple[str, ...] = ()
     # None means the bounded text-source count was unavailable, never a complete negative.
     linux_text_mixed: bool | None = False
+    ecar: bool = False
+    temporal_gaps: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def _untyped_names(self):
@@ -129,6 +132,10 @@ class FieldContract(BaseModel):
             data.pop("windows_shapes", None)
         if self.linux_text_mixed is False:
             data.pop("linux_text_mixed", None)
+        if not self.ecar:
+            data.pop("ecar", None)
+        if not self.temporal_gaps:
+            data.pop("temporal_gaps", None)
         return data
 
     def spec(self, typed: str, *, os_family: str | None = None) -> FieldSpec | None:
@@ -395,6 +402,23 @@ def _evtx_time_field(field_types) -> str:
                                    "Event.System.TimeCreated_attributes.SystemTime") if name in field_types), "@timestamp")
 
 
+def ecar_mapping(field_types) -> bool:
+    return all(name in field_types for name in ("object", "action", "objectID", "actorID", "hostname")) and any(
+        name == "properties" or name.startswith("properties.") for name in field_types)
+
+
+ECAR_FIELD_MAPPINGS = {"host.name": ("hostname",), "host.full_name": ("hostname",), "process.pid": ("pid",),
+    "process.ppid": ("ppid",), "ecar.object": ("object",), "ecar.action": ("action",), "ecar.record_id": ("id",),
+    "process.entity_id": ("objectID", "actorID")}
+for _row in ECAR_ROWS.values():
+    for _native, _typed in _row.properties.items():
+        ECAR_FIELD_MAPPINGS[_typed] = tuple(dict.fromkeys((*ECAR_FIELD_MAPPINGS.get(_typed, ()), "properties."+_native)))
+
+
+def _ecar_time_field(field_types):
+    return next((name for name in ("@timestamp", "timestamp_ms", "timestamp") if name in field_types), "timestamp_ms")
+
+
 def linux_markers(field_types, datasets=None) -> bool:
     """Whether a target holds Linux host telemetry: a Linux shipper dataset in its inventory (a logical Linux dataset
     or a shipper's name for one), or a field only Linux host shippers write. Dataset-less Linux shapes (journald,
@@ -428,11 +452,13 @@ def source_role(field_types: dict[str, str], datasets: set[str] | None = None) -
     host_shape = any(
         field == "host.ip" or field.startswith(("process.", "user.", "winlog."))
         for field in field_types
-    ) or nxlog_flat(field_types) or _evtx_json_mapping(field_types)
+    ) or nxlog_flat(field_types) or _evtx_json_mapping(field_types) or ecar_mapping(field_types)
     return "network" if network_shape and not host_shape else "host"
 
 
 def source_os_family(field_types: dict[str, str], role: str, datasets=None) -> Literal["linux", "windows", "unknown"]:
+    if role == "host" and ecar_mapping(field_types):
+        return "windows"
     if _windows_mapping(field_types, datasets):
         return "windows"
     return "linux" if role == "host" else "unknown"
@@ -497,6 +523,7 @@ def contract_from_types(
     datasets=None,
     keyword_limits: dict[str, int | None] | None = None,
     linux_text_mixed: bool | None | Literal["mapping"] = "mapping",
+    temporal_gaps: tuple[str, ...] = (),
 ) -> FieldContract:
     """Build a typed contract, adding explicit aliases for native schemas such as Windows event data. `datasets` is
     the target's dataset inventory, when known: a Linux dataset in it makes a mapping that also holds NXLog's flat
@@ -516,7 +543,8 @@ def contract_from_types(
     direct_fields = dict(fields)
     mappings = dict(field_mappings or {})
     resolved_role = role or source_role(field_types, set(datasets or ()))
-    windows = resolved_role == "host" and os_family not in {"linux", "unknown"} and (
+    ecar = resolved_role == "host" and ecar_mapping(field_types)
+    windows = not ecar and resolved_role == "host" and os_family not in {"linux", "unknown"} and (
         _windows_mapping(field_types, datasets) or (os_family == "windows" and nxlog_flat(field_types)))
     flat = windows and nxlog_flat(field_types)
     evtx = windows and _evtx_json_mapping(field_types)
@@ -524,6 +552,8 @@ def contract_from_types(
     if windows:
         mappings = {**WINDOWS_FIELD_MAPPINGS, **({"winlog.record_id": ("winlog.record_id",)} if flat or evtx else {}),
                     **mappings}
+    if ecar:
+        mappings = {**ECAR_FIELD_MAPPINGS, **mappings}
     if evtx:
         for typed, natives in EVTX_JSON_FIELD_MAPPINGS.items():
             existing = mappings.get(typed, ())
@@ -569,17 +599,29 @@ def contract_from_types(
             common_ops.discard("eq")
         evtx_alias = any(native.startswith("Event.") for native, _kind in available)
         exact, exact_limit = (_keyword_subfields(available, keyword_limits or {})
-                              if windows and (typed not in _CLASS_SELECTORS or evtx_alias) else ((), None))
+                              if (windows or ecar) and (typed not in _CLASS_SELECTORS or evtx_alias) else ((), None))
         if exact:
             common_ops |= SUBFIELD_EQUALITY_OPS
         native, native_type = available[0]
-        aggregation_native = exact[0] if evtx_alias and len(available) == 1 and exact else None
+        aggregation_native = exact[0] if (evtx_alias or ecar) and len(available) == 1 and exact else None
+        if ecar and typed in {"network.direction", "network.transport", "auth.target_user", "user.name", "user.domain"}:
+            common_ops &= {"exists", "missing"}  # normalized enum/account values are not raw native equalities
+        if ecar and typed in {"process.entity_id", "ecar.record_id"}:
+            common_ops &= {"exists", "missing"}  # UUID accepts more source spellings than a canonical value can select
+        if ecar and typed in {"source.ip", "destination.ip"} and any(kind != "ip" for _native, kind in available):
+            common_ops &= {"exists", "missing"}  # normalized IPv6 spelling need not equal a keyword's source spelling
+        if ecar and typed in {"source.port", "destination.port", "source.pid", "target.pid", "source.thread.id",
+                              "thread.id", "process.access.mask", "auth.logon_type"} and any(
+            kind not in {"long", "integer", "short"} for _native, kind in available
+        ):
+            common_ops &= {"exists", "missing"}  # decimal strings may carry noncanonical leading zeroes
         fields[typed] = FieldSpec(
             native=native,
             natives=tuple(item[0] for item in available),
             type=native_type,
             ops=sorted(common_ops),
-            aggregatable=len(available) == 1 and (native_type in AGGREGATABLE or aggregation_native is not None),
+            aggregatable=(len(available) == 1 and (native_type in AGGREGATABLE or aggregation_native is not None)
+                          and not (ecar and typed in {"process.entity_id", "ecar.record_id"})),
             exact=exact,
             exact_limit=exact_limit,
             aggregation_native=aggregation_native,
@@ -601,6 +643,8 @@ def contract_from_types(
     time_field = "firstPacket" if schema_of(field_types) == "arkime_sessions" else "@timestamp"
     if evtx:
         time_field = _evtx_time_field(field_types)
+    if ecar:
+        time_field = _ecar_time_field(field_types)
     resolved_os = os_family or source_os_family(field_types, resolved_role, datasets)
     return FieldContract(
         target=target, fields=fields, time_field=time_field, role=resolved_role, os_family=resolved_os,
@@ -608,11 +652,12 @@ def contract_from_types(
         hosts=hosts, host_inventory_complete=host_inventory_complete,
         nxlog_mixed=nxlog_mixed(field_types, resolved_role, resolved_os),
         windows_shapes=evtx_json_shapes(field_types) if evtx else (),
-        linux_text_mixed=(resolved_role == "host" and resolved_os == "windows"
+        ecar=ecar, temporal_gaps=temporal_gaps,
+        linux_text_mixed=(not ecar and resolved_role == "host" and resolved_os == "windows"
                           and any(name in field_types for name in ("message", "event.original"))
                           and any(name in field_types for name in ("event.dataset", "data_stream.dataset",
                                                                   "input.type", "log.file.path")))
-                         if linux_text_mixed == "mapping" else linux_text_mixed,
+                         if linux_text_mixed == "mapping" else (False if ecar else linux_text_mixed),
     )
 
 
@@ -968,7 +1013,8 @@ def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfil
     # Arkime sessions: time is the first packet; the "dataset" is the session protocol and the
     # reporting host is the capture node
     evtx_shapes = evtx_json_shapes(field_types)
-    windows = bool(evtx_shapes) or "winlog.computer_name" in field_types or (
+    ecar = ecar_mapping(field_types)
+    windows = ecar or bool(evtx_shapes) or "winlog.computer_name" in field_types or (
         _windows_mapping(field_types) and nxlog_flat(field_types) and "Hostname" in field_types)
     dataset_field = "event.dataset" if "event.dataset" in field_types else "data_stream.dataset"
     tf, ds_field, host_field = (("firstPacket", "protocol", "node") if schema == "arkime_sessions"
@@ -977,6 +1023,8 @@ def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfil
                                        else "Event.System.Computer" if evtx_shapes else "Hostname") if windows else "host.name"))
     if evtx_shapes:
         tf = _evtx_time_field(field_types)
+    if ecar:
+        tf, host_field = _ecar_time_field(field_types), "hostname"
     if declaration is not None:
         tf, ds_field, host_field = "ts", "_path", "_romulus_no_observer_field"
     notes = []
@@ -1062,7 +1110,7 @@ def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfil
     os_family = source_os_family(field_types, role, datasets)
     windows_records = _windows_record_count(client, target, field_types, datasets, role, notes)
     if windows_records is not None:
-        os_family = "windows" if role == "host" and windows_records > 0 else ("linux" if role == "host" else "unknown")
+        os_family = "windows" if role == "host" and (ecar or windows_records > 0) else ("linux" if role == "host" else "unknown")
     if windows and (os_family != "windows" or role == "network"):
         notes[:] = [note for note in notes if not note.startswith("hosts inventory truncated")]
         host_counts = _extra_host_inventory(client, target, _aggregation_field(field_types, "host.name"), notes, paged=False)
@@ -1100,6 +1148,16 @@ def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfil
                         if aggs.get("tmax", {}).get("value") is not None else None)
     if inventory is not None:
         prof["inventory"] = inventory
+    if ecar and role == "host":
+        count, reason = _source_count(client, target, {"bool": {"filter": [
+            {"exists": {"field": name}} for name in ("object", "action", "objectID", "actorID", "hostname")]}})
+        prof.update(ecar=True, windows_shapes={"ecar": {"records": count, "complete": count is not None,
+                                                        **({"reason": reason} if reason else {})}})
+        if tf != "@timestamp":
+            for label in ("tmin", "tmax"):
+                value = aggs.get(label, {}).get("value")
+                prof["time_min" if label == "tmin" else "time_max"] = (
+                    datetime.fromtimestamp(value/1000, UTC).isoformat() if value is not None else None)
     if role == "network" and windows_records:
         reason = f"Windows event records on a network target: {windows_records}, not evaluated"
         notes.append(reason)
@@ -1108,7 +1166,11 @@ def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfil
     if evtx_shapes and role == "host" and os_family == "windows":
         prof["windows_shapes"] = _evtx_shape_inventory(client, target, evtx_shapes)
     mixed_text = False
-    if declaration is None and role == "host" and os_family == "windows" and any(
+    temporal = _temporal_inventory(client, target, field_types, tf, ecar=ecar) if role == "host" and os_family == "windows" else []
+    if temporal:
+        prof["temporal_gaps"] = temporal
+        notes.extend(item["reason"] for item in temporal)
+    if declaration is None and not ecar and role == "host" and os_family == "windows" and any(
         name in field_types for name in ("message", "event.original")
     ):
         mixed_text, text_detail = _mixed_text_profile(client, target, field_types, datasets, notes)
@@ -1131,6 +1193,7 @@ def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfil
         datasets=datasets,
         keyword_limits=keyword_subfield_limits(mapping),
         linux_text_mixed=mixed_text,
+        temporal_gaps=tuple(item["reason"] for item in temporal),
     )
 
     return profile, apply_zeek_declaration(contract, site_facts) if declaration is not None else contract
@@ -1158,3 +1221,42 @@ def _evtx_shape_inventory(client, target, shapes) -> dict:
                 entry["reason"] = "Windows source shape count unavailable: no complete exact source total"
         inventory[shape] = entry
     return inventory
+
+
+def _source_count(client, target, query):
+    try:
+        result = client.search(target, {"size": 0, "track_total_hits": True, "query": query})
+    except SourceError as error:
+        return None, str(error)
+    total = (result.get("hits") or {}).get("total")
+    partial = result.get("timed_out") or result.get("terminated_early") or (result.get("_shards") or {}).get("failed")
+    if isinstance(total, dict) and total.get("relation") == "eq" and not partial:
+        return int(total["value"]), None
+    return None, "no complete exact source total"
+
+
+def _temporal_inventory(client, target, field_types, primary, *, ecar=False):
+    """Count source rows the single native time range cannot reach, preserving per-record fallback precedence.
+
+    This is whole-index preflight, not a hunt-window negative: any nonzero or unknown count leaves temporal
+    coverage unresolved. Coalesced multi-field sort/histogram retrieval is deliberately not claimed.
+    """
+    alternatives = (["timestamp_ms", "timestamp"] if ecar else [
+        "Event.System.TimeCreated.#attributes.SystemTime", "Event.System.TimeCreated_attributes.SystemTime"])
+    markers = ["object", "action", "objectID", "actorID", "hostname"] if ecar else ["Event.System.Computer"]
+    gaps, prior = [], [primary]
+    for alternate in alternatives:
+        if alternate == primary or alternate not in field_types:
+            continue
+        query = {"bool": {"filter": [{"exists": {"field": name}} for name in (*markers, alternate)],
+                          "must_not": [{"exists": {"field": name}} for name in prior]}}
+        count, error = _source_count(client, target, query)
+        prior.append(alternate)
+        if count == 0:
+            continue
+        scope = "whole index at source preflight; hunt-window membership unverified"
+        reason = (f"temporal coverage unresolved: {count if count is not None else 'unknown'} source records omitted "
+                  f"when {primary} is absent and {alternate} supplies time ({scope})"
+                  + (f"; count unavailable: {error}" if error else ""))
+        gaps.append({"records": count, "primary": primary, "alternate": alternate, "count_scope": scope, "reason": reason})
+    return gaps

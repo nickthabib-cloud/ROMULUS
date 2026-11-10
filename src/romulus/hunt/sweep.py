@@ -2,6 +2,7 @@
 playbooks, publish direct findings immediately, and keep an exact per-rule coverage ledger."""
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 from collections import Counter, defaultdict
@@ -33,6 +34,8 @@ from romulus.detect.netdef import DIRECTION_ASSUMED_REASON
 from romulus.detect.observed import observation
 from romulus.detect.registry import bind_windows_site, fresh_pack
 from romulus.errors import SourceError
+from romulus.evidence.ecar import ECAR_NORMALIZER
+from romulus.evidence.ecar_catalog import ECAR_FAMILIES, ECAR_ROWS
 from romulus.evidence.linux_catalog import (
     LINUX_LOGICAL_DATASETS,
     LINUX_SHIPPER_DATASETS,
@@ -126,7 +129,7 @@ LINUX_DATASET_FAMILIES = {
 # Every catalogued Zeek log by its dispatch token (`zeek:conn`, never the bare name, which other shippers' datasets
 # share): the family its records feed. A normalization error on a Zeek record is tagged with its token.
 ZEEK_DATASET_FAMILIES = {log.token: frozenset({log.family}) for log in ZEEK_LOGS}
-DATASET_FAMILIES = {**LINUX_DATASET_FAMILIES, **WINDOWS_DATASET_FAMILIES, **ZEEK_DATASET_FAMILIES}
+DATASET_FAMILIES = {**LINUX_DATASET_FAMILIES, **WINDOWS_DATASET_FAMILIES, **ZEEK_DATASET_FAMILIES, "ecar": ECAR_FAMILIES}
 ALL_FAMILIES = frozenset({"*"})
 # Zeek's provider in a Malcolm index; the other providers there (Suricata, Arkime) are read by their own normalizers.
 ZEEK_PROVIDER = "zeek"
@@ -208,6 +211,8 @@ def delivered_families(profile: dict | None, contract: FieldContract | None) -> 
     family of the target's role. Errs toward more families: a family wrongly named only costs an unresolved
     baseline, while one wrongly left out would leave that target's history unread.
     """
+    if contract is not None and contract.ecar:
+        return ECAR_FAMILIES
     role = (profile or {}).get("role") or (contract.role if contract is not None else None)
     if role is None:
         return None
@@ -602,6 +607,8 @@ class Sweep:
 
     def _source_any_of_for(self, target: str, contract: FieldContract | None = None) -> list[list[Predicate]]:
         """Select only normalized source shapes while preserving each target's other known datasets."""
+        if contract is not None and contract.ecar:
+            return []  # object/action dispatch owns each eCAR row, including explicitly counted unknown pairs
         if contract is not None and contract.role == "network":
             return self._zeek_catalog_filter(target, contract)
         if contract is not None and contract.role == "host" and contract.os_family != "windows" and contract.nxlog_mixed:
@@ -844,7 +851,7 @@ class Sweep:
         return groups
 
     def _prepare_windows_inventory(self, target: str, contract: FieldContract | None) -> None:
-        if contract is None or contract.role != "host" or contract.os_family != "windows" or target in self._windows_inventory:
+        if contract is None or contract.ecar or contract.role != "host" or contract.os_family != "windows" or target in self._windows_inventory:
             return
         required = ("event.channel", "event.provider", "event.code")
         unavailable = [
@@ -1344,6 +1351,11 @@ class Sweep:
         partition: Window | None = None,
         continuity_times: dict[tuple[str, str], tuple[datetime, datetime]] | None = None,
     ) -> list[str]:
+        if contract is not None and contract.ecar and "windows" in playbook.os_families:
+            reasons = ["collection not attested: eCAR sensor", *gap_reasons]
+            if playbook.windows_event_classes and not getattr(playbook, "ecar_compatible", False):
+                reasons.append("eCAR records have no Windows event id")
+            return reasons
         if (contract is not None and contract.nxlog_mixed and contract.os_family != "windows"
                 and "windows" in playbook.os_families):
             # NXLog's flat records on a Linux target: no Windows rule's search there is ever complete
@@ -1533,7 +1545,7 @@ class Sweep:
             # an NXLog record of a catalogued provider and event id under a channel naming none of its classes
             # could be any of them: counted against their families (normalize_hits names them)
             if reason.startswith(("dataset:", "suricata event_type", NXLOG_CHANNEL_SKIP,
-                                  "text line in no recognized format:", "text line too long:"))
+                                  "text line in no recognized format:", "text line too long:", "eCAR "))
         }
 
     @staticmethod
@@ -1858,6 +1870,7 @@ class Sweep:
     def run_target(self, target: str):
         self._zeek_visibility_enabled=True
         contract = self.contracts[target]
+        self._note_temporal_gaps(target, contract)
         self._prepare_windows_inventory(target, contract)
         self._zeek_lookback(target, contract)
         filters = self._filters_for(target, contract)
@@ -1873,6 +1886,10 @@ class Sweep:
             self.partial_reasons.append(f"{target}: {reason}")
             self._mark_all(target, f"plan:{self.window.key()}", "executed_failed", {"error": reason})
             return
+        if not parts and contract.temporal_gaps:
+            self.repo.set_rule_cells(self.hunt_id, [self._cell(pb, target, "temporal:"+self.window.key(),
+                "evaluated_partial", detail={"reasons": list(contract.temporal_gaps)})
+                for pb in self.pack if "windows" in pb.os_families])
         if zeek_ranges := [w for w, _ in parts]:
             self.__dict__.setdefault("_zeek_visibility_ranges",{})[target] = zeek_ranges
         # persist every planned (rule x target x partition) cell first: anything never executed
@@ -2016,6 +2033,9 @@ class Sweep:
             # without their line, and NXLog's flat Windows records with their collector clock offsets (one count
             # per key: each table is bounded)
             for key, count in shapes.items():
+                if key.startswith("ecar:"):
+                    self._record_ecar_shape(target, key, count)
+                    continue
                 stat = ("suricata_shapes" if key.startswith("suricata.") else
                         "windows_shapes" if key.startswith("windows.") else "linux_shapes")
                 seen = self.stats.setdefault(stat, {}).setdefault(target, {})
@@ -2041,6 +2061,14 @@ class Sweep:
                     f"{stage.windows_refusal_reason}; those events were evaluated, but a shipper copy of one in a "
                     f"later partition is evaluated again, so counts over them may include duplicates"
                 )
+        if any(event.normalizer == ECAR_NORMALIZER for event in events):
+            stage = self._event_stage()
+            events, ecar_duplicates = stage.unique_windows(events, producers=(ECAR_NORMALIZER,))
+            duplicate_events.extend(ecar_duplicates)
+            if stage.windows_refused:
+                windows_state_reasons.append(
+                    f"eCAR UUID dedup state refused {stage.windows_refused} event id(s): "
+                    f"{stage.windows_refusal_reason}; counts may include copies from later partitions")
         if any(event.normalizer == ZEEK_NORMALIZER for event in events):
             if getattr(self,"_zeek_visibility_enabled",False):
                 self.__dict__.setdefault("_zeek_observed_targets",set()).add(target)
@@ -2094,7 +2122,7 @@ class Sweep:
             unsupported = {reason: count for reason, count in unsupported.items() if reason not in not_assessed}
         gap_reasons = list(windows_state_reasons)
         continuity_times = None
-        if contract is not None and contract.role == "host" and contract.os_family == "windows":
+        if contract is not None and not contract.ecar and contract.role == "host" and contract.os_family == "windows":
             record_id = contract.spec("winlog.record_id")
             if record_id is None or record_id.type not in {"long", "integer", "short"}:
                 gap_reasons.append("shipper gaps unresolved: winlog.record_id mapping is not numeric")
@@ -2144,6 +2172,8 @@ class Sweep:
                         + (f"; {', '.join(unmapped)} feeds no known event family, so every rule is partial"
                            if unmapped else "")) if errors else ""
         cells: list[dict] = []
+        temporal_gaps = contract.temporal_gaps if contract is not None else ()
+        self._note_temporal_gaps(target, contract)
         windows_gate_reasons: set[str] = set()
         # events the joining aggregates may cite later, by id: several playbooks stage the same events, and each
         # is serialized to the stage once per partition (the first staged copy of an id is kept)
@@ -2196,6 +2226,8 @@ class Sweep:
                     windows_reasons.extend(script_reassembly_reasons)
                 # Zeek dedup and interim state: only rules reading the families of the records it concerns
                 windows_reasons.extend(reason for reason, fed in zeek_state_reasons if set(pb.families) & fed)
+                if "windows" in pb.os_families:
+                    windows_reasons.extend(temporal_gaps)
                 rule_affected = affected
                 rule_unsupported = unsupported_affected
                 rule_error_affected = error_affected
@@ -2694,6 +2726,29 @@ class Sweep:
             stage.owner_accounts = self._stage_owner_accounts
             stage.playbooks = self.pack
         return stage
+
+    def _record_ecar_shape(self, target: str, key: str, count: int) -> None:
+        known = {"ecar:" + json.dumps(pair, separators=(",", ":")) for pair in ECAR_ROWS}
+        overflow = "ecar:object/action inventory truncated"
+        seen = self.stats.setdefault("ecar_shapes", {}).setdefault(target, {})
+        if key not in seen and key not in known and key != overflow and sum(
+            item not in known and item != overflow for item in seen
+        ) >= 256:
+            key = overflow
+        seen[key] = seen.get(key, 0) + count
+        if key == overflow:
+            reason = f"{target}: eCAR object/action inventory truncated; additional pair identities not retained"
+            if reason not in self.partial_reasons:
+                self.partial_reasons.append(reason)
+            self.stats.setdefault("ecar_inventory_notes", {})[target] = [reason]
+
+    def _note_temporal_gaps(self, target, contract):
+        if contract is not None and contract.temporal_gaps:
+            self.stats.setdefault("temporal_gaps", {})[target] = list(contract.temporal_gaps)
+            for reason in contract.temporal_gaps:
+                message = f"{target}: {reason}"
+                if message not in self.partial_reasons:
+                    self.partial_reasons.append(message)
 
     def _windows_continuity(self) -> RecordIdContinuity:
         continuity = self._windows_record_ids

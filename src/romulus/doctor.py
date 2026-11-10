@@ -490,6 +490,9 @@ def check_linux_text_sources(s: Settings, client: ElasticClient | None = None) -
             "Windows classification unverified", "Windows event records on a network target"))]
         if classification:
             out.append(Check(f"es.windows_classification[{target}]", "warn", "; ".join(classification)))
+        if temporal := profile.model_dump().get("temporal_gaps"):
+            out.append(Check(f"es.temporal_coverage[{target}]", "warn", "; ".join(item["reason"] for item in temporal),
+                             {"gaps": temporal}))
         if shapes:
             parts = [f"{shape}: {detail['records'] if detail['records'] is not None else 'unknown'} source records"
                      + (f"; {detail['reason']}" if detail.get("reason") else "")

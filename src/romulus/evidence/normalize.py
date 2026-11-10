@@ -42,6 +42,14 @@ from romulus.evidence.auditd import (
 from romulus.evidence.certificates import certificate_fields as _certificate_fields
 from romulus.evidence.certificates import dn_parts as _dn_parts
 from romulus.evidence.community import community_id
+from romulus.evidence.ecar import (
+    ECAR_DUPLICATE,
+    EcarSkip,
+    is_ecar_source,
+    normalization_notices,
+    normalize_ecar,
+)
+from romulus.evidence.ecar_catalog import lookup_ecar
 from romulus.evidence.linux_auth_text import parse_auth
 from romulus.evidence.linux_catalog import (
     APACHE_ACCESS,
@@ -3570,6 +3578,19 @@ def zeek_skip_families(names) -> frozenset[str]:
                      if (log := lookup_log(shape, name)) is not None)
 
 
+def _count_ecar_shape(source: dict, shapes: dict[str, int] | None) -> None:
+    if shapes is None:
+        return
+    pair = [value[:64] if isinstance(value := source.get(name), str) else "<invalid>"
+            for name in ("object", "action")]
+    key = "ecar:" + json.dumps(pair, ensure_ascii=True, separators=(",", ":"))
+    if len(key) > 256:
+        key = key[:244] + " [truncated]"
+    if key not in shapes and len(shapes) >= 256 and lookup_ecar(source) is None:
+        key = "ecar:object/action inventory truncated"
+    shapes[key] = shapes.get(key, 0) + 1
+
+
 def _has_windows_text_marker(source: dict) -> bool:
     """An incomplete Windows envelope must not be reinterpreted as an unrelated Linux log line."""
     return (isinstance(source.get("winlog"), dict) or isinstance(_get(source, "Event.System"), dict)
@@ -3613,6 +3634,7 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
     windows_events: dict[tuple[tuple[str, str, str], str], TypedEvent] = {}
     windows_signatures: dict[tuple[str, str, str], set[str]] = defaultdict(set)
     zeek_events: dict[str, TypedEvent] = {}           # by event id: a Zeek record's logical identity
+    ecar_events: dict[str, TypedEvent] = {}           # bounded by this input batch, keyed by record UUID
     audit_hits = []
     # an Auditbeat document's records, with its event.action when they were rebuilt from its fields
     event_groups: list[tuple[tuple[str, float, int], list[tuple[dict, AuditRecord]], str | None]] = []
@@ -3663,6 +3685,22 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                     known = {raw.key for raw in prior.raw}
                     prior.raw.extend(raw for raw in windows_event.raw if raw.key not in known)
                     skips["duplicate Windows event copy (computer/channel/record_id)"] += 1
+            elif is_ecar_source(h["_source"]):
+                ds = "ecar"
+                _count_ecar_shape(h["_source"], shapes)
+                ecar_event = normalize_ecar(h)
+                for reason, families in normalization_notices(h["_source"]):
+                    skips[reason] += 1
+                    if skip_families is not None:
+                        skip_families[reason] = (skip_families.get(reason) or frozenset()) | frozenset(families)
+                prior = ecar_events.get(ecar_event.id)
+                if prior is None:
+                    ecar_events[ecar_event.id] = ecar_event
+                    events.append(ecar_event)
+                else:
+                    known = {raw.key for raw in prior.raw}
+                    prior.raw.extend(raw for raw in ecar_event.raw if raw.key not in known)
+                    skips[ECAR_DUPLICATE] += 1
             elif (zeek := (plain_record(h["_source"], contract.zeek_log)
                            if contract is not None and contract.zeek_sensor else zeek_record(h["_source"]))) is not None:
                 # Malcolm's provider, Elastic's zeek.* dataset or Security Onion's module: before the Arkime shape,
@@ -3744,6 +3782,11 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                 known = skip_families.get(unsupported.reason, frozenset())
                 fed = nxlog_class_families(h["_source"])
                 skip_families[unsupported.reason] = None if known is None else known | fed
+        except EcarSkip as unsupported:
+            reason = str(unsupported)
+            skips[reason] += 1
+            if skip_families is not None:
+                skip_families[reason] = (skip_families.get(reason) or frozenset()) | frozenset(unsupported.families)
         except ZeekNotNormalized as uncatalogued:
             skips[uncatalogued.reason] += 1
             if skip_families is not None:

@@ -111,6 +111,8 @@ def in_windows_system_dir(key: object) -> bool:
 
 
 def event_source(event: TypedEvent) -> str:
+    if event.normalizer.partition("@")[0] == "ecar":
+        return "eCAR " + str(event.get("ecar.object")) + "/" + str(event.get("ecar.action"))
     code = event.get("event.code")
     if code == 1:
         return "Sysmon event 1"
@@ -542,6 +544,7 @@ class WindowsProcessRule(Playbook):
     state_slice = "strong"
     claim_type = "observed_action"
     windows_event_classes = (SYSMON_PROCESS_CREATE, SECURITY_PROCESS_CREATE)
+    ecar_compatible = True
     assures_negative = False
     positive_only_reason = ("ROMULUS reports what it finds and never asserts that a behaviour did not occur: absence "
                             "cannot be confirmed from process-creation records, and the same behaviour can be reached "

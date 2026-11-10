@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+from datetime import UTC, datetime
 
 from romulus.evidence.linux_catalog import (
     LINUX_LOGICAL_DATASETS,
@@ -74,7 +75,7 @@ _CASELESS_WINDOWS_NATIVES = frozenset({"winlog.channel", "winlog.provider_name",
                                        "Channel", "SourceName", "ObjectType", "Event.System.Channel",
                                        "Event.System.Provider.#attributes.Name", "Event.System.Provider_attributes.Name",
                                        "Event.EventData.ObjectType"})
-_WINDOWS_COMPUTER_NATIVES = frozenset({"winlog.computer_name", "Hostname", "Event.System.Computer"})
+_WINDOWS_COMPUTER_NATIVES = frozenset({"winlog.computer_name", "Hostname", "Event.System.Computer", "hostname"})
 
 
 def _linux_text_clause(contract: FieldContract, fields: list[str]) -> dict | None:
@@ -320,6 +321,9 @@ def build_query(intent: SearchIntent, contract: FieldContract) -> dict:
                             "format": "strict_date_optional_time"}}}]
     if contract.zeek_sensor:
         must = [{"range": {tf: {"gte": intent.window.start.timestamp(), "lt": intent.window.end.timestamp()}}}]
+    elif numeric_milliseconds(contract):
+        must = [{"range": {tf: {"gte": epoch_ms_ceiling(intent.window.start),
+                                "lt": epoch_ms_ceiling(intent.window.end)}}}]
     must += [_pred(p, contract, os_family=os_family) for p in intent.filters]
     query: dict = {"bool": {"filter": must}}
     if intent.any_of:
@@ -338,7 +342,7 @@ def compile_es(intent: SearchIntent, contract: FieldContract, flavor: str = "ela
     query = build_query(intent, contract)
     if intent.kind == "raw":
         time_sort = {"order": intent.order}
-        if flavor != "opensearch" and not contract.zeek_sensor:
+        if flavor != "opensearch" and not contract.zeek_sensor and not numeric_milliseconds(contract):
             # OpenSearch's field sort refuses `format`; its date sort values are the field's own epoch numbers
             time_sort["format"] = "strict_date_optional_time_nanos"
         body = {
@@ -372,6 +376,10 @@ def compile_es(intent: SearchIntent, contract: FieldContract, flavor: str = "ela
             body["aggs"]["h"] = {"histogram": {"field": contract.time_field, "interval": sec,
                 "min_doc_count": 0, "extended_bounds": {"min": intent.window.start.timestamp(),
                                                          "max": intent.window.end.timestamp()}}}
+        elif numeric_milliseconds(contract):
+            body["aggs"]["h"] = {"histogram": {"field": contract.time_field, "interval": sec*1000,
+                "min_doc_count": 0, "extended_bounds": {"min": epoch_ms_ceiling(intent.window.start),
+                                                         "max": epoch_ms_ceiling(intent.window.end)}}}
     else:
         raise CompileError(f"unknown intent kind {intent.kind}")
     fp = digest({"target": intent.target, "kind": intent.kind, "body": body})
@@ -383,5 +391,19 @@ def time_unit(contract: FieldContract) -> str:
     """The resolution of the time field's epoch sort values: nanoseconds for `date_nanos`, else milliseconds."""
     if contract.zeek_sensor:
         return "s"
+    if numeric_milliseconds(contract):
+        return "epoch_ms"
     time_spec = contract.fields.get(contract.time_field)
     return "ns" if time_spec is not None and time_spec.type == "date_nanos" else "ms"
+
+
+def numeric_milliseconds(contract: FieldContract) -> bool:
+    spec = contract.fields.get(contract.time_field)
+    return contract.ecar and spec is not None and spec.type in {"long", "integer", "double", "float"}
+
+
+def epoch_ms_ceiling(moment: datetime) -> int:
+    """Exact integer-ms boundary for both ends of an inclusive-start/exclusive-end datetime window."""
+    delta = moment.astimezone(UTC) - datetime(1970, 1, 1, tzinfo=UTC)
+    microseconds = (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
+    return -(-microseconds // 1000)

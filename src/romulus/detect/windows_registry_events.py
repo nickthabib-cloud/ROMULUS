@@ -160,6 +160,7 @@ def _default_winlogon(value: object, name: str) -> bool:
 
 
 class _RegistryRule(WindowsEventRule):
+    ecar_compatible = True
     families = ("registry_change",)
     required_fields = ("registry.path_key",)
     positive_only_reason = "Registry data is recorded content; a write does not prove execution or effective policy."

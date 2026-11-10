@@ -183,6 +183,8 @@ def _supports(contract: FieldContract, field: str, op: str = "eq") -> bool:
 def _windows_source_groups(
     contract: FieldContract, families: set[str] | None = None,
 ) -> list[list[Predicate]]:
+    if contract.ecar and all(contract.supports(name, "exists") for name in ("ecar.object", "ecar.action")):
+        return [[Predicate(field="ecar.object", op="exists"), Predicate(field="ecar.action", op="exists")]]
     datasets = datasets_for_families(families) if families else WINDOWS_HOST_DATASETS
     channels = channels_for_families(families) if families else WINDOWS_CHANNELS
     groups: list[list[Predicate]] = []
@@ -637,6 +639,11 @@ class PivotExecutor:
         self, intent: SearchIntent, contract: FieldContract, *, pit=None,
         spend_task_id: str | None = None, physical_query_limit: int | None = None,
     ) -> SearchOutcome:
+        def temporal(outcome):
+            if intent.kind == "raw" and contract.temporal_gaps and outcome.completeness != Completeness.failed:
+                return outcome.model_copy(update={"completeness": Completeness.partial,
+                    "reasons": sorted({*outcome.reasons, *contract.temporal_gaps})})
+            return outcome
         if physical_query_limit is not None:
             ceiling = physical_query_limit
             if self.source_query_budget is not None:
@@ -652,7 +659,7 @@ class PivotExecutor:
             options = {}
             if timing := getattr(self, "zeek_deadline", None):
                 options.update(deadline=timing[0], clock=timing[1])
-            return execute(self.client, intent, contract, pit=pit, on_query=spend, **options)
+            return temporal(execute(self.client, intent, contract, pit=pit, on_query=spend, **options))
         def budget_outcome() -> SearchOutcome:
             now = datetime.now(UTC)
             prefix = self.source_query_scope or "expansion"
@@ -681,7 +688,7 @@ class PivotExecutor:
         outcome = (execute(self.client, intent, contract) if pit is None
                    else execute(self.client, intent, contract, pit=pit))
         self.heartbeat()
-        return outcome
+        return temporal(outcome)
 
     def _intents(self, request: ToolRequest) -> list[SearchIntent]:
         args = request.arguments
