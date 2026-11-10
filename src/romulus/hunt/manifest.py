@@ -13,7 +13,10 @@ from romulus.config import Settings
 from romulus.decide.policy import POLICY_VERSION
 from romulus.detect.netdef import SiteNetworks
 from romulus.detect.registry import PACK_VERSION, pack_manifest
+from romulus.evidence.ecar import ECAR_NORMALIZER
 from romulus.evidence.normalize import NORMALIZER_VERSION
+from romulus.evidence.windows import WINDOWS_NORMALIZER
+from romulus.evidence.zeek import ZEEK_NORMALIZER
 from romulus.hunt.packets import PACKET_NORMALIZER
 from romulus.site import SiteFacts
 from romulus.sources.models import Window
@@ -22,6 +25,12 @@ from romulus.store.db import digest
 
 def new_hunt_id() -> str:
     return datetime.now(UTC).strftime("h%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
+
+
+def normalizer_versions() -> dict[str, str]:
+    """Every record producer whose epoch contributes to durable event identities."""
+    return {"lab-ecs": NORMALIZER_VERSION, "windows-ecs": WINDOWS_NORMALIZER,
+            "zeek-ecs": ZEEK_NORMALIZER, "ecar": ECAR_NORMALIZER}
 
 
 def baseline_site(s: Settings, targets: list[str]) -> str:
@@ -61,6 +70,7 @@ def build_manifest(s: Settings, window: Window, original_input: dict, style: str
         } for t, p in profiles.items()},
         "pack": {"version": PACK_VERSION, "playbooks": pack_manifest()},
         "normalizer": NORMALIZER_VERSION,
+        "normalizers": normalizer_versions(),
         "packet_normalizer": PACKET_NORMALIZER,
         "policy": POLICY_VERSION,
         "model": {"triage": s.ollama_model_triage, "synthesis": s.synthesis_model, "num_ctx": s.ollama_num_ctx,
@@ -99,6 +109,11 @@ def build_manifest(s: Settings, window: Window, original_input: dict, style: str
     for target, profile in profiles.items():
         if profile.get("linux_text") is not None:
             manifest["source_profiles"][target]["linux_text"] = profile["linux_text"]
+        for key in ("windows_shapes", "linux_text_mixed", "windows_not_assessed", "ecar", "temporal_gaps"):
+            if key in profile:
+                manifest["source_profiles"][target][key] = profile[key]
+        if profile.get("notes"):
+            manifest["source_profiles"][target]["notes"] = profile["notes"]
         if profile.get("zeek_sensor"):
             manifest["source_profiles"][target].update({key: profile.get(key)
                 for key in ("kind", "zeek_sensor", "zeek_log")})
