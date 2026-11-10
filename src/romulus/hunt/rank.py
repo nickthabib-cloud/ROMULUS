@@ -274,8 +274,9 @@ def place_late_findings(repo: Repo, hunt_id: str, *, owner_token: str | None = N
     """Give the final pass a row for each reportable finding stored after it ran (an AI agent's proposals and its
     pivots' rule matches), so every view and the report place them by one stored rank. Each is scored by
     `rank_unranked` from the pass's stored entity scores, and the pass is never recomputed: evidence the agent's
-    pivots stored (events, addresses) never changes an earlier finding's score, section or reported flag, an entity's
-    score, or the hunt's result; only positions move to make room. Each batch is placed in one transaction with the
+    pivots stored (events, addresses) never changes an earlier finding's score, section or reported flag or an entity's
+    score, and never lowers the hunt's result; only positions move to make room. A rule match the agent's pivots found
+    counts toward the result once placed, as any deterministic finding does. Each batch is placed in one transaction with the
     pass's updated summary, so a crash leaves the rest unranked for the next call. Nothing to place (no final pass,
     or no late finding) returns None. A failure keeps what was placed, leaves the rest labelled "not ranked", and is
     recorded under its own audit action."""
