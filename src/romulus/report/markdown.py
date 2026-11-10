@@ -218,8 +218,9 @@ def _ranked_summary(m: dict, out: list[str]) -> list[dict]:
     out += ["## Findings", "",
             ("Findings are ordered by the evidence in this hunt, not by each rule's own opinion: an entity (host, "
              "account or network endpoint) is reported when it has a confirmed finding, findings in two or more "
-             "ATT&CK tactics, or three or more rules of which two fire within an hour of each other. Rules that recur "
-             "across most of the fleet for most of the window count toward no entity. The rule estimate is each "
+             "ATT&CK tactics (one per rule), or three or more rules of which two fire within an hour of each other. "
+             "Rules that recur on at least half the hosts across at least half the window count toward no entity. "
+             "The rule estimate is each "
              "rule's own lane. Every finding is listed; none is left out."), "",
             "### Confirmed", "", "Confirmed findings are reported on their own, whatever their entity.", "",
             *table(confirmed), "", "### Reported entities", ""]

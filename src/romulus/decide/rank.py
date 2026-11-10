@@ -102,10 +102,12 @@ BAR_COOCCURRENCE = 1
 # Tactic breadth T is the size of a maximum matching between an entity's counted rules and the tactics each maps
 # to: every rule contributes at most one tactic, so one rule whose technique spans several tactics (T1078 Valid
 # Accounts spans four) counts once, and only distinct rules in distinct stages add breadth. A maximum matching never
-# needs more rules per tactic than there are tactics, and ATT&CK Enterprise and ICS together define 26, so keeping
-# this many rules per tactic (the lowest rule ids) leaves T exact while bounding the matching's input. Were a tactic
+# needs more rules per tactic than there are tactics, and the vendored ATT&CK Enterprise and ICS releases together
+# define 18 distinct tactics (Enterprise and ICS share several names), so keeping this many rules per tactic (the lowest rule ids) leaves T exact while bounding the matching's input. Were a tactic
 # list ever longer, the entity's reasons say T may be understated.
 MATCHING_RULES_PER_TACTIC = 32
+# Separates the alternatives of a tactic group (see detect.metadata.LEGACY_TACTIC_ALTERNATIVES).
+TACTIC_GROUP_SEPARATOR = "|"
 
 # Accounts that are the same principal on every host, and so are not entities of their own: an action by one of them
 # says nothing beyond the host it ran on (the host entity carries that evidence), and one name shared by the whole
@@ -172,7 +174,11 @@ def ranking_entities(entities, *, is_internal: Callable[[str], bool] = _never_in
     MAX_ENDPOINTS) and accounts; the sensor that observed the traffic is never an entity. An internal endpoint is a
     `host`: the host whose own telemetry owns that address unambiguously in this hunt (`host_for_address`), else
     the address itself, kept apart rather than guessed. An external endpoint is an `ip` entity. A finding with none
-    of these is unattributed (an empty list): it is ranked on its own prior and listed, never dropped."""
+    of these is unattributed (an empty list): it is ranked on its own prior and listed, never dropped.
+
+    An account named with a domain or by SID is one principal across hosts (which is what shows lateral movement);
+    a bare account name is local to its host (`www-data` on two web servers is two accounts), so it is qualified by
+    each host the finding counts toward, and a bare name with no such host is not an entity."""
     out: list[tuple[str, str]] = []
     network = is_network_finding(entities)
     if network:
@@ -180,20 +186,35 @@ def ranking_entities(entities, *, is_internal: Callable[[str], bool] = _never_in
             key = (HOST, (host_for_address or {}).get(address) or address) if internal else (IP, address)
             if key not in out:
                 out.append(key)
+    accounts: list[str] = []
     for item in entities or []:
         if not isinstance(item, (list, tuple)) or len(item) < 2 or item[1] in (None, ""):
             continue
         kind, value = item[0], str(item[1])
         role = item[2] if len(item) > 2 else None
         if kind == HOST and role != OBSERVER_ROLE and not network:
-            key = (HOST, value)
-        elif kind == ACCOUNT and not is_shared_principal(value):
-            key = (ACCOUNT, value)
-        else:
-            continue
-        if key not in out:
-            out.append(key)
+            if (HOST, value) not in out:
+                out.append((HOST, value))
+        elif kind == ACCOUNT and not is_shared_principal(value) and value not in accounts:
+            accounts.append(value)
+    hosts = [value for kind, value in out if kind == HOST]
+    for value in accounts:
+        names = [value] if is_qualified_account(value) else [qualify_account(host, value) for host in hosts]
+        for name in names:
+            if (ACCOUNT, name) not in out:
+                out.append((ACCOUNT, name))
     return out
+
+
+def is_qualified_account(value: str) -> bool:
+    """An account typed with its domain (`domain\\name`, `name@realm`) or by SID."""
+    bare = value.removeprefix("name:")
+    return value.casefold().startswith("sid:") or "\\" in bare or "@" in bare
+
+
+def qualify_account(host: str, value: str) -> str:
+    """A bare (host-local) account name qualified by its host."""
+    return f"{host}\\{value.removeprefix('name:')}"
 
 
 def finding_addresses(entities, *, is_internal: Callable[[str], bool] = _never_internal) -> list[str]:
@@ -221,11 +242,17 @@ def fleet_reason(rule_id: str, rule_hosts: int, hunt_hosts: int, span_seconds: f
 def tactic_breadth(rule_tactics: Mapping[str, set[str] | tuple[str, ...]]) -> tuple[str, ...]:
     """The tactics of a maximum matching between rules and the tactics each maps to (T is its length): each rule
     contributes at most one tactic and each tactic is counted once. Augmenting paths over rules in id order, so the
-    result is deterministic."""
+    result is deterministic.
+
+    A tactic group (`a|b`, a legacy tactic tag whose stage the current release splits in two) is one choice whose
+    stage is unknown, so it never adds breadth beside either of its tactics: it is counted, as itself, only when no
+    rule's definite tactic already covers one of them and no definite tactic was left for that rule."""
+    definite = {rule: {tactic for tactic in tactics if TACTIC_GROUP_SEPARATOR not in tactic}
+                for rule, tactics in rule_tactics.items()}
     matched: dict[str, str] = {}                     # tactic -> rule
 
     def augment(rule: str, seen: set[str]) -> bool:
-        for tactic in sorted(rule_tactics[rule]):
+        for tactic in sorted(definite[rule]):
             if tactic in seen:
                 continue
             seen.add(tactic)
@@ -234,8 +261,14 @@ def tactic_breadth(rule_tactics: Mapping[str, set[str] | tuple[str, ...]]) -> tu
                 return True
         return False
 
-    for rule in sorted(rule_tactics):
+    for rule in sorted(definite):
         augment(rule, set())
+    used = set(matched.values())
+    groups = {tactic for rule, tactics in rule_tactics.items() if rule not in used
+              for tactic in tactics if TACTIC_GROUP_SEPARATOR in tactic}
+    for group in sorted(groups):
+        if not set(group.split(TACTIC_GROUP_SEPARATOR)) & set(matched):
+            matched[group] = "group"
     return tuple(sorted(matched))
 
 

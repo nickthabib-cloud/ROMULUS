@@ -13,7 +13,6 @@ from romulus.hunt.rank import (
     PASS_BEFORE_EXPANSION,
     PASS_FINAL,
     compute_rank_pass,
-    expansion_seeds,
     rank_unranked,
     run_rank_pass,
 )
@@ -331,7 +330,11 @@ def test_pass_one_ranks_only_what_the_stages_before_expansion_found():
     assert set(_ranks(repo, PASS_FINAL)[0]) == {"s1", "x1"}
 
 
-def test_seeds_are_the_reported_set_in_rank_order():
+def _reported(repo, pass_no=PASS_BEFORE_EXPANSION):
+    return [row["candidate_id"] for row in repo.finding_ranks_page("h1", pass_no, reported=True)]
+
+
+def test_the_reported_set_is_read_in_rank_order():
     repo = _repo()
     _insert(repo, [
         _row("c1", "r.confirmed", lane="urgent", host="a"),
@@ -339,11 +342,10 @@ def test_seeds_are_the_reported_set_in_rank_order():
         _row("q1", "r.high", lane="high", host="b"),
     ])
     compute_rank_pass(repo, "h1", PASS_BEFORE_EXPANSION)
-    seeds = [candidate["id"] for candidate, _score in expansion_seeds(repo, "h1")]
-    assert seeds == ["c1", "p1"]
+    assert _reported(repo) == ["c1", "p1"]
 
 
-def test_with_no_reported_pool_finding_the_ranked_seeds_are_the_confirmed_ones():
+def test_with_no_reported_pool_finding_the_reported_set_is_the_confirmed_ones():
     # expansion seeds the rule estimate's urgent and high findings anyway; the ranking adds nothing beyond them here
     repo = _repo()
     _insert(repo, [
@@ -351,7 +353,83 @@ def test_with_no_reported_pool_finding_the_ranked_seeds_are_the_confirmed_ones()
         _row("h1", "r.h1", lane="high", host="b"), _row("l1", "r.l1", host="d", priority=70.0),
     ])
     compute_rank_pass(repo, "h1", PASS_BEFORE_EXPANSION)
-    assert [candidate["id"] for candidate, _score in expansion_seeds(repo, "h1")] == ["c1"]
+    assert _reported(repo) == ["c1"]
+
+
+# -- review fixes ------------------------------------------------------------------------------------------------
+def test_a_rules_context_instances_never_make_its_attack_instance_fleet_noise():
+    rows = [_row(f"ctx{index}", "r.exec", lane="context", host=f"h{index}", attack=["T1059"],
+                 ts=START + timedelta(minutes=int(index * 0.93 * 450 / 9))) for index in range(10)]
+    rows += [_row("v-exec", "r.exec", host="victim", attack=["T1059"], ts=START + timedelta(hours=2)),
+             _row("v-cred", "r.cred", host="victim", attack=["T1003"], ts=START + timedelta(hours=2, minutes=5))]
+    findings, entities = _bar_hunt(rows)
+    victim = entities[("host", "victim")]
+    assert len(victim["tactics"]) == 2 and victim["reported"]
+    assert findings["v-exec"]["reported"] and not any("fleet" in r for r in findings["v-exec"]["reasons"])
+
+
+def test_bare_local_accounts_stay_on_their_host_and_domain_accounts_cross_hosts():
+    _findings, entities = _bar_hunt([
+        _row("w1", "r.a", host="web01", account="www-data"),
+        _row("w7", "r.a", host="web07", account="www-data"),
+        _row("a1", "r.b", host="ws01", account="CORP\\alice"),
+        _row("a2", "r.c", host="ws02", account="CORP\\alice"),
+        _row("s1", "r.d", host="ws03", account="sid:s-1-5-21-1-2-3-1104"),
+    ])
+    accounts = {value for kind, value in entities if kind == "account"}
+    assert {"web01\\www-data", "web07\\www-data", "CORP\\alice", "sid:s-1-5-21-1-2-3-1104"} == accounts
+    assert entities[("account", "CORP\\alice")]["findings"] == 2
+
+
+def test_a_legacy_sigma_tactic_tag_never_adds_breadth_beside_its_split_tactics():
+    sigma_id = "sigma." + "a" * 64
+    repo = Repo(make_engine(":memory:"))
+    migrate(repo.engine)
+    repo.create_hunt("h1", {"window": {"start": START.isoformat(), "end": END.isoformat()}, "sigma_rules": {
+        "applied": [{"id": "a" * 64, "digest": "d", "title": "evasion", "tags": ["attack.defense_evasion"],
+                     "level": "medium", "lane": "lead", "logsource": {}}]}}, "d", "test")
+    _insert(repo, [_row("s1", sigma_id, host="h"),
+                   _row("n1", "r.masquerade", host="h", attack=["T1036.005"], ts=START + timedelta(hours=3))])
+    compute_rank_pass(repo, "h1", PASS_FINAL)
+    _findings, entities = _ranks(repo)
+    assert len(entities[("host", "h")]["tactics"]) == 1
+    # alone, the legacy tag counts as one choice of its alternatives
+    assert model.tactic_breadth({sigma_id: {"defense-impairment|stealth"}}) == ("defense-impairment|stealth",)
+    assert len(model.tactic_breadth({sigma_id: {"defense-impairment|stealth"}, "r.x": {"execution"}})) == 2
+
+
+def test_case_discoveries_never_count_toward_entities_on_a_resumed_pass():
+    repo = _repo()
+    _insert(repo, [_row("d1", "r.exec", host="h", attack=["T1059"])])
+    compute_rank_pass(repo, "h1", PASS_FINAL)
+    before = _ranks(repo)[1][("host", "h")]
+    case = _row("k1", "r.cred", lane="urgent", host="h", attack=["T1003"], ts=START + timedelta(minutes=5))
+    case["source_case_id"] = "case-1"
+    _insert(repo, [case])
+    compute_rank_pass(repo, "h1", PASS_FINAL)
+    findings, entities = _ranks(repo)
+    after = entities[("host", "h")]
+    for field in ("confirmed", "tactics", "rules", "cooccur", "score", "reported"):
+        assert after[field] == before[field]
+    assert "k1" in findings and findings["k1"]["reported"]
+
+
+def test_detection_result_follows_the_final_ranking_both_ways():
+    from romulus.hunt.run import _detection_result
+
+    # the rule estimate says high, but no entity meets the bar: leads only
+    repo = _repo()
+    _insert(repo, [_row("h1", "r.high", lane="high", host="a")])
+    assert _detection_result(repo, "h1")[1] == "reportable_findings"      # lanes, before ranking
+    compute_rank_pass(repo, "h1", PASS_FINAL)
+    assert _detection_result(repo, "h1")[1] == "leads_only"
+    # only leads by lane, but their entity meets the bar: reportable
+    repo = _repo()
+    _insert(repo, [_row("l1", "r.exec", host="a", attack=["T1059"]),
+                   _row("l2", "r.cred", host="a", attack=["T1003"], ts=START + timedelta(hours=4))])
+    assert _detection_result(repo, "h1")[1] == "leads_only"
+    compute_rank_pass(repo, "h1", PASS_FINAL)
+    assert _detection_result(repo, "h1")[1] == "reportable_findings"
 
 
 # -- tactic breadth: a maximum matching of rules to tactics ---------------------------------------------------------
@@ -391,7 +469,33 @@ def test_rule_tactics_resolve_through_the_vendored_attack_data():
 
 
 def test_no_ranking_means_no_ranked_seeds():
-    assert expansion_seeds(_repo(), "h1") is None
+    assert not _repo().has_rank_pass("h1", PASS_BEFORE_EXPANSION)
+
+
+def test_extra_seeds_with_an_exhausted_budget_are_counted_never_anchored():
+    from types import SimpleNamespace
+
+    from romulus.hunt.expansion import EXTRA_SEEDS_NOT_ANCHORED_REASON, ExpansionEngine
+    from romulus.sources.models import Window
+
+    repo = _repo()
+    # 5,000 lead findings, each on a host that also has a confirmed finding: all in the Reported set
+    rows = []
+    for index in range(2500):
+        rows.append(_row(f"u{index:05d}", "r.confirmed", lane="urgent", host=f"h{index}", ts=None))
+        rows += [_row(f"l{index:05d}-{n}", f"r.lead{n}", host=f"h{index}", ts=START + timedelta(minutes=n))
+                 for n in range(2)]
+    _insert(repo, rows)
+    compute_rank_pass(repo, "h1", PASS_BEFORE_EXPANSION)
+    engine = ExpansionEngine(repo, "h1", Window(start=START, end=END), SimpleNamespace(boots={}),
+                             max_source_queries=0, wall_clock_seconds=60)
+    summary = engine.run()
+    anchors = repo.expansion_anchors("h1")
+    # the rule estimate's 2,500 confirmed seeds are anchored (untimed, so unexpanded); no extra seed is written
+    assert len(anchors) == 2500 and all(row["lane"] == "urgent" for row in anchors)
+    assert summary["reported_seeds_not_anchored"] == {"count": 5000, "reason": EXTRA_SEEDS_NOT_ANCHORED_REASON}
+    assert f"5000 {EXTRA_SEEDS_NOT_ANCHORED_REASON}" in summary["stop_reason"]
+    assert not engine._extra_scores
 
 
 def test_a_failed_pass_is_recorded_and_leaves_no_stale_ranks(monkeypatch):

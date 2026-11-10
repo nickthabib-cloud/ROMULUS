@@ -2496,6 +2496,21 @@ class Repo:
             return [dict(row) for row in connection.execute(
                 query.order_by(t.finding_rank.c.position).limit(limit)).mappings()]
 
+    def finding_rank_counts(self, hunt_id: str, pass_no: int, *, after_position: int = 0,
+                            reported: bool | None = None, exclude_lanes: tuple[str, ...] = ()) -> dict[str, int]:
+        """Of a pass's ranked deterministic findings (after `after_position`), how many per rule."""
+        joined = t.finding_rank.join(t.candidate, t.candidate.c.id == t.finding_rank.c.candidate_id)
+        query = (select(t.candidate.c.rule_id, func.count()).select_from(joined).where(
+            t.finding_rank.c.hunt_id == hunt_id, t.finding_rank.c["pass"] == pass_no,
+            t.finding_rank.c.position > after_position, t.candidate.c.provenance == "deterministic",
+            t.candidate.c.source_case_id.is_(None)).group_by(t.candidate.c.rule_id))
+        if reported is not None:
+            query = query.where(t.finding_rank.c.reported == reported)
+        if exclude_lanes:
+            query = query.where(t.candidate.c.lane.not_in(exclude_lanes))
+        with self.engine.connect() as connection:
+            return {str(rule_id): int(count) for rule_id, count in connection.execute(query)}
+
     def finding_ranks_for(self, hunt_id: str, pass_no: int, candidate_ids) -> dict[str, dict]:
         out: dict[str, dict] = {}
         ids = sorted(set(candidate_ids))

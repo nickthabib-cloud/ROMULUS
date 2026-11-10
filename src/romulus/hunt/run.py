@@ -246,7 +246,16 @@ def _site_network_check(client: ElasticClient, contracts: dict, window: Window, 
 
 
 def _detection_result(repo: Repo, hunt_id: str) -> tuple[dict[str, int], str]:
+    """The hunt's headline result. With a complete final ranking it follows the report's headline: reportable when
+    any confirmed or Reported finding exists, leads only when the ranked pool has findings but none is reported.
+    Without one (failed, or a hunt stored before ranking) it follows the rule estimate's lanes."""
     counts = repo.lane_counts(hunt_id)
+    if repo.has_rank_pass(hunt_id, PASS_FINAL):
+        ranked = sum(repo.finding_rank_counts(hunt_id, PASS_FINAL).values())
+        reported = sum(repo.finding_rank_counts(hunt_id, PASS_FINAL, reported=True).values())
+        result = ("reportable_findings" if reported else "leads_only" if ranked else
+                  "no_qualifying_observation_in_assessed_scope")
+        return counts, result
     reportable = counts.get("urgent", 0) + counts.get("high", 0)
     result = ("reportable_findings" if reportable else "leads_only" if counts.get("lead") else
               "no_qualifying_observation_in_assessed_scope")

@@ -12,7 +12,8 @@ from romulus.store.db import read_snapshot
 _SIGMA_ID = re.compile(r'sigma\.[0-9a-f]{64}\Z')
 _NETWORK_CATEGORIES = frozenset({'network_connection', 'dns', 'dns_query', 'proxy', 'firewall', 'webserver'})
 _TACTICS = frozenset({'reconnaissance', 'resource-development', 'initial-access', 'execution', 'persistence',
-                     'privilege-escalation', 'defense-evasion', 'credential-access', 'discovery',
+                     'privilege-escalation', 'defense-evasion', 'stealth', 'defense-impairment', 'evasion',
+                     'credential-access', 'discovery',
                      'lateral-movement', 'collection', 'command-and-control', 'exfiltration', 'impact',
                      'inhibit-response-function', 'impair-process-control'})
 
@@ -37,16 +38,32 @@ RULE_TECHNIQUE_TACTICS = {
 }
 
 
-def finding_attack(explicit_attack, rule) -> tuple[tuple[str, ...], tuple[str, ...]]:
+# Legacy tactic names a rule's tags may still carry, split by the current ATT&CK release: a tag alone cannot say
+# which of the new tactics it meant, so it stands for the group of them.
+LEGACY_TACTIC_ALTERNATIVES = {"defense-evasion": ("defense-impairment", "stealth")}
+
+
+def finding_attack(explicit_attack, rule, *, groups: bool = False) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """One finding's ATT&CK techniques and tactics: the techniques stored with the finding when it has them, else its
-    rule's. A rule that names its own tactics (an imported rule's tags) keeps them; otherwise each technique is
-    resolved through the vendored ATT&CK release (Enterprise and ICS), with RULE_TECHNIQUE_TACTICS only for an id
-    the release lacks. Every consumer (incident graph, ranking) reads tactics through this one mapping."""
+    rule's (an imported rule's technique tags included), each resolved through the vendored ATT&CK release
+    (Enterprise and ICS), with RULE_TECHNIQUE_TACTICS only for an id the release lacks. A rule that names tactics
+    but no technique (an imported rule tagged only with a tactic) keeps its tactic names; a legacy name the release
+    split (LEGACY_TACTIC_ALTERNATIVES) becomes its alternatives, or with `groups` one `a|b` group, which tactic
+    breadth counts as a single choice. Every consumer (incident graph, ranking) reads tactics through this mapping."""
     from romulus.content.attack_tags import technique_tactics
 
     attack = tuple(explicit_attack or getattr(rule, "attack", ()))
-    if not explicit_attack and getattr(rule, "tactics", ()):
-        return attack, tuple(rule.tactics)
+    if not attack:
+        named: set[str] = set()
+        for tactic in getattr(rule, "tactics", ()) or ():
+            alternatives = LEGACY_TACTIC_ALTERNATIVES.get(tactic)
+            if alternatives is None:
+                named.add(tactic)
+            elif groups:
+                named.add("|".join(alternatives))
+            else:
+                named.update(alternatives)
+        return attack, tuple(sorted(named))
     tactics = {tactic for technique in attack
                for tactic in (technique_tactics((technique,)) or RULE_TECHNIQUE_TACTICS.get(technique, ()))}
     return attack, tuple(sorted(tactics))

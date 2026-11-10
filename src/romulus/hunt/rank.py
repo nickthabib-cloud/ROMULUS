@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 from collections import defaultdict
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from datetime import datetime
 
 from romulus.decide import rank as model
@@ -55,7 +55,7 @@ def compute_rank_pass(repo: Repo, hunt_id: str, pass_no: int, *, owner_token: st
     def tactics(rule_id: str, attack: list) -> tuple[str, ...]:
         key = (rule_id, tuple(str(item) for item in attack))
         if key not in tactics_of:
-            tactics_of[key] = tuple(sorted(set(finding_attack(list(key[1]), rules.get(rule_id))[1])))
+            tactics_of[key] = tuple(sorted(set(finding_attack(list(key[1]), rules.get(rule_id), groups=True)[1])))
         return tactics_of[key]
 
     with repo.rank_workspace(hunt_id, pass_no) as ws:
@@ -98,18 +98,26 @@ def _stage_population(ws, batch_size: int, heartbeat, is_internal, tactics) -> i
         wanted = {address for row in page
                   for address in model.finding_addresses(row["entities"], is_internal=is_internal)}
         hosts = ws.addresses(wanted)
-        findings, members, tactic_rows, rule_hosts = [], [], [], []
+        findings, members, tactic_rows, rule_hosts, hunt_hosts = [], [], [], [], []
         for row in page:
-            deterministic = row["provenance"] != model.AGENT_PROVENANCE
+            # Findings the AI agent proposed, and the legacy investigator's case discoveries, are ranked but never
+            # counted toward any entity's evidence or any rule's prevalence.
+            deterministic = row["provenance"] != model.AGENT_PROVENANCE and row["source_case_id"] is None
             entities = model.ranking_entities(row["entities"], is_internal=is_internal, host_for_address=hosts)
+            ranked = row["lane"] in model.RANKED_LANES
             if deterministic:
-                rule_hosts.extend({"rule_id": row["rule_id"], "host": value}
-                                  for kind, value in entities if kind == model.HOST)
-            if row["lane"] not in model.RANKED_LANES:
+                found_on = [value for kind, value in entities if kind == model.HOST]
+                hunt_hosts.extend({"host": value} for value in found_on)
+                if ranked:
+                    # a rule's prevalence counts only its reportable instances: context and suppressed records of
+                    # the same rule never make its attack instances look like fleet noise
+                    rule_hosts.extend({"rule_id": row["rule_id"], "host": value} for value in found_on)
+            if not ranked:
                 continue
             ts = stored_time(row["ts"])
             findings.append({"candidate_id": row["id"], "rule_id": row["rule_id"], "ts": ts, "lane": row["lane"],
-                             "prior": float(row["priority"]), "provenance": row["provenance"]})
+                             "prior": float(row["priority"]),
+                             "provenance": row["provenance"] if deterministic else model.AGENT_PROVENANCE})
             counted = tactics(row["rule_id"], row["attack"]) if deterministic else ()
             for kind, value in entities:
                 members.append({"entity_kind": kind, "entity": value, "candidate_id": row["id"],
@@ -118,7 +126,7 @@ def _stage_population(ws, batch_size: int, heartbeat, is_internal, tactics) -> i
                                 "contributes": int(deterministic), "prior": float(row["priority"])})
                 tactic_rows.extend({"entity_kind": kind, "entity": value, "rule_id": row["rule_id"],
                                     "tactic": tactic} for tactic in counted)
-        ws.stage(findings, members, tactic_rows, rule_hosts)
+        ws.stage(findings, members, tactic_rows, rule_hosts, hunt_hosts)
         ws.commit()
         after = page[-1]["id"]
 
@@ -257,32 +265,7 @@ def rank_summary(repo: Repo, hunt_id: str, pass_no: int = PASS_FINAL) -> dict | 
     return dict(audit["detail"]) if audit else None
 
 
-# -- expansion seeds ------------------------------------------------------------------------------------------------
-def expansion_seeds(repo: Repo, hunt_id: str, *, page_size: int = RANK_BATCH
-                    ) -> Iterator[tuple[dict, float]] | None:
-    """The pass-1 Reported set in rank order, with each finding's pass-1 score; None when the hunt has no pass-1
-    ranking. Expansion seeds the rule estimate's findings (urgent and high) first, with the budget share and order
-    they always had, and then these, so it never does less than it did by the rule estimate alone: its roots are the
-    union of the two sets, at least max(the rule estimate's seeds, confirmed + Reported)."""
-    if not repo.has_rank_pass(hunt_id, PASS_BEFORE_EXPANSION):
-        return None
-    return _reported(repo, hunt_id, page_size)
-
-
-def _reported(repo: Repo, hunt_id: str, page_size: int) -> Iterator[tuple[dict, float]]:
-    after = 0
-    while True:
-        page = repo.finding_ranks_page(hunt_id, PASS_BEFORE_EXPANSION, after_position=after, limit=page_size,
-                                       reported=True)
-        if not page:
-            return
-        rows = {row["id"]: row for row in repo.candidates_by_ids(
-            hunt_id, [item["candidate_id"] for item in page])}
-        for item in page:
-            candidate = rows.get(item["candidate_id"])
-            if candidate is not None:
-                yield candidate, float(item["score"])
-        after = page[-1]["position"]
+# Expansion reads the pass-1 Reported set (repo.finding_ranks_page, reported only) to choose its extra seeds.
 
 
 # -- findings added after the last pass ------------------------------------------------------------------------------

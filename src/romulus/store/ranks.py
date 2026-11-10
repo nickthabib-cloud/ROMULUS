@@ -19,8 +19,11 @@ from sqlalchemy import Connection, Engine, text
 
 from romulus.store.db import _write_lock
 
-_TEMP_TABLES = ("rk_finding", "rk_member", "rk_tactic", "rk_pair", "rk_entity", "rk_rule_host", "rk_address",
-                "rk_fleet")
+_TEMP_TABLES = ("rk_finding", "rk_member", "rk_tactic", "rk_pair", "rk_entity", "rk_rule_host", "rk_host",
+                "rk_address", "rk_fleet")
+# A counted (deterministic, non-case) candidate, and one of the lanes a rule's prevalence is read from.
+_COUNTED = "c.provenance = 'deterministic' AND c.source_case_id IS NULL"
+_RANKED_LANES = "c.lane IN ('urgent', 'high', 'lead')"
 _CREATE = (
     # one row per ranked finding (confirmed and pool, agent findings included)
     """CREATE TEMP TABLE rk_finding (
@@ -48,10 +51,11 @@ _CREATE = (
         findings INTEGER NOT NULL, max_prior REAL, fleet_rules TEXT NOT NULL, tactics TEXT NOT NULL,
         cooccur INTEGER NOT NULL DEFAULT 0, score REAL, reported INTEGER, reasons TEXT,
         PRIMARY KEY (entity_kind, entity)) WITHOUT ROWID""",
-    # the hosts each rule's deterministic candidates were seen on (any lane), for the fleet-wide condition
+    # the hosts each rule's counted ranked-lane candidates were seen on, for the fleet-wide condition
     """CREATE TEMP TABLE rk_rule_host (rule_id TEXT NOT NULL, host TEXT NOT NULL,
         PRIMARY KEY (rule_id, host)) WITHOUT ROWID""",
-    "CREATE INDEX temp.rk_rule_host_host ON rk_rule_host (host)",
+    # the hosts with any counted candidate (any lane): the fleet condition's denominator
+    "CREATE TEMP TABLE rk_host (host TEXT PRIMARY KEY) WITHOUT ROWID",
     # addresses exactly one host's own telemetry carries in the hunt window
     "CREATE TEMP TABLE rk_address (address TEXT PRIMARY KEY, host TEXT NOT NULL) WITHOUT ROWID",
     "CREATE TEMP TABLE rk_fleet (rule_id TEXT PRIMARY KEY, reason TEXT NOT NULL) WITHOUT ROWID",
@@ -147,7 +151,7 @@ class RankWorkspace:
     def population_page(self, after: str, limit: int) -> list[dict]:
         """The next page of the pass's candidates (every lane) in id order (keyset)."""
         rows = self._run(
-            f"SELECT c.id, c.rule_id, c.ts, c.lane, c.priority, c.provenance, c.entities, "
+            f"SELECT c.id, c.rule_id, c.ts, c.lane, c.priority, c.provenance, c.source_case_id, c.entities, "
             f"json_extract(c.gate_results, '$._attack') AS attack FROM candidate c "
             f"WHERE {self._population()} AND c.id > :after ORDER BY c.id LIMIT :limit",
             {"hunt": self.hunt_id, "after": after, "limit": limit}).mappings().all()
@@ -160,7 +164,9 @@ class RankWorkspace:
             out.append(item)
         return self._page(out)
 
-    def stage(self, findings: list[dict], members: list[dict], tactics: list[dict], rule_hosts: list[dict]) -> None:
+    def stage(self, findings: list[dict], members: list[dict], tactics: list[dict], rule_hosts: list[dict],
+              hosts: list[dict]) -> None:
+        self._many("INSERT OR IGNORE INTO rk_host (host) VALUES (:host)", hosts)
         self._many("INSERT INTO rk_finding (candidate_id, rule_id, ts, lane, prior, provenance) "
                    "VALUES (:candidate_id, :rule_id, :ts, :lane, :prior, :provenance)", findings)
         self._many("INSERT OR IGNORE INTO rk_member (entity_kind, entity, candidate_id, rule_id, ts, confirmed, "
@@ -172,22 +178,24 @@ class RankWorkspace:
 
     def stage_fleet_hosts(self) -> None:
         """The full host lists of fleet-grouped findings (one finding standing for many hosts)."""
-        self._run(f"INSERT OR IGNORE INTO rk_rule_host (rule_id, host) SELECT c.rule_id, h.host FROM candidate c "
-                  f"JOIN candidate_host h ON h.candidate_id = c.id "
-                  f"WHERE {self._population()} AND c.provenance = 'deterministic'", {"hunt": self.hunt_id})
+        joined = (f"FROM candidate c JOIN candidate_host h ON h.candidate_id = c.id "
+                  f"WHERE {self._population()} AND {_COUNTED}")
+        self._run(f"INSERT OR IGNORE INTO rk_host (host) SELECT h.host {joined}", {"hunt": self.hunt_id})
+        self._run(f"INSERT OR IGNORE INTO rk_rule_host (rule_id, host) SELECT c.rule_id, h.host {joined} "
+                  f"AND {_RANKED_LANES}", {"hunt": self.hunt_id})
 
     # -- rule statistics (SQL aggregates) -----------------------------------------------------------------------
     def hunt_hosts(self) -> int:
-        """Distinct hosts with any deterministic candidate in the pass (any lane)."""
-        return int(self._run("SELECT COUNT(DISTINCT host) FROM rk_rule_host").scalar_one())
+        """Distinct hosts with any counted candidate in the pass (any lane)."""
+        return int(self._run("SELECT COUNT(*) FROM rk_host").scalar_one())
 
     def rule_spread(self) -> Iterator[tuple[str, int, datetime | None, datetime | None]]:
-        """Per rule: distinct hosts and the first and last observation time of its deterministic candidates. One row
-        per rule, so the result is bounded by the rule catalog, not by the hunt."""
+        """Per rule: distinct hosts and the first and last observation time of its counted candidates in the ranked
+        lanes. One row per rule, so the result is bounded by the rule catalog, not by the hunt."""
         hosts = dict(self._run("SELECT rule_id, COUNT(*) FROM rk_rule_host GROUP BY rule_id").all())
         spans = {rule_id: (first, last) for rule_id, first, last in self._run(
             f"SELECT c.rule_id, MIN(c.ts), MAX(c.ts) FROM candidate c WHERE {self._population()} "
-            f"AND c.provenance = 'deterministic' AND c.ts IS NOT NULL GROUP BY c.rule_id",
+            f"AND {_COUNTED} AND {_RANKED_LANES} AND c.ts IS NOT NULL GROUP BY c.rule_id",
             {"hunt": self.hunt_id}).all()}
         for rule_id in sorted(set(hosts) | set(spans)):
             first, last = spans.get(rule_id, (None, None))

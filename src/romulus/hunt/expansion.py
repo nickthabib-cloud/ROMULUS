@@ -45,7 +45,7 @@ from romulus.hunt.publish import (
     publish_match,
     subject_event_ids,
 )
-from romulus.hunt.rank import expansion_seeds
+from romulus.hunt.rank import PASS_BEFORE_EXPANSION as RANK_PASS_SEEDS
 from romulus.hunt.sweep import stored_boot_intervals
 from romulus.hunt.windows_context import publish_windows_link_context
 from romulus.hunt.zeek_links import FETCH_QUERIES as ZEEK_FETCH_QUERIES
@@ -154,6 +154,12 @@ BUDGET_TO_SEVERE_REASON = "source query budget given to more severe anchors"
 # network full of internet endpoints cannot starve the links themselves.
 FALLBACK_LOOKUP_SHARE = 0.10
 FALLBACK_CAP_REASON = "fallback lookup cap reached"
+# Extra seeds (the evidence ranking's Reported findings beyond the rule estimate's) anchored at a time: at most what
+# the queries left could start, and never more than this, so a hunt with thousands of Reported findings writes
+# anchors only as its budget can reach them. A hundred anchors at two queries a fetch is more than any leftover
+# share of the default budget.
+EXTRA_SEED_PAGE = 100
+EXTRA_SEEDS_NOT_ANCHORED_REASON = "Reported-set seeds not anchored: budget"
 
 
 # Cited records the planning cache may hold across all its anchors' plans. Beyond it the least recently planned anchor
@@ -258,12 +264,18 @@ class ExpansionEngine:
         self._fallback_queries = 0
         # anchor id -> its hunt-independent identity, the last tie-break of the anchor order
         self._identities: dict[str, str] = {}
-        # The evidence ranking's extra seeds: findings in its Reported set that the rule estimate (urgent and high)
-        # would not have seeded, in rank order, with their pass-1 rank. They are anchored and scheduled only once
-        # every anchor the rule estimate seeds is finished or stopped, so those keep the budget share and order they
-        # always had and the extra seeds spend only what is left. Empty for a hunt without a pass-1 ranking.
+        # The evidence ranking's extra seeds: findings in its pass-1 Reported set that the rule estimate (urgent and
+        # high) would not have seeded. They are anchored only once every anchor the rule estimate seeds is finished
+        # or stopped, so those keep the budget share and order they always had, and then one page at a time, in rank
+        # order, only while source queries and wall-clock time remain: the extra seeds spend only what is left, and
+        # the ones never reached are counted, not anchored. `_extra_scores` holds the pass-1 rank of extra anchors
+        # (bounded by the anchors themselves), which orders them within their tier.
+        self._ranked = False
         self._extra_scores: dict[str, float] = {}
         self._extras_open = False
+        self._extras_done = False
+        self._extra_after = 0               # rank position of the last Reported finding looked at
+        self._extra_queries: int | None = None  # source queries spent when the last extra page was anchored
         hunt = repo.get_hunt(hunt_id) if hasattr(repo, 'get_hunt') else None
         self._imported_rule_ids = {'sigma.' + row['id'] for row in ((hunt or {}).get('manifest', {}).get(
             'sigma_rules') or {}).get('applied', [])}
@@ -633,36 +645,68 @@ class ExpansionEngine:
 
     def _seed_anchors(self) -> list[dict]:
         rows = self.repo.expansion_anchors(self.hunt_id)
-        added = self._seed_candidates(self.repo.candidates(self.hunt_id, ["urgent", "high"]), rows)
-        if self._extras_open and self._extra_scores:
-            added += self._seed_candidates(self._extra_candidates(), [*rows, *added], ranked=True)
-        return added
+        return self._seed_candidates(self.repo.candidates(self.hunt_id, ["urgent", "high"]), rows)
 
-    def _load_extra_seeds(self) -> None:
-        """The pass-1 Reported set's findings beyond the rule estimate's seeds, in rank order."""
-        if not hasattr(self.repo, "has_rank_pass"):
-            return          # a store without ranks: the rule estimate's seeds alone
-        ranked = expansion_seeds(self.repo, self.hunt_id)
-        for candidate, score in ranked or ():
-            if candidate["lane"] not in {"urgent", "high"}:
-                self._extra_scores[candidate["id"]] = score
+    def _is_extra(self, row: dict) -> bool:
+        """A root the evidence ranking added: the rule estimate roots only urgent and high findings."""
+        return self._ranked and row["depth"] == 0 and row["lane"] not in {"urgent", "high"}
 
-    def _extra_candidates(self):
-        ids = list(self._extra_scores)
-        for offset in range(0, len(ids), 500):
-            chunk = ids[offset:offset + 500]
-            rows = {row["id"]: row for row in self.repo.candidates_by_ids(self.hunt_id, chunk)}
-            yield from (rows[item] for item in chunk if item in rows)
+    def _prepare_extra_seeds(self) -> None:
+        if not hasattr(self.repo, "has_rank_pass") or not self.repo.has_rank_pass(self.hunt_id, RANK_PASS_SEEDS):
+            return          # no pass-1 ranking: the rule estimate's seeds alone
+        self._ranked = True
+        # extra anchors an earlier run of this hunt made keep their rank order
+        earlier = [row["id"] for row in self.repo.expansion_anchors(self.hunt_id) if self._is_extra(row)]
+        for candidate_id, rank in self.repo.finding_ranks_for(self.hunt_id, RANK_PASS_SEEDS, earlier).items():
+            self._extra_scores[candidate_id] = float(rank["score"])
 
-    def _open_extra_seeds(self) -> bool:
-        """Once every rule-estimate anchor is finished or stopped, anchor the extra seeds. True when that happened now
-        (the run loop then continues with what budget is left)."""
-        if self._extras_open or not self._extra_scores:
+    def _anchor_extra_seeds(self, query_count: int) -> bool:
+        """When every rule-estimate anchor is finished or stopped: anchor the next page of extra seeds, as many as
+        the source queries left could start (each fetch takes at least two), while queries and wall-clock time
+        remain and the previous page spent some. True when the run loop has new work."""
+        if not self._ranked or self._extras_done:
             return False
-        self._extras_open = True
+        opened, self._extras_open = not self._extras_open, True
+        deferred = opened and any(self._is_extra(row) and row["status"] == "pending"
+                                  for row in self.repo.expansion_anchors(self.hunt_id))
+        ceiling = self.max_source_queries if self.per_anchor_source_queries is not None else self.budget
+        remaining = ceiling - query_count
+        if (remaining < 2 or self.clock() - self.started >= self.wall_clock_seconds
+                or (self._extra_queries is not None and query_count <= self._extra_queries)):
+            return deferred
+        want = min(EXTRA_SEED_PAGE, remaining // 2)
         rows = self.repo.expansion_anchors(self.hunt_id)
-        self._seed_candidates(self._extra_candidates(), rows, ranked=True)
-        return True
+        anchored = 0
+        while anchored < want:
+            page = self.repo.finding_ranks_page(self.hunt_id, RANK_PASS_SEEDS, after_position=self._extra_after,
+                                                limit=EXTRA_SEED_PAGE, reported=True)
+            if not page:
+                self._extras_done = True
+                break
+            candidates = {row["id"]: row for row in self.repo.candidates_by_ids(
+                self.hunt_id, [item["candidate_id"] for item in page])}
+            for item in page:
+                self._extra_after = item["position"]
+                candidate = candidates.get(item["candidate_id"])
+                if candidate is None or candidate["lane"] in {"urgent", "high"}:
+                    continue
+                added = self._seed_candidates([candidate], rows, ranked=True)
+                if added:
+                    self._extra_scores[candidate["id"]] = float(item["score"])
+                    rows.extend(added)
+                    anchored += 1
+                if anchored >= want:
+                    break
+        self._extra_queries = query_count
+        return anchored > 0 or deferred
+
+    def _extras_not_anchored(self) -> int:
+        """Reported-set findings past the last one looked at that expansion could have anchored."""
+        if not self._ranked or self._extras_done:
+            return 0
+        counts = self.repo.finding_rank_counts(self.hunt_id, RANK_PASS_SEEDS, after_position=self._extra_after,
+                                               reported=True, exclude_lanes=("urgent", "high"))
+        return sum(count for rule_id, count in counts.items() if rule_kind(rule_id) != "context")
 
     def _identity(self, row: dict) -> str:
         """The anchor's rule and evidence, which are the same in every hunt over the same records. A candidate id also
@@ -1333,7 +1377,7 @@ class ExpansionEngine:
         return None
 
     def run(self) -> dict:
-        self._load_extra_seeds()
+        self._prepare_extra_seeds()
         self._seed_anchors()
         all_rows = self.repo.expansion_anchors(self.hunt_id)
         query_count = self.repo.expansion_source_queries(self.hunt_id)
@@ -1354,7 +1398,7 @@ class ExpansionEngine:
             for row in all_rows:
                 if row["status"] != "pending" or row["id"] in blocked_anchors:
                     continue
-                if not self._extras_open and row["id"] in self._extra_scores:
+                if not self._extras_open and self._is_extra(row):
                     continue        # an extra seed anchored by an earlier run waits for the rule estimate's anchors
                 if row["depth"] >= self.max_depth:
                     reason = f"maximum expansion depth {self.max_depth} reached"
@@ -1377,7 +1421,7 @@ class ExpansionEngine:
                        for anchor_row in self._ordered_anchors(
                            [row for row in eligible if LANE_ORDER.get(row["lane"], 9) == rank])]
             if not ranks:
-                if self._open_extra_seeds():
+                if self._anchor_extra_seeds(query_count):
                     all_rows = self.repo.expansion_anchors(self.hunt_id)
                     continue
                 break               # every pending anchor is stopped, and only a newly found anchor grows the budget
@@ -1395,7 +1439,7 @@ class ExpansionEngine:
                 continue
             slots = self._tier_slots(ordered, anchor_reasons, root_cap)
             if not slots:
-                if self._open_extra_seeds():
+                if self._anchor_extra_seeds(query_count):
                     all_rows = self.repo.expansion_anchors(self.hunt_id)
                     continue
                 break
@@ -1535,6 +1579,9 @@ class ExpansionEngine:
             accounting = (f"anchors not fully expanded: {unexpanded_count} unexpanded, "
                           f"{len(unfinished) - unexpanded_count} partial" + (f" ({shown})" if shown else ""))
             stop_reason = accounting if stop_reason == "fixpoint" else f"{stop_reason}; {accounting}"
+        not_anchored = self._extras_not_anchored()
+        if not_anchored:
+            stop_reason = f"{stop_reason}; {not_anchored} {EXTRA_SEEDS_NOT_ANCHORED_REASON}"
         summary = {
             "status": status,
             "stop_reason": stop_reason, "anchors": len(anchors),
@@ -1542,6 +1589,8 @@ class ExpansionEngine:
             "expanded_partial": sum(row["status"] == "expanded_partial" for row in anchors),
             "unexpanded": [row["id"] for row in anchors if row["status"] == "unexpanded"],
             "source_queries": query_count,
+            **({"reported_seeds_not_anchored": {"count": not_anchored, "reason": EXTRA_SEEDS_NOT_ANCHORED_REASON}}
+               if not_anchored else {}),
             # the budget the expansion ran under, so a reader can tell a cut by the ceiling from one by the shares
             "budget": {
                 "per_anchor_source_queries": self.per_anchor_source_queries,
