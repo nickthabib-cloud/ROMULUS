@@ -655,6 +655,13 @@ class LinkFetcher:
             self._field_gap(target, window, (
                 f"windows_source_unselectable:{target}: its Winlogbeat records (winlog.*) cannot be selected, since "
                 "neither event.dataset nor event.channel is searchable there; only NXLog's flat records are"))
+        elif contract.windows_shapes and all(group[0].field in {"Channel", "Event.System.Channel", "evtx.provider"}
+                                            for group in groups) and any(
+                native.startswith("winlog.") for spec in contract.fields.values()
+                for native in (spec.natives or (spec.native,))):
+            self._field_gap(target, window, (
+                f"windows_source_unselectable:{target}: its Winlogbeat records (winlog.*) cannot be selected, since "
+                "neither event.dataset nor event.channel is searchable there; only native exported shapes are"))
         return groups
 
     def _native_windows_hosts(self, target, contract, host, window):

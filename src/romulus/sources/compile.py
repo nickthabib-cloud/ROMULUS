@@ -71,8 +71,10 @@ _LINUX_HOST_DATASETS = frozenset({*LINUX_LOGICAL_DATASETS, *shipper_names()})
 # Windows names matched without case (channel, provider, object type), in Winlogbeat's layout and NXLog's flat one
 # (whose channel names keep the source's spelling, "security" for "Security").
 _CASELESS_WINDOWS_NATIVES = frozenset({"winlog.channel", "winlog.provider_name", "winlog.event_data.ObjectType",
-                                       "Channel", "SourceName", "ObjectType"})
-_WINDOWS_COMPUTER_NATIVES = frozenset({"winlog.computer_name", "Hostname"})
+                                       "Channel", "SourceName", "ObjectType", "Event.System.Channel",
+                                       "Event.System.Provider.#attributes.Name", "Event.System.Provider_attributes.Name",
+                                       "Event.EventData.ObjectType"})
+_WINDOWS_COMPUTER_NATIVES = frozenset({"winlog.computer_name", "Hostname", "Event.System.Computer"})
 
 
 def _linux_text_clause(contract: FieldContract, fields: list[str]) -> dict | None:
@@ -342,7 +344,7 @@ def compile_es(intent: SearchIntent, contract: FieldContract, flavor: str = "ela
             spec = contract.spec(g, os_family=_intent_os_family(intent))
             if spec is None or not spec.aggregatable:
                 raise CompileError(f"field {g!r} is not aggregatable on {contract.target}")
-            sources.append({g: {"terms": {"field": spec.native, "missing_bucket": True}}})
+            sources.append({g: {"terms": {"field": spec.aggregation_native or spec.native, "missing_bucket": True}}})
         body = {"size": 0, "query": query, "track_total_hits": True,
                 "aggs": {"g": {"composite": {"size": min(1000, intent.max_records), "sources": sources},
                                "aggs": {"first": {"min": {"field": contract.time_field}},

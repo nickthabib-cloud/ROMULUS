@@ -62,6 +62,8 @@ class FieldSpec(BaseModel):
     # The smallest ignore_above among those subfields, in UTF-16 code units: a longer value is in none of them.
     # None when every subfield keeps values of any length.
     exact_limit: int | None = None
+    # A text native can be searched without dropping long values while its keyword child supplies inventory keys.
+    aggregation_native: str | None = None
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler):
@@ -70,6 +72,8 @@ class FieldSpec(BaseModel):
             data.pop("exact", None)
         if self.exact_limit is None:
             data.pop("exact_limit", None)
+        if self.aggregation_native is None:
+            data.pop("aggregation_native", None)
         return data
 
 
@@ -89,6 +93,7 @@ class FieldContract(BaseModel):
     # A Linux target whose mapping also holds NXLog's flat Windows records: both shapes are selected, each as it
     # would be alone (sources.profile.nxlog_mixed).
     nxlog_mixed: bool = False
+    windows_shapes: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def _untyped_names(self):
@@ -113,6 +118,8 @@ class FieldContract(BaseModel):
             data.pop("zeek_log", None)
         if not self.nxlog_mixed:
             data.pop("nxlog_mixed", None)
+        if not self.windows_shapes:
+            data.pop("windows_shapes", None)
         return data
 
     def spec(self, typed: str, *, os_family: str | None = None) -> FieldSpec | None:
@@ -185,16 +192,24 @@ class SourceProfile(BaseModel):
 
 def flatten_mapping(mapping: dict) -> dict[str, str]:
     out: dict[str, str] = {}
+    objects: set[str] = set()
+
+    def record(name, kind):
+        previous = out.get(name)
+        out[name] = "mixed" if name in objects or previous is not None and previous != kind else kind
 
     def walk(prefix: str, props: dict[str, Any]):
         for name, spec in props.items():
             full = f"{prefix}{name}"
             if "properties" in spec:
+                objects.add(full)
+                if full in out:
+                    out[full] = "mixed"
                 walk(full + ".", spec["properties"])
             else:
-                out[full] = spec.get("type", "object")
+                record(full, spec.get("type", "object"))
             for sub, sspec in spec.get("fields", {}).items():
-                out[f"{full}.{sub}"] = sspec.get("type", "object")
+                record(f"{full}.{sub}", sspec.get("type", "object"))
 
     for body in mapping.values():
         walk("", body.get("mappings", {}).get("properties", {}))
@@ -300,6 +315,31 @@ NXLOG_FLAT_NAMES: dict[str, tuple[str, ...]] = {
        if (names := tuple(dict.fromkeys(flat for native in natives if (flat := _nxlog_name(native)))))},
     "winlog.record_id": ("RecordNumber",),
 }
+
+_EVTX_SYSTEM_NAMES = {
+    "winlog.channel": "Event.System.Channel", "winlog.provider_name": "Event.System.Provider.#attributes.Name",
+    "winlog.event_id": "Event.System.EventID", "winlog.computer_name": "Event.System.Computer",
+    "winlog.record_id": "Event.System.EventRecordID", "winlog.time_created": "Event.System.TimeCreated.#attributes.SystemTime",
+}
+
+
+def _evtx_name(native: str) -> str | None:
+    if native.startswith("winlog.event_data."):
+        return "Event.EventData." + native.removeprefix("winlog.event_data.")
+    return _EVTX_SYSTEM_NAMES.get(native)
+
+
+EVTX_JSON_FIELD_MAPPINGS: dict[str, tuple[str, ...]] = {
+    **{typed: names for typed, natives in WINDOWS_FIELD_MAPPINGS.items()
+       if (names := tuple(dict.fromkeys(path for native in natives if (path := _evtx_name(native)))))},
+    "winlog.record_id": ("Event.System.EventRecordID",),
+    "winlog.time_created": ("Event.System.TimeCreated.#attributes.SystemTime",),
+    "evtx.provider": ("Event.System.Provider.#attributes.Name",),
+}
+EVTX_JSON_FLAT_FIELD_MAPPINGS = {
+    typed: tuple(native.replace(".#attributes.", "_attributes.") for native in natives)
+    for typed, natives in EVTX_JSON_FIELD_MAPPINGS.items()
+}
 # Aliases the sweep aggregates on (continuity metadata, the event-class inventory): a second native would make them
 # unaggregatable, so on a target that also maps Winlogbeat's names they keep those alone.
 _GROUPED_ALIASES = frozenset({"host.name", "event.channel", "event.provider", "event.code", "winlog.record_id"})
@@ -320,6 +360,32 @@ def _winlog_mapping(field_types) -> bool:
     return any(field == "winlog" or field.startswith("winlog.") for field in field_types)
 
 
+def _evtx_json_mapping(field_types) -> bool:
+    # Provider-only event classes can have a native null Channel, which a dynamic mapping never indexes.
+    return ("Event.System.Computer" in field_types
+            and any(name == "Event.System.EventID" or name.startswith("Event.System.EventID.") for name in field_types)
+            and any(name in field_types for name in ("Event.System.Channel", "Event.System.Provider.#attributes.Name",
+                                                      "Event.System.Provider_attributes.Name")))
+
+
+def evtx_json_shapes(field_types) -> tuple[str, ...]:
+    if not _evtx_json_mapping(field_types):
+        return ()
+    shapes = []
+    if "Event.System.Provider.#attributes.Name" in field_types:
+        shapes.append("evtx_json")
+    if "Event.System.Provider_attributes.Name" in field_types:
+        shapes.append("evtx_json_flat")
+    return tuple(shapes or ["evtx_json"])
+
+
+def _evtx_time_field(field_types) -> str:
+    if "@timestamp" in field_types:
+        return "@timestamp"
+    return next((name for name in ("Event.System.TimeCreated.#attributes.SystemTime",
+                                   "Event.System.TimeCreated_attributes.SystemTime") if name in field_types), "@timestamp")
+
+
 def linux_markers(field_types, datasets=None) -> bool:
     """Whether a target holds Linux host telemetry: a Linux shipper dataset in its inventory (a logical Linux dataset
     or a shipper's name for one), or a field only Linux host shippers write. Dataset-less Linux shapes (journald,
@@ -330,7 +396,8 @@ def linux_markers(field_types, datasets=None) -> bool:
 
 
 def _windows_mapping(field_types, datasets=None) -> bool:
-    return _winlog_mapping(field_types) or (nxlog_flat(field_types) and not linux_markers(field_types, datasets))
+    return (_winlog_mapping(field_types) or _evtx_json_mapping(field_types)
+            or (nxlog_flat(field_types) and not linux_markers(field_types, datasets)))
 
 
 def schema_of(field_types: dict[str, str]) -> str:
@@ -352,7 +419,7 @@ def source_role(field_types: dict[str, str], datasets: set[str] | None = None) -
     host_shape = any(
         field == "host.ip" or field.startswith(("process.", "user.", "winlog."))
         for field in field_types
-    ) or nxlog_flat(field_types)
+    ) or nxlog_flat(field_types) or _evtx_json_mapping(field_types)
     return "network" if network_shape and not host_shape else "host"
 
 
@@ -440,9 +507,22 @@ def contract_from_types(
     mappings = dict(field_mappings or {})
     windows = _windows_mapping(field_types, datasets) or (os_family == "windows" and nxlog_flat(field_types))
     flat = windows and nxlog_flat(field_types)
+    evtx = windows and _evtx_json_mapping(field_types)
     if windows:
-        mappings = {**WINDOWS_FIELD_MAPPINGS, **({"winlog.record_id": ("winlog.record_id",)} if flat else {}),
+        mappings = {**WINDOWS_FIELD_MAPPINGS, **({"winlog.record_id": ("winlog.record_id",)} if flat or evtx else {}),
                     **mappings}
+    if evtx:
+        for typed, natives in EVTX_JSON_FIELD_MAPPINGS.items():
+            existing = mappings.get(typed, ())
+            existing = (existing,) if isinstance(existing, str) else existing
+            additions = tuple(dict.fromkeys((*natives, *EVTX_JSON_FLAT_FIELD_MAPPINGS[typed])))
+            # Existing grouped aliases remain one native; each extra layout is inventoried by its own shape.
+            if typed in _GROUPED_ALIASES and any(_native_type(field_types, native) is not None for native in existing):
+                continue
+            mappings[typed] = (*existing, *additions)
+        for native in field_types:
+            if native.startswith("Event.EventData.") and not native.endswith(".keyword"):
+                mappings.setdefault("winlog.event_data." + native.removeprefix("Event.EventData."), (native,))
     for typed, candidates in mappings.items():
         native_candidates = (candidates,) if isinstance(candidates, str) else candidates
         available = [
@@ -473,21 +553,26 @@ def contract_from_types(
         # https://www.elastic.co/guide/en/elasticsearch/reference/8.19/flattened.html#supported-operations
         if typed == "object.type" and any(kind == "flattened" for _, kind in available):
             common_ops.discard("eq")
+        evtx_alias = any(native.startswith("Event.") for native, _kind in available)
         exact, exact_limit = (_keyword_subfields(available, keyword_limits or {})
-                              if windows and typed not in _CLASS_SELECTORS else ((), None))
+                              if windows and (typed not in _CLASS_SELECTORS or evtx_alias) else ((), None))
         if exact:
             common_ops |= SUBFIELD_EQUALITY_OPS
         native, native_type = available[0]
+        aggregation_native = exact[0] if evtx_alias and len(available) == 1 and exact else None
         fields[typed] = FieldSpec(
             native=native,
             natives=tuple(item[0] for item in available),
             type=native_type,
             ops=sorted(common_ops),
-            aggregatable=len(available) == 1 and native_type in AGGREGATABLE,
+            aggregatable=len(available) == 1 and (native_type in AGGREGATABLE or aggregation_native is not None),
             exact=exact,
             exact_limit=exact_limit,
+            aggregation_native=aggregation_native,
         )
     time_field = "firstPacket" if schema_of(field_types) == "arkime_sessions" else "@timestamp"
+    if evtx:
+        time_field = _evtx_time_field(field_types)
     resolved_role = role or source_role(field_types)
     resolved_os = os_family or source_os_family(field_types, resolved_role, datasets)
     return FieldContract(
@@ -495,6 +580,7 @@ def contract_from_types(
         linux_fields=direct_fields if windows else {},
         hosts=hosts, host_inventory_complete=host_inventory_complete,
         nxlog_mixed=nxlog_mixed(field_types, resolved_role, resolved_os),
+        windows_shapes=evtx_json_shapes(field_types) if evtx else (),
     )
 
 
@@ -747,13 +833,16 @@ def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfil
     declaration = site_facts.zeek.plain_sources.get(target) if site_facts is not None else None
     # Arkime sessions: time is the first packet; the "dataset" is the session protocol and the
     # reporting host is the capture node
-    windows = "winlog.computer_name" in field_types or (
+    evtx_shapes = evtx_json_shapes(field_types)
+    windows = bool(evtx_shapes) or "winlog.computer_name" in field_types or (
         _windows_mapping(field_types) and nxlog_flat(field_types) and "Hostname" in field_types)
     dataset_field = "event.dataset" if "event.dataset" in field_types else "data_stream.dataset"
     tf, ds_field, host_field = (("firstPacket", "protocol", "node") if schema == "arkime_sessions"
                                 else ("@timestamp", dataset_field,
                                       ("winlog.computer_name" if "winlog.computer_name" in field_types
-                                       else "Hostname") if windows else "host.name"))
+                                       else "Event.System.Computer" if evtx_shapes else "Hostname") if windows else "host.name"))
+    if evtx_shapes:
+        tf = _evtx_time_field(field_types)
     if declaration is not None:
         tf, ds_field, host_field = "ts", "_path", "_romulus_no_observer_field"
     notes = []
@@ -865,6 +954,8 @@ def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfil
                         if aggs.get("tmax", {}).get("value") is not None else None)
     if inventory is not None:
         prof["inventory"] = inventory
+    if evtx_shapes:
+        prof["windows_shapes"] = _evtx_shape_inventory(client, target, evtx_shapes)
     if declaration is None:
         text_detail = _text_profile(client, target, field_types, datasets, ds_field, role, os_family, notes)
         if text_detail is not None:
@@ -884,3 +975,27 @@ def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfil
     )
 
     return profile, apply_zeek_declaration(contract, site_facts) if declaration is not None else contract
+
+
+def _evtx_shape_inventory(client, target, shapes) -> dict:
+    """One exact count per mapped EVTX layout; failed counts stay unknown rather than becoming zero."""
+    inventory = {}
+    for shape in shapes:
+        provider = ("Event.System.Provider_attributes.Name" if shape == "evtx_json_flat"
+                    else "Event.System.Provider.#attributes.Name")
+        entry = {"records": None, "complete": False}
+        try:
+            result = client.search(target, {"size": 0, "track_total_hits": True, "query": {"bool": {"filter": [
+                {"exists": {"field": "Event.System.Computer"}}, {"exists": {"field": provider}},
+            ]}}})
+        except SourceError as error:
+            entry["reason"] = f"Windows source shape count unavailable: {error}"
+        else:
+            total = (result.get("hits") or {}).get("total")
+            partial = result.get("timed_out") or result.get("terminated_early") or (result.get("_shards") or {}).get("failed")
+            if isinstance(total, dict) and total.get("relation") == "eq" and not partial:
+                entry.update(records=int(total["value"]), complete=True)
+            else:
+                entry["reason"] = "Windows source shape count unavailable: no complete exact source total"
+        inventory[shape] = entry
+    return inventory

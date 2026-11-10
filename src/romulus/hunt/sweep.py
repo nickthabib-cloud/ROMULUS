@@ -717,6 +717,9 @@ class Sweep:
                 if flat is not None and not self._nxlog_aliased(contract):
                     # the class predicates read Winlogbeat's names only here: NXLog's flat records by their shape
                     groups.append(flat)
+                evtx = self._evtx_selector(contract)
+                if evtx is not None and not self._evtx_aliased(contract):
+                    groups.append(evtx)
                 return groups
         if rpc_groups and not any(contract.supports(field, "in") for field in ("event.dataset", "event.channel")):
             # The ordinary Windows fallback was unrestricted; RPC must not narrow it.
@@ -731,9 +734,25 @@ class Sweep:
         if groups and flat is not None:
             # NXLog's flat records name no dataset and may spell a channel in any case: selected by their shape
             groups.append(flat)
+        evtx = self._evtx_selector(contract)
+        if evtx is not None:
+            groups.append(evtx)
         self.stats.setdefault("dataset_filter", {})[target] = list(WINDOWS_HOST_DATASETS)
         self.stats.setdefault("channel_filter", {})[target] = list(WINDOWS_CHANNELS)
         return groups
+
+    @staticmethod
+    def _evtx_selector(contract: FieldContract) -> list[Predicate] | None:
+        from romulus.hunt.windows_filters import evtx_json_windows_group
+
+        return evtx_json_windows_group(contract)
+
+    @staticmethod
+    def _evtx_aliased(contract: FieldContract) -> bool:
+        return all((spec := contract.fields.get(typed)) is not None
+                   and any(native.startswith("Event.") for native in spec.natives)
+                   and contract.supports(typed, "eq")
+                   for typed in ("event.channel", "event.provider", "event.code", "host.name"))
 
     def _nxlog_selector(self, target: str, contract: FieldContract) -> list[Predicate] | None:
         """The selector of NXLog's flat Windows records on a Windows target, or None; a target that cannot search

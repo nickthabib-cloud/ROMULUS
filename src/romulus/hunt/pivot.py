@@ -195,6 +195,11 @@ def _windows_source_groups(
         # NXLog's flat records name no dataset and may spell a channel in any case: selected by their shape, which
         # also selects them where neither a dataset nor a channel is searchable (Channel mapped as text alone)
         groups.append(flat)
+    from romulus.hunt.windows_filters import evtx_json_windows_group
+
+    evtx = evtx_json_windows_group(contract) if datasets or channels else None
+    if evtx is not None:
+        groups.append(evtx)
     return groups
 
 
