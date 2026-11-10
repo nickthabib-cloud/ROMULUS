@@ -182,9 +182,10 @@ def _windows_source_groups(
         groups.append([Predicate(field="event.dataset", op="in", value=list(datasets))])
     if channels and _supports(contract, "event.channel", "in"):
         groups.append([Predicate(field="event.channel", op="in", value=list(channels))])
-    flat = nxlog_windows_group(contract) if groups else None
+    flat = nxlog_windows_group(contract) if datasets or channels else None
     if flat is not None:
-        # NXLog's flat records name no dataset and may spell a channel in any case: selected by their shape
+        # NXLog's flat records name no dataset and may spell a channel in any case: selected by their shape, which
+        # also selects them where neither a dataset nor a channel is searchable (Channel mapped as text alone)
         groups.append(flat)
     return groups
 

@@ -388,6 +388,10 @@ def _ns_text(value: int) -> str:
 
 def _values(source: dict, field: str) -> list:
     value = _path(source, field)
+    if value is None and field.endswith(".keyword"):
+        # a dynamically mapped string's keyword subfield: the string itself, when within its ignore_above (256)
+        parent = _values(source, field.removesuffix(".keyword"))
+        return [item for item in parent if isinstance(item, str) and len(item) <= 256]
     if value is None:
         return []
     return value if isinstance(value, list) else [value]

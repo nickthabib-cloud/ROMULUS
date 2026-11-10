@@ -46,6 +46,16 @@ class FieldSpec(BaseModel):
     type: str
     ops: list[str]
     aggregatable: bool
+    # For an alias whose natives are all analyzed text: each native's keyword subfield, in the same order. Equality
+    # ('eq', 'in') is compiled against these (sources.compile); every other op still reads the text natives.
+    exact: tuple[str, ...] = ()
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        data = handler(self)
+        if not self.exact:
+            data.pop("exact", None)
+        return data
 
 
 class FieldContract(BaseModel):
@@ -311,6 +321,40 @@ def _native_type(field_types: dict[str, str], native: str) -> str | None:
     return None
 
 
+# The ops a text alias gains through its natives' keyword subfields. A keyword subfield holds each value whole, so
+# equality on it is exact; it leaves out values longer than its ignore_above, which the compiler covers by also
+# matching such a value as a phrase on the text field (sources.compile). Prefix and substring matching on it would
+# silently miss those long values (command lines, script text), so they stay unavailable.
+SUBFIELD_EQUALITY_OPS = frozenset({"eq", "in"})
+# Aliases that select event classes rather than name an entity. On a text-mapped target they stay without equality:
+# a provider's own Channel data can overwrite NXLog's Channel, so its flat records are selected by their shape there
+# (hunt.windows_filters.nxlog_windows_group) and never by a class predicate that would miss such a record.
+_CLASS_SELECTORS = frozenset({"event.dataset", "event.channel", "event.provider", "object.type", "remote.channel_name",
+                              "rpc.interface_uuid", "rpc.protocol"})
+
+
+def _keyword_subfields(field_types: dict[str, str], available: list[tuple[str, str]]) -> tuple[str, ...]:
+    """Each text native's keyword subfield (a dynamically mapped string's `<name>.keyword`, or any keyword-typed
+    subfield the mapping reports), in order; empty unless every native is text with one. Equality on a Windows alias
+    then reads the exact value, as it does on a Winlogbeat keyword or flattened field, instead of being
+    unavailable."""
+    if not available or any(kind != "text" for _native, kind in available):
+        return ()
+    subfields = []
+    for native, _kind in available:
+        preferred = f"{native}.keyword"
+        if field_types.get(preferred) == "keyword":
+            subfields.append(preferred)
+            continue
+        found = next((name for name, kind in sorted(field_types.items())
+                      if kind == "keyword" and name.startswith(native + ".") and "." not in name[len(native) + 1:]),
+                     None)
+        if found is None:
+            return ()
+        subfields.append(found)
+    return tuple(subfields)
+
+
 def contract_from_types(
     target: str,
     field_types: dict[str, str],
@@ -372,6 +416,9 @@ def contract_from_types(
         # https://www.elastic.co/guide/en/elasticsearch/reference/8.19/flattened.html#supported-operations
         if typed == "object.type" and any(kind == "flattened" for _, kind in available):
             common_ops.discard("eq")
+        exact = _keyword_subfields(field_types, available) if windows and typed not in _CLASS_SELECTORS else ()
+        if exact:
+            common_ops |= SUBFIELD_EQUALITY_OPS
         native, native_type = available[0]
         fields[typed] = FieldSpec(
             native=native,
@@ -379,6 +426,7 @@ def contract_from_types(
             type=native_type,
             ops=sorted(common_ops),
             aggregatable=len(available) == 1 and native_type in AGGREGATABLE,
+            exact=exact,
         )
     time_field = "firstPacket" if schema_of(field_types) == "arkime_sessions" else "@timestamp"
     resolved_role = role or source_role(field_types)
