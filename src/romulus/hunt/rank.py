@@ -1,9 +1,10 @@
 """Evidence-ranking passes over a hunt's stored candidates, and the expansion seeds they choose.
 
 Pass 1 runs after the sweep, packet and baseline stages and chooses expansion's seeds. Pass 2 runs after expansion
-and its context pass; reports, the web and the agent dossier read it. Each pass is computed in bounded keyset pages
-over the store (`romulus.store.ranks`) and replaces the hunt's previous rows for that pass atomically, so running a
-pass again over the same stored candidates (a resumed hunt) gives the same ranks.
+and its context pass; reports, the web and the agent dossier read it. Findings stored after it (an AI agent's) are
+placed into it when the agent's run ends (`place_late_findings`), without recomputing it. Each pass is computed in
+bounded keyset pages over the store (`romulus.store.ranks`) and replaces the hunt's previous rows for that pass
+atomically, so running a pass again over the same stored candidates (a resumed hunt) gives the same ranks.
 """
 from __future__ import annotations
 
@@ -24,6 +25,7 @@ log = logging.getLogger("romulus.rank")
 PASS_BEFORE_EXPANSION = 1
 PASS_FINAL = 2
 SUMMARY_ACTIONS = {PASS_BEFORE_EXPANSION: "hunt.rank_pass_1_summary", PASS_FINAL: FINAL_RANK_SUMMARY}
+PLACE_FAILED_ACTION = "hunt.rank_pass_2_late_failed"
 # Rows a pass holds in Python at once (one keyset page). A few thousand rows of a few hundred bytes are a few MB on
 # any host; a larger page only saves round trips, and per-entity state lives in the store's staging tables.
 RANK_BATCH = 2000
@@ -265,6 +267,48 @@ def run_rank_pass(repo: Repo, hunt_id: str, pass_no: int, *, owner_token: str | 
 def rank_summary(repo: Repo, hunt_id: str, pass_no: int = PASS_FINAL) -> dict | None:
     audit = repo.latest_audit(hunt_id, SUMMARY_ACTIONS[pass_no])
     return dict(audit["detail"]) if audit else None
+
+
+def place_late_findings(repo: Repo, hunt_id: str, *, owner_token: str | None = None,
+                        batch_size: int = RANK_BATCH, heartbeat: Callable[[], None] = lambda: None) -> dict | None:
+    """Give the final pass a row for each reportable finding stored after it ran (an AI agent's proposals and its
+    pivots' rule matches), so every view and the report place them by one stored rank. Each is scored by
+    `rank_unranked` from the pass's stored entity scores, and the pass is never recomputed: evidence the agent's
+    pivots stored (events, addresses) never changes an earlier finding's score, section or reported flag or an entity's
+    score, and never lowers the hunt's result; only positions move to make room. A rule match the agent's pivots found
+    counts toward the result once placed, as any deterministic finding does. Each batch is placed in one transaction with the
+    pass's updated summary, so a crash leaves the rest unranked for the next call. Nothing to place (no final pass,
+    or no late finding) returns None. A failure keeps what was placed, leaves the rest labelled "not ranked", and is
+    recorded under its own audit action."""
+    if not repo.has_rank_pass(hunt_id, PASS_FINAL) or not repo.unranked_findings(hunt_id):
+        return None
+    summary = dict(rank_summary(repo, hunt_id, PASS_FINAL) or {"pass": PASS_FINAL})
+    placed, first = 0, None
+    try:
+        while page := repo.unranked_findings_page(hunt_id, batch_size):
+            if page[0]["id"] == first:
+                raise RuntimeError(f"finding {first} was not placed")
+            first = page[0]["id"]
+            heartbeat()
+            ranks = rank_unranked(repo, hunt_id, page)
+            rows = [{"candidate_id": row["id"], "score": ranks[row["id"]]["score"],
+                     "reported": bool(ranks[row["id"]]["reported"]), "entity_kind": ranks[row["id"]]["entity_kind"],
+                     "entity": ranks[row["id"]]["entity"], "reasons": _json_list(ranks[row["id"]]["reasons"]),
+                     "section": 0 if row["lane"] == model.CONFIRMED_LANE else 1 if ranks[row["id"]]["reported"] else 2}
+                    for row in page]
+            summary = repo.place_late_ranks(hunt_id, rows, {
+                **summary, "late_findings_placed": int(summary.get("late_findings_placed") or 0) + len(rows)},
+                owner_token=owner_token)
+            placed += len(rows)
+    except Exception as exc:
+        if is_lease_lost(exc):
+            raise
+        log.exception("placing findings stored after the final ranking pass failed")
+        detail = {"pass": PASS_FINAL, "version": model.RANK_VERSION, "status": "failed", "placed": placed,
+                  "reason": f"ranking error: {type(exc).__name__}: {exc}"[:300]}
+        repo.audit("system", PLACE_FAILED_ACTION, hunt_id, detail, owner_token=owner_token)
+        return detail
+    return summary
 
 
 # Expansion reads the pass-1 Reported set (repo.finding_ranks_page, reported only) to choose its extra seeds.
