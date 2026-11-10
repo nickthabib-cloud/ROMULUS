@@ -235,10 +235,11 @@ def test_refused_baseline_row_is_local_and_other_detection_keeps_growing(tmp_pat
             raise sqlite3.OperationalError("injected baseline-cell physical refusal")
         return original(self, **kwargs)
     monkeypatch.setattr(EventStage, "record_baseline_cell", write)
-    snapshot = tf.run_stack(tmp_path, docs=tf.build(1))
-    from tests.test_throughput_equality import GOLDEN_STACK
+    # expansion seeded by the rule estimate, so the comparison isolates the sweep's baseline refusal
+    snapshot = tf.run_stack(tmp_path, docs=tf.build(1), rank=False)
+    from tests.test_throughput_equality import GOLDEN_CANDIDATES_BY_RULE_ESTIMATE
     assert refused and len(snapshot["candidates"]) == 40
-    assert tf.deterministic_golden_digests(snapshot)["candidates"] == GOLDEN_STACK["candidates"]
+    assert tf.deterministic_golden_digests(snapshot)["candidates"] == GOLDEN_CANDIDATES_BY_RULE_ESTIMATE
     partial = [row for row in snapshot["rule_cells"] if "injected baseline-cell" in str(row.get("detail"))]
     assert partial and all(row["rule_id"] == "bl.exec_pair" for row in partial)
     assert all(row["state"] != "executed_failed" for row in snapshot["rule_cells"])

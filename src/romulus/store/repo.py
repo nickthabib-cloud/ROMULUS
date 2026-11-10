@@ -428,6 +428,36 @@ def _chunks(rows: Iterable[dict], size: int) -> Iterator[list[dict]]:
 AGENT_ELIGIBLE_STATES = ("completed_within_scope", "partial")
 
 
+# The ranking pass reports read (pass 2, after expansion); the hunt layer names it PASS_FINAL.
+FINAL_RANK_PASS = 2
+
+
+def _detection_result_on(connection, hunt_id: str) -> tuple[dict[str, int], str]:
+    """The hunt's deterministic lane counts and headline result. With a complete final ranking the result follows
+    the report's headline: reportable when any confirmed or Reported finding exists, leads only when the ranked pool
+    has findings but none is reported. Without one (failed, or a hunt stored before ranking) it follows the lanes.
+    A rule match an investigator pivot found is a deterministic finding like any other here (as in the lane rule);
+    it is kept out of entity evidence only, not out of the hunt's result."""
+    counts = {lane: int(n) for lane, n in connection.execute(select(t.candidate.c.lane, func.count()).where(
+        t.candidate.c.hunt_id == hunt_id, t.candidate.c.provenance == "deterministic",
+    ).group_by(t.candidate.c.lane))}
+    ranked_pass = connection.execute(select(t.finding_rank.c.candidate_id).where(
+        t.finding_rank.c.hunt_id == hunt_id, t.finding_rank.c["pass"] == FINAL_RANK_PASS).limit(1)).first()
+    if ranked_pass is None:
+        ranked_pass = connection.execute(select(t.entity_rank.c.entity).where(
+            t.entity_rank.c.hunt_id == hunt_id, t.entity_rank.c["pass"] == FINAL_RANK_PASS).limit(1)).first()
+    if ranked_pass is not None:
+        ranked, reported = connection.execute(
+            select(func.count(), func.coalesce(func.sum(case((t.finding_rank.c.reported.is_(True), 1), else_=0)), 0))
+            .select_from(t.finding_rank.join(t.candidate, t.candidate.c.id == t.finding_rank.c.candidate_id))
+            .where(t.finding_rank.c.hunt_id == hunt_id, t.finding_rank.c["pass"] == FINAL_RANK_PASS,
+                   t.candidate.c.provenance == "deterministic")).one()
+        return counts, ("reportable_findings" if reported else "leads_only" if ranked else
+                        "no_qualifying_observation_in_assessed_scope")
+    return counts, ("reportable_findings" if counts.get("urgent", 0) + counts.get("high", 0) else
+                    "leads_only" if counts.get("lead", 0) else "no_qualifying_observation_in_assessed_scope")
+
+
 def is_lease_lost(exc: BaseException) -> bool:
     """Recognize fencing failures without swallowing unrelated repository errors."""
     return isinstance(exc, RuntimeError) and "lease ownership lost" in str(exc)
@@ -825,6 +855,8 @@ class Repo:
                 t.baseline_segment.c.source_hunt_id == hunt_id,
                 t.baseline_segment.c.built_by_hunt_id == hunt_id,
             )).values(status="revoked"))
+            rm("finding_ranks", t.finding_rank.delete().where(t.finding_rank.c.hunt_id == hunt_id))
+            rm("entity_ranks", t.entity_rank.delete().where(t.entity_rank.c.hunt_id == hunt_id))
             rm("disposition_events", t.disposition_event.delete().where(t.disposition_event.c.candidate_id.in_(cand_ids)))
             rm("candidate_hosts", t.candidate_host.delete().where(t.candidate_host.c.candidate_id.in_(cand_ids)))
             rm("candidates", t.candidate.delete().where(t.candidate.c.hunt_id == hunt_id))
@@ -2514,6 +2546,93 @@ class Repo:
         with self.engine.connect() as c:
             r = c.execute(select(t.candidate).where(t.candidate.c.id == cid)).mappings().first()
             return dict(r) if r else None
+
+    # -- evidence ranks ---------------------------------------------------------------------------------------------
+    def rank_workspace(self, hunt_id: str, pass_no: int):
+        """Staging tables for computing one ranking pass; its `publish` replaces the pass atomically."""
+        from romulus.store.ranks import rank_workspace
+        return rank_workspace(self.engine, hunt_id, pass_no, self._fence_lease)
+
+    def has_rank_pass(self, hunt_id: str, pass_no: int) -> bool:
+        query = select(t.finding_rank.c.candidate_id).where(
+            t.finding_rank.c.hunt_id == hunt_id, t.finding_rank.c["pass"] == pass_no).limit(1)
+        with self.engine.connect() as connection:
+            if connection.execute(query).first() is not None:
+                return True
+            return connection.execute(select(t.entity_rank.c.entity).where(
+                t.entity_rank.c.hunt_id == hunt_id, t.entity_rank.c["pass"] == pass_no).limit(1)).first() is not None
+
+    def finding_ranks_page(self, hunt_id: str, pass_no: int, *, after_position: int = 0, limit: int = 500,
+                           reported: bool | None = None) -> list[dict]:
+        """One page of a pass's finding ranks in rank order (keyset on position), with each finding's lane."""
+        query = (select(t.finding_rank, t.candidate.c.lane, t.candidate.c.rule_id, t.candidate.c.ts)
+                 .join(t.candidate, t.candidate.c.id == t.finding_rank.c.candidate_id, isouter=True)
+                 .where(t.finding_rank.c.hunt_id == hunt_id, t.finding_rank.c["pass"] == pass_no,
+                        t.finding_rank.c.position > after_position))
+        if reported is not None:
+            query = query.where(t.finding_rank.c.reported == reported)
+        with self.engine.connect() as connection:
+            return [dict(row) for row in connection.execute(
+                query.order_by(t.finding_rank.c.position).limit(limit)).mappings()]
+
+    def detection_result(self, hunt_id: str) -> tuple[dict[str, int], str]:
+        """The hunt's deterministic lane counts and headline result (see `_detection_result_on`)."""
+        with self.engine.connect() as connection:
+            return _detection_result_on(connection, hunt_id)
+
+    def finding_rank_counts(self, hunt_id: str, pass_no: int, *, after_position: int = 0,
+                            reported: bool | None = None, exclude_lanes: tuple[str, ...] = ()) -> dict[str, int]:
+        """Of a pass's ranked deterministic findings (after `after_position`), how many per rule."""
+        joined = t.finding_rank.join(t.candidate, t.candidate.c.id == t.finding_rank.c.candidate_id)
+        query = (select(t.candidate.c.rule_id, func.count()).select_from(joined).where(
+            t.finding_rank.c.hunt_id == hunt_id, t.finding_rank.c["pass"] == pass_no,
+            t.finding_rank.c.position > after_position, t.candidate.c.provenance == "deterministic",
+            t.candidate.c.source_case_id.is_(None)).group_by(t.candidate.c.rule_id))
+        if reported is not None:
+            query = query.where(t.finding_rank.c.reported == reported)
+        if exclude_lanes:
+            query = query.where(t.candidate.c.lane.not_in(exclude_lanes))
+        with self.engine.connect() as connection:
+            return {str(rule_id): int(count) for rule_id, count in connection.execute(query)}
+
+    def finding_ranks_for(self, hunt_id: str, pass_no: int, candidate_ids) -> dict[str, dict]:
+        out: dict[str, dict] = {}
+        ids = sorted(set(candidate_ids))
+        with self.engine.connect() as connection:
+            for offset in range(0, len(ids), ID_CHUNK):
+                out.update((row["candidate_id"], dict(row)) for row in connection.execute(
+                    select(t.finding_rank).where(
+                        t.finding_rank.c.hunt_id == hunt_id, t.finding_rank.c["pass"] == pass_no,
+                        t.finding_rank.c.candidate_id.in_(ids[offset:offset + ID_CHUNK]))).mappings())
+        return out
+
+    def entity_ranks_page(self, hunt_id: str, pass_no: int, *, after_position: int = 0,
+                          limit: int = 500) -> list[dict]:
+        """One page of a pass's entity ranks in rank order (keyset on position)."""
+        query = (select(t.entity_rank).where(
+            t.entity_rank.c.hunt_id == hunt_id, t.entity_rank.c["pass"] == pass_no,
+            t.entity_rank.c.position > after_position).order_by(t.entity_rank.c.position).limit(limit))
+        with self.engine.connect() as connection:
+            return [dict(row) for row in connection.execute(query).mappings()]
+
+    def entity_ranks_for(self, hunt_id: str, pass_no: int, keys) -> dict[tuple[str, str], dict]:
+        """The stored ranks of the given (kind, value) entities of one pass."""
+        out: dict[tuple[str, str], dict] = {}
+        ordered = sorted(set(keys))
+        with self.engine.connect() as connection:
+            for offset in range(0, len(ordered), 250):
+                for row in connection.execute(select(t.entity_rank).where(
+                        t.entity_rank.c.hunt_id == hunt_id, t.entity_rank.c["pass"] == pass_no,
+                        tuple_(t.entity_rank.c.entity_kind, t.entity_rank.c.entity).in_(
+                            ordered[offset:offset + 250]))).mappings():
+                    out[(row["entity_kind"], row["entity"])] = dict(row)
+        return out
+
+    def delete_rank_pass(self, hunt_id: str, pass_no: int, *, owner_token: str | None = None) -> None:
+        with write_txn(self.engine) as connection:
+            self._fence_lease(connection, hunt_id, owner_token)
+            for table in (t.finding_rank, t.entity_rank):
+                connection.execute(table.delete().where(table.c.hunt_id == hunt_id, table.c["pass"] == pass_no))
 
     def candidates_by_ids(self, ids: list[str] | str, candidate_ids: list[str] | None = None, *,
                           hunt_id: str | None = None, finding_alias: bool = False) -> list[dict]:
@@ -5322,13 +5441,7 @@ class Repo:
             state = connection.execute(select(t.hunt.c.execution_state).where(t.hunt.c.id == hunt_id)).scalar_one()
             if state not in AGENT_ELIGIBLE_STATES:
                 raise RuntimeError(f"hunt {hunt_id} is {state}: no detection result to refresh")
-            rows = connection.execute(select(t.candidate.c.lane, func.count()).where(
-                t.candidate.c.hunt_id == hunt_id, t.candidate.c.provenance == "deterministic",
-            ).group_by(t.candidate.c.lane))
-            counts = {lane: n for lane, n in rows}
-            result = ("reportable_findings" if counts.get("urgent", 0) + counts.get("high", 0) else
-                      "leads_only" if counts.get("lead", 0) else
-                      "no_qualifying_observation_in_assessed_scope")
+            counts, result = _detection_result_on(connection, hunt_id)
             connection.execute(t.hunt.update().where(t.hunt.c.id == hunt_id).values(detection_result=result))
             terminal = {"prompt_digests": {}, "provider": {}, "ended_at": now, **values,
                         "hunt_id": hunt_id, "updated_at": now, "lease_owner": None, "lease_until": None}

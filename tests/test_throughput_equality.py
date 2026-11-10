@@ -344,7 +344,63 @@ from tests import throughput_fixture as tf
 # links, audit, manifest, rule cells, the baseline observations and scope hours, and the normalization and pivot
 # goldens). With the evidence version set back to 16 every digest here is the earlier one, and the non-baseline
 # semantic projection is unchanged.
-GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe554935eb6f87cf',
+# Evidence ranking now runs before and after expansion. Expansion first seeds what the rule estimate seeds (urgent and
+# high) with the budget share and order it always had, then anchors the rest of the ranking's Reported set in rank
+# order with the budget left. In this fixture 53 of the 54 ranked findings sit on entities that meet the evidence bar,
+# so 23 lead findings are extra seeds after the 7 rule-estimate anchors. The 7 earlier anchors fetch exactly the 156
+# links they fetched before, with the same status and reasons (test below); the extra seeds spend only the queries
+# left (source queries 135 -> 162 of 180; see the paging below). The extra anchors reach 14 context findings (4 high, 10 lead; context.credential_access,
+# .lateral_movement, .staging_and_transfer and .post_access_discovery, all re-observations on web1 of activity
+# already found). No earlier candidate is removed or changes lane; two (host.credential_material_access and
+# host.credential_store_read) change only their claim's reach text and gate reach metadata, as the extra anchors'
+# links reach them too. Events (195 -> 197), raw records, tasks (175 -> 202), event entities, rule cells
+# (the new links' context evaluations) and the hunt-derived baseline segments, counts, scope hours and
+# exclusions (keys of the new findings) move with them; the audit adds the two ranking pass summaries (which record
+# their page and statement counts); the manifest
+# adds each finding's rank fields, the ranking summary and the ranked entities.
+# Rule tactics are now resolved through the vendored ATT&CK release (the old technique table is only a fallback), which
+# moves the attack_tactics (and the narrative's mapping sentence) of 10 of the 24 incidents: the release's tactics
+# replace the table's defense-evasion with stealth or defense-impairment (Valid Accounts, Impair Defenses), and add
+# exfiltration, collection, impact, privilege-escalation and command-and-control where the table had fewer or none
+# (I-1e61a68c9c35, I-bda21460664c, I-dbb6b7f023dd, I-2d9388d67b6f, I-35a2807ebb9c, I-64996482cb56, I-5c6b5f2d653a,
+# I-9bf75eb45f37, I-b7971accd14a, I-fb7b4afcec47). Incident membership, techniques and everything else are unchanged.
+# Extra seeds are then anchored a page at a time, while queries and wall-clock time remain: as many as the queries a
+# root may still spend could start. With the fixed budget the extras are roots, so the reserve for discovered anchors
+# bounds them: 27 queries remain under the root cap after the rule estimate's anchors spend 135, so 13 extras are
+# anchored and spend them (source queries still 162), and the other 10 Reported-set seeds are counted in the
+# expansion summary ("10 Reported-set seeds not anchored: budget") instead of being anchored without budget to
+# expand (anchors 30 -> 20, all 20 partial; links 192, rule cells 17916). Candidates, events, tasks and raw records
+# are unchanged: the 13 extras reach all 14 context findings. Bare local accounts are qualified by their host, so the
+# manifest's entities name web1\www-data and db1\alice instead of www-data and alice (9 entities; no finding's
+# reported state moves). The audit moves with the expansion summary and the pass summaries' statement counts.
+# Run with expansion seeded by the rule estimate (`run_stack(rank=False)`), every digest is the earlier one except the
+# manifest's (those incident tactics alone), and the non-baseline semantic projection is the earlier one.
+GOLDEN_STACK = {'anchors': '30068f8445c084098c1481d42b0543bff8729d9a4a0fbafefee71c19b5a6ce75',
+ 'audit': '50c30e56a6516a512a3e7b9330959758cd784b28c7531123143b72b776fa322c',
+ 'baseline_counts': '748129268ef043d23f91ca3a357a5adfff57e4cf0a380709aeb729b93294021f',
+ 'baseline_hunt_exclusions': '66d8a3bf089749ff997d501f23f4d1c27c4bc7ba72ec71194789405548ed3ddc',
+ 'baseline_observations': '6753ce92f6247b473508e1e35f73339cb3843dabfb5a87c23b4339a749df13e5',
+ 'baseline_scope_hours': 'e6c1b1e01cd07466c3e4abe291c36d5420259ed7142585ca50efddb88e1af9c4',
+ 'baseline_segments': 'e7a92b3d8bc6488ee87f39e1be1301cbd3e68ee8461fb43e7853601912d3186c',
+ 'baseline_snapshot': '63b4c8094cb5450b1e707fd7be786e90324528e738b882358cae15cb8d53f776',
+ 'baseline_window_counts': '7cc0f5555260b0533927f47cfe29e6a543e2d921b0cc79e4b6b89f418d6052f8',
+ 'baseline_window_event_hours': 'bb58c65144b135443e75a690b7b2f8137ebac6b827f8e8bd8cc7606a01c53e52',
+ 'baseline_window_scope_hours': '9f977913af60b464aae55a2fa1c263ebdefd644ca53fccc58ea616b47900d90a',
+ 'candidates': '9950c06c868f9b57dd68ab69c9001dd0de7408b63805899288056afe06a18242',
+ 'entities': 'f26a3ccda6f16d94a0b0822914a0827ecd57ab81791dec1e39227f76a3529f17',
+ 'event_citations': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
+ 'event_entities': 'e3b969f22244ac772447a8a3ba4145fa4bf3a9bf5b61b0cf4be660a2513269d2',
+ 'events': '396924ad3310abcee56c94c420c6bd460c1c78c6129899b40c41cb1cd2777e4a',
+ 'expansion': '55c49a3426e21a0a4591feea9996f346ac089862a6fe95ad16a3f5aaeda7b46b',
+ 'links': 'b3e785c0d7ffb591b92816e35511caa72486542bbda892651c4fb0fa51e22bb5',
+ 'manifest': 'ed4506920e6977681fcf1b685c0ff12506fa08b4db4b0af39165078c986c66c4',
+ 'raw': '37a200c3ad1aeefe056452f68ba2180760be3849745269d44f4016ee397d019d',
+ 'rule_cells': '421a848aa9551e978655d23dec3215acf6d4f0b09132ee170b04d99891d9bb2e',
+ 'stats': '03817e5592ef62f8aecddbb9cae63bf65e5496d5f148fd5d518389275a4ae608',
+ 'tasks': '6481d38c57327f916e0d26f8f1f621d34640fa7e5ce49c23cbaec8990d494e25'}
+# The rule-estimate stack's digests (expansion seeded by the urgent and high lanes, as before evidence ranking;
+# the manifest's moved only with the incident tactics above).
+GOLDEN_STACK_BY_RULE_ESTIMATE = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe554935eb6f87cf',
  'audit': '93e7e798b20a8a186ea1fc8204ebd1cc2768f9faaa3d678841b86f4b9b12e06c',
  'baseline_counts': 'be05fabb25336f21341b46eae7d8c2627828f7a7a7e8fdb24f4eb58576099354',
  'baseline_hunt_exclusions': 'c91eefda01c512d6d63e892dc9696016b01a71d44e4abcc429d954bd51864852',
@@ -362,15 +418,13 @@ GOLDEN_STACK = {'anchors': '3214bd0b324534f0828d1ed45fd25dc113e8da587e5690e1fe55
  'events': '9d1656ca22aeb9eb4b5dfa18f98fd9db3231baea2266d72a484bdc0a252d6fcc',
  'expansion': 'e7a94c167f9a42d9adb20a9ee7660abd45c407ecf30baf023f31b465f0b845fa',
  'links': '5df971a7f0d797f9181f6ed038480cc189101da00d3dcd7a81dac834b35b13c6',
- 'manifest': 'f878ac56a388599dce6bc1cb8abb00cc2ea89b4923f08d8b48411da07d4aaf7b',
+ 'manifest': '070b7f548cb3f64a00284597d55a730b5e9d0fa213d5e07c050cbb692aa82611',
  'raw': '3d95193e192f300d2424e9109a5f5267608533e822d4dd5fb479f52a1a6486a6',
  'rule_cells': 'a3be759f41c94a81120c1a23ea136572ee48a7228dcb6b22155661d300a14dd0',
  'stats': '03817e5592ef62f8aecddbb9cae63bf65e5496d5f148fd5d518389275a4ae608',
  'tasks': '820ed1e788f6476853cd0b4a04444927a1771296cc4e1212accf11e27c20f742'}
-# Captured directly from the S7 fixture through _non_baseline_semantic_digests. Typed-event-derived hashes and
-# interchangeable predicate origins are normalized, while every decision, claim, lane, raw citation and gate is
-# checked field by field.
-GOLDEN_NON_BASELINE_SEMANTICS = {'candidates': {'all_fields': '4cf242cede6c404a9cec581aa7f10aac3a898b1c67a25dd1bb8e3ad838e139ea',
+GOLDEN_CANDIDATES_BY_RULE_ESTIMATE = GOLDEN_STACK_BY_RULE_ESTIMATE['candidates']
+GOLDEN_NON_BASELINE_SEMANTICS_BY_RULE_ESTIMATE = {'candidates': {'all_fields': '4cf242cede6c404a9cec581aa7f10aac3a898b1c67a25dd1bb8e3ad838e139ea',
                 'benign_alternatives': 'b6a6498000e772cfa17ad8ec0de6611835534dbd7262543e97e6e413b75304aa',
                 'claim': 'b9376dc415ee7a3f7cd11e025171c6aa7bcb0eb58af69169ddf7c8f0fa84653d',
                 'claim_type': '62ee830737cd920223bd88ccd391e5074f2e72242803701f1f849e25d1fdf7c2',
@@ -401,6 +455,41 @@ GOLDEN_NON_BASELINE_SEMANTICS = {'candidates': {'all_fields': '4cf242cede6c404a9
                 'rule_version': '6e06616da6f73ed294b1b7dc633b6a0890e7f521857d680563573c81be4ba338',
                 'state': '79492679c375470e7bc0235f6b4335d5ca8329aa0575e774ae0a72392f380220',
                 'target': 'c533333fd26b44f80c85e368bab8980506bfb6ad90f452f8a4e6561d059b40fe'}}
+
+# Captured directly from the S7 fixture through _non_baseline_semantic_digests. Typed-event-derived hashes and
+# interchangeable predicate origins are normalized, while every decision, claim, lane, raw citation and gate is
+# checked field by field.
+GOLDEN_NON_BASELINE_SEMANTICS = {'candidates': {'all_fields': 'eabe3b90407d230a7a0d1e5d01da1bb74e895a925f7a51f3141b188cd9db4ffb',
+                'benign_alternatives': '7ce7cd9787349e1cd28008f4262cdd4783cdc2e9cb68cfb1cb9b6b76dd5635dc',
+                'claim': '3f66c1241e93ede4913bcb55281dc7ae347b88535714360e0710dd5fdfa88555',
+                'claim_type': 'b04e5a2f324691d80a54e0a2ec6a2da2f755f30294ddea5faaea2f7c73fb66cb',
+                'confidence': 'fa5e80446bf326b315eaee790d2ff6e345e460a6c086c573b71390ac5311d89b',
+                'context_event_records': '802bfc50038c8f92c7631953da9a1413da7bb0b3469a56e590069e3ebc4c19b0',
+                'count': 54,
+                'entities': '5decb0076f62e41a54bb88e58b726b91caadec5302976cf501b575425a565cc2',
+                'event_records': 'c4c51b668353b79a55922e6b2fccab9abcd82c33f9765a6610c6c9d25c3881b9',
+                'gate_results': '86cc4535493f7c9da5c8e3ee49bbdcf149b692bda529ca77e958981063550cbd',
+                'group_key': 'cb1bd5c9307f82a7d10c906b633f17164ddb9d2107eeb6de6ab5d605eb82fe0c',
+                'lane': '320f804b0a6f760c5b77c532b9c5e6c708bca250794f1e2aec8f87aeeeef8061',
+                'next_checks': '0a9009a8bb889988a3ce45ff60eb3978b609cf4e535f09f27b8b7c633173297d',
+                'predicate_fields': '37ac627488f27134b6dee812657010a8075bca3a76edd0ac98415569399421a4',
+                'priority': 'a45083d668a7a32e5fd7069ef387db9213a665019bf25413da24756eadf071ac',
+                'priority_reasons': 'd8e5f7512822a20bc9cdc360f4d7e0988011fae30ea2fc6957e93f45773dfbf8',
+                'rule_id': 'eb76f2b67bd295d910cadd3d8da7ed9d62f8876ecee8ad233d80a677bc9f572f',
+                'rule_version': 'a41fdd6ae62c642457d93be7c19b96dfa5b161d7c2f64cf46cf63fa5baaa514a',
+                'severity': '807d269c2f4b655931696871a41e0eb6b364ec8c8ebb8eff4dc8456ddbc4e64b',
+                'source_presence': 'f7dd27fce0c2093865dff4e5d7e7b23a0677790af53a5dcb92ef73fbc8e1934d',
+                'ts': 'f137161c5bf0d610fff1a18e4080f1c4d60892c93b91351d7d96393f7abc9edf'},
+ 'rule_cells': {'all_fields': '1b6eed8d87bf103ba501c056dd396b1f2a3986ca773753502d1c6a29b31d17b0',
+                'count': 17472,
+                'detail': '05152bb6e6f17b19828b8c2951946ae46fa06f45a16db3772083b19812b1718f',
+                'evaluated': '7c6ba12f71540935a7908b139bede050023d28ada402368a21da4a76031ba1ac',
+                'matched': 'a5973482a801232a3e25e9f376936345d2a6d717e01df40987af1e5d6bd59622',
+                'partition': '040423cfcb13b6b6e07609b537c53a4331b08cc5f65aea1745cc1eb9323d10b4',
+                'rule_id': '818c87cdb438db4f3e358bc1f4f7c6bd32888c5454d8294faa1080065bcdde08',
+                'rule_version': '7af1236c72847f123988efcee5c12d7602ed1acac33bed68b3edfcfe3d35ee14',
+                'state': '60a700255d6da632988d2e562f49e020d184dd5c362acea95e4e7c5c84340a02',
+                'target': 'a6bef91f4270166a3fc59e9f2948f24cd60b800735ea6c6a70f059bec236a886'}}
 GOLDEN_NORMALIZED = {'arkime_sessions3-x': '1c08ef8ffd802ef67c6b6df2f8c5ba27bbf40ef5439c07a677c17044030f9ae9',
  'arkime_sessions3-x+boots': '1c08ef8ffd802ef67c6b6df2f8c5ba27bbf40ef5439c07a677c17044030f9ae9',
  'romulus-host-x': 'b46c4bfa21a9d32e8f11e18df9e79e32b92bca70fdf767d3aba4192416176433',
@@ -585,9 +674,18 @@ def docs():
     return tf.build(1)
 
 
-def test_the_sweep_and_expansion_stack_reproduces_the_captured_result(docs, tmp_path, monkeypatch):
-    tf.patched_sizes(monkeypatch)
-    snapshot = tf.run_stack(tmp_path, docs=docs)
+@pytest.fixture(scope="module")
+def stacks(docs, tmp_path_factory):
+    """The stack as a hunt runs it (ranked) and seeded by the rule estimate alone, over the same documents."""
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        tf.patched_sizes(monkeypatch)
+        ranked = tf.run_stack(tmp_path_factory.mktemp("ranked"), docs=docs)
+        by_rule_estimate = tf.run_stack(tmp_path_factory.mktemp("rule-estimate"), docs=docs, rank=False)
+    return ranked, by_rule_estimate
+
+
+def test_the_sweep_and_expansion_stack_reproduces_the_captured_result(stacks):
+    snapshot = stacks[0]
     # the scenario is not vacuous: findings, splits, capped fetches, expansion links and a manifest
     assert {c["lane"] for c in snapshot["candidates"]} >= {"high", "lead"}
     assert sum(c["state"] == "split" for c in snapshot["rule_cells"]) > 100
@@ -597,6 +695,36 @@ def test_the_sweep_and_expansion_stack_reproduces_the_captured_result(docs, tmp_
     _assert_every_citation_resolves_with_raw(snapshot)
     assert tf.deterministic_golden_digests(snapshot) == GOLDEN_STACK
     assert _non_baseline_semantic_digests(snapshot) == GOLDEN_NON_BASELINE_SEMANTICS
+    assert all(finding.get("rank") is not None for finding in snapshot["manifest"]["findings"])
+    assert snapshot["manifest"]["ranking"]["status"] == "complete"
+
+
+def test_the_stack_seeded_by_the_rule_estimate_is_unchanged_by_ranking(stacks):
+    """Without the ranking passes, the stack reproduces the result captured before evidence ranking existed."""
+    snapshot = stacks[1]
+    assert tf.deterministic_golden_digests(snapshot) == GOLDEN_STACK_BY_RULE_ESTIMATE
+    assert _non_baseline_semantic_digests(snapshot) == GOLDEN_NON_BASELINE_SEMANTICS_BY_RULE_ESTIMATE
+
+
+def test_ranked_seeds_never_take_budget_from_the_rule_estimates_anchors(stacks):
+    """Every anchor the rule estimate seeds fetches exactly the links it fetched without ranking, keeps its status
+    and reasons, and every finding found without ranking is still found; the extra seeds spend only what is left."""
+    ranked, by_rule_estimate = stacks
+    earlier = {row["id"]: row for row in by_rule_estimate["anchors"]}
+    now = {row["id"]: row for row in ranked["anchors"]}
+    assert earlier and set(earlier) < set(now)
+    for anchor_id, row in earlier.items():
+        assert (now[anchor_id]["status"], now[anchor_id]["reasons"]) == (row["status"], row["reasons"])
+
+    def links(snapshot):
+        return sorted(json.dumps(link, sort_keys=True, default=str) for link in snapshot["links"]
+                      if link["anchor_id"] in earlier)
+
+    assert links(ranked) == links(by_rule_estimate)
+    assert {row["id"] for row in by_rule_estimate["candidates"]} <= {row["id"] for row in ranked["candidates"]}
+    extra = [row for row in ranked["anchors"] if row["id"] not in earlier]
+    assert extra and all(row["lane"] == "lead" and row["depth"] == 0 for row in extra)
+    assert ranked["expansion"]["source_queries"] <= 180
 
 
 def test_normalization_of_every_target_reproduces_the_captured_events(docs):

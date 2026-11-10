@@ -247,6 +247,51 @@ candidate_host = Table(
     sqlite_with_rowid=False,
 )
 
+# Evidence-based ranking, one row per ranked finding and per entity for each ranking pass (1: before expansion,
+# 2: after expansion and context). A pass is always replaced as a whole in one transaction. `position` is the rank
+# order (1 is the top): score descending, then observation time, then id for findings; score, kind and value for
+# entities. The candidate is referenced without a foreign key, so a rebuild of the candidate table can never
+# cascade into the ranks; the hunt's deletion removes them.
+finding_rank = Table(
+    "finding_rank", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id"), nullable=False),
+    Column("pass", Integer, nullable=False),
+    Column("candidate_id", String, nullable=False),
+    Column("position", Integer, nullable=False),
+    Column("score", Float, nullable=False),
+    Column("reported", Boolean, nullable=False),
+    Column("entity_kind", String),
+    Column("entity", String),
+    Column("reasons", JSON, nullable=False),
+    PrimaryKeyConstraint("hunt_id", "pass", "candidate_id", name="pk_finding_rank"),
+    CheckConstraint('"pass" IN (1, 2)', name="ck_finding_rank_pass"),
+)
+Index("ix_finding_rank_score", finding_rank.c.hunt_id, finding_rank.c["pass"], finding_rank.c.score.desc())
+Index("ix_finding_rank_position", finding_rank.c.hunt_id, finding_rank.c["pass"], finding_rank.c.position,
+      unique=True)
+
+entity_rank = Table(
+    "entity_rank", metadata,
+    Column("hunt_id", String, ForeignKey("hunt.id"), nullable=False),
+    Column("pass", Integer, nullable=False),
+    Column("entity_kind", String, nullable=False),
+    Column("entity", String, nullable=False),
+    Column("position", Integer, nullable=False),
+    Column("score", Float, nullable=False),
+    Column("tactics", JSON, nullable=False),
+    Column("rules", Integer, nullable=False),
+    Column("cooccur", Integer, nullable=False),
+    Column("confirmed", Integer, nullable=False),
+    Column("findings", Integer, nullable=False),
+    Column("reported", Boolean, nullable=False),
+    Column("reasons", JSON, nullable=False),
+    PrimaryKeyConstraint("hunt_id", "pass", "entity_kind", "entity", name="pk_entity_rank"),
+    CheckConstraint('"pass" IN (1, 2)', name="ck_entity_rank_pass"),
+)
+Index("ix_entity_rank_score", entity_rank.c.hunt_id, entity_rank.c["pass"], entity_rank.c.score.desc())
+Index("ix_entity_rank_position", entity_rank.c.hunt_id, entity_rank.c["pass"], entity_rank.c.position,
+      unique=True)
+
 expansion_anchor = Table(
     "expansion_anchor", metadata,
     Column("id", String, primary_key=True),              # the anchored candidate id

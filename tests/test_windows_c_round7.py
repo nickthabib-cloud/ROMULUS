@@ -248,7 +248,8 @@ def test_native_scale4_releases_use_global_room_without_poisoning_later_findings
     # event ids again: the same 60 findings, and with the evidence version set back to 16 the earlier digest.
     budget = StateBudget(tmp_path, disk_total=int(4.1*2**20), reserve=0)
     monkeypatch.setattr(sw, "state_budget", lambda settings, stage_dir: budget)
-    snapshot = fixture.run_stack(tmp_path, docs=fixture.build(4))
+    # expansion seeded by the rule estimate, so the pinned digest isolates the sweep's shared state
+    snapshot = fixture.run_stack(tmp_path, docs=fixture.build(4), rank=False)
     assert not budget.broken
     # Shared state retains prior groups and restores SSH/login findings plus alert-linked context.
     # The alert keeps its computed HIGH lane with explicit partial citation coverage at this physical cap.

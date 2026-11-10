@@ -115,12 +115,37 @@ def _other_agent_notes_section(m: dict) -> list[str]:
     return out
 
 
+def is_ranked(m: dict) -> bool:
+    """Whether the manifest carries an evidence ranking to lay the findings out by."""
+    return (m.get("ranking") or {}).get("status") == "complete" and "entities" in m
+
+
+def ranked_sections(m: dict) -> tuple[list[dict], list[dict], list[dict]]:
+    """The findings in report order: confirmed, then the other reported ones, then the ranked pool not reported, each
+    in rank order (score descending, then time, then id). Every finding is in exactly one section."""
+    def order(finding):
+        rank = finding.get("rank")
+        return (rank is None, -(rank or 0.0), finding["observed_at"] is None, finding["observed_at"] or "",
+                finding["id"])
+
+    findings = sorted(m["findings"], key=order)
+    confirmed = [finding for finding in findings if finding["lane"] == "urgent"]
+    reported = [finding for finding in findings if finding["lane"] != "urgent" and finding.get("reported")]
+    pool = [finding for finding in findings if finding["lane"] != "urgent" and not finding.get("reported")]
+    return confirmed, reported, pool
+
+
 def outcome_sentence(m: dict) -> str:
     deterministic = [finding for finding in m["findings"] if finding.get("provenance", "deterministic") != "agent"]
     n = len(deterministic)
     urgent_high = sum(1 for f in deterministic if f["lane"] in ("urgent", "high"))
     partial = m["execution_state"] != "completed_within_scope"
-    if n:
+    if n and is_ranked(m):
+        confirmed, reported, pool = ranked_sections({**m, "findings": deterministic})
+        entities = sum(entity["reported"] for entity in m["entities"])
+        s = (f"ROMULUS reports {len(confirmed)} confirmed finding(s) and {len(reported)} finding(s) on {entities} "
+             f"reported entit{'y' if entities == 1 else 'ies'}; {len(pool)} more finding(s) are ranked for review.")
+    elif n:
         s = (f"ROMULUS reports {urgent_high} urgent/high finding(s) and {n - urgent_high} investigative lead(s) "
              f"for review.")
     else:
@@ -156,6 +181,70 @@ def _internal_networks_cell(m: dict) -> str:
     return str(view.get("line") or view.get("summary") or "Internal networks: not recorded").removeprefix("Internal networks: ")
 
 
+def _entity_text(entity: dict | None) -> str:
+    if not entity or entity.get("value") is None:
+        return "unattributed"
+    return f"{entity['kind']}:{entity['value']}"
+
+
+def _rank_line(f: dict) -> str:
+    if f.get("rank") is None:
+        return f"- Rank: not ranked ({esc('; '.join(f.get('rank_reasons') or []))})"
+    position = f" (position {f['rank_position']})" if f.get("rank_position") else ""
+    return (f"- Rank: score {f['rank']:g}{position} · {'reported' if f.get('reported') else 'not reported'} · "
+            f"entity {esc(_entity_text(f.get('entity')))} · {esc('; '.join(f.get('rank_reasons') or []))}")
+
+
+def _ranked_summary(m: dict, out: list[str]) -> list[dict]:
+    """The headline for a ranked report: Confirmed, then Reported entities with their findings, then the ranked
+    findings not reported. Returns every finding in report order, for the detail sections."""
+    confirmed, reported, pool = ranked_sections(m)
+    ordered = [*confirmed, *reported, *pool]
+    number = {f["id"]: i for i, f in enumerate(ordered, 1)}
+    by_id = {f["id"]: f for f in ordered}
+
+    def table(rows: list[dict]) -> list[str]:
+        lines = ["| # | Rank | Rule estimate | Severity | Time (UTC) | Entity | Rule | Claim |",
+                 "|---|---:|---|---|---|---|---|---|"]
+        for f in rows:
+            claim = f["claim"] if len(f["claim"]) <= 140 else f["claim"][:139] + "…"
+            rank = "not ranked" if f.get("rank") is None else f"{f['rank']:g}"
+            lines.append(f"| [{number[f['id']]}](#f-{f['id']}) | {rank} | {f['lane']} | {f['severity']} | "
+                         f"{esc(f['observed_at'][:19] if f['observed_at'] else 'Not recorded')} | "
+                         f"{cell(_entity_text(f.get('entity')))} | {esc(f.get('rule_title') or f['rule_id'])} | "
+                         f"{esc(claim)} |")
+        if not rows:
+            lines.append("| none | | | | | | | |")
+        return lines
+
+    out += ["## Findings", "",
+            ("Findings are ordered by the evidence in this hunt, not by each rule's own opinion: an entity (host, "
+             "account or network endpoint) is reported when it has a confirmed finding, findings in two or more "
+             "ATT&CK tactics (one per rule), or three or more rules of which two fire within an hour of each other. "
+             "Rules that recur on at least half the hosts across at least half the window count toward no entity. "
+             "The rule estimate is each "
+             "rule's own lane. Every finding is listed; none is left out."), "",
+            "### Confirmed", "", "Confirmed findings are reported on their own, whatever their entity.", "",
+            *table(confirmed), "", "### Reported entities", ""]
+    reported_entities = [entity for entity in m["entities"] if entity["reported"]]
+    for entity in reported_entities:
+        out += [(f"**{entity['position']}. {esc(entity['kind'])} `{esc(entity['value'])}`** · score "
+                 f"{entity['score']:g} · confirmed {entity['confirmed']} · tactics {len(entity['tactics'])} · "
+                 f"rules {entity['rules']} · co-occurring pairs {entity['cooccurrence']}"), "",
+                f"- {esc('; '.join(entity['reasons']))}", "",
+                *table([by_id[item] for item in entity["finding_ids"] if item in by_id]), ""]
+    if not reported_entities:
+        out += ["No entity meets the evidence bar.", ""]
+    fleet = (m.get("ranking") or {}).get("fleet_recurring_rules") or []
+    if fleet:
+        out += ["Recurring fleet-wide rules (ranked lower, never removed): "
+                + esc(", ".join(f"{item['rule_id']} ({item['hosts']} hosts)" for item in fleet)), ""]
+    out += ["### Ranked findings (not reported)", "",
+            "Findings on entities below the evidence bar, in rank order. They remain leads for review.", "",
+            *table(pool), "", "## Finding details", ""]
+    return ordered
+
+
 def _render_body(m: dict, banner: str = BANNER) -> str:
     h = m["hunt"]
     graph = m.get("incident_graph") or {"incidents": [], "links": [], "nodes": [], "edges": []}
@@ -187,22 +276,34 @@ def _render_body(m: dict, banner: str = BANNER) -> str:
            f"| Broken investigation citations | {m['integrity'].get('broken_investigation_citations', 0)} |", ""]
     for egress in m.get("banners") or []:
         out += [f"> **Model egress:** {cell(egress)}", ""]
+    if m.get("ranking") and not is_ranked(m):
+        out += [(f"> **Evidence ranking unavailable:** {cell(m['ranking'].get('reason') or 'not computed')}. "
+                 "Findings are ordered by each rule's own lane."), ""]
     if (m.get("internal_networks") or {}).get("warning"):
         out += [f"> **Internal networks:** {cell(m['internal_networks']['warning'])}", ""]
     if not m["integrity"]["finalizable"]:
         out += [("> **Degraded report:** one or more citations could not be resolved to retained evidence. "
                  "Those findings are listed with the broken citation marked."), ""]
 
-    out += ["## Findings and leads", "", "Ranked: urgent, then high, then investigative leads; by priority within a lane.", "",
-            "| # | Lane | Severity | Confidence | Time (UTC) | Rule | Claim |", "|---|---|---|---|---|---|---|"]
-    for i, f in enumerate(m["findings"], 1):
-        claim = f["claim"] if len(f["claim"]) <= 140 else f["claim"][:139] + "…"
-        out.append(f"| [{i}](#f-{f['id']}) | {f['lane']} | {f['severity']} | {f['confidence']} | "
-                   f"{esc(f['observed_at'][:19] if f['observed_at'] else 'Not recorded')} | {esc(f.get('rule_title') or f['rule_id'])} | {esc(claim)} |")
-    out.append("")
+    ranked = is_ranked(m)
+    if ranked:
+        ordered = _ranked_summary(m, out)
+    else:
+        ordered = m["findings"]
+        out += ["## Findings and leads", "", "Ranked: urgent, then high, then investigative leads; by priority within a lane.", "",
+                "| # | Lane | Severity | Confidence | Time (UTC) | Rule | Claim |", "|---|---|---|---|---|---|---|"]
+        for i, f in enumerate(m["findings"], 1):
+            claim = f["claim"] if len(f["claim"]) <= 140 else f["claim"][:139] + "…"
+            out.append(f"| [{i}](#f-{f['id']}) | {f['lane']} | {f['severity']} | {f['confidence']} | "
+                       f"{esc(f['observed_at'][:19] if f['observed_at'] else 'Not recorded')} | {esc(f.get('rule_title') or f['rule_id'])} | {esc(claim)} |")
+        out.append("")
 
-    for i, f in enumerate(m["findings"], 1):
-        out += [f'<a id="f-{f["id"]}"></a>', "", f"### {i}. {esc(f.get('rule_title') or f['rule_id'])} ({f['lane']})", "",
+    for i, f in enumerate(ordered, 1):
+        heading = f"rule estimate: {f['lane']}" if ranked else f["lane"]
+        out += [f'<a id="f-{f["id"]}"></a>', "", f"### {i}. {esc(f.get('rule_title') or f['rule_id'])} ({heading})", ""]
+        if ranked:
+            out += [_rank_line(f), ""]
+        out += [
                 f"**Claim.** {esc(f['claim'])}", "",
                 f"- Finding ID: `{f['id']}` · rule version {esc(f['rule_version'])} · claim type {esc(f['claim_type'])}",
                 f"- Observed at: {esc(f['observed_at']) + ' UTC' if f['observed_at'] else 'Not recorded'}",

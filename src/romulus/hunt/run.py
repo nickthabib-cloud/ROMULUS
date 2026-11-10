@@ -22,6 +22,7 @@ from romulus.hunt.links import LinkFetcher, is_agent_reach
 from romulus.hunt.manifest import build_manifest, inventory_usable, new_hunt_id
 from romulus.hunt.packets import PACKET_NORMALIZER, run_packet_stage
 from romulus.hunt.pivot import PivotExecutor
+from romulus.hunt.rank import PASS_BEFORE_EXPANSION, PASS_FINAL, run_rank_pass
 from romulus.hunt.site_networks import (
     check_host_addresses,
     contradiction_reason,
@@ -245,11 +246,9 @@ def _site_network_check(client: ElasticClient, contracts: dict, window: Window, 
 
 
 def _detection_result(repo: Repo, hunt_id: str) -> tuple[dict[str, int], str]:
-    counts = repo.lane_counts(hunt_id)
-    reportable = counts.get("urgent", 0) + counts.get("high", 0)
-    result = ("reportable_findings" if reportable else "leads_only" if counts.get("lead") else
-              "no_qualifying_observation_in_assessed_scope")
-    return counts, result
+    """The hunt's headline result: the store's one rule (the final ranking when complete, else the lanes), which the
+    agent phase's finalization applies again."""
+    return repo.lane_counts(hunt_id), repo.detection_result(hunt_id)[1]
 
 
 def _finish(repo: Repo, hunt_id: str, agent_summary: dict, sweep_summary: dict,
@@ -533,9 +532,11 @@ def run_hunt(s: Settings, hunt_id: str, on_candidate=None, expand: bool | None =
         repo, client, repo.get_hunt(hunt_id), window, contracts, heartbeat, owner_token,
         int(s.baseline_carry_disk_gb * 1e9),
     )
+    run_rank_pass(repo, hunt_id, PASS_BEFORE_EXPANSION, owner_token=owner_token, heartbeat=heartbeat)
     expansion_summary = _run_expansion_safely(
         s, repo, client, repo.get_hunt(hunt_id), contracts, window, owner_token,
     )
+    run_rank_pass(repo, hunt_id, PASS_FINAL, owner_token=owner_token, heartbeat=heartbeat)
     agent_owner = uuid.uuid4().hex
     result = _finish(
         repo, hunt_id, {"status": "disabled", "mode": "off"}, sweep_summary,
@@ -704,9 +705,16 @@ def resume_hunt(s: Settings, hunt_id: str) -> dict:
             repo, client, hunt, window, contracts, heartbeat, owner_token,
             int(s.baseline_carry_disk_gb * 1e9),
         )
+
+    def rank_heartbeat():
+        repo.heartbeat_hunt(hunt_id, _lease_seconds(s), owner_token=owner_token)
+
+    # A resumed hunt ranks again over what is stored; each pass replaces its previous rows, so this is idempotent.
+    run_rank_pass(repo, hunt_id, PASS_BEFORE_EXPANSION, owner_token=owner_token, heartbeat=rank_heartbeat)
     expansion_summary = _run_expansion_safely(
         s, repo, client, hunt, contracts, window, owner_token,
     )
+    run_rank_pass(repo, hunt_id, PASS_FINAL, owner_token=owner_token, heartbeat=rank_heartbeat)
     agent_owner = uuid.uuid4().hex
     result = _finish(
         repo, hunt_id, {"status": "disabled", "mode": "off"}, sweep_summary,

@@ -127,6 +127,9 @@ def test_populated_upgrade_downgrade_reupgrade_and_delete(tmp_path, foreign_keys
         if target == "0036":
             assert _index(repo) == _expected(repo)
             assert repo.agent_change_max_seq("h1") > 1000
+    with engine.begin() as c:
+        # deleting a hunt needs every table of the current schema
+        command.upgrade(config(c), "head")
     repo.delete_hunt("h1", "test", now=NOW + timedelta(days=1))
     assert repo.agent_change_page("h1") == []
     assert repo.agent_change_page("h2")
