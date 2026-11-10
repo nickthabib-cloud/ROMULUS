@@ -140,9 +140,9 @@ def _intent_os_family(intent: SearchIntent) -> str | None:
     return "linux" if values and values <= _LINUX_HOST_DATASETS else None
 
 
-# The longest value a dynamically mapped string's keyword subfield indexes (Elasticsearch's and Logstash's default
-# ignore_above). A longer value is in no subfield term, so equality also matches it as a phrase on the text field.
-SUBFIELD_IGNORE_ABOVE = 256
+def utf16_length(value) -> int:
+    """A value's length as ignore_above counts it: UTF-16 code units (an astral character counts two)."""
+    return len(str(value).encode("utf-16-le")) // 2
 
 
 def _to_subfields(clause: dict, subfields: dict[str, str]) -> dict:
@@ -168,14 +168,20 @@ def _phrase_value(p: Predicate, value) -> str:
 
 def _on_subfields(p: Predicate, contract: FieldContract, spec, natives: tuple[str, ...]) -> dict:
     """Equality on an alias whose text natives each have a keyword subfield (`spec.exact`): compiled exactly as on
-    keyword natives, against the subfields. A value longer than SUBFIELD_IGNORE_ABOVE is in no subfield term, so it is
-    matched as a phrase on each text native instead: the analyzer reads the query value as it read the stored one, so
-    an equal value always matches its own phrase, and extra phrase matches are judged on the typed record."""
+    keyword natives, against the subfields. A value longer than the subfields' ignore_above (`spec.exact_limit`) is in
+    no subfield term, so it is matched as a phrase on each text native instead: the analyzer reads the query value as
+    it read the stored one, so an equal value always matches its own phrase, and extra phrase matches are judged on
+    the typed record."""
     values = p.value if p.op == "in" else [p.value]
     if p.op == "in" and (not isinstance(values, list) or not values or len(values) > 1000):
         raise CompileError("'in' needs a non-empty list of at most 1000 values")
-    short = [value for value in values if len(str(value)) <= SUBFIELD_IGNORE_ABOVE]
-    long = [value for value in values if len(str(value)) > SUBFIELD_IGNORE_ABOVE]
+    limit = spec.exact_limit
+
+    def kept(value) -> bool:
+        return limit is None or utf16_length(value) <= limit
+
+    short = [value for value in values if kept(value)]
+    long = [value for value in values if not kept(value)]
     clauses = []
     if short:
         exact = p.model_copy(update={"value": short if p.op == "in" else short[0]})

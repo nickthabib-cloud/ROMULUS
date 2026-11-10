@@ -593,8 +593,11 @@ class LinkFetcher:
         result = handlers[link_type](anchor, window)
         if self._planning_field_gaps and (result[5] is None or result[5] in NOTHING_PUSHED_REASONS):
             # The link's key was usable and a Windows target holds records it cannot search by that key: the
-            # target's part of the window is unresolved, never a target without matches.
-            result = (*result[:5], None, [*result[-1], *self._planning_field_gaps])
+            # target's part of the window is unresolved, never a target without matches. The link's own reason for
+            # planning nothing stays beside the target's.
+            own = [result[5]] if result[5] is not None else []
+            gaps = [gap.model_copy(update={"reasons": [*gap.reasons, *own]}) for gap in self._planning_field_gaps]
+            result = (*result[:5], None, [*result[-1], *gaps])
         if self._planning_host_gaps:
             return (*result[:5], None, [*result[-1], *self._planning_host_gaps])
         return result
@@ -638,6 +641,22 @@ class LinkFetcher:
                 f"windows_source_unselectable:{target}: neither event.dataset, event.channel nor NXLog's Channel and "
                 "EventID shape is searchable, so its Windows records cannot be selected"))
 
+    def _windows_groups(self, target: str, contract, window: LinkWindow,
+                        families: set[str] | None = None) -> list[list[Predicate]]:
+        """The groups selecting a Windows target's records of `families`, recording each shape they leave out. A
+        target that maps Winlogbeat's winlog.* fields but can search neither event.dataset nor event.channel is
+        selected by NXLog's flat shape alone, which excludes Winlogbeat's records: those are named unresolved."""
+        groups = _windows_source_groups(contract, families)
+        if not groups:
+            self._windows_records_unselectable(target, contract, window, families)
+        elif all(group[0].field == "Channel" for group in groups) and any(
+                native.startswith("winlog.") for spec in contract.fields.values()
+                for native in (spec.natives or (spec.native,))):
+            self._field_gap(target, window, (
+                f"windows_source_unselectable:{target}: its Winlogbeat records (winlog.*) cannot be selected, since "
+                "neither event.dataset nor event.channel is searchable there; only NXLog's flat records are"))
+        return groups
+
     def _native_windows_hosts(self, target, contract, host, window):
         native = [candidate for candidate in contract.hosts
                   if _first_label(candidate) == _first_label(host)]
@@ -668,9 +687,7 @@ class LinkFetcher:
             if os_family == "windows" and not use_windows and contract.nxlog_mixed:
                 self._windows_records_unselectable(target, contract, window, families)
             if use_windows:
-                source_groups = _windows_source_groups(contract, families)
-                if not source_groups:
-                    self._windows_records_unselectable(target, contract, window, families)
+                source_groups = self._windows_groups(target, contract, window, families)
                 if source_groups:
                     filters = []
                     if host is not None and not (self._windows_searchable(target, contract, window, ["host.name"])
@@ -721,7 +738,7 @@ class LinkFetcher:
                 for ip, port in endpoints
             ]
             if _target_has_host_os(self.executor, target, contract, "windows"):
-                source_groups = _windows_source_groups(contract, {"net_socket"})
+                source_groups = self._windows_groups(target, contract, window, {"net_socket"})
                 if source_groups:
                     intents.append(SearchIntent(
                         kind="raw", target=target, window=Window(start=window.start, end=window.end),
@@ -758,9 +775,8 @@ class LinkFetcher:
                 if contract.nxlog_mixed:
                     self._windows_records_unselectable(target, contract, window, families)
                 continue
-            source_groups = _windows_source_groups(contract, families)
+            source_groups = self._windows_groups(target, contract, window, families)
             if not source_groups:
-                self._windows_records_unselectable(target, contract, window, families)
                 continue
             # A key this target cannot search leaves its part of the window unresolved, even when another key is
             # searchable there.
@@ -819,9 +835,8 @@ class LinkFetcher:
             if not self._windows_searchable(target, contract, window, ["host.name"]) or not _supports(
                     contract, "host.name"):
                 continue
-            source_groups = _windows_source_groups(contract)
+            source_groups = self._windows_groups(target, contract, window)
             if not source_groups:
-                self._windows_records_unselectable(target, contract, window)
                 continue
             for host in contract.hosts:
                 if _first_label(host) != label:
@@ -1263,10 +1278,8 @@ class LinkFetcher:
                 if os_family == "windows" and contract.nxlog_mixed:
                     self._windows_records_unselectable(target, contract, forward)
                 continue
-            windows_groups = _windows_source_groups(contract) if os_family == "windows" else []
+            windows_groups = self._windows_groups(target, contract, forward) if os_family == "windows" else []
             if os_family == "windows":
-                if not windows_groups:
-                    self._windows_records_unselectable(target, contract, forward)
                 self._windows_searchable(target, contract, forward, fields)
             mixed_linux = os_family == "linux" and _target_has_host_os(
                 self.executor, target, contract, "windows",

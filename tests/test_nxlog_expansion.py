@@ -16,9 +16,14 @@ import pytest
 from romulus.evidence.typed import RawRef, TypedEvent, fv
 from romulus.hunt.links import NXLOG_MIXED_LINK_REASON, LinkAnchor, LinkFetcher, LinkWindow
 from romulus.hunt.pivot import PivotExecutor
-from romulus.sources.compile import SUBFIELD_IGNORE_ABOVE, _pred, build_query
+from romulus.sources.compile import _pred, build_query, utf16_length
 from romulus.sources.models import Predicate, SearchIntent, Window
-from romulus.sources.profile import contract_from_types
+from romulus.sources.profile import (
+    build_profile,
+    contract_from_types,
+    flatten_mapping,
+    keyword_subfield_limits,
+)
 from tests import nxlog_expansion_fixture as fx
 
 _RUNS: dict = {}
@@ -95,6 +100,9 @@ def test_a_field_a_target_cannot_search_leaves_its_links_unresolved_with_that_re
         assert cells and all(cell["unresolved_ranges"] for cell in cells)
     assert any(f"pivot_field_unsearchable:process.guid:{fx.NXLOG_TARGET}" in reason
                for reason in links[("process_activity", "anchor ±5 min")]["reasons"])
+    # the link's own reason for planning nothing stays beside the target's
+    for link_type in ("process_activity", "host_after_anchor"):
+        assert "key not pushable; full-dataset scan refused" in links[(link_type, "anchor ±5 min")]["reasons"]
     [anchor] = repo.expansion_anchors("h1")
     assert anchor["status"] == "expanded_partial" and host_field in anchor["reasons"]
 
@@ -108,8 +116,8 @@ LINUX_TYPES = {"@timestamp": "date", "event.dataset": "keyword", "event.module":
                "user.name": "keyword", "auditd.data.syscall": "keyword", "message": "text"}
 
 
-def _nxlog_contract(mapping="dynamic"):
-    return contract_from_types(fx.NXLOG_TARGET, fx.nxlog_types(fx.nxlog_docs(), mapping=mapping), hosts=(fx.HOST,))
+def _nxlog_contract(mapping="dynamic", ignore_above: int | None = 256):
+    return fx.nxlog_contract(fx.nxlog_docs(), mapping=mapping, ignore_above=ignore_above)
 
 
 def _event(event_id: str, os_family: str, **fields) -> TypedEvent:
@@ -158,7 +166,35 @@ def test_nxlog_records_on_a_linux_target_are_named_unresolved_for_windows_links(
     for link_type in ("host_after_anchor", "process_activity"):
         intents, reason, coverage = _plan({"mixed": mixed}, root, link_type)
         assert intents == [] and reason is None, link_type
-        assert [cell.reasons for cell in coverage] == [[NXLOG_MIXED_LINK_REASON]]
+        assert [cell.reasons for cell in coverage] == [
+            [NXLOG_MIXED_LINK_REASON, "key not pushable; full-dataset scan refused"]]
+
+
+def test_winlogbeat_records_a_text_mapped_target_cannot_select_are_named_unresolved():
+    """Template-less Winlogbeat and NXLog records in one index, every string text with a keyword subfield: only
+    NXLog's flat shape can be selected there, so Winlogbeat's records are named, never silently left out."""
+    docs = fx.nxlog_docs()
+    raw = fx.nxlog_mapping(docs, mapping="dynamic")
+    keyword = {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}}
+    raw[fx.NXLOG_TARGET]["mappings"]["properties"]["winlog"] = {"properties": {
+        name: keyword for name in ("channel", "provider_name", "computer_name", "event_id")} | {
+        "event_data": {"properties": {"ProcessGuid": keyword, "LogonId": keyword}}}}
+    contract = contract_from_types("both", flatten_mapping(raw), hosts=(fx.HOST,),
+                                   keyword_limits=keyword_subfield_limits(raw))
+    assert contract.os_family == "windows" and contract.fields["host.name"].natives == ("winlog.computer_name",
+                                                                                         "Hostname")
+    root = _event("logon", "windows", process__guid="{00000000-0000-0000-0000-0000000000a3}")
+    for link_type in ("host_after_anchor", "process_activity"):
+        intents, reason, coverage = _plan({"both": contract}, root, link_type)
+        assert reason is None and intents, link_type
+        assert all(group[0].field == "Channel" for intent in intents for group in intent.any_of
+                   if group[0].field in {"Channel", "event.channel", "event.dataset"})
+        reasons = [reason for cell in coverage for reason in cell.reasons]
+        assert any(reason.startswith("windows_source_unselectable:both: its Winlogbeat records (winlog.*)")
+                   for reason in reasons), link_type
+    # a pure NXLog target records no such gap
+    intents, reason, coverage = _plan({fx.NXLOG_TARGET: _nxlog_contract()}, root, "host_after_anchor")
+    assert intents and coverage == []
 
 
 # ---- the contract and the compiled equality -----------------------------------------------------------------------
@@ -182,9 +218,93 @@ def test_text_aliases_read_their_keyword_subfields_for_equality_only():
     assert all(not spec.exact for spec in winlogbeat.fields.values())
 
 
+def _clauses(query) -> list[tuple[str, str]]:
+    """Every (clause kind, field) in a compiled query."""
+    out = []
+    if isinstance(query, dict):
+        for kind, body in query.items():
+            if kind in {"term", "terms", "wildcard", "match_phrase", "exists"} and isinstance(body, dict):
+                out.extend((kind, field) for field in (body.values() if kind == "exists" else body))
+            else:
+                out.extend(_clauses(body))
+    elif isinstance(query, list):
+        for item in query:
+            out.extend(_clauses(item))
+    return out
+
+
+def test_the_subfield_limit_is_read_from_the_mapping():
+    raw = {"a": {"mappings": {"properties": {
+        "Hostname": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 128}}},
+        "ProcessGuid": {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
+        "User": {"type": "text", "fields": {"raw": {"type": "keyword", "ignore_above": 64}}},
+        "Image": {"type": "keyword", "ignore_above": 10}}}},
+        "b": {"mappings": {"properties": {
+            "Hostname": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 512}}}}}}}
+    # the smallest limit any index of the target sets; a subfield without one keeps every value
+    assert keyword_subfield_limits(raw) == {"Hostname.keyword": 128, "ProcessGuid.keyword": None, "User.raw": 64}
+    contract = contract_from_types("t", {**flatten_mapping(raw), "Channel": "text", "EventID": "long"},
+                                   keyword_limits=keyword_subfield_limits(raw))
+    assert contract.fields["host.name"].exact_limit == 128
+    assert contract.fields["process.guid"].exact_limit is None
+    assert "exact_limit" not in contract.fields["process.guid"].model_dump()
+    assert contract.fields["user.entity_id"].exact == ("User.raw",)
+    # without the mapping's limits nothing is assumed: no text alias gains equality
+    unknown = contract_from_types("t", {**flatten_mapping(raw), "Channel": "text", "EventID": "long"})
+    assert not unknown.fields["host.name"].exact and not unknown.supports("host.name", "eq")
+
+
+class _ProfileClient:
+    settings = type("S", (), {"es_flavor": "elasticsearch"})()
+    version = "8.19.0"
+
+    def mapping(self, target):
+        return fx.nxlog_mapping(fx.nxlog_docs(), mapping="dynamic", ignore_above=128, target=target)
+
+    def search(self, target, body):
+        return {"aggregations": {"hosts": {"buckets": [{"key": {"host": fx.HOST}, "doc_count": 6}]},
+                                 "ds": {"buckets": []}}, "hits": {"total": {"value": 6}}}
+
+
+def test_a_profile_carries_the_subfield_limit_without_changing_its_field_types():
+    profile, contract = build_profile(_ProfileClient(), fx.NXLOG_TARGET)
+    assert contract.os_family == "windows" and contract.fields["host.name"].exact == ("Hostname.keyword",)
+    assert contract.fields["host.name"].exact_limit == 128
+    # the profile's field types (part of its id) are what they were: the limit is not among them
+    assert profile.field_types == flatten_mapping(_ProfileClient().mapping(fx.NXLOG_TARGET))
+
+
+def test_a_value_longer_than_the_mappings_limit_is_matched_as_a_phrase():
+    contract = _nxlog_contract(ignore_above=128)
+    long = "y" * 200
+    clauses = _clauses(_pred(Predicate(field="user.entity_id", op="eq", value=f"name:EXAMPLE\\{long}"), contract))
+    assert clauses and all(kind == "match_phrase" for kind, _field in clauses)
+    assert ("match_phrase", "User") in clauses
+    # a 38-character GUID under a 32-character limit: never a term-only query on the subfield
+    narrow = _nxlog_contract(ignore_above=32)
+    root = _event("proc", "windows", process__guid="00000000-0000-0000-0000-0000000000a3")
+    intents, reason, _coverage = _plan({fx.NXLOG_TARGET: narrow}, root, "process_activity")
+    assert reason is None and intents
+    clauses = [item for intent in intents for item in _clauses(build_query(intent, narrow))]
+    assert ("match_phrase", "ProcessGuid") in clauses
+    assert not any(field == "ProcessGuid.keyword" for _kind, field in clauses)
+    assert ("wildcard", "Hostname.keyword") in clauses           # the short host name still reads the subfield
+
+
+def test_the_limit_counts_utf16_code_units():
+    contract = _nxlog_contract(ignore_above=32)
+    astral = "\U0001F600" * 16                                       # 16 characters, 32 code units: kept
+    over = "\U0001F600" * 16 + "a"                                   # 17 characters, 33 code units: not kept
+    assert len(over) == 17 and utf16_length(astral) == 32 and utf16_length(over) == 33
+    assert _pred(Predicate(field="process.guid", op="eq", value=astral), contract) == {
+        "term": {"ProcessGuid.keyword": astral}}
+    assert _pred(Predicate(field="process.guid", op="eq", value=over), contract) == {
+        "match_phrase": {"ProcessGuid": over}}
+
+
 def test_equality_on_a_subfield_matches_a_value_longer_than_it_keeps_as_a_phrase():
     contract = _nxlog_contract()
-    short, long = "4300", "x" * (SUBFIELD_IGNORE_ABOVE + 1)
+    short, long = "4300", "x" * 257
     assert _pred(Predicate(field="process.pid", op="eq", value=short), contract) == {"bool": {"should": [
         {"term": {"ProcessId.keyword": short}}, {"term": {"NewProcessId.keyword": short}}],
         "minimum_should_match": 1}}

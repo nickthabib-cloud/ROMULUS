@@ -100,26 +100,44 @@ WINLOGBEAT_TYPES = {"@timestamp": "date", "agent.type": "keyword", "winlog.chann
                     "winlog.event_data": "flattened", "winlog.user_data": "flattened"}
 
 
-def nxlog_types(docs: list[dict], *, mapping: str = "keyword") -> dict[str, str]:
-    """The mapping of every top-level name the flat records carry: keyword fields, as an index template gives
-    ("keyword"); what Elasticsearch's dynamic mapping gives JSON without a template, a text field with a keyword
-    subfield for each string and a long for each integer ("dynamic"); or text fields alone ("text")."""
+def nxlog_mapping(docs: list[dict], *, mapping: str = "keyword", ignore_above: int | None = 256,
+                  target: str = NXLOG_TARGET) -> dict:
+    """The index mapping (as GET <index>/_mapping returns it) of every top-level name the flat records carry: keyword
+    fields, as an index template gives ("keyword"); what Elasticsearch's dynamic mapping gives JSON without a template,
+    a text field with a keyword subfield (ignore_above 256) for each string and a long for each integer ("dynamic");
+    or text fields alone ("text")."""
     names = {name: value for doc in docs for name, value in doc["_source"].items()
              if not name.startswith("@") and name != "tags"}
     if mapping == "keyword":
-        return {**FLAT_TYPES, **{name: "keyword" for name in names if name not in FLAT_TYPES},
-                "EventID": "long", "RecordNumber": "long"}
-    out = {"@timestamp": "date"}
-    for name, value in names.items():
-        if isinstance(value, bool):
-            out[name] = "boolean"
-        elif isinstance(value, int):
-            out[name] = "long"
-        else:
-            out[name] = "text"
-            if mapping == "dynamic":
-                out[f"{name}.keyword"] = "keyword"
-    return out
+        types = {**FLAT_TYPES, **{name: "keyword" for name in names if name not in FLAT_TYPES},
+                 "EventID": "long", "RecordNumber": "long"}
+        properties = {name: {"type": kind} for name, kind in types.items()}
+    else:
+        properties = {"@timestamp": {"type": "date"}}
+        subfield = {"type": "keyword", **({"ignore_above": ignore_above} if ignore_above is not None else {})}
+        for name, value in names.items():
+            if isinstance(value, bool):
+                properties[name] = {"type": "boolean"}
+            elif isinstance(value, int):
+                properties[name] = {"type": "long"}
+            else:
+                properties[name] = {"type": "text", **({"fields": {"keyword": subfield}}
+                                                       if mapping == "dynamic" else {})}
+    return {target: {"mappings": {"properties": properties}}}
+
+
+def nxlog_types(docs: list[dict], *, mapping: str = "keyword") -> dict[str, str]:
+    from romulus.sources.profile import flatten_mapping
+    return flatten_mapping(nxlog_mapping(docs, mapping=mapping))
+
+
+def nxlog_contract(docs: list[dict], *, mapping: str = "keyword", ignore_above: int | None = 256,
+                   target: str = NXLOG_TARGET, extra_types: dict[str, str] | None = None):
+    """The contract a source profile builds from that mapping (role and OS read from the mapping alone)."""
+    from romulus.sources.profile import contract_from_types, flatten_mapping, keyword_subfield_limits
+    raw = nxlog_mapping(docs, mapping=mapping, ignore_above=ignore_above, target=target)
+    return contract_from_types(target, {**(extra_types or {}), **flatten_mapping(raw)}, hosts=(HOST,),
+                               keyword_limits=keyword_subfield_limits(raw))
 
 
 def split_docs() -> dict[str, list[dict]]:
@@ -136,8 +154,7 @@ def contracts_for(docs: dict[str, list[dict]], *, mapping: str = "keyword"):
     if WINLOGBEAT_TARGET in docs:
         out[WINLOGBEAT_TARGET] = contract_from_types(WINLOGBEAT_TARGET, WINLOGBEAT_TYPES, hosts=(HOST,))
     if NXLOG_TARGET in docs:
-        out[NXLOG_TARGET] = contract_from_types(NXLOG_TARGET, nxlog_types(docs[NXLOG_TARGET], mapping=mapping),
-                                                hosts=(HOST,))
+        out[NXLOG_TARGET] = nxlog_contract(docs[NXLOG_TARGET], mapping=mapping)
     return out
 
 
