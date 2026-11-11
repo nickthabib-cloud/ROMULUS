@@ -53,6 +53,7 @@ from romulus.evidence.normalize import (
     BootIntervals,
     normalize_hits,
 )
+from romulus.evidence.suricata_protocols import SURICATA_PROTOCOL_FAMILIES
 from romulus.evidence.typed import TypedEvent
 from romulus.evidence.windows import (
     NXLOG_CHANNEL_SKIP,
@@ -103,7 +104,8 @@ PLANNED_CHUNK = 500
 # The logical Linux datasets (linux_catalog.LINUX_SHIPPER_DATASETS names the shipper datasets each one reads).
 LINUX_HOST_DATASETS = LINUX_LOGICAL_DATASETS
 HOST_DATASETS = [*LINUX_HOST_DATASETS, *WINDOWS_HOST_DATASETS]
-NET_FAMILIES ={"net_alert", "net_flow", "dns_query", "http_tx", "file_transfer", "tls_session", "ssh_session"}
+NET_FAMILIES = ({"net_alert", "net_flow", "dns_query", "http_tx", "file_transfer", "tls_session", "ssh_session"}
+                | set().union(*SURICATA_PROTOCOL_FAMILIES.values()))
 # linux.audit now also yields `auth` (USER_LOGIN/USER_START), so an unparseable audit group may hide one.
 # A login group that fails is tagged linux.audit.auth; it takes every record of its event, so it may also hide
 # an exec, socket or file record of that event and carries the whole audit family set.
@@ -123,6 +125,7 @@ LINUX_DATASET_FAMILIES = {
     **{f"suricata.eve.{event_type}": NET_FAMILIES for event_type in (
         "alert", "flow", "netflow", "dns", "http", "fileinfo", "tls", "ssh",
     )},
+    **{f"suricata.eve.{name}": families for name, families in SURICATA_PROTOCOL_FAMILIES.items()},
     # Filebeat's suricata module and the Agent's Suricata integration name every EVE event type "suricata.eve"
     "suricata.eve": NET_FAMILIES,
 }

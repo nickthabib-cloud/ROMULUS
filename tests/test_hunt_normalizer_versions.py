@@ -18,7 +18,8 @@ from romulus.hunt import run as hunt_run
 from romulus.sources.models import Window
 
 VERSIONS = {"lab-ecs": NORMALIZER_VERSION, "windows-ecs": WINDOWS_NORMALIZER,
-            "zeek-ecs": ZEEK_NORMALIZER, "ecar": ECAR_NORMALIZER}
+            "zeek-ecs": ZEEK_NORMALIZER, "ecar": ECAR_NORMALIZER,
+            "suricata-eve": "suricata-eve@1", "arkime": "arkime@1"}
 
 
 class VersionsAccepted(Exception):
@@ -75,8 +76,7 @@ def test_resume_refuses_each_changed_producer_before_claiming(producer, tmp_path
     assert producer in str(error.value) and recorded[producer] in str(error.value)
 
 
-@pytest.mark.parametrize("manifest", [{}, {"normalizer": NORMALIZER_VERSION},
-    {"normalizer": NORMALIZER_VERSION, "packet_normalizer": hunt_run.PACKET_NORMALIZER},
+@pytest.mark.parametrize("manifest", [{}, {"normalizer": NORMALIZER_VERSION, "normalizers": VERSIONS},
     {"normalizers": VERSIONS}, {"normalizers": {"windows-ecs": WINDOWS_NORMALIZER}}])
 def test_old_or_equal_recorded_producers_pass_the_version_gate(manifest, tmp_path, monkeypatch):
     with pytest.raises(VersionsAccepted):
@@ -92,3 +92,17 @@ def test_a_recorded_producer_absent_from_this_build_is_refused(tmp_path, monkeyp
 def test_malformed_new_version_map_cannot_silently_bypass_fence(recorded, tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="Start a new hunt over the same window"):
         resume({"normalizers": recorded}, tmp_path, monkeypatch)
+
+
+@pytest.mark.parametrize("manifest", [
+    {"normalizer": NORMALIZER_VERSION},
+    {"normalizers": {"lab-ecs": NORMALIZER_VERSION}},
+    {"normalizer": NORMALIZER_VERSION, "normalizers": {"windows-ecs": WINDOWS_NORMALIZER}},
+    {"normalizers": {key: value for key, value in VERSIONS.items() if key != "arkime"}},
+    {"normalizers": {key: value for key, value in VERSIONS.items() if key != "suricata-eve"}},
+])
+def test_legacy_shared_network_producers_require_a_new_hunt(manifest, tmp_path, monkeypatch):
+    # These records formerly used the shared epoch. Mixing old staged network IDs
+    # with the split producer IDs on resume would count one record twice.
+    with pytest.raises(RuntimeError, match="Start a new hunt over the same window"):
+        resume(manifest, tmp_path, monkeypatch)

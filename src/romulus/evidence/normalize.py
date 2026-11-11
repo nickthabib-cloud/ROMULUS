@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 
 from romulus.evidence import rpc_catalog, surrogates
+from romulus.evidence.arkime_protocols import ARKIME_NORMALIZER, arkime_protocol_fields, scrub_arkime_source
 from romulus.evidence.auditd import (
     AGENT_ARCH_TOKENS,
     AGENT_COPY_TYPES,
@@ -72,6 +73,12 @@ from romulus.evidence.linux_service_text import parse_service
 from romulus.evidence.linux_text import TextLine, classify, inline_time
 from romulus.evidence.linux_text_types import WRITER_MISMATCH_CAVEAT
 from romulus.evidence.raw_scrub import clean_source, might_be_zeek
+from romulus.evidence.suricata_protocols import (
+    SURICATA_NORMALIZER,
+    SURICATA_PROTOCOL_FAMILIES,
+    protocol_records,
+    scrub_suricata_source,
+)
 from romulus.evidence.typed import EVIDENCE_VERSION, FieldValue, Outcome, RawRef, TypedEvent, event_id, fv
 from romulus.evidence.windows import (
     NXLOG_CHANNEL_SKIP,
@@ -126,8 +133,12 @@ class AuditCopy(Skip):
 
 
 def raw_digest(source: dict) -> str:
-    """The digest of a record as it is stored (raw_scrub.clean_source: any record but a Zeek one, or one holding a
-    lone surrogate, is stored as it is), so a copy fetched again verifies against the stored one."""
+    """Hash the stored form: recognized network credentials masked and lone surrogates sanitized.
+
+    Unchanged records retain their original structure; a fetched copy verifies against
+    the same cleaning function used by raw persistence.
+    """
+    source = scrub_arkime_source(scrub_suricata_source(source))
     text = json.dumps(source, sort_keys=True, separators=(",", ":"))
     if "\\ud" in text or might_be_zeek(source):
         # a non-BMP or lone surrogate escape, or a Zeek record: the stored form may differ
@@ -2255,7 +2266,7 @@ def _suricata_community_id(eve: dict, o: str):
     return fv(computed, f"{o}.src_ip+src_port+dest_ip+dest_port+proto#computed:community_id_v1")
 
 
-def normalize_suricata(hit: dict) -> TypedEvent:
+def normalize_suricata(hit: dict) -> TypedEvent | list[TypedEvent]:
     src, nid = hit["_source"], hit["_id"]
     if is_elastic_suricata(src):
         # Filebeat or the Agent indexed the parsed record without its EVE line
@@ -2269,12 +2280,15 @@ def normalize_suricata(hit: dict) -> TypedEvent:
 
 def _suricata_event(hit: dict, eve: dict, o: str, *, origins: dict[str, str] | None = None,
                     caveats: list[str] | None = None, malformed: list[str] | None = None,
-                    host: str | None = None) -> TypedEvent:
+                    host: str | None = None) -> TypedEvent | list[TypedEvent]:
     """The typed event of one EVE record. `o` prefixes every origin (the EVE record's own location); `origins`
     replaces the origin of typed fields whose value was read from somewhere else, and `caveats` and `malformed`
     are what the caller already found."""
     src, ref = hit["_source"], _ref(hit)
     et = eve.get("event_type")
+    if (et in SURICATA_PROTOCOL_FAMILIES and o.endswith(":event.original#eve")
+            and not _get(src, "event.original") and src.get("message")):
+        o = f"{hit["_id"]}:message#eve"
     f = {"source.ip": fv(eve.get("src_ip"), f"{o}.src_ip"), "destination.ip": fv(eve.get("dest_ip"), f"{o}.dest_ip"),
          "source.port": fv(eve.get("src_port"), f"{o}.src_port"),
          "destination.port": fv(eve.get("dest_port"), f"{o}.dest_port"),
@@ -2282,6 +2296,22 @@ def _suricata_event(hit: dict, eve: dict, o: str, *, origins: dict[str, str] | N
          "network.app_proto": fv(eve.get("app_proto"), f"{o}.app_proto"),
          "network.community_id": _suricata_community_id(eve, o),
          "suricata.flow_id": fv(eve.get("flow_id"), f"{o}.flow_id")}
+    if et in SURICATA_PROTOCOL_FAMILIES:
+        if malformed:
+            raise ValueError("suricata protocol record has malformed enclosing fields: " + ", ".join(malformed))
+        parts = protocol_records(eve, o)
+        ts = _ts(eve["timestamp"]) if eve.get("timestamp") else _ts(src["@timestamp"])
+        rows = []
+        for part in parts:
+            fields = {k: v for k, v in {**f, **part.fields}.items() if v.value is not None}
+            for name, origin in (origins or {}).items():
+                if name in fields:
+                    fields[name] = fv(fields[name].value, origin)
+            rows.append(TypedEvent(id=event_id(part.family, [ref], producer=SURICATA_NORMALIZER),
+                        family=part.family, ts=ts, host=_get(src, "host.name") if host is None else host,
+                        outcome=part.outcome, fields=fields, raw=[ref], normalizer=SURICATA_NORMALIZER,
+                        caveats=[*(caveats or []), *part.caveats]))
+        return rows[0] if len(rows) == 1 else rows
     family = {"alert": "net_alert", "flow": "net_flow", "netflow": "net_flow", "dns": "dns_query",
               "http": "http_tx", "fileinfo": "file_transfer", "tls": "tls_session", "ssh": "ssh_session"}.get(et)
     if family is None:
@@ -2344,9 +2374,10 @@ def _suricata_event(hit: dict, eve: dict, o: str, *, origins: dict[str, str] | N
     for name, origin in (origins or {}).items():
         if name in fields:
             fields[name] = fv(fields[name].value, origin)
-    return TypedEvent(id=event_id(family, [ref]), family=family, ts=ts,
+    return TypedEvent(id=event_id(family, [ref], producer=("" if SURICATA_NORMALIZER == NORMALIZER_VERSION
+                                                       else SURICATA_NORMALIZER)), family=family, ts=ts,
                       host=_get(src, "host.name") if host is None else host,
-                      fields=fields, raw=[ref], normalizer=NORMALIZER_VERSION, caveats=caveats)
+                      fields=fields, raw=[ref], normalizer=SURICATA_NORMALIZER, caveats=caveats)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -2417,7 +2448,7 @@ def is_malcolm_suricata(src: dict) -> bool:
     return isinstance(dataset, str) and bool(dataset) and not dataset.startswith("suricata.")
 
 
-def normalize_malcolm_suricata(hit: dict) -> TypedEvent:
+def normalize_malcolm_suricata(hit: dict) -> TypedEvent | list[TypedEvent]:
     """A Suricata record as Malcolm indexes it, normalized to the typed event of the same EVE record: from the EVE
     line when the record still carries it, otherwise from the places Malcolm moved each EVE field to, which every
     typed field's origin names. The sensor is host.name, else Malcolm's `node`."""
@@ -2434,7 +2465,8 @@ def normalize_malcolm_suricata(hit: dict) -> TypedEvent:
     eve, origins, caveats, malformed, extra = _malcolm_eve(src, nid)
     event = _suricata_event(hit, eve, f"{nid}:suricata", origins=origins, caveats=caveats, malformed=malformed,
                             host=host)
-    event.fields.update(extra)
+    for item in event if isinstance(event, list) else [event]:
+        item.fields.update(extra)
     return event
 
 
@@ -2680,7 +2712,8 @@ ELASTIC_GROUPED_CAVEAT = ("The shipper removes Suricata's grouped DNS answers: t
                           "list, so answers logged only in the grouped form are not typed")
 ELASTIC_DNS_VERSION_CAVEAT = "The shipper removes the DNS record's version, and its layout does not tell it: not typed"
 # The event types the sweep reports as seen in this shape; any other is counted as "other" (the table stays bounded).
-ELASTIC_EVENT_TYPES = ("alert", "flow", "netflow", "dns", "http", "fileinfo", "tls", "ssh")
+ELASTIC_EVENT_TYPES = ("alert", "flow", "netflow", "dns", "http", "fileinfo", "tls", "ssh",
+                       *SURICATA_PROTOCOL_FAMILIES)
 _ELASTIC_V1_ANSWER = (("name", "rrname"), ("data", "rdata"), ("type", "rrtype"), ("ttl", "ttl"))
 
 
@@ -2933,7 +2966,7 @@ def elastic_suricata_eve(src: dict, nid: str = "") -> tuple[dict, dict[str, str]
     return eve, origins, caveats, bad
 
 
-def normalize_elastic_suricata(hit: dict) -> TypedEvent:
+def normalize_elastic_suricata(hit: dict) -> TypedEvent | list[TypedEvent]:
     """A Filebeat- or Agent-shipped Suricata document without its EVE line, normalized to the typed event of the
     same EVE record: every typed value read outside suricata.eve.* names its indexed path."""
     src, nid = hit["_source"], hit["_id"]
@@ -3094,6 +3127,7 @@ def normalize_arkime_session(hit: dict) -> TypedEvent:
         f["arkime.continuation"] = fv(root != nid, f"{nid}:rootId#derived:differs-from-own-id")
     f.update(_arkime_certificates(src, nid, bad, caveats))
     f.update(_arkime_dns(src, nid, bad))
+    f.update(arkime_protocol_fields(src, nid, bad, caveats))
     if bad:
         f["parse.malformed"] = fv(sorted(set(bad)), f"{nid}:#malformed")
     proto = src.get("ipProtocol")
@@ -3103,9 +3137,11 @@ def normalize_arkime_session(hit: dict) -> TypedEvent:
     f["flow.end"] = fv(last.isoformat(), f"{nid}:lastPacket")
     f["session.duration_s"] = fv(round((last - first).total_seconds(), 3), f"{nid}:lastPacket-firstPacket")
     f["arkime.node"] = fv(src.get("node"), f"{nid}:node")
-    return TypedEvent(id=event_id("net_session", [ref]), family="net_session", ts=first, host=src.get("node"),
+    return TypedEvent(id=event_id("net_session", [ref], producer=("" if ARKIME_NORMALIZER == NORMALIZER_VERSION
+                                                              else ARKIME_NORMALIZER)),
+                      family="net_session", ts=first, host=src.get("node"),
                       fields={k: v for k, v in f.items() if v.value is not None}, raw=[ref],
-                      normalizer=NORMALIZER_VERSION, caveats=caveats)
+                      normalizer=ARKIME_NORMALIZER, caveats=caveats)
 
 
 # Companion record types an exec or socket event holds at most once (EXECVE may repeat: continuation records)
@@ -3717,7 +3753,8 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                     skips[ZEEK_DUPLICATE] += 1
             elif is_malcolm_suricata(h["_source"]):
                 # before the Arkime shape: Malcolm adds Arkime's session fields to the Suricata rows it indexes
-                events.append(normalize_malcolm_suricata(h))
+                normalized = normalize_malcolm_suricata(h)
+                events.extend(normalized if isinstance(normalized, list) else [normalized])
             elif not ds and is_arkime_session(h["_source"]):
                 ds = "arkime.session"
                 events.append(normalize_arkime_session(h))
@@ -3749,7 +3786,8 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
                 if shapes is not None and is_elastic_suricata(h["_source"]):
                     key = elastic_event_type_key(h["_source"])
                     shapes[key] = shapes.get(key, 0) + 1
-                events.append(normalize_suricata(h))
+                normalized = normalize_suricata(h)
+                events.extend(normalized if isinstance(normalized, list) else [normalized])
             elif ds in SINGLE:
                 events.append(SINGLE[ds](h))
             elif ((contract is None or (contract.role == "host" and (contract.os_family == "linux"

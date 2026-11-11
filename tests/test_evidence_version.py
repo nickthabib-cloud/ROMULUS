@@ -12,8 +12,10 @@ from pathlib import Path
 
 from romulus.detect import packets as packet_rules
 from romulus.evidence import typed
+from romulus.evidence.arkime_protocols import ARKIME_NORMALIZER
 from romulus.evidence.ecar import ECAR_NORMALIZER
 from romulus.evidence.normalize import NORMALIZER_VERSION
+from romulus.evidence.suricata_protocols import SURICATA_NORMALIZER
 from romulus.evidence.typed import EVIDENCE_VERSION, RawRef, event_id
 from romulus.evidence.windows import WINDOWS_NORMALIZER
 from romulus.evidence.zeek import ZEEK_NORMALIZER
@@ -74,7 +76,7 @@ PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf211
                    # that were unsupported before change.
                    17: "baa63f719e26813a9e8a1d8f1bcce8c505ba46cb4cb5b36a7b2c052e0e0384b7",
                    # Hostless text records gain their syslog header host; all event identities use this epoch.
-                   18: "461960d9faa8960651fd9e6c2d3cae7501264a15861392ddf26ce9166017f99d"}
+                   18: "f9438c44066da703854cacba922c1ca4732e824a2524fc2c186023e508aaac3e"}
 WINDOWS_EVIDENCE_FILES = ("community.py", "windows.py", "windows_catalog.py", "windows_reassembly.py", "rpc_catalog.py")
 PINNED_WINDOWS = {
     # Native Windows copies share an instant identity at exporter millisecond precision.
@@ -108,7 +110,7 @@ PINNED_WINDOWS = {
 # Shared path, credential and scalar cleaners are part of the eCAR producer contract.
 ECAR_EVIDENCE_FILES = ('community.py', 'ecar.py', 'ecar_catalog.py', 'raw_scrub.py', 'surrogates.py', 'windows.py')
 # Native epoch, ISO timestamps and pipeline-only exports retain ordered clock provenance.
-PINNED_ECAR = {"ecar@2": "50ffd9f40e25e67c591a273b08d9705893edaf71896a524659c390975b7f0641",
+PINNED_ECAR = {"ecar@2": "0b6340adce420e237b1633435c321244e88ec744ee37a7b83e7818b6d4439c75",
                "ecar@1": "539a0832b610df1dca02729b594756bb1a0ae70a9c825beec154611b0cde56cd"}
 ZEEK_EVIDENCE_FILES = ("certificates.py", "community.py", "ics_catalog.py", "rpc_catalog.py", "zeek.py", "zeek_catalog.py",
                        "zeek_credentials.py")
@@ -123,6 +125,17 @@ PINNED_ZEEK = {
     # away a record carrying no Zeek marker before the full recognition: every recognition result is unchanged.
     "zeek-ecs@1": "a0913ccf746ede45a5f39255d94aca832da9a95dbb3276729f53bc1be6c4d085",
 }
+# Network producers carry separate event identities. Shared dispatcher and raw
+# scrubber sources remain pinned here too, including their scalar/certificate contracts.
+SURICATA_EVIDENCE_FILES = ("normalize.py", "suricata_protocols.py", "raw_scrub.py", "community.py",
+                           "certificates.py", "rpc_catalog.py", "zeek_catalog.py", "zeek_credentials.py",
+                           "surrogates.py", "typed.py")
+ARKIME_EVIDENCE_FILES = ("normalize.py", "arkime_protocols.py", "raw_scrub.py", "community.py",
+                        "certificates.py", "zeek_credentials.py", "surrogates.py", "typed.py")
+PINNED_SURICATA = {"suricata-eve@1": "8aba0c3bbb2061eef70c0c9dd77e5ab49a42bbed9a68b01ba4b4eeffad181e38"}
+PINNED_ARKIME = {"arkime@1": "bf3aa603d8acb1ade816360a7f90440e82e3dbc63e540e1b8d82fd971a5fa425"}
+
+
 # The packet stage's normalizer: HTTP bodies rebuilt by TShark -> http_body events, and TCP connections rebuilt
 # from per-segment payload -> tcp_stream events (with the shell analysis and the tables it reads).
 PACKET_FUNCTIONS = (packet_stage._body_event, packet_rules.analyze_body, packet_rules._text, packet_rules._shebang,
@@ -230,3 +243,19 @@ def test_event_ids_carry_the_producer_and_version():
     assert event_id("net_flow", [ref], ZEEK_NORMALIZER) != event_id("net_flow", [ref])
     assert event_id("http_body", [ref], "tshark-http@3") != event_id("http_body", [ref], "tshark-http@4")
     assert event_id("http_body", [ref], "tshark-http@4") != event_id("http_body", [ref], "tshark-packets@5")
+
+
+def _network_files_digest(names):
+    h = hashlib.sha256()
+    for name in names:
+        path = Path(typed.__file__).parent / name
+        h.update(name.encode() + b"\0" + path.read_bytes().replace(b"\r\n", b"\n") + b"\0")
+    return h.hexdigest()
+
+
+def test_suricata_normalization_matches_the_pinned_producer_version():
+    assert PINNED_SURICATA.get(SURICATA_NORMALIZER) == _network_files_digest(SURICATA_EVIDENCE_FILES)
+
+
+def test_arkime_normalization_matches_the_pinned_producer_version():
+    assert PINNED_ARKIME.get(ARKIME_NORMALIZER) == _network_files_digest(ARKIME_EVIDENCE_FILES)

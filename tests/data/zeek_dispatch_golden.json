@@ -168,8 +168,8 @@
      }
     },
     "host": "capture-01",
-    "id": "f62a3279cc374e6355a291a1",
-    "normalizer": "lab-ecs@18",
+    "id": "841e415f2079ef923c64ba09",
+    "normalizer": "arkime@1",
     "outcome": "unknown",
     "raw": [
      {
@@ -277,8 +277,8 @@
      }
     },
     "host": "capture-01",
-    "id": "a906c75a72b6facdc8802951",
-    "normalizer": "lab-ecs@18",
+    "id": "c518c67751e57c68bdea41b6",
+    "normalizer": "arkime@1",
     "outcome": "unknown",
     "raw": [
      {
@@ -378,8 +378,8 @@
      }
     },
     "host": "capture-01",
-    "id": "fab8e07e91a0bd302519c549",
-    "normalizer": "lab-ecs@18",
+    "id": "33922b1cff87008e3ddd01a9",
+    "normalizer": "arkime@1",
     "outcome": "unknown",
     "raw": [
      {
@@ -450,8 +450,8 @@
      }
     },
     "host": "inetfw",
-    "id": "85c71ad919c461414d2358cc",
-    "normalizer": "lab-ecs@18",
+    "id": "26d3eff1a359c3e34fc86ac9",
+    "normalizer": "suricata-eve@1",
     "outcome": "unknown",
     "raw": [
      {
@@ -549,8 +549,8 @@
      }
     },
     "host": "inetfw",
-    "id": "9bc961ac304aaa4c5d29bc09",
-    "normalizer": "lab-ecs@18",
+    "id": "d63ed39c5444f75413928fdb",
+    "normalizer": "suricata-eve@1",
     "outcome": "unknown",
     "raw": [
      {
@@ -631,8 +631,8 @@
      }
     },
     "host": "inetfw",
-    "id": "a30010cb40e7bb75be38e244",
-    "normalizer": "lab-ecs@18",
+    "id": "8586373f5ddefb10e0f4f877",
+    "normalizer": "suricata-eve@1",
     "outcome": "unknown",
     "raw": [
      {
@@ -725,8 +725,8 @@
      }
     },
     "host": "inetfw",
-    "id": "7088fcfd373d3e9949513111",
-    "normalizer": "lab-ecs@18",
+    "id": "054a205d2184cf5f23b26dfc",
+    "normalizer": "suricata-eve@1",
     "outcome": "unknown",
     "raw": [
      {
@@ -799,8 +799,8 @@
      }
     },
     "host": "inetfw",
-    "id": "bc939be4ce2fc7bd174f6884",
-    "normalizer": "lab-ecs@18",
+    "id": "7a04db463b6785d91a4c82ba",
+    "normalizer": "suricata-eve@1",
     "outcome": "unknown",
     "raw": [
      {
@@ -869,8 +869,8 @@
      }
     },
     "host": "inetfw",
-    "id": "a3b7b369fe541dc662400345",
-    "normalizer": "lab-ecs@18",
+    "id": "5045f337f8a27c6ef3c15f44",
+    "normalizer": "suricata-eve@1",
     "outcome": "unknown",
     "raw": [
      {
@@ -923,8 +923,8 @@
      }
     },
     "host": "inetfw",
-    "id": "14fd59073e094b40b534d1d2",
-    "normalizer": "lab-ecs@18",
+    "id": "498fff07216f09531486149a",
+    "normalizer": "suricata-eve@1",
     "outcome": "unknown",
     "raw": [
      {
@@ -991,8 +991,8 @@
      }
     },
     "host": "inetfw",
-    "id": "979c6e46135393363caf9594",
-    "normalizer": "lab-ecs@18",
+    "id": "74f2c7dc82120ca2cd470d3e",
+    "normalizer": "suricata-eve@1",
     "outcome": "unknown",
     "raw": [
      {
@@ -1091,8 +1091,8 @@
      }
     },
     "host": "inetfw",
-    "id": "c5a1132a96c10437b5be11cf",
-    "normalizer": "lab-ecs@18",
+    "id": "5ba175cecb1578b28bcdeca3",
+    "normalizer": "suricata-eve@1",
     "outcome": "unknown",
     "raw": [
      {
@@ -1167,8 +1167,8 @@
      }
     },
     "host": "sensor-01",
-    "id": "8e2697a92a6d6a6b87981b93",
-    "normalizer": "lab-ecs@18",
+    "id": "cf366d87522fb33683571c5c",
+    "normalizer": "suricata-eve@1",
     "outcome": "unknown",
     "raw": [
      {
@@ -1266,8 +1266,8 @@
      }
     },
     "host": "sensor-01",
-    "id": "6a26855fad2585a93f758fef",
-    "normalizer": "lab-ecs@18",
+    "id": "db1f8018bcb7ee00702ed231",
+    "normalizer": "suricata-eve@1",
     "outcome": "unknown",
     "raw": [
      {
@@ -1352,8 +1352,8 @@
      }
     },
     "host": "sensor-01",
-    "id": "2ad8b6bf8ddfbf9701c51809",
-    "normalizer": "lab-ecs@18",
+    "id": "32d9a17865c49f1bc621d00b",
+    "normalizer": "suricata-eve@1",
     "outcome": "unknown",
     "raw": [
      {
@@ -1442,8 +1442,8 @@
      }
     },
     "host": "sensor-01",
-    "id": "535573c1182c7369c8a0bbe9",
-    "normalizer": "lab-ecs@18",
+    "id": "128d3e39f42dd07cf4f6ac73",
+    "normalizer": "suricata-eve@1",
     "outcome": "unknown",
     "raw": [
      {
@@ -1525,8 +1525,8 @@
      }
     },
     "host": "sensor-01",
-    "id": "837db7194eb2a1a1f4b37bc6",
-    "normalizer": "lab-ecs@18",
+    "id": "82a797a91df5b282eef53817",
+    "normalizer": "suricata-eve@1",
     "outcome": "unknown",
     "raw": [
      {
@@ -1599,8 +1599,8 @@
      }
     },
     "host": "sensor-01",
-    "id": "6c0e477dbf2954fb145b9a59",
-    "normalizer": "lab-ecs@18",
+    "id": "60924a207c4c3de555458014",
+    "normalizer": "suricata-eve@1",
     "outcome": "unknown",
     "raw": [
      {
@@ -1665,8 +1665,8 @@
      }
     },
     "host": "sensor-01",
-    "id": "6a3a0ad13e810c86a0b997e5",
-    "normalizer": "lab-ecs@18",
+    "id": "8e3c40ff93128e812eea3403",
+    "normalizer": "suricata-eve@1",
     "outcome": "unknown",
     "raw": [
      {
@@ -1733,8 +1733,8 @@
      }
     },
     "host": "sensor-01",
-    "id": "627c5029d93ee0f8e346ee69",
-    "normalizer": "lab-ecs@18",
+    "id": "5d05143b635b355020364857",
+    "normalizer": "suricata-eve@1",
     "outcome": "unknown",
     "raw": [
      {
@@ -1841,8 +1841,8 @@
      }
     },
     "host": "sensor-01",
-    "id": "9e8a1ff70cf4f74f6b2b4276",
-    "normalizer": "lab-ecs@18",
+    "id": "605b80cbd690f1964e58cad3",
+    "normalizer": "suricata-eve@1",
     "outcome": "unknown",
     "raw": [
      {
@@ -6034,8 +6034,8 @@
      }
     },
     "host": null,
-    "id": "7a7596d780c90c355c90c182",
-    "normalizer": "lab-ecs@18",
+    "id": "f3378085a23b8b73011dc678",
+    "normalizer": "suricata-eve@1",
     "outcome": "unknown",
     "raw": [
      {
@@ -12019,8 +12019,8 @@
       }
      },
      "host": "capture-01",
-     "id": "f62a3279cc374e6355a291a1",
-     "normalizer": "lab-ecs@18",
+     "id": "841e415f2079ef923c64ba09",
+     "normalizer": "arkime@1",
      "outcome": "unknown",
      "raw": [
       {
@@ -12176,8 +12176,8 @@
       }
      },
      "host": "capture-01",
-     "id": "a906c75a72b6facdc8802951",
-     "normalizer": "lab-ecs@18",
+     "id": "c518c67751e57c68bdea41b6",
+     "normalizer": "arkime@1",
      "outcome": "unknown",
      "raw": [
       {
@@ -12329,8 +12329,8 @@
       }
      },
      "host": "capture-01",
-     "id": "fab8e07e91a0bd302519c549",
-     "normalizer": "lab-ecs@18",
+     "id": "33922b1cff87008e3ddd01a9",
+     "normalizer": "arkime@1",
      "outcome": "unknown",
      "raw": [
       {
@@ -12452,8 +12452,8 @@
       }
      },
      "host": "inetfw",
-     "id": "85c71ad919c461414d2358cc",
-     "normalizer": "lab-ecs@18",
+     "id": "26d3eff1a359c3e34fc86ac9",
+     "normalizer": "suricata-eve@1",
      "outcome": "unknown",
      "raw": [
       {
@@ -12573,8 +12573,8 @@
       }
      },
      "host": "inetfw",
-     "id": "9bc961ac304aaa4c5d29bc09",
-     "normalizer": "lab-ecs@18",
+     "id": "d63ed39c5444f75413928fdb",
+     "normalizer": "suricata-eve@1",
      "outcome": "unknown",
      "raw": [
       {
@@ -12677,8 +12677,8 @@
       }
      },
      "host": "inetfw",
-     "id": "a30010cb40e7bb75be38e244",
-     "normalizer": "lab-ecs@18",
+     "id": "8586373f5ddefb10e0f4f877",
+     "normalizer": "suricata-eve@1",
      "outcome": "unknown",
      "raw": [
       {
@@ -12793,8 +12793,8 @@
       }
      },
      "host": "inetfw",
-     "id": "7088fcfd373d3e9949513111",
-     "normalizer": "lab-ecs@18",
+     "id": "054a205d2184cf5f23b26dfc",
+     "normalizer": "suricata-eve@1",
      "outcome": "unknown",
      "raw": [
       {
@@ -12889,8 +12889,8 @@
       }
      },
      "host": "inetfw",
-     "id": "bc939be4ce2fc7bd174f6884",
-     "normalizer": "lab-ecs@18",
+     "id": "7a04db463b6785d91a4c82ba",
+     "normalizer": "suricata-eve@1",
      "outcome": "unknown",
      "raw": [
       {
@@ -12981,8 +12981,8 @@
       }
      },
      "host": "inetfw",
-     "id": "a3b7b369fe541dc662400345",
-     "normalizer": "lab-ecs@18",
+     "id": "5045f337f8a27c6ef3c15f44",
+     "normalizer": "suricata-eve@1",
      "outcome": "unknown",
      "raw": [
       {
@@ -13057,8 +13057,8 @@
       }
      },
      "host": "inetfw",
-     "id": "14fd59073e094b40b534d1d2",
-     "normalizer": "lab-ecs@18",
+     "id": "498fff07216f09531486149a",
+     "normalizer": "suricata-eve@1",
      "outcome": "unknown",
      "raw": [
       {
@@ -13147,8 +13147,8 @@
       }
      },
      "host": "inetfw",
-     "id": "979c6e46135393363caf9594",
-     "normalizer": "lab-ecs@18",
+     "id": "74f2c7dc82120ca2cd470d3e",
+     "normalizer": "suricata-eve@1",
      "outcome": "unknown",
      "raw": [
       {
@@ -13292,8 +13292,8 @@
       }
      },
      "host": "inetfw",
-     "id": "c5a1132a96c10437b5be11cf",
-     "normalizer": "lab-ecs@18",
+     "id": "5ba175cecb1578b28bcdeca3",
+     "normalizer": "suricata-eve@1",
      "outcome": "unknown",
      "raw": [
       {
@@ -13641,8 +13641,8 @@
       }
      },
      "host": "sensor-01",
-     "id": "8e2697a92a6d6a6b87981b93",
-     "normalizer": "lab-ecs@18",
+     "id": "cf366d87522fb33683571c5c",
+     "normalizer": "suricata-eve@1",
      "outcome": "unknown",
      "raw": [
       {
@@ -13799,8 +13799,8 @@
       }
      },
      "host": "sensor-01",
-     "id": "6a26855fad2585a93f758fef",
-     "normalizer": "lab-ecs@18",
+     "id": "db1f8018bcb7ee00702ed231",
+     "normalizer": "suricata-eve@1",
      "outcome": "unknown",
      "raw": [
       {
@@ -13944,8 +13944,8 @@
       }
      },
      "host": "sensor-01",
-     "id": "2ad8b6bf8ddfbf9701c51809",
-     "normalizer": "lab-ecs@18",
+     "id": "32d9a17865c49f1bc621d00b",
+     "normalizer": "suricata-eve@1",
      "outcome": "unknown",
      "raw": [
       {
@@ -14092,8 +14092,8 @@
       }
      },
      "host": "sensor-01",
-     "id": "535573c1182c7369c8a0bbe9",
-     "normalizer": "lab-ecs@18",
+     "id": "128d3e39f42dd07cf4f6ac73",
+     "normalizer": "suricata-eve@1",
      "outcome": "unknown",
      "raw": [
       {
@@ -14234,8 +14234,8 @@
       }
      },
      "host": "sensor-01",
-     "id": "837db7194eb2a1a1f4b37bc6",
-     "normalizer": "lab-ecs@18",
+     "id": "82a797a91df5b282eef53817",
+     "normalizer": "suricata-eve@1",
      "outcome": "unknown",
      "raw": [
       {
@@ -14360,8 +14360,8 @@
       }
      },
      "host": "sensor-01",
-     "id": "6c0e477dbf2954fb145b9a59",
-     "normalizer": "lab-ecs@18",
+     "id": "60924a207c4c3de555458014",
+     "normalizer": "suricata-eve@1",
      "outcome": "unknown",
      "raw": [
       {
@@ -14480,8 +14480,8 @@
       }
      },
      "host": "sensor-01",
-     "id": "6a3a0ad13e810c86a0b997e5",
-     "normalizer": "lab-ecs@18",
+     "id": "8e3c40ff93128e812eea3403",
+     "normalizer": "suricata-eve@1",
      "outcome": "unknown",
      "raw": [
       {
@@ -14597,8 +14597,8 @@
       }
      },
      "host": "sensor-01",
-     "id": "627c5029d93ee0f8e346ee69",
-     "normalizer": "lab-ecs@18",
+     "id": "5d05143b635b355020364857",
+     "normalizer": "suricata-eve@1",
      "outcome": "unknown",
      "raw": [
       {
@@ -14761,8 +14761,8 @@
       }
      },
      "host": "sensor-01",
-     "id": "9e8a1ff70cf4f74f6b2b4276",
-     "normalizer": "lab-ecs@18",
+     "id": "605b80cbd690f1964e58cad3",
+     "normalizer": "suricata-eve@1",
      "outcome": "unknown",
      "raw": [
       {
@@ -25504,8 +25504,8 @@
       }
      },
      "host": null,
-     "id": "7a7596d780c90c355c90c182",
-     "normalizer": "lab-ecs@18",
+     "id": "f3378085a23b8b73011dc678",
+     "normalizer": "suricata-eve@1",
      "outcome": "unknown",
      "raw": [
       {

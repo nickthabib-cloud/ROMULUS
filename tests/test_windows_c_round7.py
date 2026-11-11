@@ -265,9 +265,9 @@ def test_native_scale4_releases_use_global_room_without_poisoning_later_findings
         for row in snapshot["candidates"]
     ])
     assert fixture.deterministic_golden_digests(previous)["candidates"] == (
-        "8959b6b6a1dcb78d4cded5a853488337937da407bb179818e875955ec7fc9255")
+        "86b742650eb7b8268fdee5f965df350a704b4a2597408a54ffccd81886e325ef")
     assert fixture.deterministic_golden_digests(snapshot)["candidates"] == (
-        "6d67794516bf8f8df3e30faa93e2f13c50397728935613d0d34104e0af2dba06")
+        "83f3fce50078f6d6d3f5a0a53f43b68fbead2d5d4e12ef4e6fd0a360f2958501")
     assert any(row["rule_id"] == "host.shell_spawned_by_connected_process" and row["event_ids"]
                for row in snapshot["candidates"])
 

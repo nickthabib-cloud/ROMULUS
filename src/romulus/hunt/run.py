@@ -609,6 +609,16 @@ def resume_hunt(s: Settings, hunt_id: str) -> dict:
                 raise RuntimeError(f"hunt {hunt_id} was normalized with {producer}={version}; "
                                    f"this build is {current or 'missing that producer'}. "
                                    "Start a new hunt over the same window instead of resuming.")
+    # Suricata and Arkime used the shared producer before their independent epochs.
+    # An older shared manifest without both explicit epochs cannot safely mix its
+    # staged identities with new fetches, even when the shared epoch is unchanged.
+    versions = recorded_manifest.get("normalizers") or {}
+    if recorded or "lab-ecs" in versions:
+        missing = {"suricata-eve", "arkime"} - versions.keys()
+        if missing:
+            raise RuntimeError(f"hunt {hunt_id} has legacy shared network normalization without "
+                               f"{', '.join(sorted(missing))} producer versions. "
+                               "Start a new hunt over the same window instead of resuming.")
     # expansion and the investigator read the definition the sweep used; a changed one is refused here
     install_for_hunt(s, hunt_id, recorded_manifest)
     sweep_audit = repo.latest_audit(hunt_id, "hunt.sweep_summary")

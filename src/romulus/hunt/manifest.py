@@ -13,8 +13,10 @@ from romulus.config import Settings
 from romulus.decide.policy import POLICY_VERSION
 from romulus.detect.netdef import SiteNetworks
 from romulus.detect.registry import PACK_VERSION, pack_manifest
+from romulus.evidence.arkime_protocols import ARKIME_NORMALIZER
 from romulus.evidence.ecar import ECAR_NORMALIZER
 from romulus.evidence.normalize import NORMALIZER_VERSION
+from romulus.evidence.suricata_protocols import SURICATA_NORMALIZER
 from romulus.evidence.windows import WINDOWS_NORMALIZER
 from romulus.evidence.zeek import ZEEK_NORMALIZER
 from romulus.hunt.packets import PACKET_NORMALIZER
@@ -30,7 +32,8 @@ def new_hunt_id() -> str:
 def normalizer_versions() -> dict[str, str]:
     """Every record producer whose epoch contributes to durable event identities."""
     return {"lab-ecs": NORMALIZER_VERSION, "windows-ecs": WINDOWS_NORMALIZER,
-            "zeek-ecs": ZEEK_NORMALIZER, "ecar": ECAR_NORMALIZER}
+            "zeek-ecs": ZEEK_NORMALIZER, "ecar": ECAR_NORMALIZER,
+            "suricata-eve": SURICATA_NORMALIZER, "arkime": ARKIME_NORMALIZER}
 
 
 def baseline_site(s: Settings, targets: list[str]) -> str:
