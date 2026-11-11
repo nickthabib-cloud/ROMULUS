@@ -16,7 +16,7 @@ Every claim names the provider and the kind of record ("Zeek's intel framework m
 is positive-only: the absence of a Zeek alert says nothing, so no negative is ever claimed. Groups are exact counts
 with bounded examples (the shared grouped-alert machinery of romulus.detect.network): intel, signature and tabled
 notice items per (kind, name, source, destination); untabled notices and weirds per (kind, name) across every
-address pair, so a weird-heavy sensor gives one context item per weird name.
+address pair, so a weird-heavy sensor gives one item per weird name (context, or a lead for an evasion-shaped weird).
 """
 from __future__ import annotations
 
@@ -34,8 +34,14 @@ MESSAGE_CHARS = 200             # a quoted message is cut here (Zeek messages ca
 MESSAGES_HELD = 3               # distinct messages kept per group
 # Weirds that are the shape of IDS evasion or crafted probes rather than offload, truncation or legal oddities:
 # overlapping or inconsistent IP fragments (the reassembly ambiguity evasion relies on) and all-flags TCP packets.
+# Compared case-folded: Zeek writes the all-flags packet as TCP_christmas.
 EVASION_WEIRDS = frozenset({"fragment_overlap", "fragment_inconsistency", "fragment_size_inconsistency",
-                            "excessively_small_fragment", "TCP_Christmas"})
+                            "fragment_protocol_inconsistency", "excessively_small_fragment",
+                            "excessively_large_fragment", "tcp_christmas"})
+
+
+def evasion_weird(name) -> bool:
+    return isinstance(name, str) and name.casefold() in EVASION_WEIRDS
 PAIRS_HELD = 64                 # distinct address pairs kept per pairless group (untabled notices, weirds)
 PAIRS_NAMED = 5
 
@@ -173,7 +179,7 @@ def _quoted(text: str) -> str:
 
 class ZeekAlerts(_Grouped):
     """Zeek's intel and signature matches, notices judged by a sourced table of notice types, and weirds as
-    context."""
+    context unless evasion-shaped."""
     id = "net.zeek_alert"
     version = "3"
     uses_site_facts = True
@@ -280,7 +286,7 @@ class ZeekAlerts(_Grouped):
             return notice.lane, notice.severity
         if kind == "notice":
             return "lead", "low"      # an untabled notice may come from a site's exploit or CVE package
-        if kind == "weird" and name in EVASION_WEIRDS:
+        if kind == "weird" and evasion_weird(name):
             return "lead", "low"
         return "context", "low"
 
@@ -346,7 +352,7 @@ class ZeekAlerts(_Grouped):
                         "site's detection or CVE package may raise it, and its meaning is the script's."
                         if kind == "notice" else
                         " This weird is the shape of IDS evasion or a crafted probe, so it is a lead."
-                        if name in EVASION_WEIRDS else
+                        if evasion_weird(name) else
                         " A weird is a protocol or parsing anomaly; alone it is context, not a finding."))
         claim = claim.replace(f'{n} time(s)', f'{n} raw reference(s)')
         cited_refs = len({ref.key for event in evs for ref in event.raw})

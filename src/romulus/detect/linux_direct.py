@@ -626,10 +626,9 @@ class KernelModuleLoad(LinuxDirect):
         if e.family == "kernel_module" and loader == "kmod" and not p.args:
             # A kernel-requested autoload record carries no argv; its kernel-recorded comm names the kmod applet.
             loader = basename(str(e.get("process.comm") or "")) or loader
-        # A login session (audit login uid or session id set, or an enriched login name) means an operator ran the
-        # loader; only a load outside any session is the kernel's or the boot's own.
-        operator = not (e.get("process.auid") is None and e.get("process.session_id") is None
-                        and e.get("process.login_user") in (None, "", "unset"))
+        # A login session (audit login uid or session id set; every audit shape types the unset values as absent)
+        # means an operator ran the loader; only a load outside any session is the kernel's or the boot's own.
+        operator = e.get("process.auid") is not None or e.get("process.session_id") is not None
         packaged = bool(p and ((loader == "modprobe" and name in {"kmod", "modprobe"}
                                and directory in ROOT_BINARY_DIRS and not operator)
                               or (name in {"systemd-modules-load", "systemd-udevd", "udevd"}

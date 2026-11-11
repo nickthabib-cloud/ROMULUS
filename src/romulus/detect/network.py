@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from romulus.detect.alert_lanes import LOW_PRIORITY_ATTACK_CATEGORIES, alert_stack_lane, attack_tagged
+from romulus.detect.alert_lanes import BENIGN_LOW_PRIORITY_CATEGORIES, alert_stack_lane, attack_tagged
 from romulus.detect.base import Match, Playbook, pf
 from romulus.detect.bounded import HOT_COUNT, CitationUnavailable, KeyedStore
 from romulus.detect.citing import (
@@ -289,7 +289,8 @@ class SuricataAlertStack(_Grouped):
                           context_ids=context)
                 if isinstance(sev, int) and sev >= 3 and lane == "lead":
                     m.notes.append(f"priority {sev}, kept as a lead: " + (
-                        f"the '{cat}' classtype names attack activity" if cat in LOW_PRIORITY_ATTACK_CATEGORIES
+                        f"the '{cat}' classtype is not one of the benign low-priority classtypes"
+                        if cat not in BENIGN_LOW_PRIORITY_CATEGORIES
                         else "the signature metadata ties it to an attack (ATT&CK technique or Major/Critical "
                              "signature severity)"))
                 techs = sorted({t for e in evs for t in _values(e.get("alert.mitre_technique_id")) if t})
