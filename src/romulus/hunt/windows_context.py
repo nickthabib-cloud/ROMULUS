@@ -1,7 +1,7 @@
 """Publish independent Windows link facts without accumulating hunt-wide auth/session records."""
 from __future__ import annotations
 
-from romulus.decide.policy import decide
+from romulus.decide.policy import decide, publishable
 from romulus.detect.base import ContextAnchor, ContextLink
 from romulus.detect.metadata import hunt_rule_metadata, is_sigma_id
 from romulus.detect.registry import anchor_class_for_rule
@@ -36,11 +36,11 @@ def publish_windows_link_context(repo, hunt_id, candidate, result, events, *, ow
         matched = 0
         for match in playbook.consume_linked(anchor, link, events):
             decision = decide(match, hunt_id)
-            if decision.admitted:
+            matched += 1                    # a positive, published or not, is never this reach's no-match
+            if publishable(decision):
                 candidate_id = _publish_context(repo, hunt_id, playbook, match, decision, [(anchor, link)],
                                                 owner_token=owner_token)
                 out.append(repo.candidate(candidate_id))
-                matched += 1
         _write_cell(repo, hunt_id, playbook, anchor.id, link, playbook.evaluated, playbook.missing_required,
                     matched, applicable, owner_token=owner_token)
     return out

@@ -597,7 +597,7 @@ class MasqueradingBinary(FoldedLinuxDirect):
 
 
 class KernelModuleLoad(LinuxDirect):
-    version = "2"
+    version = "3"
     id = "host.kernel_module_load"
     title = "A kernel module load or an insmod command outside module package trees"
     families = ("kernel_module", "process_exec")
@@ -626,8 +626,11 @@ class KernelModuleLoad(LinuxDirect):
         if e.family == "kernel_module" and loader == "kmod" and not p.args:
             # A kernel-requested autoload record carries no argv; its kernel-recorded comm names the kmod applet.
             loader = basename(str(e.get("process.comm") or "")) or loader
+        # A login session (audit login uid or session id set; every audit shape types the unset values as absent)
+        # means an operator ran the loader; only a load outside any session is the kernel's or the boot's own.
+        operator = e.get("process.auid") is not None or e.get("process.session_id") is not None
         packaged = bool(p and ((loader == "modprobe" and name in {"kmod", "modprobe"}
-                               and directory in ROOT_BINARY_DIRS)
+                               and directory in ROOT_BINARY_DIRS and not operator)
                               or (name in {"systemd-modules-load", "systemd-udevd", "udevd"}
                                   and directory in ROOT_BINARY_DIRS | {"/usr/lib/systemd", "/lib/systemd",
                                                                       "/usr/lib/udev", "/lib/udev"})))

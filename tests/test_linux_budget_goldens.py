@@ -9,9 +9,9 @@ from tests import throughput_fixture as tf
 # evidence version set back to 16 the digest is the earlier one).
 # Discovery and transfer executions already cited by a folded alert are not repeated as context.
 # Shared execution and lineage state keep the 4 MiB candidate result identical to larger budgets.
-CANDIDATE_GOLDENS = {16: (40, 'f1369183116616ff3f61e31190673edbcbabfe58efb44e567770e16ce097ebed'),
- 4: (40, 'f1369183116616ff3f61e31190673edbcbabfe58efb44e567770e16ce097ebed'),
- 8: (40, 'f1369183116616ff3f61e31190673edbcbabfe58efb44e567770e16ce097ebed')}
+CANDIDATE_GOLDENS = {16: (40, '363d07e1031765c85c876ebc804a086d9426014b2ce3a605edc91ac1f8ead28f'),
+ 4: (40, '363d07e1031765c85c876ebc804a086d9426014b2ce3a605edc91ac1f8ead28f'),
+ 8: (40, '363d07e1031765c85c876ebc804a086d9426014b2ce3a605edc91ac1f8ead28f')}
 
 
 @pytest.mark.parametrize("mib", CANDIDATE_GOLDENS)
@@ -28,14 +28,11 @@ def test_linux_stack_candidates_at_physical_byte_budget(mib, tmp_path, monkeypat
     monkeypatch.setattr(sw.Sweep, "run_partition", run)
     # Sweep-state budgets only: expansion seeds by the rule estimate, so the candidate golden isolates the sweep.
     snapshot = tf.run_stack(tmp_path, docs=tf.build(1), rank=False)
-    # 2026-11-10: re-pin only persistence rule_version 8->9. Under this exact physical
-    # budget, restoring that field must reproduce the prior decisions and citations digest.
+    # Only rule versions moved these candidates: under this exact physical budget, restoring the prior versions must
+    # reproduce the prior decisions and citations digest.
     persistence = [row for row in snapshot["candidates"] if row["rule_id"] == "host.persistence_path_change"]
     assert persistence and {row["rule_version"] for row in persistence} == {"9"}
-    previous = dict(snapshot, candidates=[
-        dict(row, rule_version="8") if row["rule_id"] == "host.persistence_path_change" else dict(row)
-        for row in snapshot["candidates"]
-    ])
+    previous = tf.with_prior_versions(snapshot)
     assert tf.deterministic_golden_digests(previous)["candidates"] == (
         "819d72ca4130a7d6bb0880ce317287c9c4afe69b183d931e86d63b93e91bd18c")
     assert (len(snapshot["candidates"]), tf.deterministic_golden_digests(snapshot)["candidates"]) == CANDIDATE_GOLDENS[mib]

@@ -99,3 +99,76 @@ def test_zerologon_normalizes_both_peer_spellings_before_keying():
         one_server = [row.with_(**{'id.resp_h': '::ffff:10.0.0.2' if n % 2 else '10.0.0.2'})
                       for n, row in enumerate(rows_for('ZerologonRate', 50))]
         assert evaluate('ZerologonRate', one_server, shape)
+
+
+def _rpc(endpoint, operation, n, *, destination=None, seconds=1):
+    row = zl.DCE_RPC.with_(endpoint=endpoint, operation=operation, uid=f'Cenumrpc{n:09d}',
+                           **({'id.resp_h': destination} if destination else {}))
+    return replace(row, ts=zl.T0 + n * seconds)
+
+
+SHAPES = ['malcolm', 'elastic', 'security_onion', 'plain']
+
+
+@pytest.mark.parametrize('shape', SHAPES)
+def test_session_enumeration_on_ten_hosts_is_a_lead_and_nine_is_not(shape):
+    sweep = [_rpc('srvsvc', 'NetrSessionEnum', n, destination=f'10.0.1.{n}') for n in range(10)]
+    [(lane, claim, _notes)] = evaluate('RpcHostEnumerationFanout', sweep, shape)
+    assert lane == 'lead' and 'at least 10 distinct hosts' in claim
+    assert evaluate('RpcHostEnumerationFanout', sweep[:9], shape) == []
+
+
+def test_host_enumeration_counts_hosts_not_calls_and_mixes_collection_calls():
+    assert evaluate('RpcHostEnumerationFanout', [_rpc('srvsvc', 'NetrShareEnum', n) for n in range(50)], 'plain') == []
+    mixed = [_rpc(*call, n, destination=f'10.0.1.{n}') for n, call in enumerate(
+        [('srvsvc', 'NetrShareEnum'), ('wkssvc', 'NetrWkstaUserEnum'), ('samr', 'SamrGetMembersInAlias')] * 4)]
+    assert [lane for lane, *_ in evaluate('RpcHostEnumerationFanout', mixed, 'plain')] == ['lead']
+
+
+def test_routine_single_object_reads_and_slow_sweeps_are_not_host_enumeration():
+    reads = [_rpc('srvsvc', 'NetrShareGetInfo', n, destination=f'10.0.1.{n}') for n in range(30)]
+    assert evaluate('RpcHostEnumerationFanout', reads, 'plain') == []
+    slow = [_rpc('srvsvc', 'NetrSessionEnum', n, destination=f'10.0.1.{n}', seconds=120) for n in range(10)]
+    assert evaluate('RpcHostEnumerationFanout', slow, 'plain') == []
+
+
+@pytest.mark.parametrize('shape', SHAPES)
+def test_three_distinct_bulk_sam_listings_to_one_server_are_a_lead(shape):
+    calls = ['SamrEnumerateUsersInDomain', 'SamrEnumerateGroupsInDomain', 'SamrGetMembersInGroup']
+    rows = [_rpc('samr', name, n) for n, name in enumerate(calls)]
+    [(lane, claim, _notes)] = evaluate('RpcDirectoryListing', rows, shape)
+    assert lane == 'lead' and f'including to {zl.DC}' in claim
+    assert evaluate('RpcDirectoryListing', rows[:2] * 20, shape) == []
+
+
+def test_name_translation_and_logon_membership_reads_are_not_directory_listing():
+    routine = ['SamrLookupNamesInDomain', 'SamrLookupIdsInDomain', 'SamrGetAliasMembership', 'SamrGetGroupsForUser',
+               'SamrQueryInformationDomain']
+    rows = [_rpc('samr', name, n) for n, name in enumerate(routine)]
+    rows += [_rpc('lsarpc', name, 10 + n) for n, name in enumerate(['LsarLookupSids', 'LsarLookupNames', 'LsarLookupSids2'])]
+    assert evaluate('RpcDirectoryListing', rows, 'plain') == []
+
+
+def test_a_large_volume_of_routine_rpc_stays_quiet_and_one_sweep_inside_it_is_found():
+    noise = [_rpc('lsarpc', 'LsarLookupSids', n, destination=f'10.0.{n % 200}.{n % 250}') for n in range(5000)]
+    sweep = [_rpc('srvsvc', 'NetrSessionEnum', 6000 + n, destination=f'10.9.0.{n}') for n in range(12)]
+    found = evaluate('RpcHostEnumerationFanout', noise + sweep, 'plain')
+    assert [lane for lane, *_ in found] == ['lead'] and 'at least 12 distinct hosts' in found[0][1]
+
+
+
+def test_a_local_group_collector_across_many_hosts_is_one_listing_lead_and_one_fanout_lead():
+    calls = ['SamrEnumerateDomainsInSamServer', 'SamrEnumerateAliasesInDomain', 'SamrGetMembersInAlias']
+    rows = [_rpc('samr', name, 3 * host + index, destination=f'10.0.2.{host}')
+            for host in range(20) for index, name in enumerate(calls)]
+    assert [lane for lane, *_ in evaluate('RpcDirectoryListing', rows, 'plain')] == ['lead']
+    assert [lane for lane, *_ in evaluate('RpcHostEnumerationFanout', rows, 'plain')] == ['lead']
+
+
+@pytest.mark.parametrize('shape', SHAPES)
+def test_a_throttled_sweep_is_found_by_the_day_long_tier(shape):
+    throttled = [_rpc('srvsvc', 'NetrSessionEnum', n, destination=f'10.0.3.{n}', seconds=1800) for n in range(25)]
+    assert evaluate('RpcHostEnumerationFanout', throttled, shape) == []
+    [(lane, claim, _notes)] = evaluate('RpcHostEnumerationSlowFanout', throttled, shape)
+    assert lane == 'lead' and 'at least 25 distinct hosts in one day' in claim
+    assert evaluate('RpcHostEnumerationSlowFanout', throttled[:24], shape) == []

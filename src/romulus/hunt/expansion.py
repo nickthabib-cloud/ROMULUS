@@ -154,7 +154,12 @@ BUDGET_TO_SEVERE_REASON = "source query budget given to more severe anchors"
 # network full of internet endpoints cannot starve the links themselves.
 FALLBACK_LOOKUP_SHARE = 0.10
 FALLBACK_CAP_REASON = "fallback lookup cap reached"
-# Extra seeds (the evidence ranking's Reported findings beyond the rule estimate's) anchored at a time: at most what
+# Extra seeds are the evidence ranking's Reported findings beyond the rule estimate's whose listed entity (the
+# best-scoring entity the finding counts toward) carries a confirmed finding: expansion widens around a compromise the
+# hunt has confirmed. An entity reported only for its tactic or rule
+# breadth (a busy server's benign activity spans tactics) seeds nothing more than the rule estimate gives it: anchoring
+# every lead there multiplies link work and correlation items without reaching more of an intrusion.
+# Extra seeds anchored at a time: at most what
 # the queries left could start, and never more than this, so a hunt with thousands of Reported findings writes
 # anchors only as its budget can reach them. A hundred anchors at two queries a fetch is more than any leftover
 # share of the default budget.
@@ -689,7 +694,7 @@ class ExpansionEngine:
         anchored = 0
         while anchored < want:
             page = self.repo.finding_ranks_page(self.hunt_id, RANK_PASS_SEEDS, after_position=self._extra_after,
-                                                limit=EXTRA_SEED_PAGE, reported=True)
+                                                limit=EXTRA_SEED_PAGE, reported=True, confirmed_entity=True)
             if not page:
                 self._extras_done = True
                 break
@@ -710,11 +715,12 @@ class ExpansionEngine:
         return anchored > 0 or deferred
 
     def _extras_not_anchored(self) -> int:
-        """Reported-set findings past the last one looked at that expansion could have anchored."""
+        """Extra seeds past the last one looked at (Reported, on an entity with a confirmed finding) that expansion
+        could have anchored."""
         if not self._ranked or self._extras_done:
             return 0
         counts = self.repo.finding_rank_counts(self.hunt_id, RANK_PASS_SEEDS, after_position=self._extra_after,
-                                               reported=True, exclude_lanes=("urgent", "high"))
+                                               reported=True, exclude_lanes=("urgent", "high"), confirmed_entity=True)
         return sum(count for rule_id, count in counts.items() if rule_kind(rule_id) != "context")
 
     def _identity(self, row: dict) -> str:

@@ -20,6 +20,7 @@ from functools import lru_cache
 from typing import ClassVar, NamedTuple
 
 from romulus.detect import netdef
+from romulus.detect.alert_lanes import alert_stack_lane, attack_tagged
 from romulus.detect.base import Match, Playbook, basename, pf
 from romulus.detect.bounded import (
     HOT_COUNT,
@@ -920,6 +921,7 @@ class Net:
     alert_sig: str | None
     conn: str = ""              # the connection's identity: transport and both endpoints, in either direction
     staged: int = 0             # kept on the stage for citation
+    alert_tech: bool = False    # the alert's signature metadata ties it to an attack (alert_lanes.attack_tagged)
 
     def local_side(self, ip: str, port: int) -> str | None:
         """The non-remote endpoint, if this record is one direction of a connection to ip:port."""
@@ -1014,13 +1016,12 @@ def _alert_words(counts: dict[str, int]) -> str:
 
 
 def alert_lane(n: Net) -> str | None:
-    """Exactly the lane SuricataAlertStack gives the same alert on its own; None when the alert lacks the
-    severity that stack requires (it would not publish it either)."""
-    if n.alert_cat == "Not Suspicious Traffic" or n.alert_sev == 3:
-        return "context"
-    if n.alert_sev is None:
+    """The lane SuricataAlertStack gives an alert of this category and priority on its own, judged from this alert's
+    own metadata (the stack judges its whole group, so a group another tagged alert raised can be a lead there while
+    this record stays context here); None when the alert lacks the severity that stack requires."""
+    if n.alert_sev is None and n.alert_cat != "Not Suspicious Traffic":
         return None
-    return "high" if n.alert_sev == 1 else "lead"
+    return alert_stack_lane(n.alert_cat, n.alert_sev, n.alert_tech)[0]
 
 
 def _version(ip: str) -> int:
@@ -1067,7 +1068,7 @@ class ProcessNetworkLink(Playbook):
     address is not established for this host is linked but stated, and caps the lane at lead, as do
     multiple local addresses and records shared with another process."""
     id = "corr.process_network_link"
-    version = "10"
+    version = "11"
     title = "Host process connect() calls linked to network-sensor records for the same connection (inferred)"
     kind = "aggregate"
     staged = True
@@ -1166,7 +1167,7 @@ class ProcessNetworkLink(Playbook):
             spill.table("sock", "id, host, ts, ip, port, exe, user, pid, outcome, reason, lane, grp, claimant, "
                                 "ppid, boot, serial, session, staged")
             spill.table("net", 'id, family, observer, start, "end", src, sport, dst, dport, cid, sev, cat, sig, '
-                               "seq INTEGER PRIMARY KEY, conn, staged")
+                               "seq INTEGER PRIMARY KEY, conn, staged, tech")
             spill.table("ep", "ip, port, start, net")
             self._tables = True
         return spill
@@ -1277,7 +1278,8 @@ class ProcessNetworkLink(Playbook):
         row = (e.id, e.family, e.host or "", start, end, src, sport, dst, dport,
                scalar(e.get("network.community_id")) or None, sev if isinstance(sev, int) else None,
                category, signature, seq,
-               connection_identity(e.get("network.transport"), src, sport, dst, dport), staged)
+               connection_identity(e.get("network.transport"), src, sport, dst, dport), staged,
+               1 if e.family == "net_alert" and attack_tagged(e) else 0)
         self._net_seq = seq
         store = self._store()
         try:
@@ -1424,7 +1426,7 @@ class ProcessNetworkLink(Playbook):
 
     _ROWS = ('SELECT s.rowid, s.id, s.host, s.ts, s.ip, s.port, s.exe, s.user, s.pid, s.outcome, s.reason, s.lane, '
              's.grp, n.id, n.family, n.observer, n.start, n."end", n.src, n.sport, n.dst, n.dport, n.cid, n.sev, '
-             'n.cat, n.sig, nc.n, n.seq, s.ppid, s.boot, s.serial, s.session, n.conn, n.staged, s.staged '
+             'n.cat, n.sig, nc.n, n.seq, s.ppid, s.boot, s.serial, s.session, n.conn, n.staged, s.staged, n.tech '
              'FROM link l JOIN sock s '
              'ON s.rowid = l.sock JOIN net n ON n.seq = l.net JOIN nc ON nc.net = l.net ')
 
@@ -1433,7 +1435,7 @@ class ProcessNetworkLink(Playbook):
         sock = Sock(row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[9], row[10], row[11],
                     row[28], row[29], row[30], row[31], row[34])
         net = Net(row[13], row[14], row[15], row[16], row[17], row[18], row[19], row[20], row[21], row[22],
-                  row[23], row[24], row[25], row[32], row[33])
+                  row[23], row[24], row[25], row[32], row[33], bool(row[35]))
         return row[0], sock, net, row[26], row[27]
 
     def _socket_rows(self, order: str):
