@@ -338,13 +338,13 @@ A technique is covered only by a rule that explicitly declares that ATT&CK id.
 | [`T1012`](https://attack.mitre.org/techniques/T1012/) | Query Registry | — | positive-only | [net.rpc_remote_admin_call](#rule-net-rpc-remote-admin-call) (positive-only)<br>[win.rpc_remote_admin_call](#rule-win-rpc-remote-admin-call) (positive-only) | rpc_call<br>rpc_tx |
 | [`T1016`](https://attack.mitre.org/techniques/T1016/) | System Network Configuration Discovery | [`T1016.001`](https://attack.mitre.org/techniques/T1016/001/) Internet Connection Discovery — not covered<br>[`T1016.002`](https://attack.mitre.org/techniques/T1016/002/) Wi-Fi Discovery — not covered | positive-only | [context.post_access_discovery](#rule-context-post-access-discovery) (context-only)<br>[host.discovery_burst](#rule-host-discovery-burst) (positive-only) | process_exec |
 | [`T1018`](https://attack.mitre.org/techniques/T1018/) | Remote System Discovery | — | full-search | [net.dns_reverse_lookup_sweep](#rule-net-dns-reverse-lookup-sweep) (full-search)<br>[net.horizontal_sweep](#rule-net-horizontal-sweep) (full-search)<br>[net.zeek_alert](#rule-net-zeek-alert) (positive-only)<br>[win.smb_host_discovery](#rule-win-smb-host-discovery) (positive-only) | dns_query<br>net_alert<br>net_flow<br>net_session<br>net_socket |
-| [`T1033`](https://attack.mitre.org/techniques/T1033/) | System Owner/User Discovery | — | positive-only | [context.post_access_discovery](#rule-context-post-access-discovery) (context-only)<br>[host.discovery_burst](#rule-host-discovery-burst) (positive-only)<br>[net.rpc_host_enumeration_fanout](#rule-net-rpc-host-enumeration-fanout) (positive-only) | process_exec<br>rpc_tx |
+| [`T1033`](https://attack.mitre.org/techniques/T1033/) | System Owner/User Discovery | — | positive-only | [context.post_access_discovery](#rule-context-post-access-discovery) (context-only)<br>[host.discovery_burst](#rule-host-discovery-burst) (positive-only)<br>[net.rpc_host_enumeration_fanout](#rule-net-rpc-host-enumeration-fanout) (positive-only)<br>[net.rpc_host_enumeration_slow_fanout](#rule-net-rpc-host-enumeration-slow-fanout) (positive-only) | process_exec<br>rpc_tx |
 | [`T1040`](https://attack.mitre.org/techniques/T1040/) | Network Sniffing | — | positive-only | [net.cleartext_credentials](#rule-net-cleartext-credentials) (positive-only) | address_assignment<br>app_tx<br>asset_observed<br>dns_query<br>file_transfer<br>http_body<br>http_tx<br>ics_tx<br>kerberos_tx<br>ldap_tx<br>net_alert<br>net_flow<br>net_session<br>ntlm_tx<br>remote_session<br>rpc_tx<br>sensor_health<br>smb_tx<br>ssh_session<br>tls_session<br>x509_certificate |
 | [`T1046`](https://attack.mitre.org/techniques/T1046/) | Network Service Discovery | — | full-search | [net.horizontal_sweep](#rule-net-horizontal-sweep) (full-search)<br>[net.port_scan](#rule-net-port-scan) (full-search)<br>[net.zeek_alert](#rule-net-zeek-alert) (positive-only) | net_alert<br>net_flow<br>net_session |
-| [`T1049`](https://attack.mitre.org/techniques/T1049/) | System Network Connections Discovery | — | positive-only | [context.post_access_discovery](#rule-context-post-access-discovery) (context-only)<br>[host.discovery_burst](#rule-host-discovery-burst) (positive-only)<br>[net.rpc_host_enumeration_fanout](#rule-net-rpc-host-enumeration-fanout) (positive-only) | process_exec<br>rpc_tx |
+| [`T1049`](https://attack.mitre.org/techniques/T1049/) | System Network Connections Discovery | — | positive-only | [context.post_access_discovery](#rule-context-post-access-discovery) (context-only)<br>[host.discovery_burst](#rule-host-discovery-burst) (positive-only)<br>[net.rpc_host_enumeration_fanout](#rule-net-rpc-host-enumeration-fanout) (positive-only)<br>[net.rpc_host_enumeration_slow_fanout](#rule-net-rpc-host-enumeration-slow-fanout) (positive-only) | process_exec<br>rpc_tx |
 | [`T1057`](https://attack.mitre.org/techniques/T1057/) | Process Discovery | — | positive-only | [context.post_access_discovery](#rule-context-post-access-discovery) (context-only)<br>[host.discovery_burst](#rule-host-discovery-burst) (positive-only) | process_exec |
 | [`T1069`](https://attack.mitre.org/techniques/T1069/) | Permission Groups Discovery | [`T1069.003`](https://attack.mitre.org/techniques/T1069/003/) Cloud Groups — not covered<br>2 covered sub-technique(s) listed separately: [`T1069.001`](https://attack.mitre.org/techniques/T1069/001/), [`T1069.002`](https://attack.mitre.org/techniques/T1069/002/) | context-only | [context.post_access_discovery](#rule-context-post-access-discovery) (context-only) | process_exec |
-| [`T1069.001`](https://attack.mitre.org/techniques/T1069/001/) | Local Groups | sub-technique of [`T1069`](https://attack.mitre.org/techniques/T1069/) | positive-only | [net.rpc_directory_listing](#rule-net-rpc-directory-listing) (positive-only)<br>[net.rpc_host_enumeration_fanout](#rule-net-rpc-host-enumeration-fanout) (positive-only)<br>[win.sam_admin_enumeration](#rule-win-sam-admin-enumeration) (positive-only) | object_access<br>rpc_tx<br>security_enumeration |
+| [`T1069.001`](https://attack.mitre.org/techniques/T1069/001/) | Local Groups | sub-technique of [`T1069`](https://attack.mitre.org/techniques/T1069/) | positive-only | [net.rpc_directory_listing](#rule-net-rpc-directory-listing) (positive-only)<br>[net.rpc_host_enumeration_fanout](#rule-net-rpc-host-enumeration-fanout) (positive-only)<br>[net.rpc_host_enumeration_slow_fanout](#rule-net-rpc-host-enumeration-slow-fanout) (positive-only)<br>[win.sam_admin_enumeration](#rule-win-sam-admin-enumeration) (positive-only) | object_access<br>rpc_tx<br>security_enumeration |
 | [`T1069.002`](https://attack.mitre.org/techniques/T1069/002/) | Domain Groups | sub-technique of [`T1069`](https://attack.mitre.org/techniques/T1069/) | positive-only | [net.rpc_directory_listing](#rule-net-rpc-directory-listing) (positive-only)<br>[win.sam_admin_enumeration](#rule-win-sam-admin-enumeration) (positive-only) | object_access<br>rpc_tx<br>security_enumeration |
 | [`T1082`](https://attack.mitre.org/techniques/T1082/) | System Information Discovery | — | positive-only | [context.post_access_discovery](#rule-context-post-access-discovery) (context-only)<br>[host.discovery_burst](#rule-host-discovery-burst) (positive-only) | process_exec |
 | [`T1083`](https://attack.mitre.org/techniques/T1083/) | File and Directory Discovery | — | positive-only | [context.post_access_discovery](#rule-context-post-access-discovery) (context-only)<br>[host.discovery_burst](#rule-host-discovery-burst) (positive-only) | process_exec |
@@ -353,7 +353,7 @@ A technique is covered only by a rule that explicitly declares that ATT&CK id.
 | [`T1087.002`](https://attack.mitre.org/techniques/T1087/002/) | Domain Account | sub-technique of [`T1087`](https://attack.mitre.org/techniques/T1087/) | positive-only | [net.kerberos_principal_enumeration](#rule-net-kerberos-principal-enumeration) (positive-only)<br>[net.rpc_directory_listing](#rule-net-rpc-directory-listing) (positive-only)<br>[net.zeek_alert](#rule-net-zeek-alert) (positive-only)<br>[win.sam_admin_enumeration](#rule-win-sam-admin-enumeration) (positive-only) | kerberos_tx<br>net_alert<br>object_access<br>rpc_tx<br>security_enumeration |
 | [`T1120`](https://attack.mitre.org/techniques/T1120/) | Peripheral Device Discovery | — | context-only | [context.post_access_discovery](#rule-context-post-access-discovery) (context-only) | process_exec |
 | [`T1124`](https://attack.mitre.org/techniques/T1124/) | System Time Discovery | — | none | — | — |
-| [`T1135`](https://attack.mitre.org/techniques/T1135/) | Network Share Discovery | — | positive-only | [context.post_access_discovery](#rule-context-post-access-discovery) (context-only)<br>[net.rpc_host_enumeration_fanout](#rule-net-rpc-host-enumeration-fanout) (positive-only)<br>[net.zeek_alert](#rule-net-zeek-alert) (positive-only)<br>[win.new_server_share](#rule-win-new-server-share) (positive-only)<br>[win.share_created](#rule-win-share-created) (positive-only)<br>[win.smb_host_discovery](#rule-win-smb-host-discovery) (positive-only) | net_alert<br>net_socket<br>process_exec<br>registry_change<br>rpc_tx<br>share_change |
+| [`T1135`](https://attack.mitre.org/techniques/T1135/) | Network Share Discovery | — | positive-only | [context.post_access_discovery](#rule-context-post-access-discovery) (context-only)<br>[net.rpc_host_enumeration_fanout](#rule-net-rpc-host-enumeration-fanout) (positive-only)<br>[net.rpc_host_enumeration_slow_fanout](#rule-net-rpc-host-enumeration-slow-fanout) (positive-only)<br>[net.zeek_alert](#rule-net-zeek-alert) (positive-only)<br>[win.new_server_share](#rule-win-new-server-share) (positive-only)<br>[win.share_created](#rule-win-share-created) (positive-only)<br>[win.smb_host_discovery](#rule-win-smb-host-discovery) (positive-only) | net_alert<br>net_socket<br>process_exec<br>registry_change<br>rpc_tx<br>share_change |
 | [`T1201`](https://attack.mitre.org/techniques/T1201/) | Password Policy Discovery | — | context-only | [context.post_access_discovery](#rule-context-post-access-discovery) (context-only) | process_exec |
 | [`T1217`](https://attack.mitre.org/techniques/T1217/) | Browser Information Discovery | — | none | — | — |
 | [`T1482`](https://attack.mitre.org/techniques/T1482/) | Domain Trust Discovery | — | none | — | — |
@@ -1737,7 +1737,7 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 - Positive-only reason: Zeek network observations report typed positive evidence; absence and successful action are not established.
 
 <a id="rule-net-rpc-directory-listing"></a>
-### `net.rpc_directory_listing` — One source listed users, groups or group members in bulk over SAM RPC
+### `net.rpc_directory_listing` — One source made bulk user, group or member listing calls over SAM RPC
 
 - Version: `5`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
@@ -1745,11 +1745,11 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 - ATT&CK: [`T1069.001`](https://attack.mitre.org/techniques/T1069/001/), [`T1069.002`](https://attack.mitre.org/techniques/T1069/002/), [`T1087.002`](https://attack.mitre.org/techniques/T1087/002/)
 - Telemetry families: rpc_tx
 - Required typed fields: destination.ip<br>source.ip
-- Behavior: One source listed users, groups or group members in bulk over SAM RPC
+- Behavior: One source made bulk user, group or member listing calls over SAM RPC
 - Positive-only reason: Zeek window observations are positive-only; missing outcomes and partial sensor visibility cannot establish absence.
 
 <a id="rule-net-rpc-host-enumeration-fanout"></a>
-### `net.rpc_host_enumeration_fanout` — One source enumerated sessions, shares or local groups on many hosts
+### `net.rpc_host_enumeration_fanout` — One source called session, share or local-group enumeration on many hosts
 
 - Version: `5`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
@@ -1757,7 +1757,19 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 - ATT&CK: [`T1033`](https://attack.mitre.org/techniques/T1033/), [`T1049`](https://attack.mitre.org/techniques/T1049/), [`T1069.001`](https://attack.mitre.org/techniques/T1069/001/), [`T1135`](https://attack.mitre.org/techniques/T1135/)
 - Telemetry families: rpc_tx
 - Required typed fields: destination.ip<br>source.ip
-- Behavior: One source enumerated sessions, shares or local groups on many hosts
+- Behavior: One source called session, share or local-group enumeration on many hosts
+- Positive-only reason: Zeek window observations are positive-only; missing outcomes and partial sensor visibility cannot establish absence.
+
+<a id="rule-net-rpc-host-enumeration-slow-fanout"></a>
+### `net.rpc_host_enumeration_slow_fanout` — One source called session, share or local-group enumeration on many hosts over a day
+
+- Version: `5`; status: `active`
+- Kind: `aggregate`; lane: `lead`; severity: `medium`
+- Coverage strength: **positive-only**
+- ATT&CK: [`T1033`](https://attack.mitre.org/techniques/T1033/), [`T1049`](https://attack.mitre.org/techniques/T1049/), [`T1069.001`](https://attack.mitre.org/techniques/T1069/001/), [`T1135`](https://attack.mitre.org/techniques/T1135/)
+- Telemetry families: rpc_tx
+- Required typed fields: destination.ip<br>source.ip
+- Behavior: One source called session, share or local-group enumeration on many hosts over a day
 - Positive-only reason: Zeek window observations are positive-only; missing outcomes and partial sensor visibility cannot establish absence.
 
 <a id="rule-net-rpc-remote-admin-call"></a>
