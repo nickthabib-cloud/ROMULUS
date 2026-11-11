@@ -30,7 +30,7 @@ from romulus.evidence.windows_catalog import (
 if TYPE_CHECKING:
     from romulus.detect.bounded import Account, StateBudget
 
-WINDOWS_NORMALIZER = "windows-ecs@19"
+WINDOWS_NORMALIZER = "windows-ecs@20"
 # This is already far beyond what the 64 MiB assembler can retain at normal 4104 chunk sizes, while bounding every
 # completeness vector even when hostile metadata claims billions of parts.
 SCRIPT_BLOCK_MAX_PARTS = 4_096
@@ -1064,6 +1064,19 @@ def windows_record_key(hit: dict) -> tuple[str, str, str] | None:
     return computer, channel, str(record_id)
 
 
+def _signature_time(value: object) -> object:
+    """Canonical native instant at the millisecond precision shared by Windows exporters."""
+    parsed = _zoned_time(value)
+    if parsed is None:
+        return value
+    try:
+        when = parsed.astimezone(UTC)
+    except (OverflowError, ValueError):
+        return value
+    when = when.replace(microsecond=when.microsecond // 1000 * 1000)
+    return when.isoformat(timespec="milliseconds" if when.microsecond else "seconds").replace("+00:00", "Z")
+
+
 def windows_record_signature(hit: dict) -> str:
     """Stable content discriminator for copies that share a native record id.
 
@@ -1102,6 +1115,7 @@ def windows_record_signature(hit: dict) -> str:
         or _get(source, "event.created")
         or source.get("@timestamp")
     )
+    native_time = _signature_time(native_time)
     if native_time not in (None, ""):
         native.setdefault("TimeCreated", native_time)
     # Shippers vary only the spelling of some native names (for example Defender's ``Threat Name``,
@@ -1109,6 +1123,8 @@ def windows_record_signature(hit: dict) -> str:
     payload: dict[str, list[object]] = {}
     for name, value in native.items():
         canonical_name = re.sub(r"[\s_]+", "", str(name)).casefold()
+        if canonical_name in {"timecreated", "systemtime"}:
+            value = _signature_time(value)
         payload.setdefault(canonical_name, []).append(value)
     payload = {name: sorted(values, key=lambda value: json.dumps(value, sort_keys=True, default=str))
                for name, values in payload.items()}
