@@ -27,6 +27,28 @@ PROTOCOL_FAMILIES: dict[str, frozenset[str]] = {
 }
 
 
+# The producers a network rule may read when its required facts are typed the same way by each; the per-rule field
+# matrix is in docs/detection/network-protocols.md.
+ZEEK_ONLY = ("zeek-ecs",)
+ZEEK_AND_SURICATA = ("zeek-ecs", "suricata-eve")
+SENSOR_WORDS = {"zeek-ecs": "Zeek", "suricata-eve": "Suricata"}
+
+
+def sensor_words(producers: tuple[str, ...]) -> str:
+    return " or ".join(SENSOR_WORDS[name] for name in producers)
+
+
+def rule_reads(event: TypedEvent, producers: tuple[str, ...]) -> bool:
+    """Whether a network rule that reads these producers judges this record: a Zeek record as Zeek wrote it, or
+    another producer's record that carries the family's documented contract."""
+    producer = event.normalizer.partition("@")[0]
+    if producer not in producers:
+        return False
+    if producer == "zeek-ecs":
+        return event.get("observer.product") == "zeek"
+    return protocol_record(event, event.family)
+
+
 def protocol_record(event: TypedEvent, family: str) -> bool:
     """Whether the exact family carries this producer's documented typed contract."""
     if event.family != family:

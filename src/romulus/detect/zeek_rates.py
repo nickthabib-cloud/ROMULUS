@@ -1,6 +1,7 @@
 """Peer-keyed network rates with exact disk-backed raw-reference windows."""
 from ipaddress import ip_address
 
+from romulus.detect.network_producers import ZEEK_AND_SURICATA, sensor_words
 from romulus.detect.zeek_lateral import _call, _peers
 from romulus.detect.zeek_rate_state import ZeekWindowRule
 
@@ -27,7 +28,10 @@ def _name(value):
 
 
 class _Rate(ZeekWindowRule):
-    version = '5'
+    version = '6'
+    # Each rate reads facts Zeek and Suricata type alike (the per-rule matrix is in docs/detection/network-protocols.md);
+    # a fact one sensor does not record leaves that sensor's rows unselected, never counted.
+    producers = ZEEK_AND_SURICATA
     citation_fields = _FIELDS
     required_fields = ('source.ip',)
     benign = ('Authorized administration, scanners and ordinary authentication can produce rate leads.',)
@@ -44,7 +48,8 @@ class _Rate(ZeekWindowRule):
                 'query_cost': 'One family sweep and indexed disk-backed window state.',
                 'next_pivot': '; '.join(cls.next_checks),
                 'research_basis': '; '.join(cls.research),
-                'retrieval': 'Declared typed Zeek families; missing fields and state refusals remain unresolved.',
+                'retrieval': (f'Declared typed {sensor_words(cls.producers)} families; missing fields and state '
+                              'refusals remain unresolved.'),
                 'lanes': 'The concrete observation defines its evidence-supported lane.',
             }
 
@@ -92,7 +97,7 @@ class Rc4TgsFanout(_Rate):
         return 'lead', (f'Source {event.get("source.ip")} had TGS exchanges with RC4 ticket encryption for at least '
                         f'{distinct_members} distinct services in five minutes ({total_refs} raw references).'), (
             'Distinct services reduce repeated legacy-service noise; a legacy RC4 domain can still explain this lead.',
-            'Zeek cipher describes the issued ticket encryption, not a requested cipher preference.',
+            'The sensor cipher describes the issued ticket encryption, not a requested cipher preference.',
             'The breadth threshold is a review heuristic, not proof of ticket cracking.',
         )
 

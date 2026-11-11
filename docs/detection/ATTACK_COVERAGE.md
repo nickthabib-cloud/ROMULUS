@@ -1533,14 +1533,14 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 <a id="rule-net-external-rdp"></a>
 ### `net.external_rdp` — RDP session negotiation from outside the declared site
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1021.001`](https://attack.mitre.org/techniques/T1021/001/), [`T1133`](https://attack.mitre.org/techniques/T1133/)
 - Telemetry families: remote_session
 - Required typed fields: destination.ip<br>remote.protocol<br>source.ip
 - Behavior: RDP session negotiation from outside the declared site
-- Positive-only reason: Zeek network observations report typed positive evidence; absence and successful action are not established.
+- Positive-only reason: Network protocol observations report typed positive evidence; absence and successful action are not established.
 
 <a id="rule-net-horizontal-sweep"></a>
 ### `net.horizontal_sweep` — One source contacted many distinct addresses on the same port within minutes
@@ -1556,14 +1556,14 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 <a id="rule-net-http-winrm"></a>
 ### `net.http_winrm` — An HTTP request targeted the WinRM service path
 
-- Version: `2`; status: `active`
+- Version: `3`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1021.006`](https://attack.mitre.org/techniques/T1021/006/)
 - Telemetry families: http_tx
 - Required typed fields: destination.ip<br>destination.port<br>source.ip<br>url.original
 - Behavior: An HTTP request targeted the WinRM service path
-- Positive-only reason: Zeek network observations report typed positive evidence; absence and successful action are not established.
+- Positive-only reason: Network protocol observations report typed positive evidence; absence and successful action are not established.
 
 <a id="rule-net-icmp-echo-tunnel-shape"></a>
 ### `net.icmp_echo_tunnel_shape` — Payload-heavy or long-lived ICMP echo traffic between one pair
@@ -1580,38 +1580,38 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 <a id="rule-net-internal-rdp"></a>
 ### `net.internal_rdp` — RDP session negotiation from a host inside the site
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1021.001`](https://attack.mitre.org/techniques/T1021/001/)
 - Telemetry families: remote_session
 - Required typed fields: destination.ip<br>remote.protocol<br>source.ip
 - Behavior: RDP session negotiation from a host inside the site
-- Positive-only reason: Zeek network observations report typed positive evidence; absence and successful action are not established.
+- Positive-only reason: Network protocol observations report typed positive evidence; absence and successful action are not established.
 
 <a id="rule-net-kerberos-principal-enumeration"></a>
 ### `net.kerberos_principal_enumeration` — KDC unknown-principal errors for many distinct principals
 
-- Version: `5`; status: `active`
+- Version: `6`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1087.002`](https://attack.mitre.org/techniques/T1087/002/)
 - Telemetry families: kerberos_tx
 - Required typed fields: source.ip
 - Behavior: KDC unknown-principal errors for many distinct principals
-- Positive-only reason: Zeek window observations are positive-only; missing outcomes and partial sensor visibility cannot establish absence.
+- Positive-only reason: Network window observations are positive-only; missing outcomes and partial sensor visibility cannot establish absence.
 
 <a id="rule-net-kerberos-rc4-service-fanout"></a>
 ### `net.kerberos_rc4_service_fanout` — TGS exchanges with RC4 ticket encryption for many services
 
-- Version: `5`; status: `active`
+- Version: `6`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1558.003`](https://attack.mitre.org/techniques/T1558/003/)
 - Telemetry families: kerberos_tx
 - Required typed fields: source.ip
 - Behavior: TGS exchanges with RC4 ticket encryption for many services
-- Positive-only reason: Zeek window observations are positive-only; missing outcomes and partial sensor visibility cannot establish absence.
+- Positive-only reason: Network window observations are positive-only; missing outcomes and partial sensor visibility cannot establish absence.
 
 <a id="rule-net-long-external-connection"></a>
 ### `net.long_external_connection` — Long-lived TCP connection between an internal and a public address
@@ -1639,38 +1639,38 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 <a id="rule-net-netlogon-authentication-burst"></a>
 ### `net.netlogon_authentication_burst` — Repeated Netlogon secure-channel authentication calls
 
-- Version: `5`; status: `active`
+- Version: `6`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1210`](https://attack.mitre.org/techniques/T1210/)
 - Telemetry families: rpc_tx
 - Required typed fields: destination.ip<br>source.ip
 - Behavior: Repeated Netlogon secure-channel authentication calls
-- Positive-only reason: Zeek window observations are positive-only; missing outcomes and partial sensor visibility cannot establish absence.
+- Positive-only reason: Network window observations are positive-only; missing outcomes and partial sensor visibility cannot establish absence.
 
 <a id="rule-net-ntlm-password-guessing"></a>
 ### `net.ntlm_password_guessing` — Repeated NTLM authentication attempts for one user
 
-- Version: `5`; status: `active`
+- Version: `6`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1110.001`](https://attack.mitre.org/techniques/T1110/001/)
 - Telemetry families: ntlm_tx
 - Required typed fields: source.ip
 - Behavior: Repeated NTLM authentication attempts for one user
-- Positive-only reason: Zeek window observations are positive-only; missing outcomes and partial sensor visibility cannot establish absence.
+- Positive-only reason: Network window observations are positive-only; missing outcomes and partial sensor visibility cannot establish absence.
 
 <a id="rule-net-ntlm-password-spray"></a>
 ### `net.ntlm_password_spray` — One source attempted NTLM authentication for many users
 
-- Version: `5`; status: `active`
+- Version: `6`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1110.003`](https://attack.mitre.org/techniques/T1110/003/)
 - Telemetry families: ntlm_tx
 - Required typed fields: source.ip
 - Behavior: One source attempted NTLM authentication for many users
-- Positive-only reason: Zeek window observations are positive-only; missing outcomes and partial sensor visibility cannot establish absence.
+- Positive-only reason: Network window observations are positive-only; missing outcomes and partial sensor visibility cannot establish absence.
 
 <a id="rule-net-outbound-ssh-external"></a>
 ### `net.outbound_ssh_external` — An internal source initiated SSH to an external destination
@@ -1731,74 +1731,74 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 <a id="rule-net-rpc-coercion-call"></a>
 ### `net.rpc_coercion_call` — A remote authentication-coercion RPC call was observed
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1187`](https://attack.mitre.org/techniques/T1187/)
 - Telemetry families: rpc_tx
 - Required typed fields: destination.ip<br>source.ip
 - Behavior: A remote authentication-coercion RPC call was observed
-- Positive-only reason: Zeek network observations report typed positive evidence; absence and successful action are not established.
+- Positive-only reason: Network protocol observations report typed positive evidence; absence and successful action are not established.
 
 <a id="rule-net-rpc-directory-listing"></a>
 ### `net.rpc_directory_listing` — One source made bulk user, group or member listing calls over SAM RPC
 
-- Version: `5`; status: `active`
+- Version: `6`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1069.001`](https://attack.mitre.org/techniques/T1069/001/), [`T1069.002`](https://attack.mitre.org/techniques/T1069/002/), [`T1087.002`](https://attack.mitre.org/techniques/T1087/002/)
 - Telemetry families: rpc_tx
 - Required typed fields: destination.ip<br>source.ip
 - Behavior: One source made bulk user, group or member listing calls over SAM RPC
-- Positive-only reason: Zeek window observations are positive-only; missing outcomes and partial sensor visibility cannot establish absence.
+- Positive-only reason: Network window observations are positive-only; missing outcomes and partial sensor visibility cannot establish absence.
 
 <a id="rule-net-rpc-host-enumeration-fanout"></a>
 ### `net.rpc_host_enumeration_fanout` — One source called session, share or local-group enumeration on many hosts
 
-- Version: `5`; status: `active`
+- Version: `6`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1033`](https://attack.mitre.org/techniques/T1033/), [`T1049`](https://attack.mitre.org/techniques/T1049/), [`T1069.001`](https://attack.mitre.org/techniques/T1069/001/), [`T1135`](https://attack.mitre.org/techniques/T1135/)
 - Telemetry families: rpc_tx
 - Required typed fields: destination.ip<br>source.ip
 - Behavior: One source called session, share or local-group enumeration on many hosts
-- Positive-only reason: Zeek window observations are positive-only; missing outcomes and partial sensor visibility cannot establish absence.
+- Positive-only reason: Network window observations are positive-only; missing outcomes and partial sensor visibility cannot establish absence.
 
 <a id="rule-net-rpc-host-enumeration-slow-fanout"></a>
 ### `net.rpc_host_enumeration_slow_fanout` — One source called session, share or local-group enumeration on many hosts over a day
 
-- Version: `5`; status: `active`
+- Version: `6`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1033`](https://attack.mitre.org/techniques/T1033/), [`T1049`](https://attack.mitre.org/techniques/T1049/), [`T1069.001`](https://attack.mitre.org/techniques/T1069/001/), [`T1135`](https://attack.mitre.org/techniques/T1135/)
 - Telemetry families: rpc_tx
 - Required typed fields: destination.ip<br>source.ip
 - Behavior: One source called session, share or local-group enumeration on many hosts over a day
-- Positive-only reason: Zeek window observations are positive-only; missing outcomes and partial sensor visibility cannot establish absence.
+- Positive-only reason: Network window observations are positive-only; missing outcomes and partial sensor visibility cannot establish absence.
 
 <a id="rule-net-rpc-remote-admin-call"></a>
 ### `net.rpc_remote_admin_call` — A classified remote administration RPC call was observed
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1003.002`](https://attack.mitre.org/techniques/T1003/002/), [`T1003.004`](https://attack.mitre.org/techniques/T1003/004/), [`T1012`](https://attack.mitre.org/techniques/T1012/), [`T1021.003`](https://attack.mitre.org/techniques/T1021/003/), [`T1047`](https://attack.mitre.org/techniques/T1047/), [`T1053.002`](https://attack.mitre.org/techniques/T1053/002/), [`T1053.005`](https://attack.mitre.org/techniques/T1053/005/), [`T1068`](https://attack.mitre.org/techniques/T1068/), [`T1098`](https://attack.mitre.org/techniques/T1098/), [`T1098.007`](https://attack.mitre.org/techniques/T1098/007/), [`T1112`](https://attack.mitre.org/techniques/T1112/), [`T1134.005`](https://attack.mitre.org/techniques/T1134/005/), [`T1136`](https://attack.mitre.org/techniques/T1136/), [`T1210`](https://attack.mitre.org/techniques/T1210/), [`T1489`](https://attack.mitre.org/techniques/T1489/), [`T1529`](https://attack.mitre.org/techniques/T1529/), [`T1531`](https://attack.mitre.org/techniques/T1531/), [`T1543.003`](https://attack.mitre.org/techniques/T1543/003/), [`T1547.012`](https://attack.mitre.org/techniques/T1547/012/), [`T1569.002`](https://attack.mitre.org/techniques/T1569/002/)
 - Telemetry families: rpc_tx
 - Required typed fields: destination.ip<br>source.ip
 - Behavior: A classified remote administration RPC call was observed
-- Positive-only reason: Zeek network observations report typed positive evidence; absence and successful action are not established.
+- Positive-only reason: Network protocol observations report typed positive evidence; absence and successful action are not established.
 
 <a id="rule-net-rpc-replication-call"></a>
 ### `net.rpc_replication_call` — A directory replication RPC call was observed
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1003.006`](https://attack.mitre.org/techniques/T1003/006/), [`T1207`](https://attack.mitre.org/techniques/T1207/)
 - Telemetry families: rpc_tx
 - Required typed fields: destination.ip<br>source.ip
 - Behavior: A directory replication RPC call was observed
-- Positive-only reason: Zeek network observations report typed positive evidence; absence and successful action are not established.
+- Positive-only reason: Network protocol observations report typed positive evidence; absence and successful action are not established.
 
 <a id="rule-net-smb-admin-share-pe"></a>
 ### `net.smb_admin_share_pe` — Executable bytes sent to an SMB administrative-share file
@@ -1864,7 +1864,7 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 - Telemetry families: remote_session
 - Required typed fields: destination.ip<br>remote.protocol<br>source.ip
 - Behavior: VNC session negotiation was observed
-- Positive-only reason: Zeek network observations report typed positive evidence; absence and successful action are not established.
+- Positive-only reason: Network protocol observations report typed positive evidence; absence and successful action are not established.
 
 <a id="rule-net-zeek-alert"></a>
 ### `net.zeek_alert` — Zeek intel match, signature match or notice
