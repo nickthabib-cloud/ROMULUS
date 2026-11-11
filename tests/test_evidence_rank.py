@@ -797,3 +797,75 @@ def test_ranked_manifest_and_reports_follow_the_headline_structure():
     assert document.index("Confirmed") < document.index("Ranked findings (not reported)")
     canonical = canonical_manifest(repo, "h1")
     assert all("rank_position" not in finding and "rank" in finding for finding in canonical["findings"])
+
+
+def _limited_expansion(repo, **budget):
+    from types import SimpleNamespace
+
+    from romulus.hunt.expansion import ExpansionEngine
+    from romulus.sources.models import Window
+
+    return ExpansionEngine(repo, "h1", Window(start=START, end=END), SimpleNamespace(boots={}),
+                           **({"max_source_queries": 40, "wall_clock_seconds": 60} | budget)).run()
+
+
+def _lead_anchors(repo):
+    return {row["candidate_id"] for row in repo.expansion_anchors("h1") if row["lane"] == "lead"}
+
+
+@pytest.mark.parametrize("leads", [15, 5000])
+def test_one_entity_anchors_only_its_best_ranked_extra_seeds_and_counts_the_rest(leads):
+    """A compromised host carrying thousands of leads anchors its best-ranked few; the rest stay Reported and are
+    counted with the reason, so expansion's work grows with the compromised entities, not with their leads."""
+    from romulus.hunt.expansion import EXTRA_SEEDS_ENTITY_LIMIT_REASON, EXTRA_SEEDS_PER_ENTITY
+
+    repo = _repo()
+    # untimed leads: each extra is anchored as unexpanded and spends no query, so only the limit stops them
+    rows = [_row("u-victim", "r.confirmed", lane="urgent", host="victim", ts=None)]
+    rows += [_row(f"l{n:05d}", f"r.lead{n % 7}", host="victim", ts=None) for n in range(leads)]
+    _insert(repo, rows)
+    compute_rank_pass(repo, "h1", PASS_BEFORE_EXPANSION)
+    best = [row["candidate_id"] for row in repo.finding_ranks_page("h1", PASS_BEFORE_EXPANSION, reported=True,
+                                                                    limit=leads + 1) if row["candidate_id"] != "u-victim"]
+    assert len(best) == leads
+    summary = _limited_expansion(repo)
+    assert _lead_anchors(repo) == set(best[:EXTRA_SEEDS_PER_ENTITY])
+    limited = leads - EXTRA_SEEDS_PER_ENTITY
+    assert summary["reported_seeds_entity_limited"] == {"count": limited, "limit": EXTRA_SEEDS_PER_ENTITY,
+                                                        "reason": EXTRA_SEEDS_ENTITY_LIMIT_REASON}
+    assert f"{limited} {EXTRA_SEEDS_ENTITY_LIMIT_REASON}" in summary["stop_reason"]
+    assert "reported_seeds_not_anchored" not in summary
+    # every lead is still Reported: the limit bounds expansion, never the report
+    assert len(repo.finding_ranks_page("h1", PASS_BEFORE_EXPANSION, reported=True, limit=leads + 1)) == leads + 1
+
+
+def test_each_entity_gets_its_own_share_of_extra_seeds():
+    from romulus.hunt.expansion import EXTRA_SEEDS_PER_ENTITY
+
+    repo = _repo()
+    rows = []
+    for host in ("web1", "web2"):
+        rows.append(_row(f"u-{host}", "r.confirmed", lane="urgent", host=host, ts=None))
+        rows += [_row(f"l-{host}-{n:02d}", f"r.lead{n}", host=host, ts=None) for n in range(15)]
+    _insert(repo, rows)
+    compute_rank_pass(repo, "h1", PASS_BEFORE_EXPANSION)
+    summary = _limited_expansion(repo)
+    anchored = _lead_anchors(repo)
+    assert {host: sum(c.startswith(f"l-{host}-") for c in anchored) for host in ("web1", "web2")} == {
+        "web1": EXTRA_SEEDS_PER_ENTITY, "web2": EXTRA_SEEDS_PER_ENTITY}
+    assert summary["reported_seeds_entity_limited"]["count"] == 2 * (15 - EXTRA_SEEDS_PER_ENTITY)
+
+
+def test_a_resumed_expansion_keeps_the_entity_limit_and_counts_the_rest_once():
+    from romulus.hunt.expansion import EXTRA_SEEDS_PER_ENTITY
+
+    repo = _repo()
+    rows = [_row("u-victim", "r.confirmed", lane="urgent", host="victim", ts=None)]
+    rows += [_row(f"l{n:02d}", f"r.lead{n}", host="victim", ts=None) for n in range(25)]
+    _insert(repo, rows)
+    compute_rank_pass(repo, "h1", PASS_BEFORE_EXPANSION)
+    first = _limited_expansion(repo)
+    anchored = _lead_anchors(repo)
+    again = _limited_expansion(repo)
+    assert _lead_anchors(repo) == anchored and len(anchored) == EXTRA_SEEDS_PER_ENTITY
+    assert first["reported_seeds_entity_limited"]["count"] == again["reported_seeds_entity_limited"]["count"] == 15
