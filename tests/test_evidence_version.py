@@ -77,6 +77,8 @@ PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf211
                    18: "461960d9faa8960651fd9e6c2d3cae7501264a15861392ddf26ce9166017f99d"}
 WINDOWS_EVIDENCE_FILES = ("community.py", "windows.py", "windows_catalog.py", "windows_reassembly.py", "rpc_catalog.py")
 PINNED_WINDOWS = {
+    # Native Windows copies share an instant identity at exporter millisecond precision.
+    "windows-ecs@20": "22faf9d891c5f4a56274ad258a4a0622c688d4da87b8e8ae27e1e68ada85a081",
     # Native EVTX JSON records gain typed normalization with their original field paths.
     "windows-ecs@19": "38b3631781b9192adf2a8657f7b677174b4327da0191efffbe3c785fc7731af5",
     # NXLog's flat im_msvistalog records are read (windows.nxlog_to_winlog); Winlogbeat and Agent records normalize
@@ -105,7 +107,9 @@ PINNED_WINDOWS = {
 }
 # Shared path, credential and scalar cleaners are part of the eCAR producer contract.
 ECAR_EVIDENCE_FILES = ('community.py', 'ecar.py', 'ecar_catalog.py', 'raw_scrub.py', 'surrogates.py', 'windows.py')
-PINNED_ECAR = {"ecar@1": "539a0832b610df1dca02729b594756bb1a0ae70a9c825beec154611b0cde56cd"}
+# Native epoch, ISO timestamps and pipeline-only exports retain ordered clock provenance.
+PINNED_ECAR = {"ecar@2": "50ffd9f40e25e67c591a273b08d9705893edaf71896a524659c390975b7f0641",
+               "ecar@1": "539a0832b610df1dca02729b594756bb1a0ae70a9c825beec154611b0cde56cd"}
 ZEEK_EVIDENCE_FILES = ("certificates.py", "community.py", "ics_catalog.py", "rpc_catalog.py", "zeek.py", "zeek_catalog.py",
                        "zeek_credentials.py")
 PINNED_ZEEK = {
