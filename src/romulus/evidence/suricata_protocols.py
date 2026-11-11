@@ -22,7 +22,7 @@ from romulus.evidence.typed import FieldValue, Outcome, fv
 from romulus.evidence.zeek_catalog import KERBEROS_ERRORS, KERBEROS_ETYPES
 from romulus.evidence.zeek_credentials import LDAP_PASSWORD_ATTRIBUTES
 
-SURICATA_NORMALIZER = "suricata-eve@1"
+SURICATA_NORMALIZER = "suricata-eve@2"
 SURICATA_PROTOCOL_FAMILIES = {
     "dcerpc": frozenset({"rpc_tx"}), "smb": frozenset({"smb_tx", "ntlm_tx", "rpc_tx"}),
     "krb5": frozenset({"kerberos_tx"}), "rdp": frozenset({"remote_session"}),

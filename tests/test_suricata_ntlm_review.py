@@ -6,7 +6,6 @@ from romulus.evidence.zeek import normalize_plain_zeek
 from tests.fixtures import zeek_logs as zl
 from tests.test_suricata_protocols import hit
 
-
 FAILURES = ["STATUS_LOGON_FAILURE", "STATUS_ACCOUNT_LOCKED_OUT", "STATUS_PASSWORD_EXPIRED",
             "STATUS_ACCOUNT_DISABLED", "STATUS_ACCOUNT_RESTRICTION", "STATUS_INVALID_LOGON_HOURS",
             "STATUS_INVALID_WORKSTATION", "STATUS_ACCOUNT_EXPIRED", "STATUS_PASSWORD_MUST_CHANGE",

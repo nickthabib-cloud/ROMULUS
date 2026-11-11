@@ -19,7 +19,7 @@ from romulus.evidence.raw_scrub import clean_source
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, event_id, fv
 from romulus.evidence.windows import _path_metadata, registry_path_key, windows_path_key
 
-ECAR_NORMALIZER = "ecar@2"
+ECAR_NORMALIZER = "ecar@3"
 ECAR_DUPLICATE = "duplicate eCAR record UUID"
 _MARKERS = frozenset({"object", "action", "objectID", "actorID", "hostname", "properties"})
 _ZERO = "00000000-0000-0000-0000-000000000000"

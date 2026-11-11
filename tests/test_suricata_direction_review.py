@@ -8,7 +8,6 @@ from tests.test_elastic_suricata import shipped
 from tests.test_malcolm_suricata import _malcolm_base, filebeat_hit, malcolm_hit
 from tests.test_suricata_protocols import BASE
 
-
 SHAPES = ["original", "message", "filebeat", "agent", "malcolm"]
 
 

@@ -19,7 +19,7 @@ from romulus.sources.models import Window
 
 VERSIONS = {"lab-ecs": NORMALIZER_VERSION, "windows-ecs": WINDOWS_NORMALIZER,
             "zeek-ecs": ZEEK_NORMALIZER, "ecar": ECAR_NORMALIZER,
-            "suricata-eve": "suricata-eve@1", "arkime": "arkime@1"}
+            "suricata-eve": "suricata-eve@2", "arkime": "arkime@1"}
 
 
 class VersionsAccepted(Exception):

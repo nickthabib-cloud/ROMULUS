@@ -52,7 +52,7 @@ def test_catalog_rows_are_typed_or_explicitly_counted(pair):
         assert event.family == row.family
         assert event.host == "client"
         assert event.get("host.os.family") == "windows"
-        assert event.normalizer == ECAR_NORMALIZER == "ecar@2"
+        assert event.normalizer == ECAR_NORMALIZER == "ecar@3"
         assert not any(event.has(name) for name in ("event.code", "event.channel", "event.provider"))
         assert event.get("ecar.object") == pair[0]
         assert event.get("ecar.action") == pair[1]

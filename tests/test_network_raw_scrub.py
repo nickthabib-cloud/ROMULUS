@@ -11,11 +11,11 @@ from tests.test_arkime_sessions import session
 from tests.test_suricata_protocols import hit
 
 
-@pytest.mark.parametrize("producer", ["suricata-eve@1", "arkime@1"])
+@pytest.mark.parametrize("producer", ["suricata-eve@2", "arkime@1"])
 @pytest.mark.parametrize("surrogate", [False, True])
 def test_loose_zeek_marker_cannot_bypass_network_credential_scrubbing(producer, surrogate):
     secret = "synthetic-marker-secret"
-    if producer == "suricata-eve@1":
+    if producer == "suricata-eve@2":
         raw = hit("ftp", {"command": "PASS", "command_data": secret})
         raw["_source"]["event"]["module"] = "zeek"
     else:
