@@ -1,4 +1,6 @@
 """A single bounded preflight count governs header-host retrieval coverage."""
+import re
+
 import pytest
 
 from romulus.errors import SourceError
@@ -7,7 +9,23 @@ from romulus.sources.models import Predicate, SearchIntent, Window
 from romulus.sources.profile import build_profile
 from tests.test_linux_text_reporting import FIELDS, ProfileClient, _sample
 from tests.test_syslog_host_queries import END, REASON, START, _line
-from tests.zeek_source_support import matches
+from tests.zeek_source_support import matches, value
+
+
+def _count_matches(query, source):
+    # The preflight's bounded whitespace character class has identical full-term
+    # semantics in this synthetic evaluator and Lucene's regexp query.
+    if "regexp" in query:
+        field, spec = next(iter(query["regexp"].items()))
+        actual = value(source, field)
+        return isinstance(actual, str) and re.fullmatch(spec["value"], actual) is not None
+    if "bool" in query:
+        spec = query["bool"]
+        return (all(_count_matches(q, source) for q in spec.get("filter", []))
+                and not any(_count_matches(q, source) for q in spec.get("must_not", []))
+                and sum(_count_matches(q, source) for q in spec.get("should", []))
+                >= spec.get("minimum_should_match", 1 if spec.get("should") else 0))
+    return matches(query, source)
 
 
 class HostCountClient(ProfileClient):
@@ -28,7 +46,7 @@ class HostCountClient(ProfileClient):
         if self.failure == "error":
             raise SourceError("synthetic count failure")
         query = body["aggs"]["text_missing_host"]["filter"]
-        count = self.count if self.count is not None else sum(matches(query, row["_source"]) for row in self.rows)
+        count = self.count if self.count is not None else sum(_count_matches(query, row["_source"]) for row in self.rows)
         return {"aggregations": {"text_missing_host": {"doc_count": count}},
                 **({"timed_out": True} if self.failure == "timeout" else {}),
                 **({"_shards": {"failed": 1}} if self.failure == "shards" else {})}
@@ -82,3 +100,21 @@ def test_very_large_count_uses_one_scalar_filter_aggregation():
     [body] = [body for body in client.bodies if "text_missing_host" in body.get("aggs", {})]
     assert set(body["aggs"]) == {"text_missing_host"}
     assert set(body["aggs"]["text_missing_host"]) == {"filter"}
+
+
+@pytest.mark.parametrize("host", ["", " ", "\t\n", "\u00a0", "\u2003", "\x1c", "\u3000"])
+def test_indexed_blank_hosts_cannot_hide_header_only_records(host):
+    from romulus.evidence.normalize import normalize_hits
+    rows = _rows("system.syslog", True)
+    rows[1]["_source"]["host"]["name"] = host
+    events, skips, errors = normalize_hits(rows)
+    assert not skips and not errors and {e.host for e in events} == {"app01"}
+    profile, contract = build_profile(HostCountClient(rows), "logs")
+    assert contract.text_missing_host_records == 1
+    assert _gaps(contract, profile.datasets)
+
+
+def test_analyzed_host_without_exact_field_cannot_prove_no_blank_hosts():
+    from romulus.sources.profile import _text_missing_host_count, contract_from_types
+    contract = contract_from_types("logs", {**FIELDS, "host.name": "text"})
+    assert _text_missing_host_count(HostCountClient(_rows("system.syslog", True)), "logs", contract) is None

@@ -1233,13 +1233,24 @@ def _text_missing_host_count(client, target, contract):
                if contract.spec(name, os_family="linux") is not None]
     if not payload or contract.ecar:
         return 0
+    host = contract.spec("host.name", os_family="linux")
+    if host is not None and (host.native != "host.name" or host.type not in {"keyword", "constant_keyword", "wildcard"}):
+        # An analyzed/aliased host cannot prove that source whitespace is absent.
+        return None
+    # Python's stripped-empty host forms also fall back to the syslog header.
+    # Match only this fixed Unicode whitespace alphabet; no unbounded term list
+    # or per-record script. A backend refusing regexp leaves the count unknown.
+    whitespace = "\t\n\v\f\r\x1c\x1d\x1e\x1f \x85\xa0\u1680" + "".join(chr(c) for c in range(0x2000, 0x200b)) + "\u2028\u2029\u202f\u205f\u3000"
+    missing = {"bool": {"should": [
+        {"bool": {"must_not": [{"exists": {"field": "host.name"}}]}},
+        {"regexp": {"host.name": {"value": "[" + whitespace + "]*", "max_determinized_states": 100}}},
+    ], "minimum_should_match": 1}}
     try:
         selection = _pred(Predicate(field="event.dataset", op="in", value=["linux.text", "linux.syslog"]),
                           contract, os_family="linux")
         response = client.search(target, {"size": 0, "track_total_hits": False, "aggs": {
             "text_missing_host": {"filter": {"bool": {
-                "filter": [selection, {"bool": {"should": payload, "minimum_should_match": 1}}],
-                "must_not": [{"exists": {"field": "host.name"}}],
+                "filter": [selection, {"bool": {"should": payload, "minimum_should_match": 1}}, missing],
             }}}}})
     except (SourceError, CompileError):
         return None
