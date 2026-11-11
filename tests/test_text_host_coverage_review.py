@@ -62,6 +62,21 @@ def test_windows_only_intent_on_mixed_target_has_no_header_gap():
     assert not _text_host_coverage(executor.contracts, executor.dataset_inventory, intents)
 
 
+def test_windows_channel_only_intents_exclude_text_without_a_dataset_mapping():
+    executor = _mixed_executor()
+    fields = {"@timestamp": "date", "message": "text", "host.name": "keyword", "log.file.path": "keyword",
+              "winlog.channel": "keyword", "winlog.event_id": "long", "winlog.computer_name": "keyword",
+              "winlog.provider_name": "keyword"}
+    executor.contracts[HOST_TARGET] = contract_from_types(HOST_TARGET, fields, role="host", os_family="windows",
+        linux_text_mixed=True, hosts=("web1",))
+    window = LinkWindow(label="lineage", start=T0, end=T0 + timedelta(minutes=5))
+    intents = LinkFetcher(executor, window.start, window.end)._host_intents(
+        window, {"process_exec"}, host="web1", os_family="windows")
+    assert intents and all(not executor._intent_datasets(intent) for intent in intents)
+    assert not _text_host_coverage(executor.contracts, executor.dataset_inventory, intents)
+    assert _text_host_coverage(executor.contracts, executor.dataset_inventory, intents, header_host=True)
+
+
 def test_real_reader_lineage_on_text_target_routes_packaged_root_perl_to_lead():
     builder = Builder(11)
     pid = builder.exec_group("web1", T0, ["/usr/bin/perl", "-wT", "/usr/bin/zmpkg.pl", "start"],

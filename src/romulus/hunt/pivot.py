@@ -593,15 +593,23 @@ def _text_host_coverage(contracts, dataset_inventory, intents, *, header_host=Fa
         contract = contracts[intent.target]
         if _is_network(intent.target, contract):
             continue
+        if contract.text_missing_host_records == 0:
+            continue
         selected = PivotExecutor._intent_datasets(intent)
         if not header_host and selected and not selected.intersection({"linux.text", "linux.syslog"}):
             continue
+        if not header_host and contract.os_family == "windows" and all(
+            any(item.field == "event.channel" and item.op in {"eq", "in", "exists"}
+                for item in [*intent.filters, *group]) for group in (intent.any_of or [[]])
+        ):
+            # A Windows channel selector excludes text even when no dataset field is mapped.
+            continue
         inventory = dataset_inventory.get(intent.target)
         text_possible = (contract.linux_text_mixed is not False
-                         or "linux.text" in _logical_inventory(inventory or ()))
-        if (inventory is None and contract.os_family != "windows"
-                and "linux.text" in PivotExecutor._intent_datasets(intent)):
-            # Without an inventory, a mapped text payload and source selector can hold header-only lines.
+                         or (contract.text_missing_host_records or 0) > 0
+                         or bool({"linux.text", "linux.syslog"}.intersection(_logical_inventory(inventory or ()))))
+        if not inventory and (not selected or selected.intersection({"linux.text", "linux.syslog"})):
+            # An unknown datasetless count can leave text out of the usable inventory.
             payload = any(contract.spec(name, os_family="linux") is not None
                           for name in ("message", "event.original"))
             selector = any(contract.spec(name, os_family="linux") is not None
