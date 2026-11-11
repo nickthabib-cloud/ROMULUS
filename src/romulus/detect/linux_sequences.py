@@ -1093,6 +1093,7 @@ class InteractivePrivilegedLogin(LinuxSequence):
 
 class OutboundSSHExternal(LinuxSequence):
     id = "net.outbound_ssh_external"
+    version = "3"
     title = "An internal source initiated SSH to an external destination"
     os_families = ("linux", "windows")
     families = ("net_flow", "net_session", "net_socket")
@@ -1109,6 +1110,10 @@ class OutboundSSHExternal(LinuxSequence):
         ssh = proto == "ssh" or "ssh" in protocols
         if not (ssh or e.get("network.transport") == "tcp" and e.get("destination.port") == 22):
             return
+        if e.get("source.port") == 22 and e.get("destination.port") != 22:
+            # a record oriented from the server's side (a reply, or a sensor that wrote the responder first): the
+            # client is the other end
+            source, destination = destination, source
         assume_direction(self)
         if external(source) or not external(destination):
             return

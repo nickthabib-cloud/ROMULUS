@@ -209,6 +209,29 @@ def test_outbound_ssh_lanes(source, destination, port, management, lane, tmp_pat
     assert [m.proposed_lane for m in detector.finalize()] == ([lane] if lane else [])
 
 
+@pytest.mark.parametrize("source,destination,sport,dport,lane", [
+    # the server's side of an inbound session: the internal host answers on 22, the external client is not a target
+    ("10.0.0.2", "203.0.113.9", 22, 51515, None),
+    # the client's side of an outbound session recorded from the server's end
+    ("203.0.113.9", "10.0.0.2", 22, 51515, "lead"),
+    ("10.0.0.2", "203.0.113.9", 51515, 22, "lead"),
+])
+def test_outbound_ssh_reads_the_client_from_the_service_port(source, destination, sport, dport, lane, tmp_path):
+    from romulus.site import absent_site_facts
+    detector = rule("net.outbound_ssh_external")()
+    detector.spill_dir = tmp_path
+    detector.site_facts = absent_site_facts()
+    e = ev("net_flow", T0, source__ip=source, destination__ip=destination, source__port=sport,
+           destination__port=dport, network__transport="tcp", network__app_proto="ssh")
+    detector.consume([e])
+    stage = {event.id: event for event in detector.drain_staged()}
+    detector.bind_loader(lambda ids: [stage[i] for i in ids])
+    found = list(detector.finalize())
+    assert [m.proposed_lane for m in found] == ([lane] if lane else [])
+    if lane:
+        assert "10.0.0.2" in found[0].group_key.split("|")[0]
+
+
 @pytest.mark.parametrize("name,expected", [("Major Cobalt Strike", True), ("major cobalt strike", True),
                                            ("Major Cobalt Strike.example", False), ("ordinary", False)])
 def test_certificate_exact_name(name, expected):
