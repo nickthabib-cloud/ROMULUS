@@ -464,6 +464,15 @@ def _unranked(hunt_id: str):
     return ~select(1).where(_rank_on(hunt_id)).exists()
 
 
+def _on_confirmed_entity():
+    """A finding rank whose entity carries a confirmed finding in the same pass."""
+    entity = t.entity_rank
+    return select(entity.c.entity).where(
+        entity.c.hunt_id == t.finding_rank.c.hunt_id, entity.c["pass"] == t.finding_rank.c["pass"],
+        entity.c.entity_kind == t.finding_rank.c.entity_kind, entity.c.entity == t.finding_rank.c.entity,
+        entity.c.confirmed > 0).exists()
+
+
 def _unranked_reportable(hunt_id: str) -> tuple:
     return t.candidate.c.hunt_id == hunt_id, t.candidate.c.lane.in_(REPORTABLE_LANES), _unranked(hunt_id)
 
@@ -2716,14 +2725,17 @@ class Repo:
                 t.entity_rank.c.hunt_id == hunt_id, t.entity_rank.c["pass"] == pass_no).limit(1)).first() is not None
 
     def finding_ranks_page(self, hunt_id: str, pass_no: int, *, after_position: int = 0, limit: int = 500,
-                           reported: bool | None = None) -> list[dict]:
-        """One page of a pass's finding ranks in rank order (keyset on position), with each finding's lane."""
+                           reported: bool | None = None, confirmed_entity: bool = False) -> list[dict]:
+        """One page of a pass's finding ranks in rank order (keyset on position), with each finding's lane. With
+        `confirmed_entity`, only findings whose entity carries a confirmed finding in that pass."""
         query = (select(t.finding_rank, t.candidate.c.lane, t.candidate.c.rule_id, t.candidate.c.ts)
                  .join(t.candidate, t.candidate.c.id == t.finding_rank.c.candidate_id, isouter=True)
                  .where(t.finding_rank.c.hunt_id == hunt_id, t.finding_rank.c["pass"] == pass_no,
                         t.finding_rank.c.position > after_position))
         if reported is not None:
             query = query.where(t.finding_rank.c.reported == reported)
+        if confirmed_entity:
+            query = query.where(_on_confirmed_entity())
         with self.engine.connect() as connection:
             return [dict(row) for row in connection.execute(
                 query.order_by(t.finding_rank.c.position).limit(limit)).mappings()]
@@ -2734,8 +2746,10 @@ class Repo:
             return _detection_result_on(connection, hunt_id)
 
     def finding_rank_counts(self, hunt_id: str, pass_no: int, *, after_position: int = 0,
-                            reported: bool | None = None, exclude_lanes: tuple[str, ...] = ()) -> dict[str, int]:
-        """Of a pass's ranked deterministic findings (after `after_position`), how many per rule."""
+                            reported: bool | None = None, exclude_lanes: tuple[str, ...] = (),
+                            confirmed_entity: bool = False) -> dict[str, int]:
+        """Of a pass's ranked deterministic findings (after `after_position`), how many per rule; with
+        `confirmed_entity`, only those whose entity carries a confirmed finding in that pass."""
         joined = t.finding_rank.join(t.candidate, t.candidate.c.id == t.finding_rank.c.candidate_id)
         query = (select(t.candidate.c.rule_id, func.count()).select_from(joined).where(
             t.finding_rank.c.hunt_id == hunt_id, t.finding_rank.c["pass"] == pass_no,
@@ -2745,6 +2759,8 @@ class Repo:
             query = query.where(t.finding_rank.c.reported == reported)
         if exclude_lanes:
             query = query.where(t.candidate.c.lane.not_in(exclude_lanes))
+        if confirmed_entity:
+            query = query.where(_on_confirmed_entity())
         with self.engine.connect() as connection:
             return {str(rule_id): int(count) for rule_id, count in connection.execute(query)}
 

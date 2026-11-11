@@ -574,6 +574,92 @@ def test_extra_pages_that_spend_nothing_never_stop_the_next_page_while_queries_r
     assert "reported_seeds_not_anchored" not in summary
 
 
+def test_only_entities_with_a_confirmed_finding_give_extra_seeds():
+    """An entity Reported for its tactic breadth alone (a busy server's benign activity) seeds no extra anchor and is
+    not counted as left unanchored; the leads on an entity with a confirmed finding are anchored."""
+    from types import SimpleNamespace
+
+    from romulus.hunt.expansion import ExpansionEngine
+    from romulus.sources.models import Window
+
+    repo = _repo()
+    rows = [_row("u-victim", "r.confirmed", lane="urgent", host="victim", ts=None),
+            _row("l-victim", "r.exec", host="victim", attack=["T1059"], ts=None)]
+    # 300 busy servers, each Reported through two tactics, none confirmed
+    for index in range(300):
+        rows += [_row(f"s{index:03d}-a", "r.exec", host=f"srv{index}", attack=["T1059"], ts=None),
+                 _row(f"s{index:03d}-b", "r.cred", host=f"srv{index}", attack=["T1003"], ts=None)]
+    _insert(repo, rows)
+    compute_rank_pass(repo, "h1", PASS_BEFORE_EXPANSION)
+    ranks = _ranks(repo, PASS_BEFORE_EXPANSION)[0]
+    assert ranks["s000-a"]["reported"] and ranks["l-victim"]["reported"]
+    summary = ExpansionEngine(repo, "h1", Window(start=START, end=END), SimpleNamespace(boots={}),
+                              max_source_queries=40, wall_clock_seconds=60).run()
+    leads = {row["candidate_id"] for row in repo.expansion_anchors("h1") if row["lane"] == "lead"}
+    assert leads == {"l-victim"}
+    assert "reported_seeds_not_anchored" not in summary
+
+
+def _seeded_expansion(*, ranked, budget):
+    """An urgent anchor on web1 and a high one on cam0; eight timed leads on web1 (a confirmed entity) and on each of
+    four busy servers two leads of different tactics (Reported for breadth alone). Each fetch spends two queries."""
+    from romulus.hunt.expansion import ExpansionEngine
+    from romulus.store import schema as tables
+    from tests.test_expansion_engine import T0, WINDOW, add_anchor, repo_with_anchor
+    from tests.test_expansion_lane_budget import SteadyFetcher, set_lane
+
+    repo = repo_with_anchor(candidate_id="F-urgent")
+    add_anchor(repo, "F-high", "cam0", ts=T0 - timedelta(minutes=5))
+    set_lane(repo, "F-high", "high")
+    leads = {f"L-web1-{n}": ("web1", f"r.web{n}", ["T1059"]) for n in range(8)}
+    for index in range(4):
+        leads[f"L-srv{index}-a"] = (f"srv{index}", "r.exec", ["T1059"])
+        leads[f"L-srv{index}-b"] = (f"srv{index}", "r.cred", ["T1003"])
+    for offset, (candidate, (host, rule, attack)) in enumerate(sorted(leads.items())):
+        add_anchor(repo, candidate, host, ts=T0 + timedelta(minutes=offset + 1))
+        set_lane(repo, candidate, "lead", severity="medium")
+        with repo.engine.begin() as connection:
+            connection.execute(tables.candidate.update().where(tables.candidate.c.id == candidate).values(
+                rule_id=rule, gate_results={"_attack": attack}))
+    if ranked:
+        compute_rank_pass(repo, "h1", PASS_BEFORE_EXPANSION)
+    fetcher = SteadyFetcher(repo)
+    summary = ExpansionEngine(repo, "h1", WINDOW, fetcher, max_source_queries=budget).run()
+    return repo, fetcher, summary
+
+
+@pytest.mark.parametrize("budget", ["tight", 400, 100_000])
+def test_timed_extra_seeds_spend_only_what_the_rule_estimate_leaves_and_only_on_confirmed_entities(budget):
+    if budget == "tight":
+        # a few queries beyond what the rule estimate's two anchors spend: less than the root cap's reserve
+        budget = _seeded_expansion(ranked=False, budget=100_000)[2]["source_queries"] + 6
+    plain_repo, plain_fetcher, _plain = _seeded_expansion(ranked=False, budget=budget)
+    repo, fetcher, summary = _seeded_expansion(ranked=True, budget=budget)
+    rows = {row["candidate_id"]: row for row in repo.expansion_anchors("h1")}
+    plain = {row["candidate_id"]: row for row in plain_repo.expansion_anchors("h1")}
+    # the rule estimate's anchors fetch exactly what they fetch without ranking, with the same status and reasons
+    for candidate in ("F-urgent", "F-high"):
+        assert (rows[candidate]["status"], rows[candidate]["reasons"]) == (
+            plain[candidate]["status"], plain[candidate]["reasons"])
+    def calls(found, anchors):
+        ids = {row["id"] for row in anchors.values() if row["candidate_id"] in ("F-urgent", "F-high")}
+        return sorted(call[:3] for call in found.calls if call[0] in ids)
+    assert calls(fetcher, rows) == calls(plain_fetcher, plain)
+    extras = {candidate for candidate, row in rows.items() if row["lane"] == "lead"}
+    assert extras <= {f"L-web1-{n}" for n in range(8)}          # breadth-only servers never seed
+    assert summary["source_queries"] <= max(budget, 0)
+    left = summary.get("reported_seeds_not_anchored", {}).get("count", 0)
+    # what the budget could not reach is counted, and only among the confirmed entity's leads
+    assert len(extras) + left == 8 or (left == 0 and len(extras) == 8)
+    assert all(row["status"] == "expanded_complete" or row["reasons"] for candidate, row in rows.items()
+               if candidate in extras)                          # an extra the budget cut says so
+    if budget == 100_000:
+        assert len(extras) == 8 and left == 0
+    elif budget != 400:
+        # no room for extras: the confirmed entity's eight leads are counted, the servers' eight are not
+        assert left > 0 and len(extras) + left == 8
+
+
 def test_a_failed_pass_is_recorded_and_leaves_no_stale_ranks(monkeypatch):
     repo = _repo()
     _insert(repo, [_row("c1", "r.a", host="h")])
