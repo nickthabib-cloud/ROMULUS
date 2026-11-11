@@ -71,7 +71,8 @@ def build_manifest(s: Settings, window: Window, original_input: dict, style: str
             "datasets_complete": not any(str(note).startswith("ds inventory truncated")
                                          for note in p.get("notes") or []),
         } for t, p in profiles.items()},
-        "pack": {"version": PACK_VERSION, "playbooks": pack_manifest()},
+        # the digest changes whenever a playbook is added, removed or re-versioned, whatever the pack label says
+        "pack": {"version": PACK_VERSION, "digest": digest(pack_manifest()), "playbooks": pack_manifest()},
         "normalizer": NORMALIZER_VERSION,
         "normalizers": normalizer_versions(),
         "packet_normalizer": PACKET_NORMALIZER,

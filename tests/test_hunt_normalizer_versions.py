@@ -106,3 +106,19 @@ def test_legacy_shared_network_producers_require_a_new_hunt(manifest, tmp_path, 
     # with the split producer IDs on resume would count one record twice.
     with pytest.raises(RuntimeError, match="Start a new hunt over the same window"):
         resume(manifest, tmp_path, monkeypatch)
+
+
+def test_manifest_pack_digest_changes_with_any_playbook_version(monkeypatch):
+    from romulus.detect import registry
+
+    start = datetime(2030, 1, 6, tzinfo=UTC)
+
+    def pack():
+        return manifests.build_manifest(Settings(), Window(start=start, end=start + timedelta(hours=1)),
+                                        {}, "broad", [], {})["pack"]
+
+    before = pack()
+    assert before["digest"] == manifests.digest(before["playbooks"])
+    monkeypatch.setattr(registry.ALL_PLAYBOOKS[0], "version", registry.ALL_PLAYBOOKS[0].version + "x")
+    after = pack()
+    assert after["version"] == before["version"] and after["digest"] != before["digest"]

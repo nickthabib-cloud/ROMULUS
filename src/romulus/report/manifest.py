@@ -743,7 +743,8 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
                            "relation": a["relation"], "note": a["note"], "actor": a["actor"],
                            "created_at": str(a["created_at"]), "status": "analyst assertion, not proven"}
                           for a in repo.analyst_links(hunt_id)],
-        "versions": {"pack": hm["pack"]["version"], "normalizer": hm["normalizer"], "policy": hm["policy"],
+        "versions": {"pack": hm["pack"]["version"], "pack_digest": hm["pack"].get("digest"),
+                     "normalizer": hm["normalizer"], "policy": hm["policy"],
                      "model": hm["model"], "romulus": hm["romulus_version"]},
         "generated_by": actor,
     }
