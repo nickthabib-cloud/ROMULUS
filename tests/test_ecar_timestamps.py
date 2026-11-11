@@ -84,10 +84,22 @@ def test_iso_submillisecond_precision_is_not_truncated_into_an_invented_native_e
     {"@timestamp": "2025-01-01T00:00:00"}, {"@timestamp": 1735689600123},
     {"timestamp_ms": "bad", "@timestamp": "2025-01-01T00:00:00Z"},
     {"timestamp": "bad", "@timestamp": "2025-01-01T00:00:00Z"},
-    {"timestamp_ms": 1735689600123, "@timestamp": "bad"},
 ])
-def test_malformed_present_clocks_remain_counted_even_when_another_clock_is_valid(clocks):
+def test_malformed_native_or_only_pipeline_clocks_remain_counted(clocks):
     events, skips, errors = normalize_hits([_hit(**clocks)])
     assert not events and not skips and len(errors) == 1
     assert errors[0][0] == "clock-1"
     assert errors[0][1].startswith("ecar:") and "timestamp" in errors[0][1]
+
+
+@pytest.mark.parametrize("native", [{"timestamp_ms": 1735689600123},
+                                    {"timestamp": "2025-01-01T00:00:00.123Z"}])
+@pytest.mark.parametrize("pipeline", ["bad", 1735689600123, True, None, "2025-01-01T00:00:00"])
+def test_valid_native_clock_keeps_record_when_pipeline_clock_is_unusable(native, pipeline):
+    events, skips, errors = normalize_hits([_hit(**native, **{"@timestamp": pipeline})])
+    assert not skips and not errors and len(events) == 1
+    [event] = events
+    assert event.ts == datetime(2025, 1, 1, 0, 0, 0, 123000, tzinfo=UTC)
+    assert event.fields["event.created"].origin == "clock-1:" + next(iter(native))
+    assert not event.has("event.ingested")
+    assert any("@timestamp" in note and "malformed" in note and "retained" in note for note in event.caveats)

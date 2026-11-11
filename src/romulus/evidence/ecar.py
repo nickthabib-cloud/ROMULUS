@@ -89,8 +89,9 @@ def _iso_time(value):
 
 
 def _time(source):
-    """Prefer source clocks; validate every present clock instead of masking bad values."""
+    """Prefer valid source clocks; an unusable ancillary pipeline clock stays a caveat."""
     clocks = []
+    caveats = []
     for name in ("timestamp_ms", "timestamp", "@timestamp"):
         if name not in source:
             continue
@@ -109,13 +110,16 @@ def _time(source):
                 else:
                     parsed = datetime(1970, 1, 1, tzinfo=UTC) + timedelta(milliseconds=native)
         except (ValueError, TypeError, OverflowError) as exc:
+            if name == "@timestamp" and clocks:
+                caveats.append(f"eCAR @timestamp is malformed; {clocks[0][0]} is retained")
+                continue
             raise EcarInputError(f"eCAR {name} is malformed") from exc
         clocks.append((name, parsed, native))
     if not clocks:
         raise EcarInputError("eCAR timestamp is missing")
     selected_name, selected, native = clocks[0]
-    caveats = [f"eCAR {name} differs from {selected_name}; {selected_name} is retained"
-               for name, parsed, _ in clocks[1:] if parsed != selected]
+    caveats.extend(f"eCAR {name} differs from {selected_name}; {selected_name} is retained"
+                   for name, parsed, _ in clocks[1:] if parsed != selected)
     pipeline = next((parsed for name, parsed, _ in clocks if name == "@timestamp"), None)
     return selected, native, selected_name, pipeline, caveats
 
