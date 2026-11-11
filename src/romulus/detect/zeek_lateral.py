@@ -283,7 +283,6 @@ class _RemoteSession(ZeekBehaviorRule):
 
 class RdpRemoteSession(_RemoteSession):
     id, title = 'net.external_rdp', 'RDP session negotiation from outside the declared site'
-    version, producers = '2', ZEEK_AND_SURICATA
     protocol = 'rdp'
     attack = ('T1133', 'T1021.001')
 
@@ -293,7 +292,6 @@ class InternalRdpSession(_RemoteSession):
     outside one, an interactive session leaving the site. One lead per source, citing its destinations;
     administrators' sessions to servers look the same on the wire, which the host's logon records settle."""
     id, title = 'net.internal_rdp', 'RDP session negotiation from a host inside the site'
-    version, producers = '2', ZEEK_AND_SURICATA
     protocol, inside_lane, outside, per_source = 'rdp', 'lead', False, True
     attack = ('T1021.001',)
     benign = ('Administrators and help desks connecting to servers and workstations; jump hosts.',

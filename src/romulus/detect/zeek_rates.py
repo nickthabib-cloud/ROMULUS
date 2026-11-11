@@ -28,10 +28,7 @@ def _name(value):
 
 
 class _Rate(ZeekWindowRule):
-    version = '6'
-    # Each rate reads facts Zeek and Suricata type alike (the per-rule matrix is in docs/detection/network-protocols.md);
-    # a fact one sensor does not record leaves that sensor's rows unselected, never counted.
-    producers = ZEEK_AND_SURICATA
+    version = '5'
     citation_fields = _FIELDS
     required_fields = ('source.ip',)
     benign = ('Authorized administration, scanners and ordinary authentication can produce rate leads.',)
@@ -56,6 +53,8 @@ class _Rate(ZeekWindowRule):
 
 class ZerologonRate(_Rate):
     id, title = 'net.netlogon_authentication_burst', 'Repeated Netlogon secure-channel authentication calls'
+    # Suricata types the call by interface UUID and opnum where it records the interface (calls over SMB pipes)
+    version, producers = '6', ZEEK_AND_SURICATA
     families = ('rpc_tx',)
     required_fields = ('source.ip', 'destination.ip')
     # Normal machine secure-channel setup uses a handful of calls; the bypass succeeds with
@@ -97,7 +96,7 @@ class Rc4TgsFanout(_Rate):
         return 'lead', (f'Source {event.get("source.ip")} had TGS exchanges with RC4 ticket encryption for at least '
                         f'{distinct_members} distinct services in five minutes ({total_refs} raw references).'), (
             'Distinct services reduce repeated legacy-service noise; a legacy RC4 domain can still explain this lead.',
-            'The sensor cipher describes the issued ticket encryption, not a requested cipher preference.',
+            'Zeek cipher describes the issued ticket encryption, not a requested cipher preference.',
             'The breadth threshold is a review heuristic, not proof of ticket cracking.',
         )
 
@@ -207,6 +206,7 @@ def _operation(event, names):
 class RpcHostEnumerationFanout(_Rate):
     id = 'net.rpc_host_enumeration_fanout'
     title = 'One source called session, share or local-group enumeration on many hosts'
+    version, producers = '6', ZEEK_AND_SURICATA
     families = ('rpc_tx',)
     required_fields = ('source.ip', 'destination.ip')
     # A client lists sessions or shares only on the few servers it uses; ten distinct hosts in fifteen minutes is the
@@ -243,6 +243,7 @@ class RpcHostEnumerationSlowFanout(RpcHostEnumerationFanout):
 class RpcDirectoryListing(_Rate):
     id = 'net.rpc_directory_listing'
     title = 'One source made bulk user, group or member listing calls over SAM RPC'
+    version, producers = '6', ZEEK_AND_SURICATA
     families = ('rpc_tx',)
     required_fields = ('source.ip', 'destination.ip')
     # One administrative command lists one kind of object; three distinct bulk listing calls from one source within ten

@@ -66,12 +66,24 @@ def test_a_suricata_service_creation_call_is_a_remote_administration_finding():
     assert "service_create" in match.claim
 
 
-@pytest.mark.parametrize("source,name,lane", [("10.0.0.5", "InternalRdpSession", "lead"),
-                                              ("203.0.113.9", "RdpRemoteSession", "high")])
-def test_suricata_rdp_sessions_are_judged_by_direction(source, name, lane):
-    session = suricata("rdp", {"event_type": "initial_request", "cookie": "admin"}, source=source, port=3389)
-    [match] = lateral(name, [session])
-    assert match.proposed_lane == lane
+@pytest.mark.parametrize("name", ["InternalRdpSession", "RdpRemoteSession"])
+def test_suricata_rdp_records_are_not_judged(name):
+    # Suricata writes the server's responses as records of their own, and the request or response subtype is not
+    # typed: a response would name the server as the session's source.
+    response = suricata("rdp", {"event_type": "initial_request", "cookie": "admin"}, source="203.0.113.9",
+                        destination="10.0.0.5", port=51000)
+    assert lateral(name, [response]) == []
+
+
+def test_logons_both_sensors_record_never_read_as_a_spray_followed_by_a_success():
+    zeek = [normalize(zl.WRITERS["plain"](replace(zl.NTLM.with_(uid=f"Cntlm{n:010d}", username=f"user{n}",
+            success=True), ts=zl.T0 + n), f"z{n}")) for n in range(12)]
+    eve = [suricata("smb", {"command": "SMB2_COMMAND_SESSION_SETUP",
+                            "ntlmssp": {"user": f"user{n}", "domain": "EXAMPLE", "host": "WS01"}},
+                    n, source=zl.CLIENT, family="ntlm_tx") for n in range(12)]
+    assert eve[0].get("ntlm.success") is None          # Suricata records no outcome for these exchanges
+    assert rate("NtlmPasswordSpray", zeek + eve) == []
+    assert rate("NtlmPasswordGuessing", eve) == []
 
 
 def test_a_standalone_suricata_request_without_its_interface_is_not_classified():
@@ -84,6 +96,13 @@ def test_rules_that_need_facts_suricata_does_not_record_stay_zeek_only():
     lateral_rules = importlib.import_module("romulus.detect.zeek_lateral")
     assert lateral_rules.TgsLongLifetime.producers == ("zeek-ecs",)      # Suricata does not type the requested till
     assert lateral_rules.VncRemoteSession.producers == ("zeek-ecs",)     # Suricata RFB records are not normalized
+    # RDP records carry no typed request or response subtype; NTLM records carry no outcome; Kerberos replies and
+    # errors may be written from the KDC's side
+    for name in ("RdpRemoteSession", "InternalRdpSession"):
+        assert getattr(lateral_rules, name).producers == ("zeek-ecs",)
+    rates = importlib.import_module("romulus.detect.zeek_rates")
+    for name in ("NtlmPasswordSpray", "NtlmPasswordGuessing", "Rc4TgsFanout", "KerberosPrincipalEnumeration"):
+        assert getattr(rates, name).producers == ("zeek-ecs",)
     smb = importlib.import_module("romulus.detect.zeek_smb")
     assert not hasattr(smb.AdminSharePeWrite, "producers") or smb.AdminSharePeWrite.producers == ("zeek-ecs",)
 
