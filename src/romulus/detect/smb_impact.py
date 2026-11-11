@@ -34,7 +34,17 @@ _WORD_TEMP = re.compile(r'~wrl[0-9a-f]{4,}\.tmp\Z', re.IGNORECASE)
 _WORD_DOCUMENTS = frozenset({'.doc', '.docx', '.docm'})
 _TEMP_SUFFIXES = frozenset({'.tmp', '.temp', '.part', '.partial', '.filepart', '.crdownload',
                           '.download', '.!ut', '.swp'})
-_DOCUMENT_FINALS = frozenset({'.pdf', '.tif', '.tiff', '.jpg', '.jpeg', '.png'})
+# Ordinary data, document and image extensions a transfer, pipeline or application gives a finished file. Ransomware
+# marks what it encrypted with an extension of its own, never one of these, so a temporary name completed to one of
+# them is a finished file, not an encrypted one.
+_ORDINARY_FINALS = frozenset({'.pdf', '.tif', '.tiff', '.jpg', '.jpeg', '.png', '.gif', '.bmp',
+                              '.xml', '.json', '.csv', '.tsv', '.txt', '.log', '.dat', '.edi', '.x12',
+                              '.zip', '.gz', '.7z', '.tar', '.rtf', '.html', '.htm', '.eml', '.msg',
+                              '.doc', '.docx', '.xls', '.xlsx', '.xlsm', '.ppt', '.pptx', '.odt', '.ods',
+                              '.parquet', '.avro'})
+# Extensionless temporary names applications write first: Python's tempfile (tmp + random characters), Office's
+# eight hexadecimal digits, and tilde-prefixed lock and save names.
+_TEMP_NAME = re.compile(r'(?:tmp|temp)[0-9a-z_-]{3,}|[0-9a-f]{8}|~[^~].*', re.IGNORECASE)
 _ACTIONS = frozenset({'FILE_RENAME', 'FILE_DELETE', 'FILE_CREATE', 'FILE_OPEN'})
 
 
@@ -57,11 +67,12 @@ def _note_name(value):
 def _temporary_completion(previous, name, old_ext, new_ext):
     if (old_ext and name == ntpath.splitext(previous)[0]) or (previous.endswith('~') and name == previous[:-1]):
         return True
-    # Scanner/transfer tools may replace .part with the final document suffix
-    # rather than append .part to it. Require the same full path/stem and a
-    # bounded document/image destination set; .tmp -> .locked stays eligible.
-    return (old_ext in _TEMP_SUFFIXES and new_ext in _DOCUMENT_FINALS
-            and ntpath.splitext(previous)[0] == ntpath.splitext(name)[0])
+    if new_ext.lower() not in _ORDINARY_FINALS:
+        return False                    # x.tmp -> x.locked and appended victim extensions stay eligible
+    # Transfer tools and pipelines may replace a temporary suffix with the final one rather than append it: the same
+    # full path and stem. An application may also write an extensionless temporary name and rename it into place.
+    return ((old_ext.lower() in _TEMP_SUFFIXES and ntpath.splitext(previous)[0] == ntpath.splitext(name)[0])
+            or (not old_ext and bool(_TEMP_NAME.fullmatch(ntpath.basename(previous)))))
 
 
 def _text(event, name):
@@ -337,9 +348,10 @@ class SmbImpact(Playbook):
                                        '.doc/.docx/.docm names are volume-only; their expected extension change '
                                        'does not establish uniform destructive renaming.')
                 elif _temporary_completion(previous, name, old_ext, new_ext):
-                    self.note_coverage('smb_temporary_completion', 'Last-extension or trailing-tilde removal and same-stem '
-                                       'temporary-to-document/image completion are volume-only; final-file '
-                                       'completion does not establish destructive extension changes.')
+                    self.note_coverage('smb_temporary_completion', 'Last-extension or trailing-tilde removal, and a '
+                                       'temporary name completed to an ordinary data or document extension, are '
+                                       'volume-only; final-file completion does not establish destructive '
+                                       'extension changes.')
                 elif not new_ext and name != previous:
                     self.note_coverage('smb_extensionless_rename', 'Some changed names have no extension; '
                                        'these renames are volume-only and their encryption status is unresolved.')

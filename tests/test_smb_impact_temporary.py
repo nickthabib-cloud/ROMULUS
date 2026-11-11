@@ -12,7 +12,11 @@ rule = impact_rule
 @pytest.mark.parametrize('before,after', [('mod.obj.tmp', 'mod.obj'), ('archive.tar.gz.part', 'archive.tar.gz'),
                                          ('scan.part', 'scan.pdf'), ('image.partial', 'image.tiff'),
                                          ('report.pdf~', 'report.pdf'), ('data.old', 'data'),
-                                         ('document.pdf', 'DOCUMENT.PDF')])
+                                         ('document.pdf', 'DOCUMENT.PDF'),
+                                         # pipelines and applications completing a temporary name into place
+                                         ('in.tmp', 'in.xml'), ('batch.part', 'batch.CSV'),
+                                         ('tmpk2j3h4l5', 'out.json'), ('8A3F09C1', 'book.xlsx'),
+                                         ('~save', 'notes.txt')])
 def test_temporary_completion_and_case_only_renames_never_become_high(rule, before, after):
     matches = finish(rule, [smb(i, i / 2, previous=f'dir{i}/{before}', name=f'dir{i}/{after}') for i in range(130)])
     assert not matches
@@ -29,7 +33,9 @@ def test_every_named_temporary_suffix_can_be_removed_without_extension_evidence(
 @pytest.mark.parametrize('before,after', [('x.tmp', 'x.locked'), ('x.part', 'x.a3b4'),
                                          ('report.pdf', 'report.pdf.akira'),
                                          ('~WRL0001.tmp', 'encrypted.locked'),
-                                         ('old/x.tmp', 'new/x.pdf')])
+                                         ('old/x.tmp', 'new/x.pdf'),
+                                         ('tmpk2j3h4l5', 'out.locked'), ('8A3F09C1', 'book.akira'),
+                                         ('report', 'report.xml')])
 def test_temporary_exception_preserves_eligible_encryption_renames(rule, before, after):
     [match] = finish(rule, [smb(i, previous=f'dir{i}/{before}', name=f'dir{i}/{after}') for i in range(100)])
     assert match.proposed_lane == 'high'
