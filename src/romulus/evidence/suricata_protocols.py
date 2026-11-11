@@ -238,7 +238,10 @@ def _kerberos(reader):
                                           f"unknown-{number}"), reader.origin("ticket_encryption"))
     encryption = reader.obj.get("encryption")
     if encryption not in (None, "<none>"):
-        _etype(encryption, reader.origin("encryption"))
+        try:
+            _etype(encryption, reader.origin("encryption"))
+        except ValueError:
+            result.caveats.append("Unknown Kerberos response encrypted-part cipher; ticket facts remain independent")
         if "ticket_encryption" not in reader.obj:
             result.caveats.append("Kerberos response encrypted-part cipher does not establish the issued ticket cipher")
     error = reader.value("error_code")
