@@ -420,7 +420,17 @@ for _row in ECAR_ROWS.values():
 
 
 def _ecar_time_field(field_types):
-    return next((name for name in ("timestamp_ms", "timestamp", "@timestamp") if name in field_types), "timestamp_ms")
+    native = next((name for name in ("timestamp_ms", "timestamp") if name in field_types), None)
+    return (native if native is not None and field_types[native] in {
+        "date", "date_nanos", "long", "integer", "double", "float"} else "@timestamp")
+
+
+def _ecar_query_clock_gap(field_types):
+    native = next((name for name in ("timestamp_ms", "timestamp") if name in field_types), None)
+    if native is None or _ecar_time_field(field_types) == native:
+        return None
+    return (f"temporal coverage unresolved: {native} is mapped as {field_types[native]}; query uses @timestamp; "
+            "native-clock window membership unresolved")
 
 
 def linux_markers(field_types, datasets=None) -> bool:
@@ -649,6 +659,8 @@ def contract_from_types(
         time_field = _evtx_time_field(field_types)
     if ecar:
         time_field = _ecar_time_field(field_types)
+        if reason := _ecar_query_clock_gap(field_types):
+            temporal_gaps = tuple(dict.fromkeys((*temporal_gaps, reason)))
     resolved_os = os_family or source_os_family(field_types, resolved_role, datasets)
     return FieldContract(
         target=target, fields=fields, time_field=time_field, role=resolved_role, os_family=resolved_os,
@@ -1285,6 +1297,10 @@ def _temporal_inventory(client, target, field_types, primary, *, ecar=False):
         "Event.System.TimeCreated.#attributes.SystemTime", "Event.System.TimeCreated_attributes.SystemTime"])
     markers = ["object", "action", "objectID", "actorID", "hostname"] if ecar else ["Event.System.Computer"]
     gaps, prior = [], [primary]
+    if ecar and (reason := _ecar_query_clock_gap(field_types)):
+        native = next(name for name in ("timestamp_ms", "timestamp") if name in field_types)
+        gaps.append({"records": None, "primary": primary, "alternate": native,
+                     "count_scope": "mapping; native clock is not chronologically searchable", "reason": reason})
     for alternate in alternatives:
         if alternate == primary or alternate not in field_types:
             continue
