@@ -30,8 +30,24 @@ def test_omission_preserves_old_site_digest_and_empty_is_explicit():
 
 
 @pytest.mark.parametrize("values", ["anydesk", None, [123], [True], ["anydesk", "ANYDESK"], [""],
-                                     ["anydesk.com"], ["../anydesk"], ["*"], [" atera"], ["átera"],
+                                     ["a..anydesk.com"], ["../anydesk"], ["*"], [" atera"], ["átera"],
                                      ["a" * 65], ["a"] * 1001])
 def test_ambiguous_or_unbounded_approvals_are_rejected(values):
     with pytest.raises(SiteValidationError):
         validate_site_content({"schema": COLLECTION_SCHEMA, "approved_remote_access": values})
+
+
+def test_approved_suffix_is_canonical_and_keeps_its_narrow_scope(tmp_path):
+    facts = validate_site_content({"schema": COLLECTION_SCHEMA,
+                                   "approved_remote_access": ["Tenant.ScreenConnect.com.", "TeamViewer"]})
+    assert facts.approved_remote_access == ("teamviewer", "tenant.screenconnect.com")
+    save_site_facts(tmp_path, facts.content, "")
+    assert load_site_facts(tmp_path).approved_remote_access == facts.approved_remote_access
+
+
+@pytest.mark.parametrize("value", ["https://anydesk.com", "anydesk.com:443", "*.anydesk.com",
+                                   "a_.anydesk.com", "-a.anydesk.com", "a" * 64 + ".anydesk.com",
+                                   "ſcreenconnect.com"])
+def test_approval_suffix_cannot_be_url_wildcard_or_malformed(value):
+    with pytest.raises(SiteValidationError):
+        validate_site_content({"schema": COLLECTION_SCHEMA, "approved_remote_access": [value]})

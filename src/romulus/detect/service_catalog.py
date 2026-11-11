@@ -151,7 +151,7 @@ def _source(event: TypedEvent):
 class ServiceCatalog(Playbook):
     id = "network.service_catalog"
     title = "Remote access, tunnel, callback or file-sharing service name observed"
-    version = "2"
+    version = "3"
     families = ("dns_query", "tls_session", "http_tx", "net_session")
     required_fields = ("source.ip",)
     kind = "aggregate"
@@ -176,15 +176,38 @@ class ServiceCatalog(Playbook):
         self.catalog = catalog if catalog is not None else load_catalog()
         self._ready = False
         self._external = 0
+        self._approval_trie = None
+        self._approved_ids = frozenset()
+        self._approved_suffixes = {}
+
+    def _prepare_approvals(self):
+        if self._approval_trie is not None:
+            return
+        approvals = getattr(getattr(self, "site_facts", None), "approved_remote_access", ())
+        self._approved_ids = frozenset(value for value in approvals if value in self.catalog.entries)
+        suffixes = []
+        for value in approvals:
+            if "." not in value:
+                continue
+            # A suffix approval may narrow a catalog suffix, never approve a
+            # wider parent domain or the other suffixes belonging to an entry.
+            entries = self.catalog.trie.lookup(value)
+            for entry in entries:
+                self._approved_suffixes.setdefault(entry, []).append(value)
+            if entries:
+                suffixes.append((value, value))
+        self._approval_trie = NameTrie(suffixes)
+        self._approved_suffixes = {entry: frozenset(values) for entry, values in self._approved_suffixes.items()}
 
     def _db(self):
         spill = self.spill()
         if not self._ready:
             # A compound primary key keeps membership and counts exact without
             # a Python host set or a separate counter that could partly commit.
-            spill.table("service_groups", "entry TEXT NOT NULL, source TEXT NOT NULL, first_rank TEXT NOT NULL, "
+            spill.table("service_groups", "entry TEXT NOT NULL, approved INTEGER NOT NULL, source TEXT NOT NULL, "
+                        "first_rank TEXT NOT NULL, "
                         "last_rank TEXT NOT NULL, first_event BLOB, last_event BLOB, "
-                        "PRIMARY KEY(entry, source)")
+                        "PRIMARY KEY(entry, approved, source)")
             register_store(self, spill)
             self._ready = True
         return spill
@@ -209,6 +232,7 @@ class ServiceCatalog(Playbook):
         return payload
 
     def consume(self, events):
+        self._prepare_approvals()
         for event in events:
             if event.family not in self.families or not self.event_in_os_scope(event):
                 continue
@@ -243,8 +267,11 @@ class ServiceCatalog(Playbook):
                         malformed = True
                         continue
                     names_present = True
+                    suffix_approvals = self._approval_trie.lookup_canonical(name) if self._approved_suffixes else ()
                     for entry in self.catalog.trie.lookup_canonical(name):
-                        matches.setdefault(entry, field)
+                        allowed_suffixes = self._approved_suffixes.get(entry, ())
+                        approved = entry in self._approved_ids or any(suffix in allowed_suffixes for suffix in suffix_approvals)
+                        matches.setdefault((entry, approved), field)
             if omitted:
                 self.refuse("service_names", f"Only the first {MAX_NAMES_PER_RECORD} typed names per record were "
                             "evaluated; additional names and their service membership are unresolved")
@@ -257,25 +284,25 @@ class ServiceCatalog(Playbook):
                     self.evaluated += 1
                 continue
             accepted = not omitted
-            for entry, field in matches.items():
+            for (entry, approved), field in matches.items():
                 try:
                     spill = self._db()
-                    key = (entry, str(source))
+                    key = (entry, int(approved), str(source))
                     before = spill.db.execute("SELECT first_rank, last_rank FROM service_groups "
-                                              "WHERE entry=? AND source=?", key).fetchone()
+                                              "WHERE entry=? AND approved=? AND source=?", key).fetchone()
                     rank = event.ts.astimezone(UTC).isoformat(timespec="microseconds") + "|" + event.id
                     if before is not None and before[0] <= rank <= before[1]:
                         continue
                     blob = self._citation(event, field)
-                    spill.write("INSERT INTO service_groups VALUES (?, ?, ?, ?, ?, ?) "
-                                "ON CONFLICT(entry,source) DO UPDATE SET "
+                    spill.write("INSERT INTO service_groups VALUES (?, ?, ?, ?, ?, ?, ?) "
+                                "ON CONFLICT(entry,approved,source) DO UPDATE SET "
                                 "first_rank=min(first_rank,excluded.first_rank), "
                                 "last_rank=max(last_rank,excluded.last_rank), "
                                 "first_event=CASE WHEN excluded.first_rank < first_rank THEN excluded.first_event "
                                 "ELSE first_event END, "
                                 "last_event=CASE WHEN excluded.last_rank > last_rank THEN excluded.last_event "
                                 "ELSE last_event END", [(*key, rank, rank, blob, blob)])
-                    if before is None:
+                    if before is None and not approved:
                         yield self._match(entry, str(source), (blob, blob), 1, final=False)
                 except StateExhausted as error:
                     if accepted:
@@ -287,11 +314,12 @@ class ServiceCatalog(Playbook):
                     # aggregate cannot grow, publish its bounded live witness
                     # under the same source identity; fleet coverage is partial.
                     blob = self._citation(event, field)
-                    yield self._match(entry, str(source), (blob, blob), 1, final=False)
+                    yield self._match(entry, None if approved else str(source), (blob, blob), 1,
+                                      final=False, approved=approved, known_source=str(source))
             if accepted:
                 self.evaluated += 1
 
-    def _match(self, entry, source, blobs, count, *, final):
+    def _match(self, entry, source, blobs, count, *, final, approved=False, known_source=None):
         item = self.catalog.entries[entry]
         events = []
         for blob in blobs:
@@ -308,8 +336,15 @@ class ServiceCatalog(Playbook):
             notes.append(item["notes"])
         if self.direction_assumed:
             notes.append(DIRECTION_ASSUMED_REASON)
-        if entry in getattr(getattr(self, "site_facts", None), "approved_remote_access", ()):
-            notes.append("This service is site-approved; the observation remains a lead.")
+        if approved:
+            if entry in self._approved_ids:
+                notes.append(f"This service is site-approved by catalog ID '{entry}'; the observation remains a lead.")
+            else:
+                suffixes = sorted(self._approved_suffixes[entry])
+                notes.append("These observations are site-approved only within the configured DNS suffixes: "
+                             + ", ".join(suffixes[:8])
+                             + (f" ({len(suffixes)} suffix approvals total; first 8 shown)." if len(suffixes) > 8 else ".")
+                             + " Other suffixes of this service are not covered by that approval.")
         if self.capped:
             notes.append("Source host count is a lower bound: some matching records could not be retained.")
         if "service_names" in self.limits:
@@ -317,15 +352,22 @@ class ServiceCatalog(Playbook):
                          "service membership is partial.")
         if source is None:
             claim = f"A lookup or connection to the {item['name']} service was observed from {count} internal source address(es)."
-            group_key = f"{entry}|fleet"
+            group_key = f"{entry}|approved|fleet" if approved and entry not in self._approved_ids else f"{entry}|fleet"
+            if approved:
+                claim += " This roll-up covers site-approved observations."
+            if count > 2:
+                notes.append("Event citation coverage is partial: at most two representative witnesses are retained; "
+                             "the distinct source count and streamed membership remain exact unless otherwise noted.")
         else:
             claim = f"A lookup or connection to the {item['name']} service was observed from {source}."
             group_key = f"{entry}|source|{source}"
-        fleet = self._hosts(entry) if source is None else ()
+        fleet = self._hosts(entry, approved) if source is None and self._ready else ()
         # A fleet citation can be hostless network telemetry. Retain only its
         # two representative source entities here; full membership streams above.
         entities = [("ip", source, "src")] if source else list(dict.fromkeys(
             ("ip", str(address), "src") for event in events if (address := _source(event)) is not None))
+        if not entities and known_source is not None:
+            entities = [("ip", known_source, "src")]
         return Match(self.id, claim, self.claim_type, events, predicate, events[-1].ts if events else None,
                      "high" if item["category"] in {"remote_access", "tunnelling", "ide_tunnel"} else "medium",
                      "lead", "high", entities=entities, notes=notes,
@@ -337,8 +379,9 @@ class ServiceCatalog(Playbook):
                                         "source_count_complete": int(final and not self.capped)},
                      attack=tuple(item["attack"]))
 
-    def _hosts(self, entry):
-        for (source,) in self._spill.db.execute("SELECT source FROM service_groups WHERE entry=? ORDER BY source", (entry,)):
+    def _hosts(self, entry, approved):
+        for (source,) in self._spill.db.execute("SELECT source FROM service_groups WHERE entry=? AND approved=? "
+                                               "ORDER BY source", (entry, int(approved))):
             yield source, ""
 
     def finalize(self):
@@ -348,20 +391,21 @@ class ServiceCatalog(Playbook):
             return
         # The aggregate has at most one count per catalog entry. SQLite sorts on
         # disk; source membership and witnesses are streamed, never collected.
-        counts = self._spill.db.execute("SELECT entry, count(*) AS hosts FROM service_groups GROUP BY entry "
-                                        "ORDER BY (count(*) > 2), count(*), entry")
-        for entry, count in counts:
+        counts = self._spill.db.execute("SELECT entry, approved, count(*) AS hosts FROM service_groups "
+                                        "GROUP BY entry, approved ORDER BY (count(*) > 2), count(*), entry, approved")
+        for entry, approved, count in counts:
             first_blob = last_blob = None
             first_rank = last_rank = None
             for source, first_time, last_time, first, last in self._spill.db.execute(
                     "SELECT source, first_rank, last_rank, first_event, last_event FROM service_groups "
-                    "WHERE entry=? ORDER BY source", (entry,)):
+                    "WHERE entry=? AND approved=? ORDER BY source", (entry, approved)):
                 if first_rank is None or first_time < first_rank:
                     first_rank, first_blob = first_time, first
                 if last_rank is None or last_time > last_rank:
                     last_rank, last_blob = last_time, last
-                yield self._match(entry, source, (first, last), count, final=True)
-            yield self._match(entry, None, (first_blob, last_blob), count, final=True)
+                if not approved:
+                    yield self._match(entry, source, (first, last), count, final=True)
+            yield self._match(entry, None, (first_blob, last_blob), count, final=True, approved=bool(approved))
 
     def finalize_fallback(self, reason):
         self.note_limit("service_finalize", reason)

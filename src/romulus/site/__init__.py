@@ -340,12 +340,18 @@ class _SiteDocument(BaseModel):
     @classmethod
     def _approved_remote_access(cls, value):
         if not isinstance(value, (list, tuple)) or len(value) > 1000:
-            raise ValueError("approved_remote_access must be a list of at most 1000 service IDs")
+            raise ValueError("approved_remote_access must be a list of at most 1000 service IDs or DNS suffixes")
         normalized = []
         for item in value:
-            if not isinstance(item, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", item):
-                raise ValueError("approved_remote_access entries must be service catalog IDs")
-            normalized.append(item.casefold())
+            if not isinstance(item, str) or not item.isascii() or len(item) > 254:
+                raise ValueError("approved_remote_access entries must be service catalog IDs or DNS suffixes")
+            value = item.casefold().removesuffix(".")
+            is_id = "." not in item and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", value)
+            is_suffix = "." in value and len(value) <= 253 and all(
+                re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in value.split("."))
+            if not is_id and not is_suffix:
+                raise ValueError("approved_remote_access entries must be service catalog IDs or DNS suffixes")
+            normalized.append(value)
         if len(set(normalized)) != len(normalized):
             raise ValueError("approved_remote_access must not contain duplicates")
         return tuple(sorted(normalized))

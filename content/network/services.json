@@ -1,6 +1,6 @@
 {
   "schema": "romulus.network-services@1",
-  "version": "2",
+  "version": "3",
   "license": "CC0-1.0 (original factual compilation only)",
   "source_policy": "Original compilation of public domain-name facts, with attribution. No upstream code, prose, or catalog imported. Source rights and trademarks remain with their owners; LicenseRef-Source-Rights-Retained does not claim an upstream reuse license.",
   "scope": "Positive-only service-name observations. Shared provider infrastructure and arbitrary customer domains are excluded. A match does not establish execution, a successful session, maliciousness, or a transfer.",
@@ -220,8 +220,6 @@
         "gotoassist.me",
         "gotoassist.at",
         "desktopstreaming.com",
-        "logmein.com",
-        "logmeininc.com",
         "logmeinrescue.com"
       ],
       "attack": [
@@ -234,7 +232,7 @@
           "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
         },
         {
-          "url": "https://www.goto.com/company/legal/digital-properties-list",
+          "url": "https://secure.logmeinrescue.com/welcome/documents/pdfs/rescue_admin_center_userguide.pdf",
           "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
         }
       ]
