@@ -124,6 +124,65 @@ contains a text payload; otherwise the report names the absent payload or incomp
 unrecognized datasets and unsupported programs with the counts observed during the hunt. Text shape and skip
 labels are bounded to 256 characters.
 
+## Windows host source shapes
+
+Windows event logs can arrive as Winlogbeat or Elastic Agent records, flat NXLog records, or native EVTX JSON.
+The EVTX adapter accepts the `Event.System` envelope with nested `#attributes` or separate `*_attributes` maps.
+It presents the same structured view to normalization, continuity and duplicate checks while every typed field
+points back to its original JSON path. Provider, computer, channel and event identity are required. Malformed
+identities are counted; an arbitrary application `Event` object or a wrapped export is not a Windows record.
+Native timestamps retain their precision, and a pipeline `@timestamp` takes precedence when present. Recovered
+records retain a caveat. Empty native values and renderer-specific differences remain visible in the evidence.
+
+Live source classification uses dataset inventory or a bounded count of actual Windows markers. A shared
+mapping alone does not turn a network index into a Windows host. Network targets retain their role and report
+Windows records as not evaluated. Failed classification checks retain the conservative Windows hint and name
+the uncertainty. Field aliases follow the classification and the mapping's actual types and keyword subfields.
+
+A Windows host index can also contain Linux text. A bounded count looks for a text payload without Windows
+markers. Windows and text alternatives share one source query, and dispatch assigns each record to one
+normalizer. An unavailable text count makes text coverage unresolved; unsupported text affects its own families.
+When a text record lacks an indexed hostname, a valid syslog header supplies its short lowercased hostname with
+native provenance and a caveat. Indexed hostnames take precedence; nil values and localhost do not identify a
+host, and an IP literal can supply only `host.ip`.
+
+Source retrieval uses one mapped time field for ordered paging. A native timestamp is selected when the primary
+pipeline field is absent from the mapping. Where records instead require another mapped time field, profile
+checks count those omissions and affected retrieval remains unresolved. The report must not claim complete
+coverage of rows that its time query cannot reach.
+
+## eCAR endpoint evidence
+
+The `ecar@1` producer reads the public [eCAR record schema](https://github.com/FiveDirections/OpTC-data/blob/master/ecar.md),
+its [path and duplication errata](https://github.com/FiveDirections/OpTC-data/blob/master/errata.md), and the
+[CAR object vocabulary](https://car.mitre.org/data_model/). `ecar_catalog.py` separates documented rows from
+expected export vocabulary. Synthetic fixtures exercise each row; no data-specific assumptions are required.
+
+The source uses its record UUID for duplicate identity, distinct from the acting process or process-object UUID.
+Batch duplicates merge raw citations and cross-batch duplicates use disk-backed staging. Process identities
+remain eCAR-specific; a parent identified only by PID retains the existing fenced-PID semantics. Device and
+drive paths use the Windows canonicalizers. Epoch-millisecond `timestamp` and `timestamp_ms` are accepted,
+with a pipeline timestamp taking precedence.
+
+Raw sweep detection and UUID deduplication accept the UUID spellings allowed by the producer. UUID aliases
+expose existence checks only: normalized process/event UUIDs cannot safely be matched or grouped by raw source
+spellings, so UUID-keyed value pivots and links are unsupported. String IP, numeric and normalized account aliases
+also withhold exact operations when their source spelling cannot guarantee a complete match. Host and supported
+native-field expansion retain their ordinary coverage checks.
+
+Catalogued rows feed existing event families. File MODIFY, WRITE and READ and local thread CREATE and TERMINATE
+are counted as not typed. Unknown properties and malformed values are counted against the mapped family;
+unknown object/action pairs are counted without assigning an invented family. Pair inventories retain a bounded
+set of labels with an explicit overflow count, and catalogued pairs retain their own counts.
+
+eCAR does not supply Windows event IDs, channels or providers. Rules whose class gates can be expressed through
+process, socket, image, registry or file semantics use those fields and cite native object/action values.
+Rules that require event-log-specific meaning remain unresolved with the missing Windows event identity reason.
+Event-log collection settings do not attest an eCAR sensor: its collection remains explicitly unattested.
+
+Hunt manifests record each evidence producer version. Resume compares every recorded producer with the running
+build and refuses a mismatch before fetching more records. Older manifests retain the checks they recorded.
+
 ## Dependency rules (enforced by `archmap.py --check`)
 
 - `web` and `cli` may import anything below them, but nothing imports `web` or `cli`.

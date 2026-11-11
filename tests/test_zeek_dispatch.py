@@ -24,7 +24,9 @@ from pathlib import Path
 
 import pytest
 
+from romulus.evidence.arkime_protocols import ARKIME_NORMALIZER
 from romulus.evidence.normalize import NORMALIZER_VERSION, normalize_hits, raw_digest
+from romulus.evidence.suricata_protocols import SURICATA_NORMALIZER
 from romulus.evidence.windows import WINDOWS_NORMALIZER
 from romulus.evidence.zeek import ZEEK_DUPLICATE, ZEEK_NORMALIZER, scrub_zeek_source, zeek_record
 from romulus.evidence.zeek_catalog import ANALYZER_LOGS, HEALTH_LOGS, ICS_LOGS, WINDOWS_PROTOCOL_LOGS
@@ -82,7 +84,8 @@ def test_the_golden_holds_the_baseline_of_every_shape():
             and GOLDEN["ics_baseline"] == "d64b5caa37c22d76732bf63c9bf4154baf6d3cb4"
             and GOLDEN["zeek_producer"] == ZEEK_NORMALIZER)
     producers = {e["normalizer"] for record in RECORDS.values() for e in record["events"]}
-    assert producers == {NORMALIZER_VERSION, WINDOWS_NORMALIZER, ZEEK_NORMALIZER}
+    assert producers == {NORMALIZER_VERSION, WINDOWS_NORMALIZER, ZEEK_NORMALIZER,
+                         SURICATA_NORMALIZER, ARKIME_NORMALIZER}
     assert {"linux-audit-group", "systemd-journal-sshd", "apache-access", "windows-security-elastic_agent",
             "malcolm-suricata-ftp", "eve-fileinfo", "arkime-provider", "zeek-icmp", "zeek-conn-malcolm",
             "zeek-conn-security_onion-bare", "zeek-files-5.0-security_onion"} <= set(RECORDS)

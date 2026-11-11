@@ -30,7 +30,7 @@ from romulus.evidence.windows_catalog import (
 if TYPE_CHECKING:
     from romulus.detect.bounded import Account, StateBudget
 
-WINDOWS_NORMALIZER = "windows-ecs@18"
+WINDOWS_NORMALIZER = "windows-ecs@20"
 # This is already far beyond what the 64 MiB assembler can retain at normal 4104 chunk sizes, while bounding every
 # completeness vector even when hostile metadata claims billions of parts.
 SCRIPT_BLOCK_MAX_PARTS = 4_096
@@ -543,12 +543,13 @@ def _get(source: dict, path: str):
 
 
 def is_windows_source(source: dict) -> bool:
-    """Require an Elastic Agent Windows dataset, Winlogbeat's own agent marker, or NXLog's flat record shape."""
+    """Require a Windows shipper marker or a complete native Windows record envelope."""
     datasets = (_get(source, "data_stream.dataset"), _get(source, "event.dataset"))
     winlogbeat = str(_get(source, "agent.type") or "").casefold() == "winlogbeat"
     return any(isinstance(dataset, str) and dataset.casefold() in WINDOWS_DATASETS for dataset in datasets) or (
-        (winlogbeat or isinstance(source.get(NXLOG_ADAPTED), dict)) and isinstance(source.get("winlog"), dict)
-    ) or is_nxlog_windows(source)
+        (winlogbeat or isinstance(source.get(NXLOG_ADAPTED), dict)
+         or isinstance(source.get(EVTX_JSON_ADAPTED), dict)) and isinstance(source.get("winlog"), dict)
+    ) or is_nxlog_windows(source) or is_evtx_json(source)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -776,13 +777,224 @@ def nxlog_class_families(source: dict) -> frozenset[str]:
 
 
 def windows_view(source: dict) -> dict:
-    """The record in the Winlogbeat layout: itself, or an NXLog flat record adapted ({} when it cannot be)."""
-    if not is_nxlog_windows(source):
-        return source
+    """A Winlogbeat-layout view of a native Windows record, or {} when adaptation fails."""
     try:
-        return nxlog_to_winlog(source)[0]
+        if is_evtx_json(source):
+            return evtx_json_to_winlog(source)
+        if is_nxlog_windows(source):
+            return nxlog_to_winlog(source)[0]
     except WindowsInputError:
         return {}
+    return source
+
+
+EVTX_JSON_ADAPTED = "_evtx_json"
+EVTX_JSON_RECOVERED = "recovered from unallocated log space"
+# Standard keyword bit names are defined by Windows' Winmeta metadata. Provider-specific low bits need the
+# provider's message resources; an unknown bit never supplies an audit outcome.
+_EVTX_KEYWORDS = ((1 << 48, "Response Time"), (1 << 50, "WDI Diag"),
+                  (1 << 51, "SQM"), (1 << 52, "Audit Failure"), (1 << 53, "Audit Success"),
+                  (1 << 54, "Correlation Hint"), (1 << 55, "Classic"))
+
+
+def _evtx_attributes(system: dict, name: str) -> tuple[dict, str]:
+    """The XML attributes in the renderer's ordinary or separate-attributes JSON mode."""
+    value = system.get(name)
+    nested = value.get("#attributes") if isinstance(value, dict) else None
+    flat = system.get(name + "_attributes")
+    if isinstance(nested, dict):
+        if isinstance(flat, dict) and nested != flat:
+            raise WindowsInputError(f"EVTX JSON has conflicting attributes for {name}")
+        return nested, f"Event.System.{name}.#attributes"
+    if isinstance(flat, dict):
+        return flat, f"Event.System.{name}_attributes"
+    return {}, f"Event.System.{name}.#attributes"
+
+
+def is_evtx_json(source: dict) -> bool:
+    """A native Event/System envelope, never an arbitrary application Event key or a wrapped export.
+
+    Presence identifies the shape; malformed identity values are rejected by the adapter instead of guessed.
+    Channel may be null in native ETW records; only the catalog's existing provider-specific handling can read it.
+    """
+    event = source.get("Event")
+    system = event.get("System") if isinstance(event, dict) else None
+    if isinstance(source.get("winlog"), dict) or not isinstance(system, dict):
+        return False
+    provider = system.get("Provider")
+    attributes = provider.get("#attributes") if isinstance(provider, dict) else None
+    flat = system.get("Provider_attributes")
+    return (all(name in system for name in ("Channel", "Computer", "EventID"))
+            and (isinstance(attributes, dict) and "Name" in attributes
+                 or isinstance(flat, dict) and "Name" in flat))
+
+
+def _evtx_integer(value: object, name: str, bits: int) -> int:
+    if isinstance(value, bool) or not (isinstance(value, int) or (
+            isinstance(value, str) and re.fullmatch(r"[0-9]+", value.strip()))):
+        raise WindowsInputError(f"EVTX JSON {name} must be an unsigned integer")
+    try:
+        number = int(value)
+    except (ValueError, OverflowError) as exc:
+        raise WindowsInputError(f"EVTX JSON {name} is malformed") from exc
+    if not 0 <= number < (1 << bits):
+        raise WindowsInputError(f"EVTX JSON {name} is outside its unsigned {bits}-bit range")
+    return number
+
+
+def _evtx_data_scalar(value: object) -> object:
+    """Restore XML scalar text and Winlogbeat's lexical line-ending normalization."""
+    if isinstance(value, str):
+        # XML normalizes CRLF and bare CR to LF; Winlogbeat also removes trailing newlines from data pairs.
+        return value.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return value
+
+
+def evtx_json_to_winlog(source: dict) -> dict:
+    """Adapt an EVTX JSON Event to the Winlogbeat layout without altering or discarding its raw record.
+
+    A private path table translates every resulting field origin back to its indexed XML/JSON path. Both nested
+    ``#attributes`` and separate ``*_attributes`` exports are accepted. No event.original XML fallback is copied.
+    """
+    if not is_evtx_json(source):
+        raise WindowsInputError("EVTX JSON is missing its Event/System identity fields")
+    event, paths = source["Event"], {}
+    system = event["System"]
+    provider, provider_path = _evtx_attributes(system, "Provider")
+    computer = system["Computer"]
+    if not isinstance(computer, str) or not computer.strip():
+        raise WindowsInputError("EVTX JSON Computer is missing or malformed")
+    if not isinstance(provider.get("Name"), str) or not provider["Name"].strip():
+        raise WindowsInputError("EVTX JSON Provider Name is missing or malformed")
+    if system["Channel"] is not None and not isinstance(system["Channel"], str):
+        raise WindowsInputError("EVTX JSON Channel is malformed")
+    event_id = system["EventID"]
+    id_path = "Event.System.EventID"
+    if isinstance(event_id, dict):
+        event_id = event_id.get("#text")
+        id_path += ".#text"
+    winlog = {"event_id": _evtx_integer(event_id, "EventID", 16), "channel": system["Channel"],
+              "provider_name": provider["Name"], "computer_name": computer}
+    paths.update({"winlog.event_id": id_path, "winlog.channel": "Event.System.Channel",
+                  "winlog.provider_name": provider_path + ".Name", "winlog.computer_name": "Event.System.Computer"})
+    attrs, attr_path = _evtx_attributes(system, "EventID")
+    qualifiers = attrs.get("Qualifiers", system.get("EventIDQualifiers"))
+    if qualifiers is not None:
+        winlog["qualifiers"] = _evtx_integer(qualifiers, "EventID qualifiers", 16)
+        paths["winlog.qualifiers"] = (attr_path + ".Qualifiers" if "Qualifiers" in attrs
+                                      else "Event.System.EventIDQualifiers")
+        if "EventIDQualifiers" in system and winlog["qualifiers"] != _evtx_integer(
+                system["EventIDQualifiers"], "EventIDQualifiers", 16):
+            raise WindowsInputError("EVTX JSON has conflicting EventID qualifiers")
+    for name, target in (("Guid", "provider_guid"), ("EventSourceName", "event_source_name")):
+        if name in provider:
+            winlog[target] = provider[name]
+            paths["winlog." + target] = provider_path + "." + name
+    for name, target, bits in (("EventRecordID", "record_id", 64), ("Version", "version", 8),
+                               ("Level", "level", 8), ("Task", "task", 16), ("Opcode", "opcode", 8)):
+        if system.get(name) is not None:
+            winlog[target] = _evtx_integer(system[name], name, bits)
+            paths["winlog." + target] = "Event.System." + name
+    for element, name, target, bits in (
+        ("Execution", "ProcessID", "process.pid", 32), ("Execution", "ThreadID", "process.thread.id", 32),
+        ("Execution", "ProcessorID", "processor_id", 32), ("Execution", "SessionID", "session_id", 32),
+        ("Execution", "KernelTime", "kernel_time", 32), ("Execution", "UserTime", "user_time", 32),
+        ("Execution", "ProcessorTime", "processor_time", 32),
+        ("Security", "UserID", "user.identifier", None), ("Correlation", "ActivityID", "activity_id", None),
+        ("Correlation", "RelatedActivityID", "related_activity_id", None),
+    ):
+        attrs, attr_path = _evtx_attributes(system, element)
+        if attrs.get(name) is None:
+            continue
+        value = _evtx_integer(attrs[name], element + "." + name, bits) if bits else attrs[name]
+        node, parts = winlog, target.split(".")
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+        node[parts[-1]] = value
+        paths["winlog." + target] = attr_path + "." + name
+    keyword_mask = system.get("Keywords")
+    if keyword_mask is not None:
+        try:
+            if not isinstance(keyword_mask, str) or not re.fullmatch(r"0[xX][0-9a-fA-F]{1,16}", keyword_mask):
+                raise ValueError
+            number = int(keyword_mask, 16)
+        except ValueError as exc:
+            raise WindowsInputError("EVTX JSON Keywords must be a hexadecimal 64-bit mask") from exc
+        winlog["keywords"] = [name for bit, name in _EVTX_KEYWORDS if number & bit]
+        paths["winlog.keywords"] = "Event.System.Keywords"
+
+    data = event.get("EventData")
+    if data is not None and not isinstance(data, dict):
+        raise WindowsInputError("EVTX JSON EventData must be an object or null")
+    event_data = {}
+
+    def put(name: str, value: object, path: str) -> None:
+        if name in event_data:
+            raise WindowsInputError(f"EVTX JSON has conflicting event-data field {name!r}")
+        event_data[name] = _evtx_data_scalar(value)
+        paths["winlog.event_data." + name] = path
+
+    for name, value in (data or {}).items():
+        if name == "#attributes":
+            continue
+        path = "Event.EventData." + name
+        if name == "Data":
+            if isinstance(value, dict) and set(value) <= {"#text", "#attributes"}:
+                attributes = value.get("#attributes") or {}
+                text_path = path + (".#text" if "#text" in value else "#empty-element")
+                if isinstance(attributes, dict) and attributes.get("Name"):
+                    put(str(attributes["Name"]), value.get("#text", ""), text_path)
+                    continue
+                value, path = value.get("#text", ""), text_path
+            unnamed = value if isinstance(value, list) else [value]
+            for index, item in enumerate(unnamed, 1):
+                put(f"param{index}", item, f"{path}#{index}" if isinstance(value, list) else path)
+        elif isinstance(value, dict) and isinstance(value.get("#attributes"), dict) and (
+                isinstance(value["#attributes"].get("Name"), str)):
+            put(value["#attributes"]["Name"], value.get("#text", ""),
+                path + (".#text" if "#text" in value else "#empty-element"))
+        else:
+            put(name, value, path)
+    winlog["event_data"] = event_data
+    userdata = event.get("UserData")
+    if userdata is not None:
+        if not isinstance(userdata, dict):
+            raise WindowsInputError("EVTX JSON UserData must be an object")
+        schemas = [(name, value) for name, value in userdata.items() if name != "#attributes"]
+        if len(schemas) != 1 or not isinstance(schemas[0][1], dict):
+            raise WindowsInputError("EVTX JSON UserData must contain one schema element")
+        schema, content = schemas[0]
+        converted = {"xml_name": schema}
+        for name, value in content.items():
+            if name == "#attributes" and isinstance(value, dict):
+                value = {key: item for key, item in value.items() if key != "xmlns" and not key.startswith("xmlns:")}
+                if not value:
+                    continue
+            converted[name] = _evtx_data_scalar(value)
+            paths["winlog.user_data." + name] = f"Event.UserData.{schema}.{name}"
+        winlog["user_data"] = converted
+    attrs, attr_path = _evtx_attributes(system, "TimeCreated")
+    created = attrs.get("SystemTime")
+    if created is not None:
+        winlog["time_created"] = created
+        paths["winlog.time_created"] = attr_path + ".SystemTime"
+    timestamp = _pipeline_time(source.get("@timestamp")) if "@timestamp" in source else _pipeline_time(created)
+    if timestamp is None:
+        raise WindowsInputError("EVTX JSON time unresolved: @timestamp or SystemTime must name its zone")
+    paths["@timestamp"] = "@timestamp" if "@timestamp" in source else attr_path + ".SystemTime"
+    adapted = {"winlog": winlog, "@timestamp": timestamp, EVTX_JSON_ADAPTED: {
+        "paths": paths, "recovered": source.get("recovered") is True or event.get("recovered") is True}}
+    message = _get(event, "RenderingInfo.Message")
+    if isinstance(source.get("message"), str):
+        adapted["message"] = source["message"]
+    elif isinstance(message, str):
+        adapted["message"] = message
+        paths["message"] = "Event.RenderingInfo.Message"
+    return adapted
 
 
 def _windows_hit(hit: dict) -> dict:
@@ -852,6 +1064,19 @@ def windows_record_key(hit: dict) -> tuple[str, str, str] | None:
     return computer, channel, str(record_id)
 
 
+def _signature_time(value: object) -> object:
+    """Canonical native instant at the millisecond precision shared by Windows exporters."""
+    parsed = _zoned_time(value)
+    if parsed is None:
+        return value
+    try:
+        when = parsed.astimezone(UTC)
+    except (OverflowError, ValueError):
+        return value
+    when = when.replace(microsecond=when.microsecond // 1000 * 1000)
+    return when.isoformat(timespec="milliseconds" if when.microsecond else "seconds").replace("+00:00", "Z")
+
+
 def windows_record_signature(hit: dict) -> str:
     """Stable content discriminator for copies that share a native record id.
 
@@ -890,6 +1115,7 @@ def windows_record_signature(hit: dict) -> str:
         or _get(source, "event.created")
         or source.get("@timestamp")
     )
+    native_time = _signature_time(native_time)
     if native_time not in (None, ""):
         native.setdefault("TimeCreated", native_time)
     # Shippers vary only the spelling of some native names (for example Defender's ``Threat Name``,
@@ -897,6 +1123,8 @@ def windows_record_signature(hit: dict) -> str:
     payload: dict[str, list[object]] = {}
     for name, value in native.items():
         canonical_name = re.sub(r"[\s_]+", "", str(name)).casefold()
+        if canonical_name in {"timecreated", "systemtime"}:
+            value = _signature_time(value)
         payload.setdefault(canonical_name, []).append(value)
     payload = {name: sorted(values, key=lambda value: json.dumps(value, sort_keys=True, default=str))
                for name, values in payload.items()}
@@ -2503,6 +2731,15 @@ def normalize_windows(hit: dict) -> TypedEvent:
     """Normalize one cataloged Windows event from structured shipper fields only."""
     if is_nxlog_windows(hit.get("_source") or {}):
         return _normalize_nxlog(hit)
+    if is_evtx_json(hit.get("_source") or {}):
+        adapted = evtx_json_to_winlog(hit["_source"])
+        event = _normalize_windows({**hit, "_source": adapted}, hit)
+        paths = adapted[EVTX_JSON_ADAPTED]["paths"]
+        event.fields = {name: fv(value.value, _native_origin(value.origin, hit["_id"], paths))
+                        for name, value in event.fields.items()}
+        if adapted[EVTX_JSON_ADAPTED]["recovered"]:
+            event.caveats.append(EVTX_JSON_RECOVERED)
+        return event
     return _normalize_windows(hit, hit)
 
 

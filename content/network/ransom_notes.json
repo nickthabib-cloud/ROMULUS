@@ -1,0 +1,29 @@
+{
+  "version": "2026-11-10.1",
+  "description": "Curated exact whole filenames; not a comprehensive catalog.",
+  "attribution": "Contains information from NHS England, licenced under the current version of the Open Government Licence.",
+  "terms_url": "https://digital.nhs.uk/about-nhs-digital/terms-and-conditions",
+  "entries": [
+    {
+      "name": "Restore-My-Files.txt",
+      "family": "Lockbit",
+      "source": "https://digital.nhs.uk/cyber-alerts/2020/cc-3439",
+      "license": "OGL-3.0",
+      "license_url": "https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/"
+    },
+    {
+      "name": "Readme!!!.txt",
+      "family": "Hello",
+      "source": "https://digital.nhs.uk/cyber-alerts/2021/cc-3753",
+      "license": "OGL-3.0",
+      "license_url": "https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/"
+    },
+    {
+      "name": "README.html",
+      "family": "Zeoticus",
+      "source": "https://digital.nhs.uk/cyber-alerts/2021/cc-3752",
+      "license": "OGL-3.0",
+      "license_url": "https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/"
+    }
+  ]
+}

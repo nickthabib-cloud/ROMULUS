@@ -10,11 +10,13 @@ import pytest
 from pydantic import ValidationError
 
 from romulus.detect import correlation
-from romulus.evidence import normalize, typed
+from romulus.evidence import arkime_protocols, normalize, suricata_protocols, typed
 from romulus.evidence.normalize import BootIntervals, normalize_hits
 from romulus.evidence.typed import FieldValue, fv
 from romulus.hunt import sweep
 from tests import throughput_fixture as tf
+from tests.test_suricata_protocols import CASES as PROTOCOL_CASES
+from tests.test_suricata_protocols import hit as protocol_hit
 
 VALUES = [None, 0, 7, -1, 2**70, 1.5, float("inf"), "", "text", "ünï\x1dcode", True, False, [], ["a", 1, None],
           {"k": [1, {"n": None}]}, [{"name": "x", "data": None}], datetime(2024, 11, 18, tzinfo=UTC)]
@@ -63,7 +65,7 @@ def test_a_field_with_a_non_text_origin_is_validated_as_before(origin):
 
 
 def _every_family() -> list[dict]:
-    """Fixture records plus synthetic audit admin and Linux service records."""
+    """Fixture records plus synthetic audit, Linux service, and network protocol records."""
     docs = tf.build(1)
     b = tf.Builder(3)
     at = tf.T0 + timedelta(minutes=50)
@@ -94,7 +96,14 @@ def _every_family() -> list[dict]:
     b._doc("web1", at, "linux.text", None,
            message="Nov 18 14:50:00 web1 openvpn[43]: [alice] Peer Connection Initiated with "
                    "[AF_INET]192.0.2.2:51234")
-    return [record for records in docs.values() for record in records] + b.host
+    # Public synthetic protocol supplements stay local to this serialization test.
+    protocols = [protocol_hit(name, nid=f"typed-fields-{name}") for name in PROTOCOL_CASES]
+    protocols.append(protocol_hit(
+        "smb", {**PROTOCOL_CASES["smb"][0],
+                "ntlmssp": {"user": "alice", "domain": "EXAMPLE", "host": "WS01"}},
+        nid="typed-fields-smb-ntlm",
+    ))
+    return [record for records in docs.values() for record in records] + b.host + protocols
 
 
 @pytest.fixture(scope="module")
@@ -105,7 +114,8 @@ def records():
 def _dumps(records, monkeypatch=None):
     with pytest.MonkeyPatch.context() as patch:
         if monkeypatch:
-            patch.setattr(normalize, "fv", _validated)
+            for module in (normalize, suricata_protocols, arkime_protocols):
+                patch.setattr(module, "fv", _validated)
         events, skips, errors = normalize_hits(records, BootIntervals())
     return events, skips, errors
 

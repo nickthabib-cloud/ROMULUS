@@ -17,6 +17,7 @@ from romulus.detect.windows_common import (
     resolve_parent,
 )
 from romulus.detect.windows_compact_rows import FENCE_FIELDS, CompactWindowsRows
+from romulus.detect.windows_ecar import class_discriminator
 from romulus.detect.windows_events import basename, local_path_components, signal
 from romulus.detect.windows_path_data import has_short_name, installation_parts, writable_windows_path
 from romulus.detect.windows_rows import row_key
@@ -375,7 +376,7 @@ class ParentAccountTransition(Playbook):
         return hashlib.sha256(row_key(_user(event).casefold(), _path(event), event.ts.replace(microsecond=0).isoformat()).encode()).hexdigest()
 
     def consume(self, events):
-        selected = self.applicable([item for item in events if item.family == "process_exec" and item.get("event.code") == 1])
+        selected = self.applicable([item for item in events if item.family == "process_exec" and class_discriminator(item, 1, "process_exec")])
         selected += [event for event in events if self.event_in_os_scope(event)
                      and (event.family == "process_termination" and event.get("process.guid")
                           or event.family == "system_state" and event.get("process.fence") == "boot"

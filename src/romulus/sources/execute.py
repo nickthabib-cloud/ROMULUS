@@ -126,6 +126,7 @@ def execute(client: ElasticClient, intent: SearchIntent, contract: FieldContract
             if d is None:
                 return shell
             buckets = [{"key": (datetime.fromtimestamp(b["key"], UTC).isoformat() if contract.zeek_sensor
+                               else datetime.fromtimestamp(b["key"]/1000, UTC).isoformat() if q.time_unit == "epoch_ms"
                                else b["key_as_string"]), "count": b["doc_count"]}
                        for b in d.get("aggregations", {}).get("h", {}).get("buckets", [])]
             return shell.model_copy(update={"buckets": buckets, "returned": len(buckets)})

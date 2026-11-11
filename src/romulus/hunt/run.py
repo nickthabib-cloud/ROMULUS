@@ -19,7 +19,7 @@ from romulus.hunt.baseline_stage import run_baseline_stage
 from romulus.hunt.baseline_writer import DEFAULT_RETAIN_BYTES, run_hunt_segment_writer
 from romulus.hunt.expansion import PER_ANCHOR_SOURCE_QUERIES, ExpansionEngine
 from romulus.hunt.links import LinkFetcher, is_agent_reach
-from romulus.hunt.manifest import build_manifest, inventory_usable, new_hunt_id
+from romulus.hunt.manifest import build_manifest, inventory_usable, new_hunt_id, normalizer_versions
 from romulus.hunt.packets import PACKET_NORMALIZER, run_packet_stage
 from romulus.hunt.pivot import PivotExecutor
 from romulus.hunt.rank import PASS_BEFORE_EXPANSION, PASS_FINAL, run_rank_pass
@@ -597,6 +597,28 @@ def resume_hunt(s: Settings, hunt_id: str) -> dict:
         # the anchor and its own "linked" activity. Start a new hunt instead.
         raise RuntimeError(f"hunt {hunt_id} was normalized with {recorded}; this build is {NORMALIZER_VERSION}. "
                            "Start a new hunt over the same window instead of resuming.")
+    if "normalizers" in recorded_manifest:
+        recorded_versions = recorded_manifest["normalizers"]
+        if not isinstance(recorded_versions, dict):
+            raise RuntimeError(f"hunt {hunt_id} has an invalid normalizer version map. "
+                               "Start a new hunt over the same window instead of resuming.")
+        current_versions = normalizer_versions()
+        for producer, version in recorded_versions.items():
+            current = current_versions.get(producer)
+            if current is None or version != current:
+                raise RuntimeError(f"hunt {hunt_id} was normalized with {producer}={version}; "
+                                   f"this build is {current or 'missing that producer'}. "
+                                   "Start a new hunt over the same window instead of resuming.")
+    # Suricata and Arkime used the shared producer before their independent epochs.
+    # An older shared manifest without both explicit epochs cannot safely mix its
+    # staged identities with new fetches, even when the shared epoch is unchanged.
+    versions = recorded_manifest.get("normalizers") or {}
+    if recorded or "lab-ecs" in versions:
+        missing = {"suricata-eve", "arkime"} - versions.keys()
+        if missing:
+            raise RuntimeError(f"hunt {hunt_id} has legacy shared network normalization without "
+                               f"{', '.join(sorted(missing))} producer versions. "
+                               "Start a new hunt over the same window instead of resuming.")
     # expansion and the investigator read the definition the sweep used; a changed one is refused here
     install_for_hunt(s, hunt_id, recorded_manifest)
     sweep_audit = repo.latest_audit(hunt_id, "hunt.sweep_summary")

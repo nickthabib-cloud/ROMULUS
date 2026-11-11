@@ -12,6 +12,7 @@ from dataclasses import replace
 import pytest
 
 from romulus.evidence.normalize import normalize_hits
+from romulus.evidence.suricata_protocols import SURICATA_NORMALIZER
 from romulus.evidence.typed import NETWORK_OBSERVER_FAMILIES
 from romulus.evidence.zeek import (
     AMBIGUOUS,
@@ -345,7 +346,7 @@ def test_a_malcolm_mixed_batch_routes_each_row_to_its_own_normalizer():
         assert (by_id[nid].family, by_id[nid].normalizer) == ("net_flow", ZEEK_NORMALIZER)
     assert by_id["mx-arkime"].family == "net_session" and by_id["mx-arkime"].get("arkime.continuation") is False
     assert by_id["mx-arkime-provider"].family == "net_session"
-    assert by_id["malcolm-suricata-flow"].normalizer.startswith("lab-ecs@")
+    assert by_id["malcolm-suricata-flow"].normalizer == SURICATA_NORMALIZER
 
 
 # ---- recognition and dispatch ------------------------------------------------------------------------------------

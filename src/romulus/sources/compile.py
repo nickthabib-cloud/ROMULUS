@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+from datetime import UTC, datetime
 
 from romulus.evidence.linux_catalog import (
     LINUX_LOGICAL_DATASETS,
@@ -13,7 +14,7 @@ from romulus.evidence.linux_catalog import (
 )
 from romulus.evidence.normalize import ELASTIC_DATASET, ELASTIC_EVENT_TYPES
 from romulus.sources.models import CompiledQuery, Predicate, SearchIntent
-from romulus.sources.profile import FieldContract
+from romulus.sources.profile import FieldContract, mixed_text_query
 from romulus.store.db import digest
 
 
@@ -71,12 +72,16 @@ _LINUX_HOST_DATASETS = frozenset({*LINUX_LOGICAL_DATASETS, *shipper_names()})
 # Windows names matched without case (channel, provider, object type), in Winlogbeat's layout and NXLog's flat one
 # (whose channel names keep the source's spelling, "security" for "Security").
 _CASELESS_WINDOWS_NATIVES = frozenset({"winlog.channel", "winlog.provider_name", "winlog.event_data.ObjectType",
-                                       "Channel", "SourceName", "ObjectType"})
-_WINDOWS_COMPUTER_NATIVES = frozenset({"winlog.computer_name", "Hostname"})
+                                       "Channel", "SourceName", "ObjectType", "Event.System.Channel",
+                                       "Event.System.Provider.#attributes.Name", "Event.System.Provider_attributes.Name",
+                                       "Event.EventData.ObjectType"})
+_WINDOWS_COMPUTER_NATIVES = frozenset({"winlog.computer_name", "Hostname", "Event.System.Computer", "hostname"})
 
 
 def _linux_text_clause(contract: FieldContract, fields: list[str]) -> dict | None:
     """Compile content-selected text using only existing typed predicate operations."""
+    if contract.linux_text_mixed is not False:
+        return mixed_text_query(contract.linux_fields or contract.fields)
     def clause(name, op, value=None):
         spec = contract.spec(name, os_family="linux")
         if spec is None or op not in spec.ops:
@@ -108,24 +113,25 @@ def _linux_datasets(p: Predicate, contract: FieldContract, natives: tuple[str, .
     values = [str(value) for value in (p.value if isinstance(p.value, list) else [p.value])]
     if not any(value in LINUX_SHIPPER_DATASETS for value in values):
         return None
-    direct = contract.fields.get("data_stream.dataset")
+    direct = contract.spec("data_stream.dataset", os_family="linux")
     fields = [*natives, *(["data_stream.dataset"] if direct is not None and "in" in direct.ops
                           and "data_stream.dataset" not in natives else [])]
     plain, with_module, undated, _unsearchable = dataset_selection(
-        values, module_searchable=contract.supports("event.module", "eq"),
-        input_type_searchable=contract.supports("input.type", "eq"))
+        values, module_searchable=(module := contract.spec("event.module", os_family="linux")) is not None
+        and "eq" in module.ops, input_type_searchable=(input_type := contract.spec("input.type", os_family="linux"))
+        is not None and "eq" in input_type.ops)
     if len(plain) > 1000:
         raise CompileError("'in' needs a non-empty list of at most 1000 values")
     clauses = [{"terms": {field: plain}} for field in fields] if plain else []
     if "linux.text" in values and (text_clause := _linux_text_clause(contract, fields)) is not None:
         clauses.append(text_clause)
-    module = contract.spec("event.module")
+    module = contract.spec("event.module", os_family="linux")
     for dataset, name in with_module:
         clauses.append({"bool": {"filter": [
             {"bool": {"should": [{"term": {field: dataset}} for field in fields], "minimum_should_match": 1}},
             {"term": {module.native if module is not None else "event.module": name}}]}})
     for name, value in undated:
-        spec = contract.spec(name)
+        spec = contract.spec(name, os_family="linux")
         clauses.append({"bool": {"filter": [{"term": {spec.native if spec is not None else name: value}}],
                                  "must_not": [{"exists": {"field": field}} for field in fields]}})
     if not clauses and "linux.text" in values:
@@ -231,6 +237,14 @@ def _pred(p: Predicate, contract: FieldContract, *, os_family: str | None = None
         raise CompileError(f"field {p.field!r} not in field contract for {contract.target}")
     if p.op not in spec.ops:
         raise CompileError(f"op {p.op!r} not supported on {p.field} ({spec.type}) with superset guarantee")
+    if spec.alternatives:
+        clauses = [_pred_spec(p, contract, variant) for variant in (spec, *spec.alternatives)]
+        return {"bool": {"filter": clauses}} if p.op in {"missing", "not_in"} else {
+            "bool": {"should": clauses, "minimum_should_match": 1}}
+    return _pred_spec(p, contract, spec)
+
+
+def _pred_spec(p: Predicate, contract: FieldContract, spec) -> dict:
     natives = spec.natives or (spec.native,)
     if spec.exact and p.op in {"eq", "in"}:
         return _on_subfields(p, contract, spec, natives)
@@ -307,12 +321,16 @@ def build_query(intent: SearchIntent, contract: FieldContract) -> dict:
                             "format": "strict_date_optional_time"}}}]
     if contract.zeek_sensor:
         must = [{"range": {tf: {"gte": intent.window.start.timestamp(), "lt": intent.window.end.timestamp()}}}]
+    elif numeric_milliseconds(contract):
+        must = [{"range": {tf: {"gte": epoch_ms_ceiling(intent.window.start),
+                                "lt": epoch_ms_ceiling(intent.window.end)}}}]
     must += [_pred(p, contract, os_family=os_family) for p in intent.filters]
     query: dict = {"bool": {"filter": must}}
     if intent.any_of:
-        groups = [{"bool": {"filter": [
-            _pred(p, contract, os_family=os_family) for p in g
-        ]}} for g in intent.any_of]
+        groups = []
+        for group in intent.any_of:
+            group_os = _intent_os_family(intent.model_copy(update={"any_of": [group]}))
+            groups.append({"bool": {"filter": [_pred(p, contract, os_family=group_os) for p in group]}})
         query["bool"]["should"] = groups
         query["bool"]["minimum_should_match"] = 1
     return query
@@ -324,7 +342,7 @@ def compile_es(intent: SearchIntent, contract: FieldContract, flavor: str = "ela
     query = build_query(intent, contract)
     if intent.kind == "raw":
         time_sort = {"order": intent.order}
-        if flavor != "opensearch" and not contract.zeek_sensor:
+        if flavor != "opensearch" and not contract.zeek_sensor and not numeric_milliseconds(contract):
             # OpenSearch's field sort refuses `format`; its date sort values are the field's own epoch numbers
             time_sort["format"] = "strict_date_optional_time_nanos"
         body = {
@@ -342,7 +360,7 @@ def compile_es(intent: SearchIntent, contract: FieldContract, flavor: str = "ela
             spec = contract.spec(g, os_family=_intent_os_family(intent))
             if spec is None or not spec.aggregatable:
                 raise CompileError(f"field {g!r} is not aggregatable on {contract.target}")
-            sources.append({g: {"terms": {"field": spec.native, "missing_bucket": True}}})
+            sources.append({g: {"terms": {"field": spec.aggregation_native or spec.native, "missing_bucket": True}}})
         body = {"size": 0, "query": query, "track_total_hits": True,
                 "aggs": {"g": {"composite": {"size": min(1000, intent.max_records), "sources": sources},
                                "aggs": {"first": {"min": {"field": contract.time_field}},
@@ -358,6 +376,10 @@ def compile_es(intent: SearchIntent, contract: FieldContract, flavor: str = "ela
             body["aggs"]["h"] = {"histogram": {"field": contract.time_field, "interval": sec,
                 "min_doc_count": 0, "extended_bounds": {"min": intent.window.start.timestamp(),
                                                          "max": intent.window.end.timestamp()}}}
+        elif numeric_milliseconds(contract):
+            body["aggs"]["h"] = {"histogram": {"field": contract.time_field, "interval": sec*1000,
+                "min_doc_count": 0, "extended_bounds": {"min": epoch_ms_ceiling(intent.window.start),
+                                                         "max": epoch_ms_ceiling(intent.window.end)}}}
     else:
         raise CompileError(f"unknown intent kind {intent.kind}")
     fp = digest({"target": intent.target, "kind": intent.kind, "body": body})
@@ -369,5 +391,19 @@ def time_unit(contract: FieldContract) -> str:
     """The resolution of the time field's epoch sort values: nanoseconds for `date_nanos`, else milliseconds."""
     if contract.zeek_sensor:
         return "s"
+    if numeric_milliseconds(contract):
+        return "epoch_ms"
     time_spec = contract.fields.get(contract.time_field)
     return "ns" if time_spec is not None and time_spec.type == "date_nanos" else "ms"
+
+
+def numeric_milliseconds(contract: FieldContract) -> bool:
+    spec = contract.fields.get(contract.time_field)
+    return contract.ecar and spec is not None and spec.type in {"long", "integer", "double", "float"}
+
+
+def epoch_ms_ceiling(moment: datetime) -> int:
+    """Exact integer-ms boundary for both ends of an inclusive-start/exclusive-end datetime window."""
+    delta = moment.astimezone(UTC) - datetime(1970, 1, 1, tzinfo=UTC)
+    microseconds = (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
+    return -(-microseconds // 1000)

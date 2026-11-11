@@ -1,4 +1,4 @@
-"""Typed Sysmon process-image and file-writer observations; filenames do not prove payload contents."""
+"""Typed Windows process-image and file-writer observations; filenames do not prove payload contents."""
 from __future__ import annotations
 
 import json
@@ -6,6 +6,7 @@ import ntpath
 import re
 
 from romulus.detect.windows_behavior import BehaviorFleetRule
+from romulus.detect.windows_ecar import class_discriminator, ecar_record, source_label
 from romulus.detect.windows_events import (
     WindowsEventRule,
     basename,
@@ -109,6 +110,8 @@ def _suffix(path):
 
 
 def _sysmon(event, code, family):
+    if ecar_record(event):
+        return class_discriminator(event, code, family)
     return (event.family == family and event.get("event.code") == code
             and str(event.get("event.provider") or "").casefold() == SYSMON.casefold()
             and str(event.get("event.channel") or "").casefold() == SYSMON_CHANNEL.casefold())
@@ -216,6 +219,7 @@ def _image_directory_class(path):
 
 
 class ClientDriveProcess(WindowsEventRule):
+    ecar_compatible = True
     id = "win.client_drive_process"
     title = "Process image recorded on an RDP redirected client drive"
     families = ("process_exec",)
@@ -233,11 +237,12 @@ class ClientDriveProcess(WindowsEventRule):
         if not path.startswith("\\\\") or len(parts) < 3 or parts[0] != "tsclient":
             return []
         return [signal(event, "client_drive_image",
-                       f"Sysmon recorded process creation with image '{self.describe(path)}' on a redirected client drive",
+                       f"{source_label(event)} recorded process creation with image '{self.describe(path)}' on a redirected client drive",
                        self.attack, _IMAGE_FIELDS, lane="high", severity="high", content=path)]
 
 
 class NonExecutableProcessImage(BehaviorFleetRule):
+    ecar_compatible = True
     id = "win.non_executable_process_image"
     version = "2"
     title = "Process image has an extension outside native executable conventions"
@@ -258,7 +263,7 @@ class NonExecutableProcessImage(BehaviorFleetRule):
         parent = path_class(_path(event, "process.parent.executable"))
         directory = _image_directory_class(path)
         return [signal(event, "non_executable_image_suffix",
-                       f"Sysmon recorded process image '{self.describe(path)}' with extension '{self.describe(suffix)}' outside native executable conventions",
+                       f"{source_label(event)} recorded process image '{self.describe(path)}' with extension '{self.describe(suffix)}' outside native executable conventions",
                        self.attack, (*_IMAGE_FIELDS, *_PARENT_FIELDS),
                        content=json.dumps([suffix, parent, directory]),
                        common=f"Process images had suffix '{suffix}', parent image class '{parent}' and directory class '{directory}'",
@@ -266,6 +271,7 @@ class NonExecutableProcessImage(BehaviorFleetRule):
 
 
 class LsassFileWrite(BehaviorFleetRule):
+    ecar_compatible = True
     id = "win.lsass_file_write"
     version = "3"
     title = "LSASS process recorded creating or overwriting a file"
@@ -285,7 +291,7 @@ class LsassFileWrite(BehaviorFleetRule):
         routine = _system_image(_path(event, "process.executable"), "lsass.exe") and _lsass_store(path)
         directory = _directory(path)
         return [signal(event, "lsass_file_write",
-                       f"Sysmon recorded LSASS creating or overwriting file '{self.describe(path)}'",
+                       f"{source_label(event)} recorded LSASS creating or overwriting file '{self.describe(path)}'",
                        self.attack, _FILE_FIELDS, lane="lead" if routine else "high",
                        severity="medium" if routine else "high",
                        content=json.dumps([event.host, directory]) if routine else path.casefold(),
@@ -298,6 +304,7 @@ class LsassFileWrite(BehaviorFleetRule):
 
 
 class SystemBinaryFileWrite(BehaviorFleetRule):
+    ecar_compatible = True
     id = "win.system_binary_file_write"
     version = "2"
     title = "System pid 4 recorded writing a native binary"
@@ -319,13 +326,14 @@ class SystemBinaryFileWrite(BehaviorFleetRule):
                 or ":" in basename(path) or _suffix(path) not in {".exe", ".dll", ".sys"}):
             return []
         return [signal(event, "system_binary_file_write",
-                       f"Sysmon recorded System pid 4 creating or overwriting binary file '{self.describe(path)}'",
+                       f"{source_label(event)} recorded System pid 4 creating or overwriting binary file '{self.describe(path)}'",
                        self.attack, _FILE_FIELDS, content=json.dumps([event.host, _directory(path), _suffix(path)]),
                        common=f"System pid 4 wrote binary-named files with suffix '{_suffix(path)}' in directory '{_directory(path)}'",
                        notes=("Kernel-mediated creation can accompany SMB transfer; the record alone does not identify a remote sender.",))]
 
 
 class SpoolerFileWriteOutsideSpool(BehaviorFleetRule):
+    ecar_compatible = True
     id = "win.spooler_file_write_outside_spool"
     version = "2"
     title = "Print spooler recorded writing outside a spool directory"
@@ -348,7 +356,7 @@ class SpoolerFileWriteOutsideSpool(BehaviorFleetRule):
         high = _suffix(path) in _PE_SUFFIXES and not system_temp
         directory = _directory(path)
         return [signal(event, "spooler_outside_spool",
-                       f"Sysmon recorded spoolsv.exe creating or overwriting file '{self.describe(path)}' outside a spool directory",
+                       f"{source_label(event)} recorded spoolsv.exe creating or overwriting file '{self.describe(path)}' outside a spool directory",
                        self.attack, _FILE_FIELDS, lane="high" if high else "lead",
                        severity="high" if high else "medium",
                        content=path if high else json.dumps([event.host, _suffix(path), directory]),
@@ -361,6 +369,7 @@ class SpoolerFileWriteOutsideSpool(BehaviorFleetRule):
 
 
 class VolumeRootExecutableWrite(WindowsEventRule):
+    ecar_compatible = True
     id = "win.volume_root_executable_write"
     version = "2"
     title = "Native executable artifact created at a local volume root"
@@ -377,7 +386,7 @@ class VolumeRootExecutableWrite(WindowsEventRule):
                 or len(local_path_components(path)) != 1 or _suffix(path) not in {".exe", ".com"}):
             return []
         return [signal(event, "volume_root_executable",
-                       f"Sysmon recorded executable-named file '{self.describe(path)}' created or overwritten at a local volume root",
+                       f"{source_label(event)} recorded executable-named file '{self.describe(path)}' created or overwritten at a local volume root",
                        self.attack, _FILE_FIELDS, content=path,
                        notes=("A root-level artifact can intercept an unquoted path; no vulnerable service path or execution is established by this record.",))]
 

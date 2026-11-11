@@ -7,6 +7,7 @@ import re
 
 from romulus.detect.windows_behavior import BehaviorFleetRule
 from romulus.detect.windows_common import SPAWNED_CODE_RUNNERS
+from romulus.detect.windows_ecar import class_discriminator
 from romulus.detect.windows_events import (
     WindowsEventRule,
     basename,
@@ -138,6 +139,7 @@ class _FileBehaviorRule(BehaviorFleetRule):
 
 
 class StartupFileWrite(_FileBehaviorRule):
+    ecar_compatible = True
     id = "win.startup_file_write"
     version = "7"
     title = "File created in a Windows startup folder"
@@ -150,7 +152,7 @@ class StartupFileWrite(_FileBehaviorRule):
 
     def judge(self, event):
         path = event.get("file.path_key") or event.get("file.path")
-        if event.get("event.code") != 11 or not startup_path(path):
+        if not class_discriminator(event, 11, "file_change") or not startup_path(path):
             return []
         writer = event.get("process.executable")
         text = f"Windows recorded creation of startup artifact '{self.describe(path)}'"
@@ -160,6 +162,7 @@ class StartupFileWrite(_FileBehaviorRule):
 
 
 class LureApplicationFileWrite(_FileBehaviorRule):
+    ecar_compatible = True
     id = "win.lure_application_file_write"
     version = "7"
     title = "Office or browser process wrote a file in a user-writable directory"
@@ -173,7 +176,7 @@ class LureApplicationFileWrite(_FileBehaviorRule):
     def judge(self, event):
         path = event.get("file.path_key") or event.get("file.path")
         writer = event.get("process.executable_key") or event.get("process.executable")
-        if event.get("event.code") != 11 or not path or not writable(path):
+        if not class_discriminator(event, 11, "file_change") or not path or not writable(path):
             return []
         if basename(writer) not in LURE_WRITERS:
             return []
@@ -256,6 +259,7 @@ class ExecutableCreationTimeChange(_FileBehaviorRule):
 
 
 class WritableExecutableDeletion(_FileBehaviorRule):
+    ecar_compatible = True
     id = "win.writable_executable_deletion"
     version = "7"
     title = "File deleted from a user-writable or startup location"
@@ -268,7 +272,7 @@ class WritableExecutableDeletion(_FileBehaviorRule):
 
     def judge(self, event):
         path = event.get("file.path_key") or event.get("file.path")
-        if (event.get("event.code") not in {23, 26} or not path
+        if (not (class_discriminator(event, 23, "file_change") or class_discriminator(event, 26, "file_change")) or not path
                 or not (writable(path) or startup_path(path))):
             return []
         return [signal(event, "artifact_deleted", f"Windows recorded deletion of '{self.describe(path)}'; "
@@ -278,6 +282,7 @@ class WritableExecutableDeletion(_FileBehaviorRule):
 
 
 class WebRootFileWrite(_FileBehaviorRule):
+    ecar_compatible = True
     id = "win.web_root_file_write"
     version = "5"
     title = "File created in the default IIS web content directory"
@@ -294,7 +299,7 @@ class WebRootFileWrite(_FileBehaviorRule):
     def judge(self, event):
         path = event.get("file.path_key") or event.get("file.path")
         parts = local_path_components(path)
-        if (event.get("event.code") != 11 or len(parts) < 3
+        if (not class_discriminator(event, 11, "file_change") or len(parts) < 3
                 or parts[:2] != ("inetpub", "wwwroot")):
             return []
         return [signal(event, "web_content_created", f"Windows recorded creation of '{self.describe(path)}' "

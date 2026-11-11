@@ -334,6 +334,21 @@ class _SiteDocument(BaseModel):
     directory_sync_hosts: tuple[str, ...] = ()
     directory_sync_addresses: tuple[str, ...] = ()
     mail_domains: tuple[str, ...] = ()
+    approved_remote_access: tuple[str, ...] = ()
+
+    @field_validator("approved_remote_access", mode="before")
+    @classmethod
+    def _approved_remote_access(cls, value):
+        if not isinstance(value, (list, tuple)) or len(value) > 1000:
+            raise ValueError("approved_remote_access must be a list of at most 1000 service IDs")
+        normalized = []
+        for item in value:
+            if not isinstance(item, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", item):
+                raise ValueError("approved_remote_access entries must be service catalog IDs")
+            normalized.append(item.casefold())
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("approved_remote_access must not contain duplicates")
+        return tuple(sorted(normalized))
 
     @field_validator("mail_domains", mode="before")
     @classmethod
@@ -459,6 +474,7 @@ class SiteFacts:
     directory_sync_addresses: tuple[str, ...] = ()
     ics_control_hosts: tuple[str, ...] = ()
     mail_domains: tuple[str, ...] = ()
+    approved_remote_access: tuple[str, ...] = ()
 
     @property
     def zeek(self) -> ZeekPolicy:
@@ -549,7 +565,7 @@ def _facts(document: _SiteDocument) -> SiteFacts:
     if not document.directory_sync_accounts_declared:
         content.pop("directory_sync_accounts_declared", None)
     for name in ("management_hosts", "domain_controller_addresses", "directory_sync_hosts", "directory_sync_addresses",
-                 "ics_control_hosts", "mail_domains"):
+                 "ics_control_hosts", "mail_domains", "approved_remote_access"):
         if name not in document.model_fields_set:
             content.pop(name, None)
     return SiteFacts(
@@ -567,6 +583,7 @@ def _facts(document: _SiteDocument) -> SiteFacts:
         document.directory_sync_addresses,
         document.ics_control_hosts,
         document.mail_domains,
+        document.approved_remote_access,
     )
 
 
