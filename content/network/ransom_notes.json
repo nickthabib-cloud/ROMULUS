@@ -1,7 +1,7 @@
 {
-  "version": "2026-11-10.1",
-  "description": "Curated exact whole filenames; not a comprehensive catalog.",
-  "attribution": "Contains information from NHS England, licenced under the current version of the Open Government Licence.",
+  "version": "2026-11-11.1",
+  "description": "Curated whole filenames and bounded anchored forms for observed ransom notes. Generic readmes and fn.txt are excluded. Family labels identify reporting sources, not attribution from a filename.",
+  "attribution": "Original factual compilation from the attributed primary reports. Contains NHS England information under the Open Government Licence. Vendor source copyrights remain with their owners; no source prose, code, or note contents are reproduced.",
   "terms_url": "https://digital.nhs.uk/about-nhs-digital/terms-and-conditions",
   "entries": [
     {
@@ -12,18 +12,90 @@
       "license_url": "https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/"
     },
     {
-      "name": "Readme!!!.txt",
-      "family": "Hello",
-      "source": "https://digital.nhs.uk/cyber-alerts/2021/cc-3753",
-      "license": "OGL-3.0",
-      "license_url": "https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/"
+      "name": "!!!-Restore-My-Files-!!!.txt",
+      "family": "LockBit Green",
+      "source": "https://www.fortinet.com/blog/threat-research/lockbit-most-prevalent-ransomware",
+      "license": "Factual filename only; source copyright retained; no source prose reproduced",
+      "license_url": "https://www.fortinet.com/corporate/about-us/legal"
     },
     {
-      "name": "README.html",
-      "family": "Zeoticus",
-      "source": "https://digital.nhs.uk/cyber-alerts/2021/cc-3752",
-      "license": "OGL-3.0",
-      "license_url": "https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/"
+      "name": "<9-character ransomware ID>.README.txt",
+      "pattern": "(?=[a-z0-9]{0,8}[0-9])(?=[a-z0-9]{0,8}[a-z])[a-z0-9]{9}\\.readme\\.txt",
+      "constraint": "Mixed letter/digit IDs only; all-letter and all-digit readme prefixes are excluded to avoid ordinary software filenames.",
+      "suffix": ".readme.txt",
+      "example": "a1b2c3d4e.README.txt",
+      "family": "LockBit 3.0",
+      "source": "https://www.ic3.gov/CSA/2023/230316.pdf",
+      "additional_source": "https://www.fortinet.com/blog/threat-research/lockbit-most-prevalent-ransomware",
+      "license": "US government factual information; original pattern transcription",
+      "license_url": "https://www.cisa.gov/about/website-policies"
+    },
+    {
+      "name": "RECOVER-<7-character extension>-FILES.txt",
+      "pattern": "recover-[a-z0-9]{7}[- ]files\\.txt",
+      "suffix": "files.txt",
+      "example": "RECOVER-a1b2c3d-FILES.txt",
+      "family": "ALPHV / BlackCat",
+      "source": "https://www.ic3.gov/CSA/2023/231219.pdf",
+      "additional_source": "https://www.microsoft.com/en-us/wdsi/threats/malware-encyclopedia-description?Name=Behavior:Win32/BlackCatExec.B&threatId=-2147154587",
+      "license": "US government factual information; vendor corroboration retains source copyright; no source prose reproduced",
+      "license_url": "https://www.cisa.gov/about/website-policies"
+    },
+    {
+      "name": "akira_readme.txt",
+      "family": "Akira",
+      "source": "https://www.gendigital.com/blog/insights/research/decrypted-akira-ransomware",
+      "license": "Factual filename only; source copyright retained; no source prose reproduced",
+      "license_url": "https://www.gendigital.com/legal"
+    },
+    {
+      "name": "akiranew.txt",
+      "family": "Akira",
+      "source": "https://www.ic3.gov/CSA/2024/240418.pdf",
+      "license": "US government factual information; original compilation",
+      "license_url": "https://www.cisa.gov/about/website-policies"
+    },
+    {
+      "name": "readme.BlackSuit.txt",
+      "family": "BlackSuit",
+      "source": "https://www.ic3.gov/CSA/2024/240807.pdf",
+      "license": "US government factual information; original compilation",
+      "license_url": "https://www.cisa.gov/about/website-policies"
+    },
+    {
+      "name": "CriticalBreachDetected.pdf",
+      "family": "Rhysida",
+      "source": "https://www.ic3.gov/CSA/2023/231115.pdf",
+      "license": "US government factual information; original compilation",
+      "license_url": "https://www.cisa.gov/about/website-policies"
+    },
+    {
+      "name": "!!!READ_ME_MEDUSA!!!.txt",
+      "family": "Medusa",
+      "source": "https://www.ic3.gov/CSA/2025/250312.pdf",
+      "license": "US government factual information; original compilation",
+      "license_url": "https://www.cisa.gov/about/website-policies"
+    },
+    {
+      "name": "CONTI_README.txt",
+      "family": "Conti",
+      "source": "https://www.csk.gov.in/alerts/ContiRansomware.html",
+      "license": "Factual filename only; source rights retained; no source prose reproduced",
+      "license_url": "https://www.csk.gov.in/alerts/ContiRansomware.html"
+    },
+    {
+      "name": "RyukReadMe.txt",
+      "family": "Ryuk",
+      "source": "https://www.microsoft.com/en-us/wdsi/threats/malware-encyclopedia-description?Name=Ransom:Win32/Ryuk",
+      "license": "Factual filename only; source copyright retained; no source prose reproduced",
+      "license_url": "https://www.microsoft.com/en-us/legal/terms-of-use"
+    },
+    {
+      "name": "uax291-readme.txt",
+      "family": "REvil / Sodinokibi (observed sample name)",
+      "source": "https://www.mcafee.com/blogs/other-blogs/mcafee-labs/mcafee-atr-analyzes-sodinokibi-aka-revil-ransomware-as-a-service-crescendo/",
+      "license": "Factual filename only; source copyright retained; no source prose reproduced",
+      "license_url": "https://www.mcafee.com/en-us/consumer-support/policy/legal.html"
     }
   ]
 }

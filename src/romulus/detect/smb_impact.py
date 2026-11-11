@@ -32,14 +32,23 @@ _FIELDS = frozenset({'source.ip', 'destination.ip', 'smb.action', 'smb.name', 's
                      'smb.path', 'smb.share', 'smb.tree', 'observer.name', 'zeek.log', 'suricata.event_type'})
 _WORD_TEMP = re.compile(r'~wrl[0-9a-f]{4,}\.tmp\Z', re.IGNORECASE)
 _WORD_DOCUMENTS = frozenset({'.doc', '.docx', '.docm'})
-_ACTIONS = frozenset({'FILE_RENAME', 'FILE_DELETE', 'FILE_CREATE'})
+_ACTIONS = frozenset({'FILE_RENAME', 'FILE_DELETE', 'FILE_CREATE', 'FILE_OPEN'})
 
 
 @lru_cache(maxsize=1)
 def note_names():
     path = Path(__file__).resolve().parents[3] / 'content/network/ransom_notes.json'
     content = json.loads(path.read_text(encoding='utf-8'))
-    return frozenset(item['name'].casefold() for item in content['entries'])
+    return (frozenset(item['name'].casefold() for item in content['entries'] if 'pattern' not in item),
+            tuple((item['suffix'], re.compile(item['pattern'])) for item in content['entries'] if 'pattern' in item))
+
+
+def _note_name(value):
+    # Avoid address parsing and state work for ordinary FILE_OPEN traffic. Only
+    # catalogued whole basenames are admitted; Unicode lookalikes stay distinct.
+    name = value.replace('\\', '/').rsplit('/', 1)[-1].casefold()
+    exact, patterns = note_names()
+    return name in exact or any(name.endswith(suffix) and pattern.fullmatch(name) for suffix, pattern in patterns)
 
 
 def _text(event, name):
@@ -316,7 +325,7 @@ class SmbImpact(Playbook):
                                        'does not establish uniform destructive renaming.')
                 elif new_ext and old_ext != new_ext:
                     entries.append(('extension', name, new_ext))
-        elif action == 'FILE_CREATE' and ntpath.basename(name) in note_names():
+        elif action in {'FILE_OPEN', 'FILE_CREATE'} and _note_name(name):
             entries.append(('notes', ntpath.dirname(name), ''))
         if not entries:
             return None
@@ -336,6 +345,8 @@ class SmbImpact(Playbook):
                     continue
                 self.evaluated += 1
                 if action not in _ACTIONS:
+                    continue
+                if action in {'FILE_OPEN', 'FILE_CREATE'} and not _note_name(_text(event, 'smb.name')):
                     continue
                 selected = self._select(event, action)
                 if selected is None:
@@ -417,7 +428,7 @@ class SmbImpact(Playbook):
             claim = (f"SMB client {client} renamed or deleted {best['volume']} distinct filenames on "
                      f"{server}/{share} within five minutes.")
         else:
-            claim = (f"SMB client {client} recorded curated ransom-note filename creations in "
+            claim = (f"SMB client {client} opened or created curated ransom-note filenames in "
                      f"{best['directories']} distinct directories on {server}/{share} within five minutes.")
         filter_kind = {'extension': 'extension', 'volume': 'volume', 'notes': 'notes'}[kind]
         condition = "json_extract(value,'$[0]')=?"
@@ -440,6 +451,7 @@ class SmbImpact(Playbook):
             'Distinct canonical destination/current filenames are counted, never actions or raw-record multiplicity.',
             'Zeek recent_files deduplicates repeated operations for approximately 3 minutes; recorded counts can understate activity.',
             'Robocopy /MOV, archive jobs, build systems, synchronization and user bulk renames are plausible benign causes.',
+            'Ransom-note names can also be opened or copied legitimately during incident response; names do not prove contents.',
             'Only up to four compact events and three native references per event are cited; citation sampling is partial.',
             'Intervals of at most five minutes include entire timestamp groups; late records and interval starts are replayed in time order.',
             *self.coverage_notes(),

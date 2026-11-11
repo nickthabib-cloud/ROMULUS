@@ -115,7 +115,7 @@ def test_missing_previous_name_volume_only_and_coverage(rule):
 
 @pytest.mark.parametrize("count,expected", [(9, False), (10, True), (11, True)])
 def test_note_directory_boundary(rule, count, expected):
-    rows = [smb(i, action="FILE_CREATE", name=f"dir{i}/Restore-My-Files.txt", previous=False)
+    rows = [smb(i, action="FILE_OPEN", name=f"dir{i}/Restore-My-Files.txt", previous=False)
             for i in range(count)]
     matches = finish(rule, rows)
     assert bool(matches) == expected
@@ -123,10 +123,10 @@ def test_note_directory_boundary(rule, count, expected):
         assert (matches[0].proposed_lane, matches[0].severity) == ("lead", "high")
 
 
-def test_notes_match_whole_names_and_creations_only(rule):
-    rows = [smb(i, action="FILE_CREATE", name=f"dir{i}/README_DECRYPT_note_analysis.md") for i in range(30)]
-    rows += [smb(i + 30, action="FILE_OPEN", name=f"dir{i}/Restore-My-Files.txt") for i in range(30)]
-    rows += [smb(i + 60, action="FILE_CREATE", name="same/Restore-My-Files.txt") for i in range(30)]
+def test_notes_match_whole_names_and_open_create_actions_only(rule):
+    rows = [smb(i, action="FILE_OPEN", name=f"dir{i}/README_DECRYPT_note_analysis.md") for i in range(30)]
+    rows += [smb(i + 30, action="FILE_CLOSE", name=f"dir{i}/Restore-My-Files.txt") for i in range(30)]
+    rows += [smb(i + 60, action="FILE_OPEN", name="same/Restore-My-Files.txt") for i in range(30)]
     assert not finish(rule, rows)
 
 
@@ -139,7 +139,8 @@ def test_catalog_is_versioned_attributed_and_every_name_matches(tmp_path):
         rule = SmbImpact()
         rule.budget = StateBudget(tmp_path, reserve=0, disk_total=128 * 2**20)
         try:
-            [match] = finish(rule, [smb(i, action="FILE_CREATE", name=f"dir{i}/{entry['name']}")
+            name = entry.get('example', entry['name'])
+            [match] = finish(rule, [smb(i, action="FILE_OPEN", name=f"dir{i}/{name}")
                                     for i in range(10)])
             assert match.proposed_lane == "lead"
         finally:
@@ -190,8 +191,8 @@ def test_groups_never_combine_clients_servers_or_shares(rule):
 
 
 def test_unc_separator_case_dot_and_directory_canonicalization(rule):
-    rows = [smb(i, action="FILE_CREATE", name=rf"DIR{i}\.\Restore-My-Files.txt") for i in range(9)]
-    rows += [smb(20 + i, action="FILE_CREATE", name=f"//SERVER/DOCS/dir{i}/RESTORE-MY-FILES.TXT",
+    rows = [smb(i, action="FILE_OPEN", name=rf"DIR{i}\.\Restore-My-Files.txt") for i in range(9)]
+    rows += [smb(20 + i, action="FILE_OPEN", name=f"//SERVER/DOCS/dir{i}/RESTORE-MY-FILES.TXT",
                  share="//SERVER/DOCS/") for i in range(9)]
     assert not finish(rule, rows)
 
@@ -241,7 +242,7 @@ def test_completed_positive_survives_a_later_replay_refusal(rule, monkeypatch):
 
 
 def test_unc_parent_traversal_cannot_change_observed_share(rule):
-    rows = [smb(i, action="FILE_CREATE", name=rf"\\server\docs\..\other\dir{i}\Restore-My-Files.txt",
+    rows = [smb(i, action="FILE_OPEN", name=rf"\\server\docs\..\other\dir{i}\Restore-My-Files.txt",
                 share=r"\\server\other") for i in range(10)]
     assert not finish(rule, rows)
     assert rule.missing_required == 10
