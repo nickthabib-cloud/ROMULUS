@@ -1,0 +1,787 @@
+{
+  "schema": "romulus.network-services@1",
+  "version": "3",
+  "license": "CC0-1.0 (original factual compilation only)",
+  "source_policy": "Original compilation of public domain-name facts, with attribution. No upstream code, prose, or catalog imported. Source rights and trademarks remain with their owners; LicenseRef-Source-Rights-Retained does not claim an upstream reuse license.",
+  "scope": "Positive-only service-name observations. Shared provider infrastructure and arbitrary customer domains are excluded. A match does not establish execution, a successful session, maliciousness, or a transfer.",
+  "entries": [
+    {
+      "id": "anydesk",
+      "name": "AnyDesk",
+      "category": "remote_access",
+      "suffixes": [
+        "net.anydesk.com"
+      ],
+      "attack": [
+        "T1219.002"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://support.anydesk.com/firewall",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ]
+    },
+    {
+      "id": "teamviewer",
+      "name": "TeamViewer",
+      "category": "remote_access",
+      "suffixes": [
+        "teamviewer.com"
+      ],
+      "attack": [
+        "T1219.002"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://www.teamviewer.com/en-us/global/support/knowledge-base/teamviewer-remote/troubleshooting/ports-used-by-teamviewer/",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ]
+    },
+    {
+      "id": "screenconnect",
+      "name": "ScreenConnect / ConnectWise",
+      "category": "remote_access",
+      "suffixes": [
+        "screenconnect.com"
+      ],
+      "attack": [
+        "T1219.002"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://www.connectwise.com/globalassets/media/documents/connectwisecontrolsecurityevaluationmatrix.pdf",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ]
+    },
+    {
+      "id": "netsupport",
+      "name": "NetSupport",
+      "category": "remote_access",
+      "suffixes": [
+        "netsupportmanager.com",
+        "netsupportsoftware.com"
+      ],
+      "attack": [
+        "T1219.002"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://resources.netsupportsoftware.com/resources/manualpdfs/nsm_manual_uk.pdf",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ],
+      "notes": "Vendor-hosted names only; arbitrary self-hosted gateways are outside this catalog. Website or licensing traffic also matches; presence does not establish a remote-control session."
+    },
+    {
+      "id": "atera",
+      "name": "Atera",
+      "category": "remote_access",
+      "suffixes": [
+        "atera.com"
+      ],
+      "attack": [
+        "T1219.002"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://support.atera.com/hc/en-us/articles/360015461139-Firewall-settings-for-Atera-s-integrations",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ]
+    },
+    {
+      "id": "splashtop",
+      "name": "Splashtop",
+      "category": "remote_access",
+      "suffixes": [
+        "splashtop.com",
+        "splashtop.eu"
+      ],
+      "attack": [
+        "T1219.002"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://support-splashtopbusiness.splashtop.com/hc/en-us/articles/115001811966-What-Are-the-Firewall-Exceptions-and-IP-addresses-of-Splashtop-Servers-Services",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ]
+    },
+    {
+      "id": "rustdesk",
+      "name": "RustDesk public relays",
+      "category": "remote_access",
+      "suffixes": [
+        "rustdesk.com"
+      ],
+      "attack": [
+        "T1219.002"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://github.com/rustdesk/rustdesk/discussions/1488",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ],
+      "notes": "Vendor-hosted names only; arbitrary self-hosted gateways are outside this catalog. Website or licensing traffic also matches; presence does not establish a remote-control session."
+    },
+    {
+      "id": "kaseya",
+      "name": "Kaseya",
+      "category": "remote_access",
+      "suffixes": [
+        "kaseya.net"
+      ],
+      "attack": [
+        "T1219.002"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://www.kaseya.com/legal/vulnerability-disclosure-policy/",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ]
+    },
+    {
+      "id": "simplehelp",
+      "name": "SimpleHelp",
+      "category": "remote_access",
+      "suffixes": [
+        "simple-help.com"
+      ],
+      "attack": [
+        "T1219.002"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://guides.simple-help.com/licensing-guide",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ],
+      "notes": "Vendor-hosted names only; arbitrary self-hosted gateways are outside this catalog. Website or licensing traffic also matches; presence does not establish a remote-control session."
+    },
+    {
+      "id": "action1",
+      "name": "Action1",
+      "category": "remote_access",
+      "suffixes": [
+        "action1.com"
+      ],
+      "attack": [
+        "T1219.002"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://www.action1.com/documentation/firewall-configuration/",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ]
+    },
+    {
+      "id": "remote-utilities",
+      "name": "Remote Utilities",
+      "category": "remote_access",
+      "suffixes": [
+        "remoteutilities.com"
+      ],
+      "attack": [
+        "T1219.002"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://www.remoteutilities.com/support/docs/internet-id-connection-settings/",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ],
+      "notes": "Vendor-hosted names only; arbitrary self-hosted gateways are outside this catalog. Website or licensing traffic also matches; presence does not establish a remote-control session."
+    },
+    {
+      "id": "goto",
+      "name": "GoTo remote access",
+      "category": "remote_access",
+      "suffixes": [
+        "gotoassist.com",
+        "fastsupport.com",
+        "helpme.net",
+        "gotoassist.me",
+        "gotoassist.at",
+        "desktopstreaming.com",
+        "logmeinrescue.com"
+      ],
+      "attack": [
+        "T1219.002"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://support.logmeininc.com/nl/gotoassist-remote-support/help/what-should-i-allow-on-my-firewall-for-gotoassist-remote-support-v4",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        },
+        {
+          "url": "https://secure.logmeinrescue.com/welcome/documents/pdfs/rescue_admin_center_userguide.pdf",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ]
+    },
+    {
+      "id": "zoho-assist",
+      "name": "Zoho Assist",
+      "category": "remote_access",
+      "suffixes": [
+        "zohoassist.com",
+        "zohoassist.com.cn"
+      ],
+      "attack": [
+        "T1219.002"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://www.zoho.com/assist/help/troubleshooting/firewall-configuration.html",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ]
+    },
+    {
+      "id": "ngrok",
+      "name": "ngrok",
+      "category": "tunnelling",
+      "suffixes": [
+        "ngrok.app",
+        "ngrok.dev",
+        "ngrok.pizza",
+        "ngrok-free.app",
+        "ngrok-free.dev",
+        "ngrok.io",
+        "connect.ngrok-agent.com",
+        "connect.ap.ngrok-agent.com",
+        "connect.au.ngrok-agent.com",
+        "connect.eu.ngrok-agent.com",
+        "connect.in.ngrok-agent.com",
+        "connect.jp.ngrok-agent.com",
+        "connect.sa.ngrok-agent.com",
+        "connect.us-cal-1.ngrok-agent.com",
+        "connect.us.ngrok-agent.com",
+        "tunnel.ap.ngrok.com",
+        "tunnel.au.ngrok.com",
+        "tunnel.eu.ngrok.com",
+        "tunnel.in.ngrok.com",
+        "tunnel.jp.ngrok.com",
+        "tunnel.sa.ngrok.com",
+        "tunnel.us-cal-1.ngrok.com",
+        "tunnel.us.ngrok.com"
+      ],
+      "attack": [
+        "T1572",
+        "T1090.002"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://ngrok.com/docs/gateway/domains",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        },
+        {
+          "url": "https://ngrok.com/docs/gateway/agent/connectivity",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        },
+        {
+          "url": "https://s3.amazonaws.com/dns.ngrok.com/tunnel.json",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ]
+    },
+    {
+      "id": "cloudflare-tunnel",
+      "name": "Cloudflare Tunnel",
+      "category": "tunnelling",
+      "suffixes": [
+        "trycloudflare.com",
+        "argotunnel.com"
+      ],
+      "attack": [
+        "T1572",
+        "T1090.002"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        },
+        {
+          "url": "https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/tunnel-with-firewall/",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ]
+    },
+    {
+      "id": "localtonet",
+      "name": "LocalToNet",
+      "category": "tunnelling",
+      "suffixes": [
+        "localtonet.com"
+      ],
+      "attack": [
+        "T1572",
+        "T1090.002"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://localtonet.com/",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ]
+    },
+    {
+      "id": "serveo",
+      "name": "Serveo",
+      "category": "tunnelling",
+      "suffixes": [
+        "serveo.net"
+      ],
+      "attack": [
+        "T1572",
+        "T1090.002"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://serveo.net/",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ]
+    },
+    {
+      "id": "localhost-run",
+      "name": "localhost.run",
+      "category": "tunnelling",
+      "suffixes": [
+        "localhost.run",
+        "lhr.life"
+      ],
+      "attack": [
+        "T1572",
+        "T1090.002"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://localhost.run/",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ]
+    },
+    {
+      "id": "pinggy",
+      "name": "Pinggy",
+      "category": "tunnelling",
+      "suffixes": [
+        "pinggy.io"
+      ],
+      "attack": [
+        "T1572",
+        "T1090.002"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://pinggy.io/",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ]
+    },
+    {
+      "id": "playit",
+      "name": "playit.gg",
+      "category": "tunnelling",
+      "suffixes": [
+        "playit.gg"
+      ],
+      "attack": [
+        "T1572",
+        "T1090.002"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://playit.gg/",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ]
+    },
+    {
+      "id": "tailscale",
+      "name": "Tailscale control plane",
+      "category": "tunnelling",
+      "suffixes": [
+        "login.tailscale.com",
+        "controlplane.tailscale.com",
+        "log.tailscale.com"
+      ],
+      "attack": [
+        "T1572",
+        "T1090.002"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://tailscale.com/docs/reference/faq/firewall-ports",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ]
+    },
+    {
+      "id": "zerotier",
+      "name": "ZeroTier control plane",
+      "category": "tunnelling",
+      "suffixes": [
+        "my.zerotier.com"
+      ],
+      "attack": [
+        "T1572",
+        "T1090.002"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://docs.zerotier.com/what-is-a-controller/",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ]
+    },
+    {
+      "id": "visual-studio-tunnels",
+      "name": "Visual Studio dev tunnels",
+      "category": "ide_tunnel",
+      "suffixes": [
+        "devtunnels.ms",
+        "tunnels.api.visualstudio.com"
+      ],
+      "attack": [
+        "T1219.001"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://learn.microsoft.com/en-us/azure/developer/dev-tunnels/security",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ]
+    },
+    {
+      "id": "interactsh",
+      "name": "Interactsh / OAST",
+      "category": "callback",
+      "suffixes": [
+        "oast.pro",
+        "oast.live",
+        "oast.site",
+        "oast.online",
+        "oast.fun",
+        "oast.me",
+        "interactsh.com"
+      ],
+      "attack": [
+        "T1071",
+        "T1567"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://github.com/projectdiscovery/interactsh",
+          "license": "MIT (upstream code; only domain facts referenced)"
+        }
+      ]
+    },
+    {
+      "id": "burp-collaborator",
+      "name": "Burp Collaborator",
+      "category": "callback",
+      "suffixes": [
+        "burpcollaborator.net",
+        "oastify.com"
+      ],
+      "attack": [
+        "T1071",
+        "T1567"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://portswigger.net/burp/documentation/desktop/tools/collaborator",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ]
+    },
+    {
+      "id": "dnslog",
+      "name": "DNSLog platform",
+      "category": "callback",
+      "suffixes": [
+        "dnslog.org"
+      ],
+      "attack": [
+        "T1071",
+        "T1567"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://dnslog.org/",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ]
+    },
+    {
+      "id": "webhook-site",
+      "name": "Webhook.site",
+      "category": "callback",
+      "suffixes": [
+        "webhook.site",
+        "dnshook.site"
+      ],
+      "attack": [
+        "T1071",
+        "T1567"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://webhook.site/",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ]
+    },
+    {
+      "id": "request-catcher",
+      "name": "Request Catcher",
+      "category": "callback",
+      "suffixes": [
+        "requestcatcher.com"
+      ],
+      "attack": [
+        "T1071",
+        "T1567"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://requestcatcher.com/",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ]
+    },
+    {
+      "id": "transfer-sh",
+      "name": "transfer.sh",
+      "category": "file_sharing",
+      "suffixes": [
+        "transfer.sh"
+      ],
+      "attack": [
+        "T1567.002"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://github.com/dutchcoders/transfer.sh",
+          "license": "MIT (upstream code; only domain facts referenced)"
+        }
+      ]
+    },
+    {
+      "id": "temp-sh",
+      "name": "temp.sh",
+      "category": "file_sharing",
+      "suffixes": [
+        "temp.sh"
+      ],
+      "attack": [
+        "T1567.002"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://temp.sh/",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ]
+    },
+    {
+      "id": "gofile",
+      "name": "Gofile",
+      "category": "file_sharing",
+      "suffixes": [
+        "gofile.io"
+      ],
+      "attack": [
+        "T1567.002"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://gofile.io/",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ]
+    },
+    {
+      "id": "mega",
+      "name": "MEGA",
+      "category": "file_sharing",
+      "suffixes": [
+        "mega.nz",
+        "g.api.mega.co.nz",
+        "userstorage.mega.co.nz"
+      ],
+      "attack": [
+        "T1567.002"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://github.com/meganz/webclient",
+          "license": "LicenseRef-MEGA-Limited-Code-Review-Licence (upstream code; only domain facts referenced)",
+          "license_url": "https://github.com/meganz/webclient/blob/master/LICENCE.md"
+        },
+        {
+          "url": "https://github.com/meganz/sdk/blob/master/src/megaclient.cpp",
+          "license": "BSD-2-Clause (upstream code; only domain facts referenced)"
+        },
+        {
+          "url": "https://mega.io/bug-bounty",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ]
+    },
+    {
+      "id": "file-io",
+      "name": "file.io",
+      "category": "file_sharing",
+      "suffixes": [
+        "file.io"
+      ],
+      "attack": [
+        "T1567.002"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://www.file.io/",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ]
+    },
+    {
+      "id": "dnslog-cn",
+      "name": "DNSLog.cn",
+      "category": "callback",
+      "suffixes": [
+        "dnslog.cn"
+      ],
+      "attack": [
+        "T1071",
+        "T1567"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://github.com/fullhunt/log4j-scan",
+          "license": "MIT (upstream scanner documentation; only service facts referenced)"
+        }
+      ]
+    },
+    {
+      "id": "ceye",
+      "name": "Ceye",
+      "category": "callback",
+      "suffixes": [
+        "ceye.io"
+      ],
+      "attack": [
+        "T1071",
+        "T1567"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://github.com/knownsec/pocsuite3/blob/master/pocsuite3/modules/ceye/__init__.py",
+          "license": "GPL-2.0 (upstream code; only domain facts referenced)"
+        }
+      ]
+    },
+    {
+      "id": "pastebin",
+      "name": "Pastebin",
+      "category": "file_sharing",
+      "suffixes": [
+        "pastebin.com"
+      ],
+      "attack": [
+        "T1567.003"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://attack.mitre.org/techniques/T1567/003/",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ],
+      "notes": "Text storage and staging service; a name observation does not establish an upload or malicious use."
+    },
+    {
+      "id": "paste-ee",
+      "name": "Paste.ee",
+      "category": "file_sharing",
+      "suffixes": [
+        "paste.ee"
+      ],
+      "attack": [
+        "T1567.003"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://hunt.io/blog/pasteee-xworm-asyncrat-infrastructure",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ],
+      "notes": "Text storage service with documented payload staging abuse; a name observation does not establish an upload or malicious use."
+    },
+    {
+      "id": "hastebin",
+      "name": "Hastebin",
+      "category": "file_sharing",
+      "suffixes": [
+        "hastebin.com"
+      ],
+      "attack": [
+        "T1567.003"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://attack.mitre.org/detectionstrategies/DET0284/",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ],
+      "notes": "Text storage and staging service; a name observation does not establish an upload or malicious use."
+    }
+  ]
+}

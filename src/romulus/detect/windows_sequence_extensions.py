@@ -11,6 +11,7 @@ from romulus.detect.base import Match, pf
 from romulus.detect.bounded import StateExhausted
 from romulus.detect.netdef import current
 from romulus.detect.windows_compact_rows import CompactWindowsRows
+from romulus.detect.windows_ecar import class_discriminator
 from romulus.detect.windows_events import WindowsEventRule, basename, integer
 from romulus.detect.windows_path_data import installation_parts
 from romulus.detect.windows_registry_events import _target
@@ -372,7 +373,7 @@ class ParentProcessSpoofing(_Sequence):
                     and image and image != 'system' and source and target
                     and str(source).casefold() != str(target).casefold()):
                 yield from self._accept(event)
-        elif event.family == 'process_exec' and event.get('event.code') == 1:
+        elif event.family == 'process_exec' and class_discriminator(event, 1, 'process_exec'):
             parent, child = event.get('process.parent.guid'), event.get('process.guid')
             if child:
                 known = row_key('creation', event.host, str(child).casefold())
@@ -594,7 +595,7 @@ class SamAdminRegistryWithoutAudit(_Sequence):
                 and event.outcome != Outcome.failure
                 and str(event.get('account.group_id') or '').casefold() == 's-1-5-32-544'):
             self.rows.put(row_key('audit', event.host), event)
-        elif event.family == 'registry_change' and event.get('event.code') == 13:
+        elif event.family == 'registry_change' and class_discriminator(event, 13, 'registry_change'):
             target = _target(event)
             if (target and target.root == 'hkey_local_machine' and target.action == 'written'
                     and target.key == ('sam', 'sam', 'domains', 'builtin', 'aliases', '00000220')
@@ -650,7 +651,7 @@ class RdpRunMruWrite(_Sequence):
         if (event.family == 'auth' and event.get('event.code') == 4624
                 and event.get('auth.logon_type') == 10 and event.outcome == Outcome.success):
             self.rows.put(row_key('rdp', event.host), event)
-        elif event.family == 'registry_change' and event.get('event.code') == 13 and runmru_write(event):
+        elif event.family == 'registry_change' and class_discriminator(event, 13, 'registry_change') and runmru_write(event):
             self.rows.put(row_key('mru', event.host), event)
 
     def finalize(self):
@@ -666,6 +667,7 @@ class RdpRunMruWrite(_Sequence):
 
 
 class SmbHostDiscovery(_Sequence):
+    ecar_compatible = True
     id, title = 'win.smb_host_discovery', 'One host connected to many internal SMB hosts'
     families = ('net_socket',)
     windows_event_classes = ((SYSMON_CHANNEL, SYSMON, 3),)
@@ -688,7 +690,7 @@ class SmbHostDiscovery(_Sequence):
             self._dirty_smb = set()
 
     def observe(self, event):
-        if (event.get('event.code') != 3 or event.get('destination.port') != 445
+        if (not class_discriminator(event, 3, 'net_socket') or event.get('destination.port') != 445
                 or event.get('network.direction') != 'egress'
                 or event.get('network.transport') != 'tcp'):
             return

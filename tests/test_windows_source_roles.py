@@ -348,7 +348,8 @@ def test_live_profile_marks_host_inventory_partial_at_page_budget(monkeypatch):
             return {
                 "hits": {"total": {"value": 501}},
                 "aggregations": {
-                    "tmin": {}, "tmax": {}, "ds": {"buckets": []},
+                    "tmin": {}, "tmax": {},
+                    "ds": {"buckets": [{"key": "windows.security", "doc_count": 501}]},
                     "hosts": {
                         "buckets": [
                             {"key": {"host": f"ws{number:04d}"}, "doc_count": 1}

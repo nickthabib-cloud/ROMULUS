@@ -145,7 +145,11 @@ def test_uncounted_datasetless_sources_use_unknown_and_conservative_coverage():
     ({"zeek.conn": 7}, {"source.ip": "ip", "destination.ip": "ip"}),
 ])
 def test_existing_profile_shape_and_hash_material_have_no_new_empty_fields(inventory, extra):
-    profile, _ = build_profile(ProfileClient(inventory, fields={**FIELDS, **extra}), "logs")
+    # The Windows mapping's message field needs the new bounded non-Windows-text source check. Zero keeps the
+    # original profile material unchanged; this fixture is intentionally a pure Windows source.
+    samples = [{"hits": {"total": {"value": count, "relation": "eq"}, "hits": []}} for count in (7, 0)] \
+        if "winlog.channel" in extra else []
+    profile, _ = build_profile(ProfileClient(inventory, samples=samples, fields={**FIELDS, **extra}), "logs")
     assert profile.datasets == inventory
     assert "linux_text" not in profile.model_dump()
     assert profile.notes == []
@@ -250,7 +254,8 @@ def test_zero_datasetless_count_keeps_legacy_profile_hash_and_shape():
     fields = {**FIELDS, "input.type": "keyword"}
     client = ProfileClient({"system.auth": 7}, [_sample([], "", total=0)], fields)
     profile, _ = build_profile(client, "logs")
-    assert len(client.bodies) == 2
+    assert len(client.bodies) == 3
+    assert "text_missing_host" in client.bodies[-1]["aggs"]
     assert not client.samples
     assert profile.datasets == {"system.auth": 7}
     assert "linux_text" not in profile.model_dump()
@@ -358,7 +363,8 @@ def test_zero_secondary_and_datasetless_counts_keep_legacy_profile_unchanged():
     client = ProfileClient({"system.auth": 7}, [_sample([], "", total=0)], fields,
                            secondary=[_secondary_inventory({})])
     profile, _ = build_profile(client, "logs")
-    assert len(client.bodies) == 3 and not client.samples and not client.secondary
+    assert len(client.bodies) == 4 and not client.samples and not client.secondary
+    assert "text_missing_host" in client.bodies[-1]["aggs"]
     assert profile.datasets == {"system.auth": 7}
     assert profile.notes == []
     assert "linux_text" not in profile.model_dump()

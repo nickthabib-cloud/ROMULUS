@@ -119,3 +119,13 @@ def nxlog_windows_group(contract):
     if contract.supports("winlog.channel", "missing"):
         group.append(Predicate(field="winlog.channel", op="missing"))
     return group
+
+
+def evtx_json_windows_group(contract):
+    """The raw EVTX layout remains selectable when class values cannot be aggregated or filtered."""
+    marker = "evtx.provider" if contract.supports("evtx.provider", "exists") else "Event.System.Channel"
+    if not contract.windows_shapes or not all(contract.supports(name, "exists") for name in (
+            marker, "Event.System.Computer")):
+        return None
+    return [Predicate(field=marker, op="exists"),
+            Predicate(field="Event.System.Computer", op="exists")]

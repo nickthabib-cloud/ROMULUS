@@ -15,6 +15,7 @@ from typing import ClassVar
 
 from romulus.detect.base import LANES, Match, Playbook, pf
 from romulus.detect.bounded import StateExhausted, register_store
+from romulus.detect.network_producers import ZEEK_ONLY, rule_reads
 from romulus.evidence.typed import RawRef, TypedEvent
 from romulus.hunt.citations import COMPACT_CITATION_NOTE, compact_event, expand_event
 
@@ -368,10 +369,15 @@ class ZeekWindowRule(Playbook, ABC):
     anchor_class = "network_observation"
     state_slice = "strong"
     assures_negative = False
-    positive_only_reason = "Zeek window observations are positive-only; missing outcomes and partial sensor visibility cannot establish absence."
+    positive_only_reason = "Network window observations are positive-only; missing outcomes and partial sensor visibility cannot establish absence."
+    # The producers whose records this rule counts (romulus.detect.network_producers).
+    producers: ClassVar[tuple[str, ...]] = ZEEK_ONLY
     seconds: ClassVar[float] = 60
     threshold: ClassVar[int] = 1
     distinct: ClassVar[bool] = False
+    # Keep each sensor's rows apart even when counting distinct members: a rule that pairs one row's outcome with
+    # another's must not pair one sensor's success with the other sensor's record of the same exchange.
+    per_sensor: ClassVar[bool] = False
     citation_fields: ClassVar[tuple[str, ...]] = ()
     # Success selection/account proof is deliberately separate from potentially
     # large attempt citation facts. Subclasses declare facts needed by describe.
@@ -428,9 +434,12 @@ class ZeekWindowRule(Playbook, ABC):
                 self.rows.flush()
                 yield match
 
+    def _reads(self, event):
+        return rule_reads(event, self.producers)
+
     def _consume(self, events):
         for event in sorted(events, key=lambda item: (item.ts, item.id)):
-            if event.family not in self.families or not event.normalizer.startswith("zeek-ecs@"):
+            if event.family not in self.families or not self._reads(event):
                 continue
             if not self._events_pre_scoped:
                 self.os_applicable += 1
@@ -445,6 +454,12 @@ class ZeekWindowRule(Playbook, ABC):
             key, member, role = selection
             if not isinstance(key, tuple) or not isinstance(member, str) or role not in {"attempt", "success"}:
                 raise ValueError("Zeek select must return a tuple key, text member and attempt|success role")
+            producer = event.normalizer.partition("@")[0]
+            if (not self.distinct or self.per_sensor) and producer != "zeek-ecs":
+                # Two sensors watching one link both record each request: a count of raw references is kept per
+                # sensor so neither doubles it. Distinct-member counts are sets and are shared, unless the rule
+                # pairs outcomes across rows (`per_sensor`).
+                key = (producer, *key)
             key = json.dumps(key, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
             try:
                 stored = self.rows.put(key, event, member, role)

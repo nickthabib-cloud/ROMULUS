@@ -7,6 +7,7 @@ import re
 
 from romulus.detect.windows_behavior import BehaviorFleetRule
 from romulus.detect.windows_cmdline import split_argv
+from romulus.detect.windows_ecar import class_discriminator, ecar_record
 from romulus.detect.windows_events import WindowsEventRule, basename, components, integer, signal
 from romulus.detect.windows_memory_events import _installed_path
 from romulus.evidence.windows_catalog import SECURITY, SYSMON, SYSMON_CHANNEL
@@ -110,6 +111,7 @@ class LoopbackRemoteService(BehaviorFleetRule):
 
 
 class LoopbackServiceConnection(WindowsEventRule):
+    ecar_compatible = True
     id = 'win.loopback_service_connection'
     title = 'A nonstandard process connected to a loopback remote-management service'
     families = ('net_socket',)
@@ -121,7 +123,7 @@ class LoopbackServiceConnection(WindowsEventRule):
     research = ('https://learn.microsoft.com/sysinternals/downloads/sysmon',)
 
     def judge(self, event):
-        if event.get('event.code') != 3:
+        if not class_discriminator(event, 3, 'net_socket'):
             return []
         image = event.get('process.executable_key') or event.get('process.executable')
         if not image:
@@ -149,6 +151,7 @@ class LoopbackServiceConnection(WindowsEventRule):
 
 
 class PortproxyConfiguration(WindowsEventRule):
+    ecar_compatible = True
     id = 'win.portproxy_configuration'
     version = "2"
     title = 'Windows port-proxy configuration was requested or written'
@@ -161,9 +164,11 @@ class PortproxyConfiguration(WindowsEventRule):
 
     def judge(self, event):
         if event.family == 'registry_change':
-            if event.get('event.code') != 13:
+            if not class_discriminator(event, 13, 'registry_change'):
                 return []
             path = event.get('registry.path') or event.get('registry.path_key')
+            if ecar_record(event) and event.has('registry.value_name'):
+                path = str(path or '').rstrip('\\') + '\\' + str(event.get('registry.value_name'))
             stem, separator, listener = str(path or '').rpartition('\\')
             parts = components(stem)
             if not separator or len(parts) != 7 or parts[0] not in {'hklm', 'hkey_local_machine'} or parts[1] != 'system':
@@ -175,7 +180,8 @@ class PortproxyConfiguration(WindowsEventRule):
             mode = parts[5]
             high = _forward_endpoint(listener, int(mode[1])) and _forward_endpoint(event.get('registry.value'), int(mode[5]))
             return [signal(event, 'portproxy_registry', f'A Windows port-proxy forwarding value was written at {self.describe(path)}',
-                           self.attack, ('registry.path', 'registry.path_key', 'registry.value'), lane='high' if high else 'lead',
+                           self.attack, ('registry.path', 'registry.path_key', 'registry.value',
+                                         *(('registry.value_name',) if ecar_record(event) else ())), lane='high' if high else 'lead',
                            content=json.dumps([path, event.get('registry.value')]),
                            notes=('The registry write is observed; active forwarding or successful access is not established.',))]
         image = event.get('process.executable_key') or event.get('process.executable')

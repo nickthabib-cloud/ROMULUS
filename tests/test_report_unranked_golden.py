@@ -40,3 +40,17 @@ def test_a_hunt_without_ranks_renders_exactly_as_before():
     assert "rule estimate" not in markdown and "Reported entities" not in markdown
     assert hashlib.sha256(markdown.encode()).hexdigest() == MARKDOWN_SHA256
     assert hashlib.sha256(document).hexdigest() == DOCX_SHA256
+
+
+def test_a_hunt_with_a_pack_digest_names_it_in_the_report_versions(monkeypatch):
+    repo, _finding_id = _repo_with_finding()
+    stored = repo.get_hunt
+    def with_digest(hunt_id):
+        hunt = stored(hunt_id)
+        hunt["manifest"]["pack"] = {**hunt["manifest"]["pack"], "digest": "a" * 64}
+        return hunt
+    monkeypatch.setattr(repo, "get_hunt", with_digest)
+    versions = build_manifest(repo, "h1", "test")["versions"]
+    assert versions["pack_digest"] == "a" * 64
+    assert '"pack_digest": "' + "a" * 64 + '"' in render({**build_manifest(repo, "h1", "test"),
+                                                         "revision": {"number": 1, "id": "h1-r1", "supersedes": None}})

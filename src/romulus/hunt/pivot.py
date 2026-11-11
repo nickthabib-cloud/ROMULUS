@@ -183,6 +183,8 @@ def _supports(contract: FieldContract, field: str, op: str = "eq") -> bool:
 def _windows_source_groups(
     contract: FieldContract, families: set[str] | None = None,
 ) -> list[list[Predicate]]:
+    if contract.ecar and all(contract.supports(name, "exists") for name in ("ecar.object", "ecar.action")):
+        return [[Predicate(field="ecar.object", op="exists"), Predicate(field="ecar.action", op="exists")]]
     datasets = datasets_for_families(families) if families else WINDOWS_HOST_DATASETS
     channels = channels_for_families(families) if families else WINDOWS_CHANNELS
     groups: list[list[Predicate]] = []
@@ -195,6 +197,11 @@ def _windows_source_groups(
         # NXLog's flat records name no dataset and may spell a channel in any case: selected by their shape, which
         # also selects them where neither a dataset nor a channel is searchable (Channel mapped as text alone)
         groups.append(flat)
+    from romulus.hunt.windows_filters import evtx_json_windows_group
+
+    evtx = evtx_json_windows_group(contract) if datasets or channels else None
+    if evtx is not None:
+        groups.append(evtx)
     return groups
 
 
@@ -569,6 +576,56 @@ def _nxlog_mixed_coverage(contracts: dict[str, FieldContract], request: ToolRequ
             if contract.nxlog_mixed and not _is_network(target, contract)]
 
 
+TEXT_HOST_QUERY_REASON = "text lines may carry their host only in the syslog header"
+
+
+def _text_host_coverage(contracts, dataset_inventory, intents, *, header_host=False) -> list[PivotCoverage]:
+    """Keep host-name pushdowns honest when typed hosts can come from unindexed text headers.
+
+    Indexed matches remain useful, but neither their absence nor an exhaustive backend response proves that
+    every matching typed host was searched. One bounded coverage cell per target/window names that omission.
+    """
+    gaps = {}
+    for intent in intents:
+        predicates = [*intent.filters, *(item for group in intent.any_of for item in group)]
+        if not any(item.field == "host.name" and item.op in {"eq", "in"} for item in predicates):
+            continue
+        contract = contracts[intent.target]
+        if _is_network(intent.target, contract):
+            continue
+        if contract.text_missing_host_records == 0:
+            continue
+        selected = PivotExecutor._intent_datasets(intent)
+        if not header_host and selected and not selected.intersection({"linux.text", "linux.syslog"}):
+            continue
+        if not header_host and contract.os_family == "windows" and all(
+            any(item.field == "event.channel" and item.op in {"eq", "in", "exists"}
+                for item in [*intent.filters, *group]) for group in (intent.any_of or [[]])
+        ):
+            # A Windows channel selector excludes text even when no dataset field is mapped.
+            continue
+        inventory = dataset_inventory.get(intent.target)
+        text_possible = (contract.linux_text_mixed is not False
+                         or (contract.text_missing_host_records or 0) > 0
+                         or bool({"linux.text", "linux.syslog"}.intersection(_logical_inventory(inventory or ()))))
+        if not inventory and (not selected or selected.intersection({"linux.text", "linux.syslog"})):
+            # An unknown datasetless count can leave text out of the usable inventory.
+            payload = any(contract.spec(name, os_family="linux") is not None
+                          for name in ("message", "event.original"))
+            selector = any(contract.spec(name, os_family="linux") is not None
+                           for name in ("event.dataset", "data_stream.dataset", "input.type", "log.file.path"))
+            text_possible = text_possible or (payload and selector)
+        if not (header_host or text_possible):
+            continue
+        key = (intent.target, intent.window.start, intent.window.end)
+        gaps.setdefault(key, PivotCoverage(
+            target=intent.target, dataset="linux.text", start=intent.window.start, end=intent.window.end,
+            status="partial", reasons=[TEXT_HOST_QUERY_REASON], returned=0, total=None,
+            unresolved_ranges=[_range(intent.window.start, intent.window.end, TEXT_HOST_QUERY_REASON)],
+        ))
+    return list(gaps.values())
+
+
 def _link_task_kind(executor) -> str:
     """Keep borrowed executor methods compatible while separating agent link work."""
     return "agent_follow_link" if getattr(executor, "source_query_scope", None) == "agent" else "expansion_link"
@@ -632,6 +689,11 @@ class PivotExecutor:
         self, intent: SearchIntent, contract: FieldContract, *, pit=None,
         spend_task_id: str | None = None, physical_query_limit: int | None = None,
     ) -> SearchOutcome:
+        def temporal(outcome):
+            if intent.kind == "raw" and contract.temporal_gaps and outcome.completeness != Completeness.failed:
+                return outcome.model_copy(update={"completeness": Completeness.partial,
+                    "reasons": sorted({*outcome.reasons, *contract.temporal_gaps})})
+            return outcome
         if physical_query_limit is not None:
             ceiling = physical_query_limit
             if self.source_query_budget is not None:
@@ -647,7 +709,7 @@ class PivotExecutor:
             options = {}
             if timing := getattr(self, "zeek_deadline", None):
                 options.update(deadline=timing[0], clock=timing[1])
-            return execute(self.client, intent, contract, pit=pit, on_query=spend, **options)
+            return temporal(execute(self.client, intent, contract, pit=pit, on_query=spend, **options))
         def budget_outcome() -> SearchOutcome:
             now = datetime.now(UTC)
             prefix = self.source_query_scope or "expansion"
@@ -676,7 +738,7 @@ class PivotExecutor:
         outcome = (execute(self.client, intent, contract) if pit is None
                    else execute(self.client, intent, contract, pit=pit))
         self.heartbeat()
-        return outcome
+        return temporal(outcome)
 
     def _intents(self, request: ToolRequest) -> list[SearchIntent]:
         args = request.arguments
@@ -879,7 +941,8 @@ class PivotExecutor:
         """Plan executable intents and every known unresolved dataset cell together."""
         intents = self._intents(request)
         return intents, [*self._unsearchable_ip_coverage(request, intents),
-                         *_nxlog_mixed_coverage(self.contracts, request)]
+                         *_nxlog_mixed_coverage(self.contracts, request),
+                         *_text_host_coverage(self.contracts, self.dataset_inventory, intents)]
 
     @staticmethod
     def _intent_dataset(intent: SearchIntent) -> str | None:

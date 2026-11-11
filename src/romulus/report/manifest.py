@@ -744,7 +744,9 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
                            "created_at": str(a["created_at"]), "status": "analyst assertion, not proven"}
                           for a in repo.analyst_links(hunt_id)],
         "versions": {"pack": hm["pack"]["version"], "normalizer": hm["normalizer"], "policy": hm["policy"],
-                     "model": hm["model"], "romulus": hm["romulus_version"]},
+                     "model": hm["model"], "romulus": hm["romulus_version"],
+                     # a hunt stored before the pack digest existed renders as it did
+                     **({"pack_digest": hm["pack"]["digest"]} if hm["pack"].get("digest") else {})},
         "generated_by": actor,
     }
     if ranking is not None:

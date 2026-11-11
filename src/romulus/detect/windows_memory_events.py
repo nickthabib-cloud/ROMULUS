@@ -9,6 +9,7 @@ import json
 import re
 
 from romulus.detect.windows_behavior import BehaviorFleetRule
+from romulus.detect.windows_ecar import class_discriminator
 from romulus.detect.windows_events import (
     WindowsEventRule,
     basename,
@@ -329,6 +330,7 @@ class UnsignedDriverLoad(WindowsEventRule):
 
 
 class WritableUnsignedDllLoad(WindowsEventRule):
+    ecar_compatible = True
     id = "win.writable_unsigned_dll_load"
     version = '8'
     title = "A process loaded an unsigned or invalid module, or a module outside standard installation directories"
@@ -354,7 +356,7 @@ class WritableUnsignedDllLoad(WindowsEventRule):
 
     def judge(self, event):
         path = _image(event)
-        if (event.get("event.code") != 7 or event.get("image.kind") != "image"
+        if (not class_discriminator(event, 7, "image_load") or event.get("image.kind") != "image"
                 or not path or _signature_known_good(event)):
             return []
         if _installed_path(path) and not _bad_signature(event):
@@ -394,6 +396,7 @@ class WritableUnsignedDllLoad(WindowsEventRule):
 
 
 class DumpLibraryLoad(WindowsEventRule):
+    ecar_compatible = True
     id = "win.dump_library_load"
     version = "7"
     title = "A process loaded a library that provides diagnostic or dump functionality"
@@ -405,7 +408,7 @@ class DumpLibraryLoad(WindowsEventRule):
     research = (_SYSMON, _LSASS)
 
     def judge(self, event):
-        if (event.get("event.code") != 7 or event.get("image.kind") != "image"
+        if (not class_discriminator(event, 7, "image_load") or event.get("image.kind") != "image"
                 or basename(_image(event)) not in _DUMP_DLLS):
             return []
         if (_signature_known_good(event) and _system_directory(_image(event)) and _installed_path(_image(event))
@@ -418,6 +421,7 @@ class DumpLibraryLoad(WindowsEventRule):
 
 
 class UnexpectedClrLoad(WindowsEventRule):
+    ecar_compatible = True
     id = "win.unexpected_clr_load"
     version = "7"
     title = "A CLR load did not meet the expected loader, module path and signature checks"
@@ -429,7 +433,7 @@ class UnexpectedClrLoad(WindowsEventRule):
     research = (_SYSMON, "https://attack.mitre.org/techniques/T1620/")
 
     def judge(self, event):
-        if (event.get("event.code") != 7 or event.get("image.kind") != "image"
+        if (not class_discriminator(event, 7, "image_load") or event.get("image.kind") != "image"
                 or basename(_image(event)) != "clr.dll"):
             return []
         if (_expected_dotnet_host(_process(event)) and _expected_clr_path(_image(event))

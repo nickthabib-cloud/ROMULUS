@@ -79,7 +79,8 @@ def test_recovery_is_fenced_atomic_bounded_and_hunt_scoped():
 def test_pending_template_resume_needs_no_sources_and_keeps_deterministic_digest(tmp_path, monkeypatch, requested, broken_config):
     repo, _ = _repo_with_finding()
     hunt = repo.get_hunt("h1")
-    manifest = {**hunt["manifest"], "ai_agent": {"requested": requested}}
+    manifest = {**hunt["manifest"], "normalizer": hunt_run.NORMALIZER_VERSION,
+                "normalizers": hunt_run.normalizer_versions(), "ai_agent": {"requested": requested}}
     # Capture the durable handoff a killed worker leaves after _finish.
     with repo.engine.begin() as connection:
         connection.execute(t.hunt.update().where(t.hunt.c.id == "h1").values(manifest=manifest))
@@ -90,7 +91,6 @@ def test_pending_template_resume_needs_no_sources_and_keeps_deterministic_digest
     monkeypatch.setattr(hunt_run, "open_repo", lambda _s: repo)
     monkeypatch.setattr(hunt_run, "ensure_site_unchanged", lambda *_a: None)
     monkeypatch.setattr(hunt_run, "install_for_hunt", lambda *_a: None)
-    monkeypatch.setattr(hunt_run, "NORMALIZER_VERSION", "n")
     readiness = SimpleNamespace(ready=False, message=lambda: "offline", provenance=lambda _s: {})
     def resolve(_s):
         if broken_config:

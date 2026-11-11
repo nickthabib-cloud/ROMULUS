@@ -797,3 +797,154 @@ def test_ranked_manifest_and_reports_follow_the_headline_structure():
     assert document.index("Confirmed") < document.index("Ranked findings (not reported)")
     canonical = canonical_manifest(repo, "h1")
     assert all("rank_position" not in finding and "rank" in finding for finding in canonical["findings"])
+
+
+
+def _timed_hunt(confirmed_entities, leads):
+    """A confirmed (urgent) finding on web1 with the given entities, and timed leads (candidate, host, rule,
+    entities, minutes after it). Each anchor's fetches spend two queries; the budget never runs out."""
+    from romulus.hunt.expansion import ExpansionEngine
+    from romulus.store import schema as tables
+    from tests.test_expansion_engine import T0, WINDOW, add_anchor, repo_with_anchor
+    from tests.test_expansion_lane_budget import SteadyFetcher, set_lane
+
+    repo = repo_with_anchor(candidate_id="F-urgent")
+    with repo.engine.begin() as connection:
+        connection.execute(tables.candidate.update().where(tables.candidate.c.id == "F-urgent").values(
+            entities=confirmed_entities))
+    for candidate, host, rule, entities, minutes in leads:
+        add_anchor(repo, candidate, host, ts=T0 + timedelta(minutes=minutes))
+        set_lane(repo, candidate, "lead", severity="medium")
+        with repo.engine.begin() as connection:
+            connection.execute(tables.candidate.update().where(tables.candidate.c.id == candidate).values(
+                rule_id=rule, entities=entities, priority=PRIOR["lead"]))
+    compute_rank_pass(repo, "h1", PASS_BEFORE_EXPANSION)
+
+    def run():
+        return ExpansionEngine(repo, "h1", WINDOW, SteadyFetcher(repo), max_source_queries=10**7).run()
+    return repo, run
+
+
+def _lead_anchors(repo):
+    return {row["candidate_id"] for row in repo.expansion_anchors("h1") if row["lane"] == "lead"}
+
+
+def _on_web1(n, rule):
+    return (f"l{n:05d}", "web1", rule, [["host", "web1", "host"]], n + 1)
+
+
+@pytest.mark.parametrize("leads", [15, 5000])
+def test_one_host_anchors_only_its_best_ranked_extra_seeds_and_counts_the_rest(leads):
+    """A compromised host carrying thousands of leads anchors its best-ranked few, of distinct rules; the rest stay
+    Reported and are counted with the reason, so expansion's work grows with the hosts, not with their leads."""
+    from romulus.hunt.expansion import (
+        EXTRA_SEEDS_HOST_LIMIT_REASON,
+        EXTRA_SEEDS_PER_HOST,
+        EXTRA_SEEDS_PER_RULE,
+    )
+
+    repo, run = _timed_hunt([["host", "web1", "host"]], [_on_web1(n, f"r.lead{n}") for n in range(leads)])
+    best = [row["candidate_id"] for row in repo.finding_ranks_page("h1", PASS_BEFORE_EXPANSION, reported=True,
+                                                                    limit=leads + 1) if row["candidate_id"] != "F-urgent"]
+    assert len(best) == leads
+    summary = run()
+    assert _lead_anchors(repo) == set(best[:EXTRA_SEEDS_PER_HOST])
+    limited = leads - EXTRA_SEEDS_PER_HOST
+    assert summary["reported_seeds_host_limited"] == {
+        "count": limited, "per_host": EXTRA_SEEDS_PER_HOST, "per_rule": EXTRA_SEEDS_PER_RULE,
+        "reason": EXTRA_SEEDS_HOST_LIMIT_REASON}
+    assert f"{limited} {EXTRA_SEEDS_HOST_LIMIT_REASON}" in summary["stop_reason"]
+    assert "reported_seeds_not_anchored" not in summary
+    # every lead is still Reported: the limit bounds expansion, never the report
+    assert len(repo.finding_ranks_page("h1", PASS_BEFORE_EXPANSION, reported=True, limit=leads + 1)) == leads + 1
+
+
+def test_a_rule_recurring_all_through_the_window_takes_two_places_not_all_of_them():
+    from romulus.hunt.expansion import EXTRA_SEEDS_PER_RULE
+
+    leads = [_on_web1(n, "r.noisy") for n in range(12)] + [_on_web1(12, "r.attack")]
+    repo, run = _timed_hunt([["host", "web1", "host"]], leads)
+    summary = run()
+    anchored = _lead_anchors(repo)
+    assert "l00012" in anchored                                     # the later, distinct rule is expanded
+    assert len(anchored) == EXTRA_SEEDS_PER_RULE + 1
+    assert summary["reported_seeds_host_limited"]["count"] == 12 - EXTRA_SEEDS_PER_RULE
+
+
+def test_leads_listed_under_a_compromised_account_are_anchored_on_every_host_they_were_seen_on():
+    """Lateral movement: the leads on each target host are listed under the confirmed domain account, and each host
+    keeps its own share, so every target is expanded."""
+    account = ["account", "CORP\\adm", "actor"]
+    leads = [(f"l-{host}-{n}", host, f"r.lead{n}", [["host", host, "host"], account], index * 2 + n + 1)
+             for index, host in enumerate(f"srv{k:02d}" for k in range(12)) for n in range(2)]
+    repo, run = _timed_hunt([["host", "web1", "host"], account], leads)
+    ranks = _ranks(repo, PASS_BEFORE_EXPANSION)[0]
+    assert {ranks[candidate]["entity_kind"] for candidate, *_ in leads} == {"account"}
+    summary = run()
+    assert _lead_anchors(repo) == {candidate for candidate, *_ in leads}
+    assert "reported_seeds_host_limited" not in summary
+
+
+def test_beacon_leads_to_a_confirmed_address_are_anchored_on_every_internal_source():
+    c2 = ["ip", "203.0.113.5", "destination"]
+    leads = [(f"l-beacon-{k:02d}", f"ws{k:02d}", "r.beacon", [["ip", f"10.0.1.{k}", "source"], c2], k + 1)
+             for k in range(28)]
+    repo, run = _timed_hunt([["ip", "10.0.9.9", "source"], c2], leads)       # a confirmed beacon to it
+    ranks = _ranks(repo, PASS_BEFORE_EXPANSION)[0]
+    assert {(ranks[candidate]["entity_kind"], ranks[candidate]["entity"]) for candidate, *_ in leads} == {
+        ("ip", "203.0.113.5")}
+    summary = run()
+    assert _lead_anchors(repo) == {candidate for candidate, *_ in leads}
+    assert "reported_seeds_host_limited" not in summary
+
+
+def test_a_resumed_expansion_keeps_the_host_limit_and_counts_the_rest_once():
+    from romulus.hunt.expansion import EXTRA_SEEDS_PER_HOST
+
+    repo, run = _timed_hunt([["host", "web1", "host"]], [_on_web1(n, f"r.lead{n}") for n in range(25)])
+    first = run()
+    anchored = _lead_anchors(repo)
+    again = run()
+    assert _lead_anchors(repo) == anchored and len(anchored) == EXTRA_SEEDS_PER_HOST
+    assert first["reported_seeds_host_limited"]["count"] == again["reported_seeds_host_limited"]["count"] == 15
+
+
+def test_untimed_leads_take_no_place():
+    from romulus.hunt.expansion import EXTRA_SEEDS_PER_HOST
+
+    repo = _repo()
+    rows = [_row("u-victim", "r.confirmed", lane="urgent", host="victim", ts=None)]
+    rows += [_row(f"l{n:02d}", f"r.lead{n}", host="victim", ts=None) for n in range(EXTRA_SEEDS_PER_HOST + 5)]
+    _insert(repo, rows)
+    compute_rank_pass(repo, "h1", PASS_BEFORE_EXPANSION)
+    from types import SimpleNamespace
+
+    from romulus.hunt.expansion import ExpansionEngine
+    from romulus.sources.models import Window
+    summary = ExpansionEngine(repo, "h1", Window(start=START, end=END), SimpleNamespace(boots={}),
+                              max_source_queries=40, wall_clock_seconds=60).run()
+    assert len(_lead_anchors(repo)) == EXTRA_SEEDS_PER_HOST + 5       # anchored as unexpanded, spending nothing
+    assert "reported_seeds_host_limited" not in summary
+
+
+def test_a_pivots_leads_to_many_internal_targets_are_anchored_on_each_target():
+    """Network lateral movement: every lead from the compromised pivot to a target is listed under the pivot, and
+    each target keeps its own share, so every target is expanded even when one rule names them all."""
+    leads = [(f"l-lat-{k:02d}", f"t{k:02d}", "r.smb_admin_share",
+              [["ip", "10.0.0.1", "source"], ["ip", f"10.0.0.{k + 10}", "destination"]], k + 1) for k in range(30)]
+    repo, run = _timed_hunt([["ip", "10.0.0.1", "source"], ["ip", "10.0.0.250", "destination"]], leads)
+    ranks = _ranks(repo, PASS_BEFORE_EXPANSION)[0]
+    assert {(ranks[candidate]["entity_kind"], ranks[candidate]["entity"]) for candidate, *_ in leads} == {
+        ("host", "10.0.0.1")}
+    summary = run()
+    assert _lead_anchors(repo) == {candidate for candidate, *_ in leads}
+    assert "reported_seeds_host_limited" not in summary
+
+
+def test_many_internal_clients_leads_to_one_compromised_server_are_anchored_on_each_client():
+    leads = [(f"l-in-{k:02d}", f"c{k:02d}", "r.inbound",
+              [["ip", f"10.0.2.{k + 1}", "source"], ["ip", "10.0.0.200", "destination"]], k + 1) for k in range(30)]
+    repo, run = _timed_hunt([["ip", "10.0.0.200", "source"], ["ip", "203.0.113.7", "destination"]], leads)
+    summary = run()
+    assert _lead_anchors(repo) == {candidate for candidate, *_ in leads}
+    assert "reported_seeds_host_limited" not in summary

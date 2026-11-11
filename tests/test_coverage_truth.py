@@ -665,7 +665,7 @@ def test_an_error_from_an_unmapped_dataset_marks_every_rule_partial_and_says_why
     # partial: Linux data of an unknown family cannot hide a Windows (or other OS-only) event.
     applicable = {cls.id for cls in ALL_PLAYBOOKS if "linux" in cls.os_families}
     events, _skips, _errors = normalize_hits([_access_doc(0, T0)])
-    error = ("bad", "suricata.eve.smb: suricata event.original is not JSON")
+    error = ("bad", "suricata.eve.nfs: suricata event.original is not JSON")
     repo, sweep = _sweep_records(monkeypatch, [_access_doc(0, T0)], normalized=(events, {}, [error]))
     cells = [c for c in repo.rule_cells("h1") if c["target"] == HOST_TARGET and c["rule_id"] in applicable]
     assert cells and all(c["state"] not in ("no_match_complete", "evaluated_complete", "not_applicable_no_events",
@@ -675,7 +675,7 @@ def test_an_error_from_an_unmapped_dataset_marks_every_rule_partial_and_says_why
     celled = {c["rule_id"] for c in repo.rule_cells("h1")
               if c["target"] == HOST_TARGET and c["partition"] == gap["partition"] and c["rule_id"] in applicable}
     assert celled and celled <= set(gap["rules"])     # every Linux-applicable rule evaluated here is unresolved
-    assert any("suricata.eve.smb feeds no known event family, so every rule is partial" in r for r in gap["reasons"])
+    assert any("suricata.eve.nfs feeds no known event family, so every rule is partial" in r for r in gap["reasons"])
     assert sweep.partial_reasons
 
 

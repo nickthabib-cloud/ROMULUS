@@ -1,6 +1,7 @@
 """Peer-keyed network rates with exact disk-backed raw-reference windows."""
 from ipaddress import ip_address
 
+from romulus.detect.network_producers import ZEEK_AND_SURICATA, sensor_words
 from romulus.detect.zeek_lateral import _call, _peers
 from romulus.detect.zeek_rate_state import ZeekWindowRule
 
@@ -44,13 +45,16 @@ class _Rate(ZeekWindowRule):
                 'query_cost': 'One family sweep and indexed disk-backed window state.',
                 'next_pivot': '; '.join(cls.next_checks),
                 'research_basis': '; '.join(cls.research),
-                'retrieval': 'Declared typed Zeek families; missing fields and state refusals remain unresolved.',
+                'retrieval': (f'Declared typed {sensor_words(cls.producers)} families; missing fields and state '
+                              'refusals remain unresolved.'),
                 'lanes': 'The concrete observation defines its evidence-supported lane.',
             }
 
 
 class ZerologonRate(_Rate):
     id, title = 'net.netlogon_authentication_burst', 'Repeated Netlogon secure-channel authentication calls'
+    # Suricata types the call by interface UUID and opnum where it records the interface (calls over SMB pipes)
+    version, producers = '6', ZEEK_AND_SURICATA
     families = ('rpc_tx',)
     required_fields = ('source.ip', 'destination.ip')
     # Normal machine secure-channel setup uses a handful of calls; the bypass succeeds with
@@ -132,6 +136,12 @@ _ATTEMPT_NOTES = (
 
 class NtlmPasswordSpray(_Rate):
     id, title = 'net.ntlm_password_spray', 'One source attempted NTLM authentication for many users'
+    # Suricata types the outcome from the session setup's own status, success or a logon failure, and leaves it
+    # unset otherwise (an attempt, as for Zeek); its SMB records are in flow direction
+    version, producers = '6', ZEEK_AND_SURICATA
+    # a sensor that missed a logon's response leaves its outcome unset: pair successes only with the same sensor's
+    # attempts, or the other sensor's record of one successful logon reads as an attempt followed by that success
+    per_sensor = True
     families = ('ntlm_tx',)
     seconds, threshold, distinct = 600, 10, True
     attack, research = ('T1110.003',), (_NTLM,)
@@ -202,6 +212,7 @@ def _operation(event, names):
 class RpcHostEnumerationFanout(_Rate):
     id = 'net.rpc_host_enumeration_fanout'
     title = 'One source called session, share or local-group enumeration on many hosts'
+    version, producers = '6', ZEEK_AND_SURICATA
     families = ('rpc_tx',)
     required_fields = ('source.ip', 'destination.ip')
     # A client lists sessions or shares only on the few servers it uses; ten distinct hosts in fifteen minutes is the
@@ -238,6 +249,7 @@ class RpcHostEnumerationSlowFanout(RpcHostEnumerationFanout):
 class RpcDirectoryListing(_Rate):
     id = 'net.rpc_directory_listing'
     title = 'One source made bulk user, group or member listing calls over SAM RPC'
+    version, producers = '6', ZEEK_AND_SURICATA
     families = ('rpc_tx',)
     required_fields = ('source.ip', 'destination.ip')
     # One administrative command lists one kind of object; three distinct bulk listing calls from one source within ten

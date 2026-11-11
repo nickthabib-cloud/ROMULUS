@@ -40,9 +40,11 @@ def toy(*, distinct=False, threshold=3, seconds=10):
 
 
 def event(identity, stamp=0, *, member="alice", role="attempt", source="10.0.0.1", sensor="sensor",
-          refs=None, producer="zeek-ecs@2", family="rpc_tx"):
+          refs=None, producer="zeek-ecs@2", family="rpc_tx", product="zeek"):
     values = {"observer.name": sensor, "source.ip": source, "destination.ip": "10.0.0.2",
               "toy.member": member, "toy.role": role, "unused.large": "x" * 1000}
+    if product is not None:
+        values["observer.product"] = product
     return TypedEvent(id=identity, family=family, ts=START + timedelta(seconds=stamp), host=sensor,
                       fields={key: fv(value, f"{identity}:native.{key}") for key, value in values.items()},
                       raw=[RawRef(target="native", native_id=value) for value in (refs if refs is not None else [identity])],
@@ -101,7 +103,8 @@ def test_missing_refs_do_not_create_counts_and_other_producers_or_families_are_o
     rule = toy(threshold=1)
     try:
         assert not final_matches(rule, [event("no-refs", refs=[]), event("host", producer="windows-ecs@16"),
-                                        event("suricata", producer="lab-ecs@1"), event("other", family="dns_query")])
+                                        event("suricata", producer="lab-ecs@1"), event("other", family="dns_query"),
+                                        event("unlabelled", product=None)])  # a Zeek producer id not written by Zeek
         assert rule.missing_required == 1 and not rule.assures_negative
     finally:
         rule.release_state()

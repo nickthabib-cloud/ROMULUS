@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 
 from romulus.detect.base import Match
 from romulus.detect.netdef import DIRECTION_ASSUMED_REASON, SiteNetworks, current
+from romulus.detect.network_producers import ZEEK_AND_SURICATA, ZEEK_ONLY, rule_reads, sensor_words
 from romulus.detect.site_roles import address_member
 from romulus.detect.windows_events import WindowsEventRule, signal
 from romulus.detect.windows_rpc import RpcRemoteAdminCall as WindowsRpcRemoteAdminCall
@@ -21,10 +22,6 @@ _RPC_FIELDS = ('source.ip', 'source.hostname', 'destination.ip', 'rpc.endpoint',
 # Compare the requested till with AD's default 600-minute service-ticket age. Zeek reads till
 # from the TGS request, not the granted ticket; benign clients can ask beyond the KDC's policy.
 TICKET_LIFETIME = timedelta(hours=10)
-
-
-def _zeek(event):
-    return event.normalizer.startswith('zeek-ecs@') and event.get('observer.product') == 'zeek'
 
 
 def _peers(event):
@@ -55,7 +52,8 @@ class ZeekBehaviorRule(WindowsEventRule):
     uses_parent = False
     reads_command_line = False
     claim_type = 'network_observation'
-    positive_only_reason = ('Zeek network observations report typed positive evidence; absence and successful '
+    producers = ZEEK_ONLY
+    positive_only_reason = ('Network protocol observations report typed positive evidence; absence and successful '
                             'action are not established.')
     benign = ('Authorized administration and configured domain policies can produce these observations.',)
     next_checks = ('Review the cited network records and independent endpoint or authentication outcomes.',)
@@ -64,13 +62,15 @@ class ZeekBehaviorRule(WindowsEventRule):
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
         if getattr(cls, 'id', None):
-            cls.card.update(fidelity='Typed network observations from a Zeek sensor; no successful action is inferred.',
-                query_cost='Declared Zeek families, with bounded disk-backed grouping and citation examples.',
+            cls.card.update(fidelity=f'Typed network observations from a {sensor_words(cls.producers)} sensor; no '
+                                     'successful action is inferred.',
+                query_cost=f'Declared {sensor_words(cls.producers)} families, with bounded disk-backed grouping and '
+                           'citation examples.',
                 telemetry=', '.join(cls.families),
                 lanes='Evidence determines the lane; counts are per-row distinct raw references.')
 
     def consume(self, events):
-        return super().consume([event for event in events if _zeek(event)])
+        return super().consume([event for event in events if rule_reads(event, self.producers)])
 
     @staticmethod
     def raw_weight(event):
@@ -137,13 +137,14 @@ class ZeekBehaviorRule(WindowsEventRule):
 class RpcRemoteAdminCall(ZeekBehaviorRule):
     id = 'net.rpc_remote_admin_call'
     title = 'A classified remote administration RPC call was observed'
+    version, producers = '2', ZEEK_AND_SURICATA
     families = ('rpc_tx',)
     required_fields = ('source.ip', 'destination.ip')
     _HIGH, _LEAD = WindowsRpcRemoteAdminCall._HIGH, WindowsRpcRemoteAdminCall._LEAD
     attack = WindowsRpcRemoteAdminCall.attack
 
     def judge(self, event):
-        if not _zeek(event) or event.family != 'rpc_tx' or not (peers := _peers(event)):
+        if not rule_reads(event, self.producers) or event.family != 'rpc_tx' or not (peers := _peers(event)):
             return []
         call = _call(event)
         if call.interface is None or call.op_class not in self._HIGH | self._LEAD:
@@ -165,6 +166,7 @@ class WireCoercionCall(ZeekBehaviorRule):
     requests to their print servers all day, so that call counts only toward a controller, the PrinterBug target."""
     id = 'net.rpc_coercion_call'
     title = 'A remote authentication-coercion RPC call was observed'
+    version, producers = '2', ZEEK_AND_SURICATA
     families = ('rpc_tx',)
     required_fields = ('source.ip', 'destination.ip')
     attack = ('T1187',)
@@ -172,7 +174,7 @@ class WireCoercionCall(ZeekBehaviorRule):
               'Print servers on domain controllers receive notification requests from their clients.')
 
     def judge(self, event):
-        if not _zeek(event) or event.family != 'rpc_tx' or not (peers := _peers(event)):
+        if not rule_reads(event, self.producers) or event.family != 'rpc_tx' or not (peers := _peers(event)):
             return []
         call = _call(event)
         if call.interface is None or call.op_class not in {'coercion', 'print_notification'}:
@@ -197,12 +199,13 @@ class WireCoercionCall(ZeekBehaviorRule):
 class WireReplicationCall(ZeekBehaviorRule):
     id = 'net.rpc_replication_call'
     title = 'A directory replication RPC call was observed'
+    version, producers = '2', ZEEK_AND_SURICATA
     families = ('rpc_tx',)
     required_fields = ('source.ip', 'destination.ip')
     attack = ('T1003.006', 'T1207')
 
     def judge(self, event):
-        if not _zeek(event) or event.family != 'rpc_tx' or not (peers := _peers(event)):
+        if not rule_reads(event, self.producers) or event.family != 'rpc_tx' or not (peers := _peers(event)):
             return []
         call = _call(event)
         if call.op_class != 'replication' or call.interface is None:
@@ -239,8 +242,12 @@ class _RemoteSession(ZeekBehaviorRule):
     per_source = False      # fold one source's sessions to every destination into one finding
 
     def judge(self, event):
-        if (not _zeek(event) or event.family != 'remote_session'
+        if (not rule_reads(event, self.producers) or event.family != 'remote_session'
                 or event.get('remote.protocol') != self.protocol or not (peers := _peers(event))):
+            return []
+        if not event.normalizer.startswith('zeek-ecs@') and event.get('rdp.message') != 'initial_request':
+            # Suricata writes each RDP message as a record in its packet's direction: only the client's initial
+            # request names the client as its source, once per connection (the connect request may be inside TLS)
             return []
         site = getattr(self, 'site_facts', None)
         internal = getattr(site, 'internal_networks', ())
@@ -280,6 +287,7 @@ class _RemoteSession(ZeekBehaviorRule):
 
 class RdpRemoteSession(_RemoteSession):
     id, title = 'net.external_rdp', 'RDP session negotiation from outside the declared site'
+    version, producers = '2', ZEEK_AND_SURICATA
     protocol = 'rdp'
     attack = ('T1133', 'T1021.001')
 
@@ -289,6 +297,7 @@ class InternalRdpSession(_RemoteSession):
     outside one, an interactive session leaving the site. One lead per source, citing its destinations;
     administrators' sessions to servers look the same on the wire, which the host's logon records settle."""
     id, title = 'net.internal_rdp', 'RDP session negotiation from a host inside the site'
+    version, producers = '2', ZEEK_AND_SURICATA
     protocol, inside_lane, outside, per_source = 'rdp', 'lead', False, True
     attack = ('T1021.001',)
     benign = ('Administrators and help desks connecting to servers and workstations; jump hosts.',
@@ -303,7 +312,7 @@ class VncRemoteSession(_RemoteSession):
 
 
 class HttpWinrm(ZeekBehaviorRule):
-    version = '2'
+    version, producers = '3', ZEEK_AND_SURICATA
     id, title = 'net.http_winrm', 'An HTTP request targeted the WinRM service path'
     families = ('http_tx',)
     required_fields = ('source.ip', 'destination.ip', 'destination.port', 'url.original')
@@ -311,7 +320,7 @@ class HttpWinrm(ZeekBehaviorRule):
     research = (_WINRM_DOC,)
 
     def judge(self, event):
-        if (not _zeek(event) or event.family != 'http_tx' or event.get('destination.port') not in {5985, 5986}
+        if (not rule_reads(event, self.producers) or event.family != 'http_tx' or event.get('destination.port') not in {5985, 5986}
                 or not (peers := _peers(event))):
             return []
         try:
@@ -335,7 +344,7 @@ class TgsLongLifetime(ZeekBehaviorRule):
                 'https://raw.githubusercontent.com/zeek/zeek/master/scripts/base/protocols/krb/main.zeek')
 
     def judge(self, event):
-        if (not _zeek(event) or event.family != 'kerberos_tx'
+        if (not rule_reads(event, self.producers) or event.family != 'kerberos_tx'
                 or str(event.get('kerberos.request_type') or '').strip().upper() != 'TGS'):
             return []
         try:

@@ -1,10 +1,12 @@
 """A raw record as ROMULUS keeps it: every lone UTF-16 surrogate replaced (evidence.surrogates) and every credential
-of a Zeek record masked (evidence.zeek.scrub_zeek_source). Every path that stores a record's `_source` (the hunt store,
+of recognized network records masked by their producer scrubbers. Every path that stores a record's `_source` (the hunt store,
 the event stage) stores this form, and a record's digest is computed over it, so a copy fetched again from the source
 verifies against the stored one. Any other record is returned as it is (the same object)."""
 from __future__ import annotations
 
 from romulus.evidence import surrogates
+from romulus.evidence.arkime_protocols import scrub_arkime_source
+from romulus.evidence.suricata_protocols import scrub_suricata_source
 from romulus.evidence.typed import TypedEvent
 from romulus.evidence.zeek import scrub_zeek_source
 from romulus.store import cleaning as store_cleaning
@@ -33,6 +35,9 @@ def clean_source(source):
     if not isinstance(source, dict):
         return source
     sanitized, _paths = surrogates.sanitize(source)
+    # Shipper markers can overlap. The Zeek precheck is a loose superset, not
+    # exclusive producer identity; compose each recognized producer's cleaning.
+    sanitized = scrub_arkime_source(scrub_suricata_source(sanitized))
     return scrub_zeek_source(sanitized) if might_be_zeek(sanitized) else sanitized
 
 

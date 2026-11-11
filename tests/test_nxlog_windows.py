@@ -500,6 +500,12 @@ class _Client:
         return {target: {"mappings": {"properties": props}}}
 
     def search(self, target, body):
+        if "aggs" not in body:
+            assert body == {"size": 0, "track_total_hits": True, "query": {"bool": {
+                "should": [{"bool": {"filter": [{"exists": {"field": "Channel"}},
+                                                {"exists": {"field": "EventID"}}]}}],
+                "minimum_should_match": 1}}}
+            return {"hits": {"total": {"value": 3, "relation": "eq"}}}
         self.body = body
         return {"aggregations": {"hosts": {"buckets": [{"key": {"host": "ws01.example.test"}, "doc_count": 3}]},
                                  "ds": {"buckets": []}}, "hits": {"total": {"value": 3}}}

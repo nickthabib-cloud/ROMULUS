@@ -25,7 +25,9 @@ UNKNOWN_REASON = "text line in no recognized format: custom.unknown"
 # and rule cells: the unknown line also leaves host.telemetry_gap_after_tamper partial. This fixture has no confirmed
 # finding, so evidence ranking adds no extra seed: its single anchor is the rule estimate's. The rule cells include the
 # Zeek RPC coercion, internal RDP and RPC enumeration rules (not applicable here). Events, candidates, raw records and
-# citations are unchanged (`test_the_text_stack_candidates_moved_only_by_rule_versions`).
+# citations are unchanged (`test_the_text_stack_candidates_moved_only_by_rule_versions`). Evidence epoch 18
+# rehashes the event ids (candidates 75b41997... at epoch 17); the rule cells add the SMB impact and service
+# catalog rules (not applicable here).
 GOLDEN_TEXT_STACK = {'anchors': 'e23919dbbe190daf61b3494b7b21e344022b803a564803a6dadaa59988bdf81e',
  'audit': 'df843bf165da6b02210df52e96127c22a377933852ae893bd91759dd302fee88',
  'baseline_counts': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
@@ -37,16 +39,16 @@ GOLDEN_TEXT_STACK = {'anchors': 'e23919dbbe190daf61b3494b7b21e344022b803a564803a
  'baseline_window_counts': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'baseline_window_event_hours': 'dbbcb75b0e5ad202089e3eeaf84801202f5f1b8b3fcfb214f42edbdd7e007f47',
  'baseline_window_scope_hours': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
- 'candidates': '75b419972178bacfa911559c0b72bdc96abe84b235220e4ef0066b30c52cec05',
+ 'candidates': '975714d3f71dbd53ffbd9fdb49239e35640e03e9288f67e9d9cbcb9ed6f7730a',
  'entities': '9e629528fba70d33c17e231aabf743f914b553fe3bc737669e3b8c0e33da6183',
  'event_citations': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
- 'event_entities': 'aab2777b9cfdddf515ae9a452a34fc924d04660c82cf1c019a244758d034c630',
- 'events': '30c0dcf4f38cac97f4c778cf415f65e180f134153426316f1085b7cbbf3f9f1d',
+ 'event_entities': '7a95b1d7330214dbac1d0d91bfb7978e1410bbe325214fd950401b0d08fac22d',
+ 'events': '77987c6e9f03b2c3039d20372a03424166749f5feb9bf82d99496deefed0e8e2',
  'expansion': 'dae7cbd7929a4cb94bb232a7343d4d70f62885a979b52714b87bd3641a92169b',
- 'links': '1d9034491bfb6c4c55a0896c9a1d8f7f7158291270207776815b68eddede7007',
- 'manifest': '9557e6edde7387149668852b9c9764e9550f528248879455d56d0d183af1b00f',
+ 'links': 'd1c35a587f2df8cee49b324d3ade7ab1561ece9809bef4ce9dd42c5d1d946802',
+ 'manifest': '5af7d73f40cd5e201da8116e9ad5c1afbc1d8db2815934f755fd72b5561864c1',
  'raw': '64be31e697a32f93b1a71657560af514b2d430469cb3be19f44b8827985a7775',
- 'rule_cells': 'b43e1830615852292f1cd65240baf02a93c679a13d4b3d844591abbbb29df5e3',
+ 'rule_cells': '960444bef85107073906850a98c89efb1217a048ec2eb0c76d2b66b38caec6ef',
  'stats': '94249143f689b419b183019aec955234793e932e6edb0348cb5df3c50d425189',
  'tasks': 'a287691a5843ccb9f7b3d279364567cefb3dc6eb49f9d4753eaed993593437c4'}
 
@@ -169,7 +171,7 @@ def test_linux_text_whole_stack_retrieval_findings_and_partial_coverage(tmp_path
 def test_the_text_stack_candidates_moved_only_by_rule_versions(tmp_path, monkeypatch):
     snapshot, _trace, _docs = run_text_stack(tmp_path / "prior", monkeypatch)
     assert tf.deterministic_golden_digests(tf.with_prior_versions(snapshot))["candidates"] == (
-        "75b419972178bacfa911559c0b72bdc96abe84b235220e4ef0066b30c52cec05")
+        "975714d3f71dbd53ffbd9fdb49239e35640e03e9288f67e9d9cbcb9ed6f7730a")
 
 
 def test_linux_text_whole_stack_snapshot_is_deterministic(tmp_path, monkeypatch):

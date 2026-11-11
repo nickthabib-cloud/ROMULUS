@@ -10,6 +10,7 @@ from romulus.detect.site_roles import host_member
 from romulus.detect.windows_behavior import BehaviorFleetRule
 from romulus.detect.windows_cmdline import DASHES, SWITCH_STARTS, split_argv
 from romulus.detect.windows_common import Undecided
+from romulus.detect.windows_ecar import class_discriminator, ecar_record
 from romulus.detect.windows_events import (
     WindowsEventRule,
     basename,
@@ -172,7 +173,9 @@ class _Housekeeping(WindowsEventRule):
     def judge(self, event):
         observed = (str(event.get("event.channel") or "").casefold(),
                     str(event.get("event.provider") or "").casefold(), event.get("event.code"))
-        if observed not in {(channel.casefold(), provider.casefold(), code)
+        semantic = (self.ecar_compatible and ecar_record(event)
+                    and any(class_discriminator(event, code, event.family) for _channel, _provider, code in self.windows_event_classes))
+        if not semantic and observed not in {(channel.casefold(), provider.casefold(), code)
                             for channel, provider, code in self.windows_event_classes}:
             return []
         return self.observe(event)
@@ -202,6 +205,7 @@ class _FoldedHousekeeping(_Housekeeping, BehaviorFleetRule):
 
 
 class HiddenSamAccount(_Housekeeping):
+    ecar_compatible = True
     id = "win.hidden_sam_account"
     title = "A SAM account-name mapping ending in a dollar sign was created or written"
     families = ("registry_change",)
@@ -218,9 +222,9 @@ class HiddenSamAccount(_Housekeeping):
                 or target.key[:6] != ("sam", "sam", "domains", "account", "users", "names")
                 or not target.key[-1].endswith("$") or target.key[-1] == "$"):
             return []
-        created = (event.get("event.code") == 12 and target.name is None
+        created = (class_discriminator(event, 12, "registry_change") and target.name is None
                    and str(event.get("registry.event_type") or "").casefold() == "createkey")
-        written = event.get("event.code") == 13 and target.name == "" and target.action == "written"
+        written = class_discriminator(event, 13, "registry_change") and target.name == "" and target.action == "written"
         if not (created or written):
             return []
         action = "key was created" if created else "default value was written"
@@ -264,6 +268,7 @@ class KerberosLoopbackLogon(_Housekeeping):
 
 
 class UnexpectedPsRemoteServer(_FoldedHousekeeping):
+    ecar_compatible = True
     id = "win.unexpected_ps_remote_server"
     version = "5"
     title = "PowerShell server mode was launched by an unexpected parent"
@@ -341,6 +346,7 @@ class BitsUnusualCreator(_FoldedHousekeeping):
 
 
 class RunMruDeletion(_Housekeeping):
+    ecar_compatible = True
     id = "win.run_mru_deletion"
     title = "Explorer RunMRU history was deleted"
     families = ("registry_change",)
@@ -359,6 +365,7 @@ class RunMruDeletion(_Housekeeping):
 
 
 class HiddenFileAttribute(_FoldedHousekeeping):
+    ecar_compatible = True
     id = "win.hidden_file_attribute"
     version = "2"
     title = "The attrib utility was asked to set the hidden attribute"
@@ -380,6 +387,7 @@ class HiddenFileAttribute(_FoldedHousekeeping):
 
 
 class ExecutionPolicyRegistry(_Housekeeping):
+    ecar_compatible = True
     id = "win.execution_policy_registry"
     title = "A permissive PowerShell execution-policy value was written"
     families = ("registry_change",)
@@ -404,6 +412,7 @@ class ExecutionPolicyRegistry(_Housekeeping):
 
 
 class NewServerShare(_Housekeeping):
+    ecar_compatible = True
     id = "win.new_server_share"
     title = "A Windows server-share configuration value was written"
     families = ("registry_change",)
@@ -423,6 +432,7 @@ class NewServerShare(_Housekeeping):
 
 
 class EventlogWerfault(_FoldedHousekeeping):
+    ecar_compatible = True
     id = "win.eventlog_werfault"
     version = "2"
     title = "WerFault was launched to report the EventLog service host"

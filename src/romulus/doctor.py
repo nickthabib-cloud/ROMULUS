@@ -471,7 +471,7 @@ def check_site(s: Settings) -> Check:
 
 
 def check_linux_text_sources(s: Settings, client: ElasticClient | None = None) -> list[Check]:
-    """List potential text sources and bounded format samples, separately from typed coverage."""
+    """List native Windows shapes and potential text samples, separately from typed coverage."""
     client = client or ElasticClient(s)
     out = []
     try:
@@ -485,6 +485,21 @@ def check_linux_text_sources(s: Settings, client: ElasticClient | None = None) -
         except SourceError as error:
             out.append(Check(f"es.text_inventory[{target}]", "warn", f"text source inventory unavailable: {error}"))
             continue
+        shapes = profile.model_dump().get("windows_shapes") or {}
+        classification = [note for note in profile.notes if note.startswith((
+            "Windows classification unverified", "Windows event records on a network target"))]
+        if classification:
+            out.append(Check(f"es.windows_classification[{target}]", "warn", "; ".join(classification)))
+        if temporal := profile.model_dump().get("temporal_gaps"):
+            out.append(Check(f"es.temporal_coverage[{target}]", "warn", "; ".join(item["reason"] for item in temporal),
+                             {"gaps": temporal}))
+        if shapes:
+            parts = [f"{shape}: {detail['records'] if detail['records'] is not None else 'unknown'} source records"
+                     + (f"; {detail['reason']}" if detail.get("reason") else "")
+                     for shape, detail in sorted(shapes.items())]
+            out.append(Check(f"es.windows_inventory[{target}]",
+                             "ok" if all(detail["complete"] for detail in shapes.values()) else "warn",
+                             "; ".join(parts), shapes))
         detail = profile.model_dump().get("linux_text")
         inventory_notes = [note for note in profile.notes
                            if note.startswith("ds inventory truncated (data_stream.dataset")]
