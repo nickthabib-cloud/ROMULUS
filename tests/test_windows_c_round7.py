@@ -245,7 +245,8 @@ def test_native_scale4_releases_use_global_room_without_poisoning_later_findings
     # SQLite's page use depends on the order of the stored event ids, which the evidence epoch hashes: at exactly
     # 4 MiB the epoch-16 layout leaves no room for one correlation finding (the epoch-15 layout did). 4.1 MiB holds
     # the same 60 findings as epoch 15 at 4 MiB, identical apart from id-derived lineage keys. Epoch 17 rehashes the
-    # event ids again: the same 60 findings, and with the evidence version set back to 16 the earlier digest.
+    # event ids again: the same 60 findings, and with the evidence version set back to 16 the earlier digest. Epoch
+    # 18 rehashes them once more (prior-version digest 2e8c8520... at epoch 17).
     budget = StateBudget(tmp_path, disk_total=int(4.1*2**20), reserve=0)
     monkeypatch.setattr(sw, "state_budget", lambda settings, stage_dir: budget)
     # expansion seeded by the rule estimate, so the pinned digest isolates the sweep's shared state
@@ -260,9 +261,9 @@ def test_native_scale4_releases_use_global_room_without_poisoning_later_findings
     assert persistence and {row["rule_version"] for row in persistence} == {"9"}
     previous = fixture.with_prior_versions(snapshot)
     assert fixture.deterministic_golden_digests(previous)["candidates"] == (
-        "2e8c8520cc4f4028537257bc5272ff3a741b4a0ef181419a9355b32861cd88c3")
+        "86b742650eb7b8268fdee5f965df350a704b4a2597408a54ffccd81886e325ef")
     assert fixture.deterministic_golden_digests(snapshot)["candidates"] == (
-        "d8d2f6fdcf392caca99f00c070a240f0f1b8bfc572314946dc17d3dd7991ed4b")
+        "ba79adeaf66ba42fe6e74220652af096d288224daef44216e9c735ef53946b51")
     assert any(row["rule_id"] == "host.shell_spawned_by_connected_process" and row["event_ids"]
                for row in snapshot["candidates"])
 
