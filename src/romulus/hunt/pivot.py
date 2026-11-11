@@ -576,6 +576,45 @@ def _nxlog_mixed_coverage(contracts: dict[str, FieldContract], request: ToolRequ
             if contract.nxlog_mixed and not _is_network(target, contract)]
 
 
+TEXT_HOST_QUERY_REASON = "text lines may carry their host only in the syslog header"
+
+
+def _text_host_coverage(contracts, dataset_inventory, intents, *, header_host=False) -> list[PivotCoverage]:
+    """Keep host-name pushdowns honest when typed hosts can come from unindexed text headers.
+
+    Indexed matches remain useful, but neither their absence nor an exhaustive backend response proves that
+    every matching typed host was searched. One bounded coverage cell per target/window names that omission.
+    """
+    gaps = {}
+    for intent in intents:
+        predicates = [*intent.filters, *(item for group in intent.any_of for item in group)]
+        if not any(item.field == "host.name" and item.op in {"eq", "in"} for item in predicates):
+            continue
+        contract = contracts[intent.target]
+        if _is_network(intent.target, contract):
+            continue
+        inventory = dataset_inventory.get(intent.target)
+        text_possible = (contract.linux_text_mixed is not False
+                         or "linux.text" in _logical_inventory(inventory or ()))
+        if (inventory is None and contract.os_family != "windows"
+                and "linux.text" in PivotExecutor._intent_datasets(intent)):
+            # Without an inventory, a mapped text payload and source selector can hold header-only lines.
+            payload = any(contract.spec(name, os_family="linux") is not None
+                          for name in ("message", "event.original"))
+            selector = any(contract.spec(name, os_family="linux") is not None
+                           for name in ("event.dataset", "data_stream.dataset", "input.type", "log.file.path"))
+            text_possible = text_possible or (payload and selector)
+        if not (header_host or text_possible):
+            continue
+        key = (intent.target, intent.window.start, intent.window.end)
+        gaps.setdefault(key, PivotCoverage(
+            target=intent.target, dataset="linux.text", start=intent.window.start, end=intent.window.end,
+            status="partial", reasons=[TEXT_HOST_QUERY_REASON], returned=0, total=None,
+            unresolved_ranges=[_range(intent.window.start, intent.window.end, TEXT_HOST_QUERY_REASON)],
+        ))
+    return list(gaps.values())
+
+
 def _link_task_kind(executor) -> str:
     """Keep borrowed executor methods compatible while separating agent link work."""
     return "agent_follow_link" if getattr(executor, "source_query_scope", None) == "agent" else "expansion_link"
@@ -891,7 +930,8 @@ class PivotExecutor:
         """Plan executable intents and every known unresolved dataset cell together."""
         intents = self._intents(request)
         return intents, [*self._unsearchable_ip_coverage(request, intents),
-                         *_nxlog_mixed_coverage(self.contracts, request)]
+                         *_nxlog_mixed_coverage(self.contracts, request),
+                         *_text_host_coverage(self.contracts, self.dataset_inventory, intents)]
 
     @staticmethod
     def _intent_dataset(intent: SearchIntent) -> str | None:

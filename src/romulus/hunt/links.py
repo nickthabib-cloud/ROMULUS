@@ -30,6 +30,7 @@ from romulus.hunt.pivot import (
     _is_network,
     _range,
     _supports,
+    _text_host_coverage,
     _windows_source_groups,
 )
 from romulus.sources.models import Predicate, SearchIntent, Window
@@ -340,7 +341,7 @@ def _target_has_host_os(executor, target: str, contract, os_family: str) -> bool
     if os_family == "windows":
         return bool(datasets.intersection(WINDOWS_HOST_DATASETS))
     if os_family == "linux":
-        return bool(datasets.intersection(HOST_TIMELINE_DATASETS))
+        return contract.linux_text_mixed is not False or bool(datasets.intersection(HOST_TIMELINE_DATASETS))
     return False
 
 
@@ -591,6 +592,14 @@ class LinkFetcher:
             "service_process": self._service_process,
         }
         result = handlers[link_type](anchor, window)
+        header_host = any((field := event.fields.get("host.name")) is not None
+                          and field.origin.endswith("#syslog-header") for event in anchor.events)
+        text_gaps = _text_host_coverage(
+            self.executor.contracts, getattr(self.executor, "dataset_inventory", {}), result[2],
+            header_host=header_host,
+        )
+        if text_gaps:
+            result = (*result[:6], [*result[-1], *text_gaps])
         if self._planning_field_gaps and (result[5] is None or result[5] in NOTHING_PUSHED_REASONS):
             # The link's key was usable and a Windows target holds records it cannot search by that key: the
             # target's part of the window is unresolved, never a target without matches. The link's own reason for
