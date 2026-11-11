@@ -375,6 +375,9 @@ class ZeekWindowRule(Playbook, ABC):
     seconds: ClassVar[float] = 60
     threshold: ClassVar[int] = 1
     distinct: ClassVar[bool] = False
+    # Keep each sensor's rows apart even when counting distinct members: a rule that pairs one row's outcome with
+    # another's must not pair one sensor's success with the other sensor's record of the same exchange.
+    per_sensor: ClassVar[bool] = False
     citation_fields: ClassVar[tuple[str, ...]] = ()
     # Success selection/account proof is deliberately separate from potentially
     # large attempt citation facts. Subclasses declare facts needed by describe.
@@ -452,9 +455,10 @@ class ZeekWindowRule(Playbook, ABC):
             if not isinstance(key, tuple) or not isinstance(member, str) or role not in {"attempt", "success"}:
                 raise ValueError("Zeek select must return a tuple key, text member and attempt|success role")
             producer = event.normalizer.partition("@")[0]
-            if not self.distinct and producer != "zeek-ecs":
+            if (not self.distinct or self.per_sensor) and producer != "zeek-ecs":
                 # Two sensors watching one link both record each request: a count of raw references is kept per
-                # sensor so neither doubles it. Distinct-member counts are sets and are shared.
+                # sensor so neither doubles it. Distinct-member counts are sets and are shared, unless the rule
+                # pairs outcomes across rows (`per_sensor`).
                 key = (producer, *key)
             key = json.dumps(key, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
             try:

@@ -139,6 +139,9 @@ class NtlmPasswordSpray(_Rate):
     # Suricata types the outcome from the session setup's own status, success or a logon failure, and leaves it
     # unset otherwise (an attempt, as for Zeek); its SMB records are in flow direction
     version, producers = '6', ZEEK_AND_SURICATA
+    # a sensor that missed a logon's response leaves its outcome unset: pair successes only with the same sensor's
+    # attempts, or the other sensor's record of one successful logon reads as an attempt followed by that success
+    per_sensor = True
     families = ('ntlm_tx',)
     seconds, threshold, distinct = 600, 10, True
     attack, research = ('T1110.003',), (_NTLM,)

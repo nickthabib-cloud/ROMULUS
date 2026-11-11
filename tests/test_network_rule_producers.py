@@ -155,3 +155,14 @@ def test_a_distinct_host_count_is_shared_across_sensors():
     [match] = rate("RpcHostEnumerationFanout", hosts)
     assert match.proposed_lane == "lead" and "at least 10 distinct hosts" in match.claim
     assert rate("RpcHostEnumerationFanout", hosts[:9]) == []
+
+
+@pytest.mark.parametrize("zeek_success,eve_status", [(True, None), (None, "STATUS_SUCCESS")])
+def test_one_sensors_success_never_pairs_with_the_other_sensors_unrecorded_outcome(zeek_success, eve_status):
+    # one sensor missed each logon's response: its record is an attempt, the other's the same logon's success
+    def zeek_row(n):
+        row = zl.NTLM.with_(uid=f"Cntlm{n:010d}", username=f"user{n}", success=True)
+        return row if zeek_success else row.without("success")
+    zeek = [normalize(zl.WRITERS["plain"](replace(zeek_row(n), ts=zl.T0 + n), f"z{n}")) for n in range(12)]
+    eve = [_setup(n, f"user{n}", eve_status) for n in range(12)]
+    assert all(match.proposed_lane != "high" for match in rate("NtlmPasswordSpray", zeek + eve))
