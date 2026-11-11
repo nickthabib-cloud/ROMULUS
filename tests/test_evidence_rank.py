@@ -837,7 +837,11 @@ def _on_web1(n, rule):
 def test_one_host_anchors_only_its_best_ranked_extra_seeds_and_counts_the_rest(leads):
     """A compromised host carrying thousands of leads anchors its best-ranked few, of distinct rules; the rest stay
     Reported and are counted with the reason, so expansion's work grows with the hosts, not with their leads."""
-    from romulus.hunt.expansion import EXTRA_SEEDS_HOST_LIMIT_REASON, EXTRA_SEEDS_PER_HOST, EXTRA_SEEDS_PER_RULE
+    from romulus.hunt.expansion import (
+        EXTRA_SEEDS_HOST_LIMIT_REASON,
+        EXTRA_SEEDS_PER_HOST,
+        EXTRA_SEEDS_PER_RULE,
+    )
 
     repo, run = _timed_hunt([["host", "web1", "host"]], [_on_web1(n, f"r.lead{n}") for n in range(leads)])
     best = [row["candidate_id"] for row in repo.finding_ranks_page("h1", PASS_BEFORE_EXPANSION, reported=True,
