@@ -291,6 +291,7 @@ def _rdp(reader):
     if subtype not in ("initial_request", "initial_response", "connect_request", "connect_response", "tls_handshake"):
         raise ValueError(f"{reader.path}: unknown RDP subtype")
     f["remote.protocol"] = fv("rdp", reader.origin("event_type"))
+    f["rdp.message"] = fv(subtype, reader.origin("event_type"))
     reader.copy(f, "rdp.cookie", "cookie")
     reader.copy(f, "rdp.client_channels", "channel", "names")
     client = reader.child("client")
