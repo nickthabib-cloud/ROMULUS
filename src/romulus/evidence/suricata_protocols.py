@@ -232,9 +232,23 @@ def _etype(value, path):
     raise ValueError(f"{path}: unknown encryption type")
 
 
-def _kerberos(reader):
+def _kerberos(reader, common):
     result = ProtocolRecord("kerberos_tx")
     f = result.fields
+    # Suricata 8 registers krb5 with JsonGenericDirPacketLogger. Keep that
+    # tuple intact and derive endpoint roles only from one unambiguous KDC port.
+    source_kdc = common.value("src_port", "count") == 88
+    destination_kdc = common.value("dest_port", "count") == 88
+    if source_kdc != destination_kdc:
+        for role, key in (("kdc", "src_ip" if source_kdc else "dest_ip"),
+                          ("client", "dest_ip" if source_kdc else "src_ip")):
+            address = common.value(key, "ip")
+            if address is not None:
+                f["kerberos." + role + "_ip"] = fv(address, common.origin(key) + "#derived:port-88")
+            else:
+                result.caveats.append(f"Kerberos {role} address is absent from the observed tuple")
+    else:
+        result.caveats.append("Kerberos endpoint roles are unresolved: exactly one tuple end must use port 88")
     msg = reader.value("msg_type")
     failed = reader.value("failed_request")
     request = failed if msg == "KRB_ERROR" else msg
@@ -595,7 +609,9 @@ def protocol_records(eve: dict, origin: str) -> list[ProtocolRecord]:
     reader = Reader(eve.get(et), origin + "." + et)
     if et == "smb":
         return _smb(reader)
-    functions = {"dcerpc": _rpc, "krb5": _kerberos, "rdp": _rdp, "ldap": _ldap}
+    if et == "krb5":
+        return [_kerberos(reader, common)]
+    functions = {"dcerpc": _rpc, "rdp": _rdp, "ldap": _ldap}
     return [functions[et](reader) if et in functions else _application(reader, et, eve, origin)]
 
 
