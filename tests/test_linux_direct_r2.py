@@ -125,6 +125,18 @@ def test_module_load_needs_a_recorded_packaged_loader_for_context(executable, ar
         assert "module file not recorded" in finding.claim.lower()
 
 
+@pytest.mark.parametrize("session,lane", [({}, "context"), ({"process__auid": "1000"}, "lead"),
+                                          ({"process__session_id": "7"}, "lead"),
+                                          ({"process__login_user": "alice"}, "lead")])
+def test_a_module_an_operator_loads_from_the_package_tree_is_a_lead(session, lane):
+    """A module copied into the module tree and loaded with modprobe from a login session (a planted rootkit) is the
+    operator's load; only a load outside any session is the kernel's or the boot's own."""
+    event = ev("kernel_module", T0, module__op="load", module__path="/lib/modules/6.1.0/extra/rk.ko",
+               process__executable="/usr/bin/kmod", process__argv=["modprobe", "rk"], **session)
+    [finding] = KernelModuleLoad().consume([event])
+    assert finding.proposed_lane == lane
+
+
 @pytest.mark.parametrize("argv,lane", [(["insmod", "/tmp/rk.ko"], "high"),
                                       (["insmod", "/lib/modules/rk.ko"], "lead"),
                                       (["modprobe", "/tmp/rk.ko"], "high")])

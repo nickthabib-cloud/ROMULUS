@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from romulus.decide.policy import Decision, decide
+from romulus.decide.policy import Decision, decide, publishable
 from romulus.detect.base import ContextAnchor, ContextLink, Match, Playbook
 from romulus.detect.context import _session_key
 from romulus.detect.correlation import merge_unknown_boot
@@ -74,18 +74,18 @@ def evaluate_context(
     repo: Repo, hunt_id: str, anchor: ContextAnchor, link: ContextLink, events,
     *, owner_token: str | None = None,
 ) -> list[ContextEvaluation]:
-    """Evaluate one reach for coverage and return its admitted matches. Publication of context candidates is
-    the single post-expansion pass (`finalize_context`); this writes only the per-(rule, link) coverage cell."""
+    """Evaluate one reach for coverage and return its publishable matches. Publication of context candidates is
+    the single post-expansion pass (`finalize_context`); this writes only the per-(rule, link) coverage cell, which
+    counts every positive (a positive with nothing citable is still never a no-match)."""
     evaluations = []
     for playbook in fresh_context_pack():
         before_eval, before_missing = playbook.evaluated, playbook.missing_required
         matches = playbook.consume_linked(anchor, link, events)
-        admitted = [ContextEvaluation(playbook, match, decide(match, hunt_id))
-                    for match in matches if decide(match, hunt_id).admitted]
-        evaluations.extend(admitted)
+        decided = [ContextEvaluation(playbook, match, decide(match, hunt_id)) for match in matches]
+        evaluations.extend(item for item in decided if publishable(item.decision))
         _write_cell(repo, hunt_id, playbook, anchor.id, link,
                     playbook.evaluated - before_eval, playbook.missing_required - before_missing,
-                    len(admitted), playbook.accepts(anchor, link), owner_token=owner_token)
+                    len(decided), playbook.accepts(anchor, link), owner_token=owner_token)
     return evaluations
 
 
@@ -267,9 +267,9 @@ def _finalize_rule(repo: Repo, hunt_id: str, reaches: _RuleReaches,
                     match.claim += (f" {len(anchors)} anchors reached these records ({len(pairs)} reaches); each "
                                     "anchor and link is listed with the finding.")
                 decision = decide(match, hunt_id)
-                if decision.admitted:
+                if publishable(decision):
                     admitted[match.group_key] = (match, decision, pairs)
-                    part_admitted = True
+                part_admitted = True        # a positive, published or not, is never this reach's no-match
             if part_admitted:
                 contributing_reaches.update(keys)
 

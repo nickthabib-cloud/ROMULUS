@@ -158,7 +158,7 @@ class _TransferRows(_Rows):
 
 class ExecutableTransfer(Playbook):
     id = 'net.executable_transfer'
-    version = "2"
+    version = "3"
     title = 'Executable or script content transferred over HTTP, FTP or SMB'
     families = ('file_transfer', 'http_tx', 'smb_tx')
     context_families = ('http_tx', 'smb_tx')
@@ -180,7 +180,9 @@ class ExecutableTransfer(Playbook):
         'fidelity': 'Sniffed content and typed sender/receiver; completion and execution unknown.',
         'benign_and_cost': benign[0], 'query_cost': 'Disk-backed sensor/FUID/UID/peer joins and folded counts.',
         'next_pivot': next_checks[0], 'adds': title, 'research_basis': '; '.join(research),
-        'lanes': 'Masquerade and uncovered administrative-share writes high; unusual ingress or SMB writes lead; routine SMB reads context.',
+        'lanes': 'Masquerade and uncovered administrative-share writes high; unusual ingress, SMB writes, FTP transfers between internal '
+                 'hosts and internal HTTP from an IP-addressed server lead; routine SMB reads and HTTP downloads from '
+                 'named hosts context.',
         'retrieval': _LOGGING,
     }
 
@@ -352,6 +354,11 @@ class ExecutableTransfer(Playbook):
                   and (_literal_host(meta.get('http.hostname')) or
                        (meta.get('destination.port') is not None and meta.get('destination.port') != 80))):
                 lane, category = 'lead', 'ingress'
+            elif (protocol == 'HTTP' and internal_sender and internal_receiver
+                  and _literal_host(meta.get('http.hostname'))):
+                # An ad hoc web server addressed by IP (a one-line Python or PowerShell server) handing a tool to
+                # another internal host; managed software distribution is addressed by name.
+                lane, category = 'lead', 'lateral'
             elif protocol == 'HTTP' and (not _text(meta.get('http.hostname')) or meta.get('destination.port') is None):
                 continue
             else:
@@ -368,8 +375,11 @@ class ExecutableTransfer(Playbook):
         if weak:
             return 'lead', 'setup-script', content, payload, b'', pe
         if protocol == 'FTP':
-            return ('lead', 'ingress', content, payload, b'', pe) if not internal_sender and internal_receiver else (
-                'context', 'download', content, payload, b'', pe)
+            # Executable content arriving from outside is ingress; between two internal hosts it is a tool moving
+            # laterally (FTP is not how sites distribute software today), so it is a lead like an SMB write.
+            if internal_receiver:
+                return 'lead', 'lateral' if internal_sender else 'ingress', content, payload, b'', pe
+            return 'context', 'download', content, payload, b'', pe
         return best if available else None
 
     def _evaluate_fuid(self, sensor, fuid, *, final=False):
