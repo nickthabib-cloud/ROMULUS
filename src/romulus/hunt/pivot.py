@@ -593,6 +593,9 @@ def _text_host_coverage(contracts, dataset_inventory, intents, *, header_host=Fa
         contract = contracts[intent.target]
         if _is_network(intent.target, contract):
             continue
+        selected = PivotExecutor._intent_datasets(intent)
+        if not header_host and selected and not selected.intersection({"linux.text", "linux.syslog"}):
+            continue
         inventory = dataset_inventory.get(intent.target)
         text_possible = (contract.linux_text_mixed is not False
                          or "linux.text" in _logical_inventory(inventory or ()))
