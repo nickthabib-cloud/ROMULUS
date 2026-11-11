@@ -254,18 +254,15 @@ def test_native_scale4_releases_use_global_room_without_poisoning_later_findings
     # Shared state retains prior groups and restores SSH/login findings plus alert-linked context.
     # The alert keeps its computed HIGH lane with explicit partial citation coverage at this physical cap.
     assert len(snapshot["candidates"]) == 60
-    # 2026-11-10: re-pin only persistence rule_version 8->9. Under this exact physical
-    # budget, restoring that field must reproduce the prior decisions and citations digest.
+    # Only rule versions moved these candidates: under this exact physical budget, restoring the prior versions must
+    # reproduce the prior decisions and citations digest.
     persistence = [row for row in snapshot["candidates"] if row["rule_id"] == "host.persistence_path_change"]
     assert persistence and {row["rule_version"] for row in persistence} == {"9"}
-    previous = dict(snapshot, candidates=[
-        dict(row, rule_version="8") if row["rule_id"] == "host.persistence_path_change" else dict(row)
-        for row in snapshot["candidates"]
-    ])
+    previous = fixture.with_prior_versions(snapshot)
     assert fixture.deterministic_golden_digests(previous)["candidates"] == (
         "2e8c8520cc4f4028537257bc5272ff3a741b4a0ef181419a9355b32861cd88c3")
     assert fixture.deterministic_golden_digests(snapshot)["candidates"] == (
-        "482f67259f29b085d96d5efa6f75c1ae442455ac1d62c942f0988715d870e13e")
+        "d8d2f6fdcf392caca99f00c070a240f0f1b8bfc572314946dc17d3dd7991ed4b")
     assert any(row["rule_id"] == "host.shell_spawned_by_connected_process" and row["event_ids"]
                for row in snapshot["candidates"])
 

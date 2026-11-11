@@ -726,6 +726,29 @@ def digests(snapshot: dict) -> dict[str, str]:
             for name, part in sorted(snapshot.items())}
 
 
+# The rule versions the goldens were captured with, for rules whose version moved without their decisions moving (a
+# lane or wording change elsewhere in the rule, or a new arm these fixtures do not reach). A test restores them to
+# prove a re-pinned digest moved only by those version fields.
+PRIOR_RULE_VERSIONS = {
+    "host.persistence_path_change": "8",
+    "corr.process_network_link": "10",
+    "net.suricata_alert_stack": "4",
+    "net.zeek_alert": "2",
+    "net.executable_transfer": "2",
+    "net.outbound_ssh_external": "2",
+    "host.kernel_module_load": "2",
+}
+
+
+def with_prior_versions(snapshot: dict) -> dict:
+    """The snapshot with each candidate's and rule cell's rule version set back to PRIOR_RULE_VERSIONS."""
+    def back(row):
+        prior = PRIOR_RULE_VERSIONS.get(row.get("rule_id"))
+        return dict(row, rule_version=prior) if prior is not None else dict(row)
+    return dict(snapshot, candidates=[back(row) for row in snapshot["candidates"]],
+                rule_cells=[back(row) for row in snapshot["rule_cells"]])
+
+
 def deterministic_golden_digests(snapshot: dict) -> dict[str, str]:
     """Compare detection goldens without the additive AI provenance and assessment fields."""
     projected = json.loads(json.dumps(snapshot))

@@ -22,11 +22,12 @@ UNKNOWN_REASON = "text line in no recognized format: custom.unknown"
 # Fixed reference includes real text selection, scoped unknown-line coverage and writer caveats.
 # Seeded by the rule estimate (run_stack(rank=False)) this reference moves only in the manifest (incident tactics
 # now come from the vendored ATT&CK release) and, since sudo's privilege_use joined the text families, in the audit
-# and rule cells: the unknown line also leaves host.telemetry_gap_after_tamper partial. Evidence ranking then
-# anchors the rest of the Reported set, which moves anchors, expansion, links, tasks, audit, manifest and the
-# context rule cells of the added links. Events, candidates, raw records and citations are unchanged.
-GOLDEN_TEXT_STACK = {'anchors': '76d49f847a278436656be95a1a5b505f49981a042385f70276de06b1360278ed',
- 'audit': '00b16a0384533f0438b5e5cfc0e04105e17b32a19d5edd896dd47f6f0ac08862',
+# and rule cells: the unknown line also leaves host.telemetry_gap_after_tamper partial. This fixture has no confirmed
+# finding, so evidence ranking adds no extra seed: its single anchor is the rule estimate's. The rule cells include the
+# Zeek RPC coercion, internal RDP and RPC enumeration rules (not applicable here). Events, candidates, raw records and
+# citations are unchanged (`test_the_text_stack_candidates_moved_only_by_rule_versions`).
+GOLDEN_TEXT_STACK = {'anchors': 'e23919dbbe190daf61b3494b7b21e344022b803a564803a6dadaa59988bdf81e',
+ 'audit': 'df843bf165da6b02210df52e96127c22a377933852ae893bd91759dd302fee88',
  'baseline_counts': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'baseline_hunt_exclusions': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'baseline_observations': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
@@ -41,13 +42,13 @@ GOLDEN_TEXT_STACK = {'anchors': '76d49f847a278436656be95a1a5b505f49981a042385f70
  'event_citations': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
  'event_entities': 'aab2777b9cfdddf515ae9a452a34fc924d04660c82cf1c019a244758d034c630',
  'events': '30c0dcf4f38cac97f4c778cf415f65e180f134153426316f1085b7cbbf3f9f1d',
- 'expansion': '44f9f8720063e4d8ba33bffd67ea1532b81ae9678d1ec746d96fc59cee298012',
- 'links': '6d6470343a27027c549c214e10c4b05a80cea85fface21a22dbb169c16aab191',
- 'manifest': '2384dc7e26f7d2664ad513a5f5233fb0d2a6c7a6d52858e3692310b75dbb60a4',
+ 'expansion': 'dae7cbd7929a4cb94bb232a7343d4d70f62885a979b52714b87bd3641a92169b',
+ 'links': '1d9034491bfb6c4c55a0896c9a1d8f7f7158291270207776815b68eddede7007',
+ 'manifest': '5fad7f273812c309ba5169a26f666e434fa0469dcbc0ea2544c54a43e2e585b3',
  'raw': '64be31e697a32f93b1a71657560af514b2d430469cb3be19f44b8827985a7775',
- 'rule_cells': '78d1c59175dad8ef4ee87c6559fd17703ccbbcd1f707e045021c764f8e6d024a',
+ 'rule_cells': 'c46affe309fd6b0886d5c069cf1a7b11701cc85f1fb4aa9e6d8bac7d8b68e06b',
  'stats': '94249143f689b419b183019aec955234793e932e6edb0348cb5df3c50d425189',
- 'tasks': '6094da64753ceb78680dc5b2d54f8ef5d046cb7ccb786dae536f172abd1e4f70'}
+ 'tasks': 'a287691a5843ccb9f7b3d279364567cefb3dc6eb49f9d4753eaed993593437c4'}
 
 
 def text_documents():
@@ -163,6 +164,12 @@ def test_linux_text_whole_stack_retrieval_findings_and_partial_coverage(tmp_path
     snapshot, trace, docs = run_text_stack(tmp_path / "forward", monkeypatch)
     _assert_text_result(snapshot, trace, docs)
     assert tf.deterministic_golden_digests(snapshot) == GOLDEN_TEXT_STACK
+
+
+def test_the_text_stack_candidates_moved_only_by_rule_versions(tmp_path, monkeypatch):
+    snapshot, _trace, _docs = run_text_stack(tmp_path / "prior", monkeypatch)
+    assert tf.deterministic_golden_digests(tf.with_prior_versions(snapshot))["candidates"] == (
+        "75b419972178bacfa911559c0b72bdc96abe84b235220e4ef0066b30c52cec05")
 
 
 def test_linux_text_whole_stack_snapshot_is_deterministic(tmp_path, monkeypatch):

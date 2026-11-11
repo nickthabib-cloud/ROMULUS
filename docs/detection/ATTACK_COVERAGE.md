@@ -935,7 +935,7 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 <a id="rule-corr-process-network-link"></a>
 ### `corr.process_network_link` — Host process connect() calls linked to network-sensor records for the same connection (inferred)
 
-- Version: `10`; status: `active`
+- Version: `11`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `high`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1071`](https://attack.mitre.org/techniques/T1071/), [`T1095`](https://attack.mitre.org/techniques/T1095/), [`T1571`](https://attack.mitre.org/techniques/T1571/)
@@ -1086,7 +1086,7 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 <a id="rule-host-kernel-module-load"></a>
 ### `host.kernel_module_load` — A kernel module load or an insmod command outside module package trees
 
-- Version: `2`; status: `active`
+- Version: `3`; status: `active`
 - Kind: `direct`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1547.006`](https://attack.mitre.org/techniques/T1547/006/)
@@ -1517,7 +1517,7 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 <a id="rule-net-executable-transfer"></a>
 ### `net.executable_transfer` — Executable or script content transferred over HTTP, FTP or SMB
 
-- Version: `2`; status: `active`
+- Version: `3`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1036.008`](https://attack.mitre.org/techniques/T1036/008/), [`T1105`](https://attack.mitre.org/techniques/T1105/), [`T1570`](https://attack.mitre.org/techniques/T1570/)
@@ -1671,7 +1671,7 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 <a id="rule-net-outbound-ssh-external"></a>
 ### `net.outbound_ssh_external` — An internal source initiated SSH to an external destination
 
-- Version: `2`; status: `active`
+- Version: `3`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1021.004`](https://attack.mitre.org/techniques/T1021/004/), [`T1572`](https://attack.mitre.org/techniques/T1572/)
@@ -1799,7 +1799,7 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 <a id="rule-net-suricata-alert-stack"></a>
 ### `net.suricata_alert_stack` — IDS alert signature observed between a source and destination
 
-- Version: `4`; status: `active`
+- Version: `5`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **full-search**
 - ATT&CK: —
@@ -1853,13 +1853,13 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 <a id="rule-net-zeek-alert"></a>
 ### `net.zeek_alert` — Zeek intel match, signature match or notice
 
-- Version: `2`; status: `active`
+- Version: `3`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1003.006`](https://attack.mitre.org/techniques/T1003/006/), [`T1018`](https://attack.mitre.org/techniques/T1018/), [`T1021.002`](https://attack.mitre.org/techniques/T1021/002/), [`T1021.004`](https://attack.mitre.org/techniques/T1021/004/), [`T1046`](https://attack.mitre.org/techniques/T1046/), [`T1053.005`](https://attack.mitre.org/techniques/T1053/005/), [`T1059`](https://attack.mitre.org/techniques/T1059/), [`T1071.004`](https://attack.mitre.org/techniques/T1071/004/), [`T1087.002`](https://attack.mitre.org/techniques/T1087/002/), [`T1105`](https://attack.mitre.org/techniques/T1105/), [`T1110.001`](https://attack.mitre.org/techniques/T1110/001/), [`T1135`](https://attack.mitre.org/techniques/T1135/), [`T1190`](https://attack.mitre.org/techniques/T1190/), [`T1210`](https://attack.mitre.org/techniques/T1210/), [`T1569.002`](https://attack.mitre.org/techniques/T1569/002/), [`T1570`](https://attack.mitre.org/techniques/T1570/), [`T1571`](https://attack.mitre.org/techniques/T1571/), [`T1685.005`](https://attack.mitre.org/techniques/T1685/005/)
 - Telemetry families: net_alert
 - Required typed fields: —
-- Behavior: Zeek's intel framework matched a listed value, its signature engine matched a site signature, or a Zeek script raised a notice; notices are judged by a table of notice types, each sourced to the script that raises it, and a notice type outside the table, or a weird, is kept as context
+- Behavior: Zeek's intel framework matched a listed value, its signature engine matched a site signature, or a Zeek script raised a notice; notices are judged by a table of notice types, each sourced to the script that raises it, a notice type outside the table is a lead, and a weird is context unless it has the shape of IDS evasion or a crafted probe
 - Positive-only reason: the rule reports what Zeek's frameworks concluded; a sensor that raised nothing has not shown that nothing happened, so no negative is claimed
 
 <a id="rule-pcap-cleartext-interactive-shell"></a>
