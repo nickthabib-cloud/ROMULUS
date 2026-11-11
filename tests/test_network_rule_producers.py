@@ -70,7 +70,7 @@ def test_a_suricata_service_creation_call_is_a_remote_administration_finding():
 def test_suricata_rdp_records_are_not_judged(name):
     # Suricata writes the server's responses as records of their own, and the request or response subtype is not
     # typed: a response would name the server as the session's source.
-    response = suricata("rdp", {"event_type": "initial_request", "cookie": "admin"}, source="203.0.113.9",
+    response = suricata("rdp", {"event_type": "initial_response"}, source="203.0.113.9",
                         destination="10.0.0.5", port=51000)
     assert lateral(name, [response]) == []
 
