@@ -9,9 +9,9 @@ from tests import throughput_fixture as tf
 # epoch 17 reproduces the preceding complete snapshots).
 # Discovery and transfer executions already cited by a folded alert are not repeated as context.
 # Shared execution and lineage state keep the 4 MiB candidate result identical to larger budgets.
-CANDIDATE_GOLDENS = {16: (40, 'f8cd05dca12fe55f5f8f408d8632e125ed9d22b9e731e928d5c53511cb7b7e48'),
- 4: (40, 'f8cd05dca12fe55f5f8f408d8632e125ed9d22b9e731e928d5c53511cb7b7e48'),
- 8: (40, 'f8cd05dca12fe55f5f8f408d8632e125ed9d22b9e731e928d5c53511cb7b7e48')}
+CANDIDATE_GOLDENS = {16: (40, '8a753fb55d7fa51653f417c85046c383558011e7f55a1aa268e046b70385bb25'),
+ 4: (40, '8a753fb55d7fa51653f417c85046c383558011e7f55a1aa268e046b70385bb25'),
+ 8: (40, '8a753fb55d7fa51653f417c85046c383558011e7f55a1aa268e046b70385bb25')}
 
 
 @pytest.mark.parametrize("mib", CANDIDATE_GOLDENS)
@@ -37,5 +37,5 @@ def test_linux_stack_candidates_at_physical_byte_budget(mib, tmp_path, monkeypat
         for row in snapshot["candidates"]
     ])
     assert tf.deterministic_golden_digests(previous)["candidates"] == (
-        "93593433453100bcd7a4e3a24a40ac1a34bdbeec399cda01eb4b6171c37bb7f5")
+        "d4cb89534a5c41b4f80cc791d03ae3512758efdca8200e1e0d8aedbc5999244d")
     assert (len(snapshot["candidates"]), tf.deterministic_golden_digests(snapshot)["candidates"]) == CANDIDATE_GOLDENS[mib]
