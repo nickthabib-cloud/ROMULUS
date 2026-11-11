@@ -22,7 +22,7 @@ from romulus.evidence.typed import FieldValue, Outcome, fv
 from romulus.evidence.zeek_catalog import KERBEROS_ERRORS, KERBEROS_ETYPES
 from romulus.evidence.zeek_credentials import LDAP_PASSWORD_ATTRIBUTES
 
-SURICATA_NORMALIZER = "suricata-eve@1"
+SURICATA_NORMALIZER = "suricata-eve@2"
 SURICATA_PROTOCOL_FAMILIES = {
     "dcerpc": frozenset({"rpc_tx"}), "smb": frozenset({"smb_tx", "ntlm_tx", "rpc_tx"}),
     "krb5": frozenset({"kerberos_tx"}), "rdp": frozenset({"remote_session"}),
@@ -91,6 +91,16 @@ def _backslashes(text):
     return re.sub(r"\\+", lambda _m: "\\", text)
 
 
+# MS-ERREF NTSTATUS values; only explicit logon failures, not generic SMB errors.
+# https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-erref/596a1078-e883-4972-9bbc-49e60bebca55
+_NTLM_LOGON_FAILURES = frozenset({
+    "STATUS_LOGON_FAILURE", "STATUS_ACCOUNT_LOCKED_OUT", "STATUS_PASSWORD_EXPIRED",
+    "STATUS_ACCOUNT_DISABLED", "STATUS_ACCOUNT_RESTRICTION", "STATUS_INVALID_LOGON_HOURS",
+    "STATUS_INVALID_WORKSTATION", "STATUS_ACCOUNT_EXPIRED", "STATUS_PASSWORD_MUST_CHANGE",
+    "STATUS_NO_SUCH_USER", "STATUS_WRONG_PASSWORD", "STATUS_LOGON_TYPE_NOT_GRANTED",
+})
+
+
 def _smb(reader):
     result = ProtocolRecord("smb_tx")
     f = result.fields
@@ -131,6 +141,9 @@ def _smb(reader):
         f["smb.action"] = fv("FILE_RENAME", rename.path + "#derived:rename")
     elif command == "SMB1_COMMAND_DELETE":
         f["smb.action"] = fv("FILE_DELETE", reader.origin("command"))
+    elif command in {"SMB2_COMMAND_CREATE", "SMB2_COMMAND_SET_INFO"} and reader.value("access") == "delete on close":
+        f["smb.action"] = fv("FILE_DELETE", reader.origin("access"))
+        result.caveats.append("SMB delete-on-close records requested deletion, not its success")
     elif reader.value("disposition") == "FILE_CREATE":
         f["smb.action"] = fv("FILE_CREATE", reader.origin("disposition"))
         result.caveats.append("SMB create disposition records the requested operation, not its success")
@@ -138,6 +151,14 @@ def _smb(reader):
     ntlm = reader.child("ntlmssp")
     if ntlm:
         auth = ProtocolRecord("ntlm_tx")
+        # Suricata SMB log.rs emits this transaction's status and NTLM child;
+        # output-json-smb.c uses flow orientation, not the triggering packet.
+        if command in {"SMB1_COMMAND_SESSION_SETUP_ANDX", "SMB2_COMMAND_SESSION_SETUP"}:
+            status = reader.value("status")
+            if status == "STATUS_SUCCESS" or status in _NTLM_LOGON_FAILURES:
+                success = status == "STATUS_SUCCESS"
+                auth.fields["ntlm.success"] = fv(success, reader.origin("status") + "#derived:session-setup")
+                auth.outcome = Outcome.success if success else Outcome.failure
         user = ntlm.copy(auth.fields, "ntlm.username", "user")
         domain = ntlm.copy(auth.fields, "ntlm.domain", "domain")
         host = ntlm.copy(auth.fields, "ntlm.hostname", "host")
@@ -211,9 +232,23 @@ def _etype(value, path):
     raise ValueError(f"{path}: unknown encryption type")
 
 
-def _kerberos(reader):
+def _kerberos(reader, common):
     result = ProtocolRecord("kerberos_tx")
     f = result.fields
+    # Suricata 8 registers krb5 with JsonGenericDirPacketLogger. Keep that
+    # tuple intact and derive endpoint roles only from one unambiguous KDC port.
+    source_kdc = common.value("src_port", "count") == 88
+    destination_kdc = common.value("dest_port", "count") == 88
+    if source_kdc != destination_kdc:
+        for role, key in (("kdc", "src_ip" if source_kdc else "dest_ip"),
+                          ("client", "dest_ip" if source_kdc else "src_ip")):
+            address = common.value(key, "ip")
+            if address is not None:
+                f["kerberos." + role + "_ip"] = fv(address, common.origin(key) + "#derived:port-88")
+            else:
+                result.caveats.append(f"Kerberos {role} address is absent from the observed tuple")
+    else:
+        result.caveats.append("Kerberos endpoint roles are unresolved: exactly one tuple end must use port 88")
     msg = reader.value("msg_type")
     failed = reader.value("failed_request")
     request = failed if msg == "KRB_ERROR" else msg
@@ -238,7 +273,10 @@ def _kerberos(reader):
                                           f"unknown-{number}"), reader.origin("ticket_encryption"))
     encryption = reader.obj.get("encryption")
     if encryption not in (None, "<none>"):
-        _etype(encryption, reader.origin("encryption"))
+        try:
+            _etype(encryption, reader.origin("encryption"))
+        except ValueError:
+            result.caveats.append("Unknown Kerberos response encrypted-part cipher; ticket facts remain independent")
         if "ticket_encryption" not in reader.obj:
             result.caveats.append("Kerberos response encrypted-part cipher does not establish the issued ticket cipher")
     error = reader.value("error_code")
@@ -267,6 +305,7 @@ def _rdp(reader):
     if subtype not in ("initial_request", "initial_response", "connect_request", "connect_response", "tls_handshake"):
         raise ValueError(f"{reader.path}: unknown RDP subtype")
     f["remote.protocol"] = fv("rdp", reader.origin("event_type"))
+    f["rdp.message"] = fv(subtype, reader.origin("event_type"))
     reader.copy(f, "rdp.cookie", "cookie")
     reader.copy(f, "rdp.client_channels", "channel", "names")
     client = reader.child("client")
@@ -570,7 +609,9 @@ def protocol_records(eve: dict, origin: str) -> list[ProtocolRecord]:
     reader = Reader(eve.get(et), origin + "." + et)
     if et == "smb":
         return _smb(reader)
-    functions = {"dcerpc": _rpc, "krb5": _kerberos, "rdp": _rdp, "ldap": _ldap}
+    if et == "krb5":
+        return [_kerberos(reader, common)]
+    functions = {"dcerpc": _rpc, "rdp": _rdp, "ldap": _ldap}
     return [functions[et](reader) if et in functions else _application(reader, et, eve, origin)]
 
 

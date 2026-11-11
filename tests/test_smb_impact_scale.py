@@ -48,7 +48,7 @@ def run_scale(tmp_path, *, clients, rows_per_client):
     rule = SmbImpact()
     rule.budget = StateBudget(tmp_path, disk_total=1024 * 2**20, reserve=0, memory_total=2**20)
     distribution = Counter()
-    actual = peak_disk = 0
+    actual = peak_disk = note_opens = 0
     baseline_rss = peak_rss = _rss()
     started = time.perf_counter()
     try:
@@ -66,8 +66,9 @@ def run_scale(tmp_path, *, clients, rows_per_client):
                 elif client_index == 1 and ordinal < 200:
                     action, stamp = 'FILE_DELETE', ordinal * 120 / 200
                 elif client_index == 2 and ordinal < 10:
-                    action, stamp = 'FILE_CREATE', ordinal
+                    action, stamp = 'FILE_OPEN', ordinal
                     name = f'directory-{ordinal}/Restore-My-Files.txt'
+                    note_opens += 1
                 elif ordinal % 200 == 0:
                     action = 'FILE_RENAME' if ordinal % 400 == 0 else 'FILE_DELETE'
                     previous = f'ordinary/old-{ordinal}.docx' if action == 'FILE_RENAME' else None
@@ -96,7 +97,7 @@ def run_scale(tmp_path, *, clients, rows_per_client):
                 print(f'SMB_SCALE_PROGRESS rows={actual} clients={client_index + 1}', flush=True)
         consumed = time.perf_counter()
         history = rule.rows.store().db.execute('SELECT COUNT(*) FROM history').fetchone()[0]
-        assert history == actual - distribution['FILE_OPEN']
+        assert history == actual - distribution['FILE_OPEN'] + note_opens
         findings = list(rule.finalize())
         elapsed = time.perf_counter() - started
         peak_rss = max(peak_rss, _rss())

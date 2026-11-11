@@ -254,7 +254,8 @@ def test_zero_datasetless_count_keeps_legacy_profile_hash_and_shape():
     fields = {**FIELDS, "input.type": "keyword"}
     client = ProfileClient({"system.auth": 7}, [_sample([], "", total=0)], fields)
     profile, _ = build_profile(client, "logs")
-    assert len(client.bodies) == 2
+    assert len(client.bodies) == 3
+    assert "text_missing_host" in client.bodies[-1]["aggs"]
     assert not client.samples
     assert profile.datasets == {"system.auth": 7}
     assert "linux_text" not in profile.model_dump()
@@ -362,7 +363,8 @@ def test_zero_secondary_and_datasetless_counts_keep_legacy_profile_unchanged():
     client = ProfileClient({"system.auth": 7}, [_sample([], "", total=0)], fields,
                            secondary=[_secondary_inventory({})])
     profile, _ = build_profile(client, "logs")
-    assert len(client.bodies) == 3 and not client.samples and not client.secondary
+    assert len(client.bodies) == 4 and not client.samples and not client.secondary
+    assert "text_missing_host" in client.bodies[-1]["aggs"]
     assert profile.datasets == {"system.auth": 7}
     assert profile.notes == []
     assert "linux_text" not in profile.model_dump()

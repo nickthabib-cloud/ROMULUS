@@ -1,6 +1,6 @@
 {
   "schema": "romulus.network-services@1",
-  "version": "1",
+  "version": "3",
   "license": "CC0-1.0 (original factual compilation only)",
   "source_policy": "Original compilation of public domain-name facts, with attribution. No upstream code, prose, or catalog imported. Source rights and trademarks remain with their owners; LicenseRef-Source-Rights-Retained does not claim an upstream reuse license.",
   "scope": "Positive-only service-name observations. Shared provider infrastructure and arbitrary customer domains are excluded. A match does not establish execution, a successful session, maliciousness, or a transfer.",
@@ -220,8 +220,6 @@
         "gotoassist.me",
         "gotoassist.at",
         "desktopstreaming.com",
-        "logmein.com",
-        "logmeininc.com",
         "logmeinrescue.com"
       ],
       "attack": [
@@ -234,7 +232,7 @@
           "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
         },
         {
-          "url": "https://www.goto.com/company/legal/digital-properties-list",
+          "url": "https://secure.logmeinrescue.com/welcome/documents/pdfs/rescue_admin_center_userguide.pdf",
           "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
         }
       ]
@@ -268,7 +266,24 @@
         "ngrok.pizza",
         "ngrok-free.app",
         "ngrok-free.dev",
-        "ngrok.io"
+        "ngrok.io",
+        "connect.ngrok-agent.com",
+        "connect.ap.ngrok-agent.com",
+        "connect.au.ngrok-agent.com",
+        "connect.eu.ngrok-agent.com",
+        "connect.in.ngrok-agent.com",
+        "connect.jp.ngrok-agent.com",
+        "connect.sa.ngrok-agent.com",
+        "connect.us-cal-1.ngrok-agent.com",
+        "connect.us.ngrok-agent.com",
+        "tunnel.ap.ngrok.com",
+        "tunnel.au.ngrok.com",
+        "tunnel.eu.ngrok.com",
+        "tunnel.in.ngrok.com",
+        "tunnel.jp.ngrok.com",
+        "tunnel.sa.ngrok.com",
+        "tunnel.us-cal-1.ngrok.com",
+        "tunnel.us.ngrok.com"
       ],
       "attack": [
         "T1572",
@@ -278,6 +293,14 @@
       "sources": [
         {
           "url": "https://ngrok.com/docs/gateway/domains",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        },
+        {
+          "url": "https://ngrok.com/docs/gateway/agent/connectivity",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        },
+        {
+          "url": "https://s3.amazonaws.com/dns.ngrok.com/tunnel.json",
           "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
         }
       ]
@@ -623,7 +646,9 @@
       "name": "MEGA",
       "category": "file_sharing",
       "suffixes": [
-        "mega.nz"
+        "mega.nz",
+        "g.api.mega.co.nz",
+        "userstorage.mega.co.nz"
       ],
       "attack": [
         "T1567.002"
@@ -634,6 +659,14 @@
           "url": "https://github.com/meganz/webclient",
           "license": "LicenseRef-MEGA-Limited-Code-Review-Licence (upstream code; only domain facts referenced)",
           "license_url": "https://github.com/meganz/webclient/blob/master/LICENCE.md"
+        },
+        {
+          "url": "https://github.com/meganz/sdk/blob/master/src/megaclient.cpp",
+          "license": "BSD-2-Clause (upstream code; only domain facts referenced)"
+        },
+        {
+          "url": "https://mega.io/bug-bounty",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
         }
       ]
     },
@@ -654,6 +687,101 @@
           "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
         }
       ]
+    },
+    {
+      "id": "dnslog-cn",
+      "name": "DNSLog.cn",
+      "category": "callback",
+      "suffixes": [
+        "dnslog.cn"
+      ],
+      "attack": [
+        "T1071",
+        "T1567"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://github.com/fullhunt/log4j-scan",
+          "license": "MIT (upstream scanner documentation; only service facts referenced)"
+        }
+      ]
+    },
+    {
+      "id": "ceye",
+      "name": "Ceye",
+      "category": "callback",
+      "suffixes": [
+        "ceye.io"
+      ],
+      "attack": [
+        "T1071",
+        "T1567"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://github.com/knownsec/pocsuite3/blob/master/pocsuite3/modules/ceye/__init__.py",
+          "license": "GPL-2.0 (upstream code; only domain facts referenced)"
+        }
+      ]
+    },
+    {
+      "id": "pastebin",
+      "name": "Pastebin",
+      "category": "file_sharing",
+      "suffixes": [
+        "pastebin.com"
+      ],
+      "attack": [
+        "T1567.003"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://attack.mitre.org/techniques/T1567/003/",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ],
+      "notes": "Text storage and staging service; a name observation does not establish an upload or malicious use."
+    },
+    {
+      "id": "paste-ee",
+      "name": "Paste.ee",
+      "category": "file_sharing",
+      "suffixes": [
+        "paste.ee"
+      ],
+      "attack": [
+        "T1567.003"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://hunt.io/blog/pasteee-xworm-asyncrat-infrastructure",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ],
+      "notes": "Text storage service with documented payload staging abuse; a name observation does not establish an upload or malicious use."
+    },
+    {
+      "id": "hastebin",
+      "name": "Hastebin",
+      "category": "file_sharing",
+      "suffixes": [
+        "hastebin.com"
+      ],
+      "attack": [
+        "T1567.003"
+      ],
+      "license": "CC0-1.0 (this original factual catalog record only)",
+      "sources": [
+        {
+          "url": "https://attack.mitre.org/detectionstrategies/DET0284/",
+          "license": "LicenseRef-Source-Rights-Retained (facts referenced; no code or prose copied)"
+        }
+      ],
+      "notes": "Text storage and staging service; a name observation does not establish an upload or malicious use."
     }
   ]
 }

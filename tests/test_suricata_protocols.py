@@ -78,7 +78,7 @@ def test_protocol_fields_survive_every_supported_shipper(et, shape):
     assert len(events) == 1
     event = events[0]
     assert event.family == CASES[et][1]
-    assert event.normalizer == "suricata-eve@1"
+    assert event.normalizer == "suricata-eve@2"
     for key, expected in CASES[et][2].items():
         assert event.get(key) == expected, key
         assert event.fields[key].origin.startswith("row-1:")

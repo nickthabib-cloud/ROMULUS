@@ -30,7 +30,7 @@ from romulus.evidence.windows_catalog import (
 if TYPE_CHECKING:
     from romulus.detect.bounded import Account, StateBudget
 
-WINDOWS_NORMALIZER = "windows-ecs@20"
+WINDOWS_NORMALIZER = "windows-ecs@21"
 # This is already far beyond what the 64 MiB assembler can retain at normal 4104 chunk sizes, while bounding every
 # completeness vector even when hostile metadata claims billions of parts.
 SCRIPT_BLOCK_MAX_PARTS = 4_096
@@ -1112,7 +1112,7 @@ def windows_record_signature(hit: dict) -> str:
         winlog.get("time_created")
         or native.get("TimeCreated")
         or native.get("SystemTime")
-        or _get(source, "event.created")
+        # ECS event.created is the shipper's read time; @timestamp is the event time.
         or source.get("@timestamp")
     )
     native_time = _signature_time(native_time)

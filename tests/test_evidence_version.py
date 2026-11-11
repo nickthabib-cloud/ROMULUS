@@ -79,6 +79,8 @@ PINNED_EVIDENCE = {9: "4e9103b2e1eab468361e1cde83127dd13cd5d87a4c7a0926ac35cf211
                    18: "f9438c44066da703854cacba922c1ca4732e824a2524fc2c186023e508aaac3e"}
 WINDOWS_EVIDENCE_FILES = ("community.py", "windows.py", "windows_catalog.py", "windows_reassembly.py", "rpc_catalog.py")
 PINNED_WINDOWS = {
+    # Shipper read time cannot replace the Windows event clock in duplicate identity.
+    "windows-ecs@21": "7caa946e17f102f674387e6cdfdaa3cfbb14e4c1bf573c3e4e13429e54a4f6c9",
     # Native Windows copies share an instant identity at exporter millisecond precision.
     "windows-ecs@20": "22faf9d891c5f4a56274ad258a4a0622c688d4da87b8e8ae27e1e68ada85a081",
     # Native EVTX JSON records gain typed normalization with their original field paths.
@@ -110,7 +112,8 @@ PINNED_WINDOWS = {
 # Shared path, credential and scalar cleaners are part of the eCAR producer contract.
 ECAR_EVIDENCE_FILES = ('community.py', 'ecar.py', 'ecar_catalog.py', 'raw_scrub.py', 'surrogates.py', 'windows.py')
 # Native epoch, ISO timestamps and pipeline-only exports retain ordered clock provenance.
-PINNED_ECAR = {"ecar@2": "0b6340adce420e237b1633435c321244e88ec744ee37a7b83e7818b6d4439c75",
+PINNED_ECAR = {"ecar@3": "2fd5560a55e67aa823c054ffbe7cd7573cf05826f2009498202cd89a714c3242",
+               "ecar@2": "0b6340adce420e237b1633435c321244e88ec744ee37a7b83e7818b6d4439c75",
                "ecar@1": "539a0832b610df1dca02729b594756bb1a0ae70a9c825beec154611b0cde56cd"}
 ZEEK_EVIDENCE_FILES = ("certificates.py", "community.py", "ics_catalog.py", "rpc_catalog.py", "zeek.py", "zeek_catalog.py",
                        "zeek_credentials.py")
@@ -132,7 +135,8 @@ SURICATA_EVIDENCE_FILES = ("normalize.py", "suricata_protocols.py", "raw_scrub.p
                            "surrogates.py", "typed.py")
 ARKIME_EVIDENCE_FILES = ("normalize.py", "arkime_protocols.py", "raw_scrub.py", "community.py",
                         "certificates.py", "zeek_credentials.py", "surrogates.py", "typed.py")
-PINNED_SURICATA = {"suricata-eve@1": "8aba0c3bbb2061eef70c0c9dd77e5ab49a42bbed9a68b01ba4b4eeffad181e38"}
+PINNED_SURICATA = {"suricata-eve@2": "9e9474d10461d765e37685709e03d2a78793bc60f09a66ca191c981d6af89371",
+                   "suricata-eve@1": "8aba0c3bbb2061eef70c0c9dd77e5ab49a42bbed9a68b01ba4b4eeffad181e38"}
 PINNED_ARKIME = {"arkime@1": "bf3aa603d8acb1ade816360a7f90440e82e3dbc63e540e1b8d82fd971a5fa425"}
 
 

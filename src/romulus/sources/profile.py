@@ -102,6 +102,8 @@ class FieldContract(BaseModel):
     windows_shapes: tuple[str, ...] = ()
     # None means the bounded text-source count was unavailable, never a complete negative.
     linux_text_mixed: bool | None = False
+    # Whole-target preflight count; None includes old contracts and failed/incomplete counts.
+    text_missing_host_records: int | None = None
     ecar: bool = False
     temporal_gaps: tuple[str, ...] = ()
 
@@ -132,6 +134,8 @@ class FieldContract(BaseModel):
             data.pop("windows_shapes", None)
         if self.linux_text_mixed is False:
             data.pop("linux_text_mixed", None)
+        if self.text_missing_host_records is None:
+            data.pop("text_missing_host_records", None)
         if not self.ecar:
             data.pop("ecar", None)
         if not self.temporal_gaps:
@@ -416,7 +420,17 @@ for _row in ECAR_ROWS.values():
 
 
 def _ecar_time_field(field_types):
-    return next((name for name in ("timestamp_ms", "timestamp", "@timestamp") if name in field_types), "timestamp_ms")
+    native = next((name for name in ("timestamp_ms", "timestamp") if name in field_types), None)
+    return (native if native is not None and field_types[native] in {
+        "date", "date_nanos", "long", "integer", "double", "float"} else "@timestamp")
+
+
+def _ecar_query_clock_gap(field_types):
+    native = next((name for name in ("timestamp_ms", "timestamp") if name in field_types), None)
+    if native is None or _ecar_time_field(field_types) == native:
+        return None
+    return (f"temporal coverage unresolved: {native} is mapped as {field_types[native]}; query uses @timestamp; "
+            "native-clock window membership unresolved")
 
 
 def linux_markers(field_types, datasets=None) -> bool:
@@ -645,6 +659,8 @@ def contract_from_types(
         time_field = _evtx_time_field(field_types)
     if ecar:
         time_field = _ecar_time_field(field_types)
+        if reason := _ecar_query_clock_gap(field_types):
+            temporal_gaps = tuple(dict.fromkeys((*temporal_gaps, reason)))
     resolved_os = os_family or source_os_family(field_types, resolved_role, datasets)
     return FieldContract(
         target=target, fields=fields, time_field=time_field, role=resolved_role, os_family=resolved_os,
@@ -1184,23 +1200,66 @@ def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfil
         text_detail = _text_profile(client, target, field_types, datasets, ds_field, role, os_family, notes)
         if text_detail is not None:
             prof["linux_text"] = text_detail
+            if text_detail["rollup"]["records"] is None:
+                mixed_text = None
     # Role and OS are source semantics, so they intentionally participate in the profile id. Adding them changes
     # ids made by older builds; the manifest also records both values explicitly for resume validation.
-    pid = digest({k: v for k, v in prof.items() if k != "captured_at"})[:16]
-    profile = SourceProfile(id=pid, **prof)
     contract = contract_from_types(
         target,
         field_types,
         role=role, os_family=os_family,
-        hosts=tuple(sorted(profile.hosts)),
+        hosts=tuple(sorted(prof["hosts"])),
         host_inventory_complete=not any(note.startswith("hosts inventory truncated") for note in notes),
         datasets=datasets,
         keyword_limits=keyword_subfield_limits(mapping),
         linux_text_mixed=mixed_text,
         temporal_gaps=tuple(item["reason"] for item in temporal),
     )
+    if declaration is None and role == "host":
+        count = _text_missing_host_count(client, target, contract)
+        contract = contract.model_copy(update={"text_missing_host_records": count})
+    pid = digest({k: v for k, v in prof.items() if k != "captured_at"})[:16]
+    profile = SourceProfile(id=pid, **prof)
 
     return profile, apply_zeek_declaration(contract, site_facts) if declaration is not None else contract
+
+
+def _text_missing_host_count(client, target, contract):
+    """One scalar filter count, using the same text/syslog source superset as retrieval."""
+    from romulus.sources.compile import CompileError, _pred
+    from romulus.sources.models import Predicate
+
+    payload = [{"exists": {"field": name}} for name in ("message", "event.original")
+               if contract.spec(name, os_family="linux") is not None]
+    if not payload or contract.ecar:
+        return 0
+    host = contract.spec("host.name", os_family="linux")
+    if host is not None and (host.native != "host.name" or host.type not in {"keyword", "constant_keyword", "wildcard"}):
+        # An analyzed/aliased host cannot prove that source whitespace is absent.
+        return None
+    # Python's stripped-empty host forms also fall back to the syslog header.
+    # Match only this fixed Unicode whitespace alphabet; no unbounded term list
+    # or per-record script. A backend refusing regexp leaves the count unknown.
+    whitespace = "\t\n\v\f\r\x1c\x1d\x1e\x1f \x85\xa0\u1680" + "".join(chr(c) for c in range(0x2000, 0x200b)) + "\u2028\u2029\u202f\u205f\u3000"
+    missing = {"bool": {"should": [
+        {"bool": {"must_not": [{"exists": {"field": "host.name"}}]}},
+        {"regexp": {"host.name": {"value": "[" + whitespace + "]*", "max_determinized_states": 100}}},
+    ], "minimum_should_match": 1}}
+    try:
+        selection = _pred(Predicate(field="event.dataset", op="in", value=["linux.text", "linux.syslog"]),
+                          contract, os_family="linux")
+        response = client.search(target, {"size": 0, "track_total_hits": False, "aggs": {
+            "text_missing_host": {"filter": {"bool": {
+                "filter": [selection, {"bool": {"should": payload, "minimum_should_match": 1}}, missing],
+            }}}}})
+    except (SourceError, CompileError):
+        return None
+    count = (response.get("aggregations") or {}).get("text_missing_host", {}).get("doc_count")
+    if (response.get("timed_out") or response.get("terminated_early")
+            or (response.get("_shards") or {}).get("failed")
+            or not isinstance(count, int) or isinstance(count, bool) or count < 0):
+        return None
+    return count
 
 
 def _evtx_shape_inventory(client, target, shapes) -> dict:
@@ -1249,6 +1308,10 @@ def _temporal_inventory(client, target, field_types, primary, *, ecar=False):
         "Event.System.TimeCreated.#attributes.SystemTime", "Event.System.TimeCreated_attributes.SystemTime"])
     markers = ["object", "action", "objectID", "actorID", "hostname"] if ecar else ["Event.System.Computer"]
     gaps, prior = [], [primary]
+    if ecar and (reason := _ecar_query_clock_gap(field_types)):
+        native = next(name for name in ("timestamp_ms", "timestamp") if name in field_types)
+        gaps.append({"records": None, "primary": primary, "alternate": native,
+                     "count_scope": "mapping; native clock is not chronologically searchable", "reason": reason})
     for alternate in alternatives:
         if alternate == primary or alternate not in field_types:
             continue

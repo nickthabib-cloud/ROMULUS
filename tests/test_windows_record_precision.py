@@ -11,6 +11,7 @@ from romulus.evidence.normalize import normalize_hits
 from romulus.evidence.windows import RecordIdContinuity, windows_record_signature
 from romulus.hunt.stage import EventStage
 from tests.test_evtx_json import raw_hit, twin
+from tests.windows_fixtures import LogicalWindowsEvent, windows_hit
 
 
 def _copies(native_time, shipped_time):
@@ -85,3 +86,44 @@ def test_native_and_shipped_copies_in_different_batches_deduplicate_on_disk(tmp_
         assert first.id == duplicate.id
     finally:
         stage.close()
+
+
+def _read_time_copy(shape):
+    native = raw_hit()
+    source = native["_source"]
+    system = source["Event"]["System"]
+    system["TimeCreated"]["#attributes"]["SystemTime"] = "2030-01-06T09:00:00.1234567Z"
+    event = LogicalWindowsEvent(channel=system["Channel"], provider=system["Provider"]["#attributes"]["Name"],
+        event_id=system["EventID"], computer=system["Computer"], record_id=system["EventRecordID"],
+        timestamp="2030-01-06T09:00:00.123Z", data=source["Event"]["EventData"])
+    shipped = windows_hit(event, shape)
+    shipped["_source"]["winlog"].pop("time_created", None)
+    shipped["_source"].setdefault("event", {})["created"] = "2030-01-06T09:00:01.456Z"
+    return native, shipped
+
+
+@pytest.mark.parametrize("shape", ["winlogbeat_8", "elastic_agent"])
+def test_real_shipper_read_time_does_not_split_native_twins(shape):
+    native, shipped = _read_time_copy(shape)
+    events, skips, errors = normalize_hits([native, shipped])
+    assert errors == [] and len(events) == 1
+    assert skips == {"duplicate Windows event copy (computer/channel/record_id)": 1}
+    continuity = RecordIdContinuity()
+    try:
+        preceding = deepcopy(native)
+        preceding["_source"]["Event"]["System"]["EventRecordID"] = 18
+        assert continuity.observe("windows", [preceding, native]) == []
+        assert continuity.observe("windows", [shipped]) == []
+    finally:
+        continuity.close()
+
+
+@pytest.mark.parametrize("shape", ["winlogbeat_8", "elastic_agent"])
+def test_shipper_records_read_together_remain_distinct_one_millisecond_apart(shape):
+    _, first = _read_time_copy(shape)
+    second = deepcopy(first)
+    second["_id"] += "-later"
+    second["_source"]["@timestamp"] = "2030-01-06T09:00:00.124Z"
+    events, skips, errors = normalize_hits([first, second])
+    assert errors == [] and len(events) == 2
+    assert skips == {"record_id reused (log cleared or reverted)": 1}
