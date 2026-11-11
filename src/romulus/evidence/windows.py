@@ -1112,7 +1112,7 @@ def windows_record_signature(hit: dict) -> str:
         winlog.get("time_created")
         or native.get("TimeCreated")
         or native.get("SystemTime")
-        or _get(source, "event.created")
+        # ECS event.created is the shipper's read time; @timestamp is the event time.
         or source.get("@timestamp")
     )
     native_time = _signature_time(native_time)
