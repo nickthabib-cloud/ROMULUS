@@ -91,6 +91,16 @@ def _backslashes(text):
     return re.sub(r"\\+", lambda _m: "\\", text)
 
 
+# MS-ERREF NTSTATUS values; only explicit logon failures, not generic SMB errors.
+# https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-erref/596a1078-e883-4972-9bbc-49e60bebca55
+_NTLM_LOGON_FAILURES = frozenset({
+    "STATUS_LOGON_FAILURE", "STATUS_ACCOUNT_LOCKED_OUT", "STATUS_PASSWORD_EXPIRED",
+    "STATUS_ACCOUNT_DISABLED", "STATUS_ACCOUNT_RESTRICTION", "STATUS_INVALID_LOGON_HOURS",
+    "STATUS_INVALID_WORKSTATION", "STATUS_ACCOUNT_EXPIRED", "STATUS_PASSWORD_MUST_CHANGE",
+    "STATUS_NO_SUCH_USER", "STATUS_WRONG_PASSWORD", "STATUS_LOGON_TYPE_NOT_GRANTED",
+})
+
+
 def _smb(reader):
     result = ProtocolRecord("smb_tx")
     f = result.fields
@@ -141,6 +151,14 @@ def _smb(reader):
     ntlm = reader.child("ntlmssp")
     if ntlm:
         auth = ProtocolRecord("ntlm_tx")
+        # Suricata SMB log.rs emits this transaction's status and NTLM child;
+        # output-json-smb.c uses flow orientation, not the triggering packet.
+        if command in {"SMB1_COMMAND_SESSION_SETUP_ANDX", "SMB2_COMMAND_SESSION_SETUP"}:
+            status = reader.value("status")
+            if status == "STATUS_SUCCESS" or status in _NTLM_LOGON_FAILURES:
+                success = status == "STATUS_SUCCESS"
+                auth.fields["ntlm.success"] = fv(success, reader.origin("status") + "#derived:session-setup")
+                auth.outcome = Outcome.success if success else Outcome.failure
         user = ntlm.copy(auth.fields, "ntlm.username", "user")
         domain = ntlm.copy(auth.fields, "ntlm.domain", "domain")
         host = ntlm.copy(auth.fields, "ntlm.hostname", "host")
