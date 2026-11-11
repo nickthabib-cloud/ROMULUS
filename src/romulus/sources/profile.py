@@ -1110,7 +1110,11 @@ def build_profile(client, target: str, *, site_facts=None) -> tuple[SourceProfil
     os_family = source_os_family(field_types, role, datasets)
     windows_records = _windows_record_count(client, target, field_types, datasets, role, notes)
     if windows_records is not None:
-        os_family = "windows" if role == "host" and (ecar or windows_records > 0) else ("linux" if role == "host" else "unknown")
+        # A count can veto a Windows mapping hint, but cannot override Linux dataset or field evidence.
+        if role == "network":
+            os_family = "unknown"
+        elif os_family == "windows" and not ecar and windows_records == 0:
+            os_family = "linux"
     if windows and (os_family != "windows" or role == "network"):
         notes[:] = [note for note in notes if not note.startswith("hosts inventory truncated")]
         host_counts = _extra_host_inventory(client, target, _aggregation_field(field_types, "host.name"), notes, paged=False)
