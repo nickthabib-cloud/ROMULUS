@@ -164,7 +164,7 @@ class ServiceCatalog(Playbook):
                             "cannot establish that remote access, tunnelling or transfer did not occur.")
     direction_dependent = True
     uses_site_facts = True
-    attack = ("T1219.002", "T1219.001", "T1572", "T1090.002", "T1071", "T1567", "T1567.002")
+    attack = ("T1219.002", "T1219.001", "T1572", "T1090.002", "T1071", "T1567", "T1567.002", "T1567.003")
     benign = ("Approved support, development, testing and file sharing use these services.",)
     next_checks = ("Confirm the source address and whether this service use was authorized.",
                    "Inspect related connection and host records before inferring execution or data transfer.")
