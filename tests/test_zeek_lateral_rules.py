@@ -308,7 +308,7 @@ def test_rdp_from_inside_the_site_is_a_lead_and_from_outside_belongs_to_the_exte
 
 def test_internal_rdp_folds_one_lead_per_pair():
     rows=[zl.RDP.with_(uid=f'CrdpConn{i:09d}') for i in range(50)]
-    owner=rule('InternalRdpSession',facts(internal_networks=('10.0.0.0/8',)))
+    owner=rule('InternalRdpSession',facts(internal_networks=('10.0.0.0/8',)))  # one source, one destination
     found={}
     for row in rows:
         for match in owner.consume([every_shape(row)['plain']]):
@@ -318,3 +318,33 @@ def test_internal_rdp_folds_one_lead_per_pair():
     assert len(found)==1
     [match]=found.values()
     assert match.proposed_lane=='lead' and '50 raw reference(s)' in match.claim
+
+
+
+def _fold(name, rows, site):
+    owner=rule(name,site)
+    found={}
+    for row in rows:
+        for match in owner.consume([every_shape(row)['plain']]):
+            found[match.group_key]=match
+    for match in owner.finalize():
+        found[match.group_key]=match
+    return owner,list(found.values())
+
+
+def test_internal_rdp_from_one_source_to_many_hosts_is_one_lead_citing_them():
+    rows=[zl.RDP.with_(uid=f'CrdpScan{i:08d}',**{'id.resp_h':f'10.0.5.{i}'}) for i in range(30)]
+    _owner,[match]=_fold('InternalRdpSession',rows,facts(internal_networks=('10.0.0.0/8',)))
+    assert match.proposed_lane=='lead' and '30 raw reference(s)' in match.claim
+    assert 'cited records name each destination' in match.claim
+    _owner,[managed]=_fold('InternalRdpSession',rows,facts(internal_networks=('10.0.0.0/8',),
+                                                           management_hosts=(zl.CLIENT,)))
+    assert managed.proposed_lane=='lead'
+    assert any('declared management source' in note for note in managed.notes)
+
+
+def test_print_notification_without_declared_controllers_is_an_honest_partial():
+    row=zl.DCE_RPC.with_(endpoint='spoolss',operation='RpcRemoteFindFirstPrinterChangeNotificationEx')
+    owner,found=_fold('WireCoercionCall',[row],facts())
+    assert found==[]
+    assert any('domain controller addresses are not declared' in reason for reason in owner.limit_reasons())

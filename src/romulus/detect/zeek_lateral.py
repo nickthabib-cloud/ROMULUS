@@ -179,6 +179,11 @@ class WireCoercionCall(ZeekBehaviorRule):
             return []
         if call.op_class == 'print_notification':
             controllers = getattr(getattr(self, 'site_facts', None), 'domain_controller_addresses', ())
+            if not controllers:
+                self.note_limit('print_notification_unjudged',
+                                'print change-notification calls were not judged: domain controller addresses are not '
+                                'declared, so a PrinterBug call to a controller cannot be told from a print client', 1)
+                return []
             if not address_member(peers[1], controllers):
                 return []
             lane, notes = 'high', ('the destination is a declared domain controller (the PrinterBug target)',)
@@ -231,6 +236,7 @@ class _RemoteSession(ZeekBehaviorRule):
     protocol = ''
     inside_lane = None
     outside = True          # this rule judges sessions from outside the site (and those it cannot place)
+    per_source = False      # fold one source's sessions to every destination into one finding
 
     def judge(self, event):
         if (not _zeek(event) or event.family != 'remote_session'
@@ -259,10 +265,17 @@ class _RemoteSession(ZeekBehaviorRule):
         if not networks.configured:
             notes = (*notes, DIRECTION_ASSUMED_REASON)
         text = f'{self.protocol.upper()} session negotiation observed from {peers[0]} to {peers[1]}'
+        common, content = text, json.dumps([*peers, self.protocol])
+        if self.per_source:
+            # one finding per source: a scanner or jump host reaching many hosts is one item listing them
+            common = (f'{self.protocol.upper()} session negotiations observed from {peers[0]}; the cited records '
+                      'name each destination')
+            content = json.dumps([peers[0], self.protocol])
+            if address_member(peers[0], getattr(site, 'management_hosts', ())):
+                notes = (*notes, 'declared management source; authorized administration can produce these sessions')
         return [signal(event, self.id, text, self.attack,
             ('source.ip', 'destination.ip', 'destination.port', 'remote.protocol'), lane=lane,
-            severity='high' if lane == 'high' else 'medium', notes=notes, common=text,
-            content=json.dumps([*peers, self.protocol]))]
+            severity='high' if lane == 'high' else 'medium', notes=notes, common=common, content=content)]
 
 
 class RdpRemoteSession(_RemoteSession):
@@ -273,12 +286,13 @@ class RdpRemoteSession(_RemoteSession):
 
 class InternalRdpSession(_RemoteSession):
     """RDP from a host inside the site: to another inside host, the most common interactive lateral movement; to an
-    outside one, an interactive session leaving the site. One lead per source and destination pair; administrators'
-    sessions to servers look the same on the wire, which the host's logon records and the pair's history settle."""
+    outside one, an interactive session leaving the site. One lead per source, citing its destinations;
+    administrators' sessions to servers look the same on the wire, which the host's logon records settle."""
     id, title = 'net.internal_rdp', 'RDP session negotiation from a host inside the site'
-    protocol, inside_lane, outside = 'rdp', 'lead', False
+    protocol, inside_lane, outside, per_source = 'rdp', 'lead', False, True
     attack = ('T1021.001',)
-    benign = ('Administrators and help desks connecting to servers and workstations; jump hosts.',)
+    benign = ('Administrators and help desks connecting to servers and workstations; jump hosts.',
+              'Vulnerability scanners checking RDP on every host.')
 
 
 class VncRemoteSession(_RemoteSession):

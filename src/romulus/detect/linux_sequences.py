@@ -1091,6 +1091,11 @@ class InteractivePrivilegedLogin(LinuxSequence):
                               inferred=False)
 
 
+# The lowest port a client's ephemeral range starts at on common systems (Linux 32768, Windows and the IANA range
+# 49152): an SSH service on a non-standard port listens below it.
+SSH_CLIENT_PORT_FLOOR = 32768
+
+
 class OutboundSSHExternal(LinuxSequence):
     id = "net.outbound_ssh_external"
     version = "3"
@@ -1110,9 +1115,11 @@ class OutboundSSHExternal(LinuxSequence):
         ssh = proto == "ssh" or "ssh" in protocols
         if not (ssh or e.get("network.transport") == "tcp" and e.get("destination.port") == 22):
             return
-        if e.get("source.port") == 22 and e.get("destination.port") != 22:
+        sport, dport = e.get("source.port"), e.get("destination.port")
+        if (sport == 22 and dport != 22) or (ssh and isinstance(sport, int) and isinstance(dport, int)
+                                             and sport < SSH_CLIENT_PORT_FLOOR <= dport):
             # a record oriented from the server's side (a reply, or a sensor that wrote the responder first): the
-            # client is the other end
+            # client is the end on the ephemeral port
             source, destination = destination, source
         assume_direction(self)
         if external(source) or not external(destination):

@@ -1,4 +1,5 @@
 """Typed Linux observations, sequence lanes and mission-scale disk joins."""
+import json
 from datetime import timedelta
 
 import pytest
@@ -212,6 +213,9 @@ def test_outbound_ssh_lanes(source, destination, port, management, lane, tmp_pat
 @pytest.mark.parametrize("source,destination,sport,dport,lane", [
     # the server's side of an inbound session: the internal host answers on 22, the external client is not a target
     ("10.0.0.2", "203.0.113.9", 22, 51515, None),
+    # the same on a non-standard service port, recognized as SSH by its protocol
+    ("10.0.0.2", "203.0.113.9", 2222, 51515, None),
+    ("203.0.113.9", "10.0.0.2", 2222, 51515, "lead"),
     # the client's side of an outbound session recorded from the server's end
     ("203.0.113.9", "10.0.0.2", 22, 51515, "lead"),
     ("10.0.0.2", "203.0.113.9", 51515, 22, "lead"),
@@ -229,7 +233,7 @@ def test_outbound_ssh_reads_the_client_from_the_service_port(source, destination
     found = list(detector.finalize())
     assert [m.proposed_lane for m in found] == ([lane] if lane else [])
     if lane:
-        assert "10.0.0.2" in found[0].group_key.split("|")[0]
+        assert json.loads(found[0].group_key) == ["10.0.0.2", "203.0.113.9"]      # (client, server)
 
 
 @pytest.mark.parametrize("name,expected", [("Major Cobalt Strike", True), ("major cobalt strike", True),
