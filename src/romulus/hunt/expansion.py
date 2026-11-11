@@ -12,10 +12,11 @@ from datetime import UTC, datetime, timedelta
 
 from romulus.agent.models import PivotCoverage
 from romulus.decide.policy import LANE_ORDER
+from romulus.decide.rank import address_is_internal, ranking_entities
 from romulus.detect import netdef
 from romulus.detect.correlation import routable_remote
 from romulus.detect.host import bind_lineage_citation_loader, is_internal
-from romulus.detect.netdef import DIRECTION_ASSUMED_REASON
+from romulus.detect.netdef import DIRECTION_ASSUMED_REASON, SiteNetworks
 from romulus.detect.registry import bind_windows_site, fresh_direct_pack, rule_kind
 from romulus.evidence.typed import TypedEvent, event_os_family
 from romulus.evidence.windows_catalog import WINDOWS_HOST_DATASETS
@@ -165,14 +166,18 @@ FALLBACK_CAP_REASON = "fallback lookup cap reached"
 # share of the default budget.
 EXTRA_SEED_PAGE = 100
 EXTRA_SEEDS_NOT_ANCHORED_REASON = "Reported-set seeds not anchored: budget"
-# Extra seeds anchored per listed entity, best ranked first. The leads on one entity share its host-scoped evidence
-# (process lineage, host timeline, its sessions), so its best-ranked few reach what that entity's links can show and
-# further anchors there mostly fetch the same records again. The bound keeps expansion's work proportional to the
-# number of compromised entities rather than to how many leads each one carries, which on a compromised server over
-# weeks of telemetry can be thousands. The findings past it stay Reported; only their expansion is not run, and they
-# are counted.
-EXTRA_SEEDS_PER_ENTITY = 10
-EXTRA_SEEDS_ENTITY_LIMIT_REASON = "Reported-set seeds not anchored: per-entity limit"
+# Timed extra seeds anchored per host a lead is on (a network lead's internal endpoint when it has no host), best
+# ranked first, and at most EXTRA_SEEDS_PER_RULE of them from one rule. The leads on one host share its evidence
+# (process lineage, host timeline, its sessions), so its best-ranked leads of distinct rules reach what that host's
+# links can show, and further anchors there mostly fetch the same records again; a rule that recurs all through a long
+# window takes two of the host's places, not all of them. The bound keeps expansion's work proportional to the hosts
+# an intrusion touched rather than to how many leads each carries, which on a compromised server over weeks of
+# telemetry can be thousands. It is per host, never per account or address: a lead listed under a compromised
+# account or a command-and-control address is anchored on each host it was seen on. The findings past it stay
+# Reported; only their expansion is not run, and they are counted.
+EXTRA_SEEDS_PER_HOST = 10
+EXTRA_SEEDS_PER_RULE = 2
+EXTRA_SEEDS_HOST_LIMIT_REASON = "Reported-set seeds not anchored: per-host limit"
 EXTRA_SEEDS_NOT_ANCHORED_WALL_CLOCK = "Reported-set seeds not anchored: wall-clock budget"
 
 
@@ -290,9 +295,10 @@ class ExpansionEngine:
         self._extras_done = False
         self._extra_after = 0               # rank position of the last Reported finding looked at
         self._extras_stopped = EXTRA_SEEDS_NOT_ANCHORED_REASON   # why the remaining extra seeds were not anchored
-        # (entity kind, entity) -> extra anchors on it, bounded by the anchors; and the extra seeds this run passed over
-        # because their entity already had its share
-        self._extra_entities: Counter[tuple[str, str]] = Counter()
+        # scope -> timed extra anchors on it, and (scope, rule) -> those of one rule, both bounded by the anchors; and
+        # the extra seeds this run passed over because their host already had its share
+        self._extra_scopes: Counter[tuple] = Counter()
+        self._extra_rules: Counter[tuple] = Counter()
         self._extras_limited = 0
         hunt = repo.get_hunt(hunt_id) if hasattr(repo, 'get_hunt') else None
         self._imported_rule_ids = {'sigma.' + row['id'] for row in ((hunt or {}).get('manifest', {}).get(
@@ -622,6 +628,22 @@ class ExpansionEngine:
             self._plan_events -= len(dropped.events)
         return plan
 
+    def _extra_scope(self, candidate: dict, rank: dict) -> tuple:
+        """The host an extra seed is on, from its typed entities as the ranking reads them: its host, or a network
+        lead's internal endpoint; else the finding's listed entity. No record is read."""
+        for kind, value in ranking_entities(candidate.get("entities") or [], is_internal=self._rank_internal):
+            if kind == "host":
+                return (kind, value)
+        return (rank["entity_kind"], rank["entity"])
+
+    def _count_extra(self, scope: tuple, rule_id: str) -> None:
+        self._extra_scopes[scope] += 1
+        self._extra_rules[(scope, rule_id)] += 1
+
+    def _extra_room(self, scope: tuple, rule_id: str) -> bool:
+        return (self._extra_scopes[scope] < EXTRA_SEEDS_PER_HOST
+                and self._extra_rules[(scope, rule_id)] < EXTRA_SEEDS_PER_RULE)
+
     def _seed_candidates(self, candidates, existing_rows: list[dict], *, ranked: bool = False) -> list[dict]:
         """Anchor the given candidates: those the rule estimate seeds (urgent or high), or with `ranked` the evidence
         ranking's extra seeds whatever their lane."""
@@ -673,11 +695,17 @@ class ExpansionEngine:
         if not hasattr(self.repo, "has_rank_pass") or not self.repo.has_rank_pass(self.hunt_id, RANK_PASS_SEEDS):
             return          # no pass-1 ranking: the rule estimate's seeds alone
         self._ranked = True
+        # the site's addresses as the ranking read them, to place a network lead on its internal endpoint
+        self._rank_internal = address_is_internal(SiteNetworks.from_record(
+            ((self.repo.get_hunt(self.hunt_id) or {}).get("manifest") or {}).get("internal_networks")))
         # extra anchors an earlier run of this hunt made keep their rank order
         earlier = [row["id"] for row in self.repo.expansion_anchors(self.hunt_id) if self._is_extra(row)]
-        for candidate_id, rank in self.repo.finding_ranks_for(self.hunt_id, RANK_PASS_SEEDS, earlier).items():
+        ranks = self.repo.finding_ranks_for(self.hunt_id, RANK_PASS_SEEDS, earlier)
+        for candidate_id, rank in ranks.items():
             self._extra_scores[candidate_id] = float(rank["score"])
-            self._extra_entities[(rank["entity_kind"], rank["entity"])] += 1
+        for candidate in self.repo.candidates_by_ids(self.hunt_id, list(ranks)):
+            if candidate["ts"] is not None:
+                self._count_extra(self._extra_scope(candidate, ranks[candidate["id"]]), candidate["rule_id"])
 
     def _anchor_extra_seeds(self, query_count: int, all_rows: list[dict], blocked: dict) -> bool:
         """When every rule-estimate anchor is finished or stopped: anchor the next page of extra seeds, as many as
@@ -706,6 +734,11 @@ class ExpansionEngine:
         rows = self.repo.expansion_anchors(self.hunt_id)
         anchored = 0
         while anchored < want:
+            # a walk past many limited seeds reads page after page: keep the lease and stop on the wall clock
+            self.heartbeat()
+            if self.clock() - self.started >= self.wall_clock_seconds:
+                self._extras_stopped = EXTRA_SEEDS_NOT_ANCHORED_WALL_CLOCK
+                break
             page = self.repo.finding_ranks_page(self.hunt_id, RANK_PASS_SEEDS, after_position=self._extra_after,
                                                 limit=EXTRA_SEED_PAGE, reported=True, confirmed_entity=True)
             if not page:
@@ -718,15 +751,18 @@ class ExpansionEngine:
                 candidate = candidates.get(item["candidate_id"])
                 if candidate is None or candidate["lane"] in {"urgent", "high"}:
                     continue
-                entity = (item["entity_kind"], item["entity"])
-                if self._extra_entities[entity] >= EXTRA_SEEDS_PER_ENTITY:
-                    if self._extra_scores.get(candidate["id"]) is None and rule_kind(candidate["rule_id"]) != "context":
-                        self._extras_limited += 1
+                if self._extra_scores.get(candidate["id"]) is not None or rule_kind(candidate["rule_id"]) == "context":
+                    continue        # anchored by an earlier run of this hunt, or never a seed
+                # an untimed lead is anchored as unexpanded and takes no place
+                scope = self._extra_scope(candidate, item) if candidate["ts"] is not None else None
+                if scope is not None and not self._extra_room(scope, candidate["rule_id"]):
+                    self._extras_limited += 1
                     continue
                 added = self._seed_candidates([candidate], rows, ranked=True)
                 if added:
                     self._extra_scores[candidate["id"]] = float(item["score"])
-                    self._extra_entities[entity] += 1
+                    if scope is not None:
+                        self._count_extra(scope, candidate["rule_id"])
                     rows.extend(added)
                     anchored += 1
                 if anchored >= want:
@@ -1617,7 +1653,7 @@ class ExpansionEngine:
         if not_anchored:
             stop_reason = f"{stop_reason}; {not_anchored} {self._extras_stopped}"
         if self._extras_limited:
-            stop_reason = f"{stop_reason}; {self._extras_limited} {EXTRA_SEEDS_ENTITY_LIMIT_REASON}"
+            stop_reason = f"{stop_reason}; {self._extras_limited} {EXTRA_SEEDS_HOST_LIMIT_REASON}"
         summary = {
             "status": status,
             "stop_reason": stop_reason, "anchors": len(anchors),
@@ -1627,8 +1663,9 @@ class ExpansionEngine:
             "source_queries": query_count,
             **({"reported_seeds_not_anchored": {"count": not_anchored, "reason": self._extras_stopped}}
                if not_anchored else {}),
-            **({"reported_seeds_entity_limited": {"count": self._extras_limited, "limit": EXTRA_SEEDS_PER_ENTITY,
-                                                  "reason": EXTRA_SEEDS_ENTITY_LIMIT_REASON}}
+            **({"reported_seeds_host_limited": {"count": self._extras_limited, "per_host": EXTRA_SEEDS_PER_HOST,
+                                                "per_rule": EXTRA_SEEDS_PER_RULE,
+                                                "reason": EXTRA_SEEDS_HOST_LIMIT_REASON}}
                if self._extras_limited else {}),
             # the budget the expansion ran under, so a reader can tell a cut by the ceiling from one by the shares
             "budget": {
