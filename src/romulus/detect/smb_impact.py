@@ -32,6 +32,9 @@ _FIELDS = frozenset({'source.ip', 'destination.ip', 'smb.action', 'smb.name', 's
                      'smb.path', 'smb.share', 'smb.tree', 'observer.name', 'zeek.log', 'suricata.event_type'})
 _WORD_TEMP = re.compile(r'~wrl[0-9a-f]{4,}\.tmp\Z', re.IGNORECASE)
 _WORD_DOCUMENTS = frozenset({'.doc', '.docx', '.docm'})
+_TEMP_SUFFIXES = frozenset({'.tmp', '.temp', '.part', '.partial', '.filepart', '.crdownload',
+                          '.download', '.!ut', '.swp'})
+_DOCUMENT_FINALS = frozenset({'.pdf', '.tif', '.tiff', '.jpg', '.jpeg', '.png'})
 _ACTIONS = frozenset({'FILE_RENAME', 'FILE_DELETE', 'FILE_CREATE', 'FILE_OPEN'})
 
 
@@ -49,6 +52,16 @@ def _note_name(value):
     name = value.replace('\\', '/').rsplit('/', 1)[-1].casefold()
     exact, patterns = note_names()
     return name in exact or any(name.endswith(suffix) and pattern.fullmatch(name) for suffix, pattern in patterns)
+
+
+def _temporary_completion(previous, name, old_ext, new_ext):
+    if (old_ext and name == ntpath.splitext(previous)[0]) or (previous.endswith('~') and name == previous[:-1]):
+        return True
+    # Scanner/transfer tools may replace .part with the final document suffix
+    # rather than append .part to it. Require the same full path/stem and a
+    # bounded document/image destination set; .tmp -> .locked stays eligible.
+    return (old_ext in _TEMP_SUFFIXES and new_ext in _DOCUMENT_FINALS
+            and ntpath.splitext(previous)[0] == ntpath.splitext(name)[0])
 
 
 def _text(event, name):
@@ -323,6 +336,13 @@ class SmbImpact(Playbook):
                     self.note_coverage('smb_word_save', 'Word ~WRL hexadecimal .tmp replacements of same-directory '
                                        '.doc/.docx/.docm names are volume-only; their expected extension change '
                                        'does not establish uniform destructive renaming.')
+                elif _temporary_completion(previous, name, old_ext, new_ext):
+                    self.note_coverage('smb_temporary_completion', 'Last-extension or trailing-tilde removal and same-stem '
+                                       'temporary-to-document/image completion are volume-only; final-file '
+                                       'completion does not establish destructive extension changes.')
+                elif not new_ext and name != previous:
+                    self.note_coverage('smb_extensionless_rename', 'Some changed names have no extension; '
+                                       'these renames are volume-only and their encryption status is unresolved.')
                 elif new_ext and old_ext != new_ext:
                     entries.append(('extension', name, new_ext))
         elif action in {'FILE_OPEN', 'FILE_CREATE'} and _note_name(name):
@@ -458,7 +478,7 @@ class SmbImpact(Playbook):
         ]
         if kind == 'extension':
             notes.append('The denominator is distinct extension-changing filenames with recorded previous names; '
-                         'same-directory Word temporary save replacements are volume-only.')
+                         'temporary-file completion and same-directory Word temporary save replacements are volume-only.')
         if not complete:
             notes.append('Partial coverage: retention or replay for this group was incomplete; all published '
                          'counts are retained lower bounds and the extension ratio is unresolved.')
