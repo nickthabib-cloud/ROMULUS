@@ -245,6 +245,10 @@ class _RemoteSession(ZeekBehaviorRule):
         if (not rule_reads(event, self.producers) or event.family != 'remote_session'
                 or event.get('remote.protocol') != self.protocol or not (peers := _peers(event))):
             return []
+        if not event.normalizer.startswith('zeek-ecs@') and event.get('rdp.message') != 'initial_request':
+            # Suricata writes each RDP message as a record in its packet's direction: only the client's initial
+            # request names the client as its source, once per connection (the connect request may be inside TLS)
+            return []
         site = getattr(self, 'site_facts', None)
         internal = getattr(site, 'internal_networks', ())
         networks = _site_networks(tuple(internal), tuple(getattr(site, 'external_networks', ()))) if internal else current()
@@ -283,6 +287,7 @@ class _RemoteSession(ZeekBehaviorRule):
 
 class RdpRemoteSession(_RemoteSession):
     id, title = 'net.external_rdp', 'RDP session negotiation from outside the declared site'
+    version, producers = '2', ZEEK_AND_SURICATA
     protocol = 'rdp'
     attack = ('T1133', 'T1021.001')
 
@@ -292,6 +297,7 @@ class InternalRdpSession(_RemoteSession):
     outside one, an interactive session leaving the site. One lead per source, citing its destinations;
     administrators' sessions to servers look the same on the wire, which the host's logon records settle."""
     id, title = 'net.internal_rdp', 'RDP session negotiation from a host inside the site'
+    version, producers = '2', ZEEK_AND_SURICATA
     protocol, inside_lane, outside, per_source = 'rdp', 'lead', False, True
     attack = ('T1021.001',)
     benign = ('Administrators and help desks connecting to servers and workstations; jump hosts.',

@@ -1534,7 +1534,7 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 <a id="rule-net-external-rdp"></a>
 ### `net.external_rdp` — RDP session negotiation from outside the declared site
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1021.001`](https://attack.mitre.org/techniques/T1021/001/), [`T1133`](https://attack.mitre.org/techniques/T1133/)
@@ -1581,7 +1581,7 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 <a id="rule-net-internal-rdp"></a>
 ### `net.internal_rdp` — RDP session negotiation from a host inside the site
 
-- Version: `1`; status: `active`
+- Version: `2`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1021.001`](https://attack.mitre.org/techniques/T1021/001/)
@@ -1652,7 +1652,7 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 <a id="rule-net-ntlm-password-guessing"></a>
 ### `net.ntlm_password_guessing` — Repeated NTLM authentication attempts for one user
 
-- Version: `5`; status: `active`
+- Version: `6`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1110.001`](https://attack.mitre.org/techniques/T1110/001/)
@@ -1664,7 +1664,7 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 <a id="rule-net-ntlm-password-spray"></a>
 ### `net.ntlm_password_spray` — One source attempted NTLM authentication for many users
 
-- Version: `5`; status: `active`
+- Version: `6`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
 - Coverage strength: **positive-only**
 - ATT&CK: [`T1110.003`](https://attack.mitre.org/techniques/T1110/003/)
