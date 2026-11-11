@@ -131,6 +131,9 @@ def _smb(reader):
         f["smb.action"] = fv("FILE_RENAME", rename.path + "#derived:rename")
     elif command == "SMB1_COMMAND_DELETE":
         f["smb.action"] = fv("FILE_DELETE", reader.origin("command"))
+    elif command in {"SMB2_COMMAND_CREATE", "SMB2_COMMAND_SET_INFO"} and reader.value("access") == "delete on close":
+        f["smb.action"] = fv("FILE_DELETE", reader.origin("access"))
+        result.caveats.append("SMB delete-on-close records requested deletion, not its success")
     elif reader.value("disposition") == "FILE_CREATE":
         f["smb.action"] = fv("FILE_CREATE", reader.origin("disposition"))
         result.caveats.append("SMB create disposition records the requested operation, not its success")
