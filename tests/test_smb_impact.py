@@ -203,7 +203,8 @@ def test_partial_disk_refusal_preserves_volume_but_does_not_assert_ratio(rule):
     rule.budget.forced.clear()
     rule.budget._recalm()
     [match] = list(rule.finalize())
-    assert match.proposed_lane == "lead" and rule.capped > 0
+    assert match.proposed_lane == "high" and rule.capped > 0
+    assert "at least 200 retained" in match.claim and "ratio is unresolved" in match.claim
     assert any("incomplete" in note for note in rule.limit_reasons())
 
 
@@ -219,7 +220,8 @@ def test_conflicting_canonical_update_cannot_assure_extension_ratio(rule):
     list(rule.consume([smb(i) for i in range(200)]))
     list(rule.consume([smb(0, name="different.other")]))
     [match] = list(rule.finalize())
-    assert rule.capped and match.proposed_lane == "lead"
+    assert rule.capped and match.proposed_lane == "high"
+    assert "ratio is unresolved" in match.claim
 
 
 def test_completed_positive_survives_a_later_replay_refusal(rule, monkeypatch):

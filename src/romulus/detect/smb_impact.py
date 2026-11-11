@@ -110,11 +110,71 @@ def _name(value, root, prefix):
 
 class _ImpactRows(_WindowRows):
     schema = (*_WindowRows.schema,
+              'CREATE TABLE impact_refused(k TEXT PRIMARY KEY)',
               'CREATE TABLE impact_active(id TEXT,ts REAL,kind TEXT,name TEXT,ext TEXT,PRIMARY KEY(id,kind))',
               'CREATE INDEX impact_active_time ON impact_active(ts,id,kind)',
               'CREATE TABLE impact_members(kind TEXT,name TEXT,ext TEXT,n INTEGER,PRIMARY KEY(kind,name))',
               'CREATE TABLE impact_counts(kind TEXT,ext TEXT,n INTEGER,PRIMARY KEY(kind,ext))',
               'CREATE INDEX impact_count_rank ON impact_counts(kind,n DESC,ext)')
+
+    def __init__(self, owner):
+        super().__init__(owner)
+        self.untracked_refusal = False
+
+    def store(self):
+        if not self.ready:
+            spill = self.owner.spill()
+            if spill.db.execute("SELECT 1 FROM sqlite_master WHERE name='history'").fetchone():
+                # A recovered database has no durable proof that a refusal
+                # immediately before process death was recorded. Keep positives,
+                # but never reconstruct complete ratios from that uncertainty.
+                self.ready = True
+                self.untracked_refusal = True
+                self.account = self.owner.state_budget().account(self.owner.id + ':zeek_window', strong=True)
+                self.owner.note_limit('smb_impact_recovery', 'Recovered SMB history has uncertain refusal '
+                                      'accounting; every group is treated as incomplete.')
+        return super().store()
+
+    def refused(self, key):
+        try:
+            def record(db):
+                added = db.execute('INSERT OR IGNORE INTO impact_refused VALUES(?)', (key,)).rowcount
+                return None, (96 + len(key.encode())) if added else 0
+            # Loss bookkeeping must still be attempted after member admission
+            # closes. The same physical SQLite byte ceiling bounds this table.
+            self.write('refused', record, growing=False)
+        except StateExhausted as error:
+            self.untracked_refusal = True
+            self.owner.note_limit('smb_impact_refused_keys', 'SMB refused-key accounting is incomplete; '
+                                  f'every group is treated as incomplete: {error}')
+
+    def complete(self, key):
+        db = self.store().db
+        return not self.untracked_refusal and not db.execute(
+            'SELECT 1 FROM impact_refused WHERE k=?', (key,)).fetchone()
+
+    def put(self, key, event, member, role):
+        before = self.owner.capped
+        try:
+            accepted = super().put(key, event, member, role)
+        except StateExhausted:
+            try:
+                previous = self.store().db.execute(
+                    'SELECT ts,member,role FROM history WHERE k=? AND id=?',
+                    (key, event.id)).fetchone() if self.ready else None
+            except StateExhausted:
+                self.untracked_refusal = True
+                self.owner.note_limit('smb_impact_member_recovery', 'SMB canonical member retention could not '
+                                      'be checked during recovery; every group is treated as incomplete.')
+                raise
+            # An existing canonical member can lose additional citations without
+            # losing a counted filename. A new or conflicting member cannot.
+            if previous != (event.ts.timestamp(), member, role):
+                self.refused(key)
+            raise
+        if accepted is None and self.owner.capped > before:
+            self.refused(key)
+        return accepted
 
     def reset(self):
         def clear(db):
@@ -191,6 +251,7 @@ class _ImpactRows(_WindowRows):
 
 class SmbImpact(Playbook):
     id = 'network.smb_impact'
+    version = '2'
     title = 'Ransomware-shaped SMB rename, deletion or note activity'
     families = ('smb_tx',)
     required_fields = ('source.ip', 'destination.ip', 'smb.action', 'smb.name')
@@ -212,7 +273,6 @@ class SmbImpact(Playbook):
     def __init__(self):
         super().__init__()
         self.rows = _ImpactRows(self)
-        self._history_complete = True
         self._generation = 0
         self._finalized = -1
         self._word_temps = 0
@@ -282,20 +342,21 @@ class SmbImpact(Playbook):
                     continue
                 try:
                     refused_before = self.capped
-                    if self.rows.put(selected[0], event, selected[1], 'attempt') is not None:
+                    if (self.rows.put(selected[0], event, selected[1], 'attempt') is not None
+                            or self.capped > refused_before):
                         self._generation += 1
-                    if self.capped > refused_before:
-                        self._history_complete = False
                 except StateExhausted as error:
-                    self._history_complete = False
+                    self._generation += 1
                     self.refuse('smb_impact_history', f'SMB impact history is incomplete: {error}')
         finally:
             self.rows.flush()
         return []
 
-    def _best(self, stamp, previous):
+    def _best(self, key, stamp, previous):
         volume, renames, directories, extension, dominant = self.rows.counts()
-        if self._history_complete and renames >= 100 and dominant * 5 >= renames * 4:
+        complete = self.rows.complete(key)
+        if (complete and renames >= 100 and dominant * 5 >= renames * 4
+                or not complete and dominant >= 100):
             arm, score = 'extension', (2, dominant, renames)
         elif volume >= 200:
             arm, score = 'volume', (1, volume, 0)
@@ -309,7 +370,7 @@ class SmbImpact(Playbook):
         return {'stamp': stamp, 'start': start, 'arm': arm, 'score': score, 'volume': volume, 'renames': renames,
                 'directories': directories, 'extension': extension, 'dominant': dominant}
 
-    def _expire_before(self, following, end, best):
+    def _expire_before(self, key, following, end, best):
         # A ratio can cross upward when an older minority leaves. Test these
         # starts as well as arrivals. The witness interval still ends at the
         # latest actual event; do not invent a future observation timestamp.
@@ -317,8 +378,17 @@ class SmbImpact(Playbook):
             oldest = self.rows.store().db.execute('SELECT MIN(ts) FROM impact_active').fetchone()[0]
             if oldest is None or oldest + self.seconds >= following:
                 return best
-            self.rows.expire(oldest + self.seconds + 0.000001)
-            best = self._best(end, best)
+            try:
+                self.rows.expire(oldest + self.seconds + 0.000001)
+            except StateExhausted as error:
+                self._replay_refused(key, error)
+                self.rows.reset()
+                return best
+            best = self._best(key, end, best)
+
+    def _replay_refused(self, key, error):
+        self.rows.refused(key)
+        self.note_limit('smb_impact_replay', f'SMB impact ordered replay is incomplete: {error}')
 
     def _publish(self, key, best):
         if best is None:
@@ -326,8 +396,21 @@ class SmbImpact(Playbook):
         client, server, share = json.loads(key)
         stamp = best['stamp']
         kind = best['arm']
+        complete = self.rows.complete(key)
+        if not complete and kind == 'extension' and best['dominant'] < 100:
+            if best['volume'] >= 200:
+                kind = 'volume'
+            elif best['directories'] >= 10:
+                kind = 'notes'
+            else:
+                return None
         if kind == 'extension':
-            claim = (f"SMB client {client} renamed {best['renames']} distinct filenames on {server}/{share} "
+            if not complete:
+                claim = (f"SMB client {client} renamed at least {best['dominant']} retained distinct filenames "
+                         f"on {server}/{share} to {best['extension']} within five minutes; the ratio is unresolved "
+                         'because records for this group were refused or recovery was incomplete.')
+            else:
+                claim = (f"SMB client {client} renamed {best['renames']} distinct filenames on {server}/{share} "
                      f"with changed extensions within five minutes; {best['dominant']} "
                      f"({100 * best['dominant'] / best['renames']:.1f}%) ended in {best['extension']}.")
         elif kind == 'volume':
@@ -364,9 +447,9 @@ class SmbImpact(Playbook):
         if kind == 'extension':
             notes.append('The denominator is distinct extension-changing filenames with recorded previous names; '
                          'same-directory Word temporary save replacements are volume-only.')
-        if not self._history_complete:
-            notes.append('History retention was incomplete; published volume or directory counts are lower bounds '
-                         'and the extension-ratio arm is unresolved.')
+        if not complete:
+            notes.append('Partial coverage: retention or replay for this group was incomplete; all published '
+                         'counts are retained lower bounds and the extension ratio is unresolved.')
         return Match(self.id, claim, self.claim_type, events,
                      [pf(event, field) for event in events for field in sorted(_FIELDS) if field in event.fields],
                      datetime.fromtimestamp(stamp, UTC), 'critical' if kind == 'extension' else 'high',
@@ -377,6 +460,8 @@ class SmbImpact(Playbook):
                      if self._finalized >= 0 else '')
 
     def finalize(self):
+        if not self.rows.ready and self._spill is not None:
+            self.rows.store()
         if not self.rows.ready or self._finalized == self._generation:
             return
         self.rows.flush()
@@ -387,8 +472,8 @@ class SmbImpact(Playbook):
             for key, identity, new_stamp, member in cursor:
                 if key != current:
                     if current is not None:
-                        best = self._best(stamp, best)
-                        best = self._expire_before(float('inf'), stamp, best)
+                        best = self._best(current, stamp, best)
+                        best = self._expire_before(current, float('inf'), stamp, best)
                         match = self._publish(current, best)
                         if match:
                             self.rows.flush()
@@ -396,14 +481,21 @@ class SmbImpact(Playbook):
                     self.rows.reset()
                     current, stamp, best = key, new_stamp, None
                 elif new_stamp != stamp:
-                    best = self._best(stamp, best)
-                    best = self._expire_before(new_stamp, stamp, best)
+                    best = self._best(current, stamp, best)
+                    best = self._expire_before(current, new_stamp, stamp, best)
                     stamp = new_stamp
-                self.rows.expire(new_stamp)
-                self.rows.add(identity, new_stamp, json.loads(member))
+                try:
+                    self.rows.expire(new_stamp)
+                except StateExhausted as error:
+                    self._replay_refused(key, error)
+                    self.rows.reset()
+                try:
+                    self.rows.add(identity, new_stamp, json.loads(member))
+                except StateExhausted as error:
+                    self._replay_refused(key, error)
             if current is not None:
-                best = self._best(stamp, best)
-                best = self._expire_before(float('inf'), stamp, best)
+                best = self._best(current, stamp, best)
+                best = self._expire_before(current, float('inf'), stamp, best)
                 match = self._publish(current, best)
                 if match:
                     self.rows.flush()
