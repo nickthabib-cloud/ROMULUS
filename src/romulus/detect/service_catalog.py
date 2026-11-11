@@ -22,19 +22,29 @@ from romulus.detect.netdef import DIRECTION_ASSUMED_REASON, assume_direction, cu
 from romulus.evidence.typed import TypedEvent
 from romulus.hunt.citations import COMPACT_CITATION_NOTE, compact_event, expand_event
 
-NAME_FIELDS = ("dns.question.name", "tls.client.server_name", "http.hostname")
+NAME_FIELDS = ("dns.question.name", "dns.question.names", "tls.client.server_name", "http.hostname")
 CATALOG_PATH = Path(__file__).resolve().parents[3] / "content/network/services.json"
 MAX_CATALOG_BYTES = 4 * 1024 * 1024
 MAX_SUFFIXES = 50_000
 MAX_CITATION_BYTES = 64 * 1024
+MAX_NAMES_PER_RECORD = 1024
 _LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 _SLUG = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
 _CATEGORIES = {"remote_access", "tunnelling", "ide_tunnel", "callback", "file_sharing"}
 
 
-def canonical_name(value: object) -> str | None:
-    """A DNS name, not a URL, authority with a port, wildcard, or free text."""
-    if not isinstance(value, str) or not value or len(value) > 254:
+def canonical_name(value: object, *, host: bool = False) -> str | None:
+    """Canonicalize the DNS envelope; trie edges validate matched suffix labels."""
+    if not isinstance(value, str) or not value or len(value) > 260:
+        return None
+    if host and ":" in value:
+        # Bracketed IPv6 is an IP authority, never a catalog service name.
+        if value.startswith("["):
+            return None
+        value, separator, port = value.rpartition(":")
+        if not separator or not port.isascii() or not port.isdecimal() or not 0 <= int(port) <= 65535:
+            return None
+    if len(value) > 254 or re.search(r"[\s/:\\\[\]*?#@]", value):
         return None
     # IDNA maps the Unicode full stops as well as the label text. Strip only a
     # single root dot: doubled empty labels are malformed, not a hidden suffix.
@@ -43,7 +53,7 @@ def canonical_name(value: object) -> str | None:
     except (UnicodeError, ValueError):
         return None
     name = name.removesuffix(".")
-    if len(name) > 253 or not name or any(not _LABEL.fullmatch(label) for label in name.split(".")):
+    if len(name) > 253 or not name or any(not label or len(label) > 63 for label in name.split(".")):
         return None
     return name
 
@@ -59,7 +69,8 @@ class NameTrie:
             if count > MAX_SUFFIXES:
                 raise ValueError("service catalog exceeds its suffix bound")
             canonical = canonical_name(suffix)
-            if canonical is None or "." not in canonical:
+            if canonical is None or "." not in canonical or any(
+                    not _LABEL.fullmatch(label) for label in canonical.split(".")):
                 raise ValueError("service catalog suffix must be a full DNS name")
             node = self._root
             for label in reversed(canonical.split(".")):
@@ -78,6 +89,8 @@ class NameTrie:
         found = []
         seen = set()  # at most one match per DNS label, not one per catalog entry
         for label in reversed(name.split(".")):
+            if not _LABEL.fullmatch(label):
+                break
             node = node.get(label)
             if node is None:
                 break
@@ -138,7 +151,7 @@ def _source(event: TypedEvent):
 class ServiceCatalog(Playbook):
     id = "network.service_catalog"
     title = "Remote access, tunnel, callback or file-sharing service name observed"
-    version = "1"
+    version = "2"
     families = ("dns_query", "tls_session", "http_tx", "net_session")
     required_fields = ("source.ip",)
     kind = "aggregate"
@@ -211,6 +224,8 @@ class ServiceCatalog(Playbook):
                 continue
             names_present = False
             malformed = False
+            remaining = MAX_NAMES_PER_RECORD
+            omitted = 0
             matches = {}  # bounded by the shipped catalog, not event count
             for field in NAME_FIELDS:
                 raw = event.get(field)
@@ -219,22 +234,29 @@ class ServiceCatalog(Playbook):
                 values = raw if isinstance(raw, list) else (raw,)
                 if not values:
                     malformed = True
-                for value in values:
-                    name = canonical_name(value)
+                available = min(len(values), remaining)
+                omitted += len(values) - available
+                remaining -= available
+                for index in range(available):
+                    name = canonical_name(values[index], host=field == "http.hostname")
                     if name is None:
                         malformed = True
                         continue
                     names_present = True
                     for entry in self.catalog.trie.lookup_canonical(name):
                         matches.setdefault(entry, field)
+            if omitted:
+                self.refuse("service_names", f"Only the first {MAX_NAMES_PER_RECORD} typed names per record were "
+                            "evaluated; additional names and their service membership are unresolved")
             if malformed or not names_present:
                 self.missing_required += 1
             if not names_present:
                 continue
             if not matches:
-                self.evaluated += 1
+                if not omitted:
+                    self.evaluated += 1
                 continue
-            accepted = True
+            accepted = not omitted
             for entry, field in matches.items():
                 try:
                     spill = self._db()
@@ -259,6 +281,8 @@ class ServiceCatalog(Playbook):
                     if accepted:
                         self.refuse("service_state", str(error))
                         accepted = False
+                    else:
+                        self.note_limit("service_state", str(error))
                     # Matching already established a positive. Even when the
                     # aggregate cannot grow, publish its bounded live witness
                     # under the same source identity; fleet coverage is partial.
@@ -288,6 +312,9 @@ class ServiceCatalog(Playbook):
             notes.append("This service is site-approved; the observation remains a lead.")
         if self.capped:
             notes.append("Source host count is a lower bound: some matching records could not be retained.")
+        if "service_names" in self.limits:
+            notes.append("Some typed names exceeded the per-record name bound and were not evaluated; "
+                         "service membership is partial.")
         if source is None:
             claim = f"A lookup or connection to the {item['name']} service was observed from {count} internal source address(es)."
             group_key = f"{entry}|fleet"
