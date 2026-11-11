@@ -186,3 +186,37 @@ def test_canonical_conflict_marks_only_its_group(rule):
     assert sum('ratio is unresolved' in m.claim for m in matches) == 1
     assert rule.rows.store().db.execute('SELECT k FROM impact_refused').fetchall() == [
         (json.dumps(('10.0.0.1', '10.0.0.2', 'docs'), separators=(',', ':')),)]
+
+
+@pytest.mark.parametrize('positive_first', [False, True])
+@pytest.mark.parametrize('arm', ['volume', 'notes', 'extension'])
+def test_replay_loss_reselects_supported_window_instead_of_discarding_group(rule, monkeypatch,
+                                                                         positive_first, arm):
+    ratio_time, positive_time = (1000, 0) if positive_first else (0, 2000)
+    rows = [smb(f'ratio-{i}', ratio_time, name=f'ratio-{i}.{"locked" if i < 80 else "other"}')
+            for i in range(100)]
+    if arm == 'volume':
+        rows += [smb(f'positive-{i}', positive_time, action='FILE_DELETE', name=f'delete-{i}.pdf')
+                 for i in range(200)]
+    elif arm == 'notes':
+        rows += [smb(f'positive-{i}', positive_time, action='FILE_OPEN',
+                     name=f'dir{i}/Restore-My-Files.txt') for i in range(10)]
+    else:
+        # This is insufficient for a complete 80% ratio, but after a loss the
+        # 100 retained same-extension lower bound remains independently valid.
+        rows += [smb(f'positive-{i}', positive_time, name=f'positive-{i}.{"locked" if i < 100 else "other"}')
+                 for i in range(150)]
+    rows.append(smb('lost-replay', 1500))
+    rule.consume(rows)
+    original = rule.rows.add
+
+    def fail_one(identity, stamp, entries):
+        if identity == 'lost-replay':
+            raise StateExhausted('synthetic one-row replay refusal')
+        return original(identity, stamp, entries)
+
+    monkeypatch.setattr(rule.rows, 'add', fail_one)
+    [match] = list(rule.finalize())
+    assert match.proposed_lane == ('high' if arm == 'extension' else 'lead')
+    assert any('partial coverage' in note.lower() for note in match.notes)
+    assert all(event.id.startswith('positive-') for event in match.events)

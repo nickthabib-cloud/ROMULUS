@@ -383,23 +383,30 @@ class SmbImpact(Playbook):
             self.rows.flush()
         return []
 
-    def _best(self, key, stamp, previous):
+    def _best(self, stamp, previous):
         volume, renames, directories, extension, dominant = self.rows.counts()
-        complete = self.rows.complete(key)
-        if (complete and renames >= 100 and dominant * 5 >= renames * 4
-                or not complete and dominant >= 100):
-            arm, score = 'extension', (2, dominant, renames)
-        elif volume >= 200:
-            arm, score = 'volume', (1, volume, 0)
-        elif directories >= 10:
-            arm, score = 'notes', (1, 0, directories)
-        else:
-            return previous
-        if previous is not None and score <= previous['score']:
-            return previous
-        start = self.rows.store().db.execute('SELECT MIN(ts) FROM impact_active').fetchone()[0]
-        return {'stamp': stamp, 'start': start, 'arm': arm, 'score': score, 'volume': volume, 'renames': renames,
-                'directories': directories, 'extension': extension, 'dominant': dominant}
+        # Retain two bounded winners for the current group: the complete ratio
+        # observation and the independently valid retained-evidence lower bound.
+        # A later replay loss must not let a now-invalid ratio winner hide an
+        # earlier or later qualifying volume, directory or extension window.
+        best = dict(previous or {'complete': None, 'partial': None})
+        for coverage in ('complete', 'partial'):
+            if ((coverage == 'complete' and renames >= 100 and dominant * 5 >= renames * 4)
+                    or (coverage == 'partial' and dominant >= 100)):
+                arm, score = 'extension', (2, dominant, renames)
+            elif volume >= 200:
+                arm, score = 'volume', (1, volume, 0)
+            elif directories >= 10:
+                arm, score = 'notes', (1, 0, directories)
+            else:
+                continue
+            if best[coverage] is not None and score <= best[coverage]['score']:
+                continue
+            start = self.rows.store().db.execute('SELECT MIN(ts) FROM impact_active').fetchone()[0]
+            best[coverage] = {'stamp': stamp, 'start': start, 'arm': arm, 'score': score, 'volume': volume,
+                              'renames': renames, 'directories': directories, 'extension': extension,
+                              'dominant': dominant}
+        return best if any(best.values()) else None
 
     def _expire_before(self, key, following, end, best):
         # A ratio can cross upward when an older minority leaves. Test these
@@ -415,7 +422,7 @@ class SmbImpact(Playbook):
                 self._replay_refused(key, error)
                 self.rows.reset()
                 return best
-            best = self._best(key, end, best)
+            best = self._best(end, best)
 
     def _replay_refused(self, key, error):
         self.rows.refused(key)
@@ -424,17 +431,13 @@ class SmbImpact(Playbook):
     def _publish(self, key, best):
         if best is None:
             return None
+        complete = self.rows.complete(key)
+        best = best['complete' if complete else 'partial']
+        if best is None:
+            return None
         client, server, share = json.loads(key)
         stamp = best['stamp']
         kind = best['arm']
-        complete = self.rows.complete(key)
-        if not complete and kind == 'extension' and best['dominant'] < 100:
-            if best['volume'] >= 200:
-                kind = 'volume'
-            elif best['directories'] >= 10:
-                kind = 'notes'
-            else:
-                return None
         if kind == 'extension':
             if not complete:
                 claim = (f"SMB client {client} renamed at least {best['dominant']} retained distinct filenames "
@@ -504,7 +507,7 @@ class SmbImpact(Playbook):
             for key, identity, new_stamp, member in cursor:
                 if key != current:
                     if current is not None:
-                        best = self._best(current, stamp, best)
+                        best = self._best(stamp, best)
                         best = self._expire_before(current, float('inf'), stamp, best)
                         match = self._publish(current, best)
                         if match:
@@ -513,7 +516,7 @@ class SmbImpact(Playbook):
                     self.rows.reset()
                     current, stamp, best = key, new_stamp, None
                 elif new_stamp != stamp:
-                    best = self._best(current, stamp, best)
+                    best = self._best(stamp, best)
                     best = self._expire_before(current, new_stamp, stamp, best)
                     stamp = new_stamp
                 try:
@@ -526,7 +529,7 @@ class SmbImpact(Playbook):
                 except StateExhausted as error:
                     self._replay_refused(key, error)
             if current is not None:
-                best = self._best(current, stamp, best)
+                best = self._best(stamp, best)
                 best = self._expire_before(current, float('inf'), stamp, best)
                 match = self._publish(current, best)
                 if match:
