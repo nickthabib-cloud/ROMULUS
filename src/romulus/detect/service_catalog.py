@@ -49,7 +49,9 @@ def canonical_name(value: object, *, host: bool = False) -> str | None:
     # IDNA maps the Unicode full stops as well as the label text. Strip only a
     # single root dot: doubled empty labels are malformed, not a hidden suffix.
     try:
-        name = value.casefold().encode("idna").decode("ascii").lower()
+        name = value.casefold()
+        if not value.isascii() or name.startswith("xn--") or ".xn--" in name:
+            name = name.encode("idna").decode("ascii").lower()
     except (UnicodeError, ValueError):
         return None
     name = name.removesuffix(".")
