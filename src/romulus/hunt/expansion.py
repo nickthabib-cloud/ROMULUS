@@ -166,8 +166,8 @@ FALLBACK_CAP_REASON = "fallback lookup cap reached"
 # share of the default budget.
 EXTRA_SEED_PAGE = 100
 EXTRA_SEEDS_NOT_ANCHORED_REASON = "Reported-set seeds not anchored: budget"
-# Timed extra seeds anchored per host a lead is on (a network lead's internal endpoint when it has no host), best
-# ranked first, and at most EXTRA_SEEDS_PER_RULE of them from one rule. The leads on one host share its evidence
+# Timed extra seeds anchored per host a lead is on (each internal endpoint of a network lead, which is anchored while
+# either end has a place), best ranked first, and at most EXTRA_SEEDS_PER_RULE of them from one rule. The leads on one host share its evidence
 # (process lineage, host timeline, its sessions), so its best-ranked leads of distinct rules reach what that host's
 # links can show, and further anchors there mostly fetch the same records again; a rule that recurs all through a long
 # window takes two of the host's places, not all of them. The bound keeps expansion's work proportional to the hosts
@@ -628,21 +628,24 @@ class ExpansionEngine:
             self._plan_events -= len(dropped.events)
         return plan
 
-    def _extra_scope(self, candidate: dict, rank: dict) -> tuple:
-        """The host an extra seed is on, from its typed entities as the ranking reads them: its host, or a network
-        lead's internal endpoint; else the finding's listed entity. No record is read."""
-        for kind, value in ranking_entities(candidate.get("entities") or [], is_internal=self._rank_internal):
-            if kind == "host":
-                return (kind, value)
-        return (rank["entity_kind"], rank["entity"])
+    def _extra_scopes_of(self, candidate: dict, rank: dict) -> list[tuple]:
+        """The hosts an extra seed is on, from its typed entities as the ranking reads them: its host, or each of a
+        network lead's internal endpoints (both ends of a session between two site hosts, so a pivot's leads to many
+        targets, and many clients' leads to one server, give each host its own share); else the finding's listed
+        entity. No record is read."""
+        hosts = [(kind, value) for kind, value in ranking_entities(candidate.get("entities") or [],
+                                                                   is_internal=self._rank_internal) if kind == "host"]
+        return hosts[:2] or [(rank["entity_kind"], rank["entity"])]
 
-    def _count_extra(self, scope: tuple, rule_id: str) -> None:
-        self._extra_scopes[scope] += 1
-        self._extra_rules[(scope, rule_id)] += 1
+    def _count_extra(self, scopes: list[tuple], rule_id: str) -> None:
+        for scope in scopes:
+            self._extra_scopes[scope] += 1
+            self._extra_rules[(scope, rule_id)] += 1
 
-    def _extra_room(self, scope: tuple, rule_id: str) -> bool:
-        return (self._extra_scopes[scope] < EXTRA_SEEDS_PER_HOST
-                and self._extra_rules[(scope, rule_id)] < EXTRA_SEEDS_PER_RULE)
+    def _extra_room(self, scopes: list[tuple], rule_id: str) -> bool:
+        """Whether any host the seed is on still has a place for it."""
+        return any(self._extra_scopes[scope] < EXTRA_SEEDS_PER_HOST
+                   and self._extra_rules[(scope, rule_id)] < EXTRA_SEEDS_PER_RULE for scope in scopes)
 
     def _seed_candidates(self, candidates, existing_rows: list[dict], *, ranked: bool = False) -> list[dict]:
         """Anchor the given candidates: those the rule estimate seeds (urgent or high), or with `ranked` the evidence
@@ -705,7 +708,7 @@ class ExpansionEngine:
             self._extra_scores[candidate_id] = float(rank["score"])
         for candidate in self.repo.candidates_by_ids(self.hunt_id, list(ranks)):
             if candidate["ts"] is not None:
-                self._count_extra(self._extra_scope(candidate, ranks[candidate["id"]]), candidate["rule_id"])
+                self._count_extra(self._extra_scopes_of(candidate, ranks[candidate["id"]]), candidate["rule_id"])
 
     def _anchor_extra_seeds(self, query_count: int, all_rows: list[dict], blocked: dict) -> bool:
         """When every rule-estimate anchor is finished or stopped: anchor the next page of extra seeds, as many as
@@ -754,15 +757,15 @@ class ExpansionEngine:
                 if self._extra_scores.get(candidate["id"]) is not None or rule_kind(candidate["rule_id"]) == "context":
                     continue        # anchored by an earlier run of this hunt, or never a seed
                 # an untimed lead is anchored as unexpanded and takes no place
-                scope = self._extra_scope(candidate, item) if candidate["ts"] is not None else None
-                if scope is not None and not self._extra_room(scope, candidate["rule_id"]):
+                scopes = self._extra_scopes_of(candidate, item) if candidate["ts"] is not None else None
+                if scopes is not None and not self._extra_room(scopes, candidate["rule_id"]):
                     self._extras_limited += 1
                     continue
                 added = self._seed_candidates([candidate], rows, ranked=True)
                 if added:
                     self._extra_scores[candidate["id"]] = float(item["score"])
-                    if scope is not None:
-                        self._count_extra(scope, candidate["rule_id"])
+                    if scopes is not None:
+                        self._count_extra(scopes, candidate["rule_id"])
                     rows.extend(added)
                     anchored += 1
                 if anchored >= want:

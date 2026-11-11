@@ -921,3 +921,26 @@ def test_untimed_leads_take_no_place():
                               max_source_queries=40, wall_clock_seconds=60).run()
     assert len(_lead_anchors(repo)) == EXTRA_SEEDS_PER_HOST + 5       # anchored as unexpanded, spending nothing
     assert "reported_seeds_host_limited" not in summary
+
+
+def test_a_pivots_leads_to_many_internal_targets_are_anchored_on_each_target():
+    """Network lateral movement: every lead from the compromised pivot to a target is listed under the pivot, and
+    each target keeps its own share, so every target is expanded even when one rule names them all."""
+    leads = [(f"l-lat-{k:02d}", f"t{k:02d}", "r.smb_admin_share",
+              [["ip", "10.0.0.1", "source"], ["ip", f"10.0.0.{k + 10}", "destination"]], k + 1) for k in range(30)]
+    repo, run = _timed_hunt([["ip", "10.0.0.1", "source"], ["ip", "10.0.0.250", "destination"]], leads)
+    ranks = _ranks(repo, PASS_BEFORE_EXPANSION)[0]
+    assert {(ranks[candidate]["entity_kind"], ranks[candidate]["entity"]) for candidate, *_ in leads} == {
+        ("host", "10.0.0.1")}
+    summary = run()
+    assert _lead_anchors(repo) == {candidate for candidate, *_ in leads}
+    assert "reported_seeds_host_limited" not in summary
+
+
+def test_many_internal_clients_leads_to_one_compromised_server_are_anchored_on_each_client():
+    leads = [(f"l-in-{k:02d}", f"c{k:02d}", "r.inbound",
+              [["ip", f"10.0.2.{k + 1}", "source"], ["ip", "10.0.0.200", "destination"]], k + 1) for k in range(30)]
+    repo, run = _timed_hunt([["ip", "10.0.0.200", "source"], ["ip", "203.0.113.7", "destination"]], leads)
+    summary = run()
+    assert _lead_anchors(repo) == {candidate for candidate, *_ in leads}
+    assert "reported_seeds_host_limited" not in summary
