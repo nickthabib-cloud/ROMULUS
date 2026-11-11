@@ -40,6 +40,9 @@ CONTENT_TYPES = {
         'text/x-tcl', 'text/x-lua', 'application/javascript', 'text/x-php', 'text/x-msdos-batch',
         'text/x-m4', 'application/x-python-bytecode', 'application/x-setupscript')},
 }
+# Content a browser loads as part of a page: served by an internal web interface (a switch, printer, HMI or
+# controller addressed by IP) it is that interface, not a tool moving between hosts.
+BROWSER_CONTENT = frozenset({'application/javascript'})
 # These suffixes advertise passive media/documents, plain data or containers;
 # executable bytes under them are a positive mismatch. Unknown suffixes and no
 # suffix make no assertion. Script/executable suffixes are deliberately absent.
@@ -354,7 +357,7 @@ class ExecutableTransfer(Playbook):
                   and (_literal_host(meta.get('http.hostname')) or
                        (meta.get('destination.port') is not None and meta.get('destination.port') != 80))):
                 lane, category = 'lead', 'ingress'
-            elif (protocol == 'HTTP' and internal_sender and internal_receiver
+            elif (protocol == 'HTTP' and internal_sender and internal_receiver and content not in BROWSER_CONTENT
                   and _literal_host(meta.get('http.hostname'))):
                 # An ad hoc web server addressed by IP (a one-line Python or PowerShell server) handing a tool to
                 # another internal host; managed software distribution is addressed by name.

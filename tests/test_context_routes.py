@@ -22,6 +22,11 @@ from tests.test_zeek_transfer import run as transfer
     ("Generic Protocol Command Decode", 3, False, "context"),
     ("Misc activity", 3, False, "context"),
     ("Misc activity", 3, True, "lead"),
+    ("A Network Trojan was detected", 4, False, "lead"),            # an attack classtype a site re-prioritized
+    ("Attempted Administrator Privilege Gain", 5, False, "lead"),
+    ("", 3, False, "lead"),                                         # a site rule with no classtype
+    (None, 3, False, "lead"),
+    ("Unknown Traffic", 3, False, "context"),
     ("Detection of a Network Scan", 3, False, "lead"),
     ("A suspicious string was detected", 3, False, "lead"),
     ("Web Application Attack", 1, False, "high"),
@@ -52,7 +57,7 @@ def test_low_priority_attack_alerts_are_leads_and_say_why():
     assert {src: m.proposed_lane for src, m in found.items()} == {
         "198.51.100.7": "lead", "198.51.100.8": "lead", "198.51.100.9": "context", "198.51.100.6": "context"}
     assert all(m.severity == "low" for m in found.values())
-    assert any("classtype names attack activity" in note for note in found["198.51.100.7"].notes)
+    assert any("not one of the benign low-priority classtypes" in note for note in found["198.51.100.7"].notes)
     assert any("ties it to an attack" in note for note in found["198.51.100.8"].notes)
 
 
@@ -135,7 +140,8 @@ def test_a_major_signature_severity_keeps_a_low_priority_alert_a_lead():
     assert match.proposed_lane == "lead"
 
 
-@pytest.mark.parametrize(("host", "lane"), [("10.0.0.9", "lead"), ("files.corp.test", "context")])
+@pytest.mark.parametrize(("host", "lane"), [("10.0.0.9", "lead"), ("10.0.0.9:8000", "lead"),
+                                           ("files.corp.test", "context")])
 def test_internal_http_executable_transfer_from_an_ip_addressed_server_is_lateral(host, lane):
     internal = {"id.resp_h": "10.0.0.9"}
     [match] = transfer([PE.with_(**internal), HTTP.with_(host=host, **internal)])
@@ -144,8 +150,8 @@ def test_internal_http_executable_transfer_from_an_ip_addressed_server_is_latera
         assert "; lateral)" in match.claim and "T1570" in " ".join(match.notes)
 
 
-@pytest.mark.parametrize(("name", "lane"), [("fragment_overlap", "lead"), ("TCP_Christmas", "lead"),
-                                            ("bad_TCP_checksum", "context")])
+@pytest.mark.parametrize(("name", "lane"), [("fragment_overlap", "lead"), ("TCP_christmas", "lead"),
+                                            ("excessively_large_fragment", "lead"), ("bad_TCP_checksum", "context")])
 def test_evasion_shaped_weirds_are_leads(name, lane):
     _rule, [match] = zeek_alerts([zl.WEIRD.with_(name=name)])
     assert match.proposed_lane == lane
@@ -206,3 +212,11 @@ def test_an_entity_only_admission_gap_is_a_medium_lead_and_publishable():
     assert not decision.admitted and decision.lane == "lead" and decision.severity == "medium"
     assert publishable(decision) and any("entity_time" in note for note in decision.notes)
     assert not publishable(_decided(raw=False))
+
+
+def test_browser_javascript_from_an_ip_addressed_web_interface_is_not_lateral():
+    internal = {"id.resp_h": "10.0.0.9"}
+    script = PE.with_(mime_type="application/javascript", filename="app.js", **internal)
+    [match] = transfer([script, HTTP.with_(host="10.0.0.9", uri="/app.js", **internal)])
+    assert match.proposed_lane == "context"
+

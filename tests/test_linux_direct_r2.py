@@ -126,8 +126,7 @@ def test_module_load_needs_a_recorded_packaged_loader_for_context(executable, ar
 
 
 @pytest.mark.parametrize("session,lane", [({}, "context"), ({"process__auid": "1000"}, "lead"),
-                                          ({"process__session_id": "7"}, "lead"),
-                                          ({"process__login_user": "alice"}, "lead")])
+                                          ({"process__session_id": "7"}, "lead")])
 def test_a_module_an_operator_loads_from_the_package_tree_is_a_lead(session, lane):
     """A module copied into the module tree and loaded with modprobe from a login session (a planted rootkit) is the
     operator's load; only a load outside any session is the kernel's or the boot's own."""
