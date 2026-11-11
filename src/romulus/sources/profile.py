@@ -416,7 +416,7 @@ for _row in ECAR_ROWS.values():
 
 
 def _ecar_time_field(field_types):
-    return next((name for name in ("@timestamp", "timestamp_ms", "timestamp") if name in field_types), "timestamp_ms")
+    return next((name for name in ("timestamp_ms", "timestamp", "@timestamp") if name in field_types), "timestamp_ms")
 
 
 def linux_markers(field_types, datasets=None) -> bool:
@@ -1245,7 +1245,7 @@ def _temporal_inventory(client, target, field_types, primary, *, ecar=False):
     This is whole-index preflight, not a hunt-window negative: any nonzero or unknown count leaves temporal
     coverage unresolved. Coalesced multi-field sort/histogram retrieval is deliberately not claimed.
     """
-    alternatives = (["timestamp_ms", "timestamp"] if ecar else [
+    alternatives = (["timestamp_ms", "timestamp", "@timestamp"] if ecar else [
         "Event.System.TimeCreated.#attributes.SystemTime", "Event.System.TimeCreated_attributes.SystemTime"])
     markers = ["object", "action", "objectID", "actorID", "hostname"] if ecar else ["Event.System.Computer"]
     gaps, prior = [], [primary]

@@ -52,7 +52,7 @@ def test_catalog_rows_are_typed_or_explicitly_counted(pair):
         assert event.family == row.family
         assert event.host == "client"
         assert event.get("host.os.family") == "windows"
-        assert event.normalizer == ECAR_NORMALIZER == "ecar@1"
+        assert event.normalizer == ECAR_NORMALIZER == "ecar@2"
         assert not any(event.has(name) for name in ("event.code", "event.channel", "event.provider"))
         assert event.get("ecar.object") == pair[0]
         assert event.get("ecar.action") == pair[1]
@@ -74,13 +74,13 @@ def test_process_paths_origins_and_fenced_parent():
     assert event.ts == datetime(2025, 1, 1, 0, 0, 0, 123000, tzinfo=UTC)
 
 
-def test_pipeline_time_wins_and_both_native_epoch_fields_work():
+def test_native_time_wins_and_both_native_epoch_fields_work():
     hit = ecar_hit(timestamp_ms=1735689600123)
     hit["_source"].pop("timestamp")
     assert normalize_ecar(hit).ts.microsecond == 123000
     hit["_source"]["@timestamp"] = "2025-01-02T03:04:05Z"
     event = normalize_ecar(hit)
-    assert event.ts == datetime(2025, 1, 2, 3, 4, 5, tzinfo=UTC)
+    assert event.ts == datetime(2025, 1, 1, 0, 0, 0, 123000, tzinfo=UTC)
     assert event.get("ecar.timestamp_ms") == 1735689600123
 
 

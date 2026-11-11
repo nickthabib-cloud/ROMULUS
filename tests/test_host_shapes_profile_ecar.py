@@ -39,7 +39,7 @@ def test_ecar_profile_contract_and_numeric_time_are_explicit(stamp):
 
 
 def test_ecar_pipeline_date_and_existing_date_tie_paging_stay_dates():
-    current = contract_from_types('raw', {**ecar_types(), '@timestamp': 'date', 'message': 'text'})
+    current = contract_from_types('raw', {**ecar_types('@timestamp'), '@timestamp': 'date', 'message': 'text'})
     query = compile_es(SearchIntent(kind='raw', target='raw', window=WINDOW), current)
     assert current.ecar and current.time_field == '@timestamp' and current.linux_text_mixed is False
     assert query.time_unit == 'ms' and query.body['sort'][0]['@timestamp']['format']
@@ -247,7 +247,9 @@ def test_real_ecar_host_link_reads_later_endpoint_event(tmp_path):
     for n in range(2):
         row = ecar_hit(id=f'11111111-1111-4111-8111-{n+1:012d}')
         row['_index'], row['_id'] = 'raw', f'endpoint-{n}'
-        row['_source']['@timestamp'] = (WINDOW.start+timedelta(hours=1, seconds=n)).isoformat()
+        when = WINDOW.start+timedelta(hours=1, seconds=n)
+        row['_source']['@timestamp'] = when.isoformat()
+        row['_source']['timestamp'] = int(when.timestamp()*1000)
         rows.append(row)
     current = contract_from_types('raw', {**ecar_types('timestamp'), '@timestamp': 'date'})
     client = ElasticClient(Settings(es_url='http://es.invalid'),
@@ -276,3 +278,152 @@ def test_native_millisecond_range_never_loses_fractional_window_edges(start_us, 
     bounds = query.body['query']['bool']['filter'][0]['range']['timestamp_ms']
     epoch = int(WINDOW.start.timestamp()*1000)
     assert (bounds['gte']-epoch, bounds['lt']-epoch) == expected
+
+
+class EcarClockProfileClient:
+    """Answer only bounded profile aggregations/counts over synthetic source records."""
+    settings = type('Settings', (), {'es_flavor': 'elasticsearch'})()
+    version = '8.19.0'
+
+    def __init__(self, fields, rows, *, failed=False):
+        self.fields, self.rows, self.failed = fields, rows, failed
+
+    def mapping(self, target):
+        from tests.test_host_shapes_profile import mapping
+
+        return mapping(self.fields)
+
+    def search(self, target, body):
+        from tests.throughput_fixture import _matches, _ns, _ns_text
+
+        if 'aggs' not in body:
+            if self.failed and body['query'].get('bool', {}).get('must_not'):
+                from romulus.errors import SourceError
+
+                raise SourceError('synthetic temporal count failure')
+            count = sum(_matches(body['query'], row['_source'], '@timestamp') for row in self.rows)
+            return {'hits': {'total': {'value': count, 'relation': 'eq'}}}
+        field = body['aggs']['tmin']['min']['field']
+        clocks = [_ns(row['_source'][field]) for row in self.rows if field in row['_source']]
+        return {'hits': {'total': {'value': len(self.rows), 'relation': 'eq'}}, 'aggregations': {
+            'hosts': {'buckets': [{'key': {'host': 'CLIENT.example.test'}, 'doc_count': len(self.rows)}]},
+            'tmin': {'value': min(clocks)//1_000_000, 'value_as_string': _ns_text(min(clocks))} if clocks else {},
+            'tmax': {'value': max(clocks)//1_000_000, 'value_as_string': _ns_text(max(clocks))} if clocks else {}}}
+
+
+def _ecar_clock_rows(field, kind, *, pipeline_shift=timedelta(hours=2)):
+    from tests.test_ecar import ecar_hit
+
+    rows = []
+    for n in range(2):
+        row = ecar_hit(id=f'11111111-1111-4111-8111-{n+1:012d}')
+        row['_index'], row['_id'] = 'raw', f'clock-{n}'
+        row['_source'].pop('timestamp')
+        when = WINDOW.start+timedelta(hours=1, seconds=n)
+        row['_source']['@timestamp'] = (when+pipeline_shift).isoformat()
+        row['_source'][field] = int(when.timestamp()*1000) if kind == 'long' else when.isoformat()
+        rows.append(row)
+    return rows
+
+
+@pytest.mark.parametrize('field,kind', [('timestamp_ms', 'long'), ('timestamp', 'long'),
+                                      ('timestamp', 'date'), ('@timestamp', 'date')])
+def test_live_ecar_profile_clock_matches_native_time_and_actual_host_link(tmp_path, field, kind):
+    from datetime import datetime
+
+    from romulus.config import Settings
+    from romulus.evidence.ecar import normalize_ecar
+    from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkWindow
+    from romulus.hunt.pivot import PivotExecutor
+    from romulus.sources.es import ElasticClient
+    from romulus.sources.profile import build_profile
+    from tests.test_sweep import _repo
+    from tests.throughput_fixture import MiniES
+
+    rows = _ecar_clock_rows(field, kind)
+    fields = {**ecar_types(field), field: kind, '@timestamp': 'date'}
+    profile, current = build_profile(EcarClockProfileClient(fields, rows), 'raw')
+    client = ElasticClient(Settings(es_url='http://es.invalid'),
+        transport=MiniES({'raw': rows}, {'raw': current.time_field}).transport())
+    repo = _repo()
+    root, later = [normalize_ecar(row) for row in rows]
+    anchor = LinkAnchor(finding_id='clock', ts=root.ts, host=root.host, event_ids=[root.id], events=[root])
+    try:
+        executor = PivotExecutor(repo, client, 'h1', {'raw': current}, stage_dir=tmp_path)
+        result = LinkFetcher(executor, WINDOW.start, WINDOW.end).fetch(anchor, 'host_after_anchor',
+            LinkWindow(label='native clock', start=root.ts, end=root.ts+timedelta(minutes=5)))
+        assert later.id in result.event_ids, (result.status, result.reasons, current.time_field)
+        assert result.status == 'complete', result.reasons
+        assert current.time_field == field and not current.temporal_gaps
+        assert datetime.fromisoformat(profile.time_min) == root.ts
+        assert datetime.fromisoformat(profile.time_max) == later.ts
+        compiled = compile_es(SearchIntent(kind='histogram', target='raw', window=WINDOW), current)
+        histogram = compiled.body['aggs']['h']
+        assert next(iter(histogram.values()))['field'] == field
+    finally:
+        repo.engine.dispose()
+
+
+@pytest.mark.parametrize('failed', [False, True])
+def test_live_ecar_native_clock_inventory_counts_disjoint_iso_and_pipeline_fallbacks(failed):
+    from romulus.sources.profile import build_profile
+
+    rows = _ecar_clock_rows('timestamp', 'date')
+    rows[1]['_source'].pop('timestamp')
+    fields = {**ecar_types(), 'timestamp': 'date', '@timestamp': 'date'}
+    profile, current = build_profile(EcarClockProfileClient(fields, rows, failed=failed), 'raw')
+    assert current.time_field == 'timestamp_ms'
+    gaps = profile.model_dump().get('temporal_gaps', [])
+    assert [(gap['alternate'], gap['records']) for gap in gaps] == [
+        ('timestamp', None if failed else 1), ('@timestamp', None if failed else 1)]
+    assert all(gap['primary'] == 'timestamp_ms' and 'whole index' in gap['count_scope'] for gap in gaps)
+    assert current.temporal_gaps == tuple(gap['reason'] for gap in gaps)
+
+
+@pytest.mark.parametrize('no_partitions', [False, True])
+def test_ecar_pipeline_only_fallback_is_partial_even_when_native_window_has_no_rows(tmp_path, monkeypatch, no_partitions):
+    from romulus.config import Settings
+    from romulus.detect.windows_proxy import CertutilDownloadDecode
+    from romulus.evidence.ecar import normalize_ecar
+    from romulus.hunt import sweep as module
+    from romulus.hunt.links import LinkAnchor, LinkFetcher, LinkWindow
+    from romulus.hunt.pivot import PivotExecutor
+    from romulus.sources.es import ElasticClient
+    from romulus.sources.profile import build_profile
+    from tests.test_sweep import _repo
+    from tests.throughput_fixture import MiniES
+
+    rows = _ecar_clock_rows('@timestamp', 'date')
+    fields = {**ecar_types('timestamp'), 'timestamp': 'date', '@timestamp': 'date'}
+    profile, current = build_profile(EcarClockProfileClient(fields, rows), 'raw')
+    # Both records lack the mapped primary; this backend serves its empty searchable subset.
+    client = ElasticClient(Settings(es_url='http://es.invalid'),
+        transport=MiniES({'raw': []}, {'raw': current.time_field}).transport())
+    repo = _repo()
+    runner = module.Sweep(repo, client, 'h1', WINDOW, {'raw': current}, stage_dir=tmp_path/'sweep')
+    runner.pack = [CertutilDownloadDecode()]
+    runner._profiles = {'raw': profile.model_dump()}
+    try:
+        root = normalize_ecar(rows[0])
+        anchor = LinkAnchor(finding_id='clock', ts=root.ts, host=root.host, event_ids=[root.id], events=[root])
+        executor = PivotExecutor(repo, client, 'h1', {'raw': current}, stage_dir=tmp_path/'pivot')
+        result = LinkFetcher(executor, WINDOW.start, WINDOW.end).fetch(anchor, 'host_after_anchor',
+            LinkWindow(label='native clock', start=root.ts, end=root.ts+timedelta(minutes=5)))
+        assert result.status == 'partial', (result.status, result.reasons)
+        assert any('temporal coverage unresolved' in reason for reason in result.reasons)
+        [gap] = profile.model_dump()['temporal_gaps']
+        assert gap['primary'] == 'timestamp' and gap['alternate'] == '@timestamp' and gap['records'] == 2
+        assert result.coverage and all(cell.unresolved_ranges for cell in result.coverage)
+        if no_partitions:
+            monkeypatch.setattr(module, 'plan_partitions', lambda *_: [])
+            runner.run_target('raw')
+        else:
+            runner.run_partition('raw', current, [], WINDOW, est=0)
+        runner.finalize()
+        assert runner.stats['records'] == 0
+        assert any('temporal coverage unresolved' in reason for reason in runner.partial_reasons)
+        assert any(cell['state'] == 'evaluated_partial' and 'temporal coverage unresolved' in str(cell['detail'])
+                   for cell in repo.rule_cells('h1'))
+    finally:
+        runner.close_stage()
+        repo.engine.dispose()

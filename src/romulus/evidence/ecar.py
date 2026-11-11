@@ -10,7 +10,7 @@ import hashlib
 import ipaddress
 import json
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from romulus.evidence.community import community_id
@@ -19,7 +19,7 @@ from romulus.evidence.raw_scrub import clean_source
 from romulus.evidence.typed import Outcome, RawRef, TypedEvent, event_id, fv
 from romulus.evidence.windows import _path_metadata, registry_path_key, windows_path_key
 
-ECAR_NORMALIZER = "ecar@1"
+ECAR_NORMALIZER = "ecar@2"
 ECAR_DUPLICATE = "duplicate eCAR record UUID"
 _MARKERS = frozenset({"object", "action", "objectID", "actorID", "hostname", "properties"})
 _ZERO = "00000000-0000-0000-0000-000000000000"
@@ -79,25 +79,45 @@ def _pid(value):
         return None
 
 
+def _iso_time(value):
+    if not isinstance(value, str):
+        raise TypeError("ISO time is not text")
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        raise ValueError("ISO time lacks timezone")
+    return parsed.astimezone(UTC)
+
+
 def _time(source):
-    name = "timestamp_ms" if "timestamp_ms" in source else "timestamp"
-    try:
-        native = _integer(source.get(name))
-        native_time = datetime.fromtimestamp(native / 1000, UTC)
-    except (ValueError, TypeError, OverflowError, OSError) as exc:
-        raise EcarInputError("eCAR timestamp is not epoch milliseconds") from exc
-    if "@timestamp" not in source:
-        return native_time, native, name
-    value = source["@timestamp"]
-    try:
-        if not isinstance(value, str):
-            raise TypeError("pipeline time is not text")
-        parsed = datetime.fromisoformat(value)
-        if parsed.tzinfo is None:
-            raise ValueError("pipeline time lacks timezone")
-    except (ValueError, TypeError) as exc:
-        raise EcarInputError("eCAR pipeline @timestamp is malformed") from exc
-    return parsed.astimezone(UTC), native, name
+    """Prefer source clocks; validate every present clock instead of masking bad values."""
+    clocks = []
+    for name in ("timestamp_ms", "timestamp", "@timestamp"):
+        if name not in source:
+            continue
+        value = source[name]
+        native = None
+        try:
+            if name == "@timestamp":
+                parsed = _iso_time(value)
+            else:
+                try:
+                    native = _integer(value)
+                except (TypeError, ValueError):
+                    if name == "timestamp_ms":
+                        raise
+                    parsed = _iso_time(value)
+                else:
+                    parsed = datetime(1970, 1, 1, tzinfo=UTC) + timedelta(milliseconds=native)
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise EcarInputError(f"eCAR {name} is malformed") from exc
+        clocks.append((name, parsed, native))
+    if not clocks:
+        raise EcarInputError("eCAR timestamp is missing")
+    selected_name, selected, native = clocks[0]
+    caveats = [f"eCAR {name} differs from {selected_name}; {selected_name} is retained"
+               for name, parsed, _ in clocks[1:] if parsed != selected]
+    pipeline = next((parsed for name, parsed, _ in clocks if name == "@timestamp"), None)
+    return selected, native, selected_name, pipeline, caveats
 
 
 def _pair(source):
@@ -189,7 +209,7 @@ def normalize_ecar(hit: dict) -> TypedEvent:
         raise EcarInputError("eCAR hostname is missing")
     full_host = hostname.strip().casefold().rstrip(".")
     host = full_host.split(".", 1)[0]
-    ts, native_time, time_name = _time(source)
+    ts, native_time, time_name, pipeline_time, caveats = _time(source)
     properties = source.get("properties")
     if not isinstance(properties, dict):
         raise EcarInputError("eCAR properties is not an object")
@@ -208,9 +228,12 @@ def normalize_ecar(hit: dict) -> TypedEvent:
         "ecar.object": fv(source["object"], origin("object")),
         "ecar.action": fv(source["action"], origin("action")),
         "ecar.record_id": fv(record_id, origin("id")),
-        "ecar.timestamp_ms": fv(native_time, origin(time_name)),
+        "event.created": fv(ts.isoformat(), origin(time_name)),
     }
-    caveats = []
+    if native_time is not None:
+        fields["ecar.timestamp_ms"] = fv(native_time, origin(time_name))
+    if pipeline_time is not None:
+        fields["event.ingested"] = fv(pipeline_time.isoformat(), origin("@timestamp"))
     if row.support == "expected":
         caveats.append("eCAR object/action uses expected CAR export vocabulary; sensor-specific semantics are unverified")
     for key, value in properties.items():
