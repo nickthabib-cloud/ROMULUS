@@ -344,35 +344,20 @@ from tests import throughput_fixture as tf
 # links, audit, manifest, rule cells, the baseline observations and scope hours, and the normalization and pivot
 # goldens). With the evidence version set back to 16 every digest here is the earlier one, and the non-baseline
 # semantic projection is unchanged.
-# Evidence ranking now runs before and after expansion. Expansion first seeds what the rule estimate seeds (urgent and
-# high) with the budget share and order it always had, then anchors the rest of the ranking's Reported set in rank
-# order with the budget left. In this fixture 53 of the 54 ranked findings sit on entities that meet the evidence bar,
-# so 23 lead findings are extra seeds after the 7 rule-estimate anchors. The 7 earlier anchors fetch exactly the 156
-# links they fetched before, with the same status and reasons (test below); the extra seeds spend only the queries
-# left (source queries 135 -> 162 of 180; see the paging below). The extra anchors reach 14 context findings (4 high, 10 lead; context.credential_access,
-# .lateral_movement, .staging_and_transfer and .post_access_discovery, all re-observations on web1 of activity
-# already found). No earlier candidate is removed or changes lane; two (host.credential_material_access and
-# host.credential_store_read) change only their claim's reach text and gate reach metadata, as the extra anchors'
-# links reach them too. Events (195 -> 197), raw records, tasks (175 -> 202), event entities, rule cells
-# (the new links' context evaluations) and the hunt-derived baseline segments, counts, scope hours and
-# exclusions (keys of the new findings) move with them; the audit adds the two ranking pass summaries (which record
-# their page and statement counts); the manifest
-# adds each finding's rank fields, the ranking summary and the ranked entities.
+# Evidence ranking runs before and after expansion. Expansion seeds what the rule estimate seeds (urgent and high)
+# with the budget share and order it always had, then the ranking's Reported findings on entities that carry a
+# confirmed finding, with the budget left. This fixture has no confirmed finding, so its 23 Reported leads sit on
+# entities reported for breadth alone and give no extra seed: the ranked stack anchors exactly the rule estimate's
+# seeds, and differs from it only in the audit (the two ranking pass summaries) and the manifest (each finding's
+# rank fields, the ranking summary and the ranked entities).
 # Rule tactics are now resolved through the vendored ATT&CK release (the old technique table is only a fallback), which
 # moves the attack_tactics (and the narrative's mapping sentence) of 10 of the 24 incidents: the release's tactics
 # replace the table's defense-evasion with stealth or defense-impairment (Valid Accounts, Impair Defenses), and add
 # exfiltration, collection, impact, privilege-escalation and command-and-control where the table had fewer or none
 # (I-1e61a68c9c35, I-bda21460664c, I-dbb6b7f023dd, I-2d9388d67b6f, I-35a2807ebb9c, I-64996482cb56, I-5c6b5f2d653a,
 # I-9bf75eb45f37, I-b7971accd14a, I-fb7b4afcec47). Incident membership, techniques and everything else are unchanged.
-# Extra seeds are then anchored a page at a time, while queries and wall-clock time remain: as many as the queries a
-# root may still spend could start. With the fixed budget the extras are roots, so the reserve for discovered anchors
-# bounds them: 27 queries remain under the root cap after the rule estimate's anchors spend 135, so 13 extras are
-# anchored and spend them (source queries still 162), and the other 10 Reported-set seeds are counted in the
-# expansion summary ("10 Reported-set seeds not anchored: budget") instead of being anchored without budget to
-# expand (anchors 30 -> 20, all 20 partial; links 192, rule cells 17916). Candidates, events, tasks and raw records
-# are unchanged: the 13 extras reach all 14 context findings. Bare local accounts are qualified by their host, so the
-# manifest's entities name web1\www-data and db1\alice instead of www-data and alice (9 entities; no finding's
-# reported state moves). The audit moves with the expansion summary and the pass summaries' statement counts.
+# Bare local accounts are qualified by their host, so the manifest's entities name web1\www-data and db1\alice
+# instead of www-data and alice.
 # Run with expansion seeded by the rule estimate (`run_stack(rank=False)`), every digest is the earlier one except the
 # manifest's (those incident tactics alone), and the non-baseline semantic projection is the earlier one.
 # Re-pinned 2026-11-10 for Linux text support, with each movement compared against the prior snapshot:

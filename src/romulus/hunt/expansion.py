@@ -154,8 +154,9 @@ BUDGET_TO_SEVERE_REASON = "source query budget given to more severe anchors"
 # network full of internet endpoints cannot starve the links themselves.
 FALLBACK_LOOKUP_SHARE = 0.10
 FALLBACK_CAP_REASON = "fallback lookup cap reached"
-# Extra seeds are the evidence ranking's Reported findings beyond the rule estimate's whose entity carries a confirmed
-# finding: expansion widens around a compromise the hunt has confirmed. An entity reported only for its tactic or rule
+# Extra seeds are the evidence ranking's Reported findings beyond the rule estimate's whose listed entity (the
+# best-scoring entity the finding counts toward) carries a confirmed finding: expansion widens around a compromise the
+# hunt has confirmed. An entity reported only for its tactic or rule
 # breadth (a busy server's benign activity spans tactics) seeds nothing more than the rule estimate gives it: anchoring
 # every lead there multiplies link work and correlation items without reaching more of an intrusion.
 # Extra seeds anchored at a time: at most what
