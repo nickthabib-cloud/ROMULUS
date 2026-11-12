@@ -431,3 +431,23 @@ def test_login_labels_use_one_form_decode_without_html_interpretation(login_rule
     [match] = finish(login_rule, [event("/login?user=" + (first if n % 2 else second), n=n,
                                       status=401, method="POST") for n in range(20)])
     assert match.aggregate_summary["distinct_members"] == 2
+
+
+@pytest.mark.parametrize("operator", ["%2B", "%252B"])
+def test_template_arithmetic_encoded_plus_survives_percent_decoding(attack_rule, operator):
+    [match] = finish(attack_rule, [event("/?name={{7" + operator + "7}}")])
+    assert match.group_key.endswith("|template_injection")
+
+
+def test_credential_bearing_get_200_counts_only_as_login_attempt(login_rule):
+    [match] = finish(login_rule, [event("/login?username=alice&password=guess", n=n, status=200, method="GET")
+                                for n in range(20)])
+    assert match.proposed_lane == "lead"
+    assert match.aggregate_summary["total_refs"] == 20
+    assert "success" not in match.claim.casefold()
+    assert "guess" not in str(match)
+
+
+def test_get_200_with_username_only_remains_ordinary_form_fetch(login_rule):
+    assert finish(login_rule, [event("/login?username=alice", n=n, status=200, method="GET")
+                               for n in range(25)]) == []

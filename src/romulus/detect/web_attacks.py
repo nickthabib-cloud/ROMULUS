@@ -86,8 +86,8 @@ def _decode(value, bound, *, fold=True):
         return None, "length"
     try:
         value.encode("utf-8", "strict")
+        value = value.replace("+", " ")
         for pass_number in range(2):
-            value = value.replace("+", " ")
             if "%" not in value:
                 break
             if pass_number == 0 and _BAD_PERCENT.search(value):
@@ -419,7 +419,7 @@ class WebLoginBurst(ZeekWindowRule):
     next_checks = ("Compare application authentication outcomes and account evidence; HTTP status alone cannot prove success.",)
     card: ClassVar[dict] = {
         "behavior": title, "telemetry": "Zeek or Suricata HTTP transactions; Arkime lists excluded",
-        "fidelity": "401/403 responses or POST 200 attempts at explicit authentication paths, positive-only.",
+        "fidelity": "401/403 responses or 200 POST/explicit credential-bearing GET attempts at authentication paths, positive-only.",
         "benign_and_cost": benign[0], "query_cost": "Disk-backed five-minute window with late replay.",
         "next_pivot": next_checks[0], "research_basis": _CRS,
         "retrieval": "Typed request path, method, response status and peers; absent body/account stays unknown.",
@@ -450,27 +450,36 @@ class WebLoginBurst(ZeekWindowRule):
         if not isinstance(method, str) or not isinstance(status, int) or isinstance(status, bool):
             self.missing_required += 1
             return None
-        if status not in (401, 403) and not (status == 200 and method.casefold() == "post"):
+        method = method.casefold()
+        if status not in (401, 403) and not (status == 200 and method in {"get", "post"}):
             return None
         account = event.get("user.name")
         if not isinstance(account, str) or not account or len(account) > 256:
             account = ""
-            # Query boundaries precede decoding. Encoded '&' and '=' belong to
-            # an account value, not to new parameters or truncated identities.
-            query = raw_parts.query
-            if not query and event.has("url.query"):
-                query = event.get("url.query")
-                if not isinstance(query, str) or len(query) > MAX_URI:
-                    self.refuse("web_login_query", "Web-login account inspection is partial: query shape or length")
-                    query = ""
-            for part in query.split("&"):
-                key, equals, raw_account = part.partition("=")
-                key = _form_value(key)
-                if equals and key and key.casefold() in _ACCOUNT_KEYS:
-                    value = _form_value(raw_account)
-                    if value and len(value) <= 256:
+        # Query boundaries precede decoding. Encoded '&' and '=' belong to
+        # an account value, not to new parameters or truncated identities.
+        query = raw_parts.query
+        if not query and event.has("url.query"):
+            query = event.get("url.query")
+            if not isinstance(query, str) or len(query) > MAX_URI:
+                self.refuse("web_login_query", "Web-login account inspection is partial: query shape or length")
+                query = ""
+        query_account = credential = False
+        for part in query.split("&"):
+            key, equals, raw_value = part.partition("=")
+            key = _form_value(key)
+            if not equals or not key:
+                continue
+            if key.casefold() in _SECRET_KEYS and raw_value:
+                credential = True
+            if key.casefold() in _ACCOUNT_KEYS:
+                value = _form_value(raw_value)
+                if value and len(value) <= 256:
+                    query_account = True
+                    if not account:
                         account = value
-                        break
+        if status == 200 and method == "get" and not (query_account and credential):
+            return None
         member = hashlib.sha256(account.encode()).hexdigest() if account else "unknown-account"
         sensor = event.get("observer.name")
         sensor = sensor if isinstance(sensor, str) and len(sensor) <= 256 else "unknown-sensor"
@@ -479,7 +488,7 @@ class WebLoginBurst(ZeekWindowRule):
     def describe(self, event, total_refs, distinct_members, role):
         notes = [
             _UNCERTAIN,
-            "401/403 are HTTP failure responses, not necessarily failed credentials; POST 200 remains an attempt because a re-served login form cannot be distinguished.",
+            "401/403 are HTTP failure responses, not necessarily failed credentials; 200 POST or explicit credential-bearing GET remains an attempt because a re-served login form cannot be distinguished.",
             "Twenty attempt references in five minutes is a review heuristic; counts are per sensor and authentication path.",
             "Account labels are counted across repeated or distinct users when available; unknown accounts share one unknown bucket. Request bodies are unavailable.",
         ]
