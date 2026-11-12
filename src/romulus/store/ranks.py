@@ -204,13 +204,13 @@ class RankWorkspace:
         counted (and given the rule's tactics) exactly as a per-address finding's endpoint would be, so an address
         named only in a group still carries the rule's evidence. They are not the finding's own ranking entities
         (`listed` = 0): its rank reads the endpoints it names, so a page of findings stays bounded however many
-        members a group has. One SQL statement per (rule, techniques); nothing is held in Python."""
+        members a group has. A member is never confirmed by the group's lane: the group names who used a service, not
+        what each one did. One SQL statement per (rule, techniques); nothing is held in Python."""
         joined = (f"FROM candidate c JOIN candidate_host h ON h.candidate_id = c.id "
                   f"WHERE {self._population()} AND {_RANKED_LANES} AND {_EXTERNAL_MEMBERS}")
         params = {"hunt": self.hunt_id, "agent": agent_provenance, "confirmed": confirmed_lane}
         self._run(f"INSERT OR IGNORE INTO rk_member (entity_kind, entity, candidate_id, rule_id, ts, confirmed, "
-                  f"contributes, prior, listed) SELECT 'ip', h.host, c.id, c.rule_id, c.ts, "
-                  f"CASE WHEN c.lane = :confirmed THEN 1 ELSE 0 END, "
+                  f"contributes, prior, listed) SELECT 'ip', h.host, c.id, c.rule_id, c.ts, 0, "
                   f"CASE WHEN c.provenance != :agent AND c.source_case_id IS NULL THEN 1 ELSE 0 END, "
                   f"c.priority, 0 {joined}", params)
         for (rule_id, attack), counted in sorted(tactics.items(), key=lambda item: (item[0][0], item[0][1] or "")):

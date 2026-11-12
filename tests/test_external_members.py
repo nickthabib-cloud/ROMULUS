@@ -118,3 +118,15 @@ def test_the_finding_page_lists_outside_addresses(client, tmp_path):  # noqa: F8
     page = browser.get(f"/findings/{cid}")
     assert page.status_code == 200
     assert "Outside addresses in this finding" in page.text and "Hosts in this finding" not in page.text
+
+
+def test_a_member_is_never_confirmed_by_the_groups_lane():
+    repo = _repo()
+    members = [f"198.51.100.{n}" for n in range(1, 11)]
+    row = _service_row("svc", "10.0.0.5", members[:2])
+    row["lane"] = "urgent"                                   # unreachable today; the guard must hold anyway
+    _insert(repo, [row])
+    _members(repo, "svc", members)
+    compute_rank_pass(repo, "h1", PASS_FINAL)
+    _findings, entities = _ranks(repo)
+    assert entities[("ip", members[6])]["confirmed"] == 0
