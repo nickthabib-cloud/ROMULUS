@@ -706,6 +706,8 @@ def build_manifest(repo: Repo, hunt_id: str, actor: str) -> dict:
             findings[-1]["fleet_hosts"] = repo.snapshot_candidate_hosts(
                 c["id"], hunt_id, expected_count=gates["_fleet_host_count"],
                 complete=gates.get("_fleet_hosts_complete", False), expected_candidate=c)
+            if gates.get("_fleet_member_kind") == "external_address":
+                findings[-1]["fleet_member_kind"] = "external_address"
     ranking = _apply_ranking(repo, hunt_id, findings, cands)
     lane_counts = Counter(c["lane"] for c in cands if c.get("provenance", "deterministic") != "agent")
     with repo.engine.connect() as conn:

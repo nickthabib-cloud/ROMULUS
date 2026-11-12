@@ -56,6 +56,10 @@ class Match:
     fleet_hosts: Iterable[tuple[str, str]] = ()
     fleet_host_count: int = 0
     fleet_hosts_complete: bool = False
+    # What the streamed members are: "host" (the hunt's hosts a fleet-grouped finding stands for), or
+    # "external_address" (outside addresses grouped under one finding). External members are never hosts: ranking
+    # stages them as `ip` entities, not as the hunt's host population.
+    fleet_member_kind: str = "host"
     # Native subject identity retained in detection state when the event citation is unavailable.
     identity_key: str = ""
     # Opt-in bounded episode metadata, persisted with the candidate so replay
