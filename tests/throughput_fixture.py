@@ -737,6 +737,8 @@ PRIOR_RULE_VERSIONS = {
     "net.executable_transfer": "2",
     "net.outbound_ssh_external": "2",
     "host.kernel_module_load": "2",
+    "net.long_external_connection": "6",
+    "net.beaconing": "7",
 }
 
 
