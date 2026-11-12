@@ -40,6 +40,7 @@ def _hit(record_id: int | str, event_id: int = 1, *, native_id: str | None = Non
         "_source": {
             "@timestamp": "2026-01-02T00:05:00Z",
             "agent": {"type": "winlogbeat"},
+            "host": {"id": "fixture-machine"},
             "event": {"dataset": "windows.sysmon_operational"},
             "winlog": {
                 "channel": SYSMON_CHANNEL,
@@ -69,6 +70,7 @@ def _script_hit(
         "_source": {
             "@timestamp": (START + timedelta(minutes=minute)).isoformat(),
             "agent": {"type": "winlogbeat"},
+            "host": {"id": "fixture-machine"},
             "event": {"dataset": "windows.powershell_operational"},
             "winlog": {
                 "channel": channel,
@@ -242,6 +244,7 @@ def _contract():
         {
             "@timestamp": "date",
             "event.dataset": "keyword",
+            "host.id": "keyword",
             "winlog.channel": "keyword",
             "winlog.provider_name": "keyword",
             "winlog.event_id": "long",
@@ -281,6 +284,7 @@ def _continuity_bucket(
         "key": {
             "@timestamp": when,
             "host.name": host,
+            "host.id": "fixture-machine",
             "event.channel": channel,
             "winlog.record_id": record_id,
         },
@@ -580,7 +584,7 @@ def test_selective_partition_uses_one_bounded_full_channel_aggregate_without_fal
     assert len(metadata_intents) == 1
     [metadata] = metadata_intents
     assert metadata.window == window
-    assert metadata.group_by == ["@timestamp", "host.name", "event.channel", "winlog.record_id"]
+    assert metadata.group_by == ["@timestamp", "host.name", "event.channel", "winlog.record_id", "host.id"]
     assert metadata.max_records == PARTITION_MAX_DOCS
     assert metadata.any_of == []
     cell = repo.rule_cells("h1")[0]

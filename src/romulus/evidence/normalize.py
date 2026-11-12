@@ -3667,8 +3667,8 @@ def normalize_hits(hits: list[dict], boots: BootIntervals | None = None, *,
     its audit header time in (an incremental placement, see `BootIntervals`). Otherwise it stays unknown: never
     guessed."""
     events, skips, errors = [], defaultdict(int), []
-    windows_events: dict[tuple[tuple[str, str, str], str], TypedEvent] = {}
-    windows_signatures: dict[tuple[str, str, str], set[str]] = defaultdict(set)
+    windows_events: dict[tuple[tuple[str, ...], str], TypedEvent] = {}
+    windows_signatures: dict[tuple[str, ...], set[str]] = defaultdict(set)
     zeek_events: dict[str, TypedEvent] = {}           # by event id: a Zeek record's logical identity
     ecar_events: dict[str, TypedEvent] = {}           # bounded by this input batch, keyed by record UUID
     audit_hits = []

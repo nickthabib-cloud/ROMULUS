@@ -42,6 +42,7 @@ from romulus.evidence.normalize import (
     normalize_hits,
 )
 from romulus.evidence.typed import TypedEvent
+from romulus.evidence.windows import windows_identity_reasons
 from romulus.evidence.windows_catalog import (
     WINDOWS_CHANNELS,
     WINDOWS_HOST_DATASETS,
@@ -1328,6 +1329,7 @@ class PivotExecutor:
                     normalization_reasons = [
                         *self._ip_normalization_reasons(leaf_intent, outcome.records),
                         *_script_metadata_reasons(events),
+                        *windows_identity_reasons(events),
                     ]
                     if script_blocks.refusal_reason:
                         normalization_reasons.append(
@@ -1796,6 +1798,7 @@ class PivotExecutor:
                     normalization_reasons = [
                         *self._ip_normalization_reasons(leaf_intent, outcome.records),
                         *_script_metadata_reasons(events),
+                        *windows_identity_reasons(events),
                     ]
                     if script_blocks.refusal_reason:
                         normalization_reasons.append(

@@ -57,7 +57,7 @@ def _part(target: str, number: int, total: int, text: str) -> dict:
         "_id": native_id,
         "_source": {
             "@timestamp": when.isoformat(),
-            "agent": {"type": "winlogbeat", "version": "8.19.0"},
+            "agent": {"type": "winlogbeat", "version": "8.19.0", "id": "fixture-source"},
             "winlog": {
                 "channel": CHANNEL,
                 "provider_name": PROVIDER,

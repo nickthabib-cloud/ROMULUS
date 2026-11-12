@@ -30,7 +30,9 @@ from romulus.evidence.windows_catalog import (
 if TYPE_CHECKING:
     from romulus.detect.bounded import Account, StateBudget
 
-WINDOWS_NORMALIZER = "windows-ecs@21"
+WINDOWS_NORMALIZER = "windows-ecs@22"
+WINDOWS_SOURCE_IDENTITY_NOTE = "Windows clones without source identity cannot be told apart"
+WINDOWS_SOURCE_FIELDS = ("agent.id", "host.id", "log.file.path", "SourceFile", "FileName", "path", "host.ip")
 # This is already far beyond what the 64 MiB assembler can retain at normal 4104 chunk sizes, while bounding every
 # completeness vector even when hostile metadata claims billions of parts.
 SCRIPT_BLOCK_MAX_PARTS = 4_096
@@ -239,7 +241,7 @@ class WindowsRecord:
 class RecordIdContinuity:
     """Streaming record-id and timestamp gap state spilled to a private SQLite file.
 
-    State remains one row per (target, computer, channel), never one entry per record. A caller-owned directory
+    State remains one row per (target, computer/source, channel), never one entry per record. A caller-owned directory
     puts the file under the hunt stage; standalone uses get its own private temporary directory.
     """
 
@@ -335,7 +337,7 @@ class RecordIdContinuity:
             state[0] += 1
             if len(state[1]) < 10:
                 state[1].append(computer)
-        touched: set[tuple[str, str, str]] = set()
+        touched: dict[tuple[str, str, str], tuple[str, str]] = {}
         new_rows = 0
         self._cap()
         for record in records:
@@ -355,7 +357,11 @@ class RecordIdContinuity:
             except (TypeError, ValueError):
                 malformed.add(group)
                 continue
-            key = (target, *group)
+            identity = windows_source_identity(record)
+            # Scope the existing private key column; no persistent schema or migration is needed.
+            scoped_computer = (json.dumps([group[0], identity], separators=(",", ":"))
+                               if identity is not None else group[0])
+            key = (target, scoped_computer, group[1])
             signature = windows_record_signature(record)
             raw_time = winlog.get("time_created") or source.get("@timestamp")
             try:
@@ -387,7 +393,7 @@ class RecordIdContinuity:
                             self.budget.fail(reason)
                     record_refusal(group, reason)
                     continue
-                touched.add(key)
+                touched[key] = group
                 new_rows += 1
                 if new_rows % 128 == 0:
                     self._checkpoint()
@@ -427,7 +433,7 @@ class RecordIdContinuity:
                     (record_id, min(2, samples + 1), signature,
                      latest_time.isoformat() if latest_time is not None else None, *key),
                 )
-                touched.add(key)
+                touched[key] = group
             else:
                 # Time-ordered source results are not record-id ordered for this group. Refuse completeness
                 # rather than retaining an event-count-sized set to reconstruct the sequence.
@@ -508,10 +514,10 @@ class RecordIdContinuity:
                 )
         short: dict[str, list[str]] = {}
         short_counts: dict[str, int] = {}
-        for _target, computer, channel in sorted(touched):
+        for key, (computer, channel) in sorted(touched.items()):
             row = self._db.execute(
                 "SELECT samples FROM continuity WHERE target = ? AND computer = ? AND channel = ?",
-                (_target, computer, channel),
+                key,
             ).fetchone()
             if row is not None and row[0] < 2:
                 short_counts[channel] = short_counts.get(channel, 0) + 1
@@ -576,6 +582,7 @@ NXLOG_ENVELOPE = frozenset({
 NXLOG_PIPELINE_FIELDS = frozenset({
     "@timestamp", "@version", "@metadata", "agent", "beat", "data_stream", "ecs", "event", "fields", "host", "input",
     "log", "message", "observer", "offset", "path", "port", "related", "tags", "type",
+    "agent.id", "agent.ephemeral_id", "host.id", "host.ip", "log.file.path",
     # a creation time some pipelines add beside EventTime; its zone is not stated, so it is never read as a time
     "TimeCreated",
 })
@@ -691,7 +698,8 @@ def nxlog_to_winlog(source: dict) -> tuple[dict, dict[str, str]]:
                 if isinstance(item, _SCALAR):
                     put(str(inner), item, f"{name}.{inner}")
             continue
-        if name in NXLOG_PIPELINE_FIELDS or name.startswith("@") or name == NXLOG_ADAPTED or (
+        if (name == "FileName" and source.get("SourceModuleType") == "im_file") or (
+                name in NXLOG_PIPELINE_FIELDS or name.startswith("@") or name == NXLOG_ADAPTED) or (
                 name in NXLOG_ENVELOPE and not _nxlog_event_data_value(name, value)):
             continue
         if not isinstance(value, _SCALAR):
@@ -1049,8 +1057,64 @@ def _native_origin(origin: str, native_id: str, paths: dict[str, str]) -> str:
     return "".join(out)
 
 
-def windows_record_key(hit: dict) -> tuple[str, str, str] | None:
-    """Logical shipper identity used to deduplicate copies without trusting index or document ids."""
+def windows_source_identity(hit: dict) -> str | None:
+    """A stable source discriminator, read from the indexed envelope before adapting its Windows payload.
+
+    An agent id takes precedence over host id, then the collected file and host addresses. An ephemeral id,
+    hostname, provider (NXLog SourceName) or input-module name does not distinguish cloned machines. File paths
+    are collection metadata, never an EventData filename. The documented evtx_dump ``path`` wrapper and NXLog's
+    ``FileName`` are accepted alongside ECS log.file.path and an export's SourceFile.
+    """
+    source = hit.get("_source") or {}
+
+    def value(path: str):
+        return source[path] if path in source else _get(source, path)
+
+    def token(kind: str, item: object) -> str:
+        encoded = json.dumps([kind, item], ensure_ascii=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("ascii")).hexdigest()
+
+    for field in ("agent.id", "host.id"):
+        item = value(field)
+        if isinstance(item, str) and item.strip():
+            return token(field, item.strip())
+    for field in ("log.file.path", "SourceFile", "FileName", "path"):
+        if field == "FileName" and source.get("SourceModuleType") != "im_file":
+            continue
+        if field == "SourceFile" and is_nxlog_windows(source):
+            continue
+        item = value(field)
+        if isinstance(item, str) and item.strip():
+            path = item.strip()
+            # POSIX exports can have case-sensitive names; normalize Windows paths only when they say so.
+            if ntpath.splitdrive(path)[0] or "\\" in path:
+                path = ntpath.normcase(ntpath.normpath(path))
+            return token("file", path)
+    addresses = value("host.ip")
+    if isinstance(addresses, str):
+        addresses = [addresses]
+    if isinstance(addresses, (list, tuple)) and 0 < len(addresses) <= 256:
+        canonical = set()
+        for address in addresses:
+            if not isinstance(address, str):
+                return None
+            try:
+                canonical.add(str(ipaddress.ip_address(address.strip())))
+            except ValueError:
+                return None
+        return token("host.ip", sorted(canonical))
+    return None
+
+
+def windows_identity_reasons(events: list[TypedEvent]) -> list[str]:
+    """Bounded coverage explanation for source-less Windows evidence, including a collapsed copy."""
+    return [WINDOWS_SOURCE_IDENTITY_NOTE] if any(
+        WINDOWS_SOURCE_IDENTITY_NOTE in event.caveats for event in events
+    ) else []
+
+
+def windows_record_key(hit: dict) -> tuple[str, ...] | None:
+    """Logical shipper identity, source-scoped when available, never based on index or document ids."""
     source = windows_view(hit.get("_source") or {})
     winlog = source.get("winlog") or {}
     computer = str(winlog.get("computer_name") or "").strip().rstrip(".").casefold()
@@ -1061,7 +1125,9 @@ def windows_record_key(hit: dict) -> tuple[str, str, str] | None:
         channel = event_class.provider.casefold()
     if not computer or not channel or record_id in (None, "") or isinstance(record_id, bool):
         return None
-    return computer, channel, str(record_id)
+    key = (computer, channel, str(record_id))
+    source_identity = windows_source_identity(hit)
+    return (*key, source_identity) if source_identity is not None else key
 
 
 def _signature_time(value: object) -> object:
@@ -2813,9 +2879,11 @@ def _normalize_windows(hit: dict, raw_hit: dict) -> TypedEvent:
         f"{hit['_id']}:@timestamp",
     )
     outcome = _semantic_fields(fields, record, host)
-    logical_key = windows_record_key(hit)
+    logical_key = windows_record_key(raw_hit)
+    if windows_source_identity(raw_hit) is None:
+        record.caveats.append(WINDOWS_SOURCE_IDENTITY_NOTE)
     identity_refs = [ref] if logical_key is None else [RawRef(
-        target=f"windows:{logical_key[0]}:{logical_key[1]}:{logical_key[2]}",
+        target="windows:" + ":".join(logical_key),
         native_id=windows_record_signature(hit),
     )]
     return TypedEvent(
