@@ -7,7 +7,7 @@ import pytest
 from romulus.detect.bounded import StateBudget
 from romulus.detect.windows_auth_events import WindowsKerberoastDiversity, WindowsPasswordSpray
 from romulus.evidence.typed import TypedEvent
-from romulus.evidence.windows import normalize_windows
+from romulus.evidence.windows import WINDOWS_SOURCE_IDENTITY_NOTE, normalize_windows
 from romulus.evidence.windows_catalog import SECURITY
 from romulus.hunt import sweep as sw
 from romulus.hunt.publish import WindowsCitationFetcher
@@ -103,7 +103,7 @@ def test_native_missing_bodies_still_publish_and_fetch_checks_native_index():
             return {"hits": {"hits": [hit for _, hit in pairs if hit["_id"] in wanted and hit["_index"] == index]}}
     WindowsCitationFetcher(Client()).hydrate(match)
     assert len(match.raw_copies) == 10
-    assert not any(event.caveats for event in match.events)
+    assert all(event.caveats == [WINDOWS_SOURCE_IDENTITY_NOTE] for event in match.events)
     rule.release_state()
 
 
@@ -218,7 +218,7 @@ def test_native_duplicate_document_ids_fetch_from_their_own_indices():
     WindowsCitationFetcher(Client()).hydrate(match)
     assert len(match.raw_copies) == 10
     assert {event.raw[0].target for event in match.events} == {"logs-a", "logs-b"}
-    assert not any(event.caveats for event in match.events)
+    assert all(event.caveats == [WINDOWS_SOURCE_IDENTITY_NOTE] for event in match.events)
     rule.release_state()
 
 

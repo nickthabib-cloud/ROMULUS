@@ -1,0 +1,129 @@
+{
+  "version": 1,
+  "implementation": "Bounded original token grammars informed by the referenced corpora; not complete CRS/Sigma parity.",
+  "licenses": [
+    {
+      "name": "Apache-2.0",
+      "url": "https://github.com/coreruleset/coreruleset/blob/main/LICENSE",
+      "copy": "OWASP-CRS-LICENSE.txt",
+      "notice": "WEB-ATTACKS-NOTICE.txt"
+    },
+    {
+      "name": "DRL-1.1",
+      "url": "https://github.com/SigmaHQ/Detection-Rule-License/blob/main/LICENSE.Detection.Rules.md",
+      "author": "Nasreddine Bencherchali (Nextron Systems), Tim Shelton",
+      "match_attribution": true
+    }
+  ],
+  "sources": [
+    {
+      "classes": [
+        "sql_injection"
+      ],
+      "url": "https://github.com/coreruleset/coreruleset/blob/48092136c9cc8e154620aecde61d1bb2d1f436b0/regex-assembly/942190.ra",
+      "blob_sha": "44fc6fdd9a5160633f17c3e197cb73d188ffbcf0",
+      "license": "Apache-2.0",
+      "use": "Quoted SQL keyword and UNION SELECT grammar; bounded simplified adaptation."
+    },
+    {
+      "classes": [
+        "cross_site_scripting"
+      ],
+      "url": "https://github.com/coreruleset/coreruleset/blob/48092136c9cc8e154620aecde61d1bb2d1f436b0/rules/REQUEST-941-APPLICATION-ATTACK-XSS.conf",
+      "blob_sha": "96afb1b9bd0bc00774f0fc045adce0ad24b6af26",
+      "license": "Apache-2.0",
+      "use": "941110/941120 script-tag and HTML event-handler concepts."
+    },
+    {
+      "classes": [
+        "path_traversal_lfi"
+      ],
+      "url": "https://github.com/coreruleset/coreruleset/blob/48092136c9cc8e154620aecde61d1bb2d1f436b0/rules/REQUEST-930-APPLICATION-ATTACK-LFI.conf",
+      "blob_sha": "8c0a362738885994b6b38f6b119714f55651feed",
+      "license": "Apache-2.0",
+      "use": "930100/930110 traversal and 930120 OS-file concepts; paths reaching above root plus a small sensitive-path set."
+    },
+    {
+      "classes": [
+        "remote_file_inclusion"
+      ],
+      "url": "https://github.com/coreruleset/coreruleset/blob/48092136c9cc8e154620aecde61d1bb2d1f436b0/rules/REQUEST-931-APPLICATION-ATTACK-RFI.conf",
+      "blob_sha": "60d13dd9537a7d8866ba02d90ecb430ae262796e",
+      "license": "Apache-2.0",
+      "use": "931110 vulnerable-parameter + remote scheme and 931120 remote script URL concepts; ordinary redirect URLs excluded."
+    },
+    {
+      "classes": [
+        "command_injection"
+      ],
+      "url": "https://github.com/coreruleset/coreruleset/blob/48092136c9cc8e154620aecde61d1bb2d1f436b0/rules/REQUEST-932-APPLICATION-ATTACK-RCE.conf",
+      "blob_sha": "bdf897017fb93c9d7c46861d8c93504c1f10f616",
+      "license": "Apache-2.0",
+      "use": "Shell control token followed by a bounded command vocabulary; no obfuscation-complete shell parser."
+    },
+    {
+      "classes": [
+        "template_injection"
+      ],
+      "url": "https://github.com/coreruleset/coreruleset/blob/main/regex-assembly/934200.ra",
+      "blob_sha": "d55f08f7a54a2a85a3249ddf8a1f9e22946e723a",
+      "license": "Apache-2.0",
+      "use": "Template delimiters plus arithmetic, dunder access or dangerous object access; ordinary variable interpolation excluded."
+    },
+    {
+      "classes": [
+        "exploit_tool"
+      ],
+      "url": "https://github.com/SigmaHQ/sigma/blob/d7c9da10c170a6988d68ebdf2c9f7bd8782b7c55/rules/web/webserver_generic/web_susp_useragents.yml",
+      "blob_sha": "ffee3cb3d0ed52b474dbba5c7510a46a3ee419b6",
+      "license": "DRL-1.1",
+      "author": "Nasreddine Bencherchali (Nextron Systems), Tim Shelton",
+      "use": "sqlmap/, Nikto/, commix/ selected with token boundaries; author attribution emitted in match notes."
+    },
+    {
+      "classes": ["exploit_tool"],
+      "url": "https://github.com/sqlmapproject/sqlmap/blob/be216041e2f255ae43b050d466bd5bf92681e665/lib/core/settings.py#L29",
+      "blob_sha": "4c619bca9c5786535f988919c5f792c4c6a38d2b",
+      "license": "Factual identifier reference; no tool source code copied",
+      "use": "Tool-author confirmation of sqlmap/ in the documented default user agent."
+    },
+    {
+      "classes": ["exploit_tool"],
+      "url": "https://github.com/sullo/nikto/blob/999670cb6a939b6c93840ce666941756e4c5dcf5/program/plugins/nikto_core.plugin#L3515",
+      "blob_sha": "12758ed3a85882ea406ece278028948c25a6d139",
+      "license": "Factual identifier reference; no tool source code copied",
+      "use": "Tool-author confirmation of the Nikto/ user-agent identifier."
+    },
+    {
+      "classes": ["exploit_tool"],
+      "url": "https://github.com/commixproject/commix/blob/c7f1447371524427bb30abe731235acc7386153b/src/utils/settings.py#L281",
+      "blob_sha": "623bfd1750c3ea7e2f753c66ae6481f365ea170b",
+      "license": "Factual identifier reference; no tool source code copied",
+      "use": "Tool-author confirmation of the commix/ default user-agent shape."
+    },
+    {
+      "classes": [
+        "exploit_tool"
+      ],
+      "url": "https://github.com/projectdiscovery/nuclei-docs/blob/main/docs/nuclei/get-started.md",
+      "blob_sha": "0cb061bd5d5b9f0ac3d970303ad72340798bdad6",
+      "license": "Factual identifier reference; no source code or prose copied",
+      "use": "Explicit nuclei user-agent identifier only; custom/randomized user agents are not detectable by name."
+    }
+  ],
+  "limitations": [
+    "Encrypted HTTP and absent body content cannot be judged.",
+    "At most two percent-decoding passes; strict UTF-8 rejects overlong encodings.",
+    "Session URI lists do not prove transaction counts or association with status or user-agent.",
+    "Every class remains lead; 2xx does not establish exploitation.",
+    "Finite vocabularies do not cover every attack or tool."
+  ],
+  "thresholds": {
+    "uri_characters": 16384,
+    "user_agent_characters": 2048,
+    "total_text_characters": 65536,
+    "values_per_record": 128,
+    "login_attempt_references": 20,
+    "login_window_seconds": 300
+  }
+}

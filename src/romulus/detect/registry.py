@@ -27,6 +27,7 @@ from romulus.detect.smb_impact import SmbImpact
 from romulus.detect.tamper import TAMPER_PLAYBOOKS
 from romulus.detect.tls import TLS_PLAYBOOKS
 from romulus.detect.vpn import VPN_PLAYBOOKS
+from romulus.detect.web_attacks import WEB_ATTACK_PLAYBOOKS
 from romulus.detect.windows_account_events import WINDOWS_ACCOUNT_PLAYBOOKS
 from romulus.detect.windows_auth_events import WINDOWS_AUTH_EVENT_PLAYBOOKS
 from romulus.detect.windows_catalog_events import CATALOG_EVENT_RULES
@@ -65,7 +66,7 @@ from romulus.detect.zeek_rates import RULES as ZEEK_RATE_PLAYBOOKS
 from romulus.detect.zeek_smb import RULES as ZEEK_SMB_PLAYBOOKS
 from romulus.detect.zeek_transfer import RULES as ZEEK_TRANSFER_PLAYBOOKS
 
-PACK_VERSION = "pack@57"
+PACK_VERSION = "pack@59"
 WINDOWS_PROCESS_PLAYBOOKS = (WINDOWS_LINEAGE_PLAYBOOKS + WINDOWS_PROXY_PLAYBOOKS + WINDOWS_CREDENTIAL_PLAYBOOKS
                              + WINDOWS_DEFENSE_PLAYBOOKS + WINDOWS_REMOTE_PLAYBOOKS)
 WINDOWS_HOST_PLAYBOOKS = list(WINDOWS_MEMORY_PLAYBOOKS + WINDOWS_REGISTRY_PLAYBOOKS
@@ -98,7 +99,7 @@ ALL_PLAYBOOKS = (HOST_PLAYBOOKS + HIJACK_PLAYBOOKS + KERNEL_FILE_PLAYBOOKS + LIN
                  + list(ICS_PLAYBOOKS)
                  + LINUX_DIRECT_RULES + LINUX_SEQUENCE_RULES
                  + SERVICE_AUTH_PLAYBOOKS + MAIL_PLAYBOOKS + VPN_PLAYBOOKS + BASELINE_PLAYBOOKS
-                 + [SmbImpact, ServiceCatalog])
+                 + [SmbImpact, ServiceCatalog] + list(WEB_ATTACK_PLAYBOOKS))
 _ANCHOR_CLASSES = {playbook.id: playbook.anchor_class for playbook in ALL_PLAYBOOKS}
 
 

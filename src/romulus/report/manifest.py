@@ -376,6 +376,8 @@ def coverage_for_hunt(repo: Repo, hunt_id: str) -> dict:
                          sweep_finished=finished, metadata=hunt_rule_metadata(repo, manifest=hm))
     coverage["not_assessed"] = _not_assessed(hm, detail)
     coverage["baseline"] = _baseline_coverage(repo, hunt_id, hm)
+    if network_coverage := (hm.get("internal_networks") or {}).get("coverage"):
+        coverage["internal_networks"] = network_coverage
     visibility = repo.latest_audit(hunt_id, "hunt.zeek_visibility")
     if visibility:
         from itertools import islice
@@ -839,10 +841,16 @@ def _rank_order(finding: dict) -> tuple:
 def internal_networks_view(repo: Repo, hunt_id: str, hunt_manifest: dict) -> dict:
     """The definition the hunt recorded, with the sweep's host-address check and its warning when it ran."""
     view = recorded_view(hunt_manifest.get("internal_networks"))
+    coverage = (hunt_manifest.get("internal_networks") or {}).get("coverage")
+    if coverage:
+        view["coverage"] = coverage
+        if coverage.get("outside") or coverage.get("status") == "unknown":
+            view["warning"] = coverage["summary"]
     sweep = repo.latest_audit(hunt_id, "hunt.sweep_summary")
     check = ((sweep or {}).get("detail") or {}).get("internal_networks")
     if check:
-        view = {**view, "host_address_check": check, "warning": check.get("warning")}
+        warning = " ".join(text for text in (view.get("warning"), check.get("warning")) if text) or None
+        view = {**view, "host_address_check": check, "warning": warning}
     return view
 
 

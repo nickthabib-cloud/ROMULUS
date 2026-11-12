@@ -27,8 +27,14 @@ from romulus.sources.es import (
     ElasticClient,
     SourceError,
 )
+from romulus.sources.network_coverage import check_network_addresses
 from romulus.sources.packets import PacketError, arkime_client, check_arkime_endpoint
-from romulus.sources.profile import build_profile, contract_from_types, flatten_mapping
+from romulus.sources.profile import (
+    apply_zeek_declaration,
+    build_profile,
+    contract_from_types,
+    flatten_mapping,
+)
 from romulus.store.db import integrity_check, make_engine, migrate, space_report
 
 
@@ -189,13 +195,23 @@ def check_site_networks(s: Settings, client: ElasticClient | None = None) -> Che
                      f"{definition.summary()}; rules that depend on traffic direction report that they searched only in part "
                      "coverage")
     client = client or ElasticClient(s)
+    coverage = None
     try:
-        contracts = {target: contract_from_types(target, flatten_mapping(client.mapping(target)))
-                     for pattern in s.es_index_patterns for target in client.resolve(pattern)}
+        site_facts = load_site_facts(s.home)
+        contracts = {target: apply_zeek_declaration(
+            contract_from_types(target, flatten_mapping(client.mapping(target))), site_facts)
+            for pattern in s.es_index_patterns for target in client.resolve(pattern)}
+        coverage = check_network_addresses(client, contracts, definition, None)
         result = check_host_addresses(client, contracts, definition, None)
-    except SourceError as e:
+        result["coverage"] = coverage
+    except (SourceError, ValueError) as e:
         notes.append(f"{definition.summary()}; host addresses could not be checked: {e}")
-        return Check("site.internal_networks", "warn", "; ".join(notes))
+        if coverage is None:
+            coverage = {"status": "unknown", "warn": True, "outside": None, "outside_share": None,
+                        "reasons": ["source inventory or mappings unavailable"],
+                        "summary": "Network-address coverage unknown: source inventory or mappings unavailable."}
+        notes.append(coverage["summary"])
+        return Check("site.internal_networks", "warn", "; ".join(notes), data={"coverage": coverage})
     if not result["values_present"]:
         unchecked = "; ".join(f"{t}: {why}" for t, why in sorted(result["unchecked_targets"].items()))
         notes.append(f"{definition.summary()}; no host.ip value in host telemetry ({result['window']}), so the "
@@ -205,7 +221,9 @@ def check_site_networks(s: Settings, client: ElasticClient | None = None) -> Che
         notes.append(f"{definition.summary()}; every host.ip value in host telemetry ({result['window']}) is inside")
     if result["warning"]:
         notes.append(result["warning"])
-    status = "warn" if result["warning"] or not definition.configured else "ok"
+    if coverage["status"] != "not_applicable":
+        notes.append(coverage["summary"])
+    status = "warn" if result["warning"] or coverage["warn"] or not definition.configured else "ok"
     return Check("site.internal_networks", status, "; ".join(notes), data=result)
 
 

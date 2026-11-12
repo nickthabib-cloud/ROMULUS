@@ -1,0 +1,19 @@
+HTTP grammar references and adaptations
+
+Copyright (c) 2006-2020 Trustwave and contributors. All rights reserved.
+Copyright (c) 2021-2026 CRS project. All rights reserved.
+OWASP CRS is licensed under the Apache License, Version 2.0; see OWASP-CRS-LICENSE.txt.
+
+ROMULUS implements a bounded subset of these grammar concepts with its own
+token patterns, decoding, evidence semantics and disk aggregation. These are
+modified adaptations, not the complete upstream rules or a WAF engine.
+
+User-agent marker selection adapts Sigma's Suspicious User-Agents Related To
+Recon Tools rule, by Nasreddine Bencherchali (Nextron Systems) and Tim Shelton.
+https://github.com/SigmaHQ/sigma/blob/master/rules/web/webserver_generic/web_susp_useragents.yml
+Licensed under Detection Rule License (DRL) 1.1:
+https://github.com/SigmaHQ/Detection-Rule-License/blob/main/LICENSE.Detection.Rules.md
+Matched tool observations retain the authors' attribution in their notes.
+
+Nuclei is an additional factual tool-name marker from ProjectDiscovery's own
+documentation. Tool names and URLs are identifiers; no tool source code was copied.
