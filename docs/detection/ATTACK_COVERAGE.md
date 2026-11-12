@@ -1626,7 +1626,7 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 - Behavior: one TCP connection between an address inside the site and one outside it, whose records together span at least 30 minutes (overlapping observations by several sensors count once), read as a channel the internal side holds: a record shows the internal side opened it; or no record shows the opening, both sides sent traffic beyond resets and handshake answers, and the internal side is on a port of 32768 or above facing a port below it; or no record shows the opening and the records show only one side's half of it (one-way capture), or exchanges whose ports mark neither side as the client, or lack the per-side counters to tell (all reported with the opener stated as unknown, as are connections whose records disagree about the opener)
 
 <a id="rule-net-long-inbound-session"></a>
-### `net.long_inbound_session` — Long TCP sessions an outside address held to an internal service
+### `net.long_inbound_session` — Long TCP sessions outside addresses held to an internal service
 
 - Version: `1`; status: `active`
 - Kind: `aggregate`; lane: `lead`; severity: `medium`
@@ -1634,7 +1634,7 @@ All declared ATT&CK ids are active in the vendored Enterprise bundle.
 - ATT&CK: [`T1021`](https://attack.mitre.org/techniques/T1021/), [`T1133`](https://attack.mitre.org/techniques/T1133/)
 - Telemetry families: net_flow<br>net_session
 - Required typed fields: destination.ip<br>flow.start<br>source.ip
-- Behavior: an outside address held one or more TCP sessions, each spanning at least 30 minutes, open to one service port of one internal address, read as sessions the outside address held: a record shows the outside address opened each, or no record shows the opening, both sides sent traffic beyond resets and handshake answers, and the outside address is on a port of 32768 or above facing the internal port below it. Sessions to the ordinary web ports (80, 443, 8080, 8443) are not reported unless a sensor identified a remote-access protocol on them
+- Behavior: outside addresses held TCP sessions, each spanning at least 30 minutes, open to one service port of one internal address, read as sessions the outside address held: a record shows the outside address opened each, or no record shows the opening, both sides sent traffic beyond resets and handshake answers, and the outside address is on a port of 32768 or above facing the internal port below it. Sessions to the ordinary web ports (80, 443, 8080, 8443) are not reported unless a sensor identified a remote-access protocol on them
 - Positive-only reason: only connections whose records show the outside address opened them, or show both sides exchanging traffic with the outside address on a client port, are read; a connection whose opener and exchange are not recorded is not judged here, and sessions to the ordinary web ports are not reported, so the absence of a match proves nothing
 
 <a id="rule-net-long-unidentified-session"></a>
