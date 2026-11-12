@@ -33,8 +33,10 @@ from romulus.detect.citing import uncited_positive
 from romulus.detect.correlation import canon_ip, external
 from romulus.detect.flows import (
     OUTBOUND_CLIENT_SHAPED,
+    OUTBOUND_INSIDE_HALF,
     OUTBOUND_NOT_REPORTED,
     OUTBOUND_OPENED,
+    OUTBOUND_OUTSIDE_HALF,
     OUTBOUND_UNKNOWN,
     Opening,
     flow_view,
@@ -1108,12 +1110,12 @@ class InteractivePrivilegedLogin(LinuxSequence):
 # 49152): an SSH service on a non-standard port listens below it.
 SSH_CLIENT_PORT_FLOOR = 32768
 # What a counted SSH record shows about its client, kept as the record's aux value.
-SSH_OPENED, SSH_EXCHANGED, SSH_PORTS = "opened", "client-shaped", "ports"
+SSH_OPENED, SSH_EXCHANGED, SSH_PORTS, SSH_HALF = "opened", "client-shaped", "ports", "half"
 
 
 class OutboundSSHExternal(LinuxSequence):
     id = "net.outbound_ssh_external"
-    version = "4"
+    version = "5"
     title = "SSH from an internal source to an external destination"
     os_families = ("linux", "windows")
     families = ("net_flow", "net_session", "net_socket")
@@ -1129,7 +1131,8 @@ class OutboundSSHExternal(LinuxSequence):
                     "external destination, with the internal side as the client: a record shows it opened the "
                     "connection; or no record shows the opening, both sides sent traffic beyond resets and "
                     "handshake answers, and the internal side is on a port of 32768 or above facing a port below "
-                    "it; or the record lacks the per-side counters to tell, in which case the client is read from "
+                    "it; or the record shows only one side's half (one-way capture), an exchange whose ports mark "
+                    "neither side, or lacks the per-side counters to tell, in which case the client is read from "
                     "the SSH port (the side on 22, or on an SSH-identified port below 32768, is the server)",
         "telemetry": "Arkime sessions (source.packets, destination.packets, client.bytes, server.bytes, "
                      "tcp.flags.syn/syn_ack/rst, network.protocols), Suricata and Zeek flow records "
@@ -1143,10 +1146,10 @@ class OutboundSSHExternal(LinuxSequence):
         "benign_and_cost": "administrative and automated SSH to external servers; context lane from a declared "
                            "management host. Not reported, and counted on the window cell: SSH a recorded opening "
                            "shows an outside address opened (informational), records in which the internal side "
-                           "sent nothing beyond resets and handshake answers (unsolicited answers such as "
-                           "backscatter to port 22; informational), exchanged records whose ports do not mark the "
-                           "internal client, and records in which only the internal side sent traffic with no "
-                           "opening recorded (both partial)",
+                           "answered with nothing beyond resets and handshake answers, or neither side sent more "
+                           "(unsolicited answers such as backscatter from port 22; informational), and exchanged "
+                           "records with the internal side on a port below 32768 facing an outside port at or above "
+                           "it (an internal server's shape; partial)",
         "query_cost": "none beyond the sweep",
         "next_pivot": "the owning process and its arguments on the internal host",
         "adds": "the only rule that reports outbound SSH as such. Inbound SSH is judged by "
@@ -1197,7 +1200,7 @@ class OutboundSSHExternal(LinuxSequence):
             # the typed opening, or an exchange on client-shaped ports, names the internal side as the client
             source, destination = (source, destination) if external(destination) else (destination, source)
             how = SSH_OPENED if reading == OUTBOUND_OPENED else SSH_EXCHANGED
-        elif reading == OUTBOUND_UNKNOWN:
+        elif reading not in OUTBOUND_NOT_REPORTED:
             if (sport == 22 and dport != 22) or (ssh and isinstance(sport, int) and isinstance(dport, int)
                                                  and sport < SSH_CLIENT_PORT_FLOOR <= dport):
                 # no counters to read the opening or the exchange: a record oriented from the server's side (a
@@ -1205,7 +1208,7 @@ class OutboundSSHExternal(LinuxSequence):
                 source, destination = destination, source
             if external(source) or not external(destination):
                 return
-            how = SSH_PORTS
+            how = SSH_HALF if reading in (OUTBOUND_OUTSIDE_HALF, OUTBOUND_INSIDE_HALF) else SSH_PORTS
         else:
             self._unreported[reading] += 1
             return
@@ -1226,14 +1229,18 @@ class OutboundSSHExternal(LinuxSequence):
     @staticmethod
     def _how(how: Counter, count: int) -> str:
         """What the group's records show about the internal source as the client; '' when only the ports do."""
-        if not how[SSH_OPENED] and not how[SSH_EXCHANGED]:
+        if not how[SSH_OPENED] and not how[SSH_EXCHANGED] and not how[SSH_HALF]:
             return ""
         parts = [(how[SSH_OPENED], "a recorded TCP opening shows the internal source opened the connection"),
                  (how[SSH_EXCHANGED], (f"no opening is recorded, both sides sent traffic beyond resets and handshake "
                                       f"answers, and the internal source used a port of {SSH_CLIENT_PORT_FLOOR} or "
                                       f"above facing the external port below it")),
+                 (how[SSH_HALF], ("the record shows only one side's half of the connection (the other side sent "
+                                  "nothing, or nothing beyond resets and handshake answers: one-way capture or an "
+                                  "unanswered peer), and the internal source is read as the client from the SSH "
+                                  "port")),
                  (how[SSH_PORTS], ("the record cannot show who opened the connection, and the internal source is "
-                                  "read as the client from the SSH port"))]
+                                   "read as the client from the SSH port"))]
         return f" Of the {count} record(s): " + "; ".join(
             f"{n} {'record' if n == 1 else 'records'}: {text}" for n, text in parts if n) + "."
 

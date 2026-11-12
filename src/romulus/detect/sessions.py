@@ -38,11 +38,16 @@ from romulus.detect.flows import (
     ARKIME,
     EPHEMERAL_FLOOR,
     EXCHANGED,
+    HALF_SENTENCES,
     OPENED_BY_OUTSIDE,
     OUTBOUND_CLIENT_SHAPED,
+    OUTBOUND_INSIDE_HALF,
     OUTBOUND_NOT_REPORTED,
+    OUTBOUND_OUTSIDE_HALF,
     OUTBOUND_REPORTED,
+    OUTBOUND_SERVED,
     OUTBOUND_UNKNOWN,
+    OUTBOUND_UNSHAPED,
     SIDE_SILENT,
     SURICATA,
     ZEEK,
@@ -57,8 +62,10 @@ from romulus.detect.flows import (
     server_shaped,
     side_states,
 )
-from romulus.detect.netdef import assume_direction
+from romulus.detect.netdef import DIRECTION_ASSUMED_REASON, assume_direction, current
+from romulus.detect.site_roles import address_member
 from romulus.evidence.typed import TypedEvent
+from romulus.site import absent_site_facts
 
 EXAMPLE_LIMIT = 20
 PERIODIC_BY_DESIGN = {"ntp"}      # parser protocol names whose normal operation is a fixed poll interval
@@ -154,10 +161,10 @@ class _Unreported:
         elif entry > heap[0]:
             heapq.heapreplace(heap, entry)
 
-    def publish(self, rule: Playbook, describe) -> None:
+    def publish(self, rule: Playbook, describe, extra: dict | None = None) -> None:
         """Informational readings become coverage notes; the others make the window cell partial. `describe(measure)`
-        words one listed connection's measure."""
-        for reading, (partial, text) in OUTBOUND_NOT_REPORTED.items():
+        words one listed connection's measure; `extra` adds readings of the rule's own."""
+        for reading, (partial, text) in {**OUTBOUND_NOT_REPORTED, **(extra or {})}.items():
             count = self.counts[reading]
             if not count:
                 continue
@@ -444,13 +451,16 @@ class _Stitched(Playbook):
         return []           # staged on disk instead
 
 
+SERVED_ELSEWHERE = "served, other service"      # an inbound session the inbound-session rule reports
+
+
 class LongExternalConnection(_Stitched):
     """A long TCP channel an internal address holds to a public one: the internal side opened it, or both sides
     exchanged traffic with the internal side on a client port, or the records cannot say who opened it. A connection
     an outside address opened (an internal server answering) and records of unsolicited answers are not channels the
     internal side opened; they are counted on the window cell instead (romulus.detect.flows, outbound_reading)."""
     id = "net.long_external_connection"
-    version = "7"
+    version = "8"
     direction_dependent = True
     title = "Long-lived TCP connection between an internal and a public address"
     severity, lane = "medium", "lead"
@@ -466,9 +476,10 @@ class LongExternalConnection(_Stitched):
                     "together span at least 30 minutes (overlapping observations by several sensors count once), "
                     "read as a channel the internal side holds: a record shows the internal side opened it; or no "
                     "record shows the opening, both sides sent traffic beyond resets and handshake answers, and the "
-                    "internal side is on a port of 32768 or above facing a port below it; or the records lack the "
-                    "per-side counters to tell (reported with the opener stated as unknown, as are connections whose "
-                    "records disagree about the opener)",
+                    "internal side is on a port of 32768 or above facing a port below it; or no record shows the "
+                    "opening and the records show only one side's half of it (one-way capture), or exchanges whose "
+                    "ports mark neither side as the client, or lack the per-side counters to tell (all reported with "
+                    "the opener stated as unknown, as are connections whose records disagree about the opener)",
         "telemetry": "Arkime sessions as net_session (source.packets, destination.packets, client.bytes, "
                      "server.bytes, tcp.flags.syn/syn_ack/rst), Suricata flow and Zeek conn as net_flow "
                      "(flow.pkts_toserver/toclient, flow.bytes_toserver/toclient, tcp.tcp_flags_ts/tc, "
@@ -483,18 +494,18 @@ class LongExternalConnection(_Stitched):
                     "says how many records it rests on and how many are cited",
         "benign_and_cost": "remote administration, VPN tunnels, push channels, long downloads; one item per "
                            "connection. Not reported, and named on the window cell with a count and the longest "
-                           "ones: connections a recorded opening shows an outside address opened (informational), "
-                           "records in which the internal side sent nothing beyond resets and handshake answers "
-                           "(unsolicited answers such as backscatter of a spoofed flood; informational), exchanged "
-                           "connections whose ports do not mark the internal side as the client, and records in "
-                           "which only the internal side sent traffic with no opening recorded (both make the cell "
-                           "partial)",
+                           "ones: connections a recorded opening shows an outside address opened (informational: "
+                           "those to the ordinary web ports 80, 443, 8080 and 8443 are routine, and those to any "
+                           "other internal service are reported by net.long_inbound_session), records in which the "
+                           "internal side answered with nothing beyond resets and handshake answers, or neither side "
+                           "sent more (unsolicited answers such as backscatter of a spoofed flood; informational), and "
+                           "exchanged connections with the internal side on a port below 32768 facing an outside port "
+                           "at or above it (an internal server's shape; the cell is partial)",
         "query_cost": "none beyond the sweep",
         "next_pivot": "the internal host's process for the endpoint, then the connection's packets",
         "adds": "the only rule that judges the duration of a channel an internal address holds across the site "
                 "boundary. Long sessions an outside address opened to an internal server are judged by "
-                "net.long_inbound_remote_access (remote-access services: SSH, Telnet, r-services, RDP, VNC, WinRM, "
-                "X11), net.external_rdp and net.vnc_session (RDP and VNC negotiation from outside), "
+                "net.long_inbound_session (every internal service except the ordinary web ports), net.external_rdp and net.vnc_session (RDP and VNC negotiation from outside), "
                 "host.ssh_login_external_source and win.rdp_external_source (host logons from outside), "
                 "net.long_unidentified_session (long data-carrying connections with no identified protocol, in "
                 "either direction) and net.protocol_port_mismatch (a protocol that does not fit its port)",
@@ -530,6 +541,8 @@ class LongExternalConnection(_Stitched):
         reading = _outbound(c)
         if reading in OUTBOUND_REPORTED:
             return reading
+        if reading == OUTBOUND_SERVED and not _web_only(c):
+            reading = SERVED_ELSEWHERE
         self._unreported.add(reading, c["end"] - c["start"], c)
         return None
 
@@ -567,8 +580,14 @@ class LongExternalConnection(_Stitched):
 
     def explain(self, c: dict, reading: str) -> str:
         """What the claim adds about how the connection was read."""
+        inside, outside = _ends(c)
         if reading == OUTBOUND_CLIENT_SHAPED:
-            return self._port_shape(*_ends(c))
+            return self._port_shape(inside, outside)
+        if reading == OUTBOUND_UNSHAPED:
+            return (f" Both sides sent traffic beyond resets and handshake answers; the ports ({inside[0]} on "
+                    f"{inside[1]}, {outside[0]} on {outside[1]}) mark neither side as the client.")
+        if reading in HALF_SENTENCES:
+            return " " + HALF_SENTENCES[reading].format(inside=inside[0], outside=outside[0])
         return ""
 
     def finalize(self):
@@ -622,7 +641,9 @@ class LongExternalConnection(_Stitched):
                     preds.append(pf(by_id[c["opener_id"]], c["opener_field"]))
                 out.append(Match(self.id, claim, self.claim_type, evs, preds, evs[0].ts, self.severity, self.lane,
                                  "high", evs[0].entities(), group_key=c["report_key"]))
-        self._unreported.publish(self, lambda seconds: f"{seconds / 60:.0f} minutes")
+        self._unreported.publish(self, lambda seconds: f"{seconds / 60:.0f} minutes", {SERVED_ELSEWHERE: (
+            False, ("connections a recorded TCP opening shows an external address opened to an internal service other "
+                   "than the ordinary web ports (reported as inbound sessions by net.long_inbound_session)"))})
         return out
 
 
@@ -634,6 +655,13 @@ REMOTE_ACCESS_PORTS: dict[int, str] = {22: "SSH", 23: "Telnet", 512: "rexec", 51
                                        **{port: "X11" for port in range(6000, 6064)}}
 REMOTE_ACCESS_PROTOCOLS: dict[str, str] = {"ssh": "SSH", "telnet": "Telnet", "rdp": "RDP", "rfb": "VNC",
                                            "x11": "X11"}
+_REMOTE_NAMES = frozenset({*REMOTE_ACCESS_PROTOCOLS, "vnc"})
+# Ordinary public web service ports: HTTP 80 and HTTPS 443 (IANA) and their registered alternates http-alt 8080 and
+# https-alt 8443. An outside client holding one of these open for half an hour is routine use of a published site
+# (keep-alive, streaming, WebSocket and long-polling clients), so a session to one is not reported as inbound access
+# unless a sensor identified a remote-access protocol on it. Every other internal service an outside address holds a
+# long session to is reported.
+WEB_PORTS = frozenset({80, 443, 8080, 8443})
 
 
 def _remote_services(c: dict) -> list[str]:
@@ -645,71 +673,93 @@ def _remote_services(c: dict) -> list[str]:
     return sorted(names)
 
 
-class LongInboundRemoteAccess(LongExternalConnection):
-    """A long TCP session an outside address held open to an internal remote-access service: a record shows the
-    outside address opened it, or no record shows the opening and both sides exchanged traffic with the outside
-    address on a client port facing the service port."""
-    id = "net.long_inbound_remote_access"
+def _web_only(c: dict) -> bool:
+    """The internal side's port is an ordinary web port and no remote-access protocol was identified on it."""
+    return _ends(c)[0][1] in WEB_PORTS and not _remote_services(c)
+
+
+class LongInboundSession(LongExternalConnection):
+    """Long TCP sessions an outside address held open to one internal service: a record shows the outside address
+    opened each, or no record shows the opening and both sides exchanged traffic with the outside address on a client
+    port facing the service port. Ordinary web ports are left out. One item per (outside address, internal address,
+    service port), counting and citing its sessions."""
+    id = "net.long_inbound_session"
     version = "1"
-    title = "Long TCP session from a public address to an internal remote-access service"
-    severity, lane = "high", "lead"
+    title = "Long TCP sessions an outside address held to an internal service"
+    severity, lane = "medium", "lead"
     attack = ("T1133", "T1021")
     assures_negative = False
+    uses_site_facts = True
+    site_facts = absent_site_facts()
     positive_only_reason = (
         "only connections whose records show the outside address opened them, or show both sides exchanging traffic "
         "with the outside address on a client port, are read; a connection whose opener and exchange are not "
-        "recorded is not judged here, and a remote-access service on a port this rule does not list, with no "
-        "protocol a sensor identified, is not recognised, so the absence of a match proves nothing")
+        "recorded is not judged here, and sessions to the ordinary web ports are not reported, so the absence of a "
+        "match proves nothing")
     benign = ("administrators, vendors and partners using an exposed SSH, RDP or VNC service",
-              "VPN concentrators and jump hosts deliberately exposed to the internet")
-    next_checks = ("the logon on the internal host for this session (account, authentication method)",
-                   "what the account did on the host during the session",
+              ("VPN concentrators, jump hosts, mail, database and directory services deliberately exposed to outside "
+              "clients"))
+    next_checks = ("the logon or client session on the internal host for these sessions (account, method)",
+                   "what the account or client did on the host during the sessions",
                    "the outside address (ownership, other internal hosts it reached)")
+    SESSIONS_CITED = 6                  # sessions whose bounding and opening records are cited per item
     card: ClassVar[dict] = {
-        "behavior": "one TCP connection whose records together span at least 30 minutes, between an outside address "
-                    "and an internal one that offered a remote-access service on it (by its port: SSH 22, Telnet "
-                    "23, rexec 512, rlogin 513, rsh 514, RDP 3389, VNC 5900-5909, WinRM 5985/5986, X11 6000-6063; "
-                    "or by a protocol a sensor identified: ssh, telnet, rdp, rfb, x11), read as a session the outside "
-                    "address held: a record shows the outside address opened it, or no record shows the opening, "
-                    "both sides sent traffic beyond resets and handshake answers, and the outside address is on a "
-                    "port of 32768 or above facing the internal side's port below it",
+        "behavior": "an outside address held one or more TCP sessions, each spanning at least 30 minutes, open to one "
+                    "service port of one internal address, read as sessions the outside address held: a record shows "
+                    "the outside address opened each, or no record shows the opening, both sides sent traffic beyond "
+                    "resets and handshake answers, and the outside address is on a port of 32768 or above facing the "
+                    "internal port below it. Sessions to the ordinary web ports (80, 443, 8080, 8443) are not "
+                    "reported unless a sensor identified a remote-access protocol on them",
         "telemetry": LongExternalConnection.card["telemetry"],
-        "fidelity": "direct observation of the session's lifetime and opening by the sensor; it does not show a "
-                    "logon succeeded or what was done. The opening is stated from the sensor's typed SYN evidence "
-                    "or, when not recorded, the claim says the outside address is read as the client from the port "
-                    "shape. The service is named by port or by the sensor's protocol identification",
-        "benign_and_cost": "administrators, vendors and partners using exposed remote-access services, and jump "
-                           "hosts; one item per connection. Scanners and password guessers rarely hold a session "
-                           "for 30 minutes, so their probes do not reach this rule",
+        "fidelity": "direct observation of the sessions' lifetime and opening by the sensors; it does not show a "
+                    "logon succeeded or what was done. The opening is stated from the sensor's typed SYN evidence or, "
+                    "when not recorded, the claim says the outside address is read as the client from the port shape. "
+                    "A remote-access service (SSH 22, Telnet 23, rexec 512, rlogin 513, rsh 514, RDP 3389, VNC "
+                    "5900-5909, WinRM 5985/5986, X11 6000-6063, or a sensor's ssh, telnet, rdp, rfb or x11 "
+                    "identification) is named; other services are named by port and identified protocol",
+        "benign_and_cost": "administrators, vendors and partners using exposed services, jump hosts, VPN "
+                           "concentrators, exposed mail, database and directory services; one item per (outside "
+                           "address, internal address, service port), with exact session counts. Scanners and "
+                           "password guessers rarely hold a session for 30 minutes",
         "query_cost": "none beyond the sweep",
-        "next_pivot": "the host's logon records for the session, then what the account did",
-        "adds": "network-side view of inbound interactive access that net.long_external_connection does not report "
-                "(it reads outbound channels only). Overlaps net.external_rdp and net.vnc_session where Zeek or "
-                "Suricata parse the negotiation; adds SSH, Telnet, r-services, WinRM and X11, and Arkime-only sites",
+        "next_pivot": "the host's logon or service records for the sessions, then what was done",
+        "adds": "the inbound view net.long_external_connection does not report (it reads outbound channels only). "
+                "Overlaps net.external_rdp and net.vnc_session where Zeek or Suricata parse the negotiation; adds "
+                "SSH, Telnet, r-services, WinRM, X11, databases, SMB, directory, VPN and any other exposed service, "
+                "and Arkime-only sites",
         "research_basis": "ATT&CK Enterprise 20.0 T1133 (External Remote Services: network connection creation "
                           "and session metadata) and T1021; opening and exchange semantics as for "
-                          "net.long_external_connection",
+                          "net.long_external_connection; web port list from the IANA registry (http, https, "
+                          "http-alt, https-alt)",
         "retrieval": LongExternalConnection.card["retrieval"],
         "direction": LongExternalConnection.card["direction"],
-        "lanes": "lead; severity high: interactive access to an internal host from outside is high impact if "
-                 "unauthorized",
+        "lanes": "lead. Severity high for a remote-access service when the site's internal networks are configured "
+                 "(interactive access from outside the declared site is high impact if unauthorized); medium for "
+                 "other services, and for any service when the internal networks are the RFC 1918 defaults (the "
+                 "item then carries the 'direction assumed' reason). A declared management host as the outside "
+                 "address keeps the lead lane, with a note",
     }
 
     def wants(self, e: TypedEvent) -> bool:
-        # a TCP connection with one public end whose first record names a remote-access service on the internal side,
-        # by port or by an identified protocol
+        # a TCP connection with one public end, unless its first record puts the internal side on an ordinary web port
+        # with no remote-access protocol identified
         if not super().wants(e):
             return False
         inside_port = e.get("destination.port") if _public(e.get("source.ip")) else e.get("source.port")
+        if inside_port not in WEB_PORTS:
+            return True
         listed = e.get("network.protocols")
         names = {str(p).lower() for p in (listed if isinstance(listed, list) else [listed]) if p}
         app = e.get("network.app_proto")
         if isinstance(app, str):
             names.add(app.lower())
-        return inside_port in REMOTE_ACCESS_PORTS or bool(names & {"ssh", "telnet", "rdp", "rfb", "vnc", "x11"})
+        return bool(names & _REMOTE_NAMES)
 
-    def reading(self, c: dict) -> str | None:
-        if not _remote_services(c):
+    @staticmethod
+    def held(c: dict) -> str | None:
+        """OPENED_BY_OUTSIDE or EXCHANGED when the outside address held this long connection to an internal service
+        this rule reports, else None."""
+        if _web_only(c):
             return None
         judgement = _judgement(c)
         inside, outside = _ends(c)
@@ -717,12 +767,96 @@ class LongInboundRemoteAccess(LongExternalConnection):
             return judgement
         return None
 
-    def explain(self, c: dict, reading: str) -> str:
-        inside, outside = _ends(c)
-        services = " and ".join(_remote_services(c))
-        text = "" if reading == OPENED_BY_OUTSIDE else self._port_shape(outside, inside)
-        return (f"{text} {inside[0]} is an internal address offering {services} on the session; {outside[0]} is "
-                f"outside the site. The session shows access was held open, not that a logon succeeded.")
+    def finalize(self):
+        out = []
+        groups = KeyedStore(self, "inbound_groups", self.HOT)
+        for i, (key, c) in enumerate(self.conns.items(candidates=True)):
+            if not self.candidate(c):
+                continue
+            judgement = self.held(c)
+            if judgement is None:
+                continue
+            inside, outside = _ends(c)
+            g = groups.setdefault((outside[0], inside[0], inside[1]), lambda: {
+                "sessions": 0, "opened": 0, "records": 0, "first": None, "last": None, "longest": 0.0,
+                "sensors": Counter(), "protocols": set(), "services": set(), "cited": [], "latest": None,
+                "outside_ports": set()})
+            if g is None:
+                self.refuse("disk", "the inbound session groups' disk budget is spent; a session is not reported")
+                continue
+            g["sessions"] += 1
+            g["opened"] += judgement == OPENED_BY_OUTSIDE
+            g["records"] += c["records"]
+            g["first"] = c["start"] if g["first"] is None else min(g["first"], c["start"])
+            g["last"] = c["end"] if g["last"] is None else max(g["last"], c["end"])
+            g["longest"] = max(g["longest"], c["end"] - c["start"])
+            g["sensors"].update(c["sensors"])
+            g["protocols"].update(c["protocols"])
+            g["services"].update(_remote_services(c))
+            if len(g["outside_ports"]) < EXAMPLE_LIMIT:
+                g["outside_ports"].add(outside[1])
+            ref = (c["start"], key)
+            if g["latest"] is None or ref > g["latest"]:
+                g["latest"] = ref
+            if len(g["cited"]) < self.SESSIONS_CITED - 1 or ref < g["cited"][-1]:
+                g["cited"] = sorted([*g["cited"], ref])[:self.SESSIONS_CITED - 1]
+            if i % 10_000 == 9_999:
+                groups.trim()
+        configured = current().configured
+        for (outside, inside, port), g in groups.items():
+            with citation_group(self, out, (outside, inside, port), g):
+                out.append(self._item(outside, inside, port, g, configured))
+        groups.clear()
+        return out
+
+    def _item(self, outside: str, inside: str, port, g: dict, configured: bool) -> Match:
+        refs = list(dict.fromkeys([*g["cited"], g["latest"]]))
+        conns = [self.conns.peek(key) for _start, key in refs]
+        ids = []
+        for c in conns:
+            staged = c["events"]
+            ids += ([c["opener_id"]] if c["opener_id"] in staged else []) + staged[:1]
+        evs, missing = cite_with_bounds(self.load, self._events, [c["ends"] for c in conns], ids, EXAMPLE_LIMIT)
+        n, opened = g["sessions"], g["opened"]
+        remote = sorted(g["services"])
+        named = " and ".join(remote) if remote else (
+            f"identified as {', '.join(sorted(g['protocols']))}" if g["protocols"] else "no protocol identified")
+        service = f"port {port} ({named})"
+        span = f"{_iso(g['first'])} – {_iso(g['last'])}"
+        claim = (f"{outside} held {n} TCP session(s) of at least {self.MIN_SECONDS // 60} minutes open to {inside} "
+                 f"{service} ({span}); the longest lasted {g['longest'] / 60:.0f} minutes. ")
+        shaped = n - opened
+        if opened:
+            claim += (f"{'A record shows' if opened == 1 else 'Records show'} {outside} opened "
+                      f"{'the session' if n == 1 else f'{opened} of them'} (its SYN). ")
+        if shaped:
+            ports = ", ".join(str(p) for p in sorted(g["outside_ports"]) if p is not None)
+            claim += (f"{'It has' if n == 1 else f'{shaped} have'} no recorded opening, but both sides sent traffic "
+                      f"beyond resets and handshake answers with {outside} on a port of {EPHEMERAL_FLOOR} or above "
+                      f"(seen: {ports}) facing port {port}: the port shape of {outside} as the client. ")
+        claim += (f"{inside} is an internal address and {outside} is outside the site's configured internal networks."
+                  if configured else
+                  f"The site's internal networks are not configured, so {inside} is internal and {outside} external "
+                  f"only by the RFC 1918 defaults.")
+        claim += " The sessions show access held open, not that a logon succeeded or what was done."
+        claim += (f" The sensors recorded {_sensor_counts(g['sensors'])}."
+                  + cited_phrase(len(evs), g["records"], not missing))
+        if missing:
+            claim += " A record bounding a cited session was not kept for citation; the span is computed from every record."
+        severity = "high" if remote and configured else "medium"
+        notes = [] if configured else [DIRECTION_ASSUMED_REASON]
+        if address_member(outside, getattr(self.site_facts, "management_hosts", ())):
+            notes.append("declared management source; authorized administration can produce these sessions")
+        first = evs[0]
+        preds = [pf(first, name) for name in ("source.ip", "destination.ip", "destination.port", "flow.start")
+                 if first.has(name)]
+        opener = next((c for c in conns if c["opener_id"] in {e.id for e in evs} and len(c["openers"]) == 1), None)
+        if opener is not None:
+            record = next(e for e in evs if e.id == opener["opener_id"])
+            preds.append(pf(record, opener["opener_field"]))
+        match = Match(self.id, claim, self.claim_type, evs, preds, first.ts, severity, self.lane, "high",
+                      evs[0].entities(), notes, group_key=f"{outside}|{inside}|{port}")
+        return match
 
 
 class _Series:
@@ -730,7 +864,7 @@ class _Series:
     count, the earliest connections' first record ids and the latest connection's, and the protocols
     every connection was identified as."""
 
-    __slots__ = ("count", "duration_missing", "first", "last", "opened", "protocols", "sensors")
+    __slots__ = ("count", "duration_missing", "first", "halves", "last", "opened", "protocols", "sensors")
 
     def __init__(self):
         self.count = 0
@@ -739,6 +873,7 @@ class _Series:
         self.protocols: frozenset | None = None
         self.sensors = Counter()
         self.opened = True
+        self.halves = 0                                    # connections whose records show one side's half only
         self.duration_missing = False
 
     def add(self, part: list) -> None:
@@ -776,7 +911,7 @@ class Beaconing(_Stitched):
     cannot hide a beacon. It absorbs millisecond truncation, ordinary sensor skew, and Arkime's back-to-back splits
     of one long UDP session."""
     id = "net.beaconing"
-    version = "8"
+    version = "9"
     direction_dependent = True
     title = "Regular, repeated connections from an internal address to one public endpoint"
     severity, lane = "medium", "lead"
@@ -797,13 +932,15 @@ class Beaconing(_Stitched):
         "fidelity": "aggregate observation of connection start times; regularity is a deviation, not proof of "
                     "command and control. A connection counts when a record shows the internal address opened it, "
                     "when no record shows the opening but both sides sent traffic beyond resets and handshake "
-                    "answers with the internal address on a port of 32768 or above facing a port below it, or when "
-                    "the records lack the per-side counters to tell (then the recorded sides are used, as the claim "
-                    "says). Connections an outside address is shown to have opened, and records in which the "
-                    "internal address sent nothing beyond resets and handshake answers (unsolicited answers such as "
-                    "backscatter), are not counted and are named on the window cell; exchanged connections whose "
-                    "ports do not mark the internal client, and records in which only the internal address sent "
-                    "traffic with no opening recorded, are named there too and make the cell partial",
+                    "answers with the internal address on a port of 32768 or above facing a port below it, when "
+                    "the records show only one side's half of it (one-way capture; read from the internal address "
+                    "outwards, as the claim says), or when the records lack the per-side counters to tell or show "
+                    "an exchange whose ports mark neither side (then the recorded sides are used). Connections an "
+                    "outside address is shown to have opened, and records in which the internal address answered "
+                    "with nothing beyond resets and handshake answers or neither side sent more (unsolicited "
+                    "answers such as backscatter), are not counted and are named on the window cell; exchanged "
+                    "connections with the internal address on a port below 32768 facing an outside port at or "
+                    "above it are named there too and make the cell partial",
         "benign_and_cost": "NTP (context lane when the parser names it), update checks, telemetry and monitoring "
                            "agents; one item per (source, destination, port, transport)",
         "query_cost": "none beyond the sweep",
@@ -902,12 +1039,12 @@ class Beaconing(_Stitched):
         if reading not in OUTBOUND_REPORTED:
             unreported.add(reading, c["records"], c)
             return None
-        if reading != OUTBOUND_UNKNOWN:
+        if reading not in (OUTBOUND_UNKNOWN, OUTBOUND_UNSHAPED):
             (src, sport), (dst, dport) = _ends(c)
-            return src, sport, dst, dport
+            return src, sport, dst, dport, reading in (OUTBOUND_OUTSIDE_HALF, OUTBOUND_INSIDE_HALF)
         if _public(c["src"]) or not _public(c["dst"]):
             return None
-        return c["src"], c["sport"], c["dst"], c["dport"]
+        return c["src"], c["sport"], c["dst"], c["dport"], False
 
     def finalize(self):
         series = KeyedStore(self, "beacon_series", self.HOT)
@@ -920,12 +1057,13 @@ class Beaconing(_Stitched):
                 oriented = self._oriented(c, unreported)
             if oriented is None:
                 continue
-            src, _sport, dst, dport = oriented
+            src, _sport, dst, dport, half = oriented
             s = series.setdefault((src, dst, dport, c["transport"]), _Series)
             if s is None:
                 self.refuse("disk", "the series' disk budget is spent; a connection is not evaluated")
                 continue
             if first:
+                s.halves += half
                 s.sensors.update(c["sensors"])
                 s.opened = s.opened and len(c["openers"]) == 1
                 s.duration_missing = s.duration_missing or c["duration_missing"]
@@ -973,6 +1111,10 @@ class Beaconing(_Stitched):
                     claim += (f" The records do not show that {src} opened every connection: where no opening is "
                               f"recorded, {src} is the side on a client port when both sides exchanged traffic, and "
                               f"otherwise the side the sensor recorded first.")
+                if s.halves:
+                    claim += (f" For {s.halves} of the connections the records show only one side's half (the other "
+                              f"side sent nothing, or nothing beyond resets and handshake answers: one-way capture "
+                              f"or an unanswered peer); they are read from {src} outwards.")
                 if s.duration_missing:
                     claim += f" {ZEEK_NO_DURATION}; only the recorded starts are used for those records."
                 cited = next((e for e in evs if canon_ip(e.get("source.ip")) == src), evs[0])
@@ -1376,5 +1518,5 @@ class ArkimeSshReverseShellTag(Playbook):
         return out
 
 
-SESSION_PLAYBOOKS = [LongExternalConnection, LongInboundRemoteAccess, Beaconing, RareClientFingerprint,
+SESSION_PLAYBOOKS = [LongExternalConnection, LongInboundSession, Beaconing, RareClientFingerprint,
                      ArkimeSshReverseShellTag]

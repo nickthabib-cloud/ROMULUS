@@ -10,14 +10,15 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from romulus.detect import bounded, flows
+from romulus.detect import bounded, flows, netdef
 from romulus.detect.flows import (
     EXCHANGED,
+    INSIDE_HALF_ONLY,
     ONE_SIDED_INSIDE_SILENT,
-    ONE_SIDED_OUTSIDE_SILENT,
     OPENED_BY_INSIDE,
     OPENED_BY_OUTSIDE,
     OPENERS_DISAGREE,
+    OUTSIDE_HALF_ONLY,
     SIDE_BARE,
     SIDE_SILENT,
     SIDE_SPOKE,
@@ -27,9 +28,10 @@ from romulus.detect.flows import (
     judge_connection,
     record_kind,
     side_states,
+    zeek_history_kinds,
 )
 from romulus.detect.linux_sequences import OutboundSSHExternal
-from romulus.detect.sessions import Beaconing, LongExternalConnection, LongInboundRemoteAccess
+from romulus.detect.sessions import Beaconing, LongExternalConnection, LongInboundSession
 from romulus.evidence.normalize import normalize_hits
 from romulus.evidence.typed import RawRef, TypedEvent, fv
 from romulus.site import absent_site_facts
@@ -65,7 +67,9 @@ def arkime(src, sport, dst, dport, *, first=T0, seconds=60.0, src_pkts=10, dst_p
     if s2c is not None:
         doc["server"] = {"bytes": s2c}
     if flags is not None:
-        doc["tcpflags"] = {"syn": 0, "syn-ack": 0, "ack": 0, "psh": 0, "fin": 0, "rst": 0, "urg": 0, **flags}
+        # typed names (syn_ack) as Arkime writes them (syn-ack)
+        doc["tcpflags"] = {"syn": 0, "syn-ack": 0, "ack": 0, "psh": 0, "fin": 0, "rst": 0, "urg": 0,
+                           **{name.replace("_", "-"): count for name, count in flags.items()}}
     events, skips, errors = normalize_hits([{"_id": _id("a"), "_index": "arkime_sessions3-241118", "_source": doc}])
     assert (skips, errors) == ({}, []) and len(events) == 1
     return events[0]
@@ -178,6 +182,8 @@ def test_arkime_side_states(fields, expected):
     ("14", "18", (1, 9), (54, 4000), (SIDE_BARE, SIDE_SPOKE)),        # one RST|ACK packet only
     ("14", "18", (9, 9), (594, 4000), (SIDE_UNKNOWN, SIDE_SPOKE)),    # ACKs and a reset over several packets
     ("02", "04", (1, 1), (66, 54), (SIDE_UNKNOWN, SIDE_BARE)),        # opened (lone SYN): not an exchange judgement
+    ("04", "12", (6, 6), (324, 396), (SIDE_BARE, SIDE_BARE)),         # six SYN-ACKs: one handshake's retransmissions
+    ("04", "12", (7, 7), (378, 462), (SIDE_BARE, SIDE_UNKNOWN)),      # more may hide pure acknowledgements
     ("00", "00", (1, 1), (60, 60), (SIDE_UNKNOWN, SIDE_UNKNOWN)),     # flagless probes settle nothing
     (None, None, (5, 5), (330, 330), (SIDE_UNKNOWN, SIDE_UNKNOWN)),   # no tcp block
     (None, None, (5, 5), (5000, 9000), (SIDE_SPOKE, SIDE_SPOKE)),     # data both ways without flags
@@ -221,8 +227,13 @@ def test_non_tcp_records_are_never_judged():
     ([(INSIDE, 51000), (OUTSIDE, 443)], SIDE_SPOKE, SIDE_SPOKE, OPENERS_DISAGREE),
     ([], SIDE_SPOKE, SIDE_SPOKE, EXCHANGED),
     ([], SIDE_BARE, SIDE_BARE, ONE_SIDED_INSIDE_SILENT),
-    ([], SIDE_SILENT, SIDE_SPOKE, ONE_SIDED_INSIDE_SILENT),
-    ([], SIDE_SPOKE, SIDE_SILENT, ONE_SIDED_OUTSIDE_SILENT),
+    ([], SIDE_SILENT, SIDE_BARE, ONE_SIDED_INSIDE_SILENT),         # backscatter: SYN-ACKs, nothing back
+    ([], SIDE_SILENT, SIDE_SILENT, ONE_SIDED_INSIDE_SILENT),
+    ([], SIDE_BARE, SIDE_SPOKE, ONE_SIDED_INSIDE_SILENT),          # the inside only reset what it was sent
+    ([], SIDE_SILENT, SIDE_SPOKE, OUTSIDE_HALF_ONLY),              # one-way capture of the outside's half
+    ([], SIDE_SILENT, SIDE_UNKNOWN, OUTSIDE_HALF_ONLY),
+    ([], SIDE_SPOKE, SIDE_SILENT, INSIDE_HALF_ONLY),               # one-way capture of the inside's half
+    ([], SIDE_SPOKE, SIDE_BARE, INSIDE_HALF_ONLY),
     ([], SIDE_UNKNOWN, SIDE_BARE, UNJUDGED),           # the internal packets may be an unanswered opening's SYNs
     ([], SIDE_UNKNOWN, SIDE_SILENT, UNJUDGED),
     ([], SIDE_UNKNOWN, SIDE_SPOKE, UNJUDGED),
@@ -292,21 +303,83 @@ def test_inbound_long_session_to_an_internal_server_is_served_not_a_channel(make
     assert run(rule, record) == []
     [note] = rule.coverage_notes()
     assert note.startswith("not reported (informational): connections a recorded TCP opening shows an external "
-                           "address opened")
+                           "address opened to an internal service other than the ordinary web ports")
     assert f"{INSIDE}:22 and {OUTSIDE}:51000" in note and "(1 connection(s))" in note
-    # the inbound remote-access rule reports it instead
-    inbound = LongInboundRemoteAccess()
+    # the inbound-session rule reports it instead
+    inbound = LongInboundSession()
     [match] = run(inbound, record)
-    assert f"{OUTSIDE}:51000 opened to {INSIDE}:22 (a record shows its SYN)" in match.claim
-    assert f"{INSIDE} is an internal address offering SSH on the session" in match.claim
+    assert f"{OUTSIDE} held 1 TCP session(s) of at least 30 minutes open to {INSIDE} port 22 (SSH)" in match.claim
+    assert f"A record shows {OUTSIDE} opened the session (its SYN)." in match.claim
     assert "not that a logon succeeded" in match.claim
-    assert match.proposed_lane == "lead" and match.severity == "high"
+    # under the RFC 1918 defaults the direction is assumed: medium, said so, never "outside the site"
+    assert match.proposed_lane == "lead" and match.severity == "medium"
+    assert "outside the site" not in match.claim and netdef.DIRECTION_ASSUMED_REASON in match.notes
 
 
-def test_inbound_long_session_to_a_web_server_is_left_to_the_other_rules():
+def test_inbound_long_session_to_a_web_server_is_a_routine_note():
     record = chunks(lambda **kw: arkime(OUTSIDE, 51000, INSIDE, 443, flags={"syn": 1}, **kw))
+    rule = LongExternalConnection()
+    assert run(rule, record) == []
+    [note] = rule.coverage_notes()
+    assert note.startswith("not reported (informational): connections a recorded TCP opening shows an external "
+                           "address opened (inbound")
+    assert run(LongInboundSession(), record) == []
+
+
+@pytest.mark.parametrize("port,service", [(1433, None), (3306, "mysql"), (5432, None), (445, "smb"), (389, None),
+                                          (1194, None), (9443, None)])
+def test_long_inbound_session_to_any_other_service_is_reported(port, service):
+    # the S5 shape and its kin: an outside address held an exposed database, SMB, LDAP, VPN or webshell port for 2 hours
+    record = chunks(lambda **kw: arkime(OUTSIDE, 51000, INSIDE, port, flags={"syn": 1}, cid=f"1:{port}=",
+                                        protocols=("tcp", service) if service else ("tcp",), **kw), n=10)
+    [match] = run(LongInboundSession(), record)
+    assert f"{OUTSIDE} held 1 TCP session(s) of at least 30 minutes open to {INSIDE} port {port}" in match.claim
+    assert "the longest lasted 120 minutes" in match.claim
+    assert match.severity == "medium" and match.proposed_lane == "lead"
     assert run(LongExternalConnection(), record) == []
-    assert run(LongInboundRemoteAccess(), record) == []
+
+
+def test_s5_mssql_two_hours_with_the_syn_recorded_is_surfaced():
+    record = chunks(lambda **kw: arkime(OUTSIDE, 51000, INSIDE, 1433, flags={"syn": 1}, **kw), n=10)
+    [match] = run(LongInboundSession(), record)
+    assert "port 1433 (no protocol identified)" in match.claim
+
+
+def test_remote_access_is_high_under_configured_networks_and_groups_sessions():
+    previous = netdef.current()
+    netdef.install(netdef.SiteNetworks("configured", netdef.parse_networks(["10.0.0.0/8"], "test")))
+    try:
+        sessions = []
+        for k in range(3):
+            start = T0 + timedelta(hours=3 * k)
+            sessions += [arkime(OUTSIDE, 51000 + k, INSIDE, 22, first=start + timedelta(minutes=12 * i),
+                                seconds=12 * 60 - 1, flags={"syn": int(i == 0), "ack": 20, "psh": 5},
+                                cid=f"1:ssh{k}=") for i in range(4)]
+        [match] = run(LongInboundSession(), sessions)
+        assert f"{OUTSIDE} held 3 TCP session(s) of at least 30 minutes open to {INSIDE} port 22 (SSH)" in match.claim
+        assert f"Records show {OUTSIDE} opened 3 of them (its SYN)." in match.claim
+        assert f"{OUTSIDE} is outside the site's configured internal networks" in match.claim
+        assert match.severity == "high" and match.proposed_lane == "lead" and match.notes == []
+        assert match.group_key == f"{OUTSIDE}|{INSIDE}|22"
+    finally:
+        netdef.install(previous)
+
+
+def test_a_declared_management_source_keeps_the_lead_lane_with_a_note():
+    from dataclasses import replace
+    rule = LongInboundSession()
+    rule.site_facts = replace(absent_site_facts(), management_hosts=(OUTSIDE,))
+    record = chunks(lambda **kw: arkime(OUTSIDE, 51000, INSIDE, 22, flags={"syn": 1}, **kw))
+    [match] = run(rule, record)
+    assert match.proposed_lane == "lead"
+    assert any("declared management source" in note for note in match.notes)
+
+
+def test_ssh_identified_on_a_web_port_is_reported_as_remote_access():
+    record = chunks(lambda **kw: arkime(OUTSIDE, 51000, INSIDE, 443, flags={"syn": 1}, protocols=("tcp", "ssh"),
+                                        **kw))
+    [match] = run(LongInboundSession(), record)
+    assert "port 443 (SSH)" in match.claim
 
 
 @pytest.mark.parametrize("make", ["arkime", "suricata", "zeek"])
@@ -324,37 +397,90 @@ def test_midstream_exchanged_client_shaped_connection_is_reported_with_the_opene
     assert "opened to" not in match.claim
 
 
-def test_exchanged_connection_whose_ports_do_not_mark_a_client_makes_the_cell_partial():
+def test_exchanged_connection_with_the_inside_on_a_server_port_makes_the_cell_partial():
     record = chunks(lambda **kw: arkime(INSIDE, 8443, OUTSIDE, 51000, src_pkts=50, dst_pkts=40,
                                         flags={"ack": 60, "psh": 20}, **kw))
     rule = LongExternalConnection()
     assert run(rule, record) == []
     [reason] = rule.limit_reasons()
     assert reason.startswith("not reported: connections with no recorded opening on which both sides exchanged")
+    assert "the port shape of an internal server" in reason
     assert f"{INSIDE}:8443 and {OUTSIDE}:51000, 48 minutes" in reason and reason.endswith("(1 connection(s))")
 
 
+def _outside_half(make, port=443, *, beacon=None):
+    """A channel whose sensor saw only the outside address's half: the inside sent no packets on the records."""
+    ssh = port == 22
+    if make == "arkime-swapped":
+        # Arkime swapped on the server's SYN-ACK: the inside is the source and sent nothing
+        return lambda **kw: arkime(INSIDE, 51000, OUTSIDE, port, src_pkts=0, dst_pkts=40, s2c=9000,
+                                   flags={"syn_ack": 1, "ack": 30, "psh": 10},
+                                   protocols=("tcp", "ssh") if ssh else ("tcp",), **kw)
+    if make == "suricata":
+        # recorded with the outside first, no tcp block
+        return lambda **kw: suricata(OUTSIDE, port, INSIDE, 51000, pkts=(40, 0), sizes=(9000, 0), flags=None,
+                                     app_proto="ssh" if ssh else None, **kw)
+    if make == "suricata-swapped":
+        return lambda **kw: suricata(INSIDE, 51000, OUTSIDE, port, pkts=(0, 40), sizes=(0, 9000), flags=None,
+                                     app_proto="ssh" if ssh else None, **kw)
+    return lambda **kw: zeek(INSIDE, 51000, OUTSIDE, port, history="d", pkts=(0, 40), payload=(0, 9000),
+                             service="ssh" if ssh else "ssl", **kw)
+
+
+ONE_WAY = ["arkime-swapped", "suricata", "suricata-swapped", "zeek"]
+
+
+@pytest.mark.parametrize("make", ONE_WAY)
+def test_one_way_capture_of_a_channel_is_reported_with_only_the_external_half_recorded(make):
+    record = chunks(_outside_half(make), minutes=12) if make == "arkime-swapped" else [
+        _outside_half(make)(seconds=2880)]
+    rule = LongExternalConnection()
+    [match] = run(rule, record)
+    assert "Only the external half was recorded" in match.claim and "Which side opened it is not known" in match.claim
+    assert rule.coverage_notes() == [] and rule.limit_reasons() == []
+
+
+def test_arkime_48_minute_channel_with_the_inside_silent_is_reported():
+    # the reviewer's shape: 10.0.0.5:51000 -> 203.0.113.10:443, inside 0 packets, outside 40 per record
+    record = chunks(_outside_half("arkime-swapped"))
+    [match] = run(LongExternalConnection(), record)
+    assert f"{INSIDE}:51000 and {OUTSIDE}:443 spanning 48 minutes" in match.claim
+
+
 @pytest.mark.parametrize("make", ["arkime", "suricata", "zeek"])
-def test_midstream_one_sided_record_is_not_reported(make):
-    # only the outside address sent anything: the internal address took no part
-    record = {"arkime": lambda: chunks(lambda **kw: arkime(INSIDE, 51000, OUTSIDE, 443, src_pkts=0, dst_pkts=40,
-                                                            flags={"ack": 40, "psh": 10}, **kw)),
-              "suricata": lambda: [suricata(INSIDE, 51000, OUTSIDE, 443, seconds=2400, pkts=(0, 40),
-                                            sizes=(0, 9000), flags=(None, "18"))],
-              "zeek": lambda: [zeek(INSIDE, 51000, OUTSIDE, 443, seconds=2400, history="d", pkts=(0, 40),
-                                    payload=(0, 9000))]}[make]()
+def test_one_way_capture_of_the_inside_half_is_reported(make):
+    record = {"arkime": lambda: chunks(lambda **kw: arkime(INSIDE, 51000, OUTSIDE, 443, src_pkts=40, dst_pkts=0,
+                                                            c2s=9000, flags={"ack": 40, "psh": 10}, **kw)),
+              "suricata": lambda: [suricata(INSIDE, 51000, OUTSIDE, 443, seconds=2400, pkts=(40, 0),
+                                            sizes=(9000, 0), flags=("18", None))],
+              "zeek": lambda: [zeek(INSIDE, 51000, OUTSIDE, 443, seconds=2400, history="D", pkts=(40, 0),
+                                    payload=(9000, 0))]}[make]()
     rule = LongExternalConnection()
-    assert run(rule, record) == []
-    assert any("unsolicited response packets" in note for note in rule.coverage_notes())
+    [match] = run(rule, record)
+    assert "Only the internal half was recorded" in match.claim
+    assert rule.limit_reasons() == [] and rule.coverage_notes() == []
 
 
-def test_one_sided_internal_sender_with_no_opening_makes_the_cell_partial():
-    record = chunks(lambda **kw: arkime(INSIDE, 51000, OUTSIDE, 443, src_pkts=40, dst_pkts=0,
-                                        flags={"ack": 40, "psh": 10}, **kw))
+def test_true_backscatter_with_the_outside_bare_stays_a_note_beside_one_way_capture():
+    bare = chunks(lambda **kw: arkime(INSIDE, 51001, OUTSIDE, 443, **kw, **BACKSCATTER_ARKIME["silent"]))
+    half = chunks(_outside_half("arkime-swapped"))
     rule = LongExternalConnection()
-    assert run(rule, record) == []
-    [reason] = rule.limit_reasons()
-    assert "only the internal address sent traffic" in reason and reason.endswith("(1 connection(s))")
+    [match] = run(rule, bare + half)
+    assert f"{INSIDE}:51000" in match.claim
+    [note] = rule.coverage_notes()
+    assert "unsolicited response packets" in note and f"{INSIDE}:51001" in note
+
+
+@pytest.mark.parametrize("ports", [(51000, 50050), (1024, 2048)], ids=["both-high", "both-low"])
+def test_exchanged_connection_whose_ports_mark_neither_side_is_reported(ports):
+    # a channel opened before the window on an outside port at or above 32768, and one between two low ports
+    inside_port, outside_port = ports
+    record = chunks(lambda **kw: arkime(INSIDE, inside_port, OUTSIDE, outside_port, src_pkts=50, dst_pkts=40,
+                                        flags={"ack": 60, "psh": 20}, **kw))
+    rule = LongExternalConnection()
+    [match] = run(rule, record)
+    assert "mark neither side as the client" in match.claim
+    assert rule.limit_reasons() == []
 
 
 def test_sensors_that_disagree_about_the_opener_stay_unknown_and_reported():
@@ -364,7 +490,7 @@ def test_sensors_that_disagree_about_the_opener_stay_unknown_and_reported():
     sur = suricata(OUTSIDE, 443, INSIDE, 51000, seconds=2400, flags=("1b", "1b"))
     [match] = run(LongExternalConnection(), ark, [sur])
     assert "its records disagree about which side opened it" in match.claim
-    assert run(LongInboundRemoteAccess(), ark, [sur]) == []
+    assert run(LongInboundSession(), ark, [sur]) == []
 
 
 def test_records_without_counters_stay_reported_as_before():
@@ -385,23 +511,23 @@ def test_the_thirty_minute_boundary_holds_for_an_exchanged_connection(seconds, r
 def test_exchanged_inbound_session_on_server_ports_is_reported_by_the_inbound_rule_from_its_port_shape():
     record = [suricata(INSIDE, 3389, OUTSIDE, 51000, seconds=2400, pkts=(50, 40), sizes=(40000, 9000),
                        flags=("18", "18"), app_proto="rdp")]
-    [match] = run(LongInboundRemoteAccess(), record)
-    assert (f"{OUTSIDE} used port 51000 (at or above 32768, where common systems pick client ports) while {INSIDE} "
-            f"used port 3389: the port shape of {OUTSIDE} as the client.") in match.claim
-    assert "offering RDP" in match.claim
+    [match] = run(LongInboundSession(), record)
+    assert (f"It has no recorded opening, but both sides sent traffic beyond resets and handshake answers with "
+            f"{OUTSIDE} on a port of 32768 or above (seen: 51000) facing port 3389") in match.claim
+    assert "port 3389 (RDP)" in match.claim
 
 
 def test_inbound_rule_reads_an_identified_protocol_on_a_nonstandard_port():
     record = chunks(lambda **kw: arkime(OUTSIDE, 51000, INSIDE, 2222, flags={"syn": 1}, protocols=("tcp", "ssh"),
                                         **kw))
-    [match] = run(LongInboundRemoteAccess(), record)
-    assert "offering SSH" in match.claim
+    [match] = run(LongInboundSession(), record)
+    assert "port 2222 (SSH)" in match.claim
 
 
 def test_inbound_backscatter_to_a_remote_access_port_is_not_a_session():
     # SYN-ACKs from an outside SSH server to an internal address that never sent a SYN
     record = chunks(lambda **kw: arkime(INSIDE, 51000, OUTSIDE, 22, **kw, **BACKSCATTER_ARKIME["silent"]))
-    assert run(LongInboundRemoteAccess(), record) == []
+    assert run(LongInboundSession(), record) == []
 
 
 # ---- net.beaconing ---------------------------------------------------------------------------------------------------
@@ -452,6 +578,29 @@ def test_inbound_polling_of_an_internal_server_is_served_not_beaconing():
     assert run(rule, rows) == []
     assert any(note.startswith("not reported (informational): connections a recorded TCP opening shows")
                for note in rule.coverage_notes())
+
+
+@pytest.mark.parametrize("make", ONE_WAY)
+def test_one_way_captured_beacon_is_reported(make):
+    rows = [_outside_half(make)(first=T0 + timedelta(seconds=60 * i), seconds=5) for i in range(10)]
+    if make.startswith("arkime"):
+        rows = [arkime(INSIDE, 40000 + i, OUTSIDE, 443, first=T0 + timedelta(seconds=60 * i), seconds=5, src_pkts=0,
+                       dst_pkts=40, s2c=9000, flags={"syn_ack": 1, "ack": 30, "psh": 10},
+                       cid=f"1:beacon-{i}") for i in range(10)]
+    elif make == "suricata":
+        rows = [suricata(OUTSIDE, 443, INSIDE, 40000 + i, first=T0 + timedelta(seconds=60 * i), seconds=5,
+                         pkts=(40, 0), sizes=(9000, 0), flags=None) for i in range(10)]
+    elif make == "suricata-swapped":
+        rows = [suricata(INSIDE, 40000 + i, OUTSIDE, 443, first=T0 + timedelta(seconds=60 * i), seconds=5,
+                         pkts=(0, 40), sizes=(0, 9000), flags=None) for i in range(10)]
+    else:
+        rows = [zeek(INSIDE, 40000 + i, OUTSIDE, 443, first=T0 + timedelta(seconds=60 * i), seconds=5, history="d",
+                     pkts=(0, 40), payload=(0, 9000)) for i in range(10)]
+    rule = Beaconing()
+    [match] = run(rule, rows)
+    assert f"10 separate tcp connections from {INSIDE} to {OUTSIDE} port 443" in match.claim
+    assert "For 10 of the connections the records show only one side's half" in match.claim
+    assert rule.coverage_notes() == [] and rule.limit_reasons() == []
 
 
 # ---- net.outbound_ssh_external ----------------------------------------------------------------------------------------
@@ -522,10 +671,18 @@ def test_midstream_exchanged_ssh_is_reported_with_the_client_from_the_port_shape
     lambda: suricata(INSIDE, 51000, OUTSIDE, 22, pkts=(0, 30), sizes=(0, 9000), flags=(None, "18"), app_proto="ssh"),
     lambda: zeek(INSIDE, 51000, OUTSIDE, 22, history="d", pkts=(0, 30), payload=(0, 9000), service="ssh"),
 ], ids=["arkime", "suricata", "zeek"])
-def test_midstream_one_sided_ssh_is_not_reported(record, tmp_path):
-    found, rule = ssh([record()], tmp_path=tmp_path)
-    assert found == []
-    assert any("unsolicited response packets" in note for note in rule.coverage_notes())
+def test_midstream_ssh_with_only_the_outside_half_is_reported(record, tmp_path):
+    [match] = ssh([record()], tmp_path=tmp_path)[0]
+    assert json.loads(match.group_key) == [INSIDE, OUTSIDE]
+
+
+@pytest.mark.parametrize("make", ONE_WAY)
+def test_one_way_captured_ssh_is_reported(make, tmp_path):
+    found, rule = ssh([_outside_half(make, 22)()], tmp_path=tmp_path)
+    [match] = found
+    assert json.loads(match.group_key) == [INSIDE, OUTSIDE]
+    assert "the record shows only one side's half of the connection" in match.claim
+    assert rule.limit_reasons() == []
 
 
 def test_ssh_records_without_counters_keep_the_port_reading(tmp_path):
@@ -537,14 +694,20 @@ def test_ssh_records_without_counters_keep_the_port_reading(tmp_path):
     assert "Of the" not in match.claim
 
 
-def test_unanswered_ssh_without_an_opening_makes_the_cell_partial(tmp_path):
+def test_unanswered_ssh_without_an_opening_is_reported_with_the_inside_half(tmp_path):
     record = arkime(INSIDE, 51000, OUTSIDE, 22, src_pkts=12, dst_pkts=0, flags={"ack": 12, "psh": 6},
+                    protocols=("tcp", "ssh"))
+    [match], rule = ssh([record], tmp_path=tmp_path)
+    assert "only one side's half" in match.claim and rule.limit_reasons() == []
+
+
+def test_exchanged_ssh_with_the_inside_on_the_server_port_is_inbound_and_partial(tmp_path):
+    record = arkime(INSIDE, 22, OUTSIDE, 51000, src_pkts=30, dst_pkts=25, flags={"ack": 40, "psh": 12},
                     protocols=("tcp", "ssh"))
     found, rule = ssh([record], tmp_path=tmp_path)
     assert found == []
     [reason] = rule.limit_reasons()
-    assert reason.startswith("not reported: records with no recorded opening in which only the internal address")
-    assert reason.endswith("(1 SSH record(s))")
+    assert "the port shape of an internal server" in reason and reason.endswith("(1 SSH record(s))")
 
 
 # ---- mission scale ---------------------------------------------------------------------------------------------------
@@ -610,3 +773,20 @@ def test_an_unanswered_sender_whose_packets_cannot_be_judged_stays_reported():
     [match] = run(rule, record)
     assert "no record of it carries TCP flag counts" in match.claim
     assert rule.limit_reasons() == [] and rule.coverage_notes() == []
+
+
+@pytest.mark.parametrize("history,originator,expected", [
+    ("^hR", True, {"R"}), ("^hR", False, {"H"}),
+    # Zeek saw the outside's SYN-ACK (as its originator, upper case), then flipped the roles
+    ("H^R", True, {"R"}), ("H^R", False, {"H"}),
+    ("Dd^Aa", True, {"D", "A"}), ("Dd^Aa", False, {"D", "A"}),
+])
+def test_zeek_history_reads_letters_before_a_flip_with_the_roles_reversed(history, originator, expected):
+    assert zeek_history_kinds(history, originator) == expected
+
+
+def test_zeek_backscatter_with_a_late_flip_is_unsolicited():
+    rule = LongExternalConnection()
+    row = zeek(INSIDE, 51000, OUTSIDE, 80, seconds=2400, history="H^R", pkts=(1, 2), payload=(0, 0), service=None)
+    assert run(rule, [row]) == []
+    assert any("unsolicited response packets" in note for note in rule.coverage_notes())

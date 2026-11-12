@@ -417,20 +417,22 @@ def source_opened(event: TypedEvent) -> str | None:
 # A sensor's source/destination orientation is not who initiated a connection. Arkime swaps the sides of a session
 # whose first packet is a SYN-ACK, so an unsolicited SYN-ACK from an outside host (backscatter of a reflected or
 # spoofed flood) is recorded with the internal address that never sent a SYN as its source; Suricata and Zeek orient
-# a record picked up mid-stream by whichever side spoke first. The direction-dependent rules therefore read every TCP
-# record of a connection with one meaning:
+# a record picked up mid-stream by whichever side spoke first. And a sensor behind asymmetric routing sees only one
+# direction of a real connection. The direction-dependent rules therefore read every TCP record of a connection with
+# one meaning:
 #
 # Each side of a record is in one of four exchange states, from the record's typed per-side counters:
 # - SIDE_SILENT: the side's packet count is typed and is 0.
 # - SIDE_BARE: the side sent packets, but every one of them may be a reset or a handshake answer (a SYN-ACK). A TCP
 #   endpoint that receives a segment for no connection of its own answers with at most a reset (RFC 9293 3.10.7.1
-#   and 3.10.7.2), and an endpoint answers a SYN with a SYN-ACK; neither is evidence that the side took part in a
-#   conversation.
+#   and 3.10.7.2), and an endpoint answers a SYN with a SYN-ACK, retransmitting it a few times when no ACK comes
+#   back; neither is evidence that the side took part in a conversation.
 #   - Arkime (non-directional flag counts): the side's packets do not exceed tcp.flags.syn + tcp.flags.syn_ack +
 #     tcp.flags.rst for the whole session, and its application bytes (client.bytes / server.bytes) are not positive.
 #   - Suricata (directional flag summaries tcp.tcp_flags_ts / tcp.tcp_flags_tc, the OR of the side's packets): the
-#     side carried no PSH, FIN or URG, no application data, and its flags are only RST; or SYN-ACK, with or
-#     without RST; or ACK and RST on a single packet.
+#     side carried no PSH, FIN or URG and no application data, and its flags are only RST (any number of packets);
+#     or SYN and RST; or SYN-ACK (with or without RST) on at most SYNACK_TRANSMISSIONS packets; or ACK and RST on a
+#     single packet. Over more packets those summaries may hide pure acknowledgements, so they settle nothing.
 #   - Zeek (conn history, upper case for the originator and lower case for the responder): the side's packet types
 #     are only H (SYN-ACK) and R (reset), and it sent no payload.
 # - SIDE_SPOKE: the side demonstrably sent something beyond a reset or a handshake answer.
@@ -442,7 +444,7 @@ def source_opened(event: TypedEvent) -> str | None:
 #     was an acknowledgement, data or a FIN).
 #   - Zeek: the side's history has A (a pure acknowledgement), D (data) or F (FIN).
 # - SIDE_UNKNOWN: anything else, including a record without the counters, a non-TCP record, or flag combinations the
-#   summaries cannot settle (a lone SYN from the side that did not open, or ACK and RST over several packets).
+#   summaries cannot settle.
 #
 # A connection (one record, or every record of one connection, each side's state the strongest any record shows) is
 # then read by `judge_connection`:
@@ -451,21 +453,28 @@ def source_opened(event: TypedEvent) -> str | None:
 # - OPENERS_DISAGREE: records show each side opening it (a 5-tuple reused, or sensors that disagree); the opener stays
 #   unknown.
 # - EXCHANGED: no opener recorded, and both sides spoke (SIDE_SPOKE).
-# - ONE_SIDED_INSIDE_SILENT: no opener recorded, and the internal side sent nothing, or only resets and handshake
-#   answers: unsolicited response packets, a probe or backscatter, not a connection the internal side took part in.
-# - ONE_SIDED_OUTSIDE_SILENT: no opener recorded, the internal side spoke (SIDE_SPOKE, so its packets were not a SYN
-#   the record failed to count), and the external side sent nothing beyond resets and handshake answers (an
-#   unanswered sender picked up mid-stream, or a sensor that saw one direction). An internal side whose packets the
-#   record cannot judge leaves the connection UNJUDGED: they may be the SYNs of an unanswered opening.
-# - UNJUDGED: the records lack the counters to tell.
-# The thresholds are protocol constants (one SYN, one SYN-ACK, one reset per unacceptable segment), not values tuned
-# on any network.
+# - ONE_SIDED_INSIDE_SILENT: no opener recorded, and either the internal side answered with nothing beyond resets and
+#   handshake answers (SIDE_BARE: both directions were captured, and it took no part), or neither side sent more than
+#   that: unsolicited response packets, a probe or backscatter, not a connection the internal side took part in.
+# - OUTSIDE_HALF_ONLY: no opener recorded, the internal side is silent and the external side spoke or is not known.
+#   With nothing at all from the internal side, the sensor most likely saw one direction only (asymmetric routing):
+#   the connection is read with its opener unknown, never dismissed as backscatter.
+# - INSIDE_HALF_ONLY: no opener recorded, the internal side spoke, and the external side sent nothing beyond resets and
+#   handshake answers (one direction captured, or an unanswered sender picked up mid-stream).
+# - UNJUDGED: the records lack the counters to tell (an internal side whose packets cannot be judged may be the SYNs of
+#   an opening nobody answered).
+# The thresholds are protocol constants (one SYN, one reset per unacceptable segment, a SYN-ACK retransmitted a
+# bounded number of times), not values tuned on any network.
 SIDE_SILENT, SIDE_BARE, SIDE_UNKNOWN, SIDE_SPOKE = 0, 1, 2, 3
 TCP_FIN, TCP_RST, TCP_PSH, TCP_ACK, TCP_URG = 0x01, 0x04, 0x08, 0x10, 0x20
+# The most SYN-ACKs one unanswered handshake sends: Linux sends the first and retransmits it net.ipv4.
+# tcp_synack_retries (default 5) times; Windows retransmits it TcpMaxConnectResponseRetransmissions (default 2) times.
+SYNACK_TRANSMISSIONS = 6
 OPENED_BY_INSIDE, OPENED_BY_OUTSIDE = "opened by the internal side", "opened by the external side"
 OPENERS_DISAGREE, EXCHANGED, UNJUDGED = "records disagree about the opener", "exchanged", "not judged"
 ONE_SIDED_INSIDE_SILENT = "internal side sent nothing beyond resets or handshake answers"
-ONE_SIDED_OUTSIDE_SILENT = "external side sent nothing beyond resets or handshake answers"
+OUTSIDE_HALF_ONLY = "only the external half was recorded"
+INSIDE_HALF_ONLY = "only the internal half was recorded"
 _ZEEK_PACKET_TYPES = frozenset("SHADFR")
 
 
@@ -492,10 +501,32 @@ def _suricata_side(packets, data, flags) -> int:
         return SIDE_SPOKE
     if flags & ~(TCP_SYN | TCP_ACK | TCP_RST):
         return SIDE_UNKNOWN
-    if (flags == TCP_RST or flags & (TCP_SYN | TCP_ACK) == TCP_SYN | TCP_ACK
-            or flags == TCP_SYN | TCP_RST or (flags == TCP_ACK | TCP_RST and packets == 1)):
+    if flags in (TCP_RST, TCP_SYN | TCP_RST):
+        return SIDE_BARE
+    if flags & (TCP_SYN | TCP_ACK) == TCP_SYN | TCP_ACK and packets <= SYNACK_TRANSMISSIONS:
+        return SIDE_BARE
+    if flags == TCP_ACK | TCP_RST and packets == 1:
         return SIDE_BARE
     return SIDE_UNKNOWN
+
+
+def zeek_history_kinds(history: str, originator: bool) -> set[str]:
+    """The packet types (S, H, A, D, F, R) a Zeek conn history records for one side. Each ^ marks a flip of the two
+    roles: letters written before it were cased for the roles as they were then, so their case is read inverted once
+    for every ^ that follows them."""
+    flips = history.count("^")
+    kinds: set[str] = set()
+    for c in history:
+        if c == "^":
+            flips -= 1
+            continue
+        kind = c.upper()
+        if kind not in _ZEEK_PACKET_TYPES:
+            continue
+        upper = c.isupper() != bool(flips % 2)
+        if upper == originator:
+            kinds.add(kind)
+    return kinds
 
 
 def _zeek_side(packets, data, history, originator: bool) -> int:
@@ -505,7 +536,7 @@ def _zeek_side(packets, data, history, originator: bool) -> int:
         return SIDE_SPOKE
     if not isinstance(history, str):
         return SIDE_UNKNOWN
-    kinds = {c.upper() for c in history if (c.isupper() if originator else c.islower())} & _ZEEK_PACKET_TYPES
+    kinds = zeek_history_kinds(history, originator)
     if kinds & {"A", "D", "F"}:
         return SIDE_SPOKE
     if kinds and kinds <= {"H", "R"}:
@@ -569,10 +600,12 @@ def judge_connection(openers, states: dict, inside: tuple, outside: tuple) -> st
     mine, theirs = states.get(tuple(inside), SIDE_UNKNOWN), states.get(tuple(outside), SIDE_UNKNOWN)
     if mine == SIDE_SPOKE and theirs == SIDE_SPOKE:
         return EXCHANGED
-    if mine in (SIDE_SILENT, SIDE_BARE):
+    if mine == SIDE_BARE or (mine == SIDE_SILENT and theirs in (SIDE_SILENT, SIDE_BARE)):
         return ONE_SIDED_INSIDE_SILENT
+    if mine == SIDE_SILENT:
+        return OUTSIDE_HALF_ONLY
     if mine == SIDE_SPOKE and theirs in (SIDE_SILENT, SIDE_BARE):
-        return ONE_SIDED_OUTSIDE_SILENT
+        return INSIDE_HALF_ONLY
     return UNJUDGED
 
 
@@ -589,28 +622,35 @@ def server_shaped(inside_port: int | None, outside_port: int | None) -> bool:
 # How an outbound rule (a channel the internal side holds to the outside) reads a judged connection.
 OUTBOUND_OPENED = "opened inside"               # reported: a record shows the internal side opened it
 OUTBOUND_CLIENT_SHAPED = "exchanged, client-shaped"  # reported: exchanged, internal side on a client port
+OUTBOUND_UNSHAPED = "exchanged, unshaped"       # reported: exchanged, both ports at or above, or both below, the floor
+OUTBOUND_OUTSIDE_HALF = "outside half"          # reported: only the external half was recorded
+OUTBOUND_INSIDE_HALF = "inside half"            # reported: only the internal half was recorded
 OUTBOUND_UNKNOWN = "opener unknown"             # reported as before: the records cannot tell (or disagree)
 OUTBOUND_SERVED = "served"                      # note: the external side opened it, the internal side answered
 OUTBOUND_UNSOLICITED = "unsolicited"            # note: the internal side sent nothing beyond resets or answers
-OUTBOUND_NOT_CLIENT = "exchanged, not client-shaped"  # partial: exchanged, but the ports do not mark a client
-OUTBOUND_UNANSWERED = "unanswered"              # partial: only the internal side spoke, and no opening is recorded
-OUTBOUND_REPORTED = frozenset({OUTBOUND_OPENED, OUTBOUND_CLIENT_SHAPED, OUTBOUND_UNKNOWN})
+OUTBOUND_SERVER_SHAPED = "exchanged, server-shaped"  # partial: exchanged, internal side on a server port
+OUTBOUND_REPORTED = frozenset({OUTBOUND_OPENED, OUTBOUND_CLIENT_SHAPED, OUTBOUND_UNSHAPED, OUTBOUND_OUTSIDE_HALF,
+                               OUTBOUND_INSIDE_HALF, OUTBOUND_UNKNOWN})
 
 
 def outbound_reading(judgement: str, inside_port: int | None, outside_port: int | None) -> str:
-    """OUTBOUND_* for a connection judged by `judge_connection`: reported only when the internal side opened it, or
-    both sides exchanged traffic with the internal side on a client port; the opener-unknown readings the records
-    cannot settle stay reported with the opener stated as unknown."""
+    """OUTBOUND_* for a connection judged by `judge_connection`. Not reported: a connection a recorded opening shows
+    the external side opened, records of unsolicited answers, and an exchange whose ports mark the internal side as
+    the server (the cell is partial for those). Everything else is reported, with what the records show."""
     if judgement == OPENED_BY_INSIDE:
         return OUTBOUND_OPENED
     if judgement == OPENED_BY_OUTSIDE:
         return OUTBOUND_SERVED
     if judgement == EXCHANGED:
-        return OUTBOUND_CLIENT_SHAPED if client_shaped(inside_port, outside_port) else OUTBOUND_NOT_CLIENT
+        if client_shaped(inside_port, outside_port):
+            return OUTBOUND_CLIENT_SHAPED
+        return OUTBOUND_SERVER_SHAPED if server_shaped(inside_port, outside_port) else OUTBOUND_UNSHAPED
     if judgement == ONE_SIDED_INSIDE_SILENT:
         return OUTBOUND_UNSOLICITED
-    if judgement == ONE_SIDED_OUTSIDE_SILENT:
-        return OUTBOUND_UNANSWERED
+    if judgement == OUTSIDE_HALF_ONLY:
+        return OUTBOUND_OUTSIDE_HALF
+    if judgement == INSIDE_HALF_ONLY:
+        return OUTBOUND_INSIDE_HALF
     return OUTBOUND_UNKNOWN
 
 
@@ -620,14 +660,22 @@ OUTBOUND_NOT_REPORTED = {
     OUTBOUND_SERVED: (False, ("connections a recorded TCP opening shows an external address opened (inbound "
                              "connections or probes, with the internal address on the server side)")),
     OUTBOUND_UNSOLICITED: (False, ("unsolicited response packets, not connections: records with no recorded opening "
-                                  "in which the internal address sent nothing, or nothing beyond resets and handshake "
-                                  "answers (backscatter of a spoofed or reflected flood, or answers to probes)")),
-    OUTBOUND_NOT_CLIENT: (True, (f"connections with no recorded opening on which both sides exchanged traffic, but "
-                                f"whose ports do not mark the internal address as the client (it is not on a port "
-                                f"of {EPHEMERAL_FLOOR} or above facing a port below it)")),
-    OUTBOUND_UNANSWERED: (True, ("records with no recorded opening in which only the internal address sent traffic "
-                                "and the external address sent nothing beyond resets or handshake answers (an "
-                                "unanswered sender, or a sensor that saw one direction)")),
+                                  "in which the internal address answered with nothing beyond resets and handshake "
+                                  "answers, or neither side sent more than that (backscatter of a spoofed or "
+                                  "reflected flood, or answers to probes)")),
+    OUTBOUND_SERVER_SHAPED: (True, (f"connections with no recorded opening on which both sides exchanged traffic, "
+                                   f"with the internal address on a port below {EPHEMERAL_FLOOR} and the external "
+                                   f"address on one at or above it (the port shape of an internal server answering "
+                                   f"an outside client)")),
+}
+# What a reported reading adds to a claim, by reading (the ends are named by the caller).
+HALF_SENTENCES = {
+    OUTBOUND_OUTSIDE_HALF: ("Only the external half was recorded: {inside} sent no packets on the records while "
+                            "{outside} did (asymmetric routing, or a sensor that sees one direction), so which side "
+                            "opened it is not known."),
+    OUTBOUND_INSIDE_HALF: ("Only the internal half was recorded: {outside} sent nothing on the records beyond resets "
+                           "and handshake answers (asymmetric routing, a sensor that sees one direction, or a peer "
+                           "that did not answer), so which side opened it is not known."),
 }
 
 
