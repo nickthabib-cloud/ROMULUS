@@ -432,7 +432,7 @@ def source_opened(event: TypedEvent) -> str | None:
 #     that application-byte field, a peer that sends out-of-window resets could raise the session's counts past a
 #     talking side's packets, so the side is BARE only when its packets do not exceed the reset count alone (and
 #     SPOKE when its frame bytes, source.bytes / destination.bytes estimated as for Suricata, show data); otherwise
-#     UNKNOWN.
+#     UNKNOWN. A session without flag counts is never judged from frame bytes: it stays UNKNOWN.
 #   - Suricata (directional flag summaries tcp.tcp_flags_ts / tcp.tcp_flags_tc, the OR of the side's packets): the
 #     side carried no PSH, FIN or URG and no application data, and its flags are only RST (any number of packets);
 #     or SYN and RST; or SYN-ACK (with or without RST) on at most SYNACK_TRANSMISSIONS packets; or ACK and RST on a
@@ -483,17 +483,20 @@ _ZEEK_PACKET_TYPES = frozenset("SHADFR")
 
 
 def _arkime_side(packets, data, frame_bytes, answers, resets) -> int:
-    estimate = _framed_data("tcp", frame_bytes, packets)
     if packets == 0:
         return SIDE_SILENT
-    if (data is not None and data > 0) or (data is None and estimate is not None and estimate >= MIN_PAYLOAD_BYTES):
+    if data is not None and data > 0:
         return SIDE_SPOKE
     if packets is None or answers is None:
         return SIDE_UNKNOWN
     if packets > answers:
         return SIDE_SPOKE
     if data is None:
-        # no application-byte count: only a side that may have sent nothing but resets is settled
+        # no application-byte count: frame bytes may still show data; otherwise only a side that may have sent
+        # nothing but resets is settled
+        estimate = _framed_data("tcp", frame_bytes, packets)
+        if estimate is not None and estimate >= MIN_PAYLOAD_BYTES:
+            return SIDE_SPOKE
         return SIDE_BARE if packets <= resets else SIDE_UNKNOWN
     return SIDE_BARE
 
