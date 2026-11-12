@@ -423,3 +423,11 @@ def test_login_account_case_and_encoded_equals_are_preserved(login_rule):
     [match] = finish(login_rule, [event("/login?user=" + ("Name%3Da" if n % 2 else "name%3Da"), n=n,
                                       status=403, method="POST") for n in range(20)])
     assert match.aggregate_summary["distinct_members"] == 2
+
+
+@pytest.mark.parametrize("first,second", [("a%2Bb", "a+b"), ("a%26%23x62%3B", "ab"),
+                                         ("a%26amp%3Bb", "a%26b"), ("a%2526b", "a%26b")])
+def test_login_labels_use_one_form_decode_without_html_interpretation(login_rule, first, second):
+    [match] = finish(login_rule, [event("/login?user=" + (first if n % 2 else second), n=n,
+                                      status=401, method="POST") for n in range(20)])
+    assert match.aggregate_summary["distinct_members"] == 2

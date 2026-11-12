@@ -107,6 +107,16 @@ def _peers(event):
         return None
 
 
+def _form_value(value):
+    """An account label uses ordinary form decoding, not attack normalization."""
+    try:
+        if len(value) > MAX_URI or _BAD_PERCENT.search(value):
+            return None
+        return unquote_to_bytes(value.replace("+", " ")).decode("utf-8", "strict")
+    except (UnicodeError, TypeError):
+        return None
+
+
 def _management(rule, source):
     return source in getattr(getattr(rule, "site_facts", None), "management_hosts", ())
 
@@ -360,7 +370,7 @@ class WebAttacks(Playbook):
         partial = bool(self.capped)
         qualifier = "At least " if partial or not final else ""
         claim = (f"{qualifier}{count} recorded HTTP observation(s) from {source} to {destination} "
-                 f"contain {_CLASSES[name]} ({values} matching typed value(s)).")
+                 f"contain {_CLASSES[name]} ({values} distinct inspected value(s) after decoding/case folding).")
         notes = [_UNCERTAIN, "Counts deduplicate canonical event identities, not independent requests across sensors or re-indexing.",
                  "At most two representative event citations are retained; exact retained counts are independent of citation sampling.",
                  "Request bodies are not inspected. Sensitive query values are masked in retained examples."]
@@ -455,10 +465,10 @@ class WebLoginBurst(ZeekWindowRule):
                     query = ""
             for part in query.split("&"):
                 key, equals, raw_account = part.partition("=")
-                key, key_error = _decode(key, MAX_URI)
-                if equals and not key_error and key in _ACCOUNT_KEYS:
-                    value, error = _decode(raw_account, MAX_URI, fold=False)
-                    if not error and value and len(value) <= 256:
+                key = _form_value(key)
+                if equals and key and key.casefold() in _ACCOUNT_KEYS:
+                    value = _form_value(raw_account)
+                    if value and len(value) <= 256:
                         account = value
                         break
         member = hashlib.sha256(account.encode()).hexdigest() if account else "unknown-account"
