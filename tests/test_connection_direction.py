@@ -31,7 +31,12 @@ from romulus.detect.flows import (
     zeek_history_kinds,
 )
 from romulus.detect.linux_sequences import OutboundSSHExternal
-from romulus.detect.sessions import Beaconing, LongExternalConnection, LongInboundSession
+from romulus.detect.sessions import (
+    Beaconing,
+    LongExternalConnection,
+    LongInboundRemoteAccess,
+    LongInboundSession,
+)
 from romulus.evidence.normalize import normalize_hits
 from romulus.evidence.typed import RawRef, TypedEvent, fv
 from romulus.site import absent_site_facts
@@ -53,7 +58,7 @@ def _id(prefix):
 # ---- the three sensors' records, through their real normalizers ----------------------------------------------------
 
 def arkime(src, sport, dst, dport, *, first=T0, seconds=60.0, src_pkts=10, dst_pkts=12, flags=None, c2s=None,
-           s2c=None, protocols=("tcp",), cid=None):
+           s2c=None, protocols=("tcp",), cid=None, app_bytes=True):
     """An Arkime SPI session. `flags` is Arkime's tcpflags counters (None: the session carries none)."""
     doc = {"firstPacket": int(first.timestamp() * 1000),
            "lastPacket": int((first + timedelta(seconds=seconds)).timestamp() * 1000),
@@ -62,10 +67,11 @@ def arkime(src, sport, dst, dport, *, first=T0, seconds=60.0, src_pkts=10, dst_p
            "source": {"ip": src, "port": sport, "bytes": 60 * src_pkts, "packets": src_pkts},
            "destination": {"ip": dst, "port": dport, "bytes": 60 * dst_pkts, "packets": dst_pkts},
            "protocol": list(protocols)}
-    if c2s is not None:
-        doc["client"] = {"bytes": c2s}
-    if s2c is not None:
-        doc["server"] = {"bytes": s2c}
+    # Arkime writes application-byte counts on every session; `app_bytes=False` leaves them out (older shapes)
+    if c2s is not None or app_bytes:
+        doc["client"] = {"bytes": c2s or 0}
+    if s2c is not None or app_bytes:
+        doc["server"] = {"bytes": s2c or 0}
     if flags is not None:
         # typed names (syn_ack) as Arkime writes them (syn-ack)
         doc["tcpflags"] = {"syn": 0, "syn-ack": 0, "ack": 0, "psh": 0, "fin": 0, "rst": 0, "urg": 0,
@@ -312,8 +318,9 @@ def test_inbound_long_session_to_an_internal_server_is_served_not_a_channel(make
     assert note.startswith("not reported (informational): connections a recorded TCP opening shows an external "
                            "address opened to an internal service other than the ordinary web ports")
     assert f"{INSIDE}:22 and {OUTSIDE}:51000" in note and "(1 connection(s))" in note
-    # the inbound-session rule reports it instead
-    inbound = LongInboundSession()
+    # the inbound remote-access rule reports it instead, and the grouped service rule leaves it alone
+    assert run(LongInboundSession(), record) == []
+    inbound = LongInboundRemoteAccess()
     [match] = run(inbound, record)
     assert f"{OUTSIDE} held 1 TCP session(s) of at least 30 minutes open to {INSIDE} port 22 (SSH)" in match.claim
     assert f"A record shows {OUTSIDE} opened the session (its SYN)." in match.claim
@@ -331,6 +338,7 @@ def test_inbound_long_session_to_a_web_server_is_a_routine_note():
     assert note.startswith("not reported (informational): connections a recorded TCP opening shows an external "
                            "address opened (inbound")
     assert run(LongInboundSession(), record) == []
+    assert run(LongInboundRemoteAccess(), record) == []
 
 
 @pytest.mark.parametrize("port,service", [(1433, None), (3306, "mysql"), (5432, None), (445, "smb"), (389, None),
@@ -345,7 +353,9 @@ def test_long_inbound_session_to_any_other_service_is_reported(port, service):
     assert "the longest lasted 120 minutes" in match.claim and match.group_key == f"service|{INSIDE}|{port}"
     assert ("ip", OUTSIDE, "src") in match.entities
     assert match.severity == "medium" and match.proposed_lane == "lead"
+    assert match.fleet_member_kind == "external_address"
     assert run(LongExternalConnection(), record) == []
+    assert run(LongInboundRemoteAccess(), record) == []
 
 
 def test_s5_mssql_two_hours_with_the_syn_recorded_is_surfaced():
@@ -364,7 +374,7 @@ def test_remote_access_is_high_under_configured_networks_and_groups_sessions():
             sessions += [arkime(OUTSIDE, 51000 + k, INSIDE, 22, first=start + timedelta(minutes=12 * i),
                                 seconds=12 * 60 - 1, flags={"syn": int(i == 0), "ack": 20, "psh": 5},
                                 cid=f"1:ssh{k}=") for i in range(4)]
-        [match] = run(LongInboundSession(), sessions)
+        [match] = run(LongInboundRemoteAccess(), sessions)
         assert f"{OUTSIDE} held 3 TCP session(s) of at least 30 minutes open to {INSIDE} port 22 (SSH)" in match.claim
         assert f"Records show {OUTSIDE} opened 3 of them (its SYN)." in match.claim
         assert f"{OUTSIDE} is outside the site's configured internal networks" in match.claim
@@ -376,7 +386,7 @@ def test_remote_access_is_high_under_configured_networks_and_groups_sessions():
 
 def test_a_declared_management_source_keeps_the_lead_lane_with_a_note():
     from dataclasses import replace
-    rule = LongInboundSession()
+    rule = LongInboundRemoteAccess()
     rule.site_facts = replace(absent_site_facts(), management_hosts=(OUTSIDE,))
     record = chunks(lambda **kw: arkime(OUTSIDE, 51000, INSIDE, 22, flags={"syn": 1}, **kw))
     [match] = run(rule, record)
@@ -387,7 +397,7 @@ def test_a_declared_management_source_keeps_the_lead_lane_with_a_note():
 def test_ssh_identified_on_a_web_port_is_reported_as_remote_access():
     record = chunks(lambda **kw: arkime(OUTSIDE, 51000, INSIDE, 443, flags={"syn": 1}, protocols=("tcp", "ssh"),
                                         **kw))
-    [match] = run(LongInboundSession(), record)
+    [match] = run(LongInboundRemoteAccess(), record)
     assert "port 443 (SSH)" in match.claim
 
 
@@ -520,7 +530,7 @@ def test_the_thirty_minute_boundary_holds_for_an_exchanged_connection(seconds, r
 def test_exchanged_inbound_session_on_server_ports_is_reported_by_the_inbound_rule_from_its_port_shape():
     record = [suricata(INSIDE, 3389, OUTSIDE, 51000, seconds=2400, pkts=(50, 40), sizes=(40000, 9000),
                        flags=("18", "18"), app_proto="rdp")]
-    [match] = run(LongInboundSession(), record)
+    [match] = run(LongInboundRemoteAccess(), record)
     assert (f"It has no recorded opening, but both sides sent traffic beyond resets and handshake answers with "
             f"{OUTSIDE} on a port of 32768 or above (seen: 51000) facing port 3389") in match.claim
     assert "port 3389 (RDP)" in match.claim
@@ -529,14 +539,14 @@ def test_exchanged_inbound_session_on_server_ports_is_reported_by_the_inbound_ru
 def test_inbound_rule_reads_an_identified_protocol_on_a_nonstandard_port():
     record = chunks(lambda **kw: arkime(OUTSIDE, 51000, INSIDE, 2222, flags={"syn": 1}, protocols=("tcp", "ssh"),
                                         **kw))
-    [match] = run(LongInboundSession(), record)
+    [match] = run(LongInboundRemoteAccess(), record)
     assert "port 2222 (SSH)" in match.claim
 
 
 def test_inbound_backscatter_to_a_remote_access_port_is_not_a_session():
     # SYN-ACKs from an outside SSH server to an internal address that never sent a SYN
     record = chunks(lambda **kw: arkime(INSIDE, 51000, OUTSIDE, 22, **kw, **BACKSCATTER_ARKIME["silent"]))
-    assert run(LongInboundSession(), record) == []
+    assert run(LongInboundRemoteAccess(), record) == []
 
 
 # ---- net.beaconing ---------------------------------------------------------------------------------------------------
@@ -744,7 +754,7 @@ def test_a_large_backscatter_flood_reports_nothing_and_keeps_bounded_state(monke
                      flow__start=(T0 + timedelta(minutes=12 * i)).isoformat(),
                      flow__end=(T0 + timedelta(minutes=12 * i + 11)).isoformat(), source__packets=40,
                      destination__packets=30, tcp__flags__syn=int(i == 0), tcp__flags__syn_ack=int(i == 0),
-                     tcp__flags__rst=0) for i in range(4)]
+                     tcp__flags__rst=0, client__bytes=4000, server__bytes=3000) for i in range(4)]
     rule = LongExternalConnection()
     batches = [events[i:i + 5000] for i in range(0, len(events), 5000)] + [channel]
     stage, peak = {}, 0
@@ -853,7 +863,7 @@ def test_one_rare_client_is_not_split_out_by_any_volume_threshold():
 def test_remote_access_stays_one_item_per_outside_address():
     rows = [arkime(f"203.0.113.{k}", 51000, INSIDE, 22, first=T0, seconds=2400, flags={"syn": 1}, cid=f"1:ssh{k}=")
             for k in (5, 6)]
-    found = run(LongInboundSession(), rows)
+    found = run(LongInboundRemoteAccess(), rows)
     assert sorted(m.group_key for m in found) == [f"203.0.113.5|{INSIDE}|22", f"203.0.113.6|{INSIDE}|22"]
 
 
@@ -895,4 +905,32 @@ def test_the_served_elsewhere_note_names_the_inbound_rule_conditionally():
     rule = LongExternalConnection()
     assert run(rule, _clients(1433, 1)) == []
     [note] = rule.coverage_notes()
-    assert "judged as inbound sessions by net.long_inbound_session; its own cell states its coverage" in note
+    assert ("judged as inbound sessions by net.long_inbound_remote_access or net.long_inbound_session; their own "
+            "cells state their coverage") in note
+
+
+def test_remote_access_and_grouped_services_never_share_an_item():
+    rows = _clients(1433, 3) + [arkime("203.0.113.9", 51000, INSIDE, 3389, first=T0, seconds=2400,
+                                       flags={"syn": 1}, cid="1:rdp=")]
+    remote, grouped = run(LongInboundRemoteAccess(), rows), run(LongInboundSession(), rows)
+    assert [m.group_key for m in remote] == [f"203.0.113.9|{INSIDE}|3389"]
+    assert [m.group_key for m in grouped] == [f"service|{INSIDE}|1433"]
+    assert remote[0].fleet_member_kind == "host" and not remote[0].fleet_host_count
+
+
+def test_arkime_sessions_without_application_bytes_are_named_on_the_cell(tmp_path):
+    # backscatter without client.bytes/server.bytes cannot be told from one-way capture: reported, and said so
+    rows = chunks(lambda **kw: arkime(INSIDE, 51000, OUTSIDE, 80, src_pkts=0, dst_pkts=3, flags=SYN_ACKS,
+                                      app_bytes=False, **kw))
+    rule = LongExternalConnection()
+    assert len(run(rule, rows)) == 1
+    [note] = rule.coverage_notes()
+    assert note.startswith("4 Arkime TCP session record(s) carried no application-byte counts")
+    beacon = Beaconing()
+    run(beacon, [arkime(INSIDE, 40000 + i, OUTSIDE, 443, first=T0 + timedelta(seconds=60 * i), seconds=5,
+                        flags={"syn": 1}, app_bytes=False) for i in range(10)])
+    assert any(n.startswith("10 Arkime TCP session record(s)") for n in beacon.coverage_notes())
+    _found, ssh_rule = ssh([arkime(INSIDE, 51000, OUTSIDE, 22, flags={"syn": 1}, protocols=("tcp", "ssh"),
+                                   app_bytes=False)],
+                           tmp_path=tmp_path)
+    assert any(n.startswith("1 Arkime TCP session record(s)") for n in ssh_rule.coverage_notes())

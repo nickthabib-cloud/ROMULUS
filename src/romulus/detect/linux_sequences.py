@@ -32,6 +32,7 @@ from romulus.detect.bounded import (
 from romulus.detect.citing import uncited_positive
 from romulus.detect.correlation import canon_ip, external
 from romulus.detect.flows import (
+    ARKIME_APP_BYTES_NOTE,
     OUTBOUND_CLIENT_SHAPED,
     OUTBOUND_INSIDE_HALF,
     OUTBOUND_NOT_REPORTED,
@@ -1167,14 +1168,16 @@ class OutboundSSHExternal(LinuxSequence):
     def __init__(self):
         super().__init__()
         self._unreported = Counter()        # OUTBOUND_* reading -> records not reported (four keys at most)
+        self._no_app_bytes = 0              # Arkime TCP records without client.bytes / server.bytes
 
-    @staticmethod
-    def _judged(e, source, sport, destination, dport) -> str:
+    def _judged(self, e, source, sport, destination, dport) -> str:
         """OUTBOUND_* reading of a record between an internal and an external address (romulus.detect.flows)."""
         kind = record_kind(e)
         view = flow_view(e, kind) if kind in ("flow", "session") else None
         if view is None:
             return OUTBOUND_UNKNOWN
+        if kind == "session" and view.transport == "tcp" and not (e.has("client.bytes") and e.has("server.bytes")):
+            self._no_app_bytes += 1
         inside, outside = (((source, sport), (destination, dport)) if external(destination)
                            else ((destination, dport), (source, sport)))
         opening = Opening()
@@ -1216,6 +1219,8 @@ class OutboundSSHExternal(LinuxSequence):
         self.add(e, "ssh", _key(source, destination), aux=how, lane=lane)
 
     def _publish_unreported(self):
+        if self._no_app_bytes:
+            self.note_coverage("arkime_application_bytes", ARKIME_APP_BYTES_NOTE.format(n=self._no_app_bytes))
         for reading, (partial, text) in OUTBOUND_NOT_REPORTED.items():
             count = self._unreported[reading]
             if not count:

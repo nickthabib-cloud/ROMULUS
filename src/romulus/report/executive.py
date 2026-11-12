@@ -54,8 +54,13 @@ def write(m, path, technical_name):
         paragraph(finding["claim"])
         if ref := finding.get("fleet_hosts"):
             amount = str(ref["count"]) if ref["complete"] else f"{ref['count']} of {ref['expected_count']}"
-            paragraph(f"{amount} reporting hosts retained; host list {'complete' if ref['complete'] else 'partial'}. "
-                      f"See {technical_name}, Fleet host appendix, finding {finding['id']}, for every retained host.")
+            if finding.get("fleet_member_kind") == "external_address":
+                paragraph(f"{amount} outside addresses retained; outside address list "
+                          f"{'complete' if ref['complete'] else 'partial'}. See {technical_name}, Fleet host "
+                          f"appendix, finding {finding['id']}, for every retained outside address.")
+            else:
+                paragraph(f"{amount} reporting hosts retained; host list {'complete' if ref['complete'] else 'partial'}. "
+                          f"See {technical_name}, Fleet host appendix, finding {finding['id']}, for every retained host.")
         for check in finding["next_checks"]:
             paragraph("Recommended check: "+check)
     if assessment := m.get("ai_assessment"):

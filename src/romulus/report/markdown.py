@@ -636,11 +636,13 @@ def iter_render(m: dict, banner: str = BANNER, *, host_rows=None, visibility_row
     yield "\n## Fleet host appendix\n\n"
     for finding in fleets:
         ref = finding["fleet_hosts"]
+        outside = finding.get("fleet_member_kind") == "external_address"
+        members, column = ("outside addresses", "Outside address") if outside else ("reporting hosts", "Host")
         yield (f"### Finding {cell(finding['id'])}\n\n"
-               f"{ref['count']} of {ref['expected_count']} reporting hosts retained. "
-               f"Host list {'complete' if ref['complete'] else 'partial'}. "
+               f"{ref['count']} of {ref['expected_count']} {members} retained. "
+               f"{'Outside address' if outside else 'Host'} list {'complete' if ref['complete'] else 'partial'}. "
                f"Manifest appendix: `{ref['filename']}`.\n\n"
-               "| Host | First recorded event ID |\n|---|---|\n")
+               f"| {column} | First recorded event ID |\n|---|---|\n")
         count = 0
         for row in host_rows(ref):
             yield f"| {cell(row['host'])} | {cell(row['first_event_id'])} |\n"

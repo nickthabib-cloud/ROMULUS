@@ -680,6 +680,11 @@ OUTBOUND_NOT_REPORTED = {
                                    f"address on one at or above it (the port shape of an internal server answering "
                                    f"an outside client)")),
 }
+# The window-cell note for Arkime sessions without application-byte counts (the session and SSH rules).
+ARKIME_APP_BYTES_NOTE = (
+    "{n} Arkime TCP session record(s) carried no application-byte counts (client.bytes, server.bytes): their sides "
+    "were judged from packet, flag and frame-byte counts only, so an unsolicited answer (backscatter) among them can "
+    "read as one-way capture and be reported with the opener unknown")
 # What a reported reading adds to a claim, by reading (the ends are named by the caller).
 HALF_SENTENCES = {
     OUTBOUND_OUTSIDE_HALF: ("Only the external half was recorded: {inside} sent no packets on the records while "

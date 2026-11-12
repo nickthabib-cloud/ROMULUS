@@ -65,7 +65,8 @@ def test_the_direction_dependent_rules_are_exactly_these():
     flagged = {pb.id for pb in ALL_PLAYBOOKS if getattr(pb, "direction_dependent", False)}
     assert flagged == AFFECTED | {"win.rdp_external_source", "net.executable_transfer", "net.cleartext_credentials",
                                  "net.outbound_ssh_external", "corr.alert_then_host_execution",
-                                 "network.service_catalog", "net.long_inbound_session"}
+                                 "network.service_catalog", "net.long_inbound_session",
+                                 "net.long_inbound_remote_access"}
     # each can write a complete negative, which is what the reason protects
     assert all(pb.assures_negative for pb in ALL_PLAYBOOKS if pb.id in AFFECTED)
     assert all(not pb.assures_negative for pb in ALL_PLAYBOOKS if pb.id == "win.rdp_external_source")
@@ -178,7 +179,9 @@ def test_under_the_default_a_direction_skip_is_partial_with_the_named_reason(tmp
         assert parts and all(c["state"] == "evaluated_partial" for c in parts.values()), rule_id
         assert all(DIRECTION_ASSUMED_REASON in c["detail"]["reasons"] for c in parts.values()), rule_id
         assert window["state"] == "evaluated_partial", rule_id
-        assert window["detail"]["reasons"] == [WINDOW_ROLLUP_PARTIAL, DIRECTION_ASSUMED_REASON], rule_id
+        # (the fixture's Arkime sessions carry no application-byte counts, which the session rules note)
+        assert [reason for reason in window["detail"]["reasons"] if "application-byte counts" not in reason] == [
+            WINDOW_ROLLUP_PARTIAL, DIRECTION_ASSUMED_REASON], rule_id
     # a rule whose skip does not depend on direction is unchanged
     parts, window = _cells(repo, "net.port_scan")
     assert window["state"] in ("no_match_complete", "not_applicable_no_events")
